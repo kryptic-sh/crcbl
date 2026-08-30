@@ -143,77 +143,42 @@ FXAA does not leave when SMAA arrives. **It stays as the cheap tier**, on the
 terms `RenderEffects` already gives the other pairs: a tier that is off is a
 frame with fewer passes, not a shader branch.
 
-**The tables are built (2026-08-30).** `crcbl_shaders::smaa` transcribes the
-reference `AreaTex.py` and `SearchTex.py` operation for operation, committed as
-`tables/smaa_area.bin` — the 160×80 offset-zero slab SMAA 1x reads; the S2x/T2x
-slabs have no rung here and stay uncommitted — and `tables/smaa_search.bin`
-(64×16), with `cook-smaa` regenerating them and its `--check` byte-exact in CI,
-since neither generator takes a transcendental. Verified against the reference
-scripts' own output at every subsample offset.
-
-**And the rung draws (2026-08-30).** `smaa_edges.slang`, `smaa_weights.slang`
-and `smaa_blend.slang` transcribe the reference's 1x path at `SMAA_PRESET_HIGH`
-— diagonal search and corner rounding in, the S2x/T2x subsample offset and the
-reprojection pass left out rather than branched around — and
-`crcbl_render::smaa` records the three of them, uploading the two tables once
-beside the DFG table. `RenderEffects::SMAA` selects the tier and the `smaa`
-`[engine.video]` key switches it off. It is **not** in `DEFAULT_STACK`, which is
-what kept the re-bless this section priced above from happening a second time:
-no committed golden moved. The two tiers share the one resolve slot — a frame
-records SMAA's three passes or FXAA's one, never both, and `RENDER_PASSES`
-budgets the larger of the two. `crates/crcbl/tests/mesh_e2e/`'s `smaa` observer
-is the evidence: measured on radv and lavapipe, the resolve moves 1.5% of the
-frame, every changed pixel within two of a luma discontinuity, and the count of
-pixels still stepping by 96 of 255 across a neighbour falls from 332 to 164.
-What the rung still owes is cross-backend evidence — Metal, DX12 and WebGPU
+**What the rung still owes is cross-backend evidence** — Metal, DX12 and WebGPU
 compile the artifacts, and only CI has run them — which `docs/backlog.md`
 carries.
 
 **Superseded 2026-08-30**: the eighth decision below puts CMAA2 in this tier's
-place, and the three shaders, the two tables, `cook-smaa`, `crcbl_render::smaa`
-and the `smaa` key leave the tree with the slice that lands it. What stays is
+place, and the three shaders, the two tables, `cook-smaa` and
+`crcbl_render::smaa` leave the tree with the slice that lands it. What stays is
 the observer's shape — `crates/crcbl/tests/mesh_e2e/smaa.rs`'s three
 measurements are what CMAA2 is held to, on the same scene.
 
-### TAA is specified, still post-MVP, and the blocker is named exactly
+### TAA is specified and still post-MVP
 
-TAA needs four things this tree does not have:
+TAA needs two things this tree does not have:
 
 - **A per-frame subpixel jitter on the projection**, which changes the camera
   matrix every golden in the suite is drawn through.
-- **Motion vectors**, which is a second colour target on the forward pass and a
-  velocity per fragment. The SSR section's escalation clause is the shape — one
-  target state, one transient, the fragment stage's return struct — but a
-  velocity is not reconstructible from depth the way a normal is, so it is a
-  real widening rather than a contained one.
 - **A history target with neighbourhood clamping**, which makes a frame a
   function of how many frames were drawn before it. That is the property
   [47-reflections.md](47-reflections.md) already refuses in writing for SSR
   history, and [50-irradiance-probes.md](50-irradiance-probes.md) again for
   DDGI.
-- ~~**A motion-vector pass.**~~ **Built 2026-08-30**, and no longer this list's
-  to want: `crcbl_render::forward`'s `MOTION_FORMAT` target,
-  `crcbl_shaders::mesh::FrameUniforms::previous_view_proj`, and the subtraction
-  both geometry stages feed. **The convention is texture-coordinate space,
-  current minus previous, `+y` down**, so this rung's history buffer is sampled
-  at `uv - motion` — written on the format constant and on
-  `TransientImageDesc::motion`, and observed by `DebugView::Motion`,
-  `crates/crcbl/tests/mesh_e2e/motion.rs` and — for a deformed surface, through
-  `GpuInstance::previous_base_vertex` —
-  `crates/crcbl/tests/mesh_e2e/skinned_motion.rs`. What the target does not yet
-  carry is the camera's motion where the sky shows through, which is
-  `docs/backlog.md`'s and this rung's to finish; a skinned instance's own
-  transform motion was the other gap until `InstancePool::set_bases` landed on
-  2026-08-30. The AA row in [48-post-processing.md](48-post-processing.md)
-  carries the history of the earlier correction and nothing here repeats it.
+
+The motion vectors it reads are in the frame. **The convention is
+texture-coordinate space, current minus previous, `+y` down**, so this rung's
+history buffer is sampled at `uv - motion` — written on the format constant and
+on `TransientImageDesc::motion`, and observed by `DebugView::Motion`,
+`crates/crcbl/tests/mesh_e2e/motion.rs` and — for a deformed surface, through
+`GpuInstance::previous_base_vertex` —
+`crates/crcbl/tests/mesh_e2e/skinned_motion.rs`. **What the target does not yet
+carry is the camera's motion where the sky shows through**, which is
+`docs/backlog.md`'s and this rung's to finish.
 
 `crcbl_render::skinning`'s `SkinnedRegion::previous_base` was the half of the
 reservation taken first: topic 17's 2026-07-27 correction double-buffers the
 skinned-output pool region from day one and a frame alternates which run it
-writes. The instance side followed on 2026-08-27. Neither has a reader outside
-its module's tests, because there is still no pass to read them — so both sides
-of TAA's data are paid for and the pass is not, which is the honest state of the
-row.
+writes. The instance side followed on 2026-08-27.
 
 ### A seventh, taken 2026-08-27: MSAA is reopened, priced, and still not the default
 
@@ -339,10 +304,10 @@ of sight. The next two rungs of this ladder are the CS2 shape:
   SDK, where every other path in this engine is held to being the same code on
   all four backends. A quality tier that exists on one adapter is a second
   renderer wearing a capability flag.
-- **FSR 2 and FSR 3.** Temporal, so they inherit **every** TAA blocker above —
-  the jitter, the motion vectors, the instance slot — and add a history of their
-  own on top. Being vendor-neutral answers the objection to DLSS and touches
-  none of the reasons TAA is post-MVP.
+- **FSR 2 and FSR 3.** Temporal, so they inherit **everything** TAA still owes
+  above — the jitter and the history target — and add a history of their own on
+  top. Being vendor-neutral answers the objection to DLSS and touches none of
+  the reasons TAA is post-MVP.
 - **Any AA that resolves after the UI pass.** The UI composites at native
   resolution after the upscale seam, deliberately, so its text is rasterised
   sharp. Running an edge filter over it afterwards blurs glyphs that were never

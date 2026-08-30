@@ -216,13 +216,6 @@ gracefully exactly where the shipped pass cliffs, which makes it better for the
 goldens rather than worse** — and that, rather than a quality opinion, is what
 reopens it.
 
-**The upgrade is contained where the shader's header already says it is.**
-`occlusion_at` becomes the integral, and `ROTATIONS` becomes a slice-offset
-table indexed the same way, because the rule that a rotation is an
-integer-indexed constant and never a float hash survives the technique change
-untouched. The pass, the `R8Unorm` resource, the binding, `ssao_blur.slang` and
-the structural-ratio test do not move.
-
 **Bent normals are the second half, and they are what make this worth more than
 a quality bump.** A scalar occlusion can only _scale_ the ambient term; a bent
 normal is a direction the ambient term can be sampled _along_, which is exactly
@@ -249,23 +242,7 @@ Refused, with the reasons:
   eighth of its occlusion, which is the budget this section already declined to
   spend a colour target on.
 
-### Built 2026-08-28: what the horizon integral cost and what it bought
-
-`occlusion_at` is the integral, `ROTATIONS` is `SLICE_DIRECTIONS`, and nothing
-else in the pass moved — the resource, the binding, `ssao_blur.slang` and the
-structural-ratio test are the ones the section above promised would not. Two
-slices per pixel, the second the first turned an exact quarter turn, four
-marching steps along each side of each: sixteen depth taps against the eight the
-hemisphere took.
-
-**The frames say the technique was over-occluding open surfaces, not
-under-occluding contacts.** Five goldens moved and every one of them moved the
-same way — a broad wash lifted off a flat surface while the contact line under
-it stayed. `probes` is the clearest: its floor is one flat quad, its walls are
-more than the sampling radius away, and the hemisphere had been laying a soft
-vignette over the whole thing. `lights` had a diagonal gradient across the
-cube's front face, which is flat and faces the camera. Both are gone; the wall
-junction and the box corner in `ao` are still there and tighter.
+### The horizon integral: its arc cosine, its trap, and what it deleted
 
 **The arc cosine is this crate's, not the target's.** Every angle in the
 integral comes through one, no target specifies its accuracy, and two
@@ -323,7 +300,8 @@ of where the widened target is worth its bandwidth:
   target, no second pass, so the low tier gets coloured rather than grey
   occlusion for nothing. Which scalar pass low runs, SSAO or GTAO, is a
   measurement on that tier's hardware rather than a design choice, and it is why
-  SSAO stays as the cheap rung above.
+  the cheap-rung paragraph above still stands: the eight-tap body is gone, and
+  comes back behind a selector only if low measures for it.
 - **Medium and high: bent normals plus specular occlusion.** The `R8Unorm`
   target widens to carry the bent direction beside the scalar, the ambient term
   is sampled along it, and the reflection term takes the cone's occlusion — the
@@ -356,16 +334,12 @@ costs _against what it replaced_ is not measurable from this tree — recovering
 it is the `git show` the tier note above describes, and a quality seam that
 offered the cheaper rung would need exactly that number to be honest about it.
 
-### The occlusion view, built 2026-08-28
+### The occlusion view
 
-The buffer is now something a reviewer can look at. `mesh.slang`'s fragment
-stage takes a fourth debug branch — `OCCLUSION_VIEW`, outermost, above the
-heatmap on the sentinel lane `frame.ambient.w` already carried — and writes the
-blurred channel into all three colour channels.
-`ForwardRenderer::set_occlusion_view` arms it; `lantern`'s pause panel has an
-`AO VIEW` row, deliberately below its `AO` row and deliberately not a
-`RenderEffects` toggle, because the two are different questions: the row above
-turns the pass off, this one changes which picture is drawn.
+`lantern`'s pause panel has an `AO VIEW` row, deliberately below its `AO` row
+and deliberately **not** a `RenderEffects` toggle, because the two are different
+questions: the row above turns the pass off, this one changes which picture is
+drawn.
 
 **Grey, not a false-colour ramp.** A ramp puts a visible edge where the hue
 changes and none where the occlusion steps, so it reads as structure the pass

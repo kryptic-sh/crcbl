@@ -44,9 +44,8 @@ anywhere):
 | Box/sphere colliders, swept-sphere TOI, contact normal response | breakout    | L0+CCD |
 | Dynamic BVH churn, sphere overlap, segment CCD, thrust+damping  | asteroids   | L0+L1  |
 
-**Slice 2 (P6) has landed**; `crates/crcbl-phys/src/lib.rs` is the inventory and
-`git log` the history. Three things it did _not_ close are still owed, and
-`docs/backlog.md` carries them:
+Three things slice 2 did not close are still owed, and `docs/backlog.md` carries
+them:
 
 - **Rotational dynamics.** `Transform` carries a `DQuat` and `ThrustForce` reads
   it, but `RigidBody` holds only mass, velocity and a force accumulator: no
@@ -64,15 +63,10 @@ anywhere):
 | TOI vs moving targets, triggers, character controller        | towers      | L0+CCD   |
 | Lag-compensated rewind queries                               | arena       | post-MVP |
 
-**The orbit row has landed too**, and it is the largest of them: `Frames` with
-`sphere_of_influence` crossings, `Atmosphere`/`AtmosphericDrag`,
-`PointGravity`/`GravityForce`/`DragForce`, and `orbit::propagate` — a
-universal-variable Kepler solve, so one path covers ellipse, parabola and
-hyperbola. `apps/orbit` flies on it. **Bubbles and sleeping did not**: no type
-in `crcbl-phys` names either, the broadphase is one BVH rather than one per
-sector (`crcbl-phys`'s world has no sector partition at all), and what
-`apps/orbit` calls "the bubble" is the sample's own on-rails/live switch rather
-than an engine feature.
+**Bubbles and sleeping are not built**: no type in `crcbl-phys` names either,
+the broadphase is one BVH rather than one per sector (`crcbl-phys`'s world has
+no sector partition at all), and what `apps/orbit` calls "the bubble" is the
+sample's own on-rails/live switch rather than an engine feature.
 
 Stage 5 "exit" therefore overlaps stages 6–8 in wall-clock: the stage is done
 when the full L0/L1/CCD surface exists and the orbit sample passes, not when a
@@ -158,31 +152,24 @@ early.
 
 ## Tasks
 
-1. ~~`WorldPos`/sector types + rebase in `crcbl-core`~~ — shipped, with
-   `WorldPos::relative_to` as the sanctioned conversion to render space. **The
-   camera-relative upload was not executed in `crcbl-render`**: `relative_to`
-   has no caller outside `crcbl-core`'s own tests, and
+1. **The camera-relative upload was never executed in `crcbl-render`**:
+   `WorldPos::relative_to` — the sanctioned conversion to render space — has no
+   caller outside `crcbl-core`'s own tests, and
    `crates/crcbl-render/src/camera.rs` only documents that its `Vec3` is _meant_
    to be camera-relative. Nothing converts, so nothing has yet been far enough
    from the origin to jitter.
-2. ~~`crcbl-phys` crate: SoA body storage, integrator, force-provider seam.~~
-   Shipped: `RigidBody`, `SemiImplicitEuler`, `ForceProvider`.
-3. ~~L0 queries: BVH, ray/segment/sweep/overlap, triggers, character
-   controller.~~ Shipped, `CharacterController` included. **Static
-   trimesh/heightfield is the one L0 shape still missing** — `crcbl-phys` has
-   `Sphere`, `BoxCollider` and `Capsule` and nothing else.
-4. ~~L1 forces: gravity/drag/thrust, atmosphere model, Kepler on-rails
-   propagation, frame hierarchy + SOI transitions~~ — all shipped. **`buoyancy`
-   was not**, and neither was the wind this document's dynamics section also
-   names; they are the two force providers with no type.
-5. ~~CCD: TOI sweeps, motion-inflated broadphase integration.~~ Shipped for
-   sphere and capsule against sphere/box/capsule.
-6. Bubbles + sleeping + sector streaming hooks.
-7. Debug suite (draw, hash, scrub, query viz). **The hash is the only part
+2. **Static trimesh/heightfield is the one L0 shape still missing** —
+   `crcbl-phys` has `Sphere`, `BoxCollider` and `Capsule` and nothing else.
+3. **`buoyancy` is unbuilt**, and so is the wind this document's dynamics
+   section also names; they are the two force providers with no type.
+4. **CCD covers sphere and capsule against sphere/box/capsule**, and no other
+   shape pair.
+5. Bubbles + sleeping + sector streaming hooks.
+6. Debug suite (draw, hash, scrub, query viz). **The hash is the only part
    built** — `PhysicsSystem::hash_state` feeds the tick hash;
    `PhysicsSystem::debug_draw` is an empty body with a "future" comment, and
    there is no scrub and no query visualiser anywhere.
-8. (Stretch, non-gating) L2 sequential-impulse contact solver + islands.
+7. (Stretch, non-gating) L2 sequential-impulse contact solver + islands.
 
 ## Exit criteria
 

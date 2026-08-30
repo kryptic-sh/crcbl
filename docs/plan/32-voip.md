@@ -64,8 +64,9 @@ FPS-era, with breach; the capture seam is useful earlier.
 - Settings UI (topic 14, P10 screen): device pick, input level meter, mic test
   with **loopback self-monitor**, PTT/VAD toggle, VAD threshold. The settings
   _store_ under it is built — `crcbl-store`'s `settings.rs` is a dotted-key TOML
-  stack in which `engine.audio.*` is a namespace like any other, with no audio
-  keys defined yet — and the screen is not.
+  stack in which `engine.audio.*` is a namespace like any other, and the six bus
+  gains already live there — but **no voice-capture key is defined and the
+  screen is not built**.
 
 ## Codec + quality
 

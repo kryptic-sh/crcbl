@@ -54,11 +54,6 @@ only the emit tail and the material lookup differ.
 - Upload path: staging ring buffer + transfer submits with timeline semaphore
   tracking; renderer consumes meshes only after the timeline value passes.
 
-**Built** — `crcbl_render::mesh_pool` is all three: the two suballocated
-device-local pools, the `{base_vertex, base_index, count}` handle, and the
-timeline an upload's submit signals, which is what makes residency a query
-rather than a wait.
-
 ### 3.2 Instance + material data
 
 - `GpuInstance` array (SSBO): transform, mesh id, material id, flags. Written by
@@ -69,13 +64,6 @@ rather than a wait.
   holds texture indices + factors.
 - Camera/frame constants in one uniform buffer; everything else is storage
   buffers indexed by ids the GPU reads.
-
-**2026-08 — the table landed, and its factors half only.**
-`crcbl_render::MaterialTable` is the SSBO, `crcbl_shaders::mesh::GpuMaterial` is
-a row, and `GpuInstance::material` indexes it: `mesh.slang`'s fragment stage
-multiplies the row's `base_color` into the interpolated albedo at binding 6. So
-the id, which had been reserved since the record was written, now means
-something on all four targets.
 
 **2026-08 — the lookup moved to the fragment stage, on its own, to find out
 whether a flat integer varying lowers the same way everywhere.** It read the
@@ -171,9 +159,9 @@ An animated material is what makes it a ring.
 **Built, less the occlusion row.** `crcbl_render::cull` is the CPU reference
 `cull.slang` is checked against, `crcbl_render::draw_gen` runs that dispatch and
 turns its survivors into indirect arguments, and `crcbl_render::cluster_pool`
-with `mesh_cluster.slang` is the `MeshShader` tail. There is no depth pyramid
-and no two-phase pass anywhere in the tree, so the visibility slot the third
-bullet asks for is still the thing a later slice has to insert.
+with `mesh_cluster.slang` is the `MeshShader` tail. There is no two-phase pass
+anywhere in the tree, so the visibility slot the third bullet asks for is still
+the thing a later slice has to insert.
 
 ### 3.4 Sorting + passes
 
@@ -303,10 +291,10 @@ RenderDoc capture is recorded anywhere.
   shader scatters compacted instances into per-bucket indirect draws with
   per-bucket count buffers. Per-bucket capacity is sized from scene stats with
   an overflow counter. `IndirectPerBatch` emits the same buckets as per-batch
-  indirect draws. **Built** — `crcbl_render::draw_gen`, whose bucket is one
-  resident mesh today because an argument structure's index range is per draw;
-  the `(material template, permutation, pass)` key is the same table with a
-  longer one.
+  indirect draws. The bucket is one resident mesh today because an argument
+  structure's index range is per draw; the
+  `(material template, permutation, pass)` key is the same table with a longer
+  one.
 - **Transparent sorting**: GPU **radix sort over packed depth keys** (bitonic is
   the fallback for small counts) — named so it isn't rediscovered at P7.
   Unbuilt, and nothing needs it yet: §3.4 has no transparent pass.
@@ -316,9 +304,7 @@ RenderDoc capture is recorded anywhere.
   shaders become P5's inputs. The mechanism is per-target `-D` defines from
   `crates/crcbl-shaders/tools/compile-shaders.sh` plus a declared target list
   per shader — a ray-tracing or mesh shader has no WGSL form at all and must say
-  so rather than emitting a broken artifact. **Built** — the declared target
-  list is the `// crcbl-targets:` line every `.slang` opens with, and
-  `crates/crcbl-shaders/tools/compile-shaders.sh` is what reads it.
+  so rather than emitting a broken artifact.
 
 ## Correction (capability model, 2026-08-09)
 

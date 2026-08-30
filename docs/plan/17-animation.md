@@ -10,17 +10,13 @@ function and acceptance test.
 
 - **Source**: glTF skins (joint hierarchy, inverse bind matrices) + animation
   channels (TRS curves, sampled). Import extends the stage 6 pipeline — no new
-  source format. **The extraction has landed**:
-  `crates/crcbl-scene/src/gltf_import.rs` reads the document's `skins` and
-  `animations` arrays into `GltfSkin`/`GltfClip`/`GltfChannel`, and
-  `GltfPrimitive::joints`/`weights` carry the per-vertex binding. Reading is not
-  playback and that file says so — nothing there poses a skeleton. **The arrow
-  that is still missing is the one out of it**: nothing converts a `GltfSkin` +
-  `GltfClip` into `crcbl-anim`'s `Skeleton` and `Clip`, so the only rig any
-  sample plays is `apps/puppet/src/rig.rs`, authored in code with no asset on
-  disk. That conversion is index bookkeeping belonging to whoever holds both
-  crates, and `crcbl-anim` deliberately depends on neither `crcbl-scene` nor
-  `gltf` so a browser build that only plays cooked clips never links a parser.
+  source format. **The arrow that is still missing is the one out of the
+  importer**: nothing converts a `GltfSkin` + `GltfClip` into `crcbl-anim`'s
+  `Skeleton` and `Clip`, so the only rig any sample plays is
+  `apps/puppet/src/rig.rs`, authored in code with no asset on disk. That
+  conversion is index bookkeeping belonging to whoever holds both crates, and
+  `crcbl-anim` deliberately depends on neither `crcbl-scene` nor `gltf` so a
+  browser build that only plays cooked clips never links a parser.
 - **Cooked**: per-clip compressed curve tracks (fixed-rate resample +
   quantization; curve-fitting later if size demands), skeleton = flat joint
   array (parent indices, bind pose). `crcbl import` grows `--skeletons/--clips`;
@@ -45,45 +41,31 @@ function and acceptance test.
 
 ## Evaluation stack (client)
 
-1. ~~**Clip sampling**: time → local joint TRS per track.~~ Shipped:
-   `Clip::sample_into` fills a `Pose`, allocating nothing.
-2. **Blending**: linear blend nodes (1D — e.g. idle↔walk↔run by speed; 2D
+1. **Blending**: linear blend nodes (1D — e.g. idle↔walk↔run by speed; 2D
    directional later), additive layers (aim offsets), per-bone masks (upper-body
    shoot while lower-body runs). **The 1D half shipped and nothing else did**:
    `blend_into` and `BlendSpace1d` are in the crate and `apps/puppet` mixes
    idle↔walk↔run by measured speed through them, while additive layers, per-bone
    masks and a 2D space have no types at all.
-3. **State machine**: data-driven (RON asset, hot-reloadable): states = blend
+2. **State machine**: data-driven (RON asset, hot-reloadable): states = blend
    trees, transitions = condition exprs over action/params + exit time,
    crossfade durations. Authored by hand in MVP-of-the-feature; editor graph UI
    later. Unbuilt.
-4. **Post ops**: root-motion strip, sockets/attachments (weapon to hand joint),
+3. **Post ops**: root-motion strip, sockets/attachments (weapon to hand joint),
    two-bone IK + look-at (first IK; full-body IK not planned). Unbuilt.
-5. ~~Output: joint palette per instance.~~ Shipped: `Palette::compute`.
 
 ## GPU skinning (round-trip principle applied)
 
-**Built**, as `crates/crcbl-render/src/skinning.rs` over
-`crates/crcbl-shaders/shaders/skinning.slang`; `apps/puppet` is its consumer,
-natively and in the browser. What the design promised and what it delivered:
+The raster stages branch once, on `GpuInstance::BASE_VERTEX_OVERRIDE`; cull,
+draw generation and the shadow passes know nothing of skinning, because a
+skinned instance goes on naming its source mesh. That is the constraint every
+later change here keeps.
 
-- Compute prepass: joint palettes + bind-pose vertex pool → skinned vertices
-  written to a transient region of the geometry pool. Renderer consumes them
-  like any static mesh — **vertex pulling and the GPU-driven pipeline don't know
-  skinning exists**. Held: one branch exists downstream, in the raster stages,
-  on `GpuInstance::BASE_VERTEX_OVERRIDE`; cull, draw generation and the shadow
-  passes gained nothing, because a skinned instance goes on naming its source
-  mesh.
+What this stage still owes:
+
 - Culling uses conservative animated AABBs (bind pose inflated by clip bounds,
   computed at cook time). **Not done** — there is no cook to compute them at, so
   a skinned instance is culled against its undeformed box.
-- The browser gets the same compute path — skinning is just a compute shader, no
-  bindless needed — so wasm gets animated characters day one. Skinning is
-  independent of every path selector in
-  [39-capabilities.md](39-capabilities.md). Held: `puppet` publishes as a
-  browser demo.
-- Skinned shadow casters: the skinned output region feeds the topic 18 shadow
-  passes for free (same pool). Held.
 - **One dispatch per animated range**, not one over a table of ranges. The
   GPU-driven form needs a range table the shader can index — a second layout to
   pin against `slangc` — and is deliberately deferred.
@@ -116,13 +98,10 @@ the sample proves the evaluation stack without proving the pipeline.
    tests in `crates/crcbl-anim/tests/` check hand-composed chains and the glTF
    interpolation modes, not blessed poses from the sample-model suite.
 2. Server anim state + state machine + events + root motion.
-3. ~~Client sampling/blending + GPU skinning compute pass.~~ Shipped.
-4. Sockets, masks, additive layers, two-bone IK/look-at.
-5. **puppet sample** proves the stack (+ shadows + action input together). Built
-   and published through its milestone 2 — clip, blend, palette, skinning
-   dispatch and shadows. The stock-glTF-character honesty check is its milestone
-   5 and needs step 1.
-6. Editor: state-machine panel (view first, graph editing later).
+3. Sockets, masks, additive layers, two-bone IK/look-at.
+4. **puppet sample** proves the stack (+ shadows + action input together). Its
+   stock-glTF-character honesty check is milestone 5 and needs step 1.
+5. Editor: state-machine panel (view first, graph editing later).
 
 ## Risks
 

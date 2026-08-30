@@ -74,15 +74,9 @@ clear.
   cleanly is reported **clear** and the renderer selects a lesser path; it is
   never emulated behind the seam and never resolved with backend-specific
   renderer code. See [39-capabilities.md](39-capabilities.md).
-- **CI**: **built, and further than this bullet asked.** No self-hosted or
-  manual runner was needed. `ci.yml`'s `mtl e2e` job runs on GitHub's
-  `macos-latest` and `dx12 e2e` on `windows-latest`, and neither is
-  graph-compile-only: each runs its backend's HAL suite and then draws a frame
-  through `ForwardRenderer` — `CRCBL_GPU: mtl` against the runner's GPU,
-  `CRCBL_GPU: dx12` pinned to WARP — comparing the result against the golden and
-  uploading the diff on failure. Metal's API validation layer and D3D12's debug
-  layer are both on and both gate. Compile-verified-only backends are a known
-  trap (gpur lesson), which is why neither of these is one.
+- **CI**: Metal's API validation layer and D3D12's debug layer are both on and
+  both gate. Compile-verified-only backends are a known trap (gpur lesson),
+  which is why neither of these is one.
 
 ## crcbl-mtl (Metal, via `objc2-metal`)
 
@@ -124,18 +118,13 @@ GPU-based validation) integration into the same log path as Vulkan validation.
 
 ## Tasks
 
-What is left of this list is what the deferral parks. The shader, windowing and
-CI tasks it also carried are built — `crates/crcbl-shaders` commits its `msl/`
-and `dxil/` artifacts under the same manifest as the SPIR-V, `crcbl-shell` has
-Win32 and AppKit backends with `F11` bound in every sample, and the CI bullet
-above describes the jobs that replaced "CI matrix + on-hardware smoke runs".
+What is left of this list is what the deferral parks.
 
-1. ~~MoltenVK spike + decision gate.~~ Cancelled; see the 2026-08-05 correction.
-2. `crcbl-mtl`: bring-up ladder (clear → triangle → sandbox → editor), then the
+1. `crcbl-mtl`: bring-up ladder (clear → triangle → sandbox → editor), then the
    features the device reports and the renderer selects on — there are no tiers,
    per the correction at the top — then perf pass vs Vulkan baseline.
-3. `crcbl-dx12`: same ladder.
-4. Perf validation: stage 3 exit-criteria scene within ~15% of the Vulkan
+2. `crcbl-dx12`: same ladder.
+3. Perf validation: stage 3 exit-criteria scene within ~15% of the Vulkan
    numbers on comparable hardware (flag, investigate, document if not).
 
 ## Exit criteria
@@ -199,10 +188,8 @@ into the application — so choosing Metal for macOS as well makes the whole App
 side a single backend.
 
 The cost is that **`crcbl-mtl` is load-bearing rather than an optimisation**:
-whatever it cannot do, macOS cannot do. Its first two rungs — clear, then
-swapchain — are behind it, so the platform has a native GPU path and `mtl e2e`
-draws a frame through `ForwardRenderer` on it every run. Every rung above them
-is what the deferral at the top of this file parks.
+whatever it cannot do, macOS cannot do. What it does not yet do is what the
+deferral at the top of this file parks.
 
 ### The technical question the spike would have answered
 

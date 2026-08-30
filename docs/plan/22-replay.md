@@ -55,12 +55,9 @@ them therefore describe work not yet started.
 - **Black box**: dev builds keep a rolling in-memory ring of the last ~30 s of
   stream; on panic/assert/`crcbl` signal it dumps a `.crpl` — every crash
   arrives with a replay of how it happened. Attach to bug reports; CI soak
-  failures auto-attach theirs. **The ring is built**, as
-  `crates/crcbl-store/src/crash_ring.rs`: `CrashRing::new(capacity)` keeps the
-  last N ticks and writes them out in the same `.crpl` shape, reusing
-  `replay.rs`'s magic and version constants rather than restating them. What is
-  not built is the automatic half — nothing installs it on a panic hook, and no
-  CI job attaches one.
+  failures auto-attach theirs. **The automatic half is not built** — nothing
+  installs `crcbl_store::crash_ring`'s `CrashRing` on a panic hook, and no CI
+  job attaches one.
 - **Time-scrub debugger** (generalizes the physics scrub): timeline UI in the
   debug tools — drag to any tick, inspector shows any entity's state _at that
   tick_, diff two ticks side-by-side (deterministic encoding makes diffs
@@ -125,15 +122,15 @@ two bullets are the plan, not a description.
 
 ## Delivery
 
-| Slice                                                                | Phase                                                                                                    |
-| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `.crpl` writer/reader, keyframes+index, `FileTransport` playback     | Writer, reader and `FileTransport` **built** (`crcbl_store::replay`); keyframes and the index still owed |
-| Black-box ring + crash dump; record-by-default in dev/editor         | Ring **built** (`crcbl_store::crash_ring`); nothing installs it yet                                      |
-| `crcbl replay` CLI (record/play headless/dump/diff/clip/verify)      | Metadata report **built**; every subverb still owed                                                      |
-| Time-scrub debugger UI + marker track                                | P10 (with debug tools)                                                                                   |
-| Replay browser screen; determinism verifier in CI (soak runs verify) | P10                                                                                                      |
-| Live spectator relay + broadcast delay (rides dedicated server)      | P13 (towers marquee demo gains a spectator)                                                              |
-| Esports observer polish (POV tracks, caster timeline), relay fan-out | post-MVP (arena era)                                                                                     |
+| Slice                                                                | Phase                                                             |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `.crpl` writer/reader, keyframes+index, `FileTransport` playback     | Keyframes and the index are still owed over `crcbl_store::replay` |
+| Black-box ring + crash dump; record-by-default in dev/editor         | Nothing installs `crcbl_store::crash_ring`'s ring yet             |
+| `crcbl replay` CLI (record/play headless/dump/diff/clip/verify)      | Every subverb beyond the metadata report is still owed            |
+| Time-scrub debugger UI + marker track                                | P10 (with debug tools)                                            |
+| Replay browser screen; determinism verifier in CI (soak runs verify) | P10                                                               |
+| Live spectator relay + broadcast delay (rides dedicated server)      | P13 (towers marquee demo gains a spectator)                       |
+| Esports observer polish (POV tracks, caster timeline), relay fan-out | post-MVP (arena era)                                              |
 
 ## Testing (topic 12)
 

@@ -133,22 +133,12 @@ request.
   is refused are [49-antialiasing.md](49-antialiasing.md). **Built 2026-08-27**:
   `fxaa.slang` and `crcbl_render::fxaa` are one fullscreen resolve after the
   tonemap, `RenderEffects::ANTIALIASING` is the bit, and it is in
-  `DEFAULT_STACK` — so every frame this engine draws is resolved. SMAA 1x is the
-  next rung and is not built.
-
-  **The prev-transform slot is reserved as of 2026-08-27**, which this row
-  claimed for a year before it was true. `crcbl_shaders::mesh::GpuInstance`
-  carries `previous_transform` beside `transform`, `INSTANCE_STRIDE` is 160, and
-  `crcbl_render::InstancePool` fills it without the caller — so the instance
-  format is no longer a widening TAA has to pay for. What TAA still owes is the
-  pass: a motion-vector target, the subtraction that writes it, and the previous
-  frame's view-projection in the frame block.
+  `DEFAULT_STACK` — so every frame this engine draws is resolved.
 
 - **Bloom (P10)**: physically-plausible threshold-free downsample chain (Karis
   average), 5–6 mips, tent upsample, additive with scalar. Cheap, huge
   perceived-quality win — timed with the UI/debug polish phase so the profiler
-  HUD can show its cost honestly. **Built 2026-08-23**, `RenderEffects::BLOOM`,
-  off unless a view asks; `docs/backlog.md` carries what the slice left.
+  HUD can show its cost honestly. `docs/backlog.md` carries what the slice left.
 - Stack is data-driven per camera (RON: which passes, parameters) —
   games/samples tune without engine edits; settings UI (topic 14 P10) exposes
   quality toggles.
@@ -190,13 +180,12 @@ render-to-texture camera driving a security monitor, a planar reflection, or a
 weapon-scope PiP (topic 29) does not want reflections or GI of its own, and that
 is a property of the camera rather than of the player's hardware.
 
-**Built 2026-08-14, and two of the four layers have no source in the tree.**
-`crcbl_render::effects` is the resolution point: `RenderEffects` is the effect
-set, `EffectRequest` carries the three requested layers, and
-`EffectRequest::resolve` applies the whole order in one place.
-`ForwardRenderer::begin_frame` resolves once per frame and freezes the answer,
-so the half of a frame that parametrises the shadow culls and the half that
-dispatches them cannot disagree.
+**One of the four layers has no source in the tree.** `crcbl_render::effects` is
+the resolution point: `RenderEffects` is the effect set, `EffectRequest` carries
+the three requested layers, and `EffectRequest::resolve` applies the whole order
+in one place. `ForwardRenderer::begin_frame` resolves once per frame and freezes
+the answer, so the half of a frame that parametrises the shadow culls and the
+half that dispatches them cannot disagree.
 
 - **Programmatic** is wired: `ForwardRenderer::set_effect_request`, and
   `apps/lantern`'s `--no-shadows` / `--no-ao` / `--no-reflections` drive it.

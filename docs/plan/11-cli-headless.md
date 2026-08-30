@@ -126,17 +126,22 @@ Editor session control:
 
 ## Delivery (interleaved — see ROADMAP)
 
-| Slice                                                                                                                                                                                                                                                 | Roadmap phase |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| `crcbl-cli` scaffold: `new`, `run`, `build`                                                                                                                                                                                                           | **Built**     |
-| Offscreen render + `screenshot`                                                                                                                                                                                                                       | **Built**     |
-| `replay` (metadata report), `crpix`, `lod stats`/`gen`                                                                                                                                                                                                | **Built**     |
-| `sim` — the determinism harness behind a verb: `--ticks`, `--tick-rate`, `--seed`, `--json`. **The scene argument and `--input script.ron` are not built** and are refused by name; there is no scene format and no RON reader in this tree.          | **Built**     |
-| `settings get\|set\|list` — the player's `settings.toml` through `crcbl-store`'s stack, typed by TOML's own grammar. `crcbl save` is topic 14's and still unbuilt.                                                                                    | **Built**     |
-| `import <gltf> [--json]` — the importer standalone, reporting the counts a bake produces. **`--out <dir>` is not built** and is refused by name: there is no on-disk scene format in this tree to write. Skips arrive as the importer's own warnings. | **Built**     |
-| `bench --scenario jobs\|phys` — one fixed headless workload, warmed up and reported as percentiles with an environment block. [40-profiling.md](40-profiling.md) owns it; the scenarios that need a device are not written.                           | **Built**     |
-| `scene` batch ops + `edit --serve` (editor command protocol)                                                                                                                                                                                          | P12           |
-| `phys --check`                                                                                                                                                                                                                                        | P3–P11 grow   |
+What the verbs that exist still owe:
+
+- **`sim`'s scene argument and `--input script.ron` are not built** and are
+  refused by name; there is no scene format and no RON reader in this tree.
+- **`import <gltf>`'s `--out <dir>` is not built** and is refused by name, for
+  the same reason: there is no on-disk scene format in this tree to write.
+- **`crcbl save` is topic 14's verb and is still unbuilt**;
+  `settings get\|set\|list` over `crcbl-store`'s stack is the whole of the
+  store's CLI surface.
+- **`bench`'s device scenarios are not written** — `jobs` and `phys` are the
+  headless pair, and [40-profiling.md](40-profiling.md) owns the rest.
+
+| Slice                                                        | Roadmap phase |
+| ------------------------------------------------------------ | ------------- |
+| `scene` batch ops + `edit --serve` (editor command protocol) | P12           |
+| `phys --check`                                               | P3–P11 grow   |
 
 ## Exit criteria (MVP)
 

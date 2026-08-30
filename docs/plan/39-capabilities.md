@@ -38,8 +38,8 @@ the rest. `TIER_A`, `TIER_B` and `RendererTier` now name nothing in the
 workspace; what stands in its place is `Features::GPU_DRIVEN`, the data-layout
 bundle, which is asked for as _optional_ and never as required.
 
-New flags this topic adds, for the features moved into the MVP — **all built, in
-`crcbl_hal::caps`**, with `TASK_SHADER` beside `MESH_SHADER`:
+New flags this topic adds, for the features moved into the MVP, with
+`TASK_SHADER` beside `MESH_SHADER`:
 
 | Flag                     | What it gates                             |
 | ------------------------ | ----------------------------------------- |
@@ -54,7 +54,7 @@ A single tier cannot express the combinations, but the renderer does not need
 the whole capability set at each branch either — it needs to know which of a
 small number of paths to compile and record. Each selector is derived from
 `Features`, each is one shader-permutation axis, and each is one golden-image
-axis. **All three are built, in `crcbl_hal::caps`:**
+axis:
 
 | Selector       | Values                                                | Derived from                          |
 | -------------- | ----------------------------------------------------- | ------------------------------------- |
@@ -95,25 +95,12 @@ timeline semaphore — with everything else optional. A game whose whole look is
 ray traced puts `RAY_QUERY` in `required_features` and gets a named failure
 rather than a picture that is quietly a different game.
 
-**Built as written.** `DeviceDesc::for_adapter` requires
-`Features::COMPUTE.union(Features::TIMELINE_SEMAPHORE)` and asks for
-`Features::GPU_DRIVEN` as optional, so the device opens on whatever the adapter
-has and the selectors decide what to record. The doc comment on
-`required_features` carries the ray-traced-game example above, so the rule is
-stated where a caller reads it rather than only here.
-
-The samples always did the right thing and still do: `GpuContextDesc::default`
-puts `GPU_DRIVEN`, `MESH_SHADER`, `TIMESTAMP_QUERY`, `DEBUG_MARKERS`,
-`PRESENT_FEEDBACK` and `PRESENT_TIMING` in `optional_features` and requires none
-of them, so they degrade. It was the seam's own default that did not.
-
 **Every downgrade is logged once, at device creation, naming the feature and the
 path it selected.** A silently absent feature reporting as success is the same
 defect class as an unimplemented hook returning `Ok` — see the verification
-rules in `12-testing.md`. Built: `crcbl_hal::downgrades` compares what was asked
-for against what the device **granted** — not against what the adapter could
-have given — and `GpuContext::open` logs the difference once, saying nothing
-when the device granted the lot.
+rules in `12-testing.md`. The comparison is against what the device **granted**
+— not against what the adapter could have given — and the log says nothing when
+the device granted the lot.
 
 ## Toggles: three layers, one resolution point
 
@@ -156,12 +143,6 @@ quality logic can drive it directly.
 the device lacks is what `required` is for; it is not something a toggle can
 force.
 
-**Built 2026-08-14 for topic 18's three raster effects**, in
-`crcbl_render::effects`: `RenderEffects` is the effect set, `EffectRequest`
-carries the three requested layers, and `EffectRequest::resolve` is the one
-place the order is applied. `ForwardRenderer` holds one request and resolves it
-once per `begin_frame`.
-
 **One of the four layers still has no source in the tree, and it is not
 `[engine.video]`** — corrected 2026-08-27, this paragraph having claimed two.
 The camera stack is the one: there is no render-stack RON and nothing in the
@@ -195,8 +176,8 @@ layering is built and already documented in
 [18-render-features.md](18-render-features.md): camera stack → `[engine.video]`
 → programmatic override → device capability, resolved in one place by
 `EffectRequest::resolve`. Nothing below proposes a second layering. What the
-seam carries today is four **boolean** effect bits, and a quality menu needs
-rungs.
+seam carries today is six **boolean** effect bits beside four value and enum
+keys, and a quality menu needs rungs on the rest.
 
 ### Rule 1: the clamp survives the widening, and "downward" is an explicit order
 
@@ -248,7 +229,8 @@ For a level it needs saying, because "less" is not something a value type knows:
 
 This is a widening of the one table in `crates/crcbl/src/settings.rs` and of
 `RenderEffects` itself, since a bitflag cannot hold a rung. Both are the same
-slice; neither is started here.
+slice, and it is started rather than finished: the `antialiasing` row below is
+the first enumerated key to land.
 
 ### The tier table (decided 2026-08-30)
 
@@ -403,7 +385,7 @@ reads as though the work is done:
 | Draw-indirect-count   | yes / yes  | yes / yes         | yes / yes  | **no**   |
 | Mesh shaders          | yes / yes  | yes / owed        | yes / owed | **no**   |
 | Ray query / RT        | yes / owed | yes / **blocked** | yes / owed | **no**   |
-| Timestamp query       | yes / yes  | yes / owed        | yes / yes  | yes      |
+| Timestamp query       | yes / yes  | yes / yes         | yes / yes  | yes      |
 | Push constants        | yes / yes  | yes / yes         | yes / yes  | proposed |
 | Persistent mapping    | yes / yes  | yes / yes         | yes / yes  | **no**   |
 
@@ -507,18 +489,11 @@ contributing the target upstream is a legitimate option if it stalls.
 
 ## Delivery
 
-The model itself is built — the flags, the selectors, the resolution point and
-the downgrade log, in `crcbl_hal::caps`, `crcbl_hal::downgrades` and
-`crcbl_render::effects`. **The settings layer is built too**, corrected
-2026-08-27: `crcbl::settings::video_effects` maps four `[engine.video]` keys to
-`RenderEffects` bits and `GpuContext::open` reads the player's file while it
-opens, so the layer has a real source in every sample rather than only in a
-test.
-
-What is not built is the **width** of that layer and the screen in front of it.
-Four boolean keys is the entire settings surface today; the catalogue above
-names the rest and marks each one unimplemented, and exposing any of them on a
-settings screen is still P10 work.
+What is not built is the **width** of the settings layer and the engine's own
+screen in front of it. Sixteen read keys is the entire settings surface today;
+the catalogue above names the rest and marks each one unimplemented.
+`apps/options` reaches the keys that have readers and is a sample, so the
+engine-provided screen is still P10 work.
 
 ## Risks
 

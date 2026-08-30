@@ -116,13 +116,7 @@ user's order, 2026-08-30.
 
 ## Irradiance probes: the design (2026-08-14)
 
-The capability table's `Rasterised` twin of ray-traced global illumination, and
-what was P7B's last unbuilt row. **It is built now, as designed here** —
-`crcbl_render::probe` owns the `ProbeTable` and the `ProbeGrid` that rides in
-the frame uniforms, `crcbl_shaders::probe` fixes the row layout both sides
-write, `mesh.slang`'s `probe_irradiance` does the interpolation and the three
-dot products, `SceneDesc::probes` is where an application hands the volume over,
-and `apps/lantern`'s `bounce` module bakes the sun's first bounce into one. The
+The capability table's `Rasterised` twin of ray-traced global illumination. The
 paragraphs below describe what shipped rather than what was intended.
 
 ### A static grid of L1 spherical-harmonic probes, and no new pass
@@ -176,24 +170,15 @@ determinism argument rests on.
   computed LOD, which `ssr.slang` refuses in writing. Deferred with a named
   trigger.
 
-### The irradiance is authored, not baked and not computed at runtime
+### A gather bake needs an intersector this tree does not have
 
-**Superseded 2026-08-30** by the decision at the top of this file: the volume is
-filled at runtime, every frame, by the visibility-gated updater, and the
-application-computed bakes below are what that slice removes.
-
-`SceneDesc.probes`, filled by the application — for `apps/lantern`, computed
-analytically from the room's own dimension constants so that moving a wall moves
-the probes.
-
-**Not a bake tool yet, for a concrete reason:** a gather bake means casting rays
-at scene triangles, and this tree has **no ray-triangle intersector and no
-BVH**. `crcbl-phys`'s `query` module has ray-vs-sphere, ray-vs-AABB and
-ray-vs-capsule and nothing else. Writing both, plus an artifact format and a
-manifest entry, is its own topic-sized piece of work and must not be smuggled
-into this row. The precedent for when it comes is real — `cook-clusters` is a
-committed-artifact generator with a `--check` mode, and `spirv/manifest.txt` is
-how such an artifact is hashed.
+Casting rays at scene triangles is what a gather bake is, and this tree has **no
+ray-triangle intersector and no BVH**. `crcbl-phys`'s `query` module has
+ray-vs-sphere, ray-vs-AABB and ray-vs-capsule and nothing else. Writing both,
+plus an artifact format and a manifest entry, is its own topic-sized piece of
+work and must not be smuggled into this row. The precedent for when it comes is
+real — `cook-clusters` is a committed-artifact generator with a `--check` mode,
+and `spirv/manifest.txt` is how such an artifact is hashed.
 
 ### Additive, which is what makes it safe to land empty
 

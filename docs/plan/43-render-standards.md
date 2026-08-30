@@ -37,7 +37,7 @@ every gap below is easier to read against it.
 | **Volumetrics**         | height fog and a froxel column                       | [51-volumetrics.md](51-volumetrics.md), and §4 below                             |
 | Global illumination     | behind                                               | §5 below                                                                         |
 | Post-processing         | behind                                               | [48-post-processing.md](48-post-processing.md), §6                               |
-| Upscaling               | spatial half built, temporal blocked                 | [15-windowing.md](15-windowing.md), §7                                           |
+| Upscaling               | spatial half built, temporal its own rung            | [15-windowing.md](15-windowing.md), §7                                           |
 | Decals                  | absent, planned                                      | [33-decals.md](33-decals.md)                                                     |
 | Particles               | simulated, never drawn                               | [20-particles.md](20-particles.md)                                               |
 | Sky and atmosphere      | a gradient, no atmosphere                            | §8 below                                                                         |
@@ -422,13 +422,6 @@ replaces were: a rational fit the way the ACES tonemap fits the RRT; the fog
 goldens carrying a tolerance where no other shading path does; or marching the
 froxel grid so no closed form appears at all.
 
-So height fog was a **slice** again, and it is **built (2026-08-27)**. The
-arithmetic and its proof first — `crcbl_shaders::fog`, with `optical_depth`
-checked against Simpson quadrature and the saturation that keeps a camera below
-the fog plane from producing infinities — then the frame: two `float4` rows at
-the end of `FrameUniforms`, the Slang mirror in `mesh.slang`, the composite over
-the finished radiance, and `ForwardRenderer::set_fog`.
-
 **The observable is the law, not the difference.** Uniform fog's optical depth
 is `density * distance`, so doubling the density **squares** the transmittance
 at every texel at once, whatever that texel's distance —
@@ -441,12 +434,11 @@ sabotage on real hardware rather than assumed.
 The froxel row below still buys the scattering the closed form cannot, and it
 now inherits a transmittance function rather than needing one.
 
-**The froxel row's arithmetic landed 2026-08-27**, on height fog's pattern: the
-model and its proof first, the passes after. `crcbl_shaders::volumetric` is
-`phase` — Henyey-Greenstein, the angular half that makes fog glow around a light
-rather than uniformly — and `integrate_slice`, which is what one slice of a
-froxel column owes the composite: the radiance it adds and the fraction it
-transmits, in one closed form.
+`crcbl_shaders::volumetric` is `phase` — Henyey-Greenstein, the angular half
+that makes fog glow around a light rather than uniformly — and
+`integrate_slice`, which is what one slice of a froxel column owes the
+composite: the radiance it adds and the fraction it transmits, in one closed
+form.
 
 Neither reaches for a transcendental. The exponential is `fog::exp_neg`, and the
 phase function's three-halves power is written `d * sqrt(d)`, because IEEE-754
@@ -464,12 +456,8 @@ which matters, because that form reads correctly and is what a froxel pass
 reaches for first. Its failure direction is the visible one: more slices, more
 light.
 
-The frame followed — the scattering target, the pass that fills it, the scan
-along `z`, the composite, the Slang mirror of both functions and the drift guard
-that holds it to this module — as [51-volumetrics.md](51-volumetrics.md)'s rungs
-1a through 1b-ii, all built by 2026-08-28. What is left of §4 is that document's
-rungs 2 to 4: punctual lights in the medium, a 3D target with temporal
-reprojection, and a density field.
+What is left of §4 is [51-volumetrics.md](51-volumetrics.md)'s rungs 3 and 4: a
+3D target with temporal reprojection, and a density field.
 
 ## 5. Global illumination
 
@@ -484,34 +472,14 @@ the right first rung.
 
 **The gaps, in order of how much they cost:**
 
-- **No specular IBL.** L1 irradiance answers "how much light arrives at this
-  normal", which is a diffuse question. A rough metal needs prefiltered
-  _radiance_ at a mip chosen by roughness plus a split-sum BRDF lookup, and this
-  engine has neither. What it does instead is decode the L1 irradiance as
-  approximate directional radiance for SSR's fallback — documented in
-  `shaders/ssr.slang`, honest about being approximate, and the reason a metal
-  out of the march's reach looks flat.
-
-  **The prefiltered half exists since 2026-08-29** as
-  `crcbl_shaders::sky_prefilter`: a gradient is linear in its three colours, so
-  its convolution against the lobe is two weights over `(|R.y|, roughness)` and
-  one committed table serves every sky. **And it is read since the same day**:
-  `ssr.slang`'s miss fallback takes the sky through the table at the surface's
-  roughness (`sky_prefiltered`), so a rough metal's reflection of the sky is the
-  cone it gathers rather than the one mirror direction. **And the `DFG` half
-  since the same day**: `crcbl_shaders::dfg::pair_texels` is the table's two
-  channels as a second image beside the sky's, and `f0 · scale + bias` at
-  `(N·V, roughness)` scales the environment in place of Schlick along the
-  reflected direction. The rung is built.
-
-  **The determinism rule does not block it**, which is worth stating because it
-  blocks so much else on this page. Karis's split-sum needs a `DFG` table over
-  `(N·V, roughness)` and a roughness-indexed radiance mip chain; both are
-  **baked at build time and committed like a shader artifact**, so the run-time
-  cost is a multiply and two fetches and four backends read the same bytes.
-  Baking a transcendental into a table is the general escape, and
-  [44-lighting.md](44-lighting.md)'s rung 3 is where it is written down.
-
+- **The split-sum escape, and why the determinism rule does not block it.**
+  Worth stating because that rule blocks so much else on this page: Karis's
+  split-sum needs a `DFG` table over `(N·V, roughness)` and a roughness-indexed
+  radiance mip chain; both are **baked at build time and committed like a shader
+  artifact**, so the run-time cost is a multiply and two fetches and four
+  backends read the same bytes. Baking a transcendental into a table is the
+  general escape, and [44-lighting.md](44-lighting.md)'s rung 3 is where it is
+  written down.
 - **Multi-scatter energy compensation is in the frame (2026-08-27)**, and this
   entry stays on the page because the rung above still reads its table.
   Single-scatter GGX drops every microfacet bounce after the first, so a rough
@@ -525,7 +493,7 @@ the right first rung.
   reflections and already has a Hi-Z pyramid to march it with, so SSGI is closer
   than it looks: the same march with a cosine-distributed ray instead of a
   mirror one, accumulated. What it does **not** have is the temporal
-  accumulation SSGI needs to be quiet — see the blocker in §9.
+  accumulation SSGI needs to be quiet — see §9.
 - **No lightmaps, no baked GI, and no GI at all below the ray-tracing tier — the
   user's rules of 2026-08-30**: the sun and every scene light are dynamic,
   nothing bakes a lighting result, and a device without hardware ray tracing
@@ -595,7 +563,7 @@ bloom → exposure and tonemap → FXAA → UI.
 | Bloom          | Karis-average chain | **built**, off unless a view asks         |
 | Colour grading | 3D LUT              | **missing**                               |
 | Depth of field | gather or scatter   | **missing**                               |
-| Motion blur    | per-object          | **missing**, blocked — §9                 |
+| Motion blur    | per-object          | **missing** — its own rung, §9            |
 | Lens artefacts | CA, vignette, grain | **missing**                               |
 | HDR display    | scRGB or HDR10      | **missing** — sRGB swapchain only         |
 
@@ -678,7 +646,7 @@ judged entirely on how the frame looks at 0.5, and bilinear at 0.5 is visibly
 mushy where Catmull-Rom is merely soft. The tap count is on an image, not a
 scene — it does not scale with anything the game does.
 
-A _temporal_ upscaler is §9's blocker again and is not a near-term row. What
+A _temporal_ upscaler is one of §9's own rungs and is not a near-term row. What
 this rung deliberately does **not** do is jitter, accumulate, or ask for a
 history buffer; it is a spatial reconstruction of one frame, and swapping it for
 FSR 3 or TSR later replaces the pass without moving the seam around it.
@@ -692,12 +660,12 @@ and specular IBL terms.
 **Where this one is:** closed at the gradient rung. The sky lights the scene, is
 what a missed reflection falls back to, and is drawn behind the frame.
 
-**Built 2026-08-27:** `crcbl_shaders::sky::SkyGradient` — zenith, horizon and
-ground blended by a smoothstep in the direction's `y` — with `radiance` for what
-a ray leaving the scene sees and `irradiance` for the same field as an L1
-`GpuProbe`, which is the record `mesh.slang` already unpacks for probes. The
-projection is closed form: azimuthal symmetry collapses the sphere integral to
-two moments of the blend, and the horizontal bands are zero.
+The gradient is `crcbl_shaders::sky::SkyGradient` — zenith, horizon and ground
+blended by a smoothstep in the direction's `y` — with `radiance` for what a ray
+leaving the scene sees and `irradiance` for the same field as an L1 `GpuProbe`,
+which is the record `mesh.slang` already unpacks for probes. The projection is
+closed form: azimuthal symmetry collapses the sphere integral to two moments of
+the blend, and the horizontal bands are zero.
 
 **The blend is a cubic and not a `pow`, deliberately.** A hand-tuned sky usually
 tightens its horizon band with an exponent, and §4's rule forbids a
@@ -706,39 +674,20 @@ smoothstep is multiplies and adds, so this rung needed neither
 `crcbl_shaders::fog`'s construction nor `dfg`'s cooked table. A gradient wanting
 a tighter horizon than a cubic gives spends a colour band on it.
 
-**The first consumer landed the same day.** `ForwardRenderer::set_sky` carries a
-`Sky`, three rows at the end of the frame block carry its projection, and
-`mesh.slang`'s `sky_irradiance` adds it to the ambient sum beside
-`probe_irradiance` — added, not chosen between, because both are the same term.
-`Sky::NONE` projects to every coefficient zero, so the rung arrived switched off
-and no golden moved.
-
-**The second consumer landed the same day.** `ssr.slang` adds the sky along the
-reflected ray to the probe environment a missed march falls back to, out of
-three rows at the end of `SsrParams` — `sky_radiance` at first, and since
-2026-08-29 `sky_prefiltered`, the same rows weighted by
-`crcbl_shaders::sky_prefilter`'s table at the surface's roughness. Those rows
-carry the **gradient** and not its L1 projection, which is the one place the two
-blocks disagree on purpose: an ambient term wants the environment's
+**A consumer takes the gradient, not its L1 projection**, which is the one place
+the two blocks disagree on purpose: an ambient term wants the environment's
 cosine-weighted integral and L1 _is_ that integral, while a reflection wants
 radiance along one direction, and rebuilding that from four coefficients would
-blur a gradient the pass can evaluate exactly.
-
-So §5's half of this rung is closed — the environment SSR falls back to is no
-longer the probe grid alone.
-
-**The third consumer landed 2026-08-27 too, and it is the half that shows.**
-`crcbl_render::sky_pass` draws `sky.slang`'s full-screen triangle at the
-reversed-Z far plane against the depth the forward pass stored, tested
-`GreaterOrEqual` with writes off — so the hardware that rejected the hidden
-fragments is what selects the background, and the pass binds no depth texture,
-no sampler and has no `discard`. It carries the gradient rather than the
-projection, on `SsrParams`' reasoning. A frame whose sky is `Sky::NONE` adds no
-pass at all, which is why the rung landed without moving a golden.
+blur a gradient the pass can evaluate exactly. The sky pass reads it on the same
+terms: `sky.slang`'s full-screen triangle draws at the reversed-Z far plane
+against the depth the forward pass stored, tested `GreaterOrEqual` with writes
+off — so the hardware that rejected the hidden fragments is what selects the
+background, and the pass binds no depth texture, no sampler and has no
+`discard`. A frame whose sky is `Sky::NONE` adds no pass at all.
 
 **What is left here** is everything above a gradient: a cubemap or a
-physically-based atmosphere, and the specular IBL term §5 wants. Those are their
-own rungs and are not blocked by anything this one left behind.
+physically-based atmosphere. Those are their own rungs and are not blocked by
+anything this one left behind.
 
 This matters more than it sounds because of §5: **the environment term SSR falls
 back to and the ambient term a metal needs are the same term a sky would
@@ -763,25 +712,7 @@ the goldens already carry; a scene that sets an atmosphere gets it instead. An
 analytic fit (Preetham) was considered and declined: cheaper to compute, visibly
 wrong at low sun, and it saves a LUT the tree already knows how to cook.
 
-## 9. The blocker that gated five features
-
-**Motion vectors, and the previous-frame transform they need.** The transform
-half was **built 2026-08-27**: `crcbl_shaders::mesh::GpuInstance` now carries
-`previous_transform` beside `transform`, `INSTANCE_STRIDE` is 160, and
-`crcbl_render::InstancePool` fills it — a rewrite carries where the instance
-came from, an insert is at rest because a spawn did not travel from anywhere,
-and a rotate puts back at rest whatever moved a frame ago and has not moved
-again. So every instance can now say where it was last frame.
-
-The **pass** was **built 2026-08-30**, which is the other three pieces this
-section named. `crcbl_render::forward`'s `MOTION_FORMAT` is an `Rg16Float`
-transient created by `TransientImageDesc::motion`, attached to the `forward`
-pass as its third colour target and cleared to zero;
-`crcbl_shaders::mesh::FrameUniforms::previous_view_proj` is the camera-side twin
-of `GpuInstance::previous_transform`, last in the block and advanced on the same
-frame boundary `InstancePool::rotate` measures on; and `mesh.slang`'s
-`motion_vector` is the subtraction, fed by two undivided clip positions both
-geometry stages emit and divided in the fragment stage.
+## 9. Motion vectors, and the five rungs that read them
 
 **The convention, which a consumer must not have to guess**: texture-coordinate
 space, current minus previous, `+y` down — so a history buffer is read at
@@ -797,16 +728,12 @@ instance transform never changed, which is
 `crcbl_shaders::mesh::GpuInstance::previous_base_vertex` — the pool vertex the
 frame before deformed it into — being read on the override arm.
 
-So the five features below are blocked **on their own work only** — a rigid
-body's motion, a deformed surface's and a skinned object's own travel are all
-three in the target, and the one thing it does not yet carry is
-`docs/backlog.md`'s: the camera's motion where the sky shows through. A skinned
-instance's transform motion was the third gap until 2026-08-30, when
-`crcbl_render::InstancePool::set_bases` gave
-`ForwardRenderer::point_skinned_instances` a way to rewrite a record's two base
-vertices without the write being taken for a move.
+A rigid body's motion, a deformed surface's and a skinned object's own travel
+are all three in the target. **The one thing it does not carry** is
+`docs/backlog.md`'s: the camera's motion where the sky shows through.
 
-Those five, in the order they would be wanted:
+The five rungs that read it, each now blocked on its own work only, in the order
+they would be wanted:
 
 1. **TAA** — [49-antialiasing.md](49-antialiasing.md)'s ladder names it exactly.
 2. **Temporal SSR**, which is what makes a rough reflection quiet.
@@ -816,15 +743,13 @@ Those five, in the order they would be wanted:
 4. **Per-object motion blur.**
 5. **SSGI's accumulation**, per §5.
 
-**The cheap insurance was taken on 2026-08-27**, which is what this section
-recommended most strongly and for the reason it gave: widening `GpuInstance` is
-cheap while four shader copies declare it and expensive once more shaders index
-past `INSTANCE_STRIDE` — the same argument `GpuInstance::sector` is already in
-the record on. The record grew by 64 bytes an instance and no frame moved, which
-is the shape a reservation is supposed to have.
+**Widening `GpuInstance` is cheap while four shader copies declare it and
+expensive once more shaders index past `INSTANCE_STRIDE`** — the same argument
+`GpuInstance::sector` is already in the record on, and the reason a slot this
+section wanted was taken early rather than when its first reader arrived.
 
-The field is **populated rather than reserved**, and deliberately: a slot
-holding whatever the slot held last is a slot whose first reader debugs the
+A slot of that kind is **populated rather than reserved**, and deliberately: a
+slot holding whatever the slot held last is a slot whose first reader debugs the
 pool. The pool owns it the way it owns the liveness bit, so no caller can leave
 it stale.
 
@@ -868,36 +793,26 @@ desktop cost, and they are the tiers every golden runs on, so the desktop number
 alone is not a price. The same rule holds the forward pass to
 [44-lighting.md](44-lighting.md)'s attachment budget.
 
-| Rung                                                                                                                                                                                          | Why here                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **THE LIGHTING ORDER, decided 2026-08-30** — the raster items interleave with the foundations rather than waiting behind them                                                                 | (a) vertex v2 → normal maps → LTC area lights and the fill flag → the shadow atlas allocator with (f) and (e) beside it → contact shadows → the AO tint and bent normals → the probe volume rebuilt → the atmosphere → CMAA2. (b), (d) and (g) land where the first rung that needs them does; (c) when the RT tier's updater is next. The user's rule for the order: best-looking for the performance, cheapest real win first  |
-| **FOUNDATIONS BLOCK (a)–(g), 2026-08-30** — a foundation is scheduled before any feature rung that would be cheaper with it                                                                   | The seven rows below, in order; each is priced like any rung. (a) is this section's stride decision and gates the material ladder; the rest are the early-leverage items written into their own plans the same day                                                                                                                                                                                                               |
-| **(a) Vertex v2: split streams, QTangent, quantised UVs, `GpuMaterial` at 64 bytes**                                                                                                          | §2 — one re-bless, born v0; the position-only prepass and shadow passes come with it                                                                                                                                                                                                                                                                                                                                             |
-| **(b) The render stack as RON, per camera**                                                                                                                                                   | [48-post-processing.md](48-post-processing.md) — the pass list a camera runs is data, so a demo, a test and a settings preset compose it without a build                                                                                                                                                                                                                                                                         |
-| **(c) Acceleration structures and inline ray queries on the seam** (vk, dx12, mtl)                                                                                                            | §5 — the GI's engine on the ray-tracing tier: a build and refit, a `Capability` the device reports, and the hit-shading reads. Decided 2026-08-30 in `docs/backlog.md`: GI is hardware ray tracing only; the other tiers run the raster stack                                                                                                                                                                                    |
-| **(d) The page allocator, generalised**                                                                                                                                                       | §2 — one array-image allocator behind base colour, the material pages, decals and the shadow atlas rectangle                                                                                                                                                                                                                                                                                                                     |
-| **(e) The debug draw layer**                                                                                                                                                                  | [07-ui-debug.md](07-ui-debug.md) — lines, boxes and text the culling, LOD and atlas rungs are debugged through                                                                                                                                                                                                                                                                                                                   |
-| **(f) The shared importance and hysteresis helper**                                                                                                                                           | [25-lod.md](25-lod.md) + [45-shadows.md](45-shadows.md) — one scorer for cluster selection and shadow-tile priority                                                                                                                                                                                                                                                                                                              |
-| **(g) Quality presets low / medium / high**                                                                                                                                                   | [39-capabilities.md](39-capabilities.md) — every rung's rows behind three names, which is what the three-tier pricing rule reports against                                                                                                                                                                                                                                                                                       |
-| ~~Reserve the previous-transform slot in `GpuInstance`~~                                                                                                                                      | §9 — **built 2026-08-27**: the field, the stride, four shader copies and the pool that fills it; no frame moved                                                                                                                                                                                                                                                                                                                  |
-| ~~Exponential height fog~~                                                                                                                                                                    | §4 — **built 2026-08-27**: `crcbl_shaders::fog` answers the `exp` question, two rows of the frame block carry it, `set_fog` switches it on                                                                                                                                                                                                                                                                                       |
-| ~~Multi-scatter energy compensation~~                                                                                                                                                         | §5 — **built 2026-08-27**, both halves: the cooked table and the multiply on the lobe                                                                                                                                                                                                                                                                                                                                            |
-| ~~The `anisotropic_filtering` row~~                                                                                                                                                           | §2's filtering subsection — **built 2026-08-29**: the chain, the trilinear sampler, the device's anisotropy, `set_anisotropy`, the settings key and `apps/options`'s `ANISOTROPY` row; the WebGPU ceiling decision is `docs/backlog.md`'s                                                                                                                                                                                        |
-| **The viewer as the PBR showcase** — native drag-and-drop, a bundled shelf of Khronos CC0 models picked from a list, Suzanne on open ([sample/05-viewer.md](sample/05-viewer.md) milestone 4) | The first two parts need nothing the tree lacks; the material set draws when the normal-map rung lands, and the viewer on Suzanne is that rung's golden                                                                                                                                                                                                                                                                          |
-| **Normal maps: tangent, page, sampling**                                                                                                                                                      | §2 — the largest visual gap, and the rest of the material set follows the same road                                                                                                                                                                                                                                                                                                                                              |
-| **Emissive page** (the factor shipped 2026-08-27)                                                                                                                                             | §2 — rides the second texture page rung                                                                                                                                                                                                                                                                                                                                                                                          |
-| **Alpha-mask materials**                                                                                                                                                                      | §3 — a `discard`, no sorting, and it is what foliage wants                                                                                                                                                                                                                                                                                                                                                                       |
-| ~~Render scale and a blit~~                                                                                                                                                                   | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                                                                                                                                                                                                                                                                                                                                 |
-| ~~A gradient sky feeding ambient and the SSR fallback~~                                                                                                                                       | §8 — **built 2026-08-27**: the gradient, its L1 projection, the ambient it feeds, the environment a missed reflection falls back to, and the depth-tested pass that draws it behind the frame                                                                                                                                                                                                                                    |
-| ~~The sun's shaft through the froxel column~~                                                                                                                                                 | §4 — **built 2026-08-28**: the buffer, the scatter, the scan, the composite, the sun's phase-scattered radiance and the cascade lookup that occludes it — [51-volumetrics.md](51-volumetrics.md) rungs 1a through 1b-ii                                                                                                                                                                                                          |
-| ~~Auto-exposure~~                                                                                                                                                                             | §6 — **built 2026-08-29**: the histogram, the reduce, the buffer the tonemap reads, the `AUTO_EXPOSURE` bit a view asks with, and the temporal roll between one frame's exposure and the next                                                                                                                                                                                                                                    |
-| **Blended transparency with GPU-sorted keys**                                                                                                                                                 | §3 — the first rung here that touches the frame's structure                                                                                                                                                                                                                                                                                                                                                                      |
-| ~~Specular IBL: prefiltered radiance and a BRDF LUT~~                                                                                                                                         | §5 — **built 2026-08-29**, both halves: `crcbl_shaders::sky_prefilter` is the gradient convolved against the lobe as one committed table, `ssr.slang`'s miss fallback reads the sky through it at the surface's roughness, and `crcbl_shaders::dfg`'s pair scales the environment by `f0 · scale + bias` in place of Schlick — mirrors unchanged, rough metals darker at grazing angles by the energy one direction over-counted |
-| **Specular antialiasing (roughness regularisation)**                                                                                                                                          | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                                                                                                                                                                                                                                                       |
-| **Block-compressed pages: KTX2 and Basis at the bake, BC7/BC5/BC4 on the device**                                                                                                             | §2's filtering subsection — a bake-tool rung, gated on an encoder the workspace does not have and the user has not chosen. **It is the bandwidth rung** (2026-08-30): four to six times less texture traffic, which is what makes normal maps and the material pages affordable in the browser at all, so the encoder decision is what the material ladder above waits on                                                        |
-| Colour grading, DOF, lens artefacts                                                                                                                                                           | §6 — polish, after the curve exists to grade against                                                                                                                                                                                                                                                                                                                                                                             |
-| ~~The motion-vector pass~~                                                                                                                                                                    | §9 — **built 2026-08-30**: the `Rg16Float` target, `FrameUniforms::previous_view_proj`, the subtraction on both geometry paths, and `DebugView::Motion` with the e2e suite that reads it                                                                                                                                                                                                                                         |
-| ~~One `antialiasing` row~~ (**built 2026-08-30**), **CMAA2 in SMAA's place, then MSAA 2×/4×/8×**                                                                                              | [49-antialiasing.md](49-antialiasing.md)'s eighth decision — the settings row first, the depth resolve second                                                                                                                                                                                                                                                                                                                    |
-| **The shadow atlas proper: variable tiles, priority, budget**                                                                                                                                 | [45-shadows.md](45-shadows.md) — pulled forward 2026-08-30 so a many-light scene shadows; rides on the cadence rung                                                                                                                                                                                                                                                                                                              |
-| **The probe volume rebuilt: per-probe visibility maps, the RSM updater, the lantern and shard bakes removed**                                                                                 | [50-irradiance-probes.md](50-irradiance-probes.md)'s decision of 2026-08-30 — leak-free, one bounce, dynamic sun and lamps on every tier; the traced updater rides on (c)                                                                                                                                                                                                                                                        |
-| SSGI, temporal SSR, TAA, temporal upscaling                                                                                                                                                   | §9's pass is built; each is its own rung now                                                                                                                                                                                                                                                                                                                                                                                     |
+| Rung                                                                                                                                                                                          | Why here                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **THE LIGHTING ORDER, decided 2026-08-30** — the raster items interleave with the foundations rather than waiting behind them                                                                 | (a) vertex v2 → normal maps → LTC area lights and the fill flag → the shadow atlas allocator with (f) and (e) beside it → contact shadows → the AO tint and bent normals → the probe volume rebuilt → the atmosphere → CMAA2. (b), (d) and (g) land where the first rung that needs them does; (c) when the RT tier's updater is next. The user's rule for the order: best-looking for the performance, cheapest real win first |
+| **FOUNDATIONS BLOCK (a)–(g), 2026-08-30** — a foundation is scheduled before any feature rung that would be cheaper with it                                                                   | The seven rows below, in order; each is priced like any rung. (a) is this section's stride decision and gates the material ladder; the rest are the early-leverage items written into their own plans the same day                                                                                                                                                                                                              |
+| **(a) Vertex v2: split streams, QTangent, quantised UVs, `GpuMaterial` at 64 bytes**                                                                                                          | §2 — one re-bless, born v0; the position-only prepass and shadow passes come with it                                                                                                                                                                                                                                                                                                                                            |
+| **(b) The render stack as RON, per camera**                                                                                                                                                   | [48-post-processing.md](48-post-processing.md) — the pass list a camera runs is data, so a demo, a test and a settings preset compose it without a build                                                                                                                                                                                                                                                                        |
+| **(c) Acceleration structures and inline ray queries on the seam** (vk, dx12, mtl)                                                                                                            | §5 — the GI's engine on the ray-tracing tier: a build and refit, a `Capability` the device reports, and the hit-shading reads. Decided 2026-08-30 in `docs/backlog.md`: GI is hardware ray tracing only; the other tiers run the raster stack                                                                                                                                                                                   |
+| **(d) The page allocator, generalised**                                                                                                                                                       | §2 — one array-image allocator behind base colour, the material pages, decals and the shadow atlas rectangle                                                                                                                                                                                                                                                                                                                    |
+| **(e) The debug draw layer**                                                                                                                                                                  | [07-ui-debug.md](07-ui-debug.md) — lines, boxes and text the culling, LOD and atlas rungs are debugged through                                                                                                                                                                                                                                                                                                                  |
+| **(f) The shared importance and hysteresis helper**                                                                                                                                           | [25-lod.md](25-lod.md) + [45-shadows.md](45-shadows.md) — one scorer for cluster selection and shadow-tile priority                                                                                                                                                                                                                                                                                                             |
+| **(g) Quality presets low / medium / high**                                                                                                                                                   | [39-capabilities.md](39-capabilities.md) — every rung's rows behind three names, which is what the three-tier pricing rule reports against                                                                                                                                                                                                                                                                                      |
+| **The viewer as the PBR showcase** — native drag-and-drop, a bundled shelf of Khronos CC0 models picked from a list, Suzanne on open ([sample/05-viewer.md](sample/05-viewer.md) milestone 4) | The first two parts need nothing the tree lacks; the material set draws when the normal-map rung lands, and the viewer on Suzanne is that rung's golden                                                                                                                                                                                                                                                                         |
+| **Normal maps: tangent, page, sampling**                                                                                                                                                      | §2 — the largest visual gap, and the rest of the material set follows the same road                                                                                                                                                                                                                                                                                                                                             |
+| **Emissive page** (the factor shipped 2026-08-27)                                                                                                                                             | §2 — rides the second texture page rung                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Alpha-mask materials**                                                                                                                                                                      | §3 — a `discard`, no sorting, and it is what foliage wants                                                                                                                                                                                                                                                                                                                                                                      |
+| **Blended transparency with GPU-sorted keys**                                                                                                                                                 | §3 — the first rung here that touches the frame's structure                                                                                                                                                                                                                                                                                                                                                                     |
+| **Specular antialiasing (roughness regularisation)**                                                                                                                                          | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                                                                                                                                                                                                                                                      |
+| **Block-compressed pages: KTX2 and Basis at the bake, BC7/BC5/BC4 on the device**                                                                                                             | §2's filtering subsection — a bake-tool rung, gated on an encoder the workspace does not have and the user has not chosen. **It is the bandwidth rung** (2026-08-30): four to six times less texture traffic, which is what makes normal maps and the material pages affordable in the browser at all, so the encoder decision is what the material ladder above waits on                                                       |
+| Colour grading, DOF, lens artefacts                                                                                                                                                           | §6 — polish, after the curve exists to grade against                                                                                                                                                                                                                                                                                                                                                                            |
+| **CMAA2 in SMAA's place, then MSAA 2×/4×/8×**                                                                                                                                                 | [49-antialiasing.md](49-antialiasing.md)'s eighth decision — the settings row first, the depth resolve second                                                                                                                                                                                                                                                                                                                   |
+| **The shadow atlas proper: variable tiles, priority, budget**                                                                                                                                 | [45-shadows.md](45-shadows.md) — pulled forward 2026-08-30 so a many-light scene shadows; rides on the cadence rung                                                                                                                                                                                                                                                                                                             |
+| **The probe volume rebuilt: per-probe visibility maps, the RSM updater, the lantern and shard bakes removed**                                                                                 | [50-irradiance-probes.md](50-irradiance-probes.md)'s decision of 2026-08-30 — leak-free, one bounce, dynamic sun and lamps on every tier; the traced updater rides on (c)                                                                                                                                                                                                                                                       |
+| SSGI, temporal SSR, TAA, temporal upscaling                                                                                                                                                   | §9's pass is built; each is its own rung now                                                                                                                                                                                                                                                                                                                                                                                    |

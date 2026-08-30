@@ -47,35 +47,16 @@ afterwards that it worked.
 
 ## What is missing
 
-Written when the GPU side was genuinely good and the rest was not there at all.
-The struck items below have since been closed; the rest still stand.
-
-1. ~~**No CPU-side spans.** Nothing measures the tick, the ECS schedule,
-   physics, asset upload, culling's CPU half or the shell's frame. The GPU
-   report says which pass cost what; nothing says whether the frame was
-   GPU-bound at all.~~ **Built.** `crcbl_core::trace` is the mechanism — `span`,
-   `counter`, `drain` and `Snapshot`, always compiled and gated at runtime by
-   `CRCBL_TRACE`, exactly as the decision below prescribes — and `crcbl::perf`
-   is the vocabulary: the loop's phases as span names, opened by `Loop::frame`,
-   with `frame_cpu_time` subtracting the spans in which the loop was
-   deliberately blocked. `Loop::record_frame_cost` hands the result to
-   `crcbl_ui::budget` beside the GPU total, which is the frame CPU-vs-GPU row
-   below. The ECS schedule, physics and asset upload are still unspanned,
-   because they are not phases the engine's loop has — they live inside a game's
-   `tick`.
-2. ~~**No benchmark harness.** `apps/horde` has ad-hoc flags (`--wall-clock`,
-   `--fps 0`, `--tick-hz 1`, `--frames`, `--prefill`) and the numbers in
-   [sample/03-horde.md](sample/03-horde.md) were produced by hand. There is no
-   fixed scenario set, no warm-up, no statistics beyond a mean, and no
-   machine-readable output.~~ **Built for the scenarios that need no device.**
-   `crcbl bench --scenario jobs|phys` (`crates/crcbl-cli/src/bench/`) pins the
-   scenario, warms up, and reports p50, p95, p99 and max — and no mean, and no
-   percentile at all below `MIN_PERCENTILE_SAMPLES`, where a nearest-rank p95 is
-   the maximum wearing a percentile's name — as both a human line and `--json`,
-   beside an environment block. That block carries no adapter, backend or driver
-   version because neither scenario opens a device. The sample-owned scenarios
-   that would are not written, so `apps/horde`'s ad-hoc flags are still how its
-   numbers get produced.
+1. **The ECS schedule, physics and asset upload are unspanned.** They are not
+   phases the engine's loop has — they live inside a game's `tick` — so
+   `crcbl::perf`'s span vocabulary, which names the loop's own phases, does not
+   reach them.
+2. **The benchmark scenarios that need a device are not written.**
+   `crcbl bench --scenario jobs|phys` opens none, so its environment block
+   carries no adapter, backend or driver version, and `apps/horde`'s ad-hoc
+   flags (`--wall-clock`, `--fps 0`, `--tick-hz 1`, `--frames`, `--prefill`) are
+   still how the numbers in [sample/03-horde.md](sample/03-horde.md) get
+   produced.
 3. **No baseline or regression detection.** Nothing stores a previous run to
    compare against, so "is this slower than last week" is unanswerable.
    **Scheduled 2026-08-30 as the next slice of this topic**, because the render
@@ -92,49 +73,11 @@ The struck items below have since been closed; the rest still stand.
 4. **No trace export.** Nothing a real profiler UI can open.
 5. **No memory or occupancy accounting.** Pool residency, buffer bytes,
    descriptor counts, staging-ring pressure — all invisible.
-6. ~~**No job-system instrumentation.** `crcbl-jobs` has a work-stealing deque
-   and exposes no worker utilisation, steal counts or queue depth, so the phase
-   that adopts it cannot show it helped.~~ **Built** as `Pool::stats` →
-   `PoolStats`, with `Pool::reset_stats` to bound a reading to one phase: chunks
-   run by the driver against chunks run by workers (they sum, between
-   submissions, to every chunk a completed `par_for` split into), steals,
-   searches that found the deque empty, searches that lost the exchange, parks,
-   the largest burst one submission queued, and the submission count. Relaxed
-   atomics nothing in the pool reads back, counted per chunk rather than per
-   item, and torn across fields if read mid-call — which the type documents
-   rather than preventing with a lock, for the reason under Risks. The one
-   reader is `crcbl bench --scenario jobs`, which reports them in its human and
-   `--json` output. Nothing puts them on the trace or in a panel row, and
-   `crcbl-jobs` still has no spans — it does not depend on `crcbl-core`, so the
-   dependency the span module's placement decision anticipated has not been
-   added yet.
-7. ~~**Counters are piecemeal.** `SceneStats`, `visible_count` and each sample's
-   own rows exist; there is no one place a frame's draw count, instance count,
-   cluster count or triangle count is reported.~~ **Built** as
-   `crcbl_render::counters`: `FrameCounters`, produced once by whichever
-   renderer wrote the draw and summed with `plus` the way the passes' timers
-   are. A count the CPU genuinely cannot know — an indirect pass's instances and
-   triangles — is `None` and prints as `indirect`, rather than a zero that reads
-   as "nothing was drawn". `crcbl::perf::sample_counters` puts the same numbers
-   on the trace beside the spans.
-8. ~~**The culling stats never leave the GPU.** An earlier draft of this file
-   listed "the culling-stats readback on a delayed ring" under what already
-   exists. It does not: `DrawGen::visible_count` is a `DeviceLocal` buffer with
-   `TRANSFER_SRC`, and `crcbl-hal` has the poll-shaped
-   `request_readback`/`poll_readback` the frame loop is allowed to use — but
-   there is no staging buffer, no copy inside the frame graph, and no consumer.
-   Every read of it in the tree is a test copying it back by hand outside the
-   frame loop. **Until that ring is built, the culling win and the cluster
-   counts cannot be reported at all** — which is why the counters row says
-   `indirect` rather than a number wherever a `ForwardRenderer` is in the frame.
-   Building it is its own slice: a `HostReadback` buffer per frame in flight, a
-   copy the graph schedules rather than the hand-written barriers
-   `screenshot.rs` uses, and four-backend verification.~~ **Built** as
-   `crcbl_render::cull_stats`: a `CullStatsRing` of host-readable slots, filled
-   by a copy pass the graph schedules and read a full turn of the ring later
-   through `request_readback`/`poll_readback`, so the latency is again the
-   synchronisation — no fence, no `wait_idle`. `latest()` is the consumer, via
-   `ForwardRenderer::counters`.
+6. **The job-system counters reach no trace and no panel row.** `Pool::stats` is
+   read only by `crcbl bench --scenario jobs`; nothing puts the numbers on the
+   trace or in a panel row, and `crcbl-jobs` still has no spans — it does not
+   depend on `crcbl-core`, so the dependency the span module's placement
+   decision anticipated has not been added yet.
 
 ## Decisions (taken 2026-08-13, so they are not re-argued)
 
@@ -211,11 +154,8 @@ serialiser and a wire format big enough to want its own compile unit, moving it
 is a re-export away — which is not true of the dependency edge, and the
 dependency edge is the part that has to be right now.
 
-> **Built as specified, 2026-08-15.** The module is `crcbl_core::trace`, beside
-> `time` and `log`, and there is no `crcbl-trace` crate. The gate is runtime,
-> read from `CRCBL_TRACE` by `init_from_env` and off by default; there is no
-> Cargo feature, and the `--cfg crcbl_trace_off` switch is still unbuilt, which
-> is what the decision above asks for until there is a shipping build to serve.
+> **The `--cfg crcbl_trace_off` switch is still unbuilt**, which is what the
+> decision above asks for until there is a shipping build to serve.
 
 ## `crcbl bench`
 
@@ -241,18 +181,15 @@ adds, and they are what makes a slowdown visible without exporting anything:
 
 - **Frame**: CPU frame time and GPU frame time side by side with p50/p95, and
   which of the two is the budget — the single most useful row, and the reason it
-  is first: "GPU-bound" is the first question and nothing answered it.
-  **Built**, as `crcbl_ui::budget`'s `BudgetStats`, fed by
-  `Loop::record_frame_cost`. It shows two rolling distributions rather than
-  pairing one frame's two numbers, because the GPU report is frames latent and a
-  single-frame pairing would be wrong by exactly that offset. Every row below it
-  is still owed.
+  is first: "GPU-bound" is the first question and nothing answered it. It shows
+  two rolling distributions rather than pairing one frame's two numbers, because
+  the GPU report is frames latent and a single-frame pairing would be wrong by
+  exactly that offset. Every row below it is still owed.
 - **Pass list**: the existing per-pass GPU times, sorted by cost, with the
-  frame's total and each pass's share. **The exit log has this since
-  2026-08-28** — `PassStats::report`, as distributions rather than one frame —
-  but the _panel_ row does not: what the overlay shows is still `FrameTimings`'
-  own `DebugModule`, one latent frame at a time, which is the right thing for a
-  live row and the wrong thing for a comparison.
+  frame's total and each pass's share. **The _panel_ row does not have this**:
+  what the overlay shows is still `FrameTimings`' own `DebugModule`, one latent
+  frame at a time, which is the right thing for a live row and the wrong thing
+  for a comparison.
 - **CPU breakdown**: tick, schedule, physics, upload, record, present-wait.
 - **Counters**: draws, instances submitted vs drawn (the culling win, visible),
   clusters drawn and their level histogram, triangles.
@@ -282,13 +219,11 @@ the wrong row.
 
 ## Delivery
 
-| Slice                                                                                                       | Phase                                                                                                                                                              |
-| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| CPU spans + counters + the always-on/runtime-gate decision; frame CPU vs GPU row                            | **Built** — `crcbl_core::trace`, `crcbl::perf`, `crcbl_render::counters` and `crcbl_render::cull_stats`                                                            |
-| `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output                                       | **Started** — the subcommand and the `jobs` and `phys` scenarios (`crates/crcbl-cli/src/bench/`); the sample-owned scenarios, which need a device, are not written |
-| Per-pass GPU distributions in the exit log                                                                  | **Built 2026-08-28** — `crcbl_render::PassStats`, fed by `Loop::record_frame_cost` and reported by `Loop::finish`                                                  |
-| Trace export (Chrome Trace JSON) + job-system tracks                                                        | P8                                                                                                                                                                 |
-| Baseline storage + `--compare` + thresholds, per machine, 1.15× per pass — the next slice here (2026-08-30) | P8                                                                                                                                                                 |
-| Memory/occupancy accounting and its rows                                                                    | P9 (assets and pools are what make it interesting)                                                                                                                 |
-| The rest of the debug panel's perf rows; freeze toggle                                                      | P10 (with the UI slice that owns the panel)                                                                                                                        |
-| Tracy or another external profiler, if wanted                                                               | later, on demonstrated need and a dependency decision                                                                                                              |
+| Slice                                                                                                       | Phase                                                            |
+| ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output                                       | The sample-owned scenarios, which need a device, are not written |
+| Trace export (Chrome Trace JSON) + job-system tracks                                                        | P8                                                               |
+| Baseline storage + `--compare` + thresholds, per machine, 1.15× per pass — the next slice here (2026-08-30) | P8                                                               |
+| Memory/occupancy accounting and its rows                                                                    | P9 (assets and pools are what make it interesting)               |
+| The rest of the debug panel's perf rows; freeze toggle                                                      | P10 (with the UI slice that owns the panel)                      |
+| Tracy or another external profiler, if wanted                                                               | later, on demonstrated need and a dependency decision            |

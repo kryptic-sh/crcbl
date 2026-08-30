@@ -76,20 +76,15 @@ on the hot path.
   is for.
 
 - Atomic writes always: write temp + fsync + rename. Corrupted-save protection
-  is not optional. Keep last N autosaves (ring). **Both built**:
-  `crcbl_store::write_atomic`, and `save.rs`'s `AutosaveRing`, which takes a
-  capacity and a filename template and hands back the slot it wrote. The
-  checksum is a real SHA-256 (`crcbl_shaders::sha256`), and `SaveReader` exposes
-  `open_ignoring_checksum` beside `open` so a corrupt save can still be
-  inspected rather than only refused.
+  is not optional. Keep last N autosaves (ring).
 
   **"Always" is a native always, and that is the trap in this bullet.**
-  `write_atomic` is `std::fs` all the way down: temp file opened `create_new`,
-  `write_all`, `sync_all`, parent-directory fsync, rename, parent fsync again.
-  The Origin Private File System has no `rename` to build that shape on, even
-  through JS, so the browser path is `OpfsStorage` and it keeps a different half
-  of the guarantee — torn reads prevented, **durability at return not
-  provided**. A save that returned `Ok` in a browser is not yet a save that
+  `crcbl_store::write_atomic` is `std::fs` all the way down: temp file opened
+  `create_new`, `write_all`, `sync_all`, parent-directory fsync, rename, parent
+  fsync again. The Origin Private File System has no `rename` to build that
+  shape on, even through JS, so the browser path is `OpfsStorage` and it keeps a
+  different half of the guarantee — torn reads prevented, **durability at return
+  not provided**. A save that returned `Ok` in a browser is not yet a save that
   survives the tab closing. Do not carry a native atomicity test over to the
   wasm job and call it passed.
 
@@ -157,35 +152,28 @@ describes what the player wants on, and a negated key would make
 
 The machinery under these catalogues is further along than "settings are not
 built" suggests, and stating the gap loosely is how a plan comes to owe work the
-tree already ships. Verified 2026-08-27:
+tree already ships. None of the storage layer is owed. Verified 2026-08-30, the
+gap is three specific things:
 
-**Built.** The layered TOML stack and its four layer kinds; `SettingsStack`'s
-`get`, `get_section`, `set`, `save`, `dump` and `contains`;
-`StorageSettingsFile::load` / `save`; `SettingsStack::platform(app_name)`, which
-picks the backend by target — the platform config directory through
-`NativeStorage::config_root` natively, and **on `wasm32` the Origin Private File
-System** through the installed OPFS store. Four `StorageSource` implementations
-exist: `NativeStorage`, `MemoryStorage`, `FetchSource` and `OpfsStorage`. The
-user-file layer stores only changed values, which is what keeps the files small.
-None of that is owed.
-
-The gap is three specific things:
-
-1. **Nothing but the CLI ever writes settings.**
-   `crates/crcbl-cli/src/settings_cmd.rs` calls `set` and `save`; no app, sample
-   or demo in the workspace does, outside its own tests. So the round trip is
-   exercised only from a command line, and the "hot-apply versus apply-on-
-   confirm" bullet above describes a pattern nothing has yet had to implement.
-2. **`crates/crcbl/src/settings.rs` reads four boolean keys and nothing else.**
-   `VIDEO_KEYS` maps `shadows`, `ambient_occlusion`, `reflections` and `bloom`
-   to `RenderEffects` bits, and `GpuContext::open` reads them. That is the whole
-   settings **surface** of the engine. Every other key in the three catalogues
-   has a defined home in the TOML and no reader.
-3. **There is no settings UI anywhere.** The engine's pause menu offers
+1. **The hot-apply-versus-apply-on-confirm pattern has one implementor.**
+   `apps/options` writes through `crcbl::settings`' setters and
+   `crates/crcbl-cli/src/settings_cmd.rs` writes from a terminal; nothing else
+   in the workspace writes settings outside its own tests. So the bullet above
+   describes a pattern one screen has had to implement and nothing has had to
+   generalise.
+2. **`crates/crcbl/src/settings.rs` reads sixteen keys and no more.**
+   `VIDEO_KEYS` maps six booleans to `RenderEffects` bits and `GpuContext::open`
+   reads them; `render_scale`, `frame_limit`, `antialiasing` and
+   `anisotropic_filtering` are read beside them, and `audio_gains` reads the six
+   `[engine.audio]` bus gains. That is the whole settings **surface** of the
+   engine. Every other key in the three catalogues has a defined home in the
+   TOML and no reader.
+3. **The engine's own pause menu writes nothing.** It offers
    `MenuAction::Fullscreen` and `MenuAction::DebugOverlay` and neither touches a
    file — the fullscreen toggle is a live `Shell::set_mode` call whose result is
-   forgotten at exit. A menu is what turns this from a file a player edits by
-   hand into a setting, and it is the P10 row in the delivery table below.
+   forgotten at exit. `apps/options` is a sample; the engine-provided screen
+   that turns this from a file a player edits by hand into a setting is the P10
+   row in the delivery table below.
 
 ### When there is nowhere to write
 
@@ -279,16 +267,13 @@ unbuilt.
   trait.
 - **Wasm: OPFS** (Origin Private File System) primary, IndexedDB fallback —
   async by nature, which is why the whole persistence API is async from day one
-  (same wasm-forcing-function as assets). Browser saves are real saves. **Built,
-  and with two real consumers**: `crates/crcbl-store/src/web/opfs.rs` behind
-  `crcbl::store::web::OpfsStorage`; `apps/breakout` keeps its high score there
-  and `apps/shard` writes its whole save there, each selecting the backing by
-  platform. No IndexedDB fallback exists — OPFS is the only browser backend, so
-  a browser without it has no persistence rather than a degraded one. That is a
-  known hole, not an oversight, and `crcbl-store`'s `web` module says so in its
-  own "what is not closed" list: the wasm side is a queue of `(name, bytes)`
-  records that a shim could satisfy from IndexedDB without this crate knowing,
-  but no shim does, and the choice has no representation in `OpfsEnvironment`.
+  (same wasm-forcing-function as assets). Browser saves are real saves. **No
+  IndexedDB fallback exists** — OPFS is the only browser backend, so a browser
+  without it has no persistence rather than a degraded one. That is a known
+  hole, not an oversight, and `crcbl-store`'s `web` module says so in its own
+  "what is not closed" list: the wasm side is a queue of `(name, bytes)` records
+  that a shim could satisfy from IndexedDB without this crate knowing, but no
+  shim does, and the choice has no representation in `OpfsEnvironment`.
 - Server deployments: configurable data dir (dedicated server flag).
 - Quota/failure surfaced as results, not panics — the browser can say no. **Half
   built**: failures do come back as `StorageError` rather than panicking, but
@@ -318,16 +303,14 @@ unbuilt.
 
 ## Delivery (interleaved — see ROADMAP)
 
-| Slice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Roadmap phase                                           |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `StorageSource` + settings layers (engine.video/audio/input)                                                                                                                                                                                                                                                                                                                                                                                                                                  | P2 (with the sim core; settings needed by first sample) |
-| Save/load container over snapshots + atomic writes + autosave — **built**: `crates/crcbl-store/src/save.rs` (`SaveWriter`, `SaveReader`, `AutosaveRing`, SHA-256 checksum, `write_atomic`). Not built over `SnapshotWriter` in practice — see the note under the section heading.                                                                                                                                                                                                             | P2 (thin layer over the same phase's SnapshotWriter)    |
-| Profiles (high scores, binds) — **the high-score half built as `crcbl_store::record::Record`**; no `Profile` type, no RON, no persisted binds. See the profiles note above.                                                                                                                                                                                                                                                                                                                   | P4 (breakout ships with a high score)                   |
-| `crcbl settings get\|set\|list` CLI — **built**: `crates/crcbl-cli/src/settings_cmd.rs`, wiring `crates/crcbl-store/src/settings.rs` to a terminal. It reads and writes the player's `settings.toml` under the platform config directory; `--app`, or the package name of the project in the current directory, names the game. Its stack has one layer — the player's file — because a game's compiled-in defaults live in the game's own binary and this CLI is not it, and `list` says so. | built                                                   |
-| `crcbl save` CLI, save diff — **not built**: the verb is not parsed and `crcbl-cli` has no module for it. `crcbl-store`'s `save.rs` exists and nothing in the CLI reaches it. Blocked rather than merely owed: `save dump` is specified above to render a snapshot as RON, this tree has no RON reader or writer, and adopting one is an open decision in `docs/backlog.md`. Said P2 until 2026-08-23; the exit criteria below still assume it.                                               | unbuilt                                                 |
-| OPFS wasm backend — **built**: `crates/crcbl-store/src/web/opfs.rs`, consumed by `apps/breakout` and `apps/shard`                                                                                                                                                                                                                                                                                                                                                                             | P5                                                      |
-| Settings UI screen (engine-provided, CSS-styled, reusable)                                                                                                                                                                                                                                                                                                                                                                                                                                    | P10                                                     |
-| towers: mid-run save/resume incl. co-op world save                                                                                                                                                                                                                                                                                                                                                                                                                                            | S6                                                      |
+| Slice                                                                                                                                                                                                                                                                                                                                                                                                                                           | Roadmap phase                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `StorageSource` + settings layers (engine.video/audio/input)                                                                                                                                                                                                                                                                                                                                                                                    | P2 (with the sim core; settings needed by first sample) |
+| Save/load container over snapshots + atomic writes + autosave — **not built over `SnapshotWriter` in practice**; see the note under the section heading.                                                                                                                                                                                                                                                                                        | P2 (thin layer over the same phase's SnapshotWriter)    |
+| Profiles (high scores, binds) — **the high-score half built as `crcbl_store::record::Record`**; no `Profile` type, no RON, no persisted binds. See the profiles note above.                                                                                                                                                                                                                                                                     | P4 (breakout ships with a high score)                   |
+| `crcbl save` CLI, save diff — **not built**: the verb is not parsed and `crcbl-cli` has no module for it. `crcbl-store`'s `save.rs` exists and nothing in the CLI reaches it. Blocked rather than merely owed: `save dump` is specified above to render a snapshot as RON, this tree has no RON reader or writer, and adopting one is an open decision in `docs/backlog.md`. Said P2 until 2026-08-23; the exit criteria below still assume it. | unbuilt                                                 |
+| Settings UI screen (engine-provided, CSS-styled, reusable)                                                                                                                                                                                                                                                                                                                                                                                      | P10                                                     |
+| towers: mid-run save/resume incl. co-op world save                                                                                                                                                                                                                                                                                                                                                                                              | S6                                                      |
 
 ## Exit criteria (MVP)
 
@@ -367,10 +350,6 @@ Single-sector games (every MVP sample) produce exactly the original format, so
 nothing gets more complex early — but the container is correct from P2 instead
 of being restructured after saves ship.
 
-> **The sector half landed; the rest of the header did not, 2026-08-15.**
-> `save.rs`'s container is a sector count and a `SectorEntry` per sector, each
-> keyed by a `[i64; 3]` sector id and holding the same snapshot bytes
-> replication uses — so the shape this correction insisted on is the shape that
-> shipped. What the header still lacks is the versions, the scene ref and its
-> hash; on-rails elements and per-system extension blocks have no place in the
-> format yet either. That is the remaining gap between this block and the tree.
+> **The header still lacks the versions, the scene ref and its hash**, and
+> on-rails elements and per-system extension blocks have no place in the format
+> yet either. That is the remaining gap between this block and the tree.

@@ -106,15 +106,9 @@ Grammar invariants (what makes it a learnable skill):
 
 ## Buses and volume (LOCKED 2026-08-27)
 
-### Built 2026-08-28: the gain stages exist
+### Two consequences of the gain chain
 
-`Bus` and its six variants, `Voice::with_bus`, `Mixer::set_bus_gain` and the
-three-multiply chain are in `crates/crcbl-audio/src/mixer.rs`. The gap section
-below is left as written because it is the argument for the decision rather than
-a status line, and the decision it argues for did not change in the building.
-
-What the code adds beyond the decision, both of them consequences nobody had to
-choose:
+Neither of these was chosen; both fall out of the decision below:
 
 - **`Mixer::route_gain` returns unity for `Bus::Master`.** The master is a bus
   like the others _and_ the stage every voice passes through, so a voice routed
@@ -130,33 +124,8 @@ with three gains whose products differ under regrouping — and the test checks
 that property of the three gains first, so a later edit cannot quietly pick
 three that associate and leave the assertion unable to fail.
 
-**What is not built**: nothing reads the `[engine.audio]` keys yet, so the gains
-are reachable from code and not from a player's file; and `AudioEvent` still
-carries no bus, which is the wire break the section below prices.
-
-### The gap, stated plainly
-
-**A player cannot turn the music down without turning the gunfire down.** That
-is not a shortfall against an ambitious design; it is the state of the crate.
-Verified in `crates/crcbl-audio/src/mixer.rs` on 2026-08-27, and **fixed
-2026-08-28** by the section above:
-
-- A `Voice` has a linear `volume`, clamped to `[0, 1]`, plus per-channel
-  `gains`. `Voice::with_volume` and `Mixer::set_mix` are the ways in, and
-  `mix_block` multiplies each sample by `volume` and its channel's gain.
-- The `Mixer` has `voices`, `releasing`, `listener` and `next_id`, and **no
-  volume field at all.** `AudioSource::fill` sums every voice into the buffer
-  and clamps the result to `[-1, 1]`; there is no gain applied above a voice, so
-  there is not even a single master volume to turn down.
-- There is **no bus concept anywhere.** No `Bus`, no routing, no per-bus gain,
-  no limiter. `crcbl-audio`'s module list is `event`, `mixer`, `qoa`, `spatial`,
-  `synth`, `wav`, `web` — the 2026-08-09 correction below has said the bus graph
-  does not exist for a while, and this is that correction restated as the thing
-  it actually costs a player.
-
-So the only way to make music quieter today is for the game to pass a smaller
-`volume` to every music voice it starts, which is a policy scattered across
-every call site and unreachable from a settings file.
+**What is not built**: `AudioEvent` still carries no bus, which is the wire
+break the touch list below prices.
 
 ### The decision: a small fixed set of buses
 
@@ -226,14 +195,14 @@ choice of bus names cannot become a compatibility surface.
 
 One `[engine.audio]` key per bus, each a linear gain in `[0, 1]`:
 
-| Key               | Domain          | Today                                                                                                                                                                                |
-| ----------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `master_volume`   | linear `[0, 1]` | **The key name is already in use as an example and nothing reads it.** `crcbl_store::settings`' module docs and the CLI's own test table both spell it; no code maps it to anything. |
-| `music_volume`    | linear `[0, 1]` | **Nothing.**                                                                                                                                                                         |
-| `sfx_volume`      | linear `[0, 1]` | **Nothing.**                                                                                                                                                                         |
-| `ui_volume`       | linear `[0, 1]` | **Nothing.**                                                                                                                                                                         |
-| `voice_volume`    | linear `[0, 1]` | **Nothing.**                                                                                                                                                                         |
-| `ambience_volume` | linear `[0, 1]` | **Nothing.**                                                                                                                                                                         |
+| Key               | Domain          |
+| ----------------- | --------------- |
+| `master_volume`   | linear `[0, 1]` |
+| `music_volume`    | linear `[0, 1]` |
+| `sfx_volume`      | linear `[0, 1]` |
+| `ui_volume`       | linear `[0, 1]` |
+| `voice_volume`    | linear `[0, 1]` |
+| `ambience_volume` | linear `[0, 1]` |
 
 Storage, spelling and the absent-key rule are
 [14-persistence.md](14-persistence.md)'s; `master_volume` is adopted rather than
@@ -360,10 +329,10 @@ backend makes every test above run with no device.
 
 | Slice                                                                                                                                                                                                                                                                                                                                                                                             | Roadmap phase                                            |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Device seam + audio thread + mixer/buses + WAV/QOA + voices + **full cue grammar** — **built except the buses**: `AudioStream`, `Mixer`, `wav.rs`, `qoa.rs`, `spatial.rs`. The buses are the one hole and they have their own correction below.                                                                                                                                                   | P4A (before first sample — breakout bounces pan audibly) |
+| Device seam + audio thread + mixer/buses + WAV/QOA + voices + **full cue grammar**                                                                                                                                                                                                                                                                                                                | P4A (before first sample — breakout bounces pan audibly) |
 | Event replication wiring (spatial sounds from server events)                                                                                                                                                                                                                                                                                                                                      | P4A (rides P2 machinery)                                 |
 | Music streaming + ducking snapshots + cue inspector overlay                                                                                                                                                                                                                                                                                                                                       | P10                                                      |
-| AudioWorklet wasm output — **built**: `crates/crcbl-audio/src/web.rs`. Read its header first: the worklet and the wasm instance are the same thread, so the SAB ring an AudioWorklet feed would normally use is not what this does.                                                                                                                                                               | P5                                                       |
+| AudioWorklet wasm output — read `crates/crcbl-audio/src/web.rs`'s header first: the worklet and the wasm instance are the same thread, so the SAB ring an AudioWorklet feed would normally use is not what this does.                                                                                                                                                                             | P5                                                       |
 | **Occlusion (rule 5)**: acoustic materials on colliders, raycast → lowpass chain — **unbuilt, and its dependency is now half met**: `crcbl-phys` has the ray query (`cast_ray`), so what is owed is the acoustic-material presets on colliders and a per-voice filter. There is no biquad or one-pole in the voice path at all — the only lowpass in `crcbl-audio` is inside the noise generator. | P10 (needs phys ray queries + scene materials)           |
 | Reverb zones, portal/room-graph propagation, doppler, surround                                                                                                                                                                                                                                                                                                                                    | post-MVP                                                 |
 
@@ -425,24 +394,12 @@ backend makes every test above run with no device.
 
 ## Correction (2026-08-09)
 
-- **The bus graph is specified here and does not exist.** The architecture
-  section calls for per-bus gain and a soft-knee limiter on master, and the
-  delivery table puts buses in **P4A**, which the ROADMAP marks done.
-  `crates/crcbl-audio` has no bus type and no limiter — `Mixer` is voices and
-  nothing above them. Mix snapshots and ducking are scheduled at P10 and depend
-  on the buses that were never built, so P10 inherits both. **Still true on
-  2026-08-27** — no `Bus`, no `Limiter`, nothing named either, anywhere under
-  `crates/crcbl-audio/src`. It has a third debtor now: [32-voip.md](32-voip.md)
-  schedules "mixer voice bus/ducking" with team voice, and that bus is this bus.
-
-  **What changed on 2026-08-27 is that the design is now settled rather than
-  sketched**, in "Buses and volume" above: the six buses, the routing rule, the
-  order of the three multiplies, and the `[engine.audio]` keys. The gap this
-  bullet reports is unchanged in size — nothing is built — but whoever picks it
-  up is no longer also deciding what to build. That section also records the
-  fact this bullet understates: there is not merely no bus, there is no mixer
-  volume of any kind, so today the crate has no way to turn _anything_ down
-  except voice by voice.
+- **The master limiter is specified here and does not exist.** The architecture
+  section calls for a soft-knee limiter on master, and the delivery table puts
+  it in **P4A**, which the ROADMAP marks done. Nothing named `Limiter` exists
+  anywhere under `crates/crcbl-audio/src`. Mix snapshots and ducking are
+  scheduled at P10 above that stage, and [32-voip.md](32-voip.md) schedules
+  "mixer voice bus/ducking" with team voice against it too.
 
 - **The transcendental policy conflicts with [05-physics.md](05-physics.md).**
   This document requires own polynomial approximations plus a CI deny; topic 5's
@@ -467,10 +424,7 @@ backend makes every test above run with no device.
   to a small coherent drift spread over a whole buffer. A sample-level golden
   that pins bytes will fail the same way.
 
-- ~~**There is still no listener.**~~ **Closed 2026-08-15, verified again
-  2026-08-27** — `Listener`, `Listener::ORIGIN` and `Mixer::set_listener` all
-  ship; see the architecture bullet above. Kept as a line rather than deleted
-  because of _how_ it closed: the answer was already written in this document's
-  architecture section, so the work was unbuilt work and not an open design
-  question, and the backlog entry that framed it as a design question was wrong.
-  That is the failure mode to watch for in the bullets around it.
+- **A backlog entry once framed the missing listener as an open design question,
+  and it was not one.** The answer was already written in this document's
+  architecture section, so what was owed was unbuilt work rather than a
+  decision. That is the failure mode to watch for in the bullets around it.

@@ -9,47 +9,6 @@ the froxel half.
 
 ## Where this is
 
-**Built.** Exponential height fog — `crcbl_shaders::fog`, an exponential
-constructed out of operations IEEE-754 pins down, two rows at the end of
-`FrameUniforms`, the composite in `mesh.slang`'s fragment stage, and
-`ForwardRenderer::set_fog` to switch it on. It answers absorption along the view
-ray and nothing else: a surface behind fog is dimmed toward the fog colour, and
-no light in the scene puts anything _into_ that fog.
-
-**Built.** The scattering model — `crcbl_shaders::volumetric`. `phase` is
-Henyey-Greenstein, the angular half; `integrate_slice` is what one slice of a
-column owes the composite, the radiance it adds and the fraction it transmits,
-with the self-attenuation term that makes slicing not change the picture.
-
-**Built.** The frame that carries a column — rung 1a. `volumetric.slang` cuts
-the frustum into the same froxels `light_cluster.slang` does and writes what
-each slab of air scatters and transmits, then scans each column into an
-exclusive prefix; `volumetric_composite.slang` reads that prefix, integrates the
-last partial slice along the pixel's own ray and composites over the frame.
-`crcbl_render::volumetric` owns the three passes and
-`RenderEffects::VOLUMETRIC_FOG` switches them on — out of
-`RenderEffects::DEFAULT_STACK`, and the frame block's fog density is zeroed when
-they run, so the medium is charged once. `apps/lantern`'s main view is the one
-camera stack in the tree that asks for it, which is what makes every backend
-that draws that room — the browser included — dispatch the three passes rather
-than merely compile their artifacts.
-
-**Built.** The sun in the medium — rung 1b-i. `scatterMain` and the composite's
-partial slice both add `sun_radiance * phase(anisotropy, cos_theta)` to the
-environment term, along the segment each is integrating, with the sun's
-direction and the medium's anisotropy carried in the params block.
-`crcbl_render::Fog` gained `sun_scattering` and `anisotropy` and both default to
-zero, so the term is additive over rung 1a rather than a mode: a scene that sets
-neither renders bit for bit what it did before, which is what makes rung 1a's
-three tests this feature's off-switch.
-
-**Built.** The occlusion — rung 1b-ii. `scatterMain` looks each froxel's
-midpoint up in the sun's cascade atlas and scales the sun term of its scattering
-source by what comes back, so the air behind an occluder keeps its ambient glow
-and loses the beam. The atlas and its comparison sampler are bound to a compute
-stage, which is what was new: `SampleCmpLevelZero` needs no derivatives and is
-legal outside a fragment shader on all four targets.
-
 `atlas_uv`, `tile_pcf` and the cascade walk are `mesh.slang`'s, copied once —
 there being no `#include` — and held to it by `crcbl_shaders::volumetric`'s
 `both_shaders_spell_the_same_atlas_walk`, which compares the two bodies letter
@@ -59,45 +18,24 @@ for letter with comments dropped and the uniform block's name normalised.
 a volume of air. Biasing one would push its scattering out of the shadow it
 stands in, which reads as a lit rim along every shaft.
 
-The answer leaves the pass in a **second buffer**, one `float` per froxel, and
-that is the design decision this rung turned on — see below.
-
-**Built.** The lamps in the medium — rung 2, 2026-08-29. `scatterMain` walks
-each froxel's own cluster list — the one `light_cluster.slang` cut for the mesh
-pass, bound to the scatter layout beside the light rows — at the slice's
-midpoint, and sums every point and spot light in it through `mesh.slang`'s
-`punctual_falloff` and `spot_cone` and the medium's phase function against the
-slab's own view direction. `crcbl_render::Fog` gained `light_scattering`, the
-coefficient the sum is scaled by, carried in the params block's
-`sun_radiance.w`; it defaults to zero, so the term is additive over rung 1
-exactly as the sun was, and no frame in the tree moved. The sum leaves the pass
-in the second buffer, which widened from a `float` to a `float4` — the glow in
-`rgb`, the sun's visibility in `w` — so the composite's partial slice adds the
-same glow the froxel around it got without walking the list per pixel;
-`crcbl_shaders::volumetric::LIGHTING_STRIDE` carries the argument.
-
-The copy is guarded as the decision below says it has to be:
+The punctual copy is guarded the same way:
 `both_shaders_spell_the_same_punctual_light` holds `struct GpuLight`,
 `punctual_falloff`, `spot_cone` and the list walk's load-bearing lines to
-`mesh.slang`'s, and `crcbl_shaders::light`'s constants guard now names
+`mesh.slang`'s, and `crcbl_shaders::light`'s constants guard names
 `volumetric.slang` beside the two files that already carried the kinds and the
-stride.
+stride. `volumetric_punctual_visibility` is `mesh.slang`'s `punctual_visibility`
+on the cascade walk's terms — both biases dropped, the `n_dot_l` return with
+them, the `w` test and the far-plane test kept, because those are what a
+perspective map needs that an orthographic one does not.
 
-**And the lamps occlude** — the same day. The params block gained
-`FrameUniforms::light_view_proj` after its pad, so no golden moved;
-`volumetric_punctual_visibility` is `mesh.slang`'s `punctual_visibility` on the
-cascade walk's terms — both biases dropped, the `n_dot_l` return with them, the
-`w` test and the far-plane test kept, because those are what a perspective map
-needs that an orthographic one does not — and `point_face` and `light_tile` are
-copied letter for letter. The walk makes `mesh.slang`'s two tile checks before
-it reads, and skips a light its window has already closed. Checked by drawing
-the column with the atlas written and with it left at its clear (2026-08-29,
-radv): no froxel brightens, 3 of 105 glowing froxels lose more than half their
-glow — the deepest all of it — and 101 keep it to the digit. What the rung left:
-a light whose radius is shorter than the slice it sits in is missed when the
-midpoint is outside it, which the far slices' length makes ordinary for a small
-light far away. Rung 3's jitter along the slice is what recovers it;
-`docs/backlog.md` carries it.
+The answer leaves the scatter pass in a **second buffer**, a `float4` per froxel
+— the glow in `rgb`, the sun's visibility in `w` — and that is the design
+decision this rung turned on; see below.
+
+**What rung 2 left**: a light whose radius is shorter than the slice it sits in
+is missed when the midpoint is outside it, which the far slices' length makes
+ordinary for a small light far away. Rung 3's jitter along the slice is what
+recovers it; `docs/backlog.md` carries it.
 
 ## The decisions
 

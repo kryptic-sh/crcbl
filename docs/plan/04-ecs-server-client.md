@@ -82,20 +82,10 @@ crates/crcbl-net      — transport trait, in-memory impl, replication protocol
 
 ## Tasks
 
-1. ~~`crcbl-ecs`: entity pool, system trait + registration, schedule, removal
-   sweep, inspector registry.~~ Shipped: `World`, `System<T>`/`SystemTrait`,
-   `Schedule`, the deferred-despawn sweep and `Inspector`.
-2. ~~`crcbl-net`: message types, transport trait, `InMemoryTransport`, snapshot
-   writer/reader.~~ Shipped, and grown well past the list — handshake, sessions,
-   the delta codec and the condition simulator.
-3. ~~`crcbl-server`: tick loop on the fixed-timestep accumulator (stage 1),
-   input queue, snapshot emission.~~ Shipped. **The headless `server` binary
-   target was not**: `crcbl-server` is a library with no `[[bin]]`, so the
-   "proves no render deps" half of this task is carried by the manifest alone —
-   see the exit criterion below.
-4. ~~`crcbl-client`: connection state machine, input send, snapshot apply,
-   interpolation buffer, feed to render instance array.~~ Shipped.
-5. **The sandbox never became client+server, and does not need to.** Sample rule
+1. **The headless `server` binary target was never built**: `crcbl-server` is a
+   library with no `[[bin]]`, so the "proves no render deps" half of that task
+   is carried by the manifest alone — see the exit criterion below.
+2. **The sandbox never became client+server, and does not need to.** Sample rule
    2 (`docs/plan/sample/00-samples-overview.md`) made the split non-optional for
    every sample instead, so breakout onward each run a `GameModule` on a
    `Server` against an `InMemoryTransport` — a stronger proof than one app would

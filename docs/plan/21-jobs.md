@@ -190,27 +190,23 @@ by the determinism rule.
 | **Seams reserved**: mailbox between sim/client (exists as interpolation buffer), audio ring (exists), `tick(dt)` runner shape                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | P2 — done, **except the ECS access declarations**, which this row claimed until 2026-08-23 and which were never written. `SystemTrait` declares no access and `crcbl-ecs` asserts no conflict; see `docs/backlog.md`, which also records why a DAG derived from the trait as it stands would say every system is independent. |
 | **Tick-id protocol** — built. **Client tick alignment is not**: no lead, no EWMA server-time estimate, no rate correction anywhere in `crcbl-client`, `crcbl-server` or `crcbl-net`; `crcbl-client` advances playback at a constant rate, which is an interpolation buffer and what its own header calls it. The **server no longer discards client input** — that half of this row is closed: it queues the frames that arrived since the tick began and hands them to the module as `crcbl_ecs::ClientInputs`, capped by `MAX_CLIENT_INPUTS_PER_TICK` with a `dropped_input_count` saying what the cap refused. What is still absent is a **jitter buffer keyed by target tick**: the queue is in arrival order, not tick order, and nothing holds an early input back or places a late one | P2 (with the replication protocol)                                                                                                                                                                                                                                                                                            |
 | Input thread + stacked `InputTickState` (accumulate-then-swap, last-N ring) — **none of the three**, checked 2026-08-23: `InputTickState` is a flat `Vec<(String, ActionValue)>` with no stacking, swap or ring, and nothing on any platform spawns an input thread.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | P2 (with the action layer; single-thread runner inlines it on wasm)                                                                                                                                                                                                                                                           |
-| `crcbl-jobs`: pool, `par_for` (both modes), mailbox/ring primitives + property tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | **Built** at P5B — `spawn`, `pool`, `deque`, `mailbox`, `ring`; adopted by `apps/horde`                                                                                                                                                                                                                                       |
 | ECS parallel schedule (startup DAG, debug access asserts)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | P8                                                                                                                                                                                                                                                                                                                            |
 | Pipeline-thread formalization (named threads, timeline profiler view)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | P8                                                                                                                                                                                                                                                                                                                            |
 | Physics/anim/VFX `par_for` adoption — **not inside any of the three crates**: neither `crcbl-phys`, `crcbl-anim` nor `crcbl-vfx` depends on `crcbl-jobs`. What exists is adoption **by a caller**: `apps/horde` holds the `Pool` and runs its steering `par_for` over results a batch query filled, and `crcbl-phys`'s allocation-free `*_into` query forms exist so that it can. That is what a crate-side adoption would build on, and it is not the same thing                                                                                                                                                                                                                                                                                                                             | P8 → wave 1 as each system scales                                                                                                                                                                                                                                                                                             |
 | wasm-threads pool re-enable (SharedArrayBuffer)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | post-MVP                                                                                                                                                                                                                                                                                                                      |
 
 The P2 line matters most: it costs almost nothing and prevents the classic
-retrofit disaster. P5B, not P8, is where threads actually switched on — the
-2026-08-03 correction moved it and the crate shipped there — with horde's
-numbers as before/after proof.
+retrofit disaster.
 
-**The Web Worker spawner is built.** `crcbl_jobs::spawn` is `#[cfg]`-split —
-native gets `Threads`, `wasm32` gets `crcbl_jobs::workers::Workers`. It cannot
-start a thread itself, because no wasm module can; it **queues** each request
-and a page drains the queue through the `__crcbl_web_jobs_*` exports, which
-keeps the engine's exports-plus-polling ABI intact rather than adding the first
-import to a browser artifact.
+`crcbl_jobs::spawn` is `#[cfg]`-split — native gets `Threads`, `wasm32` gets
+`crcbl_jobs::workers::Workers`, which cannot start a thread itself because no
+wasm module can: it **queues** each request and a page drains the queue through
+the `__crcbl_web_jobs_*` exports, which keeps the engine's exports-plus-polling
+ABI intact rather than adding the first import to a browser artifact.
 
-Two things about it decide how the rest of this document reads. `Workers`
-answers `Spawn::threaded` **false** until a page announces itself, so an
-artifact loaded by a page with no shim degrades exactly as `Inline` did. One
+Two things about the wasm side decide how the rest of this document reads.
+`Workers` answers `Spawn::threaded` **false** until a page announces itself, so
+an artifact loaded by a page with no shim degrades exactly as `Inline` did. One
 page implements the shim — `web/jobs/`, driven by `web/run-jobs-e2e.sh`, which
 brings workers up in a real browser and asserts Rust ran on a stack and a
 thread-local of its own. **No demo page does**: nothing under `web/demos/`
@@ -361,38 +357,31 @@ is the constraint that already forbids a `crcbl::run(game)`.
 
 ### Order
 
-1. ~~The spawn seam in `crcbl-jobs`, with the native backend and a single-thread
-   fallback.~~ Shipped as `crcbl_jobs::spawn` with `Threads`, `Inline` and
-   `Workers`.
-2. ~~Cross-origin isolation on the Pages deploy, proved by the browser gate
-   asserting `crossOriginIsolated === true` before anything relies on it.~~
-   **Rescoped 2026-08-30, the user's call:** the deploy's origin is not the
-   gate's business. GitHub Pages sends no COOP/COEP, so a published demo runs
-   the `Inline` fallback, and that is a **supported configuration** rather than
-   a gap — the seam exists so that a page without `SharedArrayBuffer` still
-   runs. What the gate owes is coverage of **both** backends, and today it has
-   half: `web/tools/serve.mjs` always sends the pair, the driver asserts
-   `crossOriginIsolated === true`, and nothing exercises the origin a real
-   visitor gets. The rung is therefore a two-run gate: the jobs demo served once
-   with the headers, asserting the `Workers` backend reported in with its worker
-   count, and once without them (`serve.mjs` grows a switch), asserting
-   `crossOriginIsolated === false` and the `Inline` backend chosen — the backend
-   by name in both, since the flag alone is satisfied by a pool that silently
-   fell back. Isolating the deploy (a service-worker shim, or a proxy that adds
-   the headers) stays available as a later choice and gates nothing.
-3. ~~The wasm worker backend behind the seam, and the pinned nightly for it.~~
-   Shipped — `crcbl_jobs::workers::Workers` plus `web/engine/jobs.js` and
-   `web/engine/jobs-worker.js`, gated locally by `web/run-jobs-e2e.sh`.
-4. Subsystem threads, in the order topic 21 already lists. **Only the pool's
+1. **Cross-origin isolation on the Pages deploy — rescoped 2026-08-30, the
+   user's call:** the deploy's origin is not the gate's business. GitHub Pages
+   sends no COOP/COEP, so a published demo runs the `Inline` fallback, and that
+   is a **supported configuration** rather than a gap — the seam exists so that
+   a page without `SharedArrayBuffer` still runs. What the gate owes is coverage
+   of **both** backends, and today it has half: `web/tools/serve.mjs` always
+   sends the pair, the driver asserts `crossOriginIsolated === true`, and
+   nothing exercises the origin a real visitor gets. The rung is therefore a
+   two-run gate: the jobs demo served once with the headers, asserting the
+   `Workers` backend reported in with its worker count, and once without them
+   (`serve.mjs` grows a switch), asserting `crossOriginIsolated === false` and
+   the `Inline` backend chosen — the backend by name in both, since the flag
+   alone is satisfied by a pool that silently fell back. Isolating the deploy (a
+   service-worker shim, or a proxy that adds the headers) stays available as a
+   later choice and gates nothing.
+2. Subsystem threads, in the order topic 21 already lists. **Only the pool's
    workers actually start through the seam.** `crcbl-audio` spawns its DSP
    thread with a bare `std::thread::spawn` in `crates/crcbl-audio/src/lib.rs`,
    which is a lane that predates the seam and does not use it; and nothing on
    any platform spawns an input, sim, net or io thread at all. The topology at
    the top of this file is still a design.
 
-Step 2 is a gate rather than a step: if isolation cannot be had on Pages, the
+Step 1 is a gate rather than a step: if isolation cannot be had on Pages, the
 demos stay single-threaded through the fallback and native keeps the topology —
-which is exactly what the seam in step 1 exists to make survivable.
+which is exactly what the spawn seam exists to make survivable.
 
 ## Topology on the web, settled (2026-08-03)
 

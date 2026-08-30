@@ -794,51 +794,16 @@ which is what the box in the sentence above became — and the **2026-08-26
 re-tiling** that bought a second point light by shrinking `SHADOW_TILE` rather
 than growing the image.
 
-**The re-tiling has a measured cost, and it is not hypothetical.** Since that
-change the `cube` browser-path golden fails on linux and windows: **64 grossly
-wrong pixels** against the budget of 49 that
-`crcbl_golden::Tolerance::RASTERISER`'s `max_gross_ratio` of one in a thousand
-allows a 256×192 frame, at a **max channel delta of 216**, with an SSIM of
-**0.998945** — which clears that tolerance's floor of 0.99, so the picture is
-structurally the same picture and the failure is localised rather than a frame
-that stopped drawing. The diff is scattered noise along shadow edges: the cube's
-face gradients, and the pyramid's edges. macOS passes. **This is unresolved**,
-and it is recorded here as evidence that the tile is now the binding constraint
-on shadow quality — every map is 768 texels a side where it was 1024 — not as a
-defect with a fix attached.
-
-**Those numbers are from before the seventh decision, and it fixed them.** That
-decision re-blessed `cube` and moved exactly the shadow edges the diff was made
-of. The Pages run for it — `cec27b3`, run 33109785579 — has all three browser
-golden jobs green, linux and windows included, and so does the run for the ninth
-decision's commit. The re-tiling's cost was real and is now paid; what stands
-from the paragraph above is the part that was never about that frame, which is
-that every map is 768 texels a side where it was 1024.
+**The tile is now the binding constraint on shadow quality**: the 2026-08-26
+re-tiling bought a second point light by shrinking `SHADOW_TILE` rather than
+growing the image, so every map is 768 texels a side where it was 1024.
 
 The ladder, in the order it should be climbed:
 
-- ~~**Normal-offset bias.**~~ **Built 2026-08-28** — the seventh decision above
-  has the frames and the two sweeps. It earned back exactly what the fifth
-  decision's closing line said it would: the constant term fell from three
-  texels to one, and lantern's wall-foot strip went with it.
-- ~~**Cascade cross-fade.**~~ **Built 2026-08-28** — the eighth decision above
-  has the seam's measurement and the sweep that sized the band. It cost what
-  this rung said it would: a second `tile_pcf` inside the band and nothing
-  outside it.
-- ~~**A rotated Poisson-disc PCF kernel.**~~ **Built 2026-08-28** as a rotated
-  _Vogel_ disc — the ninth decision above says why the substitution, and carries
-  the two sweeps that sized the reach and the tap count. The rotation is the
-  integer-indexed constant table this rung insisted on. What the rung did not
-  anticipate is that a wider penumbra is not free at the same tap count: it took
-  thirty-two, not twelve, to keep the dither under what the box already had.
-- ~~**PCSS, or contact hardening.**~~ **Built 2026-08-28** — the tenth decision
-  above has the estimate, the clamps and the sweep. It cost the second sampling
-  loop this rung said it would: sixteen `Load`s over eight tile texels, on the
-  fragment path and for the sun alone. What the rung did not anticipate is that
-  the _physical_ sun buys nothing at a 768-texel tile, which the decision
-  measures rather than asserts, so the shipped angle is an artistic one and says
-  so. What is left above it is the contact rung below and the tile resolution
-  itself, which is `docs/backlog.md`'s question, not a rung.
+- **The tile resolution itself** is `docs/backlog.md`'s question rather than a
+  rung, and it is what the tenth decision's PCSS ran into: the _physical_ sun's
+  penumbra buys nothing at a 768-texel tile, which is why the shipped angle is
+  an artistic one and says so.
 - **Screen-space contact shadows — DECIDED 2026-08-30: on for the medium and
   high tiers, off on low.** A short march along the light's direction through
   the depth prepass, per fragment, that closes the contact gap no bias and no

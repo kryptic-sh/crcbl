@@ -332,12 +332,10 @@ that collects both, and it is one slice because they share the march.
   when the bloom bit is on — which no view in this workspace but the
   `Scene::Bloom` fixture sets. The computed-LOD read is untouched by any of that
   and remains the harder half of the refusal.
-- **Temporal accumulation is still blocked, and blocked on the antialiasing
-  section's blocker exactly**: motion vectors. The prev-transform slot half of
-  that was **taken 2026-08-27** — `GpuInstance::previous_transform`, filled by
-  `crcbl_render::InstancePool` — and it was taken once for both features, which
-  is what the argument here asked for. What is left is the pass that turns the
-  two transforms into a vector, and it is the same pass for TAA and for this.
+- **Temporal accumulation is blocked on its own work only.** The motion-vector
+  pass it waited on is in the frame and is the same pass TAA will read —
+  [43-render-standards.md](43-render-standards.md)'s §9 carries the convention a
+  consumer must not guess at.
 - **Planar reflections stay refused for this row**, and stay the right answer
   for the render-to-texture mirror this document already names. Nothing above
   weakens that paragraph: a planar pass is per-plane, is a second geometry pass

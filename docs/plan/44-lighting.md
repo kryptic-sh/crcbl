@@ -68,11 +68,7 @@ The table above names shadows for spot and point lights, and when this section
 was written **the engine had exactly one light** — a single `DirectionalLight`
 (direction, colour) in the frame block. There was no light list, no light
 culling and no count budget specified anywhere, so the shadow rows above were
-not implementable as written. This section is that missing half, and it is
-built: `crcbl_render::light` turns a `DirectionalLight` and each `Light::Point`
-/ `Light::Spot` into `GpuLight` rows, and `crcbl_render::light_grid` runs the
-compute pass that assigns them to the froxel grid `mesh.slang`'s fragment stage
-indexes.
+not implementable as written. This section is that missing half.
 
 ### Clustered forward
 
@@ -246,26 +242,8 @@ lobe's directional albedo:
 **Take Fdez-Agüera**, for that last reason: one table serves both rungs, and a
 table that two features read is a table somebody will keep correct.
 
-**Built 2026-08-27, both halves.** `crcbl_shaders::dfg` holds the committed
-`tables/dfg.bin` — 64 square, two `f32` channels, `DFG_SAMPLES` samples a texel
-— with `directional_albedo` and `energy_compensation` over it, and
-`crates/crcbl-shaders/tools/cook-dfg.rs` regenerates or checks it the way
-`cook-clusters` does the DAG. What it measures: a head-on surface hands back all
-of the light at the smoothest row and **0.317 of it at the roughest**, so a
-fully rough conductor in this engine is short by more than two thirds until the
-factor puts it back. The table is cross-checked against an independent uniform
-quadrature of the same integral, which is what says it is right rather than
-merely self-consistent.
-
-The shader half landed with it. `mesh.slang` binds the table as an `Rg8Unorm`
-image at binding 25, decodes each texel's byte pair as one 16-bit fixed-point
-number, filters four of them itself, and multiplies the summed specular lobe by
-`1 + f0 (1 / E - 1)` once outside the light loop — the factor depends on the
-material and the view and on nothing a light carries. Two of `apps/lantern`'s
-goldens moved and were re-blessed.
-
-**The filter is written out rather than asked of a sampler**, which is the same
-determinism argument one line down: a hardware filter's weights are
+**The table's filter is written out rather than asked of a sampler**, which is
+the same determinism argument one line down: a hardware filter's weights are
 fixed-function arithmetic four rasterisers compute independently, and these
 goldens have no tolerance. It also costs no sampler and therefore moves no index
 of Metal's sampler argument table.
@@ -276,15 +254,6 @@ is finer everywhere than half precision — which near one is `2^-11`, thirty
 times coarser — and the split is an integer one this crate can perform without a
 dependency. Rung 3 wants the scale and bias pair rather than their sum and will
 upload its own image from the same committed bytes.
-
-**What darkened, and why it is not this term taking light away.** Re-blessing
-`room.png` moved 16113 channels up and 11470 down. Every darkened pixel sits on
-a hard edge: the scene target is pointwise brighter by construction — the factor
-is never below one — and FXAA's edge resolve is what turns a brighter
-neighbourhood into a different blend. Measured by rendering the same frame with
-the multiply neutralised and with reflections both on and off: 689 darkened
-channels of 102045 changed at 960×720, present with reflections off, and each
-one on a 173-against-203 silhouette.
 
 **It is legal here, and the reason generalises.** The compensation term is
 multiplies and divides over a sampled table, so no transcendental reaches a
@@ -352,9 +321,8 @@ smallest thing that closes both is a gradient sky rendered into a small cube,
 prefiltered on the way in — which also gives §5's SSR miss a real radiance
 fallback in place of the L1 decode it approximates with today.
 
-**The prefilter is a table, not a cube, and it is cooked (2026-08-29).** The
-gradient is linear in its three colours and reads only a direction's `y`, so its
-convolution against the lobe is
+**The prefilter is a table, not a cube.** The gradient is linear in its three
+colours and reads only a direction's `y`, so its convolution against the lobe is
 `far · W_far + opposite · W_opposite + horizon · (1 − W_far − W_opposite)` with
 two weights over `(|R.y|, roughness)` — `crcbl_shaders::sky_prefilter`, a
 64-square two-channel table committed as `tables/sky_prefilter.bin` on
@@ -363,27 +331,11 @@ colours stay a run-time parameter; only the lobe is baked. Facing the zenith,
 the roughest lobe sees 0.697 of it and the horizon for the rest.
 `prefiltered_radiance` is the sum on the CPU.
 
-**The prefiltered half is in the frame (2026-08-29).** The table goes up once as
-an `Rgba8Unorm` image (`sky_prefilter::texels`, two 16-bit fixed-point shares a
-texel) bound to `ssr.slang`, which filters it with four `Load`s on
-`specular_albedo_at`'s terms and reads the sky through it at the surface's
-roughness — `sky_prefiltered`, in place of the mirror-direction `sky_radiance`
-the miss fallback added before. It lives in the reflection pass and not in
-`mesh.slang`'s ambient sum because that is where the gradient's rows already are
-and where metals take their ambient specular; a term in both would count the sky
-twice. The roughness axis shows in exactly one frame of the suite — the fully
-rough floor `tests/render_e2e.rs` holds under a sky lit only below the horizon,
-which a mirror's rays cannot see and the lobe can — and the goldens, all
-mirrors, did not move. **And the `DFG` half is in the frame since the same
-day**: `dfg::pair_texels` is the table's two channels as a second `Rgba8Unorm`
-image the pass binds beside the sky's, filtered by the same four-`Load` helper
-(`fixed_pair_at`), and `f0 · scale + bias` at `(N·V, roughness)` scales the
-environment — sky and probes alike — in place of Schlick along the reflected
-direction. The roughness-zero row is Schlick, so mirrors take what they took;
-the rough floor in `tests/render_e2e.rs` takes under a quarter of what Schlick
-gave it at its grazing `N·V`, and the test holds that from both sides. The rung
-is built; what it leaves — no ambient specular when `REFLECTIONS` is off — is a
-decision `docs/backlog.md` records.
+**What the rung leaves** — no ambient specular when `REFLECTIONS` is off — is a
+decision `docs/backlog.md` records: the prefiltered sky and the `DFG` pair are
+read in the reflection pass and not in `mesh.slang`'s ambient sum, because that
+is where the gradient's rows already are and where metals take their ambient
+specular, and a term in both would count the sky twice.
 
 ### Rung 4 — Specular antialiasing, once normal maps exist
 

@@ -160,16 +160,13 @@ Designed against InMemory first; every later transport inherits them:
   uses unquantized server state (quantization is a wire concern, not a sim
   concern).
 - **Ack-baseline deltas (the design of record — supersedes "dirty-sets per
-  tick")** — **built**, in `crates/crcbl-net/src/delta.rs` and `session.rs`: the
-  server tracks each client's last-acked snapshot and encodes every snapshot as
-  a **delta vs that client's acked baseline**. `Baseline` / `BaselineStore` is
-  the bounded ring, `DeltaCodec` computes and applies, `encode_delta` /
-  `decode_delta` are the wire format, and the whole of it is bounded by explicit
-  caps (`MAX_BASELINE_ENTITIES`, `MAX_BASELINE_SYSTEMS`, `MAX_DELTA_BYTES`)
-  rather than by hope. Note `MAX_DELTA_BYTES` is the transport limit _minus_
-  `auth::AUTH_OVERHEAD`, because a delta that encodes fine and is then refused
-  by the transport is a client that desyncs for good. This makes sparse sync
-  automatic and loss-safe with zero game-code involvement:
+  tick")**: the server tracks each client's last-acked snapshot and encodes
+  every snapshot as a **delta vs that client's acked baseline**, over a bounded
+  snapshot ring and under explicit caps rather than under hope.
+  `MAX_DELTA_BYTES` is the transport limit _minus_ `auth::AUTH_OVERHEAD`,
+  because a delta that encodes fine and is then refused by the transport is a
+  client that desyncs for good. This makes sparse sync automatic and loss-safe
+  with zero game-code involvement:
   - unchanged since baseline → zero bytes;
   - lost packet, value changed again → old update never resent, current value
     ships in the next delta;
@@ -251,14 +248,14 @@ core; the token mint is the interface those services will use. LAN discovery
 
 ## Delivery
 
-| Slice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Phase                                             |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------- |
-| Channel semantics, handshake/version/schema-hash, session+reconnect, condition simulator, hardening + fuzz corpus, **sector-scoped envelope + (client,sector) ack-baselines** (galaxy wire model, degenerate 1-sector) — **built, bar the channel table**: `handshake.rs` (`HandshakeGate` rejecting on protocol version, engine build id and schema hash), `session.rs` (`SessionManager`, per-sector baselines, reconnect grace), `condition.rs`, `rate_limit.rs`, `delta.rs`, and a fuzz target tree at `crates/crcbl-net/fuzz`. The channel semantics are the exception — see the note under the channel table | P2 (on InMemory)                                  |
-| Netgraph HUD                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | P10                                               |
-| UDP reliability layer (acks, resend, fragmentation, tokens, **X25519+XChaCha20-Poly1305 AEAD**) — ~~+ WebTransport + WebSocket(wss)~~, both removed 2026-08-09. Unbuilt; no socket of any kind exists in the workspace.                                                                                                                                                                                                                                                                                                                                                                                            | P13                                               |
-| Quantization + priority/budget encoder                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | P13, tightened by towers co-op numbers            |
-| Authenticated key roots (backend token mint / PSK), interest management, LAN discovery                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | post-MVP                                          |
-| Backend infra (NAT/relay/matchmaking/accounts/browser)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | out of engine core — separate project when needed |
+| Slice                                                                                                                                                                                                                                                                                                                | Phase                                             |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Channel semantics, handshake/version/schema-hash, session+reconnect, condition simulator, hardening + fuzz corpus, **sector-scoped envelope + (client,sector) ack-baselines** (galaxy wire model, degenerate 1-sector) — **the channel semantics are the one part still owed**; see the note under the channel table | P2 (on InMemory)                                  |
+| Netgraph HUD                                                                                                                                                                                                                                                                                                         | P10                                               |
+| UDP reliability layer (acks, resend, fragmentation, tokens, **X25519+XChaCha20-Poly1305 AEAD**) — ~~+ WebTransport + WebSocket(wss)~~, both removed 2026-08-09. Unbuilt; no socket of any kind exists in the workspace.                                                                                              | P13                                               |
+| Quantization + priority/budget encoder                                                                                                                                                                                                                                                                               | P13, tightened by towers co-op numbers            |
+| Authenticated key roots (backend token mint / PSK), interest management, LAN discovery                                                                                                                                                                                                                               | post-MVP                                          |
+| Backend infra (NAT/relay/matchmaking/accounts/browser)                                                                                                                                                                                                                                                               | out of engine core — separate project when needed |
 
 ## Testing (topic 12)
 
@@ -289,19 +286,19 @@ core; the token mint is the interface those services will use. LAN discovery
 The ack-baseline model is the **Quake 3 delta-compressed snapshot** design —
 named now, along with the two answers it supplies that were missing:
 
-- **Entity lifecycle** — **built**: a delta is computed against the baseline's
-  _entity set_, so **removals are expressed as part of the delta**
-  (`SystemDelta` carries a `removed: Vec<EntityBits>`, written on the wire as
-  bare ids between the added and modified entries because a removal has no
-  payload). "Unchanged → zero bytes" applies to surviving entities only.
-- **Baseline too old** — **built**: if a client's last ack has fallen off the
-  bounded snapshot ring the server sends a **full (keyframe) snapshot** and
-  resets the baseline. `crcbl-server` adds a second trigger for the same
-  recovery — `KEYFRAME_RECOVERY_TICKS`, a keyframe once a client's acks have
-  stopped advancing for that many ticks, so a client whose acks are lost rather
-  than late is rescued too. The decoder refuses a keyframe that contains removed
-  or modified entities, which is the invariant that keeps "keyframe" from
-  quietly becoming "delta with a flag".
+- **Entity lifecycle**: a delta is computed against the baseline's _entity set_,
+  so **removals are expressed as part of the delta** (`SystemDelta` carries a
+  `removed: Vec<EntityBits>`, written on the wire as bare ids between the added
+  and modified entries because a removal has no payload). "Unchanged → zero
+  bytes" applies to surviving entities only.
+- **Baseline too old**: if a client's last ack has fallen off the bounded
+  snapshot ring the server sends a **full (keyframe) snapshot** and resets the
+  baseline. `crcbl-server` adds a second trigger for the same recovery —
+  `KEYFRAME_RECOVERY_TICKS`, a keyframe once a client's acks have stopped
+  advancing for that many ticks, so a client whose acks are lost rather than
+  late is rescued too. The decoder refuses a keyframe that contains removed or
+  modified entities, which is the invariant that keeps "keyframe" from quietly
+  becoming "delta with a flag".
 - **Priority model**: the relevance×staleness rotation is the **Tribes 2
   priority-accumulator** design (Frohnmayer & Gift) — named so its
   starvation-avoidance rules are adopted rather than reinvented. Predicted

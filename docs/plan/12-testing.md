@@ -331,9 +331,7 @@ validation-report assertion once, for all of them.
 | lavapipe render e2e + golden-image tooling (`CRCBL_BLESS`) | P1                  |
 | Determinism harness + sim e2e pattern                      | P2                  |
 | Phys analytic/property/CCD suites                          | P3, grows P6/P8/P11 |
-| Cross-backend image compare (native ↔ browser)             | **Built**           |
 | glTF corpus + scene roundtrip                              | P9                  |
-| UI draw-list snapshots + hit-test grid                     | **Built**           |
 | Editor command/undo property suite                         | P12                 |
 
 ## Exit criteria (MVP)
@@ -350,48 +348,14 @@ validation-report assertion once, for all of them.
   `.ps1` for anything needing a device or a window system, plain
   `cargo nextest run --workspace --all-features` for everything else.
 
-## Corrections (2026-08-09)
-
-- **Shader artifacts are validated one target in four.** `spirv-val` runs on the
-  SPIR-V; the WGSL, MSL and DXIL emitted from the same source are checked by
-  nothing, which is how a shader Dawn rejects passed every gate and shipped a
-  black canvas. The rules that close it are in
-  [02-vulkan-backend.md](02-vulkan-backend.md)'s shader-portability section;
-  they belong to this topic's anchor list too.
-
-  **Closed, 2026-08-15 — all four are validated now.** `spirv-val` still runs on
-  the SPIR-V from `crates/crcbl-shaders/tools/compile-shaders.sh`;
-  `crates/crcbl-shaders/tests/wgsl_validation.rs` runs naga over every committed
-  `wgsl/*.wgsl`, and its header records the `var<uniform>` with no binding
-  decoration that shipped for months because nothing looked; the DXIL comes from
-  a pinned `dxc` whose version is checked and whose container is then asserted
-  to be **signed**, since an unsigned one commits happily and is refused by
-  every real driver; and the MSL is compiled with `xcrun metal -c` in `ci.yml`'s
-  `mtl e2e` job, which is the only place on the matrix that can — and which
-  counts what it compiled, so a glob matching nothing fails rather than exits 0.
-
-- **The cross-backend image compare is the only detector for a whole bug class**
-  — a shader whose _semantics_ differ per target, which no lint can find. It
-  currently covers two backends and one scene. Extending it to every engine
-  shader and every backend is a testing deliverable, not a rendering one.
-
-  **Closed wider than this asked, and re-read 2026-08-23.**
-  `web/run-cross-backend-e2e.sh` now holds every scene the browser draws against
-  a live native render — `--reference vk`, and `--reference mtl` on macOS — so
-  the pair is two genuinely separate implementations rather than two
-  abstractions over one Vulkan driver. This entry claimed it still drove `vk`
-  against `wgpu` over three scenes at several sizes; that was the deleted
-  script, and Metal is no longer outside the compare.
-
 ## Superseded (2026-08-10)
 
-The corrections above are open gaps: the doc claims coverage the tree does not
-have, and closing them means changing the tree. These three are the opposite
-shape — the tree deliberately chose a better mechanism and the doc kept
-describing the old one. They are rewritten in place above rather than footnoted,
-because a rule left standing with its retraction in a later section still reads
-as a rule, and someone would eventually "restore" the code to it. What they used
-to say, and why the replacement won:
+These three are a shape worth naming on its own: the tree deliberately chose a
+better mechanism and the doc kept describing the old one. They are rewritten in
+place above rather than footnoted, because a rule left standing with its
+retraction in a later section still reads as a rule, and someone would
+eventually "restore" the code to it. What they used to say, and why the
+replacement won:
 
 - **"e2e suites feature-gated (`--features e2e`)."** There is no workspace-wide
   `e2e` feature and there should not be one. Per-crate features name the

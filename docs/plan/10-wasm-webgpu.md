@@ -64,10 +64,8 @@ differs.
 - **Build**: `wasm32-unknown-unknown`, and a small `crcbl-web` crate for canvas
   setup, rAF loop driving `tick(dt)`, resize/DPI from the browser. crcbl-shell's
   canvas backend (topic 15, own JS shim) provides this — if its canvas/rAF
-  handling is solid, `crcbl-web` shrinks to glue. It did: what shipped is
-  `crcbl::web`, a module rather than a crate, plus the shim in `web/`. The
-  `wasm-bindgen` this bullet used to name is gone with it; see the deviation
-  note below.
+  handling is solid, `crcbl-web` shrinks to glue. See the deviations below for
+  what that turned into.
 - **Shaders**: Slang → WGSL (via SPIR-V → naga if Slang's WGSL target isn't
   clean at the time). Same shader-hash pipeline, third artifact format.
 - **Assets**: `FetchSource` (HTTP fetch → async decode). Asset packs matter more
@@ -84,21 +82,12 @@ differs.
 
 ## Tasks
 
-1. ~~`crcbl-wgpu` HAL impl (native first — faster iteration, same code), Tier B
-   renderer path validated on native wgpu against the stage 3 scene.~~ Overtaken
-   by the reversal above: the HAL implementation that shipped is
-   `crcbl-webgpu`'s command stream, and it has no native leg to validate first.
-2. ~~wasm build of sandbox: canvas, rAF, FetchSource, single-thread loop.~~
-   Built, for the samples rather than the sandbox — `web/build.sh` and the demos
-   it publishes.
-3. ~~Slang→WGSL artifact pipeline.~~ Built — `crates/crcbl-shaders/wgsl` is
-   committed and hashed alongside the SPIR-V.
-4. WebTransport/WebSocket transport + server listener; sandbox client-in-browser
+1. WebTransport/WebSocket transport + server listener; sandbox client-in-browser
    connecting to native server — **the multiplayer first-class story,
    demonstrated**.
-5. Perf pass: Tier B scene budget defined (smaller than native, explicitly);
+2. Perf pass: Tier B scene budget defined (smaller than native, explicitly);
    document the tier gap honestly.
-6. (Stretch) Editor-in-browser smoke — should mostly work by construction; fix
+3. (Stretch) Editor-in-browser smoke — should mostly work by construction; fix
    what doesn't, don't polish.
 
 ## Exit criteria

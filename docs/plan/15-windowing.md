@@ -117,7 +117,7 @@ is a file every existing player has already written.
 | `resolution`   | `[width, height]` in device pixels — the **surface** extent     | The shell creates a window at a requested size and `SwapchainDesc::extent` is that size. No key reads it, and nothing resizes a window from a setting.                                                                                                                                                    |
 | `present_mode` | `"auto"` \| `"vsync"` \| `"adaptive"` \| `"off"`                | `crcbl::engine::Pacing` implements all four and `GpuContext::set_pacing` applies them to a live swapchain. No key reads it.                                                                                                                                                                               |
 | `frame_limit`  | frames a second; `0` is unlimited                               | **Read as of 2026-08-28.** `crcbl::settings::frame_limit` reads the key as a _ceiling_ and `FrameLimit::clamped_to` applies it, since "less" here means less than the game's own cap; `GpuContext::frame_limit` is the pair, and `Loop::new` applies it off `GameGpu::video`, so every sample honours it. |
-| `render_scale` | fraction of the surface extent — the **internal** extent        | **The renderer half is built and no key reads it.** `ForwardRenderer::set_render_scale` sizes the internal target and `shaders/upscale.slang` reconstructs it into the caller's; `MIN_RENDER_SCALE` is the floor. No settings key and no `Shell` request.                                                 |
+| `render_scale` | fraction of the surface extent — the **internal** extent        | **The seam half is missing.** `crcbl::settings::render_scale` reads the key and `ForwardRenderer::set_render_scale` sizes the internal target, which `shaders/upscale.slang` reconstructs into the caller's; `MIN_RENDER_SCALE` is the floor. No `Shell` request carries it.                              |
 | `brightness`   | scalar multiplier applied in the tonemap pass                   | **Nothing.** `crcbl_shaders::tonemap::TonemapParams` carries `exposure` and no second field; brightness would be that field.                                                                                                                                                                              |
 | `hdr_output`   | `true` \| `false`                                               | **Nothing, and further from built than the rest** — see the HDR note below.                                                                                                                                                                                                                               |
 | `ui_scale`     | multiplier over the window's own scale factor, UI only          | **Nothing global.** `crcbl_ui::MenuStyle::pixel_art` takes a whole-number scale per menu; no crate applies a player-chosen factor to UI layout.                                                                                                                                                           |
@@ -387,21 +387,17 @@ Notes on the from-scratch protocol work:
   `public.file-url` is read. On X11 there is no XDND at all. Closing it is seam
   work on three of four backends — see [08-editor.md](08-editor.md)'s correction
   and `docs/backlog.md`.
-- **Render scale has a renderer half now, and no seam half.** The display-mode
-  table defines borderless as an internal render target upscaled to the native
-  surface, `ShellCaps` carries `HW_UPSCALE`, and
-  [18-render-features.md](18-render-features.md) orders the post chain around
-  the upscale. As of 2026-08-27 that upscale exists: `crcbl_render`'s
-  `set_render_scale` and `shaders/upscale.slang` draw the frame at a fraction of
-  the caller's extent and reconstruct it, and the post chain really does cost
-  what the internal extent says. **What is still missing is everything above the
-  renderer** — no settings key reads `render_scale`, no `Shell` carries a
-  render-scale request, and no window system is asked to do the resample
-  instead. So borderless still renders at native size and `HW_UPSCALE` still
-  describes a mechanism nothing can ask for, which is why it stays clear on
-  macOS despite `CAMetalLayer` supporting exactly this. The seam addition is a
-  render-scale request on `Shell`, and that remains a decision above this crate.
-  The settings catalogue above names the key it would be driven by —
+- **Render scale has no seam half.** The display-mode table defines borderless
+  as an internal render target upscaled to the native surface, `ShellCaps`
+  carries `HW_UPSCALE`, and [18-render-features.md](18-render-features.md)
+  orders the post chain around the upscale. The renderer draws the frame at a
+  fraction of the caller's extent and a settings key reaches it, but **no
+  `Shell` carries a render-scale request** and no window system is asked to do
+  the resample instead. So borderless still renders at native size and
+  `HW_UPSCALE` still describes a mechanism nothing can ask for, which is why it
+  stays clear on macOS despite `CAMetalLayer` supporting exactly this. The seam
+  addition is a render-scale request on `Shell`, and that remains a decision
+  above this crate. The settings catalogue above names the key it is driven by —
   `render_scale`, the internal extent, distinct from `resolution`.
 - **Exclusive fullscreen stays dropped, and one backend actively defends it.**
   `crcbl-dx12` calls `MakeWindowAssociation(DXGI_MWA_NO_ALT_ENTER)` per

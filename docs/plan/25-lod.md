@@ -314,14 +314,14 @@ its tests rather than values recorded from its own output.
 
 ## Delivery
 
-| Slice                                                                                                                                                                                                     | Phase                                                                         |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| LOD table in mesh handles + cull-shader selection + hysteresis + hand-LOD import (naming/`MSFT_lod`)                                                                                                      | P7 (with GPU-driven rendering — mechanism is a small delta on the cull pass)  |
-| Shadow LOD bias                                                                                                                                                                                           | P7 (with CSM, topic 18)                                                       |
-| **QEM auto-generation + meshlet cluster hierarchy** and `crcbl lod` — built. Joint-weight-aware collapse is not: the hierarchy is built over the bind pose and nothing carries weights through a collapse | **P7** (the `MeshShader` path selects per cluster and needs levels to select) |
-| Debug overlay + stats; global bias setting; editor/viewer LOD panel                                                                                                                                       | P10                                                                           |
-| HLOD per-sector proxies                                                                                                                                                                                   | wave 2                                                                        |
-| Impostors, dithered crossfade                                                                                                                                                                             | later, on demonstrated need                                                   |
+| Slice                                                                                                                                         | Phase                                                                         |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| LOD table in mesh handles + cull-shader selection + hysteresis + hand-LOD import (naming/`MSFT_lod`)                                          | P7 (with GPU-driven rendering — mechanism is a small delta on the cull pass)  |
+| Shadow LOD bias                                                                                                                               | P7 (with CSM, topic 18)                                                       |
+| **Joint-weight-aware collapse** over the QEM/meshlet hierarchy: it is built over the bind pose and nothing carries weights through a collapse | **P7** (the `MeshShader` path selects per cluster and needs levels to select) |
+| Debug overlay + stats; global bias setting; editor/viewer LOD panel                                                                           | P10                                                                           |
+| HLOD per-sector proxies                                                                                                                       | wave 2                                                                        |
+| Impostors, dithered crossfade                                                                                                                 | later, on demonstrated need                                                   |
 
 ## Risks
 
