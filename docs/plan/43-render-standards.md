@@ -515,10 +515,13 @@ the right first rung.
 - **No lightmaps, no baked GI, and no GI at all below the ray-tracing tier — the
   user's rules of 2026-08-30**: the sun and every scene light are dynamic,
   nothing bakes a lighting result, and a device without hardware ray tracing
-  (every browser, lavapipe) runs the raster stack with no bounce term. On
-  `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` the GI is `docs/backlog.md`'s
-  runtime-traced probe volume — the same `GpuProbe` rows, filled every frame by
-  inline ray queries in compute, fixed pattern, no history.
+  (every browser, lavapipe) runs the raster stack. **Amended the same day**:
+  that tier carries one bounce after all —
+  [50-irradiance-probes.md](50-irradiance-probes.md)'s visibility-gated probe
+  volume, updated every frame from the sun's reflective shadow map and weighted
+  at shading by a per-probe depth map so it does not leak. On `crcbl-vk`,
+  `crcbl-dx12` and `crcbl-mtl` the same `GpuProbe` rows are filled by inline ray
+  queries in compute instead — fixed pattern, no history on either tier.
 
 **Which trace family this engine can afford (2026-08-27).** "Ray marching" names
 three techniques, and only one of them answers GI:
@@ -856,4 +859,5 @@ alone is not a price. The same rule holds the forward pass to
 | ~~The motion-vector pass~~                                                                                                  | §9 — **built 2026-08-30**: the `Rg16Float` target, `FrameUniforms::previous_view_proj`, the subtraction on both geometry paths, and `DebugView::Motion` with the e2e suite that reads it                                                                                                                                                                                                                                         |
 | ~~One `antialiasing` row~~ (**built 2026-08-30**), **CMAA2 in SMAA's place, then MSAA 2×/4×/8×**                            | [49-antialiasing.md](49-antialiasing.md)'s eighth decision — the settings row first, the depth resolve second                                                                                                                                                                                                                                                                                                                    |
 | **The shadow atlas proper: variable tiles, priority, budget**                                                               | [45-shadows.md](45-shadows.md) — pulled forward 2026-08-30 so a many-light scene shadows; rides on the cadence rung                                                                                                                                                                                                                                                                                                              |
+| **The probe volume rebuilt: per-probe visibility maps, the RSM updater, the lantern and shard bakes removed**               | [50-irradiance-probes.md](50-irradiance-probes.md)'s decision of 2026-08-30 — leak-free, one bounce, dynamic sun and lamps on every tier; the traced updater rides on (c)                                                                                                                                                                                                                                                        |
 | SSGI, temporal SSR, TAA, temporal upscaling                                                                                 | §9's pass is built; each is its own rung now                                                                                                                                                                                                                                                                                                                                                                                     |

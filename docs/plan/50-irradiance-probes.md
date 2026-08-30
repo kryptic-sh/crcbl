@@ -6,6 +6,65 @@ technique had to carry six others to reach it; topic 18 is now the index that
 orders these and holds what is genuinely cross-cutting — the interactions, the
 delivery table and the risks.
 
+## DECIDED 2026-08-30 — one volume, two updaters, and no leaking
+
+**The user's decision, on the question "best-looking dynamic lighting for decent
+performance, and above all no light leaking", after the no-bake rule of the same
+day.** The grid below stays, and everything that _fills_ it changes:
+
+- **The static bakes go.** `apps/lantern`'s `bounce` module and `apps/shard`'s
+  `light::probes` compute a lighting result once, at load, from a sun and
+  torches that then move — a bake in the sense the rule forbids (the result
+  outlives its inputs), whatever thread computed it. Both are replaced by the
+  updater below in the slice that lands it; until then they stand, documented
+  here as the thing being removed.
+- **Each probe gains a visibility map**: a small octahedral depth + depth² image
+  (Majercik et al. 2019's contribution, and the one thing that makes a probe
+  grid stop leaking). `probe_irradiance` weights each of a fragment's eight
+  probes by a Chebyshev visibility test against it, so a probe on the far side
+  of a wall gets no weight. The maps are **rendered, not baked**: a depth cube
+  per probe from the static geometry, drawn on load and again on demand for the
+  probes a static-geometry change touches — the same shape as a reflection
+  capture, a runtime capture of geometry rather than of light. Dynamic objects
+  are not in them and do not occlude the bounce, which is the accepted limit
+  (Enlighten's too).
+- **The raster updater, every frame, on all four backends**: the sun's near
+  cascade (and any lamp the application asks for) also writes flux and normal —
+  a reflective shadow map — and one compute pass gathers the RSM into every
+  probe, **each sample gated by that probe's visibility map**, so an RSM texel
+  the probe cannot see contributes nothing. Sky irradiance goes through the same
+  visibility, which is what stops a closed room receiving the sky. A fixed
+  sample pattern, every probe every frame, no history —
+  [43-render-standards.md](43-render-standards.md) §5's C2 holds and a golden is
+  a function of its own inputs. One bounce, dynamic sun and lamps.
+- **The traced updater, on `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl`**: the same
+  rows, filled by inline ray queries once foundation (c) exists, which buys
+  multi-bounce and dynamic occluders. The volume, the visibility test and the
+  shader readers are the same on both tiers; only the pass that writes the rows
+  differs. That is what "the diffuse GI twin" in this file's title now means.
+
+**What this amends.** The GI decision of 2026-08-30 said the tier below ray
+tracing has no bounce term; it now has this one, because it is leak-free and its
+cost is one compute pass and two extra shadow-pass targets — the first thing on
+the ladder below that the user judged worth having on every tier. The DDGI
+rejection below stands on its temporal half and falls on its ray-tracing half;
+the light-field-probe rejection ("no leaking defect yet to justify them") is
+withdrawn — leaking is the defect the decision is about. The section "The
+irradiance is authored, not baked and not computed at runtime" describes what
+shipped in August and is superseded by this one.
+
+**Pricing, before it is built.** Visibility capture: 6 × 32² depth per probe,
+thousands of probes in a few hundred milliseconds on desktop, amortised over
+frames on the browser tier. Per frame: the RSM's two extra targets on the near
+cascade and one gather pass — the DDGI-class budget of roughly half a
+millisecond to a millisecond at 1080p on desktop; the browser tier takes a
+smaller grid. Each figure is measured on the three tiers before the rung counts,
+per the standing rule.
+
+**Order.** Among the raster lighting items this rebuild comes after LTC area
+lights, the shadow atlas and the AO tint, and **ahead of the atmosphere** — the
+user's order, 2026-08-30.
+
 ## Irradiance probes: the design (2026-08-14)
 
 The capability table's `Rasterised` twin of ray-traced global illumination, and
@@ -39,9 +98,10 @@ determinism argument rests on.
   temporal accumulation, which [47-reflections.md](47-reflections.md) already
   refuses in writing for SSR history: a golden must not be a function of how
   many frames preceded it. Either one is fatal alone.
-- **Light-field probes** (McGuire et al. 2017) are the correct answer to light
+- ~~**Light-field probes** (McGuire et al. 2017) are the correct answer to light
   leaking and cost a per-probe octahedral depth map. There is no leaking defect
-  yet to justify them.
+  yet to justify them.~~ **Withdrawn 2026-08-30** — the per-probe depth map is
+  adopted, in the decision at the top of this file.
 - **SH L2** (Ramamoorthi & Hanrahan 2001) captures ~99% of diffuse irradiance
   against L1's ~87%, for 27 floats against 12 — a difference
   `Tolerance::RASTERISER` cannot resolve. Escalating later is contained to one
@@ -68,6 +128,10 @@ determinism argument rests on.
   trigger.
 
 ### The irradiance is authored, not baked and not computed at runtime
+
+**Superseded 2026-08-30** by the decision at the top of this file: the volume is
+filled at runtime, every frame, by the visibility-gated updater, and the
+application-computed bakes below are what that slice removes.
 
 `SceneDesc.probes`, filled by the application — for `apps/lantern`, computed
 analytically from the room's own dimension constants so that moving a wall moves

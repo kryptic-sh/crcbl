@@ -877,6 +877,19 @@ this buys: the ray budget stops being the question (hardware traversal is two
 orders cheaper than a compute BVH), the browser tier pays nothing, and the
 raster stack is one stack on four backends rather than two.
 
+**Amended later the same day (2026-08-30):** the tier below ray tracing carries
+one bounce after all — `docs/plan/50-irradiance-probes.md`'s decision: the
+existing `GpuProbe` grid gains a per-probe octahedral depth map (rendered from
+static geometry on load, re-rendered on demand; a capture of geometry, not of
+light), `probe_irradiance` weights probes by a Chebyshev test against it so
+nothing leaks through a wall, and a compute pass fills the rows every frame from
+the sun's reflective shadow map, each sample gated by the same map. The user
+chose it on "best-looking for decent performance, and above all no light
+leaking": it is the one cheap option that is leak-free, and it is the same
+volume the RT tier fills by ray queries. The lantern and shard bakes leave with
+the slice that lands it. Order among the raster items: LTC area lights, the
+shadow atlas, the AO tint, **this**, then the atmosphere, then anything else.
+
 **Still open under it, and smaller than before:** (i) whether the GI term may
 carry a temporal blend now that it never runs on a golden's tier — C2 stands
 until this is answered, and the fixed-pattern every-probe-every-frame update is
@@ -901,14 +914,11 @@ was surveyed against the tree the same day; what is already built (GGX + Smith
   the user can make, with the trade-off, so a slice can start from the answer
   rather than from the survey.
 
-1. **The L1 probe grid is a bake, and the rule forbids one.**
-   `apps/lantern/src/bounce.rs` computes the sun's first bounce host-side at
-   load into `SceneDesc::probes`, and it is stale the moment the sun moves.
-   Options: (a) delete the bake and keep `crcbl_render::probe`'s `ProbeTable` as
-   the storage the RT tier's traced probes fill, so a non-RT tier's ambient is
-   sky IBL plus AO alone; (b) keep the volume and re-project it whenever the sun
-   moves, which is the cost of GI on a tier the decision above excludes; (c)
-   keep it as static application data, a bake by another name. Recommended: (a).
+1. ~~**The L1 probe grid is a bake, and the rule forbids one.**~~ **DECIDED
+   2026-08-30**: neither delete nor keep — rebuild. The volume becomes
+   `docs/plan/50-irradiance-probes.md`'s visibility-gated, RSM-updated grid, and
+   `apps/lantern/src/bounce.rs` and `apps/shard/src/light.rs`'s bake go with
+   that slice. The amendment under the GI decision above has the reasons.
 2. **LTC area lights — which shapes, and when.** Sphere, tube and rect with
    correct specular, off a cooked table like `crcbl_shaders::dfg`'s. Changes the
    `GpuLight` record (pre-1.0, no migration). Before or after clustered culling
