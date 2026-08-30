@@ -371,7 +371,7 @@ What §2's argument actually rules out is deriving a **tangent frame** from
 derivatives, and the reason is mirrored UVs, where the derivative route gives a
 handedness the vertex route gets right.
 
-### Rung 5 — LTC area lights, and the fill flag (decided 2026-08-30)
+### Rung 5 — LTC area lights, and the fill flag — rectangles landed 2026-08-31
 
 **Decided by the user's rule "best-looking for the performance", 2026-08-30.**
 Point lights read as pinpricks; a fixture reads as a fixture only when its
@@ -391,9 +391,62 @@ shadow and contributes no specular. It is how a no-bake stack lights the far end
 of a room — a practice every classic engine relies on and clustered forward
 makes affordable by the hundred — and a flag on the record rather than a light
 type, because everything else about it (cluster, falloff, colour) is the
-ordinary light's. Priced on the three tiers before it counts; the LTC evaluation
-is a handful of multiplies and one table fetch per light, so the expected answer
-is "on everywhere".
+ordinary light's.
+
+**What landed.** `crcbl_shaders::ltc` holds the fit and the polygon integral;
+`tables/ltc.bin` is the cooked 64-square table of the inverse transform's four
+free entries, and `cook-ltc --check` holds it to its own integrator in CI the
+way `cook-dfg` does. `GpuLight` grew to `LIGHT_STRIDE` 80 to carry a `tangent`
+and a `flags` word, `KIND_RECT` and `FLAG_FILL` are the first values in each,
+and `crcbl_render::RectLight` is the constructor. `mesh.slang` shades a
+rectangle with the clamped-cosine integral outright for diffuse and the same
+integral through the fitted transform for specular, scaled by the `dfg` pair —
+which is why the paper's second table is not cooked at all: its magnitude and
+Fresnel are Karis's scale and bias rearranged,
+`f0 · magnitude + (1 − f0) · fresnel` and `f0 · scale + bias` being the same
+number. Binding 25 therefore carries both channels now rather than one, and
+binding 27 is the transform.
+
+**Priced on radv and on lavapipe, 2026-08-31**, off `crcbl_render::PassStats`
+through `mesh_e2e`'s `the_price_of_a_froxel_full_of_area_lights`, at 1920×1080
+over 400 frames with a froxel full of lights — `CLUSTER_LIGHT_CAPACITY` of them,
+so every fragment walks a full list, which is the worst case the grid allows:
+
+| forward pass, 1920×1080      | radv (RX 7900 XTX, Mesa 26.2.1) | lavapipe (same Mesa) |
+| ---------------------------- | ------------------------------- | -------------------- |
+| sun alone                    | 0.082 / 0.092 ms                | 10.242 / 10.656 ms   |
+| + a full froxel of point     | 0.203 / 0.231 ms                | 19.540 / 20.164 ms   |
+| + a full froxel of rectangle | 0.532 / 0.615 ms                | 31.455 / 32.138 ms   |
+
+p50 / p95, and the three rows are rendered **interleaved on one device**, a
+frame each per turn, so a burst of contention lands on all three alike —
+measured one set after another on lavapipe under the rest of the suite, the sun
+alone came out dearer than the sixteen area lights that followed it. Over the
+sun-only frame that is 7.6 µs per point light and 28.1 µs per rectangle on radv,
+and 0.581 ms against 1.326 ms on lavapipe — **a rectangle costs 3.7× a point
+light on the desktop tier and 2.3× on the software one**. The answer the row
+predicted, "on everywhere", holds: even lavapipe's full froxel of rectangles is
+a third of a 1080p frame it already spends ten milliseconds on, and no scene in
+this tree has sixteen area lights over every pixel.
+
+**The browser tier is stated rather than measured**, because no scene with an
+area light reaches the browser harness yet — `docs/backlog.md` carries that gap.
+By count, a rectangle costs a fragment four extra `Load`s (the transform's
+bilinear tap, which shares its texel coordinates with the `dfg` read) and two
+polygon integrals of up to five edges each; an edge is a normalise, a dot, a 2D
+cross and the published rational, with a `sqrt` and a divide on the obtuse
+branch. Against a punctual light's two normalises and the GGX lobe's two `sqrt`s
+that is roughly an order of magnitude more ALU, which is what the two measured
+tiers put at 2.3× to 3.7×. The browser runs the same shader on the same silicon
+through WebGPU, so it should sit in the same band.
+
+**What the rung left**, all in `docs/backlog.md`: sphere, tube and disc shapes
+(the table serves them unchanged — they need corners and a shape field, not a
+second fit); textured area lights; `fill` on `PointLight` and `SpotLight`, which
+needs their struct literals across `apps/**` touched; a rectangle in the
+`crcbl::screenshot::Scene` list so the frame reaches `render_e2e` and the
+browser; area-light shadows; and `volumetric.slang` scattering a rectangle as a
+point at its centre.
 
 ### What stays out, and why
 

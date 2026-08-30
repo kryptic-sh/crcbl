@@ -60,7 +60,7 @@ pub const PREFILTER_SIZE: usize = 64;
 /// the table is nothing either way, and half precision would put a rounding
 /// this crate cannot perform without a dependency between the integrator and
 /// the committed bytes. The upload decides its own texel format, as
-/// `crate::dfg::albedo_texels` does.
+/// `crate::dfg::pair_texels` does.
 pub const PREFILTER_ENTRY_BYTES: usize = 8;
 
 /// The committed table's exact length.
@@ -122,7 +122,7 @@ pub const fn bytes() -> &'static [u8; PREFILTER_BYTES] {
 /// Bytes one texel of [`texels`] occupies: `W_far` then `W_opposite`, each as
 /// 16-bit fixed point with its high byte first, in an `Rgba8Unorm` image.
 ///
-/// Fixed point and not half precision, for [`crate::dfg::ALBEDO_TEXEL_BYTES`]'s
+/// Fixed point and not half precision, for [`crate::dfg::PAIR_TEXEL_BYTES`]'s
 /// reasons: a share in `[0, 1]` is finer at `1 / 65535` than binary16 is
 /// anywhere near one, and the split is integer arithmetic this crate can
 /// perform without a dependency.
@@ -135,7 +135,7 @@ pub const PREFILTER_IMAGE_BYTES: usize = PREFILTER_SIZE * PREFILTER_SIZE * PREFI
 /// The committed table encoded for upload as an `Rgba8Unorm` image, in
 /// [`entry`]'s order — row-major, `roughness` slow and `|R.y|` fast.
 ///
-/// `crate::dfg::albedo_texels`'s encoding with both channels kept, since the
+/// `crate::dfg::pair_texels`'s encoding exactly, since the
 /// consumer wants the pair: `ssr.slang`'s `decode_fixed_pair` is the read.
 #[must_use]
 pub fn texels() -> Vec<u8> {

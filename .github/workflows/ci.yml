@@ -649,9 +649,19 @@ jobs:
           --check
       # SMAA's area and search tables. Byte-exact rather than within a
       # tolerance — the generator takes no transcendental — but in this job
-      # with the other two all the same, so one job owns every cooked table.
+      # with the other three all the same, so one job owns every cooked table.
       - name: Check the committed SMAA tables against their generator
         run: cargo run --locked -p crcbl-shaders --example cook-smaa -- --check
+      # The area lights' linearly transformed cosine fit, Linux-only for the
+      # DFG table's reason and with a looser tolerance for one of its own: this
+      # generator *minimises* where the other three integrate, so what a
+      # platform's `libm` moves is where a Nelder-Mead simplex stopped rather
+      # than the last place of a sum. `crates/crcbl-shaders/tools/cook-ltc.rs`
+      # carries the number. It is also the slowest of the four by orders of
+      # magnitude — a derivative-free fit per texel — which is why it is last in
+      # a job that has already built everything it links.
+      - name: Check the committed LTC table against its fit
+        run: cargo run --locked -p crcbl-shaders --example cook-ltc -- --check
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v7

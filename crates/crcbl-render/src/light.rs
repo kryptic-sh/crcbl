@@ -2,8 +2,9 @@
 //!
 //! ```text
 //!  DirectionalLight ──┐
-//!  Light::Point    ───┼──▶ [GpuLight] ──▶ light_cluster.slang ──▶ froxel grid
-//!  Light::Spot     ───┘                                              │
+//!  Light::Point    ───┤
+//!  Light::Spot     ───┼──▶ [GpuLight] ──▶ light_cluster.slang ──▶ froxel grid
+//!  Light::Rect     ───┘                                              │
 //!                                            mesh.slang's fragment ◀─┘
 //! ```
 //!
@@ -22,9 +23,9 @@ use crate::camera::DirectionalLight;
 
 /// A light that lives somewhere, as distinct from the sun, which does not.
 ///
-/// Two variants and one row: the shader loop shades all three kinds with one
+/// Three variants and one row: the shader loop shades all four kinds with one
 /// BRDF, which is `docs/plan/18-render-features.md`'s "one material model, one
-/// BRDF, one set of inputs" holding by construction rather than by three copies
+/// BRDF, one set of inputs" holding by construction rather than by four copies
 /// of it agreeing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Light {
@@ -32,6 +33,8 @@ pub enum Light {
     Point(PointLight),
     /// A point light with a cone over it.
     Spot(SpotLight),
+    /// A rectangle that radiates from one of its faces.
+    Rect(RectLight),
 }
 
 /// A light radiating equally in every direction.
@@ -80,7 +83,135 @@ pub struct SpotLight {
     pub outer_angle: f32,
 }
 
+/// A rectangle that radiates from one of its faces — `docs/plan/44-lighting.md`'s
+/// rung 5, shaded through the linearly transformed cosine fit in
+/// [`crcbl_shaders::ltc`].
+///
+/// # What a rectangle is here
+///
+/// A centre, a plane, two half-extents and a side. The plane is
+/// [`direction`](Self::direction) — the way the panel faces, so a surface behind
+/// it is not lit at all — and [`tangent`](Self::tangent), which names the `u`
+/// axis inside it; the `v` axis is their cross product and is not stored.
+/// Neither vector has to arrive unit or perpendicular: [`Light::row`] normalises
+/// and orthogonalises them on the way into the row, because a row that broke
+/// either would be a rectangle that is not one and no picture would say so.
+///
+/// # The winding, which is what makes it one-sided
+///
+/// `v` is `cross(tangent, direction)`, and the shader walks the corners
+/// `-u-v, +u-v, +u+v, -u+v`. That order makes the spherical polygon's integral
+/// **positive** for a receiver on the side [`direction`](Self::direction) points
+/// at and negative behind it, and the shader takes the positive half. So a panel
+/// lights the room it faces and nothing on the other side of its own wall —
+/// which is what a window is, and what saves the far half of a scene from being
+/// lit through the floor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RectLight {
+    /// The centre of the rectangle, in render space.
+    pub position: Vec3,
+    /// How far its influence reaches **from that centre**, in world units.
+    ///
+    /// [`PointLight::radius`]'s terms, and the same hard bound: the shading
+    /// window reaches exactly zero here and `light_cluster.slang` culls against
+    /// this same sphere, so there is no radius at which the two disagree.
+    /// Measured from the centre rather than from the nearest corner, which is
+    /// what makes those two the same number — so a large panel wants a radius
+    /// comfortably past its own half-diagonal or it will fade out before its own
+    /// edge does.
+    pub radius: f32,
+    /// Colour premultiplied by intensity — the radiance leaving the face.
+    ///
+    /// **A radiance rather than a power**, which is what makes a rectangle
+    /// behave: doubling its extent doubles the light in the room, because it is
+    /// twice the emitter. A caller holding a lumen figure divides by the area.
+    pub color: Vec3,
+    /// The direction the face radiates along, away from the panel.
+    ///
+    /// [`SpotLight::direction`]'s convention — a fixture points *at* something —
+    /// and normalised on the way into the row.
+    pub direction: Vec3,
+    /// The `u` axis of the rectangle's plane, which fixes how it is turned about
+    /// its own normal.
+    ///
+    /// Orthogonalised against [`direction`](Self::direction) and normalised on
+    /// the way into the row, so a caller may hand over any vector that is not
+    /// parallel to the normal — a world axis, usually. One exactly parallel to
+    /// it leaves the rectangle without a plane, and [`Light::row`] picks a
+    /// perpendicular rather than emitting a row of nothings.
+    pub tangent: Vec3,
+    /// Half the rectangle's extent along `u`, in world units.
+    pub half_width: f32,
+    /// Half its extent along `v`, which is `cross(tangent, direction)`.
+    pub half_height: f32,
+    /// Whether this is a **fill** light: one that lights but casts no shadow and
+    /// adds no specular.
+    ///
+    /// `docs/plan/44-lighting.md`'s rung 5 asked for it beside the area lights.
+    /// It is how a stack with no baked bounce lights the far end of a room
+    /// without paying for a shadow map or leaving a highlight where no fixture
+    /// is. `crcbl_shaders::light::FLAG_FILL` is the row's bit;
+    /// [`shadow::Selection`](crate::shadow::Selection) refuses such a light a
+    /// tile and `mesh.slang` refuses it a lobe.
+    ///
+    /// **Only a rectangle carries it today.** The flag belongs on every light
+    /// and the row already has room for it on every kind; what it waits on is a
+    /// field on [`PointLight`] and [`SpotLight`], which is a breaking change to
+    /// two structs every sample in this workspace builds by literal.
+    /// `docs/backlog.md` carries it.
+    pub fill: bool,
+}
+
+impl RectLight {
+    /// The rectangle's plane, as a unit normal and a unit `u` axis inside it.
+    ///
+    /// The whole of the orthogonalisation the row needs, in one place because
+    /// [`Light::row`] and [`Light::sphere`] would otherwise each have an opinion
+    /// about a degenerate rectangle. A normal that is not a direction at all
+    /// becomes `+Z`, and a tangent parallel to the normal becomes whichever
+    /// world axis is least like it — both of which are arbitrary, and both of
+    /// which are a rectangle rather than a row of `NaN`s.
+    #[must_use]
+    pub fn frame(&self) -> (Vec3, Vec3) {
+        let normal = self.direction.normalize_or_zero();
+        let normal = if normal.length_squared() > 0.0 {
+            normal
+        } else {
+            Vec3::Z
+        };
+        let across = self.tangent - normal * self.tangent.dot(normal);
+        let tangent = across.normalize_or_zero();
+        if tangent.length_squared() > 0.0 {
+            return (normal, tangent);
+        }
+        // The tangent was parallel to the normal, so it names no plane. Any
+        // perpendicular will do — the rectangle is then turned arbitrarily about
+        // its own axis, which is the only thing the caller left unsaid.
+        let seed = if normal.z.abs() < 0.9 {
+            Vec3::Z
+        } else {
+            Vec3::X
+        };
+        (normal, seed.cross(normal).normalize())
+    }
+}
+
 impl Light {
+    /// Whether this light is a **fill** light: one that lights, casts no shadow
+    /// and adds no specular.
+    ///
+    /// A method on the enum rather than a field on each variant, so
+    /// [`shadow::Selection`](crate::shadow::Selection) asks one question of a
+    /// light rather than three. [`RectLight::fill`] is the only variant that can
+    /// answer yes today and says why.
+    #[must_use]
+    pub const fn is_fill(&self) -> bool {
+        match self {
+            Self::Point(_) | Self::Spot(_) => false,
+            Self::Rect(rect) => rect.fill,
+        }
+    }
+
     /// This light as the row the shaders read, occluding through the light tiles
     /// starting at `base_tile`.
     ///
@@ -106,10 +237,11 @@ impl Light {
                 position: point.position.extend(point.radius).to_array(),
                 color: point.color.extend(0.0).to_array(),
                 direction: [0.0; 4],
+                tangent: [0.0; 4],
                 kind: light::KIND_POINT,
                 cos_inner: 0.0,
                 shadow_tile,
-                pad1: 0,
+                flags: 0,
             },
             Self::Spot(spot) => {
                 // **Widened rather than trusted.** The shader divides by
@@ -126,10 +258,27 @@ impl Light {
                         .normalize_or_zero()
                         .extend(outer.cos())
                         .to_array(),
+                    tangent: [0.0; 4],
                     kind: light::KIND_SPOT,
                     cos_inner: spot.inner_angle.cos(),
                     shadow_tile,
-                    pad1: 0,
+                    flags: 0,
+                }
+            }
+            Self::Rect(rect) => {
+                let (normal, tangent) = rect.frame();
+                GpuLight {
+                    position: rect.position.extend(rect.radius).to_array(),
+                    color: rect.color.extend(0.0).to_array(),
+                    // The `w`s are the two half-extents, each beside the axis it
+                    // is measured along — `crcbl_shaders::light::KIND_RECT` is
+                    // the map.
+                    direction: normal.extend(rect.half_height).to_array(),
+                    tangent: tangent.extend(rect.half_width).to_array(),
+                    kind: light::KIND_RECT,
+                    cos_inner: 0.0,
+                    shadow_tile,
+                    flags: if rect.fill { light::FLAG_FILL } else { 0 },
                 }
             }
         }
@@ -142,6 +291,12 @@ impl Light {
         match self {
             Self::Point(point) => (point.position, point.radius),
             Self::Spot(spot) => (spot.position, spot.radius),
+            // The rectangle's own centre and reach, and deliberately not a
+            // sphere grown to hold its corners: `light_cluster.slang` culls
+            // against exactly the radius `mesh.slang`'s window goes to zero at,
+            // and a bound that disagreed with the window is the seam
+            // `RectLight::radius` exists to rule out.
+            Self::Rect(rect) => (rect.position, rect.radius),
         }
     }
 }
@@ -162,6 +317,7 @@ pub fn sun_row(sun: &DirectionalLight) -> GpuLight {
         position: [0.0; 4],
         color: sun.color.extend(0.0).to_array(),
         direction: sun.direction.normalize_or_zero().extend(0.0).to_array(),
+        tangent: [0.0; 4],
         kind: light::KIND_DIRECTIONAL,
         cos_inner: 0.0,
         // **The sun occludes through the cascades, not through a light tile.**
@@ -170,7 +326,7 @@ pub fn sun_row(sun: &DirectionalLight) -> GpuLight {
         // cascades by `kind` rather than by this field, which is why the two
         // cannot be confused.
         shadow_tile: light::NO_SHADOW_TILE,
-        pad1: 0,
+        flags: 0,
     }
 }
 

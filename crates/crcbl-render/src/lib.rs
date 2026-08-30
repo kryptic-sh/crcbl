@@ -207,7 +207,7 @@ pub use instance_pool::{
     Instance, InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError,
 };
 pub use layers::{Layer, LayerStack, Parallax};
-pub use light::{Light, PointLight, SpotLight, sun_row};
+pub use light::{Light, PointLight, RectLight, SpotLight, sun_row};
 pub use light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 pub use material_table::{
     Material, MaterialHandle, MaterialTable, MaterialTableDesc, MaterialTableError,

@@ -1125,6 +1125,7 @@ mod tests {
         // files, so the signature carries its own line breaks.
         for signature in [
             "\nstruct GpuLight\n",
+            "float range_window(float distance, float radius)",
             "float punctual_falloff(float distance, float radius)",
             "float spot_cone(float3 to_light, float3 axis, float cos_outer, float cos_inner)",
         ] {

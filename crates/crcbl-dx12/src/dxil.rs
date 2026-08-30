@@ -947,17 +947,22 @@ mod tests {
                 // whole list only ever grows at its top.
                 //
                 // Then the split-sum `DFG` table at binding 25, and therefore
-                // `t11`: an `Rg8Unorm` `Texture2D<float2>` read by `Load`, so it
-                // takes no sampler beside it either. Binding 24 belongs to
+                // `t11`: an `Rgba8Unorm` `Texture2D<float4>` read by `Load`, so
+                // it takes no sampler beside it either. Binding 24 belongs to
                 // `mesh_cluster.slang` and is another gap D3D12 does not see.
                 //
-                // Last is §2's normal page at binding 26, and therefore `t12`: a
+                // Then §2's normal page at binding 26, and therefore `t12`: a
                 // second `Texture2DArray` beside the base-colour one, read
                 // through the **same** sampler — which is why it adds an `Srv`
                 // here and no `Sampler`.
+                //
+                // Last is `docs/plan/44-lighting.md`'s area-light table at
+                // binding 27, and therefore `t13`: an `Rgba16Float`
+                // `Texture2D<float4>`, read by `Load` like the `DFG` pair beside
+                // it and taking no sampler for the same reason.
                 &[
                     Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv, Srv,
-                    Srv, Srv, Srv,
+                    Srv, Srv, Srv, Srv,
                 ],
             ),
             (

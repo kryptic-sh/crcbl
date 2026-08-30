@@ -48,10 +48,11 @@ struct GpuLight_std430_0
     @align(16) position_0 : vec4<f32>,
     @align(16) color_0 : vec4<f32>,
     @align(16) direction_0 : vec4<f32>,
+    @align(16) tangent_0 : vec4<f32>,
     @align(16) kind_0 : u32,
     @align(4) cos_inner_0 : f32,
     @align(8) shadow_tile_0 : u32,
-    @align(4) pad1_0 : u32,
+    @align(4) flags_0 : u32,
 };
 
 @binding(5) @group(0) var<storage, read> lights_0 : array<GpuLight_std430_0>;
@@ -208,11 +209,16 @@ fn volumetric_sun_visibility_0( world_position_0 : vec3<f32>,  pixel_3 : vec2<f3
     return tile_pcf_0(cascade_0, vec2<f32>(ndc_1.x * 0.5f + 0.5f, 0.5f - ndc_1.y * 0.5f), ndc_1.z, pixel_3, 2.0f);
 }
 
-fn punctual_falloff_0( distance_0 : f32,  radius_1 : f32) -> f32
+fn range_window_0( distance_0 : f32,  radius_1 : f32) -> f32
 {
     var ratio_0 : f32 = distance_0 / max(radius_1, 9.99999997475242708e-07f);
     var window_0 : f32 = saturate(1.0f - ratio_0 * ratio_0 * ratio_0 * ratio_0);
-    return window_0 * window_0 / (distance_0 * distance_0 + 1.0f);
+    return window_0 * window_0;
+}
+
+fn punctual_falloff_0( distance_1 : f32,  radius_2 : f32) -> f32
+{
+    return range_window_0(distance_1, radius_2) / (distance_1 * distance_1 + 1.0f);
 }
 
 fn spot_cone_0( to_light_0 : vec3<f32>,  axis_0 : vec3<f32>,  cos_outer_0 : f32,  cos_inner_1 : f32) -> f32
@@ -344,9 +350,9 @@ fn volumetric_punctual_0( froxel_0 : u32,  at_0 : vec3<f32>,  view_direction_0 :
         }
         var _S18 : vec3<f32> = light_0.position_0.xyz;
         var offset_0 : vec3<f32> = _S18 - at_0;
-        var distance_1 : f32 = length(offset_0);
-        var to_light_1 : vec3<f32> = offset_0 / vec3<f32>(max(distance_1, 9.99999997475242708e-07f));
-        var reach_0 : f32 = punctual_falloff_0(distance_1, light_0.position_0.w);
+        var distance_2 : f32 = length(offset_0);
+        var to_light_1 : vec3<f32> = offset_0 / vec3<f32>(max(distance_2, 9.99999997475242708e-07f));
+        var reach_0 : f32 = punctual_falloff_0(distance_2, light_0.position_0.w);
         var reach_1 : f32;
         if((light_0.kind_0) == u32(2))
         {
@@ -440,13 +446,13 @@ fn fog_one_minus_exp_over_0( d_1 : f32) -> f32
     return (1.0f - fog_exp_neg_0(d_1)) / d_1;
 }
 
-fn fog_optical_depth_0( density_0 : f32,  falloff_0 : f32,  height_a_0 : f32,  height_b_0 : f32,  distance_2 : f32) -> f32
+fn fog_optical_depth_0( density_0 : f32,  falloff_0 : f32,  height_a_0 : f32,  height_b_0 : f32,  distance_3 : f32) -> f32
 {
     if(falloff_0 <= 0.0f)
     {
-        return clamp(density_0 * distance_2, 0.0f, 32.0f);
+        return clamp(density_0 * distance_3, 0.0f, 32.0f);
     }
-    return clamp(density_0 * distance_2 * fog_exp_neg_0(height_a_0 / falloff_0) * fog_one_minus_exp_over_0((height_b_0 - height_a_0) / falloff_0), 0.0f, 32.0f);
+    return clamp(density_0 * distance_3 * fog_exp_neg_0(height_a_0 / falloff_0) * fog_one_minus_exp_over_0((height_b_0 - height_a_0) / falloff_0), 0.0f, 32.0f);
 }
 
 fn volumetric_source_0( view_direction_1 : vec3<f32>,  lit_0 : vec4<f32>) -> vec3<f32>

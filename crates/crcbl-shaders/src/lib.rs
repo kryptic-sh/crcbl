@@ -331,6 +331,11 @@ pub mod sky_prefilter;
 // the same reason.
 pub mod smaa;
 
+// The linearly transformed cosine fit an area light's highlight is shaped by,
+// and the polygon integral that reads it; its own `//!` header, for `fog`'s
+// reason above.
+pub mod ltc;
+
 use std::sync::OnceLock;
 
 /// Little-endian `f32`s in iteration order — what `std430` means for a struct

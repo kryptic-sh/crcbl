@@ -84,3 +84,10 @@ path = "tools/cook-sky-prefilter.rs"
 [[example]]
 name = "cook-smaa"
 path = "tools/cook-smaa.rs"
+
+# The LTC fit's table, on `cook-dfg`'s terms and in the same directory. It is
+# the only one of the four whose generator *minimises* rather than integrates,
+# which is why it carries a looser tolerance and its own paragraph about it.
+[[example]]
+name = "cook-ltc"
+path = "tools/cook-ltc.rs"

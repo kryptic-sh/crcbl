@@ -44,6 +44,7 @@ use crcbl::hal::{
     SampleType, SubmitInfo,
 };
 use crcbl::shaders::dfg;
+use crcbl::shaders::ltc;
 use crcbl::shaders::mesh;
 
 /// Two overlapping quads, the **near one drawn first**, so the depth test is the
@@ -124,7 +125,11 @@ struct DepthProbe {
     /// binding out is refused at pipeline creation; the *real* table rather than
     /// a stand-in because the probe's frames are compared against what the
     /// renderer draws, and a different table is a different lobe.
-    specular_albedo: crcbl::render::UploadedTexture,
+    specular_dfg: crcbl::render::UploadedTexture,
+    /// `mesh.slang`'s linearly transformed cosine table, on the table above it's
+    /// terms exactly — the real cooked one, bound because the module declares
+    /// it. No frame this probe draws holds an area light, so nothing reads it.
+    ltc_table: crcbl::render::UploadedTexture,
     base_color_sampler: crcbl::hal::SamplerHandle,
     /// A 1×1 `D32Float` image standing in for topic 18's shadow atlas, and its
     /// **comparison** sampler.
@@ -639,16 +644,30 @@ impl DepthProbe {
         // stand-in: it is what the engine binds and it is cooked into the
         // binary, so a probe that fabricated its own would be shading with a
         // different lobe than the renderer it exists to speak for.
-        let specular_albedo = crcbl::render::upload_texture(
+        let specular_dfg = crcbl::render::upload_texture(
             device,
             headless.queue,
             "probe dfg table",
-            Format::Rg8Unorm,
+            Format::Rgba8Unorm,
             dfg::DFG_SIZE as u32,
             dfg::DFG_SIZE as u32,
-            &dfg::albedo_texels(),
+            &dfg::pair_texels(),
         )
         .expect("the cooked DFG table uploads");
+
+        // And the area lights' fit beside it, for the same reason: the module
+        // declares it, so the layout has to cover it whether a frame here reads
+        // it or not.
+        let ltc_table = crcbl::render::upload_texture(
+            device,
+            headless.queue,
+            "probe ltc table",
+            Format::Rgba16Float,
+            ltc::LTC_SIZE as u32,
+            ltc::LTC_SIZE as u32,
+            &ltc::texels(),
+        )
+        .expect("the cooked LTC table uploads");
 
         let entries = [
             crcbl::hal::BindGroupLayoutEntry {
@@ -850,6 +869,20 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl::hal::BindingFlags::empty(),
             },
+            // The area lights' table, on the two rows above's terms: declared by
+            // the module, read by no frame here, and a layout that left it out
+            // would be refused at pipeline creation.
+            crcbl::hal::BindGroupLayoutEntry {
+                binding: 27,
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::SampledImage {
+                    view_type: crcbl::hal::ImageViewType::D2,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: crcbl::hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
@@ -936,7 +969,7 @@ impl DepthProbe {
             crcbl::hal::BindGroupEntry {
                 binding: 25,
                 array_index: 0,
-                resource: crcbl::hal::BindingResource::ImageView(specular_albedo.view),
+                resource: crcbl::hal::BindingResource::ImageView(specular_dfg.view),
             },
             // The base-colour page's own view again. A descriptor has to point
             // at something the backend can validate, and nothing here samples
@@ -946,6 +979,11 @@ impl DepthProbe {
                 binding: 26,
                 array_index: 0,
                 resource: crcbl::hal::BindingResource::ImageView(base_color_page.view),
+            },
+            crcbl::hal::BindGroupEntry {
+                binding: 27,
+                array_index: 0,
+                resource: crcbl::hal::BindingResource::ImageView(ltc_table.view),
             },
         ];
         let group = device
@@ -1031,7 +1069,8 @@ impl DepthProbe {
             visible_instances,
             base_color_page,
             occlusion,
-            specular_albedo,
+            specular_dfg,
+            ltc_table,
             base_color_sampler,
             shadow_atlas,
             shadow_atlas_view,
@@ -1054,7 +1093,8 @@ impl DepthProbe {
         device.destroy_sampler(self.base_color_sampler);
         self.base_color_page.destroy(device);
         self.occlusion.destroy(device);
-        self.specular_albedo.destroy(device);
+        self.specular_dfg.destroy(device);
+        self.ltc_table.destroy(device);
         device.destroy_buffer(self.visible_instances);
         device.destroy_buffer(self.mesh_table);
         device.destroy_buffer(self.probes);
@@ -1101,10 +1141,11 @@ fn probe_sun() -> crcbl::shaders::light::GpuLight {
         position: [0.0; 4],
         color: [0.8, 0.8, 0.8, 0.0],
         direction: [0.0, 0.0, 1.0, 0.0],
+        tangent: [0.0; 4],
         kind: crcbl::shaders::light::KIND_DIRECTIONAL,
         cos_inner: 0.0,
         shadow_tile: crcbl::shaders::light::NO_SHADOW_TILE,
-        pad1: 0,
+        flags: 0,
     }
 }
 

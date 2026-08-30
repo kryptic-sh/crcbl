@@ -275,6 +275,79 @@ delivery table is the record of which. `apps/options` is sample 20; the other
 three samples are planned, not built. What follows is what the plans could not
 settle.
 
+### What the LTC area-light rung left (2026-08-31)
+
+`docs/plan/44-lighting.md`'s rung 5 landed as rectangles: `crcbl_shaders::ltc`
+(the fit, the committed `tables/ltc.bin`, the polygon integral),
+`crcbl_render::RectLight`, `KIND_RECT` and `FLAG_FILL` on the widened
+`GpuLight`, and the shading in `mesh.slang`. The evidence is
+`crates/crcbl/tests/mesh_e2e/area_light.rs` — a golden, a turn that moves the
+highlight, the fill flag measured on the linear target, and the price — plus
+`crcbl_shaders::ltc`'s own tests against a brute-force hemisphere sweep and
+against the GGX lobe. What it did not do:
+
+- **The fill flag's shadow half is a guard that cannot fail.**
+  `crcbl_render::shadow::can_be_shadowed` opens with
+  `if light.is_fill() { return false; }`, and nothing reaches it: `fill` is a
+  field on `RectLight` alone, and the `Light::Rect` arm below refuses a
+  rectangle a tile regardless. Deleting the line leaves every test in
+  `crcbl-render` green — 426 + 43 + 2 on 2026-08-31 — so that half of the flag
+  is asserted by nothing. It becomes real, and testable, the moment `fill` moves
+  onto `PointLight` and `SpotLight`, which is the next item; the line is kept
+  and its doc now says it decides nothing today rather than claiming to be the
+  enforcement.
+- **No area light reaches `render_e2e` or the browser harness.** The frames
+  above are `mesh_e2e`'s, which draws through `ForwardRenderer` directly. A
+  frame in `crates/crcbl/tests/render_e2e.rs` needs a new
+  `crcbl::screenshot::Scene` variant, and that variant has to be named in
+  `crates/crcbl/src/screenshot.rs`, `crates/crcbl-cli/src/args.rs` and
+  `apps/render-harness/src/lib.rs` — three files outside the rung's slice, two
+  of them being edited concurrently when it landed. It is the missing half of
+  the browser tier's price, which `44-lighting.md` states by tap count instead
+  of measuring.
+- **Only Vulkan has drawn a rectangle.** `mesh_e2e` names no backend, so
+  `CRCBL_GPU=mtl`/`dx12`/`wgpu` over `crates/crcbl/tests/run-mesh-e2e.sh` is the
+  whole of the missing evidence — the Metal, DXIL and WGSL artifacts are
+  compiled and committed and nothing has run them.
+- **`fill` is on `RectLight` alone.** `crcbl_render::Light::is_fill` is the seam
+  and `shadow::can_be_shadowed` already refuses any fill light a tile, so the
+  flag generalises the moment `PointLight` and `SpotLight` grow the field. They
+  did not here because their struct literals are spread across `apps/**` and
+  `crates/crcbl/src`, which the slice did not own.
+- **Sphere, tube and disc are unbuilt.** The table serves them unchanged — the
+  paper's own point — so what each needs is corners (a sphere and a tube are
+  integrated as their silhouette quads) and a shape word in the row, not a
+  second fit. Textured area lights need a page and a filtered fetch, and are a
+  rung above that.
+- **A rectangle is culled as a sphere.** `light_cluster.slang` reads
+  `position.xyz` and `position.w` and nothing else, so a long thin strip is
+  bounded by a sphere that fits it loosely and reaches more froxels than it
+  lights. Correct, and wasteful in proportion to the aspect ratio.
+- **`volumetric.slang` scatters a rectangle as a point at its centre.** It
+  declares `KIND_RECT` — the drift guards demand every shader spell the same row
+  — and deliberately does not read it. A strip in fog therefore draws a
+  point-shaped shaft. Fixing it means the polygon integral in the scattering
+  pass, which is a per-froxel-per-step cost nobody has priced.
+- **No area light casts a shadow.** `shadow::tile_span` gives `Light::Rect` zero
+  tiles. A rectangle's shadow is not a cube map or a single frustum, so this is
+  its own rung — the industry answer is a shadow map from the rectangle's centre
+  plus a contact term, and `docs/plan/45-shadows.md` has neither.
+- **The fit's grazing shoulder is tens of per cent off the real lobe, and that
+  is the paper's trade rather than a defect.** `crcbl_shaders::ltc`'s
+  `PUNCTUAL_SHARE` records the measurement against a punctual GGX lobe: 0.037 of
+  the answer head on, 0.156 at `N·V` 0.7 and 0.394 at 0.4. Raising `LTC_SAMPLES`
+  to 64 and `LTC_FIT_STEPS` to 160 did not move the worst case at all, which is
+  what says it is model error and not an unconverged simplex — a three-parameter
+  linear transform of a cosine cannot follow the asymmetric tail a grazing GGX
+  lobe grows, and the paper's error norm weights the peak instead. Improving it
+  means a richer transform (the full five-parameter matrix, or an anisotropic
+  fit), which is a bigger table and a different shader.
+- **What the rung costs a scene with _no_ area light was not measured against
+  the tree before it.** The polygon integral, the frame and the transform's tap
+  all sit inside the `KIND_RECT` branch, and the `dfg` read that grew is one
+  extra decode over the same four `Load`s — but that is an argument, not a
+  measurement, and taking one needs a build of the previous commit.
+
 ### What the motion-vector pass left owed (2026-08-30)
 
 `docs/plan/43-render-standards.md` §9's pass is built — `MOTION_FORMAT`'s

@@ -974,9 +974,14 @@ struct GpuLight
     float4 position;
     /// Colour premultiplied by intensity in `rgb`; `w` unused.
     float4 color;
-    /// Towards the light for a directional; the cone axis for a spot. `w` is the
-    /// cosine of a spot's outer half-angle.
+    /// Towards the light for a directional; the cone axis for a spot; the
+    /// direction a rectangle emits along. `w` is the cosine of a spot's outer
+    /// half-angle, and a rectangle's half-extent along its `v` axis.
     float4 direction;
+    /// A rectangle's unit `u` axis in `xyz` and its half-extent along it in `w`.
+    /// Unread by every other kind. The `v` axis is
+    /// `cross(tangent.xyz, direction.xyz)`, which is unit because those two are.
+    float4 tangent;
     uint kind;
     /// The cosine of a spot's inner half-angle.
     float cos_inner;
@@ -990,7 +995,8 @@ struct GpuLight
     /// `docs/plan/18-render-features.md`'s rule is that such a light still lights
     /// and simply does not occlude.
     uint shadow_tile;
-    uint pad1;
+    /// What this light may contribute: `FLAG_FILL`, or zero for an ordinary one.
+    uint flags;
 };
 
 /// `GpuLight::shadow_tile` for a light with no shadow map of its own.
@@ -1010,6 +1016,20 @@ static const uint KIND_POINT = 1;
 
 /// `GpuLight::kind` for a spot light.
 static const uint KIND_SPOT = 2;
+
+/// `GpuLight::kind` for a rectangular area light, shaded through the linearly
+/// transformed cosine `ltc_matrix` holds — `crcbl_shaders::light::KIND_RECT` is
+/// the map of which of the row's vectors means what for one.
+static const uint KIND_RECT = 3;
+
+/// `GpuLight::flags` for a light that lights but does not shadow and adds no
+/// specular, matching `crcbl_shaders::light::FLAG_FILL`.
+///
+/// **Only the specular half is enforced here.** The shadow half is
+/// `crcbl_render::shadow::Selection`'s: it is the only thing that hands a light
+/// a tile, so a fill light's row already carries `NO_SHADOW_TILE` and the walk
+/// below needs no second test for it.
+static const uint FLAG_FILL = 1;
 
 /// How many light indices one froxel's list holds, matching
 /// `crcbl_shaders::light::CLUSTER_LIGHT_CAPACITY`.
@@ -1305,19 +1325,30 @@ Texture2D<float> ambient_occlusion;
 [[vk::binding(23, 0)]]
 StructuredBuffer<GpuProbe> probes;
 
-/// The split-sum `DFG` table, reduced to the one number multi-scatter energy
-/// compensation reads: how much of the light arriving at a GGX lobe that lobe
-/// hands back. `crcbl_shaders::dfg` is where it is integrated and committed, and
-/// `crcbl_shaders::dfg::albedo_texels` is the image `crcbl_render::forward`
+/// The split-sum `DFG` table: the **scale and bias on `f0`** whose sum is how
+/// much of the light arriving at a GGX lobe that lobe hands back.
+/// `crcbl_shaders::dfg` is where it is integrated and committed, and
+/// `crcbl_shaders::dfg::pair_texels` is the image `crcbl_render::forward`
 /// uploads into this slot.
 ///
-/// # Two bytes of fixed point, not a half float
+/// # Both channels, because two terms read it
 ///
-/// `Rg8Unorm`, red the high byte and green the low, decoded by
-/// `decode_specular_albedo` below. The stored number is a *share of arriving
-/// light* and therefore lives in `[0, 1]`, where a step of `1 / 65535` is finer
+/// Multi-scatter energy compensation wants only the sum — the directional
+/// albedo — and read that alone until the area lights arrived. An area light's
+/// specular is the polygon integral times `f0 · scale + bias`, which is the
+/// pair, so the slot now carries the pair and the compensation adds the two
+/// channels itself. One image and one set of four `Load`s serve both, which is
+/// `docs/plan/44-lighting.md`'s own "one table serves both rungs" holding by
+/// construction rather than by two uploads of the same bytes agreeing.
+///
+/// # Two bytes of fixed point per channel, not a half float
+///
+/// `Rgba8Unorm`, each channel's high byte then its low, decoded by
+/// `decode_dfg_pair` below. Each stored number is a *share of arriving light*
+/// and therefore lives in `[0, 1]`, where a step of `1 / 65535` is finer
 /// everywhere than half precision — which near one is `2^-11`, thirty times
-/// coarser. `crcbl_shaders::dfg::ALBEDO_TEXEL_BYTES` argues the rest of it.
+/// coarser. `crcbl_shaders::dfg::PAIR_TEXEL_BYTES` argues the rest of it, and
+/// `ssr.slang` reads the same encoding out of its own copy.
 ///
 /// # Fetched by texel and filtered here, not by a sampler
 ///
@@ -1335,7 +1366,7 @@ StructuredBuffer<GpuProbe> probes;
 /// everything `mesh_cluster.slang` declares — that file reaches 24 — so it needs
 /// no mirror there and no index it already owns moves.
 [[vk::binding(25, 0)]]
-Texture2D<float2> specular_albedo;
+Texture2D<float4> specular_dfg;
 
 /// §2's second texture page: the **normal** map, one `Texture2DArray` indexed
 /// by `normal_layer(material)`.
@@ -1359,7 +1390,7 @@ Texture2D<float2> specular_albedo;
 /// "bumpier than intended" rather than as broken.
 /// `crcbl_render::forward::the_two_page_formats_differ` is the guard.
 ///
-/// **Appended past `specular_albedo`, never inserted**, for
+/// **Appended past `specular_dfg`, never inserted**, for
 /// `SHADOW_ATLAS_BINDING`'s reason exactly: `crcbl-mtl` gives a resource the
 /// next index in its Metal argument table by counting the same-table entries of
 /// the layout list, and Slang numbers a stage's arguments by declaration order,
@@ -1368,6 +1399,36 @@ Texture2D<float2> specular_albedo;
 /// there and no index anything already owns moves.
 [[vk::binding(26, 0)]]
 Texture2DArray<float4> normal_textures;
+
+/// `docs/plan/44-lighting.md`'s rung 5: the linearly transformed cosine fit of
+/// the GGX lobe, four matrix entries per texel over the same `(N·V, roughness)`
+/// grid `specular_dfg` is on. `crcbl_shaders::ltc` is where it is fitted and
+/// committed, and `crcbl_shaders::ltc::texels` is the image
+/// `crcbl_render::forward` uploads into this slot.
+///
+/// # Half floats, where the table beside it is fixed point
+///
+/// `Rgba16Float`. The `DFG` pair holds shares of arriving light, which live in
+/// `[0, 1]` where a fixed-point step beats half precision; these are matrix
+/// entries that change sign and run over two orders of magnitude, and half
+/// floats spend their precision relatively rather than absolutely.
+/// `crcbl_shaders::ltc::LTC_TEXEL_BYTES` argues it in full.
+///
+/// # Fetched by texel and filtered here, for `specular_dfg`'s reason
+///
+/// Four `Load`s and a bilinear blend written out. The two tables share a grid,
+/// so `table_tap` computes one set of texel coordinates and weights and both
+/// reads use it — which is the whole reason `crcbl_shaders::ltc` was fitted on
+/// `crcbl_shaders::dfg`'s axes rather than on the paper's own.
+///
+/// **Appended past `normal_textures`, never inserted**, for the reason every
+/// binding above it gives: `crcbl-mtl` numbers a resource by counting the
+/// same-table entries of the layout list, and Slang numbers a stage's arguments
+/// by declaration order, so the two agree only while both ascend. 27 is past
+/// everything `mesh_cluster.slang` declares, so it needs no mirror there and no
+/// index anything already owns moves.
+[[vk::binding(27, 0)]]
+Texture2D<float4> ltc_matrix;
 
 /// The matrix that carries a mesh-space normal into `GpuInstance::transform`'s
 /// space, built out of that transform's own upper-left 3×3.
@@ -1729,57 +1790,104 @@ float3 ggx_lobe(float alpha2, float3 f0, float n_dot_l, float n_dot_v, float n_d
 /// doc says why the *upper* half of that clamp is the load-bearing one.
 static const float MIN_DIRECTIONAL_ALBEDO = 1e-4;
 
-/// One texel of `specular_albedo` as the number it encodes.
+/// Where in a `(N·V, roughness)` table the four texels around a point are, and
+/// how they are weighted.
 ///
-/// `red` and `green` arrive as the stored bytes over 255, a conversion every
-/// backend defines exactly; multiplying back by 255 recovers the bytes, and
-/// `high * 256 + low` over 65535 is the fixed point the cook wrote.
-/// `crcbl_shaders::dfg::decode_albedo` is the same arithmetic on the CPU, and
-/// `the_texels_encode_the_committed_table_to_a_quantisation_step` is what holds
-/// the pair together.
-float decode_specular_albedo(float2 texel)
+/// **One tap for two tables.** `specular_dfg` and `ltc_matrix` are the same
+/// square on the same axes at the same texel centres — which is why
+/// `crcbl_shaders::ltc` was fitted on `crcbl_shaders::dfg`'s grid rather than on
+/// the paper's own — so the addressing is computed once here and both reads
+/// spend four `Load`s and a blend and nothing else.
+struct TableTap
 {
-    return (texel.r * 65280.0 + texel.g * 255.0) / 65535.0;
-}
+    /// The lower texel on each axis.
+    int2 lo;
+    /// The upper one, clamped to the edge rather than wrapped.
+    int2 hi;
+    /// How far between them the point sits, per axis.
+    float2 weight;
+};
 
-/// The share of arriving light a single-scatter GGX lobe hands back, read out of
-/// `specular_albedo` at `(n_dot_v, roughness)`.
+/// Where `(n_dot_v, roughness)` lands in either table.
 ///
-/// Bilinear over the four texels around the point, with the addressing a clamped
-/// sampler would use: the table is baked on texel *centres*, so the axis maps to
-/// `value * size - 0.5` and both ends clamp to the edge texel rather than
-/// wrapping. `crcbl_shaders::dfg::sampled_albedo` is the same filter on the CPU.
+/// The addressing a clamped linear sampler would use: both tables are baked on
+/// texel *centres*, so an axis maps to `value * size - 0.5` and both ends clamp
+/// to the edge texel. `crcbl_shaders::dfg::sample` and
+/// `crcbl_shaders::ltc::sample` are the same filter on the CPU.
 ///
 /// The extent comes from `GetDimensions` rather than from a constant mirrored
-/// out of Rust: there is exactly one image this ever reads and its size is a
-/// property of that image, so asking it is one fewer number for two files to
-/// disagree about.
-float specular_albedo_at(float n_dot_v, float roughness)
+/// out of Rust: the size is a property of the image, so asking it is one fewer
+/// number for two files to disagree about. `the_grid_is_the_dfg_table_s_grid`
+/// is what says asking one of the two is asking both.
+TableTap table_tap(float n_dot_v, float roughness)
 {
     uint width;
     uint height;
-    specular_albedo.GetDimensions(width, height);
+    specular_dfg.GetDimensions(width, height);
     float2 extent = float2(float(width), float(height));
     float2 scaled = float2(saturate(n_dot_v), saturate(roughness)) * extent - 0.5;
     float2 low = clamp(floor(scaled), float2(0.0, 0.0), extent - 1.0);
     float2 high = min(low + 1.0, extent - 1.0);
-    float2 weight = clamp(scaled - low, 0.0, 1.0);
 
-    int2 lo = int2(low);
-    int2 hi = int2(high);
-    float top = lerp(decode_specular_albedo(specular_albedo.Load(int3(lo.x, lo.y, 0))),
-                     decode_specular_albedo(specular_albedo.Load(int3(hi.x, lo.y, 0))),
-                     weight.x);
-    float bottom = lerp(decode_specular_albedo(specular_albedo.Load(int3(lo.x, hi.y, 0))),
-                        decode_specular_albedo(specular_albedo.Load(int3(hi.x, hi.y, 0))),
-                        weight.x);
-    return lerp(top, bottom, weight.y);
+    TableTap tap;
+    tap.lo = int2(low);
+    tap.hi = int2(high);
+    tap.weight = clamp(scaled - low, 0.0, 1.0);
+    return tap;
+}
+
+/// One texel of `specular_dfg` as the two numbers it encodes.
+///
+/// Each channel pair arrives as the stored bytes over 255, a conversion every
+/// backend defines exactly; multiplying back by 255 recovers the bytes, and
+/// `high * 256 + low` over 65535 is the fixed point the cook wrote.
+/// `crcbl_shaders::dfg::decode_albedo` is the same arithmetic on the CPU, once
+/// per channel, and `ssr.slang`'s `decode_fixed_pair` is the other copy of this
+/// one.
+float2 decode_dfg_pair(float4 texel)
+{
+    return float2(texel.r * 65280.0 + texel.g * 255.0, texel.b * 65280.0 + texel.a * 255.0)
+         / 65535.0;
+}
+
+/// The split-sum pair — a scale and a bias on `f0` — at `tap`.
+///
+/// Bilinear over the four texels around the point, written out rather than asked
+/// of a sampler: a hardware filter's weights are fixed-function arithmetic four
+/// rasterisers compute independently, and the blend below is ordinary multiplies
+/// and adds, which they agree on.
+float2 dfg_at(TableTap tap)
+{
+    float2 top = lerp(decode_dfg_pair(specular_dfg.Load(int3(tap.lo.x, tap.lo.y, 0))),
+                      decode_dfg_pair(specular_dfg.Load(int3(tap.hi.x, tap.lo.y, 0))),
+                      tap.weight.x);
+    float2 bottom = lerp(decode_dfg_pair(specular_dfg.Load(int3(tap.lo.x, tap.hi.y, 0))),
+                         decode_dfg_pair(specular_dfg.Load(int3(tap.hi.x, tap.hi.y, 0))),
+                         tap.weight.x);
+    return lerp(top, bottom, tap.weight.y);
+}
+
+/// The four entries of the linearly transformed cosine's inverse matrix at
+/// `tap`, in `crcbl_shaders::ltc`'s order.
+///
+/// `dfg_at`'s filter over the other table; the texels are half floats rather
+/// than fixed-point pairs, so there is nothing to decode.
+float4 ltc_at(TableTap tap)
+{
+    float4 top = lerp(ltc_matrix.Load(int3(tap.lo.x, tap.lo.y, 0)),
+                      ltc_matrix.Load(int3(tap.hi.x, tap.lo.y, 0)),
+                      tap.weight.x);
+    float4 bottom = lerp(ltc_matrix.Load(int3(tap.lo.x, tap.hi.y, 0)),
+                         ltc_matrix.Load(int3(tap.hi.x, tap.hi.y, 0)),
+                         tap.weight.x);
+    return lerp(top, bottom, tap.weight.y);
 }
 
 /// What the specular lobe is multiplied by to put back the light a single
 /// scatter dropped.
 ///
-/// `1 + f0 * (1 / E - 1)` per channel, where `E` is `specular_albedo_at`. A GGX
+/// `1 + f0 * (1 / E - 1)` per channel, where `E` is the directional albedo —
+/// `dfg_at`'s two channels added, which is the table at `f0 = 1`. A GGX
 /// lobe follows light off the microsurface once and loses everything that bounces
 /// again, so it returns `E` of what arrived and the shortfall grows with
 /// roughness — two thirds of it on the roughest conductor this table holds. The
@@ -1792,11 +1900,300 @@ float specular_albedo_at(float n_dot_v, float roughness)
 /// it is inverted, so a polished surface — where `E` is one and the table's
 /// Monte Carlo noise can put it a hair above — comes back with the factor
 /// exactly one and the smooth half of every material set is untouched.
-float3 specular_compensation(float3 f0, float n_dot_v, float roughness)
+float3 specular_compensation(float3 f0, float directional_albedo)
 {
-    float albedo = clamp(specular_albedo_at(n_dot_v, roughness), MIN_DIRECTIONAL_ALBEDO, 1.0);
+    float albedo = clamp(directional_albedo, MIN_DIRECTIONAL_ALBEDO, 1.0);
     float gain = 1.0 / albedo - 1.0;
     return float3(1.0, 1.0, 1.0) + f0 * gain;
+}
+
+/// The `pi` this file's two lobes folded out of themselves, put back once at the
+/// end of a polygon integral.
+///
+/// `ggx_lobe`'s header has the convention: neither lobe carries its `1 / pi`,
+/// because a light's intensity has absorbed it. The published edge fit below
+/// carries a `1 / (2 pi)` instead — it is written to hand a shader the
+/// Lambertian *response* rather than the irradiance — so this engine multiplies
+/// it back. One constant, in one place, rather than three altered coefficients
+/// nobody could check against the paper. `crcbl_shaders::ltc::LOBE_PI` is the
+/// same number on the host.
+static const float LOBE_PI = 3.14159265;
+
+/// A spherical polygon mid-integration: up to five corners, and how many of them
+/// survived the horizon.
+///
+/// Five because a quad clipped against a plane is a triangle, a quad or a
+/// pentagon.
+struct LtcPolygon
+{
+    /// The corners, relative to the shading point and already transformed.
+    float3 corner[5];
+    /// How many of them are real.
+    int count;
+};
+
+/// The shading frame `crcbl_shaders::ltc`'s fit is expressed in: the normal at
+/// `+z` and the view in the `+xz` half-plane, as the rows of a world-to-local
+/// matrix.
+///
+/// **The degenerate case is a view exactly along the normal**, where the
+/// tangent has no direction to point in and `normalize` would hand back a
+/// nothing. It is not a corner case to be ignored: it is the middle of every
+/// surface facing the camera. The fallback is any perpendicular, and it is
+/// exactly right rather than merely safe — the table's head-on column has no
+/// shear at all, so at that incidence the lobe is rotationally symmetric about
+/// the normal and every choice of tangent gives the same answer.
+float3x3 ltc_shading_frame(float3 normal, float3 to_eye, float n_dot_v)
+{
+    float3 across = to_eye - normal * n_dot_v;
+    float span = length(across);
+    float3 seed = abs(normal.z) < 0.9 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+    float3 tangent = span > 1e-4 ? across / span : normalize(cross(seed, normal));
+    float3 bitangent = cross(normal, tangent);
+    return float3x3(tangent, bitangent, normal);
+}
+
+/// The inverse of the fitted transform, from the four entries `ltc_at` read.
+///
+/// The middle entry is one because the integral below normalises every
+/// transformed corner, so a positive scale of the whole matrix cannot change its
+/// answer and the fit's fifth number was spent normalising the other four.
+/// `crcbl_shaders::ltc::inverse_transform` is the same matrix on the host.
+float3x3 ltc_transform(float4 entry)
+{
+    return float3x3(entry.x, 0.0, entry.y,
+                    0.0, 1.0, 0.0,
+                    entry.z, 0.0, entry.w);
+}
+
+/// One edge's contribution to the clamped-cosine integral: the `z` of the two
+/// corners' cross product, scaled by `theta / (2 pi sin theta)`.
+///
+/// **The rational is the paper's own, and it is why this term is legal here.**
+/// The exact factor is an `acos` over a `sin`, and
+/// `docs/plan/44-lighting.md`'s rule is that no transcendental may reach a
+/// colour; Heitz, Dupuy, Hill and Neubelt's shader replaces it with two
+/// polynomials, a divide and a square root, every one of which IEEE-754
+/// specifies. That is the same ground `crcbl_shaders::fog`'s exponential stands
+/// on and the fourth escape from the rule this workspace uses.
+///
+/// The obtuse branch is the fit's own: the polynomial covers `cos theta >= 0`,
+/// and past a right angle the identity
+/// `theta / sin theta = pi / sin theta - (pi - theta) / sin(pi - theta)` reaches
+/// it with the same polynomial evaluated at `|cos theta|` — which is the
+/// `0.5 / sqrt(1 - x^2)` term once the `2 pi` is folded in.
+///
+/// Only the `z` of the cross product is wanted: the receiver's normal is `+z` in
+/// this frame, and the edge term is that cross dotted with it.
+/// `crcbl_shaders::ltc::edge_weight` is the same fit on the host.
+float ltc_edge(float3 first, float3 second)
+{
+    float cosine = clamp(dot(first, second), -1.0, 1.0);
+    float y = abs(cosine);
+    float numerator = 0.8543985 + (0.4965155 + 0.0145206 * y) * y;
+    float denominator = 3.4175940 + (4.1616724 + y) * y;
+    float fit = numerator / denominator;
+    // `0.5 / sqrt` rather than `rsqrt`: IEEE-754 requires a correctly rounded
+    // square root and a correctly rounded divide, and specifies nothing at all
+    // about a reciprocal square root — which is the difference between a term
+    // four backends agree on and one they nearly do.
+    float weight = cosine > 0.0 ? fit : 0.5 / sqrt(max(1.0 - cosine * cosine, 1e-7)) - fit;
+    return (first.x * second.y - first.y * second.x) * weight;
+}
+
+/// `polygon` clipped against the `z > 0` half-space.
+///
+/// Transcribed from the paper's `ClipQuadToHorizon`: the configuration is the
+/// four corners' sign bits, and each case replaces the corners below the horizon
+/// with the points where their edges cross it — `-b.z * a + a.z * b`, which is
+/// the crossing scaled by the two heights and therefore needs no divide. Two of
+/// the sixteen configurations are opposite corners above with the other two
+/// below, which a planar quad cannot be in, and they return nothing.
+///
+/// `crcbl_shaders::ltc`'s `clip_to_horizon` is the same table on the host, and
+/// `the_polygon_integral_agrees_with_a_hemisphere_quadrature` is what says the
+/// table is right — it fires rays at a rectangle and knows nothing about any of
+/// these cases.
+LtcPolygon ltc_clip(LtcPolygon polygon)
+{
+    float3 l0 = polygon.corner[0];
+    float3 l1 = polygon.corner[1];
+    float3 l2 = polygon.corner[2];
+    float3 l3 = polygon.corner[3];
+    float3 l4 = float3(0.0, 0.0, 0.0);
+
+    int config = 0;
+    config += l0.z > 0.0 ? 1 : 0;
+    config += l1.z > 0.0 ? 2 : 0;
+    config += l2.z > 0.0 ? 4 : 0;
+    config += l3.z > 0.0 ? 8 : 0;
+
+    int count = 0;
+    if (config == 1)
+    {
+        count = 3;
+        l1 = -l1.z * l0 + l0.z * l1;
+        l2 = -l3.z * l0 + l0.z * l3;
+    }
+    else if (config == 2)
+    {
+        count = 3;
+        l0 = -l0.z * l1 + l1.z * l0;
+        l2 = -l2.z * l1 + l1.z * l2;
+    }
+    else if (config == 3)
+    {
+        count = 4;
+        l2 = -l2.z * l1 + l1.z * l2;
+        l3 = -l3.z * l0 + l0.z * l3;
+    }
+    else if (config == 4)
+    {
+        count = 3;
+        l0 = -l3.z * l2 + l2.z * l3;
+        l1 = -l1.z * l2 + l2.z * l1;
+    }
+    else if (config == 6)
+    {
+        count = 4;
+        l0 = -l0.z * l1 + l1.z * l0;
+        l3 = -l3.z * l2 + l2.z * l3;
+    }
+    else if (config == 7)
+    {
+        count = 5;
+        l4 = -l3.z * l0 + l0.z * l3;
+        l3 = -l3.z * l2 + l2.z * l3;
+    }
+    else if (config == 8)
+    {
+        count = 3;
+        l0 = -l0.z * l3 + l3.z * l0;
+        l1 = -l2.z * l3 + l3.z * l2;
+        l2 = l3;
+    }
+    else if (config == 9)
+    {
+        count = 4;
+        l1 = -l1.z * l0 + l0.z * l1;
+        l2 = -l2.z * l3 + l3.z * l2;
+    }
+    else if (config == 11)
+    {
+        count = 5;
+        l4 = l3;
+        l3 = -l3.z * l2 + l2.z * l3;
+        l2 = -l2.z * l1 + l1.z * l2;
+    }
+    else if (config == 12)
+    {
+        count = 4;
+        l1 = -l1.z * l2 + l2.z * l1;
+        l0 = -l0.z * l3 + l3.z * l0;
+    }
+    else if (config == 13)
+    {
+        count = 5;
+        l4 = l3;
+        l3 = l2;
+        l2 = -l2.z * l1 + l1.z * l2;
+        l1 = -l1.z * l0 + l0.z * l1;
+    }
+    else if (config == 14)
+    {
+        count = 5;
+        l4 = -l0.z * l3 + l3.z * l0;
+        l0 = -l0.z * l1 + l1.z * l0;
+    }
+    else if (config == 15)
+    {
+        count = 4;
+    }
+
+    // The unused corners are set to the first rather than left as they were, so
+    // the unrolled sum below closes the ring by adding an edge of zero length
+    // instead of normalising whatever the clip happened to leave.
+    if (count <= 3)
+    {
+        l3 = l0;
+        l4 = l0;
+    }
+    else if (count == 4)
+    {
+        l4 = l0;
+    }
+
+    LtcPolygon clipped;
+    clipped.corner[0] = l0;
+    clipped.corner[1] = l1;
+    clipped.corner[2] = l2;
+    clipped.corner[3] = l3;
+    clipped.corner[4] = l4;
+    clipped.count = count;
+    return clipped;
+}
+
+/// The clamped-cosine integral over the spherical polygon `corners` subtends at
+/// the shading point, under `transform`.
+///
+/// `transform` is the world-to-local frame alone for the diffuse term and that
+/// frame under the fitted matrix for the specular one — which is the whole of
+/// what a linearly transformed cosine is. A polygon covering the hemisphere
+/// answers `LOBE_PI`; one entirely below the horizon, or wound so the receiver
+/// is behind it, answers zero.
+///
+/// `crcbl_shaders::ltc::polygon_irradiance` is the same integral on the host.
+float ltc_irradiance(float3x3 transform, float3 corners[4])
+{
+    LtcPolygon polygon;
+    for (int corner = 0; corner < 4; ++corner)
+    {
+        polygon.corner[corner] = mul(transform, corners[corner]);
+    }
+    polygon.corner[4] = float3(0.0, 0.0, 0.0);
+    polygon.count = 4;
+    polygon = ltc_clip(polygon);
+    if (polygon.count == 0)
+    {
+        return 0.0;
+    }
+    for (int at = 0; at < 5; ++at)
+    {
+        polygon.corner[at] = normalize(polygon.corner[at]);
+    }
+
+    float sum = ltc_edge(polygon.corner[0], polygon.corner[1]);
+    sum += ltc_edge(polygon.corner[1], polygon.corner[2]);
+    sum += ltc_edge(polygon.corner[2], polygon.corner[3]);
+    if (polygon.count >= 4)
+    {
+        sum += ltc_edge(polygon.corner[3], polygon.corner[4]);
+    }
+    if (polygon.count == 5)
+    {
+        sum += ltc_edge(polygon.corner[4], polygon.corner[0]);
+    }
+    // One-sided: a negative sum is a polygon wound the other way round, which
+    // is a surface behind the panel. `crcbl_render::RectLight` carries the
+    // winding that makes "in front" the positive one.
+    return max(sum, 0.0) * LOBE_PI;
+}
+
+/// A rectangle light's four corners, relative to the shading point.
+///
+/// The row carries the `u` axis and both half-extents; `v` is
+/// `cross(tangent.xyz, direction.xyz)`, which is unit because those two are unit
+/// and perpendicular. The order is what makes `ltc_irradiance` positive for a
+/// receiver the rectangle faces — see `crcbl_shaders::light::KIND_RECT`.
+void rect_corners(GpuLight light, float3 world_position, out float3 corners[4])
+{
+    float3 across = light.tangent.xyz * light.tangent.w;
+    float3 down = cross(light.tangent.xyz, light.direction.xyz) * light.direction.w;
+    float3 centre = light.position.xyz - world_position;
+    corners[0] = centre - across - down;
+    corners[1] = centre + across - down;
+    corners[2] = centre + across + down;
+    corners[3] = centre - across + down;
 }
 
 /// `log2(e)`, mirroring `crcbl_shaders::fog::LOG2_E`.
@@ -2915,23 +3312,36 @@ float point_visibility(GpuLight light, uint base, float3 world_position, float3 
                                2.0 * axial / SHADOW_TILE, geometric_normal, pixel);
 }
 
+/// Karis' quartic window on a light's reach: `1` at the light, **exactly zero**
+/// at `radius`, and smooth between.
+///
+/// Split out of `punctual_falloff` because an area light wants the window and
+/// not the inverse square beside it: a rectangle's own polygon integral already
+/// shrinks with distance, because that is what a solid angle does, so
+/// multiplying by `1 / d²` a second time would darken it by the square of its
+/// distance twice over. What both kinds share is the hard cut at `radius`, and
+/// `light_cluster.slang` culls both against that same number — so a light is
+/// either in a froxel's list or contributing nothing to it, with no radius at
+/// which the two disagree.
+float range_window(float distance, float radius)
+{
+    float ratio = distance / max(radius, 1e-6);
+    float window = saturate(1.0 - ratio * ratio * ratio * ratio);
+    return window * window;
+}
+
 /// How bright a punctual light is at `distance`, reaching **exactly zero** at
 /// `radius`.
 ///
-/// Inverse-square with Karis' quartic window on top. The window is not
-/// cosmetic: `light_cluster.slang` culls a light against this same radius, so a
-/// falloff still contributing there would leave a hard edge wherever a froxel
-/// stopped listing it — the seam that reads as a shading bug. Zero at the radius
-/// is what makes the cull and the shading the same statement.
+/// Inverse-square under `range_window`, which is where the cut at `radius` and
+/// its reason live.
 ///
 /// The `1` in the denominator keeps the singularity at zero distance finite;
 /// it is the standard form, and it costs a light its physical units in exchange
 /// for never producing an infinity a tonemap has to survive.
 float punctual_falloff(float distance, float radius)
 {
-    float ratio = distance / max(radius, 1e-6);
-    float window = saturate(1.0 - ratio * ratio * ratio * ratio);
-    return window * window / (distance * distance + 1.0);
+    return range_window(distance, radius) / (distance * distance + 1.0);
 }
 
 /// How much of a spot light this direction is inside its cone for: `1` within
@@ -3668,10 +4078,19 @@ FragmentOutput fragmentMain(VertexOutput input)
     // list.
     uint count = min(cluster_lights[base], CLUSTER_LIGHT_CAPACITY);
 
+    // Both tables, read once for the fragment through one set of texel
+    // coordinates. The pair is what an area light scales its polygon integral
+    // by and what the multi-scatter compensation below adds together, so a
+    // fragment with no area light in its froxel pays exactly what it paid
+    // before this rung: four `Load`s and a blend.
+    TableTap table = table_tap(n_dot_v, roughness);
+    float2 dfg = dfg_at(table);
+    float3 lobe_energy = f0 * dfg.x + dfg.y;
+
     // Accumulated rather than branched on, which is the whole of what making the
-    // sun a row bought: one loop shades a directional, a point and a spot, and
-    // topic 18's "one material model, one BRDF" holds by construction instead of
-    // by three copies of the same maths agreeing.
+    // sun a row bought: one loop shades a directional, a point, a spot and a
+    // rectangle, and topic 18's "one material model, one BRDF" holds by
+    // construction instead of by four copies of the same maths agreeing.
     float3 direct = float3(0.0, 0.0, 0.0);
     float3 gloss = float3(0.0, 0.0, 0.0);
     for (uint slot = 0; slot < count; ++slot)
@@ -3688,6 +4107,19 @@ FragmentOutput fragmentMain(VertexOutput input)
             to_light = normalize(light.direction.xyz);
             reach = 1.0;
         }
+        else if (light.kind == KIND_RECT)
+        {
+            // The **window and not the inverse square**: the polygon integral
+            // below already shrinks with distance, because that is what a solid
+            // angle does. `range_window` says what would happen if both were
+            // applied. `to_light` is the direction to the rectangle's centre,
+            // which nothing in the shading of one reads — it is here for the
+            // shadow selection below, which refuses a rectangle a tile.
+            float3 offset = light.position.xyz - input.world_position;
+            float distance = length(offset);
+            to_light = offset / max(distance, 1e-6);
+            reach = range_window(distance, light.position.w);
+        }
         else
         {
             float3 offset = light.position.xyz - input.world_position;
@@ -3700,22 +4132,59 @@ FragmentOutput fragmentMain(VertexOutput input)
             }
         }
 
-        // Lambert.
+        // Read by the shadow biases below and by the punctual shading; a
+        // rectangle replaces both terms outright and keeps this only for the
+        // biases.
         float n_dot_l = dot(normal, to_light);
-        float diffuse = max(n_dot_l, 0.0);
+        float diffuse;
+        float3 specular;
+        if (light.kind == KIND_RECT)
+        {
+            // **The rung's whole shading, in four lines.** The clamped-cosine
+            // integral over the rectangle is the diffuse term outright — a
+            // Lambert lobe *is* a clamped cosine, so there is no approximation
+            // in that half at all. The specular one is the same integral over
+            // the same rectangle seen through the fitted transform, scaled by
+            // the energy the lobe returns, which is the pair already read
+            // above. `docs/plan/44-lighting.md`'s rung 5 is the argument and
+            // `crcbl_shaders::ltc` is the fit.
+            float3 corners[4];
+            rect_corners(light, input.world_position, corners);
+            float3x3 to_local = ltc_shading_frame(normal, to_eye, n_dot_v);
+            diffuse = ltc_irradiance(to_local, corners);
+            specular = ltc_irradiance(mul(ltc_transform(ltc_at(table)), to_local), corners)
+                     * lobe_energy;
+        }
+        else
+        {
+            // Lambert.
+            diffuse = max(n_dot_l, 0.0);
 
-        // Cook-Torrance, one GGX lobe, driven by the row's own two factors —
-        // where this was a Blinn power and a strength constant no caller could
-        // vary. The half-vector form survives the change: it is what the
-        // microfacet model is written in, rather than an approximation of it.
-        float3 half_vector = normalize(to_light + to_eye);
-        float3 specular = ggx_lobe(alpha2, f0, diffuse, n_dot_v,
-                                   max(dot(normal, half_vector), 0.0),
-                                   max(dot(to_eye, half_vector), 0.0));
-        // No light on the back of a surface, whatever the half-vector says. The
-        // `N·L` the lobe left out is the same one Lambert already carries, so
-        // both terms take it from here and a back-facing fragment loses both.
-        specular *= diffuse;
+            // Cook-Torrance, one GGX lobe, driven by the row's own two factors
+            // — where this was a Blinn power and a strength constant no caller
+            // could vary. The half-vector form survives the change: it is what
+            // the microfacet model is written in, rather than an approximation
+            // of it.
+            float3 half_vector = normalize(to_light + to_eye);
+            specular = ggx_lobe(alpha2, f0, diffuse, n_dot_v,
+                                max(dot(normal, half_vector), 0.0),
+                                max(dot(to_eye, half_vector), 0.0));
+            // No light on the back of a surface, whatever the half-vector says.
+            // The `N·L` the lobe left out is the same one Lambert already
+            // carries, so both terms take it from here and a back-facing
+            // fragment loses both.
+            specular *= diffuse;
+        }
+
+        // **A fill light lights and does not glint.** The other half of the
+        // flag — that it casts no shadow — is `crcbl_render::shadow::Selection`
+        // refusing it a tile, so nothing below has to test for it a second
+        // time. `crcbl_shaders::light::FLAG_FILL` argues why it is a flag
+        // rather than a kind of light.
+        if ((light.flags & FLAG_FILL) != 0u)
+        {
+            specular = float3(0.0, 0.0, 0.0);
+        }
 
         // The shadow maps, and the *only* place they enter the shading. The sun
         // occludes through its cascades, a spot through the one tile `Selection`
@@ -3776,7 +4245,7 @@ FragmentOutput fragmentMain(VertexOutput input)
     // omission: what the lobe dropped is light that went on bouncing *within the
     // microsurface* and left it as specular, so putting it back anywhere else
     // would be inventing energy in a term that never lost any.
-    gloss *= specular_compensation(f0, n_dot_v, roughness);
+    gloss *= specular_compensation(f0, dfg.x + dfg.y);
 
     // **Screen-space occlusion scales the ambient term and nothing else**, and
     // the refusal is as load-bearing as the multiply. Ambient stands in for every

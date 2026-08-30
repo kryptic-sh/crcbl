@@ -44,8 +44,10 @@ What is real today:
   AppKit, Win32, the browser canvas, and a headless backend that CI runs
   everything through.
 - **A GPU-driven forward renderer.** Culling and draw generation on the GPU, a
-  shadow pass, depth prepass, SSAO, SSR, clustered lights, tonemapping and a
-  screen-space grid, with mesh shaders and bindless where the device has them.
+  shadow pass, depth prepass, SSAO, SSR, clustered lights — point, spot and
+  rectangular area lights shaded by linearly transformed cosines — tonemapping
+  and a screen-space grid, with mesh shaders and bindless where the device has
+  them.
 - **glTF import** with meshlet building, a cluster DAG and QEM simplification.
 - **A server-authoritative game stack** — fixed-tick simulation, snapshots,
   interpolation, an ECS, physics, input mapping, audio, persistence and a job

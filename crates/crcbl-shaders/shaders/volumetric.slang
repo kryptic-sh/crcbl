@@ -121,6 +121,16 @@ static const uint SHADOW_ATLAS_ROWS = 4;
 static const uint KIND_DIRECTIONAL = 0;
 static const uint KIND_POINT = 1;
 static const uint KIND_SPOT = 2;
+
+/// `GpuLight::kind` for a rectangular area light.
+///
+/// **Declared and not read: a rectangle scatters into this medium as a point
+/// light at its own centre.** The walk below takes the `else` a point light
+/// takes, so a panel glows in fog with the right colour, in the right place and
+/// with the right reach, and without its shape. Integrating a polygon per froxel
+/// per slice is what the surface pass does once per fragment, and this pass runs
+/// it over a volume; `docs/backlog.md` carries the rung that would pay for it.
+static const uint KIND_RECT = 3;
 static const uint CLUSTER_LIGHT_CAPACITY = 16;
 static const uint CLUSTER_STRIDE = 17;
 
@@ -141,9 +151,13 @@ struct GpuLight
     float4 position;
     /// Colour premultiplied by intensity in `rgb`; `w` unused.
     float4 color;
-    /// Towards the light for a directional; the cone axis for a spot. `w` is the
-    /// cosine of a spot's outer half-angle.
+    /// Towards the light for a directional; the cone axis for a spot; the
+    /// direction a rectangle emits along. `w` is the cosine of a spot's outer
+    /// half-angle, and a rectangle's half-extent along its `v` axis.
     float4 direction;
+    /// A rectangle's `u` axis and half-extent. **Unread here**, for the reason
+    /// `KIND_RECT` below gives.
+    float4 tangent;
     uint kind;
     /// The cosine of a spot's inner half-angle.
     float cos_inner;
@@ -151,7 +165,9 @@ struct GpuLight
     /// here**: a punctual light reaches every froxel in its radius, occluded by
     /// nothing — see `docs/plan/51-volumetrics.md`'s rung 2.
     uint shadow_tile;
-    uint pad1;
+    /// What this light may contribute. **Unread here**: a fill light is an
+    /// ordinary light to a medium, which has no specular lobe to refuse it.
+    uint flags;
 };
 
 /// What neither dispatch can derive for itself, matching
@@ -459,11 +475,18 @@ float3 volumetric_source(float3 view_direction, float4 lit)
 /// `mesh.slang`'s function of the same name, letter for letter — the window
 /// that goes to exactly zero at the radius is what makes the clustering pass's
 /// cull and this loop's reach the same statement, there as here.
-float punctual_falloff(float distance, float radius)
+float range_window(float distance, float radius)
 {
     float ratio = distance / max(radius, 1e-6);
     float window = saturate(1.0 - ratio * ratio * ratio * ratio);
-    return window * window / (distance * distance + 1.0);
+    return window * window;
+}
+
+/// How bright a punctual light is at `distance`, reaching exactly zero at
+/// `radius` — `mesh.slang`'s copy, letter for letter.
+float punctual_falloff(float distance, float radius)
+{
+    return range_window(distance, radius) / (distance * distance + 1.0);
 }
 
 /// How much of a spot light this direction is inside its cone for: `1` within

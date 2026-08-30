@@ -77,9 +77,14 @@ struct GpuLight
     float4 position;
     /// Colour premultiplied by intensity in `rgb`; `w` unused.
     float4 color;
-    /// Towards the light for a directional; the cone axis for a spot. `w` is the
-    /// cosine of a spot's outer half-angle.
+    /// Towards the light for a directional; the cone axis for a spot; the
+    /// direction a rectangle emits along. `w` is the cosine of a spot's outer
+    /// half-angle, and a rectangle's half-extent along its `v` axis.
     float4 direction;
+    /// A rectangle's `u` axis and half-extent. **Read by nothing here**: a
+    /// rectangle is culled against the sphere its `position` already names, so
+    /// this pass carries the field for the layout's sake.
+    float4 tangent;
     uint kind;
     /// The cosine of a spot's inner half-angle.
     float cos_inner;
@@ -91,7 +96,10 @@ struct GpuLight
     /// exactly as far as a shadowed one — so this pass carries the field for the
     /// layout's sake and `mesh.slang`'s fragment stage is what reads it.
     uint shadow_tile;
-    uint pad1;
+    /// What this light may contribute. **Read by nothing here**, for
+    /// `shadow_tile`'s reason: a fill light is in a froxel's list exactly as
+    /// far as any other.
+    uint flags;
 };
 
 /// `GpuLight::kind` for the sun: no position, no falloff, and in every froxel.
@@ -102,6 +110,15 @@ static const uint KIND_POINT = 1;
 
 /// `GpuLight::kind` for a spot light.
 static const uint KIND_SPOT = 2;
+
+/// `GpuLight::kind` for a rectangular area light.
+///
+/// **Culled as a sphere and nothing more.** A rectangle's `position` carries the
+/// centre and the radius its influence ends at, exactly as a point light's does,
+/// so the test below needs no arm for it — and a bound tight to the rectangle's
+/// own plane would be a second shape for the pass to reason about in exchange
+/// for froxels behind a panel, which a wall usually occupies anyway.
+static const uint KIND_RECT = 3;
 
 /// How many light indices one froxel's list holds, matching
 /// `crcbl_shaders::light::CLUSTER_LIGHT_CAPACITY`. **The budget.**

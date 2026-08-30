@@ -28,7 +28,7 @@ use crcbl::render::{ForwardRenderer, Projection, TransientPool};
 /// resulting `Drop` warning and out-of-band device error would print on top of
 /// the message that says what actually went wrong. Every caller tears down
 /// first and unwraps last.
-fn mesh_golden(name: &str, image: &crcbl_golden::Image) -> Result<String, String> {
+pub(crate) fn mesh_golden(name: &str, image: &crcbl_golden::Image) -> Result<String, String> {
     let reference =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/golden/{name}.png"));
     crcbl_golden::Golden::new(reference)

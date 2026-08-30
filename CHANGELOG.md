@@ -57,6 +57,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The light row grew, and the specular table's image changed format.**
+  `crcbl_shaders::light::GpuLight` gains `tangent: [f32; 4]` and turns its
+  padding word into `flags`, so `LIGHT_STRIDE` is 80 where it was 64 and every
+  shader that declares the struct — `mesh`, `mesh_cluster`, `light_cluster`,
+  `volumetric` — declares both new fields. `KIND_RECT` joins the kinds and
+  `FLAG_FILL` is the first flag. `crcbl_shaders::dfg::albedo_texels`,
+  `ALBEDO_TEXEL_BYTES` and `ALBEDO_BYTES` are gone: binding 25 now carries
+  `dfg::pair_texels()` as `Rgba8Unorm`, because the area lights' scale and the
+  multi-scatter compensation want the same two channels and a second image of
+  the same integral would be a copy to drift. Binding 27 is new and holds the
+  LTC transform as `Rgba16Float`. No golden moved for the format change.
+
 - **`GpuMesh` and `GpuMaterial` both grew, and the mesh upload takes a
   descriptor.** `GpuMesh` gains `flags` (`MESH_ENTRY_STRIDE` 52 → 56) carrying
   `MESH_AUTHORED_TANGENTS`, so `crcbl_render::MeshRange` gains `flags` and
@@ -146,6 +158,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   gains `attribute_base`. No golden moved.
 
 ### Added
+
+- **Rectangular area lights, shaded by linearly transformed cosines.**
+  `crcbl_render::RectLight` is a new `Light::Rect` variant — a centre, a normal,
+  a tangent, two half-extents and a reach — and `shaders/mesh.slang` shades it
+  with the closed-form clamped-cosine integral over the rectangle: the diffuse
+  term outright, and the specular term as the same integral through a fitted
+  3x3, scaled by the energy `crcbl_shaders::dfg`'s pair already holds. A strip
+  light now draws a strip-shaped highlight that turns when the strip turns,
+  where a point light drew a round one wherever it was pointed. The fit is
+  Heitz, Dupuy, Hill and Neubelt (SIGGRAPH 2016); the new `crcbl_shaders::ltc`
+  module holds it, `tables/ltc.bin` is the cooked result and
+  `cargo run -p crcbl-shaders --example cook-ltc -- --check` holds the artifact
+  to the integrator in CI beside `cook-dfg`'s. No transcendental reaches the
+  frame: the fit runs at cook time and the shader's per-edge term is the paper's
+  published rational for `acos`.
+- **A light can be marked _fill_: it lights and does not glint, and casts no
+  shadow.** `crcbl_render::RectLight::fill` sets
+  `crcbl_shaders::light::FLAG_FILL` on the row; `mesh.slang` drops the specular
+  lobe and `crcbl_render::shadow`'s selection refuses the light a tile. It is
+  what lights the far end of a room without a bake. Rectangles only for now — a
+  `fill` field on `PointLight` and `SpotLight` is `docs/backlog.md`'s.
 
 - **The debug console opens on `` ` `` in every game, with no per-app code.**
   `crcbl::engine::CONSOLE_KEY` (`KeyCode::Backquote`) joins `F3`, `Escape` and

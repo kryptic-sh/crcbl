@@ -29,6 +29,11 @@ pub(crate) struct HdrTarget(pub(crate) Vec<u8>);
 
 impl HdrTarget {
     /// The linear HDR value at a texel, decoded from `Rgba16Float`.
+    ///
+    /// Through `crcbl_shaders::ltc::half_value`, which is the decode the area
+    /// lights' table already needed on the host — this file carried a copy of
+    /// it until that module existed, and two transcriptions of IEEE 754's
+    /// binary16 are two places a subnormal can be got wrong.
     pub(crate) fn pixel(&self, x: u32, y: u32) -> [f32; 4] {
         let index = ((y * MESH_EXTENT.0 + x) * 4) as usize * 2;
         let mut out = [0.0f32; 4];
@@ -38,7 +43,7 @@ impl HdrTarget {
                     .try_into()
                     .expect("two bytes"),
             );
-            *value = half_to_f32(bits);
+            *value = crcbl_shaders::ltc::half_value(bits);
         }
         out
     }
@@ -61,35 +66,6 @@ impl HdrTarget {
         }
         hottest
     }
-}
-
-/// Decodes an IEEE binary16 into an `f32`.
-///
-/// Written out rather than pulled in: this is the only place in the engine that
-/// reads an `Rgba16Float` on the CPU, and a dependency for twelve lines of
-/// shifts would be a `cargo deny` conversation about a test helper.
-fn half_to_f32(bits: u16) -> f32 {
-    let sign = u32::from(bits >> 15) << 31;
-    let exponent = u32::from((bits >> 10) & 0x1f);
-    let mantissa = u32::from(bits & 0x3ff);
-    let value = match exponent {
-        // Zero or subnormal.
-        0 => {
-            if mantissa == 0 {
-                0
-            } else {
-                // Renormalise: shift the mantissa up until its leading bit
-                // falls off, decrementing the exponent as it goes.
-                let leading = mantissa.leading_zeros() - 21;
-                let mantissa = (mantissa << (leading + 1)) & 0x3ff;
-                ((127 - 15 - leading) << 23) | (mantissa << 13)
-            }
-        }
-        // Infinity or NaN.
-        31 => 0xff << 23 | (mantissa << 13),
-        _ => ((exponent + 127 - 15) << 23) | (mantissa << 13),
-    };
-    f32::from_bits(sign | value)
 }
 
 /// One frame of the cube scene, with the scene target read back beside the

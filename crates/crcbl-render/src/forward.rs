@@ -151,7 +151,7 @@ use crcbl_hal::{
 };
 use crcbl_shaders::meshlet::MeshClusters;
 use crcbl_shaders::{
-    MESH, MESH_CLUSTER, Stage, TONEMAP, dfg, level_select, mesh, ssao, ssr, tonemap,
+    MESH, MESH_CLUSTER, Stage, TONEMAP, dfg, level_select, ltc, mesh, ssao, ssr, tonemap,
 };
 use glam::{Mat4, Quat, Vec3};
 
@@ -451,11 +451,11 @@ const LEVEL_GROUP_TABLE_BINDING: u32 = 24;
 /// bound to the fragment stage alone would be a global the vertex stage names
 /// and nothing fills. See [`crcbl_hal::check_portable_storage_buffers`] and
 /// binding 7's `geometry` visibility.
-const SPECULAR_ALBEDO_BINDING: u32 = 25;
+const SPECULAR_DFG_BINDING: u32 = 25;
 
 /// The bind-group slot §2's normal page is sampled through.
 ///
-/// **Appended past [`SPECULAR_ALBEDO_BINDING`], never inserted**, for
+/// **Appended past [`SPECULAR_DFG_BINDING`], never inserted**, for
 /// [`PROBE_TABLE_BINDING`]'s reason exactly: `crcbl-mtl` gives a resource the
 /// next index in its Metal argument table by counting the same-table entries of
 /// this layout, and Slang numbers a stage's arguments by declaration order, so
@@ -472,11 +472,36 @@ const SPECULAR_ALBEDO_BINDING: u32 = 25;
 /// be identical.
 const NORMAL_PAGE_BINDING: u32 = 26;
 
+/// The bind-group slot `docs/plan/44-lighting.md`'s rung 5 reads its linearly
+/// transformed cosine table through.
+///
+/// **Appended past [`NORMAL_PAGE_BINDING`], never inserted**, for that
+/// constant's reason exactly: `crcbl-mtl` gives a resource the next index in its
+/// Metal argument table by counting the same-table entries of this layout, and
+/// Slang numbers a stage's arguments by declaration order, so the two agree only
+/// while both ascend. 27 is past everything `mesh_cluster.slang` declares, so it
+/// needs no mirror there and no index anything already owns moves.
+///
+/// **No sampler**, like the table two rows below it: four `Load`s and a bilinear
+/// blend written out in the shader, because a hardware filter's weights are
+/// fixed-function arithmetic four rasterisers compute independently and these
+/// goldens are compared across all four.
+const LTC_TABLE_BINDING: u32 = 27;
+
 /// [`crcbl_shaders::dfg::DFG_SIZE`] as an image extent.
 ///
 /// The table is square, and its size is a compile-time constant, so the
 /// conversion belongs here rather than as a fallible one at the upload.
 const DFG_SIZE_U32: u32 = dfg::DFG_SIZE as u32;
+
+/// [`crcbl_shaders::ltc::LTC_SIZE`] as an image extent.
+///
+/// The same number as [`DFG_SIZE_U32`], and a separate constant rather than a
+/// reuse of it: `crcbl_shaders::ltc`'s `the_grid_is_the_dfg_table_s_grid` is
+/// what says the two tables are the same square, and each upload naming its own
+/// module is what would make a day they were not into a compile error here
+/// rather than a stretched image.
+const LTC_SIZE_U32: u32 = ltc::LTC_SIZE as u32;
 
 /// The radius `ssao.slang` gathers occlusion within, in **world units**.
 ///
@@ -1397,16 +1422,24 @@ pub struct ForwardRenderer {
     /// [`ResourceState::ShaderRead`] from the moment it exists and no pass has to
     /// declare it to give it a layout.
     ambient_occlusion_placeholder: UploadedTexture,
-    /// The split-sum `DFG` table as an `Rg8Unorm` image — binding
-    /// [`SPECULAR_ALBEDO_BINDING`], and the whole of multi-scatter energy
-    /// compensation's input.
+    /// The split-sum `DFG` table as an `Rgba8Unorm` image — binding
+    /// [`SPECULAR_DFG_BINDING`], read by multi-scatter energy compensation and
+    /// by every area light's specular term.
     ///
-    /// Uploaded once from `crcbl_shaders::dfg::albedo_texels` and never written
+    /// Uploaded once from `crcbl_shaders::dfg::pair_texels` and never written
     /// again: it is a property of the GGX lobe rather than of a scene, a view or
     /// a frame. Unlike [`ForwardRenderer::ambient_occlusion_placeholder`] beside
     /// it this is not a stand-in for anything — there is no path on which the
     /// table is absent, because there is no path on which the lobe is.
-    specular_albedo: UploadedTexture,
+    specular_dfg: UploadedTexture,
+    /// The linearly transformed cosine fit as an `Rgba16Float` image — binding
+    /// [`LTC_TABLE_BINDING`], and the whole of an area light's specular shape.
+    ///
+    /// Uploaded once from `crcbl_shaders::ltc::texels`, on the table above it's
+    /// terms exactly and for the same reason: it is a property of the lobe, and
+    /// it is bound on every path because Slang's Metal backend materialises
+    /// every global into every entry point.
+    ltc_table: UploadedTexture,
     /// `[frame]`: the entries [`ForwardRenderer::mesh_groups`] was built from.
     ///
     /// Kept because the occlusion image is a graph transient: its view is known
@@ -1789,14 +1822,17 @@ struct SharedBindings<'a> {
     /// them is the *budget* the mesh stage projects against, and that rides in
     /// each pass's own frame block.
     tables: BufferHandle,
-    /// Binding [`SPECULAR_ALBEDO_BINDING`], the split-sum `DFG` table's
-    /// directional albedo — see [`ForwardRenderer::specular_albedo`].
+    /// Binding [`SPECULAR_DFG_BINDING`], the split-sum `DFG` pair — see
+    /// [`ForwardRenderer::specular_dfg`].
     ///
     /// Shared rather than per-group for the probe grid's reason and more
     /// strongly: it is cooked into the binary, uploaded once at build and
     /// identical for every view this engine will ever draw. A cascade names it
     /// and never looks.
-    specular_albedo: ImageViewHandle,
+    specular_dfg: ImageViewHandle,
+    /// Binding [`LTC_TABLE_BINDING`], the area lights' fit — see
+    /// [`ForwardRenderer::ltc_table`]. Shared for the table above it's reason.
+    ltc_table: ImageViewHandle,
 }
 
 /// The half of a mesh-layout bind group that differs between the colour pass and
@@ -2059,9 +2095,9 @@ impl MeshGroup {
         // [`SPECULAR_ALBEDO_BINDING`]. Unconditional, because unlike the row
         // below it this one is read by the fragment stage of every path.
         entries.push(BindGroupEntry {
-            binding: SPECULAR_ALBEDO_BINDING,
+            binding: SPECULAR_DFG_BINDING,
             array_index: 0,
-            resource: BindingResource::ImageView(shared.specular_albedo),
+            resource: BindingResource::ImageView(shared.specular_dfg),
         });
         // And §2's normal page above that, on the same ascending terms — see
         // [`NORMAL_PAGE_BINDING`]. Unconditional and `array_index: 0` for
@@ -2070,6 +2106,13 @@ impl MeshGroup {
             binding: NORMAL_PAGE_BINDING,
             array_index: 0,
             resource: BindingResource::ImageView(shared.normal_page),
+        });
+        // And the area lights' table above that, on the same ascending terms —
+        // see [`LTC_TABLE_BINDING`].
+        entries.push(BindGroupEntry {
+            binding: LTC_TABLE_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(shared.ltc_table),
         });
         entries
     }
@@ -3539,19 +3582,19 @@ impl ForwardRenderer {
             });
         }
 
-        // The `DFG` table, above everything — see [`SPECULAR_ALBEDO_BINDING`].
+        // The `DFG` table, above everything — see [`SPECULAR_DFG_BINDING`].
         //
         // `geometry` beside `FRAGMENT` for binding 7's reason exactly: Slang's
         // Metal backend materialises every global into every entry point, so
-        // `msl/mesh.metal`'s `vertexMain` takes `specular_albedo [[texture(3)]]`
+        // `msl/mesh.metal`'s `vertexMain` takes `specular_dfg [[texture(3)]]`
         // whether it reads it or not.
         mesh_entries.push(BindGroupLayoutEntry {
-            binding: SPECULAR_ALBEDO_BINDING,
+            binding: SPECULAR_DFG_BINDING,
             visibility: geometry.union(ShaderStages::FRAGMENT),
             kind: BindingKind::SampledImage {
                 view_type: ImageViewType::D2,
-                // `Float`, as the occlusion channel above: an `Rg8Unorm` colour
-                // image, declared `texture_2d<f32>` by the WGSL artifact.
+                // `Float`, as the occlusion channel above: an `Rgba8Unorm`
+                // colour image, declared `texture_2d<f32>` by the WGSL artifact.
                 sample_type: SampleType::Float,
             },
             count: 1,
@@ -3575,6 +3618,23 @@ impl ForwardRenderer {
                 // `texture_2d_array<f32>` by the WGSL artifact — the same
                 // sample type the sRGB base-colour page reports, since both
                 // decode to floats.
+                sample_type: SampleType::Float,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
+        // The area lights' table, above the page — see [`LTC_TABLE_BINDING`].
+        //
+        // `geometry` beside `FRAGMENT` for the two rows above it's reason.
+        // `Float` because `Rgba16Float` is a filterable sampled format on every
+        // target this engine opens, and the WGSL artifact declares it
+        // `texture_2d<f32>` — the shader only ever `Load`s it, but the layout
+        // has to say what the module declared.
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: LTC_TABLE_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
                 sample_type: SampleType::Float,
             },
             count: 1,
@@ -3760,19 +3820,34 @@ impl ForwardRenderer {
         // importance-samples a lobe, which is `sin`, `cos` and a `powf`, and this
         // engine's goldens are compared across four backends with no tolerance.
         // Baking here would be four slightly different tables.
-        let specular_albedo = upload_texture(
+        let specular_dfg = upload_texture(
             device,
             queue,
             "dfg table",
-            // Two bytes of fixed point per texel, high byte in red — see
-            // `crcbl_shaders::dfg::ALBEDO_TEXEL_BYTES`, which argues why this is
+            // Two bytes of fixed point per channel, high byte first — see
+            // `crcbl_shaders::dfg::PAIR_TEXEL_BYTES`, which argues why this is
             // not the `Rg16Float` the format's own doc anticipated.
-            Format::Rg8Unorm,
+            Format::Rgba8Unorm,
             DFG_SIZE_U32,
             DFG_SIZE_U32,
-            &dfg::albedo_texels(),
+            &dfg::pair_texels(),
         )?;
-        rollback.textures.push(specular_albedo);
+        rollback.textures.push(specular_dfg);
+
+        // The area lights' fit, beside it and on its terms — cooked bytes for
+        // the same reason, and `Rgba16Float` rather than fixed point because
+        // these are matrix entries rather than shares of arriving light.
+        // `crcbl_shaders::ltc::LTC_TEXEL_BYTES` argues the format.
+        let ltc_table = upload_texture(
+            device,
+            queue,
+            "ltc table",
+            Format::Rgba16Float,
+            LTC_SIZE_U32,
+            LTC_SIZE_U32,
+            &ltc::texels(),
+        )?;
+        rollback.textures.push(ltc_table);
 
         // **A comparison sampler, and that is the PCF.** Each
         // `SampleCmpLevelZero` returns the filtered fraction of four texels that
@@ -3911,7 +3986,8 @@ impl ForwardRenderer {
                 light_grid: lights.grid(frame),
                 probes: probe_buffer,
                 tables: draws.tables(),
-                specular_albedo: specular_albedo.view,
+                specular_dfg: specular_dfg.view,
+                ltc_table: ltc_table.view,
             };
             let buffer = device.create_buffer(&BufferDesc {
                 label: Some("mesh frame uniforms"),
@@ -4507,7 +4583,8 @@ impl ForwardRenderer {
             tonemap_curve: tonemap::TonemapCurve::Clamp,
             target_format,
             ambient_occlusion_placeholder,
-            specular_albedo,
+            specular_dfg,
+            ltc_table,
             mesh_group_entries,
             prepass_group_entries,
             shadow_group_entries,
@@ -5205,7 +5282,11 @@ impl ForwardRenderer {
                             shadow::point_matrix(point, face).to_cols_array();
                     }
                 }
-                None => {}
+                // A rectangle is refused a tile by `shadow::can_be_shadowed`,
+                // so it never holds a slot and never reaches this — the arm is
+                // here because the alternative is a wildcard that would also
+                // swallow the next kind of light somebody adds.
+                Some(Light::Rect(_)) | None => {}
             }
         }
 
@@ -5603,9 +5684,12 @@ impl ForwardRenderer {
             }
             let frustum = match light {
                 Light::Point(point) => shadow::point_frustum(point),
-                Light::Spot(_) => Frustum::from_view_projection(Mat4::from_cols_array(
-                    &light_view_proj[held.base],
-                )),
+                // A rectangle holds no slot, for the reason the `light_view_proj`
+                // fill above gives, so it cannot reach this loop; its tile's
+                // identity matrix is what this would cull against if it did.
+                Light::Spot(_) | Light::Rect(_) => Frustum::from_view_projection(
+                    Mat4::from_cols_array(&light_view_proj[held.base]),
+                ),
             };
             self.shadow_draws[shadow_cull(slot)].begin_frame(
                 device,
@@ -8962,7 +9046,8 @@ impl ForwardRenderer {
         self.hiz.destroy(device);
         self.ssao.destroy(device);
         self.ambient_occlusion_placeholder.destroy(device);
-        self.specular_albedo.destroy(device);
+        self.specular_dfg.destroy(device);
+        self.ltc_table.destroy(device);
         self.normal_page.destroy(device);
 
         device.destroy_graphics_pipeline(self.mesh_pipeline);

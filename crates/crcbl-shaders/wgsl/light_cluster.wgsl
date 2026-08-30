@@ -24,10 +24,11 @@ struct GpuLight_std430_0
     @align(16) position_0 : vec4<f32>,
     @align(16) color_0 : vec4<f32>,
     @align(16) direction_0 : vec4<f32>,
+    @align(16) tangent_0 : vec4<f32>,
     @align(16) kind_0 : u32,
     @align(4) cos_inner_0 : f32,
     @align(8) shadow_tile_0 : u32,
-    @align(4) pad1_0 : u32,
+    @align(4) flags_0 : u32,
 };
 
 @binding(1) @group(0) var<storage, read> lights_0 : array<GpuLight_std430_0>;

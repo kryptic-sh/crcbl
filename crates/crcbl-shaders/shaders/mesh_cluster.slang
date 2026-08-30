@@ -315,10 +315,11 @@ struct GpuLight
     float4 position;
     float4 color;
     float4 direction;
+    float4 tangent;
     uint kind;
     float cos_inner;
     uint shadow_tile;
-    uint pad1;
+    uint flags;
 };
 
 /// Matching `struct GpuProbe` in `mesh.slang`.

@@ -21,13 +21,17 @@
 
 /// Bytes per [`GpuLight`], and the stride of the light storage buffer.
 ///
-/// Three `float4` then two 4-byte scalars and two words of padding — 64 rather
-/// than 56, because the row's alignment is the `float4`s' 16 and `std430` rounds
-/// the size up to a multiple of it. Spelled out in the shader struct rather than
+/// **Four `float4` then four 4-byte scalars**, which is 80 exactly with no
+/// padding at all. It was 64 — three `float4` and two scalars, rounded up from
+/// 56 by the `float4`s' alignment — until `docs/plan/44-lighting.md`'s rung 5
+/// spent the two spare words and added a fourth vector for the rectangle's
+/// orientation and extents. Spelled out in the shader struct rather than
 /// implied, exactly as [`GpuMaterial`](crate::mesh::GpuMaterial) spells its own.
-/// Checked against the `ArrayStride` and `Offset` decorations `slangc` emits by
-/// this module's `the_light_layout_matches_the_offsets_slangc_emits`.
-pub const LIGHT_STRIDE: usize = 64;
+/// `the_light_row_writes_its_fields_in_declaration_order` is what holds the
+/// bytes to those offsets, and `crate::cull`'s
+/// `the_shared_structs_are_declared_identically_in_every_shader` is what holds
+/// the shader copies of the struct to each other.
+pub const LIGHT_STRIDE: usize = 80;
 
 /// [`GpuLight::kind`] for the sun: no position, no radius, no falloff, and a
 /// member of every froxel.
@@ -40,6 +44,41 @@ pub const KIND_POINT: u32 = 1;
 /// [`GpuLight::kind`] for a spot light: a point light with
 /// [`GpuLight::direction`] as its cone axis and the two cosines closing it.
 pub const KIND_SPOT: u32 = 2;
+
+/// [`GpuLight::kind`] for a rectangular area light, shaded through
+/// [`crate::ltc`]'s fit.
+///
+/// The row's four vectors carry the whole rectangle: its centre and the radius
+/// its influence ends at in [`position`](GpuLight::position), the direction it
+/// emits along and its half-extent across in [`direction`](GpuLight::direction),
+/// and the axis that half-extent is measured against in
+/// [`tangent`](GpuLight::tangent) with its own half-extent in `w`. The fourth
+/// corner axis is `cross(tangent.xyz, direction.xyz)` and is not stored: both
+/// are unit and perpendicular, so the cross is unit too and costs six
+/// multiplies against a `float4`'s sixteen bytes on every light in the frame.
+///
+/// **One-sided.** A surface behind the rectangle — on the far side of the plane
+/// its normal points out of — is not lit by it at all, which is what a panel or
+/// a window is. `crcbl_render::RectLight` is the host side and carries the
+/// winding.
+pub const KIND_RECT: u32 = 3;
+
+/// [`GpuLight::flags`] for a **fill** light: one that lights but does not
+/// shadow and adds no specular.
+///
+/// `docs/plan/44-lighting.md`'s rung 5 asked for it beside the area lights and
+/// said why it is a flag rather than a kind: everything else about such a light
+/// — its cluster, its falloff, its colour — is the ordinary light's, and what
+/// differs is only what it is allowed to contribute. It is how a stack with no
+/// baked bounce lights the far end of a room without paying for a shadow map or
+/// leaving a highlight where no fixture is.
+///
+/// **Its two halves are enforced in two places, each once.** The specular is
+/// refused in `mesh.slang`, which is the only file that adds one; the shadow is
+/// refused by `crcbl_render::shadow::Selection`, which is the only thing that
+/// hands a light a tile — so a fill light's row carries [`NO_SHADOW_TILE`] and
+/// the shader needs no second test for it.
+pub const FLAG_FILL: u32 = 1;
 
 /// How wide a froxel is on screen, in pixels, and how tall.
 ///
@@ -197,14 +236,18 @@ pub fn slice_near(index: u32) -> f32 {
 /// One light, matching `struct GpuLight` in `shaders/light_cluster.slang` and in
 /// `shaders/mesh.slang`.
 ///
-/// # Nine floats and two scalars, and not a `float3` in sight
+/// # Four vectors and four scalars, and not a `float3` in sight
 ///
 /// Under `std430` a `float3` is 16-byte aligned and 12 bytes wide, so a struct
 /// mixing them with scalars grows padding the CPU side has to reproduce exactly.
-/// Three `float4`s carry every vector here with the scalar each of them needs
+/// Four `float4`s carry every vector here with the scalar each of them needs
 /// tucked into the `w` it would otherwise waste — which is why the radius lives
 /// in [`position`](Self::position) and the outer cone cosine in
 /// [`direction`](Self::direction) rather than in fields of their own.
+///
+/// **Every field is read by some kind and none by all of them**, which is what
+/// keeps one row serving four shapes instead of four rows serving one each.
+/// [`KIND_RECT`]'s doc is the map of which vector means what for a rectangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuLight {
     /// World-space position in `xyz` and the radius its influence ends at in
@@ -227,10 +270,25 @@ pub struct GpuLight {
     /// [`KIND_SPOT`], the unit vector the cone points **along**, away from the
     /// light. Unread for [`KIND_POINT`].
     ///
-    /// `w` is the cosine of the spot's outer half-angle, where the cone closes;
-    /// unread by the other two kinds.
+    /// For [`KIND_RECT`], the unit direction the rectangle **emits along** — its
+    /// own normal, pointing at the scene.
+    ///
+    /// `w` is the cosine of the spot's outer half-angle, where the cone closes.
+    /// For [`KIND_RECT`] it is instead the rectangle's **half-extent along its
+    /// `v` axis**, where `v` is `cross(tangent.xyz, direction.xyz)`; unread by
+    /// the other two kinds. The pairing is [`position`](Self::position)'s: a
+    /// vector and the one scalar that closes the shape it describes.
     pub direction: [f32; 4],
-    /// Which of [`KIND_DIRECTIONAL`], [`KIND_POINT`], [`KIND_SPOT`] this is.
+    /// For [`KIND_RECT`], the unit `u` axis of the rectangle's plane in `xyz`
+    /// and its half-extent along that axis in `w`. Unread by every other kind.
+    ///
+    /// Perpendicular to [`direction`](Self::direction)'s `xyz`, which is what
+    /// lets the `v` axis be their cross product rather than a fifth vector. A
+    /// row that broke that is a rectangle that is not a rectangle, and
+    /// `crcbl_render::RectLight` is where it is made true.
+    pub tangent: [f32; 4],
+    /// Which of [`KIND_DIRECTIONAL`], [`KIND_POINT`], [`KIND_SPOT`],
+    /// [`KIND_RECT`] this is.
     pub kind: u32,
     /// The cosine of a spot's inner half-angle, inside which it is at full
     /// brightness. Unread by the other two kinds.
@@ -266,9 +324,14 @@ pub struct GpuLight {
     /// than added to the row because `std430` had already rounded the row up to
     /// [`LIGHT_STRIDE`] to hold it, so the shadow tile costs no bytes at all.
     pub shadow_tile: u32,
-    /// Pads the row to [`LIGHT_STRIDE`], which is what `std430` rounds it to
-    /// anyway.
-    pub pad1: u32,
+    /// What this light is allowed to contribute: [`FLAG_FILL`], or zero for an
+    /// ordinary light.
+    ///
+    /// The row's second padding word, spent the same way the first one was. A
+    /// bit field rather than a `bool` because the next flag this row wants —
+    /// a two-sided rectangle, a light excluded from the volumetrics — is a bit
+    /// beside this one rather than another word.
+    pub flags: u32,
 }
 
 /// [`GpuLight::shadow_tile`] for a light with no shadow map of its own.
@@ -290,7 +353,7 @@ impl GpuLight {
             bytes[at..at + 4].copy_from_slice(&value);
             at += 4;
         };
-        for vector in [&self.position, &self.color, &self.direction] {
+        for vector in [&self.position, &self.color, &self.direction, &self.tangent] {
             for value in vector {
                 put(value.to_le_bytes());
             }
@@ -298,7 +361,7 @@ impl GpuLight {
         put(self.kind.to_le_bytes());
         put(self.cos_inner.to_le_bytes());
         put(self.shadow_tile.to_le_bytes());
-        put(self.pad1.to_le_bytes());
+        put(self.flags.to_le_bytes());
         debug_assert_eq!(at, LIGHT_STRIDE);
         bytes
     }
@@ -317,10 +380,11 @@ impl Default for GpuLight {
             position: [0.0; 4],
             color: [0.0; 4],
             direction: [0.0; 4],
+            tangent: [0.0; 4],
             kind: KIND_DIRECTIONAL,
             cos_inner: 0.0,
             shadow_tile: NO_SHADOW_TILE,
-            pad1: 0,
+            flags: 0,
         }
     }
 }
@@ -484,6 +548,7 @@ mod tests {
             ("KIND_DIRECTIONAL", KIND_DIRECTIONAL),
             ("KIND_POINT", KIND_POINT),
             ("KIND_SPOT", KIND_SPOT),
+            ("KIND_RECT", KIND_RECT),
         ] {
             let declaration = format!("static const uint {name} = {value};");
             for (file, source) in [
@@ -588,10 +653,11 @@ mod tests {
             position: [1.0, 2.0, 3.0, 4.0],
             color: [5.0, 6.0, 7.0, 8.0],
             direction: [9.0, 10.0, 11.0, 12.0],
+            tangent: [13.0, 14.0, 15.0, 16.0],
             kind: KIND_SPOT,
-            cos_inner: 13.0,
+            cos_inner: 17.0,
             shadow_tile: NO_SHADOW_TILE,
-            pad1: 0,
+            flags: FLAG_FILL,
         };
         let bytes = light.to_bytes();
         let float_at = |offset: usize| {
@@ -610,17 +676,18 @@ mod tests {
                 bytes[offset + 3],
             ])
         };
-        for slot in 0..12 {
+        for slot in 0..16 {
             assert_eq!(
                 float_at(slot * 4),
                 (slot + 1) as f32,
-                "the three float4s occupy the first 48 bytes, in order"
+                "the four float4s occupy the first 64 bytes, in order"
             );
         }
-        assert_eq!(word_at(48), KIND_SPOT, "kind at offset 48");
-        assert_eq!(float_at(52), 13.0, "cos_inner at offset 52");
-        assert_eq!(word_at(56), NO_SHADOW_TILE, "shadow_tile at offset 56");
-        assert_eq!(word_at(60), 0, "pad1 at offset 60");
+        assert_eq!(word_at(64), KIND_SPOT, "kind at offset 64");
+        assert_eq!(float_at(68), 17.0, "cos_inner at offset 68");
+        assert_eq!(word_at(72), NO_SHADOW_TILE, "shadow_tile at offset 72");
+        assert_eq!(word_at(76), FLAG_FILL, "flags at offset 76");
+        assert_eq!(bytes.len(), LIGHT_STRIDE);
     }
 
     #[test]

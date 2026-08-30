@@ -532,6 +532,13 @@ pub const fn tile_span(light: &Light) -> usize {
     match light {
         Light::Point(_) => POINT_FACES,
         Light::Spot(_) => 1,
+        // **No tiles, and never asked for any**: [`can_be_shadowed`] refuses a
+        // rectangle before [`Selection`] reaches this, so the run allocator
+        // never sees a zero-length run. The zero is what a rectangle's span
+        // actually is rather than a placeholder — an area light has no single
+        // view to render a map from, and giving it one is a rung of its own that
+        // `docs/backlog.md` carries.
+        Light::Rect(_) => 0,
     }
 }
 
@@ -774,9 +781,29 @@ pub fn point_frustum(point: &PointLight) -> Frustum {
 ///
 /// Split out so the reason a light was refused is one predicate rather than a
 /// condition buried in a fold: a zero radius has no frustum, a non-finite
-/// position has no view, and a cone at or past [`MAX_SPOT_HALF_ANGLE`] has no
-/// projection. All of them light without occluding.
+/// position has no view, a cone at or past [`MAX_SPOT_HALF_ANGLE`] has no
+/// projection, a **fill** light was asked not to occlude, and an area light has
+/// no single view a map could be rendered from. All of them light without
+/// occluding.
+///
+/// The fill test is the leading one and covers every kind, and **today it
+/// decides nothing**: [`RectLight::fill`](crate::RectLight::fill) is the only
+/// way a light can answer yes to
+/// [`is_fill`](crate::Light::is_fill), and the `Rect` arm below refuses a
+/// rectangle a tile whatever its flag says. Deleting the test changes no
+/// behaviour and reddens no test — measured on 2026-08-31, and
+/// `docs/backlog.md` carries it. It is kept because it is where the rule
+/// belongs the moment a point or spot light gains the flag, and because the
+/// alternative is remembering to add it then.
+///
+/// What *is* enforced is that this function is the only thing that hands a
+/// light a tile, so a fill light's row carries `NO_SHADOW_TILE` and
+/// `mesh.slang` needs no test of its own for the shadow — only for the
+/// specular, which is the flag's other half and is enforced there.
 fn can_be_shadowed(light: &Light) -> bool {
+    if light.is_fill() {
+        return false;
+    }
     match light {
         Light::Point(point) => point.radius > 0.0 && point.position.is_finite(),
         Light::Spot(spot) => {
@@ -785,6 +812,11 @@ fn can_be_shadowed(light: &Light) -> bool {
                 && spot.position.is_finite()
                 && spot.outer_angle.max(spot.inner_angle) < MAX_SPOT_HALF_ANGLE
         }
+        // A rectangle radiates from a surface rather than from a point, so
+        // there is no single centre of projection a shadow map could be
+        // rendered from. `docs/plan/45-shadows.md` is where an area light's
+        // shadow belongs, and `docs/backlog.md` records that it is not built.
+        Light::Rect(_) => false,
     }
 }
 
