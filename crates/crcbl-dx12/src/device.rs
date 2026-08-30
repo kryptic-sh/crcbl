@@ -7407,6 +7407,10 @@ pub(crate) mod tests {
             // renderer's first frame follows.
             previous_view_proj: IDENTITY,
             vertex_pool: [PROBE_ATTRIBUTE_BASE, 0, 0, 0],
+            // No atlas rectangles: this frame carries no cascade and no
+            // shadowed light, so no slot names a map. A zero rectangle is what
+            // `crcbl_render::shadow` writes for a slot nothing rendered into.
+            shadow_atlas_rect: [[0.0; 4]; crcbl_shaders::mesh::SHADOW_ATLAS_TILES],
         };
 
         // One triangle over the centre of the target and neither corner, in
