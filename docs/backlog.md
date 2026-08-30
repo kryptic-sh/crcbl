@@ -823,44 +823,36 @@ These belong here rather than there, because they are gaps rather than plans:
   remains a text guard worth exactly what it says: the read is written down, not
   that it is right.
 
-### DECISION NEEDED — when the vertex and material strides widen (2026-08-27)
+### DECIDED — the vertex and material strides widen once, into the compact split-stream layout (2026-08-30)
 
-`docs/plan/43-render-standards.md` §2 and `44-lighting.md`'s rung 2 both stop at
-the same wall, and it is one decision rather than two. `MeshVertex` is four
-`float4`s (`crcbl_shaders::mesh::VERTEX_STRIDE`, 64 bytes) with no tangent, and
-`GpuMaterial` is full at `MATERIAL_STRIDE` (48) since emissive took the row's
-last padding. Between them they gate **normal mapping, the metallic-roughness
-and occlusion pages, alpha-mask materials, and the first of any second BRDF
-lobe** — which is to say most of what separates this renderer's look from a
-current engine's.
+The 2026-08-27 question — when to spend the `MeshVertex` and `GpuMaterial`
+widening that gates normal mapping, the metallic-roughness and occlusion pages,
+alpha-mask materials and any second BRDF lobe — is answered: **once, now, and
+into the long-term layout rather than a wider copy of today's.** The layout is
+`docs/plan/43-render-standards.md` §2's: a position-only stream 0 (`float3`,
+twelve bytes) that the depth prepass and every shadow pass read alone, and an
+attribute stream 1 of a QTangent in `snorm16x4`, two quantised UV sets and an
+`rgba8` colour — 32 bytes against the 64 of today's four `float4`s — with
+`GpuMaterial` at 64 bytes carrying four page indices. It is the foundations
+block's first row in that plan's delivery table.
 
-**Why it is a decision and not a slice:** widening `MeshVertex` moves every mesh
-in every golden and every `.crcblmesh` on disk, so it is a mesh-format version
-bump plus a re-bless of the whole suite. `06-assets-scenes.md` carries the
-format's compatibility rule. Widening `GpuMaterial` is cheaper — no on-disk
-format, one stride constant and its drift test — but it re-blesses nothing only
-because no shader indexes past the row yet, and that stops being true the moment
-a page lands.
+**What made the decision cheap:** there is no `.crcblmesh` on disk to migrate —
+zero tracked files, no source mentions one — so the format is born v0 under
+[06-assets-scenes.md](plan/06-assets-scenes.md)'s pre-1.0 rule, and the re-bless
+is one, not one per feature. The derivative route for tangents stays rejected on
+mirrored UVs (§2's 2026-08-27 correction).
 
-**The options.** Spend it once, now, and take tangent plus the material fields
-in a single bump; or spend it per feature and pay the re-bless several times; or
-take the derivative route for tangents and pay nothing — which
-`43-render-standards.md` §2 rejects on mirrored UVs, not on determinism (see the
-2026-08-27 correction there).
+**Two calls this leaves open, both the user's:**
 
-**Rides on this, whichever way it goes (2026-08-30):** a **position-only vertex
-stream** for the depth prepass and every shadow pass. Those passes fetch the
-whole `MeshVertex` today and read twelve bytes of it, and there are as many of
-them per frame as there are cascades and lit tiles; a split stream cuts their
-vertex traffic to the position and is the standard forward-renderer layout. It
-is a `MeshVertex` layout change, so it belongs in the one bump this decision is,
-not in a churn of its own.
-
-**Not blocked on this:** specular IBL, and the trilinear anisotropic sampler
-over the page's mip chain (`43-render-standards.md`'s filtering subsection; the
-chain itself was built 2026-08-29). Both read the row as it stands;
-multi-scatter compensation and the gradient sky were not blocked either, and are
-built.
+- **MikkTSpace.** A tangent for a mesh that ships none has to be generated at
+  import, and MikkTSpace is what every tool and engine agrees on — but it is a
+  new dependency (`mikktspace` on crates.io) or a transcription of the reference
+  implementation into `crcbl-scene`. New dependencies are the user's call; a
+  transcription is the bigger review. The layout lands with the derivative frame
+  as the no-tangent fallback either way, so this does not block it.
+- **The BC encoder** for the block-compressed pages rung — a crate in the bake
+  tool or a pinned external `basisu` — which is the same shape of choice and is
+  the bandwidth rung's gate; see §2's filtering subsection.
 
 ### DECISION NEEDED — the global-illumination direction (2026-08-30)
 
@@ -982,6 +974,11 @@ SH L2 (priced in `50-irradiance-probes.md`; a contained escalation later).
    static source is in the gather — so it can close with that slice.
 
 Nothing here is started until question 1 is answered.
+
+**Where it sits in the schedule (2026-08-30):** the bake tool itself is
+foundation (c) in `docs/plan/43-render-standards.md`'s delivery table, and
+candidate 1's probe volume is its first output — so the tool is scheduled, and
+its first output waits on question 1, not the other way round.
 
 ### Specular IBL: what rung 3 left (2026-08-29)
 

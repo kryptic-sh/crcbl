@@ -96,11 +96,14 @@ to `ClusterPool`, and the renderer's clusters are hand-written cooked constants
 **The seam is a cooked artifact, mirroring the shader arrangement.** A tool
 generates the DAG from the builder and writes it into `crcbl-shaders`; the
 artifact is committed; a `--check` mode regenerates and compares, and CI runs it
-the way it already runs "shaders (committed artifacts match their sources)".
-That keeps `crcbl-shaders` dependency-free, makes the existing hand-written
-constants a generated case of the same thing, and is a bake output in the sense
-topic 6 means — when the real asset pipeline arrives it replaces the generator,
-not the consumer.
+the way it already runs "shaders (committed artifacts match their sources)". The
+DAG's vertex tables index the position stream — stream 0 of the split vertex
+layout [43-render-standards.md](43-render-standards.md) §2 decided on 2026-08-30
+— so a cluster's cut is the same on the prepass and the forward pass. That keeps
+`crcbl-shaders` dependency-free, makes the existing hand-written constants a
+generated case of the same thing, and is a bake output in the sense topic 6
+means — when the real asset pipeline arrives it replaces the generator, not the
+consumer.
 
 Rejected as a **delivery mechanism**: generating the data from a dev-dependency
 at test time, which gives tests data and leaves the shipping path with none; and
