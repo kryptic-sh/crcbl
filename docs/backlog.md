@@ -882,6 +882,78 @@ the atlas and SSR, which is a pricing question once the queries exist.
 
 The survey that led here stays below for the record.
 
+### PENDING — the raster lighting stack: twelve calls before a slice is cut (2026-08-30)
+
+The decision above puts the traditional raster stack on every tier. The stack
+was surveyed against the tree the same day; what is already built (GGX + Smith
+
+- multi-scatter, cascades with rotated PCF and PCSS, the shadow atlas as a fixed
+  tile grid, sky-gradient IBL, GTAO, SSR with the probe and sky fallback, the L1
+  probe grid) and what is not (clustered light culling, LTC area lights,
+  screen-space contact shadows, an atmosphere, bent normals, runtime reflection
+  captures) is recorded in the per-topic plans. Each item below is a call only
+  the user can make, with the trade-off, so a slice can start from the answer
+  rather than from the survey.
+
+1. **The L1 probe grid is a bake, and the rule forbids one.**
+   `apps/lantern/src/bounce.rs` computes the sun's first bounce host-side at
+   load into `SceneDesc::probes`, and it is stale the moment the sun moves.
+   Options: (a) delete the bake and keep `crcbl_render::probe`'s `ProbeTable` as
+   the storage the RT tier's traced probes fill, so a non-RT tier's ambient is
+   sky IBL plus AO alone; (b) keep the volume and re-project it whenever the sun
+   moves, which is the cost of GI on a tier the decision above excludes; (c)
+   keep it as static application data, a bake by another name. Recommended: (a).
+2. **LTC area lights — which shapes, and when.** Sphere, tube and rect with
+   correct specular, off a cooked table like `crcbl_shaders::dfg`'s. Changes the
+   `GpuLight` record (pre-1.0, no migration). Before or after clustered culling
+   (`44-lighting.md`, "Clustered forward", not built)? Recommended: after, so
+   the light record changes once; all three shapes.
+3. **The shadow atlas's re-render cadence against "every light dynamic".**
+   `45-shadows.md`'s allocator rung already says the highest-priority lights
+   re-render every frame, the rest every second and fourth, and a light whose
+   covered instances did not move is not re-rendered at all. That is a cache
+   with invalidation, not a bake — it needs the user's confirmation that it
+   satisfies the rule. With it: the shadowed-local-light count and atlas size on
+   each of the three tiers.
+4. **Screen-space contact shadows — always-on or a preset.** Not built;
+   `43-render-standards.md` §7 ranks it the cheapest real win. One march on the
+   depth prepass. Recommended: on for the mid and high tiers, off on low.
+5. **An atmosphere — the model, and the §4 rule.** `43-render-standards.md` §4
+   forbids a transcendental reaching a colour, and an atmosphere is `exp`
+   throughout. Hillaire's model needs a transmittance LUT (sun-independent,
+   cooked once like `dfg.bin`) and a sky-view LUT recomputed when the sun moves
+   — a runtime table, not a bake, but the user should say so. The alternative is
+   an analytic Preetham fit: cheaper, lower fidelity. And: replace the gradient
+   (`crcbl_shaders::sky::SkyGradient`) or sit above it as a preset.
+6. **Runtime reflection captures — at all.** Absent from `47-reflections.md`.
+   Six views per capture, re-rendered when lights move, and a proxy volume in
+   the scene format for parallax correction. Options: skip (RT reflections cover
+   interiors on the RT tier; non-RT interiors reflect the sky), or a high-preset
+   item with a capture count and cadence. Recommended: skip until a demo needs
+   one.
+7. **Whether SSGI counts as GI.** Candidate 3 in the GI survey below —
+   non-temporal, desktop-only, a contact-scale bounce. The decision above says
+   no GI below the RT tier; rule SSGI in as a screen-space term or delete it
+   from the candidates.
+8. **Bent normals, AO tint and specular occlusion — which tiers.**
+   `46-ambient-occlusion.md` owes bent normals; they widen the AO target from
+   `R8Unorm`, which is bandwidth on the low tier. Scalar GTAO on low and bent
+   normals on mid and high, or bent everywhere.
+9. **Burley diffuse.** `44-lighting.md` leaves it unranked. Recommended: decline
+   outright — a retroreflective rim on rough dielectrics is small next to any
+   item above.
+10. **Fill lights.** A no-GI, no-bake stack lights interiors with placed fill
+    lights, and forward+ makes hundreds of them free. Engine feature (a
+    no-shadow, no-specular flag on the existing light) or left to applications?
+    Recommended: the flag.
+11. **The tier table.** The three-tier pricing rule wants a Low / Mid / High
+    cell for every item above before it is built. Decide once, as a table, not
+    per slice.
+12. **Ordering against the foundations block.** Foundations (a)–(g) in
+    `43-render-standards.md`'s delivery table come first. Does lighting
+    interleave — LTC straight after (a) vertex v2, since normal maps matter more
+    than any item here — or wait behind the whole block?
+
 #### The survey (2026-08-30, superseded by the decision above)
 
 A survey of what Frostbite, Unreal, Godot and Unity ship for GI, scored against
