@@ -2080,10 +2080,10 @@ pruning pass compressed the Delivery table down to this one open row.
 **Per flush, decided by measurement** — commit `7a0d6ee` (2026-08-22) carries
 the figures, and `Replayer#openErrorScopes` with `ERROR_SCOPE_FILTERS` in
 `web/engine/gpu-replay.js` attribute a browser error to the flush that caused
-it. What is left is the plan: `docs/plan/41-webgpu-stream.md` still calls the
-granularity "deliberately left open", still lists it as needing a measurement,
-and still describes errors as "recorded as the device's, unattributed" — three
-sentences to correct.
+it, and `docs/plan/41-webgpu-stream.md` no longer lists it as unsettled; what
+this entry still records is that nothing in CI runs
+`web/tools/error-scope-bench.mjs`, so the figures in `7a0d6ee` are the only
+ones.
 
 **Evidence:** `grep -rn 'error-scope-bench' .github/ web/README.md` finds no
 caller.

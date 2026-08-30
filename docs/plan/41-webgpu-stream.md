@@ -512,7 +512,6 @@ bytes.
 
 ## What this document does not settle
 
-- **Error-scope granularity** — needs a measurement.
 - **The opcode table itself.** The families and the conventions are fixed here;
   the numbers belong with the encoder, next to the tag table, so that adding a
   command touches one file.
