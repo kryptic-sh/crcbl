@@ -132,6 +132,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The log the debug console will draw, and a `log` command that moves the
+  filter while the engine runs.** `crcbl_core::log::console` is a bounded ring —
+  `Record { sequence, level, target, message, elapsed }`, `CONSOLE_RING_LINES`
+  deep — that both of the engine's sinks push into through one `console::push`,
+  `StderrLogger::emit` natively and `crcbl::web`'s `WebLogger` in a browser. The
+  push is **before** each sink's level filter, so the ring holds a record a
+  per-target directive silenced and a panel can show what the terminal did not;
+  the browser's `log_take` queue is untouched and stays the page's. Readers copy
+  it out with `console::snapshot()` or, per frame,
+  `console::snapshot_since(seq)` from the sequence they last saw. There is no
+  `clear_ring`: `clear` empties the panel's view, not the log. `console::print`
+  is the one funnel everything the console itself prints takes, at `Level::Info`
+  under `console::CONSOLE_TARGET` (`"console"`), so a console line is on stderr,
+  in the browser console and in the ring at once.
+  `crcbl_core::log::filter()`/`set_filter()` read and swap the installed
+  logger's filter, `Filter::try_parse` refuses a directive `Filter::parse` would
+  skip (`BadDirective` names it), `Filter` now has a `Display` that writes the
+  directives back in the form `parse` accepts, and `log <directives>` —
+  `crcbl_core::console_table()`'s one command — installs a filter and prints it
+  while bare `log` prints the current one. `crcbl-core` therefore depends on
+  `crcbl-console`, which depends on nothing.
 - **Normal maps.** `crcbl_scene`'s glTF importer reads the `TANGENT` accessor
   and glTF's `normalTexture` (index, `texCoord` 0 and `scale`); the renderer
   carries a second array image beside the base-colour page — linear

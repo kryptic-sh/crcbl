@@ -183,6 +183,13 @@ fn elapsed_seconds() -> f64 {
 /// terminal log read the same and the gate's matchers — which look at the
 /// message, never the prefix — are indifferent to which produced them.
 ///
+/// **It feeds the console's log ring as well**, through the one
+/// [`crcbl_core::log::console::push`] the native sink also calls and before its
+/// own filter, so the debug console draws the same lines in a browser as in a
+/// terminal. The queue below stays the page's: that one is destructive — the
+/// shim takes each line — and a panel reading it would take the lines away from
+/// the browser console.
+///
 /// **No wall-clock banner here, unlike the native side.** `SystemTime::now`
 /// panics on this target as surely as `Instant::now` does, and getting a date
 /// would mean importing one from JS. The browser console stamps each line as
@@ -196,6 +203,18 @@ impl log::Log for WebLogger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
+        // Before the filter, and the same push the native sink makes: the
+        // console's ring holds what the browser console did not print, which is
+        // `docs/plan/52-debug-console.md` decision 4. `try_from_secs_f64` rather
+        // than `from_secs_f64` because that one panics on a non-finite number,
+        // and a logger must not be the thing that ends a frame.
+        crcbl_core::log::console::push(
+            record.level(),
+            record.target(),
+            core::time::Duration::try_from_secs_f64(elapsed_seconds())
+                .unwrap_or(core::time::Duration::ZERO),
+            *record.args(),
+        );
         if !self.enabled(record.metadata()) {
             return;
         }
@@ -1138,6 +1157,46 @@ mod tests {
             line.chars().last().is_some_and(|c| c == 'é'),
             "the cut landed inside a character",
         );
+    }
+
+    /// **The browser sink feeds the console ring, and does it before its own
+    /// filter.**
+    ///
+    /// Both halves, and the level is what separates them: a debug line under an
+    /// `Info` maximum is one the browser console never prints, so finding it in
+    /// the ring is the whole claim. A push moved below the `enabled` check
+    /// leaves the ring empty here and every other test in this file green.
+    ///
+    /// The maximum is set to `Info` rather than read, exactly as the two tests
+    /// above set it, because a capture running in another of this binary's
+    /// tests raises it to `Trace` and the fixture would then be logging a line
+    /// the filter admits.
+    #[test]
+    fn the_web_sink_rings_a_line_its_filter_refused() {
+        log::set_max_level(log::LevelFilter::Info);
+        drain();
+
+        let target = "crcbl::web::tests::the_web_sink_rings_a_line_its_filter_refused";
+        let message = "queued nowhere, ringed anyway";
+        LOGGER.log(
+            &log::Record::builder()
+                .level(log::Level::Debug)
+                .target(target)
+                .args(format_args!("{message}"))
+                .build(),
+        );
+
+        assert!(
+            drain().is_empty(),
+            "a debug line is under the filter and must not reach the shim queue",
+        );
+        let ringed: Vec<_> = crcbl_core::log::console::snapshot()
+            .into_iter()
+            .filter(|record| record.target == target)
+            .collect();
+        assert_eq!(ringed.len(), 1, "the ring did not get it: {ringed:?}");
+        assert_eq!(ringed[0].message, message);
+        assert_eq!(ringed[0].level, log::Level::Debug);
     }
 
     // ---- the lifecycle ------------------------------------------------------

@@ -14,9 +14,10 @@ an annotation-style way to expose a thing. Valve's Source engine (`ConVar`,
 `ConCommand`, `FCVAR_*` flags, `help`, `find`, tab completion) is the model, on
 the user's instruction.
 
-This document is the plan and the record of the decisions taken to write it.
-Nothing in it is built. The tree was read on 2026-08-30 for every "today" claim
-below; each names the file it came from.
+This document is the plan and the record of the decisions taken to write it. The
+delivery list at the end says which slices have landed; the rest is not built.
+The tree was read on 2026-08-30 for every "today" claim below; each names the
+file it came from.
 
 ## Where the tree stands today
 
@@ -203,21 +204,29 @@ session that flips twenty variables must not silently become the player's file.
 
 ### 4. The log the console shows is the log, from a ring the funnel feeds
 
-One bounded ring in `crcbl_core::log` —
-`Record { level, target, message, elapsed }`, `CONSOLE_RING_LINES` deep, behind
-a `Mutex<VecDeque>` — pushed from the one funnel `StderrLogger::emit` already
-is, **before** the level filter so the ring can show what the terminal filtered
-if asked, and from `WebLogger::log` on wasm (the page's `log_take` queue is
-destructive and stays the page's). The console reads a snapshot once per open
-frame. Everything the console itself prints — the echoed command, a variable's
-value, `help` — goes through `info!` under the target `console`, so it is on
+One bounded ring in `crcbl_core::log::console` —
+`Record { sequence, level, target, message, elapsed }`, `CONSOLE_RING_LINES`
+deep, behind a `Mutex<VecDeque>` — pushed from the one funnel
+`StderrLogger::emit` already is, **before** the level filter so the ring can
+show what the terminal filtered if asked, and from `WebLogger::log` for the
+browser (the page's `log_take` queue is destructive and stays the page's). The
+console reads `snapshot()` when it opens and `snapshot_since(sequence)` on every
+later frame, which is what the sequence is for: a reader copies the lines that
+arrived since it last looked rather than the whole ring. Everything the console
+itself prints — the echoed command, a variable's value, `help` — goes through
+`console::print`, at `Level::Info` under the target `console`, so it is on
 stderr and in the browser console too: the terminal and the panel show the same
 lines, which is what the user asked for, and a test can assert console output
-through the existing `log::capture()`.
+through the existing `log::capture()`. (The level macros take their target from
+`module_path!` and cannot set one, which is why this is a function and not an
+`info!` call site.)
 
-`log <filter>` sets the live filter (`Filter::parse` exists); the console
-panel's own filter is a separate dropdown-less toggle per level, cycled with a
-key, so "show me debug lines" does not mean "print debug lines to the CI log".
+`log <filter>` sets the live filter, through `Filter::try_parse` — which refuses
+a directive `Filter::parse` skips, because a person typing at a console can be
+told — and `log::set_filter`, which swaps the filter the installed logger holds
+and moves the facade's global maximum with it. The console panel's own filter is
+a separate dropdown-less toggle per level, cycled with a key, so "show me debug
+lines" does not mean "print debug lines to the CI log".
 
 ### 5. The key, the takeover, and where the text goes
 
@@ -390,8 +399,17 @@ entry; the browser gate runs on every slice that touches a demo.
    `HostedGame::take_pending_frame_limit`'s arrangement. The scaffold template
    holds no `ForwardRenderer` and so keeps the defaults.
 
-3. **The ring**: `crcbl_core::log`'s console ring fed from both funnels; the
-   `console` target; `log <filter>`.
+3. **The ring — landed 2026-08-30.** `crcbl_core::log::console` is the ring:
+   `Record { sequence, level, target, message, elapsed }`, `CONSOLE_RING_LINES`
+   deep behind a `Mutex` whose poison is stepped over, pushed by `console::push`
+   from `StderrLogger::emit` and from `crcbl::web`'s `WebLogger` before either
+   sink's own filter, read with `snapshot()` or `snapshot_since(sequence)`, and
+   with no `clear_ring`. `console::print` puts the console's own output on
+   `CONSOLE_TARGET`. `Filter` gained a `Display` that round-trips through
+   `parse`, a `try_parse` that refuses what `parse` skips, and a live
+   `set_filter`/`filter` pair over an `RwLock` on the installed logger; `log` is
+   a `concommand!` in `crcbl_core::log` listed by `crcbl_core::console_table()`
+   and held there by `crates/crcbl-core/tests/console_table.rs`.
 4. **`crcbl_ui::console`**: `TextField`, `LogView`, the panel layout, the Send
    button, the completion rows — draw-list snapshot tests like the menu's.
 5. **The engine**: `CONSOLE_KEY`, the takeover and the held-key repair, the

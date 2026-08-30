@@ -46,6 +46,11 @@
 //! can be asserted on instead of trusted. See its docs for the concurrency
 //! argument.
 //!
+//! [`console`] is the third: a bounded ring every sink pushes into, which is
+//! what the debug console draws. It holds records the filter refused, so the
+//! panel can show what the terminal did not — `docs/plan/52-debug-console.md`
+//! decision 4.
+//!
 //! Filtering is `env_logger`-style, read from `CRCBL_LOG`:
 //!
 //! ```text
@@ -57,6 +62,12 @@
 //! A directive's target matches a module path prefix at `::` boundaries, and
 //! the **longest** matching directive wins, so `crcbl_render=debug` and
 //! `crcbl_render::graph=trace` compose the way you would expect.
+//!
+//! It is settable while the engine runs, through [`set_filter`] and the `log`
+//! console command below, so a directive can be widened at the moment something
+//! is going wrong rather than on the next launch.
+
+pub mod console;
 
 use std::cell::RefCell;
 use std::env;
@@ -64,10 +75,17 @@ use std::fmt;
 use std::io::Write as _;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard};
 use std::time::Instant;
 
 use ::log::{Log, Metadata, Record, SetLoggerError};
+use crcbl_console::Fault;
+
+/// The ring's two constants, up a level: they carry `CONSOLE_` in their names
+/// already, so `log::CONSOLE_TARGET` reads as well as `log::console::` does.
+/// The functions do not — `console::push` and `console::snapshot` say which
+/// log they mean and `push` alone would not — so they stay in [`console`].
+pub use console::{CONSOLE_RING_LINES, CONSOLE_TARGET};
 
 /// The five levels, and the filter form of them.
 ///
@@ -109,8 +127,39 @@ impl Filter {
     /// Each directive is either a bare level (setting the default) or
     /// `target=level`. Unparseable directives are skipped rather than fatal: a
     /// typo in an environment variable must not stop the engine from starting.
+    /// [`try_parse`](Self::try_parse) is the same reading for a caller who can
+    /// be told.
     #[must_use]
     pub fn parse(directives: &str) -> Self {
+        Self::read(directives).0
+    }
+
+    /// Parses, refusing the first directive it cannot read.
+    ///
+    /// What the `log` console command uses. [`parse`](Self::parse) skips a bad
+    /// directive because a typo in `CRCBL_LOG` must not stop the engine from
+    /// starting; a person typing at the console is there to be answered, and a
+    /// filter that silently ignored half of what they wrote would be read as one
+    /// that did not work.
+    ///
+    /// # Errors
+    ///
+    /// The first directive that is neither a level nor `target=level`, as it was
+    /// written.
+    pub fn try_parse(directives: &str) -> Result<Self, BadDirective> {
+        let (filter, refused) = Self::read(directives);
+        match refused.into_iter().next() {
+            Some(directive) => Err(BadDirective(directive)),
+            None => Ok(filter),
+        }
+    }
+
+    /// The one reading of a directive list: the filter, and what it could not
+    /// read.
+    ///
+    /// Both public forms come through here, so the rule for what a directive
+    /// means cannot differ between the one that skips and the one that refuses.
+    fn read(directives: &str) -> (Self, Vec<String>) {
         // Anything not named by a directive keeps the default level; a filter
         // string of only overrides ("crcbl_vk=trace") must not silence the
         // rest of the engine.
@@ -118,6 +167,7 @@ impl Filter {
             default: parse_level(DEFAULT_FILTER).unwrap_or(LevelFilter::Info),
             targets: Vec::new(),
         };
+        let mut refused = Vec::new();
         for directive in directives.split(',') {
             let directive = directive.trim();
             if directive.is_empty() {
@@ -127,11 +177,15 @@ impl Filter {
                 Some((target, level)) => {
                     if let Some(level) = parse_level(level.trim()) {
                         filter.targets.push((target.trim().to_owned(), level));
+                    } else {
+                        refused.push(directive.to_owned());
                     }
                 }
                 None => {
                     if let Some(level) = parse_level(directive) {
                         filter.default = level;
+                    } else {
+                        refused.push(directive.to_owned());
                     }
                 }
             }
@@ -140,7 +194,7 @@ impl Filter {
         filter
             .targets
             .sort_by_key(|(target, _)| core::cmp::Reverse(target.len()));
-        filter
+        (filter, refused)
     }
 
     /// Reads the filter from `CRCBL_LOG`, falling back to [`DEFAULT_FILTER`].
@@ -180,10 +234,68 @@ impl Default for Filter {
     }
 }
 
+/// Writes the directives back in the form [`Filter::parse`] accepts.
+///
+/// So `log` can print a filter that can be typed straight back in, and so the
+/// two spellings cannot drift: `the_filter_round_trips_through_its_own_display`
+/// re-parses this.
+///
+/// The default level comes first and the overrides follow it, longest prefix
+/// first, which is the order they are matched in and not the order they were
+/// written in — a re-parse sorts them the same way, so the round trip is stable
+/// rather than merely equivalent.
+impl fmt::Display for Filter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(level_directive(self.default))?;
+        for (target, level) in &self.targets {
+            write!(f, ",{target}={}", level_directive(*level))?;
+        }
+        Ok(())
+    }
+}
+
+/// A directive [`Filter::try_parse`] could not read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BadDirective(String);
+
+impl BadDirective {
+    /// The directive, as it was written.
+    #[must_use]
+    pub fn directive(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for BadDirective {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`{}` is not a filter directive: write a level, or `target=level`",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for BadDirective {}
+
 /// Whether `target` is `prefix` or a module below it.
 fn target_matches(target: &str, prefix: &str) -> bool {
     target.starts_with(prefix)
         && (target.len() == prefix.len() || target[prefix.len()..].starts_with("::"))
+}
+
+/// How a directive spells a level — which is not how [`LevelFilter`] does:
+/// `Display` for that is `OFF`, and a directive is read case-insensitively but
+/// written lower case, the way `CRCBL_LOG` is set on a command line.
+const fn level_directive(level: LevelFilter) -> &'static str {
+    match level {
+        LevelFilter::Off => "off",
+        LevelFilter::Error => "error",
+        LevelFilter::Warn => "warn",
+        LevelFilter::Info => "info",
+        LevelFilter::Debug => "debug",
+        LevelFilter::Trace => "trace",
+    }
 }
 
 fn parse_level(text: &str) -> Option<LevelFilter> {
@@ -199,9 +311,16 @@ fn parse_level(text: &str) -> Option<LevelFilter> {
 }
 
 /// The stderr logger installed by [`init_logging`].
+///
+/// The filter is behind an `RwLock` because [`set_filter`] swaps it while the
+/// engine runs: every record takes the read side and they do not contend with
+/// each other, which a `Mutex` would not manage, and swapping is rare enough
+/// that the write side never queues behind anything. The alternative — an
+/// atomically swapped `Arc` — buys a lock-free read at the price of a
+/// dependency this crate does not have.
 #[derive(Debug)]
 struct StderrLogger {
-    filter: Filter,
+    filter: RwLock<Filter>,
     start: Instant,
 }
 
@@ -210,27 +329,40 @@ impl StderrLogger {
     /// reaches stderr — [`Log::enabled`] below widens for capture, and a record
     /// let through on that account must still not be printed.
     fn permits(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.level() <= self.filter.level_for(metadata.target())
+        metadata.level() <= self.read_filter().level_for(metadata.target())
     }
 
-    /// Capture, filter and write one record.
+    /// The filter in force, borrowed rather than cloned: this is read once per
+    /// record, and a clone would allocate a `Vec<String>` for every log line.
+    ///
+    /// A poisoned lock is stepped over for the reason [`console::push`] gives
+    /// about the ring's: a logger that panicked must not stop the run from
+    /// saying what happened next.
+    fn read_filter(&self) -> RwLockReadGuard<'_, Filter> {
+        self.filter.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Capture, ring, filter and write one record.
     ///
     /// **The one path.** This module's own macros call it directly and the
     /// [`Log`] impl below funnels third-party records into it, so there is a
     /// single filter check, a single capture point and a single line format
     /// rather than one of each per entry point.
     fn emit(&self, level: Level, target: &str, args: fmt::Arguments<'_>) {
-        // Before the filter, for the reason `enabled` gives.
-        push_captured(level, target, args);
-        if !self.permits(&Metadata::builder().level(level).target(target).build()) {
-            return;
-        }
         // Seconds since init, not a date: the useful question in a frame loop is
         // "how long into the run". The wall-clock time the run *started* is
         // written once by `init_logging`, which is what makes a line here
         // correlatable with an outside log without paying date formatting per
         // line — see `start_banner`.
-        let elapsed = self.start.elapsed().as_secs_f64();
+        let elapsed = self.start.elapsed();
+        // Both before the filter: capture for the reason `enabled` gives, and
+        // the console ring so the panel can show what the terminal did not.
+        push_captured(level, target, args);
+        console::push(level, target, elapsed, args);
+        if !self.permits(&Metadata::builder().level(level).target(target).build()) {
+            return;
+        }
+        let elapsed = elapsed.as_secs_f64();
         let mut stderr = std::io::stderr().lock();
         // A failed log write must never take the process down.
         let _ = writeln!(
@@ -442,12 +574,12 @@ pub fn init_logging() -> bool {
 /// call to this function, whose filter stays in force.
 pub fn try_init_logging(filter: Filter) -> Result<(), SetLoggerError> {
     let logger = LOGGER.get_or_init(|| StderrLogger {
-        filter,
+        filter: RwLock::new(filter),
         start: Instant::now(),
     });
     ::log::set_logger(logger)?;
     INSTALLED.store(true, Ordering::Relaxed);
-    ::log::set_max_level(logger.filter.max_level());
+    ::log::set_max_level(logger.read_filter().max_level());
     // Only the winner of the race writes it, so a second `init_logging` does not
     // claim the run restarted.
     logger.emit(
@@ -531,6 +663,86 @@ const fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[must_use]
 pub fn is_installed() -> bool {
     INSTALLED.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
+// The live filter
+// ---------------------------------------------------------------------------
+
+/// The filter the installed logger is applying.
+///
+/// `None` when this module's logger is not the process's — a host application
+/// won the slot, or nothing has installed anything yet. There is no filter to
+/// report in that case, and reporting the one this module would have used would
+/// describe a sink nothing is writing to.
+#[must_use]
+pub fn filter() -> Option<Filter> {
+    if !is_installed() {
+        return None;
+    }
+    let logger = LOGGER.get()?;
+    Some(logger.read_filter().clone())
+}
+
+/// Swaps the filter the installed logger applies, from the next record on.
+///
+/// Returns `false` when this module's logger is not the process's, in which case
+/// nothing changed — see [`is_installed`].
+///
+/// **The facade's global maximum is set to match, exactly as installing does.**
+/// That is what makes a widened filter reach the sink at all: a call site above
+/// `log::max_level()` never builds its arguments, so raising the directive
+/// without raising the maximum would change nothing. It cuts the other way too —
+/// narrowing here stops those records reaching the console ring as well as
+/// stderr, and a [`capture`] running on another thread stops seeing them.
+pub fn set_filter(filter: Filter) -> bool {
+    if !is_installed() {
+        return false;
+    }
+    let Some(logger) = LOGGER.get() else {
+        return false;
+    };
+    // The maximum first: between the two writes the sink is asked about records
+    // the new filter admits, and `permits` — which has the old filter until the
+    // line below — is what decides them. The other order drops records the
+    // caller just asked for.
+    ::log::set_max_level(filter.max_level());
+    *logger
+        .filter
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = filter;
+    true
+}
+
+crcbl_console::concommand! {
+    /// Show the log filter, or install directives: `log warn,crcbl_render=debug`.
+    pub fn log(cx, args) {
+        if args.is_empty() {
+            let Some(current) = filter() else {
+                return Err(Fault::new(
+                    "the engine's logger is not installed, so there is no filter to read",
+                ));
+            };
+            cx.print(format!("log {current}"));
+            return Ok(());
+        }
+        // Joined with a comma rather than a space: the directive list has no
+        // spaces in it, so every way of typing one — `log warn,crcbl_vk=trace`,
+        // `log warn, crcbl_vk=trace`, `log warn crcbl_vk=trace` — reads as the
+        // list the person meant.
+        let directives = args.join(",");
+        let wanted = Filter::try_parse(&directives).map_err(|bad| Fault::new(bad.to_string()))?;
+        // The line is the filter as it will be matched, not the text as it was
+        // typed, so `log warn crcbl_vk=trace` answers with the list it became.
+        let installed = wanted.to_string();
+        if !set_filter(wanted) {
+            return Err(Fault::new(
+                "the engine's logger is not installed, so the filter was left alone",
+            ));
+        }
+        cx.print(format!("log {installed}"));
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -801,10 +1013,133 @@ mod tests {
         assert_eq!(filter.level_for("crcbl_ui"), LevelFilter::Error);
     }
 
+    /// **`log` prints a filter that can be typed straight back in.**
+    ///
+    /// Two spellings of one thing drift; this is what stops them. A `Display`
+    /// that dropped a directive, or wrote a level `parse_level` does not know,
+    /// would still print something plausible — so the check is the round trip
+    /// and not the text.
+    #[test]
+    fn the_filter_round_trips_through_its_own_display() {
+        for directives in [
+            "info",
+            "off",
+            "warn,crcbl_render=debug",
+            "off,crcbl_render=warn,crcbl_render::graph=trace",
+            "crcbl_vk=trace",
+        ] {
+            let filter = Filter::parse(directives);
+            let written = filter.to_string();
+            let reparsed = Filter::parse(&written);
+            assert_eq!(reparsed.to_string(), written, "{directives}");
+            for target in [
+                "crcbl_core",
+                "crcbl_render",
+                "crcbl_render::graph",
+                "crcbl_vk",
+            ] {
+                assert_eq!(
+                    reparsed.level_for(target),
+                    filter.level_for(target),
+                    "{directives} at {target}",
+                );
+            }
+        }
+    }
+
+    /// The overrides are written in match order, longest prefix first, which is
+    /// not the order they were typed in — so the round trip above is stable and
+    /// not merely equivalent.
+    #[test]
+    fn display_writes_the_default_then_the_overrides_in_match_order() {
+        let filter = Filter::parse("crcbl_render::graph=trace,warn,crcbl_render=debug");
+        assert_eq!(
+            filter.to_string(),
+            "warn,crcbl_render::graph=trace,crcbl_render=debug",
+        );
+    }
+
+    /// **`parse` skips what it cannot read and `try_parse` names it**, which is
+    /// the difference between a typo in an environment variable and a typo
+    /// somebody just typed at a console.
+    #[test]
+    fn try_parse_refuses_the_directive_parse_would_skip() {
+        let refused = Filter::try_parse("info,crcbl_vk=louder").expect_err("`louder` is no level");
+        assert_eq!(refused.directive(), "crcbl_vk=louder");
+        assert!(refused.to_string().contains("crcbl_vk=louder"), "{refused}");
+
+        assert_eq!(
+            Filter::parse("info,crcbl_vk=louder").level_for("crcbl_vk"),
+            LevelFilter::Info,
+            "the lenient form still skips it",
+        );
+        assert_eq!(
+            Filter::try_parse("bogus")
+                .expect_err("a bare word is no level")
+                .directive(),
+            "bogus",
+        );
+        assert!(
+            Filter::try_parse("warn,,  ,crcbl_vk=trace").is_ok(),
+            "empties are not directives"
+        );
+    }
+
+    /// **The ring is fed before the filter, and the filter still decides
+    /// stderr.**
+    ///
+    /// The two halves of plan 52 decision 4, and each fails silently alone: a
+    /// ring fed after the filter shows the panel exactly what the terminal
+    /// already printed, and a ring that widened the filter would print every
+    /// dropped line to CI.
+    ///
+    /// `capture` cannot answer the stderr half — it deliberately captures
+    /// *before* the filter too, so a capturing thread sees everything — which is
+    /// why `permits` is read directly here. It is documented as the one thing
+    /// that decides what is written.
+    #[test]
+    fn the_ring_holds_records_the_filter_refused() {
+        let quiet = "crcbl_core::log::tests::refused";
+        let loud = "crcbl_core::log::tests::printed";
+        let logger = StderrLogger {
+            filter: RwLock::new(Filter::parse(&format!("info,{quiet}=off"))),
+            start: Instant::now(),
+        };
+        assert!(
+            !logger.permits(
+                &Metadata::builder()
+                    .level(Level::Error)
+                    .target(quiet)
+                    .build()
+            ),
+            "the directive silences that target, so none of its records reach stderr",
+        );
+        assert!(
+            logger.permits(&Metadata::builder().level(Level::Info).target(loud).build()),
+            "the default level admits the other target",
+        );
+
+        logger.emit(Level::Error, quiet, format_args!("under the filter"));
+        logger.emit(Level::Info, loud, format_args!("over the filter"));
+
+        let mine: Vec<console::Record> = console::snapshot()
+            .into_iter()
+            .filter(|record| record.target == quiet || record.target == loud)
+            .collect();
+        assert_eq!(
+            mine.iter()
+                .map(|record| (record.target.as_str(), record.message.as_str()))
+                .collect::<Vec<_>>(),
+            [(quiet, "under the filter"), (loud, "over the filter")],
+            "both records are in the ring, whatever stderr got",
+        );
+        assert_eq!(mine[0].level, Level::Error);
+    }
+
     #[test]
     fn logger_respects_the_filter_without_being_installed() {
         let logger = StderrLogger {
-            filter: Filter::parse("warn,noisy=trace"),
+            filter: RwLock::new(Filter::parse("warn,noisy=trace")),
             start: Instant::now(),
         };
         assert!(

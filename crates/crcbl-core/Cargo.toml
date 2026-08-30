@@ -11,6 +11,13 @@ repository.workspace = true
 # every layer above the shell reads, and hand-rolling it would mean hand-rolling
 # `Debug`, the bit operators and the set predicates too.
 bitflags = { workspace = true }
+# The console's vocabulary, for the one command this crate owns: `log`, which
+# sets the live `CRCBL_LOG` filter. `docs/plan/52-debug-console.md` decision 2 is
+# the rule — a command is declared in the crate that owns the behaviour — and
+# this is the arrow it implies. No cycle: `crcbl-console` depends on nothing at
+# all, so this adds one `core`/`std` compilation unit on every target and no
+# transitive anything.
+crcbl-console = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
 

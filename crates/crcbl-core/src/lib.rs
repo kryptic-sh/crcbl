@@ -18,7 +18,8 @@
 //!   [`Modifiers`](input::Modifiers)). Vocabulary only: the *event* enum lives
 //!   in `crcbl-shell`, which is the only crate that produces one.
 //! * [`log`] — stderr logging behind the [`log`](::log) facade, filtered by
-//!   `CRCBL_LOG`.
+//!   `CRCBL_LOG`, with the console's log ring in [`log::console`] and the `log`
+//!   command that sets the filter while the engine runs.
 //! * [`rand`] — deterministic values from an index, for simulations that
 //!   replay. Deliberately not a generator; see the module docs for why every
 //!   sample independently arrived at the same shape.
@@ -46,6 +47,17 @@ pub mod surface;
 pub mod time;
 pub mod trace;
 pub mod world;
+
+/// Everything this crate exposes to the debug console.
+///
+/// One list per crate, gathered by the engine at one seam —
+/// `docs/plan/52-debug-console.md` decision 2. It holds `log`, the command that
+/// reads and sets the live filter; `tests/console_table.rs` is what keeps it in
+/// step with what the source actually declares.
+#[must_use]
+pub fn console_table() -> crcbl_console::Table {
+    crcbl_console::table![cmd crate::log::log]
+}
 
 pub use alloc::FrameArena;
 pub use handle::{Handle, Pool};

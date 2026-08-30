@@ -90,6 +90,56 @@ What slice 1 left as limits rather than fixed, each stated in the code:
 - **Not measured:** completion is a linear scan over the sorted table, which
   decision 10 says needs no per-tier pricing at the table's size.
 
+What slice 3 — the log ring, the `console` target, `log <filter>` — left as
+limits rather than fixed:
+
+- **The ring only holds what a sink was offered.** The push in
+  `crcbl_core::log::console::push` is before each sink's own filter, so a record
+  a _per-target_ directive silenced is in the ring; a record above
+  `log::max_level()` is not, because the level macros' `__enabled` gate drops it
+  before any sink is asked. So `log off` narrows the ring as well as the
+  terminal, and slice 4's per-level panel toggle can only show lines that
+  reached a sink. Verified: `the_ring_holds_records_the_filter_refused` in
+  `crates/crcbl-core/src/log.rs` and
+  `a_filter_installed_at_runtime_decides_the_next_record` in
+  `crates/crcbl-core/tests/console_log.rs` assert both halves.
+- **`log::set_filter` moves the facade's global maximum with the filter**, which
+  is what makes a widened directive reach a sink at all — and means a
+  `log::capture` running on another thread stops seeing records the narrowed
+  maximum drops. Stated on `set_filter`. It is why the filter tests are their
+  own binary and serialise on one mutex; the capture tests stay in
+  `crates/crcbl-core/tests/log_capture.rs`, which never writes the filter.
+- **`CONSOLE_RING_LINES` is a judgement, not a measurement.** It was picked for
+  scrollback past a demo's boot, and the ring's memory was never measured on any
+  tier. The same goes for the cost decision 10 prices: every record now renders
+  its message and allocates a target `String`, where before a filtered-out
+  record cost nothing — no frame-time measurement was taken either way.
+- **`console::print` has no caller in the engine.** Slice 5 drains a
+  `crcbl_console::Context`'s lines into it; today only
+  `crates/crcbl-core/tests/console_log.rs` does, which is what proves the target
+  round-trips.
+- **The web sink's ring push is verified natively, not in a browser.**
+  `crcbl::web` is deliberately not `wasm32`-gated, so
+  `the_web_sink_rings_a_line_its_filter_refused` in `crates/crcbl/src/web.rs`
+  exercises the real `WebLogger::log`; nothing reads the ring in a browser until
+  the panel exists, so the browser gate can only show the change is harmless.
+- **`log` joins its arguments with a comma**, so `log warn crcbl_vk=trace` reads
+  as the two-directive list a space-separated typing meant. Safe only because a
+  filter directive never contains a space — unlike an `Enum` value, which
+  `Registry::run_statement` joins with one.
+- **`log` answers with a fault in a browser.** `crcbl_core::log::set_filter` and
+  `filter()` act on `StderrLogger`, and on `wasm32` the installed sink is
+  `crcbl::web`'s `WebLogger`, whose filter is the facade's global maximum and
+  nothing else — so `is_installed()` is false there and both forms of the
+  command report "the engine's logger is not installed". Slice 5 owes the web
+  half: a `set_filter` the web sink honours, or `log` reaching
+  `log::set_max_level` directly when that sink is the one installed. Found in
+  review, not by a test; nothing runs the command in a browser yet.
+- **Not reviewed:** `crcbl_core::console_table()` is held to its own crate's
+  source and to nothing else. Nothing yet checks that a crate depending on
+  `crcbl-console` appears in the engine's gather at all — that second guard is
+  decision 2's other half and is slice 5's, along with the gather itself.
+
 **Also owed with it:** the AO debug view is lantern's alone today
 (`ForwardRenderer::set_occlusion_view` behind lantern's pause panel). The user
 wants every debug view available in every build and demo; the debug console
