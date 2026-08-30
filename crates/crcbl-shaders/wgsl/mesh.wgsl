@@ -1016,6 +1016,21 @@ fn ggx_lobe_0( alpha2_0 : f32,  f0_0 : vec3<f32>,  n_dot_l_0 : f32,  n_dot_v_2 :
     return vec3<f32>((alpha2_0 / max(shape_0 * shape_0, 9.99999993922529029e-09f) * (0.5f / max(n_dot_l_0 * sqrt(n_dot_v_2 * n_dot_v_2 * _S97 + alpha2_0) + n_dot_v_2 * sqrt(n_dot_l_0 * n_dot_l_0 * _S97 + alpha2_0), 9.99999997475242708e-07f)))) * (f0_0 + (vec3<f32>(1.0f, 1.0f, 1.0f) - f0_0) * vec3<f32>((grazing2_0 * grazing2_0 * grazing_0)));
 }
 
+fn atlas_rect_0( tile_0 : u32) -> vec4<f32>
+{
+    return frame_0.shadow_atlas_rect_0[tile_0];
+}
+
+fn atlas_rect_is_empty_0( rect_0 : vec4<f32>) -> bool
+{
+    return !((rect_0.x) > 0.0f);
+}
+
+fn tile_texels_0( rect_1 : vec4<f32>) -> f32
+{
+    return rect_1.x / frame_0.shadow_params_0.x;
+}
+
 fn shadow_normal_offset_0( geometric_normal_0 : vec3<f32>,  to_light_1 : vec3<f32>) -> f32
 {
     var cosine_1 : f32 = saturate(dot(geometric_normal_0, to_light_1));
@@ -1028,25 +1043,20 @@ fn shadow_rotation_0( pixel_1 : vec2<f32>) -> vec2<f32>
     return SHADOW_ROTATIONS_0[SHADOW_DITHER_0[cell_0.y * u32(4) + cell_0.x]];
 }
 
-fn atlas_rect_0( tile_0 : u32) -> vec4<f32>
+fn atlas_step_0( rect_2 : vec4<f32>) -> vec2<f32>
 {
-    return frame_0.shadow_atlas_rect_0[tile_0];
+    return frame_0.shadow_params_0.xy / rect_2.xy;
 }
 
-fn atlas_step_0( rect_0 : vec4<f32>) -> vec2<f32>
+fn atlas_uv_0( rect_3 : vec4<f32>,  tile_uv_0 : vec2<f32>) -> vec2<f32>
 {
-    return frame_0.shadow_params_0.xy / rect_0.xy;
-}
-
-fn atlas_uv_0( rect_1 : vec4<f32>,  tile_uv_0 : vec2<f32>) -> vec2<f32>
-{
-    return rect_1.zw + tile_uv_0 * rect_1.xy;
+    return rect_3.zw + tile_uv_0 * rect_3.xy;
 }
 
 fn sun_penumbra_texels_0( cascade_0 : u32,  tile_uv_1 : vec2<f32>,  reference_0 : f32,  rotation_0 : vec2<f32>) -> f32
 {
-    var rect_2 : vec4<f32> = atlas_rect_0(cascade_0);
-    var texel_step_0 : vec2<f32> = atlas_step_0(rect_2);
+    var rect_4 : vec4<f32> = atlas_rect_0(cascade_0);
+    var texel_step_0 : vec2<f32> = atlas_step_0(rect_4);
     var _S98 : vec2<f32> = vec2<f32>(0.5f, 0.5f) * texel_step_0;
     const _S99 : vec2<f32> = vec2<f32>(1.0f, 1.0f);
     var _S100 : vec2<f32> = _S99 / frame_0.shadow_params_0.xy;
@@ -1067,7 +1077,7 @@ fn sun_penumbra_texels_0( cascade_0 : u32,  tile_uv_1 : vec2<f32>,  reference_0 
         var _S102 : f32 = rotation_0.x;
         var _S103 : f32 = spoke_0.y;
         var _S104 : f32 = rotation_0.y;
-        var _S105 : vec3<i32> = vec3<i32>(vec2<i32>(min(atlas_uv_0(rect_2, clamp(tile_uv_1 + vec2<f32>(_S101 * _S102 - _S103 * _S104, _S101 * _S104 + _S103 * _S102) * texel_step_0, _S98, vec2<f32>(1.0f) - _S98)) * _S100, _S100 - _S99)), i32(0));
+        var _S105 : vec3<i32> = vec3<i32>(vec2<i32>(min(atlas_uv_0(rect_4, clamp(tile_uv_1 + vec2<f32>(_S101 * _S102 - _S103 * _S104, _S101 * _S104 + _S103 * _S102) * texel_step_0, _S98, vec2<f32>(1.0f) - _S98)) * _S100, _S100 - _S99)), i32(0));
         var depth_1 : f32 = (textureLoad((shadow_atlas_0), ((_S105)).xy, ((_S105)).z));
         if(depth_1 > reference_0)
         {
@@ -1082,24 +1092,28 @@ fn sun_penumbra_texels_0( cascade_0 : u32,  tile_uv_1 : vec2<f32>,  reference_0 
         return 2.0f;
     }
     var _S106 : f32 = 2.0f * frame_0.cascade_far_0[cascade_0];
-    return clamp((sum_2 / found_0 - reference_0) * (_S106 + 40.0f) * 0.01999999955296516f / (_S106 / 768.0f), 2.0f, 8.0f);
+    return clamp((sum_2 / found_0 - reference_0) * (_S106 + 40.0f) * 0.01999999955296516f / (_S106 / tile_texels_0(rect_4)), 2.0f, 8.0f);
 }
 
-fn tile_tap_0( rect_3 : vec4<f32>,  texel_step_1 : vec2<f32>,  tile_uv_2 : vec2<f32>,  spoke_1 : vec2<f32>,  rotation_1 : vec2<f32>,  reference_1 : f32) -> f32
+fn tile_tap_0( rect_5 : vec4<f32>,  texel_step_1 : vec2<f32>,  tile_uv_2 : vec2<f32>,  spoke_1 : vec2<f32>,  rotation_1 : vec2<f32>,  reference_1 : f32) -> f32
 {
     var tile_min_0 : vec2<f32> = vec2<f32>(0.5f, 0.5f) * texel_step_1;
     var _S107 : f32 = spoke_1.x;
     var _S108 : f32 = rotation_1.x;
     var _S109 : f32 = spoke_1.y;
     var _S110 : f32 = rotation_1.y;
-    return (textureSampleCompareLevel((shadow_atlas_0), (shadow_sampler_0), (atlas_uv_0(rect_3, clamp(tile_uv_2 + vec2<f32>(_S107 * _S108 - _S109 * _S110, _S107 * _S110 + _S109 * _S108) * texel_step_1, tile_min_0, vec2<f32>(1.0f) - tile_min_0))), (reference_1)));
+    return (textureSampleCompareLevel((shadow_atlas_0), (shadow_sampler_0), (atlas_uv_0(rect_5, clamp(tile_uv_2 + vec2<f32>(_S107 * _S108 - _S109 * _S110, _S107 * _S110 + _S109 * _S108) * texel_step_1, tile_min_0, vec2<f32>(1.0f) - tile_min_0))), (reference_1)));
 }
 
 fn tile_pcf_0( tile_1 : u32,  tile_uv_3 : vec2<f32>,  reference_2 : f32,  pixel_2 : vec2<f32>,  radius_2 : f32) -> f32
 {
     var _S111 : vec2<f32> = shadow_rotation_0(pixel_2);
-    var rect_4 : vec4<f32> = atlas_rect_0(tile_1);
-    var _S112 : vec2<f32> = atlas_step_0(rect_4);
+    var rect_6 : vec4<f32> = atlas_rect_0(tile_1);
+    if(atlas_rect_is_empty_0(rect_6))
+    {
+        return 1.0f;
+    }
+    var _S112 : vec2<f32> = atlas_step_0(rect_6);
     var spot_0 : u32 = u32(0);
     var probe_0 : f32 = 0.0f;
     for(;;)
@@ -1111,7 +1125,7 @@ fn tile_pcf_0( tile_1 : u32,  tile_uv_3 : vec2<f32>,  reference_2 : f32,  pixel_
         {
             break;
         }
-        var probe_1 : f32 = probe_0 + tile_tap_0(rect_4, _S112, tile_uv_3, SHADOW_DISC_0[SHADOW_PROBE_INDEX_0[spot_0]] * vec2<f32>(radius_2), _S111, reference_2);
+        var probe_1 : f32 = probe_0 + tile_tap_0(rect_6, _S112, tile_uv_3, SHADOW_DISC_0[SHADOW_PROBE_INDEX_0[spot_0]] * vec2<f32>(radius_2), _S111, reference_2);
         spot_0 = spot_0 + u32(1);
         probe_0 = probe_1;
     }
@@ -1134,7 +1148,7 @@ fn tile_pcf_0( tile_1 : u32,  tile_uv_3 : vec2<f32>,  reference_2 : f32,  pixel_
         {
             break;
         }
-        var visibility_1 : f32 = visibility_0 + tile_tap_0(rect_4, _S112, tile_uv_3, SHADOW_DISC_0[index_3] * vec2<f32>(radius_2), _S111, reference_2);
+        var visibility_1 : f32 = visibility_0 + tile_tap_0(rect_6, _S112, tile_uv_3, SHADOW_DISC_0[index_3] * vec2<f32>(radius_2), _S111, reference_2);
         index_3 = index_3 + u32(1);
         visibility_0 = visibility_1;
     }
@@ -1143,7 +1157,12 @@ fn tile_pcf_0( tile_1 : u32,  tile_uv_3 : vec2<f32>,  reference_2 : f32,  pixel_
 
 fn cascade_visibility_0( cascade_1 : u32,  world_position_4 : vec3<f32>,  to_light_2 : vec3<f32>,  geometric_normal_1 : vec3<f32>,  pixel_3 : vec2<f32>) -> f32
 {
-    var texel_world_0 : f32 = 2.0f * frame_0.cascade_far_0[cascade_1] / 768.0f;
+    var rect_7 : vec4<f32> = atlas_rect_0(cascade_1);
+    if(atlas_rect_is_empty_0(rect_7))
+    {
+        return 1.0f;
+    }
+    var texel_world_0 : f32 = 2.0f * frame_0.cascade_far_0[cascade_1] / tile_texels_0(rect_7);
     var clip_0 : vec4<f32> = (((vec4<f32>(world_position_4 + geometric_normal_1 * vec3<f32>((texel_world_0 * frame_0.shadow_params_0.w * shadow_normal_offset_0(geometric_normal_1, to_light_2))) + to_light_2 * vec3<f32>((texel_world_0 * frame_0.shadow_params_0.z)), 1.0f)) * (mat4x4<f32>(frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(0)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(1)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(2)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_1].data_1[i32(3)][i32(3)]))));
     var ndc_0 : vec3<f32> = clip_0.xyz / vec3<f32>(clip_0.w);
     var _S113 : bool;
@@ -1260,8 +1279,15 @@ fn light_tile_0( tile_2 : u32) -> u32
     return u32(2) + tile_2;
 }
 
-fn punctual_visibility_0( tile_3 : u32,  world_position_6 : vec3<f32>,  to_light_4 : vec3<f32>,  n_dot_l_2 : f32,  texel_world_1 : f32,  geometric_normal_3 : vec3<f32>,  pixel_5 : vec2<f32>) -> f32
+fn punctual_visibility_0( tile_3 : u32,  world_position_6 : vec3<f32>,  to_light_4 : vec3<f32>,  n_dot_l_2 : f32,  map_world_0 : f32,  geometric_normal_3 : vec3<f32>,  pixel_5 : vec2<f32>) -> f32
 {
+    var atlas_0 : u32 = light_tile_0(tile_3);
+    var rect_8 : vec4<f32> = atlas_rect_0(atlas_0);
+    if(atlas_rect_is_empty_0(rect_8))
+    {
+        return 1.0f;
+    }
+    var texel_world_1 : f32 = map_world_0 / tile_texels_0(rect_8);
     var clip_1 : vec4<f32> = (((vec4<f32>(world_position_6 + geometric_normal_3 * vec3<f32>((texel_world_1 * 4.0f * shadow_normal_offset_0(geometric_normal_3, to_light_4))) + to_light_4 * vec3<f32>((texel_world_1 * 2.0f)), 1.0f)) * (mat4x4<f32>(frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(0)][i32(0)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(1)][i32(0)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(2)][i32(0)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(3)][i32(0)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(0)][i32(1)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(1)][i32(1)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(2)][i32(1)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(3)][i32(1)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(0)][i32(2)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(1)][i32(2)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(2)][i32(2)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(3)][i32(2)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(0)][i32(3)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(1)][i32(3)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(2)][i32(3)], frame_0.light_view_proj_0.data_3[tile_3].data_1[i32(3)][i32(3)]))));
     var _S120 : f32 = clip_1.w;
     if(_S120 <= 0.0f)
@@ -1290,7 +1316,7 @@ fn punctual_visibility_0( tile_3 : u32,  world_position_6 : vec3<f32>,  to_light
     {
         return 1.0f;
     }
-    return tile_pcf_0(light_tile_0(tile_3), vec2<f32>(ndc_1.x * 0.5f + 0.5f, 0.5f - ndc_1.y * 0.5f), ndc_1.z, pixel_5, 2.0f);
+    return tile_pcf_0(atlas_0, vec2<f32>(ndc_1.x * 0.5f + 0.5f, 0.5f - ndc_1.y * 0.5f), ndc_1.z, pixel_5, 2.0f);
 }
 
 fn point_visibility_0( light_1 : ptr<function, GpuLight_std430_0>,  base_1 : u32,  world_position_7 : vec3<f32>,  to_light_5 : vec3<f32>,  n_dot_l_3 : f32,  geometric_normal_4 : vec3<f32>,  pixel_6 : vec2<f32>) -> f32
@@ -1300,7 +1326,7 @@ fn point_visibility_0( light_1 : ptr<function, GpuLight_std430_0>,  base_1 : u32
         return 1.0f;
     }
     var from_light_1 : vec3<f32> = world_position_7 - (*light_1).position_0.xyz;
-    return punctual_visibility_0(base_1 + point_face_0(from_light_1), world_position_7, to_light_5, n_dot_l_3, 2.0f * max(max(abs(from_light_1.x), abs(from_light_1.y)), abs(from_light_1.z)) / 768.0f, geometric_normal_4, pixel_6);
+    return punctual_visibility_0(base_1 + point_face_0(from_light_1), world_position_7, to_light_5, n_dot_l_3, 2.0f * max(max(abs(from_light_1.x), abs(from_light_1.y)), abs(from_light_1.z)), geometric_normal_4, pixel_6);
 }
 
 fn spot_visibility_0( light_2 : ptr<function, GpuLight_std430_0>,  tile_4 : u32,  world_position_8 : vec3<f32>,  to_light_6 : vec3<f32>,  n_dot_l_4 : f32,  geometric_normal_5 : vec3<f32>,  pixel_7 : vec2<f32>) -> f32
@@ -1310,7 +1336,7 @@ fn spot_visibility_0( light_2 : ptr<function, GpuLight_std430_0>,  tile_4 : u32,
         return 1.0f;
     }
     var cos_outer_1 : f32 = (*light_2).direction_0.w;
-    return punctual_visibility_0(tile_4, world_position_8, to_light_6, n_dot_l_4, 2.0f * (sqrt(saturate(1.0f - cos_outer_1 * cos_outer_1)) / max(cos_outer_1, 0.00009999999747379f)) * max(dot(world_position_8 - (*light_2).position_0.xyz, normalize((*light_2).direction_0.xyz)), 0.0f) / 768.0f, geometric_normal_5, pixel_7);
+    return punctual_visibility_0(tile_4, world_position_8, to_light_6, n_dot_l_4, 2.0f * (sqrt(saturate(1.0f - cos_outer_1 * cos_outer_1)) / max(cos_outer_1, 0.00009999999747379f)) * max(dot(world_position_8 - (*light_2).position_0.xyz, normalize((*light_2).direction_0.xyz)), 0.0f), geometric_normal_5, pixel_7);
 }
 
 fn specular_compensation_0( f0_1 : vec3<f32>,  directional_albedo_0 : f32) -> vec3<f32>

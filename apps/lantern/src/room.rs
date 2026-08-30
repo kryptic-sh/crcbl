@@ -2235,7 +2235,9 @@ mod tests {
     /// and a plausible one.
     #[test]
     fn the_shadow_atlas_holds_both_punctual_lights_on_every_frame_of_the_orbit() {
-        use crcbl::render::shadow::{LIGHT_TILES, POINT_FACES, Selection, tile_span};
+        use crcbl::render::shadow::{
+            LIGHT_TILES, POINT_FACES, Selection, TILE, light_tile, tile_span,
+        };
 
         const {
             assert!(
@@ -2246,7 +2248,7 @@ mod tests {
             );
         }
 
-        let eye = fixed_camera().eye;
+        let camera = fixed_camera();
         let held_by = |selection: &Selection| -> Vec<usize> {
             let mut held: Vec<usize> = selection
                 .slots()
@@ -2261,9 +2263,9 @@ mod tests {
         for step in 0..360 {
             let seconds = LAMP_PERIOD * step as f32 / 360.0;
             let lights = lights(seconds);
-            carried.update(&lights, eye);
+            carried.update(&lights, &camera);
             let mut fresh = Selection::default();
-            fresh.update(&lights, eye);
+            fresh.update(&lights, &camera);
             for (selection, how) in [(&carried, "carried"), (&fresh, "fresh")] {
                 let held = held_by(selection);
                 assert_eq!(
@@ -2302,6 +2304,26 @@ mod tests {
                     "at {seconds:.3}s a {how} selection covers the wrong tile count: the \
                      lamp's cube is {POINT_FACES} tiles and the downlight's map is one"
                 );
+                // **And every one of those tiles is a whole root cell**, which
+                // is what says this room's goldens are still evidence about the
+                // maps they were blessed under. `docs/plan/45-shadows.md`'s
+                // priority rung sizes a map by how much of the frame it covers,
+                // and the downlight is the narrowest cone in the tree — the
+                // fixture `crcbl::render::shadow`'s `WHOLE_CELL_COVERAGE` is
+                // anchored against. A rung that demoted it would move
+                // `room.png` and `live.png` without any assertion here noticing.
+                for assignment in selection.slots().iter().flatten() {
+                    for face in 0..tile_span(&lights[assignment.light]) {
+                        let rect = selection.atlas_rect(light_tile(assignment.base + face));
+                        assert_eq!(
+                            rect.side, TILE,
+                            "at {seconds:.3}s a {how} selection put light {}'s face {face} in \
+                             {rect:?}, which is not a whole cell — this room's goldens were \
+                             blessed on maps of {TILE} texels",
+                            assignment.light
+                        );
+                    }
+                }
             }
         }
         eprintln!(

@@ -5256,7 +5256,7 @@ impl ForwardRenderer {
         // an incumbent held until a challenger clearly beats it — lives in
         // `shadow::Selection`, and a light it refuses is a light whose row says
         // `NO_SHADOW_TILE`: it still lights, it just does not occlude.
-        self.shadow_lights.update(&self.extra_lights, camera.eye);
+        self.shadow_lights.update(&self.extra_lights, camera);
         let mut rows = Vec::with_capacity(1 + self.extra_lights.len());
         rows.push(sun_row(light));
         rows.extend(
@@ -7612,6 +7612,29 @@ impl ForwardRenderer {
             }
         });
         (atlas, recorded)
+    }
+
+    /// Which lights hold the atlas's light tiles this frame, and where each
+    /// map was laid out.
+    ///
+    /// **The observable `docs/plan/45-shadows.md`'s priority rung otherwise has
+    /// none for.** A map's *size* leaves no trace in the picture that a golden
+    /// can hold anyone to: a light demoted to a quarter of a cell draws a
+    /// slightly softer shadow, which is a perfectly plausible frame and one a
+    /// re-bless accepts. [`Selection::atlas_rect`](crate::shadow::Selection)
+    /// off this is what says which level the allocator actually handed out, and
+    /// `crates/crcbl/tests/mesh_e2e/shadow_tiles.rs` is what reads it.
+    ///
+    /// Named for the selection's own subject rather than for its type, because
+    /// [`Self::shadow_selection`] above is a *buffer* — the cut a cascade
+    /// descended to — and two accessors of one name is a caller reaching for
+    /// the wrong one.
+    ///
+    /// It is this frame's answer, written by [`Self::begin_frame`]: before the
+    /// first frame every slot is free.
+    #[must_use]
+    pub const fn shadow_lights(&self) -> &shadow::Selection {
+        &self.shadow_lights
     }
 
     /// The shadow atlas, for a caller that wants to read it back.

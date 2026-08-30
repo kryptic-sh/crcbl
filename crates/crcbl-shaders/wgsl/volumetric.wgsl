@@ -114,31 +114,40 @@ fn atlas_rect_0( tile_0 : u32) -> vec4<f32>
     return params_0.shadow_atlas_rect_0[tile_0];
 }
 
-fn atlas_step_0( rect_0 : vec4<f32>) -> vec2<f32>
+fn atlas_rect_is_empty_0( rect_0 : vec4<f32>) -> bool
 {
-    return params_0.shadow_params_0.xy / rect_0.xy;
+    return !((rect_0.x) > 0.0f);
 }
 
-fn atlas_uv_0( rect_1 : vec4<f32>,  tile_uv_0 : vec2<f32>) -> vec2<f32>
+fn atlas_step_0( rect_1 : vec4<f32>) -> vec2<f32>
 {
-    return rect_1.zw + tile_uv_0 * rect_1.xy;
+    return params_0.shadow_params_0.xy / rect_1.xy;
 }
 
-fn tile_tap_0( rect_2 : vec4<f32>,  texel_step_0 : vec2<f32>,  tile_uv_1 : vec2<f32>,  spoke_0 : vec2<f32>,  rotation_0 : vec2<f32>,  reference_0 : f32) -> f32
+fn atlas_uv_0( rect_2 : vec4<f32>,  tile_uv_0 : vec2<f32>) -> vec2<f32>
+{
+    return rect_2.zw + tile_uv_0 * rect_2.xy;
+}
+
+fn tile_tap_0( rect_3 : vec4<f32>,  texel_step_0 : vec2<f32>,  tile_uv_1 : vec2<f32>,  spoke_0 : vec2<f32>,  rotation_0 : vec2<f32>,  reference_0 : f32) -> f32
 {
     var tile_min_0 : vec2<f32> = vec2<f32>(0.5f, 0.5f) * texel_step_0;
     var _S2 : f32 = spoke_0.x;
     var _S3 : f32 = rotation_0.x;
     var _S4 : f32 = spoke_0.y;
     var _S5 : f32 = rotation_0.y;
-    return (textureSampleCompareLevel((shadow_atlas_0), (shadow_sampler_0), (atlas_uv_0(rect_2, clamp(tile_uv_1 + vec2<f32>(_S2 * _S3 - _S4 * _S5, _S2 * _S5 + _S4 * _S3) * texel_step_0, tile_min_0, vec2<f32>(1.0f) - tile_min_0))), (reference_0)));
+    return (textureSampleCompareLevel((shadow_atlas_0), (shadow_sampler_0), (atlas_uv_0(rect_3, clamp(tile_uv_1 + vec2<f32>(_S2 * _S3 - _S4 * _S5, _S2 * _S5 + _S4 * _S3) * texel_step_0, tile_min_0, vec2<f32>(1.0f) - tile_min_0))), (reference_0)));
 }
 
 fn tile_pcf_0( tile_1 : u32,  tile_uv_2 : vec2<f32>,  reference_1 : f32,  pixel_2 : vec2<f32>,  radius_0 : f32) -> f32
 {
     var _S6 : vec2<f32> = shadow_rotation_0(pixel_2);
-    var rect_3 : vec4<f32> = atlas_rect_0(tile_1);
-    var _S7 : vec2<f32> = atlas_step_0(rect_3);
+    var rect_4 : vec4<f32> = atlas_rect_0(tile_1);
+    if(atlas_rect_is_empty_0(rect_4))
+    {
+        return 1.0f;
+    }
+    var _S7 : vec2<f32> = atlas_step_0(rect_4);
     var spot_0 : u32 = u32(0);
     var probe_0 : f32 = 0.0f;
     for(;;)
@@ -150,7 +159,7 @@ fn tile_pcf_0( tile_1 : u32,  tile_uv_2 : vec2<f32>,  reference_1 : f32,  pixel_
         {
             break;
         }
-        var probe_1 : f32 = probe_0 + tile_tap_0(rect_3, _S7, tile_uv_2, SHADOW_DISC_0[SHADOW_PROBE_INDEX_0[spot_0]] * vec2<f32>(radius_0), _S6, reference_1);
+        var probe_1 : f32 = probe_0 + tile_tap_0(rect_4, _S7, tile_uv_2, SHADOW_DISC_0[SHADOW_PROBE_INDEX_0[spot_0]] * vec2<f32>(radius_0), _S6, reference_1);
         spot_0 = spot_0 + u32(1);
         probe_0 = probe_1;
     }
@@ -173,7 +182,7 @@ fn tile_pcf_0( tile_1 : u32,  tile_uv_2 : vec2<f32>,  reference_1 : f32,  pixel_
         {
             break;
         }
-        var visibility_1 : f32 = visibility_0 + tile_tap_0(rect_3, _S7, tile_uv_2, SHADOW_DISC_0[index_1] * vec2<f32>(radius_0), _S6, reference_1);
+        var visibility_1 : f32 = visibility_0 + tile_tap_0(rect_4, _S7, tile_uv_2, SHADOW_DISC_0[index_1] * vec2<f32>(radius_0), _S6, reference_1);
         index_1 = index_1 + u32(1);
         visibility_0 = visibility_1;
     }

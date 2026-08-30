@@ -25,10 +25,12 @@ The list exists now, so these are settled.
   Ties break by light index so a frame's selection is stable rather than
   order-dependent, and hysteresis on the selection is owed for the same reason
   it was owed for LOD: a light drifting across the cutoff should not flicker its
-  shadow on and off. Since 2026-08-30 that hysteresis is
-  [25-lod.md](25-lod.md)'s shared importance helper, a foundation rung, and this
-  selection and the atlas priority below both read it rather than keeping a band
-  of their own.
+  shadow on and off. Since 2026-08-31 that metric is `shadow::coverage` and the
+  hysteresis is this module's own: `HOLD_RATIO` on the ranking and
+  `LEVEL_HOLD_RATIO` on the tile size. It is not [25-lod.md](25-lod.md)'s helper
+  — that was tried and refused, and
+  [43-render-standards.md](43-render-standards.md)'s row (f) says why — but it
+  is the same rule with the same band, and the two constants name each other.
 - **The atlas is a fixed tile grid** — and the rung that replaces the grid is
   pulled forward below, 2026-08-30. The sun's cascades take the first tiles, and
   the rest are handed out one per spot and six per point until they run out. A
@@ -253,8 +255,9 @@ within tolerance and was left alone.
   light lights and does not occlude. That capacity is unchanged by the items
   below that have landed — they made the atlas divisible, not larger. The rung
   makes the atlas an **allocator rather than a grid**, in the shape Doom 2016
-  and Unity HDRP ship. **Items 1 and 4 landed 2026-08-31**; 2, 3 and 5 are what
-  is left, and they are what actually spend the allocator.
+  and Unity HDRP ship. **Items 1, 2 and 4 landed 2026-08-31**; 3 and 5 are what
+  is left. Item 2 is what first spends the allocator's levels, and 3 and 5 spend
+  the frame.
   1. **Variable tile sizes — the allocator landed 2026-08-31.**
      `crcbl_render::shadow::AtlasAllocator` is a quadtree over each of the
      atlas's root cells: `allocate(level)` hands out a whole cell or a halving
@@ -268,10 +271,66 @@ within tolerance and was left alone.
      shipped. **`MIN_TILE` is a floor nothing has measured** — no light asks for
      a sub-cell map until item 2 exists — so the halvings are a starting point
      for that rung to sweep, not a finding.
-  2. **A priority per light per frame**: projected screen coverage of the
-     light's reach, scaled down by distance, with hysteresis so a light on the
-     cutoff does not flicker its shadow, which is the LOD rule this section
-     already keeps for the shadow bit itself.
+  2. **A priority per light per frame — landed 2026-08-31.**
+     `crcbl_render::shadow::coverage` is how much of the frame's **height** a
+     light's shadow map covers on screen: the map's own footprint over the
+     distance to the eye, through the projection's own scale with no viewport
+     height in it. **A fraction of the frame rather than a count of pixels**, so
+     a scene allocates the same tiles at every extent and a golden at 256x192 is
+     evidence about the 1080p frame. **The map's footprint rather than the
+     light's sphere**, so a narrow cone is not demoted for being narrow: two
+     lights of one radius spread their texels over world regions that differ by
+     the cone's tangent, and the narrow one already has the finer texels.
+
+     One scorer decides both questions: the ranking that hands out runs of tiles
+     and the size of the tiles in that run. `WHOLE_CELL_COVERAGE` is the anchor
+     — a quarter of the frame's height earns a whole root cell — and every
+     threshold below it is that halved, because a level of the quadtree is a
+     halving of the tile's side. `LEVEL_HOLD_RATIO` is the band:
+     [25-lod.md](25-lod.md)'s "switch-up and switch-down differ" at this
+     module's other boundary, deliberately the same fifth
+     `ForwardRenderer::lod_hold_ratio` opens, so a light on a threshold does not
+     halve and double its map every frame. A light with no history starts at the
+     coarsest level and climbs, which is the ladder with no band at all — so a
+     frame's first answer is reproducible.
+
+     **The anchor is the conservative end of a sweep bounded by the fixtures
+     that must not move**, and that is written down rather than hidden. Measured
+     on the tree's own fixtures, which the metric makes independent of the
+     extent they render at: `Scene::PointShadow` 3.06, `Scene::SpotShadow` 1.41,
+     `apps/lantern`'s lamp 1.06 at the worst phase of its orbit, its corner
+     downlight 0.37 — and the downlight is what binds, clearing the anchor by
+     half as much again. The parameter-free rule of one shadow texel per screen
+     pixel would demote every one of them at the 256x192 the goldens are blessed
+     at; `docs/backlog.md` carries what that costs and what it buys.
+
+     **The bias had to move with it**, and that is the half a golden could not
+     have caught: `mesh.slang`'s `SHADOW_TILE` was the whole cell's side and
+     every bias in that file was denominated in it, so a demoted light would
+     have been biased by a footprint four times too small per two levels.
+     `tile_texels(rect)` — the reciprocal of `atlas_step` — is the map's own
+     side, read out of the rectangle item 4 already hands over, and the constant
+     is gone from the shader.
+
+     Checked by `crates/crcbl/tests/mesh_e2e/shadow_tiles.rs`: two lights of one
+     shape over one floor, one at a whole cell and one at a quarter of its side,
+     with the demoted light's pool measured for self-shadowing dots — 22 in 2941
+     pixels correctly biased against 195 in 2828 with the bias taken from the
+     cell, on radv at 1280x960; 23 in 2940 against 200 in 2823 on lavapipe.
+
+     **Priced 2026-08-31**: four spot lights over a six-by-six field of dunes
+     patches, the same rig drawn from a camera at 22 and at 88 world units, so
+     the far camera is that rig two ladder rungs down. `PassStats` over 48
+     recorded frames after the warm-up, the `shadow` pass alone — on an RX 7900
+     XTX 0.032 ms p50 whole against 0.030 demoted, and on llvmpipe 3.254 against
+     2.695. A sixth off on the software tier and a few per cent on the hardware
+     one, and the saving is the tile's _and_ the cut's together, since the far
+     camera also selects a coarser cut. The sun's two cascades are whole cells
+     in both columns and are most of what is left, which is why four demoted
+     lights do not halve the pass — on radv a repeat put the two 2 µs apart on a
+     pass of thirty, which is why the test reports the pair and asserts no
+     ordering between them. The browser tier is unmeasured.
+
   3. **A budget in tiles and in rendered faces per frame**, with the cadence
      rung above spending it: the highest-priority lights re-render every frame,
      the next tier every second, the rest hold their tile until they move. A

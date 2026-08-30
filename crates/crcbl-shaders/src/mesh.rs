@@ -118,11 +118,17 @@ pub const SHADOW_LIGHT_TILES: usize = 14;
 /// the one place on the device.
 pub const SHADOW_POINT_FACES: usize = 6;
 
-/// The side of one shadow-atlas tile, in texels.
+/// The side of one **root cell** of the shadow atlas, in texels.
 ///
-/// Read by the shader as well as by the host: every shadow bias `mesh.slang`
-/// applies — a cascade's as much as a cone's — is denominated in *tile texels*,
-/// so it has to know how many of them the tile has. See
+/// The largest map `crcbl_render::shadow::AtlasAllocator` can hand out, and one
+/// cell of the grid its quadtrees are rooted on — not the side of every map,
+/// which since `docs/plan/45-shadows.md`'s priority rung is whatever level a
+/// light's coverage earned it.
+///
+/// **A host number, and no longer the shader's.** Every shadow bias
+/// `mesh.slang` applies — a cascade's as much as a cone's — is denominated in
+/// the texels of the map being sampled, and that file reads each map's own side
+/// out of its `shadow_atlas_rect` through `tile_texels`. See
 /// `PUNCTUAL_DEPTH_BIAS_TEXELS` there, and `crcbl_render::shadow`'s
 /// `DEPTH_BIAS_TEXELS` for the sun's.
 ///
@@ -2360,24 +2366,28 @@ mod tests {
             }
         }
         // What is left of the atlas's geometry on the sampling side. The grid's
-        // two extents are gone from it — a slot's place is a rectangle the host
-        // allocated and hands over in the block, which is `shadow_atlas_rect`
-        // and the rung `docs/plan/45-shadows.md` calls the atlas proper — and
-        // the tile's own side stays, because every bias in that file is
-        // denominated in its texels.
-        for declaration in [
-            format!("static const float SHADOW_TILE = {SHADOW_TILE}.0;"),
-            // The face count, which only the sampling side reads: it is how far
-            // apart two of a point light's tiles are, so a shader that thought a
-            // point light had five faces would sample another light's map for the
-            // sixth — a picture, and a plausible one.
-            format!("static const uint SHADOW_POINT_FACES = {SHADOW_POINT_FACES};"),
-        ] {
-            assert!(
-                mesh.contains(&declaration),
-                "mesh.slang does not declare `{declaration}`; the atlas's geometry has drifted"
-            );
-        }
+        // two extents went with `docs/plan/45-shadows.md`'s allocator rung — a
+        // slot's place is a rectangle the host hands over in
+        // `shadow_atlas_rect` — and the tile's own side went with the priority
+        // rung, because a map is no longer always a whole root cell and the one
+        // it landed in is read out of that same rectangle.
+        // The face count is what is left of it, and only the sampling side reads
+        // it: it is how far apart two of a point light's tiles are, so a shader
+        // that thought a point light had five faces would sample another light's
+        // map for the sixth — a picture, and a plausible one.
+        let declaration = format!("static const uint SHADOW_POINT_FACES = {SHADOW_POINT_FACES};");
+        assert!(
+            mesh.contains(&declaration),
+            "mesh.slang does not declare `{declaration}`; the atlas's geometry has drifted"
+        );
+        assert!(
+            !mesh.contains("static const float SHADOW_TILE"),
+            "mesh.slang declares a whole cell's side again. Every bias in that file is \
+             denominated in the texels of the map being sampled, and since the priority \
+             rung a map may be a halving of a cell — a constant there under-biases every \
+             demoted light by exactly the factor it was demoted by, which is acne on that \
+             light's receivers and on no other's"
+        );
         // Not atlas geometry but the same kind of number: the cascade's depth
         // range, which `crcbl_render::shadow::cascade_matrix` builds and
         // `sun_penumbra_texels` inverts. A shader holding a different one sizes
@@ -4565,6 +4575,143 @@ mod tests {
         );
     }
 
+    /// **Every bias is denominated in the texels of the map it is about**, which
+    /// since `docs/plan/45-shadows.md`'s priority rung is not one number.
+    ///
+    /// A light whose coverage earned it a halving of a root cell has half the
+    /// texels across its map and twice the world footprint per texel. Biasing it
+    /// by the *cell's* side is therefore exactly a factor of two too little per
+    /// level demoted — acne on that one light's receivers, on a frame where
+    /// every other light is right, which is as plausible a picture as this file
+    /// can draw and one a golden blessed from a scene of whole-cell lights
+    /// cannot see at all.
+    ///
+    /// Each expression is matched whole, and between them they are every
+    /// division by a texel count in the file: the sun's bias, the sun's penumbra
+    /// estimate and the punctual pair's — with `tile_texels`' own body asserted
+    /// beside them, because a reciprocal spelled the wrong way round biases
+    /// every map by the square of the atlas's own texel and still compiles.
+    ///
+    /// Where each divide sits relative to the guard in front of it is
+    /// [`no_shadow_lookup_divides_by_a_rectangle_before_it_checks_one`]'s, so
+    /// nothing here matches a line and its neighbour as one block: that is how
+    /// a text assertion ends up forbidding the very statement that had to be
+    /// inserted between them.
+    #[test]
+    fn every_shadow_bias_is_denominated_in_its_own_maps_texels() {
+        let source = include_str!("../shaders/mesh.slang");
+        let squeezed = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        for (site, expected) in [
+            (
+                "tile_texels",
+                "float tile_texels(float4 rect) { return rect.x / frame.shadow_params.x; }",
+            ),
+            (
+                "cascade_visibility",
+                "float texel_world = 2.0 * frame.cascade_far[cascade] / tile_texels(rect);",
+            ),
+            (
+                "sun_penumbra_texels",
+                "float texel_world = 2.0 * radius / tile_texels(rect);",
+            ),
+            (
+                "punctual_visibility",
+                "float texel_world = map_world / tile_texels(rect);",
+            ),
+        ] {
+            let wanted = expected.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                squeezed.contains(&wanted),
+                "{site} no longer reads the side of the map it is sampling, so a light the \
+                 allocator demoted is biased by a footprint it does not have:\n{wanted}"
+            );
+        }
+    }
+
+    /// **No shadow lookup divides by a rectangle before it has checked that the
+    /// rectangle names a map.**
+    ///
+    /// A slot no map was rendered into carries `TileRect::EMPTY`, whose `to_uv`
+    /// is four zeros, and on a frame with no cascade and no shadowed light
+    /// *every* row is that — `crates/crcbl/tests/forward_e2e/depth_probe.rs`
+    /// draws exactly such a frame. `tile_texels` divides by `rect.x` and
+    /// `atlas_step` by `rect.xy`, so the order of the guard and the divide is
+    /// the difference between answering "lit" and producing a `NaN`.
+    ///
+    /// **And a `NaN` is not merely a wrong number here.** Every comparison
+    /// against one is false, so `cascade_visibility`'s own
+    /// `any(abs(ndc.xy) > 1.0) || ndc.z <= 0.0` — the return that exists for
+    /// fragments outside the map — is false too, and the fragment walks past it
+    /// to sample the atlas at `NaN` coordinates. On llvmpipe (LLVM 20.1.2) that
+    /// is zero visibility and a black frame; on llvmpipe (LLVM 22.1.8) and on
+    /// radv it is not, which is why this went red on CI and green on every tier
+    /// this workspace can run locally.
+    ///
+    /// So the guard is asserted **by position** rather than by presence: a
+    /// guard that exists below the divide it is for is a guard that never runs.
+    /// That is a claim about the source, checkable on any machine, and it is
+    /// what a driver-dependent frame cannot be.
+    #[test]
+    fn no_shadow_lookup_divides_by_a_rectangle_before_it_checks_one() {
+        let source = include_str!("../shaders/mesh.slang");
+        for (signature, divide) in [
+            (
+                "float cascade_visibility(uint cascade, float3 world_position",
+                "tile_texels(rect)",
+            ),
+            (
+                "float punctual_visibility(uint tile, float3 world_position",
+                "tile_texels(rect)",
+            ),
+            (
+                "float tile_pcf(uint tile, float2 tile_uv, float reference",
+                "atlas_step(rect)",
+            ),
+        ] {
+            let body = one_body(source, signature);
+            let guard = body.find("atlas_rect_is_empty(rect)").unwrap_or_else(|| {
+                panic!("`{signature}` no longer asks whether its rectangle names a map at all")
+            });
+            let divides = body
+                .find(divide)
+                .unwrap_or_else(|| panic!("`{signature}` no longer divides by `{divide}`"));
+            assert!(
+                guard < divides,
+                "`{signature}` divides by its rectangle at byte {divides} and only asks \
+                 whether the rectangle names a map at {guard}. A slot with no map carries \
+                 zeros, so the divide is a NaN — and a NaN is false against every comparison \
+                 below it, including the one that would have returned lit"
+            );
+        }
+    }
+
+    /// The text of the function `signature` opens, braces counted.
+    ///
+    /// Enough for this file: nothing here has a brace inside a string literal,
+    /// and a copy that grew one would fail the assertions above rather than
+    /// pass them silently.
+    fn one_body(source: &str, signature: &str) -> String {
+        let at = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("no `{signature}` in mesh.slang"));
+        let tail = &source[at..];
+        let open = tail.find('{').expect("a function has a body");
+        let mut depth = 0i32;
+        for (offset, character) in tail[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return tail[open..=open + offset].to_owned();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("`{signature}`'s body never closes")
+    }
+
     /// **The cascade fade grows towards the cascade behind it, over a band at
     /// the outer edge of the one in front.**
     ///
@@ -4636,12 +4783,15 @@ mod tests {
              SHADOW_CASTER_REACH);",
             // A similar triangle over that height, in texels of this cascade,
             // and clamped to the span the search can speak for.
-            "float texel_world = 2.0 * radius / SHADOW_TILE;",
+            "float texel_world = 2.0 * radius / tile_texels(rect);",
             "return clamp(separation * SHADOW_SUN_TAN_RADIUS / texel_world, \
              SHADOW_FILTER_TEXELS, SHADOW_SEARCH_TEXELS);",
             // And the sun is the only light that gets it: a punctual map is a
-            // perspective projection whose depths are not a distance.
-            "return tile_pcf(light_tile(tile), tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);",
+            // perspective projection whose depths are not a distance. `atlas` is
+            // `light_tile(tile)`, resolved once at the top of
+            // `punctual_visibility` because the bias there reads that slot's
+            // rectangle too.
+            "return tile_pcf(atlas, tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);",
         ] {
             let wanted = expected.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(

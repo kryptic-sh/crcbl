@@ -175,92 +175,104 @@ float4 atlas_rect_0(uint tile_0, KernelContext_0 thread* kernelContext_2)
 }
 
 
-
-float2 atlas_step_0(float4 rect_0, KernelContext_0 thread* kernelContext_3)
+#line 700
+bool atlas_rect_is_empty_0(float4 rect_0)
 {
-    return kernelContext_3->params_0->shadow_params_0.xy / rect_0.xy;
+    return !((rect_0.x) > 0.0f);
+}
+
+
+#line 690
+float2 atlas_step_0(float4 rect_1, KernelContext_0 thread* kernelContext_3)
+{
+    return kernelContext_3->params_0->shadow_params_0.xy / rect_1.xy;
 }
 
 
 #line 610
-float2 atlas_uv_0(float4 rect_1, float2 tile_uv_0)
+float2 atlas_uv_0(float4 rect_2, float2 tile_uv_0)
 {
-    return rect_1.zw + tile_uv_0 * rect_1.xy;
+    return rect_2.zw + tile_uv_0 * rect_2.xy;
 }
 
 
-#line 698
-float tile_tap_0(float4 rect_2, float2 texel_step_0, float2 tile_uv_1, float2 spoke_0, float2 rotation_0, float reference_0, KernelContext_0 thread* kernelContext_4)
+#line 708
+float tile_tap_0(float4 rect_3, float2 texel_step_0, float2 tile_uv_1, float2 spoke_0, float2 rotation_0, float reference_0, KernelContext_0 thread* kernelContext_4)
 {
 
     float2 tile_min_0 = float2(0.5f, 0.5f) * texel_step_0;
 
     float _S2 = spoke_0.x;
 
-#line 703
+#line 713
     float _S3 = rotation_0.x;
 
-#line 703
+#line 713
     float _S4 = spoke_0.y;
 
-#line 703
+#line 713
     float _S5 = rotation_0.y;
 
 
-    float _S6 = ((kernelContext_4->shadow_atlas_0).sample_compare((kernelContext_4->shadow_sampler_0), (atlas_uv_0(rect_2, clamp(tile_uv_1 + float2(_S2 * _S3 - _S4 * _S5, _S2 * _S5 + _S4 * _S3) * texel_step_0, tile_min_0, float2(1.0f)  - tile_min_0))), (reference_0), level((0.0f))));
+    float _S6 = ((kernelContext_4->shadow_atlas_0).sample_compare((kernelContext_4->shadow_sampler_0), (atlas_uv_0(rect_3, clamp(tile_uv_1 + float2(_S2 * _S3 - _S4 * _S5, _S2 * _S5 + _S4 * _S3) * texel_step_0, tile_min_0, float2(1.0f)  - tile_min_0))), (reference_0), level((0.0f))));
 
-#line 706
+#line 716
     return _S6;
 }
 
 
-#line 724
+#line 734
 float tile_pcf_0(uint tile_1, float2 tile_uv_2, float reference_1, float2 pixel_2, float radius_0, KernelContext_0 thread* kernelContext_5)
 {
     float2 _S7 = shadow_rotation_0(pixel_2);
 
-#line 726
+#line 736
     float4 _S8 = atlas_rect_0(tile_1, kernelContext_5);
 
-#line 726
+    if(atlas_rect_is_empty_0(_S8))
+    {
+        return 1.0f;
+    }
+
+#line 740
     float2 _S9 = atlas_step_0(_S8, kernelContext_5);
 
-#line 726
+#line 740
     uint spot_0 = 0U;
 
-#line 726
+#line 740
     float probe_0 = 0.0f;
 
-#line 731
+#line 745
     for(;;)
     {
 
-#line 731
+#line 745
         if(spot_0 < 5U)
         {
         }
         else
         {
 
-#line 731
+#line 745
             break;
         }
 
-#line 731
+#line 745
         float _S10 = tile_tap_0(_S8, _S9, tile_uv_2, SHADOW_DISC_0[SHADOW_PROBE_INDEX_0[spot_0]] * float2(radius_0) , _S7, reference_1, kernelContext_5);
 
         float probe_1 = probe_0 + _S10;
 
-#line 731
+#line 745
         spot_0 = spot_0 + 1U;
 
-#line 731
+#line 745
         probe_0 = probe_1;
 
-#line 731
+#line 745
     }
 
-#line 740
+#line 754
     if(probe_0 <= 0.0f)
     {
         return 0.0f;
@@ -270,10 +282,10 @@ float tile_pcf_0(uint tile_1, float2 tile_uv_2, float reference_1, float2 pixel_
         return 1.0f;
     }
 
-#line 746
+#line 760
     uint index_1 = 0U;
 
-#line 746
+#line 760
     float visibility_0 = 0.0f;
 
 
@@ -281,116 +293,116 @@ float tile_pcf_0(uint tile_1, float2 tile_uv_2, float reference_1, float2 pixel_
     for(;;)
     {
 
-#line 750
+#line 764
         if(index_1 < 32U)
         {
         }
         else
         {
 
-#line 750
+#line 764
             break;
         }
 
-#line 750
+#line 764
         float _S11 = tile_tap_0(_S8, _S9, tile_uv_2, SHADOW_DISC_0[index_1] * float2(radius_0) , _S7, reference_1, kernelContext_5);
 
         float visibility_1 = visibility_0 + _S11;
 
-#line 750
+#line 764
         index_1 = index_1 + 1U;
 
-#line 750
+#line 764
         visibility_0 = visibility_1;
 
-#line 750
+#line 764
     }
 
-#line 755
+#line 769
     return visibility_0 / 32.0f;
 }
 
 
-#line 774
+#line 788
 float volumetric_sun_visibility_0(float3 world_position_0, float2 pixel_3, KernelContext_0 thread* kernelContext_6)
 {
 
-#line 774
+#line 788
     uint cascade_0;
 
-#line 779
+#line 793
     float _S12 = length(world_position_0 - kernelContext_6->params_0->eye_0.xyz);
 
-#line 779
+#line 793
     uint index_2 = 0U;
 
     for(;;)
     {
 
-#line 781
+#line 795
         if(index_2 < 2U)
         {
         }
         else
         {
 
-#line 781
+#line 795
             cascade_0 = 1U;
 
-#line 781
+#line 795
             break;
         }
         if(_S12 < kernelContext_6->params_0->cascade_far_0[index_2])
         {
 
-#line 783
+#line 797
             cascade_0 = index_2;
 
 
             break;
         }
 
-#line 781
+#line 795
         index_2 = index_2 + 1U;
 
-#line 781
+#line 795
     }
 
-#line 790
+#line 804
     float4 clip_0 = (((float4(world_position_0, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(0)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(0)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(0)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(0)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(1)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(1)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(1)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(1)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(2)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(2)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(2)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(2)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(3)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(3)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(3)], (&kernelContext_6->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(3)]))));
 
 
     float3 ndc_1 = clip_0.xyz / float3(clip_0.w) ;
 
-#line 793
+#line 807
     bool _S13;
     if(any((abs(ndc_1.xy)) > (float2(1.0f) )))
     {
 
-#line 794
+#line 808
         _S13 = true;
 
-#line 794
+#line 808
     }
     else
     {
 
-#line 794
+#line 808
         _S13 = (ndc_1.z) <= 0.0f;
 
-#line 794
+#line 808
     }
 
-#line 794
+#line 808
     if(_S13)
     {
         return 1.0f;
     }
 
-#line 796
+#line 810
     float _S14 = tile_pcf_0(cascade_0, float2(ndc_1.x * 0.5f + 0.5f, 0.5f - ndc_1.y * 0.5f), ndc_1.z, pixel_3, 2.0f, kernelContext_6);
 
-#line 807
+#line 821
     return _S14;
 }
 
@@ -419,60 +431,60 @@ float spot_cone_0(float3 to_light_0, float3 axis_0, float cos_outer_0, float cos
 }
 
 
-#line 817
+#line 831
 uint point_face_0(float3 from_light_0)
 {
     float3 axis_1 = abs(from_light_0);
     float _S15 = axis_1.x;
 
-#line 820
+#line 834
     float _S16 = axis_1.y;
 
-#line 820
+#line 834
     bool _S17;
 
-#line 820
+#line 834
     if(_S15 >= _S16)
     {
 
-#line 820
+#line 834
         _S17 = _S15 >= (axis_1.z);
 
-#line 820
+#line 834
     }
     else
     {
 
-#line 820
+#line 834
         _S17 = false;
 
-#line 820
+#line 834
     }
 
-#line 820
+#line 834
     uint _S18;
 
-#line 820
+#line 834
     if(_S17)
     {
         if((from_light_0.x) >= 0.0f)
         {
 
-#line 822
+#line 836
             _S18 = 0U;
 
-#line 822
+#line 836
         }
         else
         {
 
-#line 822
+#line 836
             _S18 = 1U;
 
-#line 822
+#line 836
         }
 
-#line 822
+#line 836
         return _S18;
     }
     if(_S16 >= (axis_1.z))
@@ -480,41 +492,41 @@ uint point_face_0(float3 from_light_0)
         if((from_light_0.y) >= 0.0f)
         {
 
-#line 826
+#line 840
             _S18 = 2U;
 
-#line 826
+#line 840
         }
         else
         {
 
-#line 826
+#line 840
             _S18 = 3U;
 
-#line 826
+#line 840
         }
 
-#line 826
+#line 840
         return _S18;
     }
     if((from_light_0.z) >= 0.0f)
     {
 
-#line 828
+#line 842
         _S18 = 4U;
 
-#line 828
+#line 842
     }
     else
     {
 
-#line 828
+#line 842
         _S18 = 5U;
 
-#line 828
+#line 842
     }
 
-#line 828
+#line 842
     return _S18;
 }
 
@@ -526,66 +538,66 @@ uint light_tile_0(uint tile_2)
 }
 
 
-#line 846
+#line 860
 float volumetric_punctual_visibility_0(uint tile_3, float3 world_position_1, float2 pixel_4, KernelContext_0 thread* kernelContext_7)
 {
     float4 clip_1 = (((float4(world_position_1, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(0)][int(0)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(1)][int(0)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(2)][int(0)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(3)][int(0)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(0)][int(1)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(1)][int(1)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(2)][int(1)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(3)][int(1)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(0)][int(2)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(1)][int(2)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(2)][int(2)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(3)][int(2)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(0)][int(3)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(1)][int(3)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(2)][int(3)], (&kernelContext_7->params_0->light_view_proj_0)->data_2[tile_3].data_0[int(3)][int(3)]))));
     float _S19 = clip_1.w;
 
-#line 849
+#line 863
     if(_S19 <= 0.0f)
     {
         return 1.0f;
     }
     float3 ndc_2 = clip_1.xyz / float3(_S19) ;
 
-#line 853
+#line 867
     bool _S20;
     if(any((abs(ndc_2.xy)) > (float2(1.0f) )))
     {
 
-#line 854
+#line 868
         _S20 = true;
 
-#line 854
+#line 868
     }
     else
     {
 
-#line 854
+#line 868
         _S20 = (ndc_2.z) <= 0.0f;
 
-#line 854
+#line 868
     }
 
-#line 854
+#line 868
     if(_S20)
     {
 
-#line 854
+#line 868
         _S20 = true;
 
-#line 854
+#line 868
     }
     else
     {
 
-#line 854
+#line 868
         _S20 = (ndc_2.z) > 1.0f;
 
-#line 854
+#line 868
     }
 
-#line 854
+#line 868
     if(_S20)
     {
         return 1.0f;
     }
 
-#line 856
+#line 870
     float _S21 = tile_pcf_0(light_tile_0(tile_3), float2(ndc_2.x * 0.5f + 0.5f, 0.5f - ndc_2.y * 0.5f), ndc_2.z, pixel_4, 2.0f, kernelContext_7);
 
-#line 862
+#line 876
     return _S21;
 }
 
@@ -878,7 +890,7 @@ float3 volumetric_source_0(float3 view_direction_1, float4 lit_0, KernelContext_
 }
 
 
-#line 876
+#line 890
 float4 volumetric_slice_0(float3 from_0, float3 to_0, float3 view_direction_2, float4 lit_1, KernelContext_0 thread* kernelContext_10)
 {
     float reference_2 = kernelContext_10->params_0->fog_params_0.z;
@@ -887,64 +899,64 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float3 view_direction_2, f
 
     float survives_0 = fog_exp_neg_0(fog_optical_depth_0(kernelContext_10->params_0->fog_params_0.x, kernelContext_10->params_0->fog_params_0.y, from_0.y - reference_2, to_0.y - reference_2, length(to_0 - from_0)));
 
-#line 882
+#line 896
     float3 _S34 = volumetric_source_0(view_direction_2, lit_1, kernelContext_10);
     return float4(_S34 * float3((1.0f - survives_0)) , survives_0);
 }
 
 
-#line 893
+#line 907
 [[kernel]] void scatterMain(uint3 thread_0 [[thread_position_in_grid]], VolumetricParams_natural_0 constant* params_1 [[buffer(0)]], depth2d<float, access::sample> shadow_atlas_1 [[texture(0)]], sampler shadow_sampler_1 [[sampler(0)]], uint device* cluster_lights_1 [[buffer(4)]], GpuLight_natural_0 device* lights_1 [[buffer(3)]], packed_float4 device* lighting_1 [[buffer(2)]], packed_float4 device* volumetrics_1 [[buffer(1)]])
 {
 
-#line 893
+#line 907
     thread KernelContext_0 kernelContext_11;
 
-#line 893
+#line 907
     (&kernelContext_11)->params_0 = params_1;
 
-#line 893
+#line 907
     (&kernelContext_11)->shadow_atlas_0 = shadow_atlas_1;
 
-#line 893
+#line 907
     (&kernelContext_11)->shadow_sampler_0 = shadow_sampler_1;
 
-#line 893
+#line 907
     (&kernelContext_11)->cluster_lights_0 = cluster_lights_1;
 
-#line 893
+#line 907
     (&kernelContext_11)->lights_0 = lights_1;
 
-#line 893
+#line 907
     (&kernelContext_11)->lighting_0 = lighting_1;
 
-#line 893
+#line 907
     (&kernelContext_11)->volumetrics_0 = volumetrics_1;
 
     uint froxel_1 = thread_0.x;
     uint tiles_0 = max(params_1->grid_x_0, 1U) * max(params_1->grid_y_0, 1U);
     uint _S35 = max(params_1->slices_0, 1U);
 
-#line 897
+#line 911
     bool _S36;
     if(froxel_1 >= (tiles_0 * _S35))
     {
 
-#line 898
+#line 912
         _S36 = true;
 
-#line 898
+#line 912
     }
     else
     {
 
-#line 898
+#line 912
         _S36 = froxel_1 >= ((&kernelContext_11)->params_0->froxel_count_0);
 
-#line 898
+#line 912
     }
 
-#line 898
+#line 912
     if(_S36)
     {
         return;
@@ -953,108 +965,108 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float3 view_direction_2, f
     uint tile_x_1 = froxel_1 % max(params_1->grid_x_0, 1U);
     uint _S37 = froxel_1 / max(params_1->grid_x_0, 1U);
 
-#line 904
+#line 918
     uint tile_y_1 = _S37 % max(params_1->grid_y_0, 1U);
     uint slice_0 = froxel_1 / tiles_0;
 
     thread float3 near_point_1;
     thread float near_depth_1;
 
-#line 908
+#line 922
     volumetric_tile_ray_0(tile_x_1, tile_y_1, &near_point_1, &near_depth_1, &kernelContext_11);
 
     float3 along_0 = (near_point_1 - (&kernelContext_11)->params_0->eye_0.xyz) / float3(near_depth_1) ;
 
-#line 910
+#line 924
     float from_depth_0;
 
-#line 920
+#line 934
     if(slice_0 == 0U)
     {
 
-#line 920
+#line 934
         from_depth_0 = 0.0f;
 
-#line 920
+#line 934
     }
     else
     {
 
-#line 920
+#line 934
         from_depth_0 = volumetric_slice_start_0(slice_0);
 
-#line 920
+#line 934
     }
     uint _S38 = slice_0 + 1U;
 
-#line 921
+#line 935
     float to_depth_0;
 
-#line 921
+#line 935
     if(_S38 == _S35)
     {
 
-#line 921
+#line 935
         to_depth_0 = 1000.0f;
 
-#line 921
+#line 935
     }
     else
     {
 
-#line 921
+#line 935
         to_depth_0 = volumetric_slice_start_0(_S38);
 
-#line 921
+#line 935
     }
 
     float3 from_1 = (&kernelContext_11)->params_0->eye_0.xyz + along_0 * float3(from_depth_0) ;
     float3 to_1 = (&kernelContext_11)->params_0->eye_0.xyz + along_0 * float3(to_depth_0) ;
 
-#line 937
+#line 951
     float3 middle_0 = (from_1 + to_1) * float3(0.5f) ;
     float2 pixel_6 = float2(float(tile_x_1), float(tile_y_1));
 
-#line 938
+#line 952
     float _S39 = volumetric_sun_visibility_0(middle_0, pixel_6, &kernelContext_11);
 
-#line 943
+#line 957
     float3 segment_0 = to_1 - from_1;
     float length_of_0 = length(segment_0);
 
-#line 944
+#line 958
     float3 view_direction_3;
     if(length_of_0 > 9.99999997475242708e-07f)
     {
 
-#line 945
+#line 959
         view_direction_3 = segment_0 / float3(length_of_0) ;
 
-#line 945
+#line 959
     }
     else
     {
 
-#line 945
+#line 959
         view_direction_3 = float3(0.0f, 0.0f, 1.0f);
 
-#line 945
+#line 959
     }
 
-#line 945
+#line 959
     float3 _S40 = volumetric_punctual_0(froxel_1, middle_0, view_direction_3, pixel_6, &kernelContext_11);
     float4 lit_2 = float4(_S40, _S39);
 
-#line 946
+#line 960
     *((&kernelContext_11)->lighting_0+froxel_1) = packed_float4(lit_2) ;
 
-#line 946
+#line 960
     packed_float4 device* _S41 = (&kernelContext_11)->volumetrics_0+froxel_1;
 
-#line 946
+#line 960
     float4 _S42 = volumetric_slice_0(from_1, to_1, view_direction_3, lit_2, &kernelContext_11);
 
-#line 946
+#line 960
     *_S41 = packed_float4(_S42) ;
 
 
@@ -1062,32 +1074,32 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float3 view_direction_2, f
 }
 
 
-#line 961
+#line 975
 [[kernel]] void integrateMain(uint3 thread_1 [[thread_position_in_grid]], VolumetricParams_natural_0 constant* params_2 [[buffer(0)]], depth2d<float, access::sample> shadow_atlas_2 [[texture(0)]], sampler shadow_sampler_2 [[sampler(0)]], uint device* cluster_lights_2 [[buffer(4)]], GpuLight_natural_0 device* lights_2 [[buffer(3)]], packed_float4 device* lighting_2 [[buffer(2)]], packed_float4 device* volumetrics_2 [[buffer(1)]])
 {
 
-#line 961
+#line 975
     thread KernelContext_0 kernelContext_12;
 
-#line 961
+#line 975
     (&kernelContext_12)->params_0 = params_2;
 
-#line 961
+#line 975
     (&kernelContext_12)->shadow_atlas_0 = shadow_atlas_2;
 
-#line 961
+#line 975
     (&kernelContext_12)->shadow_sampler_0 = shadow_sampler_2;
 
-#line 961
+#line 975
     (&kernelContext_12)->cluster_lights_0 = cluster_lights_2;
 
-#line 961
+#line 975
     (&kernelContext_12)->lights_0 = lights_2;
 
-#line 961
+#line 975
     (&kernelContext_12)->lighting_0 = lighting_2;
 
-#line 961
+#line 975
     (&kernelContext_12)->volumetrics_0 = volumetrics_2;
 
     uint tile_4 = thread_1.x;
@@ -1100,26 +1112,26 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float3 view_direction_2, f
 
     float3 _S44 = float3(0.0f, 0.0f, 0.0f);
 
-#line 971
+#line 985
     uint slice_1 = 0U;
 
-#line 971
+#line 985
     float3 accumulated_0 = _S44;
 
-#line 971
+#line 985
     float through_0 = 1.0f;
 
     for(;;)
     {
 
-#line 973
+#line 987
         if(slice_1 < _S43)
         {
         }
         else
         {
 
-#line 973
+#line 987
             break;
         }
         uint froxel_2 = tile_4 + slice_1 * tiles_1;
@@ -1128,10 +1140,10 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float3 view_direction_2, f
             break;
         }
 
-#line 978
+#line 992
         float4 _S45 = float4(*((&kernelContext_12)->volumetrics_0+froxel_2)) ;
 
-#line 978
+#line 992
         *((&kernelContext_12)->volumetrics_0+froxel_2) = packed_float4(float4(accumulated_0, through_0)) ;
 
 
@@ -1139,19 +1151,19 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float3 view_direction_2, f
         float3 accumulated_1 = accumulated_0 + float3(through_0)  * _S45.xyz;
         float through_1 = through_0 * _S45.w;
 
-#line 973
+#line 987
         slice_1 = slice_1 + 1U;
 
-#line 973
+#line 987
         accumulated_0 = accumulated_1;
 
-#line 973
+#line 987
         through_0 = through_1;
 
-#line 973
+#line 987
     }
 
-#line 985
+#line 999
     return;
 }
 

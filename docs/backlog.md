@@ -411,31 +411,55 @@ left behind:
   stopped needing, and because an allocator that cannot free is not one. It is
   exercised by `a_released_tile_s_space_is_reusable_at_its_own_size` and by
   nothing else; the doc comment on `release` says so too.
-- **`MIN_TILE` and `TILE_LEVELS` are unswept.** Nothing in the renderer asks for
-  a level above 0 yet, so no scene has shown where a halved shadow map stops
-  being worth the texels. The two bounds the module docs give — the finest tile
-  is still far wider than the disc `mesh.slang` filters with, and one root
-  divided that far already holds more maps than the light region has slots — are
-  an argument, not a measurement. The priority rung is what will first request a
-  sub-cell map, and the sweep belongs with it.
-- **The priority rung has to carry each tile's own side into the shader, or its
-  maps are mis-biased.** `mesh.slang`'s `SHADOW_TILE` is still the _whole
-  cell's_ side and every bias in that file is denominated in it, so a light
-  demoted to a halving would be biased by the wrong texel footprint. Invisible
-  until a light is demoted, which is why it is written down now.
-- **Nothing yet asserts that a sub-cell map samples correctly on a device.** The
-  rectangle path is exercised at one size only, because one size is what this
-  slice ships: the goldens prove the rectangle is read — a wrong rectangle moves
-  every shadowed frame — but not that a quarter-sized map's clamp, bias and
-  penumbra hold up.
-- **The atlas layout is still the fixed grid, cell for cell.**
-  `Selection::lay_out` asks for level 0 for every occupied slot, in slot order,
-  so a slot's rectangle is exactly `tile_origin(slot)` with the whole cell's
-  side — which is what let every shadow golden and
-  `crates/crcbl/tests/forward_e2e/shadow.rs`'s `tile_origin`-addressed readbacks
-  stay untouched. Those readbacks will need the renderer's own rectangle the
-  moment a light takes a halved cell, and `ForwardRenderer` exposes no accessor
-  for `Selection` today, so that slice owes one.
+- **`MIN_TILE` and `TILE_LEVELS` are still unswept, and now so is the anchor.**
+  The priority rung set `WHOLE_CELL_COVERAGE` at a quarter of the frame's
+  height, and that number is the _conservative end of a sweep bounded by the
+  fixtures that must not move_ rather than the point at which a halved map stops
+  being worth its texels. Read as texels per pixel it is generous: a light at
+  the anchor gets about three shadow texels per screen pixel at 1080p. The
+  parameter-free rule — one texel per pixel, where a map stops being oversampled
+  — would demote **every** punctual light in the tree at the 256x192 the goldens
+  are blessed at: measured 2026-08-31, `apps/lantern`'s corner downlight covers
+  0.37 of the frame and would need 0.356 at 1080p to keep a whole cell, and at
+  the golden extent it would land at `MIN_TILE`. Shipping that is a re-bless of
+  every punctual shadow golden plus `apps/lantern`'s images, which is a
+  measurement rung of its own. What it would buy is real — the atlas is heavily
+  oversampled at golden resolutions — and what it needs is a quality sweep on
+  fixtures that may be re-blessed.
+- **A demoted map's penumbra is wider in world units, and nothing measures it.**
+  `SHADOW_FILTER_TEXELS` is a reach in _tile_ texels, so a light at a quarter of
+  a root cell's side filters over four times the world distance. That is correct
+  for a map four times coarser, and it is also the largest visible difference
+  between a demoted light and a whole-cell one. No fixture compares the two.
+- **The demotion test's acne statistic is a stipple count, and the artefact is
+  partly sub-pixel.** At the shipped anchor a map delivers roughly three texels
+  per screen pixel at every level, so a receiver shadowing itself is filtered by
+  the 32-tap disc before it reaches a pixel.
+  `crates/crcbl/tests/mesh_e2e/shadow_tiles.rs`'s sweep separates a correctly
+  biased pool from a cell-biased one by about six times, which is wide enough to
+  gate on and narrower than it would be if the map were coarser than the screen.
+  A scene that put a demoted map under one texel per pixel would separate
+  further; none exists.
+- **Detachment is not asked on a device, and the test says so.** Peter-panning
+  is a gap of about the bias, and the bias on a demoted light in that fixture is
+  a hundredth of a world unit against a caster a sixth of one tall — under a
+  pixel at that camera. What holds that end is the assertion that the demoted
+  pool still has a shadow in it at all, which catches a divisor that grew
+  instead of shrinking.
+- **Only radv and lavapipe have priced the rung**, and the two runs differ in
+  the camera's distance rather than in the tile alone — the far camera also
+  selects a coarser cut in the shadow pass, since `SHADOW_LOD_BIAS` scales a
+  budget denominated in the camera's pixels. Separating the two would need a
+  knob that pinned the level, which nothing else would use.
+- **The atlas layout is the fixed grid only while every light clears the
+  anchor.** `Selection::lay_out` asks for each light's own level, coarsest
+  first, and stable-sorts so the order within one level is the slot order every
+  golden was blessed under — so a frame whose lights all reach
+  `WHOLE_CELL_COVERAGE` lays out exactly as before, cell for cell, and every
+  shadow golden and `crates/crcbl/tests/forward_e2e/shadow.rs`'s
+  `tile_origin`-addressed readbacks are untouched. Those readbacks still address
+  by `tile_origin` and would need `ForwardRenderer::shadow_lights`, which now
+  exists, the day a scene they cover demotes a light. None does.
 
 ## The render-quality programme (opened 2026-08-27)
 

@@ -180,11 +180,26 @@ pub(crate) fn render_mesh_lit(
     hdr: Option<&mut Vec<u8>>,
 ) -> crcbl_golden::Image {
     let device = headless.device.as_ref();
-    let (width, height) = MESH_EXTENT;
     let acquired = device
         .acquire_next_frame(headless.swapchain)
         .expect("the ring always has an image");
-    assert_eq!(acquired.extent, MESH_EXTENT);
+    // **The ring's own extent, not the constant.** Every golden here opens at
+    // [`MESH_EXTENT`] and reads back exactly what it always did; a suite that
+    // opens a larger ring — `tests/mesh_e2e/shadow_tiles.rs`, whose subject is
+    // a light's *share of the frame* and so needs pixels to measure it in —
+    // gets its own frame out of the same path rather than a second copy of it.
+    //
+    // What the constant used to be asserted against is asserted here instead,
+    // and it is the condition that actually binds: `copy_image_to_buffer` wants
+    // a row pitch of 256 bytes on wgpu and D3D12, which four bytes a texel
+    // makes a width divisible by 64.
+    let (width, height) = acquired.extent;
+    assert!(
+        (width * 4).is_multiple_of(256),
+        "a ring {width} texels wide has a {}-byte row, which is not the 256-byte copy pitch \
+         wgpu and D3D12 enforce",
+        width * 4
+    );
 
     let color_bytes = u64::from(width) * u64::from(height) * 4;
     let staging = device
@@ -211,7 +226,7 @@ pub(crate) fn render_mesh_lit(
     });
 
     renderer
-        .begin_frame(device, camera, light, MESH_EXTENT)
+        .begin_frame(device, camera, light, acquired.extent)
         .expect("the uniform buffer is writable");
 
     // Where the graph's realised HDR handle lands, so the copy below can name
@@ -232,7 +247,7 @@ pub(crate) fn render_mesh_lit(
                 image: acquired.image,
                 view: acquired.view,
                 format: headless.format,
-                extent: MESH_EXTENT,
+                extent: acquired.extent,
                 initial: ResourceState::Undefined,
                 claim: crcbl::render::InitialClaim::Acquired,
                 // **Not `Present`**: this frame is read back rather than shown,
@@ -243,7 +258,7 @@ pub(crate) fn render_mesh_lit(
                 final_state: ResourceState::TransferSrc,
             },
         );
-        let scene = renderer.add_passes(&mut graph, &*pool, target, MESH_EXTENT);
+        let scene = renderer.add_passes(&mut graph, &*pool, target, acquired.extent);
         if hdr_staging.is_some() {
             // One extra declaration, and the graph works out that the HDR
             // target has to move from `ShaderRead` (the tonemap sampled it) to

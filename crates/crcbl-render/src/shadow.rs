@@ -32,10 +32,17 @@
 //! image is a quadtree over [`ATLAS_COLUMNS`] by [`ATLAS_ROWS`] root cells of
 //! [`TILE`] texels, a map takes a whole cell or a halving of one down to
 //! [`MIN_TILE`], and the shader reads the rectangle it landed in — see
-//! [`Selection::atlas_rect`] and `mesh.slang`'s `atlas_uv`. Nothing yet asks for
-//! anything but a whole cell, so the arrangement is the fixed grid this rung
-//! generalised, cell for cell; the priority and budget rungs of that plan are
-//! what will spend the halvings.
+//! [`Selection::atlas_rect`] and `mesh.slang`'s `atlas_uv`.
+//!
+//! **What asks for a halving is the priority rung, and it is `coverage`**:
+//! how much of the frame's height a light's map covers on screen decides both
+//! which lights are worth a run of tiles and how large each of those tiles is.
+//! A light covering less than `WHOLE_CELL_COVERAGE` takes a quarter of a cell,
+//! and each halving of its coverage below that takes another —
+//! `tile_level` is the ladder and `LEVEL_HOLD_RATIO` the band that stops a
+//! light on a threshold halving and doubling its map every frame. A frame whose
+//! lights all clear the top of the ladder lays out exactly as the fixed grid
+//! did, cell for cell.
 //!
 //! # Two budgets, because they buy different things
 //!
@@ -141,15 +148,19 @@ pub const POINT_FACES: usize = crcbl_shaders::mesh::SHADOW_POINT_FACES;
 /// is why they are two numbers.
 pub const LIGHT_SLOTS: usize = 4;
 
-/// The side of one tile in the shadow atlas, in texels.
+/// The side of one **root cell** of the shadow atlas, in texels.
 ///
-/// One number for every tile — a per-map resolution is what a shadow atlas with
-/// a packing policy would buy, and topic 18 puts packing post-MVP.
+/// The largest map the allocator can hand out and the size of every cell of the
+/// grid the quadtree's roots are laid out on — not the size of every map, which
+/// is [`Assignment::level`]'s answer and varies with `coverage`.
 ///
-/// The shader's number rather than a second one, like every constant above it:
-/// `mesh.slang` denominates every shadow bias it applies in *tile texels*, so a
-/// host that tiled the atlas one way while the sampler scaled for another would
-/// bias every map by the ratio between them.
+/// **A host number, and no longer the shader's.** `mesh.slang` used to declare
+/// it because every shadow bias there is denominated in the texels of the map
+/// being sampled, and while every map was a whole cell the two were the same
+/// number; since the priority rung they are not, and the shader reads each map's
+/// own side out of its `shadow_atlas_rect` instead. What it sizes here is the
+/// image — see [`atlas_extent`] — which is a fact about the resource the
+/// renderer allocates and about nothing a shader can see.
 pub const TILE: u32 = crcbl_shaders::mesh::SHADOW_TILE;
 
 /// Tiles across the atlas.
@@ -840,16 +851,68 @@ fn can_be_shadowed(light: &Light) -> bool {
     }
 }
 
-/// How much of the screen a light is worth, as topic 18's rule states it:
-/// **radius over distance to the eye**.
+/// How wide a light's shadow map is in the world, at the far end of the frustum
+/// it is rendered with.
 ///
-/// The same metric family `docs/plan/25-lod.md`'s level selection uses, so there
-/// is one notion of "how much does this matter on screen" in the engine rather
-/// than two. The distance is floored so a light the eye is standing inside is
-/// the most important light there is rather than an infinity.
-fn influence(light: &Light, eye: Vec3) -> f32 {
-    let (position, radius) = light.sphere();
-    radius / eye.distance(position).max(1e-4)
+/// **The map's own footprint, not the light's sphere**, and the difference is
+/// the whole reason this is a function rather than `2 * radius`: a spot's map
+/// covers its cone and a point light's face covers a right angle, so two lights
+/// of one radius spread their texels over world regions that differ by
+/// `tan(outer)`. A narrow cone already has fine texels at the size it was given,
+/// and judging it by its sphere would demote it for being narrow.
+///
+/// A rectangle has no map — [`can_be_shadowed`] refuses it one — so it has no
+/// footprint either, and the zero it answers with is what
+/// [`tile_span`] answers for the same light and for the same reason.
+fn map_extent(light: &Light) -> f32 {
+    match light {
+        // A cube face is a 90° frustum, so its half-angle's tangent is one and
+        // the far face is exactly the light's diameter across. `point_matrix`
+        // is where that right angle is built.
+        Light::Point(point) => 2.0 * point.radius,
+        Light::Spot(spot) => {
+            // The widened angle `spot_matrix` projects with, not the field as
+            // it arrived: `Light::row` widens an outer angle narrower than the
+            // inner one, and a footprint taken from the narrower of the two
+            // would describe a map nothing renders.
+            let outer = spot.outer_angle.max(spot.inner_angle);
+            2.0 * spot.radius * outer.tan()
+        }
+        Light::Rect(_) => 0.0,
+    }
+}
+
+/// How much of the frame's **height** a light's shadow map covers on screen.
+///
+/// Topic 18's rule — "projected screen influence", the metric family
+/// `docs/plan/25-lod.md`'s level selection uses — with the two refinements this
+/// module's priority rung needed to make one number answer two questions:
+///
+/// * **[`map_extent`] rather than the sphere's diameter**, so the number is
+///   about the map rather than about the light. What decides both which lights
+///   deserve a tile and how large that tile should be is how many texels a map
+///   delivers per pixel of what it covers, and a spot's map covers its cone.
+/// * **A fraction of the frame rather than a count of pixels**, which makes it
+///   independent of the viewport: the projection's own scale over the distance
+///   to the light, with no viewport height in it at all. A scene therefore
+///   allocates the same tiles at 256×192 as at 1920×1080, which is what makes a
+///   golden at the small extent evidence about the large one.
+///
+/// **An orthographic camera has no distance falloff**, so its coverage is the
+/// footprint over the visible height and nothing else —
+/// [`Projection::pixels_per_unit`](crate::camera::Projection::pixels_per_unit)
+/// at a height of one is exactly that scale for both variants, and the divide
+/// is what only a perspective camera takes. The distance is floored so a light
+/// the eye is standing inside is the most important light there is rather than
+/// an infinity.
+fn coverage(light: &Light, camera: &Camera) -> f32 {
+    let scale = camera.projection.pixels_per_unit(1.0);
+    let extent = map_extent(light);
+    if camera.projection.is_orthographic() {
+        return extent * scale;
+    }
+    let (position, _) = light.sphere();
+    extent * scale / camera.eye.distance(position).max(1e-4)
 }
 
 /// How much better a challenger must be before it takes a tile off the light
@@ -864,6 +927,106 @@ fn influence(light: &Light, eye: Vec3) -> f32 {
 /// clearly drops.
 const HOLD_RATIO: f32 = 1.25;
 
+/// The [`coverage`] at which a light's map is worth a whole root cell, and
+/// therefore the top of the ladder [`tile_level`] walks.
+///
+/// # The ladder halves with the tile, which is why one number sets it
+///
+/// A level of the quadtree is a halving of the tile's side, so the coverage that
+/// earns it halves too: a map covering half as much of the frame delivers the
+/// same texels per pixel at half the side. Every threshold below the first is
+/// therefore this over a power of two, and there is one number here rather than
+/// [`TILE_LEVELS`] of them.
+///
+/// # What the number is, and what it is not
+///
+/// **It is the conservative end of a sweep, set by the fixtures that must not
+/// move.** Read as texels per pixel it is generous: a quarter of a 1080-pixel
+/// frame is 270 pixels of footprint against a whole cell's [`TILE`] texels, so
+/// the shipped anchor hands a light nearly three shadow texels for every screen
+/// pixel its map covers. The parameter-free rule is one texel per pixel, which
+/// is where a map stops being oversampled — a light keeps a whole cell only
+/// while its footprint spans more than half [`TILE`] pixels of the frame, so the
+/// anchor would have to be that over the frame's height and would *rise* as the
+/// frame shrinks. At the 256×192 every golden in this tree is blessed at, it
+/// demotes every punctual light in the tree, `apps/lantern`'s pair included.
+/// Shipping it is a re-bless of every punctual shadow golden, which is a
+/// measurement rung rather than this one; `docs/backlog.md` carries it.
+///
+/// Measured against the tree's own fixtures, as this metric is independent of
+/// the extent they are rendered at:
+///
+/// | Fixture                              | Coverage | Level here |
+/// | ------------------------------------ | -------- | ---------- |
+/// | `Scene::PointShadow`'s lamp          | 3.06     | 0          |
+/// | `Scene::SpotShadow`'s cone           | 1.41     | 0          |
+/// | `apps/lantern`'s lamp, worst of orbit | 1.06     | 0          |
+/// | `apps/lantern`'s corner spot         | 0.37     | 0          |
+///
+/// The corner spot is the one that binds: at this anchor it clears a whole cell
+/// by half as much again, and at an anchor of 0.375 it would not. Nothing in the
+/// tree sits inside the band [`LEVEL_HOLD_RATIO`] opens under it.
+const WHOLE_CELL_COVERAGE: f32 = 0.25;
+
+/// How far a light's [`coverage`] must fall below the threshold that earned it
+/// its tile before the tile halves.
+///
+/// `docs/plan/25-lod.md`'s "switch-up and switch-down differ", at this module's
+/// other boundary: without a band a light drifting along a threshold halves and
+/// doubles its map every frame, and a shadow whose resolution flickers is worse
+/// than one that is a size too small. A ratio rather than an offset because the
+/// thresholds are a geometric ladder — a fixed offset is most of the bottom rung
+/// and none of the top.
+///
+/// The same fifth of the budget `ForwardRenderer::lod_hold_ratio` opens for the
+/// same reason, and it is deliberately the same number: the two bands are one
+/// rule about one kind of flicker, and a reader who has understood one has
+/// understood the other.
+const LEVEL_HOLD_RATIO: f32 = 0.8;
+
+/// The [`coverage`] a map must reach to be worth level `level`.
+///
+/// [`WHOLE_CELL_COVERAGE`] halved once per level, so the ladder's steps are the
+/// quadtree's own. The coarsest level has no threshold — every eligible light
+/// gets at least [`MIN_TILE`] — and asking for one past the ladder answers with
+/// a coverage nothing reaches rather than with a level nothing can allocate.
+fn level_threshold(level: usize) -> f32 {
+    if level + 1 >= TILE_LEVELS {
+        return 0.0;
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the guard above bounds the shift by TILE_LEVELS"
+    )]
+    let halvings = (1u32 << level) as f32;
+    WHOLE_CELL_COVERAGE / halvings
+}
+
+/// Which of [`TILE_LEVELS`] tile sizes a map of `coverage` earns, given the
+/// level it held last frame.
+///
+/// `docs/plan/45-shadows.md`'s priority rung: a near, large light takes a whole
+/// cell and a far or narrow one takes a halving of it. `previous` is the level
+/// this light held last frame, or [`None`] for a light that held none — and a
+/// light with no history starts at the coarsest level and climbs, which is
+/// exactly the answer the ladder gives with no band at all. That is the property
+/// `a_light_with_no_history_lands_where_the_sharp_ladder_puts_it` reads back.
+///
+/// The two walks are the band: a tile grows only once the coverage reaches the
+/// finer level's threshold outright, and shrinks only once it falls
+/// [`LEVEL_HOLD_RATIO`] below the one it holds. Between them the previous answer
+/// stands, which is the whole of the hysteresis.
+fn tile_level(coverage: f32, previous: Option<usize>) -> usize {
+    let mut level = previous.unwrap_or(TILE_LEVELS - 1).min(TILE_LEVELS - 1);
+    while level > 0 && coverage >= level_threshold(level - 1) {
+        level -= 1;
+    }
+    while level + 1 < TILE_LEVELS && coverage < level_threshold(level) * LEVEL_HOLD_RATIO {
+        level += 1;
+    }
+    level
+}
+
 /// Whether `span` tiles from `base` are inside the light region and all free.
 ///
 /// A function rather than a closure inside [`Selection::update`]'s loop, because
@@ -872,11 +1035,14 @@ fn run_is_free(used: &[bool; LIGHT_TILES], base: usize, span: usize) -> bool {
     base + span <= LIGHT_TILES && used[base..base + span].iter().all(|tile| !*tile)
 }
 
-/// One shadowed light: which light it is, and where its run of tiles starts.
+/// One shadowed light: which light it is, where its run of tiles starts, and
+/// how large each of them is.
 ///
-/// The pair rather than a light index alone, because a slot no longer decides a
-/// tile: a spot owns one tile and a point owns [`POINT_FACES`], so where a
-/// light's map lives is an allocation and not an index.
+/// The triple rather than a light index alone, because a slot no longer decides
+/// a tile: a spot owns one tile and a point owns [`POINT_FACES`], so where a
+/// light's map lives is an allocation and not an index — and since
+/// `docs/plan/45-shadows.md`'s priority rung, how *large* it is is an allocation
+/// too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Assignment {
     /// Which light, as an index into the list [`Selection::update`] was given.
@@ -885,6 +1051,17 @@ pub struct Assignment {
     /// — so [`light_tile`] of it is the atlas tile, and it is also the number
     /// `Light::row` puts in `GpuLight::shadow_tile`.
     pub base: usize,
+    /// Which of [`TILE_LEVELS`] sizes each of those tiles is: 0 a whole root
+    /// cell of [`TILE`] texels, each one below a halving of it.
+    ///
+    /// **One level for the whole run**, which is what a point light needs: its
+    /// six faces are one map of one sphere seen six ways, and a cube with one
+    /// face finer than its neighbour would change resolution across a seam.
+    ///
+    /// Carried on the assignment rather than recomputed because it is the
+    /// hysteresis' memory — `tile_level` reads last frame's level out of
+    /// [`Selection::slots`] to decide this frame's.
+    pub level: usize,
 }
 
 /// Which lights hold the atlas's light tiles, and its memory of last frame.
@@ -922,12 +1099,17 @@ pub struct Selection {
 }
 
 impl Selection {
-    /// Re-runs the selection over `lights` for an eye at `eye`.
+    /// Re-runs the selection over `lights` for `camera`.
     ///
     /// `lights` is the caller's own list and the indices below are into it; a
     /// caller whose shader rows are offset from it — the sun is row 0 — maps
     /// them itself.
-    pub fn update(&mut self, lights: &[Light], eye: Vec3) {
+    ///
+    /// **The whole camera rather than its eye**, since the priority rung: what
+    /// a light's map covers on screen depends on the projection as well as on
+    /// the distance, and `coverage` is the one number both the ranking and the
+    /// tile size are decided by.
+    pub fn update(&mut self, lights: &[Light], camera: &Camera) {
         // Last frame's answer, kept whole: an incumbent's score is boosted and
         // its run is preferred, and both need to be read after `self.slots` has
         // been rebuilt.
@@ -946,18 +1128,24 @@ impl Selection {
         // the list, or stopped being eligible, is simply not in the ranking — the
         // list is rebuilt every frame and an index is only meaningful against the
         // list it was taken from.
-        let mut ranked: Vec<(usize, f32)> = lights
+        //
+        // The coverage rides beside the score rather than being recomputed for
+        // the light that wins a run: the score *is* the coverage with the
+        // incumbent's bonus on it, and the tile size below is decided by the
+        // coverage without it — one measurement, read twice.
+        let mut ranked: Vec<(usize, f32, f32)> = lights
             .iter()
             .enumerate()
             .filter(|(_, light)| can_be_shadowed(light))
             .map(|(index, light)| {
-                let score = influence(light, eye)
+                let coverage = coverage(light, camera);
+                let score = coverage
                     * if held_by(index).is_some() {
                         HOLD_RATIO
                     } else {
                         1.0
                     };
-                (index, score)
+                (index, score, coverage)
             })
             .collect();
         // Descending by score, ties by index. `total_cmp` rather than
@@ -973,7 +1161,7 @@ impl Selection {
         // shadowed.
         let mut used = [false; LIGHT_TILES];
         let mut chosen: Vec<Assignment> = Vec::with_capacity(LIGHT_SLOTS);
-        for (index, _) in ranked {
+        for (index, _, coverage) in ranked {
             if chosen.len() == LIGHT_SLOTS {
                 break;
             }
@@ -991,7 +1179,16 @@ impl Selection {
             for tile in &mut used[base..base + span] {
                 *tile = true;
             }
-            chosen.push(Assignment { light: index, base });
+            // The priority rung's answer, and the band around it: the level this
+            // light held last frame is what [`tile_level`] holds against, and a
+            // light that held none climbs the ladder from its bottom — which is
+            // the sharp answer.
+            let level = tile_level(coverage, held_by(index).map(|held| held.level));
+            chosen.push(Assignment {
+                light: index,
+                base,
+                level,
+            });
         }
 
         // Incumbents keep the slot they had, so a light's cull — and with it the
@@ -1028,40 +1225,69 @@ impl Selection {
     /// through a rectangle that names real texels. Then the light region's
     /// occupied slots, in slot order.
     ///
-    /// **Every request is for a whole cell.** Choosing a size per light is
-    /// `docs/plan/45-shadows.md`'s priority rung and not this one, and asking
-    /// for level 0 throughout is what makes this arrangement the fixed grid it
-    /// generalised — cell for cell, so no shadow golden moves.
+    /// **A cascade always takes a whole cell**, and a light's tiles take the
+    /// level [`tile_level`] gave its assignment. The sun's map is the one this
+    /// module never demotes: it covers the whole view rather than a light's
+    /// reach, so there is no coverage to measure it by and every fragment the
+    /// camera draws is a fragment it may shadow.
+    ///
+    /// # Coarsest first, and that is what makes the fit a fact
+    ///
+    /// The requests are sorted by level before they are spent, so every whole
+    /// cell is handed out before anything subdivides one. There are at most
+    /// [`TILES`] requests — a cascade or a light tile each, which is what the
+    /// assertion beside [`LIGHT_TILES`] counts — and each is at most a whole
+    /// root, so after `j` level-0 requests there are `TILES - j` whole roots
+    /// left for at most that many remaining requests, none of which needs more
+    /// than one. The allocation therefore cannot run out, which is why the
+    /// failure below is `unreachable!` rather than a fallback: a fallback here
+    /// would be a map rendered into a rectangle another map is also using.
+    ///
+    /// Spending a finer request first is what would break it — a level-1 request
+    /// splits a root and leaves three quarters that no whole cell can use — and
+    /// it is the only ordering constraint the allocator has.
     fn lay_out(&mut self, lights: &[Light]) {
         self.allocator.reset();
         self.rects = [TileRect::EMPTY; TILES];
-        let mut occupied = [false; LIGHT_TILES];
+        // Which level each light tile was asked for, or `None` where the tile is
+        // free. Per tile rather than per slot because a point light's run is
+        // `POINT_FACES` tiles of one level, and the atlas addresses tiles.
+        let mut levels: [Option<usize>; LIGHT_TILES] = [None; LIGHT_TILES];
         for assignment in self.slots.iter().flatten() {
             let Some(light) = lights.get(assignment.light) else {
                 continue;
             };
             let span = tile_span(light);
-            for tile in &mut occupied[assignment.base..assignment.base + span] {
-                *tile = true;
+            for tile in &mut levels[assignment.base..assignment.base + span] {
+                *tile = Some(assignment.level);
             }
         }
-        let slots = (0..CASCADES).chain(
-            occupied
-                .iter()
-                .enumerate()
-                .filter(|(_, held)| **held)
-                .map(|(tile, _)| light_tile(tile)),
-        );
-        for slot in slots {
-            // The atlas has exactly one cell per slot — `TILES` of them, which
-            // the assertion beside `LIGHT_TILES` is what holds — so a whole-cell
-            // request in slot order cannot run out. It is `unreachable!` rather
-            // than a fallback because a fallback here would be a map rendered
-            // into a rectangle another map is also using.
-            let tile = self
-                .allocator
-                .allocate(0)
-                .unwrap_or_else(|| unreachable!("one root cell per atlas slot"));
+
+        // The slot and the level it wants, cascades first and then the held
+        // light tiles in tile order — an array rather than a `Vec` because the
+        // count is bounded by the atlas's own slots and this runs every frame.
+        let mut requests = [(0usize, 0usize); TILES];
+        let mut count = 0;
+        for slot in 0..CASCADES {
+            requests[count] = (slot, 0);
+            count += 1;
+        }
+        for (tile, level) in levels.iter().enumerate() {
+            let Some(level) = *level else {
+                continue;
+            };
+            requests[count] = (light_tile(tile), level);
+            count += 1;
+        }
+        // Stable, so the order within one level is still the slot order every
+        // shadow golden was blessed under: a frame whose lights all take whole
+        // cells lays out exactly as the fixed grid did.
+        requests[..count].sort_by_key(|(_, level)| *level);
+
+        for &(slot, level) in &requests[..count] {
+            let tile = self.allocator.allocate(level).unwrap_or_else(|| {
+                unreachable!("a whole root cell per atlas slot, coarsest first")
+            });
             self.rects[slot] = tile.rect();
         }
     }
@@ -1705,9 +1931,20 @@ mod tests {
         })
     }
 
-    /// A slot holding light `light` from tile `base`, for the assertions below.
+    /// A slot holding light `light` from tile `base` at a whole root cell, for
+    /// the assertions below.
+    ///
+    /// Level 0 rather than a parameter because every light in the lists these
+    /// assertions are built from covers more of the frame than
+    /// [`WHOLE_CELL_COVERAGE`]: what they are about is which light gets a run,
+    /// and the size of that run is
+    /// [`the_tile_size_falls_with_the_coverage`]'s subject instead.
     const fn held(light: usize, base: usize) -> Option<Assignment> {
-        Some(Assignment { light, base })
+        Some(Assignment {
+            light,
+            base,
+            level: 0,
+        })
     }
 
     /// The budget goes to the lights with the largest projected influence, and a
@@ -1734,7 +1971,7 @@ mod tests {
             spot_light_at(Vec3::new(0.0, 0.0, -3.0), 2.25),
         ];
         let mut selection = Selection::default();
-        selection.update(&lights, eye);
+        selection.update(&lights, &camera_at(eye));
         assert_eq!(
             selection.slots(),
             &[held(1, 0), held(2, 1), held(3, 2), held(4, 3)],
@@ -1766,7 +2003,7 @@ mod tests {
             spot_light_at(Vec3::new(0.0, 0.0, 3.0), 1.0),
         ];
         let mut selection = Selection::default();
-        selection.update(&lights, Vec3::ZERO);
+        selection.update(&lights, &camera_at(Vec3::ZERO));
         assert_eq!(
             selection.slots(),
             &[held(0, 0), held(1, 1), held(2, 2), held(3, 3)]
@@ -1800,7 +2037,7 @@ mod tests {
             contender(1.0),
         ];
         let mut selection = Selection::default();
-        selection.update(&lights, Vec3::ZERO);
+        selection.update(&lights, &camera_at(Vec3::ZERO));
         assert_eq!(
             selection.slots(),
             &[held(0, 0), held(1, 1), held(2, 2), held(3, 3)]
@@ -1811,7 +2048,7 @@ mod tests {
         // stays in the *same* slot and on the *same* tile rather than being
         // reshuffled.
         lights[4] = contender(2.1);
-        selection.update(&lights, Vec3::ZERO);
+        selection.update(&lights, &camera_at(Vec3::ZERO));
         assert_eq!(
             selection.slots(),
             &[held(0, 0), held(1, 1), held(2, 2), held(3, 3)],
@@ -1820,7 +2057,7 @@ mod tests {
 
         // Clearly past it, and the tile changes hands.
         lights[4] = contender(2.0 * HOLD_RATIO + 0.1);
-        selection.update(&lights, Vec3::ZERO);
+        selection.update(&lights, &camera_at(Vec3::ZERO));
         assert_eq!(
             selection.slots(),
             &[held(0, 0), held(1, 1), held(2, 2), held(4, 3)],
@@ -1851,7 +2088,7 @@ mod tests {
             spot_light_at(Vec3::new(0.0, 0.0, -5.0), 1.0),
         ];
         let mut selection = Selection::default();
-        selection.update(&lights, Vec3::ZERO);
+        selection.update(&lights, &camera_at(Vec3::ZERO));
         assert_eq!(
             selection.slots(),
             &[held(2, 0), held(3, 1), held(4, 2), held(5, 3)],
@@ -1879,7 +2116,7 @@ mod tests {
             spot_light_at(Vec3::new(0.0, 0.0, -2.0), 1.0),
         ];
         let mut selection = Selection::default();
-        selection.update(&lights, Vec3::ZERO);
+        selection.update(&lights, &camera_at(Vec3::ZERO));
         assert_eq!(
             selection.slots(),
             &[held(0, 0), held(1, POINT_FACES), None, None],
@@ -1911,7 +2148,7 @@ mod tests {
             Light::Point(point_at(Vec3::new(2.0, 0.0, -1.0), 4.0)),
         ];
         let mut selection = Selection::default();
-        selection.update(&lights, Vec3::ZERO);
+        selection.update(&lights, &camera_at(Vec3::ZERO));
         assert_eq!(
             selection.slots(),
             &[held(0, 0), held(1, POINT_FACES), None, None],
@@ -1948,7 +2185,7 @@ mod tests {
             spot_light_at(Vec3::new(0.0, 0.0, -3.0), 1.0),
         ];
         let mut selection = Selection::default();
-        selection.update(&lights, Vec3::ZERO);
+        selection.update(&lights, &camera_at(Vec3::ZERO));
         assert_eq!(
             selection.slots(),
             &[
@@ -1994,7 +2231,7 @@ mod tests {
             vec![point, point, point],
             vec![point, spot, point, other, point],
         ] {
-            selection.update(&lights, Vec3::ZERO);
+            selection.update(&lights, &camera_at(Vec3::ZERO));
             let mut used = [false; LIGHT_TILES];
             for assignment in selection.slots().iter().flatten() {
                 let span = tile_span(&lights[assignment.light]);
@@ -2012,6 +2249,282 @@ mod tests {
         }
     }
 
+    /// Where a spot of this list's shape has to stand for its map to cover
+    /// `wanted` of the frame's height.
+    ///
+    /// [`coverage`] inverted, through the module's own [`map_extent`] and the
+    /// camera's own scale rather than through a second copy of the arithmetic:
+    /// what the assertions below are about is the *ladder* and its band, and a
+    /// distance written as a literal would make them about the scorer's
+    /// constants instead and go stale the moment one moved.
+    fn distance_for(wanted: f32, light: &Light, camera: &Camera) -> f32 {
+        map_extent(light) * camera.projection.pixels_per_unit(1.0) / wanted
+    }
+
+    /// A spot standing far enough down `-z` to cover `wanted` of the frame.
+    fn spot_covering(wanted: f32, camera: &Camera) -> Light {
+        let template = spot_light_at(Vec3::ZERO, 1.0);
+        let distance = distance_for(wanted, &template, camera);
+        spot_light_at(Vec3::new(0.0, 0.0, -distance), 1.0)
+    }
+
+    /// **A light with no history lands exactly where the ladder with no band at
+    /// all would put it**, which is what makes a frame's first answer
+    /// reproducible rather than a function of what ran before it.
+    ///
+    /// The two walks in [`tile_level`] start from the coarsest level, so the
+    /// shrink walk cannot fire on a fresh light and the grow walk stops at the
+    /// first threshold the coverage does not clear. Asserted against the ladder
+    /// written out independently — the first level whose threshold the coverage
+    /// reaches — rather than against [`tile_level`]'s own walk.
+    #[test]
+    fn a_light_with_no_history_lands_where_the_sharp_ladder_puts_it() {
+        // A fine grid over the whole ladder and well past its top, so every rung
+        // is sampled inside the band `LEVEL_HOLD_RATIO` opens under its
+        // threshold as well as outside it. Coarser steps would land on the
+        // thresholds themselves and miss the only coverages where a start from
+        // the wrong end of the ladder gives a different answer.
+        for numerator in 1..=512u32 {
+            let coverage = f32::from(u16::try_from(numerator).expect("a small count")) / 512.0;
+            let sharp = (0..TILE_LEVELS)
+                .find(|level| coverage >= level_threshold(*level))
+                .unwrap_or(TILE_LEVELS - 1);
+            assert_eq!(
+                tile_level(coverage, None),
+                sharp,
+                "a coverage of {coverage} with no history"
+            );
+        }
+    }
+
+    /// **A light sitting on a threshold does not flicker its tile size**, and
+    /// the band is crossed in both directions.
+    ///
+    /// The half that a one-sided test would miss is the second pair: a rule that
+    /// never shrinks is not hysteresis, it is a tile a light keeps for ever, and
+    /// a scene that walked away from its lights would spend the atlas on maps
+    /// nothing can see. Every coverage below is written as a fraction of
+    /// [`WHOLE_CELL_COVERAGE`] so the assertion is about the band rather than
+    /// about where the ladder happens to start.
+    #[test]
+    fn a_light_on_a_threshold_holds_its_tile_size_until_it_clearly_crosses() {
+        let inside_band = WHOLE_CELL_COVERAGE * (1.0 + LEVEL_HOLD_RATIO) / 2.0;
+        let past_band = WHOLE_CELL_COVERAGE * LEVEL_HOLD_RATIO * 0.95;
+        assert!(
+            past_band < WHOLE_CELL_COVERAGE * LEVEL_HOLD_RATIO && inside_band < WHOLE_CELL_COVERAGE,
+            "both excursions must be below the threshold, or the test is about the grow walk"
+        );
+
+        // Holding a whole cell, drifting under the threshold but not out of the
+        // band: the tile stays whole.
+        assert_eq!(tile_level(inside_band, Some(0)), 0);
+        // Clearly under it: the tile halves.
+        assert_eq!(tile_level(past_band, Some(0)), 1);
+        // And back the other way. Inside the band from below is *not* enough —
+        // a challenger has to reach the threshold outright — and past it is.
+        assert_eq!(tile_level(inside_band, Some(1)), 1);
+        assert_eq!(tile_level(WHOLE_CELL_COVERAGE, Some(1)), 0);
+    }
+
+    /// **A far or narrow light takes a halving of a cell and a near, large one
+    /// takes the whole of it**, which is the priority rung's whole claim and the
+    /// first thing in this tree to ask [`AtlasAllocator`] for anything but level
+    /// zero.
+    ///
+    /// Read off the rectangles rather than off the levels, because the rectangle
+    /// is what the shadow pass sets its viewport to and what the shader samples
+    /// through: a level that never reached the allocator would still pass an
+    /// assertion about [`Assignment::level`].
+    #[test]
+    fn the_tile_size_falls_with_the_coverage() {
+        let camera = camera_at(Vec3::ZERO);
+        // One coverage comfortably inside each rung of the ladder: the top one
+        // well clear of the anchor, then each threshold's midpoint below it, and
+        // one under the last threshold entirely.
+        let lights: Vec<Light> = (0..TILE_LEVELS)
+            .map(|level| {
+                let wanted = if level + 1 == TILE_LEVELS {
+                    level_threshold(level - 1) * 0.5
+                } else {
+                    level_threshold(level) * 1.5
+                };
+                spot_covering(wanted, &camera)
+            })
+            .collect();
+        let mut selection = Selection::default();
+        selection.update(&lights, &camera);
+        for (level, _) in lights.iter().enumerate() {
+            let base = selection
+                .base_of(level)
+                .unwrap_or_else(|| panic!("light {level} was given no tile"));
+            let rect = selection.atlas_rect(light_tile(base));
+            assert_eq!(
+                rect.side,
+                TILE >> level,
+                "light {level} was laid out at {rect:?}, not the level-{level} tile its \
+                 coverage earned"
+            );
+        }
+        // And the allocation is still a partition: every size at once is exactly
+        // where a quadtree can hand out a rectangle inside another one.
+        let (width, height) = atlas_extent();
+        let mut covered = vec![false; (width * height) as usize];
+        for slot in 0..TILES {
+            let rect = selection.atlas_rect(slot);
+            for row in rect.y..rect.y + rect.side {
+                for column in rect.x..rect.x + rect.side {
+                    let texel = (row * width + column) as usize;
+                    assert!(
+                        !covered[texel],
+                        "texel ({column}, {row}) is in slot {slot}'s {rect:?} and in a \
+                         slot laid out before it"
+                    );
+                    covered[texel] = true;
+                }
+            }
+        }
+    }
+
+    /// The same claim through a whole [`Selection`], with the light *moving*:
+    /// a small excursion across the threshold does not change the rectangle it
+    /// is rendered into, and a large one does.
+    ///
+    /// The unit test above is about [`tile_level`]; this one is about the memory
+    /// that feeds it. A selection that rebuilt its assignments without carrying
+    /// last frame's level would pass that test and flicker here, because every
+    /// frame would be a fresh light landing at the sharp answer.
+    #[test]
+    fn a_moving_light_keeps_its_tile_size_across_a_small_excursion() {
+        let camera = camera_at(Vec3::ZERO);
+        let inside_band = WHOLE_CELL_COVERAGE * (1.0 + LEVEL_HOLD_RATIO) / 2.0;
+        let past_band = WHOLE_CELL_COVERAGE * LEVEL_HOLD_RATIO * 0.95;
+        let mut selection = Selection::default();
+        let side = |selection: &Selection| {
+            selection
+                .atlas_rect(light_tile(selection.base_of(0).expect("a tile")))
+                .side
+        };
+
+        selection.update(
+            &[spot_covering(WHOLE_CELL_COVERAGE * 2.0, &camera)],
+            &camera,
+        );
+        assert_eq!(
+            side(&selection),
+            TILE,
+            "a light well over the anchor is a whole cell"
+        );
+
+        selection.update(&[spot_covering(inside_band, &camera)], &camera);
+        assert_eq!(
+            side(&selection),
+            TILE,
+            "a light that drifted under the threshold but not out of the band must keep \
+             the tile it had"
+        );
+
+        selection.update(&[spot_covering(past_band, &camera)], &camera);
+        assert_eq!(
+            side(&selection),
+            TILE >> 1,
+            "a light clearly under the threshold must take the halving"
+        );
+
+        selection.update(&[spot_covering(inside_band, &camera)], &camera);
+        assert_eq!(
+            side(&selection),
+            TILE >> 1,
+            "coming back inside the band is not reaching the threshold, so the tile stays \
+             halved — the half of the band a one-sided test would miss"
+        );
+
+        selection.update(&[spot_covering(WHOLE_CELL_COVERAGE, &camera)], &camera);
+        assert_eq!(
+            side(&selection),
+            TILE,
+            "reaching the threshold outright takes the whole cell back"
+        );
+    }
+
+    /// **A narrow cone is not demoted for being narrow.**
+    ///
+    /// [`coverage`] is about the map rather than about the light, which is the
+    /// difference between this rung and "radius over distance": two lights of
+    /// one radius at one distance spread their texels over world regions that
+    /// differ by `tan(outer)`, and the narrow one already has the finer texels.
+    /// Judging it by its sphere would hand the whole cell to the light that
+    /// needs it least.
+    #[test]
+    fn a_narrow_cone_outscores_a_wide_one_of_the_same_reach() {
+        let camera = camera_at(Vec3::ZERO);
+        let at = Vec3::new(0.0, 0.0, -4.0);
+        let mut narrow = spot_light_at(at, 1.0);
+        if let Light::Spot(spot) = &mut narrow {
+            spot.inner_angle = 0.05;
+            spot.outer_angle = 0.1;
+        }
+        let wide = spot_light_at(at, 1.0);
+        assert!(
+            coverage(&narrow, &camera) < coverage(&wide, &camera),
+            "a cone covering less of the frame must score below a wider one at the same reach"
+        );
+        // And the sphere metric this replaced cannot tell them apart at all,
+        // which is the reason the footprint is read instead.
+        assert_eq!(narrow.sphere().1, wide.sphere().1);
+    }
+
+    /// **A slot with no map hands the shader a rectangle of zeros, and that is
+    /// the condition every lookup in `mesh.slang` guards on.**
+    ///
+    /// The host half of `crcbl_shaders::mesh`'s
+    /// `no_shadow_lookup_divides_by_a_rectangle_before_it_checks_one`: that
+    /// test says the shader answers "lit" before it divides by a rectangle
+    /// whose `x` is not positive, and this says the rectangle it will be handed
+    /// for an empty slot is exactly that. Neither half is worth anything on its
+    /// own — a guard on a condition the host never produces is dead, and a host
+    /// producing a condition nothing guards is
+    /// `crates/crcbl/tests/forward_e2e/depth_probe.rs`'s black frame on
+    /// llvmpipe 20.1.2.
+    ///
+    /// **And a real tile is never mistaken for an empty one**, which is the
+    /// other half of a two-sided condition: the finest tile the allocator can
+    /// hand out is [`MIN_TILE`] texels, so its scale into the atlas is a
+    /// positive number and no map is ever read as absent.
+    #[test]
+    fn a_slot_with_no_map_hands_the_shader_a_rectangle_of_zeros() {
+        assert_eq!(
+            TileRect::EMPTY.to_uv(),
+            [0.0; 4],
+            "an empty slot's rectangle is what `mesh.slang`'s `atlas_rect_is_empty` tests, and \
+             it tests `x` against zero"
+        );
+
+        // A frame with no shadowed light at all — `depth_probe.rs`'s frame, and
+        // every light-region slot of it.
+        let mut selection = Selection::default();
+        selection.update(&[], &camera_at(Vec3::ZERO));
+        for tile in 0..LIGHT_TILES {
+            assert_eq!(
+                selection.atlas_rect(light_tile(tile)).to_uv(),
+                [0.0; 4],
+                "light tile {tile} of a frame with no shadowed light must read as empty"
+            );
+        }
+
+        // And every size a light can actually be given reads as present.
+        for level in 0..TILE_LEVELS {
+            let mut allocator = AtlasAllocator::new();
+            let tile = allocator
+                .allocate(level)
+                .unwrap_or_else(|| panic!("an empty atlas has room for a level-{level} tile"));
+            assert!(
+                tile.rect().to_uv()[0] > 0.0,
+                "a level-{level} tile reads as an empty slot, so `mesh.slang` would answer lit \
+                 through a map that was rendered"
+            );
+        }
+    }
+
     /// An incumbent that leaves the list — or stops being eligible — frees its
     /// tile rather than holding an index into a list that no longer has it.
     ///
@@ -2025,13 +2538,13 @@ mod tests {
             spot_light_at(Vec3::new(0.0, 0.0, -2.0), 1.0),
         ];
         let mut selection = Selection::default();
-        selection.update(&lights, Vec3::ZERO);
+        selection.update(&lights, &camera_at(Vec3::ZERO));
         assert_eq!(selection.slots(), &[held(0, 0), held(1, 1), None, None]);
 
-        selection.update(&lights[..1], Vec3::ZERO);
+        selection.update(&lights[..1], &camera_at(Vec3::ZERO));
         assert_eq!(selection.slots(), &[held(0, 0), None, None, None]);
 
-        selection.update(&[], Vec3::ZERO);
+        selection.update(&[], &camera_at(Vec3::ZERO));
         assert_eq!(selection.slots(), &[None; LIGHT_SLOTS]);
     }
 }

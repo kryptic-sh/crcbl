@@ -692,6 +692,16 @@ float2 atlas_step(float4 rect)
     return params.shadow_params.xy / rect.xy;
 }
 
+/// Whether `rect` names a map at all, `mesh.slang`'s helper — and that file
+/// carries the argument in full: a rectangle of zeros is what the host writes
+/// for a slot no map was rendered into, `atlas_step` above divides by it, and a
+/// `NaN` walks past every guard that would have caught a wrong number because
+/// every comparison against one is false.
+bool atlas_rect_is_empty(float4 rect)
+{
+    return !(rect.x > 0.0);
+}
+
 /// One tap of the filter, `mesh.slang`'s letter for letter: the spoke turned,
 /// clamped half a texel inside the tile so the sampler's own 2×2 cannot reach
 /// the neighbouring map, and compared.
@@ -725,6 +735,10 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
 {
     float2 rotation = shadow_rotation(pixel);
     float4 rect = atlas_rect(tile);
+    if (atlas_rect_is_empty(rect))
+    {
+        return 1.0;
+    }
     float2 texel_step = atlas_step(rect);
 
     float probe = 0.0;

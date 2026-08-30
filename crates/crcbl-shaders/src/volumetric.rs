@@ -1010,6 +1010,11 @@ mod tests {
             "float2 atlas_uv(float4 rect, float2 tile_uv)",
             "float4 atlas_rect(uint tile)",
             "float2 atlas_step(float4 rect)",
+            // The guard that stands in front of every divide by a rectangle. A
+            // copy that kept it in one file and not the other would leave the
+            // scatter pass sampling at `NaN` on the frames the fragment stage
+            // answers "lit" for — see `mesh.slang`'s `atlas_rect_is_empty`.
+            "bool atlas_rect_is_empty(float4 rect)",
             "uint point_face(float3 from_light)",
             "float2 shadow_rotation(float2 pixel)",
             "float tile_tap(float4 rect, float2 texel_step, float2 tile_uv, float2 spoke, \

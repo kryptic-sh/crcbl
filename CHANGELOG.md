@@ -159,6 +159,36 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A shadowed light's atlas tile is now sized by how much of the frame it
+  covers.** `crcbl_render::shadow`'s `coverage` is the share of the frame's
+  height a light's shadow map spans on screen — the map's own footprint over its
+  distance to the eye, through the projection's scale and with no viewport in
+  it, so a scene allocates the same tiles at 256x192 as at 1920x1080. A light
+  covering less than `WHOLE_CELL_COVERAGE` takes a quarter of a root cell's
+  side, and each halving of its coverage below that takes another, down to
+  `MIN_TILE`. `LEVEL_HOLD_RATIO` is the band that keeps a light drifting along a
+  threshold from halving and doubling its map every frame: a tile grows only
+  when the coverage reaches the finer level's threshold outright, and shrinks
+  only when it falls a fifth below the one it holds. `Selection::update` takes
+  the whole `&Camera` rather than an eye now, and `Assignment` carries the level
+  its light earned. Nothing in the tree is demoted by it — every shadowed light
+  in every scene and demo measures above the anchor — so no golden moved.
+
+- **Every shadow bias is denominated in the texels of the map being sampled.**
+  `mesh.slang`'s `SHADOW_TILE` is gone and `tile_texels(rect)` stands in its
+  place, read by `cascade_visibility`, `sun_penumbra_texels` and
+  `punctual_visibility`; the last of those takes the world width its whole map
+  covers at the receiver now, so the divide happens where the tile's rectangle
+  is known. Without it a demoted light would be biased by a footprint four times
+  too small per two levels, which is acne on that one light's receivers and on
+  no other's. `crcbl_shaders::mesh::SHADOW_TILE` stays as a host-only number: it
+  sizes the image and is the allocator's root cell.
+
+- **`ForwardRenderer::shadow_lights`** returns the frame's `shadow::Selection`,
+  so a caller can read which light holds which slot and what rectangle its map
+  was laid out in. It is the only observable a tile's _size_ has — a demoted
+  light draws a plausible frame that a re-blessed golden would accept.
+
 - **The debug console pastes, rebinds, toggles and resets.** `Ctrl`/`Cmd`+`V`
   puts the clipboard into the console's field: the open console records the
   press, `Loop::ask_for_paste` issues `Shell::clipboard_request` once the pump
@@ -797,16 +827,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   their parent, and `TileRect::to_uv` is the scale and offset the shader reads.
   `crcbl_shaders::mesh::FrameUniforms` gained `shadow_atlas_rect` — one `float4`
   per atlas slot — and `crcbl_shaders::volumetric::VolumetricParams` the same
-  row, so a froxel and a fragment read one map out of one rectangle.
-  `mesh.slang` and `volumetric.slang` lost `SHADOW_ATLAS_COLUMNS` and
-  `SHADOW_ATLAS_ROWS` entirely: `atlas_uv` is a scale and an offset now,
-  `atlas_step` turns an atlas texel into a step in the tile's own space, and
-  `tile_tap` takes both rather than looking them up per tap. Every map still
-  takes a whole cell, so the arrangement and every golden are what they were;
-  choosing a size per light is the priority rung that follows. **Breaking** for
-  anything that builds these blocks itself: `mesh::FRAME_UNIFORMS_SIZE` is 1648
-  where it was 1392, `volumetric::PARAMS_SIZE` grew by one `float4` per atlas
-  slot, and both structs gained a field.
+  row, so a froxel and a fragment read one map out of one rectangle. A slot with
+  no map carries a rectangle of zeros, so every shadow lookup asks
+  `atlas_rect_is_empty` before it divides by one: `tile_texels` and `atlas_step`
+  would otherwise return a NaN, and a NaN is false against every comparison
+  below them — including the bounds test that would have returned the fragment
+  lit. On llvmpipe that drew a fully black frame wherever a frame named fewer
+  maps than the atlas has slots. `mesh.slang` and `volumetric.slang` lost
+  `SHADOW_ATLAS_COLUMNS` and `SHADOW_ATLAS_ROWS` entirely: `atlas_uv` is a scale
+  and an offset now, `atlas_step` turns an atlas texel into a step in the tile's
+  own space, and `tile_tap` takes both rather than looking them up per tap.
+  Every map still takes a whole cell, so the arrangement and every golden are
+  what they were; choosing a size per light is the priority rung that follows.
+  **Breaking** for anything that builds these blocks itself:
+  `mesh::FRAME_UNIFORMS_SIZE` is 1648 where it was 1392,
+  `volumetric::PARAMS_SIZE` grew by one `float4` per atlas slot, and both
+  structs gained a field.
 
 - **`viewer`'s model argument is optional.** `viewer` with no path opens the
   shelf's Suzanne instead of exiting with a usage error; a build with no shelf

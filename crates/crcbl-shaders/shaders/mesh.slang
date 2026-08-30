@@ -290,19 +290,6 @@ static const uint SHADOW_POINT_FACES = 6;
 /// drift test that pins `SHADOW_CASCADES` pins it.
 static const uint SHADOW_ATLAS_TILES = 16;
 
-/// The side of one whole atlas cell in texels, matching
-/// `crcbl_shaders::mesh::SHADOW_TILE`.
-///
-/// Read here because every shadow bias in this file is denominated in *tile
-/// texels* — see `PUNCTUAL_DEPTH_BIAS_TEXELS` — and the world footprint of one
-/// texel is what that converts through, for a cascade as much as for a cone.
-///
-/// **The size of a whole cell, which is what every map the renderer allocates
-/// takes today.** `docs/plan/45-shadows.md`'s atlas rung made the image a
-/// quadtree, so a map may be a halving of a cell; the rung that hands one out
-/// is the rung that has to bias it by its own side rather than by this.
-static const float SHADOW_TILE = 768.0;
-
 /// Which atlas tile light tile `tile` of the light region was rendered into.
 ///
 /// The cascades take tiles `0 .. SHADOW_CASCADES` and the lights take the rest,
@@ -2699,8 +2686,9 @@ static const float SHADOW_CASTER_REACH = 40.0;
 /// # The physical number is a no-op here, and that was measured
 ///
 /// **The real sun's is 0.004634** — half of a 0.5310° disc, tangent taken. A
-/// cascade texel is `2 r / SHADOW_TILE`: 10.6 mm on the near cascade of
-/// `apps/lantern`'s split and 62.5 mm on the outer one, so the physical sun
+/// cascade texel is `2 r` over the cascade's own `tile_texels`: 10.6 mm on the
+/// near cascade of `apps/lantern`'s split and 62.5 mm on the outer one, so the
+/// physical sun
 /// needs 4.6 m of blocker separation before its penumbra reaches even
 /// [`SHADOW_FILTER_TEXELS`] on the near cascade, and 27 m on the outer one.
 /// Nothing in either test scene casts that far. Rendered at the physical value
@@ -2830,6 +2818,54 @@ float2 atlas_step(float4 rect)
     return frame.shadow_params.xy / rect.xy;
 }
 
+/// How many texels the map at `rect` is across.
+///
+/// [`atlas_step`]'s reciprocal, written as one divide: the map is `rect.x` of
+/// the atlas wide and one atlas texel is `frame.shadow_params.x` of it, so their
+/// ratio is the map's own side. Square, because a tile of the quadtree is.
+///
+/// **Every shadow bias in this file is denominated in the texels of the map
+/// being sampled**, and until `docs/plan/45-shadows.md`'s priority rung that was
+/// one number for every map — a whole root cell — declared here as
+/// `SHADOW_TILE`. A light demoted to a halving of a cell has half the texels
+/// across and twice the world footprint per texel, so biasing it by the cell's
+/// side under-biases it by exactly the factor it was demoted by, which is acne
+/// on that light's receivers and on no other's. Reading the side out of the
+/// rectangle the host allocated is what makes one pair of bias constants mean
+/// the same thing at every size.
+float tile_texels(float4 rect)
+{
+    return rect.x / frame.shadow_params.x;
+}
+
+/// Whether `rect` names a map at all.
+///
+/// **A rectangle of zeros is what the host writes for a slot no map was
+/// rendered into** — `crcbl_render::shadow::TileRect::EMPTY`, whose `to_uv` is
+/// four zeros, and every row of the block is that on a frame with no cascade
+/// and no shadowed light. So this is host data that is legitimately zero, and
+/// every arithmetic below that touches a rectangle **divides by it**:
+/// `tile_texels` by `rect.x` and `atlas_step` by `rect.xy`.
+///
+/// `0.0 / 0.0` is a `NaN`, and a `NaN` does not merely produce a wrong number —
+/// it walks past the guard that would have caught it, because every comparison
+/// against a `NaN` is false. `cascade_visibility`'s "outside this cascade's
+/// box" test is `any(abs(ndc.xy) > 1.0) || ndc.z <= 0.0`, and with a `NaN`
+/// `ndc` both halves are false and the fragment goes on to sample the atlas at
+/// `NaN` coordinates. What that draws is the driver's business: on llvmpipe
+/// (LLVM 20.1.2) it is zero visibility and a **black frame**, which is how
+/// `crates/crcbl/tests/forward_e2e/depth_probe.rs` found it, and on llvmpipe
+/// (LLVM 22.1.8) and radv it is not.
+///
+/// So every caller answers **lit** as soon as it sees this, before it divides —
+/// on the same reasoning the past-the-far-plane return already gives: a map
+/// that was never rendered knows nothing, and inventing a shadow from it is
+/// worse than admitting it.
+bool atlas_rect_is_empty(float4 rect)
+{
+    return !(rect.x > 0.0);
+}
+
 /// One tap of the shadow filter: `spoke` turned by `rotation`, clamped into the
 /// map at `rect`, and compared against `reference`.
 ///
@@ -2881,6 +2917,10 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
 {
     float2 rotation = shadow_rotation(pixel);
     float4 rect = atlas_rect(tile);
+    if (atlas_rect_is_empty(rect))
+    {
+        return 1.0;
+    }
     float2 texel_step = atlas_step(rect);
 
     float probe = 0.0;
@@ -2986,7 +3026,7 @@ float sun_penumbra_texels(uint cascade, float2 tile_uv, float reference, float2 
     // those two ends are set.
     float radius = frame.cascade_far[cascade];
     float separation = (sum / found - reference) * (2.0 * radius + SHADOW_CASTER_REACH);
-    float texel_world = 2.0 * radius / SHADOW_TILE;
+    float texel_world = 2.0 * radius / tile_texels(rect);
     return clamp(separation * SHADOW_SUN_TAN_RADIUS / texel_world,
                  SHADOW_FILTER_TEXELS,
                  SHADOW_SEARCH_TEXELS);
@@ -3045,9 +3085,12 @@ float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
     // The bias, and it is `punctual_visibility`'s exactly: two moves of the
     // world position before it is projected, each a multiple of the world
     // footprint of one texel of *this cascade's* map. A cascade is an
-    // orthographic box of `2 * radius` fitted to `SHADOW_TILE` texels, and its
-    // radius is the split distance the caller's selection read — the same
-    // arithmetic `crcbl_render::shadow::cascade_matrix` snaps its origin to.
+    // orthographic box of `2 * radius` fitted to `tile_texels` of its own
+    // rectangle, and its radius is the split distance the caller's selection
+    // read — the same arithmetic `crcbl_render::shadow::cascade_matrix` snaps
+    // its origin to. The side comes out of the rectangle rather than out of a
+    // constant because a map is no longer always a whole root cell; see
+    // `tile_texels`.
     //
     // **A number in texels rather than in shadow-clip depth**, which is the
     // whole of this: acne is the map quantising a receiver's own depth away
@@ -3070,7 +3113,14 @@ float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
     // What the two counts are and why they are what they are lives on the host,
     // in `crcbl_render::shadow`: `DEPTH_BIAS_TEXELS` and `NORMAL_OFFSET_TEXELS`
     // have the numbers and the frames they were read off.
-    float texel_world = 2.0 * frame.cascade_far[cascade] / SHADOW_TILE;
+    float4 rect = atlas_rect(cascade);
+    if (atlas_rect_is_empty(rect))
+    {
+        // No map in this slot, so nothing here was ever rendered. **Before the
+        // divide**, which is the whole point: see `atlas_rect_is_empty`.
+        return 1.0;
+    }
+    float texel_world = 2.0 * frame.cascade_far[cascade] / tile_texels(rect);
     float3 biased = world_position
                   + geometric_normal
                         * (texel_world * frame.shadow_params.w
@@ -3207,10 +3257,10 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
 /// So the offset is applied to the **world position, before projecting**, which
 /// makes it independent of the projection entirely, and it is denominated in the
 /// footprint of one shadow-map texel at the receiver — which for a frustum of
-/// half-angle `θ` at axial depth `d` is `2 d tan θ / SHADOW_TILE`, and for a
-/// cascade of radius `r` is the constant `2 r / SHADOW_TILE`. A surface at slope
-/// `s` to the light climbs `s` times that across one texel, which is the term
-/// below.
+/// half-angle `θ` at axial depth `d` is `2 d tan θ` over the map's own
+/// `tile_texels`, and for a cascade of radius `r` is `2 r` over the same. A
+/// surface at slope `s` to the light climbs `s` times that across one texel,
+/// which is the term below.
 ///
 /// **That is also why one pair of numbers covers a point light's faces as well
 /// as a spot's cone**, whose fields of view are nothing like each other: a face
@@ -3269,9 +3319,13 @@ static const float PUNCTUAL_NORMAL_OFFSET_TEXELS = 4.0;
 /// lit, `0.0` fully shadowed, the values between the PCF filter.
 ///
 /// The half a spot and a point light's face have in common, which is all of it
-/// but two numbers: `tile` is the light tile to sample and `texel_world` the
-/// world footprint of one of its texels at this receiver — see
-/// `PUNCTUAL_DEPTH_BIAS_TEXELS`, which is what that footprint is multiplied by.
+/// but two numbers: `tile` is the light tile to sample and `map_world` the world
+/// width the whole map covers at this receiver's depth — `2 d tan θ` for a
+/// frustum of half-angle `θ`. One texel of it is that over `tile_texels` of the
+/// map's own rectangle, which is what `PUNCTUAL_DEPTH_BIAS_TEXELS` multiplies,
+/// and taking the divide **here** rather than at the two call sites is what
+/// keeps a demoted map biased by its own side: the caller knows the frustum and
+/// only this function knows which rectangle the map landed in.
 /// `to_light` is the unit vector towards the light and `n_dot_l` the unclamped
 /// Lambert term, both already computed by the shading loop.
 ///
@@ -3284,8 +3338,17 @@ static const float PUNCTUAL_NORMAL_OFFSET_TEXELS = 4.0;
 /// `Scene::SpotShadow` and `Scene::PointShadow` receive on a flat floor, where
 /// the facet and the shading normal are the same vector.
 float punctual_visibility(uint tile, float3 world_position, float3 to_light, float n_dot_l,
-                          float texel_world, float3 geometric_normal, float2 pixel)
+                          float map_world, float3 geometric_normal, float2 pixel)
 {
+    uint atlas = light_tile(tile);
+    float4 rect = atlas_rect(atlas);
+    if (atlas_rect_is_empty(rect))
+    {
+        // `cascade_visibility`'s guard, for its reason: a row naming a slot the
+        // host laid no map into divides by zero here otherwise.
+        return 1.0;
+    }
+    float texel_world = map_world / tile_texels(rect);
     // Two moves, in two directions, on `sun_visibility`'s terms exactly: along
     // the normal by what the receiver's slope costs in lateral travel, and along
     // the light by the constant that covers a facet seam.
@@ -3324,7 +3387,7 @@ float punctual_visibility(uint tile, float3 world_position, float3 to_light, flo
     // perspective projection, so a difference of two of its depths is not a
     // distance until it is un-projected, and its light has no angular radius to
     // scale one by. Contact hardening for these is its own rung.
-    return tile_pcf(light_tile(tile), tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
+    return tile_pcf(atlas, tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
 }
 
 /// The fraction of a shadowed spot this fragment can see.
@@ -3352,8 +3415,8 @@ float spot_visibility(GpuLight light, uint tile, float3 world_position, float3 t
     // *before* the matrix, and a radial distance would be up to `1 / cos_outer`
     // too large at the rim.
     float axial = max(dot(world_position - light.position.xyz, normalize(light.direction.xyz)), 0.0);
-    return punctual_visibility(tile, world_position, to_light, n_dot_l,
-                               2.0 * tan_outer * axial / SHADOW_TILE, geometric_normal, pixel);
+    return punctual_visibility(tile, world_position, to_light, n_dot_l, 2.0 * tan_outer * axial,
+                               geometric_normal, pixel);
 }
 
 /// Which of a point light's six faces `from_light` — the direction from the
@@ -3400,11 +3463,11 @@ float point_visibility(GpuLight light, uint base, float3 world_position, float3 
     float3 from_light = world_position - light.position.xyz;
     // A face is a 90° frustum, so its half-angle's tangent is 1 and the axial
     // depth is the largest component of the offset — which is the same
-    // `2 d tan θ / SHADOW_TILE` a spot computes, with both terms known rather
-    // than read off the row.
+    // `2 d tan θ` a spot computes, with both terms known rather than read off
+    // the row.
     float axial = max(max(abs(from_light.x), abs(from_light.y)), abs(from_light.z));
     return punctual_visibility(base + point_face(from_light), world_position, to_light, n_dot_l,
-                               2.0 * axial / SHADOW_TILE, geometric_normal, pixel);
+                               2.0 * axial, geometric_normal, pixel);
 }
 
 /// Karis' quartic window on a light's reach: `1` at the light, **exactly zero**
