@@ -837,8 +837,20 @@ The ladder, in the order it should be climbed:
   fragment path and for the sun alone. What the rung did not anticipate is that
   the _physical_ sun buys nothing at a 768-texel tile, which the decision
   measures rather than asserts, so the shipped angle is an artistic one and says
-  so. The ladder above this is empty; what is left for shadows is the tile
-  resolution itself, and that is `docs/backlog.md`'s question, not a rung.
+  so. What is left above it is the contact rung below and the tile resolution
+  itself, which is `docs/backlog.md`'s question, not a rung.
+- **Screen-space contact shadows — DECIDED 2026-08-30: on for the medium and
+  high tiers, off on low.** A short march along the light's direction through
+  the depth prepass, per fragment, that closes the contact gap no bias and no
+  filter can: the sliver where a foot meets the floor or a book meets a shelf,
+  finer than any atlas texel. `docs/plan/43-render-standards.md` §7 ranks it the
+  cheapest real win among the screen-space marches, and it needs nothing the
+  tree lacks — the prepass is there, the Hi-Z pyramid is there. The user took
+  the recommendation as given: not a settings row of its own but a tier item —
+  its own `RenderEffects` bit, in `DEFAULT_STACK`, that foundation (g)'s low
+  preset clears; until the presets exist it is simply on. Priced on the three
+  tiers before it counts, per the standing rule, and a screen-space term, so it
+  leaves no trace on a tile and stacks with every rung above.
 
 Refused, with the reasons:
 

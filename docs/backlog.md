@@ -930,9 +930,10 @@ was surveyed against the tree the same day; what is already built (GGX + Smith
    re-rendered otherwise. `45-shadows.md`'s allocator rung carries the rule.
    Still open from this call: the budget row — shadowed local lights per frame
    and atlas size on each of the three tiers.
-4. **Screen-space contact shadows — always-on or a preset.** Not built;
-   `43-render-standards.md` §7 ranks it the cheapest real win. One march on the
-   depth prepass. Recommended: on for the mid and high tiers, off on low.
+4. ~~**Screen-space contact shadows — always-on or a preset.**~~ **DECIDED
+   2026-08-30**, the recommendation as given: on for the medium and high tiers,
+   off on low — its own `RenderEffects` bit in `DEFAULT_STACK`, cleared by
+   foundation (g)'s low preset. `45-shadows.md`'s ladder carries the rung.
 5. **An atmosphere — the model, and the §4 rule.** `43-render-standards.md` §4
    forbids a transcendental reaching a colour, and an atmosphere is `exp`
    throughout. Hillaire's model needs a transmittance LUT (sun-independent,
