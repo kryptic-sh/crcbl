@@ -79,6 +79,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The v2 vertex's attribute encodings, host side.** `crcbl_shaders::vertex` is
+  new: `QTangent` packs an orthonormal tangent frame into `snorm16x4` as a unit
+  quaternion with the frame's handedness in the sign of `w` (Crytek's QTangents,
+  with the paper's bias so a half-turn frame's `w` cannot quantise to a signless
+  zero and mirror the bitangent), `UvRange` takes a mesh's UV bounds and
+  quantises a coordinate to `unorm16x2` over them, `orthonormal_basis` is Duff
+  et al.'s branchless basis for a mesh that ships no tangent, and
+  `encode_rgba8`/`decode_rgba8` round a linear colour to bytes and back. Nothing
+  constructs a vertex through them yet — `mesh::MeshVertex` and the four shader
+  copies of it are unchanged — so what this adds is the arithmetic
+  `docs/plan/43-render-standards.md` §2's layout is made of, held to known
+  values from the papers, not the layout itself.
 - **A motion-vector pass.** `docs/plan/43-render-standards.md` §9's remaining
   half, and the last thing TAA, temporal SSR, temporal upscaling, per-object
   motion blur and SSGI's accumulation were jointly blocked on. The forward pass

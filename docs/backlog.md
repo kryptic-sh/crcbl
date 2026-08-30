@@ -12726,6 +12726,27 @@ it. Also declined: refusing with `HalError::Unsupported` on a device without the
 capability. It was tried as a falsification and the engine's frame loop fails
 every frame under it, which is the argument against it in one line.
 
+## The v2 vertex encodings: what the next slice owes (2026-08-30)
+
+`crcbl_shaders::vertex` landed host side only, by design. Left behind:
+
+- **The device half is not written.** No Slang mirror of `QTangent::decode` or
+  `UvRange::decode`, so nothing holds a host decode and a device decode to the
+  same numbers. The two hand-written frame/quaternion pairs in
+  `a_frame_extracts_the_quaternion_the_paper_writes_for_it` are what the
+  shader-side test should reuse. That, `MeshVertex` as two streams, the eight
+  constructors, `VERTEX_STRIDE` split for `crcbl-dx12`'s input layout and the
+  `UvRange` draw-constant wiring are the next slice, with its one re-bless.
+- **`QTangent` accepts any four lanes.** The field is public so the slice that
+  writes vertex bytes can read it, so `QTangent([0; 4])` decodes to `NaN`. Left
+  as is: a checked constructor for a value that today only comes out of `encode`
+  is an accessor nobody calls. Revisit when a `QTangent` is first read off disk
+  rather than computed.
+- **Coverage gap:** `UvRange::MAX_RELATIVE_ERROR` is relative to a range's
+  _extent_; a range whose offset dwarfs its extent (coordinates near 10000
+  spanning a hundredth of a unit) is dominated by `f32` spacing at that
+  magnitude and was not swept. Not believed to matter for real UVs.
+
 ## D3D12 and Metal: the hardware-proof rows stay parked (2026-08-30)
 
 **The constraint, stated by the user:** no Windows machine and no Apple machine

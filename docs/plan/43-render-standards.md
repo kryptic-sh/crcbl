@@ -147,6 +147,20 @@ normalised quaternion recovers both, its sign carries glTF's handedness, and a
 mesh that ships no tangent takes the derivative frame as its fallback until the
 importer fills one (which is the MikkTSpace call, `docs/backlog.md`'s).
 
+**The host-side encodings are built (2026-08-30).** `crcbl_shaders::vertex`
+carries the arithmetic the layout above is made of, tested on its own before any
+constructor moves: `QTangent` (the frame as a snorm16 quaternion, handedness in
+`w`'s sign, with the paper's bias for the half-turn case where `w` is zero
+exactly), `UvRange` (a mesh's bounds, the unorm16 quantisation over them, and
+the degenerate axis that must still round-trip exactly), `orthonormal_basis`
+(Duff et al.'s branchless stand-in, so the encoding never sees a missing frame),
+and the `rgba8` pair. The next slice is what spends it: `MeshVertex` becomes the
+two streams, every constructor in the list below calls into this module,
+`VERTEX_STRIDE` splits into a position stride and an attribute stride for
+`crcbl-dx12`'s input layout, the four shader copies gain a Slang decode
+mirroring `QTangent::decode` and held to the same known frames, and the goldens
+re-bless once.
+
 **Who constructs a vertex today, and so changes with it:** `crcbl_shaders::mesh`
 (the type and its cooked constants), `crcbl_shaders::dunes`,
 `crcbl_render::skinning`, `crcbl_scene::gltf_render`, `crcbl_greybox::build`,
