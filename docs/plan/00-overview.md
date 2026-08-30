@@ -149,6 +149,8 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 48    | [48-post-processing.md](48-post-processing.md)     | The post stack: pipeline order, HDR, tonemap, bloom, where toggles live   |
 | 49    | [49-antialiasing.md](49-antialiasing.md)           | Antialiasing: FXAA, SMAA 1x, TAA's blocker, and MSAA repriced             |
 | 50    | [50-irradiance-probes.md](50-irradiance-probes.md) | Irradiance probes: the static L1 grid, the diffuse GI twin                |
+| 51    | [51-volumetrics.md](51-volumetrics.md)             | Volumetrics: height fog and the froxel column                             |
+| 52    | [52-debug-console.md](52-debug-console.md)         | The debug console: variables and commands declared beside the code        |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before

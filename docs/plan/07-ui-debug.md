@@ -270,7 +270,9 @@ Surfaces for instrumentation that already exists:
 4. **Console** — log sink view with filtering + command registry (`Fn(&str)`
    handlers registered by systems). Server commands route through the normal
    transport as `Command` messages — the console works identically over a
-   network connection (server-authoritative debugging, free).
+   network connection (server-authoritative debugging, free). **Planned in full
+   and pulled forward in [52-debug-console.md](52-debug-console.md)**
+   (2026-08-30); the transport half is that plan's reserved `SIM` flag.
 5. **Debug draw controls** — toggle the stage 3 debug-draw categories (AABBs,
    system overlays) per system. **The layer those controls toggle is itself
    unbuilt, and it is a foundation rung (2026-08-30)** in

@@ -571,7 +571,9 @@ tables):
   netgraph appears when the sample has a connection. See the standing
   requirements above; the frame-timing core was pulled forward out of P10 and is
   built, and every sample contributes its own modules through it. The netgraph
-  and the rest of the debug suite are still P10.
+  and the rest of the debug suite are still P10, except the **console**, pulled
+  forward on the user's call of 2026-08-30 and planned in
+  [52-debug-console.md](52-debug-console.md).
 - **Profiling and benchmarking** ([40-profiling.md](40-profiling.md)) — CPU
   spans and counters have **landed** beside the per-pass GPU timestamps
   (`crcbl_core::trace`, `crcbl_render::FrameCounters`, `CullStatsRing`);

@@ -60,6 +60,16 @@ bit-identical on the goldens. `docs/plan/46-ambient-occlusion.md` owns the tier
 split (scalar + tint on low, bent normals on mid/high); the fix lands on the
 scalar pass first because every tier reads it.
 
+### The debug console (2026-08-30)
+
+Planned in `docs/plan/52-debug-console.md` on the user's ask — a Source-style
+console on `` ` `` in every demo, the log in a panel, an input with Send, every
+settings key a variable, `help` and autocomplete, variables declared beside the
+code. Its eight delivery slices are the plan's; nothing is built. The one
+decision the user's "go with your recs" settled: registration is a per-crate
+table gathered at one seam with a source-reading guard, not `linkme` (no wasm)
+or `inventory` (life-before-main) — see the plan's decision 2.
+
 **Also owed with it:** the AO debug view is lantern's alone today
 (`ForwardRenderer::set_occlusion_view` behind lantern's pause panel). The user
 wants every debug view available in every build and demo; the debug console
