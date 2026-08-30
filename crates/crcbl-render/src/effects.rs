@@ -4,15 +4,25 @@
 //! ```text
 //! camera stack (RON) declares what the view wants
 //!   → [engine.video] clamps it downward as a player quality setting
+//!       and its `antialiasing` rung replaces the one resolve slot
 //!   → programmatic override may set it either way
 //!   → device capability clamps it downward, last and absolutely
 //! ```
 //!
-//! [`EffectRequest`] carries the first three — they are what a caller supplies
+//! [`EffectRequest`] carries the first four — they are what a caller supplies
 //! — and [`EffectRequest::resolve`] applies the whole order in one place, which
 //! is the property topic 39 asks for by name. The renderer holds one request and
 //! one resolved set, and every pass it records reads the resolved set; nothing
 //! else in this crate branches on a layer.
+//!
+//! # The antialiasing rung is a choice, not a clamp
+//!
+//! [`Antialiasing`] is the one thing the `[engine.video]` layer **replaces**
+//! rather than removes, and that type says why: a clamp can only take the
+//! resolve away, and a player choosing SMAA where the camera asked for FXAA is
+//! asking for a different filter rather than for less of one. It is still one
+//! layer — [`EffectRequest::resolve`] applies it where the video clamp sits,
+//! before the override and before the device.
 //!
 //! # An effect that is off is a frame with fewer passes, never a shader branch
 //!
@@ -42,6 +52,7 @@
 //! | --- | --- | --- |
 //! | [`EffectRequest::camera`] | the view's own render stack | yes — a renderer per view, each with its own request |
 //! | [`EffectRequest::video`] | `[engine.video]` | yes — `crcbl`'s start-up reads it: `GpuContextDesc::settings`, `GpuContext::effect_request` |
+//! | [`EffectRequest::antialiasing`] | `[engine.video] antialiasing` | yes — the same read: `crcbl::settings::antialiasing`, `GpuContext::effect_request` |
 //! | [`EffectRequest::programmatic`] | game code | yes — [`ForwardRenderer::set_effect_request`] |
 //! | the device clamp | [`crcbl_hal::DeviceCaps`] | yes, and it removes nothing — see [`ForwardRenderer::device_effects`] |
 //!
@@ -66,9 +77,11 @@
 //! read is infallible — a player with no settings file, and a platform that
 //! names no settings directory, both mean "the player has not asked for less".
 //!
-//! **What a context reads is a ceiling, not a request.** `effect_request`
-//! returns this struct with [`video`](EffectRequest::video) filled in and the
-//! other two at their defaults, so a caller with a per-view stack writes
+//! **What a context reads is the player's answer, not a request.**
+//! `effect_request` returns this struct with
+//! [`video`](EffectRequest::video) and
+//! [`antialiasing`](EffectRequest::antialiasing) filled in and the other two at
+//! their defaults, so a caller with a per-view stack writes
 //! `EffectRequest { camera, ..ctx.effect_request() }` and keeps both.
 //!
 //! [`ForwardRenderer::set_effect_request`]: crate::ForwardRenderer::set_effect_request
@@ -102,7 +115,8 @@ bitflags::bitflags! {
         /// [`RenderEffects::DEFAULT_STACK`]; that constant says why.
         const BLOOM = 1 << 3;
         /// FXAA — the fullscreen edge filter that resolves the tonemapped
-        /// frame into the target.
+        /// frame into the target. [`Antialiasing::Fxaa`] is the rung a settings
+        /// file names it by.
         ///
         /// The second bit **not** in [`RenderEffects::DEFAULT_STACK`], and for a
         /// different reason from [`BLOOM`](Self::BLOOM)'s: this one is not a
@@ -159,6 +173,7 @@ bitflags::bitflags! {
         const AUTO_EXPOSURE = 1 << 6;
         /// SMAA 1x — the edge detection, the blend-weight pass that reads the
         /// two committed lookup tables, and the neighbourhood blend.
+        /// [`Antialiasing::Smaa`] is the rung a settings file names it by.
         ///
         /// `docs/plan/49-antialiasing.md`'s antialiasing ladder, second rung and
         /// **the higher of the two antialiasing tiers**. When it is set it takes
@@ -275,6 +290,96 @@ impl RenderEffects {
     }
 }
 
+/// Which tier fills the frame's one antialiasing slot.
+///
+/// `docs/plan/49-antialiasing.md`'s eighth decision, taken 2026-08-30 with
+/// Counter-Strike 2's video panel in front of it: the slot holds **one** filter,
+/// so the settings seam holds one ladder rather than two independent bits a
+/// panel could switch on together. The renderer still reads
+/// [`RenderEffects::ANTIALIASING`] and [`RenderEffects::SMAA`] —
+/// [`bits`](Self::bits) and [`from_effects`](Self::from_effects) are the join,
+/// and [`ForwardRenderer::add_passes`] is where the bits become passes.
+///
+/// The rungs above this one — CMAA2 in SMAA's place, then MSAA 2×, 4× and 8× —
+/// are that section's next two slices and are deliberately not here.
+///
+/// [`ForwardRenderer::add_passes`]: crate::forward::ForwardRenderer::add_passes
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Antialiasing {
+    /// Neither tier: the tonemap writes the caller's target and no resolve pass
+    /// is recorded at all.
+    None,
+    /// FXAA 3.11 — [`RenderEffects::ANTIALIASING`], one fullscreen pass.
+    Fxaa,
+    /// SMAA 1x — [`RenderEffects::SMAA`], three passes and the higher tier.
+    Smaa,
+}
+
+impl Antialiasing {
+    /// The tiers, in the order a settings ladder climbs them.
+    ///
+    /// Ascending by cost and by what it removes, which is the order
+    /// `apps/options`' `ANTIALIASING` row steps and the order
+    /// [`from_name`](Self::from_name) searches.
+    pub const ALL: [Self; 3] = [Self::None, Self::Fxaa, Self::Smaa];
+
+    /// The two bits one resolve slot is made of.
+    ///
+    /// [`EffectRequest::resolve`] clears both before it sets the chosen one, so
+    /// a set that reached it with both on cannot leave with both on.
+    const SLOT: RenderEffects = RenderEffects::ANTIALIASING.union(RenderEffects::SMAA);
+
+    /// The bits this tier sets, and no others.
+    #[must_use]
+    pub const fn bits(self) -> RenderEffects {
+        match self {
+            Self::None => RenderEffects::empty(),
+            Self::Fxaa => RenderEffects::ANTIALIASING,
+            Self::Smaa => RenderEffects::SMAA,
+        }
+    }
+
+    /// The tier `effects` draws.
+    ///
+    /// **[`Smaa`](Self::Smaa) wins where both bits are set**, because that is
+    /// the choice [`ForwardRenderer::add_passes`] makes when it fills the slot:
+    /// this answers what the frame draws rather than what the set says.
+    ///
+    /// [`ForwardRenderer::add_passes`]: crate::forward::ForwardRenderer::add_passes
+    #[must_use]
+    pub const fn from_effects(effects: RenderEffects) -> Self {
+        if effects.contains(RenderEffects::SMAA) {
+            Self::Smaa
+        } else if effects.contains(RenderEffects::ANTIALIASING) {
+            Self::Fxaa
+        } else {
+            Self::None
+        }
+    }
+
+    /// The snake_case word a settings file spells this tier with.
+    ///
+    /// **The one place a rung's spelling is written**, which is why
+    /// [`from_name`](Self::from_name) searches [`ALL`](Self::ALL) through this
+    /// rather than matching the strings a second time: two spellings of one
+    /// rung is a row a screen saves and a start-up never reads back.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Fxaa => "fxaa",
+            Self::Smaa => "smaa",
+        }
+    }
+
+    /// The tier `name` spells, or [`None`] for a word no rung
+    /// wears.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tier| tier.name() == name)
+    }
+}
+
 /// A programmatic override: which effects are forced on, and which off.
 ///
 /// The third layer, and the only one that may move a decision **either way** —
@@ -354,17 +459,17 @@ impl EffectOverride {
     }
 }
 
-/// The three layers a caller supplies, in the order they are applied.
+/// The layers a caller supplies, in the order they are applied.
 ///
-/// A struct rather than three arguments, for the reason this crate's `SsrImages`
-/// is one: two of these fields are the same type, so positional arguments could
-/// be swapped at a call site and the frame would still compile and still draw a
-/// picture.
+/// A struct rather than positional arguments, for the reason this crate's
+/// `SsrImages` is one: two of these fields are the same type, so positional
+/// arguments could be swapped at a call site and the frame would still compile
+/// and still draw a picture.
 ///
 /// [`Default`] is [`RenderEffects::DEFAULT_STACK`] wanted by the view, no
-/// quality clamp and no override — which resolves to whatever the device
-/// permits, and is what every frame the engine drew before this type existed
-/// did.
+/// quality clamp, no antialiasing choice and no override — which resolves to
+/// whatever the device permits, and is what every frame the engine drew before
+/// this type existed did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectRequest {
     /// What this **view** needs, from its render stack.
@@ -395,13 +500,28 @@ pub struct EffectRequest {
     /// missing key, a missing file and a missing settings directory all produce
     /// — a clamp that removes nothing rather than a frame with no effects in it.
     pub video: RenderEffects,
+    /// Which antialiasing tier the **player** picked, from
+    /// `[engine.video] antialiasing`.
+    ///
+    /// [`None`] is "the player has not picked one", and is what a
+    /// missing key, a missing file and a missing settings directory all produce
+    /// — the view's own stack keeps the slot it asked for.
+    ///
+    /// **The one layer that replaces rather than clamps**, and
+    /// [`Antialiasing`]'s docs carry the argument: the slot holds one filter, so
+    /// a player choosing SMAA where the camera asked for FXAA is asking for a
+    /// different filter and not for less of one. It is applied after
+    /// [`video`](Self::video) and before [`programmatic`](Self::programmatic),
+    /// so game code still has the last word before the device — see
+    /// [`resolve`](Self::resolve).
+    pub antialiasing: Option<Antialiasing>,
     /// What this **moment** calls for, from game code.
     pub programmatic: EffectOverride,
 }
 
 impl Default for EffectRequest {
-    /// [`RenderEffects::DEFAULT_STACK`] for the view, no quality clamp and no
-    /// override.
+    /// [`RenderEffects::DEFAULT_STACK`] for the view, no quality clamp, no
+    /// antialiasing choice and no override.
     ///
     /// **The camera field is the default stack rather than
     /// [`RenderEffects::all`]**, and that constant carries the argument: the
@@ -411,6 +531,7 @@ impl Default for EffectRequest {
         Self {
             camera: RenderEffects::DEFAULT_STACK,
             video: RenderEffects::all(),
+            antialiasing: None,
             programmatic: EffectOverride::none(),
         }
     }
@@ -420,9 +541,18 @@ impl EffectRequest {
     /// Applies the whole order and returns what the frame draws.
     ///
     /// ```text
-    /// camera → clamped by video → moved either way by the override
+    /// camera → clamped by video → the AA slot replaced by the player's tier
+    ///        → moved either way by the override
     ///        → clamped by device, last and absolutely
     /// ```
+    ///
+    /// **The antialiasing tier sits inside the order rather than beside it**,
+    /// and both of its neighbours matter. It is after the video clamp because a
+    /// clamp can only take the resolve away, and the player picking a *different*
+    /// filter is not a smaller ask; it is before the programmatic override
+    /// because game code is the layer that may move a decision either way, and a
+    /// tier applied after it would silently undo an override that had just
+    /// forced a resolve on or off.
     ///
     /// `device` is what the hardware can run. **It cannot be overridden
     /// upward**: asking for an effect a device has no way to draw is what
@@ -430,8 +560,12 @@ impl EffectRequest {
     /// is for, and it is not something a toggle can force.
     #[must_use]
     pub fn resolve(&self, device: RenderEffects) -> RenderEffects {
-        self.camera
-            .intersection(self.video)
+        let clamped = self.camera.intersection(self.video);
+        let chosen = match self.antialiasing {
+            Some(tier) => clamped.difference(Antialiasing::SLOT).union(tier.bits()),
+            None => clamped,
+        };
+        chosen
             .union(self.programmatic.on)
             .difference(self.programmatic.off)
             .intersection(device)
@@ -497,6 +631,7 @@ mod tests {
             camera: all,
             video: shadows,
             programmatic: EffectOverride::none().force(ao, Some(true)),
+            ..EffectRequest::default()
         };
         assert_eq!(
             forced_on.resolve(all),
@@ -518,6 +653,134 @@ mod tests {
             forced_on.resolve(all.difference(ao)),
             shadows,
             "the device clamp must be last, and must not be overridable upward"
+        );
+
+        // 5. The antialiasing tier *replaces* the resolve slot rather than
+        //    clamping it, which is the arm that fails if it is intersected with
+        //    the camera's set the way `video` is: the camera here asks for FXAA
+        //    and the player asked for SMAA, and an intersection leaves neither.
+        let smaa = RenderEffects::SMAA;
+        let picked = EffectRequest {
+            camera: RenderEffects::DEFAULT_STACK,
+            antialiasing: Some(Antialiasing::Smaa),
+            ..EffectRequest::default()
+        };
+        assert_eq!(
+            picked.resolve(all),
+            RenderEffects::DEFAULT_STACK
+                .difference(RenderEffects::ANTIALIASING)
+                .union(smaa),
+            "the player's tier must take the slot, not intersect with it"
+        );
+        assert_eq!(
+            EffectRequest {
+                antialiasing: Some(Antialiasing::None),
+                ..EffectRequest::default()
+            }
+            .resolve(all),
+            RenderEffects::DEFAULT_STACK.difference(Antialiasing::SLOT),
+            "a player who chose no tier must empty the slot, both bits of it"
+        );
+
+        // 6. And it is applied *before* the override, which is the arm that
+        //    fails if the two are swapped: game code forcing the resolve off is
+        //    the last word, and a tier applied after it would put SMAA back.
+        let forced_off_after = EffectRequest {
+            antialiasing: Some(Antialiasing::Smaa),
+            programmatic: EffectOverride::none().force(Antialiasing::SLOT, Some(false)),
+            ..EffectRequest::default()
+        };
+        assert_eq!(
+            forced_off_after.resolve(all),
+            RenderEffects::DEFAULT_STACK.difference(Antialiasing::SLOT),
+            "the override must run after the tier, not before it"
+        );
+        let forced_on_after = EffectRequest {
+            antialiasing: Some(Antialiasing::None),
+            programmatic: EffectOverride::none().force(RenderEffects::ANTIALIASING, Some(true)),
+            ..EffectRequest::default()
+        };
+        assert_eq!(
+            forced_on_after.resolve(all),
+            RenderEffects::DEFAULT_STACK,
+            "the override must be able to restore a slot the player emptied"
+        );
+
+        // 7. The device still clamps the tier, last and absolutely.
+        assert_eq!(
+            picked.resolve(all.difference(smaa)),
+            RenderEffects::DEFAULT_STACK.difference(RenderEffects::ANTIALIASING),
+            "a device with no SMAA must not draw the tier the player picked"
+        );
+    }
+
+    /// **A tier is one word, one pair of bits, and the same tier back again.**
+    ///
+    /// The spellings are written out rather than looped off
+    /// [`Antialiasing::ALL`], for the reason `crcbl::settings`' key table is:
+    /// a table used as its own oracle cannot fail, and these words are the
+    /// file-format promise — renaming one is a settings file every existing
+    /// player has already written. The match is exhaustive, so a rung added to
+    /// the enum arrives here as a build error rather than as a silent gap.
+    #[test]
+    fn a_tier_spells_one_word_and_sets_one_pair_of_bits() {
+        for tier in Antialiasing::ALL {
+            let (word, bits) = match tier {
+                Antialiasing::None => ("none", RenderEffects::empty()),
+                Antialiasing::Fxaa => ("fxaa", RenderEffects::ANTIALIASING),
+                Antialiasing::Smaa => ("smaa", RenderEffects::SMAA),
+            };
+            assert_eq!(tier.name(), word);
+            assert_eq!(Antialiasing::from_name(word), Some(tier));
+            assert_eq!(tier.bits(), bits);
+            assert!(
+                Antialiasing::SLOT.contains(tier.bits()),
+                "{tier:?} sets a bit outside the resolve slot"
+            );
+            assert_eq!(
+                Antialiasing::from_effects(tier.bits()),
+                tier,
+                "{tier:?} did not survive the trip through its own bits"
+            );
+        }
+
+        assert_eq!(
+            Antialiasing::from_name("FXAA"),
+            None,
+            "the key is snake_case"
+        );
+        assert_eq!(
+            Antialiasing::from_name("cmaa2"),
+            None,
+            "a rung that is not built"
+        );
+        assert_eq!(Antialiasing::from_name(""), None);
+
+        // Every set the two bits can be in names a tier that is on the ladder,
+        // which is what makes `ALL` the whole enum rather than most of it.
+        for extra in [
+            RenderEffects::empty(),
+            RenderEffects::ANTIALIASING,
+            RenderEffects::SMAA,
+            Antialiasing::SLOT,
+        ] {
+            let tier = Antialiasing::from_effects(extra);
+            assert!(
+                Antialiasing::ALL.contains(&tier),
+                "{extra:?} resolved to {tier:?}, which is not on the ladder"
+            );
+        }
+        assert_eq!(
+            Antialiasing::from_effects(Antialiasing::SLOT),
+            Antialiasing::Smaa,
+            "the higher tier fills the slot when both bits are set, as add_passes does",
+        );
+
+        // The rung a view that declared no stack draws, which is what the
+        // `ANTIALIASING` row is born on.
+        assert_eq!(
+            Antialiasing::from_effects(RenderEffects::DEFAULT_STACK),
+            Antialiasing::Fxaa,
         );
     }
 

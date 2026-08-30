@@ -80,14 +80,20 @@ and lavapipe. What it did not do:
   committed golden still. The browser-gate cost is therefore still unmeasured:
   three passes where FXAA is one, and the shadow-filter entry below records what
   a pass costs there.
-- **Whether SMAA should take FXAA's place in `DEFAULT_STACK` is still the user's
-  call.** It is a re-bless of every golden the bit would be on for — the set
+- **Which tier `DEFAULT_STACK` carries is still the user's call, and it is now
+  the only thing left of this question.** The row that was going to answer it is
+  built (`docs/plan/49-antialiasing.md`'s eighth decision, rung 1, landed
+  2026-08-30): `apps/options`' `ANTIALIASING` row is born on
+  `Antialiasing::from_effects(RenderEffects::DEFAULT_STACK)` and the player
+  steps off it themselves, so the constant is the default the panel shows.
+  Moving it from `Fxaa` to `Smaa` is still a one-line change to `DEFAULT_STACK`
+  plus a re-bless of every golden the bit would be on for — the set
   `docs/plan/49-antialiasing.md` priced when FXAA landed, plus whatever has been
-  blessed with the bit on since (`crates/crcbl/tests/golden/` has grown). The
-  tiers share one resolve slot, so the flip is a one-line change to
-  `DEFAULT_STACK` and the bless. Since 2026-08-30 that plan's eighth decision
-  folds the two bits into one `antialiasing` cycler row whose default _is_ this
-  answer, with MSAA rungs above it; the row is the next AA slice.
+  blessed since (`crates/crcbl/tests/golden/` has grown). Two tests pin the
+  current answer and will go red on the flip, which is intended: `apps/options`'
+  `the_antialiasing_ladder_is_the_whole_enum` and `crcbl-render`'s
+  `a_tier_spells_one_word_and_sets_one_pair_of_bits`. The CMAA2 slice retires
+  SMAA, so the flip is worth taking before it or not at all.
 - **The reference's S2x/T2x and reprojection paths are not transcribed**, and
   deliberately: they are not branched around in the shaders, they are absent, so
   `SMAA_AREATEX_SUBTEX_SIZE` still selects nothing and only the offset-zero slab

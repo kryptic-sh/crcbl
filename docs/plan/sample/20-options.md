@@ -80,18 +80,18 @@ machinery. Verified against the tree on 2026-08-28:
 - **A setting is writable from an application**, as of 2026-08-28.
   `SettingsStack::with_platform_storage` lends the storage `platform` used to
   resolve and drop, `save_platform` writes the user layer back to it, and
-  `crcbl::settings` has `set_video`, `set_video_effects`, `set_render_scale`,
-  `set_anisotropic_filtering` and `set_audio_gain` beside its readers, with
-  `SettingsSource::open` and `SettingsSource::save` as the pair a screen holds.
-  The paragraph above this section still says the only writer is a command line;
-  that was true when it was written and is not now.
+  `crcbl::settings` has `set_video`, `set_video_effects`, `set_antialiasing`,
+  `set_render_scale`, `set_anisotropic_filtering` and `set_audio_gain` beside
+  its readers, with `SettingsSource::open` and `SettingsSource::save` as the
+  pair a screen holds. The paragraph above this section still says the only
+  writer is a command line; that was true when it was written and is not now.
 - **`crates/crcbl/src/settings.rs` reads every `RenderEffects` boolean of
-  `VIDEO_KEYS`, `render_scale`, `anisotropic_filtering`, `frame_limit` and every
-  `[engine.audio]` bus volume.** `frame_limit` is the one the engine's loop
-  applies for a game, through `GameGpu::video`; the rest are handed over and
-  applied by the caller. `crcbl::settings::catalogue` is the enumeration — every
-  key the engine defines, each marked `Read` or `Named` — and
-  `crcbl settings list` marks each line of a player's file with it, so a key
+  `VIDEO_KEYS`, `antialiasing`, `render_scale`, `anisotropic_filtering`,
+  `frame_limit` and every `[engine.audio]` bus volume.** `frame_limit` is the
+  one the engine's loop applies for a game, through `GameGpu::video`; the rest
+  are handed over and applied by the caller. `crcbl::settings::catalogue` is the
+  enumeration — every key the engine defines, each marked `Read` or `Named` —
+  and `crcbl settings list` marks each line of a player's file with it, so a key
   under `engine.` that the engine does not define is reported rather than
   silently written.
 - **`crates/crcbl-audio/src/mixer.rs` has buses.** `Bus::ALL` is master, music,
@@ -162,6 +162,18 @@ machinery. Verified against the tree on 2026-08-28:
   what was chosen for each switch. `RESET` allows everything, since that is what
   an absent section means. The mark is per switch: `on (next start)` on a row
   the run came up with off.
+- **The antialiasing tier is one cycler row**, as of 2026-08-30 —
+  `docs/plan/49-antialiasing.md`'s eighth decision, rung 1. It replaced the
+  `antialiasing` and `smaa` switches, which were two booleans over one resolve
+  slot: `crcbl_render::Antialiasing` is the ladder (`none`, `fxaa`, `smaa`), the
+  `[engine.video] antialiasing` key holds its `Antialiasing::name` spelling, and
+  `EffectRequest::resolve` applies it as a _replacement_ inside the slot rather
+  than as a clamp — a clamp can only take a resolve away, and a player picking
+  SMAA where the camera asked for FXAA is asking for a different filter.
+  `menu::ANTIALIASING_ID` sits beside `ANISOTROPY`; it is born on the rung
+  `RenderEffects::DEFAULT_STACK` carries, because that is what an absent key
+  means, and `RESET` writes that rung back. It wears `menu::NEXT_START_MARK` for
+  the anisotropy's reason.
 - **The screen runs in a browser**, as of 2026-08-28: `apps/options/src/web.rs`
   carries the `__crcbl_options_*` ABI, `web/demos/options/` and
   `web/pages/options.html` are the page, and both browser-gate jobs run it. Its
@@ -197,11 +209,11 @@ machinery. Verified against the tree on 2026-08-28:
    the requested-versus-resolved display of the clamp. **The frame cap is
    done**, in `apps/options`'s `FRAME CAP` row — the cheapest of the four,
    because `crcbl::settings::frame_limit` is the only one of them with a reader
-   today — and the `ANISOTROPY` and `RENDER SCALE` rows and the seven effect
-   switches are the graphics half's keys on the screen, ahead of the tiers. What
-   the other three need first is somewhere for a change to land: a display mode
-   or a resolution is applied to a live window, not read once at start-up, so
-   each of them wants a seam this sample does not have yet.
+   today — and the `ANISOTROPY`, `ANTIALIASING` and `RENDER SCALE` rows and the
+   effect switches are the graphics half's keys on the screen, ahead of the
+   tiers. What the other three need first is somewhere for a change to land: a
+   display mode or a resolution is applied to a live window, not read once at
+   start-up, so each of them wants a seam this sample does not have yet.
 3. **The graphics half**: the quality tiers over the technique ladders, the
    preset and its custom escape hatch.
 4. **The browser half held to the same bar**, including the no-store case.

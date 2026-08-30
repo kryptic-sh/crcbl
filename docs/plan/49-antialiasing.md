@@ -261,14 +261,31 @@ What this tree has instead is **two independent bits**,
 row, so the panel can switch both on and the resolve slot picks between them out
 of sight. The next two rungs of this ladder are the CS2 shape:
 
-1. **One `antialiasing` cycler row** — `None`, `FXAA`, `CMAA2`, then the MSAA
-   rungs — so the two bits become one enum on the settings seam and one row in
-   `apps/options`. This is a settings and options change with no shader in it,
-   and it is the change that answers `docs/backlog.md`'s open question of which
-   tier `DEFAULT_STACK` carries: the row's default is that tier, and the user
-   steps off it themselves. It moves a `VIDEO_KEYS` entry, so
-   `web/tools/browser-e2e.mjs`'s `toFader` moves with it and the options browser
-   gate runs locally before it is pushed.
+1. **One `antialiasing` cycler row — built 2026-08-30.**
+   `crcbl_render::Antialiasing` is the ladder (`None`, `Fxaa`, `Smaa`; CMAA2 and
+   the MSAA rungs arrive with the slices below). The
+   `[engine.video] antialiasing` key holds `Antialiasing::name`'s word, the
+   `smaa` key is gone, and `VIDEO_KEYS` is a six-row table of pure booleans
+   again. `EffectRequest` grew `antialiasing: Option<Antialiasing>` and
+   `resolve` applies it as a **replacement** inside the AA slot — after the
+   video clamp, before the programmatic override, before the device — because a
+   clamp cannot choose SMAA where the camera asked for FXAA.
+   `GpuContext::antialiasing` reads it while the context opens and
+   `effect_request` carries it. `apps/options`' `ANTIALIASING` row sits beside
+   `ANISOTROPY`, is born on whatever `RenderEffects::DEFAULT_STACK` carries —
+   which is what an absent key means — and is corrected to the file's rung on
+   the first frame. `RenderEffects::DEFAULT_STACK` did **not** change: which
+   tier the default carries is still the answer this row's default _is_, and
+   flipping it is still the user's call and a re-bless.
+   `web/tools/browser-e2e.mjs`'s `toFader` moved with the row and the options
+   browser gate was run locally.
+
+   A file still holding the boolean reads as the meaning it had:
+   `antialiasing = true` was "the player has not asked for less", which is an
+   unpicked tier; `antialiasing = false` was "no resolve", which is
+   `Antialiasing::None`. Neither warns. No other migration — everything here is
+   v0.
+
 2. **CMAA2 in SMAA's place** — the user's call, 2026-08-30, taken with CS2's row
    in front of them, and the trade is written out under the refusal below.
    Intel's Conservative Morphological AA 2 (Strugar, 2018) is the same tier as

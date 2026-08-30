@@ -42,6 +42,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The `[engine.video] smaa` key is gone and `antialiasing` is a string, not a
+  boolean.** The two bits shared one resolve slot, so a panel could switch both
+  on and the frame picked between them out of sight —
+  `docs/plan/49-antialiasing.md`'s eighth decision folds them into one ladder.
+  `crcbl_render::Antialiasing` is that ladder (`"none"`, `"fxaa"`, `"smaa"`),
+  `crcbl::settings::antialiasing` reads the key and `set_antialiasing` writes
+  it, `ANTIALIASING_KEY` is the spelling, and `VIDEO_KEYS` is back to six pure
+  booleans. A file still holding the old boolean is answered rather than warned
+  about: `true` is an unpicked tier, `false` is `Antialiasing::None`. A `smaa`
+  row is now a key the engine does not define, and `crcbl settings list` reports
+  it as such.
+- **`EffectRequest` grew `antialiasing: Option<Antialiasing>`**, so every struct
+  literal that named all its fields needs the new one — `..Default` covers it.
+  `EffectRequest::resolve` applies the tier as a **replacement** inside the AA
+  slot, after the `[engine.video]` clamp and before the programmatic override;
+  it is the first video key that does not clamp. `GpuContext::antialiasing` is
+  the narrow accessor and `effect_request` carries it.
+- **`VideoSettings` grew `antialiasing`**, and `set_video` writes that row only
+  for a `Some`: the domain has no word for "the player has not picked", so the
+  only way a file says it is by not holding the key.
+- **`apps/options` shows one `ANTIALIASING` row** in place of the two effect
+  switches, beside `ANISOTROPY`. It is born on the tier
+  `RenderEffects::DEFAULT_STACK` carries and its heartbeat line gained an `aa:`
+  field.
 - **`Clock::limit` returns `FrameLimit`, not `Option<FrameLimit>`.** A manual
   clock answers with the limit it was given rather than `None`, because the
   browser reads the cap back off a clock that is always `Manual`; what still

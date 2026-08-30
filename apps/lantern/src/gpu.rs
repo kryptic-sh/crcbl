@@ -28,8 +28,9 @@ use crcbl::hal::{
 };
 use crcbl::prelude::*;
 use crcbl::render::{
-    EffectOverride, EffectRequest, ForwardRenderer, ImportedImage, MAX_TIMED_PASSES, MenuRenderer,
-    PassTimers, RenderEffects, RenderGraph, TransientImageDesc, TransientPool, UiRenderer,
+    Antialiasing, EffectOverride, EffectRequest, ForwardRenderer, ImportedImage, MAX_TIMED_PASSES,
+    MenuRenderer, PassTimers, RenderEffects, RenderGraph, TransientImageDesc, TransientPool,
+    UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -60,8 +61,8 @@ const MONITOR_FORMAT: Format = Format::Rgba8UnormSrgb;
 /// which `PassTimers` reports as one warning and then lives with.
 const LANTERN_TIMED_PASSES: u32 = MAX_TIMED_PASSES + ForwardRenderer::MAX_PASSES + 1;
 
-/// The three requested layers for `view`, given what the command line asked for
-/// and what the player's settings allow.
+/// The requested layers for `view`, given what the command line asked for and
+/// what the player's settings allow.
 ///
 /// **The camera layer is the view's, the video layer is the player's and the
 /// programmatic layer is the run's**, which is the whole of
@@ -76,10 +77,20 @@ const LANTERN_TIMED_PASSES: u32 = MAX_TIMED_PASSES + ForwardRenderer::MAX_PASSES
 /// this run has only ever *removes*: `--no-*` sets the programmatic layer's off
 /// bits and nothing here forces one back on, so the video layer's clamp is the
 /// last word on an effect it took.
-fn request_for(view: room::View, video: RenderEffects, effects: RenderEffects) -> EffectRequest {
+///
+/// `antialiasing` is the player's too and is the one layer that is not a clamp
+/// — see [`EffectRequest::antialiasing`]. A run's `--no-*` flags still have the
+/// last word over it, because the override is applied after it.
+fn request_for(
+    view: room::View,
+    video: RenderEffects,
+    antialiasing: Option<Antialiasing>,
+    effects: RenderEffects,
+) -> EffectRequest {
     EffectRequest {
         camera: view.stack(),
         video,
+        antialiasing,
         programmatic: EffectOverride::none()
             .force(RenderEffects::all().difference(effects), Some(false)),
     }
@@ -493,8 +504,14 @@ impl Gpu {
         // camera stack is the view's and the programmatic override is the run's
         // — see [`request_for`].
         let video = ctx.video_effects();
-        renderer.set_effect_request(request_for(room::View::Main, video, effects));
-        monitor.set_effect_request(request_for(room::View::Monitor, video, effects));
+        let antialiasing = ctx.antialiasing();
+        renderer.set_effect_request(request_for(room::View::Main, video, antialiasing, effects));
+        monitor.set_effect_request(request_for(
+            room::View::Monitor,
+            video,
+            antialiasing,
+            effects,
+        ));
         // Resolved rather than requested: the device clamps last, so what the
         // panel and the summary report has to come back off the renderer.
         let paths = Paths::of(
@@ -1161,8 +1178,8 @@ mod tests {
 
         let device = RenderEffects::all();
         let all = RenderEffects::all();
-        let main = request_for(room::View::Main, all, all).resolve(device);
-        let monitor = request_for(room::View::Monitor, all, all).resolve(device);
+        let main = request_for(room::View::Main, all, None, all).resolve(device);
+        let monitor = request_for(room::View::Monitor, all, None, all).resolve(device);
         assert!(main.contains(RenderEffects::REFLECTIONS));
         assert!(
             !monitor.contains(RenderEffects::REFLECTIONS),
@@ -1208,8 +1225,8 @@ mod tests {
         let all = RenderEffects::all();
         let video = all.difference(RenderEffects::SHADOWS);
 
-        let main = request_for(room::View::Main, video, all).resolve(device);
-        let monitor = request_for(room::View::Monitor, video, all).resolve(device);
+        let main = request_for(room::View::Main, video, None, all).resolve(device);
+        let monitor = request_for(room::View::Monitor, video, None, all).resolve(device);
         assert_eq!(
             main,
             room::View::Main.stack().difference(RenderEffects::SHADOWS),
@@ -1329,6 +1346,31 @@ mod tests {
                 "`{key} = false` did not reach the monitor's own view",
             );
         }
+
+        // **The antialiasing tier, which is the layer that replaces rather than
+        // clamps** — the guard for `let antialiasing = ctx.antialiasing()`
+        // beside the line above. Both views ask for FXAA by carrying
+        // `DEFAULT_STACK`'s resolve bit, so a tier that never arrived leaves
+        // them exactly as the control above, and only a file naming the *other*
+        // rung can tell the two apart.
+        let storage = settings_file("[engine.video]\nantialiasing = \"smaa\"\n");
+        let (picked, picked_monitor) =
+            effects_opened_with(crcbl::engine::SettingsSource::Source(&storage));
+        let swapped = |stack: RenderEffects| {
+            stack
+                .difference(RenderEffects::ANTIALIASING)
+                .union(RenderEffects::SMAA)
+        };
+        assert_eq!(
+            picked,
+            swapped(main),
+            "`antialiasing = \"smaa\"` did not reach the room this sample draws",
+        );
+        assert_eq!(
+            picked_monitor,
+            swapped(monitor),
+            "`antialiasing = \"smaa\"` did not reach the monitor's own view",
+        );
     }
 
     /// **A run's `--no-*` flags reach both views, and the camera layer still
@@ -1344,8 +1386,8 @@ mod tests {
         let without_shadows = RenderEffects::all().difference(RenderEffects::SHADOWS);
 
         let all = RenderEffects::all();
-        let main = request_for(room::View::Main, all, without_shadows).resolve(device);
-        let monitor = request_for(room::View::Monitor, all, without_shadows).resolve(device);
+        let main = request_for(room::View::Main, all, None, without_shadows).resolve(device);
+        let monitor = request_for(room::View::Monitor, all, None, without_shadows).resolve(device);
         assert_eq!(
             main,
             room::View::Main.stack().difference(RenderEffects::SHADOWS)

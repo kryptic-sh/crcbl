@@ -31,7 +31,7 @@
 
 use crcbl::audio::mixer::Bus;
 use crcbl::engine::{DEBUG_OVERLAY_ID, FIRST_GAME_ID, FULLSCREEN_ID, FrameLimit};
-use crcbl::render::{DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEffects};
+use crcbl::render::{Antialiasing, DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEffects};
 use crcbl::settings::VIDEO_KEYS;
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet, Slider};
 
@@ -216,8 +216,65 @@ pub fn anisotropy_label(anisotropy: f32) -> String {
     }
 }
 
+/// The id of the row that steps `[engine.video] antialiasing`.
+pub const ANTIALIASING_ID: crcbl::ui::WidgetId = ANISOTROPY_ID + 1;
+
+/// The rung an absent `antialiasing` key means: whatever the game's own stack
+/// carries in its resolve slot.
+///
+/// Read off [`RenderEffects::DEFAULT_STACK`] rather than written down, because
+/// that constant is the thing an absent key defers to — a row born on a
+/// different rung would show the player a tier the run is not drawing, on the
+/// very first frame and for a file with nothing wrong with it.
+pub const DEFAULT_ANTIALIASING: Antialiasing =
+    Antialiasing::from_effects(RenderEffects::DEFAULT_STACK);
+
+/// [`rung_of`] over [`Antialiasing::ALL`].
+///
+/// **Not [`rung_of`] itself**, and the difference is what the enum bought: the
+/// key's reader answers with a rung or with nothing at all, so there is no
+/// value between rungs for the highest-rung-not-above rule to place. A tier
+/// missing from the ladder would be a rung a player could reach from a file and
+/// not from the row, which `the_antialiasing_ladder_is_the_whole_enum` is what
+/// catches.
+#[must_use]
+pub fn antialiasing_rung(current: Antialiasing) -> usize {
+    Antialiasing::ALL
+        .iter()
+        .position(|rung| *rung == current)
+        .unwrap_or(0)
+}
+
+/// [`stepped`] over [`Antialiasing::ALL`]: the rung the widget chose.
+///
+/// Not [`stepped`] itself for [`antialiasing_rung`]'s reason — there is no
+/// off-ladder value to step *from*, so all that is left of that function is its
+/// first branch.
+#[must_use]
+pub fn antialiasing_stepped(chosen: usize) -> Antialiasing {
+    Antialiasing::ALL
+        .get(chosen)
+        .copied()
+        .unwrap_or(Antialiasing::ALL[0])
+}
+
+/// How a tier is written beside its row: `off` at the bottom rung, since no
+/// resolve at all is what a player reads as off, and the key's own word above
+/// it.
+///
+/// The upper rungs are [`Antialiasing::name`]'s spelling rather than a second
+/// one, so the row and the settings-file panel under `F3` cannot disagree about
+/// which filter is picked.
+#[must_use]
+pub const fn antialiasing_label(tier: Antialiasing) -> &'static str {
+    match tier {
+        Antialiasing::None => "off",
+        other => other.name(),
+    }
+}
+
 /// The id of the groove that sets `[engine.video] render_scale`.
-pub const RENDER_SCALE_ID: crcbl::ui::WidgetId = ANISOTROPY_ID + 1;
+pub const RENDER_SCALE_ID: crcbl::ui::WidgetId = ANTIALIASING_ID + 1;
 
 /// The render scale a handle `position` of the way along the groove names.
 ///
@@ -418,7 +475,21 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
             ANISOTROPIES.len(),
             anisotropy_rung(DEFAULT_ANISOTROPY),
         ),
-        // The third video key, a groove: the whole extent at the right end,
+        // The AA ladder, beside the other two: it is a video key rather than an
+        // effect switch, because one resolve slot cannot be two independent
+        // bits. **Born on the game's own rung** — whatever
+        // `RenderEffects::DEFAULT_STACK` carries — rather than on the bottom of
+        // the ladder, because that is what an absent key means here: the view's
+        // stack keeps the slot. The first frame corrects it to the file's rung
+        // like the two above.
+        MenuItem::cycler(
+            ANTIALIASING_ID,
+            "ANTIALIASING",
+            antialiasing_label(DEFAULT_ANTIALIASING),
+            Antialiasing::ALL.len(),
+            antialiasing_rung(DEFAULT_ANTIALIASING),
+        ),
+        // The fourth video key, a groove: the whole extent at the right end,
         // which is what an absent key means. Walked down to the file's value
         // by the first frame, like a fader.
         MenuItem::slider(RENDER_SCALE_ID, "RENDER SCALE", percent(1.0), 1.0),
@@ -617,6 +688,56 @@ mod tests {
         assert_eq!(anisotropy_stepped(0.5, true, 1), ANISOTROPIES[0]);
         assert_eq!(anisotropy_stepped(0.5, false, 0), ANISOTROPIES[0]);
         assert_eq!(anisotropy_rung(f32::NAN), ANISOTROPIES.len() - 1);
+    }
+
+    /// **The AA ladder is the whole enum, in the enum's own order, and every
+    /// rung names itself back.**
+    ///
+    /// A tier missing from the ladder is a rung a player can reach by editing
+    /// the file and cannot reach from the row — a setting the screen shows and
+    /// cannot restore. The labels are checked against
+    /// [`Antialiasing::name`] rather than written out, so the row and the
+    /// settings-file panel cannot drift; `off` is the one word that is the
+    /// screen's rather than the key's, and it is asserted to be exactly that.
+    #[test]
+    fn the_antialiasing_ladder_is_the_whole_enum() {
+        for (index, tier) in Antialiasing::ALL.into_iter().enumerate() {
+            assert_eq!(antialiasing_rung(tier), index, "{tier:?}");
+            assert_eq!(antialiasing_stepped(index), tier);
+            let next = (index + 1) % Antialiasing::ALL.len();
+            assert_eq!(
+                antialiasing_stepped(next),
+                Antialiasing::ALL[next],
+                "{tier:?} did not wrap onto the rung the widget chose",
+            );
+            assert!(
+                antialiasing_label(tier)
+                    .bytes()
+                    .all(|byte| byte.is_ascii_graphic()),
+                "the label has to be in the atlas",
+            );
+        }
+        assert_eq!(antialiasing_label(Antialiasing::None), "off");
+        assert_eq!(
+            antialiasing_label(Antialiasing::Fxaa),
+            Antialiasing::Fxaa.name(),
+        );
+        assert_eq!(
+            antialiasing_label(Antialiasing::Smaa),
+            Antialiasing::Smaa.name(),
+        );
+
+        // A rung the widget cannot have chosen lands on the bottom rather than
+        // off the ladder — the widget clamps, so this is the arm nothing else
+        // exercises.
+        assert_eq!(
+            antialiasing_stepped(Antialiasing::ALL.len()),
+            Antialiasing::ALL[0],
+        );
+
+        // The rung the row is born on is the one an absent key means.
+        assert_eq!(DEFAULT_ANTIALIASING, Antialiasing::Fxaa);
+        assert!(Antialiasing::ALL.contains(&DEFAULT_ANTIALIASING));
     }
 
     /// A switch is a two-rung cycler with `off` first, so the chevron points

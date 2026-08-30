@@ -54,7 +54,7 @@ use crcbl::engine::{
     wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::render::{DEFAULT_ANISOTROPY, RenderEffects};
+use crcbl::render::{Antialiasing, DEFAULT_ANISOTROPY, RenderEffects};
 use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
 use crcbl::store::settings::SettingsStack;
 
@@ -266,6 +266,16 @@ pub struct Screen {
     effects: RenderEffects,
     /// The effects this run **started** with, for `opened_anisotropy`'s reason.
     opened_effects: RenderEffects,
+    /// `[engine.video] antialiasing` as the screen currently holds it.
+    ///
+    /// A tier rather than an `Option<Antialiasing>`: the row always sits on a
+    /// rung, and the rung an absent key means is the game's own —
+    /// `menu::DEFAULT_ANTIALIASING`. What the key holds is the screen's answer
+    /// to "which filter", and "the player has not said" is not one of the
+    /// answers a row can show.
+    antialiasing: Antialiasing,
+    /// The tier this run **started** on, for `opened_anisotropy`'s reason.
+    opened_antialiasing: Antialiasing,
 }
 
 /// The loop options runs in.
@@ -408,6 +418,8 @@ impl Screen {
         let anisotropy = crcbl::settings::anisotropic_filtering(&stack);
         let scale = crcbl::settings::render_scale(&stack);
         let effects = crcbl::settings::video_effects(&stack);
+        let antialiasing =
+            crcbl::settings::antialiasing(&stack).unwrap_or(crate::menu::DEFAULT_ANTIALIASING);
         Self {
             stack,
             store,
@@ -433,6 +445,8 @@ impl Screen {
             opened_scale: scale,
             effects,
             opened_effects: effects,
+            antialiasing,
+            opened_antialiasing: antialiasing,
         }
     }
 
@@ -464,6 +478,12 @@ impl Screen {
     #[must_use]
     pub const fn effects(&self) -> RenderEffects {
         self.effects
+    }
+
+    /// The antialiasing tier as this screen currently holds it.
+    #[must_use]
+    pub const fn antialiasing(&self) -> Antialiasing {
+        self.antialiasing
     }
 
     /// How many times a setting has been changed.
@@ -503,8 +523,8 @@ impl Screen {
         }
         crcbl::log::info!(
             "[HUD] tick: {}  master: {}  music: {}  sfx: {}  ui: {}  voice: {}  \
-             ambience: {}  cap: {}  aniso: {}  scale: {}  effects: {} of {}  \
-             edits: {}  file: {}",
+             ambience: {}  cap: {}  aniso: {}  scale: {}  aa: {}  \
+             effects: {} of {}  edits: {}  file: {}",
             self.ticks,
             crate::menu::percent(self.gains[Bus::Master.index()]),
             crate::menu::percent(self.gains[Bus::Music.index()]),
@@ -515,7 +535,14 @@ impl Screen {
             crate::menu::frame_cap_label(self.cap),
             crate::menu::anisotropy_label(self.anisotropy),
             crate::menu::percent(self.scale),
-            self.effects.bits().count_ones(),
+            crate::menu::antialiasing_label(self.antialiasing),
+            // The switches that are on, not the bits that are set: the two
+            // resolve bits are the `aa:` field's and are never in this table,
+            // so counting bits would read as more effects than there are rows.
+            crcbl::settings::VIDEO_KEYS
+                .iter()
+                .filter(|(_, effect)| self.effects.contains(*effect))
+                .count(),
             crcbl::settings::VIDEO_KEYS.len(),
             self.edits,
             self.saved,
@@ -657,6 +684,29 @@ impl Screen {
         }
     }
 
+    /// Moves the antialiasing tier, writing the key and marking the file
+    /// unsaved, on [`Screen::set_cap`]'s terms — and applied to nothing, since
+    /// this sample draws no scene. `GpuContext::effect_request` is where the key
+    /// reaches a renderer, one start later.
+    fn set_antialiasing(&mut self, tier: Antialiasing) {
+        self.antialiasing = tier;
+        self.edits += 1;
+        self.saved = SaveState::Unsaved;
+        if let Err(error) = crcbl::settings::set_antialiasing(&mut self.stack, tier) {
+            self.saved = SaveState::Failed(error.to_string());
+        }
+    }
+
+    /// What the AA row says: the tier, and whether this run came up on it.
+    fn antialiasing_hint(&self) -> String {
+        let label = crate::menu::antialiasing_label(self.antialiasing);
+        if self.antialiasing == self.opened_antialiasing {
+            label.to_string()
+        } else {
+            format!("{label} {}", crate::menu::NEXT_START_MARK)
+        }
+    }
+
     /// What a switch says: on or off, and whether this run came up that way.
     fn effect_hint(&self, effect: RenderEffects) -> String {
         let on = self.effects.contains(effect);
@@ -692,8 +742,15 @@ impl Screen {
 
     /// Puts every setting back to what a file that says nothing means — every
     /// bus at unity, no frame ceiling, the engine's own anisotropy, the whole
-    /// extent and every effect allowed — which is what a player asking for the
-    /// defaults is asking for.
+    /// extent, every effect allowed and the game's own antialiasing tier —
+    /// which is what a player asking for the defaults is asking for.
+    ///
+    /// **The tier is written rather than removed**, which is the one place this
+    /// falls short of an absent key: the key has no word for "unpicked", so a
+    /// reset names the rung an absent key would have meant. A later change to
+    /// `RenderEffects::DEFAULT_STACK` would leave that file holding the old
+    /// rung, which is the same bargain `set_video_effects` makes when it writes
+    /// `true` for an effect the player kept.
     fn reset(&mut self) {
         for bus in Bus::ALL {
             self.set(bus, 1.0);
@@ -702,6 +759,7 @@ impl Screen {
         self.set_anisotropy(DEFAULT_ANISOTROPY);
         self.set_scale(1.0);
         self.set_effects(RenderEffects::all());
+        self.set_antialiasing(crate::menu::DEFAULT_ANTIALIASING);
     }
 }
 
@@ -882,6 +940,21 @@ impl HostedGame for Screen {
             }
             menu.set_cycler(id, crate::menu::anisotropy_rung(self.anisotropy));
             menu.set_item_hint(id, self.anisotropy_hint());
+
+            // The antialiasing ladder's, on the same terms — and simpler than
+            // the two above, because every value the key reads is a rung: there
+            // is no `stepped` to consult about where a value between rungs
+            // lands, so the rung the widget chose *is* the answer.
+            let id = crate::menu::ANTIALIASING_ID;
+            let rung = crate::menu::antialiasing_rung(self.antialiasing);
+            if let Some(chosen) = menu.cycler(id)
+                && self.placed
+                && chosen != rung
+            {
+                self.set_antialiasing(crate::menu::antialiasing_stepped(chosen));
+            }
+            menu.set_cycler(id, crate::menu::antialiasing_rung(self.antialiasing));
+            menu.set_item_hint(id, self.antialiasing_hint());
 
             // The switches: two rungs each, so any move is a flip. Every key
             // is written once for however many flipped this frame.
@@ -1304,6 +1377,7 @@ mod tests {
         );
         assert_eq!(Screen::menu_action(crate::menu::FRAME_CAP_ID), None);
         assert_eq!(Screen::menu_action(crate::menu::ANISOTROPY_ID), None);
+        assert_eq!(Screen::menu_action(crate::menu::ANTIALIASING_ID), None);
         for (index, (key, _)) in crcbl::settings::VIDEO_KEYS.iter().enumerate() {
             assert_eq!(
                 Screen::menu_action(crate::menu::effect_id(index)),
@@ -1948,6 +2022,143 @@ mod tests {
                 crate::view::EMPTY_ROW.1.to_string()
             )],
             "an empty file says so",
+        );
+    }
+
+    /// **The antialiasing tier round trips through the file, and the row is
+    /// born on the game's rung rather than on the bottom of the ladder.**
+    ///
+    /// The cap's and the anisotropy's claim for the key that replaced the two
+    /// effect switches. An absent key is the tier
+    /// `RenderEffects::DEFAULT_STACK` carries, because that is the slot the
+    /// view's own stack keeps; a step writes the rung the widget chose; and a
+    /// screen opened over the same storage comes up on it.
+    #[test]
+    fn a_saved_antialiasing_tier_is_still_there_when_the_screen_opens_again() {
+        let storage = crcbl::store::MemoryStorage::new();
+        let mut screen = Screen::over(
+            SettingsStack::from_storage(&storage),
+            Store::None,
+            FrameLimit::unlimited(),
+        );
+        assert_eq!(
+            screen.antialiasing(),
+            crate::menu::DEFAULT_ANTIALIASING,
+            "an absent key is the tier the game's own stack carries",
+        );
+        let mut menus = Screen::menus();
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.edits(), 0, "placing the row is not an edit");
+        assert_eq!(
+            rung(&mut menus, crate::menu::ANTIALIASING_ID),
+            crate::menu::antialiasing_rung(crate::menu::DEFAULT_ANTIALIASING),
+        );
+
+        assert!(step(&mut menus, crate::menu::ANTIALIASING_ID, true));
+        reconcile(&mut screen, &mut menus);
+        let stepped = screen.antialiasing();
+        assert_eq!(
+            stepped,
+            Antialiasing::Smaa,
+            "the first step up from the game's tier is the rung above it",
+        );
+        assert_eq!(screen.edits(), 1);
+        assert_eq!(screen.saved(), &SaveState::Unsaved);
+        assert_eq!(
+            crcbl::settings::antialiasing(screen.stack()),
+            Some(stepped),
+            "the step did not reach the key",
+        );
+
+        screen.save_to(SettingsSource::Source(&storage));
+        assert_eq!(screen.saved(), &SaveState::Saved);
+
+        let reopened = Screen::over(
+            SettingsStack::from_storage(&storage),
+            Store::None,
+            FrameLimit::unlimited(),
+        );
+        assert_eq!(
+            reopened.antialiasing(),
+            stepped,
+            "the restart came up on {:?} rather than the {stepped:?} that was saved",
+            reopened.antialiasing(),
+        );
+    }
+
+    /// **The file's tier reaches the row before a frame is drawn, the row says
+    /// when this run is not under it, and it stops saying so.**
+    ///
+    /// The set is born on the game's rung, so a screen opened over
+    /// `antialiasing = "none"` finds the widget one rung above its value —
+    /// which is the first-frame placement, not a step, and calling it a step
+    /// would write over the player's choice on frame one. Then the ladder is
+    /// walked all the way round, which is what tells a mark from a flag that is
+    /// only ever set.
+    #[test]
+    fn the_antialiasing_row_is_placed_from_the_file_and_marks_a_tier_this_run_is_not_on() {
+        let (mut screen, mut menus) = screen("[engine.video]\nantialiasing = \"none\"\n");
+        assert_eq!(screen.antialiasing(), Antialiasing::None);
+        assert_eq!(
+            rung(&mut menus, crate::menu::ANTIALIASING_ID),
+            crate::menu::antialiasing_rung(crate::menu::DEFAULT_ANTIALIASING),
+            "the set is born on the game's rung",
+        );
+
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.edits(), 0, "placing the row was read as a step");
+        assert_eq!(
+            rung(&mut menus, crate::menu::ANTIALIASING_ID),
+            crate::menu::antialiasing_rung(Antialiasing::None),
+            "the widget was not walked to the file's rung",
+        );
+        assert_eq!(
+            hint(&mut menus, crate::menu::ANTIALIASING_ID),
+            crate::menu::antialiasing_label(Antialiasing::None),
+            "a run opened on its own tier has nothing to add",
+        );
+
+        // Round the whole ladder with `ENTER`, which wraps: the mark comes on
+        // at the first press and off again at the last.
+        press(&mut menus, crate::menu::ANTIALIASING_ID);
+        reconcile(&mut screen, &mut menus);
+        let marked = hint(&mut menus, crate::menu::ANTIALIASING_ID);
+        assert!(
+            marked.starts_with(crate::menu::antialiasing_label(screen.antialiasing()))
+                && marked.contains(crate::menu::NEXT_START_MARK),
+            "the row reads {marked:?} for a tier this run is not under",
+        );
+
+        for _ in 1..Antialiasing::ALL.len() {
+            press(&mut menus, crate::menu::ANTIALIASING_ID);
+            reconcile(&mut screen, &mut menus);
+        }
+        assert_eq!(
+            screen.antialiasing(),
+            Antialiasing::None,
+            "the ladder did not wrap"
+        );
+        assert_eq!(
+            hint(&mut menus, crate::menu::ANTIALIASING_ID),
+            crate::menu::antialiasing_label(Antialiasing::None),
+            "the mark stayed on a tier the run came up on",
+        );
+    }
+
+    /// `RESET` puts the tier back on the game's own rung — what an absent key
+    /// means — and writes the key to say so.
+    #[test]
+    fn reset_takes_the_antialiasing_tier_back_to_the_games_own_rung() {
+        let (mut screen, mut menus) = screen("[engine.video]\nantialiasing = \"smaa\"\n");
+        assert_eq!(screen.antialiasing(), Antialiasing::Smaa);
+        reconcile(&mut screen, &mut menus);
+
+        screen.apply(Action::Reset);
+        assert_eq!(screen.antialiasing(), crate::menu::DEFAULT_ANTIALIASING);
+        assert_eq!(
+            crcbl::settings::antialiasing(screen.stack()),
+            Some(crate::menu::DEFAULT_ANTIALIASING),
+            "the screen reset a tier it never wrote",
         );
     }
 

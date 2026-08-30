@@ -44,8 +44,8 @@ use crcbl::engine::{
 use crcbl::hal::{CommandEncoderDesc, ResourceState};
 use crcbl::prelude::*;
 use crcbl::render::{
-    EffectOverride, EffectRequest, ImportedImage, InitialClaim, RenderEffects, RenderGraph,
-    TransientPool,
+    Antialiasing, EffectOverride, EffectRequest, ImportedImage, InitialClaim, RenderEffects,
+    RenderGraph, TransientPool,
 };
 use crcbl::shell::{
     DisplayMode, HeadlessShell, PhysicalSize, Shell, ShellBackend, WindowDesc, WindowId,
@@ -706,6 +706,58 @@ fn the_video_layer_clamps_downward_and_the_order_around_it_holds() {
         forced.resolve(all.difference(RenderEffects::SHADOWS)),
         RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS),
         "no toggle may conjure an effect the device has no way to draw"
+    );
+
+    gpu.destroy().expect("the device is released");
+    shell.destroy_window(window).expect("the window goes away");
+}
+
+/// **The player's antialiasing tier reaches a renderer through the context**,
+/// and it replaces the resolve slot rather than clamping it.
+///
+/// The companion to `the_video_layer_clamps_downward_and_the_order_around_it_holds`,
+/// and it is a separate test for the reason that one is: the whole path is
+/// under test — a file on disk, `GpuContext::open` reading it,
+/// `GpuContext::effect_request` carrying it — so nothing here writes
+/// [`EffectRequest::antialiasing`](crcbl::render::EffectRequest::antialiasing)
+/// by hand. The observable is the *bit* that comes out: the view asks for FXAA
+/// by saying nothing, the file asks for SMAA, and a layer wired as a clamp
+/// would leave the frame with neither.
+#[test]
+fn the_players_antialiasing_tier_replaces_the_resolve_slot() {
+    let all = RenderEffects::all();
+    let storage = settings_file("[engine.video]\nantialiasing = \"smaa\"\n");
+
+    let (mut shell, window, _clock) = windowed();
+    let mut events = 0;
+    let extent =
+        wait_for_configure(shell.as_mut(), window, &mut events).expect("headless configures");
+    let gpu = GpuContext::open(
+        shell.as_ref(),
+        window,
+        extent,
+        &GpuContextDesc {
+            label: "library seam",
+            backend: BACKEND,
+            settings: SettingsSource::Source(&storage),
+            ..GpuContextDesc::default()
+        },
+    )
+    .expect("the null backend opens everywhere");
+
+    assert_eq!(gpu.antialiasing(), Some(Antialiasing::Smaa));
+    let request = gpu.effect_request();
+    assert_eq!(request.antialiasing, Some(Antialiasing::Smaa));
+    assert_eq!(
+        request.video, all,
+        "the tier is not a bit the effect clamp answers for"
+    );
+    assert_eq!(
+        request.resolve(all),
+        RenderEffects::DEFAULT_STACK
+            .difference(RenderEffects::ANTIALIASING)
+            .union(RenderEffects::SMAA),
+        "the file's tier must take the slot the view's own stack asked FXAA for"
     );
 
     gpu.destroy().expect("the device is released");

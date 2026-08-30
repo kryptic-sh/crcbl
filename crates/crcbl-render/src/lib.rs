@@ -191,7 +191,7 @@ pub use crcbl_ui::{ButtonState, SkinInsets};
 pub use cull::{Aabb, Frustum, visible_instances};
 pub use cull_stats::{ClusterCull, CullStats, CullStatsRing};
 pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
-pub use effects::{EffectOverride, EffectRequest, RenderEffects};
+pub use effects::{Antialiasing, EffectOverride, EffectRequest, RenderEffects};
 pub use exposure::{ExposureAdaptation, ExposureBuffers};
 pub use fly::{Flyer, LOOK, SPEED, TURN};
 pub use forward::{

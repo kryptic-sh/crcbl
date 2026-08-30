@@ -1475,6 +1475,20 @@ impl GpuContext {
         self.video.render_scale
     }
 
+    /// Which antialiasing tier the player picked, read while this context
+    /// opened.
+    ///
+    /// [`None`] for a run whose player has said nothing, which leaves the
+    /// resolve slot to the view's own stack. **Unlike
+    /// [`video_effects`](Self::video_effects) this is not a ceiling**: it
+    /// replaces the slot rather than clamping it, because the frame has one
+    /// resolve and a player picking a different filter is not asking for less
+    /// of one — see [`crate::settings::antialiasing`].
+    #[must_use]
+    pub const fn antialiasing(&self) -> Option<crcbl_render::Antialiasing> {
+        self.video.antialiasing
+    }
+
     /// The anisotropy the player asked the base-colour page to be sampled
     /// with, read while this context opened.
     ///
@@ -1495,6 +1509,7 @@ impl GpuContext {
     /// The whole `[engine.video]` section this context read while opening.
     ///
     /// The narrow accessors beside it — [`video_effects`](Self::video_effects),
+    /// [`antialiasing`](Self::antialiasing),
     /// [`render_scale`](Self::render_scale),
     /// [`anisotropic_filtering`](Self::anisotropic_filtering),
     /// [`frame_limit`](Self::frame_limit) — are what a caller wanting one key
@@ -1536,17 +1551,19 @@ impl GpuContext {
     /// renderer.set_effect_request(ctx.effect_request());
     /// ```
     ///
-    /// The `[engine.video]` layer filled in and the other two left at their
-    /// defaults, because they are not this context's to answer: the camera
-    /// layer belongs to the view the renderer draws — a render-to-texture
-    /// monitor wants a different one from the frame it hangs in, from this one
-    /// device — and the programmatic layer is whatever the game decides later.
-    /// A caller with an opinion about either writes
+    /// The two `[engine.video]` layers filled in — the effect clamp and the
+    /// antialiasing tier — and the other two left at their defaults, because
+    /// they are not this context's to answer: the camera layer belongs to the
+    /// view the renderer draws — a render-to-texture monitor wants a different
+    /// one from the frame it hangs in, from this one device — and the
+    /// programmatic layer is whatever the game decides later. A caller with an
+    /// opinion about either writes
     /// `EffectRequest { camera, ..ctx.effect_request() }`.
     #[must_use]
     pub fn effect_request(&self) -> EffectRequest {
         EffectRequest {
             video: self.video.effects,
+            antialiasing: self.video.antialiasing,
             ..EffectRequest::default()
         }
     }
@@ -12899,13 +12916,13 @@ mod tests {
         }
     }
 
-    /// **A settings source carries the whole `[engine.video]` section**, both
-    /// the effect bits and the render scale, and [`SettingsSource::None`] is
-    /// unrestricted.
+    /// **A settings source carries the whole `[engine.video]` section** — the
+    /// effect bits, the antialiasing tier and the render scale — and
+    /// [`SettingsSource::None`] is unrestricted.
     ///
-    /// One file setting both, because the two are read through one stack and a
-    /// reader that opened it twice — or that let the scale's warning path
-    /// swallow the bits — would still pass a test for either alone.
+    /// One file setting all of them, because they are read through one stack and
+    /// a reader that opened it twice — or that let the scale's warning path
+    /// swallow the bits — would still pass a test for any one alone.
     #[test]
     fn a_settings_source_carries_the_whole_video_section() {
         use crcbl_store::StorageSource;
@@ -12915,7 +12932,8 @@ mod tests {
         storage
             .write(
                 std::path::Path::new(SETTINGS_FILE),
-                b"[engine.video]\nshadows = false\nrender_scale = 0.5\nanisotropic_filtering = 4\n",
+                b"[engine.video]\nshadows = false\nantialiasing = \"smaa\"\n\
+                  render_scale = 0.5\nanisotropic_filtering = 4\n",
             )
             .expect("memory storage accepts every write");
 
@@ -12924,6 +12942,7 @@ mod tests {
             read.effects,
             RenderEffects::all().difference(RenderEffects::SHADOWS)
         );
+        assert_eq!(read.antialiasing, Some(crcbl_render::Antialiasing::Smaa));
         assert!((read.render_scale - 0.5).abs() < f32::EPSILON);
         assert!((read.anisotropic_filtering - 4.0).abs() < f32::EPSILON);
 
@@ -12931,6 +12950,11 @@ mod tests {
             SettingsSource::None.video("test"),
             VideoSettings::unrestricted(),
             "a run with no source must draw everything at full size",
+        );
+        assert_eq!(
+            VideoSettings::unrestricted().antialiasing,
+            None,
+            "a run with no source must leave the resolve slot to the view",
         );
     }
 

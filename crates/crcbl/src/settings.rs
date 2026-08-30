@@ -75,6 +75,25 @@
 //! being above every rate rather than below it, though it is spelled zero —
 //! belongs to the type rather than to the file.
 //!
+//! # And [`antialiasing`] is the first key that **replaces** rather than clamps
+//!
+//! Every key above answers "has the player asked for less?", and the answer only
+//! ever removes. The antialiasing tier cannot: the frame has one resolve slot,
+//! and a player who picked SMAA where the camera asked for FXAA has asked for a
+//! *different* filter rather than a smaller one — an intersection of the two
+//! leaves neither, and a union runs both. So the key holds a
+//! [`Antialiasing`] rung by name,
+//! [`EffectRequest::antialiasing`](crcbl_render::EffectRequest::antialiasing)
+//! carries it, and
+//! [`EffectRequest::resolve`](crcbl_render::EffectRequest::resolve) applies it
+//! as a replacement inside that slot.
+//! An absent key is still "the player has said nothing", which here means the
+//! view's own stack keeps the tier it asked for.
+//!
+//! **`antialiasing` used to be a boolean and `smaa` used to be a key.** Both are
+//! gone; [`antialiasing`]'s docs say what a file still holding the old spelling
+//! reads as.
+//!
 //! # And [`anisotropic_filtering`] is the first key that may ask for more
 //!
 //! Every key above answers at most what the game asked for. This one runs from
@@ -91,7 +110,7 @@
 //! still the engine's own figure, as it is for every key here.
 
 use crcbl_audio::mixer::Bus;
-use crcbl_render::{DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEffects};
+use crcbl_render::{Antialiasing, DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEffects};
 
 use crate::engine::FrameLimit;
 use crcbl_store::StorageError;
@@ -100,12 +119,12 @@ use crcbl_store::settings::SettingsStack;
 /// The `[engine.video]` section, as a dotted key prefix.
 pub const VIDEO_NAMESPACE: &str = "engine.video";
 
-/// Every effect a player can switch off, and the `[engine.video]` key that does
-/// it.
+/// Every effect a player can switch off with a boolean, and the
+/// `[engine.video]` key that does it.
 ///
-/// **The one place a key is spelled.** A settings screen writing the row and a
-/// start-up reading it back go through this table, because two spellings of one
-/// key is a game that saves a setting it will never load again.
+/// **The one place such a key is spelled.** A settings screen writing the row
+/// and a start-up reading it back go through this table, because two spellings
+/// of one key is a game that saves a setting it will never load again.
 ///
 /// The names are the ones `crcbl_store::settings`' own examples already use for
 /// this namespace — bare snake_case nouns beside `vsync` and `master_volume` —
@@ -113,15 +132,19 @@ pub const VIDEO_NAMESPACE: &str = "engine.video";
 /// switches have on a command line. A settings file is a description of what
 /// the player wants on, and a negated key would make `shadows = false` and
 /// `no_shadows = false` both writable and opposite.
-pub const VIDEO_KEYS: [(&str, RenderEffects); 8] = [
+///
+/// **The two antialiasing bits are deliberately not here.** They share one
+/// resolve slot, so a pair of booleans is a panel that can switch both on and a
+/// frame that then picks between them out of sight;
+/// [`ANTIALIASING_KEY`] is the ladder that replaced them and
+/// [`antialiasing`] is its reader.
+pub const VIDEO_KEYS: [(&str, RenderEffects); 6] = [
     ("shadows", RenderEffects::SHADOWS),
     ("ambient_occlusion", RenderEffects::AMBIENT_OCCLUSION),
     ("reflections", RenderEffects::REFLECTIONS),
     ("bloom", RenderEffects::BLOOM),
-    ("antialiasing", RenderEffects::ANTIALIASING),
     ("volumetric_fog", RenderEffects::VOLUMETRIC_FOG),
     ("auto_exposure", RenderEffects::AUTO_EXPOSURE),
-    ("smaa", RenderEffects::SMAA),
 ];
 
 /// What the player's `[engine.video]` section allows, for
@@ -174,6 +197,13 @@ pub const RENDER_SCALE_KEY: &str = "render_scale";
 /// [`frame_limit`].
 pub const FRAME_LIMIT_KEY: &str = "frame_limit";
 
+/// The `[engine.video]` key that picks the frame's antialiasing tier.
+///
+/// Spelled here for [`RENDER_SCALE_KEY`]'s reason — it clears no
+/// [`RenderEffects`] bit on its own, it *replaces* the pair of them that make
+/// the resolve slot — and read by [`antialiasing`].
+pub const ANTIALIASING_KEY: &str = "antialiasing";
+
 /// The `[engine.video]` key that sets the base-colour page's anisotropy.
 ///
 /// Spelled here for [`RENDER_SCALE_KEY`]'s reason, and read by
@@ -200,6 +230,12 @@ pub const MAX_ANISOTROPIC_FILTERING: f32 = crcbl_hal::Limits::desktop().max_samp
 pub struct VideoSettings {
     /// Which of topic 18's effects the player allows; see [`video_effects`].
     pub effects: RenderEffects,
+    /// Which antialiasing tier the player picked, or [`None`] for a player who
+    /// picked none; see [`antialiasing`].
+    ///
+    /// **Not a bit in [`effects`](Self::effects)**, because it replaces the
+    /// resolve slot rather than clamping it — see the [module docs](self).
+    pub antialiasing: Option<Antialiasing>,
     /// What fraction of the caller's extent the renderer draws at; see
     /// [`render_scale`].
     pub render_scale: f32,
@@ -217,8 +253,9 @@ pub struct VideoSettings {
 }
 
 impl VideoSettings {
-    /// What a player who has said nothing gets: every effect standing, the
-    /// full extent and the page at the engine's own anisotropy.
+    /// What a player who has said nothing gets: every effect standing, no
+    /// antialiasing tier picked, the full extent and the page at the engine's
+    /// own anisotropy.
     ///
     /// Also what [`SettingsSource::None`](crate::engine::SettingsSource::None)
     /// answers, and the two are the same answer for the same reason — this
@@ -228,6 +265,7 @@ impl VideoSettings {
     pub fn unrestricted() -> Self {
         Self {
             effects: RenderEffects::all(),
+            antialiasing: None,
             render_scale: 1.0,
             anisotropic_filtering: DEFAULT_ANISOTROPY,
             frame_limit: FrameLimit::unlimited(),
@@ -240,10 +278,58 @@ impl VideoSettings {
 pub fn video(stack: &SettingsStack) -> VideoSettings {
     VideoSettings {
         effects: video_effects(stack),
+        antialiasing: antialiasing(stack),
         render_scale: render_scale(stack),
         anisotropic_filtering: anisotropic_filtering(stack),
         frame_limit: frame_limit(stack),
     }
+}
+
+/// Which antialiasing tier the player picked, for
+/// [`EffectRequest::antialiasing`](crcbl_render::EffectRequest::antialiasing).
+///
+/// [`None`] for a stack that says nothing, which leaves the view's own stack
+/// holding the resolve slot, and otherwise the [`Antialiasing`] rung the key
+/// names — `"none"`, `"fxaa"` or `"smaa"`, [`Antialiasing::name`]'s spelling on
+/// both sides of the round trip.
+///
+/// # A file still holding the boolean reads as one of two things
+///
+/// The key was a `bool` beside a second key called `smaa` until
+/// `docs/plan/49-antialiasing.md`'s eighth decision folded the pair into this
+/// ladder. There is no migration — everything here is v0 — but the two spellings
+/// a hand-edited file can still hold are answered rather than warned about,
+/// because both had a meaning and neither is a mistake the player made:
+/// `antialiasing = true` was "the player has not asked for less", which is
+/// exactly [`None`] here, and `antialiasing = false` was "no resolve at all",
+/// which is [`Antialiasing::None`]. A `smaa` key is not read by anything and is
+/// reported by `crcbl settings list` as a key the engine does not define.
+///
+/// # A line that does nothing says so
+///
+/// Any other value — a number, or a word no rung wears — leaves the tier
+/// unpicked and **warns**, naming the key, on [`video_effects`]' terms. A key
+/// that is simply absent is not a mistake and does not warn.
+#[must_use]
+pub fn antialiasing(stack: &SettingsStack) -> Option<Antialiasing> {
+    let dotted = format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}");
+    let tier = match stack.get::<String>(&dotted) {
+        Some(name) => Antialiasing::from_name(&name),
+        // Not a string, so it may be the boolean this key used to be. Both of
+        // its values are answered rather than warned about, on the terms above.
+        None => match stack.get::<bool>(&dotted) {
+            Some(true) => return None,
+            Some(false) => return Some(Antialiasing::None),
+            _ => None,
+        },
+    };
+    if tier.is_none() && stack.contains(&dotted) {
+        crcbl_core::log::warn!(
+            "settings: `{dotted}` names no antialiasing tier, so it does nothing; \
+             the frame is resolved the way the game asked for it"
+        );
+    }
+    tier
 }
 
 /// What fraction of the caller's extent the player wants drawn, for
@@ -368,8 +454,8 @@ pub fn frame_limit(stack: &SettingsStack) -> FrameLimit {
 /// Write the whole `[engine.video]` section into the stack's user layer.
 ///
 /// The mirror of [`video`], key for key: every entry of [`VIDEO_KEYS`],
-/// [`RENDER_SCALE_KEY`], [`ANISOTROPIC_FILTERING_KEY`] and [`FRAME_LIMIT_KEY`].
-/// Nothing is persisted until the
+/// [`ANTIALIASING_KEY`], [`RENDER_SCALE_KEY`], [`ANISOTROPIC_FILTERING_KEY`] and
+/// [`FRAME_LIMIT_KEY`]. Nothing is persisted until the
 /// caller saves the stack
 /// — see [`SettingsStack::save_platform`].
 ///
@@ -383,15 +469,45 @@ pub fn frame_limit(stack: &SettingsStack) -> FrameLimit {
 /// says what the player chose rather than only where they differed from the
 /// engine.
 ///
+/// # The antialiasing tier is the one key it may leave out
+///
+/// Its domain has no word for "unpicked": `"none"` is a tier — the one that
+/// draws no resolve at all — so the only way a file says the player picked
+/// nothing is by not holding the key. A [`None`] therefore writes no row and
+/// **leaves any row already there standing**, which is the one case this writer
+/// cannot express; a screen that wants the key gone rewrites it with a tier.
+///
 /// # Errors
 ///
 /// [`SettingsStack::set`]'s: no user layer in the stack, or an ancestor of a
 /// key already holding a scalar in a hand-edited file.
 pub fn set_video(stack: &mut SettingsStack, video: VideoSettings) -> Result<(), StorageError> {
     set_video_effects(stack, video.effects)?;
+    if let Some(tier) = video.antialiasing {
+        set_antialiasing(stack, tier)?;
+    }
     set_render_scale(stack, video.render_scale)?;
     set_anisotropic_filtering(stack, video.anisotropic_filtering)?;
     set_frame_limit(stack, video.frame_limit)
+}
+
+/// Write `[engine.video] antialiasing`, as the rung [`antialiasing`] reads back.
+///
+/// The tier is written by [`Antialiasing::name`], which is the reader's spelling
+/// too — a settings screen and a start-up disagreeing about the word for a rung
+/// is a filter the player picks once and never sees.
+///
+/// It takes a tier rather than an [`Option`] for [`set_video`]'s reason: there
+/// is no word for "unpicked", so a writer's only choice is which rung to name.
+///
+/// # Errors
+///
+/// [`set_video`]'s.
+pub fn set_antialiasing(stack: &mut SettingsStack, tier: Antialiasing) -> Result<(), StorageError> {
+    stack.set(
+        &format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}"),
+        &tier.name(),
+    )
 }
 
 /// Write the effect rows of `[engine.video]`, one key per [`VIDEO_KEYS`] entry.
@@ -613,10 +729,16 @@ const NAMED_VIDEO_KEYS: [(&str, &str); 8] = [
 ///
 /// **Derived from the readers wherever there is a reader**, so a key cannot
 /// appear here under one spelling and be read under another: the effect rows
-/// come from [`VIDEO_KEYS`], the scale row from [`RENDER_SCALE_KEY`], the
-/// anisotropy row from [`ANISOTROPIC_FILTERING_KEY`], and the volume rows from
+/// come from [`VIDEO_KEYS`], the antialiasing row from [`ANTIALIASING_KEY`], the
+/// scale row from [`RENDER_SCALE_KEY`], the anisotropy row from
+/// [`ANISOTROPIC_FILTERING_KEY`], and the volume rows from
 /// [`Bus::settings_key`]. Only the rows with no reader are
 /// written out, because there is nothing to derive them from.
+///
+/// The **domains** are prose either way, so the antialiasing row's is checked
+/// against [`Antialiasing::ALL`] by
+/// `the_antialiasing_domain_names_every_rung_the_reader_takes` rather than
+/// derived from it.
 ///
 /// A `Vec` rather than a `const`: a dotted key is its namespace and its name
 /// joined, and `format!` is not a const operation. The caller is a settings
@@ -636,6 +758,10 @@ pub fn catalogue() -> Vec<CatalogueKey> {
         .iter()
         .map(|(key, _)| read(format!("{VIDEO_NAMESPACE}.{key}"), "true | false"))
         .collect();
+    keys.push(read(
+        format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}"),
+        r#""none" | "fxaa" | "smaa"; absent leaves the game's own tier"#,
+    ));
     keys.push(read(
         format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"),
         "fraction of the surface extent; clamped to the renderer's floor",
@@ -709,6 +835,7 @@ mod tests {
     fn a_saved_video_section_reads_back_unchanged() {
         let wanted = VideoSettings {
             effects: RenderEffects::all() - RenderEffects::BLOOM - RenderEffects::SHADOWS,
+            antialiasing: Some(Antialiasing::Smaa),
             render_scale: 0.5,
             anisotropic_filtering: 4.0,
             frame_limit: FrameLimit::fps(60),
@@ -843,6 +970,7 @@ mod tests {
             .iter()
             .map(|(key, _)| format!("{VIDEO_NAMESPACE}.{key}"))
             .collect();
+        wanted.push(format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"));
@@ -1034,12 +1162,16 @@ mod tests {
         assert!((gain - 1.0).abs() < f32::EPSILON, "read {gain}");
     }
 
-    /// **Every effect can be switched off from a settings file.**
+    /// **Every effect is reachable from a settings file**, through the boolean
+    /// table or through the antialiasing ladder, and no two keys claim one bit.
     ///
     /// The guard against a bit added to [`RenderEffects`] and not to
     /// [`VIDEO_KEYS`]: the omission has no symptom of its own — the effect
     /// simply cannot be turned off, and a player's row does nothing — so
-    /// nothing else would report it.
+    /// nothing else would report it. The two resolve bits are the exception the
+    /// ladder exists for, so they are named here as the ladder's and asserted to
+    /// be **out** of the boolean table: a `smaa = false` row a player could
+    /// still write is a row nothing reads.
     #[test]
     fn every_effect_has_a_key_and_no_two_share_one() {
         let mut covered = RenderEffects::empty();
@@ -1050,10 +1182,18 @@ mod tests {
             );
             covered.insert(effect);
         }
+
+        let slot = Antialiasing::ALL
+            .into_iter()
+            .fold(RenderEffects::empty(), |bits, tier| bits.union(tier.bits()));
+        assert!(
+            !covered.intersects(slot),
+            "the resolve slot is a boolean row as well as a ladder rung"
+        );
         assert_eq!(
-            covered,
+            covered.union(slot),
             RenderEffects::all(),
-            "an effect with no [engine.video] key is one a player cannot switch off"
+            "an effect with no [engine.video] key is one a player cannot reach"
         );
     }
 
@@ -1072,10 +1212,8 @@ mod tests {
             ("ambient_occlusion", RenderEffects::AMBIENT_OCCLUSION),
             ("reflections", RenderEffects::REFLECTIONS),
             ("bloom", RenderEffects::BLOOM),
-            ("antialiasing", RenderEffects::ANTIALIASING),
             ("volumetric_fog", RenderEffects::VOLUMETRIC_FOG),
             ("auto_exposure", RenderEffects::AUTO_EXPOSURE),
-            ("smaa", RenderEffects::SMAA),
         ] {
             let stack = stack_from(&format!("[{VIDEO_NAMESPACE}]\n{key} = false\n"));
             assert_eq!(
@@ -1404,6 +1542,152 @@ mod tests {
                 .iter()
                 .all(|record| record.level != crcbl_core::log::Level::Warn),
             "a file this layer can read whole warns about nothing: {records:?}"
+        );
+    }
+
+    /// The tier the reader answers off a file holding `toml`.
+    fn tier_of(toml: &str) -> Option<Antialiasing> {
+        antialiasing(&stack_from(toml))
+    }
+
+    /// **A file that says nothing picks no tier**, which leaves the resolve
+    /// slot to the view's own stack.
+    ///
+    /// The distinction the [`Option`] exists for: `None` here is not
+    /// [`Antialiasing::None`], which is a tier the player *chose* and which
+    /// empties the slot.
+    #[test]
+    fn an_absent_antialiasing_key_leaves_the_games_own_tier() {
+        assert_eq!(tier_of(""), None);
+        assert_eq!(tier_of("[game]\ndifficulty = \"normal\"\n"), None);
+        assert_eq!(
+            tier_of(&format!("[{VIDEO_NAMESPACE}]\nshadows = false\n")),
+            None,
+            "another key must not pick a tier"
+        );
+        assert_eq!(video(&stack_from("")).antialiasing, None);
+    }
+
+    /// **Every rung round trips through a file**, under the one spelling
+    /// [`Antialiasing::name`] gives it.
+    ///
+    /// Both directions on every rung, because the failure this guards is a
+    /// screen that saves `"smaa"` and a start-up that reads back `"none"` — the
+    /// player's whole setting, silently, with no line to tell them why.
+    #[test]
+    fn every_antialiasing_rung_round_trips_through_a_file() {
+        for tier in Antialiasing::ALL {
+            let (reloaded, written) = round_trip(|stack| {
+                set_antialiasing(stack, tier).expect("a fresh user layer takes the key");
+            });
+            assert_eq!(antialiasing(&reloaded), Some(tier));
+            assert!(
+                written.contains(&format!("{ANTIALIASING_KEY} = \"{}\"", tier.name())),
+                "{tier:?} left no row behind:\n{written}"
+            );
+
+            // And the hand-written spelling, which is what a player edits in.
+            assert_eq!(
+                tier_of(&format!(
+                    "[{VIDEO_NAMESPACE}]\n{ANTIALIASING_KEY} = \"{}\"\n",
+                    tier.name()
+                )),
+                Some(tier),
+            );
+        }
+    }
+
+    /// **A file still holding the boolean this key used to be reads as the
+    /// meaning it had**, and says nothing about it.
+    ///
+    /// `true` was "the player has not asked for less", which is a tier unpicked;
+    /// `false` was "no resolve at all", which is [`Antialiasing::None`]. Neither
+    /// is a mistake the player made, so neither warns — a line that still means
+    /// what it meant is not a line to complain about.
+    #[test]
+    fn a_stale_antialiasing_boolean_reads_as_the_meaning_it_had() {
+        let capture = crcbl_core::log::capture();
+        assert_eq!(
+            tier_of(&format!("[{VIDEO_NAMESPACE}]\n{ANTIALIASING_KEY} = true\n")),
+            None,
+            "the old `true` was the player asking for nothing",
+        );
+        assert_eq!(
+            tier_of(&format!(
+                "[{VIDEO_NAMESPACE}]\n{ANTIALIASING_KEY} = false\n"
+            )),
+            Some(Antialiasing::None),
+            "the old `false` was the player emptying the slot",
+        );
+        let records = capture.records();
+        assert!(
+            records
+                .iter()
+                .all(|record| record.level != crcbl_core::log::Level::Warn),
+            "a line that still means what it meant warned: {records:?}"
+        );
+    }
+
+    /// **A value that names no rung picks nothing and warns, naming the key.**
+    ///
+    /// The spellings are the ones a hand-edited file plausibly holds: a rung
+    /// that is not built yet, the same word in the wrong case, and the numbers
+    /// TOML would take for the boolean this key used to be.
+    #[test]
+    fn an_antialiasing_key_naming_no_rung_warns_and_picks_nothing() {
+        for value in ["\"cmaa2\"", "\"FXAA\"", "\"\"", "1", "0.5"] {
+            let capture = crcbl_core::log::capture();
+            let toml = format!("[{VIDEO_NAMESPACE}]\n{ANTIALIASING_KEY} = {value}\n");
+            assert_eq!(tier_of(&toml), None, "`{value}` was read as a tier");
+
+            let warned: Vec<_> = capture
+                .records()
+                .into_iter()
+                .filter(|record| {
+                    record
+                        .message
+                        .contains(&format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}"))
+                })
+                .collect();
+            assert_eq!(
+                warned.len(),
+                1,
+                "`{value}` should warn exactly once: {:?}",
+                capture.records()
+            );
+            assert_eq!(warned[0].level, crcbl_core::log::Level::Warn);
+        }
+    }
+
+    /// **The catalogue names the tier key once, with every rung the reader
+    /// takes, and names no `smaa` key at all.**
+    ///
+    /// The domain is prose and cannot be derived from [`Antialiasing::ALL`], so
+    /// this is what binds the two: a rung added to the enum and left out of the
+    /// domain is a screen offering a control it will not describe. The `smaa`
+    /// half is the retired key — a catalogue that still named it would have
+    /// `crcbl settings list` reporting a row nothing reads as one the engine
+    /// defines.
+    #[test]
+    fn the_antialiasing_domain_names_every_rung_the_reader_takes() {
+        let key = format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}");
+        let entry = catalogued(&key).expect("the tier is catalogued");
+        assert_eq!(entry.status, KeyStatus::Read);
+        for tier in Antialiasing::ALL {
+            assert!(
+                entry.domain.contains(&format!("\"{}\"", tier.name())),
+                "{tier:?} is missing from the domain {:?}",
+                entry.domain,
+            );
+        }
+        assert_eq!(
+            catalogue().iter().filter(|row| row.key == key).count(),
+            1,
+            "the tier is catalogued twice",
+        );
+        assert!(
+            catalogued(&format!("{VIDEO_NAMESPACE}.smaa")).is_none(),
+            "the retired key is still catalogued",
         );
     }
 
