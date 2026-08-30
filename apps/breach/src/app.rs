@@ -594,6 +594,15 @@ impl HostedGame for Breach {
         self.pending_keys.push((key, pressed));
     }
 
+    /// The map the console's `bind` and `unbind` rebind.
+    ///
+    /// The same map the queued keys above are replayed into, so a rebind typed
+    /// at the console moves the key this game actually plays on rather than a
+    /// copy of it.
+    fn actions(&mut self) -> Option<&mut ActionMap> {
+        Some(&mut self.actions)
+    }
+
     /// The whole of the mouse — the look and the trigger — and the one
     /// condition both are bound under.
     ///
@@ -844,7 +853,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
 mod tests {
     use super::*;
     use crcbl::args::Common;
-    use crcbl::engine::PAUSE_KEY;
+    use crcbl::engine::{CONSOLE_KEY, PAUSE_KEY};
     use crcbl::shell::HeadlessShell;
 
     fn scripted(options: &Options) -> Loop<HeadlessShell> {
@@ -888,6 +897,83 @@ mod tests {
         for _ in 0..count {
             engine.frame().expect("a frame");
         }
+    }
+
+    /// **A `bind` typed at the console moves the key the view turns on.**
+    ///
+    /// `docs/plan/52-debug-console.md` slice 8, over the *other* shape of
+    /// `HostedGame::actions`: breach keeps its [`ActionMap`] on the hosted
+    /// struct itself rather than inside a `Game` a module away, and this is that
+    /// half proven. The observable is not the map — it is the **eye**, which
+    /// `draw` turns from `look_turn(&self.actions, …)`: a rebind that reached
+    /// some other map leaves the view exactly where it was.
+    ///
+    /// The practice map, not the range: the range imposes an aim on the camera
+    /// during its warm-up (see `RenderState::imposed_aim`), and a yaw something
+    /// else is writing cannot say whether a key turned it.
+    #[test]
+    fn a_console_rebind_moves_the_key_the_view_turns_on() {
+        const NEW_KEY: KeyCode = KeyCode::KeyJ;
+        let mut engine = scripted(&on(crate::map::MapChoice::Practice, 400));
+        let window = engine.window();
+        let tap = |engine: &mut Loop<HeadlessShell>, key: KeyCode| {
+            let window = engine.window();
+            engine
+                .shell_mut()
+                .key_press(window, key)
+                .expect("the window is live");
+            engine
+                .shell_mut()
+                .key_release(window, key)
+                .expect("the window is live");
+        };
+
+        // One frame per step: the pump decides who a batch's keys belong to
+        // from last frame's panel.
+        tap(&mut engine, CONSOLE_KEY);
+        frames(&mut engine, 1);
+        engine
+            .shell_mut()
+            .commit_text(window, "bind look-left KeyJ")
+            .expect("the window is live");
+        tap(&mut engine, KeyCode::Enter);
+        frames(&mut engine, 1);
+        tap(&mut engine, CONSOLE_KEY);
+        frames(&mut engine, 2);
+
+        let before = engine.game().eye().yaw();
+
+        // The key it was declared on turns nothing now. Exact equality rather
+        // than a tolerance: on this map nothing else writes the yaw, so any
+        // movement at all is this key still being bound.
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::ArrowLeft)
+            .expect("the window is live");
+        frames(&mut engine, 10);
+        let after_old = engine.game().eye().yaw();
+        assert_eq!(
+            after_old, before,
+            "ten frames of the old key turned the view, so `look-left` is still bound to it"
+        );
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::ArrowLeft)
+            .expect("the window is live");
+        frames(&mut engine, 1);
+
+        // And the key the console named does.
+        engine
+            .shell_mut()
+            .key_press(window, NEW_KEY)
+            .expect("the window is live");
+        frames(&mut engine, 10);
+        let after_new = engine.game().eye().yaw();
+        assert_ne!(
+            after_new, before,
+            "ten frames of the key the console bound turned nothing, so the rebind \
+             reached a map this game does not look with"
+        );
     }
 
     /// **A headless run shoots the range and draws it.** The one check that says

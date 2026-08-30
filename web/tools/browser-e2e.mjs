@@ -837,6 +837,14 @@ const EXPECTATIONS = {
       restore: 'debug_view shaded',
       restored: (line) => line.includes('view: shaded'),
       restoredLabel: 'view: shaded',
+      // **What Ctrl+V answers here.** `crcbl::engine::Loop::ask_for_paste`
+      // prints this when the shell refuses the read, and the web backend is
+      // the backend that refuses: a browser's clipboard read is a
+      // permission-gated promise and `crates/crcbl-shell/src/web/mod.rs` has
+      // no route to one. The line is the whole point of the check — a paste
+      // that silently did nothing on this tier would read exactly like an
+      // empty clipboard.
+      pasteRefused: 'paste: this backend has no clipboard to read',
     },
   },
   // **The sample whose subject does not move.** viewer is a tool rather than a
@@ -6251,6 +6259,30 @@ try {
         `no heartbeat in ${pollCeiling()} ms said ${spec.appliedLabel}; the ` +
           `last of ${hud().length - beforeCommand} since the line was typed was ` +
           `"${(hud().at(-1) ?? 'none').trim()}"`
+    );
+
+    // **The paste key, and the answer this tier gives it.** `Ctrl+V` is
+    // claimed by the open console on every tier and issues
+    // `Shell::clipboard_request`; here that is refused, and the console says
+    // which half is missing rather than leaving the field empty and the
+    // visitor guessing at their own clipboard. No `text` on the keydown,
+    // because a browser sends none while Ctrl is held — the same condition the
+    // backend's own commit is gated on.
+    const beforePaste = consoleLines.length;
+    await tap('KeyV', 'v', 86, { modifiers: CDP_CTRL });
+    const refused = await until(async () =>
+      consoleLines
+        .slice(beforePaste)
+        .find((line) => line.includes(spec.pasteRefused))
+    );
+    check(
+      'C',
+      'the console says so when a browser has no clipboard to paste from',
+      Boolean(refused),
+      refused?.trim() ??
+        `nothing the page logged in ${pollCeiling()} ms carried ` +
+          `"${spec.pasteRefused}"; either the paste key reached no console or ` +
+          'a refused read is being swallowed'
     );
 
     // **Out and back in**, which is what makes the line below a check of the

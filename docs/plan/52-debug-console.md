@@ -377,10 +377,11 @@ tier beyond stating that.
   storage, is what lets the owning code read it without a lookup; a cache is a
   second copy that drifts.
 - **Auto-saving `ARCHIVE` variables on exit** — decision 3.
-- **Selection, clipboard paste and IME on the web in v0** — the field is
-  insert-and-caret first; paste rides `Shell::clipboard_request`'s async answer
-  and is the first follow-up; IME needs the web backend's `TEXT_IME` work, which
-  is `15-windowing.md`'s.
+- **Selection and IME on the web in v0** — the field is insert-and-caret first,
+  and IME needs the web backend's `TEXT_IME` work, which is `15-windowing.md`'s.
+  Clipboard paste was on this list as the first follow-up and landed with slice
+  8, on every backend that implements `Shell::clipboard_request`; the web is not
+  one of them, so a browser still cannot paste.
 
 ## Delivery, in order
 
@@ -555,9 +556,36 @@ entry; the browser gate runs on every slice that touches a demo.
    backend, the shim and the gate), and `AltGr`, which reports as `Ctrl`+`Alt`
    and so commits nothing. Both in `docs/backlog.md`.
 
-8. **Follow-ups, each its own slice**: clipboard paste; `bind`/`unbind` over
-   `ActionMap::action_names`; the `SIM` flag over the transport; a `config`
-   command that runs a file of commands; a touch keyboard.
+8. **The paste key and the rebinding commands — landed 2026-08-31.**
+   `CONSOLE_PASTE_KEY` is `V` under `Ctrl` or `Meta`: the open console records
+   the press, `Loop::ask_for_paste` issues `Shell::clipboard_request` after the
+   pump has let the shell go — a command cannot ask the shell for anything from
+   inside the pump's own closure — and the `ShellEvent::ClipboardData` that
+   answers it lands in the field through `TextField::insert`, matched by request
+   id so a game's own read is not stolen. A backend that refuses the read says
+   which half is missing; the web backend is that backend, and
+   `EXPECTATIONS.quarry.console.pasteRefused` is the browser check that it says
+   so. `bind`/`unbind` reach the game's `ActionMap` through a new defaulted
+   `HostedGame::actions`, with the ask recorded on `EngineLink` and applied by
+   `Loop::drain_binds` where the game is in hand; `debug_console::apply_bind`
+   owns the reporting, so what a binding is called in a printed line is the
+   console's business and not the loop's. `toggle` and `reset` — decision 7's
+   table, and slice 5's leftovers — are `crcbl-console` built-ins now, the bare
+   `reset` skipping every `ARCHIVE` variable so a debug session cannot empty the
+   player's settings file.
+
+   Every sample that keeps an `ActionMap` overrides `actions` — the four whose
+   map lives on their `Game` through a new `Game::action_map_mut`, since a
+   `HostedGame` impl is a sibling module away from a private field — and
+   asteroids and breach each drive a console rebind end to end, one per shape.
+
+   **What it did not do**, each in `docs/backlog.md`: six of the eight overrides
+   are compile-checked rather than driven; a browser still cannot read a
+   clipboard; a pasted newline joins two lines; and `bind` spells keys only, not
+   the other `Binding` variants.
+
+9. **Still to do, each its own slice**: the `SIM` flag over the transport; a
+   `config` command that runs a file of commands; a touch keyboard.
 
 ## Exit criteria
 

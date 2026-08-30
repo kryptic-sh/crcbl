@@ -214,13 +214,6 @@ than fixed:
 What slice 5 — `CONSOLE_KEY`, the takeover, the gather and the drain — left as
 limits rather than fixed:
 
-- **`toggle` and `reset` are not built.** Plan decision 7's table lists both,
-  and both are registry-generic — they belong in `crcbl-console`'s `builtin.rs`
-  beside `help`/`find`/`echo`/`clear`, which is the crate slice 5 did not own.
-  Each is about ten lines over `Registry::lookup` and `Var::set`/`Var::default`,
-  and landing them means extending `builtin_table` and the exact list
-  `crates/crcbl-console/tests/guard.rs`'s
-  `the_guard_reads_the_names_the_declarations_actually_use` asserts.
 - **A console audio-gain write does not reach the running mixer.** The loop
   drains `settings::Deferred`'s video section into `GameGpu::apply_video` and
   its frame limit into `Clock::set_limit`, and has nowhere to send a gain: a
@@ -349,6 +342,59 @@ gate — left as limits rather than fixed:
   row with one, because quarry's heartbeat is the only one that prints a value a
   console command moves. Any demo could carry the _echo_ check; none of the
   others can carry the effect check without a new HUD field.
+
+What slice 8's first two follow-ups — the paste key, `bind`/`unbind` — left as
+limits rather than fixed:
+
+- **Six of the eight `HostedGame::actions` overrides are compile-checked and not
+  driven.** Every sample that keeps an `ActionMap` hands it over — asteroids,
+  breach, breakout, flappy, horde, orbit, puppet, shard — in two shapes: the map
+  on the `Game` behind a new `Game::action_map_mut` (asteroids, breakout,
+  flappy, horde) and the map on the hosted struct itself (breach, orbit, puppet,
+  shard). One of each shape is driven end to end by a console line in its own
+  crate:
+  `asteroids::app::tests::a_console_rebind_moves_the_key_the_ship_fires_on`
+  reads the action off the map `Game::tick` itself reads, and
+  `breach::app::tests::a_console_rebind_moves_the_key_the_view_turns_on` reads
+  the camera yaw `draw` turns from `look_turn`. The other six are the same two
+  lines over a field checked by hand to be the one their own `key_event` replay
+  feeds, and nothing drives them. Closing it is one test per app, each needing
+  an observable that game already exposes; breach could not use the range map
+  for its own, because `RenderState::imposed_aim` writes the yaw there.
+- **A browser cannot paste.** `crates/crcbl-shell/src/web/mod.rs` answers
+  `clipboard_request` with `Unsupported`, so `Ctrl`+`V` in a demo prints that
+  this backend has no clipboard to read — checked by name in
+  `web/run-browser-e2e.sh` and by `EXPECTATIONS.quarry.console.pasteRefused`.
+  Closing it is `navigator.clipboard.readText()`, a permission-gated promise in
+  a secure context: the shim would have to call it from the keydown whose
+  gesture satisfies that requirement, and resolve it back into a queued
+  `ShellEvent::ClipboardData`. Whether a headless CI browser can be granted the
+  permission at all is the first thing to find out — if it cannot, the refusal
+  check is the only one that gate can carry.
+- **A pasted newline joins two lines rather than submitting the first.**
+  `TextField::insert` drops control characters, which is the rule every other
+  path into the field already follows. Source's console runs each line of a
+  multi-line paste; doing that here means the field growing a queue of pasted
+  lines and the console draining it, which is a change to `crcbl-ui`'s widget
+  rather than to the paste path.
+- **Only the one clipboard is read.** `Shift`+`Insert` is deliberately not a
+  second spelling of the paste key: on X11 it means the _primary selection_,
+  which is a different clipboard from the one `Shell::clipboard_request` reads,
+  and binding it here would paste the wrong text for the users who expect it.
+  `crcbl-shell` has no primary-selection seam and nothing has asked for one.
+- **Verified on the headless shell and in a browser, and on no native backend.**
+  The paste path is backend-agnostic — `Shell::clipboard_request` and the
+  `ClipboardData` that answers it — and `HeadlessShell` implements the whole
+  seam including Wayland's focus gate, but no test drives a real X11, Wayland,
+  Win32 or AppKit clipboard through the _console_. Each of those backends has
+  clipboard tests of its own; what is unproven is the console's use of them on a
+  real display.
+- **`bind` cannot spell a mouse button, an axis or an on-screen control.**
+  `bind <action> <key>` takes a `KeyCode` only, so an action driven by
+  `Binding::MouseButton`, `KeyAxis`, `Wasd`, `PointerPosition` or `Virtual` can
+  be listed (`crcbl::debug_console::binding_name` prints each) and cleared, but
+  not written back. A `bind aim mouse` spelling needs a parser for the other
+  variants and a decision about what `Wasd` looks like on one line.
 
 ## The shadow atlas allocator: what items 1 and 4 left (2026-08-31)
 

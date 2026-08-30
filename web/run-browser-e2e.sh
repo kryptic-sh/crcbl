@@ -558,6 +558,13 @@ case "$DEMO" in
             echo "               control, and it passes for a shim that swallows every backquote" >&2
             exit 1
         fi
+        PASTE="$(grep -F 'the console says so when a browser has no clipboard to paste from' "${OUTPUT}.plain" || true)"
+        if [ -z "$PASTE" ]; then
+            echo "crcbl web e2e: the driver never pressed the console's paste key; the one" >&2
+            echo "               tier whose clipboard read is refused is the one tier nothing" >&2
+            echo "               asks, and a silent paste there reads as an empty clipboard" >&2
+            exit 1
+        fi
         ;;
 esac
 

@@ -62,6 +62,36 @@ convar! {
     pub static t_refused_int: i64 in 1..=16 = 1;
 }
 
+// `toggle` and `reset`'s own variables, for the reason above and one more: a
+// bare `reset` walks the whole registry, so it is run over a table of its own
+// rather than over `a_table`, where it would put back a value another test in
+// this binary is in the middle of asserting.
+convar! {
+    /// A switch one test flips.
+    pub static t_toggled: bool = false;
+}
+
+convar! {
+    /// A whole number one test resets by name.
+    pub static t_reset_int: i64 in 1..=16 = 4;
+}
+
+convar! {
+    /// A whole number one test tries to toggle. Nothing ever writes it.
+    pub static t_not_a_bool: i64 in 0..=9 = 3;
+}
+
+convar! {
+    /// A switch the bare reset puts back.
+    pub static t_bare_switch: bool = false;
+}
+
+convar! {
+    /// A saved variable the bare reset must leave exactly where it is.
+    #[flags(ARCHIVE)]
+    pub static t_bare_saved: i64 in 1..=16 = 1;
+}
+
 concommand! {
     /// Print the arguments back, loudly.
     pub fn shout(cx, args) {
@@ -115,6 +145,9 @@ fn a_table() -> Table {
         t_written_enum,
         t_written_int,
         t_refused_int,
+        t_toggled,
+        t_reset_int,
+        t_not_a_bool,
         bind VOLUME,
         cmd shout,
         cmd refuse,
@@ -123,6 +156,11 @@ fn a_table() -> Table {
 
 fn gathered() -> Registry {
     Registry::gather(&[a_table()]).expect("no two entries claim one name")
+}
+
+/// A registry holding only the variables the bare `reset` is allowed to walk.
+fn reset_registry() -> Registry {
+    Registry::gather(&[table![t_bare_switch, t_bare_saved]]).expect("no two entries claim one name")
 }
 
 /// Run `line` and return what it printed.
@@ -557,4 +595,125 @@ fn an_entry_answers_for_the_thing_it_holds() {
         panic!("`echo` is a command");
     };
     assert_eq!(command.help(), "Print the arguments back as one line.");
+}
+
+// -- toggle and reset --------------------------------------------------------
+
+/// **`toggle` flips the cell the owning code reads**, which is the whole point
+/// of a `ConVar` being its own storage: the value is read back off the static
+/// and not off the line the command printed.
+#[test]
+fn toggle_flips_a_bool_and_the_owning_code_reads_the_new_value() {
+    let registry = gathered();
+    assert!(!t_toggled.get_bool(), "declared false");
+    assert_eq!(run(&registry, "toggle t_toggled"), ["t_toggled = true"]);
+    assert!(t_toggled.get_bool(), "the flip did not reach the cell");
+    assert_eq!(run(&registry, "toggle t_toggled"), ["t_toggled = false"]);
+    assert!(!t_toggled.get_bool(), "and back again");
+}
+
+/// **A variable that is not a bool has nothing to flip**, and the refusal says
+/// what it is instead.
+#[test]
+fn toggle_refuses_a_variable_that_is_not_a_bool() {
+    let registry = gathered();
+    let mut host = Host::default();
+    let mut cx = Context::new(&registry, &mut host);
+    let fault = registry
+        .execute(&mut cx, "toggle t_not_a_bool")
+        .expect_err("an int is not a bool");
+    assert_eq!(
+        fault.message(),
+        "`t_not_a_bool` is an int, and toggle is for a bool"
+    );
+    assert_eq!(t_not_a_bool.get_i64(), 3, "and it left it alone");
+    assert!(cx.lines().is_empty());
+}
+
+/// **A command is refused by name**, rather than reported as an unknown
+/// variable — it exists, and sending someone to `find` would send them looking
+/// for a typo that is not there.
+#[test]
+fn toggle_names_a_command_rather_than_calling_it_unknown() {
+    let registry = gathered();
+    let mut host = Host::default();
+    let mut cx = Context::new(&registry, &mut host);
+    assert_eq!(
+        registry
+            .execute(&mut cx, "toggle echo")
+            .expect_err("`echo` is a command")
+            .message(),
+        "`echo` is a command, not a variable"
+    );
+    assert_eq!(
+        registry
+            .execute(&mut cx, "toggle r_no_such_variable")
+            .expect_err("nothing knows that name")
+            .message(),
+        "unknown variable `r_no_such_variable` — try `find r_no_such_variable`"
+    );
+}
+
+/// **`reset <var>` puts the declared default back into the cell.**
+#[test]
+fn reset_puts_one_variable_back_to_its_declared_default() {
+    let registry = gathered();
+    assert_eq!(run(&registry, "t_reset_int 9"), ["t_reset_int = 9"]);
+    assert_eq!(t_reset_int.get_i64(), 9);
+    assert_eq!(run(&registry, "reset t_reset_int"), ["t_reset_int = 4"]);
+    assert_eq!(
+        t_reset_int.get_i64(),
+        4,
+        "the default did not reach the cell"
+    );
+}
+
+/// **A settings-backed variable has no default here to go back to**, and says
+/// so rather than writing whatever the console last saw.
+#[test]
+fn reset_refuses_a_variable_whose_storage_is_the_settings_stack() {
+    let registry = gathered();
+    let mut host = Host { volume: 0.25 };
+    let mut cx = Context::new(&registry, &mut host);
+    assert_eq!(
+        registry
+            .execute(&mut cx, "reset volume")
+            .expect_err("a binding declares no default")
+            .message(),
+        "`volume` is stored through the settings stack, which keeps its own defaults"
+    );
+    drop(cx);
+    assert_eq!(host.volume, 0.25, "and it wrote nothing");
+}
+
+/// **A bare `reset` moves the debug variables and leaves the saved ones**, which
+/// is plan decision 7's "every non-`ARCHIVE` variable": a console session that
+/// emptied the player's settings file would be a preference gone for good.
+#[test]
+fn a_bare_reset_moves_the_unsaved_variables_and_leaves_the_saved_ones() {
+    let registry = reset_registry();
+    assert_eq!(
+        run(&registry, "t_bare_switch true"),
+        ["t_bare_switch = true"]
+    );
+    assert_eq!(run(&registry, "t_bare_saved 9"), ["t_bare_saved = 9"]);
+
+    assert_eq!(
+        run(&registry, "reset"),
+        ["t_bare_switch = false"],
+        "the bare reset printed something other than the one variable it moved"
+    );
+    assert!(!t_bare_switch.get_bool(), "the switch did not go back");
+    assert_eq!(
+        t_bare_saved.get_i64(),
+        9,
+        "a saved variable was reset with the debug ones"
+    );
+
+    // And with nothing left to move it says so, rather than printing nothing
+    // at all and looking like a command that did not run.
+    assert_eq!(
+        run(&registry, "reset"),
+        ["every variable is already at its default"]
+    );
 }

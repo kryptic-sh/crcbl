@@ -42,5 +42,8 @@ fn the_guard_reads_the_names_the_declarations_actually_use() {
     // The other half of the guard: that the scan finds the built-ins by the
     // names the console answers to, not by some other ident in the file.
     let declared = guard::declared_names("src").expect("this crate's src directory");
-    assert_eq!(declared, ["clear", "echo", "find", "help"]);
+    assert_eq!(
+        declared,
+        ["clear", "echo", "find", "help", "reset", "toggle"]
+    );
 }

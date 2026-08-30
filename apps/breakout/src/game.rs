@@ -1199,6 +1199,15 @@ impl<T: Transport> Game<T> {
         self.pending_input.push(Queued::Key(key, pressed));
     }
 
+    /// The action map, for the debug console's `bind` and `unbind`.
+    ///
+    /// The map is private and this game's `HostedGame` impl is a sibling module,
+    /// so `crcbl::engine::HostedGame::actions` has no other way to reach it.
+    /// Nothing else writes bindings: the console's rebind is the one caller.
+    pub const fn action_map_mut(&mut self) -> &mut ActionMap {
+        &mut self.action_map
+    }
+
     /// Queue a tap — or a click — for replay at the start of the next tick.
     ///
     /// The pointer's half of [`key_event`](Self::key_event), queued for the same

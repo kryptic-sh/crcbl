@@ -354,6 +354,14 @@ impl HostedGame for Horde {
         self.game.key_event(key, pressed);
     }
 
+    /// The map the console's `bind` and `unbind` rebind.
+    ///
+    /// The same map `key_event` above feeds, so a rebind typed at the console
+    /// moves the key this game actually plays on rather than a copy of it.
+    fn actions(&mut self) -> Option<&mut crcbl::input::ActionMap> {
+        Some(self.game.action_map_mut())
+    }
+
     /// One finger, offered to the on-screen controls and then reported as a
     /// **device**.
     ///

@@ -351,6 +351,15 @@ impl HostedGame for Orbit {
         self.pending_keys.push((key, pressed));
     }
 
+    /// The map the console's `bind` and `unbind` rebind.
+    ///
+    /// The same map the queued keys above are replayed into, so a rebind typed
+    /// at the console moves the key this game actually plays on rather than a
+    /// copy of it.
+    fn actions(&mut self) -> Option<&mut ActionMap> {
+        Some(&mut self.actions)
+    }
+
     fn menu_action(_id: crcbl::ui::WidgetId) -> Option<core::convert::Infallible> {
         None
     }

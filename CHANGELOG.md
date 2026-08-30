@@ -159,6 +159,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The debug console pastes, rebinds, toggles and resets.** `Ctrl`/`Cmd`+`V`
+  puts the clipboard into the console's field: the open console records the
+  press, `Loop::ask_for_paste` issues `Shell::clipboard_request` once the pump
+  has let the shell go, and the `ShellEvent::ClipboardData` that answers it —
+  which may be several frames later — is inserted through `TextField::insert`,
+  matched by request id so a game's own read is not stolen. A backend that
+  cannot read a clipboard says which half is missing rather than pasting
+  nothing; that is the web backend today, whose read is a permission-gated
+  promise `crcbl-shell` has no route to. `bind` and `unbind` reach the game's
+  `crcbl::input::ActionMap` through a new defaulted `HostedGame::actions`:
+  `bind` alone lists every action and what drives it, `bind <action> <key>`
+  replaces the bindings with that one key (W3C `code` spellings, matched without
+  regard to case), and `unbind <action>` leaves it driven by nothing. **Every
+  sample that keeps an action map overrides it** — asteroids, breach, breakout,
+  flappy, horde, orbit, puppet and shard — so a rebind typed at the console
+  moves the key the game is actually played on; the four that keep the map
+  inside their `Game` expose it through a new `Game::action_map_mut`, a
+  `HostedGame` impl being a sibling module away from a private field.
+  `toggle <var>` and `reset [<var>]` are `crcbl-console` built-ins beside
+  `help`/`find`/`echo`/`clear`, and a bare `reset` puts back every variable that
+  is neither `ARCHIVE` nor `READ_ONLY`, so a debug session cannot empty the
+  player's settings file.
+
 - **The debug console can be typed at in a browser.** `crcbl-shell`'s Web
   backend emits `ShellEvent::TextCommit` for a press whose composed
   `KeyboardEvent.key` is a single printable character and that carries no `Ctrl`

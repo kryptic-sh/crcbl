@@ -3545,6 +3545,15 @@ impl Game {
         self.pending_keys.push((key, pressed));
     }
 
+    /// The action map, for the debug console's `bind` and `unbind`.
+    ///
+    /// The map is private and this game's `HostedGame` impl is a sibling module,
+    /// so `crcbl::engine::HostedGame::actions` has no other way to reach it.
+    /// Nothing else writes bindings: the console's rebind is the one caller.
+    pub const fn action_map_mut(&mut self) -> &mut ActionMap {
+        &mut self.action_map
+    }
+
     /// Where the on-screen stick is deflected to, +X right and +Y up.
     ///
     /// Queued like a key and for the same reason — the widget is driven from the

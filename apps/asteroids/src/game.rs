@@ -2095,6 +2095,15 @@ impl Game {
         self.pending_keys.push((key, pressed));
     }
 
+    /// The action map, for the debug console's `bind` and `unbind`.
+    ///
+    /// The map is private and this game's `HostedGame` impl is a sibling module,
+    /// so `crcbl::engine::HostedGame::actions` has no other way to reach it.
+    /// Nothing else writes bindings: the console's rebind is the one caller.
+    pub const fn action_map_mut(&mut self) -> &mut ActionMap {
+        &mut self.action_map
+    }
+
     /// Advances the simulation by exactly one fixed tick.
     ///
     /// Call it from the loop's fixed-timestep accumulator — once per tick, not

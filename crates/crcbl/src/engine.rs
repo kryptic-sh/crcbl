@@ -5480,6 +5480,23 @@ pub trait HostedGame: Sized {
         crcbl_console::Table::EMPTY
     }
 
+    /// The action map the console's `bind` and `unbind` rebind.
+    ///
+    /// `docs/plan/52-debug-console.md` slice 8's second follow-up. An
+    /// [`ActionMap`](crate::input::ActionMap) is the *game's* — the engine
+    /// declares no actions and holds no map — so rebinding one needs the game
+    /// to hand it over, exactly as
+    /// [`take_pending_frame_limit`](Self::take_pending_frame_limit) needs it to
+    /// hand over a limit.
+    ///
+    /// **The default answers `None`**, on [`apply_video`](GameGpu::apply_video)'s
+    /// terms: a game with no action map has nothing to rebind, and the loop's
+    /// drain says so out loud rather than printing a binding it never made. A
+    /// game that keeps one overrides this with a single line.
+    fn actions(&mut self) -> Option<&mut crate::input::ActionMap> {
+        None
+    }
+
     /// Adds this game's own fields to the run's shared ones.
     fn summary(&self, run: RunSummary) -> Self::Summary;
 
@@ -5853,6 +5870,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             }
         });
         let from_keyboard = menu.activated;
+        // Here rather than inside the pump: the closure above is borrowing the
+        // shell, and a clipboard read is something to ask the shell for.
+        self.ask_for_paste();
         self.events += pending.count;
         // Hit-tested against **this** frame's layout, which is why the pointer
         // is resolved here and not inside the pump: the rectangles depend on the
@@ -6041,6 +6061,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // `&mut dyn Any` and cannot hold a borrow of the renderer; this is the
         // drain that arrangement is built around.
         self.drain_console();
+        self.drain_binds();
         self.apply_debug_view();
         if self.console.host_mut().engine_mut().take_quit() {
             return Ok(Flow::Stop(ExitReason::Quit));
@@ -6549,6 +6570,63 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         }
         if let Some(limit) = limit {
             self.clock_source.set_limit(limit);
+        }
+    }
+
+    /// Issues the clipboard read an open console's paste key asked for.
+    ///
+    /// The read is asynchronous on every backend — see
+    /// [`crcbl_shell::clipboard`] — so this only starts it: the answer arrives
+    /// as a [`ShellEvent::ClipboardData`] in some later batch and
+    /// [`Console::observe`](crate::debug_console::Console::observe) is what puts
+    /// it in the field.
+    ///
+    /// **A backend with no clipboard says so, loudly.** The web backend answers
+    /// [`crcbl_shell::ShellError::Unsupported`] — a browser's clipboard read is
+    /// a permission-gated promise and
+    /// `crcbl-shell`'s web backend has no route to one — and a paste that
+    /// silently did nothing there would be indistinguishable from a clipboard
+    /// that happened to be empty.
+    fn ask_for_paste(&mut self) {
+        if !self.console.take_paste_request() {
+            return;
+        }
+        match self
+            .shell
+            .clipboard_request(self.window, crcbl_shell::MimeType::TextUtf8)
+        {
+            Ok(request) => self.console.expect_paste(request),
+            Err(error) => crcbl_core::log::console::print(&format!(
+                "paste: this backend has no clipboard to read — {error}"
+            )),
+        }
+    }
+
+    /// Carries what `bind` and `unbind` asked for to the game's action map.
+    ///
+    /// [`drain_console`](Self::drain_console)'s shape, for
+    /// [`EngineLink`](crate::debug_console::EngineLink)'s reason: a command
+    /// reaches its host as `&mut dyn Any` and cannot hold a borrow of the game,
+    /// so it records the ask and this is where the game is in hand.
+    ///
+    /// **A game with no map says so once per line and not per ask**, and it
+    /// names the seam: the default [`HostedGame::actions`] answers `None`, so
+    /// the honest answer is that this game hands no map over rather than that
+    /// the action does not exist.
+    fn drain_binds(&mut self) {
+        let asks = self.console.host_mut().engine_mut().take_binds();
+        if asks.is_empty() {
+            return;
+        }
+        let Some(actions) = self.game.actions() else {
+            crcbl_core::log::console::print(
+                "bind: this game hands the loop no action map — `HostedGame::actions` is the seam, \
+                 and this game leaves it at the default that answers none",
+            );
+            return;
+        };
+        for ask in &asks {
+            crate::debug_console::apply_bind(actions, ask);
         }
     }
 
@@ -11676,6 +11754,29 @@ mod tests {
         }
     }
 
+    /// The action `bind` moves, and the key it is declared on.
+    const SERVE_ACTION: &str = "serve";
+
+    /// The fixture's action map, with one button action on [`SERVE_KEY`].
+    ///
+    /// A newtype for [`WantedCursor`]'s reason: `ActionMap`'s own `Default` is
+    /// an *empty* map, so a derived default would give this game no actions at
+    /// all and every `bind` check would be about a map that declares nothing.
+    #[derive(Debug)]
+    struct FakeActions(crate::input::ActionMap);
+
+    impl Default for FakeActions {
+        fn default() -> Self {
+            let mut actions = crate::input::ActionMap::new();
+            actions.declare(crate::input::ActionDecl {
+                name: SERVE_ACTION.to_owned(),
+                kind: crate::input::ActionKind::Button,
+                bindings: vec![crate::input::Binding::Key(SERVE_KEY)],
+            });
+            Self(actions)
+        }
+    }
+
     /// A game with no simulation in it, which records what the loop asked of it.
     #[derive(Debug, Default)]
     struct FakeGame {
@@ -11705,6 +11806,12 @@ mod tests {
         wanted_pointer: PointerMode,
         /// What [`HostedGame::cursor`] answers, for the same reason.
         wanted_cursor: WantedCursor,
+        /// The map `bind` rebinds, fed by every key the loop forwards.
+        actions: FakeActions,
+        /// Whether this game hands the map over at all, so the check that the
+        /// console says so has a game that does not — which is every `apps/*`
+        /// today.
+        hides_actions: bool,
     }
 
     /// This game's own summary: the shared half, plus a count only it kept.
@@ -11772,7 +11879,15 @@ mod tests {
             if key == SERVE_KEY && pressed {
                 self.served = true;
             }
+            // Fed the raw key, exactly as a real game feeds its map — which is
+            // what makes a rebind observable here: `serve` fires on whatever
+            // key the map says, and on no other.
+            self.actions.0.key_event(key, pressed);
             self.keys.push((key, pressed));
+        }
+
+        fn actions(&mut self) -> Option<&mut crate::input::ActionMap> {
+            (!self.hides_actions).then_some(&mut self.actions.0)
         }
 
         fn touch_event(&mut self, touch: TouchUpdate) {
@@ -14203,6 +14318,251 @@ mod tests {
             engine.clock_source.limit().rate(),
             37,
             "the clock is still pacing at whatever the run started with"
+        );
+    }
+
+    /// Holds `modifiers` down for `body`, and puts the keyboard back.
+    fn holding(
+        engine: &mut Hosted,
+        modifiers: crcbl_core::input::Modifiers,
+        body: impl FnOnce(&mut Hosted),
+    ) {
+        engine.shell_mut().set_modifiers(modifiers);
+        body(engine);
+        engine
+            .shell_mut()
+            .set_modifiers(crcbl_core::input::Modifiers::empty());
+    }
+
+    /// **Ctrl+V puts what is on the clipboard into the field.**
+    ///
+    /// `docs/plan/52-debug-console.md` slice 8's first follow-up, end to end
+    /// through the loop: the key is claimed by the open console, the loop asks
+    /// the shell once the pump has let go of it, and the answer — which arrives
+    /// in a *later* batch, because every backend's read is asynchronous — lands
+    /// in the line being typed. The field's contents are the observable; the
+    /// request having been made is not, since a request nothing answered types
+    /// nothing.
+    #[test]
+    fn the_paste_key_puts_the_clipboard_into_the_console_field() {
+        let mut engine = with_console_open();
+        let window = engine.window;
+        typed(&mut engine, "echo ");
+        engine
+            .shell_mut()
+            .clipboard_offer(window, &[crcbl_shell::ClipboardOffer::text("pasted")])
+            .expect("the headless clipboard takes an offer");
+
+        holding(&mut engine, crcbl_core::input::Modifiers::CTRL, |engine| {
+            tap(engine, crate::debug_console::CONSOLE_PASTE_KEY)
+        });
+        // Two frames: the first takes the key and issues the read, the second
+        // is the batch the answer arrives in.
+        step(&mut engine);
+        step(&mut engine);
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "echo pasted",
+            "the clipboard did not reach the line being typed"
+        );
+
+        // And the pasted line runs, which is what a paste is for.
+        tap(&mut engine, crcbl_core::input::KeyCode::Enter);
+        step(&mut engine);
+        assert_eq!(engine.console().panel().field().text(), "");
+    }
+
+    /// **A bare `V` is a letter, not a paste.**
+    ///
+    /// The control for the check above: without the modifier the key is a
+    /// character like any other, and a console that pasted on every `v` could
+    /// not be typed at.
+    #[test]
+    fn the_paste_key_without_its_modifier_types_a_letter() {
+        let mut engine = with_console_open();
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .clipboard_offer(window, &[crcbl_shell::ClipboardOffer::text("pasted")])
+            .expect("the headless clipboard takes an offer");
+
+        tap(&mut engine, crate::debug_console::CONSOLE_PASTE_KEY);
+        typed(&mut engine, "v");
+        step(&mut engine);
+        step(&mut engine);
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "v",
+            "a bare V pasted instead of typing"
+        );
+    }
+
+    /// **A backend with no clipboard says so**, rather than swallowing the
+    /// paste.
+    ///
+    /// The web backend is that backend today — a browser's read is a
+    /// permission-gated promise `crcbl-shell` has no route to — and a paste that
+    /// did nothing there would look exactly like an empty clipboard. Driven here
+    /// by taking the capability off the headless shell, which is what
+    /// [`HeadlessShell::set_caps`](crcbl_shell::HeadlessShell::set_caps) is for.
+    #[test]
+    fn a_backend_with_no_clipboard_says_so_rather_than_pasting_nothing() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        engine.shell_mut().set_caps(
+            crcbl_shell::ShellCaps::DESKTOP.difference(crcbl_shell::ShellCaps::CLIPBOARD),
+        );
+
+        holding(&mut engine, crcbl_core::input::Modifiers::CTRL, |engine| {
+            tap(engine, crate::debug_console::CONSOLE_PASTE_KEY)
+        });
+        step(&mut engine);
+        step(&mut engine);
+        let printed = console_lines(&logs);
+        assert!(
+            printed
+                .iter()
+                .any(|line| line.starts_with("paste: this backend has no clipboard")),
+            "a refused clipboard read said nothing at all: {printed:?}"
+        );
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "",
+            "and nothing was typed into the field"
+        );
+    }
+
+    /// **A rebound action fires on the new key and not on the old one.**
+    ///
+    /// Slice 8's second follow-up, at the seam that makes it real: `bind` is a
+    /// line typed at the console, `HostedGame::actions` is how the loop reaches
+    /// the map, and the observable is the *action* — read off the game's own
+    /// map after the console has been shut and the keys have gone back to the
+    /// game.
+    #[test]
+    fn a_rebound_action_fires_on_the_new_key_and_not_on_the_old_one() {
+        const NEW_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::KeyJ;
+        let mut engine = with_console_open();
+        run_line(&mut engine, &format!("bind {SERVE_ACTION} {NEW_KEY}"));
+
+        // Shut, so the game sees the keyboard again.
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        assert!(!engine.console().is_open());
+
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .key_press(window, SERVE_KEY)
+            .expect("the window is live");
+        step(&mut engine);
+        assert!(
+            !engine.game.actions.0.button_held(SERVE_ACTION),
+            "the action still fires on the key it was rebound away from"
+        );
+        engine
+            .shell_mut()
+            .key_release(window, SERVE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_press(window, NEW_KEY)
+            .expect("the window is live");
+        step(&mut engine);
+        assert!(
+            engine.game.actions.0.button_held(SERVE_ACTION),
+            "the action does not fire on the key the console bound it to"
+        );
+    }
+
+    /// **`unbind` leaves the action with nothing driving it**, and the console
+    /// says so in the same shape `bind` prints.
+    #[test]
+    fn unbind_leaves_an_action_with_nothing_driving_it() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        run_line(&mut engine, &format!("unbind {SERVE_ACTION}"));
+        assert!(
+            console_lines(&logs)
+                .iter()
+                .any(|line| line == &format!("{SERVE_ACTION} = nothing")),
+            "the console did not report the empty binding: {:?}",
+            console_lines(&logs)
+        );
+
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .key_press(window, SERVE_KEY)
+            .expect("the window is live");
+        step(&mut engine);
+        assert!(
+            !engine.game.actions.0.button_held(SERVE_ACTION),
+            "an unbound action still fires on its old key"
+        );
+    }
+
+    /// **`bind` alone lists the game's actions and what drives each**, and a
+    /// name nothing declares is refused rather than silently created.
+    #[test]
+    fn bind_lists_the_actions_and_refuses_a_name_no_action_has() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        run_line(&mut engine, "bind");
+        assert!(
+            console_lines(&logs)
+                .iter()
+                .any(|line| line == &format!("{SERVE_ACTION} = {SERVE_KEY}")),
+            "the listing did not name the action and its key: {:?}",
+            console_lines(&logs)
+        );
+
+        run_line(&mut engine, "bind no_such_action Space");
+        assert!(
+            console_lines(&logs)
+                .iter()
+                .any(|line| line.contains("no such action: no_such_action")),
+            "an undeclared action was not refused: {:?}",
+            console_lines(&logs)
+        );
+
+        // And the key name is refused with the spelling it wanted, so a typo is
+        // not a binding to a key nobody pressed.
+        run_line(&mut engine, &format!("bind {SERVE_ACTION} Banana"));
+        assert!(
+            console_lines(&logs)
+                .iter()
+                .any(|line| line.contains("`Banana` is not a key")),
+            "a name that is not a key was taken as one: {:?}",
+            console_lines(&logs)
+        );
+        assert_eq!(
+            engine.game.actions.0.bindings(SERVE_ACTION),
+            Some([crate::input::Binding::Key(SERVE_KEY)].as_slice()),
+            "a refused line moved the binding anyway"
+        );
+    }
+
+    /// **A game that hands the loop no action map says so**, naming the seam
+    /// rather than reporting a binding it never made.
+    ///
+    /// The default [`HostedGame::actions`] answers `None`, and that is every
+    /// `apps/*` in this workspace until each overrides it — so this is the arm
+    /// a player actually meets today.
+    #[test]
+    fn a_game_that_hands_over_no_action_map_says_so() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        engine.game.hides_actions = true;
+        run_line(&mut engine, "bind");
+        let printed = console_lines(&logs);
+        assert!(
+            printed
+                .iter()
+                .any(|line| line.contains("no action map") && line.contains("HostedGame::actions")),
+            "a game with no map left the line unanswered: {printed:?}"
         );
     }
 

@@ -318,9 +318,11 @@ pub mod settings;
 pub fn console_table() -> crcbl_console::Table {
     static VARS: &[&crcbl_console::ConVar] = &[&debug_view::r_debug_view];
     static COMMANDS: &[&crcbl_console::ConCommand] = &[
+        &debug_console::bind,
         &debug_console::fps,
         &debug_console::pause,
         &debug_console::quit,
+        &debug_console::unbind,
         &debug_view::debug_view,
         &settings::dump,
         &settings::save,

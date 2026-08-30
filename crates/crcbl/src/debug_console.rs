@@ -32,9 +32,10 @@
 use std::any::Any;
 use std::time::Duration;
 
-use crcbl_console::{Context, History, Registry, Table};
-use crcbl_core::input::{KeyCode, ScrollDelta};
-use crcbl_shell::{ButtonState, ShellEvent};
+use crcbl_console::{Context, Fault, History, Registry, Table};
+use crcbl_core::input::{KeyCode, Modifiers, ScrollDelta};
+use crcbl_input::{ActionMap, Binding};
+use crcbl_shell::{ButtonState, ClipboardContent, ClipboardRequestId, ShellEvent};
 use crcbl_ui::console::{ConsolePanel, caret_shown};
 use crcbl_ui::{FontAtlas, PointerInput, UiState, draw_list::DrawList};
 
@@ -54,6 +55,25 @@ use crate::settings::ConsoleHost;
 ///
 /// [`LogView::set_filter`]: crcbl_ui::console::LogView::set_filter
 pub const CONSOLE_LEVEL_KEY: KeyCode = KeyCode::F2;
+
+/// Pastes the clipboard into the field, held with `Ctrl` or the platform's
+/// `Meta`/`Command` key.
+///
+/// Plan 52's first follow-up, and it is one key rather than a command because
+/// pasting is what a person does *while* typing a line. Both modifiers are
+/// accepted on every platform: the engine has no per-platform shortcut table,
+/// `Meta`+`V` is what a Mac keyboard sends and `Ctrl`+`V` is what every other
+/// one does, and neither means anything else to the console.
+///
+/// **`Shift`+`Insert` is deliberately not a second spelling.** It is the X11
+/// convention for the *primary selection*, which is a different clipboard from
+/// the one [`Shell::clipboard_request`](crcbl_shell::Shell::clipboard_request)
+/// reads, and binding it to this one would paste the wrong text on the one
+/// platform whose users expect it.
+pub const CONSOLE_PASTE_KEY: KeyCode = KeyCode::KeyV;
+
+/// The modifiers [`CONSOLE_PASTE_KEY`] is read under.
+const PASTE_MODIFIERS: Modifiers = Modifiers::CTRL.union(Modifiers::SUPER);
 
 /// How many log lines one wheel detent scrolls.
 ///
@@ -113,6 +133,12 @@ pub struct EngineLink {
     pub(crate) fps: f32,
     /// The last frame's wall time, in milliseconds.
     pub(crate) frame_ms: f32,
+    /// What `bind` and `unbind` asked of the game's action map, in the order
+    /// they were typed.
+    ///
+    /// A queue rather than one slot, unlike [`Self::pause`]: `bind a KeyA; bind
+    /// b KeyB` is one line and both halves of it were meant.
+    pub(crate) binds: Vec<BindAsk>,
 }
 
 impl EngineLink {
@@ -125,6 +151,7 @@ impl EngineLink {
             quit: false,
             fps: 0.0,
             frame_ms: 0.0,
+            binds: Vec::new(),
         }
     }
 
@@ -149,6 +176,35 @@ impl EngineLink {
         self.fps = rate;
         self.frame_ms = frame_ms;
     }
+
+    /// Every `bind`/`unbind` typed since the loop last looked.
+    pub fn take_binds(&mut self) -> Vec<BindAsk> {
+        std::mem::take(&mut self.binds)
+    }
+}
+
+/// What one `bind` or `unbind` line asked of the game's action map.
+///
+/// Recorded rather than done, for [`EngineLink`]'s reason: the map is the
+/// game's and a command reaches its host as `&mut dyn Any`, so the line is
+/// carried to [`Loop::drain_binds`](crate::engine::Loop) and applied where the
+/// game is in hand — the same arrangement `pause` and the settings writes take.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BindAsk {
+    /// `bind` — every action and what drives it.
+    List,
+    /// `bind <action>` — one action and what drives it.
+    Show(String),
+    /// `bind <action> <key>` — that action, driven by that key and nothing
+    /// else.
+    Set {
+        /// The action being rebound.
+        action: String,
+        /// The key it fires on from now on.
+        key: KeyCode,
+    },
+    /// `unbind <action>` — that action, driven by nothing at all.
+    Clear(String),
 }
 
 /// The [`EngineLink`] on the host a command was handed.
@@ -194,6 +250,147 @@ crcbl_console::concommand! {
     }
 }
 
+crcbl_console::concommand! {
+    /// Show what drives an action, or drive it with one key instead: `bind jump Space`.
+    pub fn bind(cx, args) {
+        let ask = match args {
+            [] => BindAsk::List,
+            [action] => BindAsk::Show((*action).to_owned()),
+            [action, key] => BindAsk::Set {
+                action: (*action).to_owned(),
+                key: key_named(key)?,
+            },
+            _ => {
+                return Err(Fault::new(
+                    "bind takes an action and one key, an action alone, or nothing at all",
+                ));
+            }
+        };
+        link(cx.host_mut()).binds.push(ask);
+        Ok(())
+    }
+}
+
+crcbl_console::concommand! {
+    /// Leave an action with nothing driving it: `unbind jump`.
+    pub fn unbind(cx, args) {
+        let [action] = args else {
+            return Err(Fault::new("unbind takes one action name"));
+        };
+        link(cx.host_mut())
+            .binds
+            .push(BindAsk::Clear((*action).to_owned()));
+        Ok(())
+    }
+}
+
+/// The key `name` spells, without regard to case.
+///
+/// The names are [`KeyCode::as_str`]'s — the W3C `code` spellings, which are
+/// what a binding profile is written in — and the case is ignored for the
+/// registry's own reason: the console matches a variable's name that way, and a
+/// person typing `bind jump space` at a prompt has not made a mistake.
+///
+/// # Errors
+///
+/// A [`Fault`] naming three of the spellings, because "not a key" on its own
+/// leaves someone guessing at the format rather than at the key.
+fn key_named(name: &str) -> Result<KeyCode, Fault> {
+    KeyCode::ALL
+        .iter()
+        .copied()
+        .find(|key| key.as_str().eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            Fault::new(format!(
+                "`{name}` is not a key — they are the `code` spellings, like `KeyF`, `Space` or `ArrowUp`"
+            ))
+        })
+}
+
+/// Carries out one [`BindAsk`] against the game's map, and prints the answer.
+///
+/// Here rather than in the loop because the reporting is the console's: what a
+/// binding is called in a printed line is this module's business, and the loop's
+/// half is only that it has the game in hand.
+pub fn apply_bind(actions: &mut ActionMap, ask: &BindAsk) {
+    match ask {
+        BindAsk::List => {
+            let names: Vec<String> = actions.action_names().map(str::to_owned).collect();
+            if names.is_empty() {
+                crcbl_core::log::console::print("this game declares no actions");
+                return;
+            }
+            for name in &names {
+                crcbl_core::log::console::print(&bindings_line(actions, name));
+            }
+        }
+        BindAsk::Show(action) => {
+            crcbl_core::log::console::print(&bindings_line(actions, action));
+        }
+        BindAsk::Set { action, key } => {
+            // The whole list, not an addition: `bind` in Source replaces, and
+            // an action that kept its old key as well would leave a player who
+            // rebound away from a clash still holding the clash.
+            match actions.rebind(action, vec![Binding::Key(*key)]) {
+                Ok(()) => crcbl_core::log::console::print(&bindings_line(actions, action)),
+                Err(error) => crcbl_core::log::console::print(&format!(
+                    "{error} — `bind` alone lists the ones this game has"
+                )),
+            }
+        }
+        BindAsk::Clear(action) => match actions.rebind(action, Vec::new()) {
+            Ok(()) => crcbl_core::log::console::print(&bindings_line(actions, action)),
+            Err(error) => crcbl_core::log::console::print(&format!(
+                "{error} — `bind` alone lists the ones this game has"
+            )),
+        },
+    }
+}
+
+/// One action and everything that drives it, in the shape every `bind` line
+/// prints.
+fn bindings_line(actions: &ActionMap, action: &str) -> String {
+    match actions.bindings(action) {
+        None => format!("no action called `{action}` — `bind` alone lists them"),
+        Some([]) => format!("{action} = nothing"),
+        Some(bindings) => {
+            let sources: Vec<String> = bindings.iter().map(binding_name).collect();
+            format!("{action} = {}", sources.join(", "))
+        }
+    }
+}
+
+/// What one binding is called in a printed line.
+///
+/// A match rather than [`Binding`]'s `Debug`, so the line reads as something a
+/// person typed: only [`Binding::Key`] can be typed back in, and the rest say
+/// what the device is rather than what the variant is called.
+fn binding_name(binding: &Binding) -> String {
+    match binding {
+        Binding::Key(key) => key.as_str().to_owned(),
+        Binding::MouseButton(button) => format!("mouse {button:?}"),
+        Binding::MouseMotion => "mouse motion".to_owned(),
+        Binding::MouseScroll => "mouse wheel".to_owned(),
+        Binding::PointerPosition { axis } => format!("pointer {axis:?}"),
+        Binding::KeyAxis { negative, positive } => {
+            format!("{}/{}", negative.as_str(), positive.as_str())
+        }
+        Binding::Virtual(id) => format!("on-screen `{id}`"),
+        Binding::Wasd {
+            up,
+            down,
+            left,
+            right,
+        } => format!(
+            "{}{}{}{}",
+            up.as_str(),
+            left.as_str(),
+            down.as_str(),
+            right.as_str()
+        ),
+    }
+}
+
 /// The engine's own console state: the registry, the panel, the history and the
 /// host every command and binding is run over.
 ///
@@ -224,6 +421,23 @@ pub struct Console {
     /// The prefix every candidate shares, which is the head the panel
     /// highlights.
     cycle_prefix: String,
+    /// [`CONSOLE_PASTE_KEY`] was pressed and the loop has not yet asked the
+    /// shell for the clipboard.
+    ///
+    /// A request rather than a read for [`EngineLink`]'s reason once more: the
+    /// shell is being pumped while the key arrives, so the console cannot call
+    /// [`Shell::clipboard_request`](crcbl_shell::Shell::clipboard_request) from
+    /// inside the pump's own closure.
+    paste_wanted: bool,
+    /// The clipboard read the loop issued and no [`ShellEvent::ClipboardData`]
+    /// has answered yet.
+    ///
+    /// Matched by id, because exactly one event answers each request and a
+    /// backend may answer several frames later — the seam's obligation 4. A
+    /// second paste while one is outstanding replaces it: the newer press is the
+    /// one the person is waiting on, and the older answer is then ignored rather
+    /// than typed into the field behind it.
+    awaiting_paste: Option<ClipboardRequestId>,
 }
 
 impl Console {
@@ -259,6 +473,8 @@ impl Console {
             cycle_at: None,
             cycle_stem: String::new(),
             cycle_prefix: String::new(),
+            paste_wanted: false,
+            awaiting_paste: None,
         }
     }
 
@@ -274,9 +490,17 @@ impl Console {
         self.panel.log_mut().scroll_to_bottom();
     }
 
-    /// Hides the panel and drops any completion it was offering.
+    /// Hides the panel and drops any completion it was offering, and any paste
+    /// that has not been answered.
+    ///
+    /// The read is not cancellable — a backend answers every request it
+    /// accepted — so what is dropped here is the *expectation*: an answer that
+    /// arrives after the panel is shut lands in no field, rather than in the
+    /// line whoever opens the console next is typing.
     pub fn close(&mut self) {
         self.open = false;
+        self.paste_wanted = false;
+        self.awaiting_paste = None;
         self.clear_cycle();
     }
 
@@ -328,6 +552,7 @@ impl Console {
             ShellEvent::Key {
                 key_code: Some(code),
                 state,
+                modifiers,
                 ..
             } => {
                 // Repeats included: holding Backspace to clear a line is what a
@@ -335,8 +560,18 @@ impl Console {
                 // would toggle at the keyboard's rate — were claimed before
                 // this.
                 if matches!(state, ButtonState::Pressed) {
-                    self.key(*code);
+                    self.key(*code, *modifiers);
                 }
+                true
+            }
+            // The answer to this console's own paste, and to no other read: a
+            // game that asked the clipboard for something of its own gets its
+            // event back untouched.
+            ShellEvent::ClipboardData {
+                request, content, ..
+            } if self.awaiting_paste == Some(*request) => {
+                self.awaiting_paste = None;
+                self.paste(content);
                 true
             }
             // A key with no `key_code` is one no layout named; nothing here can
@@ -415,8 +650,56 @@ impl Console {
             .render(dl, &layout, atlas, caret_shown(self.elapsed));
     }
 
+    /// Whether [`CONSOLE_PASTE_KEY`] was pressed since the loop last asked.
+    ///
+    /// The loop takes it, issues the read where the shell is in hand, and hands
+    /// the id back through [`expect_paste`](Self::expect_paste).
+    pub const fn take_paste_request(&mut self) -> bool {
+        std::mem::replace(&mut self.paste_wanted, false)
+    }
+
+    /// The read the loop issued for the paste this console asked for.
+    pub const fn expect_paste(&mut self, request: ClipboardRequestId) {
+        self.awaiting_paste = Some(request);
+    }
+
+    /// Puts a clipboard answer into the field, or says why it could not.
+    ///
+    /// The text goes in through [`TextField::insert`], which drops control
+    /// characters — so a copied newline joins the two lines rather than
+    /// submitting the first, and a line pasted from a file arrives as one line.
+    ///
+    /// [`TextField::insert`]: crcbl_ui::console::TextField::insert
+    fn paste(&mut self, content: &ClipboardContent) {
+        match content {
+            ClipboardContent::Bytes(bytes) => match core::str::from_utf8(bytes) {
+                Ok(text) => {
+                    self.panel.field_mut().insert(text);
+                    self.clear_cycle();
+                }
+                // Refused rather than replaced character by character: a paste
+                // that silently corrupts what was copied is worse than one that
+                // does not happen — `ClipboardContent::text` makes the same
+                // call for the same reason.
+                Err(_) => {
+                    crcbl_core::log::console::print("paste: the clipboard is not UTF-8 text");
+                }
+            },
+            ClipboardContent::Empty => {
+                crcbl_core::log::console::print("paste: the clipboard is empty");
+            }
+            ClipboardContent::Unavailable => {
+                crcbl_core::log::console::print("paste: the clipboard could not be read");
+            }
+        }
+    }
+
     /// One key press, while the console is open.
-    fn key(&mut self, code: KeyCode) {
+    fn key(&mut self, code: KeyCode, modifiers: Modifiers) {
+        if code == CONSOLE_PASTE_KEY && modifiers.intersects(PASTE_MODIFIERS) {
+            self.paste_wanted = true;
+            return;
+        }
         match code {
             KeyCode::Enter => {
                 if let Some(line) = self.panel.submit() {

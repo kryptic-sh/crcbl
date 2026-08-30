@@ -285,6 +285,14 @@ impl HostedGame for Asteroids {
         self.game.key_event(key, pressed);
     }
 
+    /// The map the console's `bind` and `unbind` rebind.
+    ///
+    /// The same map `key_event` above feeds, so a rebind typed at the console
+    /// moves the key this game actually plays on rather than a copy of it.
+    fn actions(&mut self) -> Option<&mut crcbl::input::ActionMap> {
+        Some(self.game.action_map_mut())
+    }
+
     fn menu_action(id: crcbl::ui::WidgetId) -> Option<Fire> {
         menu::fire_from_id(id)
     }
@@ -539,7 +547,7 @@ fn draw_hud(dl: &mut DrawList, hud: &HudStrings) {
 #[cfg(test)]
 mod tests {
     use crcbl::args::Common;
-    use crcbl::engine::{Flow, MENU_ACTIVATE_KEY, PAUSE_KEY};
+    use crcbl::engine::{CONSOLE_KEY, Flow, MENU_ACTIVATE_KEY, PAUSE_KEY};
 
     use super::*;
     use crcbl::core::input::PointerButton;
@@ -985,6 +993,94 @@ mod tests {
                 extent.1 as f32,
             ],
             "the scrim does not cover the framebuffer",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A `bind` typed at the console moves the key the ship fires on.**
+    ///
+    /// `docs/plan/52-debug-console.md` slice 8's second follow-up, in a shipping
+    /// demo rather than over the engine's fixture: the console line reaches
+    /// `HostedGame::actions` — which for this game is
+    /// [`Game::action_map_mut`](crate::game::Game::action_map_mut), a sibling
+    /// module away — and the observable is the **action**, read off the map the
+    /// simulation itself reads on the tick it decides what the ship did.
+    ///
+    /// Both halves are asserted, because either alone is a different bug: an
+    /// action that still fires on `Space` is a rebind that added a key instead
+    /// of replacing them, and one that does not fire on `KeyJ` is a rebind that
+    /// reached a map nothing plays on.
+    #[test]
+    fn a_console_rebind_moves_the_key_the_ship_fires_on() {
+        const NEW_KEY: KeyCode = KeyCode::KeyJ;
+        let mut engine = scripted(&headless(400));
+        let window = engine.window();
+        let tap = |engine: &mut Loop<HeadlessShell>, key: KeyCode| {
+            let window = engine.window();
+            engine
+                .shell_mut()
+                .key_press(window, key)
+                .expect("the window is live");
+            engine
+                .shell_mut()
+                .key_release(window, key)
+                .expect("the window is live");
+        };
+
+        // Open the console, type the line, and shut it again. Each step gets a
+        // frame of its own: the pump decides who a batch's keys belong to from
+        // *last* frame's panel, so a line typed in the same batch as the key
+        // that opened the console would be played at the ship.
+        tap(&mut engine, CONSOLE_KEY);
+        run_frames(&mut engine, 1);
+        engine
+            .shell_mut()
+            .commit_text(window, "bind fire KeyJ")
+            .expect("the window is live");
+        tap(&mut engine, KeyCode::Enter);
+        run_frames(&mut engine, 1);
+        tap(&mut engine, CONSOLE_KEY);
+        run_frames(&mut engine, 1);
+
+        // What the map says now, for the failure messages below: an assertion
+        // that only said "it did not fire" would leave a reader guessing at
+        // whether the line was refused, bound something else, or reached
+        // another map entirely.
+        let bound = format!(
+            "{:?}",
+            engine
+                .game_mut()
+                .actions()
+                .and_then(|map| map.bindings("fire").map(<[_]>::to_vec))
+        );
+
+        // The key it was declared on does nothing now.
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        run_frames(&mut engine, 2);
+        assert!(
+            !engine.game().game().fire_is_down(),
+            "`fire` still fires on the key the console bound it away from; \
+             the map this game plays on says {bound}"
+        );
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::Space)
+            .expect("the window is live");
+        run_frames(&mut engine, 1);
+
+        // And the key the console named does.
+        engine
+            .shell_mut()
+            .key_press(window, NEW_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 2);
+        assert!(
+            engine.game().game().fire_is_down(),
+            "`fire` does not fire on the key the console bound it to; the map \
+             this game plays on says {bound}"
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
