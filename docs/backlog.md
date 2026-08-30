@@ -12613,6 +12613,36 @@ Applying it live is one slice: the panel hands the new cap through
 before advancing the clock, and the row's "held" hint loses its next-start
 clause. Not blocked on anything; not started.
 
+## Windows opened on the live display during a session (2026-08-30)
+
+The user saw `apps/sandbox` appear on their screen, repeatedly, while work was
+in flight. **The test harnesses are not the leak**: `run-wayland-e2e.sh` and
+`run-cli-e2e.sh` run on a private sway with `WLR_BACKENDS=headless`
+(`crates/crcbl-shell/tests/sway-session.sh` unsets `WAYLAND_DISPLAY` and
+`DISPLAY` first), and `run-x11-e2e.sh`, `run-windowed-e2e.sh`,
+`tools/run-samples-windowed.sh` and the browser gate run on a private Xvfb
+(`tools/x11-display.sh`). Every `#[ignore]`d windowed test names its harness.
+The leak was a hand-run measurement of the frame limiter —
+`target/release/sandbox --fps 144 --pacing off --frames 1600`, windowed on the
+session's own `WAYLAND_DISPLAY` — because there is no other way to observe the
+limiter: `--headless` builds `Clock::Manual`, which never waits, so the real
+clock is only ever paced behind a real surface.
+
+**The rule, now:** nothing a test, gate or measurement opens may reach the
+user's display. A windowed run goes through `sway-session.sh` or
+`tools/x11-display.sh` — `run_sandbox_paced` in `run-wayland-e2e.sh` is the
+shape for a limiter measurement — and a script that needs a window sources one
+of those two rather than inheriting the session's display.
+
+**DECISION NEEDED — a paced headless mode.** Measuring the limiter without a
+compositor at all would take a real clock over the offscreen ring: `--headless`
+plus an opt-in (`--paced`, say) that builds `Clock::Real` instead of the manual
+clock. It costs headless determinism for that run only — tick counts become
+wall-clock dependent — which is why the manual clock is the headless default "by
+construction" (`Clock` docs). The trade is one flag against needing a compositor
+on every machine that wants to read the limiter's rate; the per-machine perf
+baseline (`docs/plan/40-profiling.md`) would use it too. Not started.
+
 ## `--pacing` and `--fps` reach the engine; three quarters of what they can ask for is unexercised
 
 `crcbl::args::Common::pacing` and `::limit` carry the two values,
