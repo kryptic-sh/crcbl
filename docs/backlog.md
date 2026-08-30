@@ -12733,9 +12733,10 @@ material fixture) and `gallery` (a shelf of CC0 Khronos models). Both wait on
 foundation (a) and the normal-map rung with (d). The plan carries the asset
 licence rule (CC0 first, CC-BY with `ATTRIBUTION.md`, no NC/SA) and the verdicts
 read at the sources on 2026-08-30 — the Stanford bunny is research-only and
-cannot ship in an MIT repository; a rabbit here is a CC0 one. Nothing is
-downloaded yet; when the slice starts, re-read each licence at its source before
-committing a file.
+cannot ship in an MIT repository. **Decided: the Khronos CC0 models only** — no
+Poly Haven models, no CC-BY sets, so there is no rabbit. Nothing is downloaded
+yet; when the slice starts, re-read each licence at its source before committing
+a file.
 
 ## The v2 vertex encodings: what the next slice owes (2026-08-30)
 

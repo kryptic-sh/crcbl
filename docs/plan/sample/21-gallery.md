@@ -27,6 +27,13 @@ it is redistributed under terms a downstream MIT user inherits. The rule:
   Stanford scanning repository's terms page. Re-read before committing a file;
   an asset's licence is the one on its page that day.
 
+**Decided 2026-08-30, the user:** the model demos use **the CC0 models from
+Khronos' `glTF-Sample-Assets` and nothing else.** Not Poly Haven models, not
+CC-BY sets with an attribution file, not a modelled-here rabbit — one source,
+one licence, nothing to track. Poly Haven stays named below only as the CC0
+source for a PBR _texture_ or an HDRI if a rung ever needs one that the Khronos
+shelf lacks.
+
 ## The models, checked
 
 | Model                                                                                                    | Source                          | Licence                                             | Verdict                                                                                                                                                               |
@@ -39,9 +46,9 @@ it is redistributed under terms a downstream MIT user inherits. The rule:
 | Poly Haven models and textures                                                                           | polyhaven.com                   | CC0                                                 | **In.** The source for any prop or PBR texture set the gallery wants beyond the Khronos shelf, and for an HDRI once the sky can take one                              |
 | Duck, BrainStem, CesiumMan                                                                               | Khronos glTF-Sample-Assets      | SCEA / Poser EULA / CC-BY                           | Out, or not worth their terms                                                                                                                                         |
 
-A "rabbit" that is MIT-clean is a Poly Haven or CC0 rabbit, or a rabbit modelled
-for this repository — the Stanford scan is the one the user means and it is the
-one that cannot ship. Named here so nobody re-derives it.
+There is no rabbit on the Khronos CC0 shelf, and the Stanford scan is the one
+the user meant and the one that cannot ship — so the demos have no rabbit. Named
+here so nobody re-derives it.
 
 ## What each demo proves
 
