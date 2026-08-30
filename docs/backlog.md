@@ -924,13 +924,12 @@ was surveyed against the tree the same day; what is already built (GGX + Smith
    `GpuLight` record (pre-1.0, no migration). Before or after clustered culling
    (`44-lighting.md`, "Clustered forward", not built)? Recommended: after, so
    the light record changes once; all three shapes.
-3. **The shadow atlas's re-render cadence against "every light dynamic".**
-   `45-shadows.md`'s allocator rung already says the highest-priority lights
-   re-render every frame, the rest every second and fourth, and a light whose
-   covered instances did not move is not re-rendered at all. That is a cache
-   with invalidation, not a bake — it needs the user's confirmation that it
-   satisfies the rule. With it: the shadowed-local-light count and atlas size on
-   each of the three tiers.
+3. ~~**The shadow atlas's re-render cadence against "every light dynamic".**~~
+   **DECIDED 2026-08-30**: the atlas is dynamic _and_ cached — a light
+   re-renders its tiles whenever it or an instance it covers moves, and is not
+   re-rendered otherwise. `45-shadows.md`'s allocator rung carries the rule.
+   Still open from this call: the budget row — shadowed local lights per frame
+   and atlas size on each of the three tiers.
 4. **Screen-space contact shadows — always-on or a preset.** Not built;
    `43-render-standards.md` §7 ranks it the cheapest real win. One march on the
    depth prepass. Recommended: on for the mid and high tiers, off on low.

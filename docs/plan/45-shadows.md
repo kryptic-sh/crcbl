@@ -271,6 +271,19 @@ within tolerance and was left alone.
   5. **Static caching** rides on it once tiles are stable across frames: a tile
      whose light and covered instances did not move is not re-rendered at all.
 
+  **DECIDED 2026-08-30, the user's rule for this rung:** the atlas is **dynamic
+  and cached** — every light re-renders its tiles whenever it or an instance it
+  covers moves, and a light whose tiles would come out the same is not
+  re-rendered at all, so a scene full of still fixtures costs the frame nothing
+  and a lamp that swings costs exactly its own tiles. That makes items 3 and 5
+  the rule rather than an option: the cadence tiers exist to bound the worst
+  case when everything moves, and the cache is what makes the common case cheap.
+  A cached tile is not a bake — it is re-rendered the frame its inputs change,
+  and nothing about it survives a load. Still open under it: the budget row —
+  how many shadowed local lights a frame renders and the atlas's size on each of
+  the three quality tiers — which is the pricing question `docs/backlog.md`'s
+  pending lighting calls carry.
+
   Checked by the goldens that stand — the sun's cascades and the four lights
   lantern shadows must not move — plus a scene with more lights than tiles that
   reads every tile allocated, the priority order observed, and the cost row
