@@ -12726,6 +12726,23 @@ it. Also declined: refusing with `HalError::Unsupported` on a device without the
 capability. It was tried as a falsification and the engine's frame loop fails
 every frame under it, which is the argument against it in one line.
 
+## D3D12 and Metal: the hardware-proof rows stay parked (2026-08-30)
+
+**The constraint, stated by the user:** no Windows machine and no Apple machine
+are available right now, so every `owed` cell in `39-capabilities.md`'s table
+that needs a real device to prove — D3D12 mesh shading, Metal mesh shading,
+Metal timestamp query, and the ray-query rows on both — is parked on the same
+ground. CI's software adapters (WARP, the macOS paravirtual device) remain the
+only verdict those backends get, and a capability that a software adapter cannot
+exercise is not owed until hardware is. Reviewed with the user and left parked.
+`crcbl-dx12` has the DXIL, the mesh PSO and `DispatchMesh`; what it lacks is the
+`OPTIONS7` tier query behind `features_of` and a gate that proves the path on
+D3D12 (`39-capabilities.md`'s rule: no flag without a proof). The cost is a
+proving slice — the flag from the tier, the meshlet gates on WARP, the two
+`DIVERGENCES` rows — and the gap is performance on Windows, where the vertex
+path draws everything. If it is ever picked up, do it after foundation (a)'s
+vertex re-bless so the proof is not run twice.
+
 ## The browser gate covers one jobs backend, not both (2026-08-30)
 
 `docs/plan/21-jobs.md`'s second rung, rescoped by the user: the published site
