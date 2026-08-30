@@ -3,6 +3,68 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## HIGH PRIORITY — the user's calls of 2026-08-30
+
+Two items the user ranked above the lighting order. They stay at the top of this
+file until they ship.
+
+### The ambient occlusion pass bands, and a well-defined technique should not
+
+**What the user sees:** visible banding in the AO term — a screen-space
+occlusion pass that is a textbook technique (GTAO, Jimenez et al. 2016) and
+should read as a smooth field. Reported on 2026-08-30 from a real display; the
+golden suite at 256×192 cannot resolve it, which is why nothing red said so.
+
+**What the pass is today, read from `crates/crcbl-shaders/shaders/ssao.slang`
+and `ssao_blur.slang` on 2026-08-30:** two slices per pixel (the second an exact
+quarter turn of the first), `SLICE_STEPS` = 4 marching steps out along each side
+of each slice, spaced evenly in pixels; the first slice direction comes from
+`SLICE_DIRECTIONS`, a sixteen-entry Bayer-ordered table indexed by
+`pixel.xy & 3`; no per-pixel offset on the step start; no noise anywhere, by the
+determinism rule (an integer table index, never a hash); the raw result is one
+`R8Unorm` channel; `ssao_blur.slang` is a 4×4 depth-weighted kernel whose
+footprint is exactly the tile. There is no temporal accumulation and there will
+not be (the goldens refuse history).
+
+**Where banding comes from in that construction, to be measured before any of it
+is changed** (`docs/backlog.md`'s standing rule: sweep first):
+
+- **Step banding.** Four steps to the projected radius, all pixels starting at
+  the same fractional offset, means a horizon can only sit at four distances —
+  an occluder produces four concentric rings of occlusion rather than a
+  gradient. The standard GTAO remedy is a per-pixel **step offset** (start the
+  march at `(index + offset) / STEPS` with `offset` from a table, not a hash —
+  the same 4×4 tile can supply it) and more steps on the higher tiers.
+- **Tile banding surviving the blur.** The 4×4 blur averages the sixteen
+  directions on a flat surface, but the depth weight rejects taps at every
+  silhouette and depth step, so the tile pattern shows exactly where the eye
+  looks — along edges. A wider or two-pass bilateral, or an 8×8 table with the
+  blur widened to match, is the remedy; the blur's own header says the divisor
+  "falls towards one" there.
+- **Quantisation.** `R8Unorm` in and out of the blur is 256 levels on a term
+  that is then multiplied into ambient light; a shallow gradient across a wall
+  can step visibly at 8 bits. `R16Unorm` for the raw channel costs bandwidth the
+  low tier may not want — price it per tier.
+- **The reconstructed normal.** Four-neighbour depth reconstruction gives a
+  faceted normal on a curved surface, which bands the cosine weighting.
+
+**How to measure:** the AO view (lantern's `AO VIEW` row — see the console item
+below for making it reachable everywhere) at native resolution, raw and blurred,
+on a flat wall under a single occluder: count distinct grey levels along a line,
+and along an edge. Then change one thing at a time. A fix that moves the goldens
+must move them for the reason it names.
+
+**Constraints that still bind:** no transcendental the targets do not specify
+(`acos_approx` stays), no hash noise, no temporal blend, four backends
+bit-identical on the goldens. `docs/plan/46-ambient-occlusion.md` owns the tier
+split (scalar + tint on low, bent normals on mid/high); the fix lands on the
+scalar pass first because every tier reads it.
+
+**Also owed with it:** the AO debug view is lantern's alone today
+(`ForwardRenderer::set_occlusion_view` behind lantern's pause panel). The user
+wants every debug view available in every build and demo; the debug console
+below is how.
+
 ## The render-quality programme (opened 2026-08-27)
 
 Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
