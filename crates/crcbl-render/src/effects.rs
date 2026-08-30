@@ -118,20 +118,17 @@ bitflags::bitflags! {
         /// frame into the target. [`Antialiasing::Fxaa`] is the rung a settings
         /// file names it by.
         ///
-        /// The second bit **not** in [`RenderEffects::DEFAULT_STACK`], and for a
-        /// different reason from [`BLOOM`](Self::BLOOM)'s: this one is not a
-        /// lens, it is a resolve, and it belongs in the default stack on the
-        /// merits. What keeps it out for now is that turning it on moves every
-        /// golden in the suite at once — an edge filter has no additive-zero
-        /// form to land behind, the way the probe and bloom slices had — so the
-        /// flip is its own change with its own re-bless rather than a side
-        /// effect of the pass arriving. `docs/plan/18-render-features.md`'s
-        /// antialiasing section is where that ladder is written down.
+        /// **In [`RenderEffects::DEFAULT_STACK`]**, unlike [`BLOOM`](Self::BLOOM):
+        /// this one is not a lens, it is a resolve, and it is the tier the
+        /// resolve slot carries by default — [`Antialiasing::from_effects`] of
+        /// the default stack answers [`Antialiasing::Fxaa`]. The higher tier,
+        /// [`SMAA`](Self::SMAA), is the one kept out, and its doc says why.
+        /// `docs/plan/49-antialiasing.md` is where the ladder is written down.
         const ANTIALIASING = 1 << 4;
         /// Volumetric fog — the froxel scatter, the column scan that turns it
         /// into a prefix, and the fullscreen composite over the frame.
         ///
-        /// `docs/plan/51-volumetrics.md`'s ladder. **The third bit not in
+        /// `docs/plan/51-volumetrics.md`'s ladder. **The second bit not in
         /// [`RenderEffects::DEFAULT_STACK`], and for a reason neither of the
         /// other two has**: this one does not add a term, it *moves* one. The
         /// medium it integrates is the same exponential height fog `mesh.slang`
@@ -151,7 +148,7 @@ bitflags::bitflags! {
         /// reduce that turns it into one number, and the tonemap reading that
         /// number instead of the one a caller set.
         ///
-        /// `docs/plan/43-render-standards.md` §6's rung, and **the fourth bit
+        /// `docs/plan/43-render-standards.md` §6's rung, and **the third bit
         /// not in [`RenderEffects::DEFAULT_STACK`]**. The reason is
         /// [`VOLUMETRIC_FOG`](Self::VOLUMETRIC_FOG)'s rather than
         /// [`BLOOM`](Self::BLOOM)'s: it does not add a term to the picture, it
