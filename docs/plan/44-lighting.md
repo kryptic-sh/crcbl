@@ -409,6 +409,30 @@ What §2's argument actually rules out is deriving a **tangent frame** from
 derivatives, and the reason is mirrored UVs, where the derivative route gives a
 handedness the vertex route gets right.
 
+### Rung 5 — LTC area lights, and the fill flag (decided 2026-08-30)
+
+**Decided by the user's rule "best-looking for the performance", 2026-08-30.**
+Point lights read as pinpricks; a fixture reads as a fixture only when its
+specular highlight has the fixture's shape. **Linearly transformed cosines**
+(Heitz, Dupuy, Hill and Neubelt, 2016) give sphere, tube and rectangle lights a
+physically plausible specular lobe from a small cooked table indexed by
+roughness and view angle — the same shape as `crcbl_shaders::dfg`'s table, and
+the same determinism argument: the transcendentals are in the cook, not the
+shader. **All three shapes**, because a rect is what a window and a panel are,
+and sphere and tube are nearly free once the table exists. **After clustered
+forward**, so the light record changes once: `GpuLight` gains the shape, its
+extents and its orientation in the same widening that gives it a cluster index,
+and every constructor is touched once.
+
+The same widening carries the **fill flag**: a light marked _fill_ casts no
+shadow and contributes no specular. It is how a no-bake stack lights the far end
+of a room — a practice every classic engine relies on and clustered forward
+makes affordable by the hundred — and a flag on the record rather than a light
+type, because everything else about it (cluster, falloff, colour) is the
+ordinary light's. Priced on the three tiers before it counts; the LTC evaluation
+is a handful of multiplies and one table fetch per light, so the expected answer
+is "on everywhere".
+
 ### What stays out, and why
 
 - **A second BRDF lobe of any kind** — anisotropic GGX, clearcoat, sheen,

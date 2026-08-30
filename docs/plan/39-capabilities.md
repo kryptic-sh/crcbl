@@ -250,6 +250,37 @@ This is a widening of the one table in `crates/crcbl/src/settings.rs` and of
 `RenderEffects` itself, since a bitflag cannot hold a rung. Both are the same
 slice; neither is started here.
 
+### The tier table (decided 2026-08-30)
+
+The three-tier pricing rule wants every lighting item to know its cell before it
+is built. Decided once here, on the user's rule "best-looking for the
+performance", so a slice starts from a row rather than from a question. Every
+number is a **starting budget to sweep on that tier's hardware**, not a constant
+— the constant is spelled where the code reads it, and the sweep
+(`docs/backlog.md`'s standing practice) fixes it there.
+
+| Item                    | Low (browser, lavapipe, integrated)          | Medium                            | High (desktop, RT where present)           |
+| ----------------------- | -------------------------------------------- | --------------------------------- | ------------------------------------------ |
+| Antialiasing            | FXAA                                         | CMAA2                             | CMAA2; MSAA opt-in                         |
+| Render scale            | 0.75                                         | 1.0                               | 1.0                                        |
+| Shadow atlas            | 2048², 4 shadowed local lights               | 4096², 8                          | 8192², 16                                  |
+| Sun shadows             | 2 cascades, rotated PCF                      | 3 cascades, PCSS                  | 3 cascades, PCSS                           |
+| Contact shadows         | off                                          | on                                | on                                         |
+| Ambient occlusion       | scalar + multi-bounce tint                   | bent normals + specular occlusion | bent normals + specular occlusion          |
+| Area lights (LTC)       | on                                           | on                                | on                                         |
+| Probe volume            | 2 levels, 16³ probes each, capture amortised | 3 levels, 24³                     | 4 levels, 32³; traced updater on RT        |
+| Atmosphere              | on (one LUT fetch)                           | on                                | on                                         |
+| Reflections             | SSR half-res, sky + probe fallback           | SSR full-res, Hi-Z                | SSR + cone trace; RT reflections on RT     |
+| Volumetric fog          | off                                          | on, half-res froxels              | on                                         |
+| Bloom, auto-exposure    | on                                           | on                                | on                                         |
+| Ray-traced shadows / GI | —                                            | —                                 | on where the device reports the capability |
+
+Each row's Low cell is what a frame must fit on the browser tier at 60 Hz; the
+Medium column is the default the settings screen shows on a device that reports
+no ray tracing; the High column is what an RT-capable desktop opens on. The
+preset key below is what selects a column, and `custom` is a row the player
+edited.
+
 ### The preset is the key players actually use, and it is not a fifth layer
 
 `quality` — `"low"` | `"medium"` | `"high"` | `"ultra"` | `"custom"`.

@@ -54,6 +54,16 @@ refusal is not applied by analogy to a pass it was never about.
 
 ### What is refused
 
+- **Runtime reflection captures** (parallax-corrected cubemaps re-rendered on
+  demand) — **declined 2026-08-30**. Six views per capture every time a light
+  moves, a proxy volume in the scene format for the parallax correction, and a
+  second environment path beside the one that exists. What they would buy — a
+  reflected _room_ rather than a reflected sky on a glossy interior surface —
+  the rebuilt probe volume now provides at low frequency on every tier
+  ([50-irradiance-probes.md](50-irradiance-probes.md)'s per-level directional
+  environment is the SSR miss fallback), and the ray-traced tier provides
+  exactly. Revisit only if a demo shows a glossy interior where neither is
+  enough.
 - **Packing into the scene target's alpha.** Nothing reads it today — the
   tonemap samples `rgb` and writes a literal 1.0 — but one channel cannot carry
   a coloured `F0` and a roughness, so the packing is a scalar-reflectance design

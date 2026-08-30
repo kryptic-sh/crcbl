@@ -276,9 +276,11 @@ of sight. The next two rungs of this ladder are the CS2 shape:
    which is what an absent key means — and is corrected to the file's rung on
    the first frame. `RenderEffects::DEFAULT_STACK` did **not** change: which
    tier the default carries is still the answer this row's default _is_, and
-   flipping it is still the user's call and a re-bless.
-   `web/tools/browser-e2e.mjs`'s `toFader` moved with the row and the options
-   browser gate was run locally.
+   flipping it is still the user's call and a re-bless — **and the call is
+   taken, 2026-08-30: it is not flipped to SMAA.** CMAA2 becomes the default
+   tier when its slice lands, so the goldens re-bless once for the filter that
+   stays rather than twice. `web/tools/browser-e2e.mjs`'s `toFader` moved with
+   the row and the options browser gate was run locally.
 
    A file still holding the boolean reads as the meaning it had:
    `antialiasing = true` was "the player has not asked for less", which is an

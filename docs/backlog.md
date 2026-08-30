@@ -919,11 +919,9 @@ was surveyed against the tree the same day; what is already built (GGX + Smith
    `docs/plan/50-irradiance-probes.md`'s visibility-gated, RSM-updated grid, and
    `apps/lantern/src/bounce.rs` and `apps/shard/src/light.rs`'s bake go with
    that slice. The amendment under the GI decision above has the reasons.
-2. **LTC area lights — which shapes, and when.** Sphere, tube and rect with
-   correct specular, off a cooked table like `crcbl_shaders::dfg`'s. Changes the
-   `GpuLight` record (pre-1.0, no migration). Before or after clustered culling
-   (`44-lighting.md`, "Clustered forward", not built)? Recommended: after, so
-   the light record changes once; all three shapes.
+2. ~~**LTC area lights — which shapes, and when.**~~ **DECIDED 2026-08-30**: all
+   three shapes, after clustered forward, with the fill flag in the same
+   `GpuLight` widening. `44-lighting.md` rung 5.
 3. ~~**The shadow atlas's re-render cadence against "every light dynamic".**~~
    **DECIDED 2026-08-30**: the atlas is dynamic _and_ cached — a light
    re-renders its tiles whenever it or an instance it covers moves, and is not
@@ -934,23 +932,17 @@ was surveyed against the tree the same day; what is already built (GGX + Smith
    2026-08-30**, the recommendation as given: on for the medium and high tiers,
    off on low — its own `RenderEffects` bit in `DEFAULT_STACK`, cleared by
    foundation (g)'s low preset. `45-shadows.md`'s ladder carries the rung.
-5. **An atmosphere — the model, and the §4 rule.** `43-render-standards.md` §4
-   forbids a transcendental reaching a colour, and an atmosphere is `exp`
-   throughout. Hillaire's model needs a transmittance LUT (sun-independent,
-   cooked once like `dfg.bin`) and a sky-view LUT recomputed when the sun moves
-   — a runtime table, not a bake, but the user should say so. The alternative is
-   an analytic Preetham fit: cheaper, lower fidelity. And: replace the gradient
-   (`crcbl_shaders::sky::SkyGradient`) or sit above it as a preset.
-6. **Runtime reflection captures — at all.** Absent from `47-reflections.md`.
-   Six views per capture, re-rendered when lights move, and a proxy volume in
-   the scene format for parallax correction. Options: skip (RT reflections cover
-   interiors on the RT tier; non-RT interiors reflect the sky), or a high-preset
-   item with a capture count and cadence. Recommended: skip until a demo needs
-   one.
-7. **Whether SSGI counts as GI.** Candidate 3 in the GI survey below —
-   non-temporal, desktop-only, a contact-scale bounce. The decision above says
-   no GI below the RT tier; rule SSGI in as a screen-space term or delete it
-   from the candidates.
+5. ~~**An atmosphere — the model, and the §4 rule.**~~ **DECIDED 2026-08-30**:
+   Hillaire's, replacing the gradient as the default sky; the sun-dependent
+   sky-view LUT is computed on the host with `fog::exp_neg` and uploaded when
+   the sun moves, so §4 holds. `43-render-standards.md` §8.
+6. ~~**Runtime reflection captures — at all.**~~ **DECLINED 2026-08-30**: the
+   rebuilt probe volume is the interior environment on every tier and RT
+   reflections are the exact one. `47-reflections.md`'s refusals.
+7. ~~**Whether SSGI counts as GI.**~~ **WITHDRAWN 2026-08-30**: the probe volume
+   is the bounce on every tier; SSGI would be a second, view-dependent estimate
+   of it for a pass of its own. Struck from the GI candidates below and from
+   `43-render-standards.md` §7's ordering.
 8. ~~**Bent normals, AO tint and specular occlusion — which tiers.**~~ **DECIDED
    2026-08-30**: scalar occlusion plus the multi-bounce tint on low (the tint
    costs no target); bent normals plus specular occlusion on medium and high.
@@ -959,17 +951,17 @@ was surveyed against the tree the same day; what is already built (GGX + Smith
 9. ~~**Burley diffuse.**~~ **DECLINED 2026-08-30**: Lambert stays, improved by
    the terms around it (multi-scatter compensation, the AO tint and bent
    normals, LTC area lights, the probe bounce). `44-lighting.md` records it.
-10. **Fill lights.** A no-GI, no-bake stack lights interiors with placed fill
-    lights, and forward+ makes hundreds of them free. Engine feature (a
-    no-shadow, no-specular flag on the existing light) or left to applications?
-    Recommended: the flag.
-11. **The tier table.** The three-tier pricing rule wants a Low / Mid / High
-    cell for every item above before it is built. Decide once, as a table, not
-    per slice.
-12. **Ordering against the foundations block.** Foundations (a)–(g) in
-    `43-render-standards.md`'s delivery table come first. Does lighting
-    interleave — LTC straight after (a) vertex v2, since normal maps matter more
-    than any item here — or wait behind the whole block?
+10. ~~**Fill lights.**~~ **DECIDED 2026-08-30**: a flag on the existing light —
+    no shadow, no specular — landing with the LTC widening of `GpuLight`.
+11. ~~**The tier table.**~~ **DECIDED 2026-08-30**: drafted in
+    `39-capabilities.md`, "The tier table", every number a starting budget to
+    sweep on that tier's hardware. The atlas budgets from call 3 live there.
+12. ~~**Ordering against the foundations block.**~~ **DECIDED 2026-08-30**:
+    interleave — (a) vertex v2, normal maps, LTC, the atlas allocator with (f)
+    and (e), contact shadows, the AO tint and bent normals, the probe volume,
+    the atmosphere, CMAA2; the other foundations land where the first rung that
+    needs them does. The row above the foundations block in
+    `43-render-standards.md`'s delivery table carries it.
 
 #### The survey (2026-08-30, superseded by the decision above)
 
