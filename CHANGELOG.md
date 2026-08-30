@@ -42,6 +42,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`CatalogueKey::domain` is gone; the domain is a `crcbl_console::Kind` and
+  the prose is `help`.** A prose domain could say "1 to 16" while the setter
+  clamped to something else and nothing could tell, which is the failure
+  `docs/plan/52-debug-console.md` decision 3 removes: the entry now carries
+  `kind` (`Bool`, `Int { min, max }`, `Float { min, max }`, `Enum(..)`, `Text`),
+  `help`, and `name` — the key without its namespace, which is what the console
+  types. The antialiasing set is derived from `crcbl_render::Antialiasing::ALL`
+  through `crcbl::settings::ANTIALIASING_NAMES`, and every numeric range is the
+  one its own setter clamps to, asserted key by key. `crcbl settings list` is
+  unchanged: it reads `status` and never read the domain.
+- **`crcbl::impl_game_gpu!` takes an optional `with_renderer` clause.**
+  `impl_game_gpu!(Gpu)` leaves `apply_video`/`set_debug_view` at their defaults,
+  which is the right answer for a bundle that holds no renderer;
+  `impl_game_gpu!(Gpu, with_renderer)` forwards both to inherent methods of the
+  same names. A bundle cannot add the pair beside the invocation, because Rust
+  allows one `impl GameGpu` block per type — hence the clause.
+- **`apps/quarry`'s `Gpu::set_debug_view` returns
+  `Result<(), crcbl::settings::Unsupported>`** and is the forward the trait
+  picks up; its private per-renderer copy of the switch table is gone, replaced
+  by `crcbl::settings::set_debug_view_on`, which writes all five switches
+  instead of three.
 - **The `[engine.video] smaa` key is gone and `antialiasing` is a string, not a
   boolean.** The two bits shared one resolve slot, so a panel could switch both
   on and the frame picked between them out of sight —
@@ -91,6 +112,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Every `[engine.video]` and `[engine.audio]` key is now a typed console
+  variable, and one function writes and applies it.**
+  `crcbl::settings::apply(stack, key, value, stage)` is that function: it
+  refuses a key the catalogue does not name, a `KeyStatus::Named` key ("nothing
+  reads this yet"), a value the key's `Kind` refuses and a storage error, then
+  writes the stack and hands the write to a `crcbl::settings::Stage`. It answers
+  `Applied::Live` or `Applied::NextStart`, which is the distinction
+  `apps/options`' rows already drew with their "next start" mark.
+  `crcbl::settings::console_bindings()` is one `crcbl_console::Binding` per
+  catalogue key under the key's bare name (`antialiasing`, `master_volume`),
+  `ARCHIVE`, and `READ_ONLY` for the keys nothing reads;
+  `crcbl::settings::ConsoleHost` is the state they reach, and `crcbl::console`
+  re-exports the registry crate so a game can spell a `Value`. Nothing gathers
+  the bindings yet — that is `docs/plan/52-debug-console.md`'s slice 5.
+- **`GameGpu::apply_video` and `GameGpu::set_debug_view`, both defaulted to
+  `Err(crcbl::settings::Unsupported)`.** The first puts a `[engine.video]`
+  section into force on a bundle's renderer now instead of at the next start-up;
+  the second draws any `crcbl_render::DebugView` on any host, which is what
+  `docs/plan/52-debug-console.md` decision 8 needs for `r_debug_view`. The eight
+  bundles that hold a `ForwardRenderer` — `breach`, `lantern` (both of its
+  renderers), `puppet`, `quarry`, `sandbox`, `shard`, `sparks`, `viewer` —
+  implement the pair through the two shared bodies
+  `crcbl::settings::apply_video_to` and `crcbl::settings::set_debug_view_on`;
+  every other host keeps the default and reports that it has no renderer rather
+  than pretending to apply.
 - **`crcbl-console`, the console's registry — a new crate with no dependencies
   at all.** `ConVar` **is** its own storage, a typed atomic per `Kind`, so the
   code that owns a knob reads `r_ao_view.get_bool()` instead of polling;

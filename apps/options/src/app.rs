@@ -48,6 +48,7 @@
 //! setting.
 
 use crcbl::audio::mixer::Bus;
+use crcbl::console::Value;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Booted, Clock, ExitReason, FrameInfo, FrameLimit, HostedGame, RunSummary, SettingsSource,
@@ -562,18 +563,54 @@ impl Screen {
     /// a drag the player made.
     fn set(&mut self, bus: Bus, gain: f32) {
         self.gains[bus.index()] = gain;
-        // The gain stage, moved with the number. This is the whole claim the
-        // audio half of the sample exists to make, and putting it anywhere but
-        // here is how a screen comes to show a level it is not applying.
-        self.audio.set_bus_gain(bus, gain);
+        self.edited();
+        // `apply` writes the key **and** moves the gain stage, through
+        // `impl Stage for Audio`. Moving the level is the whole claim the audio
+        // half of this sample makes, and it is in the engine's one write-and-
+        // apply body rather than here so that a console setting `music_volume`
+        // moves the same fader through the same call.
+        self.write(
+            &format!(
+                "{}.{}",
+                crcbl::settings::AUDIO_NAMESPACE,
+                bus.settings_key()
+            ),
+            &Value::Float(gain),
+        );
+    }
+
+    /// Counts an edit and marks the file unsaved.
+    ///
+    /// Separate from [`Screen::write`] because a row can be **one** edit over
+    /// several keys — the effect switches write every entry of `VIDEO_KEYS` —
+    /// and a count that followed the keys would report a player who flipped one
+    /// switch as having changed the whole table.
+    fn edited(&mut self) {
         self.edits += 1;
         self.saved = SaveState::Unsaved;
-        if let Err(error) = crcbl::settings::set_audio_gain(&mut self.stack, bus, gain) {
-            // The stack refused the value rather than the disk refusing the
-            // file, which is a different failure and one the player can see on
-            // the row: `SAVE` would write a file this key is missing from.
-            self.saved = SaveState::Failed(error.to_string());
+    }
+
+    /// Writes one catalogue key through [`crcbl::settings::apply`], which writes
+    /// the stack and applies whatever this screen can apply.
+    ///
+    /// **The single place this screen writes a setting**, and the reason
+    /// `docs/plan/52-debug-console.md` decision 3 moved the fan-out into the
+    /// engine: the per-key spelling, the clamp and the live application were
+    /// this file's, and a console would have had to copy all three.
+    ///
+    /// A refusal — a value outside the key's domain, or a stack with no user
+    /// layer — lands on the row as [`SaveState::Failed`], which is where it
+    /// landed before: `SAVE` would otherwise write a file this key is missing
+    /// from and say nothing about it.
+    fn write(&mut self, key: &str, value: &Value) {
+        if let Err(fault) = crcbl::settings::apply(&mut self.stack, key, value, &mut self.audio) {
+            self.saved = SaveState::Failed(fault.to_string());
         }
+    }
+
+    /// The dotted key of one `[engine.video]` row.
+    fn video_key(name: &str) -> String {
+        format!("{}.{name}", crcbl::settings::VIDEO_NAMESPACE)
     }
 
     /// Moves the frame ceiling, writing the key and marking the file unsaved.
@@ -585,11 +622,11 @@ impl Screen {
     /// something to say beyond its value.
     fn set_cap(&mut self, cap: FrameLimit) {
         self.cap = cap;
-        self.edits += 1;
-        self.saved = SaveState::Unsaved;
-        if let Err(error) = crcbl::settings::set_frame_limit(&mut self.stack, cap) {
-            self.saved = SaveState::Failed(error.to_string());
-        }
+        self.edited();
+        self.write(
+            &Self::video_key(crcbl::settings::FRAME_LIMIT_KEY),
+            &Value::Int(i64::from(cap.rate())),
+        );
     }
 
     /// What the row says: the ceiling; the rate the game's own limit holds it
@@ -620,12 +657,11 @@ impl Screen {
     /// `ForwardRenderer::set_anisotropy`.
     fn set_anisotropy(&mut self, anisotropy: f32) {
         self.anisotropy = anisotropy;
-        self.edits += 1;
-        self.saved = SaveState::Unsaved;
-        if let Err(error) = crcbl::settings::set_anisotropic_filtering(&mut self.stack, anisotropy)
-        {
-            self.saved = SaveState::Failed(error.to_string());
-        }
+        self.edited();
+        self.write(
+            &Self::video_key(crcbl::settings::ANISOTROPIC_FILTERING_KEY),
+            &Value::Float(anisotropy),
+        );
     }
 
     /// What the row says: the anisotropy, and whether this run came up on it.
@@ -650,11 +686,11 @@ impl Screen {
     /// the authority on where its handle is.
     fn set_scale(&mut self, scale: f32) {
         self.scale = scale;
-        self.edits += 1;
-        self.saved = SaveState::Unsaved;
-        if let Err(error) = crcbl::settings::set_render_scale(&mut self.stack, scale) {
-            self.saved = SaveState::Failed(error.to_string());
-        }
+        self.edited();
+        self.write(
+            &Self::video_key(crcbl::settings::RENDER_SCALE_KEY),
+            &Value::Float(scale),
+        );
     }
 
     /// What the groove says: the scale, and whether this run came up on it,
@@ -677,10 +713,12 @@ impl Screen {
     /// chose for each switch rather than only where they differed.
     fn set_effects(&mut self, effects: RenderEffects) {
         self.effects = effects;
-        self.edits += 1;
-        self.saved = SaveState::Unsaved;
-        if let Err(error) = crcbl::settings::set_video_effects(&mut self.stack, effects) {
-            self.saved = SaveState::Failed(error.to_string());
+        self.edited();
+        for (key, effect) in crcbl::settings::VIDEO_KEYS {
+            self.write(
+                &Self::video_key(key),
+                &Value::Bool(effects.contains(effect)),
+            );
         }
     }
 
@@ -690,11 +728,11 @@ impl Screen {
     /// reaches a renderer, one start later.
     fn set_antialiasing(&mut self, tier: Antialiasing) {
         self.antialiasing = tier;
-        self.edits += 1;
-        self.saved = SaveState::Unsaved;
-        if let Err(error) = crcbl::settings::set_antialiasing(&mut self.stack, tier) {
-            self.saved = SaveState::Failed(error.to_string());
-        }
+        self.edited();
+        self.write(
+            &Self::video_key(crcbl::settings::ANTIALIASING_KEY),
+            &Value::Enum(tier.name()),
+        );
     }
 
     /// What the AA row says: the tier, and whether this run came up on it.

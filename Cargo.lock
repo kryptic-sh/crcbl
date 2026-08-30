@@ -265,6 +265,7 @@ dependencies = [
  "crcbl-assets",
  "crcbl-audio",
  "crcbl-client",
+ "crcbl-console",
  "crcbl-core",
  "crcbl-dx12",
  "crcbl-ecs",

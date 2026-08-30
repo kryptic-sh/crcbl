@@ -1678,6 +1678,72 @@ The counter-argument is real: flattening is what lets `main.rs` write
 
 ## Unbuilt work
 
+### The debug console's settings slice — what slice 2 left for slice 5 (2026-08-30)
+
+`docs/plan/52-debug-console.md` slice 2 landed the typed catalogue,
+`crcbl::settings::apply`, `settings::console_bindings()` and the
+`GameGpu::apply_video`/`set_debug_view` pair. What it deliberately did not do:
+
+- **A console write is recorded, not applied.** `crcbl_console::Binding` reaches
+  its host as `&mut dyn Any` and `Any` is implemented only for `'static` types,
+  so `settings::ConsoleHost` cannot hold a borrow of the renderer, the mixer or
+  the clock — it records into `settings::Deferred` instead. **Slice 5 owes the
+  drain**: read `ConsoleHost::pending_mut()`'s `take_video`, `take_gains` and
+  `take_frame_limit` once a frame where the bundle is in hand, and hand each to
+  `GameGpu::apply_video`, the game's mixer and the clock. Nothing drains it
+  today, so a set through a binding writes the file and changes no frame. If
+  that arrangement is ever unwanted, the alternative is a `Binding` host bound
+  by something other than `Any` — which is a change to `crcbl-console`'s public
+  shape, not to this module.
+- **`settings::Stage::set_frame_limit` has no implementor at all.** `Loop::new`
+  takes the ceiling when it is built and `HostedGame::take_pending_frame_limit`
+  is the only way it moves, so `apply` on `engine.video.frame_limit` answers
+  `Applied::NextStart` everywhere. Making it live means a seam that reaches the
+  loop's `Clock` mid-frame.
+- **`GpuContext::set_pacing` is reachable from no catalogue key.** The key that
+  would want it is `engine.video.present_mode`, which is `KeyStatus::Named` — so
+  plan decision 3's "the seams that exist" list is one shorter than it reads. It
+  becomes reachable the day `present_mode` grows a reader.
+- **The eight `KeyStatus::Named` rows carry ranges nobody measured.**
+  `NAMED_VIDEO_KEYS` gives `brightness` `0..=2`, `ui_scale` `0.25..=4` and `fov`
+  `1..=179`, because a `Kind::Float` needs a range and there is no setter to
+  agree with — which is exactly what makes them `Named`. Every one is
+  `READ_ONLY`, so no range there decides anything today; a row that grows a
+  reader must take the reader's range with it and join
+  `every_kind_admits_the_ends_of_its_own_range_and_reads_them_back`.
+  `resolution` is `Kind::Text` because it is a TOML array and the console's
+  domain type spells no array — a `Kind::List` is the alternative, and nothing
+  needs it yet.
+- **`settings::apply_video_to` coarsens a `HalError` into `Unsupported`.** The
+  only fallible call in it is `ForwardRenderer::set_anisotropy`, whose failure
+  is `create_sampler`'s; the body logs the error at `warn` naming the key and
+  returns `Err(Unsupported)`, so what the device said survives in the log and
+  not in the type. Giving `Unsupported` a `Refused(HalError)` arm is the
+  alternative; it was declined because every caller today does the same thing
+  with both answers.
+- **No test owns a real `ForwardRenderer`.** `debug_view_switches` is asserted
+  against `ForwardRenderer::debug_view`'s precedence order without a device, and
+  `apply_video_to`'s body is covered only by compiling. Nothing calls the
+  `GameGpu` pair yet, so no e2e or browser gate reaches either body — that
+  arrives with slice 5 and slice 6, whose exit criterion
+  ("`debug_view ambient occlusion` shows the AO channel in a demo that never
+  exposed it") is the real proof.
+- **`crcbl-console` has no `Kind: Display`, and slice 2 did not need one.** The
+  brief expected `crcbl settings list` to print the domain; it does not — that
+  command reads `CatalogueKey::status` and nothing else, so its output shape is
+  untouched. Slice 5's `help` is the first thing that will want to print a
+  `Kind`, and that is where the `Display` belongs (in `crcbl-console`, tested
+  there).
+
+### The scaffold template has no renderer to forward to (2026-08-30)
+
+`crates/crcbl-cli/templates/main.rs.tmpl`'s `Gpu` holds a `MenuRenderer`, a
+`UiRenderer` and a `TransientPool` and no `ForwardRenderer` — it only uses
+`ForwardRenderer::present_target`, the static import helper. So its hand-written
+`impl GameGpu for Gpu` keeps the `apply_video`/`set_debug_view` defaults and
+reports `Unsupported`, which is the honest answer. The day the template
+scaffolds a scene, the pair goes in beside the renderer.
+
 ### `crcbl_audio::CueDeck` — the cue plumbing every sample copies (2026-08-27)
 
 The stream-open-with-null-fallback, the unknown-id guard, the cue→`VoiceMix`

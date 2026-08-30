@@ -956,7 +956,50 @@ fn feed_monitor<'a>(
 // `PolledGpu` is written out below instead of taken from
 // `crcbl::impl_polled_gpu!`, because this sample's `request_open` takes its
 // forced path and effect set as well.
-crcbl::impl_game_gpu!(Gpu);
+/// The two seams `crcbl::settings::apply` reaches a renderer through.
+///
+/// A second inherent block rather than lines inside the one above, so the
+/// forward `crcbl::impl_game_gpu!(Gpu, with_renderer)` picks up sits beside the
+/// invocation that needs it. `docs/plan/52-debug-console.md` decision 3 is where
+/// the pair comes from, and `crcbl::settings` holds both bodies — every bundle
+/// with a `ForwardRenderer` writes exactly these two lines.
+impl Gpu {
+    /// Put the player's `[engine.video]` section into force now.
+    ///
+    /// # Errors
+    ///
+    /// `crcbl::settings::apply_video_to`'s: the device refused the sampler the
+    /// anisotropy asked for.
+    fn apply_video(
+        &mut self,
+        video: &crcbl::settings::VideoSettings,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        // **Both renderers**, because the player's quality clamp is a fact
+        // about the player rather than about a view: a monitor drawn at full
+        // anisotropy inside a frame the player asked to be cheap is the setting
+        // half-applied. Each renderer keeps its own `camera` layer — the monitor
+        // asks for no reflections — because `apply_video_to` writes only the
+        // `video` and `antialiasing` layers.
+        crcbl::settings::apply_video_to(&mut self.renderer, self.ctx.device(), video)?;
+        crcbl::settings::apply_video_to(&mut self.monitor, self.ctx.device(), video)
+    }
+
+    /// Draw `view` instead of the shaded picture.
+    ///
+    /// # Errors
+    ///
+    /// None: this bundle has the renderer the view needs.
+    fn set_debug_view(
+        &mut self,
+        view: crcbl::render::DebugView,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        crcbl::settings::set_debug_view_on(&mut self.renderer, view);
+        crcbl::settings::set_debug_view_on(&mut self.monitor, view);
+        Ok(())
+    }
+}
+
+crcbl::impl_game_gpu!(Gpu, with_renderer);
 
 /// Lets [`crcbl::engine::PolledBoot`] drive this bundle's arrival.
 ///

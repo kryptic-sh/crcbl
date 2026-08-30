@@ -346,6 +346,22 @@ impl crcbl::ui::DebugModule for Audio {
     }
 }
 
+/// The one seam this sample can apply a settings key through.
+///
+/// `crcbl::settings::apply` writes the key and then hands the write to a
+/// [`Stage`](crcbl::settings::Stage); this is options' answer to that. The gain
+/// rows move a bus **as they move**, which is the claim the audio half of the
+/// sample exists to make; every video row inherits the trait's default and
+/// reports `Unsupported`, which is exactly what `crate::app`'s docs already say
+/// about them — this screen draws no scene and builds no loop, so there is no
+/// renderer and no clock here to put one into force on.
+impl crcbl::settings::Stage for Audio {
+    fn set_bus_gain(&mut self, bus: Bus, gain: f32) -> Result<(), crcbl::settings::Unsupported> {
+        Self::set_bus_gain(self, bus, gain);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -568,8 +568,12 @@ impl Gpu {
 
 /// The frame's half of this bundle, for [`crcbl::engine::Loop`].
 ///
-/// Six one-line forwards. Every one already existed for the loop that used to
-/// call them from `app.rs`; the trait is what lets the engine call them instead.
+/// One-line forwards. Every one but the last two already existed for the loop
+/// that used to call them from `app.rs`; the trait is what lets the engine call
+/// them instead. The pair at the end is
+/// `docs/plan/52-debug-console.md` decision 3's, written out here rather than
+/// through `crcbl::impl_game_gpu!(Gpu, with_renderer)` because this bundle
+/// writes its whole block by hand.
 impl crcbl::engine::GameGpu for Gpu {
     fn atlas(&self) -> &FontAtlas {
         Self::atlas(self)
@@ -601,6 +605,28 @@ impl crcbl::engine::GameGpu for Gpu {
 
     fn destroy(self) -> Result<(), GpuError> {
         Self::destroy(self)
+    }
+
+    /// # Errors
+    ///
+    /// `crcbl::settings::apply_video_to`'s: the device refused the sampler the
+    /// anisotropy asked for.
+    fn apply_video(
+        &mut self,
+        video: &crcbl::settings::VideoSettings,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        crcbl::settings::apply_video_to(&mut self.renderer, self.ctx.device(), video)
+    }
+
+    /// # Errors
+    ///
+    /// None: this bundle has the renderer the view needs.
+    fn set_debug_view(
+        &mut self,
+        view: crcbl::render::DebugView,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        crcbl::settings::set_debug_view_on(&mut self.renderer, view);
+        Ok(())
     }
 }
 

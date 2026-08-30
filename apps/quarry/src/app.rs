@@ -677,7 +677,11 @@ impl HostedGame for Quarry {
         // Here rather than in `tick`, which does not run while paused: the row
         // that was just pressed is on a panel over a frame that has to change
         // behind it.
-        gpu.set_debug_view(self.view);
+        // Infallible here — this bundle has a renderer — and the `Result` is
+        // `GameGpu::set_debug_view`'s, which exists so a bundle without one can
+        // say so.
+        gpu.set_debug_view(self.view)
+            .expect("quarry's bundle holds a renderer");
         // Here for the same reason, and unconditionally rather than on the
         // frames it changed: a `None` written every frame is the renderer's own
         // default written every frame, which is the state every golden was

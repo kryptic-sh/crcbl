@@ -109,7 +109,10 @@
 //! the ask follows them to a machine with a different ceiling. An absent key is
 //! still the engine's own figure, as it is for every key here.
 
+use std::any::Any;
+
 use crcbl_audio::mixer::Bus;
+use crcbl_console::{Binding, Fault, Flags, Kind, Value};
 use crcbl_render::{Antialiasing, DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEffects};
 
 use crate::engine::FrameLimit;
@@ -197,12 +200,39 @@ pub const RENDER_SCALE_KEY: &str = "render_scale";
 /// [`frame_limit`].
 pub const FRAME_LIMIT_KEY: &str = "frame_limit";
 
+/// The highest rate [`FRAME_LIMIT_KEY`] can hold: the ceiling of the type
+/// [`frame_limit`] reads it as.
+///
+/// [`FrameLimit`] is a `u32` of frames a second, so this is that type's own
+/// ceiling widened to the `i64` a [`Kind::Int`] range is spelled in — not a
+/// rate anyone will ask for, and not a number this file gets to choose either.
+/// A file above it is what [`frame_limit`] already warns about.
+pub const FRAME_LIMIT_CEILING: i64 = u32::MAX as i64;
+
 /// The `[engine.video]` key that picks the frame's antialiasing tier.
 ///
 /// Spelled here for [`RENDER_SCALE_KEY`]'s reason — it clears no
 /// [`RenderEffects`] bit on its own, it *replaces* the pair of them that make
 /// the resolve slot — and read by [`antialiasing`].
 pub const ANTIALIASING_KEY: &str = "antialiasing";
+
+/// Every rung [`antialiasing`] reads, as the words a file and a console line
+/// spell them with — the [`Kind::Enum`] set of [`ANTIALIASING_KEY`].
+///
+/// **Derived from [`Antialiasing::ALL`] rather than written out**, through
+/// [`Antialiasing::name`], which is already "the one place a rung's spelling is
+/// written". A literal list here would be a second spelling of every rung and a
+/// silent omission of the next one; this cannot be either. The `while` loop is
+/// what a `const` context has instead of `map`.
+pub const ANTIALIASING_NAMES: [&str; Antialiasing::ALL.len()] = {
+    let mut names = [""; Antialiasing::ALL.len()];
+    let mut i = 0;
+    while i < Antialiasing::ALL.len() {
+        names[i] = Antialiasing::ALL[i].name();
+        i += 1;
+    }
+    names
+};
 
 /// The `[engine.video]` key that sets the base-colour page's anisotropy.
 ///
@@ -690,39 +720,150 @@ pub enum KeyStatus {
 }
 
 /// One key the engine's settings catalogue defines.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// **`PartialEq` and not `Eq`**, since [`Kind`] holds floats.
+#[derive(Clone, Debug, PartialEq)]
 pub struct CatalogueKey {
     /// The dotted key, as it is written in `settings.toml` and passed to
     /// [`SettingsStack::get`].
     pub key: String,
-    /// What the key accepts, for a screen to render and a person to read.
-    pub domain: &'static str,
+    /// The name the console types, which is the key without its namespace.
+    ///
+    /// The spelling `docs/plan/52-debug-console.md` decision 2 fixes for a
+    /// settings-backed variable: `antialiasing`, not `engine.video.antialiasing`
+    /// and not `r_antialiasing`, because a bare key is what the user typed in
+    /// the example the plan is written against. It is `&'static str` where
+    /// [`key`](Self::key) is a `String` because that is what it comes from —
+    /// [`VIDEO_KEYS`] and its siblings — and because
+    /// [`Binding`] needs a name that outlives the call.
+    pub name: &'static str,
+    /// What the key accepts, as the console's own domain type.
+    ///
+    /// **Was prose until `docs/plan/52-debug-console.md` decision 3.** A string
+    /// could say "1 to 16" while the setter clamped to something else, and
+    /// nothing could tell; a [`Kind`] is what a value is coerced and
+    /// range-checked through, so
+    /// `every_numeric_kind_agrees_with_the_setter_that_writes_it` can hold the
+    /// two together. The prose that was here is [`help`](Self::help).
+    pub kind: Kind,
+    /// What the key is for, in one line — the prose the domain used to carry,
+    /// minus whatever [`kind`](Self::kind) now states exactly.
+    pub help: &'static str,
     /// Whether a reader answers it; see [`KeyStatus`].
     pub status: KeyStatus,
 }
 
-/// The `[engine.video]` rows nothing reads yet, with the domains
+/// The help line every [`VIDEO_KEYS`] switch wears.
+///
+/// One line for six keys because it is one sentence about six keys — the name
+/// is what says which effect, and a line per switch would be six copies of the
+/// same clause. [`catalogue`] and the switch's own [`Binding`] read this
+/// constant rather than each spelling it.
+const EFFECT_HELP: &str = "whether the player allows this effect; absent allows it";
+
+/// [`ANTIALIASING_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
+const ANTIALIASING_HELP: &str = "which resolve the frame gets; absent leaves the game's own tier";
+
+/// [`RENDER_SCALE_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
+const RENDER_SCALE_HELP: &str = "fraction of the surface extent the frame is drawn at";
+
+/// [`ANISOTROPIC_FILTERING_KEY`]'s help line, for [`catalogue`] and its
+/// [`Binding`].
+const ANISOTROPIC_FILTERING_HELP: &str = "how the base-colour page is filtered; the low end is off, and the \
+     device's own ceiling clamps it";
+
+/// [`FRAME_LIMIT_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
+const FRAME_LIMIT_HELP: &str = "frames a second the loop is held under; zero is unlimited";
+
+/// The domain of every `[engine.audio]` gain: what [`audio_gains`] clamps to.
+const GAIN_KIND: Kind = Kind::Float { min: 0.0, max: 1.0 };
+
+/// The help line every `[engine.audio]` gain wears, on [`EFFECT_HELP`]'s terms.
+const GAIN_HELP: &str = "the bus gain; absent is unity";
+
+/// What a [`KeyStatus::Named`] key's [`Binding`] carries: the settings stack is
+/// still its storage, and nothing may write it.
+///
+/// [`Flags::READ_ONLY`] is the console half of [`KeyStatus::Named`] — the plan's
+/// decision 3, so `help` lists the whole catalogue instead of hiding the part of
+/// it no frame reads.
+const NAMED_FLAGS: Flags = Flags::ARCHIVE.union(Flags::READ_ONLY);
+
+/// The help line of each [`NAMED_VIDEO_KEYS`] row, in that table's order.
+///
+/// Its own table so the console's binding for a row and the catalogue's entry
+/// for it read the same literal: a `static Binding` needs a `&'static str` in a
+/// const initializer, which is what stops the sentence being written twice and
+/// then edited once.
+///
+/// **Each one opens with what the row's [`KeyStatus::Named`] means**, in the
+/// words `docs/plan/52-debug-console.md` decision 3 asks the console to print,
+/// because that is the fact a person reading `help` needs before the rest of the
+/// line is worth anything.
+const NAMED_HELP: [&str; 8] = [
+    "nothing reads this yet — how the window sits on the desktop",
+    "nothing reads this yet — monitor name; absent means wherever the window is",
+    "nothing reads this yet — [width, height] in device pixels, as a TOML array",
+    "nothing reads this yet — how the swapchain paces presentation",
+    "nothing reads this yet — a scalar multiplier applied in the tonemap pass",
+    "nothing reads this yet — whether the swapchain asks for an HDR format",
+    "nothing reads this yet — a multiplier over the window's own scale factor",
+    "nothing reads this yet — the vertical field of view in degrees",
+];
+
+/// The `[engine.video]` rows nothing reads yet, with the kinds and the help
 /// `docs/plan/15-windowing.md` fixed for them.
 ///
 /// Literals, unlike the rows below them, because there is nothing in the tree
 /// to derive them from — that is exactly what makes them [`KeyStatus::Named`].
 /// A row leaves this list by growing a reader and joining `catalogue`'s derived
 /// half, so the two halves cannot both claim one key.
-const NAMED_VIDEO_KEYS: [(&str, &str); 8] = [
-    ("display_mode", r#""windowed" | "borderless""#),
+///
+/// **Every range here is this list's own**, and that is the honest half of the
+/// same fact: there is no setter to agree with, which is why
+/// `every_numeric_kind_agrees_with_the_setter_that_writes_it` can only cover the
+/// derived rows. A row that grows a reader takes the reader's range with it, and
+/// joins the test at the same moment. Until then every one of them is
+/// [`Flags::READ_ONLY`] to the console, so no range here decides anything.
+///
+/// `resolution` is [`Kind::Text`] rather than a pair, because it is a TOML array
+/// and the console's domain type spells no array; `monitor` is text because a
+/// monitor name is text.
+const NAMED_VIDEO_KEYS: [(&str, Kind, &str); 8] = [
     (
-        "monitor",
-        "monitor name; absent means wherever the window is",
+        "display_mode",
+        Kind::Enum(&["windowed", "borderless"]),
+        NAMED_HELP[0],
     ),
-    ("resolution", "[width, height] in device pixels"),
-    ("present_mode", r#""auto" | "vsync" | "adaptive" | "off""#),
+    ("monitor", Kind::Text, NAMED_HELP[1]),
+    ("resolution", Kind::Text, NAMED_HELP[2]),
+    (
+        "present_mode",
+        Kind::Enum(&["auto", "vsync", "adaptive", "off"]),
+        NAMED_HELP[3],
+    ),
     (
         "brightness",
-        "scalar multiplier applied in the tonemap pass",
+        Kind::Float { min: 0.0, max: 2.0 },
+        NAMED_HELP[4],
     ),
-    ("hdr_output", "true | false"),
-    ("ui_scale", "multiplier over the window's own scale factor"),
-    ("fov", "vertical field of view in degrees"),
+    ("hdr_output", Kind::Bool, NAMED_HELP[5]),
+    (
+        "ui_scale",
+        Kind::Float {
+            min: 0.25,
+            max: 4.0,
+        },
+        NAMED_HELP[6],
+    ),
+    (
+        "fov",
+        Kind::Float {
+            min: 1.0,
+            max: 179.0,
+        },
+        NAMED_HELP[7],
+    ),
 ];
 
 /// Every key the engine defines, read or merely named.
@@ -735,10 +876,10 @@ const NAMED_VIDEO_KEYS: [(&str, &str); 8] = [
 /// [`Bus::settings_key`]. Only the rows with no reader are
 /// written out, because there is nothing to derive them from.
 ///
-/// The **domains** are prose either way, so the antialiasing row's is checked
-/// against [`Antialiasing::ALL`] by
-/// `the_antialiasing_domain_names_every_rung_the_reader_takes` rather than
-/// derived from it.
+/// The **kinds** are derived too wherever a reader fixes one: the antialiasing
+/// row's set is [`ANTIALIASING_NAMES`], and every numeric row's range is the one
+/// its setter clamps to, which
+/// `every_numeric_kind_agrees_with_the_setter_that_writes_it` holds it to.
 ///
 /// A `Vec` rather than a `const`: a dotted key is its namespace and its name
 /// joined, and `format!` is not a const operation. The caller is a settings
@@ -749,42 +890,60 @@ const NAMED_VIDEO_KEYS: [(&str, &str); 8] = [
 /// the *engine* rather than wrong.
 #[must_use]
 pub fn catalogue() -> Vec<CatalogueKey> {
-    let read = |key: String, domain| CatalogueKey {
-        key,
-        domain,
+    let read = |namespace: &str, name: &'static str, kind, help| CatalogueKey {
+        key: format!("{namespace}.{name}"),
+        name,
+        kind,
+        help,
         status: KeyStatus::Read,
     };
     let mut keys: Vec<CatalogueKey> = VIDEO_KEYS
         .iter()
-        .map(|(key, _)| read(format!("{VIDEO_NAMESPACE}.{key}"), "true | false"))
+        .map(|(key, _)| read(VIDEO_NAMESPACE, key, Kind::Bool, EFFECT_HELP))
         .collect();
     keys.push(read(
-        format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}"),
-        r#""none" | "fxaa" | "smaa"; absent leaves the game's own tier"#,
+        VIDEO_NAMESPACE,
+        ANTIALIASING_KEY,
+        Kind::Enum(&ANTIALIASING_NAMES),
+        ANTIALIASING_HELP,
     ));
     keys.push(read(
-        format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"),
-        "fraction of the surface extent; clamped to the renderer's floor",
+        VIDEO_NAMESPACE,
+        RENDER_SCALE_KEY,
+        Kind::Float {
+            min: MIN_RENDER_SCALE,
+            max: 1.0,
+        },
+        RENDER_SCALE_HELP,
     ));
     keys.push(read(
-        format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}"),
-        "1 to 16; 1 is off, and the device's own ceiling clamps it",
+        VIDEO_NAMESPACE,
+        ANISOTROPIC_FILTERING_KEY,
+        Kind::Float {
+            min: 1.0,
+            max: MAX_ANISOTROPIC_FILTERING,
+        },
+        ANISOTROPIC_FILTERING_HELP,
     ));
     keys.push(read(
-        format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"),
-        "frames a second; 0 is unlimited",
+        VIDEO_NAMESPACE,
+        FRAME_LIMIT_KEY,
+        Kind::Int {
+            min: 0,
+            max: FRAME_LIMIT_CEILING,
+        },
+        FRAME_LIMIT_HELP,
     ));
-    keys.extend(NAMED_VIDEO_KEYS.map(|(key, domain)| CatalogueKey {
+    keys.extend(NAMED_VIDEO_KEYS.map(|(key, kind, help)| CatalogueKey {
         key: format!("{VIDEO_NAMESPACE}.{key}"),
-        domain,
+        name: key,
+        kind,
+        help,
         status: KeyStatus::Named,
     }));
-    keys.extend(Bus::ALL.map(|bus| {
-        read(
-            format!("{AUDIO_NAMESPACE}.{}", bus.settings_key()),
-            "gain from 0 to 1; absent is unity",
-        )
-    }));
+    keys.extend(
+        Bus::ALL.map(|bus| read(AUDIO_NAMESPACE, bus.settings_key(), GAIN_KIND, GAIN_HELP)),
+    );
     keys
 }
 
@@ -797,6 +956,646 @@ pub fn catalogue() -> Vec<CatalogueKey> {
 #[must_use]
 pub fn catalogued(key: &str) -> Option<CatalogueKey> {
     catalogue().into_iter().find(|entry| entry.key == key)
+}
+
+// ── Applying a key ──────────────────────────────────────────────────────────
+
+/// A seam the host does not have.
+///
+/// Not an error: a settings screen with no renderer, a headless run with no
+/// mixer and the engine's own loop fixture are all hosts that legitimately
+/// cannot show a key, and every one of them still wants the key written. It is
+/// reported rather than swallowed because the alternative is
+/// "not implemented" arriving as "applied" — the failure
+/// `docs/plan/40-profiling.md` names for counters and this file's [`KeyStatus`]
+/// names for keys.
+///
+/// **A `Result<(), Unsupported>` rather than a three-armed enum**, because the
+/// two outcomes are exactly "it happened" and "there is nothing here to happen
+/// on": `?` composes them at a call site that has several seams to reach, and
+/// `#[must_use]` on `Result` is what stops a bundle's forward silently dropping
+/// one. [`Applied`] is the answer [`apply`] gives, and it is where the shades in
+/// between belong.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Unsupported;
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this host has no seam to apply that through")
+    }
+}
+
+impl std::error::Error for Unsupported {}
+
+/// What a settings write reaches once the stack holds it.
+///
+/// # Why this is not [`GameGpu`](crate::engine::GameGpu)
+///
+/// Two reasons, and either alone would decide it. `GameGpu` is `Sized` and
+/// takes `self` by value in `destroy`, so it is not object-safe and there is no
+/// `&mut dyn GameGpu` for [`apply`] to take; and a settings key reaches more
+/// than a renderer — the mixer and the loop's clock are seams no GPU bundle
+/// owns. So the bundle keeps the pair `docs/plan/52-debug-console.md` decision 3
+/// puts on it, [`GpuStage`] is the one line that forwards to it, and this is the
+/// vocabulary [`apply`] speaks.
+///
+/// **Every method defaults to [`Unsupported`]**, so an implementor writes only
+/// the seams it actually has and a caller is told which of them did nothing
+/// rather than left to assume.
+pub trait Stage {
+    /// Hand the whole `[engine.video]` section to the renderer.
+    ///
+    /// The whole section rather than the key that moved: the renderer's own
+    /// state is the resolved set, the scale and the sampler together, and a
+    /// caller that applied one key would have to know which of the three it
+    /// touched.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] where this host has no renderer.
+    fn apply_video(&mut self, video: &VideoSettings) -> Result<(), Unsupported> {
+        let _ = video;
+        Err(Unsupported)
+    }
+
+    /// Move one bus's gain on the running mixer.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] where this host has no mixer.
+    fn set_bus_gain(&mut self, bus: Bus, gain: f32) -> Result<(), Unsupported> {
+        let _ = (bus, gain);
+        Err(Unsupported)
+    }
+
+    /// Put the loop under a new frame-rate ceiling.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] where this host has no clock to re-pace — which is every
+    /// host in this workspace today, since
+    /// [`Loop`](crate::engine::Loop) takes its limit when it is built. See
+    /// `docs/backlog.md`.
+    fn set_frame_limit(&mut self, limit: FrameLimit) -> Result<(), Unsupported> {
+        let _ = limit;
+        Err(Unsupported)
+    }
+}
+
+/// The [`Stage`] a GPU bundle is: `[engine.video]` reaches the renderer through
+/// [`GameGpu::apply_video`](crate::engine::GameGpu::apply_video).
+///
+/// One line of forwarding, and the whole of the path from a typed settings write
+/// to a live frame. A bundle with no renderer inherits that method's default and
+/// this reports [`Unsupported`] without the caller having to ask which kind of
+/// bundle it holds.
+#[derive(Debug)]
+pub struct GpuStage<'a, G: crate::engine::GameGpu>(pub &'a mut G);
+
+impl<G: crate::engine::GameGpu> Stage for GpuStage<'_, G> {
+    fn apply_video(&mut self, video: &VideoSettings) -> Result<(), Unsupported> {
+        self.0.apply_video(video)
+    }
+}
+
+/// A [`Stage`] that records what it was asked to do, for a caller that cannot
+/// hold the thing it would apply through.
+///
+/// **The console's host is the caller.** A [`Binding`] reaches its host as
+/// `&mut dyn Any`, and [`Any`] is implemented only for `'static` types — so the
+/// state a binding writes cannot hold a borrow of the renderer or the mixer,
+/// both of which live for a frame. This records the write instead and the loop
+/// drains it where the bundle is in hand, which is
+/// [`HostedGame::take_pending_frame_limit`](crate::engine::HostedGame::take_pending_frame_limit)'s
+/// arrangement already.
+///
+/// It keeps the **latest** ask per seam rather than a queue: two writes to one
+/// key in a frame are one thing to apply, and applying the first would be
+/// drawing a value the player has already moved off.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Deferred {
+    video: Option<VideoSettings>,
+    gains: [Option<f32>; Bus::ALL.len()],
+    frame_limit: Option<FrameLimit>,
+}
+
+impl Deferred {
+    /// Nothing recorded.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            video: None,
+            gains: [None; Bus::ALL.len()],
+            frame_limit: None,
+        }
+    }
+
+    /// The `[engine.video]` section a write asked for, taken.
+    pub const fn take_video(&mut self) -> Option<VideoSettings> {
+        self.video.take()
+    }
+
+    /// The bus gains a write asked for, taken, in [`Bus::ALL`]'s order.
+    pub const fn take_gains(&mut self) -> [Option<f32>; Bus::ALL.len()] {
+        std::mem::replace(&mut self.gains, [None; Bus::ALL.len()])
+    }
+
+    /// The frame ceiling a write asked for, taken.
+    pub const fn take_frame_limit(&mut self) -> Option<FrameLimit> {
+        self.frame_limit.take()
+    }
+
+    /// Whether anything is waiting to be applied.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.video.is_none() && self.frame_limit.is_none() && self.gains.iter().all(Option::is_none)
+    }
+}
+
+impl Stage for Deferred {
+    fn apply_video(&mut self, video: &VideoSettings) -> Result<(), Unsupported> {
+        self.video = Some(*video);
+        Ok(())
+    }
+
+    fn set_bus_gain(&mut self, bus: Bus, gain: f32) -> Result<(), Unsupported> {
+        self.gains[bus.index()] = Some(gain);
+        Ok(())
+    }
+
+    fn set_frame_limit(&mut self, limit: FrameLimit) -> Result<(), Unsupported> {
+        self.frame_limit = Some(limit);
+        Ok(())
+    }
+}
+
+/// How far a write got.
+///
+/// The distinction `apps/options`' rows already draw with their "next start"
+/// mark, made into a value so every caller draws it the same way: the stack
+/// holds the key either way, and the question is whether anything in *this*
+/// process shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Applied {
+    /// Written, and the thing that shows it has been told.
+    Live,
+    /// Written, and this host has no seam for it — the next start-up reads it.
+    NextStart,
+}
+
+/// Write one catalogue key and apply it through `stage`.
+///
+/// **The one place a settings key is written and applied together**, and the
+/// reason `docs/plan/52-debug-console.md` decision 3 asked for it: until this
+/// existed the fan-out was `apps/options`', per key, so a console — or a second
+/// screen — would have had to copy it, and a copy is where the two drift.
+///
+/// One function with a match rather than a function per key, because every arm
+/// is the same three steps in the same order (coerce, write, apply) and the
+/// spelling of each key's writer is the only thing that differs; a function per
+/// key would be sixteen bodies that must not disagree about the order.
+///
+/// # What it refuses
+///
+/// - A key the catalogue does not name.
+/// - A [`KeyStatus::Named`] key — nothing reads it, so writing it would be a
+///   value the player set and no frame ever shows.
+/// - A value the key's [`Kind`] refuses: the wrong shape, or outside the range
+///   the setter clamps to.
+/// - A storage error from the write, which leaves the stack as it was.
+///
+/// A [`Stage`] that answers [`Unsupported`] is **not** a refusal: the key is
+/// written and the answer is [`Applied::NextStart`].
+///
+/// # Errors
+///
+/// A [`Fault`] naming the key, on each of the terms above.
+pub fn apply(
+    stack: &mut SettingsStack,
+    key: &str,
+    value: &Value,
+    stage: &mut dyn Stage,
+) -> Result<Applied, Fault> {
+    let entry = catalogued(key)
+        .ok_or_else(|| Fault::new(format!("`{key}` is not a key the engine defines")))?;
+    if entry.status == KeyStatus::Named {
+        return Err(Fault::new(format!(
+            "`{key}`: nothing reads this yet, so setting it would change no frame"
+        )));
+    }
+    entry.kind.check(key, value)?;
+    let storage = |error: StorageError| Fault::new(error.to_string());
+
+    if let Some(bus) = Bus::ALL
+        .into_iter()
+        .find(|bus| entry.key == format!("{AUDIO_NAMESPACE}.{}", bus.settings_key()))
+    {
+        let Value::Float(gain) = *value else {
+            unreachable!("an audio key is a float kind, which `check` has already held it to")
+        };
+        set_audio_gain(stack, bus, gain).map_err(storage)?;
+        return Ok(reached(stage.set_bus_gain(bus, gain)));
+    }
+
+    match entry.name {
+        FRAME_LIMIT_KEY => {
+            let Value::Int(rate) = *value else {
+                unreachable!("the frame limit is an int kind, which `check` has held it to")
+            };
+            let rate = u32::try_from(rate)
+                .map_err(|_| Fault::new(format!("`{key}`: {rate} is not a frame rate")))?;
+            let limit = FrameLimit::fps(rate);
+            set_frame_limit(stack, limit).map_err(storage)?;
+            Ok(reached(stage.set_frame_limit(limit)))
+        }
+        ANTIALIASING_KEY => {
+            let Value::Enum(name) = *value else {
+                unreachable!("the tier is an enum kind, which `check` has held it to")
+            };
+            let tier = Antialiasing::from_name(name)
+                .expect("`check` has already held the value to `ANTIALIASING_NAMES`");
+            set_antialiasing(stack, tier).map_err(storage)?;
+            Ok(reached(stage.apply_video(&video(stack))))
+        }
+        RENDER_SCALE_KEY => {
+            let Value::Float(scale) = *value else {
+                unreachable!("the scale is a float kind, which `check` has held it to")
+            };
+            set_render_scale(stack, scale).map_err(storage)?;
+            Ok(reached(stage.apply_video(&video(stack))))
+        }
+        ANISOTROPIC_FILTERING_KEY => {
+            let Value::Float(anisotropy) = *value else {
+                unreachable!("the anisotropy is a float kind, which `check` has held it to")
+            };
+            set_anisotropic_filtering(stack, anisotropy).map_err(storage)?;
+            Ok(reached(stage.apply_video(&video(stack))))
+        }
+        // Every remaining `Read` key is one of `VIDEO_KEYS`, whose entry in the
+        // catalogue is derived from that table — so a name that reaches here and
+        // matches nothing is a key catalogued as read with no writer, which the
+        // catalogue tests already refuse.
+        name => {
+            let Value::Bool(on) = *value else {
+                unreachable!("an effect key is a bool kind, which `check` has held it to")
+            };
+            let (_, effect) = VIDEO_KEYS
+                .into_iter()
+                .find(|(candidate, _)| *candidate == name)
+                .expect("every `Read` video key not matched above is an effect switch");
+            let mut effects = video_effects(stack);
+            effects.set(effect, on);
+            set_video_effects(stack, effects).map_err(storage)?;
+            Ok(reached(stage.apply_video(&video(stack))))
+        }
+    }
+}
+
+/// [`Applied`] from what a [`Stage`] answered.
+const fn reached(outcome: Result<(), Unsupported>) -> Applied {
+    match outcome {
+        Ok(()) => Applied::Live,
+        Err(Unsupported) => Applied::NextStart,
+    }
+}
+
+// ── The renderer half of a `GameGpu` forward ────────────────────────────────
+
+/// Put `video` into force on `renderer`, through the `device` that built it.
+///
+/// **The body every bundle's
+/// [`GameGpu::apply_video`](crate::engine::GameGpu::apply_video) forwards to.**
+/// Every bundle in `apps/` that holds a
+/// [`ForwardRenderer`](crcbl_render::ForwardRenderer) has to do exactly this,
+/// and a copy each is a chance each to forget the effect request or to hand the
+/// scale to the anisotropy; there is one copy here and a line each there.
+///
+/// It writes all three of the renderer's player-facing knobs rather than the one
+/// that moved, because [`VideoSettings`] is the section and a caller holding one
+/// does not know which key produced it. Setting a knob to the value it already
+/// holds costs nothing —
+/// [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy)
+/// returns early on a bit-equal ask, and the other two are field writes.
+///
+/// The frame ceiling in `video` is deliberately **not** applied: it is the
+/// loop's, not the renderer's, and [`Stage::set_frame_limit`] is where it goes.
+///
+/// # Errors
+///
+/// [`Unsupported`] where the device refused the sampler the anisotropy asked
+/// for. The renderer is left holding the sampler it had — that is
+/// [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy)'s
+/// own guarantee — and the failure is **also** logged, naming the key, on this
+/// module's "a line that does nothing
+/// says so" terms: `Unsupported` says the value did not reach the frame, and the
+/// log line is where what the device said survives.
+pub fn apply_video_to(
+    renderer: &mut crcbl_render::ForwardRenderer,
+    device: &dyn crcbl_hal::Device,
+    video: &VideoSettings,
+) -> Result<(), Unsupported> {
+    renderer.set_render_scale(video.render_scale);
+    let mut request = renderer.effect_request();
+    request.video = video.effects;
+    request.antialiasing = video.antialiasing;
+    renderer.set_effect_request(request);
+    renderer
+        .set_anisotropy(device, video.anisotropic_filtering)
+        .map_err(|error| {
+            crcbl_core::log::warn!(
+                "settings: `{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}` did not reach the \
+                 frame: {error}; the page is still sampled at {}",
+                renderer.anisotropy()
+            );
+            Unsupported
+        })
+}
+
+/// Which of [`ForwardRenderer`](crcbl_render::ForwardRenderer)'s debug
+/// switches `view` turns on.
+///
+/// In
+/// [`ForwardRenderer::debug_view`](crcbl_render::ForwardRenderer::debug_view)'s
+/// own precedence order — motion, occlusion, heatmap, LOD, normals — so
+/// `debug_view` of a renderer this was
+/// applied to answers back the view it was handed, whichever it was. That
+/// round trip is what
+/// `every_debug_view_sets_exactly_the_switch_its_precedence_reads_back` asserts
+/// without a device.
+///
+/// A `match` on the whole enum rather than five comparisons, so a
+/// [`DebugView`](crcbl_render::DebugView) variant added later fails to compile
+/// here instead of silently drawing the shaded frame.
+#[must_use]
+pub const fn debug_view_switches(view: crcbl_render::DebugView) -> [bool; 5] {
+    use crcbl_render::DebugView as V;
+    match view {
+        V::Shaded => [false, false, false, false, false],
+        V::Motion => [true, false, false, false, false],
+        V::AmbientOcclusion => [false, true, false, false, false],
+        V::Heatmap => [false, false, true, false, false],
+        V::LodTint => [false, false, false, true, false],
+        V::Normals => [false, false, false, false, true],
+    }
+}
+
+/// Draw `view` on `renderer` instead of the shaded picture.
+///
+/// **The body every bundle's
+/// [`GameGpu::set_debug_view`](crate::engine::GameGpu::set_debug_view) forwards
+/// to**, on [`apply_video_to`]'s terms. It writes **every** switch rather than
+/// the one the view names, because the five are independent and
+/// [`ForwardRenderer::debug_view`](crcbl_render::ForwardRenderer::debug_view)
+/// resolves them by precedence: leaving an outer one standing would draw a view
+/// nobody asked for. [`debug_view_switches`] is the table.
+pub const fn set_debug_view_on(
+    renderer: &mut crcbl_render::ForwardRenderer,
+    view: crcbl_render::DebugView,
+) {
+    let [motion, occlusion, heatmap, lod, normals] = debug_view_switches(view);
+    renderer.set_motion_view(motion);
+    renderer.set_occlusion_view(occlusion);
+    renderer.set_heatmap(heatmap);
+    renderer.set_lod_view(lod);
+    renderer.set_normals_view(normals);
+}
+
+// ── The console's variables ─────────────────────────────────────────────────
+
+/// The state a settings console variable reads and writes: the player's stack,
+/// and what a write still owes the process.
+///
+/// **The type every [`console_bindings`] binding downcasts `&mut dyn Any` to**,
+/// and the reason it owns its two halves rather than borrowing them:
+/// [`Any`] is implemented only for `'static` types, so a host cannot hold the
+/// renderer or the mixer a write has to reach. It holds the stack, which it can
+/// own, and a [`Deferred`] — see that type. `Loop::new` builds one and the
+/// frame drains it; that is `docs/plan/52-debug-console.md`'s slice 5.
+#[derive(Debug, Default)]
+pub struct ConsoleHost {
+    stack: SettingsStack,
+    pending: Deferred,
+}
+
+impl ConsoleHost {
+    /// A host over `stack`, with nothing pending.
+    #[must_use]
+    pub const fn new(stack: SettingsStack) -> Self {
+        Self {
+            stack,
+            pending: Deferred::new(),
+        }
+    }
+
+    /// The settings as they stand.
+    #[must_use]
+    pub const fn stack(&self) -> &SettingsStack {
+        &self.stack
+    }
+
+    /// The settings, to write — what `save` and `dump` reach.
+    pub const fn stack_mut(&mut self) -> &mut SettingsStack {
+        &mut self.stack
+    }
+
+    /// What a write has asked for and nothing has applied yet.
+    pub const fn pending_mut(&mut self) -> &mut Deferred {
+        &mut self.pending
+    }
+}
+
+/// Every catalogue key as a console variable, in [`catalogue`]'s order.
+///
+/// One [`Binding`] per key: the key's bare name as the console name
+/// ([`CatalogueKey::name`]), the catalogue's [`Kind`] and help, [`Flags::ARCHIVE`]
+/// because the settings stack is where the value lives, and
+/// [`Flags::READ_ONLY`] beside it for a [`KeyStatus::Named`] key so the console
+/// prints the whole catalogue and refuses to write the half nothing reads.
+///
+/// # Why a macro over a static list, and not one generic pair of functions
+///
+/// A [`Binding`]'s `get` and `set` are bare `fn` pointers and are **not** handed
+/// the binding they belong to, so a single pair could not know which key it was
+/// called for; the name has to be baked into the function. The macro bakes it,
+/// one tiny pair per key, each forwarding to the one `read`/`write` body below —
+/// so there is one copy of the logic and N copies of a name, which is the
+/// direction that cannot drift. `the_bindings_are_the_catalogue` holds the list
+/// to [`catalogue`] itself, so a key added to one and forgotten in the other is
+/// a red test rather than a variable the console does not have.
+#[must_use]
+pub const fn console_bindings() -> &'static [&'static Binding] {
+    BINDINGS
+}
+
+/// Read `namespace.name` off a [`ConsoleHost`], as `kind`'s [`Value`].
+///
+/// Through the readers rather than off the stack directly, so what the console
+/// prints is what the engine would read — including the clamp, the default for
+/// an absent key and the warning for a line that says nothing.
+fn read(host: &dyn Any, namespace: &str, name: &str, kind: Kind) -> Value {
+    let stack = &host
+        .downcast_ref::<ConsoleHost>()
+        .expect("a settings binding is only ever given a `ConsoleHost`")
+        .stack;
+    if namespace == AUDIO_NAMESPACE {
+        let gains = audio_gains(stack);
+        let (_, gain) = gains
+            .into_iter()
+            .find(|(bus, _)| bus.settings_key() == name)
+            .expect("every audio binding names a bus");
+        return Value::Float(gain);
+    }
+    match name {
+        FRAME_LIMIT_KEY => Value::Int(i64::from(frame_limit(stack).rate())),
+        // There is no word for "the player has not picked one" — see
+        // `set_video`'s docs — so an absent key reads back as the rung it leaves
+        // the game on, which is what `apps/options`' row shows for it too.
+        ANTIALIASING_KEY => Value::Enum(
+            antialiasing(stack)
+                .unwrap_or_else(|| Antialiasing::from_effects(RenderEffects::DEFAULT_STACK))
+                .name(),
+        ),
+        RENDER_SCALE_KEY => Value::Float(render_scale(stack)),
+        ANISOTROPIC_FILTERING_KEY => Value::Float(anisotropic_filtering(stack)),
+        _ => match VIDEO_KEYS
+            .into_iter()
+            .find(|(candidate, _)| *candidate == name)
+        {
+            Some((_, effect)) => Value::Bool(video_effects(stack).contains(effect)),
+            // A `Named` key: nothing reads it, so there is nothing to read it
+            // back through. Its binding is `READ_ONLY`, and this is what `help`
+            // prints beside it.
+            None => named_value(stack, namespace, name, kind),
+        },
+    }
+}
+
+/// What a [`KeyStatus::Named`] key reads back as: whatever the file holds,
+/// coerced through the kind the catalogue declared for it.
+///
+/// Straight off the stack rather than through a reader, because the whole of
+/// what makes the key `Named` is that it has no reader. A key the file does not
+/// hold — the ordinary case — reads back as the kind's own floor, which is what
+/// `help` prints beside "nothing reads this yet".
+fn named_value(stack: &SettingsStack, namespace: &str, name: &str, kind: Kind) -> Value {
+    let dotted = format!("{namespace}.{name}");
+    match kind {
+        Kind::Bool => Value::Bool(stack.get::<bool>(&dotted).unwrap_or_default()),
+        Kind::Int { min, .. } => Value::Int(stack.get::<i64>(&dotted).unwrap_or(min)),
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a settings float is read as f64 and shown as f32, which is the width every other reader here answers in"
+        )]
+        // Not clamped to the kind: the file holds what a hand-edit put there,
+        // and a row that reported the floor instead would be this reader
+        // inventing the value it was asked to show. Nothing can be set through
+        // it either way — the binding is `READ_ONLY`.
+        Kind::Float { min, .. } => {
+            Value::Float(stack.get::<f64>(&dotted).map_or(min, |value| value as f32))
+        }
+        Kind::Enum(values) => Value::Enum(
+            stack
+                .get::<String>(&dotted)
+                .and_then(|held| {
+                    values
+                        .iter()
+                        .copied()
+                        .find(|candidate| *candidate == held.as_str())
+                })
+                .unwrap_or(values[0]),
+        ),
+        Kind::Text => Value::Text(stack.get::<String>(&dotted).unwrap_or_default()),
+    }
+}
+
+/// Write `namespace.name` through [`apply`], on the host's own [`Deferred`]
+/// stage.
+///
+/// # Errors
+///
+/// [`apply`]'s.
+fn write(host: &mut dyn Any, namespace: &str, name: &str, value: &Value) -> Result<(), Fault> {
+    let host = host
+        .downcast_mut::<ConsoleHost>()
+        .expect("a settings binding is only ever given a `ConsoleHost`");
+    apply(
+        &mut host.stack,
+        &format!("{namespace}.{name}"),
+        value,
+        &mut host.pending,
+    )
+    .map(|_| ())
+}
+
+/// One [`Binding`] per catalogue key, each with its own name baked in.
+macro_rules! settings_bindings {
+    ($(
+        $binding:ident: $namespace:expr, $name:expr, $kind:expr, $flags:expr, $help:expr;
+    )*) => {
+        $(
+            static $binding: Binding = {
+                fn get(host: &dyn Any) -> Value {
+                    read(host, $namespace, $name, $kind)
+                }
+                fn set(host: &mut dyn Any, value: &Value) -> Result<(), Fault> {
+                    write(host, $namespace, $name, value)
+                }
+                Binding::new($name, $help, $kind, $flags, get, set)
+            };
+        )*
+
+        /// The list [`console_bindings`] answers with.
+        static BINDINGS: &[&Binding] = &[$(&$binding),*];
+    };
+}
+
+settings_bindings! {
+    SHADOWS: VIDEO_NAMESPACE, VIDEO_KEYS[0].0, Kind::Bool, Flags::ARCHIVE, EFFECT_HELP;
+    AMBIENT_OCCLUSION: VIDEO_NAMESPACE, VIDEO_KEYS[1].0, Kind::Bool, Flags::ARCHIVE, EFFECT_HELP;
+    REFLECTIONS: VIDEO_NAMESPACE, VIDEO_KEYS[2].0, Kind::Bool, Flags::ARCHIVE, EFFECT_HELP;
+    BLOOM: VIDEO_NAMESPACE, VIDEO_KEYS[3].0, Kind::Bool, Flags::ARCHIVE, EFFECT_HELP;
+    VOLUMETRIC_FOG: VIDEO_NAMESPACE, VIDEO_KEYS[4].0, Kind::Bool, Flags::ARCHIVE, EFFECT_HELP;
+    AUTO_EXPOSURE: VIDEO_NAMESPACE, VIDEO_KEYS[5].0, Kind::Bool, Flags::ARCHIVE, EFFECT_HELP;
+
+    ANTIALIASING: VIDEO_NAMESPACE, ANTIALIASING_KEY, Kind::Enum(&ANTIALIASING_NAMES),
+        Flags::ARCHIVE, ANTIALIASING_HELP;
+    RENDER_SCALE: VIDEO_NAMESPACE, RENDER_SCALE_KEY,
+        Kind::Float { min: MIN_RENDER_SCALE, max: 1.0 }, Flags::ARCHIVE, RENDER_SCALE_HELP;
+    ANISOTROPIC_FILTERING: VIDEO_NAMESPACE, ANISOTROPIC_FILTERING_KEY,
+        Kind::Float { min: 1.0, max: MAX_ANISOTROPIC_FILTERING }, Flags::ARCHIVE,
+        ANISOTROPIC_FILTERING_HELP;
+    FRAME_LIMIT: VIDEO_NAMESPACE, FRAME_LIMIT_KEY,
+        Kind::Int { min: 0, max: FRAME_LIMIT_CEILING }, Flags::ARCHIVE, FRAME_LIMIT_HELP;
+
+    DISPLAY_MODE: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[0].0, NAMED_VIDEO_KEYS[0].1,
+        NAMED_FLAGS, NAMED_HELP[0];
+    MONITOR: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[1].0, NAMED_VIDEO_KEYS[1].1,
+        NAMED_FLAGS, NAMED_HELP[1];
+    RESOLUTION: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[2].0, NAMED_VIDEO_KEYS[2].1,
+        NAMED_FLAGS, NAMED_HELP[2];
+    PRESENT_MODE: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[3].0, NAMED_VIDEO_KEYS[3].1,
+        NAMED_FLAGS, NAMED_HELP[3];
+    BRIGHTNESS: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[4].0, NAMED_VIDEO_KEYS[4].1,
+        NAMED_FLAGS, NAMED_HELP[4];
+    HDR_OUTPUT: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[5].0, NAMED_VIDEO_KEYS[5].1,
+        NAMED_FLAGS, NAMED_HELP[5];
+    UI_SCALE: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[6].0, NAMED_VIDEO_KEYS[6].1,
+        NAMED_FLAGS, NAMED_HELP[6];
+    FOV: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[7].0, NAMED_VIDEO_KEYS[7].1,
+        NAMED_FLAGS, NAMED_HELP[7];
+
+    MASTER_VOLUME: AUDIO_NAMESPACE, Bus::ALL[0].settings_key(), GAIN_KIND,
+        Flags::ARCHIVE, GAIN_HELP;
+    MUSIC_VOLUME: AUDIO_NAMESPACE, Bus::ALL[1].settings_key(), GAIN_KIND,
+        Flags::ARCHIVE, GAIN_HELP;
+    SFX_VOLUME: AUDIO_NAMESPACE, Bus::ALL[2].settings_key(), GAIN_KIND,
+        Flags::ARCHIVE, GAIN_HELP;
+    UI_VOLUME: AUDIO_NAMESPACE, Bus::ALL[3].settings_key(), GAIN_KIND,
+        Flags::ARCHIVE, GAIN_HELP;
+    VOICE_VOLUME: AUDIO_NAMESPACE, Bus::ALL[4].settings_key(), GAIN_KIND,
+        Flags::ARCHIVE, GAIN_HELP;
+    AMBIENCE_VOLUME: AUDIO_NAMESPACE, Bus::ALL[5].settings_key(), GAIN_KIND,
+        Flags::ARCHIVE, GAIN_HELP;
 }
 
 #[cfg(test)]
@@ -1019,7 +1818,13 @@ mod tests {
                 "an empty file answered `{}`",
                 entry.key
             );
-            assert!(!entry.domain.is_empty(), "`{}` has no domain", entry.key);
+            assert!(!entry.help.is_empty(), "`{}` has no help", entry.key);
+            assert!(
+                entry.key.ends_with(entry.name) && !entry.name.contains('.'),
+                "`{}` does not end in its bare console name `{}`",
+                entry.key,
+                entry.name
+            );
         }
     }
 
@@ -1662,23 +2467,28 @@ mod tests {
     /// **The catalogue names the tier key once, with every rung the reader
     /// takes, and names no `smaa` key at all.**
     ///
-    /// The domain is prose and cannot be derived from [`Antialiasing::ALL`], so
-    /// this is what binds the two: a rung added to the enum and left out of the
-    /// domain is a screen offering a control it will not describe. The `smaa`
-    /// half is the retired key — a catalogue that still named it would have
-    /// `crcbl settings list` reporting a row nothing reads as one the engine
-    /// defines.
+    /// The kind is [`ANTIALIASING_NAMES`], which is built from
+    /// [`Antialiasing::ALL`] — so this asserts the derivation actually arrived
+    /// rather than re-deriving it: a rung added to the enum and a set that did
+    /// not follow is a screen offering a control it will not describe. The
+    /// `smaa` half is the retired key — a catalogue that still named it would
+    /// have `crcbl settings list` reporting a row nothing reads as one the
+    /// engine defines.
     #[test]
     fn the_antialiasing_domain_names_every_rung_the_reader_takes() {
         let key = format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}");
         let entry = catalogued(&key).expect("the tier is catalogued");
         assert_eq!(entry.status, KeyStatus::Read);
+        let Kind::Enum(values) = entry.kind else {
+            panic!("the tier is an enum, not {:?}", entry.kind)
+        };
+        assert_eq!(values.len(), Antialiasing::ALL.len());
         for tier in Antialiasing::ALL {
             assert!(
-                entry.domain.contains(&format!("\"{}\"", tier.name())),
-                "{tier:?} is missing from the domain {:?}",
-                entry.domain,
+                values.contains(&tier.name()),
+                "{tier:?} is missing from the set {values:?}",
             );
+            assert_eq!(entry.kind.parse(tier.name()), Ok(Value::Enum(tier.name())));
         }
         assert_eq!(
             catalogue().iter().filter(|row| row.key == key).count(),
@@ -1797,5 +2607,390 @@ mod tests {
             written.contains(&format!("{FRAME_LIMIT_KEY} = 0")),
             "an unlimited ceiling left no row behind:\n{written}"
         );
+    }
+
+    // ── The typed catalogue, `apply` and the console's variables ────────────
+
+    /// A [`Stage`] that records what it was asked to apply, and answers
+    /// [`Unsupported`] for the seam it does not have.
+    ///
+    /// A recorder rather than a real bundle because what these tests are about
+    /// is what [`apply`] *asked for*: the renderer's own arithmetic is
+    /// `crcbl-render`'s and needs a device, and asserting on it here would be
+    /// asserting on the wrong half.
+    #[derive(Debug, Default)]
+    struct Recorder {
+        video: Vec<VideoSettings>,
+        gains: Vec<(Bus, f32)>,
+        limits: Vec<FrameLimit>,
+        /// Whether `set_frame_limit` has a clock behind it, so one test can turn
+        /// the seam off and read [`Applied::NextStart`] back.
+        has_clock: bool,
+    }
+
+    impl Stage for Recorder {
+        fn apply_video(&mut self, video: &VideoSettings) -> Result<(), Unsupported> {
+            self.video.push(*video);
+            Ok(())
+        }
+
+        fn set_bus_gain(&mut self, bus: Bus, gain: f32) -> Result<(), Unsupported> {
+            self.gains.push((bus, gain));
+            Ok(())
+        }
+
+        fn set_frame_limit(&mut self, limit: FrameLimit) -> Result<(), Unsupported> {
+            if !self.has_clock {
+                return Err(Unsupported);
+            }
+            self.limits.push(limit);
+            Ok(())
+        }
+    }
+
+    /// The values a kind's own ends are, for a sweep that has to touch both.
+    fn ends_of(kind: Kind) -> Vec<Value> {
+        match kind {
+            Kind::Bool => vec![Value::Bool(false), Value::Bool(true)],
+            Kind::Int { min, max } => vec![Value::Int(min), Value::Int(max)],
+            Kind::Float { min, max } => vec![Value::Float(min), Value::Float(max)],
+            Kind::Enum(values) => values.iter().copied().map(Value::Enum).collect(),
+            Kind::Text => vec![Value::Text("anything".to_owned())],
+        }
+    }
+
+    /// The binding the console reaches `name` through.
+    fn binding_for(name: &str) -> &'static Binding {
+        console_bindings()
+            .iter()
+            .copied()
+            .find(|binding| binding.name() == name)
+            .unwrap_or_else(|| panic!("`{name}` has no console binding"))
+    }
+
+    /// **Every numeric kind's own range is the range its setter stores**, at
+    /// both ends.
+    ///
+    /// The failure this exists for is the one
+    /// `docs/plan/52-debug-console.md` decision 3 names: a domain that says
+    /// "1 to 16" while the setter clamps to something else, so a console
+    /// accepts a value the file then reads back as a different one. Written as
+    /// a sweep over [`catalogue`] rather than a list, so a key added with a
+    /// hand-written range joins it the day it lands — and the count is
+    /// asserted, because a sweep that matched nothing would pass in silence.
+    #[test]
+    fn every_kind_admits_the_ends_of_its_own_range_and_reads_them_back() {
+        let mut checked = 0;
+        for entry in catalogue() {
+            if entry.status != KeyStatus::Read {
+                continue;
+            }
+            for end in ends_of(entry.kind) {
+                let binding = binding_for(entry.name);
+                let mut host = ConsoleHost::new(stack_from(""));
+                binding
+                    .set(&mut host, &end)
+                    .unwrap_or_else(|fault| panic!("`{}` refused {end}: {fault}", entry.key));
+                assert_eq!(
+                    binding.get(&host),
+                    end,
+                    "`{}` did not read back the value its own kind admits",
+                    entry.key,
+                );
+                assert!(
+                    host.stack().contains(&entry.key),
+                    "`{}` was applied without being written",
+                    entry.key,
+                );
+                checked += 1;
+            }
+        }
+        // Six switches, four video rows and six gains, two ends each bar the
+        // tier's three rungs.
+        assert_eq!(checked, 33, "the sweep did not cover the read catalogue");
+    }
+
+    /// **A value outside a key's kind is refused before it reaches the file.**
+    #[test]
+    fn a_value_outside_its_kind_is_refused_and_the_stack_is_untouched() {
+        let key = format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}");
+        let mut stack = stack_from("");
+        let mut stage = Recorder::default();
+        let fault = apply(&mut stack, &key, &Value::Float(0.05), &mut stage)
+            .expect_err("below the renderer's floor");
+        assert!(fault.message().contains("outside"), "{}", fault.message());
+        assert!(!stack.contains(&key), "a refused write reached the file");
+        assert!(
+            stage.video.is_empty(),
+            "a refused write reached the renderer"
+        );
+
+        let fault = apply(&mut stack, &key, &Value::Bool(true), &mut stage)
+            .expect_err("a scale is not a bool");
+        assert_eq!(fault.message(), format!("`{key}` is a float, not a bool"),);
+    }
+
+    /// **A key nothing reads refuses a set, and says why.**
+    ///
+    /// The console half of [`KeyStatus::Named`]: a control that silently does
+    /// nothing is worse than one that says so, which is what that enum exists
+    /// for — and the binding carries [`Flags::READ_ONLY`] so the refusal
+    /// happens before [`apply`] is even reached.
+    #[test]
+    fn a_key_nothing_reads_refuses_a_set_through_both_doors() {
+        let key = format!("{VIDEO_NAMESPACE}.fov");
+        let mut stack = stack_from("");
+        let mut stage = Recorder::default();
+        let fault = apply(&mut stack, &key, &Value::Float(90.0), &mut stage)
+            .expect_err("nothing reads the field of view");
+        assert!(
+            fault.message().contains("nothing reads this yet"),
+            "{}",
+            fault.message()
+        );
+        assert!(!stack.contains(&key), "a refused write reached the file");
+
+        let binding = binding_for("fov");
+        assert!(binding.flags().contains(Flags::READ_ONLY));
+        let mut host = ConsoleHost::new(stack_from(""));
+        assert_eq!(
+            binding
+                .set(&mut host, &Value::Float(90.0))
+                .expect_err("read only")
+                .message(),
+            "`fov` is read-only"
+        );
+    }
+
+    /// **A key the engine does not define is refused by name.**
+    #[test]
+    fn a_key_the_engine_does_not_define_cannot_be_applied() {
+        let mut stack = stack_from("");
+        let mut stage = Recorder::default();
+        let fault = apply(
+            &mut stack,
+            "engine.video.shadow",
+            &Value::Bool(true),
+            &mut stage,
+        )
+        .expect_err("a typo is not a key");
+        assert!(
+            fault.message().contains("is not a key the engine defines"),
+            "{}",
+            fault.message()
+        );
+    }
+
+    /// **Each half of the catalogue reaches the seam that shows it**, and the
+    /// value the seam is handed is the one the file now holds.
+    ///
+    /// Reading the stage's record rather than the stack is the point: the
+    /// stack half is `a_saved_video_section_reads_back_unchanged`'s, and this
+    /// is the half that would silently be a no-op if `apply` wrote the key and
+    /// told nobody.
+    #[test]
+    fn a_write_reaches_the_seam_that_shows_it() {
+        let mut stack = stack_from("");
+        let mut stage = Recorder {
+            has_clock: true,
+            ..Recorder::default()
+        };
+
+        let key = format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}");
+        assert_eq!(
+            apply(&mut stack, &key, &Value::Enum("smaa"), &mut stage),
+            Ok(Applied::Live)
+        );
+        assert_eq!(
+            stage
+                .video
+                .last()
+                .expect("the renderer was told")
+                .antialiasing,
+            Some(Antialiasing::Smaa)
+        );
+
+        let key = format!("{VIDEO_NAMESPACE}.{}", VIDEO_KEYS[3].0);
+        assert_eq!(
+            apply(&mut stack, &key, &Value::Bool(false), &mut stage),
+            Ok(Applied::Live)
+        );
+        let video = *stage.video.last().expect("the renderer was told");
+        assert!(!video.effects.contains(RenderEffects::BLOOM));
+        assert!(
+            video.effects.contains(RenderEffects::SHADOWS),
+            "one switch took the others with it"
+        );
+        // The tier survived the second write, which is what proves the stage is
+        // handed the section rather than the key.
+        assert_eq!(video.antialiasing, Some(Antialiasing::Smaa));
+
+        let key = format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}");
+        assert_eq!(
+            apply(&mut stack, &key, &Value::Int(60), &mut stage),
+            Ok(Applied::Live)
+        );
+        assert_eq!(stage.limits, [FrameLimit::fps(60)]);
+
+        // The two float rows, whose arms are their own: each hands the
+        // renderer the section, and the section carries the other's value.
+        let key = format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}");
+        assert_eq!(
+            apply(&mut stack, &key, &Value::Float(0.5), &mut stage),
+            Ok(Applied::Live)
+        );
+        let video = *stage.video.last().expect("the renderer was told");
+        assert!((video.render_scale - 0.5).abs() < f32::EPSILON);
+        let key = format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}");
+        assert_eq!(
+            apply(&mut stack, &key, &Value::Float(4.0), &mut stage),
+            Ok(Applied::Live)
+        );
+        let video = *stage.video.last().expect("the renderer was told");
+        assert!((video.anisotropic_filtering - 4.0).abs() < f32::EPSILON);
+        assert!(
+            (video.render_scale - 0.5).abs() < f32::EPSILON,
+            "the scale did not survive the anisotropy write"
+        );
+
+        let key = format!("{AUDIO_NAMESPACE}.{}", Bus::Music.settings_key());
+        assert_eq!(
+            apply(&mut stack, &key, &Value::Float(0.25), &mut stage),
+            Ok(Applied::Live)
+        );
+        assert_eq!(stage.gains, [(Bus::Music, 0.25)]);
+    }
+
+    /// **A host with no seam still writes the key**, and says the next start-up
+    /// is where it lands.
+    ///
+    /// [`Unsupported`] is not a refusal — `apps/options` has no renderer and
+    /// still has to write every video row — and the distinction is what its
+    /// "next start" mark on the row means.
+    #[test]
+    fn a_host_with_no_seam_writes_the_key_and_says_next_start() {
+        let key = format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}");
+        let mut stack = stack_from("");
+        // Every method left at its default, which is the whole of what a bundle
+        // with no renderer answers.
+        struct Nowhere;
+        impl Stage for Nowhere {}
+
+        assert_eq!(
+            apply(&mut stack, &key, &Value::Float(0.5), &mut Nowhere),
+            Ok(Applied::NextStart)
+        );
+        assert!(
+            (render_scale(&stack) - 0.5).abs() < f32::EPSILON,
+            "the key was not written: {}",
+            render_scale(&stack)
+        );
+    }
+
+    /// **A write the console makes is waiting for the frame that can show it.**
+    ///
+    /// The console's host cannot hold the renderer — see [`Deferred`] — so the
+    /// claim that has to hold is that the ask survives to be drained, and that
+    /// the drain empties it.
+    #[test]
+    fn a_console_write_is_recorded_for_the_frame_to_drain() {
+        let binding = binding_for(RENDER_SCALE_KEY);
+        let mut host = ConsoleHost::new(stack_from(""));
+        assert!(host.pending_mut().is_empty());
+
+        binding
+            .set(&mut host, &Value::Float(0.5))
+            .expect("inside the range");
+        let taken = host.pending_mut().take_video().expect("the frame has work");
+        assert!((taken.render_scale - 0.5).abs() < f32::EPSILON);
+        assert!(
+            host.pending_mut().is_empty(),
+            "the drain left the ask behind, so the next frame would apply it again"
+        );
+    }
+
+    /// **There is one console variable per catalogue key, under the key's own
+    /// bare name.**
+    ///
+    /// Both directions, because either alone passes on an empty list: the count
+    /// against [`catalogue`], and every binding's name back to a catalogue
+    /// entry with the same kind and help.
+    #[test]
+    fn the_bindings_are_the_catalogue() {
+        let catalogue = catalogue();
+        assert_eq!(
+            console_bindings().len(),
+            catalogue.len(),
+            "the macro's list and the catalogue disagree about how many keys there are",
+        );
+        for binding in console_bindings() {
+            let entry = catalogue
+                .iter()
+                .find(|entry| entry.name == binding.name())
+                .unwrap_or_else(|| panic!("`{}` is a variable and not a key", binding.name()));
+            assert_eq!(binding.kind(), entry.kind, "`{}`", entry.key);
+            assert_eq!(binding.help(), entry.help, "`{}`", entry.key);
+            assert!(
+                binding.flags().contains(Flags::ARCHIVE),
+                "`{}` is not persisted, though the settings stack is its storage",
+                entry.key,
+            );
+            assert_eq!(
+                binding.flags().contains(Flags::READ_ONLY),
+                entry.status == KeyStatus::Named,
+                "`{}`'s console flag disagrees with its catalogue status",
+                entry.key,
+            );
+        }
+    }
+
+    /// **A `READ_ONLY` binding still prints**, which is the point of listing the
+    /// half of the catalogue nothing reads.
+    #[test]
+    fn a_key_nothing_reads_still_prints_what_the_file_holds() {
+        let host = ConsoleHost::new(stack_from("[engine.video]\nfov = 75.0\n"));
+        assert_eq!(binding_for("fov").get(&host), Value::Float(75.0));
+        assert_eq!(
+            binding_for("display_mode").get(&host),
+            Value::Enum("windowed"),
+            "an absent enum reads back as the first name in its set"
+        );
+    }
+
+    /// **Every debug view turns on exactly the switch
+    /// [`crcbl_render::ForwardRenderer::debug_view`] reads it back off**, and
+    /// leaves the other four alone.
+    ///
+    /// The renderer needs a device and these do not, so this asserts the table
+    /// against that function's precedence order directly: motion, occlusion,
+    /// heatmap, LOD, normals. A view that set two switches would be drawn as
+    /// whichever is outermost, silently.
+    #[test]
+    fn every_debug_view_sets_exactly_the_switch_its_precedence_reads_back() {
+        use crcbl_render::DebugView as V;
+        let order = [
+            V::Motion,
+            V::AmbientOcclusion,
+            V::Heatmap,
+            V::LodTint,
+            V::Normals,
+        ];
+        assert_eq!(
+            debug_view_switches(V::Shaded),
+            [false; 5],
+            "the shaded frame is every switch off",
+        );
+        for (index, view) in order.into_iter().enumerate() {
+            let switches = debug_view_switches(view);
+            assert_eq!(
+                switches.iter().filter(|on| **on).count(),
+                1,
+                "{view:?} sets more than one switch",
+            );
+            assert!(
+                switches[index],
+                "{view:?} is not at its precedence position"
+            );
+        }
     }
 }

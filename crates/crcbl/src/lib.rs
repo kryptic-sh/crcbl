@@ -99,6 +99,16 @@ pub use crcbl_audio as audio;
 /// reconciliation against the server's snapshots and interpolation between
 /// them.
 pub use crcbl_client as client;
+/// [`crcbl-console`](crcbl_console): the console's vocabulary — `Kind`, `Value`,
+/// `Fault`, `ConVar`, `Binding`, `Flags` and the registry they are gathered
+/// into.
+///
+/// Re-exported because a game names the engine and nothing else, and a settings
+/// screen writing a key through [`settings::apply`] has to spell the [`Value`]
+/// it is writing. `docs/plan/52-debug-console.md` is the design.
+///
+/// [`Value`]: crcbl_console::Value
+pub use crcbl_console as console;
 /// [`crcbl-core`](crcbl_core): handles, `WorldPos`, the frame arena, the frame
 /// clock, the input vocabulary and `SurfaceTarget`.
 ///

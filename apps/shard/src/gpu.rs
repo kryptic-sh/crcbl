@@ -495,7 +495,42 @@ impl Gpu {
 
 // The forwards `crcbl::engine` calls this bundle through. Every one of them is a
 // method above; the macro is what stops a sample forgetting one.
-crcbl::impl_game_gpu!(Gpu);
+/// The two seams `crcbl::settings::apply` reaches a renderer through.
+///
+/// A second inherent block rather than lines inside the one above, so the
+/// forward `crcbl::impl_game_gpu!(Gpu, with_renderer)` picks up sits beside the
+/// invocation that needs it. `docs/plan/52-debug-console.md` decision 3 is where
+/// the pair comes from, and `crcbl::settings` holds both bodies — every bundle
+/// with a `ForwardRenderer` writes exactly these two lines.
+impl Gpu {
+    /// Put the player's `[engine.video]` section into force now.
+    ///
+    /// # Errors
+    ///
+    /// `crcbl::settings::apply_video_to`'s: the device refused the sampler the
+    /// anisotropy asked for.
+    fn apply_video(
+        &mut self,
+        video: &crcbl::settings::VideoSettings,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        crcbl::settings::apply_video_to(&mut self.renderer, self.ctx.device(), video)
+    }
+
+    /// Draw `view` instead of the shaded picture.
+    ///
+    /// # Errors
+    ///
+    /// None: this bundle has the renderer the view needs.
+    fn set_debug_view(
+        &mut self,
+        view: crcbl::render::DebugView,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        crcbl::settings::set_debug_view_on(&mut self.renderer, view);
+        Ok(())
+    }
+}
+
+crcbl::impl_game_gpu!(Gpu, with_renderer);
 
 // …and the polled half, which is how a browser opens a device it may not block
 // on. Shard opens with nothing of its own, so the generated `Context = ()` is

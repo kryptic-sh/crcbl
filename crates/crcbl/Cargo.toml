@@ -21,6 +21,12 @@ repository.workspace = true
 # them.
 [dependencies]
 crcbl-core = { workspace = true }
+# The console's vocabulary — `Kind`, `Value`, `Fault`, `Binding`, `Flags`. It is
+# `crcbl::settings`' dependency rather than the other way round: the catalogue's
+# domain **is** a `Kind`, and every catalogue key is a `Binding` the console
+# reaches. The crate has no dependencies at all, so this arrow adds one
+# compilation unit of `core`/`std` and nothing else on any target.
+crcbl-console = { workspace = true }
 crcbl-hal = { workspace = true }
 crcbl-render = { workspace = true }
 crcbl-shaders = { workspace = true }

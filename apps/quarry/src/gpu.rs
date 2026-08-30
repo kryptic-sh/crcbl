@@ -281,21 +281,6 @@ fn desc(gpu: GpuOptions, forced: Forced) -> GpuContextDesc<'static> {
     }
 }
 
-/// Asks the renderer for `view`, and for no other overlay.
-///
-/// **Every switch is written, not only the one being turned on**, which is what
-/// makes this fixture's rows exclusive: the renderer holds three independent
-/// booleans and resolves a precedence over them, so leaving a stale `true`
-/// behind would draw an overlay nobody asked for the moment the outer one was
-/// switched off. `DebugView::Normals` is not one of the rows this sample has,
-/// and it is written here for the same reason — a run that never asks for it
-/// must not inherit it either.
-const fn set_debug_view(renderer: &mut ForwardRenderer, view: DebugView) {
-    renderer.set_heatmap(matches!(view, DebugView::Heatmap));
-    renderer.set_lod_view(matches!(view, DebugView::LodTint));
-    renderer.set_normals_view(matches!(view, DebugView::Normals));
-}
-
 /// A [`Gpu`] being opened one poll at a time.
 ///
 /// It carries the three settings the device request outlives: all of them are
@@ -434,7 +419,7 @@ impl Gpu {
         // `SettingsSource::None`, so no developer's home directory reaches the
         // measured runs.
         renderer.set_effect_request(ctx.effect_request());
-        set_debug_view(&mut renderer, view);
+        crcbl::settings::set_debug_view_on(&mut renderer, view);
 
         // Resolved rather than requested: the device clamps last, so what the
         // panel and the summary report has to come back off the renderer.
@@ -535,9 +520,21 @@ impl Gpu {
         self.renderer.debug_view()
     }
 
-    /// Draws `view` instead, from the pause menu's rows.
-    pub const fn set_debug_view(&mut self, view: DebugView) {
-        set_debug_view(&mut self.renderer, view);
+    /// Draws `view` instead, from the pause menu's rows — and the forward
+    /// `crcbl::impl_game_gpu!(Gpu, with_renderer)` picks up for
+    /// `GameGpu::set_debug_view`, so the console's `r_debug_view` and this
+    /// sample's own rows move one renderer through one body.
+    ///
+    /// # Errors
+    ///
+    /// None: this bundle has the renderer the view needs. The `Result` is the
+    /// trait's, so that a bundle without one can say so.
+    pub const fn set_debug_view(
+        &mut self,
+        view: DebugView,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        crcbl::settings::set_debug_view_on(&mut self.renderer, view);
+        Ok(())
     }
 
     /// Pins the LOD selection at `eye`, or lets it follow the camera again —
@@ -745,7 +742,29 @@ impl Gpu {
 // `PolledGpu` is written out below instead of taken from
 // `crcbl::impl_polled_gpu!`, because this sample's `request_open` takes its
 // forced path and its two LOD settings as well.
-crcbl::impl_game_gpu!(Gpu);
+/// The two seams `crcbl::settings::apply` reaches a renderer through.
+///
+/// A second inherent block rather than lines inside the one above, so the
+/// forward `crcbl::impl_game_gpu!(Gpu, with_renderer)` picks up sits beside the
+/// invocation that needs it. `docs/plan/52-debug-console.md` decision 3 is where
+/// the pair comes from, and `crcbl::settings` holds both bodies — every bundle
+/// with a `ForwardRenderer` writes exactly these two lines.
+impl Gpu {
+    /// Put the player's `[engine.video]` section into force now.
+    ///
+    /// # Errors
+    ///
+    /// `crcbl::settings::apply_video_to`'s: the device refused the sampler the
+    /// anisotropy asked for.
+    fn apply_video(
+        &mut self,
+        video: &crcbl::settings::VideoSettings,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        crcbl::settings::apply_video_to(&mut self.renderer, self.ctx.device(), video)
+    }
+}
+
+crcbl::impl_game_gpu!(Gpu, with_renderer);
 
 /// Lets [`crcbl::engine::PolledBoot`] drive this bundle's arrival.
 ///

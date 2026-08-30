@@ -4518,6 +4518,62 @@ pub trait GameGpu: GpuSurface + Sized {
     /// read them. [`Loop::new`] takes the frame-rate ceiling off it.
     fn video(&self) -> &crate::settings::VideoSettings;
 
+    /// Put a `[engine.video]` section into force on this bundle's renderer,
+    /// **now** rather than at the next start-up.
+    ///
+    /// The seam `docs/plan/52-debug-console.md` decision 3 adds so that
+    /// [`crcbl::settings::apply`](crate::settings::apply) has somewhere to send
+    /// a write: the render scale, the page's anisotropy and the player's half of
+    /// the effect resolution all live on a
+    /// [`ForwardRenderer`](crcbl_render::ForwardRenderer), which nothing at
+    /// engine level could reach before.
+    ///
+    /// **The default answers [`Unsupported`](crate::settings::Unsupported)**,
+    /// because a bundle that draws no scene has nothing to put the section into
+    /// force on and saying so is the honest answer — `apps/options` and
+    /// `apps/hud` are that bundle. A default that returned `Ok(())` would be
+    /// "not implemented" arriving as "applied", which is the failure
+    /// [`counters`](Self::counters) refuses a default for.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`](crate::settings::Unsupported) where this bundle has no
+    /// renderer.
+    fn apply_video(
+        &mut self,
+        video: &crate::settings::VideoSettings,
+    ) -> Result<(), crate::settings::Unsupported> {
+        let _ = video;
+        Err(crate::settings::Unsupported)
+    }
+
+    /// Draw `view` instead of the shaded picture, on every renderer this bundle
+    /// holds.
+    ///
+    /// [`apply_video`](Self::apply_video)'s sibling and
+    /// `docs/plan/52-debug-console.md` decision 8's whole mechanism: the debug
+    /// views are the engine's, not one sample's, so `r_debug_view` needs one
+    /// forwarder per bundle rather than a key binding in each game.
+    /// [`ForwardRenderer::debug_view`](crcbl_render::ForwardRenderer::debug_view)
+    /// is the precedence this has to compose the renderer's independent switches
+    /// into, and an implementation sets **every** one of them so that no earlier
+    /// view is left standing under a later one.
+    ///
+    /// **The default answers [`Unsupported`](crate::settings::Unsupported)**,
+    /// on [`apply_video`](Self::apply_video)'s terms exactly.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`](crate::settings::Unsupported) where this bundle has no
+    /// renderer.
+    fn set_debug_view(
+        &mut self,
+        view: crcbl_render::DebugView,
+    ) -> Result<(), crate::settings::Unsupported> {
+        let _ = view;
+        Err(crate::settings::Unsupported)
+    }
+
     /// Records, submits and presents one frame.
     ///
     /// # Errors
@@ -4569,10 +4625,25 @@ pub trait GameGpu: GpuSurface + Sized {
 /// impl by hand rather than reaching for a macro flag, because at that point the
 /// block is no longer the shared one.
 ///
+/// # The one clause, and why it is not a flag
+///
+/// [`GameGpu::apply_video`] and [`GameGpu::set_debug_view`] are the methods with
+/// a **default**, and the default is the right answer for a bundle that
+/// holds no [`ForwardRenderer`](crcbl_render::ForwardRenderer): it says
+/// [`Unsupported`](crate::settings::Unsupported) rather than pretending.
+/// `crcbl::impl_game_gpu!(Gpu, with_renderer)` is what a bundle that *does* hold
+/// one writes, and it forwards the pair to inherent methods of the same names —
+/// so the choice is which of two true statements the bundle is making, not which
+/// parts of the shared block it would like. A bundle cannot add the pair after
+/// the macro has run, because two `impl GameGpu` blocks for one type is not a
+/// thing Rust allows; that is the whole reason the clause exists here rather
+/// than beside the invocation.
+///
 /// # Examples
 ///
 /// ```ignore
-/// crcbl::impl_game_gpu!(Gpu);
+/// crcbl::impl_game_gpu!(Gpu);                 // no renderer: the defaults answer
+/// crcbl::impl_game_gpu!(Gpu, with_renderer);  // plus the `[engine.video]` pair
 /// ```
 ///
 /// The example is `ignore` because it needs a `Gpu` with every inherent method. The expansion is exercised by every sample in `apps/`, and its
@@ -4580,6 +4651,52 @@ pub trait GameGpu: GpuSurface + Sized {
 #[macro_export]
 macro_rules! impl_game_gpu {
     ($gpu:ty) => {
+        $crate::__impl_game_gpu!($gpu, {}, {});
+    };
+    ($gpu:ty, with_renderer $(,)?) => {
+        $crate::__impl_game_gpu!(
+            $gpu,
+            {
+                let _: fn(
+                    &mut $gpu,
+                    &$crate::settings::VideoSettings,
+                ) -> ::core::result::Result<(), $crate::settings::Unsupported> =
+                    <$gpu>::apply_video;
+                let _: fn(
+                    &mut $gpu,
+                    $crate::render::DebugView,
+                ) -> ::core::result::Result<(), $crate::settings::Unsupported> =
+                    <$gpu>::set_debug_view;
+            },
+            {
+                fn apply_video(
+                    &mut self,
+                    video: &$crate::settings::VideoSettings,
+                ) -> ::core::result::Result<(), $crate::settings::Unsupported> {
+                    Self::apply_video(self, video)
+                }
+
+                fn set_debug_view(
+                    &mut self,
+                    view: $crate::render::DebugView,
+                ) -> ::core::result::Result<(), $crate::settings::Unsupported> {
+                    Self::set_debug_view(self, view)
+                }
+            }
+        );
+    };
+}
+
+/// [`impl_game_gpu!`]'s body, with the optional pair's guard coercions and
+/// methods handed in as token trees.
+///
+/// Not called directly. It exists because both of that macro's arms expand to
+/// **one** `impl GameGpu` block — Rust allows no second one for a type — so the
+/// arms cannot each add a piece; they hand this one the piece to include.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_game_gpu {
+    ($gpu:ty, { $($guard:tt)* }, { $($extra:tt)* }) => {
         // Every forward below is `Self::method(self)`, and if the bundle has no
         // inherent method of that name it resolves to the *trait* method — an
         // infinite recursion rather than a compile error. Written by hand that
@@ -4592,6 +4709,7 @@ macro_rules! impl_game_gpu {
         // here, so each coercion resolves to the inherent method alone — a
         // bundle missing one fails to compile, naming it.
         const _: () = {
+            $($guard)*
             let _: fn(&$gpu) -> (u32, u32) = <$gpu>::extent;
             let _: fn(
                 &mut $gpu,
@@ -4671,6 +4789,8 @@ macro_rules! impl_game_gpu {
             fn destroy(self) -> ::core::result::Result<(), $crate::engine::GpuError> {
                 Self::destroy(self)
             }
+
+            $($extra)*
         }
     };
 }
@@ -6782,6 +6902,45 @@ mod tests {
         fn destroy(self) -> Result<(), GpuError> {
             Ok(())
         }
+    }
+
+    /// **A bundle with no renderer says so, rather than passing.**
+    ///
+    /// [`FakeGpu`] implements neither of
+    /// [`GameGpu::apply_video`]/[`GameGpu::set_debug_view`], which is exactly
+    /// what `apps/options` and `apps/hud` do, so this is the default body under
+    /// test. A default that answered `Ok(())` would let
+    /// [`crate::settings::apply`] report a value as live that reached no frame —
+    /// the "not implemented arriving as passed" failure
+    /// [`GameGpu::counters`] refuses a default over.
+    #[test]
+    fn a_bundle_with_no_renderer_reports_unsupported_for_both_video_seams() {
+        let mut gpu = FakeGpu::at((64, 64));
+        assert_eq!(
+            gpu.apply_video(&crate::settings::VideoSettings::unrestricted()),
+            Err(crate::settings::Unsupported)
+        );
+        assert_eq!(
+            gpu.set_debug_view(crcbl_render::DebugView::AmbientOcclusion),
+            Err(crate::settings::Unsupported)
+        );
+        // And that is what `apply` turns into "the next start-up reads it",
+        // rather than into a refusal — the bundle is the only thing missing.
+        let storage = crcbl_store::MemoryStorage::new();
+        let mut stack = crcbl_store::settings::SettingsStack::from_storage(&storage);
+        assert_eq!(
+            crate::settings::apply(
+                &mut stack,
+                &format!(
+                    "{}.{}",
+                    crate::settings::VIDEO_NAMESPACE,
+                    crate::settings::RENDER_SCALE_KEY
+                ),
+                &crcbl_console::Value::Float(0.5),
+                &mut crate::settings::GpuStage(&mut gpu),
+            ),
+            Ok(crate::settings::Applied::NextStart)
+        );
     }
 
     /// **The device is asked for once, on the poll that first learns the size.**

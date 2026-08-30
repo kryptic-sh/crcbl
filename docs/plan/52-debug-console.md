@@ -168,21 +168,28 @@ one `ARCHIVE` variable per catalogue key at gather time and nothing has to be
 declared twice — a key added to the catalogue is a console variable the same
 day. Two things change in `crcbl::settings` to make that mechanical:
 
-- **The domain becomes a type.** `CatalogueKey::domain` is a prose string today
-  (`"1 to 16; 1 is off, and the device's own ceiling clamps it"`). It becomes
+- **The domain becomes a type.** `CatalogueKey::domain` was a prose string
+  (`"1 to 16; 1 is off, and the device's own ceiling clamps it"`). It is now
   `Kind` — `Bool`, `Enum(&["none", "fxaa", "smaa"])`, `Float { min, max }`,
-  `Int { min, max }` — and the prose moves to the help text. `help` prints both;
+  `Int { min, max }` — and the prose is `help`. `help` prints both;
   `apps/options` keeps its own labels and reads the same `Kind` for its rung
-  count, so the two cannot disagree about a domain.
-- **Apply lives in one place.** Today `apps/options` fans out per key to the
-  setter and to the app's `Gpu` bundle. That fan-out moves into the engine as
-  `crcbl::settings::Apply` — one function per key that writes the stack and
-  applies live through the seams that exist (`GpuContext::set_pacing`, the frame
-  limit, and a **new `GameGpu` pair**, `apply_video(&VideoSettings)` and
+  count, so the two cannot disagree about a domain. The eight `KeyStatus::Named`
+  rows carry kinds of their own, because there is no reader to derive one from;
+  each is `READ_ONLY`, so no range of theirs decides anything, and a row that
+  grows a reader takes the reader's range with it.
+- **Apply lives in one place.** `apps/options` used to fan out per key to the
+  setter and to the app's `Gpu` bundle. That fan-out is now
+  `crcbl::settings::apply` — one function that writes the stack and applies
+  through a `settings::Stage`: the mixer, the loop's frame ceiling, and a **new
+  `GameGpu` pair**, `apply_video(&VideoSettings)` and
   `set_debug_view(DebugView)`, each with a default that returns `Unsupported` so
-  a host that has no renderer says so rather than passing). `apps/options` calls
-  the same `Apply`, which is a refactor with no visible change and the second
-  caller that earns the helper.
+  a host that has no renderer says so rather than passing. `Stage` is a trait of
+  its own rather than `GameGpu` because `GameGpu` is `Sized` (it takes `self` in
+  `destroy`) and so has no `dyn`, and because a settings key reaches more than a
+  renderer. `GpuContext::set_pacing` is **not** reached: the only key that would
+  want it is `present_mode`, which nothing reads. `apps/options` calls the same
+  `apply`, which is a refactor with no visible change and the second caller that
+  earns the helper.
 
 A `KeyStatus::Named` key (declared, unread — `brightness`, `fov`, `hdr_output`)
 is a `READ_ONLY` variable whose help says "nothing reads this yet", so the
@@ -361,10 +368,28 @@ entry; the browser gate runs on every slice that touches a demo.
    with `help`/`find`/`echo`/`clear` built in; `Registry::complete`; `History`;
    and `guard::declared_names`, the source reader slice 5's per-crate guards
    call. Unit-tested to the value, every test shown red first.
-2. **Settings typed**: `CatalogueKey::domain` becomes `Kind`; the derived
-   `ARCHIVE` variables; `crcbl::settings::Apply` and `GameGpu::apply_video` /
-   `set_debug_view`; `apps/options` moved onto `Apply` (no visible change; the
-   options browser gate and the seam test hold it).
+2. **Settings typed — landed 2026-08-30.** `CatalogueKey` carries `kind`
+   (`crcbl_console::Kind`), `help` and `name` in place of the prose `domain`,
+   with the antialiasing set derived from `Antialiasing::ALL` and every numeric
+   range asserted equal to the setter's own clamp; `settings::apply` writes one
+   key and applies it through a `settings::Stage`, refusing an unknown key, a
+   `KeyStatus::Named` key, a value outside the `Kind` and a storage error, and
+   answering `Applied::Live` or `Applied::NextStart`;
+   `settings::console_bindings()` is one `ARCHIVE` `Binding` per catalogue key
+   over `settings::ConsoleHost`, `READ_ONLY` where nothing reads the key;
+   `GameGpu::apply_video`/`set_debug_view` default to `Unsupported` and are
+   forwarded by the eight bundles with a `ForwardRenderer` through
+   `settings::apply_video_to`/`set_debug_view_on`; `apps/options` writes every
+   row through `apply` and applies its bus gains through `impl Stage for Audio`.
+
+   **The console's writes are deferred, not live, and that is slice 5's to
+   finish.** `Binding` reaches its host as `&mut dyn Any` and `Any` is
+   implemented only for `'static` types, so the host cannot hold a borrow of the
+   renderer or the mixer; `ConsoleHost` records into a `settings::Deferred` and
+   the loop drains it where the bundle is in hand, which is
+   `HostedGame::take_pending_frame_limit`'s arrangement. The scaffold template
+   holds no `ForwardRenderer` and so keeps the defaults.
+
 3. **The ring**: `crcbl_core::log`'s console ring fed from both funnels; the
    `console` target; `log <filter>`.
 4. **`crcbl_ui::console`**: `TextField`, `LogView`, the panel layout, the Send

@@ -114,6 +114,10 @@ crcbl-anim = { path = "crates/crcbl-anim", version = "0.1.0" }
 # a browser build nothing beyond the simulation itself — there is no renderer,
 # no shader and no asset parser in it, by design.
 crcbl-vfx = { path = "crates/crcbl-vfx", version = "0.1.0" }
+# The console registry: the variable and command vocabulary the UI, the engine
+# and the CLI all speak. It depends on nothing but `core`/`std`, so the arrow
+# into it costs every target the same nothing — see that crate's own manifest.
+crcbl-console = { path = "crates/crcbl-console", version = "0.1.0" }
 bytemuck = { version = "1", features = ["derive"] }
 
 [workspace.lints.rust]
