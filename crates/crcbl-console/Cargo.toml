@@ -1,0 +1,21 @@
+[package]
+name = "crcbl-console"
+description = "Crucible's console registry: variables, commands, the line and the table they come from"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# **No dependencies at all**, on purpose and per `docs/plan/52-debug-console.md`
+# decision 1: this crate is the vocabulary the UI, the engine and the CLI all
+# speak, so an arrow from any of them into it must cost nothing. It draws
+# nothing, it reads no settings file, and it names no vector type — a variable
+# whose storage lives elsewhere is a `Binding`, which is how the settings keys
+# arrive without this crate knowing what a setting is.
+#
+# That also makes it testable headless on every target: the whole crate is
+# `core`/`std`, so it compiles for `wasm32-unknown-unknown` with the same code
+# the native build runs.
+
+[lints]
+workspace = true

@@ -91,6 +91,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-console`, the console's registry — a new crate with no dependencies
+  at all.** `ConVar` **is** its own storage, a typed atomic per `Kind`, so the
+  code that owns a knob reads `r_ao_view.get_bool()` instead of polling;
+  `Binding` is a variable whose storage lives in host state, the shape every
+  settings key will take; `ConCommand` runs against a `Context` that collects
+  its output and carries `clear` as a request the UI honours. `convar!`,
+  `concommand!` and `table!` declare and list them — the ident is the name a
+  person types, and a text `ConVar` does not compile. `Registry::gather` merges
+  the per-crate tables and refuses two entries claiming one name, naming both;
+  `Registry::execute` runs a Source-style line (`name`, `name value`,
+  `name = value`, quoted arguments, `;` between statements) with `help`, `find`,
+  `echo` and `clear` present in every registry; `Registry::complete` fills the
+  common prefix and completes an enum's values, a multi-word one included;
+  `History` is the arrow keys; `guard::declared_names` is the source reader each
+  crate's own table test uses. Nothing draws it yet — that is
+  `docs/plan/52-debug-console.md`'s slices 2 onward.
 - **`apps/viewer` ships a shelf of Khronos CC0 models, and opens Suzanne when no
   path is given, on both hosts.** The `ESC` panel's new `SHELF` row steps
   through them and opens the one it names, through the same reload path a

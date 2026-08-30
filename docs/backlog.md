@@ -65,10 +65,30 @@ scalar pass first because every tier reads it.
 Planned in `docs/plan/52-debug-console.md` on the user's ask — a Source-style
 console on `` ` `` in every demo, the log in a panel, an input with Send, every
 settings key a variable, `help` and autocomplete, variables declared beside the
-code. Its eight delivery slices are the plan's; nothing is built. The one
-decision the user's "go with your recs" settled: registration is a per-crate
-table gathered at one seam with a source-reading guard, not `linkme` (no wasm)
-or `inventory` (life-before-main) — see the plan's decision 2.
+code. Its eight delivery slices are the plan's; slice 1, the `crcbl-console`
+crate, is built and nothing draws it. The one decision the user's "go with your
+recs" settled: registration is a per-crate table gathered at one seam with a
+source-reading guard, not `linkme` (no wasm) or `inventory` (life-before-main) —
+see the plan's decision 2.
+
+What slice 1 left as limits rather than fixed, each stated in the code:
+
+- **`Flags::SIM` is declared and nothing sets it** — reserved by decision 9,
+  deliberately; its doc comment says what lands with the first one.
+- **`guard::names_in` strips line comments, not block comments**, and splits a
+  line at its first `//` — a declaration inside `/* … */` is counted as real,
+  and a `//` inside a string literal ends the scan of that line. Line comments
+  are what doc examples use, which is the case that bites; a block-comment and
+  string-aware stripper is a parser's job and the crate has no dependencies.
+- **`Context::new` takes a registry and `Registry::execute` takes `&self`;
+  nothing enforces they are the same registry.** They are at every call site,
+  and the console is built once at `Loop::new`. If a second registry ever
+  exists, make `Registry::context(&self, host)` the only constructor.
+- **`echo =b` echoes `b`.** The `=` between a name and its first value is
+  optional, and the rule cannot tell that first argument from a value;
+  `echo "=b"` echoes `=b`, and the quoted exemption is tested.
+- **Not measured:** completion is a linear scan over the sorted table, which
+  decision 10 says needs no per-tier pricing at the table's size.
 
 **Also owed with it:** the AO debug view is lantern's alone today
 (`ForwardRenderer::set_occlusion_view` behind lantern's pause panel). The user
@@ -17774,9 +17794,13 @@ them hud's:
   canvas is labelled `aria-label="HUD game"` and the page carries a note about
   browsers not starting audio until you interact. hud is neither a game nor
   audible.
-- **CI's shellcheck step covers `tools/*.sh` and `crates/*/tests/*.sh`, not
-  `web/*.sh`.** Both web scripts touched here were checked by hand and are
-  clean, but nothing in CI would have caught it.
+- **CI's shellcheck step covers `tools/*.sh`, `crates/*/tests/*.sh` and
+  `apps/*/tests/*.sh` — not `web/*.sh` and not `crates/crcbl-shaders/tools/`.**
+  Both web scripts touched here were checked by hand and are clean, but nothing
+  in CI would have caught it. `shellcheck` over `git ls-files "*.sh"` on
+  2026-08-30 found one SC2140 in `crates/crcbl-shaders/tools/compile-shaders.sh`
+  (a `"$PREFIX"_"$DXIL_MODEL"` word in an `echo`), harmless and unfixed; the
+  step's globs are the gap.
 
 **Sample rule 8 (spatial audio through `crcbl-audio`) is not met, and this may
 be an honest exemption rather than a gap.** The rule is about _positional game

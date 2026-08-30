@@ -125,20 +125,24 @@ So a variable is declared where it lives and listed once, by the crate:
 // crates/crcbl-render/src/forward.rs — beside the thing it controls
 crcbl_console::convar! {
     /// Draw the ambient-occlusion channel as grey instead of the shaded frame.
-    pub static R_AO_VIEW: bool = false;
+    pub static r_ao_view: bool = false;
 }
 
 // crates/crcbl-render/src/lib.rs — once per crate
 pub fn console_table() -> crcbl_console::Table {
-    crcbl_console::table![R_AO_VIEW, R_NORMALS_VIEW, R_MOTION_VIEW, /* … */]
+    crcbl_console::table![r_ao_view, r_normals_view, r_motion_view, /* … */]
 }
 ```
 
 The `convar!` macro is the annotation: it defines the static, its default, its
-help (the doc comment) and its kind from the type. A crate's `console_table()`
-is the one list a new variable joins, and **a test in that crate holds the list
-to the source**: it reads the crate's own `src/` for every `convar!`/
-`concommand!` name and asserts each is in the table — the same text-guard shape
+help (the doc comment) and its kind from the type. **The ident is the console
+name** (through `stringify!`), so a static is written in Source's lower-case
+spelling and the expansion allows the lint; the registry matches, sorts and
+de-duplicates names without regard to ASCII case, so a `SCREAMING_CASE` static
+still answers to `r_ao_view` (built 2026-08-30). A crate's `console_table()` is
+the one list a new variable joins, and **a test in that crate holds the list to
+the source**: it reads the crate's own `src/` for every `convar!`/ `concommand!`
+name and asserts each is in the table — the same text-guard shape
 `crcbl_shaders::volumetric::both_shaders_spell_the_same_atlas_walk` already
 uses, so forgetting the list is a red test, not a missing command. The engine
 gathers crate tables at one seam in `Loop::new`, and a second guard reads the
@@ -277,10 +281,15 @@ as a known gap, not designed around.
 | `fps`                   | the frame-timing row's numbers as a line                                                                                                 |
 
 A command with a `Fault` prints the fault and leaves state alone. Unknown names
-print "unknown command or variable, try `find`". Every command is a
-`concommand!` in the crate that owns the behaviour (`quit` and `pause` in
-`crcbl`, `debug_view` in `crcbl-render`, `save`/`dump` in `crcbl`'s settings
-module), so the built-in list is itself an instance of decision 2.
+print "unknown command or variable, try `find`". **An enum value may hold a
+space** — `debug_view ambient occlusion` is one value — so a set joins
+everything after the name into the value it coerces, and completion treats
+everything after the name as one token rather than completing per word; both are
+built and tested, and a per-token "simplification" would break the table above.
+Every command is a `concommand!` in the crate that owns the behaviour (`quit`
+and `pause` in `crcbl`, `debug_view` in `crcbl-render`, `save`/`dump` in
+`crcbl`'s settings module), so the built-in list is itself an instance of
+decision 2.
 
 ### 8. The AO view, and every debug view, in every build — the user's specific ask
 
@@ -343,10 +352,15 @@ tier beyond stating that.
 Each slice is tested headless, sabotaged red first, and lands with its CHANGELOG
 entry; the browser gate runs on every slice that touches a demo.
 
-1. **`crcbl-console`**: the types, `convar!`/`concommand!`/`table!`, the
-   registry with the duplicate refusal, the parser (`name`, `name value`,
-   `name = value`, quoted strings), `Kind` coercion and range refusal, prefix
-   completion with common-prefix fill, history. Unit-tested to the value.
+1. **`crcbl-console` — landed 2026-08-30.** `Kind`/`Value` with coercion and
+   range refusal; `ConVar` over a typed atomic cell and `Binding` for a variable
+   whose storage is elsewhere; `ConCommand` over a `Context` that collects
+   output and carries the `clear` request; `convar!`/`concommand!`/`table!`;
+   `Registry::gather` with the duplicate refusal; the parser (`name`,
+   `name value`, `name = value`, quoted arguments, `;`); `Registry::execute`
+   with `help`/`find`/`echo`/`clear` built in; `Registry::complete`; `History`;
+   and `guard::declared_names`, the source reader slice 5's per-crate guards
+   call. Unit-tested to the value, every test shown red first.
 2. **Settings typed**: `CatalogueKey::domain` becomes `Kind`; the derived
    `ARCHIVE` variables; `crcbl::settings::Apply` and `GameGpu::apply_video` /
    `set_debug_view`; `apps/options` moved onto `Apply` (no visible change; the

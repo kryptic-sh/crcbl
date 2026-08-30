@@ -209,6 +209,7 @@ crates/crcbl-ecs        crates/crcbl-phys     crates/crcbl-input
 crates/crcbl-server     crates/crcbl-client   crates/crcbl-net
 crates/crcbl-ui         crates/crcbl-sprite   crates/crcbl-audio
 crates/crcbl-assets     crates/crcbl-store    crates/crcbl-jobs
+crates/crcbl-console    the debug console's registry: variables, commands, the line
 crates/crcbl-core       ids, handles, arenas, time, logging
 crates/crcbl-cli        the `crcbl` binary
 apps/                   the samples
