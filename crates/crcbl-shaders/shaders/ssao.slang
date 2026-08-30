@@ -42,6 +42,10 @@
 // `(x, y) -> (-y, x)` and involves no arithmetic at all. That is why
 // `SLICE_COUNT` is two: a third slice would need a rotation that is not exact.
 //
+// `STEP_OFFSETS` is the same rule applied to the other axis of the march — how
+// far along a slice a pixel starts rather than which way it faces — and is an
+// ordered-dither table for the same reason, never a random number.
+//
 // `ssao_blur.slang` is the other half of the rule and is **not optional**: its
 // footprint is exactly this file's tile, so it averages the sixteen directions
 // back into a smooth field.
@@ -202,6 +206,41 @@ static const float2 SLICE_DIRECTIONS[16] = {
     float2(2.0, -1.0),  float2(-2.0, 1.0),  float2(1.0, -2.0),  float2(-1.0, 2.0),
 };
 
+/// The step tile: the fraction of a step each pixel of a 4×4 block starts its
+/// march at, indexed by `pixel.xy & 3` exactly as [`SLICE_DIRECTIONS`] is.
+///
+/// **Without it a horizon can only sit at [`SLICE_STEPS`] distances.** Every
+/// pixel would begin at the same fraction of a step, so an occluder draws that
+/// many concentric terraces rather than a gradient — and the phase is identical
+/// across the whole tile, which leaves `ssao_blur.slang` nothing to average:
+/// its footprint is exactly this tile, and sixteen pixels that stepped in
+/// lockstep average to the step they all took.
+///
+/// **A 4×4 ordered-dither (Bayer) threshold map over sixteenths**, entry `i`
+/// being `(M[i] + 1) / 16` for the standard recursive `M` — the same
+/// construction `SLICE_DIRECTIONS` is ordered by, and the hash-free spelling of
+/// "spread sixteen phases as far apart as possible inside a 4×4 tile". The
+/// map's defining property is that numerically adjacent values land as far
+/// apart as the tile allows, so neighbouring pixels sample from opposite ends
+/// of a step rather than from beside each other. Every entry is a multiple of
+/// a sixteenth and therefore exact in binary floating point, which is the
+/// determinism rule the header states: an integer table, never
+/// `frac(sin(dot(...)))`.
+///
+/// **The range is `(0, 1]`, closed at the top.** The entry that is one is the
+/// march this file made before there was a table: its last step lands exactly
+/// on `reach`, and no pixel steps past the radius. At the bottom, a sixteenth
+/// of a step rounds to the centre pixel once `reach` is small, and
+/// [`horizon_cosine`]'s own zero-length rejection is what drops that sample —
+/// the loop still runs [`SLICE_STEPS`] times, so the tap count and the cost are
+/// unchanged.
+static const float STEP_OFFSETS[16] = {
+    0.0625, 0.5625, 0.1875, 0.6875,
+    0.8125, 0.3125, 0.9375, 0.4375,
+    0.2500, 0.7500, 0.1250, 0.6250,
+    1.0000, 0.5000, 0.8750, 0.3750,
+};
+
 struct FullscreenOutput
 {
     float4 position : SV_Position;
@@ -354,6 +393,10 @@ float slice_visibility(float h1, float cos_h1, float sin_h1,
 /// — which is the *smallest* angle from the eye, and therefore the highest
 /// horizon.
 ///
+/// **`offset` phases the march**, in `(0, 1]`. It is this pixel's entry in
+/// [`STEP_OFFSETS`], and that table is where the reason lives: every pixel
+/// starting at the same fraction of a step is what terraces the result.
+///
 /// **Starts at `-1.0`, which is a horizon behind the eye and not one flat
 /// against it.** The caller clamps every horizon into the hemisphere over the
 /// surface, so this value arrives there as exactly `±π/2` — the rim — and a side
@@ -367,15 +410,16 @@ float slice_visibility(float h1, float cos_h1, float sin_h1,
 /// standing in front of a distant wall. `radius` is in view-space units and the
 /// test is on the sample's own distance, so it is the same surface either way it
 /// is approached.
-float horizon_cosine(int2 pixel, float2 step, float reach, float3 centre,
+float horizon_cosine(int2 pixel, float2 step, float offset, float reach, float3 centre,
                      float3 view, float radius, int2 extent, float2 size)
 {
     float cosine = -1.0;
     for (uint index = 0; index < SLICE_STEPS; ++index)
     {
-        // Evenly spaced out to `reach`, the first step a whole one so no sample
-        // lands on the centre pixel and reads its own depth as a horizon.
-        float distance = reach * float(index + 1) / float(SLICE_STEPS);
+        // Evenly spaced out to `reach` and phased by `offset`, so the sixteen
+        // pixels of a tile march sixteen different sets of distances between
+        // them. See [`STEP_OFFSETS`].
+        float distance = reach * (float(index) + offset) / float(SLICE_STEPS);
         int2 tap = pixel + int2(step * distance);
         if (tap.x < 0 || tap.y < 0 || tap.x >= extent.x || tap.y >= extent.y)
         {
@@ -432,8 +476,9 @@ float occlusion_at(int2 pixel, float3 centre, float3 normal, int2 extent, float2
     // space puts the eye at the origin, so this is the position negated.
     float3 view = normalize(-centre);
 
-    float2 first = SLICE_DIRECTIONS[(uint(pixel.y) & 3u) * 4u + (uint(pixel.x) & 3u)];
-    float2 direction = normalize(first);
+    uint tile = (uint(pixel.y) & 3u) * 4u + (uint(pixel.x) & 3u);
+    float2 direction = normalize(SLICE_DIRECTIONS[tile]);
+    float offset = STEP_OFFSETS[tile];
 
     float visibility = 0.0;
     float weight = 0.0;
@@ -482,9 +527,9 @@ float occlusion_at(int2 pixel, float3 centre, float3 normal, int2 extent, float2
         // mirror the surface's tilt inside every slice, which draws a frame that
         // is occluded on the wrong side of each object and is still a picture.
         float cos_negative =
-            horizon_cosine(pixel, -direction, reach, centre, view, radius, extent, size);
+            horizon_cosine(pixel, -direction, offset, reach, centre, view, radius, extent, size);
         float cos_positive =
-            horizon_cosine(pixel, direction, reach, centre, view, radius, extent, size);
+            horizon_cosine(pixel, direction, offset, reach, centre, view, radius, extent, size);
 
         // Each horizon clamped to the plane of the surface. Where the clamp binds
         // the angle is `gamma ∓ π/2`, whose cosine and sine are `gamma`'s swapped

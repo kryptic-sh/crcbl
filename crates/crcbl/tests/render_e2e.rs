@@ -2919,7 +2919,7 @@ fn draw_scene_on_every_geometry_path(
 /// scene would be slack nobody measured — the exact comparison is what has
 /// caught a path drawing something else, and it keeps its teeth everywhere it
 /// still holds. Verified rather than assumed: radv and wgpu answer zero on every
-/// scene, and llvmpipe answers zero on every scene but the three named below.
+/// scene, and llvmpipe answers zero on every scene but the ones named below.
 ///
 /// `Dunes` is the exception because its two arms **deliberately draw different
 /// geometry** — see `crcbl-vk`'s
@@ -2973,7 +2973,18 @@ fn draw_scene_on_every_geometry_path(
 /// Mesa 25.2.8 / LLVM 20.1.2 and on Arch's Mesa 26.2.1 / LLVM 22.1.8, which is
 /// the first of these four to reproduce off the runner.
 ///
-/// All four budgets are two orders of magnitude under anything a level that
+/// `Ao` is the fifth, and it is `Probes`' mechanism on the scene built around
+/// that pass: the horizon integral's **max** over depth taps. It read zero
+/// until 2026-08-30, when `ssao.slang` gained `STEP_OFFSETS` — a per-pixel
+/// phase for the march, so that sixteen pixels of a tile tap sixteen distances
+/// instead of one. Fifteen new tap distances per tile are fifteen more places
+/// a last-bit depth disagreement can sit on the edge that decides which tap
+/// wins a horizon. Measured at **one** channel, off by one, out of the frame's
+/// 196608, on llvmpipe alone and reproducibly: radv answers zero, and forcing
+/// every offset back to `1.0` — the old march — takes llvmpipe to zero too,
+/// which is what says the offsets are the cause and not the two geometry paths.
+///
+/// All five budgets are two orders of magnitude under anything a level that
 /// failed to draw would produce — the failure this exists for moves whole
 /// clusters, not one channel. `worst <= 1` is the other half and is not budgeted
 /// at all: a reflection that landed on the wrong surface moves a channel by far
@@ -2984,6 +2995,7 @@ const fn path_lsb_channels(scene: Scene) -> usize {
         Scene::PointShadow => 16,
         Scene::Ssr => 16,
         Scene::Probes => 16,
+        Scene::Ao => 16,
         _ => 0,
     }
 }

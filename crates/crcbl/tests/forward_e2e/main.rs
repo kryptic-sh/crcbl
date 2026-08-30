@@ -75,6 +75,7 @@ pub(crate) const SUITE: &str = "crcbl forward e2e";
 // binary named `forward_e2e` and every `mod` here resolves beside the root.
 mod depth_probe;
 mod lights;
+mod occlusion;
 mod page;
 mod shadow;
 

@@ -39,6 +39,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   leaving `last_ms` alone so the tick that does run steps the clock by the whole
   gap. A browser can do no better than choose which vsync ticks to draw on, so a
   cap that is not a divisor of the refresh rate judders there.
+- **The ambient occlusion pass no longer terraces a gradient.**
+  `shaders/ssao.slang` started every pixel's march at the same fraction of a
+  step, so a horizon could only sit at `SLICE_STEPS` distances and that phase
+  was identical across the 4x4 tile `ssao_blur.slang` averages — an occluder
+  drew concentric bands where there should be a falloff. A new `STEP_OFFSETS`, a
+  4x4 ordered-dither (Bayer) table over sixteenths indexed by the same
+  `pixel.xy & 3` that already picks the slice direction, phases the march per
+  pixel: the step distance is now `reach * (index + offset) / SLICE_STEPS` where
+  it was `reach * (index + 1) / SLICE_STEPS`. No extra taps, no format change
+  and no blur change, and every entry is an exact binary fraction read out of a
+  table, so the determinism rule that file is built on is untouched. Measured
+  across the falloff past an occluder at 1920x1080, the longest run of one 8-bit
+  level drops from 16 columns to 5 on radv and from 13 to 4 on lavapipe.
+  **Twenty-five golden images moved and were re-blessed**; the largest single
+  change is 47 of 255 on one pixel of `probes.png`.
 
 ### Breaking
 

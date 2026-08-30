@@ -8,57 +8,86 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 Two items the user ranked above the lighting order. They stay at the top of this
 file until they ship.
 
-### The ambient occlusion pass bands, and a well-defined technique should not
+### The ambient occlusion pass still bands along the tangential axis
 
-**What the user sees:** visible banding in the AO term — a screen-space
-occlusion pass that is a textbook technique (GTAO, Jimenez et al. 2016) and
-should read as a smooth field. Reported on 2026-08-30 from a real display; the
-golden suite at 256×192 cannot resolve it, which is why nothing red said so.
+**The radial half shipped on 2026-08-30** — `ssao.slang` gained `STEP_OFFSETS`,
+a 4×4 ordered-dither table that phases each pixel's march, and the changelog
+carries what a user sees. `crates/crcbl/tests/forward_e2e/occlusion.rs` is the
+device test that holds it: a wall and a plate written into the prepass image as
+exact depths at 1920×1080, the shipping `ssao` and `ssao-blur` pipelines, and
+the longest run of one 8-bit level across the falloff. Swept before the bound
+was fixed — with the offsets forced off that run is 16 columns on radv and 13 on
+lavapipe, with them 5 and 4.
 
-**What the pass is today, read from `crates/crcbl-shaders/shaders/ssao.slang`
-and `ssao_blur.slang` on 2026-08-30:** two slices per pixel (the second an exact
-quarter turn of the first), `SLICE_STEPS` = 4 marching steps out along each side
-of each slice, spaced evenly in pixels; the first slice direction comes from
-`SLICE_DIRECTIONS`, a sixteen-entry Bayer-ordered table indexed by
-`pixel.xy & 3`; no per-pixel offset on the step start; no noise anywhere, by the
-determinism rule (an integer table index, never a hash); the raw result is one
-`R8Unorm` channel; `ssao_blur.slang` is a 4×4 depth-weighted kernel whose
-footprint is exactly the tile. There is no temporal accumulation and there will
-not be (the goldens refuse history).
+**What is left is the tangential (vertical) half**, which is slice-count banding
+rather than step banding: `SLICE_COUNT` is 2 and `SLICE_DIRECTIONS` has sixteen
+first directions, so a blur neighbourhood spans thirty-two planes and no more.
+The step offsets help it — the 2026-08-30 measurement pass reported the worst
+cliff falling from 21 levels to 10 — but only the rung below reaches zero sharp
+edges.
 
-**Where banding comes from in that construction, to be measured before any of it
-is changed** (`docs/backlog.md`'s standing rule: sweep first):
+**The rung, and its price.** `SLICE_COUNT` 4 with the extra slices at an eighth
+turn, plus a second blur pass. The 2026-08-30 measurement pass priced that at
+**+69% on the `ssao` pass on radv** and reported it as the only variant that
+removed every sharp edge on the tangential line. Two things block it and both
+are decisions, not work:
 
-- **Step banding.** Four steps to the projected radius, all pixels starting at
-  the same fractional offset, means a horizon can only sit at four distances —
-  an occluder produces four concentric rings of occlusion rather than a
-  gradient. The standard GTAO remedy is a per-pixel **step offset** (start the
-  march at `(index + offset) / STEPS` with `offset` from a table, not a hash —
-  the same 4×4 tile can supply it) and more steps on the higher tiers.
-- **Tile banding surviving the blur.** The 4×4 blur averages the sixteen
-  directions on a flat surface, but the depth weight rejects taps at every
-  silhouette and depth step, so the tile pattern shows exactly where the eye
-  looks — along edges. A wider or two-pass bilateral, or an 8×8 table with the
-  blur widened to match, is the remedy; the blur's own header says the divisor
-  "falls towards one" there.
-- **Quantisation.** `R8Unorm` in and out of the blur is 256 levels on a term
-  that is then multiplied into ambient light; a shallow gradient across a wall
-  can step visibly at 8 bits. `R16Unorm` for the raw channel costs bandwidth the
-  low tier may not want — price it per tier.
-- **The reconstructed normal.** Four-neighbour depth reconstruction gives a
-  faceted normal on a curved surface, which bands the cosine weighting.
+- **An eighth turn is not exact.** `SLICE_COUNT` is 2 today precisely because
+  the quarter turn is `(x, y) -> (-y, x)` and involves no arithmetic; a 45°
+  rotation spells `sqrt(2)/2`, and `ssao.slang`'s header is explicit that this
+  file has never written a transcendental it could not bound. A constant
+  `0.70710678` is exactly representable and its _product_ with a direction is
+  not, so the question is whether a rounding in the last place is acceptable
+  here when `acos` was refused. Nobody has answered it.
+- **+69% is priced on one tier.** Unmeasured on lavapipe and unmeasured in the
+  browser, which is where `docs/plan/43-render-standards.md`'s low tier lives. A
+  second blur pass is also a second full-screen `R8Unorm` read and write per
+  frame, which is the part a bandwidth-bound tier feels rather than the taps.
 
-**How to measure:** the AO view (lantern's `AO VIEW` row — see the console item
-below for making it reachable everywhere) at native resolution, raw and blurred,
-on a flat wall under a single occluder: count distinct grey levels along a line,
-and along an edge. Then change one thing at a time. A fix that moves the goldens
-must move them for the reason it names.
+**Considered and declined, with numbers.** Both were hypotheses in the original
+item and both measured inert on 2026-08-30, so neither should be re-proposed
+without new evidence:
 
-**Constraints that still bind:** no transcendental the targets do not specify
-(`acos_approx` stays), no hash noise, no temporal blend, four backends
-bit-identical on the goldens. `docs/plan/46-ambient-occlusion.md` owns the tier
-split (scalar + tint on low, bent normals on mid/high); the fix lands on the
-scalar pass first because every tier reads it.
+- **8-bit quantisation of the occlusion channel.** Re-rendering the raw channel
+  as `R32Float` reproduced the baseline's plateau list byte for byte — the
+  terraces were in the horizon distances, not in the channel that stored them.
+  `R16Unorm` for the raw target therefore buys nothing and costs bandwidth on
+  every tier.
+- **The four-neighbour reconstructed normal.** The improved reconstruction was
+  byte-identical to the shipping one on a flat wall, which is the surface the
+  banding was reported on. It may still be worth having on curved geometry; it
+  is not what bands.
+
+**Decided 2026-08-30: `Scene::Ao => 16` in `path_lsb_channels`.**
+`the_ao_scene_draws_the_same_frame_on_every_geometry_path` in
+`crates/crcbl/tests/render_e2e.rs` went red on lavapipe with the offsets in —
+one channel off by one out of 196 608, reproducibly, radv zero either way, and
+forcing every offset back to one took lavapipe to zero too. That is the exposure
+the function documents for `Dunes`, `PointShadow`, `Ssr` and `Probes`, and its
+`Probes` paragraph names this pass's mechanism: the horizon integral's max over
+depth taps. The budget was widened to the same sixteen the other four carry,
+with the measurement in its doc. It is a tolerance change and the user may
+revisit it; the alternative was a red lavapipe job or no step offsets.
+
+**A surprise that is not a bug.** The offsets made the `ssao` pass measurably
+_faster_, not slower: 566 µs against 650 µs median over nine runs each on radv
+at 1920×1080 with a 187-pixel projected radius, with no overlap between the two
+distributions. The tap count is identical, so the explanation has to be locality
+— the offsets average about half a step, which pulls every tap closer to the
+centre pixel and into the depth image's cache. The effect is a property of that
+rig's large reach and should not be quoted as a general speedup.
+
+**Coverage gaps.** `the_blurred_occlusion_falloff_does_not_terrace` is about the
+coherent march and only that: with the offset applied to one side of each slice
+and the other side left at `1.0`, the longest run read 8 against the bound of 9
+on radv (2026-08-30 sabotage), so a half-dithered march passes it. The bound was
+swept on this machine's two drivers and cannot be tightened against the backends
+only CI runs. The device test and the golden re-bless were run on radv and
+lavapipe only. D3D12 on WARP, Metal, and the wgpu backend are CI's verdict and
+have not been seen. `occlusion.rs` asserts `Capability::DepthImageCopy` because
+WebGPU defines the buffer-to-depth-image copy for `D16Unorm` alone; no backend
+that runs `forward-e2e` lacks it today, and the assertion is what will say so if
+one arrives.
 
 ### The debug console (2026-08-30)
 
