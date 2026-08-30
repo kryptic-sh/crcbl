@@ -1339,6 +1339,9 @@ technique's ladder lands, because each new rung adds citations to the old path.
 
 ### The rendering-gap survey has no owner per row (2026-08-27)
 
+**DECIDED 2026-08-30 — the survey has no owner because
+`43-render-standards.md`'s delivery table is the owner.** Read that table; this
+section stays as the record of the 2026-08-27 gaps.
 `docs/plan/43-render-standards.md` enumerates what a current engine ships and
 where this one stands, and its delivery table orders the gaps by benefit per
 unit of work. The rows above **blended transparency** each have a section
@@ -1785,9 +1788,12 @@ work they name that the tree does not have.
 
 ### Which stacks default to the filmic curve is undecided (2026-08-27)
 
-The ACES fit shipped on 2026-08-27 and **nothing renders with it**:
-`crcbl_shaders::tonemap::TonemapCurve::Clamp` is what `ForwardRenderer` starts
-on, so the curve only runs for a caller that names it and no caller does.
+**DECIDED 2026-08-30 — the filmic curve becomes the default in the same re-bless
+as CMAA2's default**, so the goldens move once for both. Until that slice the
+clamp stays the default. The ACES fit shipped on 2026-08-27 and **nothing
+renders with it**: `crcbl_shaders::tonemap::TonemapCurve::Clamp` is what
+`ForwardRenderer` starts on, so the curve only runs for a caller that names it
+and no caller does.
 
 That is deliberate — the clamp is the identity on `0..=1` and every 2D sample in
 the tree is display-referred, so a curve applied engine-wide would move colours
@@ -2011,12 +2017,16 @@ Kept intact; listed so the next audit does not re-derive it.
 
 ### The Vulkan suballocator is still owed (2026-08-27)
 
-**Not built.** `crcbl-vk` takes no dependency on `gpu-allocator` and does one
-`vkAllocateMemory` per resource. `crates/crcbl-vk/src/mem.rs`'s header says so
-in its own words and names the wall: `maxMemoryAllocationCount` is guaranteed to
-be only 4096, so a per-resource allocation stops working at the point the engine
-allocates per mesh. Memory-type _selection_ (`find_memory_type`,
-`MemoryRequest::for_location`) is the part that is built and tested.
+**DECIDED 2026-08-30 — `gpu-allocator` is taken when foundation (d), the
+generalised page allocator, first holds more than one texture set** (the
+viewer's shelf is the trigger). Approved on the recommendation; not added before
+that slice. **Not built.** `crcbl-vk` takes no dependency on `gpu-allocator` and
+does one `vkAllocateMemory` per resource. `crates/crcbl-vk/src/mem.rs`'s header
+says so in its own words and names the wall: `maxMemoryAllocationCount` is
+guaranteed to be only 4096, so a per-resource allocation stops working at the
+point the engine allocates per mesh. Memory-type _selection_
+(`find_memory_type`, `MemoryRequest::for_location`) is the part that is built
+and tested.
 
 **What it would take:** wrap `gpu-allocator` behind the seam's three
 `MemoryLocation`s, per `docs/plan/02-vulkan-backend.md` §2.1 — which `mem.rs`
@@ -2231,13 +2241,16 @@ exercised, because nothing has yet been far enough from the origin. Task 1 of
 
 ### Cross-target determinism: the `libm` decision is still the user's (2026-08-27)
 
-**Open, and it is a decision rather than a task.** `05-physics.md`'s 2026-07-27
-correction routes determinism-bearing math through the **`libm` crate**;
-`13-audio.md`'s correction requires **own polynomial approximations plus a CI
-deny** on std transcendentals. They are not interchangeable and neither is
-built. No workspace crate names `libm` — it reaches `Cargo.lock` only through
-`naga` and `num-traits`, neither of which is in a sim path — and there is no
-deny anywhere.
+**DECIDED 2026-08-30 — no `libm`.** The policy is `43-render-standards.md` §4's:
+a transcendental is cooked into a table on the host or built from multiplies
+(`fog::exp_neg`), and never reaches a colour in a shader. Closed together with
+the transcendental-policy entry below. **Open, and it is a decision rather than
+a task.** `05-physics.md`'s 2026-07-27 correction routes determinism-bearing
+math through the **`libm` crate**; `13-audio.md`'s correction requires **own
+polynomial approximations plus a CI deny** on std transcendentals. They are not
+interchangeable and neither is built. No workspace crate names `libm` — it
+reaches `Cargo.lock` only through `naga` and `num-traits`, neither of which is
+in a sim path — and there is no deny anywhere.
 
 **New evidence since that correction was written:** the cost is now visible in
 the tree. `crates/crcbl-phys/src/character.rs` and
@@ -3047,11 +3060,15 @@ corrupts the pitch cues rules 3 and 4 depend on, so it is not cosmetic.
 
 ### The transcendental policy is two conflicting requirements and neither is built (2026-08-27)
 
-**Not built, and it needs a decision.** `13-audio.md` requires own polynomial
-approximations plus a CI deny on std float transcendentals; `05-physics.md`
-requires the `libm` crate. Neither exists: no `libm` in any manifest, no
-polynomial approximations, and `crcbl-audio` calls `powf`, `sin`, `exp` and
-`cos` today (`spatial.rs`, `synth.rs`).
+**DECIDED 2026-08-30 — one policy, the cooked-table rule.**
+`43-render-standards.md` §4 as written is the workspace policy: tables cooked on
+the host, multiplies in the shader, no libm on either side. The conflict is
+resolved by choosing this side; nothing further to build. **Not built, and it
+needs a decision.** `13-audio.md` requires own polynomial approximations plus a
+CI deny on std float transcendentals; `05-physics.md` requires the `libm` crate.
+Neither exists: no `libm` in any manifest, no polynomial approximations, and
+`crcbl-audio` calls `powf`, `sin`, `exp` and `cos` today (`spatial.rs`,
+`synth.rs`).
 
 **The deny mechanism does not exist either.** There is no `clippy.toml` anywhere
 in the workspace, and no CI step greps for anything of the kind. The audio doc
@@ -3243,11 +3260,12 @@ exist. Treat the list as unverified in both directions.
 
 ### There is still no network transport, and therefore no crypto (2026-08-27)
 
-**Not built.** `Transport` is implemented by `InMemoryTransport` and by
-`crcbl_store`'s `FileTransport` — a process-local pair and a replay file,
-neither touching a socket. The UDP layer, its reliability (acks, resend,
-fragmentation), connection tokens, X25519 and XChaCha20-Poly1305 are all P13 and
-all absent.
+**DEFERRED 2026-08-30 — the transport and the first crypto crate are decided
+when netcode (`23-netcode.md`) is the active topic**, not before. **Not built.**
+`Transport` is implemented by `InMemoryTransport` and by `crcbl_store`'s
+`FileTransport` — a process-local pair and a replay file, neither touching a
+socket. The UDP layer, its reliability (acks, resend, fragmentation), connection
+tokens, X25519 and XChaCha20-Poly1305 are all P13 and all absent.
 
 **What _is_ built is narrower and easy to overread:** `crcbl_net::auth` is
 per-session HMAC-SHA256 keyed with the handshake's 32-byte `ResumeToken`,
@@ -11976,9 +11994,12 @@ never being set.
 
 ## Steamworks: four decisions the plan is waiting on (2026-08-22)
 
-`docs/plan/42-steam.md` designs `crcbl-steam` end to end and is blocked on none
-of these to _start_ — slice 1 (lifecycle, pump, overlay event) runs on SpaceWar
-app id 480. Each of these gates something later, and each is the user's call.
+**DEFERRED 2026-08-30 — all four wait until Steam is in scope.** The plan's
+recommendation (hand-written `extern "C"`, no `steamworks-rs`) stands as the
+default answer then. `docs/plan/42-steam.md` designs `crcbl-steam` end to end
+and is blocked on none of these to _start_ — slice 1 (lifecycle, pump, overlay
+event) runs on SpaceWar app id 480. Each of these gates something later, and
+each is the user's call.
 
 - **The binding route, and whether this MIT repo publishes our own flat-API
   declarations.** (a) hand-write `extern "C"` declarations and `repr(C)` structs
@@ -12193,17 +12214,20 @@ recorded anywhere else.
 
 ## `pages.yml` cancels the verification jobs it is not deploying (2026-08-22)
 
-**The three-hour Windows leg is fixed and the cold-cache theory it spawned is
-dead — do not resurrect either.** For the record, because both were written down
-here as established and both were wrong: the leg was never slow. Its work took
-54 seconds (30 of them the wasm build) and then `node render-harness-e2e.mjs`
-sat in teardown until the job's timeout killed it, three hours later. The cache
-being skipped was a _consequence_ of the cancellation, not its cause, and
-raising the timeout — tried twice, at 90 and at 180 minutes — could never have
-worked. Reordering the teardown so the browser dies before the server is
-awaited, plus `closeAllConnections()` in `serve.mjs`, ended it: on run
-**32585681819** the Windows leg finished in **2m04s** and the watchdog line
-never printed, so the process exited on its own rather than being rescued.
+**DECIDED 2026-08-30 — split the verification legs into their own workflow with
+per-job concurrency**, leaving `pages.yml`'s cancellation to the deploy alone.
+Filed as work; not done yet. **The three-hour Windows leg is fixed and the
+cold-cache theory it spawned is dead — do not resurrect either.** For the
+record, because both were written down here as established and both were wrong:
+the leg was never slow. Its work took 54 seconds (30 of them the wasm build) and
+then `node render-harness-e2e.mjs` sat in teardown until the job's timeout
+killed it, three hours later. The cache being skipped was a _consequence_ of the
+cancellation, not its cause, and raising the timeout — tried twice, at 90 and at
+180 minutes — could never have worked. Reordering the teardown so the browser
+dies before the server is awaited, plus `closeAllConnections()` in `serve.mjs`,
+ended it: on run **32585681819** the Windows leg finished in **2m04s** and the
+watchdog line never printed, so the process exited on its own rather than being
+rescued.
 
 **What is still not known** is which handle held node's event loop open. It was
 never identified, and no local reproduction ever succeeded — holding a
@@ -12937,21 +12961,24 @@ runner GitHub retires. If this job ever goes red on a timeout, the fix is the
 
 ## P5B — the job system, and the two decisions in front of it
 
-`crates/crcbl-jobs` carries the spawn seam (`Spawn`, `Threads`, `Inline`,
-`Workers`, `default_spawner`), the design's two communication primitives —
-`mailbox` (latest-wins triple buffer, for states) and `ring` (bounded SPSC, for
-streams) — and the work-stealing `pool` with `par_for` in both modes. The order
-is forced: the spawn seam and its single-threaded fallback came first (a pool on
-`std::thread` would silently have no browser story — spawning _compiles_ on
-wasm32 and returns `UNSUPPORTED_PLATFORM` at run time), then the pool, then
-adoption, and the browser's `Workers` backend behind the same seam last. The
-adoption slice found **one consumer, not four**, and that is a fact about the
-samples rather than a shortfall: `apps/horde`'s `steer_enemies` is on `par_for`,
-and every other candidate collection is smaller than a single chunk — breakout
-has forty bricks, asteroids at most forty-four rocks — so a `par_for` over them
-would be the serial loop plus a pool. **The "two samples freeze a seam" rule has
-therefore not been met**, and `Spawn::threaded` returning a `bool` is still the
-most likely thing to give.
+**DECIDED 2026-08-30 — the `CRCBL_TARGET` build script (four lines,
+`cargo::rustc-env` from `TARGET`) is taken; the mode-comparison limit stays a
+documented limit.** Filed as work; not done yet. `crates/crcbl-jobs` carries the
+spawn seam (`Spawn`, `Threads`, `Inline`, `Workers`, `default_spawner`), the
+design's two communication primitives — `mailbox` (latest-wins triple buffer,
+for states) and `ring` (bounded SPSC, for streams) — and the work-stealing
+`pool` with `par_for` in both modes. The order is forced: the spawn seam and its
+single-threaded fallback came first (a pool on `std::thread` would silently have
+no browser story — spawning _compiles_ on wasm32 and returns
+`UNSUPPORTED_PLATFORM` at run time), then the pool, then adoption, and the
+browser's `Workers` backend behind the same seam last. The adoption slice found
+**one consumer, not four**, and that is a fact about the samples rather than a
+shortfall: `apps/horde`'s `steer_enemies` is on `par_for`, and every other
+candidate collection is smaller than a single chunk — breakout has forty bricks,
+asteroids at most forty-four rocks — so a `par_for` over them would be the
+serial loop plus a pool. **The "two samples freeze a seam" rule has therefore
+not been met**, and `Spawn::threaded` returning a `bool` is still the most
+likely thing to give.
 
 - **Every read-only query has the shared form, and one caller runs it in
   parallel.** `OverlapQueries` and `EntityOverlapQueries` carry
@@ -16090,10 +16117,11 @@ list, unfit for a fixture, a golden value or a comparison across runs.
 
 ## `Format::ALL` cannot be made airtight on stable
 
-The seam owns the canonical format list as `Format::ALL` in `crcbl-hal::format`,
-and all three backends — `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` — now drive
-their injectivity tests off it rather than a copy each kept beside the mapping.
-What is left is one thing.
+**DECLINED 2026-08-30 — no proc-macro dependency for this.** The test as it
+stands catches the realistic miss. The seam owns the canonical format list as
+`Format::ALL` in `crcbl-hal::format`, and all three backends — `crcbl-vk`,
+`crcbl-dx12` and `crcbl-mtl` — now drive their injectivity tests off it rather
+than a copy each kept beside the mapping. What is left is one thing.
 
 **The list is hand-maintained, and the gap that remains is a variant appended to
 the enum and not to `ALL`.** `the_format_table_is_in_declaration_order` compares
@@ -19110,15 +19138,16 @@ an entry rather than a change.
 
 ## `CARGO_NET_OFFLINE` on the vk e2e steps: looked at, not applied
 
-`Updating crates.io index` costs about 7.4s per cargo invocation on the Windows
-leg despite `--locked`, and `CARGO_NET_OFFLINE=true` would remove it. **Not
-applied, because the workflow cannot be read as making it safe.**
-`Swatinem/rust-cache@v2` restore is best-effort — a cold key, an evicted entry
-or a changed lockfile hash all leave the registry index absent — and no step in
-either vk e2e job runs `cargo fetch` first, so an offline cargo would fail the
-job outright rather than fetch. Making it safe means an explicit
-`cargo fetch --locked` step before the suite, and only then the variable; that
-is a workflow change with its own failure mode and wants the user's call.
+**DECIDED 2026-08-30 — left as is.** `Updating crates.io index` costs about 7.4s
+per cargo invocation on the Windows leg despite `--locked`, and
+`CARGO_NET_OFFLINE=true` would remove it. **Not applied, because the workflow
+cannot be read as making it safe.** `Swatinem/rust-cache@v2` restore is
+best-effort — a cold key, an evicted entry or a changed lockfile hash all leave
+the registry index absent — and no step in either vk e2e job runs `cargo fetch`
+first, so an offline cargo would fail the job outright rather than fetch. Making
+it safe means an explicit `cargo fetch --locked` step before the suite, and only
+then the variable; that is a workflow change with its own failure mode and wants
+the user's call.
 
 The other cost in the same job, also untouched: the pinned LunarG SDK install is
 about 46s and `Swatinem/rust-cache` does not cover it, since it caches cargo
@@ -19317,8 +19346,10 @@ What is left:
 
 ## Decision needed: `taiki-e/install-action` is a single point of failure 17 times over
 
-All three hit on 2026-08-12 within an hour, on commits that could not have
-caused any of them, and **every one left its real step skipped**. None is a
+**DECIDED 2026-08-30 — replace the action with `cargo install --locked` behind
+the cargo cache**, one tool at a time as each job is touched. Filed as work; not
+done yet. All three hit on 2026-08-12 within an hour, on commits that could not
+have caused any of them, and **every one left its real step skipped**. None is a
 defect in the tree; each cost a red build and a re-run.
 
 - **`decoder fuzz (libFuzzer)`** — `taiki-e/install-action` could not download a
@@ -19582,6 +19613,9 @@ trying it is the thing that needs approval.
 
 ## Sidecar meta RON: three items now want it, and the workspace has no RON reader
 
+**DECIDED 2026-08-30 — `ron` is approved.** The user's call; add it with
+`cargo add` in the slice that first reads a file (foundation (b), the render
+stack as RON, is the fourth wanter and the likely first), not before.
 `docs/plan/06-assets-scenes.md` and topic 25 both assume a `crate.glb.meta.ron`
 sidecar, and **nothing in the workspace reads or writes RON**. There is no `ron`
 crate in `[workspace.dependencies]`; what exists is the plan's
@@ -22156,6 +22190,8 @@ slice deliberately did not do.
 
 ## Decision: should `crcbl-webgpu`'s encoder see device state? (2026-08-24)
 
+**DECIDED 2026-08-30 — option A, leave it:** the browser validates the range and
+the offsets itself; the seam's asterisk stays recorded here.
 `WebGpuCommandEncoder` holds a `SharedChannel` and a `HandlePool` and nothing
 else. The device holds the tables — `buffers`, `layouts`, `images`, `swapchains`
 — so any rule that needs to know something about a resource can be checked in a
