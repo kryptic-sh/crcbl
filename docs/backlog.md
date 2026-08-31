@@ -2667,17 +2667,32 @@ still ship on D3D12 undetected.
 **Note:** this sits inside the deferral in `docs/plan/09-backends-metal-dx12.md`
 — it is parked, not owed.
 
-### XDND is still absent on X11 (2026-08-27)
+### XDND action negotiation is copy, and only copy (2026-08-31)
 
-**Not built** — recorded in `docs/plan/15-windowing.md` and re-verified as still
-open. `ShellCaps::DRAG_DROP` is honestly clear on the X11 backend and
-`DroppedFile` is never emitted there. Wayland (`data-device`) and Win32
-(`WM_DROPFILES`) both have it.
+**Deliberate, not a gap in the handshake.** `crates/crcbl-shell/src/x11/xdnd.rs`
+answers every accepting `XdndStatus` with `XdndActionCopy` whatever the source
+suggested, and reports the same in `XdndFinished`. The engine reads a path
+another process handed it and never takes ownership of the file, so answering
+`move` would be a promise to delete something. A source that offers only `move`
+still gets `copy` back and decides for itself — the specification lets it.
+`XdndActionList` and `XdndActionDescription` are not interned.
 
-**What it blocks:** the editor's asset browser (P12) needs OS-file drops.
+**What would change it:** a consumer that wants to _move_ a dropped file, which
+needs `ShellEvent::DroppedFile` to carry the action first. The Wayland backend
+made the same choice (`data::ACTION_COPY`) and would need the same change.
 
-**Carried forward unchanged** from the doc; no new evidence gathered beyond
-confirming the caps bit and the doc text still agree.
+### No drop feedback while a drag is in the air, on any backend (2026-08-31)
+
+**A seam gap, not a backend one.** X11 now answers `XdndPosition` for every
+pointer motion during a drag, so the position under the cursor is known
+continuously — and there is no `ShellEvent` to report it with. Nothing
+highlights and nothing can draw a drop cursor until the button comes up.
+`crates/crcbl-shell/src/win32/dnd.rs` records the same gap for `WM_DROPFILES`
+(it is why `IDropTarget` was not used) and Wayland has the same silence.
+
+**What it would take:** a `DragOver`-shaped event on the seam carrying window,
+position and whether the payload is acceptable, then a use of it in each backend
+— X11's is already computed and thrown away.
 
 ### The `[engine.video]` settings layer has no source (2026-08-27)
 
@@ -3377,9 +3392,10 @@ dir. `08-editor.md` now records this.
 appears nowhere in `crates/crcbl-shell/src`; Win32 publishes `text/uri-list` as
 `Encoding::Registered` (`win32/clipboard.rs`); AppKit reads `public.file-url`
 (`appkit/pasteboard.rs`, which also records that `NSFilenamesPboardType` is
-deprecated); X11 has no XDND (`x11/shell.rs` says `ShellCaps::DRAG_DROP` is
-cut). So OS file drag-drop into the asset browser is **seam work owed before the
-editor wants it**, not editor work.
+deprecated); X11 takes XDND version 5 receiving (`x11/xdnd.rs`). So OS file
+drag-drop into the asset browser is still **seam work owed before the editor
+wants it**, not editor work — but what is left is the Win32 and AppKit halves,
+not X11's.
 
 ### Wasm module hosting: nothing but the static binding exists (2026-08-27)
 
@@ -12859,18 +12875,6 @@ item lives.
   automated way to check this: a capture is looked at, not asserted on. Stated
   as a coverage gap rather than a task, because the honest form of it is "not
   verified".
-
-- **XDND on X11 is not implemented, and the editor plan assumes otherwise.**
-  `ShellCaps::DRAG_DROP` is honestly clear on that backend and
-  `ShellEvent::DroppedFile` is never emitted; `crcbl-shell`'s `x11` module docs
-  carry the reason under "What was cut, and why that seam" — XDND is a
-  five-message handshake over a second selection with its own version
-  negotiation, which is the whole of the selection machinery again with a
-  different trigger. `docs/plan/08-editor.md` claims OS file drop is "editor
-  work, not seam work" because the shell carries file-list mimes from day one,
-  and that is false here. Owed before the editor's asset browser at P12. The
-  Win32 half of the same claim is already recorded separately in this file; this
-  is the X11 half, which had no entry.
 
 - **Nobody has listened to the mixer's output.** Every claim about it is
   numeric, and the numeric coverage is real — this entry replaces one that said

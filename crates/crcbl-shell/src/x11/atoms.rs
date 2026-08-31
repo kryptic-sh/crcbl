@@ -30,12 +30,15 @@
 //! | EWMH | `_NET_WM_NAME`, `_NET_WM_STATE`, `_NET_WM_STATE_FULLSCREEN`, `_NET_SUPPORTING_WM_CHECK`, `_NET_WORKAREA`, `_NET_WM_PID` | the title, borderless, WM detection, the work area |
 //! | Text | `UTF8_STRING` | `_NET_WM_NAME`'s type, and a clipboard target |
 //! | Selection | `CLIPBOARD`, `TARGETS`, `INCR`, `CRCBL_SELECTION`, `CRCBL_TIMESTAMP` | the clipboard in both directions, and the timestamp a claim needs |
+//! | XDND | `XdndAware`, `XdndEnter`, `XdndPosition`, `XdndStatus`, `XdndLeave`, `XdndDrop`, `XdndFinished`, `XdndSelection`, `XdndTypeList`, `XdndActionCopy`, `CRCBL_XDND` | the receiving half of drag and drop; see [`xdnd`](super::xdnd) |
 //! | Mime | `text/plain;charset=utf-8`, `text/plain`, `application/x-crcbl+ron`, `text/uri-list` | the formats the seam names |
 //!
 //! Absent on purpose: `PRIMARY` (middle-click paste — the seam has no
 //! vocabulary for a second selection, exactly as the Wayland backend says of
-//! `wp_primary_selection_v1`), every `XdndAware`/`XdndEnter`/… atom (drag and
-//! drop is cut from this slice; see the [backend docs](super)), and
+//! `wp_primary_selection_v1`), the XDND *source* atoms this client never sends
+//! — `XdndActionMove`, `XdndActionLink`, `XdndActionAsk`, `XdndActionPrivate`,
+//! `XdndActionList` and `XdndActionDescription`, all of which belong to
+//! starting a drag or to negotiating an action other than copy — and
 //! `_NET_WM_ICON` (an icon is pixels, and pixels are P1). `WM_STATE` is absent
 //! too, and that one is a judgement rather than a deferral: it is how ICCCM
 //! distinguishes *iconified* from *withdrawn*, and this backend does not need
@@ -108,6 +111,17 @@ atom_table! {
     incr => "INCR",
     crcbl_selection => "CRCBL_SELECTION",
     crcbl_timestamp => "CRCBL_TIMESTAMP",
+    xdnd_aware => "XdndAware",
+    xdnd_enter => "XdndEnter",
+    xdnd_position => "XdndPosition",
+    xdnd_status => "XdndStatus",
+    xdnd_leave => "XdndLeave",
+    xdnd_drop => "XdndDrop",
+    xdnd_finished => "XdndFinished",
+    xdnd_selection => "XdndSelection",
+    xdnd_type_list => "XdndTypeList",
+    xdnd_action_copy => "XdndActionCopy",
+    crcbl_xdnd => "CRCBL_XDND",
     mime_text_utf8 => "text/plain;charset=utf-8",
     mime_text_plain => "text/plain",
     mime_crcbl_ron => "application/x-crcbl+ron",
@@ -265,9 +279,21 @@ impl Atoms {
 mod tests {
     use super::*;
 
+    /// The last atom the protocol itself defines, `XA_LAST_PREDEFINED`.
+    ///
+    /// A server allocates above it and can never allocate below it, which is
+    /// what makes the table below a model of a real server rather than merely a
+    /// set of distinct integers. Numbering from 1 put `application/x-crcbl+ron`
+    /// on 31 — which is permanently `STRING`, one of [`Atoms::text_targets`] —
+    /// so `mime_for_target` answered `TextUtf8` for it and the collision was
+    /// the fixture's, not the code's.
+    const LAST_PREDEFINED: u32 = 68;
+
     /// A table with distinct, non-zero values, as a live server would produce.
     fn table() -> Atoms {
-        let values: Vec<u32> = (1..=u32::try_from(NAMES.len()).expect("small")).collect();
+        let values: Vec<u32> = (1..=u32::try_from(NAMES.len()).expect("small"))
+            .map(|index| LAST_PREDEFINED + index)
+            .collect();
         Atoms::from_values(&values)
     }
 
@@ -278,11 +304,11 @@ mod tests {
         // `WM_DELETE_WINDOW`'s atom, which fails in a way that looks like a
         // window manager bug.
         let atoms = table();
-        assert_eq!(atoms.wm_protocols, 1, "the first name");
-        assert_eq!(atoms.wm_delete_window, 2);
+        assert_eq!(atoms.wm_protocols, LAST_PREDEFINED + 1, "the first name");
+        assert_eq!(atoms.wm_delete_window, LAST_PREDEFINED + 2);
         assert_eq!(
             atoms.mime_uri_list,
-            u32::try_from(NAMES.len()).expect("small"),
+            LAST_PREDEFINED + u32::try_from(NAMES.len()).expect("small"),
             "the last name"
         );
 
@@ -304,6 +330,17 @@ mod tests {
             atoms.incr,
             atoms.crcbl_selection,
             atoms.crcbl_timestamp,
+            atoms.xdnd_aware,
+            atoms.xdnd_enter,
+            atoms.xdnd_position,
+            atoms.xdnd_status,
+            atoms.xdnd_leave,
+            atoms.xdnd_drop,
+            atoms.xdnd_finished,
+            atoms.xdnd_selection,
+            atoms.xdnd_type_list,
+            atoms.xdnd_action_copy,
+            atoms.crcbl_xdnd,
             atoms.mime_text_utf8,
             atoms.mime_text_plain,
             atoms.mime_crcbl_ron,

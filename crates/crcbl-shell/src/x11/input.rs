@@ -483,11 +483,17 @@ impl X11Shell {
         self.queue.push_back(ShellEvent::WindowDestroyed { window });
     }
 
-    /// A message from another client — in practice, the window manager.
+    /// A message from another client — the window manager, or a drag source.
     fn handle_client_message(&mut self, raw: &Raw) {
         let Some(event) = read_wire::<ffi::ClientMessageEvent>(raw) else {
             return;
         };
+        // XDND first, and *before* the window lookup: a drop is refused with an
+        // `XdndFinished` even when it names a window this backend does not
+        // know, because the source blocks its own drag loop until one arrives.
+        if self.handle_xdnd_message(&event) {
+            return;
+        }
         let Some(window) = self.window_by_xid(event.window) else {
             return;
         };

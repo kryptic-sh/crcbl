@@ -82,7 +82,9 @@
 
 use core::time::Duration;
 
-use crate::{ClipboardContent, ClipboardRequestId, MimeType, WindowId};
+use crcbl_core::EventTime;
+
+use crate::{ClipboardContent, ClipboardRequestId, MimeType, PhysicalPoint, WindowId};
 
 /// How long a read may make no progress before it is abandoned.
 ///
@@ -151,16 +153,60 @@ pub enum Step {
     Convert(u32),
 }
 
-/// One outstanding [`clipboard_request`](crate::Shell::clipboard_request).
+/// What a finished [`Read`] turns into.
+///
+/// **One transfer machine, reached two ways.** `docs/plan/15-windowing.md` says
+/// the clipboard and drag-and-drop are "one implementation, two triggers" on
+/// Linux, and on X11 that is literally true: a drop's payload arrives through
+/// `ConvertSelection` on `XdndSelection` exactly as a paste arrives through
+/// `ConvertSelection` on `CLIPBOARD` — same `INCR` handshake, same
+/// [`TIMEOUT`], same [`MAX_BYTES`]. Only the last step differs, and this is
+/// that step. The Wayland backend's `Delivery` splits the same seam at the same
+/// place, for the same reason: two state machines would mean two copies of
+/// ICCCM's `INCR` protocol, and the deadline bounding only one of them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Delivery {
+    /// Answers one [`clipboard_request`](crate::Shell::clipboard_request) with
+    /// one [`ClipboardData`](crate::ShellEvent::ClipboardData).
+    Clipboard {
+        /// Which request this answers.
+        request: ClipboardRequestId,
+        /// The format that was asked for, for the answer's `mime` when there is
+        /// no peer spelling to report.
+        mime: MimeType,
+    },
+    /// Becomes one [`DroppedFile`](crate::ShellEvent::DroppedFile) per local
+    /// path in the `text/uri-list`, and an `XdndFinished` to the source
+    /// whatever happened.
+    Drop {
+        /// The source window every XDND reply is addressed to.
+        source: u32,
+        /// The negotiated protocol version; see [`xdnd`](super::xdnd).
+        version: u8,
+        /// Where in the window the pointer was released, from the last
+        /// `XdndPosition`.
+        position: PhysicalPoint,
+        /// When the button came up, from `XdndDrop`'s own server timestamp.
+        ///
+        /// Stamped at the drop rather than when the bytes finish arriving:
+        /// [`DroppedFile::time`](crate::ShellEvent::DroppedFile) means the
+        /// moment the file was let go, and an `INCR` transfer of a long file
+        /// list puts those two an arbitrary distance apart.
+        time: EventTime,
+    },
+}
+
+/// One outstanding selection conversion — a paste, or a drop's payload.
 #[derive(Clone, Debug)]
 pub struct Read {
-    /// Which request this answers.
-    pub request: ClipboardRequestId,
     /// Which window asked. Also the requestor window on the wire.
     pub window: WindowId,
-    /// The format that was asked for, for the answer's `mime` when there is no
-    /// peer spelling to report.
-    pub mime: MimeType,
+    /// The selection being converted: `CLIPBOARD`, or `XdndSelection`.
+    ///
+    /// Both use the same machine and both may be in flight at once, so the
+    /// `SelectionNotify` that answers one has to be told from the other — and
+    /// the event's own `selection` field is the only thing that can say.
+    pub selection: u32,
     /// The property the answer is being written into.
     pub property: u32,
     /// The atoms this format may be spelled as, best first.
@@ -173,29 +219,63 @@ pub struct Read {
     pub state: ReadState,
     /// `CLOCK_MONOTONIC` nanoseconds of the last progress.
     pub last_progress_nanos: u64,
+    /// What the bytes become once they are all here.
+    pub delivery: Delivery,
 }
 
 impl Read {
-    /// A read that has just had its `ConvertSelection` sent.
+    /// A clipboard read that has just had its `TARGETS` conversion sent.
     #[must_use]
-    pub fn new(
+    pub fn clipboard(
         request: ClipboardRequestId,
         window: WindowId,
         mime: MimeType,
         candidates: Vec<u32>,
+        selection: u32,
         property: u32,
         now_nanos: u64,
     ) -> Self {
         Self {
-            request,
             window,
-            mime,
+            selection,
             candidates,
             property,
             answered_target: 0,
             buffer: Vec::new(),
             state: ReadState::AwaitingTargets,
             last_progress_nanos: now_nanos,
+            delivery: Delivery::Clipboard { request, mime },
+        }
+    }
+
+    /// A drop's read, which starts one step further along.
+    ///
+    /// **There is no `TARGETS` phase.** XDND's whole point of difference from
+    /// the clipboard is that the source lists its types up front, in
+    /// `XdndEnter` — so the spelling is already chosen by the time a drop
+    /// happens, and the read begins at [`AwaitingNotify`](ReadState::AwaitingNotify).
+    /// Asking `TARGETS` on `XdndSelection` anyway would be a second round trip
+    /// for an answer already in hand, and sources are not required to answer
+    /// it.
+    #[must_use]
+    pub fn for_drop(
+        window: WindowId,
+        target: u32,
+        selection: u32,
+        property: u32,
+        delivery: Delivery,
+        now_nanos: u64,
+    ) -> Self {
+        Self {
+            window,
+            selection,
+            candidates: vec![target],
+            property,
+            answered_target: 0,
+            buffer: Vec::new(),
+            state: ReadState::AwaitingNotify,
+            last_progress_nanos: now_nanos,
+            delivery,
         }
     }
 
@@ -270,8 +350,8 @@ impl Read {
         }
         if self.buffer.len().saturating_add(value.len()) > MAX_BYTES {
             crcbl_core::log::warn!(
-                "clipboard peer sent more than {MAX_BYTES} bytes for {}; abandoning",
-                self.request
+                "an X11 peer sent more than {MAX_BYTES} bytes for {:?}; abandoning",
+                self.delivery
             );
             return Step::Done(ClipboardContent::Unavailable);
         }
@@ -415,11 +495,12 @@ mod tests {
     }
 
     fn pending(now: u64) -> Read {
-        let mut read = Read::new(
+        let mut read = Read::clipboard(
             ClipboardRequestId(1),
             window(),
             MimeType::TextUtf8,
             vec![11],
+            9,
             12,
             now,
         );
@@ -427,6 +508,44 @@ mod tests {
         // been negotiated; `on_targets` is exercised on its own.
         let _ = read.on_targets(&[11], now);
         read
+    }
+
+    #[test]
+    fn a_drop_read_skips_the_targets_phase() {
+        // XDND publishes the source's types in `XdndEnter`, so the spelling is
+        // already chosen by the time there is anything to fetch. A drop read
+        // that began at `AwaitingTargets` would send a `TARGETS` conversion on
+        // `XdndSelection` — which sources are not required to answer — and
+        // would then read the drop's own answer as if it were a type list.
+        let delivery = Delivery::Drop {
+            source: 42,
+            version: 5,
+            position: PhysicalPoint::new(3.0, 4.0),
+            time: EventTime::ZERO,
+        };
+        let read = Read::for_drop(window(), 77, 9, 12, delivery.clone(), 0);
+        assert_eq!(read.state, ReadState::AwaitingNotify);
+        assert_eq!(
+            read.candidates,
+            vec![77],
+            "the one type the source published, and no guesses"
+        );
+        assert_eq!(read.selection, 9, "XdndSelection, not CLIPBOARD");
+        assert_eq!(read.delivery, delivery);
+
+        // And a clipboard read does begin there, which is the other half of
+        // what makes the two routable apart.
+        let paste = Read::clipboard(
+            ClipboardRequestId(1),
+            window(),
+            MimeType::UriList,
+            vec![77],
+            5,
+            12,
+            0,
+        );
+        assert_eq!(paste.state, ReadState::AwaitingTargets);
+        assert_ne!(paste.selection, read.selection);
     }
 
     #[test]
@@ -552,11 +671,12 @@ mod tests {
         // `TARGETS` is ICCCM and some real clients still do not implement it.
         // Treating a refusal as "nothing on the clipboard" would silently stop
         // pasting from them.
-        let mut read = Read::new(
+        let mut read = Read::clipboard(
             ClipboardRequestId(2),
             window(),
             MimeType::TextUtf8,
             vec![77, 78],
+            9,
             12,
             0,
         );
@@ -564,11 +684,12 @@ mod tests {
         assert_eq!(read.on_targets(&[], 10), Step::Convert(77));
         assert_eq!(read.state, ReadState::AwaitingNotify);
 
-        let mut nothing_in_common = Read::new(
+        let mut nothing_in_common = Read::clipboard(
             ClipboardRequestId(3),
             window(),
             MimeType::CrcblRon,
             vec![55],
+            9,
             12,
             0,
         );

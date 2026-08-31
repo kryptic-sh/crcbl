@@ -159,6 +159,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A file dragged onto an X11 window arrives as `ShellEvent::DroppedFile`.**
+  `crcbl_shell`'s X11 backend implements the receiving half of XDND —
+  `crates/crcbl-shell/src/x11/xdnd.rs` — so `ShellCaps::DRAG_DROP` is now set on
+  X11 as it already was on Wayland and Win32, and `apps/viewer` opens a model
+  from a window drop on all three. Version 5 is published in `XdndAware` and
+  negotiated down to whatever a source announces; a source below version 3 is
+  refused with an `XdndStatus` that clears the accept bit, because below that
+  `XdndPosition` carries neither the timestamp the conversion has to quote nor
+  an action word, and the fields a target would read there are the source's
+  padding. `WindowDesc::accept_drops` is the gate and the whole of the
+  advertisement: a window that did not ask publishes no `XdndAware` and is
+  invisible to a drag, the same system-level refusal `DragAcceptFiles` gives the
+  Win32 backend. `text/uri-list` is the only format taken — the three type atoms
+  `XdndEnter` carries inline, or the source's `XdndTypeList` property when there
+  are more than three — and the bytes go through the shared
+  `crcbl_shell::parse_uri_list`, so `file:///tmp/my%20scene.ron` reaches a
+  consumer as `/tmp/my scene.ron` on every backend. Starting a drag is not
+  implemented: these windows are drop targets.
+
+  The payload rides the clipboard's own transfer machine rather than a second
+  copy of it. `x11::selection::Read` now carries the selection it is converting
+  and a `Delivery` saying what the finished bytes become, which is the split the
+  Wayland backend already makes — so a drop gets ICCCM's `INCR` handshake, the
+  stall deadline and the byte cap for free, and a paste and a drop in flight at
+  once answer their own conversions instead of each other's. A multi-file list
+  sent chunk by chunk is reassembled in order, one `DroppedFile` per file, and a
+  window destroyed mid-transfer still sends the `XdndFinished` the source is
+  blocking its own drag loop on.
+
 - **The debug draw layer: lines, boxes, spheres and frusta, drawn pre-tonemap in
   HDR from a buffer any system appends to.** `crcbl_render::debug_draw` is
   `docs/plan/07-ui-debug.md` item 5's immediate-mode layer and

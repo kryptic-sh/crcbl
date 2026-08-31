@@ -219,12 +219,20 @@ impl Shell for X11Shell {
     ///   ordinary value. See [`connect`](super::connect) for why RandR's
     ///   physical millimetres are deliberately not used instead.
     ///
-    /// And two that are clear for reasons rather than for want of work:
+    /// And one that is clear for a reason rather than for want of work:
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE), because X11 has no viewporter and
     /// no equivalent — the renderer does an upscale blit, which is the exact
-    /// decision `docs/plan/15-windowing.md` names caps for — and
-    /// [`DRAG_DROP`](ShellCaps::DRAG_DROP), which is XDND and is cut from this
-    /// slice.
+    /// decision `docs/plan/15-windowing.md` names caps for.
+    ///
+    /// [`DRAG_DROP`](ShellCaps::DRAG_DROP) is set, and it is the one bit here
+    /// that depends on nothing: XDND is client-to-client client messages plus a
+    /// selection, with no server extension and no window manager behind it, so
+    /// it works on a bare `Xvfb`. What it claims is exactly what
+    /// [`DroppedFile`](ShellEvent::DroppedFile) documents — files, in, with a
+    /// position — for a window that asked with
+    /// [`WindowDesc::accept_drops`](crate::WindowDesc::accept_drops). See
+    /// [`xdnd`](super::xdnd) for the version negotiated and what happens with
+    /// the versions that are not.
     fn caps(&self) -> ShellCaps {
         self.caps
     }
@@ -323,11 +331,17 @@ impl Shell for X11Shell {
             mapped: false,
             map_requested: false,
             close_pending: false,
+            accept_drops: desc.accept_drops,
         };
 
         self.write_title(xid, desc.title);
         self.write_identity(xid, desc.app_id);
         self.write_size_hints(&window);
+        if desc.accept_drops {
+            // Before the map, so a source that reads the property the instant
+            // the window appears finds it — see `set_xdnd_aware`.
+            self.set_xdnd_aware(xid);
+        }
         if let DisplayMode::Borderless { monitor } = desc.mode {
             if let Some(monitor) = monitor {
                 self.move_to_monitor(xid, monitor)?;

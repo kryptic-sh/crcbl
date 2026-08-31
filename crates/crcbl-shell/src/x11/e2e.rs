@@ -16,6 +16,7 @@
 //! | Key, button and pointer input | a physical device | `Peer::key` etc., through `XTEST` |
 //! | Something on the clipboard | any other application | `Peer::own_clipboard` |
 //! | Reading *our* clipboard, including `INCR` | any other application | `Peer::read_clipboard` |
+//! | Dragging a file onto a window | a file manager | `Peer::xdnd_enter` and the rest of the XDND source half |
 //!
 //! Every one of those is a real X client doing a real thing over a real socket.
 //! Nothing here reaches inside the shell; the peer only ever sees XIDs and
@@ -34,6 +35,7 @@
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use super::ffi::{self, Connection, Lib};
 use super::read_wire;
@@ -174,6 +176,42 @@ struct Incoming {
     done: Option<Option<Vec<u8>>>,
 }
 
+/// One XDND drag this peer is driving, as the **source**.
+///
+/// The half of the protocol the backend does not implement and never will —
+/// see `x11::xdnd` — so it is here, because a drop needs a source and there is
+/// no other one on a headless display. Every field is what a file manager
+/// would have: the window being dragged over, the version announced, the types
+/// offered, and what the target answered.
+struct DragSource {
+    /// The window the drag is over. Every message is addressed here.
+    target: u32,
+    /// The version announced in `XdndEnter`'s high byte.
+    version: u8,
+    /// The last `XdndStatus`: whether the target accepted, and with what
+    /// action.
+    status: Option<(bool, u32)>,
+    /// How many `XdndStatus` messages have arrived.
+    ///
+    /// A target that answers a position with silence is a target a real source
+    /// treats as busy, so "it answered every one" is a property worth counting
+    /// rather than merely observing once.
+    statuses: u32,
+    /// The `XdndFinished`: whether the drop was taken, and the action reported.
+    finished: Option<(bool, u32)>,
+    /// The timestamp [`Peer::xdnd_drop`] stamped `XdndDrop` with.
+    dropped_at: Option<u32>,
+    /// The timestamp the target's `ConvertSelection` quoted on `XdndSelection`.
+    ///
+    /// Recorded rather than merely honoured, because the specification requires
+    /// it to be [`dropped_at`](Self::dropped_at) and a server answers a
+    /// conversion stamped `CurrentTime` just as readily — so a target that
+    /// quotes the wrong time is invisible to every other assertion here. It is
+    /// the last one seen: an `INCR` transfer is a single conversion followed by
+    /// property deletes, not a conversion per chunk.
+    converted_at: Option<u32>,
+}
+
 /// A second X client, on its own connection.
 pub struct Peer {
     lib: &'static Lib,
@@ -183,11 +221,37 @@ pub struct Peer {
     window: u32,
     atoms: HashMap<String, u32>,
     offers: Vec<Offer>,
+    /// What this peer is offering on `XdndSelection`, kept apart from the
+    /// clipboard's [`offers`](Self::offers).
+    ///
+    /// Two selections, two offer lists: a test that drags a file while the
+    /// clipboard holds text must not have one conversion answered out of the
+    /// other's payload, which is exactly the mix-up the backend's own routing
+    /// is written to avoid.
+    xdnd_offers: Vec<Offer>,
+    /// The drag being driven, if any.
+    drag: Option<DragSource>,
+    /// How many `SelectionRequest`s have arrived on `XdndSelection`.
+    ///
+    /// The signal that a target has *started* fetching a drop's payload, which
+    /// is otherwise invisible from outside the shell — and the only thing a
+    /// test can wait for when what it wants to interrupt is a transfer already
+    /// under way.
+    xdnd_conversions: u32,
     outgoing: Vec<Outgoing>,
     incoming: Incoming,
     /// `INCR` transfers this peer is pulling, keyed by the property each one
     /// arrives in. See [`Pull`].
     pulls: Vec<Pull>,
+    /// How many `PropertyNotify` events have been handled.
+    ///
+    /// **What [`server_time`](Self::server_time) waits on**, rather than the
+    /// timestamp changing. X11 timestamps are milliseconds, so two appends
+    /// inside one millisecond are answered with the same number — and a wait
+    /// for a *different* value then never ends, because only one append was
+    /// sent and no further event is coming. Counting the answers asks the
+    /// question that was meant: has this append been answered yet.
+    property_notifies: u64,
     /// The most recent server timestamp any event has carried.
     ///
     /// X11 has no "what time is it" request, so the only way to hold a valid
@@ -286,9 +350,13 @@ impl Peer {
             window,
             atoms: HashMap::new(),
             offers: Vec::new(),
+            xdnd_offers: Vec::new(),
+            drag: None,
+            xdnd_conversions: 0,
             outgoing: Vec::new(),
             incoming: Incoming::default(),
             pulls: Vec::new(),
+            property_notifies: 0,
             last_time: 0,
             chunk: None,
         })
@@ -347,12 +415,6 @@ impl Peer {
         self.flush();
     }
 
-    /// PROBE
-    #[must_use]
-    pub fn probe_root(&self) -> u32 {
-        self.root
-    }
-
     /// The server's current time, as close as X11 lets a client get to it.
     ///
     /// **There is no request that asks.** The only timestamps a client holds
@@ -370,15 +432,26 @@ impl Peer {
     /// refused it — and every focus-needing test from that point in the run
     /// onwards timed out, while each passed on its own.
     ///
-    /// Bounded: if the server never answers, the last time known is returned
-    /// and the request is merely as good as it was before.
+    /// **Bounded by a deadline, not by a turn count, and it waits for the
+    /// append's own answer.** `service` does not block, so a fixed number of
+    /// turns is spent in microseconds and bounds nothing: under load this
+    /// returned before the `PropertyNotify` arrived and handed back the initial
+    /// `last_time` of zero, which *is* `CurrentTime` — the one answer this
+    /// function exists to avoid, returned silently while every assertion still
+    /// passed. Measured 2026-08-31: one failure in twelve runs of the XDND drop
+    /// test with the machine busy, none in twelve with it idle.
+    ///
+    /// It waits on [`property_notifies`](Self::property_notifies) rather than
+    /// on the timestamp changing, because two appends inside one millisecond
+    /// are answered with the same number and a wait for a different one would
+    /// never end.
     fn server_time(&mut self) -> u32 {
-        /// Long enough for a loaded server, short enough not to be felt. A
-        /// local X socket answers in microseconds.
-        const TURNS: u32 = 500;
+        /// Long enough for a server on a loaded machine; a local X socket
+        /// answers in microseconds, so this is never waited out in practice.
+        const DEADLINE: Duration = Duration::from_secs(2);
 
         let stamp = self.atom("CRCBL_E2E_TIME");
-        let before = self.last_time;
+        let answered = self.property_notifies;
         // SAFETY: the connection and window are live. Appending zero elements
         // is well-defined and leaves the property's value untouched.
         unsafe {
@@ -394,11 +467,16 @@ impl Peer {
             );
         }
         self.flush();
-        for _ in 0..TURNS {
+        let started = Instant::now();
+        while self.property_notifies == answered {
+            assert!(
+                started.elapsed() < DEADLINE,
+                "the X server did not answer a property append with a \
+                 PropertyNotify within {DEADLINE:?}; without one every \
+                 timestamp this harness sends would be CurrentTime, which is \
+                 older than everything"
+            );
             self.service();
-            if self.last_time != before {
-                break;
-            }
         }
         self.last_time
     }
@@ -548,6 +626,35 @@ impl Peer {
         Some(origin)
     }
 
+    /// The window's parent, or `None` if the server answered with an error.
+    ///
+    /// **What a test uses it for: telling "not managed" from "not managed
+    /// *yet*".** A reparenting window manager puts a client window inside a
+    /// frame, so a window whose parent is still the root has not been placed —
+    /// and until it has been,
+    /// [`window_origin`](Self::window_origin) answers `(0, 0)`, which is
+    /// indistinguishable from the legitimate unmanaged answer. A test that
+    /// reads the origin in that window computes a screen coordinate that is
+    /// really a window-relative one, and the failure lands somewhere else
+    /// entirely.
+    #[must_use]
+    pub fn window_parent(&self, xid: u32) -> Option<u32> {
+        // SAFETY: the connection and window are live; a null error pointer
+        // discards the error and a null reply is handled below.
+        let reply = unsafe {
+            let cookie = (self.lib.query_tree)(self.connection, xid);
+            (self.lib.query_tree_reply)(self.connection, cookie, ptr::null_mut())
+        };
+        if reply.is_null() {
+            return None;
+        }
+        // SAFETY: `reply` is a live reply this call owns.
+        let parent = unsafe { (*reply).parent };
+        // SAFETY: freed exactly once.
+        unsafe { ffi::free_reply(reply) };
+        Some(parent)
+    }
+
     /// Resizes someone else's window, as a window manager or a user drag would.
     pub fn resize(&self, xid: u32, width: u32, height: u32) {
         let values = [width, height];
@@ -638,21 +745,248 @@ impl Peer {
     }
 
     fn claim(&mut self, payloads: &[(&str, &[u8])]) {
-        self.offers = payloads
+        self.offers = self.intern_offers(payloads);
+        self.set_owner("CLIPBOARD", self.window);
+    }
+
+    /// Interns each target name and copies each payload.
+    fn intern_offers(&mut self, payloads: &[(&str, &[u8])]) -> Vec<Offer> {
+        payloads
             .iter()
             .map(|(name, bytes)| Offer {
                 target: self.atom(name),
                 bytes: (*bytes).to_vec(),
             })
-            .collect();
-        self.set_owner(self.window);
+            .collect()
     }
 
     /// Gives up the selection, so nobody owns it.
     pub fn release_clipboard(&mut self) {
         self.offers.clear();
         self.outgoing.clear();
-        self.set_owner(ffi::value::NONE);
+        self.set_owner("CLIPBOARD", ffi::value::NONE);
+    }
+
+    // -----------------------------------------------------------------------
+    // XDND, the source half
+    // -----------------------------------------------------------------------
+
+    /// The XDND version a window publishes, or `None` when it publishes none.
+    ///
+    /// The first thing any real source reads, and the whole of the target's
+    /// opt-in: a window without `XdndAware` is never sent an `XdndEnter` by
+    /// anything, so this is also how the suite checks that
+    /// `WindowDesc::accept_drops` being off means *invisible to a drag* rather
+    /// than merely refused.
+    #[must_use]
+    pub fn xdnd_version(&mut self, xid: u32) -> Option<u8> {
+        let aware = self.atom("XdndAware");
+        let (_, bytes) = self.property_on(xid, aware)?;
+        let word = bytes.get(..4)?;
+        Some(u32::from_ne_bytes([word[0], word[1], word[2], word[3]]) as u8)
+    }
+
+    /// Begins a drag over `xid`, announcing `version` and offering `types`.
+    ///
+    /// `payloads` is what a conversion on `XdndSelection` will be answered
+    /// with, by target name — separate from `types` so a test can announce a
+    /// format it then refuses to convert, and so a list longer than the three
+    /// atoms `XdndEnter` carries inline can be announced through the
+    /// `XdndTypeList` property, which is a branch of the target's parsing that
+    /// nothing else reaches.
+    pub fn xdnd_enter(
+        &mut self,
+        xid: u32,
+        version: u8,
+        types: &[&str],
+        payloads: &[(&str, &[u8])],
+    ) {
+        self.chunk = None;
+        self.begin_drag(xid, version, types, payloads);
+    }
+
+    /// As [`xdnd_enter`](Self::xdnd_enter), but answers the payload conversion
+    /// with an `INCR` transfer of `chunk`-byte pieces.
+    ///
+    /// The same device [`own_clipboard_incrementally`](Self::own_clipboard_incrementally)
+    /// uses, for the same reason: it makes a transfer that would otherwise
+    /// complete inside one `pump` take a dozen of them, so a test can act while
+    /// one is still in flight.
+    pub fn xdnd_enter_incrementally(
+        &mut self,
+        xid: u32,
+        version: u8,
+        types: &[&str],
+        payloads: &[(&str, &[u8])],
+        chunk: usize,
+    ) {
+        self.chunk = Some(chunk.max(1));
+        self.begin_drag(xid, version, types, payloads);
+    }
+
+    /// How many conversions of `XdndSelection` this peer has been asked for.
+    #[must_use]
+    pub const fn xdnd_conversions(&self) -> u32 {
+        self.xdnd_conversions
+    }
+
+    fn begin_drag(&mut self, xid: u32, version: u8, types: &[&str], payloads: &[(&str, &[u8])]) {
+        self.xdnd_offers = self.intern_offers(payloads);
+        self.set_owner("XdndSelection", self.window);
+        let atoms: Vec<u32> = types.iter().map(|name| self.atom(name)).collect();
+        // Bit 0 of the second word says the inline three are not the whole
+        // list; the property is where the rest is.
+        let long = atoms.len() > 3;
+        if long {
+            let type_list = self.atom("XdndTypeList");
+            let bytes: Vec<u8> = atoms.iter().flat_map(|atom| atom.to_ne_bytes()).collect();
+            self.set_property(self.window, type_list, ffi::value::ATOM_ATOM, 32, &bytes);
+        }
+        self.drag = Some(DragSource {
+            target: xid,
+            version,
+            status: None,
+            statuses: 0,
+            finished: None,
+            dropped_at: None,
+            converted_at: None,
+        });
+        let flags = (u32::from(version) << 24) | u32::from(long);
+        let enter = self.atom("XdndEnter");
+        self.send_xdnd(
+            xid,
+            enter,
+            [
+                self.window,
+                flags,
+                atoms.first().copied().unwrap_or(0),
+                atoms.get(1).copied().unwrap_or(0),
+                atoms.get(2).copied().unwrap_or(0),
+            ],
+        );
+    }
+
+    /// Reports the pointer at `(x, y)` in **root** coordinates.
+    ///
+    /// Root coordinates because that is what the protocol carries and what a
+    /// source actually knows; turning them into window-relative ones is the
+    /// target's job, and is the part of it worth testing.
+    pub fn xdnd_position(&mut self, x: i16, y: i16) {
+        let Some(target) = self.drag.as_ref().map(|drag| drag.target) else {
+            return;
+        };
+        let action = self.atom("XdndActionCopy");
+        let position = self.atom("XdndPosition");
+        let time = self.last_time;
+        self.send_xdnd(
+            target,
+            position,
+            [
+                self.window,
+                0,
+                (u32::from(x as u16) << 16) | u32::from(y as u16),
+                time,
+                action,
+            ],
+        );
+    }
+
+    /// Leaves without dropping.
+    pub fn xdnd_leave(&mut self) {
+        let Some(target) = self.drag.as_ref().map(|drag| drag.target) else {
+            return;
+        };
+        let leave = self.atom("XdndLeave");
+        self.send_xdnd(target, leave, [self.window, 0, 0, 0, 0]);
+    }
+
+    /// Releases the button, which is what asks the target to fetch the data.
+    ///
+    /// The timestamp is a real server one rather than `CurrentTime`, provoked
+    /// by the zero-length property append this harness uses everywhere it needs
+    /// a stamp. The specification requires the target's `ConvertSelection` to
+    /// quote it, so a harness that sent `CurrentTime` would let a backend that
+    /// quoted anything at all pass; [`xdnd_drop_times`](Self::xdnd_drop_times)
+    /// is what actually compares the two.
+    pub fn xdnd_drop(&mut self) {
+        let Some(target) = self.drag.as_ref().map(|drag| drag.target) else {
+            return;
+        };
+        let time = self.server_time();
+        let drop = self.atom("XdndDrop");
+        self.send_xdnd(target, drop, [self.window, 0, time, 0, 0]);
+        if let Some(drag) = self.drag.as_mut() {
+            drag.dropped_at = Some(time);
+        }
+    }
+
+    /// The last `XdndStatus`: whether the target accepted, and the action atom.
+    #[must_use]
+    pub fn xdnd_status(&self) -> Option<(bool, u32)> {
+        self.drag.as_ref().and_then(|drag| drag.status)
+    }
+
+    /// How many `XdndStatus` messages have come back.
+    #[must_use]
+    pub fn xdnd_statuses(&self) -> u32 {
+        self.drag.as_ref().map_or(0, |drag| drag.statuses)
+    }
+
+    /// The `XdndFinished`: whether the drop was taken, and the action reported.
+    #[must_use]
+    pub fn xdnd_finished(&self) -> Option<(bool, u32)> {
+        self.drag.as_ref().and_then(|drag| drag.finished)
+    }
+
+    /// The timestamp of the drop, and the one the target's `ConvertSelection`
+    /// quoted — equal exactly when the target obeyed the specification.
+    ///
+    /// Both `None` until a drop has been sent and its conversion answered.
+    ///
+    /// **Reported as a pair rather than checked here**, because a server
+    /// answers a conversion stamped `CurrentTime` exactly as readily as one
+    /// stamped correctly — so nothing the protocol does can tell a target that
+    /// quoted the wrong time from one that did not, and the comparison has to
+    /// be an assertion in a test that knows both numbers.
+    #[must_use]
+    pub fn xdnd_drop_times(&self) -> (Option<u32>, Option<u32>) {
+        self.drag
+            .as_ref()
+            .map_or((None, None), |drag| (drag.dropped_at, drag.converted_at))
+    }
+
+    /// The version this drag announced, so a test can state it once.
+    #[must_use]
+    pub fn xdnd_announced_version(&self) -> Option<u8> {
+        self.drag.as_ref().map(|drag| drag.version)
+    }
+
+    /// Sends one XDND client message to the target.
+    ///
+    /// Mask `0`, which delivers to the client that created the window — the
+    /// routing every XDND message uses, and the only one that reaches a target
+    /// whose window is not selecting anything in particular.
+    fn send_xdnd(&self, xid: u32, type_: u32, data: [u32; 5]) {
+        let message = ffi::ClientMessageEvent {
+            response_type: ffi::event::CLIENT_MESSAGE,
+            format: 32,
+            sequence: 0,
+            window: xid,
+            type_,
+            data,
+        };
+        // SAFETY: the connection and window are live, and `SendEvent` reads
+        // exactly the 32 bytes a `ClientMessageEvent` is.
+        unsafe {
+            (self.lib.send_event)(
+                self.connection,
+                0,
+                xid,
+                0,
+                ptr::from_ref(&message).cast::<c_char>(),
+            );
+        }
+        self.flush();
     }
 
     /// Takes or releases `CLIPBOARD`, and **does not return until the server
@@ -672,8 +1006,8 @@ impl Peer {
     /// [`Empty`](crate::ClipboardContent::Empty) to a test expecting the
     /// payload. Pumping first does not help: pumping drives the shell, and this
     /// request is not the shell's.
-    fn set_owner(&mut self, owner: u32) {
-        let clipboard = self.atom("CLIPBOARD");
+    fn set_owner(&mut self, selection: &str, owner: u32) {
+        let clipboard = self.atom(selection);
         // SAFETY: the connection is live, and `owner` is this peer's own window
         // or `XCB_NONE`.
         unsafe {
@@ -867,11 +1201,36 @@ impl Peer {
             ffi::event::SELECTION_REQUEST => self.answer_request(raw),
             ffi::event::SELECTION_NOTIFY => self.collect_notify(raw),
             ffi::event::PROPERTY_NOTIFY => self.property(raw),
+            ffi::event::CLIENT_MESSAGE => self.collect_xdnd(raw),
             ffi::event::SELECTION_CLEAR => {
-                self.offers.clear();
+                let cleared =
+                    read_wire::<ffi::SelectionClearEvent>(raw).map_or(0, |event| event.selection);
+                if cleared == self.atom("XdndSelection") {
+                    self.xdnd_offers.clear();
+                } else {
+                    self.offers.clear();
+                }
                 self.outgoing.clear();
             }
             _ => {}
+        }
+    }
+
+    /// Collects an `XdndStatus` or an `XdndFinished` from the target.
+    fn collect_xdnd(&mut self, raw: &[u8]) {
+        let Some(event) = read_wire::<ffi::ClientMessageEvent>(raw) else {
+            return;
+        };
+        let status = self.atom("XdndStatus");
+        let finished = self.atom("XdndFinished");
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+        if event.type_ == status {
+            drag.statuses += 1;
+            drag.status = Some((event.data[1] & 1 != 0, event.data[4]));
+        } else if event.type_ == finished {
+            drag.finished = Some((event.data[1] & 1 != 0, event.data[2]));
         }
     }
 
@@ -881,6 +1240,37 @@ impl Peer {
         };
         let targets_atom = self.atom("TARGETS");
         let incr_atom = self.atom("INCR");
+        // Which selection is being converted decides which payload answers it.
+        // Without this a drag and a clipboard offer held at the same time would
+        // answer each other's conversions, and the suite could not tell a
+        // backend that routes them correctly from one that does not.
+        let xdnd_selection = self.atom("XdndSelection");
+        let offers = if event.selection == xdnd_selection {
+            self.xdnd_conversions += 1;
+            if let Some(drag) = self.drag.as_mut() {
+                drag.converted_at = Some(event.time);
+            }
+            core::mem::take(&mut self.xdnd_offers)
+        } else {
+            core::mem::take(&mut self.offers)
+        };
+        self.answer_from(&event, &offers, targets_atom, incr_atom);
+        if event.selection == xdnd_selection {
+            self.xdnd_offers = offers;
+        } else {
+            self.offers = offers;
+        }
+    }
+
+    /// The body of [`answer_request`](Self::answer_request), against one
+    /// selection's offers.
+    fn answer_from(
+        &mut self,
+        event: &ffi::SelectionRequestEvent,
+        offers: &[Offer],
+        targets_atom: u32,
+        incr_atom: u32,
+    ) {
         let property = if event.property == 0 {
             event.target
         } else {
@@ -888,9 +1278,9 @@ impl Peer {
         };
         let mut answered = 0;
 
-        if event.target == targets_atom && !self.offers.is_empty() {
+        if event.target == targets_atom && !offers.is_empty() {
             let mut list = vec![targets_atom];
-            list.extend(self.offers.iter().map(|offer| offer.target));
+            list.extend(offers.iter().map(|offer| offer.target));
             self.set_property(
                 event.requestor,
                 property,
@@ -902,12 +1292,8 @@ impl Peer {
                     .collect::<Vec<u8>>(),
             );
             answered = property;
-        } else if let Some(index) = self
-            .offers
-            .iter()
-            .position(|offer| offer.target == event.target)
-        {
-            let bytes = self.offers[index].bytes.clone();
+        } else if let Some(index) = offers.iter().position(|offer| offer.target == event.target) {
+            let bytes = offers[index].bytes.clone();
             match self.chunk {
                 Some(chunk) => {
                     let estimate = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
@@ -998,6 +1384,7 @@ impl Peer {
             return;
         };
         self.last_time = event.time;
+        self.property_notifies = self.property_notifies.wrapping_add(1);
 
         // A `MULTIPLE` starts one transfer per pair, so these are matched on
         // the property the chunk arrived in rather than on there being a single

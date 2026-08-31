@@ -26,23 +26,20 @@
 //! | Pointer: motion, buttons, wheel, enter/leave, grabs, warp | complete |
 //! | XI2 raw relative motion | complete |
 //! | Clipboard: `TARGETS`, `INCR` both directions, own and read | complete |
-//! | **Drag and drop (XDND)** | **cut — see below** |
+//! | Drag and drop in: XDND version 5, the `accept_drops` gate | complete — [`DRAG_DROP`](ShellCaps::DRAG_DROP), see [`xdnd`] |
 //! | Key repeat synthesis | not needed — the X server does it |
 //! | Themed cursor shapes | recorded, not applied — same gap the Wayland backend documents |
 //!
 //! ## What was cut, and why that seam
 //!
-//! **XDND.** [`ShellCaps::DRAG_DROP`] is clear on this backend and
-//! [`ShellEvent::DroppedFile`] is never emitted. XDND is a five-message
-//! handshake (`XdndEnter`/`Position`/`Status`/`Drop`/`Finished`) layered on top
-//! of a *second* selection (`XdndSelection`) with its own version negotiation
-//! and its own timestamp rules — in other words, the whole of
-//! [`selection`] again with a different trigger and a protocol on top. On
-//! Wayland it was its own slice (P0.5c) for a reason, and the honest choice
-//! here was a smaller backend that is tested against a real server over a
-//! larger one that is half-verified. The clipboard stayed because [obligations
-//! 4, 5 and 6](Shell) are stated in terms of it and could not otherwise be
-//! answered.
+//! **Starting a drag.** [`xdnd`] implements the receiving half only: these
+//! windows accept a drop and never begin one. A source needs a pointer grab, a
+//! drag icon, an action menu and an offer the seam has no vocabulary for, and
+//! nothing in this engine asks to drag a file *out* — the viewer and the
+//! editor's asset browser both want files coming in.
+//!
+//! **Themed cursor shapes**, as the table says, and for the reason the Wayland
+//! backend gives: a cursor is a theme lookup and a pixmap, and pixels are P1.
 //!
 //! # What X11 does that neither Wayland nor `HeadlessShell` models
 //!
@@ -161,7 +158,8 @@ use crate::{
 use atoms::Atoms;
 use ffi::{Connection, Lib};
 use keys::{SizeHints, WmStateAction};
-use selection::{Read, Step, Write};
+use selection::{Delivery, Read, Step, Write};
+use xdnd::Drag;
 
 /// Which keyboard and pointer an event came from.
 ///
@@ -677,6 +675,14 @@ struct XWindow {
     /// gap.
     map_requested: bool,
     close_pending: bool,
+    /// Whether [`WindowDesc::accept_drops`] was set.
+    ///
+    /// Recorded as well as advertised. `XdndAware` is a *window* property that
+    /// anything in this process can write, so a window this backend was told
+    /// not to accept drops for must not start reporting them because some host
+    /// application or injected library published the property behind its back —
+    /// the same second check the Win32 backend keeps over `WS_EX_ACCEPTFILES`.
+    accept_drops: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +734,12 @@ pub struct X11Shell {
     /// acquisition time rather than "now": a peer uses it to tell one ownership
     /// from the next.
     owner_time: u32,
+    /// The one drag currently over this client, if any; see [`xdnd`].
+    ///
+    /// One, not a list: a drag is driven by a pointer grab the source holds and
+    /// there is one core pointer, so a second `XdndEnter` before a `XdndLeave`
+    /// is a protocol violation rather than a second drag.
+    drag: Option<Drag>,
     /// A hidden cursor, created once and shared. `0` until something asks.
     blank_cursor: u32,
     queue: VecDeque<ShellEvent>,
@@ -894,6 +906,7 @@ impl X11Shell {
             offers: Vec::new(),
             owner_window: 0,
             owner_time: ffi::value::CURRENT_TIME,
+            drag: None,
             blank_cursor: 0,
             queue: VecDeque::new(),
             time: TimeBase::now(),
@@ -959,8 +972,12 @@ impl X11Shell {
             xkb::x11_available() && self.keymap.is_some(),
         );
 
-        // Cut from this slice; see the module docs.
-        caps.remove(ShellCaps::DRAG_DROP);
+        // XDND, receiving. Unconditional and not latched from anything: the
+        // protocol is client-to-client client messages plus a selection, so
+        // there is no server extension and no window manager for it to depend
+        // on — a drop works on a bare `Xvfb` with nothing else running. See
+        // [`xdnd`].
+        caps.insert(ShellCaps::DRAG_DROP);
         // X11 has no viewporter and no equivalent: a client presents pixels at
         // the window's size, full stop. The renderer does the upscale blit.
         caps.remove(ShellCaps::HW_UPSCALE);
@@ -999,7 +1016,26 @@ impl X11Shell {
     /// on a window it no longer has. `HeadlessShell::resolve_reads` makes the
     /// same call for the same reason, and this is the two backends agreeing.
     fn forget_selection_state(&mut self, window: WindowId, xid: u32) {
+        // A drop whose payload was still arriving is dropped like any other
+        // read — and its *source* still has to be released. A source blocks its
+        // own drag loop on `XdndFinished` and cannot see that the window it was
+        // talking to has gone, so the one thing that must not happen here is
+        // silence. The answer says the drop was not taken, which it was not.
+        let orphaned: Vec<Delivery> = self
+            .reads
+            .iter()
+            .filter(|read| read.window == window)
+            .map(|read| read.delivery.clone())
+            .collect();
         self.reads.retain(|read| read.window != window);
+        for delivery in &orphaned {
+            self.abandon_drop(xid, delivery);
+        }
+        // A drag still in the air over a window that has gone away. The same
+        // argument: an `XdndStatus` naming a destroyed window is answered by
+        // the server with a `BadWindow` nobody reads, and a `DroppedFile` for
+        // it would break obligation 1.
+        self.forget_drag(window);
         if self.owner_window == xid {
             // A selection owned by a window that has stopped existing is a
             // clipboard nobody can ever read: the server would keep naming a
@@ -1058,6 +1094,7 @@ mod input;
 mod monitors;
 mod shell;
 mod window;
+mod xdnd;
 mod xselection;
 
 #[cfg(test)]

@@ -57,8 +57,8 @@
 //! races.
 
 use super::{
-    ClipboardContent, ClipboardRequestId, MimeType, Read, ReceivedMime, ShellEvent, Step, Write,
-    X11Shell, ffi, read_wire, selection, window,
+    ClipboardContent, ClipboardRequestId, Delivery, MimeType, Read, ReceivedMime, ShellEvent, Step,
+    Write, X11Shell, ffi, read_wire, selection, window,
 };
 
 impl X11Shell {
@@ -343,11 +343,19 @@ impl X11Shell {
         // outstanding at a time, so the phase is enough to route it — and it
         // has to be the *phase* rather than the property, because both use the
         // same property by design.
+        //
+        // The selection is matched as well, and it is not decoration: a drop's
+        // payload arrives on `XdndSelection` through this same machine, and a
+        // window with a paste already in flight has a read in exactly the phase
+        // a drop's notify would otherwise be routed to. Without this the two
+        // answer each other's requests.
         let is_targets = event.target == self.conn.atoms.targets;
         let Some(index) = self.reads.iter().position(|read| {
-            self.windows
-                .get(read.window.cast())
-                .is_some_and(|window| window.id == event.requestor)
+            read.selection == event.selection
+                && self
+                    .windows
+                    .get(read.window.cast())
+                    .is_some_and(|window| window.id == event.requestor)
                 && (read.state == selection::ReadState::AwaitingTargets) == is_targets
         }) else {
             return;
@@ -529,24 +537,34 @@ impl X11Shell {
                 };
                 if xid == 0 {
                     let read = self.reads.remove(index);
-                    self.emit_answer(&read, ClipboardContent::Unavailable);
+                    self.finish_read(&read, ClipboardContent::Unavailable);
                     return;
                 }
-                self.convert(xid, target, property);
+                let selection = self.reads[index].selection;
+                self.convert(xid, selection, target, property, self.last_server_time);
             }
             Step::Done(content) => {
                 let read = self.reads.remove(index);
-                self.emit_answer(&read, content);
+                self.finish_read(&read, content);
             }
         }
     }
 
-    /// Emits the one [`ClipboardData`](ShellEvent::ClipboardData) a read owes.
+    /// Hands a finished read to whatever asked for it.
     ///
     /// Obligation 4's "exactly once" is structural here: a [`Read`] is removed
     /// from the list in the same expression that produces the event, so there
-    /// is no path that emits twice and none that drops one silently.
-    fn emit_answer(&mut self, read: &Read, content: ClipboardContent) {
+    /// is no path that emits twice and none that drops one silently. A drop
+    /// owes an `XdndFinished` on exactly the same terms — see
+    /// [`finish_drop`](X11Shell::finish_drop).
+    fn finish_read(&mut self, read: &Read, content: ClipboardContent) {
+        let (request, mime) = match read.delivery {
+            Delivery::Clipboard { request, mime } => (request, mime),
+            Delivery::Drop { .. } => {
+                self.finish_drop(read.window, &read.delivery, &content);
+                return;
+            }
+        };
         let mime = match content {
             // The peer chose the spelling, so report the peer's — which is why
             // `ReceivedMime` is a separate type from `MimeType`.
@@ -554,16 +572,14 @@ impl X11Shell {
                 .conn
                 .atoms
                 .spelling_of(read.answered_target)
-                .map_or_else(|| ReceivedMime::from(read.mime), ReceivedMime::new),
+                .map_or_else(|| ReceivedMime::from(mime), ReceivedMime::new),
             // There is no peer spelling for a non-answer, so the seam specifies
             // the format that was *asked* for.
-            ClipboardContent::Empty | ClipboardContent::Unavailable => {
-                ReceivedMime::from(read.mime)
-            }
+            ClipboardContent::Empty | ClipboardContent::Unavailable => ReceivedMime::from(mime),
         };
         self.queue.push_back(ShellEvent::ClipboardData {
             window: read.window,
-            request: read.request,
+            request,
             mime,
             content,
         });
@@ -603,27 +619,40 @@ impl X11Shell {
         // atom as the property — which some clients do — would collide the
         // moment two windows read the same format at once.
         let property = self.conn.atoms.crcbl_selection;
+        let selection = self.conn.atoms.clipboard;
         // Step one is always `TARGETS`: a mime type is one string here and up
         // to four atoms on the wire, and only the owner knows which it has.
-        self.convert(xid, self.conn.atoms.targets, property);
-        self.reads.push(Read::new(
+        self.convert(
+            xid,
+            selection,
+            self.conn.atoms.targets,
+            property,
+            self.last_server_time,
+        );
+        self.reads.push(Read::clipboard(
             request,
             window,
             mime,
             candidates,
+            selection,
             property,
             ffi::monotonic_nanos(),
         ));
         request
     }
 
-    /// Issues one `ConvertSelection` into `property`.
+    /// Issues one `ConvertSelection` on `selection` into `property`.
+    ///
+    /// `time` is the timestamp the request quotes. A clipboard read quotes the
+    /// last server time this connection saw; a drop must quote `XdndDrop`'s
+    /// own, because that is the moment the source keeps its offer alive
+    /// against — see [`xdnd`](super::xdnd).
     ///
     /// The property is deleted first, because a stale value from a previous
     /// conversion would otherwise be indistinguishable from this one's answer —
     /// the owner writes the property and *then* sends the notify, so a
     /// requestor that skipped this can read the wrong bytes and never know.
-    fn convert(&self, xid: u32, target: u32, property: u32) {
+    pub(super) fn convert(&self, xid: u32, selection: u32, target: u32, property: u32, time: u32) {
         self.conn.delete_property(xid, property);
         // SAFETY: the connection and window are live, and every atom came from
         // the interned table.
@@ -631,10 +660,10 @@ impl X11Shell {
             (self.conn.lib.convert_selection)(
                 self.conn.raw(),
                 xid,
-                self.conn.atoms.clipboard,
+                selection,
                 target,
                 property,
-                self.last_server_time,
+                time,
             );
         }
         self.conn.flush();
@@ -716,11 +745,11 @@ impl X11Shell {
             if self.reads[index].is_stalled(now) {
                 let read = self.reads.remove(index);
                 crcbl_core::log::warn!(
-                    "clipboard {} stalled for {:?}; answering Unavailable",
-                    read.request,
+                    "an X11 selection transfer for {:?} stalled for {:?}; giving up on it",
+                    read.delivery,
                     selection::TIMEOUT
                 );
-                self.emit_answer(&read, ClipboardContent::Unavailable);
+                self.finish_read(&read, ClipboardContent::Unavailable);
                 continue;
             }
             index += 1;

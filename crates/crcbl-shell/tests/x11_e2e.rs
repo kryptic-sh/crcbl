@@ -180,10 +180,30 @@ impl Session {
     ///
     /// See [`Peer::window_origin`] for why a test cannot simply name a screen
     /// coordinate: a managed window is not at the origin.
-    fn point_in(&self, window: WindowId, x: i16, y: i16) -> (i16, i16) {
+    ///
+    /// **Under a window manager this first waits for the window to be placed.**
+    /// `openbox` reparents asynchronously, and until it has, the origin reads
+    /// `(0, 0)` — the same answer an unmanaged window gives — so the point
+    /// computed here would be window-relative while the backend, reading the
+    /// origin a moment later, translates against the real one. That mismatch
+    /// surfaces as a pointer position off by the whole window origin, in a
+    /// test that is not about placement at all. `Peer::window_parent` is what
+    /// tells the two states apart: a placed window is inside the frame, not
+    /// under the root.
+    fn point_in(&mut self, window: WindowId, x: i16, y: i16) -> (i16, i16) {
+        let xid = self.xid(window);
+        if self.has_window_manager() {
+            let root = self.peer.root();
+            self.pump_until("the window manager to place the window", |session| {
+                session
+                    .peer
+                    .window_parent(xid)
+                    .is_some_and(|parent| parent != root)
+            });
+        }
         let (origin_x, origin_y) = self
             .peer
-            .window_origin(self.xid(window))
+            .window_origin(xid)
             .expect("the window is still alive");
         (origin_x + x, origin_y + y)
     }
@@ -519,9 +539,14 @@ fn the_capability_set_is_x11_shaped() {
         !caps.contains(ShellCaps::HW_UPSCALE),
         "X11 has no viewporter; the renderer blits"
     );
+    // And one that depends on nothing at all: XDND is client-to-client client
+    // messages plus a selection, with no extension and no window manager under
+    // it. The bit is a claim, and the claim is cashed by
+    // `a_file_dragged_from_another_client_arrives_as_a_dropped_file`, which
+    // asserts it *and* performs a real drop in the same test.
     assert!(
-        !caps.contains(ShellCaps::DRAG_DROP),
-        "XDND is cut from this slice, and the bit says so"
+        caps.contains(ShellCaps::DRAG_DROP),
+        "XDND is implemented, receiving"
     );
 
     assert!(caps.contains(ShellCaps::CLIPBOARD));
@@ -2335,6 +2360,628 @@ fn an_empty_offer_releases_the_selection() {
         content,
         ClipboardContent::Empty,
         "nobody owns the selection any more"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Drag and drop (XDND)
+// ---------------------------------------------------------------------------
+
+/// The XDND version this backend publishes and speaks.
+///
+/// Spelled here rather than read off the window, because the point of the
+/// assertion is that a *specific* version reaches the wire: a target that
+/// published nothing, or published a version below what its own handshake
+/// assumes, would still satisfy a test that only compared the property with
+/// itself.
+const XDND_VERSION: u8 = 5;
+
+/// A window that accepts drops.
+fn drop_target(title: &str) -> WindowDesc<'_> {
+    WindowDesc {
+        accept_drops: true,
+        ..desc(title)
+    }
+}
+
+/// Drives an accepted drag to the point of release and answers what the target
+/// said along the way.
+///
+/// The three messages every drop goes through, in the order the protocol puts
+/// them in. Factored out because five tests below differ only in what they
+/// announce and what they then expect.
+fn drag_over(
+    session: &mut Session,
+    window: WindowId,
+    version: u8,
+    types: &[&str],
+    payload: &[u8],
+    at: (i16, i16),
+) {
+    let xid = session.xid(window);
+    let point = session.point_in(window, at.0, at.1);
+    session
+        .peer
+        .xdnd_enter(xid, version, types, &[("text/uri-list", payload)]);
+    session.peer.xdnd_position(point.0, point.1);
+    session.pump_until("the target to answer the first XdndPosition", |session| {
+        session.peer.xdnd_status().is_some()
+    });
+}
+
+/// A file dragged out of another application arrives, with its position.
+///
+/// The whole protocol end to end, against a real X server and a second real X
+/// client: `XdndAware`, `XdndEnter`, `XdndPosition`, `XdndStatus`, `XdndDrop`,
+/// a conversion on `XdndSelection`, and `XdndFinished`.
+///
+/// It asserts [`ShellCaps::DRAG_DROP`] as well, deliberately in *this* test:
+/// the bit is a claim, and a claim asserted in a test that does not exercise it
+/// is a claim nothing can contradict. Here the two go red together.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_file_dragged_from_another_client_arrives_as_a_dropped_file() {
+    let mut session = Session::open();
+    assert!(
+        session.shell.caps().contains(ShellCaps::DRAG_DROP),
+        "the backend claims drag and drop, and the rest of this test cashes it"
+    );
+    let window = session.window(&drop_target("drop"));
+    let xid = session.xid(window);
+
+    // The opt-in a source looks for, and the only thing that makes this window
+    // addressable by a drag at all.
+    assert_eq!(
+        session.peer.xdnd_version(xid),
+        Some(XDND_VERSION),
+        "XdndAware publishes the version the backend speaks"
+    );
+
+    // A path with a space in it, because percent-decoding is exactly the part
+    // of `text/uri-list` a backend gets wrong in a way that still looks like a
+    // filename in a log.
+    let payload = b"file:///tmp/crcbl%20e2e/level%20one.ron\r\n";
+    drag_over(
+        &mut session,
+        window,
+        XDND_VERSION,
+        &["text/uri-list"],
+        payload,
+        (40, 30),
+    );
+
+    let action = session.peer.xdnd_status().expect("a status arrived");
+    assert!(action.0, "a window that asked for drops accepts one");
+    assert_ne!(
+        action.1, 0,
+        "an accepting status names the action it accepts"
+    );
+
+    session.events.clear();
+    session.peer.xdnd_drop();
+    session.pump_until("the dropped file", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::DroppedFile { .. }))
+    });
+
+    let dropped: Vec<_> = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::DroppedFile {
+                window: got,
+                path,
+                position,
+                ..
+            } => Some((*got, path.clone(), *position)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dropped.len(), 1, "one event per file: {dropped:?}");
+    assert_eq!(dropped[0].0, window);
+    assert_eq!(
+        dropped[0].1,
+        std::path::PathBuf::from("/tmp/crcbl e2e/level one.ron"),
+        "the file:// prefix is stripped and the percent escapes are decoded"
+    );
+    assert_eq!(
+        dropped[0].2,
+        Some(PhysicalPoint::new(40.0, 30.0)),
+        "the position is the pointer's, in the window's own pixels"
+    );
+
+    // And the source is released. A source blocks its drag loop on this, so a
+    // target that never sends one wedges the other application.
+    session.pump_until("XdndFinished", |session| {
+        session.peer.xdnd_finished().is_some()
+    });
+    let finished = session.peer.xdnd_finished().expect("just waited for it");
+    assert!(finished.0, "the drop was taken, and the source is told so");
+    assert_ne!(finished.1, 0, "version 5 reports the action performed");
+
+    // And the payload was fetched against the drop's own timestamp. The
+    // specification requires it, and nothing else in this suite can see it: a
+    // server answers a conversion stamped `CurrentTime` exactly as readily, so
+    // a target that quoted the wrong time would pass every assertion above.
+    // `Peer::xdnd_drop` goes to the trouble of provoking a real server
+    // timestamp precisely so that this comparison has two different numbers to
+    // tell apart.
+    let (dropped_at, converted_at) = session.peer.xdnd_drop_times();
+    let dropped_at = dropped_at.expect("the drop was sent");
+    assert_ne!(
+        dropped_at, 0,
+        "a real server timestamp, not `CurrentTime` -- otherwise the next \
+         assertion cannot fail"
+    );
+    assert_eq!(
+        converted_at,
+        Some(dropped_at),
+        "the conversion quotes the drop's timestamp, which is what keeps the \
+         source's offer alive against it"
+    );
+}
+
+/// A window that did not ask for drops is invisible to a drag, and refuses one
+/// driven at it anyway.
+///
+/// Two halves, and both matter: `XdndAware` missing is what stops a real source
+/// ever addressing the window, and the explicit refusal is what a source that
+/// addresses it regardless — because something else in this process published
+/// the property — is told.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_window_that_did_not_ask_for_drops_takes_none() {
+    let mut session = Session::open();
+    let window = session.window(&desc("no drops"));
+    let xid = session.xid(window);
+    assert_eq!(
+        session.peer.xdnd_version(xid),
+        None,
+        "accept_drops is off by default, and nothing advertises it"
+    );
+
+    drag_over(
+        &mut session,
+        window,
+        XDND_VERSION,
+        &["text/uri-list"],
+        b"file:///tmp/refused.ron\r\n",
+        (20, 20),
+    );
+    assert_eq!(
+        session.peer.xdnd_status().map(|status| status.0),
+        Some(false),
+        "the status refuses, which is what makes the source's cursor say so"
+    );
+
+    session.peer.xdnd_drop();
+    session.pump_until("XdndFinished", |session| {
+        session.peer.xdnd_finished().is_some()
+    });
+    assert_eq!(
+        session.peer.xdnd_finished().map(|finished| finished.0),
+        Some(false),
+        "answered rather than ignored: a silent target wedges the source"
+    );
+    assert!(
+        !session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::DroppedFile { .. })),
+        "nothing was dropped: {:?}",
+        session.names()
+    );
+}
+
+/// A source announcing a version below the floor is refused, not misread.
+///
+/// Version 2 has no action word in `XdndPosition` and version 0 has no
+/// timestamp either, so the fields a target would read are the source's
+/// padding. Refusing is the honest answer, and it still answers.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_source_below_the_supported_version_is_refused_and_still_answered() {
+    let mut session = Session::open();
+    let window = session.window(&drop_target("old source"));
+
+    drag_over(
+        &mut session,
+        window,
+        2,
+        &["text/uri-list"],
+        b"file:///tmp/old.ron\r\n",
+        (30, 30),
+    );
+    assert_eq!(
+        session.peer.xdnd_status().map(|status| status.0),
+        Some(false),
+        "version 2 is below the floor and the status says so"
+    );
+
+    session.peer.xdnd_drop();
+    session.pump_until("XdndFinished", |session| {
+        session.peer.xdnd_finished().is_some()
+    });
+    let finished = session.peer.xdnd_finished().expect("just waited for it");
+    assert!(!finished.0, "not taken");
+    assert_eq!(
+        finished.1, 0,
+        "the version-5 action word must be zero for an older source"
+    );
+    assert!(
+        !session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::DroppedFile { .. })),
+        "nothing was dropped: {:?}",
+        session.names()
+    );
+}
+
+/// A source at the floor version is accepted, and answered in its own version.
+///
+/// The other side of the refusal above, and the one that keeps the floor from
+/// being a number nothing exercises. Version 3 also pins the version-5-only
+/// words in `XdndFinished` down: the specification requires them zero for an
+/// older source, and a target that always filled them in would be handing a
+/// version-3 source two words it reads as reserved.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_source_at_the_floor_version_is_accepted_and_answered_in_its_own_version() {
+    let mut session = Session::open();
+    let window = session.window(&drop_target("floor version"));
+
+    drag_over(
+        &mut session,
+        window,
+        3,
+        &["text/uri-list"],
+        b"file:///tmp/three.ron\r\n",
+        (18, 22),
+    );
+    assert_eq!(
+        session.peer.xdnd_status().map(|status| status.0),
+        Some(true),
+        "three is the floor, and the floor is spoken"
+    );
+
+    session.events.clear();
+    session.peer.xdnd_drop();
+    session.pump_until("the dropped file", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::DroppedFile { .. }))
+    });
+    assert!(
+        session.events.iter().any(|event| matches!(
+            event,
+            ShellEvent::DroppedFile { path, .. }
+                if path == &std::path::PathBuf::from("/tmp/three.ron")
+        )),
+        "{:?}",
+        session.events
+    );
+
+    session.pump_until("XdndFinished", |session| {
+        session.peer.xdnd_finished().is_some()
+    });
+    let finished = session.peer.xdnd_finished().expect("just waited for it");
+    assert!(
+        !finished.0,
+        "the accepted flag arrived in version 5 and must be zero below it"
+    );
+    assert_eq!(finished.1, 0, "and so must the action word");
+}
+
+/// A drag carrying no `text/uri-list` is refused: `DroppedFile` is a path.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_drag_of_something_that_is_not_a_file_is_refused() {
+    let mut session = Session::open();
+    let window = session.window(&drop_target("not a file"));
+
+    drag_over(
+        &mut session,
+        window,
+        XDND_VERSION,
+        &["text/plain;charset=utf-8", "text/html"],
+        b"some text",
+        (25, 25),
+    );
+    assert_eq!(
+        session.peer.xdnd_status().map(|status| status.0),
+        Some(false),
+        "the seam can report a path and nothing else, so this is refused"
+    );
+}
+
+/// More than three types go in the source's `XdndTypeList`, and are read there.
+///
+/// `XdndEnter` carries three type atoms inline and sets a flag when there are
+/// more. A target that only ever reads the inline three refuses every drag from
+/// a file manager that offers four formats — which is most of them.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_type_list_too_long_for_the_message_is_read_out_of_the_property() {
+    let mut session = Session::open();
+    let window = session.window(&drop_target("long type list"));
+
+    // `text/uri-list` fourth, so nothing but the property can find it.
+    drag_over(
+        &mut session,
+        window,
+        XDND_VERSION,
+        &[
+            "text/html",
+            "text/plain;charset=utf-8",
+            "application/x-kde-cutselection",
+            "text/uri-list",
+        ],
+        b"file:///tmp/fourth.ron\r\n",
+        (15, 45),
+    );
+    assert_eq!(
+        session.peer.xdnd_status().map(|status| status.0),
+        Some(true),
+        "the fourth type is in XdndTypeList and is the one that matters"
+    );
+
+    session.events.clear();
+    session.peer.xdnd_drop();
+    session.pump_until("the dropped file", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::DroppedFile { .. }))
+    });
+    assert!(
+        session.events.iter().any(|event| matches!(
+            event,
+            ShellEvent::DroppedFile { path, .. } if path == &std::path::PathBuf::from("/tmp/fourth.ron")
+        )),
+        "{:?}",
+        session.events
+    );
+}
+
+/// A drag that leaves without dropping leaves nothing behind.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_drag_that_leaves_drops_nothing() {
+    let mut session = Session::open();
+    let window = session.window(&drop_target("leaving"));
+
+    drag_over(
+        &mut session,
+        window,
+        XDND_VERSION,
+        &["text/uri-list"],
+        b"file:///tmp/never.ron\r\n",
+        (10, 10),
+    );
+    session.peer.xdnd_leave();
+    session.settle();
+
+    // And a drop after the leave is refused rather than served from the state
+    // the leave was supposed to have discarded.
+    session.events.clear();
+    session.peer.xdnd_drop();
+    session.pump_until("XdndFinished", |session| {
+        session.peer.xdnd_finished().is_some()
+    });
+    assert_eq!(
+        session.peer.xdnd_finished().map(|finished| finished.0),
+        Some(false),
+        "the drag left; there is nothing to take"
+    );
+    assert!(
+        !session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::DroppedFile { .. })),
+        "nothing was dropped: {:?}",
+        session.names()
+    );
+}
+
+/// A drop too large for one property is reassembled, and every file arrives.
+///
+/// Two claims in one drag, because they share a payload. **`INCR`**: a
+/// `text/uri-list` past the server's request limit is transferred chunk by
+/// chunk, and a drop rides the clipboard's own machine for it rather than a
+/// second copy — three-byte chunks here, so the handshake runs its whole length
+/// in milliseconds instead of needing a quarter-megabyte payload. **One event
+/// per file**: `DroppedFile` carries one path, so a drag of four files is four
+/// events, in the order the list gave them.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_multi_file_drop_sent_incrementally_is_reassembled_in_order() {
+    let mut session = Session::open();
+    let window = session.window(&drop_target("many files"));
+    let xid = session.xid(window);
+    let point = session.point_in(window, 12, 34);
+
+    let names = ["one", "two", "three", "four"];
+    let payload: Vec<u8> = names
+        .iter()
+        .map(|name| format!("file:///tmp/{name}.ron\r\n"))
+        .collect::<String>()
+        .into_bytes();
+    session.peer.xdnd_enter_incrementally(
+        xid,
+        XDND_VERSION,
+        &["text/uri-list"],
+        &[("text/uri-list", &payload)],
+        3,
+    );
+    session.peer.xdnd_position(point.0, point.1);
+    session.pump_until("the target to answer the first XdndPosition", |session| {
+        session.peer.xdnd_status().is_some()
+    });
+
+    session.events.clear();
+    session.peer.xdnd_drop();
+    session.pump_until("every dropped file", |session| {
+        session
+            .events
+            .iter()
+            .filter(|event| matches!(event, ShellEvent::DroppedFile { .. }))
+            .count()
+            == names.len()
+    });
+
+    let dropped: Vec<_> = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::DroppedFile { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<std::path::PathBuf> = names
+        .iter()
+        .map(|name| std::path::PathBuf::from(format!("/tmp/{name}.ron")))
+        .collect();
+    assert_eq!(dropped, expected, "in the order the uri-list gave them");
+
+    session.pump_until("XdndFinished", |session| {
+        session.peer.xdnd_finished().is_some()
+    });
+    assert_eq!(
+        session.peer.xdnd_finished().map(|finished| finished.0),
+        Some(true),
+        "the whole transfer arrived, so the source is told it was taken"
+    );
+}
+
+/// A window destroyed mid-transfer still releases the source.
+///
+/// The one way an accepted drop can end without reaching either branch of
+/// `handle_xdnd_drop`. A source blocks its own drag loop on `XdndFinished` and
+/// cannot see that the window it was talking to has gone, so silence here wedges
+/// the other application until its own timeout — while the seam's obligation 1
+/// forbids emitting a `DroppedFile` naming a handle the consumer has been told
+/// is stale. Both are satisfied by answering "not taken".
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_window_destroyed_while_a_drop_is_arriving_still_releases_the_source() {
+    let mut session = Session::open();
+    let window = session.window(&drop_target("destroyed mid-drop"));
+
+    // An `INCR` transfer, so the payload takes a dozen turns rather than one:
+    // the state this is about is a drop already under way, and a transfer that
+    // completed inside a single pump could never be interrupted.
+    let xid = session.xid(window);
+    let point = session.point_in(window, 35, 35);
+    let payload: Vec<u8> = b"file:///tmp/interrupted.ron\r\n".repeat(8);
+    session.peer.xdnd_enter_incrementally(
+        xid,
+        XDND_VERSION,
+        &["text/uri-list"],
+        &[("text/uri-list", &payload)],
+        3,
+    );
+    session.peer.xdnd_position(point.0, point.1);
+    session.pump_until("the target to answer the first XdndPosition", |session| {
+        session.peer.xdnd_status().is_some()
+    });
+    session.peer.xdnd_drop();
+    // The conversion having *arrived* is what says the read exists — and with
+    // `INCR` it is nowhere near finished, so destroying the window now is
+    // destroying it mid-transfer rather than racing the whole handshake.
+    session.pump_until("the target to ask for the payload", |session| {
+        session.peer.xdnd_conversions() > 0
+    });
+
+    session.shell.destroy_window(window).expect("destroy");
+    session.pump_until("XdndFinished", |session| {
+        session.peer.xdnd_finished().is_some()
+    });
+    assert_eq!(
+        session.peer.xdnd_finished().map(|finished| finished.0),
+        Some(false),
+        "the window went away, so the drop was not taken — and the source is told"
+    );
+    assert!(
+        !session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::DroppedFile { .. })),
+        "obligation 1: no event names a handle already reported destroyed: {:?}",
+        session.names()
+    );
+}
+
+/// A drop and a paste in flight at once answer their own conversions.
+///
+/// **The one thing about this backend that a drop could break.** A drop's
+/// payload arrives through `ConvertSelection` on `XdndSelection` and a paste's
+/// through `ConvertSelection` on `CLIPBOARD` — same request, same
+/// `SelectionNotify`, same window. The only field that separates the two
+/// answers is the event's `selection`, and a backend that routed on the
+/// transfer's *phase* alone would hand each read the other's bytes.
+///
+/// The clipboard side is deliberately an `INCR` transfer, so the paste is
+/// unfinished and in exactly the phase a drop's notify would otherwise be
+/// routed to for the whole of the drag.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_drop_and_a_paste_in_flight_at_once_do_not_answer_each_other() {
+    let mut session = Session::open();
+    let window = session.window(&drop_target("both at once"));
+
+    // Three-byte chunks, so the paste takes many pumps rather than one.
+    let pasted: Vec<u8> = b"file:///tmp/pasted.ron\r\n".repeat(8);
+    session
+        .peer
+        .own_clipboard_incrementally(&[("text/uri-list", &pasted)], 3);
+    let request = session
+        .shell
+        .clipboard_request(window, MimeType::UriList)
+        .expect("accepted");
+    // Far enough in for the read to be past `TARGETS` and pulling chunks.
+    for _ in 0..4 {
+        session.pump();
+    }
+
+    drag_over(
+        &mut session,
+        window,
+        XDND_VERSION,
+        &["text/uri-list"],
+        b"file:///tmp/dropped.ron\r\n",
+        (50, 60),
+    );
+    session.peer.xdnd_drop();
+    session.pump_until("the dropped file", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::DroppedFile { .. }))
+    });
+
+    let dropped: Vec<_> = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::DroppedFile { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        dropped,
+        vec![std::path::PathBuf::from("/tmp/dropped.ron")],
+        "the drop got the drag's bytes, not the clipboard's"
+    );
+
+    let (_, content) = session.clipboard_answer(request);
+    assert_eq!(
+        content,
+        ClipboardContent::Bytes(pasted),
+        "the paste got the clipboard's bytes, not the drag's"
     );
 }
 

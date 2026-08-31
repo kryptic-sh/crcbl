@@ -298,15 +298,13 @@ pub trait Shell {
 - Drag-drop: file paths in (viewer/editor import), same mime set as clipboard —
   DnD and clipboard share the offer/receive plumbing on Wayland/X11 anyway (one
   implementation, two triggers).
-  - **Status:** implemented on Wayland (P0.5c) and on Win32 (P5C W3, through
-    `WM_DROPFILES` — small enough to be in scope, unlike XDND). **XDND is
-    deferred on X11** — it is a five-message handshake over a _second_ selection
-    with its own version and timestamp rules, i.e. the whole selection machinery
-    again with a protocol on top, and it was its own slice on Wayland.
-    `ShellCaps::DRAG_DROP` is honestly clear on the X11 backend and
-    `DroppedFile` is never emitted there. Owed before the editor's asset browser
-    needs OS-file drops (P12), and the `accept_drops` gate plus `parse_uri_list`
-    already carry over unchanged.
+  - **Status:** implemented on Wayland (P0.5c), on Win32 (P5C W3, through
+    `WM_DROPFILES`) and on X11 (XDND version 5, receiving — see
+    `crates/crcbl-shell/src/x11/xdnd.rs`). Every desktop backend sets
+    `ShellCaps::DRAG_DROP` and emits `DroppedFile`; the browser backend clears
+    it. **Starting** a drag is out on all of them: nothing in the engine drags a
+    file out, and a source needs a pointer grab, a drag icon and an action
+    negotiation the seam has no vocabulary for.
 
 Explicitly out (post-MVP or never): exclusive fullscreen, multi-window MVP
 (editor is single-window until it isn't), gamepad raw backends
@@ -384,9 +382,9 @@ Notes on the from-scratch protocol work:
   asset browser for free. On Win32 `MimeType::UriList` is a registered format
   and `CF_HDROP` is never read, so an Explorer copy is invisible, and the shared
   `clipboard::parse_uri_list` cannot round-trip a Windows path. On macOS only
-  `public.file-url` is read. On X11 there is no XDND at all. Closing it is seam
-  work on three of four backends — see [08-editor.md](08-editor.md)'s correction
-  and `docs/backlog.md`.
+  `public.file-url` is read. X11 now takes XDND version 5 receiving. Closing
+  what is left is seam work on two of four backends — see
+  [08-editor.md](08-editor.md)'s correction and `docs/backlog.md`.
 - **Render scale has no seam half.** The display-mode table defines borderless
   as an internal render target upscaled to the native surface, `ShellCaps`
   carries `HW_UPSCALE`, and [18-render-features.md](18-render-features.md)
