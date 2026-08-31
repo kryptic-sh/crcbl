@@ -1365,12 +1365,40 @@ for breach, 87.0x for shard. The shadow filter's early-out took 27% off the
 forward pass on two adapters and moved puppet's step by one second (612 s to 613
 s) — the same finding from the other side.
 
-**shard has still never completed.** Every run before `e010015` was cancelled by
-a later push while it was still going; `e010015` killed it at 20 minutes in
-section I, the last one, with every check it had reached green; every run since
-died at a demo ahead of it. The `demos` job's uniform 45-minute cap is past
-every figure measured so far — puppet 774 s and breach 1213 s at `80022df` — but
-it is a bound on a hang, not a measurement of shard, and there is still none.
+**shard completes about half the time, and the other half it hangs to the cap —
+measured 2026-08-31.** The claim that it had never completed is retired: it now
+has figures, and they are bimodal rather than slow. Four consecutive Pages runs,
+job durations read off `gh run view <id> --json jobs`:
+
+| Commit    | Run         | shard  | Outcome              |
+| --------- | ----------- | ------ | -------------------- |
+| `79a555a` | 33353650899 | 26 min | success              |
+| `9bd267b` | 33360958824 | 45 min | cancelled at the cap |
+| `458a5ed` | 33368904505 | 24 min | success              |
+| `a1e5168` | 33371443850 | 45 min | cancelled at the cap |
+
+A passing run is 24–26 minutes; a failing one is 45:17 and 45:00 — the `demos`
+job's `timeout-minutes: 45` exactly. So this is **a hang, not slowness**, and
+the paragraph above is right that the cap cannot tell them apart: nothing here
+distinguishes "shard got slower" from "shard stopped".
+
+**The cost is that the site does not publish.** On both hung runs
+`deploy to GitHub Pages` was **skipped** — confirmed by name, not inferred — so
+the run reads `cancelled` and the published site silently stays at the last
+commit that got through. That is what happened to `a1e5168`: CI green, every
+other demo green, and the site left at `458a5ed`. Distinguish the two causes
+when reading the run list: **only** shard cancelled is this hang, while shard
+_and_ `deploy` cancelled together is an ordinary concurrency cancellation from
+the next push.
+
+The hang predates the shadow ladder's last rungs — `ad988ae` and `c41c15d` on
+2026-08-30 show the same single-job cancellation — so it is not caused by them.
+Nothing has yet caught it in the act: the cancelled step flushes **no** output
+into the job log at all, only the runner's own setup lines and its
+`Terminate orphan process` list (bash, Xvfb, chrome, two `cat`s), so where in
+the run it stops is still unknown. The `Upload the browser evidence` step does
+run on the cancelled job, and reading that artifact is the next step nobody has
+taken.
 
 ### The audio buses ship without a reader or a wire slot (2026-08-28)
 
