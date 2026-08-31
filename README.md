@@ -61,8 +61,8 @@ What is not:
 - **No editor.** `apps/editor` is deliberately absent until there is something
   to put in it.
 - The viewer opens a file from the command line, from a drop on its window
-  (Wayland, Win32 and AppKit — X11 has no XDND), from a drop on the canvas in
-  the browser, and from the shelf of Khronos CC0 models on its `ESC` panel.
+  (Wayland, X11, Win32 and AppKit), from a drop on the canvas in the browser,
+  and from the shelf of Khronos CC0 models on its `ESC` panel.
 
 `docs/plan/ROADMAP.md` is the canonical build order and carries a fuller status;
 `docs/backlog.md` is what was raised and not finished, and why.
@@ -100,10 +100,11 @@ shaded picture (`shaded`, `heatmap`, `lod tint`, `normals`, `ambient occlusion`,
 every action in a sample that has them and `bind fire KeyJ` moves one, and `log`
 prints the log filter and `log warn,crcbl_vk=trace` installs one for the running
 process — in a browser as well as a terminal — `master_volume 0.5` moves a bus
-on the mix that is already playing, and `save` writes it to the settings file.
-`Ctrl`+`V` pastes into the input line wherever the platform has a clipboard to
-read. The same keys work in the browser demos: the shim leaves `` ` `` to the
-engine and passes every character typed at the console through.
+on the mix that is already playing, `save` writes it to the settings file, and
+`config video` runs `video.cfg` out of that same settings directory, one console
+line per line. `Ctrl`+`V` pastes into the input line wherever the platform has a
+clipboard to read. The same keys work in the browser demos: the shim leaves
+`` ` `` to the engine and passes every character typed at the console through.
 
 `CRCBL_SHELL=x11` forces a windowing backend and `CRCBL_LOG=debug` prints every
 shell event.
