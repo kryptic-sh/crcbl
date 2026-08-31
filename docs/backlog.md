@@ -151,10 +151,6 @@ own unbuilt row, not this entry's.
   `rung.sharp < blurred_twice.sharp` measured `0 < 2` on radv and `0 < 5` on
   lavapipe; the radv margin is one step, so WARP and SwiftShader see that
   headroom for the first time in CI.
-- **Nothing renders a real frame at four slices end to end.** The device test
-  drives the two pipelines directly, and
-  `forward::tests::a_second_occlusion_blur_is_a_pass_the_frame_records` moves
-  the blur count rather than the slice count.
 - The tangential measure counts steps of two levels or more. A regression that
   moved the whole line by a constant, or that kept every step at one level while
   wandering, would not be caught by it.

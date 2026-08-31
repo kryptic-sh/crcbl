@@ -12497,6 +12497,47 @@ mod tests {
     /// [`ssao_blur_switch`]'s lock.
     static SSAO_BLUR_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Takes `r_ssao_slices` for this thread and puts it back at its default
+    /// when the guard drops.
+    ///
+    /// [`ssao_blur_switch`]'s shape exactly, for its reason: a plain
+    /// `cargo test` run shares one process between tests, and a variable this
+    /// one left moved is a frame the next test did not ask for.
+    fn ssao_slice_switch() -> SsaoSliceSwitch {
+        let guard = SSAO_SLICE_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let switch = SsaoSliceSwitch { _guard: guard };
+        switch.set(i64::from(ssao::SLICE_COUNT_DEFAULT));
+        switch
+    }
+
+    /// What [`ssao_slice_switch`] hands back.
+    struct SsaoSliceSwitch {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl SsaoSliceSwitch {
+        /// Asks each pixel for `slices` of them.
+        fn set(&self, slices: i64) {
+            crate::ssao::r_ssao_slices
+                .set(&crcbl_console::Value::Int(slices))
+                .expect("`r_ssao_slices` is a writable int in range");
+        }
+    }
+
+    impl Drop for SsaoSliceSwitch {
+        fn drop(&mut self) {
+            // Back to the shipping count at both ends, so a check that panicked
+            // mid-way does not hand the next holder a four-slice frame — which
+            // is a frame every golden in this workspace was blessed without.
+            self.set(i64::from(ssao::SLICE_COUNT_DEFAULT));
+        }
+    }
+
+    /// [`ssao_slice_switch`]'s lock.
+    static SSAO_SLICE_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Every draw the recorded stream holds, whichever call recorded it.
     ///
     /// Not scoped to a pass, unlike [`commands_in_pass`]: what
@@ -15654,6 +15695,144 @@ mod tests {
             twice.iter().any(|pass| pass == "forward"),
             "the frame still has to reach its forward pass: {twice:#?}"
         );
+        recorder.assert_valid();
+    }
+
+    /// Every host-written buffer at the end of a whole ring of frames, keyed by
+    /// the handle written and holding what that handle last held.
+    ///
+    /// A whole ring rather than one frame, because the blocks a frame writes are
+    /// themselves rings — a buffer per frame in flight, [`Ssao`]'s among them —
+    /// so one frame touches one slot of each and two single-frame batches would
+    /// be comparing different buffers. A ring writes every slot, so two batches'
+    /// keys line up and a difference between them is a difference in *bytes*.
+    ///
+    /// Only the events this call appends are read, so a caller can take one
+    /// batch after another off the same recorder.
+    fn host_buffers_over_a_ring(
+        recorder: &Recorder,
+        device: &dyn Device,
+        renderer: &mut ForwardRenderer,
+        queue: QueueHandle,
+    ) -> std::collections::BTreeMap<u64, Vec<u8>> {
+        let from = recorder.events().len();
+        for _ in 0..FRAMES_IN_FLIGHT {
+            frame(device, renderer, queue).release(device);
+        }
+        recorder.events()[from..]
+            .iter()
+            .filter_map(|event| match event {
+                Event::BufferWritten { buffer, .. } => Some(*buffer),
+                _ => None,
+            })
+            .map(|buffer| {
+                let bytes = recorder
+                    .buffer_bytes(buffer)
+                    .expect("the stream only names buffers this recorder created");
+                (buffer.to_bits(), bytes)
+            })
+            .collect()
+    }
+
+    /// **`r_ssao_slices` reaches the block `ssao.slang` reads, on every frame of
+    /// the ring, and moves nothing else in the frame.**
+    ///
+    /// The device test drives the two occlusion pipelines directly and
+    /// [`a_second_occlusion_blur_is_a_pass_the_frame_records`] moves the *blur*
+    /// count, so until this the slice count was a variable with a `get_i64` and
+    /// no evidence that a rendered frame ever carried it: `slice_count` could
+    /// have returned its default unconditionally and every check in this
+    /// workspace would still be green.
+    ///
+    /// So the observable is the bytes, taken off the null recorder's write log
+    /// after a whole ring of frames at each setting and compared **by handle**.
+    /// Two claims come out of that comparison and both are load-bearing:
+    ///
+    /// * **Some block moved** — every ring slot, in fact, which is what says the
+    ///   count reaches the frame at all rather than only the slot the last frame
+    ///   happened to land in.
+    /// * **Every block that moved, moved only there.** A frame is a few dozen
+    ///   host writes and the slice count has business with exactly one word of
+    ///   one of them; a setting that perturbed a matrix, an instance or a shadow
+    ///   view would be drawing a different frame for a reason nobody asked for,
+    ///   and the "at least one differs" half alone would pass on it happily.
+    #[test]
+    fn four_slices_reach_the_frame_the_shader_reads() {
+        let switch = ssao_slice_switch();
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+
+        // A ring rendered before either batch is taken, because the two below
+        // are compared by handle and the renderer's opening frame writes blocks
+        // no later frame writes again: it fills a cold shadow atlas, so the
+        // shadow views' uniform blocks and the draw-generation blocks of the
+        // cascades that were drawn are written once and never again while the
+        // cache holds. Those would be in the first batch and missing from the
+        // second, and a key that is only in one of them is a difference this
+        // test cannot say anything about.
+        for _ in 0..FRAMES_IN_FLIGHT {
+            frame(device, &mut renderer, queue).release(device);
+        }
+        let shipping = host_buffers_over_a_ring(&recorder, device, &mut renderer, queue);
+        switch.set(i64::from(ssao::SLICE_COUNT_MAX));
+        let asked = host_buffers_over_a_ring(&recorder, device, &mut renderer, queue);
+        assert_eq!(
+            shipping.keys().collect::<Vec<_>>(),
+            asked.keys().collect::<Vec<_>>(),
+            "the two batches must write the same buffers, or they are not comparable",
+        );
+
+        // Which bytes moving the count alone is allowed to move, asked of
+        // `SsaoParams::to_bytes` rather than written here as an offset: the
+        // block's layout is `crcbl_shaders::ssao`'s, and a field inserted ahead
+        // of the count would leave a number spelled here pointing at the radius.
+        let block_of = |slices| {
+            ssao::SsaoParams {
+                inv_proj: [0.0; 16],
+                proj: [0.0; 16],
+                radius: 0.0,
+                slices,
+            }
+            .to_bytes()
+        };
+        let at_shipping = block_of(ssao::SLICE_COUNT_DEFAULT);
+        let at_max = block_of(ssao::SLICE_COUNT_MAX);
+        let count_word: Vec<usize> = (0..ssao::PARAMS_SIZE)
+            .filter(|at| at_shipping[*at] != at_max[*at])
+            .collect();
+
+        let mut moved = 0;
+        for (handle, before) in &shipping {
+            let after = &asked[handle];
+            if before == after {
+                continue;
+            }
+            moved += 1;
+            let mut only_the_count = before.clone();
+            for at in &count_word {
+                assert_eq!(
+                    before[*at], at_shipping[*at],
+                    "buffer {handle} differs between the batches but did not go in holding the \
+                     shipping slice count, so this is some other write moving",
+                );
+                only_the_count[*at] = at_max[*at];
+            }
+            assert_eq!(
+                after, &only_the_count,
+                "buffer {handle} moved somewhere other than the slice count's word: the setting \
+                 is perturbing a block it has no business in",
+            );
+        }
+        assert_eq!(
+            moved, FRAMES_IN_FLIGHT,
+            "`r_ssao_slices 4` must reach every slot of the occlusion ring; a count that moved \
+             none of them is a console variable no rendered frame reads",
+        );
+
+        renderer.destroy(device);
         recorder.assert_valid();
     }
 
