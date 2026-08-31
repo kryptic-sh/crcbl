@@ -83,16 +83,37 @@ with no GPU. puppet is the row to quote — it holds inside 1% across all four
 runs — and the dashes are the two runs shard was killed in. Against radv's 645
 us and lavapipe's 17.0 ms above, that is the third tier this entry was missing.
 
-**What is still not measured is the rung itself**, and the reason is narrower
-than "no readout": nothing sets `r_ssao_slices` or `r_ssao_blur_passes` during a
-browser run, so every number here is the shipping 2-slice, 1-blur pair. The
-route needs no new export — `EXPECTATIONS.quarry.console` in
-`web/tools/browser-e2e.mjs` already types whole console lines through a real
-keyboard and reads their effect back off quarry's own heartbeat. What it would
-take is typing the two variables early in the run and reading the same rows. One
-thing to design around: the report is a p50 over the run's **last** frames
-rather than over the whole run, so a line typed at boot is measured cleanly, but
-a line typed late would be averaged against frames that never had it.
+**A browser on real hardware, measured 2026-08-31.** quarry through Chrome on an
+RX 7900 XTX, `--adapter hardware`, canvas 959x463: `ssao` **0.054 ms** p50 and
+one `ssao-blur` **0.017 ms**, 8.0% and 2.6% of a 0.678 ms frame. Not comparable
+in absolute terms to the 1920x1080 native figures above — 4.7x fewer pixels and
+a different scene — but it is the tier a visitor to the Pages URL actually gets,
+and it says the shipping pair is under a tenth of a millisecond there.
+
+**The rung itself is still unmeasured on any browser, and two things block it —
+both found by trying, 2026-08-31.**
+
+- **The gate cannot type a digit.** `physical()` inside the console block of
+  `web/tools/browser-e2e.mjs` maps a space, an underscore and `a`–`z`, and
+  throws on anything else: `no US-layout key for "4"`. So `r_ssao_slices 4` is
+  untypeable by the only route that reaches the console. Three lines would add
+  `Digit0`–`Digit9`; nothing else in the tree wants them yet, which is why they
+  were not added speculatively.
+- **A line typed in the console group is too late to be timed at all**, and this
+  is the real obstacle. With the digits patched in locally the console did take
+  both lines — the page logged `r_ssao_slices = 4` and `r_ssao_blur_passes = 2`
+  — and the reported figures did not move by so much as a microsecond: 0.054 and
+  0.017 ms, identical to the baseline run. The proof of why is the label count.
+  A second blur is a _pass_, so a frame that had one reports `ssao-blur-2`; the
+  report says **19 label(s)** in both runs. No timed frame ever carried the
+  change. The run drew 157 frames while the report covers "the last 75 of 75",
+  so GPU timing had already stopped before the console group ran.
+
+So typing it later in the run can never work, whatever the key map does. What
+would: apply the setting before the frames are timed. The routes are a `.cfg`
+seeded into OPFS for `config` to run at boot, or a boot-time hook that takes
+console lines — the second is engine surface added for a test, which is the same
+objection recorded against the `config` storage seam.
 
 **What the rung buys, re-measured.** The scene is
 `forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`: a
