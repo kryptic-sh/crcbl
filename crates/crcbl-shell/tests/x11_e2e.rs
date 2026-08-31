@@ -126,6 +126,17 @@ struct Session {
     pumps: u32,
 }
 
+/// How many agreeing reads of a window's origin count as "the manager has
+/// finished placing it".
+///
+/// A settling count rather than a signal, because X11 offers no "placement is
+/// done" event: a reparenting manager moves the frame after it reparents, and
+/// the only thing a second client can observe is the origin it reports. Each
+/// read is separated by a `pump` and its event wait, so this is a poll with a
+/// deadline rather than a sleep — [`Session::pump_until`] still fails loudly if
+/// the origin never settles.
+const ORIGIN_SETTLED_POLLS: u32 = 3;
+
 impl Session {
     fn open() -> Self {
         let expect_wm = std::env::var("CRCBL_E2E_EXPECT_WM").is_ok();
@@ -199,6 +210,32 @@ impl Session {
                     .peer
                     .window_parent(xid)
                     .is_some_and(|parent| parent != root)
+            });
+            // **Reparenting is not placement, and the gap between them is what
+            // made this flake.** `openbox` puts the client inside a frame and
+            // moves the frame *afterwards*, so an origin read the instant the
+            // parent stops being the root can still be the pre-placement
+            // `(0, 0)`. The point computed from it is then window-relative
+            // while the backend, translating a moment later, uses the real
+            // origin — and the drop arrives at minus the whole window origin.
+            // Measured at 2 failures in 60 runs under `openbox` and twelve
+            // spinners before this wait, and the CI leg failed the same way.
+            //
+            // So wait for the origin to hold still rather than for the parent
+            // to change: `ORIGIN_SETTLED_POLLS` agreeing reads, each after a
+            // `pump` and its event wait, which is a poll with a deadline
+            // rather than a sleep.
+            let mut last = None;
+            let mut agreed = 0_u32;
+            self.pump_until("the window's origin to stop moving", |session| {
+                let now = session.peer.window_origin(xid);
+                if now.is_some() && now == last {
+                    agreed += 1;
+                } else {
+                    agreed = 0;
+                }
+                last = now;
+                agreed >= ORIGIN_SETTLED_POLLS
             });
         }
         let (origin_x, origin_y) = self
