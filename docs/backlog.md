@@ -496,6 +496,33 @@ limits rather than fixed:
   not written back. A `bind aim mouse` spelling needs a parser for the other
   variants and a decision about what `Wasd` looks like on one line.
 
+## `45-shadows.md`'s atlas section is a record of shipped work (2026-08-31)
+
+All five items of the atlas rung landed, and `43-render-standards.md`'s delivery
+table no longer carries the row — but the five items themselves are still
+written in `docs/plan/45-shadows.md` as a delivery list, at length. The standing
+rule is that shipped work leaves the plans, and this has not left.
+
+**It is not a delete, which is why it was not done in passing.** Parts of that
+prose still bind future work and would be lost with it:
+
+- **`MIN_TILE` is a floor nothing has measured.** The text says so explicitly —
+  no light asks for a sub-cell map until the priority rung spends one — so the
+  halvings are a starting point for a sweep, not a finding. That is a live
+  instruction to whoever builds the next rung.
+- **The coverage anchors are a sweep bounded by fixtures that must not move**:
+  `Scene::PointShadow` 3.06, `Scene::SpotShadow` 1.41, `apps/lantern`'s lamp
+  1.06 at the worst phase of its orbit, its corner downlight 0.37, with the
+  downlight binding. Anyone moving `WHOLE_CELL_COVERAGE` needs those numbers.
+- **`LEVEL_HOLD_RATIO` is deliberately the same fifth `lod_hold_ratio` opens**,
+  which is a cross-module constraint rather than a note about this rung.
+
+What it would take: lift those three into decisions of their own — the file
+already has eleven numbered decisions and they belong beside them — and then cut
+the five-item narrative, which `git log` and the changelog already hold. Doing
+it as one edit risks mangling a long file, so it wants to be its own change with
+its own diff review.
+
 ## The shadow atlas: what items 1, 2, 4 and 5 left (2026-08-31)
 
 `docs/plan/45-shadows.md`'s atlas rung is five items; item 3 (a budget in tiles
