@@ -1533,12 +1533,30 @@ the next push.
 
 The hang predates the shadow ladder's last rungs — `ad988ae` and `c41c15d` on
 2026-08-30 show the same single-job cancellation — so it is not caused by them.
-Nothing has yet caught it in the act: the cancelled step flushes **no** output
-into the job log at all, only the runner's own setup lines and its
-`Terminate orphan process` list (bash, Xvfb, chrome, two `cat`s), so where in
-the run it stops is still unknown. The `Upload the browser evidence` step does
-run on the cancelled job, and reading that artifact is the next step nobody has
-taken.
+Nothing has yet caught it in the act, and the obvious route is a dead end —
+**checked 2026-08-31, so nobody repeats it.** The cancelled step flushes no
+output into the job log at all, only the runner's setup lines and its
+`Terminate orphan process` list (bash, Xvfb, chrome, two `cat`s). The
+`Upload the browser evidence` step does still run on a cancelled job, but the
+`web-e2e-shard` artifact it uploads then holds **only `shard-swiftshader.png`**
+— a successful run's holds `shard-swiftshader.log` beside it, 39,921 bytes on
+run 33368904505 — because that log is written when the run finishes. A hung run
+therefore leaves no log anywhere, and the artifact cannot say where it stopped.
+
+**What the passing log does say is where the time goes**, and it argues this may
+be slowness rather than a hang. On run 33368904505 shard's own `PassStats` line
+reports the `forward` pass at **3,809.661 ms per frame, 87.0% of the frame**,
+with `ssr` at 250 ms and the occlusion pair at 180 ms, and the demo reaches 469
+simulated seconds over 109 frames. So a passing shard job is ~24 minutes of
+genuinely slow software rasterisation against a 45-minute cap — under **twice**
+the headroom. A runner half as quick as the median crosses it, which fits the
+observed 2-in-4 rate without any hang at all.
+
+**What would actually distinguish them**, and neither exists: the driver already
+measures its own scale factor, so it could fail on the factor rather than on the
+clock; or the harness could write its log incrementally rather than at the end,
+so a killed job leaves evidence. The second is the cheaper one and would settle
+this question the next time it fires.
 
 ### The audio buses ship without a reader or a wire slot (2026-08-28)
 
