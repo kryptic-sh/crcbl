@@ -214,10 +214,12 @@ impl Bloom {
     /// The most passes [`Bloom::add_passes`] can add to a frame: a downsample
     /// per level, an upsample per level but the last, and the composite.
     ///
-    /// A **ceiling**, unlike [`crate::ssao::Ssao::PASSES`], because the chain's
+    /// A **ceiling**, like [`crate::ssao::Ssao::MAX_PASSES`], because the chain's
     /// length is a function of the extent and [`ForwardRenderer::MAX_PASSES`] is
     /// a constant a caller sizes query sets with before any extent is known.
-    /// [`Bloom::passes_for`] is what a frame actually records.
+    /// [`Bloom::passes_for`] is what a frame actually records, and
+    /// [`crate::ssao::Ssao::passes`] is the occlusion pair's answer to the same
+    /// question.
     ///
     /// [`ForwardRenderer::MAX_PASSES`]: crate::ForwardRenderer::MAX_PASSES
     pub(crate) const MAX_PASSES: u32 = 2 * MAX_MIPS;

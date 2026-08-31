@@ -30,6 +30,24 @@ pub const PARAMS_SIZE: usize = 64 + 64 + 16;
 /// position by dividing by nothing.
 pub const DEPTH_FAR: f32 = 0.0;
 
+/// Planes through the eye each pixel sweeps by default, matching
+/// `static const uint SLICE_COUNT_DEFAULT` in `shaders/ssao.slang`.
+///
+/// Two: the tile's own direction and its quarter turn. Every golden in this
+/// workspace was blessed at this count, and it is the floor `slice_count`
+/// clamps to — so a producer that leaves [`SsaoParams::slices`] at zero gets
+/// this frame rather than an unoccluded one.
+pub const SLICE_COUNT_DEFAULT: u8 = 2;
+
+/// The most planes a pixel may sweep, matching `static const uint
+/// SLICE_COUNT_MAX` in `shaders/ssao.slang`.
+///
+/// Four, the extra pair at an eighth turn from the first. The shader's own
+/// constant carries the arithmetic: the turn is exact because it is done on the
+/// direction table's integers, and what it buys is four plane orientations the
+/// table cannot otherwise reach.
+pub const SLICE_COUNT_MAX: u8 = 4;
+
 /// Radians [`acos_approx`] is allowed to differ from `f64::acos`.
 ///
 /// Measured rather than chosen, over `-1..=1` at two million steps —
@@ -107,21 +125,36 @@ pub struct SsaoParams {
     pub proj: [f32; 16],
     /// The sampling radius, in world units.
     ///
-    /// The only scalar the block carries. A depth bias sat beside it until GTAO
-    /// replaced the hemisphere of depth comparisons that needed one; `ssao.slang`
-    /// says on `SsaoParams::params` why a horizon integral does not.
+    /// A depth bias sat beside it until GTAO replaced the hemisphere of depth
+    /// comparisons that needed one; `ssao.slang` says on `SsaoParams::params`
+    /// why a horizon integral does not. [`slices`] is what took the slot it
+    /// left.
+    ///
+    /// [`slices`]: Self::slices
     pub radius: f32,
+    /// Planes through the eye each pixel sweeps for a horizon.
+    ///
+    /// [`SLICE_COUNT_DEFAULT`] is what ships and [`SLICE_COUNT_MAX`] is the
+    /// ceiling; `ssao.slang`'s `slice_count` clamps whatever arrives into that
+    /// range, so a producer that writes nothing here gets the default rather
+    /// than a frame with no slices in it.
+    ///
+    /// A `u8` because the range is that small and because the block carries it
+    /// as a float: every value it can hold converts without rounding, which is
+    /// what lets the shader read it back with a `uint` cast rather than a
+    /// nearest-integer search.
+    pub slices: u8,
 }
 
 impl SsaoParams {
     /// The block as the bytes a uniform buffer holds.
     ///
-    /// Little-endian throughout, and the three padding words after [`radius`]
-    /// are written rather than left alone for [`crate::compute_probe::Params`]'s
+    /// Little-endian throughout, and the two padding words after [`slices`] are
+    /// written rather than left alone for [`crate::compute_probe::Params`]'s
     /// reason: the buffer is [`PARAMS_SIZE`] wide and a partial write leaves the
     /// tail undefined.
     ///
-    /// [`radius`]: Self::radius
+    /// [`slices`]: Self::slices
     #[must_use]
     pub fn to_bytes(self) -> [u8; PARAMS_SIZE] {
         let mut bytes = [0u8; PARAMS_SIZE];
@@ -132,7 +165,9 @@ impl SsaoParams {
         }
         bytes[at..at + 4].copy_from_slice(&self.radius.to_le_bytes());
         at += 4;
-        debug_assert_eq!(at + 12, PARAMS_SIZE, "three padding words close the row");
+        bytes[at..at + 4].copy_from_slice(&f32::from(self.slices).to_le_bytes());
+        at += 4;
+        debug_assert_eq!(at + 8, PARAMS_SIZE, "two padding words close the row");
         bytes
     }
 }
@@ -155,6 +190,33 @@ mod tests {
         assert!(
             source.contains(&declaration),
             "ssao.slang does not declare `{declaration}`; DEPTH_FAR has drifted from the shader"
+        );
+    }
+
+    /// The slice counts and the shader must name the same two numbers.
+    ///
+    /// `the_far_plane_matches_the_constant_ssao_slang_declares`'s check exactly,
+    /// for its reason: the shader compiles with any pair of these, and a
+    /// disagreement shows up only as a frame drawn at a count nobody chose —
+    /// a host asking for four while the shader clamps to two is a silent
+    /// no-op, and a floor that drifted below two is every surface fully lit.
+    #[test]
+    fn the_slice_counts_match_the_constants_ssao_slang_declares() {
+        let source = include_str!("../shaders/ssao.slang");
+        for declaration in [
+            format!("static const uint SLICE_COUNT_MAX = {SLICE_COUNT_MAX};"),
+            format!("static const uint SLICE_COUNT_DEFAULT = {SLICE_COUNT_DEFAULT};"),
+        ] {
+            assert!(
+                source.contains(&declaration),
+                "ssao.slang does not declare `{declaration}`; the slice counts have drifted from \
+                 the shader"
+            );
+        }
+        assert!(
+            source.contains("clamp(uint(camera.params.y), SLICE_COUNT_DEFAULT, SLICE_COUNT_MAX)"),
+            "ssao.slang no longer clamps the requested count into those two, so a block whose \
+             `params.y` was never written sweeps no slices and lights every surface"
         );
     }
 
@@ -318,6 +380,7 @@ mod tests {
             inv_proj,
             proj,
             radius: 0.5,
+            slices: SLICE_COUNT_MAX,
         }
         .to_bytes();
 
@@ -325,6 +388,15 @@ mod tests {
         assert_eq!(&bytes[0..4], &1.0f32.to_le_bytes());
         assert_eq!(&bytes[124..128], &2.0f32.to_le_bytes());
         assert_eq!(&bytes[128..132], &0.5f32.to_le_bytes());
-        assert!(bytes[132..].iter().all(|byte| *byte == 0), "{bytes:?}");
+        // The count rides in `params.y` as a float, and **the whole point is
+        // that the trip is exact**: the shader casts it straight back to a
+        // `uint`, so a value that arrived a hair under would floor to one less
+        // and sweep a plane fewer than the host asked for.
+        assert_eq!(
+            &bytes[132..136],
+            &f32::from(SLICE_COUNT_MAX).to_le_bytes(),
+            "the slice count did not survive the block as the number it went in as"
+        );
+        assert!(bytes[136..].iter().all(|byte| *byte == 0), "{bytes:?}");
     }
 }

@@ -8,86 +8,135 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 The items the user ranked above the lighting order. They stay at the top of this
 file until they ship.
 
-### The ambient occlusion pass still bands along the tangential axis
+### The ambient occlusion tangential rung is built and is not the default
 
-**The radial half shipped on 2026-08-30** — `ssao.slang` gained `STEP_OFFSETS`,
-a 4×4 ordered-dither table that phases each pixel's march, and the changelog
-carries what a user sees. `crates/crcbl/tests/forward_e2e/occlusion.rs` is the
-device test that holds it: a wall and a plate written into the prepass image as
-exact depths at 1920×1080, the shipping `ssao` and `ssao-blur` pipelines, and
-the longest run of one 8-bit level across the falloff. Swept before the bound
-was fixed — with the offsets forced off that run is 16 columns on radv and 13 on
-lavapipe, with them 5 and 4.
+**Both halves exist now.** The radial half shipped 2026-08-30 (`STEP_OFFSETS` in
+`ssao.slang`). The tangential half shipped 2026-08-31 as two console variables
+in `crates/crcbl-render/src/ssao.rs` — `r_ssao_slices` in `2..=4` and
+`r_ssao_blur_passes` in `1..=2` — both defaulting to what shipped. What is left
+here is one decision: **whether either default moves.**
 
-**What is left is the tangential (vertical) half**, which is slice-count banding
-rather than step banding: `SLICE_COUNT` is 2 and `SLICE_DIRECTIONS` has sixteen
-first directions, so a blur neighbourhood spans thirty-two planes and no more.
-The step offsets help it — the 2026-08-30 measurement pass reported the worst
-cliff falling from 21 levels to 10 — but only the rung below reaches zero sharp
-edges.
+**Blocker 1 is closed, and the answer was better than the question.** The old
+entry asked whether a rounding in the last place was acceptable for a 45 degree
+rotation. It never has to happen: the turn is done on `SLICE_DIRECTIONS`' own
+integers rather than on a unit vector. `(x, y) -> (x - y, x + y)` is the 45
+degree rotation scaled by `sqrt(2)`, and `normalize` divides the scale back out,
+so `sqrt(2)/2` is never spelled. The table's pairs are `(2,0)`, `(1,1)`,
+`(0,±2)`, `(1,±1)`, `(1,±2)`, `(2,±1)` and their negations; the turn sends them
+to components of magnitude at most 3 — `(2,1) -> (1,3)`, `(1,2) -> (-1,3)` —
+every one exactly representable, so the float adds are exact. The only rounding
+left is the `normalize` the first slice has always made; bounded generously at
+eight units in the last place it turns a direction by under `7e-7` radians, two
+orders of magnitude under `crcbl_shaders::ssao::MAX_ACOS_ERROR`, about a
+ten-thousandth of one `R8Unorm` level, and under a hundredth of a texel at any
+reach a 4K frame can hold. `ssao.slang`'s `SLICE_COUNT_MAX` carries the
+arithmetic.
 
-**The rung, and its price.** `SLICE_COUNT` 4 with the extra slices at an eighth
-turn, plus a second blur pass. The 2026-08-30 measurement pass priced that at
-**+69% on the `ssao` pass on radv** and reported it as the only variant that
-removed every sharp edge on the tangential line. Two things block it and both
-are decisions, not work:
+One thing genuinely moved: the second slice used to be an exact quarter turn of
+the normalised first and is now the `normalize` of a quarter-turned integer
+vector. Bit-identical wherever `normalize` is a reciprocal square root and a
+multiply, possibly a last place apart otherwise. Measured identical on both
+local drivers, and no golden moved.
 
-- **An eighth turn is not exact.** `SLICE_COUNT` is 2 today precisely because
-  the quarter turn is `(x, y) -> (-y, x)` and involves no arithmetic; a 45°
-  rotation spells `sqrt(2)/2`, and `ssao.slang`'s header is explicit that this
-  file has never written a transcendental it could not bound. A constant
-  `0.70710678` is exactly representable and its _product_ with a direction is
-  not, so the question is whether a rounding in the last place is acceptable
-  here when `acos` was refused. Nobody has answered it.
-- **+69% is priced on one tier.** Unmeasured on lavapipe and unmeasured in the
-  browser, which is where `docs/plan/43-render-standards.md`'s low tier lives. A
-  second blur pass is also a second full-screen `R8Unorm` read and write per
-  frame, which is the part a bandwidth-bound tier feels rather than the taps.
+**Blocker 2 is closed on two tiers and open on the third.** Measured 2026-08-31,
+p50 over seven runs, 1920x1080, every pass timed separately:
 
-**Considered and declined, with numbers.** Both were hypotheses in the original
-item and both measured inert on 2026-08-30, so neither should be re-proposed
-without new evidence:
+```text
+                                  radv (RX 7900 XTX)     lavapipe
+ssao, 2 slices                             582 us         11.9 ms
+ssao, 4 slices                            1245 us         21.4 ms
+one ssao-blur                               63 us          5.1 ms
+--------------------------------------------------------------------
+the pair that ships                        645 us         17.0 ms
+   + the second blur only          710 us  (+10%)   21.9 ms  (+29%)
+   + the extra slices only        1308 us (+103%)   26.5 ms  (+56%)
+   the rung, both               1369 us (+112%)   31.4 ms  (+85%)
+```
 
-- **8-bit quantisation of the occlusion channel.** Re-rendering the raw channel
-  as `R32Float` reproduced the baseline's plateau list byte for byte — the
-  terraces were in the horizon distances, not in the channel that stored them.
-  `R16Unorm` for the raw target therefore buys nothing and costs bandwidth on
-  every tier.
-- **The four-neighbour reconstructed normal.** The improved reconstruction was
-  byte-identical to the shipping one on a flat wall, which is the surface the
-  banding was reported on. It may still be worth having on curved geometry; it
-  is not what bands.
+The 2026-08-30 note's "+69% on the `ssao` pass on radv" was low: it is **+114%**
+on that pass. The two purchases price very differently by tier, which is why
+they are two variables: the second blur is a tenth of the pair on radv and
+nearly a third of it on lavapipe — the bandwidth-bound behaviour the old entry
+predicted, and the reason a low tier should not be handed one switch that sets
+both.
 
-**Decided 2026-08-30: `Scene::Ao => 16` in `path_lsb_channels`.**
-`the_ao_scene_draws_the_same_frame_on_every_geometry_path` in
-`crates/crcbl/tests/render_e2e.rs` went red on lavapipe with the offsets in —
-one channel off by one out of 196 608, reproducibly, radv zero either way, and
-forcing every offset back to one took lavapipe to zero too. That is the exposure
-the function documents for `Dunes`, `PointShadow`, `Ssr` and `Probes`, and its
-`Probes` paragraph names this pass's mechanism: the horizon integral's max over
-depth taps. The budget was widened to the same sixteen the other four carry,
-with the measurement in its doc. It is a tolerance change and the user may
-revisit it; the alternative was a red lavapipe job or no step offsets.
+**The browser row is still blank, and the reason is not the driver.** The
+capability plumbing is all present: `crcbl::engine` asks for
+`Features::TIMESTAMP_QUERY` optionally, `web/engine/gpu-replay.js` maps it to
+`'timestamp-query'` and folds it into `requestDevice` when the adapter has it,
+`crcbl-webgpu`'s `create_query_set` honours it, and no
+`cfg(target_arch = "wasm32")` disables any of it. What is missing is a
+**readout**: `globalThis.crcbl` in `web/engine/demo.js` exposes no timing field,
+there is no `__crcbl_web_*` export for one, and the only text surface is the
+run-aggregate line `Loop::finish` logs through
+`crcbl_render::PassStats::report`, which `web/tools/browser-e2e.mjs` captures
+into `consoleLines` and never inspects. A browser number needs either a new
+export or a `said(...)` assertion in the harness, both `web/` changes. No
+browser was run.
 
-**A surprise that is not a bug.** The offsets made the `ssao` pass measurably
-_faster_, not slower: 566 µs against 650 µs median over nine runs each on radv
-at 1920×1080 with a 187-pixel projected radius, with no overlap between the two
-distributions. The tap count is identical, so the explanation has to be locality
-— the offsets average about half a step, which pulls every tap closer to the
-centre pixel and into the depth image's cache. The effect is a property of that
-rig's large reach and should not be quoted as a general speedup.
+**What the rung buys, re-measured.** The scene is
+`forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`: a
+half-plane occluder whose edge runs along `(3, 2)` — deliberately not the
+frame's diagonal, which is the orientation an eighth-turned slice runs parallel
+to — and a 480-sample line parallel to that edge, so every sample sits at the
+same perpendicular distance and the true answer is smooth. The measure is how
+many neighbouring pairs differ by two levels or more. Identical in all seven
+runs on each tier:
 
-**Coverage gaps.** `the_blurred_occlusion_falloff_does_not_terrace` is about the
-coherent march and only that: with the offset applied to one side of each slice
-and the other side left at `1.0`, the longest run read 8 against the bound of 9
-on radv (2026-08-30 sabotage), so a half-dithered march passes it. The bound was
-swept on this machine's two drivers and cannot be tightened against the backends
-only CI runs. The device test and the golden re-bless were run on radv and
-lavapipe only. D3D12 on WARP, Metal, and the wgpu backend are CI's verdict and
-have not been seen. `occlusion.rs` asserts `Capability::DepthImageCopy` because
-WebGPU defines the buffer-to-depth-image copy for `D16Unorm` alone; no backend
-that runs `forward-e2e` lacks it today, and the assertion is what will say so if
-one arrives.
+```text
+slices  blurs     radv   lavapipe
+     2      1        1          1     what ships
+     4      1        1          0
+     2      2        2          5
+     4      2        0          0     the rung
+anti-baseline: one plane orientation across the whole tile
+     2      1      148        172
+```
+
+Two findings worth keeping:
+
+- **The second blur on its own makes it worse** — 1 to 2 on radv, 1 to 5 on
+  lavapipe. Widening the footprint over a field that still carries the same tile
+  spreads the step rather than removing it. It is only worth having with the
+  extra slices.
+- **The extra slices add four plane orientations, not sixteen.** Reduced modulo
+  a half turn, the sixteen entries of `SLICE_DIRECTIONS` point along eight
+  orientations, and the quarter turn permutes that set onto itself — so two and
+  four slices per pixel used to give the blur's neighbourhood the same eight.
+  The eighth turn is the only turn that leaves the set; it takes the
+  neighbourhood to twelve. The old entry's "a blur neighbourhood spans
+  thirty-two planes" counted slice _instances_, not orientations.
+
+**What the user still has to decide.** Only the two defaults, and they are
+separable:
+
+- `r_ssao_slices 4` buys the orientations, at roughly double the `ssao` pass. On
+  its own it is already no worse than the shipping count on radv and better on
+  lavapipe.
+- `r_ssao_blur_passes 2` costs a tenth of the pair on radv and nearly a third on
+  lavapipe, and on its own it is a regression. With four slices it is what takes
+  the line to zero on both tiers.
+
+Whether that becomes a quality preset is `docs/plan/43-render-standards.md`'s
+own unbuilt row, not this entry's.
+
+**Coverage gaps.**
+
+- The browser tier is unmeasured, above.
+- D3D12 and Metal are unmeasured for the reason every row of theirs is — no
+  Windows or Apple hardware here. CI's software adapters will run the new
+  assertions but will time nothing.
+- `MAX_SHARP_EDGES` is swept on radv and lavapipe only. The rung assertion
+  `rung.sharp < blurred_twice.sharp` measured `0 < 2` on radv and `0 < 5` on
+  lavapipe; the radv margin is one step, so WARP and SwiftShader see that
+  headroom for the first time in CI.
+- **Nothing renders a real frame at four slices end to end.** The device test
+  drives the two pipelines directly, and
+  `forward::tests::a_second_occlusion_blur_is_a_pass_the_frame_records` moves
+  the blur count rather than the slice count.
+- The tangential measure counts steps of two levels or more. A regression that
+  moved the whole line by a constant, or that kept every step at one level while
+  wandering, would not be caught by it.
 
 ### The debug console (2026-08-30)
 

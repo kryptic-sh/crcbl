@@ -244,9 +244,16 @@ pub use volumetric::FroxelBuffers;
 /// One list per crate, gathered by the engine at one seam —
 /// `docs/plan/52-debug-console.md` decision 2, whose worked example is this
 /// crate. It holds [`debug_draw::r_debug_draw`], the switch the debug draw
-/// layer reads once a frame; `tests/console_table.rs` is what keeps it in step
-/// with what the source actually declares.
+/// layer reads once a frame, and the occlusion pair's two —
+/// `ssao::r_ssao_slices` and `ssao::r_ssao_blur_passes`, which
+/// `crate::ssao`'s header argues are two variables rather than one quality
+/// knob. `tests/console_table.rs` is what keeps this list in step with what the
+/// source actually declares.
 #[must_use]
 pub fn console_table() -> crcbl_console::Table {
-    crcbl_console::table![debug_draw::r_debug_draw]
+    crcbl_console::table![
+        debug_draw::r_debug_draw,
+        ssao::r_ssao_slices,
+        ssao::r_ssao_blur_passes
+    ]
 }

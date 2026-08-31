@@ -159,6 +159,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The ambient occlusion pass can sweep four slice planes per pixel instead of
+  two, and its blur can run twice.** Both are console variables declared beside
+  the pass in `crcbl_render::ssao` — `r_ssao_slices` in `2..=4` and
+  `r_ssao_blur_passes` in `1..=2` — and both default to what shipped, so a frame
+  nobody has typed at is the frame every golden was blessed from. Together they
+  are what removes the tangential banding: on a line whose true answer is
+  smooth, the shipping counts leave one step of two levels or more in 480
+  samples and four slices with two blurs leave none, on radv and on lavapipe
+  alike. Two switches rather than one because they price very differently — the
+  extra slices roughly double the `ssao` pass, while the second blur is a tenth
+  of the pair on radv and nearly a third of it on lavapipe, and on its own it is
+  a regression. `crcbl_shaders::ssao::SsaoParams` carries the count in the
+  `params.y` word the removed depth bias left free, and `ssao.slang` clamps
+  whatever arrives, so a producer that never writes the field draws the frame it
+  drew before the field existed.
+
 - **A file dragged onto an X11 window arrives as `ShellEvent::DroppedFile`.**
   `crcbl_shell`'s X11 backend implements the receiving half of XDND —
   `crates/crcbl-shell/src/x11/xdnd.rs` — so `ShellCaps::DRAG_DROP` is now set on

@@ -80,8 +80,8 @@ struct SsaoParams
     /// the block's layout.
     float4x4 proj;
     /// `x` is the sampling radius in **world units**, which is what
-    /// [`DEPTH_TOLERANCE_RADII`] is a share of. `y` is `ssao.slang`'s depth bias
-    /// and `zw` pad the row; nothing here reads them.
+    /// [`DEPTH_TOLERANCE_RADII`] is a share of. `y` is the count of planes
+    /// `ssao.slang` swept and `zw` pad the row; nothing here reads them.
     float4 params;
 };
 

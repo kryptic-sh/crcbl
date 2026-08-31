@@ -77,9 +77,16 @@ first.
   `frac(sin(dot(…)))` hashes amplify float differences _by construction_, which
   is the opposite of what a golden needs; an integer index into a constant array
   is bit-identical by inspection. The blur's footprint is exactly the noise
-  tile, so it removes the banding, and where all sixteen of its taps count it
-  divides an isolated flipped sample by sixteen — which the depth-weighted
-  kernel below is precise about, because it is no longer sixteen everywhere.
+  tile, so it removes the _radial_ banding, and where all sixteen of its taps
+  count it divides an isolated flipped sample by sixteen — which the
+  depth-weighted kernel below is precise about, because it is no longer sixteen
+  everywhere. **It does not remove the tangential banding**, and measurement
+  2026-08-31 is why that sentence now says "radial": the tile carries only eight
+  plane orientations at the shipping slice count, and averaging a footprint over
+  a field that still carries the same eight spreads the step rather than
+  removing it — a second blur pass on its own measurably makes it worse. What
+  buys orientations is `crcbl_render::ssao`'s `r_ssao_slices`; `docs/backlog.md`
+  carries the numbers on both local tiers and the two defaults still to decide.
 - **The golden is not the instrument.** An AO pass writing a constant 1.0 draws
   a perfectly plausible frame. The check is a **structural ratio**, in the shape
   `SPOT_SHADOW_RATIO` already uses: a band inside a concave corner must be

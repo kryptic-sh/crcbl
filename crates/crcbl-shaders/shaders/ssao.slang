@@ -14,7 +14,7 @@
 //
 // # The technique is GTAO — ground-truth ambient occlusion
 //
-// Not a hemisphere of depth comparisons. Each pixel takes `SLICE_COUNT` planes
+// Not a hemisphere of depth comparisons. Each pixel takes `slice_count` planes
 // through the eye, marches `SLICE_STEPS` pixels out along each side of each one,
 // and keeps the **largest elevation** any sample reached — the horizon. What the
 // visible hemisphere is then worth is a closed-form integral over those two
@@ -38,9 +38,19 @@
 // the same sixteen-entry Bayer-ordered table this file has always had, read for
 // a marching direction now rather than for a tangent-frame spin.
 //
-// The **second** slice is the first turned a quarter turn, which is
-// `(x, y) -> (-y, x)` and involves no arithmetic at all. That is why
-// `SLICE_COUNT` is two: a third slice would need a rotation that is not exact.
+// The slices after the first are that direction **turned on the table's own
+// integers**, which is what keeps every one of them exact. A quarter turn is
+// `(x, y) -> (-y, x)`, a swap and a negation. An eighth turn is
+// `(x, y) -> (x - y, x + y)` — the 45 degree rotation scaled by `sqrt(2)`, and
+// scale is the one thing `normalize` removes, so the `sqrt(2)/2` a rotation
+// matrix would spell never has to be written down. Both send an entry of
+// `SLICE_DIRECTIONS` to another pair of small integers, so the only rounding in
+// a marching direction is the `normalize` this file already did for its first
+// slice. [`SLICE_COUNT_MAX`] carries that bound as an angle, a texel and a
+// channel level.
+//
+// **How many of the four a frame sweeps is `camera.params.y`**, and two is what
+// ships. See [`SLICE_COUNT_MAX`] for what the other two buy and cost.
 //
 // `STEP_OFFSETS` is the same rule applied to the other axis of the march — how
 // far along a slice a pixel starts rather than which way it faces — and is an
@@ -87,8 +97,14 @@ struct SsaoParams
     float4x4 inv_proj;
     /// View → clip, for projecting a sample point back to a pixel.
     float4x4 proj;
-    /// `x` is the sampling radius in **world units**. `yzw` pad the row out to
-    /// the sixteen bytes `std140` gives a uniform buffer, and nothing reads them.
+    /// `x` is the sampling radius in **world units** and `y` is how many planes
+    /// each pixel sweeps — see [`slice_count`], which is what reads it. `zw` pad
+    /// the row out to the sixteen bytes `std140` gives a uniform buffer, and
+    /// nothing reads them.
+    ///
+    /// **`y` is a count and not a quality enumeration**, so the shader has one
+    /// number to clamp rather than a table to agree with a host about. It is
+    /// whole and small, so it survives the trip through a float exactly.
     ///
     /// `y` used to be a depth bias, which the hemisphere-of-comparisons this
     /// file drew before GTAO needed: half of a flat surface's own samples land
@@ -96,7 +112,8 @@ struct SsaoParams
     /// that is grey haze over every wall. A horizon integral has no such
     /// threshold to sit on — a sample in the surface's own plane lands exactly
     /// on the tangent, where the integral is stationary — so the bias measured
-    /// as a no-op and was removed rather than left as a uniform nothing reads.
+    /// as a no-op and was removed. The slot it left is what the slice count
+    /// took, which is why the block is the width it always was.
     float4 params;
 };
 
@@ -133,22 +150,90 @@ DepthTexture2D scene_depth;
 /// constant.
 static const float DEPTH_FAR = 0.0;
 
-/// Planes through the eye each pixel sweeps for a horizon.
+/// Planes through the eye a pixel may sweep for a horizon, at most.
 ///
-/// Two, and the second is the first turned a quarter turn — `(x, y)` to
-/// `(-y, x)`, which is a swap and a negation and therefore exact on every
-/// target. A third slice would need a rotation by 60°, whose sine and cosine are
-/// the platform's and differ in the last place between them; this file has never
-/// spelled a transcendental it could not bound, and it is not starting with the
-/// cheapest one. What buys the missing directions back is
-/// [`SLICE_DIRECTIONS`]: the tile gives sixteen different first slices across a
-/// 4×4 block, so the neighbourhood the blur averages has thirty-two.
-static const uint SLICE_COUNT = 2;
+/// The frame picks how many of them it wants — see [`slice_count`] — and two is
+/// what ships. What the other two are, and what they are worth, is below.
+///
+/// # The four turns, and why none of them rounds
+///
+/// [`turned`] is the whole of it: a quarter turn is a swap and a negation, an
+/// eighth turn is `(x, y) -> (x - y, x + y)`, and both are applied to an entry
+/// of [`SLICE_DIRECTIONS`] rather than to a unit vector. Those entries have
+/// components in `-2..=2`, the turns take them to `-3..=3`, and every integer in
+/// that range is exactly representable — so a float add or subtract of two of
+/// them lands on the exact answer and rounds nothing.
+///
+/// An eighth turn spelled as a rotation matrix would need `sqrt(2)/2` and would
+/// round twice per component before anything else happened. This spelling is the
+/// same rotation scaled by `sqrt(2)`, and `normalize` divides the scale back out
+/// — which is why the constant never appears. `acos` was refused in this file
+/// because no target specifies it; nothing here needs that argument, because
+/// there is no transcendental to specify.
+///
+/// # The one rounding, bounded
+///
+/// It is `normalize`, and **it is not new**: it is the call the first slice has
+/// made since the table was a table, on a vector this file now constructs
+/// exactly rather than approximately. What the targets promise for it is a few
+/// units in the last place rather than a correctly-rounded answer — which is a
+/// different objection from the one this file makes to `acos`, where *no*
+/// accuracy is stated at all — so bound it generously at eight units: a relative
+/// `8 * 2^-24` on each component turns a unit vector by at most
+/// `sqrt(2) * 8 * 2^-24`, under `7e-7` radians.
+///
+/// What that is worth in the three units this pass actually consumes:
+///
+/// * **As a horizon angle**, against the error budget the file already accepts:
+///   `crcbl_shaders::ssao::MAX_ACOS_ERROR` is what [`acos_approx`] is allowed to
+///   be off by, and this is two orders of magnitude under it.
+/// * **As an occlusion level.** That constant's own doc does the conversion —
+///   the integral's range is about `pi/2` into an `R8Unorm` channel, so one
+///   level is roughly `6e-3` radians of horizon. Seven parts in ten million of a
+///   radian is about a ten-thousandth of the smallest step the channel holds.
+/// * **As a texel**, which is the only one that can bite, because
+///   [`horizon_cosine`] truncates `step * distance` to whole pixels. A direction
+///   off by `7e-7` radians displaces the furthest tap by that times `reach`, so
+///   even a reach of a few thousand pixels moves it by under a hundredth of a
+///   texel. A tap changes only where the exact product already sat that close to
+///   an integer, and then by one pixel — which is the exposure the first slice
+///   has always had.
+///
+/// One thing genuinely did move, and it is worth naming: the second slice used
+/// to be an exact quarter turn of the *normalised* first, and is now the
+/// `normalize` of an exactly quarter-turned integer vector. A target that
+/// computes `normalize` as a reciprocal square root and a multiply gives
+/// bit-identical answers either way — the sum of squares is the same and
+/// negation is exact — and a target that does something else may differ in the
+/// last place. It measured identical on both drivers here: the radial
+/// measurement in `crcbl`'s `forward_e2e::occlusion` reports the same longest
+/// run before and after, and every golden in the workspace is unmoved.
+///
+/// # What the extra two buy
+///
+/// Distinct plane *orientations* across the tile, which is what the tangential
+/// banding is a shortage of. Reduced modulo a half turn, the sixteen entries of
+/// [`SLICE_DIRECTIONS`] point along **eight** orientations, and the quarter turn
+/// permutes that set onto itself — so the count that ships gives the blur's
+/// footprint those eight and no more, however many slice *instances* it sweeps.
+/// The eighth turn is the one that leaves the set: it adds four orientations the
+/// table cannot reach, taking the neighbourhood to twelve. That is the whole of
+/// what the second pair buys, and `crcbl`'s
+/// `forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step` is what
+/// measures it as a picture rather than as a count.
+static const uint SLICE_COUNT_MAX = 4;
+
+/// The default, and the count every golden in this workspace was blessed at.
+///
+/// Two slices sweep the tile's own direction and its quarter turn, which is what
+/// this file did before it could be asked for more.
+static const uint SLICE_COUNT_DEFAULT = 2;
 
 /// Samples marched out along **each side** of each slice.
 ///
-/// So a pixel reads `SLICE_COUNT * 2 * SLICE_STEPS` depths for its horizons,
-/// sixteen here, against the eight comparisons the hemisphere kernel took. The
+/// So a pixel reads `slice_count() * 2 * SLICE_STEPS` depths for its horizons,
+/// sixteen at the count that ships, against the eight comparisons the
+/// hemisphere kernel took. The
 /// steps are spaced evenly in *pixels* out to the projected radius, which is
 /// what keeps the march reading texels it can actually distinguish: spacing them
 /// evenly in world units puts several of them inside one pixel whenever the
@@ -446,6 +531,38 @@ float horizon_cosine(int2 pixel, float2 step, float offset, float reach, float3 
     return cosine;
 }
 
+/// How many of [`SLICE_COUNT_MAX`]'s planes this frame asked for.
+///
+/// `camera.params.y`, and the host writes a whole number there — see
+/// `crcbl_shaders::ssao::SsaoParams`. The floor is [`SLICE_COUNT_DEFAULT`]
+/// rather than zero, and it is not defensive decoration: a producer that never
+/// writes the field leaves the padding it used to be, which reads as zero, and a
+/// zero here would run the loop no times and light every surface fully. The
+/// floor makes that frame the frame this file drew before the field existed.
+uint slice_count()
+{
+    return clamp(uint(camera.params.y), SLICE_COUNT_DEFAULT, SLICE_COUNT_MAX);
+}
+
+/// One entry of [`SLICE_DIRECTIONS`] turned into slice `slice`'s marching
+/// direction, still unnormalised.
+///
+/// Bit 1 is an eighth turn and bit 0 a quarter, so the slices come out at
+/// `0`, `pi/2`, `pi/4`, `3pi/4` in that order — which is why raising the count
+/// from two to four adds planes rather than reordering the two that ship.
+///
+/// **Every operation here is exact**, and [`SLICE_COUNT_MAX`] is where that is
+/// argued and bounded: the entries are small integers, both turns keep them
+/// integers, and the `sqrt(2)` an eighth turn leaves on the length is divided
+/// out by the `normalize` the caller does anyway.
+float2 turned(float2 seed, uint slice)
+{
+    float2 eighth = (slice & 2u) != 0u
+        ? float2(seed.x - seed.y, seed.x + seed.y)
+        : seed;
+    return (slice & 1u) != 0u ? float2(-eighth.y, eighth.x) : eighth;
+}
+
 /// How much of the hemisphere over `centre` is blocked, in `0..=1`.
 ///
 /// **Replace this function, and only this function, to upgrade the technique.**
@@ -477,13 +594,27 @@ float occlusion_at(int2 pixel, float3 centre, float3 normal, int2 extent, float2
     float3 view = normalize(-centre);
 
     uint tile = (uint(pixel.y) & 3u) * 4u + (uint(pixel.x) & 3u);
-    float2 direction = normalize(SLICE_DIRECTIONS[tile]);
+    float2 seed = SLICE_DIRECTIONS[tile];
     float offset = STEP_OFFSETS[tile];
+    uint slices = slice_count();
 
     float visibility = 0.0;
     float weight = 0.0;
-    for (uint slice = 0; slice < SLICE_COUNT; ++slice)
+    // **Bounded by the constant and left early by the count**, rather than
+    // running to `slices` directly: the trip count stays something the compiler
+    // can see, so the two slices that ship still unroll. The test is on a
+    // uniform, so every lane in the draw takes the same side of it.
+    for (uint slice = 0; slice < SLICE_COUNT_MAX; ++slice)
     {
+        if (slice >= slices)
+        {
+            break;
+        }
+
+        // This slice's marching direction: the tile's entry turned, then
+        // normalised — in that order, which is what makes the turn exact. See
+        // [`turned`].
+        float2 direction = normalize(turned(seed, slice));
         // Screen `y` counts down the framebuffer while view `y` counts up, which
         // is the flip `view_position` carries — so a screen-space step of
         // `(dx, dy)` is a view-space direction of `(dx, -dy)`.
@@ -499,7 +630,6 @@ float occlusion_at(int2 pixel, float3 centre, float3 normal, int2 extent, float2
             // The surface is edge-on to this slice: it has no orientation inside
             // the plane, so the plane has nothing to say about it. Weighted out
             // rather than counted as unoccluded.
-            direction = float2(-direction.y, direction.x);
             continue;
         }
 
@@ -555,10 +685,6 @@ float occlusion_at(int2 pixel, float3 centre, float3 normal, int2 extent, float2
                     * slice_visibility(h1, cos_h1, sin_h1, h2, cos_h2, sin_h2,
                                        cos_gamma, sin_gamma);
         weight += projected_length;
-
-        // The quarter turn to the next slice: exact, and the reason there are
-        // two of them. See [`SLICE_COUNT`].
-        direction = float2(-direction.y, direction.x);
     }
 
     if (weight <= 0.0)

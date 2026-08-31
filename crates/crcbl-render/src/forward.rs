@@ -716,7 +716,7 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
 /// atlas's, the depth prepass, the forward pass, the debug draw layer, the
 /// tonemap, the ground grid and the culling-statistics copy — plus
-/// [`Ssao::PASSES`], [`Ssr::PASSES`],
+/// [`Ssao::MAX_PASSES`], [`Ssr::PASSES`],
 /// [`Bloom::MAX_PASSES`], [`Exposure::PASSES`] and [`Upscale::PASSES`] beside
 /// them.
 ///
@@ -737,15 +737,16 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// therefore absent until a caller moves it. The debug draw layer is the third,
 /// and [`DebugDraw::MAX_PASSES`] is its own ceiling.
 ///
-/// **The bloom and Hi-Z terms are ceilings where the others are counts**,
-/// because a chain's length is a function of the target's extent — see
-/// [`crate::bloom`] and [`crate::hiz`] — and this constant is read before any
-/// extent is known. The frame that lands on
+/// **The bloom, Hi-Z and occlusion terms are ceilings where the others are
+/// counts**: a chain's length is a function of the target's extent — see
+/// [`crate::bloom`] and [`crate::hiz`] — and the occlusion pair's is a function
+/// of [`crate::ssao::r_ssao_blur_passes`], while this constant is read before
+/// either an extent or a console is known. The frame that lands on
 /// it is a large one with bloom switched on; every smaller frame records fewer,
 /// exactly as a frame with a free shadow slot does.
 const RENDER_PASSES: u32 = 6
     + DebugDraw::MAX_PASSES
-    + Ssao::PASSES
+    + Ssao::MAX_PASSES
     + Hiz::PASSES
     + Ssr::PASSES
     + Volumetric::PASSES
@@ -820,13 +821,24 @@ const FULLSCREEN_DRAWS: u64 = 1;
 /// resolution, not an effect — so it arrives as its own argument, on the ground
 /// grid's terms. It is false on every frame at full render scale, which is the
 /// frame this function counted before the knob existed.
-fn fullscreen_passes(effects: RenderEffects, extent: (u32, u32), upscaling: bool) -> u64 {
+///
+/// `ssao_blurs` arrives the same way and for the same reason: it is a console
+/// variable rather than an effect bit, and it is the caller's job to read it
+/// **once** for the frame. Reading it here as well would be a second read that
+/// a command landing between the two could disagree with, and the disagreement
+/// would be a counter describing a frame that was not recorded.
+fn fullscreen_passes(
+    effects: RenderEffects,
+    extent: (u32, u32),
+    upscaling: bool,
+    ssao_blurs: u32,
+) -> u64 {
     let mut passes = 1;
     if upscaling {
         passes += Upscale::PASSES as u64;
     }
     if effects.contains(RenderEffects::AMBIENT_OCCLUSION) {
-        passes += Ssao::PASSES as u64;
+        passes += u64::from(Ssao::passes(ssao_blurs));
     }
     if effects.contains(RenderEffects::REFLECTIONS) {
         // The march's pair, and the pyramid it climbs — which is as long as the
@@ -1627,6 +1639,16 @@ pub struct ForwardRenderer {
     /// changed between the two would dispatch a cull whose counters nothing
     /// zeroed, which is a plausible frame drawn off last frame's numbers.
     frame_effects: RenderEffects,
+    /// How many blur passes the frame [`begin_frame`](ForwardRenderer::begin_frame)
+    /// opened runs over the raw occlusion channel — [`crate::ssao::blur_passes`],
+    /// read once there.
+    ///
+    /// **Frozen for the frame on [`ForwardRenderer::frame_effects`]'s terms.**
+    /// [`add_passes`](ForwardRenderer::add_passes) both counts the frame's
+    /// full-screen triangles and records its passes, and a console command
+    /// landing between the two reads would leave `counters` describing a frame
+    /// that was never submitted.
+    frame_ssao_blurs: u32,
     /// Full-screen passes the last [`add_passes`](ForwardRenderer::add_passes)
     /// recorded, which is what [`counters`](ForwardRenderer::counters) reports
     /// as submitted beside the pool's instances.
@@ -4688,6 +4710,10 @@ impl ForwardRenderer {
             effect_request: EffectRequest::default(),
             device_effects: RenderEffects::all(),
             frame_effects: RenderEffects::DEFAULT_STACK,
+            // What the switch says today, so a renderer built and never opened
+            // still describes the frame it would draw. `begin_frame` reads it
+            // again for the frame it opens.
+            frame_ssao_blurs: crate::ssao::blur_passes(),
             // No frame has been recorded yet, on `recorded_draws`' terms.
             recorded_fullscreen: 0,
             // No frame has been recorded yet, on `recorded_fullscreen`'s terms.
@@ -5198,6 +5224,11 @@ impl ForwardRenderer {
         // shadows are off, and a request changed between the two would dispatch
         // that cull against numbers nothing zeroed.
         self.frame_effects = self.resolved_effects();
+        // The occlusion rung's second switch, frozen here for the field's
+        // reason. Its sibling — how many planes the march sweeps — needs no
+        // field: it goes straight into the uniform block written below, and the
+        // block is what `add_passes` records against.
+        self.frame_ssao_blurs = crate::ssao::blur_passes();
 
         // Requests the readback the *last* frame's copy earned and resolves the
         // slot that has come round, which is why it is here rather than beside
@@ -5526,6 +5557,7 @@ impl ForwardRenderer {
                 inv_proj: inv_projection.to_cols_array(),
                 proj: projection.to_cols_array(),
                 radius: SSAO_RADIUS,
+                slices: crate::ssao::slice_count(),
             },
         )?;
         // The reflection march's block: the same two matrices and nothing else.
@@ -6655,7 +6687,17 @@ impl ForwardRenderer {
                 TransientImageDesc::ambient_occlusion(extent),
             );
             let raw = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(extent));
-            (raw, blurred)
+            // The second blur's target, and requested **last** so the two above
+            // keep the physical images they had before this one could be asked
+            // for — the pool hands them out in request order, and a frame at the
+            // default switch has to be the frame it was.
+            let again = (self.frame_ssao_blurs > 1).then(|| {
+                graph.create_image(
+                    "ssao-blurred-2",
+                    TransientImageDesc::ambient_occlusion(extent),
+                )
+            });
+            (raw, blurred, again)
         });
         // **Created whatever the reflections are doing**, unlike the pair above.
         // It is one of the forward pass's colour attachments, which is in that
@@ -6850,9 +6892,10 @@ impl ForwardRenderer {
         // resolved by the toggle order — it is a caller's opt-in, off by
         // default — so what decides it is the field and not this frame's
         // effects.
-        self.recorded_fullscreen = fullscreen_passes(effects, extent, upscaling)
-            + u64::from(self.ground_grid().is_some())
-            + if draws_sky { SkyPass::PASSES } else { 0 };
+        self.recorded_fullscreen =
+            fullscreen_passes(effects, extent, upscaling, self.frame_ssao_blurs)
+                + u64::from(self.ground_grid().is_some())
+                + if draws_sky { SkyPass::PASSES } else { 0 };
         // The debug draw layer's own call, on the ground grid's terms: not an
         // effect bit, and decided by whether this frame's slot has a segment in
         // it. One direct draw of one instance covering every segment appended,
@@ -6991,10 +7034,9 @@ impl ForwardRenderer {
         // two depth-only passes, neither of which has a fragment stage and so
         // neither of which ever samples it.
         let occlusion = match occlusion_pair {
-            Some((raw, blurred)) => {
+            Some((raw, blurred, again)) => {
                 self.ssao
-                    .add_passes(graph, frame, scene_depth, raw, blurred);
-                blurred
+                    .add_passes(graph, frame, scene_depth, raw, blurred, again)
             }
             None => occlusion_placeholder,
         };
@@ -11684,6 +11726,46 @@ mod tests {
     /// [`debug_draw_switch`]'s lock.
     static DEBUG_DRAW_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Takes `r_ssao_blur_passes` for this thread and puts it back at its
+    /// default when the guard drops.
+    ///
+    /// [`debug_draw_switch`]'s shape exactly, for its reason: a plain
+    /// `cargo test` run shares one process between tests, and a variable this
+    /// one left moved is a frame the next test did not ask for.
+    fn ssao_blur_switch() -> SsaoBlurSwitch {
+        let guard = SSAO_BLUR_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let switch = SsaoBlurSwitch { _guard: guard };
+        switch.set(1);
+        switch
+    }
+
+    /// What [`ssao_blur_switch`] hands back.
+    struct SsaoBlurSwitch {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl SsaoBlurSwitch {
+        /// Asks for `passes` of them.
+        fn set(&self, passes: i64) {
+            crate::ssao::r_ssao_blur_passes
+                .set(&crcbl_console::Value::Int(passes))
+                .expect("`r_ssao_blur_passes` is a writable int in range");
+        }
+    }
+
+    impl Drop for SsaoBlurSwitch {
+        fn drop(&mut self) {
+            // Back to the shipping count at both ends, so a check that panicked
+            // mid-way does not hand the next holder a three-pass frame.
+            self.set(1);
+        }
+    }
+
+    /// [`ssao_blur_switch`]'s lock.
+    static SSAO_BLUR_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Every draw the recorded stream holds, whichever call recorded it.
     ///
     /// Not scoped to a pass, unlike [`commands_in_pass`]: what
@@ -11748,8 +11830,12 @@ mod tests {
         // Derived from what the frame resolved rather than from a constant, so
         // this is still the every-effect frame's count and would follow a frame
         // that switched one off.
-        let fullscreen =
-            fullscreen_passes(renderer.effects(), TEST_EXTENT, false) * FULLSCREEN_DRAWS;
+        let fullscreen = fullscreen_passes(
+            renderer.effects(),
+            TEST_EXTENT,
+            false,
+            renderer.frame_ssao_blurs,
+        ) * FULLSCREEN_DRAWS;
         assert!(
             counters.draws > fullscreen,
             "a frame that recorded only its full-screen passes drew no scene",
@@ -11821,7 +11907,14 @@ mod tests {
         let counters = renderer.counters();
         assert_eq!(
             counters.drawn,
-            Some(fullscreen_passes(renderer.effects(), TEST_EXTENT, false) * FULLSCREEN_DRAWS),
+            Some(
+                fullscreen_passes(
+                    renderer.effects(),
+                    TEST_EXTENT,
+                    false,
+                    renderer.frame_ssao_blurs,
+                ) * FULLSCREEN_DRAWS,
+            ),
             "the survivor count the null backend produced is zero, plus one instance per \
              full-screen pass — which is on both sides of the row",
         );
@@ -13547,6 +13640,12 @@ mod tests {
         // buffer: the layer is immediate mode.
         let switch = debug_draw_switch();
         switch.set(true);
+        // And the occlusion pair's second blur, for exactly that reason: it is a
+        // pass [`Ssao::MAX_PASSES`] counts and no effect bit switches on, so a
+        // frame at the shipping count comes one short of the bound and this test
+        // would be asserting the bound against a frame that could not reach it.
+        let blurs = ssao_blur_switch();
+        blurs.set(i64::from(Ssao::MAX_BLUR_PASSES));
         renderer
             .debug_draw()
             .line(Vec3::ZERO, Vec3::X, [1.0, 1.0, 1.0, 1.0]);
@@ -13899,6 +13998,132 @@ mod tests {
         pool.destroy(device);
         device.destroy_image_view(imported.view);
         device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **A second occlusion blur is a pass the frame records, an image it takes
+    /// out of the pool, and a triangle its counter reports** — or it is a switch
+    /// that does nothing.
+    ///
+    /// `crcbl`'s `forward_e2e::occlusion` measures what the second blur is worth
+    /// by driving the pipelines itself, so nothing there would notice that a
+    /// real frame never records it. The three things below are what a frame has
+    /// to do differently, and each of them fails silently on its own: a missing
+    /// pass draws a slightly rougher picture, a missing image is a bind of the
+    /// wrong one, and a counter short by one is a number nobody reads until it
+    /// is quoted.
+    ///
+    /// **This test owns `r_ssao_blur_passes` for its duration**, through
+    /// [`ssao_blur_switch`] and for [`debug_draw_switch`]'s reason.
+    /// The id [`Ssao::add_passes`] hands back is the image the last blur wrote.
+    ///
+    /// **The one thing about that pair no other check can see.** The pass list
+    /// is identical either way, the graph accepts a written-and-never-read
+    /// transient without complaint, and every golden is at one blur where the
+    /// two answers coincide — so a frame bound to the half-blurred image draws
+    /// something nobody would question, which is exactly what the function's
+    /// own doc warns about. Verified 2026-08-31 by returning `blurred` from the
+    /// two-blur arm: `crcbl-render`'s unit tests, the forward and mesh e2e
+    /// suites and lantern's golden all stayed green.
+    #[test]
+    fn the_occlusion_id_handed_back_is_the_last_blur_written() {
+        let (_recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut ssao = Ssao::new(device, 1, ForwardRenderer::build_fullscreen).expect("built");
+
+        let one = {
+            let mut graph = crate::RenderGraph::new(queue);
+            let depth =
+                graph.create_image("scene-depth", TransientImageDesc::scene_depth(TEST_EXTENT));
+            let raw =
+                graph.create_image("ssao", TransientImageDesc::ambient_occlusion(TEST_EXTENT));
+            let blurred = graph.create_image(
+                "ssao-blurred",
+                TransientImageDesc::ambient_occlusion(TEST_EXTENT),
+            );
+            let got = ssao.add_passes(&mut graph, 0, depth, raw, blurred, None);
+            (got == blurred, got == raw)
+        };
+        assert!(one.0, "one blur finishes in the image it wrote");
+        assert!(!one.1, "and never in the raw channel the march wrote");
+
+        let two = {
+            let mut graph = crate::RenderGraph::new(queue);
+            let depth =
+                graph.create_image("scene-depth", TransientImageDesc::scene_depth(TEST_EXTENT));
+            let raw =
+                graph.create_image("ssao", TransientImageDesc::ambient_occlusion(TEST_EXTENT));
+            let blurred = graph.create_image(
+                "ssao-blurred",
+                TransientImageDesc::ambient_occlusion(TEST_EXTENT),
+            );
+            let again = graph.create_image(
+                "ssao-blurred-2",
+                TransientImageDesc::ambient_occlusion(TEST_EXTENT),
+            );
+            let got = ssao.add_passes(&mut graph, 0, depth, raw, blurred, Some(again));
+            (got == again, got == blurred)
+        };
+        assert!(
+            two.0,
+            "two blurs finish in the second one's image, which is the id the forward pass binds"
+        );
+        assert!(
+            !two.1,
+            "and not in the half-blurred image the first blur wrote -- a frame bound to that one \
+             is a frame nobody would question"
+        );
+    }
+
+    #[test]
+    fn a_second_occlusion_blur_is_a_pass_the_frame_records() {
+        let switch = ssao_blur_switch();
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let imported = swapchain_image(device);
+        let pool = crate::TransientPool::new();
+
+        let once = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
+        let counted_once = renderer.counters().instances;
+        assert!(
+            once.contains(&"ssao-blur".to_string()),
+            "the shipping frame has to blur once, or the arm below is about a frame with no \
+             occlusion in it at all: {once:#?}"
+        );
+        assert!(
+            !once.contains(&"ssao-blur-2".to_string()),
+            "a frame nobody moved the switch for must record one blur: {once:#?}"
+        );
+
+        switch.set(2);
+        let twice = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
+        let counted_twice = renderer.counters().instances;
+        assert!(
+            twice.contains(&"ssao-blur-2".to_string()),
+            "`r_ssao_blur_passes 2` must put a second blur in the frame: {twice:#?}"
+        );
+        assert_eq!(
+            twice.len(),
+            once.len() + 1,
+            "the second blur is the only pass that may join the frame: {twice:#?}"
+        );
+        assert_eq!(
+            counted_twice,
+            counted_once + FULLSCREEN_DRAWS,
+            "the frame recorded a full-screen triangle its counter did not report"
+        );
+
+        // The pass has to write somewhere the forward pass then reads, and the
+        // graph is what would refuse a frame that bound an image nothing wrote.
+        // `passes_in_a_frame` compiles rather than executes, so this is the
+        // check that the third transient was requested at all.
+        assert!(
+            twice.iter().any(|pass| pass == "forward"),
+            "the frame still has to reach its forward pass: {twice:#?}"
+        );
         recorder.assert_valid();
     }
 
@@ -14442,14 +14667,22 @@ mod tests {
         assert_eq!(
             control.instances,
             instances
-                + fullscreen_passes(RenderEffects::all(), TEST_EXTENT, false) * FULLSCREEN_DRAWS,
+                + fullscreen_passes(
+                    RenderEffects::all(),
+                    TEST_EXTENT,
+                    false,
+                    crate::ssao::blur_passes(),
+                ) * FULLSCREEN_DRAWS,
             "the control frame submits one triangle per full-screen pass"
         );
 
         // Each pair is one full-screen triangle per pass, and the atlas is
         // untouched by either.
         for (off, fewer) in [
-            (RenderEffects::AMBIENT_OCCLUSION, u64::from(Ssao::PASSES)),
+            (
+                RenderEffects::AMBIENT_OCCLUSION,
+                u64::from(Ssao::passes(crate::ssao::blur_passes())),
+            ),
             // The march's two passes and the reductions that feed them, which
             // is what makes this arm's number a function of the extent the way
             // the chain's below is.
@@ -14474,8 +14707,12 @@ mod tests {
             assert_eq!(
                 counters.instances,
                 instances
-                    + fullscreen_passes(RenderEffects::all().difference(off), TEST_EXTENT, false)
-                        * FULLSCREEN_DRAWS,
+                    + fullscreen_passes(
+                        RenderEffects::all().difference(off),
+                        TEST_EXTENT,
+                        false,
+                        crate::ssao::blur_passes(),
+                    ) * FULLSCREEN_DRAWS,
                 "{off:?}: and must not report as submitted a triangle it never submitted"
             );
             assert_eq!(

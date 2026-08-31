@@ -28,6 +28,28 @@
 //! passes leaves `ForwardRenderer`'s white placeholder bound, and `mesh.slang`
 //! multiplies its ambient by 1.0. There is no device fact to gate on — every
 //! backend has a full-screen draw, a sampled `D32Float` and an `R8Unorm` target.
+//!
+//! # The higher rung, and why it is two switches
+//!
+//! `docs/backlog.md` records banding along the **tangential** axis, which is a
+//! shortage of distinct slice planes rather than of steps along one: the raw
+//! channel's neighbourhood carries eight plane orientations at the shipping
+//! count, whatever the blur then does with it. [`r_ssao_slices`] is what buys
+//! more of them — `shaders/ssao.slang`'s `SLICE_COUNT_MAX` has the arithmetic —
+//! and [`r_ssao_blur_passes`] is what widens the footprint they are averaged
+//! over.
+//!
+//! **Two switches and not one**, because they are two different purchases: the
+//! slices are arithmetic and texture fetches inside one pass, and a second blur
+//! is a whole extra full-screen read and write of an `R8Unorm` image. A
+//! bandwidth-bound tier may want the first and refuse the second, and a knob
+//! that bundled them could not say so. Both default to what ships, so a frame
+//! nobody has touched the console on is the frame every golden was blessed at.
+//!
+//! Neither is a quality preset. `docs/plan/43-render-standards.md`'s tiers are
+//! their own unbuilt row; these are the two variables such a preset would set,
+//! declared beside the pass that reads them the way `crate::debug_draw`'s switch
+//! is.
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
@@ -43,6 +65,40 @@ use crate::graph::{ImageId, RenderGraph};
 /// Vertices in the over-sized full-screen triangle `ssao.slang` and
 /// `ssao_blur.slang` generate from `SV_VertexID`. No geometry is bound anywhere.
 const FULLSCREEN_VERTICES: u32 = 3;
+
+crcbl_console::convar! {
+    /// Planes each pixel sweeps for a horizon: 2 ships, 4 adds an eighth turn.
+    pub static r_ssao_slices: i64 in 2 ..= 4 = 2;
+}
+
+crcbl_console::convar! {
+    /// Times the occlusion blur runs over the raw channel: 1 ships.
+    pub static r_ssao_blur_passes: i64 in 1 ..= 2 = 1;
+}
+
+/// [`r_ssao_slices`] as the shader's uniform wants it.
+///
+/// Clamped on the way through rather than trusted: the variable's own range is
+/// the console's guard, and this is the one that holds if the constant the
+/// shader declares ever moves below it. `ssao.slang`'s `slice_count` clamps
+/// again on its side, which is where a value that never reached this function
+/// at all is caught.
+pub(crate) fn slice_count() -> u8 {
+    let asked = r_ssao_slices.get_i64().clamp(
+        i64::from(ssao::SLICE_COUNT_DEFAULT),
+        i64::from(ssao::SLICE_COUNT_MAX),
+    );
+    u8::try_from(asked).unwrap_or(ssao::SLICE_COUNT_DEFAULT)
+}
+
+/// [`r_ssao_blur_passes`] as a pass count, clamped into what
+/// [`Ssao::add_passes`] can record.
+pub(crate) fn blur_passes() -> u32 {
+    let asked = r_ssao_blur_passes
+        .get_i64()
+        .clamp(1, i64::from(Ssao::MAX_BLUR_PASSES));
+    u32::try_from(asked).unwrap_or(1)
+}
 
 /// Everything the occlusion pair owns.
 ///
@@ -75,11 +131,44 @@ pub(crate) struct Ssao {
     /// block the occlusion pass does — and a single cache keyed on the views
     /// alone would hand the even frames' block to the odd frames.
     blur_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
+    /// `[frame]`: the second blur's group, when [`r_ssao_blur_passes`] asks for
+    /// one.
+    ///
+    /// **Its own ring rather than [`Ssao::blur_groups`] reused**, and not for
+    /// tidiness: the two passes bind different occlusion images, so one cache
+    /// shared between them would be rebuilt twice a frame — a descriptor write
+    /// per pass per frame, which is the cost `cached_group` exists to avoid.
+    /// The pipeline and the layout *are* shared, because the second blur is the
+    /// same shader reading the first one's output.
+    ///
+    /// Empty of groups on every frame the switch is at its default, and the
+    /// slots themselves cost a pointer each.
+    blur_again_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
 }
 
 impl Ssao {
-    /// Passes [`Ssao::add_passes`] adds to a frame.
-    pub(crate) const PASSES: u32 = 2;
+    /// Blur passes [`r_ssao_blur_passes`] may ask for.
+    ///
+    /// Two: the shipping one and the second the tangential rung wants. There is
+    /// no third because the kernel's footprint doubles with each — see
+    /// `shaders/ssao_blur.slang`, whose whole argument is that its footprint is
+    /// `ssao.slang`'s tile — and a third would be blurring past every contact
+    /// in the frame.
+    pub(crate) const MAX_BLUR_PASSES: u32 = 2;
+
+    /// The most passes [`Ssao::add_passes`] can add to a frame: the march, and
+    /// every blur behind it.
+    ///
+    /// A **ceiling**, which is what `crate::forward`'s `RENDER_PASSES` needs
+    /// from every term it adds up — see [`Ssao::passes`] for what a given frame
+    /// actually records.
+    pub(crate) const MAX_PASSES: u32 = 1 + Self::MAX_BLUR_PASSES;
+
+    /// Passes [`Ssao::add_passes`] adds to a frame that asked for `blurs` of
+    /// them: the occlusion march, and one per blur.
+    pub(crate) const fn passes(blurs: u32) -> u32 {
+        1 + blurs
+    }
 
     /// Builds both pipelines and the uniform ring.
     ///
@@ -226,6 +315,7 @@ impl Ssao {
             blur_pipeline_layout,
             blur_pipeline,
             blur_groups: vec![None; frames],
+            blur_again_groups: vec![None; frames],
         })
     }
 
@@ -247,12 +337,20 @@ impl Ssao {
         device.write_buffer(self.uniforms[frame], 0, &params.to_bytes())
     }
 
-    /// Adds the `ssao` and `ssao-blur` passes, in that order.
+    /// Adds the `ssao` pass and its blurs, in that order, and returns the image
+    /// the forward pass should read.
     ///
-    /// `depth` must be the prepass's stored depth and `blurred` is what the
-    /// forward pass reads. Both occlusion images are the caller's so it can
-    /// declare the read on the pass that consumes the second one — a pass
-    /// declares its own accesses and this one cannot declare the forward pass's.
+    /// `depth` must be the prepass's stored depth. `blurred` is where the first
+    /// blur writes, and `again` — [`Some`] exactly when [`r_ssao_blur_passes`]
+    /// asked for a second — is where the second one does. Every occlusion image
+    /// is the caller's so it can declare the read on the pass that consumes the
+    /// last of them: a pass declares its own accesses and this one cannot
+    /// declare the forward pass's.
+    ///
+    /// **The returned id is the one to bind**, rather than the caller assuming
+    /// `blurred`, because which image holds the finished channel is this
+    /// function's business and gets it wrong silently — a forward pass bound to
+    /// the half-blurred image draws a frame nobody would question.
     ///
     /// # Panics
     ///
@@ -264,18 +362,24 @@ impl Ssao {
         depth: ImageId,
         raw: ImageId,
         blurred: ImageId,
-    ) {
+        again: Option<ImageId>,
+    ) -> ImageId {
         let pipeline = self.pipeline;
         let pipeline_layout = self.pipeline_layout;
         let layout = self.layout;
         let uniforms = self.uniforms[frame];
-        // Split so the two closures below borrow different halves of `self`; one
+        // Split so the closures below borrow different halves of `self`; one
         // `&mut self` shared between them is what the borrow checker refuses, and
         // it would be refusing something genuinely wrong — a pass body may run at
         // any point after it is declared.
-        let (groups, blur_groups) = (&mut self.groups, &mut self.blur_groups);
+        let (groups, blur_groups, again_groups) = (
+            &mut self.groups,
+            &mut self.blur_groups,
+            &mut self.blur_again_groups,
+        );
         let cached = &mut groups[frame];
         let blur_cached = &mut blur_groups[frame];
+        let again_cached = &mut again_groups[frame];
 
         graph
             .add_render_pass("ssao")
@@ -315,25 +419,102 @@ impl Ssao {
                 encoder.draw(0..FULLSCREEN_VERTICES, 0..1);
             });
 
-        let blur_pipeline = self.blur_pipeline;
-        let blur_pipeline_layout = self.blur_pipeline_layout;
-        let blur_layout = self.blur_layout;
+        let blur = Blur {
+            uniforms,
+            layout: self.blur_layout,
+            pipeline_layout: self.blur_pipeline_layout,
+            pipeline: self.blur_pipeline,
+        };
+        blur.add_pass(graph, "ssao-blur", blur_cached, raw, depth, blurred);
+        let Some(again) = again else {
+            return blurred;
+        };
+        // The second blur reads the first one's output and writes its own
+        // image. **Not back into `raw`**, which would be a write-after-read on
+        // an image this same frame's march wrote and this same frame's first
+        // blur read: the graph would have to order it, the pool could not alias
+        // it, and the saving is one `R8Unorm` image on the frames that asked for
+        // this at all.
+        blur.add_pass(graph, "ssao-blur-2", again_cached, blurred, depth, again);
+        again
+    }
+
+    /// Releases everything, in dependency order. The device must be idle.
+    pub(crate) fn destroy(self, device: &dyn Device) {
+        for cached in self
+            .groups
+            .into_iter()
+            .chain(self.blur_groups)
+            .chain(self.blur_again_groups)
+            .flatten()
+        {
+            device.destroy_bind_group(cached.1);
+        }
+        device.destroy_graphics_pipeline(self.blur_pipeline);
+        device.destroy_pipeline_layout(self.blur_pipeline_layout);
+        device.destroy_bind_group_layout(self.blur_layout);
+        device.destroy_graphics_pipeline(self.pipeline);
+        device.destroy_pipeline_layout(self.pipeline_layout);
+        device.destroy_bind_group_layout(self.layout);
+        for buffer in self.uniforms {
+            device.destroy_buffer(buffer);
+        }
+    }
+}
+
+/// The pipeline, layout and uniform block both blur passes share.
+///
+/// The second blur is the *same shader* reading the first one's output — see
+/// this module's header on why there can be a second at all — so what differs
+/// between the two passes is three image ids and a label, and everything else
+/// is this. Gathered into a type rather than passed as six arguments, and
+/// extracted the moment there were two callers rather than left as a copy of
+/// the pass body with two ids changed.
+#[derive(Clone, Copy)]
+struct Blur {
+    uniforms: BufferHandle,
+    layout: BindGroupLayoutHandle,
+    pipeline_layout: PipelineLayoutHandle,
+    pipeline: GraphicsPipelineHandle,
+}
+
+impl Blur {
+    /// Adds one blur pass: `source` and `depth` in, `target` out.
+    ///
+    /// `cached` is this pass's own group ring slot — the two passes bind
+    /// different source images, so sharing one slot between them would rebuild
+    /// the group twice a frame.
+    fn add_pass<'a>(
+        self,
+        graph: &mut RenderGraph<'a>,
+        label: &'static str,
+        cached: &'a mut Option<(Vec<ImageViewHandle>, BindGroupHandle)>,
+        source: ImageId,
+        depth: ImageId,
+        target: ImageId,
+    ) {
+        let Self {
+            uniforms,
+            layout,
+            pipeline_layout,
+            pipeline,
+        } = self;
         graph
-            .add_render_pass("ssao-blur")
+            .add_render_pass(label)
             .color(
-                blurred,
+                target,
                 LoadOp::DontCare,
                 StoreOp::Store,
                 ClearValue::default(),
             )
-            .read_image(raw)
+            .read_image(source)
             // **The depth this pass weights its kernel by**, and the
             // declaration is what gives it a shader-readable layout here as
-            // well: the pass above declared its own read, and a barrier the
-            // graph was never told about is one it does not insert.
+            // well: the march declared its own read, and a barrier the graph was
+            // never told about is one it does not insert.
             .read_image(depth)
             .execute(move |ctx| {
-                let view = ctx.image_view(raw);
+                let view = ctx.image_view(source);
                 let depth_view = ctx.image_view(depth);
                 let device = ctx.device();
                 let entries = vec![
@@ -358,36 +539,20 @@ impl Ssao {
                     },
                 ];
                 let Some(group) = cached_group(
-                    blur_cached,
+                    cached,
                     device,
                     &[(1, view), (2, depth_view)],
-                    "ssao blur",
-                    blur_layout,
+                    label,
+                    layout,
                     entries,
                 ) else {
                     return;
                 };
                 let encoder = ctx.encoder();
-                encoder.bind_graphics_pipeline(blur_pipeline);
-                encoder.bind_group(0, group, &[], blur_pipeline_layout);
+                encoder.bind_graphics_pipeline(pipeline);
+                encoder.bind_group(0, group, &[], pipeline_layout);
                 encoder.draw(0..FULLSCREEN_VERTICES, 0..1);
             });
-    }
-
-    /// Releases everything, in dependency order. The device must be idle.
-    pub(crate) fn destroy(self, device: &dyn Device) {
-        for cached in self.groups.into_iter().chain(self.blur_groups).flatten() {
-            device.destroy_bind_group(cached.1);
-        }
-        device.destroy_graphics_pipeline(self.blur_pipeline);
-        device.destroy_pipeline_layout(self.blur_pipeline_layout);
-        device.destroy_bind_group_layout(self.blur_layout);
-        device.destroy_graphics_pipeline(self.pipeline);
-        device.destroy_pipeline_layout(self.pipeline_layout);
-        device.destroy_bind_group_layout(self.layout);
-        for buffer in self.uniforms {
-            device.destroy_buffer(buffer);
-        }
     }
 }
 

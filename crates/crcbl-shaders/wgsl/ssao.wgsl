@@ -75,20 +75,45 @@ fn normal_at_0( pixel_2 : vec2<i32>,  centre_0 : vec3<f32>,  extent_2 : vec2<i32
     return normalize(cross(vertical_0, horizontal_0));
 }
 
-fn acos_approx_0( x_0 : f32) -> f32
+fn slice_count_0() -> u32
 {
-    var _S8 : f32 = min(abs(x_0), 1.0f);
-    var positive_0 : f32 = (((-0.01872929930686951f * _S8 + 0.07426100224256516f) * _S8 + -0.21211439371109009f) * _S8 + 1.57072877883911133f) * sqrt(1.0f - _S8);
-    var _S9 : f32;
-    if(x_0 < 0.0f)
+    return clamp(u32(camera_0.params_0.y), u32(2), u32(4));
+}
+
+fn turned_0( seed_0 : vec2<f32>,  slice_0 : u32) -> vec2<f32>
+{
+    var eighth_0 : vec2<f32>;
+    if(((slice_0 & (u32(2)))) != u32(0))
     {
-        _S9 = 3.14159274101257324f - positive_0;
+        var _S8 : f32 = seed_0.x;
+        var _S9 : f32 = seed_0.y;
+        eighth_0 = vec2<f32>(_S8 - _S9, _S8 + _S9);
     }
     else
     {
-        _S9 = positive_0;
+        eighth_0 = seed_0;
     }
-    return _S9;
+    if(((slice_0 & (u32(1)))) != u32(0))
+    {
+        eighth_0 = vec2<f32>(- eighth_0.y, eighth_0.x);
+    }
+    return eighth_0;
+}
+
+fn acos_approx_0( x_0 : f32) -> f32
+{
+    var _S10 : f32 = min(abs(x_0), 1.0f);
+    var positive_0 : f32 = (((-0.01872929930686951f * _S10 + 0.07426100224256516f) * _S10 + -0.21211439371109009f) * _S10 + 1.57072877883911133f) * sqrt(1.0f - _S10);
+    var _S11 : f32;
+    if(x_0 < 0.0f)
+    {
+        _S11 = 3.14159274101257324f - positive_0;
+    }
+    else
+    {
+        _S11 = positive_0;
+    }
+    return _S11;
 }
 
 fn horizon_cosine_0( pixel_3 : vec2<i32>,  step_0 : vec2<f32>,  offset_0 : f32,  reach_0 : f32,  centre_1 : vec3<f32>,  view_1 : vec3<f32>,  radius_0 : f32,  extent_3 : vec2<i32>,  size_1 : vec2<f32>) -> f32
@@ -105,35 +130,35 @@ fn horizon_cosine_0( pixel_3 : vec2<i32>,  step_0 : vec2<f32>,  offset_0 : f32, 
             break;
         }
         var tap_0 : vec2<i32> = pixel_3 + vec2<i32>(step_0 * vec2<f32>((reach_0 * (f32(index_1) + offset_0) / 4.0f)));
-        var _S10 : i32 = tap_0.x;
-        var _S11 : bool;
-        if(_S10 < i32(0))
-        {
-            _S11 = true;
-        }
-        else
-        {
-            _S11 = (tap_0.y) < i32(0);
-        }
-        var _S12 : bool;
-        if(_S11)
-        {
-            _S12 = true;
-        }
-        else
-        {
-            _S12 = _S10 >= (extent_3.x);
-        }
+        var _S12 : i32 = tap_0.x;
         var _S13 : bool;
-        if(_S12)
+        if(_S12 < i32(0))
         {
             _S13 = true;
         }
         else
         {
-            _S13 = (tap_0.y) >= (extent_3.y);
+            _S13 = (tap_0.y) < i32(0);
         }
+        var _S14 : bool;
         if(_S13)
+        {
+            _S14 = true;
+        }
+        else
+        {
+            _S14 = _S12 >= (extent_3.x);
+        }
+        var _S15 : bool;
+        if(_S14)
+        {
+            _S15 = true;
+        }
+        else
+        {
+            _S15 = (tap_0.y) >= (extent_3.y);
+        }
+        if(_S15)
         {
             break;
         }
@@ -145,16 +170,16 @@ fn horizon_cosine_0( pixel_3 : vec2<i32>,  step_0 : vec2<f32>,  offset_0 : f32, 
         }
         var delta_0 : vec3<f32> = view_position_0(tap_0, depth_1, size_1) - centre_1;
         var length_squared_0 : f32 = dot(delta_0, delta_0);
-        var _S14 : bool;
+        var _S16 : bool;
         if(length_squared_0 > (radius_0 * radius_0))
         {
-            _S14 = true;
+            _S16 = true;
         }
         else
         {
-            _S14 = length_squared_0 < 1.00000001335143196e-10f;
+            _S16 = length_squared_0 < 1.00000001335143196e-10f;
         }
-        if(_S14)
+        if(_S16)
         {
             index_1 = index_1 + u32(1);
             continue;
@@ -175,54 +200,56 @@ fn occlusion_at_0( pixel_4 : vec2<i32>,  centre_2 : vec3<f32>,  normal_0 : vec3<
     var radius_1 : f32 = camera_0.params_0.x;
     var near_clip_0 : vec4<f32> = (((vec4<f32>(centre_2, 1.0f)) * (mat4x4<f32>(camera_0.proj_0.data_0[i32(0)][i32(0)], camera_0.proj_0.data_0[i32(1)][i32(0)], camera_0.proj_0.data_0[i32(2)][i32(0)], camera_0.proj_0.data_0[i32(3)][i32(0)], camera_0.proj_0.data_0[i32(0)][i32(1)], camera_0.proj_0.data_0[i32(1)][i32(1)], camera_0.proj_0.data_0[i32(2)][i32(1)], camera_0.proj_0.data_0[i32(3)][i32(1)], camera_0.proj_0.data_0[i32(0)][i32(2)], camera_0.proj_0.data_0[i32(1)][i32(2)], camera_0.proj_0.data_0[i32(2)][i32(2)], camera_0.proj_0.data_0[i32(3)][i32(2)], camera_0.proj_0.data_0[i32(0)][i32(3)], camera_0.proj_0.data_0[i32(1)][i32(3)], camera_0.proj_0.data_0[i32(2)][i32(3)], camera_0.proj_0.data_0[i32(3)][i32(3)]))));
     var far_clip_0 : vec4<f32> = (((vec4<f32>(centre_2 + vec3<f32>(radius_1, 0.0f, 0.0f), 1.0f)) * (mat4x4<f32>(camera_0.proj_0.data_0[i32(0)][i32(0)], camera_0.proj_0.data_0[i32(1)][i32(0)], camera_0.proj_0.data_0[i32(2)][i32(0)], camera_0.proj_0.data_0[i32(3)][i32(0)], camera_0.proj_0.data_0[i32(0)][i32(1)], camera_0.proj_0.data_0[i32(1)][i32(1)], camera_0.proj_0.data_0[i32(2)][i32(1)], camera_0.proj_0.data_0[i32(3)][i32(1)], camera_0.proj_0.data_0[i32(0)][i32(2)], camera_0.proj_0.data_0[i32(1)][i32(2)], camera_0.proj_0.data_0[i32(2)][i32(2)], camera_0.proj_0.data_0[i32(3)][i32(2)], camera_0.proj_0.data_0[i32(0)][i32(3)], camera_0.proj_0.data_0[i32(1)][i32(3)], camera_0.proj_0.data_0[i32(2)][i32(3)], camera_0.proj_0.data_0[i32(3)][i32(3)]))));
-    var _S15 : f32 = near_clip_0.w;
-    var _S16 : bool;
-    if(_S15 <= 0.0f)
+    var _S17 : f32 = near_clip_0.w;
+    var _S18 : bool;
+    if(_S17 <= 0.0f)
     {
-        _S16 = true;
+        _S18 = true;
     }
     else
     {
-        _S16 = (far_clip_0.w) <= 0.0f;
+        _S18 = (far_clip_0.w) <= 0.0f;
     }
-    if(_S16)
+    if(_S18)
     {
         return 0.0f;
     }
-    var reach_1 : f32 = abs(far_clip_0.x / far_clip_0.w - near_clip_0.x / _S15) * 0.5f * size_2.x;
+    var reach_1 : f32 = abs(far_clip_0.x / far_clip_0.w - near_clip_0.x / _S17) * 0.5f * size_2.x;
     if(reach_1 < 2.0f)
     {
         return 0.0f;
     }
-    var _S17 : vec3<f32> = normalize((vec3<f32>(0) - centre_2));
+    var _S19 : vec3<f32> = normalize((vec3<f32>(0) - centre_2));
     var tile_0 : u32 = ((u32(pixel_4.y) & (u32(3)))) * u32(4) + ((u32(pixel_4.x) & (u32(3))));
-    var direction_0 : vec2<f32> = normalize(SLICE_DIRECTIONS_0[tile_0]);
-    var slice_0 : u32 = u32(0);
+    var _S20 : u32 = slice_count_0();
+    var slice_1 : u32 = u32(0);
     var visibility_0 : f32 = 0.0f;
     var weight_0 : f32 = 0.0f;
     for(;;)
     {
-        if(slice_0 < u32(2))
+        if(slice_1 < u32(4))
         {
         }
         else
         {
             break;
         }
-        var _S18 : f32 = direction_0.x;
-        var _S19 : f32 = - direction_0.y;
-        var axis_0 : vec3<f32> = normalize(cross(vec3<f32>(_S18, _S19, 0.0f), _S17));
+        if(slice_1 >= _S20)
+        {
+            break;
+        }
+        var direction_0 : vec2<f32> = normalize(turned_0(SLICE_DIRECTIONS_0[tile_0], slice_1));
+        var axis_0 : vec3<f32> = normalize(cross(vec3<f32>(direction_0.x, - direction_0.y, 0.0f), _S19));
         var projected_0 : vec3<f32> = normal_0 - axis_0 * vec3<f32>(dot(normal_0, axis_0));
         var projected_length_0 : f32 = length(projected_0);
         if(projected_length_0 < 9.99999997475242708e-07f)
         {
-            direction_0 = vec2<f32>(_S19, _S18);
-            slice_0 = slice_0 + u32(1);
+            slice_1 = slice_1 + u32(1);
             continue;
         }
-        var cos_gamma_1 : f32 = clamp(dot(projected_0, _S17) / projected_length_0, -1.0f, 1.0f);
+        var cos_gamma_1 : f32 = clamp(dot(projected_0, _S19) / projected_length_0, -1.0f, 1.0f);
         var sign_gamma_0 : f32;
-        if((dot(cross(_S17, axis_0), projected_0)) < 0.0f)
+        if((dot(cross(_S19, axis_0), projected_0)) < 0.0f)
         {
             sign_gamma_0 = -1.0f;
         }
@@ -232,8 +259,8 @@ fn occlusion_at_0( pixel_4 : vec2<i32>,  centre_2 : vec3<f32>,  normal_0 : vec3<
         }
         var gamma_0 : f32 = sign_gamma_0 * acos_approx_0(cos_gamma_1);
         var sin_gamma_1 : f32 = sign_gamma_0 * sqrt(saturate(1.0f - cos_gamma_1 * cos_gamma_1));
-        var cos_negative_0 : f32 = horizon_cosine_0(pixel_4, (vec2<f32>(0) - direction_0), STEP_OFFSETS_0[tile_0], reach_1, centre_2, _S17, radius_1, extent_4, size_2);
-        var cos_positive_0 : f32 = horizon_cosine_0(pixel_4, direction_0, STEP_OFFSETS_0[tile_0], reach_1, centre_2, _S17, radius_1, extent_4, size_2);
+        var cos_negative_0 : f32 = horizon_cosine_0(pixel_4, (vec2<f32>(0) - direction_0), STEP_OFFSETS_0[tile_0], reach_1, centre_2, _S19, radius_1, extent_4, size_2);
+        var cos_positive_0 : f32 = horizon_cosine_0(pixel_4, direction_0, STEP_OFFSETS_0[tile_0], reach_1, centre_2, _S19, radius_1, extent_4, size_2);
         var raw_low_0 : f32 = - acos_approx_0(cos_negative_0);
         var low_0 : f32 = gamma_0 - 1.57079637050628662f;
         var clamped_low_0 : bool = raw_low_0 < low_0;
@@ -294,12 +321,10 @@ fn occlusion_at_0( pixel_4 : vec2<i32>,  centre_2 : vec3<f32>,  normal_0 : vec3<
         {
             sin_h2_1 = sqrt(saturate(1.0f - cos_positive_0 * cos_positive_0));
         }
-        var visibility_1 : f32 = visibility_0 + projected_length_0 * slice_visibility_0(h1_1, cos_h1_1, sin_h1_1, h2_1, cos_h2_1, sin_h2_1, cos_gamma_1, sin_gamma_1);
         var weight_1 : f32 = weight_0 + projected_length_0;
-        direction_0 = vec2<f32>(_S19, _S18);
-        visibility_0 = visibility_1;
+        visibility_0 = visibility_0 + projected_length_0 * slice_visibility_0(h1_1, cos_h1_1, sin_h1_1, h2_1, cos_h2_1, sin_h2_1, cos_gamma_1, sin_gamma_1);
         weight_0 = weight_1;
-        slice_0 = slice_0 + u32(1);
+        slice_1 = slice_1 + u32(1);
     }
     if(weight_0 <= 0.0f)
     {
@@ -319,22 +344,22 @@ struct pixelInput_0
 };
 
 @fragment
-fn fragmentMain( _S20 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) -> pixelOutput_0
+fn fragmentMain( _S21 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) -> pixelOutput_0
 {
     var width_0 : u32;
     var height_0 : u32;
     {var dim = textureDimensions((scene_depth_0));((width_0)) = dim.x;((height_0)) = dim.y;};
     var extent_5 : vec2<i32> = vec2<i32>(i32(width_0), i32(height_0));
     var size_3 : vec2<f32> = vec2<f32>(f32(width_0), f32(height_0));
-    var _S21 : vec2<i32> = vec2<i32>(position_1.xy);
-    var depth_2 : f32 = depth_at_0(_S21, extent_5);
+    var _S22 : vec2<i32> = vec2<i32>(position_1.xy);
+    var depth_2 : f32 = depth_at_0(_S22, extent_5);
     if(depth_2 <= 0.0f)
     {
-        var _S22 : pixelOutput_0 = pixelOutput_0( 1.0f );
-        return _S22;
+        var _S23 : pixelOutput_0 = pixelOutput_0( 1.0f );
+        return _S23;
     }
-    var centre_3 : vec3<f32> = view_position_0(_S21, depth_2, size_3);
-    var _S23 : pixelOutput_0 = pixelOutput_0( saturate(1.0f - occlusion_at_0(_S21, centre_3, normal_at_0(_S21, centre_3, extent_5, size_3), extent_5, size_3)) );
-    return _S23;
+    var centre_3 : vec3<f32> = view_position_0(_S22, depth_2, size_3);
+    var _S24 : pixelOutput_0 = pixelOutput_0( saturate(1.0f - occlusion_at_0(_S22, centre_3, normal_at_0(_S22, centre_3, extent_5, size_3), extent_5, size_3)) );
+    return _S24;
 }
 
