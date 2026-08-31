@@ -654,8 +654,12 @@ entry; the browser gate runs on every slice that touches a demo.
     the console's own answer — not its echo, which is printed before anything
     runs.
 
-11. **Still to do, its own slice**: the `SIM` flag over the transport (decision
-    9), which belongs with the determinism and network work rather than here.
+11. **`Flags::SIM` is deferred, not outstanding.** Decision 9 reserves it and
+    names its trigger — the first `SIM` variable anyone wants — and nothing in
+    the workspace declares one. Building the transport half now (a `Command`
+    message applied on a tick boundary, recorded by the replay stream, refused
+    off the host) would be machinery with no caller, so this list is complete
+    until that trigger fires.
 
 ## Exit criteria
 

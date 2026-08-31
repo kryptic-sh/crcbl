@@ -138,18 +138,20 @@ own unbuilt row, not this entry's.
   moved the whole line by a constant, or that kept every step at one level while
   wandering, would not be caught by it.
 
-### The debug console (2026-08-30)
+## What the debug console left as limits (2026-08-31)
 
-Planned in `docs/plan/52-debug-console.md` on the user's ask — a Source-style
-console on `` ` `` in every demo, the log in a panel, an input with Send, every
-settings key a variable, `help` and autocomplete, variables declared beside the
-code. Its eight delivery slices are the plan's; slices 1 to 7 have landed, so
-`` ` `` opens a working console in every game and in every browser demo,
-`debug_view ambient occlusion` draws any renderer's channel, and slice 8 is what
-is left. The one decision the user's "go with your recs" settled: registration
-is a per-crate table gathered at one seam with a source-reading guard, not
-`linkme` (no wasm) or `inventory` (life-before-main) — see the plan's
-decision 2.
+**The console shipped.** Every delivery slice in `docs/plan/52-debug-console.md`
+has landed — the registry, typed settings, the log ring, the panel, the engine
+takeover, the shared debug view, the web backend, the paste key and `bind`,
+`config`, and the button and keyboard a finger reaches. The one item that has
+not is `Flags::SIM`, and it is **deferred by decision 9 rather than
+outstanding**: its trigger is the first `SIM` variable anyone wants, and nobody
+wants one, so building the transport for it now would be machinery with no
+caller.
+
+What follows is what those slices left as limits rather than fixed — each stated
+in the code as well as here. It is no longer a tracking entry for unshipped
+work, which is why it is no longer under HIGH PRIORITY.
 
 What slice 1 left as limits rather than fixed, each stated in the code:
 
