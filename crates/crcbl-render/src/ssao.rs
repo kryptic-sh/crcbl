@@ -46,10 +46,12 @@
 //! that bundled them could not say so. Both default to what ships, so a frame
 //! nobody has touched the console on is the frame every golden was blessed at.
 //!
-//! Neither is a quality preset. `docs/plan/43-render-standards.md`'s tiers are
-//! their own unbuilt row; these are the two variables such a preset would set,
-//! declared beside the pass that reads them the way `crate::debug_draw`'s switch
-//! is.
+//! Neither is a quality preset, and neither is set by one.
+//! `crcbl::settings::presets` writes the `[engine.video]` keys of a tier, and
+//! `docs/plan/39-capabilities.md`'s tier table has no row for the occlusion
+//! pair — so these two stay what they are: variables declared beside the pass
+//! that reads them, the way `crate::debug_draw`'s switch is. What a tier should
+//! spend on them is `docs/backlog.md`'s.
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,

@@ -108,6 +108,16 @@
 //! the file holds the player's ask rather than one machine's answer to it —
 //! the ask follows them to a machine with a different ceiling. An absent key is
 //! still the engine's own figure, as it is for every key here.
+//!
+//! # A quality tier is a writer over these keys, not a key of its own
+//!
+//! [`presets`] is `docs/plan/39-capabilities.md`'s tier table: selecting `low`,
+//! `medium` or `high` writes the individual keys that column names, through
+//! [`apply`], and nothing in the resolution order ever consults the tier. So it
+//! is a console command rather than a [`CatalogueKey`], and the word for which
+//! tier a file is on is derived from the readers above rather than stored —
+//! that module's header says why, and why `custom` is what a file that is on no
+//! tier reads as.
 
 use std::any::Any;
 use std::cell::{Ref, RefCell, RefMut};
@@ -120,6 +130,8 @@ use crcbl_render::{Antialiasing, DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEff
 use crate::engine::FrameLimit;
 use crcbl_store::StorageError;
 use crcbl_store::settings::SettingsStack;
+
+pub mod presets;
 
 /// The `[engine.video]` section, as a dotted key prefix.
 pub const VIDEO_NAMESPACE: &str = "engine.video";
@@ -481,6 +493,19 @@ pub fn frame_limit(stack: &SettingsStack) -> FrameLimit {
         }
         None => FrameLimit::unlimited(),
     }
+}
+
+/// Which tier the frame resolves with, for a caller that has no word for
+/// "unpicked".
+///
+/// [`antialiasing`]'s answer where the player named a rung, and otherwise the
+/// rung [`RenderEffects::DEFAULT_STACK`] carries — which is what a view's own
+/// stack keeps when the file says nothing. The console's `antialiasing` row and
+/// [`presets::selected`] both read it rather than each spelling the fallback,
+/// because a row that showed one rung while a preset compared against another
+/// would make the label disagree with the value beside it.
+fn antialiasing_or_default(stack: &SettingsStack) -> Antialiasing {
+    antialiasing(stack).unwrap_or_else(|| Antialiasing::from_effects(RenderEffects::DEFAULT_STACK))
 }
 
 /// Write the whole `[engine.video]` section into the stack's user layer.
@@ -1604,11 +1629,7 @@ fn read(host: &dyn Any, namespace: &str, name: &str, kind: Kind) -> Value {
         // There is no word for "the player has not picked one" — see
         // `set_video`'s docs — so an absent key reads back as the rung it leaves
         // the game on, which is what `apps/options`' row shows for it too.
-        ANTIALIASING_KEY => Value::Enum(
-            antialiasing(stack)
-                .unwrap_or_else(|| Antialiasing::from_effects(RenderEffects::DEFAULT_STACK))
-                .name(),
-        ),
+        ANTIALIASING_KEY => Value::Enum(antialiasing_or_default(stack).name()),
         RENDER_SCALE_KEY => Value::Float(render_scale(stack)),
         ANISOTROPIC_FILTERING_KEY => Value::Float(anisotropic_filtering(stack)),
         _ => match VIDEO_KEYS
@@ -2013,7 +2034,7 @@ mod tests {
     /// A stack over a settings file with `toml` in it, through the real
     /// loader — not a table built in memory, because the spelling of the
     /// section header is half of what this module has to get right.
-    fn stack_from(toml: &str) -> SettingsStack {
+    pub(super) fn stack_from(toml: &str) -> SettingsStack {
         let storage = MemoryStorage::new();
         storage
             .write(std::path::Path::new(SETTINGS_FILE), toml.as_bytes())

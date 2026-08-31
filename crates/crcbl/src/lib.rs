@@ -306,11 +306,13 @@ pub mod settings;
 ///
 /// One list per crate, gathered by the engine at one seam —
 /// `docs/plan/52-debug-console.md` decision 2. It holds the commands the engine
-/// itself owns, [`debug_view::r_debug_view`] — the one view every host draws —
-/// and, through [`settings::console_bindings`], one `ARCHIVE` variable per
-/// catalogue key, so every setting the engine reads is a console variable with
-/// nothing declared twice. `tests/console_table.rs` is what keeps the declared
-/// half in step with what the source actually declares.
+/// itself owns — including [`settings::presets::quality`], which writes the
+/// `[engine.video]` keys of a tier rather than holding a value of its own —
+/// [`debug_view::r_debug_view`], the one view every host draws, and, through
+/// [`settings::console_bindings`], one `ARCHIVE` variable per catalogue key, so
+/// every setting the engine reads is a console variable with nothing declared
+/// twice. `tests/console_table.rs` is what keeps the declared half in step with
+/// what the source actually declares.
 ///
 /// **The bindings are a slice rather than a `table!` entry**, because they are
 /// generated one per catalogue key by a macro in `settings` and
@@ -328,6 +330,7 @@ pub fn console_table() -> crcbl_console::Table {
         &debug_console::unbind,
         &debug_view::debug_view,
         &settings::dump,
+        &settings::presets::quality,
         &settings::save,
     ];
     crcbl_console::Table::new(VARS, settings::console_bindings(), COMMANDS)

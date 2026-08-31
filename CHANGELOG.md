@@ -215,6 +215,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   a tap on it that fell through would move the player every time a letter was
   typed.
 
+- **A quality tier is a thing you can select, and it is a console command rather
+  than a key.** `docs/plan/43-render-standards.md`'s foundation row (g), reading
+  `docs/plan/39-capabilities.md`'s tier table. `crcbl::settings::presets` is the
+  module: `QualityPreset` is the table's three columns, `QualityPreset::values`
+  is what each one says in the keys this tree can write, and `quality low` |
+  `medium` | `high` at the console writes them through `crcbl::settings::apply`,
+  key by key, exactly as a settings screen's row does. `quality` on its own
+  prints the tier the keys currently hold. **The label is derived, never
+  stored**, so it cannot lie: `presets::selected` compares what the engine's own
+  readers answer against each column, and `custom` means precisely "these keys
+  are not any one tier's set" — which a hand-edited file, a moved row and a
+  fresh run all are, and where two columns of the table say the same thing
+  `presets::label` names both rather than picking one. Selecting a tier is
+  opt-in and nothing selects one at start-up, so a run nobody has typed at draws
+  what it always drew. **Three keys are covered today** — `render_scale`,
+  `antialiasing` and the `volumetric_fog` switch — because every other row of
+  the tier table names an amount of something with no `[engine.video]` key.
+  `medium` and `high` therefore write the same three values; `docs/backlog.md`
+  carries what each tier still owes.
+
 - **The shadow atlas has a cadence and a budget: a frame where everything moved
   at once no longer redraws every map.** `docs/plan/45-shadows.md`'s atlas rung,
   item 3, and the last of the five. `crcbl_render::shadow::Cadence::schedule`

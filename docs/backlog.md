@@ -624,6 +624,146 @@ that has not been built. What the four that landed left behind:
   need `ForwardRenderer::shadow_lights` the day a scene they cover demotes a
   light. None does.
 
+## The tier table is silent about six knobs a preset could write (2026-08-31)
+
+`crcbl::settings::presets::QualityPreset::values` writes three keys because
+those are the three rows of `docs/plan/39-capabilities.md`'s tier table this
+tree has an `[engine.video]` key for. The table says nothing at all about the
+knobs that already exist beside them, and each needs a **number per tier**
+before a preset can spend it:
+
+- `crcbl_render::shadow::cadence::r_shadow_cadence` and `r_shadow_faces` — the
+  entry below on the cadence default is the same question. The table has no
+  cadence row.
+- `crcbl_render::ssao::r_ssao_slices` and `r_ssao_blur_passes` — the tier
+  table's "Ambient occlusion" row is written in terms of bent normals and
+  specular occlusion, neither of which is built, and says nothing about slices
+  or blur passes.
+- `anisotropic_filtering` — named as a preset knob in that document's "Quality
+  presets are a foundation rung" paragraph, with no row in the table.
+
+Each is a sweep on that tier's hardware, which is the table's own preamble ("a
+starting budget to sweep on that tier's hardware, not a constant"). Until the
+numbers exist, a preset leaving them alone is the honest answer: a tier that
+wrote a guessed cadence would move every golden with a moving light.
+
+**And each needs a settings key before a tier could write it even with the
+numbers in hand.** All four are `convar!` process globals; a preset writes the
+player's file, which `docs/plan/39-capabilities.md` fixes as "a layer of keys
+and not a second mechanism". So the route for each is two steps, in this order:
+a catalogue key in `crcbl::settings::catalogue` whose reader drives the variable
+— the road `RENDER_SCALE_KEY` already takes to
+`ForwardRenderer::set_render_scale` — and then a tier-table row saying what each
+column spends. The first is ordinary work; the second is the measurement.
+`crcbl::settings::presets`' header says the same thing where an implementor will
+read it.
+
+## `medium` and `high` are the same preset today (2026-08-31)
+
+Every tier-table row that separates those two columns — the shadow atlas's size
+and light budget (2048²/4096²/8192², 4/8/16 lights), the probe volume's levels
+(2/3/4), SSR's resolution and the ray-traced rung — is a knob with no
+`[engine.video]` key and mostly no renderer half. So
+`QualityPreset::Medium.values()` and `QualityPreset::High.values()` are one arm,
+and `medium_and_high_hold_the_same_values_until_a_key_separates_them` is the
+tripwire that reddens on the day one of those grows a key. `presets::label`
+prints `medium, high` for a file either of them wrote, so a run that selected
+`high` is not told it is on `medium`; that second name disappears on its own
+when the columns separate. Not a defect; recorded so the resemblance is not read
+as a copy-paste slip.
+
+## The tier table's CMAA2 cells are read as SMAA (2026-08-31)
+
+The Medium and High "Antialiasing" cells say CMAA2, which has no code.
+`docs/plan/49-antialiasing.md`'s eighth decision puts CMAA2 and SMAA 1x in one
+tier and retires SMAA in the slice that lands CMAA2, so `QualityPreset::values`
+writes `Antialiasing::Smaa` for those two columns and its comment says the
+constant moves with that slice. **This is the one place the slice read the table
+rather than transcribing it** — if the intent was that medium and high get no AA
+row until CMAA2 exists, this is the line to change.
+
+## The shadow cadence default still has no tier to live in (2026-08-31)
+
+This supersedes nothing in the entry "Whether any tier should ship the shadow
+cadence switched on" — it answers only the second of that entry's two blockers.
+`crcbl_render::shadow::cadence::r_shadow_cadence` and `r_shadow_faces` now have
+a preset mechanism to be set from, and still have neither a settings key nor a
+tier-table row, so the decision is exactly where it was: it needs the visible
+cost measured per tier (how far a shadow lags at that tier's frame rate and
+light speed), then a row in `docs/plan/39-capabilities.md`'s tier table, then a
+`shadow_cadence` catalogue key. The companion entry "The shadow cadence has no
+route from a settings file or a preset" can lose its "the tier table it would
+read is itself unbuilt" clause: the reader is built, the table row is what is
+missing.
+
+## Whether any tier should be the default is still the user's call (2026-08-31)
+
+Nothing selects a preset at start-up, deliberately: `low` alone would move every
+golden (it writes `render_scale = 0.75` and clears the fog switch).
+`docs/plan/39-capabilities.md` says the software and browser tiers "ship on
+`low` deterministically" and that the Medium column "is the default the settings
+screen shows" — neither is implemented, and both are a re-bless. What a default
+would need: a decision about which tier each of the four backends and the
+browser opens on, and a golden re-bless for the ones that move.
+
+## `apps/options` offers no quality row (2026-08-31)
+
+The preset is reachable from the console and from `crcbl::settings::presets` and
+from nowhere else. `apps/options`' menu is built from `VIDEO_KEYS` and four
+hand-written rows in `apps/options/src/menu.rs`, so a `QUALITY` cycler above
+them is a small change — but adding a row shifts `web/tools/browser-e2e.mjs`'s
+`toFader` index and moves the options browser gate, which was out of this
+slice's paths. Deliberately deferred, not forgotten.
+
+## `quality` is not reachable from `crcbl settings` (2026-08-31)
+
+`crcbl-cli`'s `settings get|set|list` walks `crcbl::settings::catalogue`, and a
+preset is a command rather than a catalogue key — so there is no
+`crcbl settings set quality medium`. A `crcbl settings preset <tier>` subcommand
+over `crcbl::settings::presets::select` is what would close it;
+`crates/crcbl-cli` was out of this slice's paths.
+
+## What the preset slice did not verify (2026-08-31)
+
+- **No GPU ran.** Every check is over `SettingsStack`, the readers and the
+  console command; nothing drew a frame at a tier. That a `render_scale` of 0.75
+  draws a smaller target is `ForwardRenderer::set_render_scale`'s own existing
+  coverage, not this slice's.
+- **No device clamp was exercised.** The claim that a tier meets the same device
+  clamp every other write meets is a structural one — `select` calls
+  `crcbl::settings::apply` and opens no second path to a renderer — and is not
+  asserted by a test, because the clamp needs an adapter.
+- **The `quality` command cannot report `Applied::NextStart`.** A
+  `ConsoleHost`'s stage is a `Deferred`, which records every seam and refuses
+  none, so the command always sees `Live` and prints no "next start" line. The
+  answer is on `presets::select` for a caller with a real stage —
+  `a_stage_with_no_seam_writes_the_tier_and_reports_the_next_start_up` covers
+  that — and a console that grows a `GpuStage` is where the line would be
+  wanted.
+
+## The unpicked antialiasing rung is not guarded by any check (2026-08-31)
+
+`crcbl::settings::antialiasing_or_default` is what the console's `antialiasing`
+row and `presets::selected` both fall back to when the player has named no rung:
+`Antialiasing::from_effects(RenderEffects::DEFAULT_STACK)`. **Changing it to
+`Antialiasing::None` passes the whole of `crcbl`** — 363 tests, measured
+2026-08-31 by making exactly that edit — so nothing pins what antialiasing an
+unconfigured run resolves.
+
+**Pre-existing, not introduced by the preset slice**: that expression was inline
+in `read`'s `ANTIALIASING_KEY` arm before it was extracted, and was unguarded
+there too. What the slice changed is that it now has two readers instead of one,
+and its own doc comment says why they must agree — a row showing one rung while
+a preset compares against another makes the label disagree with the value beside
+it.
+
+**Why no check was added with the finding:** the assertion available at this
+level is tautological — comparing the helper against `DEFAULT_STACK` restates
+its body. The honest check is a frame-level one: draw from an untouched stack
+and assert the antialiasing resolve pass the default stack names is in the pass
+list. That is `crcbl-render`/e2e work rather than a settings test, and it would
+also close the same gap for `render_scale` and the effect switches.
+
 ## Whether any tier should ship the shadow cadence switched on (2026-08-31)
 
 `crcbl_render::shadow::r_shadow_cadence` and `r_shadow_faces` both default to
