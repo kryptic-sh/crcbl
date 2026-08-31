@@ -66,6 +66,15 @@
 //! It is settable while the engine runs, through [`set_filter`] and the `log`
 //! console command below, so a directive can be widened at the moment something
 //! is going wrong rather than on the next launch.
+//!
+//! **The filter is this module's, not a sink's.** `crcbl::web`'s queueing
+//! logger takes the process's slot in a browser, where there is no stderr to
+//! write to, so a filter kept inside `StderrLogger` would have been unreadable
+//! and unsettable for a whole tier — which is what `log` reported there until
+//! [`register_sink`] and [`sink_permits`] existed. A sink outside this crate
+//! declares itself with the first and decides its records with the second, and
+//! then `log warn,crcbl_vk=trace` means the same thing in a browser as in a
+//! terminal, per-target directives included.
 
 pub mod console;
 
@@ -122,6 +131,19 @@ pub struct Filter {
 }
 
 impl Filter {
+    /// [`DEFAULT_FILTER`], as a `const`.
+    ///
+    /// [`FILTER`] is a `static` and a `RwLock<Filter>` can only be built in one
+    /// without a lazy initialiser if the value inside it is const-constructible,
+    /// which `Filter::parse(DEFAULT_FILTER)` is not. Spelling the same filter
+    /// twice is the price, and
+    /// `the_const_initial_filter_is_the_default_one_parsed` is what stops the
+    /// two drifting.
+    const INITIAL: Self = Self {
+        default: LevelFilter::Info,
+        targets: Vec::new(),
+    };
+
     /// Parses a comma-separated directive list.
     ///
     /// Each directive is either a bare level (setting the default) or
@@ -213,6 +235,15 @@ impl Filter {
             .iter()
             .find(|(prefix, _)| target_matches(target, prefix))
             .map_or(self.default, |(_, level)| *level)
+    }
+
+    /// Whether this filter admits a record at `level` from `target`.
+    ///
+    /// The one reading of "does the filter allow this", so the stderr sink and
+    /// a sink outside this crate — [`sink_permits`] — cannot decide a record
+    /// differently.
+    fn permits(&self, level: Level, target: &str) -> bool {
+        level <= self.level_for(target)
     }
 
     /// The loosest level any target can produce — what the `log` facade needs
@@ -312,15 +343,11 @@ fn parse_level(text: &str) -> Option<LevelFilter> {
 
 /// The stderr logger installed by [`init_logging`].
 ///
-/// The filter is behind an `RwLock` because [`set_filter`] swaps it while the
-/// engine runs: every record takes the read side and they do not contend with
-/// each other, which a `Mutex` would not manage, and swapping is rare enough
-/// that the write side never queues behind anything. The alternative — an
-/// atomically swapped `Arc` — buys a lock-free read at the price of a
-/// dependency this crate does not have.
+/// It holds no filter of its own: [`FILTER`] is the process's one filter and
+/// every sink that honours it reads that, which is what lets [`set_filter`]
+/// mean the same thing whichever sink took the slot — see [`register_sink`].
 #[derive(Debug)]
 struct StderrLogger {
-    filter: RwLock<Filter>,
     start: Instant,
 }
 
@@ -329,17 +356,7 @@ impl StderrLogger {
     /// reaches stderr — [`Log::enabled`] below widens for capture, and a record
     /// let through on that account must still not be printed.
     fn permits(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.level() <= self.read_filter().level_for(metadata.target())
-    }
-
-    /// The filter in force, borrowed rather than cloned: this is read once per
-    /// record, and a clone would allocate a `Vec<String>` for every log line.
-    ///
-    /// A poisoned lock is stepped over for the reason [`console::push`] gives
-    /// about the ring's: a logger that panicked must not stop the run from
-    /// saying what happened next.
-    fn read_filter(&self) -> RwLockReadGuard<'_, Filter> {
-        self.filter.read().unwrap_or_else(PoisonError::into_inner)
+        read_filter().permits(metadata.level(), metadata.target())
     }
 
     /// Capture, ring, filter and write one record.
@@ -556,6 +573,61 @@ static LOGGER: OnceLock<StderrLogger> = OnceLock::new();
 /// ordered by those, not by this.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// Whether a sink outside this module has declared that it honours [`FILTER`].
+///
+/// [`register_sink`] sets it and nothing clears it. Read beside [`INSTALLED`]
+/// by [`honoured`], which is the question [`filter`] and [`set_filter`] both
+/// actually ask: "is there a sink that would notice?"
+///
+/// `Relaxed` for [`INSTALLED`]'s reason — the flag publishes no data, and the
+/// filter it speaks for is published by its own `RwLock`.
+static SINK_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// The one filter the process applies, whichever sink is installed.
+///
+/// Behind an `RwLock` because [`set_filter`] swaps it while the engine runs:
+/// every record takes the read side and they do not contend with each other,
+/// which a `Mutex` would not manage, and swapping is rare enough that the write
+/// side never queues behind anything. The alternative — an atomically swapped
+/// `Arc` — buys a lock-free read at the price of a dependency this crate does
+/// not have.
+///
+/// **A module-level static rather than a field on [`StderrLogger`]**, because
+/// that sink is not the only one: `crcbl::web`'s queueing logger takes the slot
+/// in a browser and honours this same filter through [`sink_permits`]. Held in
+/// one place, `log warn,crcbl_vk=trace` means the same thing on both tiers; held
+/// per sink, the web one could only ever have been the facade's global maximum.
+static FILTER: RwLock<Filter> = RwLock::new(Filter::INITIAL);
+
+/// The filter in force, borrowed rather than cloned: this is read once per
+/// record, and a clone would allocate a `Vec<String>` for every log line.
+///
+/// A poisoned lock is stepped over for the reason [`console::push`] gives about
+/// the ring's: a logger that panicked must not stop the run from saying what
+/// happened next.
+fn read_filter() -> RwLockReadGuard<'static, Filter> {
+    FILTER.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Puts `filter` in force and moves the facade's global maximum with it.
+///
+/// **The maximum first**: between the two writes a sink is asked about records
+/// the new filter admits, and the old filter is what decides them. The other
+/// order drops records the caller just asked for.
+fn store_filter(filter: Filter) {
+    ::log::set_max_level(filter.max_level());
+    *FILTER.write().unwrap_or_else(PoisonError::into_inner) = filter;
+}
+
+/// Whether any installed sink honours [`FILTER`].
+///
+/// The question [`filter`] and [`set_filter`] ask: a process whose logger is
+/// some host application's has a filter here that decides nothing, and saying
+/// so is the only honest answer to `log`.
+fn honoured() -> bool {
+    is_installed() || SINK_REGISTERED.load(Ordering::Relaxed)
+}
+
 /// Installs the stderr logger using the filter from `CRCBL_LOG`.
 ///
 /// Idempotent and never fatal: if a logger is already installed (a host
@@ -574,12 +646,16 @@ pub fn init_logging() -> bool {
 /// call to this function, whose filter stays in force.
 pub fn try_init_logging(filter: Filter) -> Result<(), SetLoggerError> {
     let logger = LOGGER.get_or_init(|| StderrLogger {
-        filter: RwLock::new(filter),
         start: Instant::now(),
     });
     ::log::set_logger(logger)?;
     INSTALLED.store(true, Ordering::Relaxed);
-    ::log::set_max_level(logger.read_filter().max_level());
+    // After the slot is won, so a second call's filter never displaces the
+    // first's — the `?` above is what turns that one back. The window between
+    // the two lines is a fresh process's `log::max_level()`, which is `Off`, so
+    // in the ordinary case no record is offered to any sink before the filter
+    // this caller asked for is in force.
+    store_filter(filter);
     // Only the winner of the race writes it, so a second `init_logging` does not
     // claim the run restarted.
     logger.emit(
@@ -669,25 +745,62 @@ pub fn is_installed() -> bool {
 // The live filter
 // ---------------------------------------------------------------------------
 
+/// Declares that the process's logger is a sink this module does not own, and
+/// puts `filter` in force for it.
+///
+/// **What `crcbl::web`'s queueing logger calls the moment it wins the slot.**
+/// A browser has no stderr, so `StderrLogger` is never installed there and
+/// [`is_installed`] is `false` for the whole run — which used to mean
+/// [`filter`] answered `None` and [`set_filter`] refused, so the `log` console
+/// command could only report that there was no filter to move. The filter is
+/// this module's rather than a sink's, so a sink that reads it through
+/// [`sink_permits`] gets the same per-target directives the terminal does; the
+/// registration is how this module knows somebody is reading.
+///
+/// Call it **after** `log::set_logger` has succeeded. A sink that lost the slot
+/// registering here would put a filter in force for a logger that is not
+/// running, which is the dishonest answer [`is_installed`] exists to avoid.
+///
+/// Nothing unregisters: a process installs one logger and keeps it.
+pub fn register_sink(filter: Filter) {
+    SINK_REGISTERED.store(true, Ordering::Relaxed);
+    store_filter(filter);
+}
+
+/// Whether the live filter admits a record at `level` from `target`.
+///
+/// The predicate a sink outside this crate answers `log::Log::enabled` with —
+/// `crcbl::web`'s is the one caller — so that the directives typed at the
+/// console decide its records the way `StderrLogger::permits` decides
+/// stderr's.
+///
+/// **Falls back to the facade's global maximum when no sink has registered**,
+/// which is what a sink that never called [`register_sink`] did before this
+/// existed: an unregistered sink has no filter of this module's to honour, and
+/// answering `false` would silence it outright.
+#[must_use]
+pub fn sink_permits(level: Level, target: &str) -> bool {
+    if !SINK_REGISTERED.load(Ordering::Relaxed) {
+        return level <= ::log::max_level();
+    }
+    read_filter().permits(level, target)
+}
+
 /// The filter the installed logger is applying.
 ///
-/// `None` when this module's logger is not the process's — a host application
-/// won the slot, or nothing has installed anything yet. There is no filter to
-/// report in that case, and reporting the one this module would have used would
+/// `None` when no installed sink honours it — a host application won the
+/// process's logger slot, or nothing has installed anything yet. There is no
+/// filter to report in that case, and reporting the one this module holds would
 /// describe a sink nothing is writing to.
 #[must_use]
 pub fn filter() -> Option<Filter> {
-    if !is_installed() {
-        return None;
-    }
-    let logger = LOGGER.get()?;
-    Some(logger.read_filter().clone())
+    honoured().then(|| read_filter().clone())
 }
 
-/// Swaps the filter the installed logger applies, from the next record on.
+/// Swaps the filter the installed sink applies, from the next record on.
 ///
-/// Returns `false` when this module's logger is not the process's, in which case
-/// nothing changed — see [`is_installed`].
+/// Returns `false` when no installed sink honours it, in which case nothing
+/// changed — see [`filter`], [`is_installed`] and [`register_sink`].
 ///
 /// **The facade's global maximum is set to match, exactly as installing does.**
 /// That is what makes a widened filter reach the sink at all: a call site above
@@ -696,21 +809,10 @@ pub fn filter() -> Option<Filter> {
 /// narrowing here stops those records reaching the console ring as well as
 /// stderr, and a [`capture`] running on another thread stops seeing them.
 pub fn set_filter(filter: Filter) -> bool {
-    if !is_installed() {
+    if !honoured() {
         return false;
     }
-    let Some(logger) = LOGGER.get() else {
-        return false;
-    };
-    // The maximum first: between the two writes the sink is asked about records
-    // the new filter admits, and `permits` — which has the old filter until the
-    // line below — is what decides them. The other order drops records the
-    // caller just asked for.
-    ::log::set_max_level(filter.max_level());
-    *logger
-        .filter
-        .write()
-        .unwrap_or_else(PoisonError::into_inner) = filter;
+    store_filter(filter);
     true
 }
 
@@ -720,7 +822,7 @@ crcbl_console::concommand! {
         if args.is_empty() {
             let Some(current) = filter() else {
                 return Err(Fault::new(
-                    "the engine's logger is not installed, so there is no filter to read",
+                    "the process's logger honours no engine filter, so there is none to read",
                 ));
             };
             cx.print(format!("log {current}"));
@@ -737,7 +839,7 @@ crcbl_console::concommand! {
         let installed = wanted.to_string();
         if !set_filter(wanted) {
             return Err(Fault::new(
-                "the engine's logger is not installed, so the filter was left alone",
+                "the process's logger honours no engine filter, so it was left alone",
             ));
         }
         cx.print(format!("log {installed}"));
@@ -1085,6 +1187,44 @@ mod tests {
         );
     }
 
+    /// Serialises the tests that put a filter in force.
+    ///
+    /// They share [`FILTER`] and each asserts on the one it just wrote, so
+    /// concurrently they would be asserting on each other's.
+    static FILTER_ORDER: Mutex<()> = Mutex::new(());
+
+    /// Runs `body` with `directives` in force, and puts back what was there.
+    ///
+    /// **The facade's global maximum is deliberately left alone**, which is the
+    /// one thing this does not share with [`set_filter`]: nothing in this binary
+    /// installs a logger — `installing_the_logger_is_idempotent` asserts the slot
+    /// is still empty — so the maximum decides nothing here, while lowering it
+    /// would silence a [`capture`] running on another thread. The filter tests
+    /// that need both halves are `tests/console_log.rs`, in a binary of their own.
+    fn with_filter<R>(directives: &str, body: impl FnOnce() -> R) -> R {
+        let _order = FILTER_ORDER.lock().unwrap_or_else(PoisonError::into_inner);
+        let previous = std::mem::replace(
+            &mut *FILTER.write().unwrap_or_else(PoisonError::into_inner),
+            Filter::parse(directives),
+        );
+        let result = body();
+        *FILTER.write().unwrap_or_else(PoisonError::into_inner) = previous;
+        result
+    }
+
+    /// **[`Filter::INITIAL`] is [`DEFAULT_FILTER`], parsed.**
+    ///
+    /// The one spelled twice — a `const` for the `static` and a string for
+    /// everyone else — so this is what stops the two drifting the day the
+    /// default level changes.
+    #[test]
+    fn the_const_initial_filter_is_the_default_one_parsed() {
+        assert_eq!(
+            Filter::INITIAL.to_string(),
+            Filter::parse(DEFAULT_FILTER).to_string(),
+        );
+    }
+
     /// **The ring is fed before the filter, and the filter still decides
     /// stderr.**
     ///
@@ -1102,25 +1242,26 @@ mod tests {
         let quiet = "crcbl_core::log::tests::refused";
         let loud = "crcbl_core::log::tests::printed";
         let logger = StderrLogger {
-            filter: RwLock::new(Filter::parse(&format!("info,{quiet}=off"))),
             start: Instant::now(),
         };
-        assert!(
-            !logger.permits(
-                &Metadata::builder()
-                    .level(Level::Error)
-                    .target(quiet)
-                    .build()
-            ),
-            "the directive silences that target, so none of its records reach stderr",
-        );
-        assert!(
-            logger.permits(&Metadata::builder().level(Level::Info).target(loud).build()),
-            "the default level admits the other target",
-        );
+        with_filter(&format!("info,{quiet}=off"), || {
+            assert!(
+                !logger.permits(
+                    &Metadata::builder()
+                        .level(Level::Error)
+                        .target(quiet)
+                        .build()
+                ),
+                "the directive silences that target, so none of its records reach stderr",
+            );
+            assert!(
+                logger.permits(&Metadata::builder().level(Level::Info).target(loud).build()),
+                "the default level admits the other target",
+            );
 
-        logger.emit(Level::Error, quiet, format_args!("under the filter"));
-        logger.emit(Level::Info, loud, format_args!("over the filter"));
+            logger.emit(Level::Error, quiet, format_args!("under the filter"));
+            logger.emit(Level::Info, loud, format_args!("over the filter"));
+        });
 
         let mine: Vec<console::Record> = console::snapshot()
             .into_iter()
@@ -1139,32 +1280,33 @@ mod tests {
     #[test]
     fn logger_respects_the_filter_without_being_installed() {
         let logger = StderrLogger {
-            filter: RwLock::new(Filter::parse("warn,noisy=trace")),
             start: Instant::now(),
         };
-        assert!(
-            logger.enabled(
-                &Metadata::builder()
-                    .level(Level::Error)
-                    .target("any")
-                    .build()
-            )
-        );
-        assert!(!logger.enabled(&Metadata::builder().level(Level::Info).target("any").build()));
-        assert!(
-            logger.enabled(
-                &Metadata::builder()
-                    .level(Level::Trace)
+        with_filter("warn,noisy=trace", || {
+            assert!(
+                logger.enabled(
+                    &Metadata::builder()
+                        .level(Level::Error)
+                        .target("any")
+                        .build()
+                )
+            );
+            assert!(!logger.enabled(&Metadata::builder().level(Level::Info).target("any").build()));
+            assert!(
+                logger.enabled(
+                    &Metadata::builder()
+                        .level(Level::Trace)
+                        .target("noisy")
+                        .build()
+                )
+            );
+            logger.log(
+                &Record::builder()
+                    .args(format_args!("hello"))
                     .target("noisy")
-                    .build()
-            )
-        );
-        logger.log(
-            &Record::builder()
-                .args(format_args!("hello"))
-                .target("noisy")
-                .build(),
-        );
+                    .build(),
+            );
+        });
         logger.flush();
     }
 

@@ -837,6 +837,19 @@ const EXPECTATIONS = {
       restore: 'debug_view shaded',
       restored: (line) => line.includes('view: shaded'),
       restoredLabel: 'view: shaded',
+      // **The engine's log filter, read back on the one tier where reading it
+      // used to be a fault.** `crcbl_core::log`'s filter lived inside its
+      // stderr sink, and a browser installs that sink never — there is no
+      // stderr — so both forms of `log` answered that nothing here honoured a
+      // filter. `crcbl::web::install_logger` registers the queueing sink for
+      // the engine's filter now, and this line is what proves the registration
+      // happened on a real page rather than only in a native fixture.
+      //
+      // `info` is the answer because `web/engine/demo.js` calls
+      // `logLevel(LOG_INFO)` when it boots, and this group runs before the two
+      // blocks below that move the level.
+      filter: 'log',
+      filterAnswer: 'log info',
       // **What Ctrl+V answers here.** `crcbl::engine::Loop::ask_for_paste`
       // prints this when the shell refuses the read, and the web backend is
       // the backend that refuses: a browser's clipboard read is a
@@ -6259,6 +6272,30 @@ try {
         `no heartbeat in ${pollCeiling()} ms said ${spec.appliedLabel}; the ` +
           `last of ${hud().length - beforeCommand} since the line was typed was ` +
           `"${(hud().at(-1) ?? 'none').trim()}"`
+    );
+
+    // **The log filter, read back through the command that reports it.** The
+    // console's answer is the filter the page's sink is applying, so a line
+    // saying so is the whole registration — the filter, the sink, and the
+    // command that reaches both — proven on the tier that had none of it. A
+    // page where the sink never registered answers with a fault here instead,
+    // which carries no `log info` and fails this loudly.
+    const beforeFilter = consoleLines.length;
+    await typeLine(spec.filter);
+    const reported = await until(async () =>
+      consoleLines
+        .slice(beforeFilter)
+        .find((line) => line.includes(spec.filterAnswer))
+    );
+    check(
+      'C',
+      'the console reads back the log filter this page is applying',
+      Boolean(reported),
+      reported?.trim() ??
+        `nothing the page logged in ${pollCeiling()} ms carried ` +
+          `"${spec.filterAnswer}"; the last of ` +
+          `${consoleLines.length - beforeFilter} lines since it was typed was ` +
+          `"${(consoleLines.at(-1) ?? 'none').trim()}"`
     );
 
     // **The paste key, and the answer this tier gives it.** `Ctrl+V` is

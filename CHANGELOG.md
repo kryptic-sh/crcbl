@@ -159,6 +159,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The `log` command works in a browser, and a console gain reaches the mix
+  that is already playing.** `crcbl_core::log::register_sink` and `sink_permits`
+  let a sink outside `crcbl-core` declare that it applies the engine's filter
+  and decide each record by it; `crcbl::web`'s queueing logger registers on
+  install, so `log` and `log warn,crcbl_vk=trace` read and set the filter on a
+  page — per-target directives included — instead of answering that no filter is
+  installed. `HostedGame::set_bus_gain` is the seam the loop hands an
+  `[engine.audio]` write to, overridden by asteroids, breakout, flappy, horde
+  and options, so `master_volume 0.5` typed at the console is heard on the
+  voices already sounding; the default refuses and says which seam is missing.
+
 - **A shadowed light's atlas tile is now sized by how much of the frame it
   covers.** `crcbl_render::shadow`'s `coverage` is the share of the frame's
   height a light's shadow map spans on screen — the map's own footprint over its
@@ -818,6 +829,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   cycler row as it does over a slider (`MenuSet::cycler_highlighted`).
 
 ### Changed
+
+- **`crcbl_core::log`'s live filter moved out of `StderrLogger` into the
+  module**, so one filter serves every sink: `filter` and `set_filter` answer
+  for a registered foreign sink as well as for this crate's own logger, and
+  still refuse when the process's logger is somebody else's.
+  `crcbl::web::set_log_level` — the shim's `logLevel` — goes through
+  `set_filter` rather than moving `log::set_max_level` alone, which is what the
+  page's sink reads now. The `log` command's refusals say the process's logger
+  honours no engine filter, which is the condition that actually holds, rather
+  than that the engine's logger is not installed, which was only one of the ways
+  it can happen.
 
 - **The shadow atlas is an allocator rather than a fixed grid, and the shader
   reads a rectangle per map instead of deriving a cell from an index.**

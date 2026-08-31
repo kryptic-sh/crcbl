@@ -293,6 +293,21 @@ impl HostedGame for Asteroids {
         Some(self.game.action_map_mut())
     }
 
+    /// The mixer the console's `[engine.audio]` keys move.
+    ///
+    /// The one this game plays every cue through, so `music_volume 0.2` typed at
+    /// the console is heard on the bed that is already sounding rather than on
+    /// the next launch — see
+    /// [`Mixer::set_bus_gain`](crcbl::audio::mixer::Mixer::set_bus_gain).
+    fn set_bus_gain(
+        &mut self,
+        bus: crcbl::audio::mixer::Bus,
+        gain: f32,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        self.game.audio.set_bus_gain(bus, gain);
+        Ok(())
+    }
+
     fn menu_action(id: crcbl::ui::WidgetId) -> Option<Fire> {
         menu::fire_from_id(id)
     }

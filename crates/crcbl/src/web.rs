@@ -198,8 +198,18 @@ fn elapsed_seconds() -> f64 {
 struct WebLogger;
 
 impl log::Log for WebLogger {
+    /// The engine's live filter, per target, which is what
+    /// [`install_logger`] registers this sink for.
+    ///
+    /// Not `metadata.level() <= log::max_level()`, which is what it was: that
+    /// one reading is the facade's single global maximum, so
+    /// `log warn,crcbl_vk=trace` typed at the console in a browser could only
+    /// ever have meant "trace, everywhere". The directives are the terminal's
+    /// now — `crcbl_core::log::sink_permits` is the same predicate
+    /// `StderrLogger::permits` uses — and the maximum stays in front of it as
+    /// the facade's cheap gate.
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= log::max_level()
+        crcbl_core::log::sink_permits(metadata.level(), metadata.target())
     }
 
     fn log(&self, record: &log::Record<'_>) {
@@ -258,9 +268,26 @@ impl log::Log for WebLogger {
 static LOGGER: WebLogger = WebLogger;
 
 /// Installs the queueing logger, unless a logger is already installed.
+///
+/// **The registration is what makes `log` answer on this tier.**
+/// `crcbl_core::log`'s filter is the engine's rather than a sink's, and
+/// [`crcbl_core::log::register_sink`] is how it learns that the sink applying
+/// it is this one: without it `crcbl_core::log::filter` answers `None` and
+/// `set_filter` refuses, because `StderrLogger` is never installed in a browser
+/// — which is exactly what the console command reported here until this line
+/// existed.
+///
+/// **Only on the winning branch**, because a sink that lost the slot honours
+/// nothing: registering there would put a filter in force for a logger that is
+/// not running.
+///
+/// [`Filter::from_env`](crcbl_core::log::Filter::from_env) rather than a level
+/// written here, so a native caller of this gets `CRCBL_LOG` like every other
+/// entry point. On `wasm32` there is no environment to read and it is
+/// `crcbl_core::log::DEFAULT_FILTER`, which is the `Info` this used to set.
 pub fn install_logger() {
     if log::set_logger(&LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Info);
+        crcbl_core::log::register_sink(crcbl_core::log::Filter::from_env());
     }
 }
 
@@ -273,16 +300,26 @@ pub fn install_logger() {
 /// asked for.
 #[must_use]
 pub fn set_log_level(level: u32) -> u32 {
-    let filter = match level {
-        0 => log::LevelFilter::Off,
-        1 => log::LevelFilter::Error,
-        2 => log::LevelFilter::Warn,
-        3 => log::LevelFilter::Info,
-        4 => log::LevelFilter::Debug,
-        5 => log::LevelFilter::Trace,
+    let directive = match level {
+        0 => "off",
+        1 => "error",
+        2 => "warn",
+        3 => "info",
+        4 => "debug",
+        5 => "trace",
         _ => return 0,
     };
-    log::set_max_level(filter);
+    // Through the engine's filter rather than straight at the facade's maximum,
+    // because that filter is what this page's sink now consults: a shim moving
+    // only the maximum would leave the directives in force and change nothing a
+    // record is actually decided by. A bare level has no per-target overrides,
+    // so its `max_level` *is* the level — which is what the fallback needs on a
+    // page whose logger somebody else installed and this sink never registered.
+    let filter = crcbl_core::log::Filter::parse(directive);
+    let maximum = filter.max_level();
+    if !crcbl_core::log::set_filter(filter) {
+        log::set_max_level(maximum);
+    }
     1
 }
 
@@ -1060,6 +1097,7 @@ pub use crate::web_exports;
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
     use log::Log as _;
 
@@ -1076,14 +1114,56 @@ mod tests {
     }
 
     fn write_line(target: &str, message: &str) {
+        write_at(log::Level::Info, target, message);
+    }
+
+    fn write_at(level: log::Level, target: &str, message: &str) {
         LOGGER.log(
             &log::Record::builder()
-                .level(log::Level::Info)
+                .level(level)
                 .target(target)
                 .args(format_args!("{message}"))
                 .build(),
         );
     }
+
+    /// Puts `directives` in force as the filter this sink reads, registering it
+    /// as the sink that reads them.
+    ///
+    /// Replaces the bare `log::set_max_level(Info)` these tests used to open
+    /// with. [`WebLogger::enabled`] asks [`crcbl_core::log::sink_permits`] now,
+    /// so pinning the facade's maximum no longer says what the sink will accept.
+    /// It still moves that maximum — `register_sink` does — so the reason the old
+    /// line was here holds unchanged: a `capture` running in another of this
+    /// binary's tests raises it to `Trace`, and a fixture that read it would be
+    /// logging a line the filter admits.
+    ///
+    /// **`init_logging` first, and it is not decoration.** The filter these
+    /// write is the process's, and `crcbl_core::log::try_init_logging` stores
+    /// the caller's over it — once, on whichever thread wins the logger slot. A
+    /// `capture` in another of this binary's tests is what calls it, so a
+    /// fixture that did not take the slot first could have its directives
+    /// replaced by `CRCBL_LOG`'s between writing them and logging the record
+    /// they are about. Calling it here means the slot is gone before any
+    /// directive is written, and a later `try_init_logging` returns `Err`
+    /// without touching the filter.
+    ///
+    /// **The guard is the caller's to hold for the rest of its test**, because
+    /// the filter is one value and these tests each assert on the one they just
+    /// wrote: without it they overwrite each other's directives, which was a
+    /// failure of this file about one `cargo test -p crcbl --lib` run in ten.
+    /// (Under `cargo nextest`, which CI runs, each test is its own process and
+    /// neither hazard can arise.)
+    fn filter_at(directives: &str) -> MutexGuard<'static, ()> {
+        let order = FILTER_ORDER.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = crcbl_core::log::init_logging();
+        crcbl_core::log::register_sink(crcbl_core::log::Filter::parse(directives));
+        order
+    }
+
+    /// Serialises the tests that write the process-wide log filter. See
+    /// [`filter_at`].
+    static FILTER_ORDER: Mutex<()> = Mutex::new(());
 
     /// **A page that stops draining bounds the queue and says how much it lost.**
     ///
@@ -1092,7 +1172,7 @@ mod tests {
     /// quietly turns "the log is missing the interesting part" into a mystery.
     #[test]
     fn a_queue_nobody_drains_is_bounded_and_reports_what_it_dropped() {
-        log::set_max_level(log::LevelFilter::Info);
+        let _order = filter_at("info");
         drain();
 
         let overflow = 10;
@@ -1133,7 +1213,7 @@ mod tests {
     /// character straddling the limit, which is the only case that can fail.
     #[test]
     fn an_over_long_line_is_cut_without_splitting_a_character() {
-        log::set_max_level(log::LevelFilter::Info);
+        let _order = filter_at("info");
         drain();
 
         // 'é' is two bytes, and the prefix is chosen so that MAX_LOG_LINE lands
@@ -1173,7 +1253,7 @@ mod tests {
     /// the filter admits.
     #[test]
     fn the_web_sink_rings_a_line_its_filter_refused() {
-        log::set_max_level(log::LevelFilter::Info);
+        let _order = filter_at("info");
         drain();
 
         let target = "crcbl::web::tests::the_web_sink_rings_a_line_its_filter_refused";
@@ -1197,6 +1277,50 @@ mod tests {
         assert_eq!(ringed.len(), 1, "the ring did not get it: {ringed:?}");
         assert_eq!(ringed[0].message, message);
         assert_eq!(ringed[0].level, log::Level::Debug);
+    }
+
+    /// **A filter set at runtime decides what this sink queues, target by
+    /// target.**
+    ///
+    /// `docs/backlog.md`'s "`log` answers with a fault in a browser", at the
+    /// sink end of it: [`WebLogger::enabled`] was `level <= log::max_level()`,
+    /// one global number, so no per-target directive could reach this logger and
+    /// the console command that installs them had nothing here to move.
+    ///
+    /// **The pair of targets is what makes it a check.** Both records are
+    /// `Debug` and one filter decides them: a sink back on the facade's maximum
+    /// queues both, because a filter carrying a `debug` directive raises that
+    /// maximum to `Debug`; a sink that took the directives and not the maximum
+    /// queues neither.
+    ///
+    /// Native rather than in a browser, for
+    /// [`the_web_sink_rings_a_line_its_filter_refused`]'s reason — this drives
+    /// the real [`WebLogger::log`]. That `install_logger` performs the
+    /// registration on a real page is the browser gate's `log` line in
+    /// `web/tools/browser-e2e.mjs`.
+    #[test]
+    fn a_filter_set_at_runtime_decides_what_the_browser_sink_queues() {
+        const LOUD: &str = "crcbl::web::tests::queued";
+        const QUIET: &str = "crcbl::web::tests::unqueued";
+
+        let _order = filter_at(&format!("info,{LOUD}=debug"));
+        drain();
+
+        write_at(log::Level::Debug, LOUD, "the directive admits this one");
+        write_at(log::Level::Debug, QUIET, "and refuses this one");
+
+        let taken = drain();
+        assert_eq!(
+            taken.len(),
+            1,
+            "one directive named one target, and the queue took {}: {taken:?}",
+            taken.len(),
+        );
+        assert!(
+            taken[0].contains(LOUD) && taken[0].contains("admits this one"),
+            "the queued line is not the one the directive named: {}",
+            taken[0],
+        );
     }
 
     // ---- the lifecycle ------------------------------------------------------

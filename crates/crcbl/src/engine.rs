@@ -5497,6 +5497,37 @@ pub trait HostedGame: Sized {
         None
     }
 
+    /// Move one `[engine.audio]` bus's gain on the mixer this game plays
+    /// through.
+    ///
+    /// `docs/plan/52-debug-console.md` slice 5's one open seam, and
+    /// [`actions`](Self::actions)' shape for
+    /// [`Deferred`](crate::settings::Deferred)'s reason: a console write reaches
+    /// its host as `&mut dyn Any` and cannot hold a borrow of the mixer, so it
+    /// records the gain and `Loop::drain_console` hands it here, where the
+    /// game is. A mixer **is** the game's — the engine builds none and
+    /// [`SettingsSource::apply_audio_gains`] is a game calling it — so this is
+    /// the only way the loop can reach one.
+    ///
+    /// A gain is linear and in `0..=1`; [`Mixer::set_bus_gain`](crcbl_audio::mixer::Mixer::set_bus_gain)
+    /// clamps and is what an override forwards to.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`](crate::settings::Unsupported) where this game holds no
+    /// mixer, which is what the default answers. It is a refusal rather than a
+    /// silent `Ok` on purpose: the loop prints the refusal and names this seam,
+    /// so a game that never overrode it says so instead of reporting a gain it
+    /// never applied.
+    fn set_bus_gain(
+        &mut self,
+        bus: crcbl_audio::mixer::Bus,
+        gain: f32,
+    ) -> Result<(), crate::settings::Unsupported> {
+        let _ = (bus, gain);
+        Err(crate::settings::Unsupported)
+    }
+
     /// Adds this game's own fields to the run's shared ones.
     fn summary(&self, run: RunSummary) -> Self::Summary;
 
@@ -6540,12 +6571,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// where the bundle and the clock are in hand — the arrangement
     /// [`HostedGame::take_pending_frame_limit`] already had.
     ///
-    /// **The audio gains are the one seam the loop cannot reach**: a mixer is
-    /// the game's and no [`HostedGame`] method hands one over, so a gain a
-    /// console set is in the settings stack and in the file and not in the
-    /// running mix. It is said out loud rather than dropped, on this file's own
-    /// terms about a value that reached no frame; `docs/backlog.md` carries what
-    /// closing it would take.
+    /// **The audio gains go to the game**, through
+    /// [`HostedGame::set_bus_gain`]: a mixer is the game's and the engine builds
+    /// none, so that method is the only way the loop can reach one. A game whose
+    /// default it still is refuses, and the refusal is printed with the seam's
+    /// name in it rather than a gain being reported that reached no mix.
     fn drain_console(&mut self) {
         let pending = self.console.host_mut().pending_mut();
         let video = pending.take_video();
@@ -6560,10 +6590,14 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             }
         }
         for (bus, gain) in crcbl_audio::mixer::Bus::ALL.into_iter().zip(gains) {
-            if let Some(gain) = gain {
+            let Some(gain) = gain else {
+                continue;
+            };
+            if self.game.set_bus_gain(bus, gain).is_err() {
                 crcbl_core::log::console::print(&format!(
                     "{}: {gain} is in the settings stack and not in the running mix — \
-                     the loop can reach no mixer",
+                     this game hands the loop no mixer, and `HostedGame::set_bus_gain` \
+                     is the seam",
                     bus.settings_key()
                 ));
             }
@@ -11812,6 +11846,26 @@ mod tests {
         /// console says so has a game that does not — which is every `apps/*`
         /// today.
         hides_actions: bool,
+        /// The mixer a console gain write has to reach, so the drain has a
+        /// *running* gain stage to be read back off rather than a settings key.
+        mixer: FakeMixer,
+        /// Whether this game hands the mixer over at all, for
+        /// [`FakeGame::hides_actions`]' reason.
+        hides_mixer: bool,
+    }
+
+    /// The fixture's mixer.
+    ///
+    /// A newtype because [`crcbl_audio::mixer::Mixer`] implements no `Debug` and
+    /// [`FakeGame`] derives one; `Default` is the mixer's own, every bus at
+    /// unity.
+    #[derive(Default)]
+    struct FakeMixer(crcbl_audio::mixer::Mixer);
+
+    impl core::fmt::Debug for FakeMixer {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("FakeMixer")
+        }
     }
 
     /// This game's own summary: the shared half, plus a count only it kept.
@@ -11888,6 +11942,18 @@ mod tests {
 
         fn actions(&mut self) -> Option<&mut crate::input::ActionMap> {
             (!self.hides_actions).then_some(&mut self.actions.0)
+        }
+
+        fn set_bus_gain(
+            &mut self,
+            bus: crcbl_audio::mixer::Bus,
+            gain: f32,
+        ) -> Result<(), crate::settings::Unsupported> {
+            if self.hides_mixer {
+                return Err(crate::settings::Unsupported);
+            }
+            self.mixer.0.set_bus_gain(bus, gain);
+            Ok(())
         }
 
         fn touch_event(&mut self, touch: TouchUpdate) {
@@ -14542,6 +14608,62 @@ mod tests {
             engine.game.actions.0.bindings(SERVE_ACTION),
             Some([crate::input::Binding::Key(SERVE_KEY)].as_slice()),
             "a refused line moved the binding anyway"
+        );
+    }
+
+    /// **A gain typed at the console reaches the running mixer**, and is read
+    /// back off it.
+    ///
+    /// `docs/plan/52-debug-console.md` slice 5's one open seam. The observable
+    /// is deliberately not the settings key — `crcbl::settings::apply` wrote
+    /// that before this existed and a check on it passed while the mix never
+    /// moved — but [`Mixer::bus_gain`](crcbl_audio::mixer::Mixer::bus_gain) on
+    /// the game's own mixer, which is what a voice is multiplied by.
+    ///
+    /// The value it opens at is asserted first: every mixer starts at unity, so
+    /// a check that only looked at the end would pass on a console line that did
+    /// nothing if the fixture happened to be at the value it names.
+    #[test]
+    fn a_gain_typed_at_the_console_reaches_the_running_mixer() {
+        use crcbl_audio::mixer::Bus;
+
+        let mut engine = with_console_open();
+        assert!(
+            (engine.game.mixer.0.bus_gain(Bus::Music) - 1.0).abs() < f32::EPSILON,
+            "the fixture's mixer does not open at unity, so the line below proves nothing",
+        );
+
+        run_line(&mut engine, "music_volume 0.25");
+
+        assert!(
+            (engine.game.mixer.0.bus_gain(Bus::Music) - 0.25).abs() < f32::EPSILON,
+            "the console's gain never reached the mixer: it is at {}",
+            engine.game.mixer.0.bus_gain(Bus::Music),
+        );
+        assert!(
+            (engine.game.mixer.0.bus_gain(Bus::Master) - 1.0).abs() < f32::EPSILON,
+            "one key moved a bus it does not name",
+        );
+    }
+
+    /// **A game that hands the loop no mixer says so**, naming the seam rather
+    /// than reporting a gain that reached no mix.
+    ///
+    /// The default [`HostedGame::set_bus_gain`] refuses, which is every
+    /// `apps/*` that owns no mixer — eleven of the sixteen.
+    #[test]
+    fn a_game_that_hands_over_no_mixer_says_so() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        engine.game.hides_mixer = true;
+        run_line(&mut engine, "music_volume 0.25");
+        let printed = console_lines(&logs);
+        assert!(
+            printed
+                .iter()
+                .any(|line| line.contains("music_volume")
+                    && line.contains("HostedGame::set_bus_gain")),
+            "a game with no mixer left the gain unanswered: {printed:?}"
         );
     }
 

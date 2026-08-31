@@ -224,6 +224,20 @@ impl Audio {
         ]));
     }
 
+    /// Moves `bus`'s gain stage to `gain` on the mixer already playing.
+    ///
+    /// What `crcbl::engine::HostedGame::set_bus_gain` forwards to, so an
+    /// `[engine.audio]` key typed at the debug console is heard on the voices
+    /// that are sounding rather than on the next launch — which is the whole
+    /// point of a bus, and what
+    /// [`Mixer::set_bus_gain`] does. The gains a run *starts* at come from the
+    /// player's file through
+    /// [`SettingsSource::apply_audio_gains`](crcbl::engine::SettingsSource::apply_audio_gains)
+    /// in [`Audio::new`]; this is the same stage, moved mid-run.
+    pub fn set_bus_gain(&self, bus: crcbl::audio::mixer::Bus, gain: f32) {
+        self.mixer.set_bus_gain(bus, gain);
+    }
+
     /// Plays a cue for something happening at `at` in world space.
     ///
     /// No listener argument: [`Audio::set_listener`] put the ear on the player,

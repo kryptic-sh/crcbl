@@ -154,17 +154,37 @@ limits rather than fixed:
   as the two-directive list a space-separated typing meant. Safe only because a
   filter directive never contains a space — unlike an `Enum` value, which
   `Registry::run_statement` joins with one.
-- **`log` answers with a fault in a browser.** `crcbl_core::log::set_filter` and
-  `filter()` act on `StderrLogger`, and on `wasm32` the installed sink is
-  `crcbl::web`'s `WebLogger`, whose filter is the facade's global maximum and
-  nothing else — so `is_installed()` is false there and both forms of the
-  command report "the engine's logger is not installed". The web half — a
-  `set_filter` the web sink honours, or `log` reaching `log::set_max_level`
-  directly when that sink is the one installed — is `crcbl-core`'s to take, and
-  neither slice 5 nor slice 7 did: slice 7 owned the web backend, the shim and
-  the browser gate. Found in review, not by a test; the browser gate now types
-  at the console, so a `log` line can join `EXPECTATIONS.quarry.console` the day
-  the command answers.
+- **The log filter is process-wide, and one sink at a time is the honest case.**
+  `crcbl_core::log::FILTER` is a module static that `StderrLogger::permits` and
+  `sink_permits` both read, so a process that installed both sinks shares one
+  filter between them. That happens only under `cargo test`, where `crcbl`'s own
+  binary installs `StderrLogger` while the web tests drive `WebLogger` directly;
+  the shared filter is correct there rather than merely tolerated, since a
+  filter is the engine's and not a sink's.
+- **`Filter::INITIAL` spells the default filter a second time.** `RwLock::new`
+  in a `static` needs a const value and `Filter::parse` is not const, so the
+  initial filter is a struct literal beside the string.
+  `the_const_initial_filter_is_the_default_one_parsed` holds the two together; a
+  `const fn parse` would remove the duplication and nothing needs it yet.
+- **`crcbl::web::set_log_level` still takes a bare level, not directives.** The
+  shim's `logLevel(n)` maps a small range onto `off..trace` and installs that as
+  the whole filter, so a page cannot ask for a per-target directive from JS the
+  way the console can from the keyboard. Nothing wants one; the console is the
+  way in.
+- **The browser gate reads the filter and does not move it.**
+  `EXPECTATIONS.quarry.console.filter` types `log` and asserts the answer, which
+  is what proves `install_logger` registered on a real page. A check that
+  `log warn` silences the demo's heartbeat would be stronger and needs an
+  absence-with-a-timeout assertion plus a restore; the per-target half is
+  asserted natively instead, against the real `WebLogger`.
+- **`crcbl::web`'s filter-writing tests serialise on a mutex, and they have
+  to.** `filter_at` takes that order, calls `init_logging` and then
+  `register_sink`, and the guard is the caller's to hold for the rest of its
+  test. Both halves were found by running `cargo test -p crcbl --lib` in a loop:
+  without the mutex the tests overwrite each other's directives, and without the
+  `init_logging` a `capture` elsewhere in the binary can win the logger slot
+  mid-test. `nextest`, which CI runs, gives each test a process and would never
+  have shown either.
 
 What slice 4 — `crcbl_ui::console`, the panel's widgets — left as limits rather
 than fixed:
@@ -214,15 +234,28 @@ than fixed:
 What slice 5 — `CONSOLE_KEY`, the takeover, the gather and the drain — left as
 limits rather than fixed:
 
-- **A console audio-gain write does not reach the running mixer.** The loop
-  drains `settings::Deferred`'s video section into `GameGpu::apply_video` and
-  its frame limit into `Clock::set_limit`, and has nowhere to send a gain: a
-  mixer is the game's and no `HostedGame` method hands one over.
-  `Loop::drain_console` prints a line per pending gain saying the value is in
-  the settings stack and not in the running mix, rather than dropping it.
-  Closing it is a defaulted `HostedGame::set_bus_gain` and one override in each
-  of the five `apps/*` that own a mixer — asteroids, breakout, flappy, horde and
-  options, which already has `impl Stage for Audio` to forward to.
+- **The five app overrides of `HostedGame::set_bus_gain` are checked by the
+  compiler and not by a test of their own.** The loop → game → `Mixer` path is
+  proven in `crcbl::engine`'s
+  `a_gain_typed_at_the_console_reaches_the_running_mixer`, which reads the gain
+  back off a real mixer the fixture game holds; each `apps/*` override is a
+  one-line forward to its `Audio::set_bus_gain`, which is a one-line forward to
+  the mixer. Nothing exercises those two lines in asteroids, breakout, flappy or
+  horde — a forward to the wrong bus would compile.
+- **A gain typed at the console does not move `apps/options`' fader.** The
+  handles are laid out from the screen's own stack and the console keeps a stack
+  of its own — the second-copy-of-the-settings-file entry above — so the bed
+  gets quieter while the groove shows where the screen last put it. Stated on
+  `Screen::set_bus_gain`; the fix is that entry's fix.
+- **`debug_view::tests::a_second_guard_on_one_thread_nests_instead_of_waiting`
+  is itself a flake under `cargo test`.** Its last two assertions read the view
+  lock's `try_lock` after dropping a guard, and another thread's `for_test()`
+  can take the lock in between, so "the outermost guard dropped without giving
+  the lock back" fires on code that is correct. Measured at two failures in
+  about 70 `cargo test -p crcbl --lib` runs on 2026-08-31, on a tree whose only
+  other change was the log filter and the audio-gain seam. `nextest` gives it a
+  process and never sees it. The fix is to assert the release without racing for
+  it — hold the lock's own state rather than probing a global `try_lock`.
 - **`fps` reads the loop's own frame clock, not the GPU's.**
   `debug_console::EngineLink::set_frame_timing` is fed
   `FrameClock::render_dt_secs` once a frame, so the number is the wall time

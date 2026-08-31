@@ -855,6 +855,22 @@ impl HostedGame for Screen {
     /// binding of this sample's own to do.
     fn key_event(&mut self, _key: KeyCode, _pressed: bool) {}
 
+    /// The gain stage the console's `[engine.audio]` keys move.
+    ///
+    /// Through [`Stage`](crcbl::settings::Stage), which is the seam this
+    /// screen's own rows already write gains through — so a bus moved from the
+    /// console and a bus moved by dragging a fader take one path into the mixer
+    /// rather than two.
+    ///
+    /// **The fader does not follow.** A handle's position comes from
+    /// [`Screen::stack`], and the console keeps a settings stack of its own —
+    /// `docs/backlog.md`'s "the console's stack is a second copy of the settings
+    /// file" — so a gain typed at the console is audible on the bed and the
+    /// groove still shows where the screen last put it.
+    fn set_bus_gain(&mut self, bus: Bus, gain: f32) -> Result<(), crcbl::settings::Unsupported> {
+        crcbl::settings::Stage::set_bus_gain(&mut self.audio, bus, gain)
+    }
+
     fn menu_action(id: crcbl::ui::WidgetId) -> Option<Action> {
         match id {
             crate::menu::SAVE_ID => Some(Action::Save),
