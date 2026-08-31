@@ -16,6 +16,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A run has one settings stack, so a key set on a settings screen is what the
+  console prints.** `Loop::new` opened a `SettingsSource::for_run(...)` stack of
+  its own for the `ConsoleHost` while `apps/options` owned a second one over the
+  same file, so within one run the two disagreed and whichever `save` ran last
+  won. `HostedGame::settings` is the new seam: a game hands the loop a
+  `crcbl::settings::SharedSettings` and the console edits that one, defaulting
+  to `None` for the games with no settings screen — which is every sample but
+  `apps/options`. A gain typed at the console now also moves that sample's
+  fader: `Screen::set_bus_gain` puts the drained gain into the screen's own
+  gains and marks the file unsaved, so the groove follows the key instead of
+  showing where the pointer last left it.
+- **`apps/options` can write a key on a headless run.** `Screen::opened` took
+  `SettingsSource::open(..).unwrap_or_default()`, and a default `SettingsStack`
+  has no user layer — `SettingsStack::set` refuses one — so every row on a
+  headless run reported `SAVE FAILED: no user settings layer in the stack`. The
+  new `SettingsSource::open_editable` answers a stack over
+  `crcbl_store::MemoryStorage` where there is nothing to read, which is the rule
+  `Loop::new` already applied to the console's stack and now the only copy of
+  it.
 - **A frame limit now runs at the rate it was asked for, and the browser applies
   one at all.** `crcbl::engine::FramePacer` paces on a deadline _grid_ — the
   next deadline is the previous deadline plus a period, re-based to `now` only
@@ -56,6 +75,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   change is 47 of 255 on one pixel of `probes.png`.
 
 ### Breaking
+
+- **`HostedGame` gains `settings`, and `ConsoleHost` holds a shared stack.**
+  `HostedGame::settings(&self) -> Option<crcbl::settings::SharedSettings>`
+  defaults to `None`, so no existing implementor has to write anything.
+  `ConsoleHost::stack` and `ConsoleHost::stack_mut` now answer
+  `core::cell::Ref`/`RefMut` rather than a plain borrow and are no longer
+  `const`; `ConsoleHost::new` is no longer `const` and `ConsoleHost::over` is
+  the constructor for a stack the game also holds. `apps/options`'
+  `Screen::stack` changed the same way. New: `crcbl::settings::SharedSettings`
+  and `crcbl::engine::SettingsSource::open_editable`.
 
 - **The light row grew, and the specular table's image changed format.**
   `crcbl_shaders::light::GpuLight` gains `tangent: [f32; 4]` and turns its

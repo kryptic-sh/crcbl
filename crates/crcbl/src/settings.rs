@@ -110,6 +110,8 @@
 //! still the engine's own figure, as it is for every key here.
 
 use std::any::Any;
+use std::cell::{Ref, RefCell, RefMut};
+use std::rc::Rc;
 
 use crcbl_audio::mixer::Bus;
 use crcbl_console::{Binding, Fault, Flags, Kind, Value};
@@ -1362,26 +1364,102 @@ pub const fn set_debug_view_on(
 
 // ── The console's variables ─────────────────────────────────────────────────
 
+/// One run's settings, held by everything that edits them.
+///
+/// **A run has one settings file, so it has one stack.** The debug console and
+/// a game's own settings screen both read keys and write them back, and a copy
+/// each is two writers over one path: a key set on the screen is not what the
+/// console prints, and whichever of them saves last wins. This is the handle
+/// they share — [`HostedGame::settings`](crate::engine::HostedGame::settings)
+/// is where a game hands it to the loop, and [`ConsoleHost`] is what the loop
+/// puts it in.
+///
+/// # Why shared ownership rather than a borrow
+///
+/// A [`Binding`] reaches its host as `&mut dyn Any`, and [`Any`] is implemented
+/// only for `'static` types — so a [`ConsoleHost`] cannot hold a borrow of
+/// anything the loop owns, which is the same constraint [`Deferred`] exists
+/// for. [`Rc`] is what is left, and a [`RefCell`] inside it because both
+/// holders write. Nothing here crosses a thread: a loop and its game are one
+/// thread's, natively and in a browser alike.
+///
+/// # Borrows are for the length of one read or one write
+///
+/// [`stack_mut`](Self::stack_mut) panics while another borrow is live, on
+/// [`RefCell`]'s own terms, and the other holder is reachable from any call
+/// that leaves this crate. So a borrow is taken, used and dropped without a
+/// call to the console or the game in between; one held across such a call is
+/// what makes that call panic, and nothing but this rule prevents it.
+#[derive(Clone, Debug, Default)]
+pub struct SharedSettings(Rc<RefCell<SettingsStack>>);
+
+impl SharedSettings {
+    /// A handle over `stack`, with no other holder yet.
+    #[must_use]
+    pub fn new(stack: SettingsStack) -> Self {
+        Self(Rc::new(RefCell::new(stack)))
+    }
+
+    /// The settings as they stand.
+    ///
+    /// # Panics
+    ///
+    /// If a [`stack_mut`](Self::stack_mut) borrow is still live.
+    #[must_use]
+    pub fn stack(&self) -> Ref<'_, SettingsStack> {
+        self.0.borrow()
+    }
+
+    /// The settings, to write.
+    ///
+    /// `&self` rather than `&mut self` because that is the whole point of the
+    /// type: the other holder is editing the same stack through a handle of its
+    /// own.
+    ///
+    /// # Panics
+    ///
+    /// If any other borrow is still live.
+    #[must_use]
+    pub fn stack_mut(&self) -> RefMut<'_, SettingsStack> {
+        self.0.borrow_mut()
+    }
+}
+
 /// The state a settings console variable reads and writes: the player's stack,
 /// and what a write still owes the process.
 ///
 /// **The type every [`console_bindings`] binding downcasts `&mut dyn Any` to**,
 /// and the reason it owns its two halves rather than borrowing them:
 /// [`Any`] is implemented only for `'static` types, so a host cannot hold the
-/// renderer or the mixer a write has to reach. It holds the stack, which it can
-/// own, and a [`Deferred`] — see that type. `Loop::new` builds one and the
+/// renderer or the mixer a write has to reach. It holds the stack — through a
+/// [`SharedSettings`], so the game's settings screen is editing the same one —
+/// and a [`Deferred`] — see that type. `Loop::new` builds one and the
 /// frame drains it; that is `docs/plan/52-debug-console.md`'s slice 5.
 #[derive(Debug, Default)]
 pub struct ConsoleHost {
-    stack: SettingsStack,
+    stack: SharedSettings,
     pending: Deferred,
     engine: crate::debug_console::EngineLink,
 }
 
 impl ConsoleHost {
-    /// A host over `stack`, with nothing pending and nowhere to save.
+    /// A host over `stack` alone, with nothing pending and nowhere to save.
+    ///
+    /// What a run whose game keeps no settings of its own gets — every sample
+    /// but `apps/options`. [`over`](Self::over) is the other half.
     #[must_use]
-    pub const fn new(stack: SettingsStack) -> Self {
+    pub fn new(stack: SettingsStack) -> Self {
+        Self::over(SharedSettings::new(stack))
+    }
+
+    /// A host over a stack the game is editing too.
+    ///
+    /// What `Loop::new` builds from
+    /// [`HostedGame::settings`](crate::engine::HostedGame::settings), so the
+    /// console's `music_volume` and a settings screen's fader are one key in
+    /// one file rather than two copies of it.
+    #[must_use]
+    pub fn over(stack: SharedSettings) -> Self {
         Self {
             stack,
             pending: Deferred::new(),
@@ -1406,13 +1484,14 @@ impl ConsoleHost {
 
     /// The settings as they stand.
     #[must_use]
-    pub const fn stack(&self) -> &SettingsStack {
-        &self.stack
+    pub fn stack(&self) -> Ref<'_, SettingsStack> {
+        self.stack.stack()
     }
 
     /// The settings, to write — what `save` and `dump` reach.
-    pub const fn stack_mut(&mut self) -> &mut SettingsStack {
-        &mut self.stack
+    #[must_use]
+    pub fn stack_mut(&mut self) -> RefMut<'_, SettingsStack> {
+        self.stack.stack_mut()
     }
 
     /// What a write has asked for and nothing has applied yet.
@@ -1451,6 +1530,7 @@ crcbl_console::concommand! {
                 ));
             };
             host.stack
+                .stack()
                 .save_platform(&app_name)
                 .map_err(|error| Fault::new(error.to_string()))?;
             app_name
@@ -1468,6 +1548,7 @@ crcbl_console::concommand! {
             .downcast_ref::<ConsoleHost>()
             .expect("the engine's console is only ever run over a `ConsoleHost`")
             .stack
+            .stack()
             .dump();
         for line in text.lines() {
             cx.print(line);
@@ -1508,7 +1589,8 @@ fn read(host: &dyn Any, namespace: &str, name: &str, kind: Kind) -> Value {
     let stack = &host
         .downcast_ref::<ConsoleHost>()
         .expect("a settings binding is only ever given a `ConsoleHost`")
-        .stack;
+        .stack
+        .stack();
     if namespace == AUDIO_NAMESPACE {
         let gains = audio_gains(stack);
         let (_, gain) = gains
@@ -1590,8 +1672,9 @@ fn write(host: &mut dyn Any, namespace: &str, name: &str, value: &Value) -> Resu
     let host = host
         .downcast_mut::<ConsoleHost>()
         .expect("a settings binding is only ever given a `ConsoleHost`");
+    let mut stack = host.stack.stack_mut();
     apply(
-        &mut host.stack,
+        &mut stack,
         &format!("{namespace}.{name}"),
         value,
         &mut host.pending,

@@ -753,6 +753,24 @@ impl SettingsSource<'_> {
         }
     }
 
+    /// The stack this source resolves to, writable even where it read nothing.
+    ///
+    /// [`open`](Self::open)'s answer for the two arms that have a file, and a
+    /// stack over [`crcbl_store::MemoryStorage`] for [`Self::None`] — **not**
+    /// a default [`SettingsStack`], and the difference is not cosmetic:
+    /// [`SettingsStack::set`](crcbl_store::settings::SettingsStack::set)
+    /// refuses a stack with no user layer, so a bare default would make every
+    /// settings key read-only on exactly the runs a developer types into a
+    /// console and exactly the runs a test drives a settings screen through.
+    /// The layer is writable and reaches no disk, which is what [`Self::None`]
+    /// asks for; whether there is anywhere to **save** is a separate question,
+    /// and [`save`](Self::save) is the one that answers it.
+    #[must_use]
+    pub fn open_editable(self, app_name: &str) -> SettingsStack {
+        self.open(app_name)
+            .unwrap_or_else(|| SettingsStack::from_storage(&crcbl_store::MemoryStorage::new()))
+    }
+
     /// Write `stack`'s user layer back to wherever [`open`](Self::open) read
     /// it.
     ///
@@ -5499,6 +5517,33 @@ pub trait HostedGame: Sized {
         None
     }
 
+    /// The settings this game edits, for the console to edit the same ones.
+    ///
+    /// **A run has one settings file, so it has one stack.** A game with a
+    /// settings screen reads keys, writes them and saves them; so does the
+    /// debug console. Given a copy each, a key set on the screen is not what
+    /// the console prints and whichever of the two saves last wins — which is
+    /// what this seam exists to stop. A game that hands its stack over here has
+    /// the console's `music_volume` and its own fader on one key in one file.
+    ///
+    /// [`SharedSettings`](crate::settings::SharedSettings) rather than a
+    /// borrow, for [`Deferred`](crate::settings::Deferred)'s reason: the
+    /// console's host reaches a binding as `&mut dyn Any` and can hold nothing
+    /// borrowed. That type's docs are where the rest of the argument is.
+    ///
+    /// **Asked once, by [`Loop::new`]**, so the stack a game hands over is the
+    /// one the console has for the whole run. A game that swaps its stack
+    /// afterwards has two again, and nothing here can tell.
+    ///
+    /// The `None` default carries [`actions`](Self::actions)' argument: a game
+    /// with no settings screen edits no keys, so there is nothing of its own
+    /// for the console to share and the loop opens the run's own stack. That is
+    /// every sample in this workspace but `apps/options`, and none of them
+    /// writes a line to say so.
+    fn settings(&self) -> Option<crate::settings::SharedSettings> {
+        None
+    }
+
     /// Move one `[engine.audio]` bus's gain on the mixer this game plays
     /// through.
     ///
@@ -5771,19 +5816,22 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // neither: `SettingsSource::for_run` is the rule, stated once, and a run
         // with no file to read is a run with nowhere to save.
         let source = SettingsSource::for_run(!config.windowed);
-        let host = match source.open(G::NAME) {
-            Some(stack) => crate::settings::ConsoleHost::new(stack).saving_as(G::NAME),
-            // **A stack over memory rather than an empty one**, and the
-            // difference is not cosmetic: `SettingsStack::set` refuses a stack
-            // with no user layer, so a bare `SettingsStack::default()` would
-            // make every settings variable read-only on exactly the runs a
-            // developer types into a console — the headless ones. The layer is
-            // writable and reaches no disk, which is what
-            // `SettingsSource::None` asks for; `saving_as` is left unset, so
-            // `save` says there is nowhere to save rather than pretending.
-            None => crate::settings::ConsoleHost::new(SettingsStack::from_storage(
-                &crcbl_store::MemoryStorage::new(),
-            )),
+        // **The game's own stack where it has one**, so the console and a
+        // settings screen are two views of one file rather than two copies of
+        // it — see `HostedGame::settings`. A game with none gets the run's
+        // source, opened writable so that a console on a headless run is not
+        // read-only.
+        let stack = game
+            .settings()
+            .unwrap_or_else(|| crate::settings::SharedSettings::new(source.open_editable(G::NAME)));
+        let host = crate::settings::ConsoleHost::over(stack);
+        let host = match source {
+            // A run with nothing to read is a run with nowhere to save:
+            // `saving_as` is left unset, so `save` says so rather than
+            // persisting into whichever home directory a golden run executes
+            // in.
+            SettingsSource::None => host,
+            SettingsSource::Platform | SettingsSource::Source(_) => host.saving_as(G::NAME),
         };
         let tables: Vec<crcbl_console::Table> = crate::debug_console::engine_tables()
             .into_iter()
@@ -11900,6 +11948,12 @@ mod tests {
         /// Whether this game hands the mixer over at all, for
         /// [`FakeGame::hides_actions`]' reason.
         hides_mixer: bool,
+        /// The settings stack this game hands the loop, standing in for a
+        /// sample with a settings screen.
+        ///
+        /// `None` — the default — is every sample but `apps/options`, and is
+        /// what leaves the loop opening a stack of its own.
+        settings: Option<crate::settings::SharedSettings>,
     }
 
     /// The fixture's mixer.
@@ -11990,6 +12044,10 @@ mod tests {
 
         fn actions(&mut self) -> Option<&mut crate::input::ActionMap> {
             (!self.hides_actions).then_some(&mut self.actions.0)
+        }
+
+        fn settings(&self) -> Option<crate::settings::SharedSettings> {
+            self.settings.clone()
         }
 
         fn set_bus_gain(
@@ -12174,6 +12232,14 @@ mod tests {
         hosted_on(&crcbl_shell::WindowDesc::default(), frames)
     }
 
+    /// The same, hosting a fixture built by the caller.
+    ///
+    /// What the settings-seam checks need: a game that hands its own stack over
+    /// is a different `FakeGame`, and every other field of it is the default.
+    fn hosted_game(game: FakeGame) -> Loop<crcbl_shell::HeadlessShell, FakeGame> {
+        hosted_with(&crcbl_shell::WindowDesc::default(), None, game)
+    }
+
     /// The same, on a window described by `desc`.
     ///
     /// Split out for the drop test and nothing else: a window that never asked
@@ -12182,6 +12248,15 @@ mod tests {
     fn hosted_on(
         desc: &crcbl_shell::WindowDesc<'_>,
         frames: Option<u64>,
+    ) -> Loop<crcbl_shell::HeadlessShell, FakeGame> {
+        hosted_with(desc, frames, FakeGame::default())
+    }
+
+    /// The one place a fixture loop is assembled.
+    fn hosted_with(
+        desc: &crcbl_shell::WindowDesc<'_>,
+        frames: Option<u64>,
+        game: FakeGame,
     ) -> Loop<crcbl_shell::HeadlessShell, FakeGame> {
         let mut shell = crcbl_shell::HeadlessShell::new();
         let window = shell
@@ -12195,7 +12270,7 @@ mod tests {
                 clock_source: Clock::new(true),
                 events: 0,
             },
-            FakeGame::default(),
+            game,
             hosted_config(frames),
         )
     }
@@ -14656,6 +14731,84 @@ mod tests {
             engine.clock_source.limit().rate(),
             37,
             "the clock is still pacing at whatever the run started with"
+        );
+    }
+
+    /// A loop whose game hands `stack` over, with the console already open.
+    fn sharing(stack: &crate::settings::SharedSettings) -> Hosted {
+        let mut engine = hosted_game(FakeGame {
+            settings: Some(stack.clone()),
+            ..FakeGame::default()
+        });
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        assert!(
+            engine.console().is_open(),
+            "the console key opens the panel"
+        );
+        engine
+    }
+
+    /// The stack a fixture hands over, over storage that reaches no disk.
+    fn a_stack() -> crate::settings::SharedSettings {
+        crate::settings::SharedSettings::new(SettingsStack::from_storage(
+            &crcbl_store::MemoryStorage::new(),
+        ))
+    }
+
+    /// **A key typed at the console lands in the stack the game handed over.**
+    ///
+    /// One of the two directions [`HostedGame::settings`] exists for. The
+    /// observable is the *game's* stack — the one a settings screen would be
+    /// laying its rows out from — read after the line ran, so a loop that kept
+    /// a copy of its own fails here whatever its own copy says.
+    #[test]
+    fn a_key_typed_at_the_console_lands_in_the_stack_the_game_handed_over() {
+        use crcbl_audio::mixer::Bus;
+
+        let stack = a_stack();
+        let mut engine = sharing(&stack);
+        assert_eq!(
+            crate::settings::audio_gains(&stack.stack())[Bus::Music.index()].1,
+            1.0,
+            "an absent key is unity, which is where this starts"
+        );
+
+        run_line(&mut engine, "music_volume 0.25");
+        assert!(
+            (crate::settings::audio_gains(&stack.stack())[Bus::Music.index()].1 - 0.25).abs()
+                < 1e-6,
+            "the console wrote a copy of its own: the game's stack still says {}",
+            crate::settings::audio_gains(&stack.stack())[Bus::Music.index()].1,
+        );
+    }
+
+    /// **And a key the game wrote is what the console prints.**
+    ///
+    /// The other direction, and the one a settings screen's `SAVE` row depends
+    /// on: the screen writes the key, and `music_volume` typed afterwards has
+    /// to answer with what the screen set rather than with the file as it stood
+    /// when the loop was built.
+    #[test]
+    fn the_console_prints_the_key_the_game_wrote_and_not_a_copy_of_its_own() {
+        use crcbl_audio::mixer::Bus;
+
+        let logs = crcbl_core::log::capture();
+        let stack = a_stack();
+        let mut engine = sharing(&stack);
+
+        // The write a settings screen's fader makes, straight onto the stack it
+        // shares — no console involved.
+        crate::settings::set_audio_gain(&mut stack.stack_mut(), Bus::Music, 0.25)
+            .expect("the stack has a writable user layer");
+
+        run_line(&mut engine, "music_volume");
+        let printed = console_lines(&logs);
+        assert!(
+            printed
+                .iter()
+                .any(|line| line.starts_with("music_volume = ") && line.contains("0.25")),
+            "the console printed a gain the game never set: {printed:?}"
         );
     }
 

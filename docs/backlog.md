@@ -285,19 +285,16 @@ than fixed:
 What slice 5 — `CONSOLE_KEY`, the takeover, the gather and the drain — left as
 limits rather than fixed:
 
-- **The five app overrides of `HostedGame::set_bus_gain` are checked by the
-  compiler and not by a test of their own.** The loop → game → `Mixer` path is
-  proven in `crcbl::engine`'s
+- **Four of the five app overrides of `HostedGame::set_bus_gain` are checked by
+  the compiler and not by a test of their own.** The loop → game → `Mixer` path
+  is proven in `crcbl::engine`'s
   `a_gain_typed_at_the_console_reaches_the_running_mixer`, which reads the gain
   back off a real mixer the fixture game holds; each `apps/*` override is a
   one-line forward to its `Audio::set_bus_gain`, which is a one-line forward to
   the mixer. Nothing exercises those two lines in asteroids, breakout, flappy or
-  horde — a forward to the wrong bus would compile.
-- **A gain typed at the console does not move `apps/options`' fader.** The
-  handles are laid out from the screen's own stack and the console keeps a stack
-  of its own — the second-copy-of-the-settings-file entry above — so the bed
-  gets quieter while the groove shows where the screen last put it. Stated on
-  `Screen::set_bus_gain`; the fix is that entry's fix.
+  horde — a forward to the wrong bus would compile. `apps/options`' override is
+  the exception: it moves the screen's own fader as well, and
+  `a_gain_typed_at_the_console_moves_the_fader` drives it.
 - **`debug_view::tests::a_second_guard_on_one_thread_nests_instead_of_waiting`
   is itself a flake under `cargo test`.** Its last two assertions read the view
   lock's `try_lock` after dropping a guard, and another thread's `for_test()`
@@ -312,21 +309,40 @@ limits rather than fixed:
   `FrameClock::render_dt_secs` once a frame, so the number is the wall time
   between frames; the per-pass GPU timings the debug overlay shows are not in
   it.
-- **The console's stack is a second copy of the settings file.** `Loop::new`
-  reads `SettingsSource::for_run(...).open(G::NAME)` for the `ConsoleHost`, and
-  `apps/options` owns a stack of its own that it writes and saves — so within
-  one run a key set on the options screen is not what the console prints, and
-  the last `save` of the two wins. Nothing else in the workspace edits settings,
-  so the drift needs the options screen to be open. The fix is a `HostedGame`
-  seam handing the loop the game's own stack, which would also give the console
-  somewhere to save on the web (below).
-- **`save` writes nothing in a browser or a headless run, and says so.**
-  `ConsoleHost::saving_as` is set only for `SettingsSource::Platform`, and
-  `save` goes through `SettingsStack::save_platform`. A headless run gets a
-  stack over `crcbl_store::MemoryStorage` — writable, so every variable is still
-  settable — and no name, so `save` faults with "nowhere to save to". A browser
-  run _is_ `Platform`, so it saves through whatever OPFS store the page
-  installed, and that path has not been exercised by any gate.
+- **`save` writes nothing in a headless run, and says so; the browser path is
+  unexercised.** `ConsoleHost::saving_as` is set for every arm but
+  `SettingsSource::None`, and `save` goes through
+  `SettingsStack::save_platform`. A headless run gets a stack over
+  `crcbl_store::MemoryStorage` — `SettingsSource::open_editable`, writable, so
+  every variable is still settable — and no name, so `save` faults with "nowhere
+  to save to". A browser run _is_ `Platform`, so it saves through whatever OPFS
+  store the page installed, and that path has not been exercised by any gate.
+- **Nothing stops a game handing the loop a second stack after start-up.**
+  `HostedGame::settings` is asked once, by `Loop::new`, and a game that replaced
+  its own `SharedSettings` afterwards would be back to two writers with nothing
+  to notice. No game does; the method's docs say so and no check enforces it.
+  Enforcing it would mean the loop owning the handle and the game borrowing it,
+  which every `HostedGame` hook's signature would have to carry.
+- **`SharedSettings` borrows can panic and nothing proves they do not.** It is
+  an `Rc<RefCell<SettingsStack>>`, so `stack_mut` panics while another borrow is
+  live. Every caller in the workspace takes a borrow, reads or writes, and drops
+  it inside one statement or function — `ConsoleHost`'s
+  `read`/`write`/`save`/`dump`, `Screen::write`, `Screen::save_to`,
+  `Screen::debug_sections` — and the test suite exercises all of them, so a
+  re-entrant borrow would have to arrive with new code. There is no lint or
+  type-level guard against one.
+- **The options browser gate was not re-run for this change.** No settings key
+  and no `VIDEO_KEYS` entry moved, so `web/tools/browser-e2e.mjs`'s `toFader`
+  index is untouched; the browser path exercises faders and never types at the
+  console, and the change to `Screen::set_bus_gain` is only reachable through
+  the console drain. Stated as a coverage gap rather than a verdict: the gate
+  itself was not run locally.
+- **`apps/options` on a headless run now keeps its edits in memory rather than
+  refusing them.** A behaviour change nothing outside the sample reads — the
+  `SAVE` row still says `NOWHERE TO SAVE`, because `SettingsSource::None`'s save
+  still answers `Ok(false)` — but a summary line that used to carry
+  `save failed: no user settings layer in the stack` for a scripted headless
+  edit now carries `unsaved edits`. No gate reads that field.
 - **A fault prints at `Level::Info`, like every other console line.**
   `console::print` is the only sink the console has and it is fixed at `Info`,
   so a refused command is the same colour in the panel as a value. A

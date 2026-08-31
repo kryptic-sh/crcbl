@@ -56,6 +56,7 @@ use crcbl::engine::{
 };
 use crcbl::prelude::*;
 use crcbl::render::{Antialiasing, DEFAULT_ANISOTROPY, RenderEffects};
+use crcbl::settings::SharedSettings;
 use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
 use crcbl::store::settings::SettingsStack;
 
@@ -204,7 +205,12 @@ impl Store {
 #[derive(Debug)]
 pub struct Screen {
     /// The player's settings, as opened at start-up and edited since.
-    stack: SettingsStack,
+    ///
+    /// **Shared with the debug console**, through
+    /// [`HostedGame::settings`]: a run has one settings file, and a copy each
+    /// would be two writers over one path — see
+    /// [`SharedSettings`].
+    stack: SharedSettings,
     /// Where those settings came from, and where `SAVE` puts them back.
     store: Store,
     /// What each fader was last seen holding, in [`Bus::ALL`]'s order.
@@ -402,8 +408,7 @@ impl Screen {
     /// `[engine.audio]` key means.
     #[must_use]
     pub fn opened(store: Store, asked: FrameLimit) -> Self {
-        let stack = store.source().open(APP_NAME).unwrap_or_default();
-        Self::over(stack, store, asked)
+        Self::over(store.source().open_editable(APP_NAME), store, asked)
     }
 
     /// The same screen over a stack the caller already has — what a test uses,
@@ -422,7 +427,7 @@ impl Screen {
         let antialiasing =
             crcbl::settings::antialiasing(&stack).unwrap_or(crate::menu::DEFAULT_ANTIALIASING);
         Self {
-            stack,
+            stack: SharedSettings::new(stack),
             store,
             handles: gains.map(crate::menu::handle_at),
             // The mixer is opened on the gains this screen opened on, not on a
@@ -501,9 +506,14 @@ impl Screen {
 
     /// The settings as they stand, for a test that wants to read the keys back
     /// without going near a config directory.
+    ///
+    /// # Panics
+    ///
+    /// If a write to the same stack is still in flight —
+    /// [`SharedSettings::stack`]'s own rule.
     #[must_use]
-    pub const fn stack(&self) -> &SettingsStack {
-        &self.stack
+    pub fn stack(&self) -> core::cell::Ref<'_, SettingsStack> {
+        self.stack.stack()
     }
 
     /// The `[HUD]` line, in the shape every other sample logs one.
@@ -603,7 +613,14 @@ impl Screen {
     /// landed before: `SAVE` would otherwise write a file this key is missing
     /// from and say nothing about it.
     fn write(&mut self, key: &str, value: &Value) {
-        if let Err(fault) = crcbl::settings::apply(&mut self.stack, key, value, &mut self.audio) {
+        // The borrow is scoped so it is gone before `saved` is written: a
+        // `SharedSettings` is a `RefCell` and this method holds the only handle
+        // that could still be open when the row below is set.
+        let written = {
+            let mut stack = self.stack.stack_mut();
+            crcbl::settings::apply(&mut stack, key, value, &mut self.audio)
+        };
+        if let Err(fault) = written {
             self.saved = SaveState::Failed(fault.to_string());
         }
     }
@@ -771,7 +788,7 @@ impl Screen {
     /// no arm for it: a borrowed source would put a lifetime on the hosted game
     /// and therefore on the loop.
     pub fn save_to(&mut self, source: SettingsSource<'_>) {
-        self.saved = match source.save(APP_NAME, &self.stack) {
+        self.saved = match source.save(APP_NAME, &self.stack.stack()) {
             Ok(true) => SaveState::Saved,
             Ok(false) => SaveState::Nowhere,
             Err(error) => SaveState::Failed(error.to_string()),
@@ -855,19 +872,36 @@ impl HostedGame for Screen {
     /// binding of this sample's own to do.
     fn key_event(&mut self, _key: KeyCode, _pressed: bool) {}
 
-    /// The gain stage the console's `[engine.audio]` keys move.
+    /// The settings the console edits: this screen's own, so the two are one
+    /// file.
     ///
-    /// Through [`Stage`](crcbl::settings::Stage), which is the seam this
-    /// screen's own rows already write gains through — so a bus moved from the
-    /// console and a bus moved by dragging a fader take one path into the mixer
-    /// rather than two.
+    /// The seam [`HostedGame::settings`] exists for, and the only override of
+    /// it in the workspace — this is the one sample with a settings screen.
+    fn settings(&self) -> Option<SharedSettings> {
+        Some(self.stack.clone())
+    }
+
+    /// The gain stage the console's `[engine.audio]` keys move — **and the
+    /// fader that shows it**.
     ///
-    /// **The fader does not follow.** A handle's position comes from
-    /// [`Screen::stack`], and the console keeps a settings stack of its own —
-    /// `docs/backlog.md`'s "the console's stack is a second copy of the settings
-    /// file" — so a gain typed at the console is audible on the bed and the
-    /// groove still shows where the screen last put it.
+    /// The mixer through [`Stage`](crcbl::settings::Stage), which is the seam
+    /// this screen's own rows already write gains through — so a bus moved from
+    /// the console and a bus moved by dragging a fader take one path into the
+    /// mixer rather than two.
+    ///
+    /// The **key** is already written by the time this is called: the console's
+    /// binding wrote it into the stack this screen shares, and
+    /// [`Loop::drain_console`](crcbl::engine::Loop) hands the gain here
+    /// afterwards. So what is left is the screen's own copy of it, and putting
+    /// it back is what makes [`Screen::menu_kind`](HostedGame::menu_kind)'s
+    /// other direction walk the groove down to where the console put the gain.
+    ///
+    /// It counts as an edit, on `Screen::set`'s terms: a setting on this
+    /// screen changed and the file on disk no longer says what the stack does,
+    /// which is what the `SAVE` row is for.
     fn set_bus_gain(&mut self, bus: Bus, gain: f32) -> Result<(), crcbl::settings::Unsupported> {
+        self.gains[bus.index()] = gain;
+        self.edited();
         crcbl::settings::Stage::set_bus_gain(&mut self.audio, bus, gain)
     }
 
@@ -1056,7 +1090,7 @@ impl HostedGame for Screen {
     /// [`crate::view`].
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.audio);
-        panel.add(&crate::view::FileView(&self.stack));
+        panel.add(&crate::view::FileView(&self.stack.stack()));
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
@@ -1218,6 +1252,23 @@ mod tests {
         assert_eq!(menu.activate(), None, "a cycler fired an id");
     }
 
+    /// The settings variable named `name`, as the console reaches it.
+    fn binding(name: &str) -> &'static crcbl::console::Binding {
+        crcbl::settings::console_bindings()
+            .iter()
+            .copied()
+            .find(|binding| binding.name() == name)
+            .unwrap_or_else(|| panic!("the engine declares no `{name}` variable"))
+    }
+
+    /// The gain a settings variable read back as.
+    fn gain_of(value: Value) -> f32 {
+        match value {
+            Value::Float(gain) => gain,
+            other => panic!("an `[engine.audio]` key is a float, not {other:?}"),
+        }
+    }
+
     fn hint(menus: &mut Menus, id: crcbl::ui::WidgetId) -> String {
         menus
             .get_mut(MenuKind::Settings)
@@ -1270,7 +1321,7 @@ mod tests {
         assert!((screen.gain(Bus::Music) - 0.25).abs() < 1e-6);
         assert_eq!(screen.edits(), 1);
         assert_eq!(screen.saved(), &SaveState::Unsaved);
-        let read_back = crcbl::settings::audio_gains(screen.stack());
+        let read_back = crcbl::settings::audio_gains(&screen.stack());
         assert!(
             (read_back[Bus::Music.index()].1 - 0.25).abs() < 1e-6,
             "the screen moved a fader without writing the key it is for",
@@ -1557,7 +1608,7 @@ mod tests {
         screen.apply(Action::Reset);
         assert_eq!(screen.effects(), RenderEffects::all());
         assert_eq!(
-            crcbl::settings::video_effects(screen.stack()),
+            crcbl::settings::video_effects(&screen.stack()),
             RenderEffects::all(),
             "the screen reset a set it never wrote",
         );
@@ -1737,7 +1788,7 @@ mod tests {
         screen.apply(Action::Reset);
         assert_eq!(screen.cap(), FrameLimit::unlimited());
         assert_eq!(
-            crcbl::settings::frame_limit(screen.stack()),
+            crcbl::settings::frame_limit(&screen.stack()),
             FrameLimit::unlimited(),
             "the screen reset a number it never wrote",
         );
@@ -1884,7 +1935,7 @@ mod tests {
         reconcile(&mut screen, &mut menus);
         assert_eq!(screen.cap(), FrameLimit::fps(72), "90 steps back to 72");
         assert_eq!(
-            crcbl::settings::frame_limit(screen.stack()),
+            crcbl::settings::frame_limit(&screen.stack()),
             FrameLimit::fps(72),
             "the step did not reach the key",
         );
@@ -1975,7 +2026,7 @@ mod tests {
             "the left end of the groove is the renderer's floor",
         );
         assert_eq!(
-            crcbl::settings::render_scale(screen.stack()),
+            crcbl::settings::render_scale(&screen.stack()),
             crcbl::render::MIN_RENDER_SCALE,
             "the drag did not reach the key",
         );
@@ -2003,7 +2054,7 @@ mod tests {
         screen.apply(Action::Reset);
         assert_eq!(screen.render_scale(), 1.0);
         assert_eq!(
-            crcbl::settings::render_scale(screen.stack()),
+            crcbl::settings::render_scale(&screen.stack()),
             1.0,
             "the screen reset a number it never wrote",
         );
@@ -2119,7 +2170,7 @@ mod tests {
         assert_eq!(screen.edits(), 1);
         assert_eq!(screen.saved(), &SaveState::Unsaved);
         assert_eq!(
-            crcbl::settings::antialiasing(screen.stack()),
+            crcbl::settings::antialiasing(&screen.stack()),
             Some(stepped),
             "the step did not reach the key",
         );
@@ -2210,7 +2261,7 @@ mod tests {
         screen.apply(Action::Reset);
         assert_eq!(screen.antialiasing(), crate::menu::DEFAULT_ANTIALIASING);
         assert_eq!(
-            crcbl::settings::antialiasing(screen.stack()),
+            crcbl::settings::antialiasing(&screen.stack()),
             Some(crate::menu::DEFAULT_ANTIALIASING),
             "the screen reset a tier it never wrote",
         );
@@ -2227,9 +2278,115 @@ mod tests {
         screen.apply(Action::Reset);
         assert_eq!(screen.anisotropy(), DEFAULT_ANISOTROPY);
         assert_eq!(
-            crcbl::settings::anisotropic_filtering(screen.stack()),
+            crcbl::settings::anisotropic_filtering(&screen.stack()),
             DEFAULT_ANISOTROPY,
             "the screen reset a number it never wrote",
+        );
+    }
+
+    /// **The console and the screen edit one settings file.**
+    ///
+    /// The seam `HostedGame::settings` exists for, built exactly as `Loop::new`
+    /// builds it, and read back through the console's own `Binding` rather than
+    /// off the handle — a stack that is merely *passed* to a host proves
+    /// nothing; what matters is that the variable the console reads answers with
+    /// the key the screen wrote, and the other way round.
+    #[test]
+    fn the_console_and_the_screen_edit_one_settings_file() {
+        let (mut screen, mut menus) = screen("");
+        let mut host = crcbl::settings::ConsoleHost::over(
+            HostedGame::settings(&screen).expect("options hands its stack over"),
+        );
+        let music = binding(Bus::Music.settings_key());
+
+        // The screen's direction: a drag writes the key, and the console's
+        // variable is what reads it back.
+        reconcile(&mut screen, &mut menus);
+        menus
+            .get_mut(MenuKind::Settings)
+            .expect("the one menu")
+            .set_slider(crate::menu::fader_id(Bus::Music), 0.5);
+        reconcile(&mut screen, &mut menus);
+        assert!(
+            (gain_of(music.get(&host)) - screen.gain(Bus::Music)).abs() < 1e-6,
+            "the console prints {} where the screen holds {}",
+            gain_of(music.get(&host)),
+            screen.gain(Bus::Music),
+        );
+
+        // And the console's: a write through the binding is what the screen's
+        // own reader answers with.
+        music
+            .set(&mut host, &Value::Float(0.75))
+            .expect("`music_volume` is a writable float");
+        assert!(
+            (crcbl::settings::audio_gains(&screen.stack())[Bus::Music.index()].1 - 0.75).abs()
+                < 1e-6,
+            "the screen reads a gain the console never wrote",
+        );
+    }
+
+    /// **A gain typed at the console moves the fader that shows it.**
+    ///
+    /// The second half of the drift, and the one sharing a stack does not fix
+    /// on its own: a handle's position comes from `Screen::gains`, so the loop's
+    /// drain has to put the console's gain there — `Screen::set_bus_gain` — or
+    /// the groove goes on showing where the screen last left it.
+    #[test]
+    fn a_gain_typed_at_the_console_moves_the_fader() {
+        let (mut screen, mut menus) = screen("");
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(handle(&mut menus, Bus::Music), 1.0, "a run opens at unity");
+
+        // What `Loop::drain_console` hands the game for `music_volume 0.25`.
+        HostedGame::set_bus_gain(&mut screen, Bus::Music, 0.25)
+            .expect("options plays through a mixer of its own");
+        reconcile(&mut screen, &mut menus);
+
+        assert!(
+            (handle(&mut menus, Bus::Music) - 0.5).abs() < 1e-5,
+            "a quarter of the amplitude is half the travel, and the fader is at {}",
+            handle(&mut menus, Bus::Music),
+        );
+        assert_eq!(
+            hint(&mut menus, crate::menu::fader_id(Bus::Music)),
+            "25%",
+            "the number beside the groove is the gain that would be saved",
+        );
+        assert_eq!(
+            screen.saved(),
+            &SaveState::Unsaved,
+            "the file no longer says what the stack does, and the row has to say so",
+        );
+    }
+
+    /// **A headless run's screen can still write a key**, which is what makes
+    /// the console it shares a stack with writable too.
+    ///
+    /// `Store::None` has no file, and a stack with no user layer refuses every
+    /// `set` — so a screen opened over one would report `SaveState::Failed` for
+    /// a row nobody could have got wrong. `SettingsSource::open_editable` is
+    /// the rule both this and `Loop::new` take: writable, over memory, reaching
+    /// no disk. Nothing here touches a config directory, which is the other
+    /// half of what `Store::None` means.
+    #[test]
+    fn a_headless_screen_writes_its_keys_to_a_stack_that_accepts_them() {
+        let mut screen = Screen::opened(Store::None, FrameLimit::unlimited());
+        let mut menus = Screen::menus();
+        reconcile(&mut screen, &mut menus);
+
+        press(&mut menus, crate::menu::FRAME_CAP_ID);
+        reconcile(&mut screen, &mut menus);
+
+        assert_eq!(
+            screen.saved(),
+            &SaveState::Unsaved,
+            "the write was refused rather than kept",
+        );
+        assert_eq!(
+            crcbl::settings::frame_limit(&screen.stack()),
+            screen.cap(),
+            "the row moved a ceiling it never wrote",
         );
     }
 }
