@@ -1491,11 +1491,12 @@ waits on both. The wall clock is the slowest single demo rather than the sum,
 **What is still not fixed is the cap itself.** `web/tools/browser-e2e.mjs`
 scales its own per-check budgets to the machine it is on, so a slower frame
 stretches the run rather than failing it: a demo that genuinely hangs and a demo
-that is merely slow are the same red, forty-five minutes later. What would
+that is merely slow are the same red whenever the cap fires. What would
 distinguish them is a budget the driver enforces — it already measures its own
 scale factor, so it could fail on the factor rather than on the clock — or a
 per-demo wall-clock figure recorded and compared run to run. Neither exists, and
-the fan-out does not create either.
+the fan-out does not create either; the entry below carries what has been
+measured since, and what closing that gap would take.
 
 **What these gates spend is simulation, not picture.** The runner has no GPU;
 its software rasteriser drives the tick at a fraction of real time, and every
@@ -1505,10 +1506,10 @@ for breach, 87.0x for shard. The shadow filter's early-out took 27% off the
 forward pass on two adapters and moved puppet's step by one second (612 s to 613
 s) — the same finding from the other side.
 
-**shard completes about half the time, and the other half it hangs to the cap —
-measured 2026-08-31.** The claim that it had never completed is retired: it now
-has figures, and they are bimodal rather than slow. Four consecutive Pages runs,
-job durations read off `gh run view <id> --json jobs`:
+**It is slowness, not a hang, and the cap was below the legitimate range —
+measured 2026-08-31.** An earlier revision of this entry read the bimodality as
+a hang. That was wrong, and the sweep that overturned it is below. Five
+consecutive Pages runs, job durations read off `gh run view <id> --json jobs`:
 
 | Commit    | Run         | shard  | Outcome              |
 | --------- | ----------- | ------ | -------------------- |
@@ -1516,47 +1517,71 @@ job durations read off `gh run view <id> --json jobs`:
 | `9bd267b` | 33360958824 | 45 min | cancelled at the cap |
 | `458a5ed` | 33368904505 | 24 min | success              |
 | `a1e5168` | 33371443850 | 45 min | cancelled at the cap |
+| `031696a` | 33375515324 | 45 min | cancelled at the cap |
 
-A passing run is 24–26 minutes; a failing one is 45:17 and 45:00 — the `demos`
-job's `timeout-minutes: 45` exactly. So this is **a hang, not slowness**, and
-the paragraph above is right that the cap cannot tell them apart: nothing here
-distinguishes "shard got slower" from "shard stopped".
+**What settles it is the spread between runs of the same code.** Each demo's
+`web-e2e-<demo>` artifact holds the page log, and `PassStats` in it reports the
+forward pass per frame. Across the four runs that uploaded one, in ms:
 
-**The cost is that the site does not publish.** On both hung runs
+| demo    | `79a555a` | `9bd267b` | `458a5ed` | `a1e5168` |
+| ------- | --------- | --------- | --------- | --------- |
+| shard   | 4260.955  | —         | 3809.661  | —         |
+| breach  | 3907.520  | 4034.938  | 3480.389  | 3969.237  |
+| puppet  | 2512.963  | 2195.695  | 2337.706  | 2337.690  |
+| quarry  | 2681.151  | 1355.780  | 2703.682  | 2714.067  |
+| lantern | 1164.494  | 1457.002  | 1647.502  | 2888.790  |
+| sparks  | 806.025   | 1254.571  | 835.170   | 1234.698  |
+| viewer  | 237.158   | 191.151   | 231.977   | 237.494   |
+
+quarry's slowest run is **2.0x** its fastest and sparks' is **1.5x**, with no
+change to either demo between them. So the runner's software rasteriser varies
+by up to a factor of two, and that alone spans the 24-to-45-minute range shard
+shows — no stop is needed to explain it. The dashes are the two runs where shard
+was killed and wrote no log.
+
+**The same variance forbids attributing any of these numbers to a commit.**
+lantern reads 1647 ms at `458a5ed` and 2888 ms at `a1e5168`, which invites
+blaming the shadow cadence that landed between them; quarry moves by the same
+factor with nothing between its runs at all. One sample per commit cannot tell
+the two apart. Anything wanting a per-commit figure needs repeated runs of the
+same commit, which nothing here does.
+
+**The cap is raised to 90 rather than the gate weakened.** Job durations at run
+33375515324: breach completed in 39 minutes, puppet 21, lantern 16, quarry 12.
+The slowest legitimate completion doubled is past 45, so the old cap sat inside
+the range of a passing run rather than above it. `pages.yml`'s `demos` job
+carries the measurement.
+
+**The cost of getting it wrong is not a red gate.** On every hung run
 `deploy to GitHub Pages` was **skipped** — confirmed by name, not inferred — so
 the run reads `cancelled` and the published site silently stays at the last
-commit that got through. That is what happened to `a1e5168`: CI green, every
-other demo green, and the site left at `458a5ed`. Distinguish the two causes
-when reading the run list: **only** shard cancelled is this hang, while shard
-_and_ `deploy` cancelled together is an ordinary concurrency cancellation from
-the next push.
+commit that got through. `a1e5168` and `031696a` both did this; the site is at
+`458a5ed`. Distinguish the two causes when reading the run list: **only** the
+demo job cancelled is the cap, while a demo job _and_ `deploy` cancelled
+together is an ordinary concurrency cancellation from the next push.
 
-The hang predates the shadow ladder's last rungs — `ad988ae` and `c41c15d` on
-2026-08-30 show the same single-job cancellation — so it is not caused by them.
-Nothing has yet caught it in the act, and the obvious route is a dead end —
-**checked 2026-08-31, so nobody repeats it.** The cancelled step flushes no
-output into the job log at all, only the runner's setup lines and its
-`Terminate orphan process` list (bash, Xvfb, chrome, two `cat`s). The
+**One route is a dead end — checked 2026-08-31, so nobody repeats it.** The
+cancelled step flushes no output into the job log at all, only the runner's
+setup lines and its `Terminate orphan process` list. The
 `Upload the browser evidence` step does still run on a cancelled job, but the
-`web-e2e-shard` artifact it uploads then holds **only `shard-swiftshader.png`**
-— a successful run's holds `shard-swiftshader.log` beside it, 39,921 bytes on
-run 33368904505 — because that log is written when the run finishes. A hung run
-therefore leaves no log anywhere, and the artifact cannot say where it stopped.
+artifact then holds **only** the PNG — a successful run's holds the page log
+beside it, 39,921 bytes on run 33368904505 — because that log was written when
+the run finished.
 
-**What the passing log does say is where the time goes**, and it argues this may
-be slowness rather than a hang. On run 33368904505 shard's own `PassStats` line
-reports the `forward` pass at **3,809.661 ms per frame, 87.0% of the frame**,
-with `ssr` at 250 ms and the occlusion pair at 180 ms, and the demo reaches 469
-simulated seconds over 109 frames. So a passing shard job is ~24 minutes of
-genuinely slow software rasterisation against a 45-minute cap — under **twice**
-the headroom. A runner half as quick as the median crosses it, which fits the
-observed 2-in-4 rate without any hang at all.
+**That last gap is closed.** `web/tools/browser-e2e.mjs` now appends each page
+line to `<slug>-live.log` as it arrives, so a job the cap kills uploads the log
+it had reached. Verified by killing a run with SIGKILL at 30 seconds: 90 lines
+present, the end-of-run log and the PNG absent. The next demo to die at the cap
+is the first one that will say where it stopped — and if it stopped rather than
+crawled, that log is what proves it.
 
-**What would actually distinguish them**, and neither exists: the driver already
-measures its own scale factor, so it could fail on the factor rather than on the
-clock; or the harness could write its log incrementally rather than at the end,
-so a killed job leaves evidence. The second is the cheaper one and would settle
-this question the next time it fires.
+**What is still not built** is a bound the driver enforces itself: it already
+measures its own scale factor in group B and scales every later budget by it, so
+the run's wall clock is roughly linear in that factor and the driver could
+refuse a run it can predict will not fit. That would turn a 90-minute
+cancellation into a two-minute failure carrying a number. It needs a per-demo
+threshold, and a threshold wants a sweep of the factor across runs — the sweep
+above is of the forward pass, which is not the same measurement.
 
 ### The audio buses ship without a reader or a wire slot (2026-08-28)
 
