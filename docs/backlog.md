@@ -109,11 +109,18 @@ both found by trying, 2026-08-31.**
   change. The run drew 157 frames while the report covers "the last 75 of 75",
   so GPU timing had already stopped before the console group ran.
 
-So typing it later in the run can never work, whatever the key map does. What
-would: apply the setting before the frames are timed. The routes are a `.cfg`
-seeded into OPFS for `config` to run at boot, or a boot-time hook that takes
-console lines — the second is engine surface added for a test, which is the same
-objection recorded against the `config` storage seam.
+So typing it later in the run can never work, whatever the key map does. The
+setting has to be applied before the frames are timed, and **nothing in the tree
+can do that today**: `crcbl::console_config::config` is registered in
+`crates/crcbl/src/lib.rs` as a console command and nothing else calls it, so
+there is no `autoexec.cfg` equivalent — no file runs on its own at start-up.
+
+That is the natural unblock, and it is not test-only surface: Source runs an
+`autoexec.cfg` and this console was built in that shape deliberately, so an
+engine that ran one config file at boot is a feature the engine plausibly wants
+regardless of this measurement. It would also give the browser a route, since
+`config` already reads through the OPFS store, and a harness that seeded a file
+before the demo booted would need no key map, no digits and no typing at all.
 
 **What the rung buys, re-measured.** The scene is
 `forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`: a
