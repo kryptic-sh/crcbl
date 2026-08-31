@@ -160,6 +160,7 @@ use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
 use crate::counters::FrameCounters;
 use crate::cull::Frustum;
 use crate::cull_stats::CullStatsRing;
+use crate::debug_draw::DebugDraw;
 use crate::draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 use crate::effects::{EffectRequest, RenderEffects};
 use crate::graph::{
@@ -235,7 +236,16 @@ const _: () = assert!(
 /// Read by [`ForwardRenderer::set_ground_grid`], whose pipeline is built for a
 /// depth attachment before there is a frame to ask. The extent is irrelevant to
 /// a format, which is why any is passed.
-const SCENE_DEPTH_FORMAT: Format = TransientImageDesc::scene_depth((1, 1)).format;
+pub(crate) const SCENE_DEPTH_FORMAT: Format = TransientImageDesc::scene_depth((1, 1)).format;
+
+/// The format the frame's HDR scene target is created with, taken from the
+/// description that creates it rather than written down a second time.
+///
+/// Read by [`crate::debug_draw`], whose pipeline blends into whichever image the
+/// chain of HDR passes ended with — every one of them is a
+/// [`TransientImageDesc::scene_color`]. The extent is irrelevant to a format,
+/// which is why any is passed.
+pub(crate) const SCENE_COLOR_FORMAT: Format = TransientImageDesc::scene_color((1, 1)).format;
 
 /// The format §3.2's base-colour page is created with.
 ///
@@ -704,8 +714,9 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 }
 
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
-/// atlas's, the depth prepass, the forward pass, the tonemap, the ground grid
-/// and the culling-statistics copy — plus [`Ssao::PASSES`], [`Ssr::PASSES`],
+/// atlas's, the depth prepass, the forward pass, the debug draw layer, the
+/// tonemap, the ground grid and the culling-statistics copy — plus
+/// [`Ssao::PASSES`], [`Ssr::PASSES`],
 /// [`Bloom::MAX_PASSES`], [`Exposure::PASSES`] and [`Upscale::PASSES`] beside
 /// them.
 ///
@@ -723,7 +734,8 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// records one more pass, and a bound short of that would silently stop timing
 /// the last pass of every frame it drew. The render-scale upscale is the second
 /// of those — see [`ForwardRenderer::set_render_scale`], which is `1.0` and
-/// therefore absent until a caller moves it.
+/// therefore absent until a caller moves it. The debug draw layer is the third,
+/// and [`DebugDraw::MAX_PASSES`] is its own ceiling.
 ///
 /// **The bloom and Hi-Z terms are ceilings where the others are counts**,
 /// because a chain's length is a function of the target's extent — see
@@ -732,6 +744,7 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// it is a large one with bloom switched on; every smaller frame records fewer,
 /// exactly as a frame with a free shadow slot does.
 const RENDER_PASSES: u32 = 6
+    + DebugDraw::MAX_PASSES
     + Ssao::PASSES
     + Hiz::PASSES
     + Ssr::PASSES
@@ -1509,6 +1522,15 @@ pub struct ForwardRenderer {
     /// every sample and every golden image predates it.
     ground_grid_on: bool,
 
+    /// The debug draw layer's immediate-mode buffer and its pass — see
+    /// [`crate::debug_draw`].
+    ///
+    /// Always present and empty by default, because appending to it is what a
+    /// system does and the buffer is a `Vec`; the pipeline and the rings inside
+    /// it are what stay unbuilt until a frame has both a segment and
+    /// [`crate::debug_draw::r_debug_draw`] switched on.
+    debug_draw: DebugDraw,
+
     /// This frame's camera view-projection, as
     /// [`begin_frame`](ForwardRenderer::begin_frame) computed it.
     ///
@@ -1613,6 +1635,15 @@ pub struct ForwardRenderer {
     /// `counters` describes the frame that *was* recorded, and a request set
     /// after it would otherwise change the count of a frame already submitted.
     recorded_fullscreen: u64,
+
+    /// Whether the last [`add_passes`](ForwardRenderer::add_passes) recorded the
+    /// debug draw layer's pass, as the one direct draw it costs.
+    ///
+    /// Separate from [`ForwardRenderer::recorded_fullscreen`] because it is not
+    /// a full-screen triangle: it is one line-list draw of every segment this
+    /// frame appended. Both are direct draws of one instance, which is what
+    /// [`ForwardRenderer::direct_draws`] adds up.
+    recorded_debug_draw: u64,
 }
 
 /// What a partly-built [`ForwardRenderer`] has to give back.
@@ -4598,6 +4629,9 @@ impl ForwardRenderer {
             // for one draws the frame it drew before this module existed.
             ground_grid: None,
             ground_grid_on: false,
+            // Empty, and unbuilt: nothing has appended a segment, so this
+            // renderer records the frame it recorded before the layer existed.
+            debug_draw: DebugDraw::default(),
             // Replaced by every `begin_frame`, which `add_passes` documents as
             // having to run first.
             camera_view_proj: Mat4::IDENTITY,
@@ -4656,6 +4690,8 @@ impl ForwardRenderer {
             frame_effects: RenderEffects::DEFAULT_STACK,
             // No frame has been recorded yet, on `recorded_draws`' terms.
             recorded_fullscreen: 0,
+            // No frame has been recorded yet, on `recorded_fullscreen`'s terms.
+            recorded_debug_draw: 0,
         })
     }
 
@@ -5552,6 +5588,20 @@ impl ForwardRenderer {
         // and pays for sixteen bytes nobody reads, and a block written only on
         // the frames that use it is stale on the frame a caller moves the knob.
         self.upscale.begin_frame(device, self.frame, extent)?;
+
+        // `docs/plan/07-ui-debug.md` item 5's immediate-mode buffer: whatever
+        // any system appended since the last frame, uploaded and cleared here.
+        // **The camera this frame is drawn with**, not a second derivation of
+        // it — the ground grid's pass takes the same matrix for the same
+        // reason.
+        //
+        // A frame with nothing appended, or one with the console switch off,
+        // uploads nothing and leaves the slot's count at zero, which is what
+        // makes `add_frame_passes` record no pass at all. See
+        // [`crate::debug_draw`].
+        let frames = self.uniforms.len();
+        self.debug_draw
+            .begin_frame(device, frames, self.frame, view_projection)?;
 
         // Every element the pool has ever handed out, not its live count: a
         // removed instance leaves a hole and the live ones above it still have
@@ -6803,9 +6853,15 @@ impl ForwardRenderer {
         self.recorded_fullscreen = fullscreen_passes(effects, extent, upscaling)
             + u64::from(self.ground_grid().is_some())
             + if draws_sky { SkyPass::PASSES } else { 0 };
-        self.recorded_draws = shadow_draws
-            + 2 * bucket_draws.calls.len() as u64
-            + self.recorded_fullscreen * FULLSCREEN_DRAWS;
+        // The debug draw layer's own call, on the ground grid's terms: not an
+        // effect bit, and decided by whether this frame's slot has a segment in
+        // it. One direct draw of one instance covering every segment appended,
+        // which is why it joins the full-screen triangles rather than the
+        // indirect draws — `counters` counts both as submitted *and* drawn,
+        // because the CPU knows what they cover.
+        self.recorded_debug_draw = u64::from(self.debug_draw.records_pass(self.frame));
+        self.recorded_draws =
+            shadow_draws + 2 * bucket_draws.calls.len() as u64 + self.direct_draws();
 
         // --- the depth prepass ---
         //
@@ -7197,6 +7253,31 @@ impl ForwardRenderer {
             self.auto_exposure
                 .add_passes(graph, frame, extent, tonemapped);
         }
+
+        // --- the debug draw layer ---
+        //
+        // **Before the tonemap, into the HDR image the tonemap is about to
+        // read**, which is `docs/plan/18-render-features.md`'s interaction rule:
+        // "Debug overlays (debug draw, gizmos) render pre-tonemap in HDR
+        // (they're in the world) except UI-space panels." A segment is therefore
+        // exposed and tonemapped like the geometry it annotates, which is the
+        // opposite of the ground grid below — and [`crate::grid`]'s header and
+        // [`crate::debug_draw`]'s carry the two halves of that argument.
+        //
+        // **And after everything that reads the scene colour.** The reflection
+        // march, the bloom chain and the auto-exposure histogram have all
+        // already been recorded against this image, so a debug line does not
+        // reflect in a surface, does not bloom, and does not move the exposure
+        // the scene is metered at. Each of those would be an overlay changing
+        // the picture it is drawn over, which is the one thing an overlay must
+        // not do.
+        //
+        // Nothing here is conditional on [`RenderEffects`], on the ground
+        // grid's terms: a frame that appended no segment is the frame this
+        // renderer recorded before [`crate::debug_draw`] existed — no pass, no
+        // pipeline, no block.
+        self.debug_draw
+            .add_pass(graph, frame, tonemapped, scene_depth);
 
         // The tonemap group names a *graph-owned* view, so it can only be built
         // once the graph has realised one. It is cached against the view handle
@@ -7833,6 +7914,22 @@ impl ForwardRenderer {
         grid.set_style(style);
         self.ground_grid_on = true;
         Ok(())
+    }
+
+    /// The debug draw layer's immediate-mode buffer, to append to.
+    ///
+    /// `docs/plan/07-ui-debug.md` item 5: any system appends lines, boxes,
+    /// spheres and frusta during the frame, and
+    /// [`begin_frame`](Self::begin_frame) uploads and clears what is there — so
+    /// a segment lives exactly the frame it was appended in and nothing has to
+    /// be un-appended. See [`crate::debug_draw`] for where the pass lands and
+    /// for the console switch that has to be on before anything is drawn.
+    ///
+    /// **Appending is free while the layer is off**, but building the geometry
+    /// is the caller's: a system whose overlay costs something to compute asks
+    /// [`DebugDraw::enabled`] first.
+    pub fn debug_draw(&mut self) -> &mut DebugDraw {
+        &mut self.debug_draw
     }
 
     /// How the ground grid is drawn, or [`None`] where it is switched off.
@@ -8937,7 +9034,8 @@ impl ForwardRenderer {
     ///
     /// # The triangles are [`None`] here, on every geometry path
     ///
-    /// Every draw this renderer records except the tonemap's is **indirect**:
+    /// Every draw this renderer records except the full-screen passes' and the
+    /// debug draw layer's is **indirect**:
     /// the instance count and the index range live in the argument buffer
     /// `draw_gen.slang` wrote, so the CPU records the call and learns nothing
     /// about what it covered. That is true of
@@ -8953,8 +9051,8 @@ impl ForwardRenderer {
     ///
     /// [`FrameCounters::drawn`](crate::counters::FrameCounters::drawn) is
     /// `cull.slang`'s survivor count, off [`crate::cull_stats`]'s delayed ring,
-    /// plus the tonemap's own triangle — the one draw here whose instance the
-    /// CPU knows about, and the one that is also in
+    /// plus the frame's direct draws — the ones here whose instance the CPU
+    /// knows about, and the ones that are also in
     /// [`instances`](crate::counters::FrameCounters::instances). So the pair is
     /// comparable: the same quantity submitted and kept.
     ///
@@ -8972,24 +9070,25 @@ impl ForwardRenderer {
     /// [`FrameCounters::instances`](crate::counters::FrameCounters::instances)
     /// is known and is the plan's "submitted" half: the live instances
     /// [`add_passes`](Self::add_passes) hands the cull dispatches, plus the
-    /// tonemap's own full-screen triangle.
+    /// frame's direct draws — every full-screen pass's triangle and the debug
+    /// draw layer's line list.
     #[must_use]
     pub fn counters(&self) -> FrameCounters {
         if self.recorded_draws == 0 {
             return FrameCounters::default();
         }
         let stats = self.cull_stats();
-        let fullscreen = self.recorded_fullscreen * FULLSCREEN_DRAWS;
+        let direct = self.direct_draws();
         FrameCounters {
             draws: self.recorded_draws,
-            instances: self.instances.len() as u64 + fullscreen,
-            // Each full-screen triangle is submitted and drawn, and none of them
-            // is in the cull's count — they are direct draws of one instance,
-            // added on both sides so the two halves of the row measure the same
-            // thing. Off the frame that *was* recorded rather than off a
-            // constant, so a frame with an effect switched off does not count a
-            // triangle it never submitted.
-            drawn: stats.map(|stats| stats.instances + fullscreen),
+            instances: self.instances.len() as u64 + direct,
+            // Each direct draw is submitted and drawn, and none of them is in
+            // the cull's count — they are draws of one instance, added on both
+            // sides so the two halves of the row measure the same thing. Off the
+            // frame that *was* recorded rather than off a constant, so a frame
+            // with an effect switched off does not count a triangle it never
+            // submitted.
+            drawn: stats.map(|stats| stats.instances + direct),
             triangles: None,
             // The survivors alone: the panel row is "clusters drawn", and the
             // frustum and cone rejection counts beside them are a different
@@ -9000,6 +9099,18 @@ impl ForwardRenderer {
                 .map(|cull| cull.survivors),
             cull_frame: stats.map(|stats| stats.frame),
         }
+    }
+
+    /// The draws this renderer records **directly** — the ones whose instance
+    /// the CPU knows about, as opposed to the indirect calls whose counts live
+    /// in a buffer a shader wrote.
+    ///
+    /// Every full-screen pass's over-sized triangle, plus the debug draw
+    /// layer's line list on a frame that has one. One instance each, which is
+    /// why [`counters`](Self::counters) adds this to both halves of its
+    /// submitted/drawn pair.
+    fn direct_draws(&self) -> u64 {
+        self.recorded_fullscreen * FULLSCREEN_DRAWS + self.recorded_debug_draw
     }
 
     /// What the camera's cull kept, on the frame the ring has reached.
@@ -9085,6 +9196,9 @@ impl ForwardRenderer {
         if let Some(grid) = self.ground_grid {
             grid.destroy(device);
         }
+        // Nothing to release on a renderer nobody drew a segment through — see
+        // [`crate::debug_draw`], whose pipeline is built on first use.
+        self.debug_draw.destroy(device);
         self.sky_pass.destroy(device);
         self.upscale.destroy(device);
         self.smaa.destroy(device);
@@ -11524,6 +11638,52 @@ mod tests {
         }
     }
 
+    /// Serialises the two checks that move
+    /// [`r_debug_draw`](crate::debug_draw::r_debug_draw), and puts it back
+    /// afterwards.
+    ///
+    /// A [`ConVar`](crcbl_console::ConVar) is process-global by design, and
+    /// `cargo test` runs a crate's tests as threads of *one* process: two checks
+    /// that move the switch are then two writers to one cell, which shows up as
+    /// a flake rather than as a failure anybody can read.
+    /// `crcbl::debug_view::for_test` is the same shape one crate up and there
+    /// for the same reason; this one is smaller because nothing outside these
+    /// two tests ever writes the cell.
+    fn debug_draw_switch() -> DebugDrawSwitch {
+        let guard = DEBUG_DRAW_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let switch = DebugDrawSwitch { _guard: guard };
+        switch.set(false);
+        switch
+    }
+
+    /// What [`debug_draw_switch`] hands back: the switch is this thread's until
+    /// it drops, and it goes back off when it does.
+    struct DebugDrawSwitch {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl DebugDrawSwitch {
+        /// Moves the switch.
+        fn set(&self, on: bool) {
+            crate::debug_draw::r_debug_draw
+                .set(&crcbl_console::Value::Bool(on))
+                .expect("`r_debug_draw` is a writable bool");
+        }
+    }
+
+    impl Drop for DebugDrawSwitch {
+        fn drop(&mut self) {
+            // Off at both ends, so a check that panicked mid-way does not hand
+            // the next holder a switched-on layer.
+            self.set(false);
+        }
+    }
+
+    /// [`debug_draw_switch`]'s lock.
+    static DEBUG_DRAW_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Every draw the recorded stream holds, whichever call recorded it.
     ///
     /// Not scoped to a pass, unlike [`commands_in_pass`]: what
@@ -13318,7 +13478,10 @@ mod tests {
     ///
     /// The ground grid is switched on for **both** frames, because the widest
     /// frame is the one that has it: it is off by default and not a
-    /// [`RenderEffects`] bit, so nothing else here would put its pass in.
+    /// [`RenderEffects`] bit, so nothing else here would put its pass in. The
+    /// debug draw layer is on for both frames for the same reason, and it needs
+    /// a segment appended before each rather than one switch, because
+    /// [`begin_frame`](ForwardRenderer::begin_frame) clears its buffer.
     ///
     /// **And the frames are drawn at [`WIDEST_EXTENT`] rather than at
     /// [`TEST_EXTENT`], with every effect forced on and the render scale off
@@ -13378,6 +13541,15 @@ mod tests {
         let imported = swapchain_image_at(device, WIDEST_EXTENT);
         let mut pool = crate::TransientPool::new();
 
+        // The debug draw layer on for both frames below, because it is a pass
+        // the bound counts and no effect bit switches on — the ground grid's
+        // argument again. A segment before each, since `begin_frame` clears the
+        // buffer: the layer is immediate mode.
+        let switch = debug_draw_switch();
+        switch.set(true);
+        renderer
+            .debug_draw()
+            .line(Vec3::ZERO, Vec3::X, [1.0, 1.0, 1.0, 1.0]);
         let bare =
             passes_in_a_frame(device, queue, &mut renderer, imported, &pool, WIDEST_EXTENT).len();
         assert_eq!(
@@ -13405,6 +13577,9 @@ mod tests {
             .map(|slot| shadowable_spot(1.0 + slot as f32))
             .collect();
         renderer.set_lights(&spots);
+        renderer
+            .debug_draw()
+            .line(Vec3::ZERO, Vec3::X, [1.0, 1.0, 1.0, 1.0]);
         let widest =
             passes_in_a_frame(device, queue, &mut renderer, imported, &pool, WIDEST_EXTENT).len();
         assert_eq!(
@@ -13724,6 +13899,163 @@ mod tests {
         pool.destroy(device);
         device.destroy_image_view(imported.view);
         device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **The debug draw layer costs a frame nothing until something is appended
+    /// *and* the console switch is on, and then it is the pass immediately
+    /// before the tonemap.**
+    ///
+    /// Four claims, and each is a separate way to get this wrong.
+    ///
+    /// * **Off by default** is what keeps every golden image in the workspace
+    ///   where it was blessed.
+    /// * **A segment appended while the switch is off records nothing**, so a
+    ///   system may append unconditionally.
+    /// * **The switch on with an empty buffer records nothing either** — this is
+    ///   the "costs nothing when empty" claim as a check rather than a sentence:
+    ///   the compiled pass list is compared whole against the frame drawn before
+    ///   the layer was switched on, so a pass that clears, blits or barriers
+    ///   anything would show up here.
+    /// * **Before the tonemap**, which is
+    ///   `docs/plan/18-render-features.md`'s interaction rule and the opposite of
+    ///   the ground grid above. Recorded a line later it would draw into the
+    ///   display-space target and be free of the exposure, which compiles and
+    ///   draws lines and is the wrong picture.
+    ///
+    /// And the fifth, which is what "immediate mode" means: the frame *after*
+    /// the one that appended records nothing again, because
+    /// [`ForwardRenderer::begin_frame`] cleared the buffer.
+    ///
+    /// The whole list is compared rather than its length, for the ground grid
+    /// test's reason: one more pass is satisfied by gaining the wrong one.
+    ///
+    /// **This test owns `r_debug_draw` for its duration**, through
+    /// [`debug_draw_switch`]: a plain `cargo test` run shares one process
+    /// between tests, so the two checks here that move it have to take turns.
+    /// `cargo nextest`, which CI runs, gives each a process of its own and needs
+    /// none of it.
+    #[test]
+    fn the_debug_draw_layer_is_off_by_default_and_lands_before_the_tonemap() {
+        let switch = debug_draw_switch();
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+
+        assert!(
+            !crate::DebugDraw::enabled(),
+            "the layer must be off before anything switches it on, or every claim below is \
+             about a different default"
+        );
+        let off = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
+        assert!(
+            !off.contains(&"debug-draw".to_string()),
+            "the layer must not be in a frame nobody switched it on for: {off:#?}"
+        );
+
+        renderer
+            .debug_draw()
+            .line(Vec3::ZERO, Vec3::X, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT),
+            off,
+            "a segment appended while the switch is off must record no pass"
+        );
+
+        switch.set(true);
+        assert_eq!(
+            passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT),
+            off,
+            "the switch on with an empty buffer must record the frame the layer's absence would"
+        );
+
+        renderer
+            .debug_draw()
+            .aabb(-Vec3::ONE, Vec3::ONE, [0.0, 1.0, 0.0, 1.0]);
+        let on = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
+        let mut expected = off.clone();
+        let tonemap = expected
+            .iter()
+            .position(|label| label == "tonemap")
+            .expect("a frame has to reach the swapchain");
+        expected.insert(tonemap, "debug-draw".to_string());
+        assert_eq!(
+            on, expected,
+            "the layer must be the one pass gained, and it must sit before the tonemap"
+        );
+
+        assert_eq!(
+            passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT),
+            off,
+            "the buffer is immediate mode: the frame after the one that appended must record \
+             nothing"
+        );
+
+        switch.set(false);
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **The debug draw layer's own call is counted in the frame's draws.**
+    ///
+    /// [`ForwardRenderer::counters`]' draw count is compared against the
+    /// commands the null backend actually recorded, which is the same instrument
+    /// `the_forward_counters_are_the_recorded_draws_and_admit_what_they_cannot_know`
+    /// uses — so a layer whose line list was recorded and not counted fails here
+    /// rather than quietly making every panel's draw row one short.
+    ///
+    /// Both directions are asserted: the frame that drew a segment records one
+    /// more draw than the frame before it, *and* the counter moved by the same
+    /// one. A count wired to a constant satisfies neither.
+    ///
+    /// It owns `r_debug_draw` for its duration, on
+    /// `the_debug_draw_layer_is_off_by_default_and_lands_before_the_tonemap`'s
+    /// terms.
+    #[test]
+    fn the_debug_draw_layers_call_is_counted_in_the_frames_draws() {
+        let switch = debug_draw_switch();
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+
+        let quiet = frame(device, &mut renderer, queue);
+        let without = renderer.counters().draws;
+        assert_eq!(
+            without,
+            recorded_draws(&recorder) as u64,
+            "the counter and the frame's recorded draws disagree before the layer draws at all"
+        );
+        quiet.release(device);
+
+        switch.set(true);
+        renderer
+            .debug_draw()
+            .line(Vec3::ZERO, Vec3::X, [1.0, 1.0, 1.0, 1.0]);
+        let drawn = frame(device, &mut renderer, queue);
+        let with = renderer.counters().draws;
+        assert_eq!(
+            with,
+            without + 1,
+            "the layer records one draw, so the count has to move by one"
+        );
+        assert_eq!(
+            recorded_draws(&recorder) as u64,
+            without + with,
+            "the two frames' recorded draws and the two counts disagree, so the layer's call is \
+             counted somewhere it was not recorded or recorded somewhere it was not counted"
+        );
+
+        switch.set(false);
+        drawn.finish(device, renderer);
         recorder.assert_valid();
     }
 

@@ -159,6 +159,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The debug draw layer: lines, boxes, spheres and frusta, drawn pre-tonemap in
+  HDR from a buffer any system appends to.** `crcbl_render::debug_draw` is
+  `docs/plan/07-ui-debug.md` item 5's immediate-mode layer and
+  `docs/plan/43-render-standards.md`'s foundations row (e).
+  `ForwardRenderer::debug_draw` hands out the buffer; `DebugDraw::line`, `aabb`,
+  `box_edges`, `sphere` and `frustum` append to it; `begin_frame` uploads and
+  clears it, so a segment lives exactly the frame it was appended in. The pass
+  is recorded immediately before the tonemap and writes the HDR scene target —
+  `docs/plan/18-render-features.md`'s interaction rule — after the reflection
+  composite, the bloom chain and the auto-exposure histogram, so an overlay
+  neither reflects, blooms, nor moves the exposure the scene is metered at, and
+  it is depth-tested read-only against the scene depth so geometry in front of
+  it occludes it — a segment behind the demo cube leaves those texels
+  byte-identical to the frame with nothing appended, and the same segment in
+  front of it carries the segment's colour. **Off by default and free when
+  empty**: the console variable `r_debug_draw` is `false`, and a frame that
+  appended nothing records no pass, no pipeline and no buffer. No golden moved.
+  **World-anchored text is not in this slice** — it needs a glyph atlas and a
+  rasteriser seam, and `docs/backlog.md` carries it as its own rung.
+
 - **The `log` command works in a browser, and a console gain reaches the mix
   that is already playing.** `crcbl_core::log::register_sink` and `sink_permits`
   let a sink outside `crcbl-core` declare that it applies the engine's filter

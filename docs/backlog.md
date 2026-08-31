@@ -2445,29 +2445,6 @@ field; `the_tonemap_block_carries_the_curve_a_caller_selected` in
 and `the_aces_curve_keeps_the_shading_the_clamp_flattens` in
 `crates/crcbl/tests/mesh_e2e/hdr.rs` is what proves the branch runs on a device.
 
-### §3.6's debug draw layer is unbuilt (2026-08-27)
-
-**Not built.** `03-gpu-driven-rendering.md` §3.6 asks for "line/AABB/sphere
-immediate primitives accumulated into an instance buffer, drawn in one pass",
-and says "systems from stage 4 onward use this to visualize themselves". The
-other two rows of that section are built — `crcbl_render::timing` for the
-per-pass timestamps and `crcbl_render::cull_stats` for the delayed readback
-ring. This one has no module, no shader and no caller.
-
-**What it would take.** A vertex-pulled line/triangle pass over a per-frame
-instance buffer, drawn pre-tonemap in HDR per `18-render-features.md`'s
-interaction rule. `crcbl_render::sprite_pass` is the closest existing shape.
-
-**Blocks.** Every "visualize itself" affordance the plans promise: the
-cascade-split overlay and shadow-map inspector (topic 18), the LOD screen-error
-heatmap and freeze-LOD camera (topic 25), decal cluster heatmaps and carve
-wireframes (topic 33), the server vis view (topic 31).
-
-**Nearest existing things, and why they are not it.**
-`ForwardRenderer::set_wireframe` is a pipeline mode over scene geometry, and
-`crcbl_render::grid` is one fullscreen pass ray-casting `y = 0`. Neither takes
-primitives from a caller.
-
 ### Cascade debug overlay and shadow-map inspector (2026-08-27)
 
 **Not built.** `18-render-features.md`'s shadow section names both, and its risk
@@ -23173,36 +23150,128 @@ plan says the demo is for, and "your rating is only as good as the variety of
 people you play" is a real thing to show. That does not settle which rating
 system ships.
 
-## There is still no world-space debug draw (2026-08-24)
+## World-anchored debug text is not built (2026-08-31)
 
-The **UI-space** half of this has shipped: `DrawList::line` and
-`DrawList::polyline` stroke segments and connected runs with bevelled corners,
-and `apps/orbit` draws its trajectory and plume with them. That covers any
-overlay whose lines live in screen space.
+**Deliberately out of scope** of the debug draw layer that landed the same day.
+`docs/plan/07-ui-debug.md` item 5 names "lines, boxes, spheres, frusta and
+world-anchored text"; `crcbl_render::debug_draw` is the first four and nothing
+of the fifth. There is no stub: the module's header says so and `DebugDraw` has
+no text method to mistake for one.
 
-It does **not** cover the other shape, and the two were never the same feature.
-`docs/plan/05-physics.md`'s debug draw — contacts, sweeps, fat AABBs, BVH
-bounds, islands — wants lines that are _in the scene_, so they have to be
-transformed by the camera and depth-tested against the geometry they annotate.
-Nothing in `crcbl-render` does that today. The HAL can already express
-`LineList` and `LineStrip` and no pass uses either, so the missing piece is a
-render pass and its pipeline, not a primitive.
+**Why it was split off.** Text needs a glyph atlas and a rasteriser seam, and
+the workspace has exactly one — `crcbl_ui::text::FontAtlas`, uploaded and
+sampled by `crcbl_render::ui_pass`. A second consumer of that atlas means a
+second bind group, a second pipeline with a sampled image in it, a quad
+expansion in the vertex stage, and a `.slang` that is no longer one entry-point
+pair over a line list.
 
-Not started. Worth noting that thin hardware lines are one pixel wide and not
-uniformly supported, so the same triangle-expansion `push_stroke` does for the
-UI is likely the right answer there too — which is an argument for lifting that
-helper rather than writing a second one.
+**What it would take.** A second pipeline over the same immediate-mode buffer
+pattern; a decision this slice did not have to make — does world-anchored text
+scale with distance or stay a fixed pixel size, both legitimate and each a
+different vertex stage; and a home for the atlas upload that both consumers can
+reach, which is the real coupling.
 
-**A second consumer arrived on 2026-08-25**: `apps/viewer`'s skeleton overlay,
-which draws a posed skeleton from `crcbl-anim`'s joint palette. It projects each
-joint to screen by hand and strokes the bones with the UI-space polyline —
-exactly the workaround a world-space pass exists to remove, and it inherits the
-two limitations that come with it. The bones do **not** depth-test against the
-geometry they annotate, so a joint behind the mesh draws in front of it; and the
-projection is the viewer's own copy of what the camera already does.
+**Blocks.** Any overlay that has to name something in the world rather than
+outline it: per-cluster error figures, a light's name beside its reach, a
+joint's index on a skeleton. Nothing shipping.
 
-That does not make the overlay wrong — it is the honest shape available today,
-and a skeleton drawn over the mesh is what most tools show anyway. It does mean
-the count of consumers waiting on the world-space pass is no longer only
-`05-physics.md`'s five, and that the next one to want it will be the third to
-hand-roll a projection.
+## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
+
+`r_debug_draw` is a single `bool`, while `docs/plan/07-ui-debug.md` item 5's
+controls are per-category ("AABBs, system overlays") per system. No system
+appends to the buffer yet, so a category enum and filter today would be an
+interface with one implementation and a parameter every call site passes the
+same value for. The switch is declared through the per-crate table seam, so a
+category variable joins `crcbl_render::console_table` beside it and the gather
+does not change.
+
+**What splits it:** two systems appending and someone wanting one without the
+other. Then a category on the append, a bitset in place of the bool, and the
+filter applied where `begin_frame` decides what to upload — already one place.
+The buffer would store the category per segment or segregate it into runs; a run
+per category is cheaper and keeps the draw one call per category.
+
+## Hardware line width is one pixel, and the layer takes that (2026-08-31)
+
+**Considered and taken deliberately**, against the earlier prediction that
+`crcbl_ui::draw_list`'s triangle expansion would be lifted and shared. The
+pipeline is `PrimitiveTopology::LineList` with no line-width state: one
+entry-point pair over a storage buffer and no CPU-side expansion, so a box is
+twelve `line()` calls and 24 vertices rather than twelve quads and 144. All four
+backends already map `LineList`, so nothing at the seam changed.
+
+**What it costs, plainly.** No width control, no dashed or thick lines, and the
+exact texels a diagonal covers differ between rasterisers — D3D12's diamond-exit
+rule and Vulkan's parallelogram rule disagree at a line's last pixel.
+`crates/crcbl/tests/mesh_e2e/debug_draw.rs` is written around that: the sharp
+per-texel assertion is on a segment that is horizontal in screen space, and the
+twelve-edge and six-face assertions allow one texel of slack and say why.
+
+**When to revisit.** If a caller wants width, the expansion is a vertex-stage
+change — two triangles per segment, expanded in NDC by a pixel width from a
+constant — not a new pass. `push_stroke`'s bevel logic is a screen-space helper
+that does not transfer to a world-space segment whose two ends have different
+depths, so "lift `push_stroke`" is probably still not the answer.
+
+## The debug draw layer's `depth_write: false` is guarded only by Vulkan validation (2026-08-31)
+
+**A coverage gap, found while sabotaging the depth test.**
+`crcbl_render::debug_draw`'s pipeline sets `depth_write: false` and the comment
+beside it says an overlay must not occlude anything drawn after it.
+
+Setting it to `true` was tried on 2026-08-31 and **no assertion anywhere catches
+it**: every test in the mesh e2e suite still passes and the picture does not
+change, because the only passes after this one either ignore depth (the tonemap)
+or read it (the ground grid, off in these frames). What does catch it is the
+Vulkan validation layer, through the check `crates/crcbl/tests/run-mesh-e2e.sh`
+already runs over its own log — the runner exits non-zero on
+`VUID-vkCmdDraw-None-06886`, once per drawing test, because
+`PassBuilder::depth_read` puts the attachment in a read-only layout.
+
+**That guard is real and it is Vulkan only.** CI's lavapipe and hardware legs
+report it; the D3D12, Metal and WebGPU legs would not, and no assertion in the
+tree would either. No assertion was added, because there is no observable to
+assert against until something is drawn after this pass that depth-tests, and
+writing an assertion that has not been seen fail is what this repo refuses.
+
+**When it becomes checkable.** The moment a second world-space overlay is
+recorded after this one — a second debug-draw category, or the ground grid
+switched on in a frame that also appends — a segment that wrote depth would
+occlude it, and that is a texel comparison of exactly the shape
+`a_segment_behind_a_surface_is_hidden_and_one_in_front_is_not` already has.
+
+## The debug draw layer is unpriced in a browser (2026-08-31)
+
+**A coverage gap, stated as one.** The pricing rule asks for the desktop
+adapter, lavapipe _and_ the browser. The first two are in
+`docs/plan/43-render-standards.md`'s row (e); the third is missing, because the
+price test runs under the mesh-e2e runner, which has no browser leg, and no demo
+appends a segment yet — so there is nothing for the browser gate to time.
+
+**What it would take.** A caller. The first system that appends its own geometry
+— the cascade overlay is the obvious one — gives the browser gate something to
+measure, and `PassStats` already reports the pass by name there.
+
+## The viewer's skeleton overlay still projects by hand (2026-08-24, narrowed 2026-08-31)
+
+The world-space half of this shipped on 2026-08-31 as
+`crcbl_render::debug_draw`: a pass that transforms segments by the camera and
+depth-tests them against the geometry they annotate, which is what
+`docs/plan/05-physics.md`'s contacts, sweeps, fat AABBs, BVH bounds and islands
+were waiting for. What is left is its **callers**.
+
+`apps/viewer`'s skeleton overlay is the one that already exists and still does
+it the old way: it projects each joint to screen by hand and strokes the bones
+with the UI-space polyline, so a joint behind the mesh draws in front of it and
+the projection is the viewer's own copy of what the camera already does. Moving
+it to `DebugDraw::line` removes both, and is one caller's change.
+
+**The triangle-expansion suggestion was considered and not taken.** The old
+entry argued that thin hardware lines are one pixel wide and not uniformly
+supported, so `push_stroke`'s expansion should be lifted out of the UI. The
+layer that landed draws `PrimitiveTopology::LineList` instead — every backend on
+the seam maps it, a one-pixel line is what every debug overlay in the industry
+draws, and expansion would have meant a width in world or screen units, a
+miter/round decision at every joint, and four vertices where there are two. If a
+caller ever needs a thick world-space line, that is the argument to revisit, and
+`push_stroke` is still the thing to lift.

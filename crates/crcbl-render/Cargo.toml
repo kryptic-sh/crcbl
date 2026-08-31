@@ -12,6 +12,12 @@ repository.workspace = true
 # as living above the seam rather than in it.
 [dependencies]
 crcbl-core = { workspace = true }
+# The debug draw layer's `r_debug_draw`, declared beside the pass it switches on
+# and listed in this crate's `console_table()` —
+# `docs/plan/52-debug-console.md` decision 2, whose own worked example is a
+# renderer variable declared in this crate. No cycle: `crcbl-console` depends on
+# nothing at all.
+crcbl-console = { workspace = true }
 crcbl-hal = { workspace = true }
 # The camera's projection matrices, and nothing else. §1.1 already lists glam as
 # a workspace dependency for exactly this.

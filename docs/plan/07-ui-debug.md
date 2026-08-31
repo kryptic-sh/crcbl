@@ -274,19 +274,31 @@ Surfaces for instrumentation that already exists:
    and pulled forward in [52-debug-console.md](52-debug-console.md)**
    (2026-08-30); the transport half is that plan's reserved `SIM` flag.
 5. **Debug draw controls** — toggle the stage 3 debug-draw categories (AABBs,
-   system overlays) per system. **The layer those controls toggle is itself
-   unbuilt, and it is a foundation rung (2026-08-30)** in
-   `43-render-standards.md`'s foundations block: lines, boxes, spheres, frusta
-   and world-anchored text, drawn pre-tonemap in HDR as
-   `18-render-features.md`'s interaction rule already fixes, from an
-   immediate-mode buffer any system appends to. It is scheduled early because
-   four owed views wait on it — `45-shadows.md`'s cascade overlay and atlas
-   view, `25-lod.md`'s cluster bounds and `44-lighting.md`'s light reach — and
-   each halves the time to debug the rung it belongs to.
-6. **UI inspector** (the web-dev devtools payoff): hover any element → its box
-   outlines (content/padding/margin), matched style rules, computed values,
-   id/class path. Nearly free because the tree + resolved styles are real data
-   structures.
+   system overlays) per system. **The geometry half of the layer those controls
+   toggle is built (2026-08-31)**: `crcbl_render::debug_draw` is the
+   immediate-mode buffer any system appends to, `DebugDraw::line`, `aabb`,
+   `box_edges`, `sphere` and `frustum` are its primitives,
+   `ForwardRenderer::debug_draw` hands it out, and the pass is recorded
+   immediately before the tonemap and writes the HDR scene target as
+   `18-render-features.md`'s interaction rule already fixed. It is off by
+   default behind the console variable `r_debug_draw`, and a frame that appends
+   nothing records no pass at all.
+
+   **The control is one switch, not a set of categories, and that is
+   deliberate**: no system appends yet, so a per-category filter would be a
+   parameter with one value. The first two systems that need separating are what
+   splits it, and `docs/backlog.md` carries the question.
+
+   **World-anchored text is not built.** It needs a glyph atlas and a rasteriser
+   seam — `crcbl_ui::text::FontAtlas` and `crcbl_render::ui_pass` own one
+   between them — which is a second consumer of that atlas and a screen-space
+   pass beside a world-space one; it is its own slice and `docs/backlog.md` says
+   what it needs.
+
+   The four owed views still wait on the _callers_, not on the layer:
+   `45-shadows.md`'s cascade overlay and atlas view, `25-lod.md`'s cluster
+   bounds and `44-lighting.md`'s light reach each now need only the system that
+   appends its own geometry.
 
 ## Tasks
 

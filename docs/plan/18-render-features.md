@@ -45,8 +45,13 @@ does these, and it is answered in one place:
 - UI renders after upscale at native res (crisp text regardless of 3D scale) —
   this ordering is the reason the UI pass was kept separate in stage 7.
 - Debug overlays (debug draw, gizmos) render pre-tonemap in HDR (they're in the
-  world) except UI-space panels. §3.6's debug draw layer is itself unbuilt, so
-  this rule binds whoever builds it.
+  world) except UI-space panels. **`crcbl_render::debug_draw` was built to this
+  rule on 2026-08-31**: its pass writes the HDR scene target immediately before
+  the tonemap — after the reflection composite, the bloom chain and the
+  auto-exposure histogram, so an overlay does not reflect, bloom or move the
+  exposure the scene is metered at. `crcbl_render::grid` is the deliberate
+  exception and its header says why: reference chrome is drawn in display space
+  after the tonemap so its colour does not move with the scene's brightness.
 - Golden-image tests (topic 12): shadows and each post pass get dedicated golden
   frames; tonemap changes are the classic "everything shifted" diff — the
   `--bless` flow exists for exactly this.

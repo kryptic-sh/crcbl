@@ -129,6 +129,7 @@ pub mod cluster_pool;
 pub mod counters;
 pub mod cull;
 pub mod cull_stats;
+pub mod debug_draw;
 pub mod draw_gen;
 pub mod effects;
 mod exposure;
@@ -190,6 +191,7 @@ pub use crcbl_ui::text::FontAtlas;
 pub use crcbl_ui::{ButtonState, SkinInsets};
 pub use cull::{Aabb, Frustum, visible_instances};
 pub use cull_stats::{ClusterCull, CullStats, CullStatsRing};
+pub use debug_draw::{DebugDraw, DebugVertex, frustum_corners};
 pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 pub use effects::{Antialiasing, EffectOverride, EffectRequest, RenderEffects};
 pub use exposure::{ExposureAdaptation, ExposureBuffers};
@@ -236,3 +238,15 @@ pub use timing::{FrameTimings, MAX_TIMED_PASSES, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};
 pub use ui_pass::UiRenderer;
 pub use volumetric::FroxelBuffers;
+
+/// Everything this crate exposes to the debug console.
+///
+/// One list per crate, gathered by the engine at one seam —
+/// `docs/plan/52-debug-console.md` decision 2, whose worked example is this
+/// crate. It holds [`debug_draw::r_debug_draw`], the switch the debug draw
+/// layer reads once a frame; `tests/console_table.rs` is what keeps it in step
+/// with what the source actually declares.
+#[must_use]
+pub fn console_table() -> crcbl_console::Table {
+    crcbl_console::table![debug_draw::r_debug_draw]
+}

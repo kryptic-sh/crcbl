@@ -880,9 +880,10 @@ fn completing(text: &str) -> &str {
 /// [`HostedGame::console_table`](crate::engine::HostedGame::console_table),
 /// which is per-run rather than per-workspace.
 #[must_use]
-pub fn engine_tables() -> [(&'static str, Table); 2] {
+pub fn engine_tables() -> [(&'static str, Table); 3] {
     [
         ("crcbl-core", crcbl_core::console_table()),
+        ("crcbl-render", crcbl_render::console_table()),
         ("crcbl", crate::console_table()),
     ]
 }
