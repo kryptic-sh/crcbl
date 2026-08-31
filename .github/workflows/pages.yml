@@ -343,25 +343,36 @@ jobs:
   # two.
   #
   # **What settles it as slowness rather than a stop is the spread between runs
-  # of the same code.** `PassStats` in each demo's uploaded page log reports the
-  # forward pass per frame; across four Pages runs it reads, in ms:
+  # of the same code.** `PassStats` in each demo's uploaded page log reports a
+  # p50 and p95 per pass over the run's last frames. Across four Pages runs the
+  # forward pass reads, in ms of p50:
   #
   #     quarry   2681.151  1355.780  2703.682  2714.067
   #     sparks    806.025  1254.571   835.170  1234.698
   #     breach   3907.520  4034.938  3480.389  3969.237
   #
   # quarry's slowest run is 2.0x its fastest and sparks' is 1.5x, with no change
-  # to either demo between them — so this runner's software rasteriser varies by
-  # up to a factor of two, and a 39-minute job under a 45-minute cap had far
-  # less headroom than that. Nothing in the sweep points at a demo stopping.
+  # to either demo between them — twice the work in the same job is far more
+  # spread than a 39-minute job under a 45-minute cap can absorb.
   #
-  # So the cap is set clear of the slowest observed completion doubled, which is
-  # what the measured variance asks for, and a generous cap still costs nothing
-  # on a run that passes.
-  # cap kills is `cancelled`, `deploy` is then skipped rather than failed, and
-  # the published site silently stays at the last commit that got through — that
-  # has now happened three times. If a demo ever does stop, the live page log
-  # `web/tools/browser-e2e.mjs` writes as lines arrive is what says where.
+  # **That spread is the workload, not the machine**, which matters because only
+  # one of those can be fixed here. The same logs time `ssao`, a full-screen
+  # pass whose cost is set by the resolution rather than by the scene: across
+  # the same four runs puppet's reads 137.557, 136.668, 138.822 and 139.557 ms
+  # while quarry's forward pass halves. A runner running at half speed would
+  # have moved both. So the machine is steady and the demos reach different
+  # simulation states from run to run, which is also why the heavy ones can
+  # wander past a cap that fits them most of the time. Nothing in the sweep
+  # points at a demo stopping.
+  #
+  # So the cap is set clear of the slowest observed completion doubled, which
+  # is what the measured variance asks for, and a generous cap still costs
+  # nothing on a run that passes. **The cost of getting this wrong is not a
+  # red gate**: a job the cap kills is `cancelled`, `deploy` is then skipped
+  # rather than failed, and the published site silently stays at the last
+  # commit that got through — that has now happened three times. If a demo
+  # ever does stop, the live page log `web/tools/browser-e2e.mjs` writes as
+  # lines arrive is what says where.
   demos:
     name: render ${{ matrix.demo }} in a real browser
     needs: build

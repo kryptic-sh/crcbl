@@ -60,19 +60,39 @@ nearly a third of it on lavapipe — the bandwidth-bound behaviour the old entry
 predicted, and the reason a low tier should not be handed one switch that sets
 both.
 
-**The browser row is still blank, and the reason is not the driver.** The
-capability plumbing is all present: `crcbl::engine` asks for
-`Features::TIMESTAMP_QUERY` optionally, `web/engine/gpu-replay.js` maps it to
-`'timestamp-query'` and folds it into `requestDevice` when the adapter has it,
-`crcbl-webgpu`'s `create_query_set` honours it, and no
-`cfg(target_arch = "wasm32")` disables any of it. What is missing is a
-**readout**: `globalThis.crcbl` in `web/engine/demo.js` exposes no timing field,
-there is no `__crcbl_web_*` export for one, and the only text surface is the
-run-aggregate line `Loop::finish` logs through
-`crcbl_render::PassStats::report`, which `web/tools/browser-e2e.mjs` captures
-into `consoleLines` and never inspects. A browser number needs either a new
-export or a `said(...)` assertion in the harness, both `web/` changes. No
-browser was run.
+**The browser row is no longer blank for what ships, and the earlier claim that
+it needed new code was wrong.** This entry used to say a browser number wanted
+either a `__crcbl_web_*` export or a `said(...)` assertion in the harness, and
+that no browser had been run. Both are false: `Loop::finish` logs
+`crcbl_render::PassStats::report` on every tier, `web/tools/browser-e2e.mjs`
+captures it, and the browser gate uploads it as `web-e2e-<demo>` on **every**
+Pages run. The numbers were already there. Read off four runs — 33353650899,
+33360958824, 33368904505, 33371443850 — as p50 ms under SwiftShader at the
+gate's own window size:
+
+| demo    | `ssao` p50, four runs                 | one `ssao-blur` p50, four runs        |
+| ------- | ------------------------------------- | ------------------------------------- |
+| puppet  | 137.557 / 136.668 / 138.822 / 139.557 | 82.304 / 81.926 / 83.065 / 83.181     |
+| breach  | 165.533 / 166.913 / 146.490 / 166.904 | 104.102 / 104.976 / 106.950 / 104.558 |
+| quarry  | 134.992 / 117.800 / 133.753 / 137.897 | 76.793 / 90.667 / 79.855 / 79.657     |
+| lantern | 90.895 / 123.062 / 140.170 / 161.271  | 69.528 / 99.923 / 114.112 / 100.596   |
+| shard   | 124.045 / — / 101.100 / —             | 102.244 / — / 78.570 / —              |
+
+So the shipping pair costs roughly **220 ms a frame** in a browser on a runner
+with no GPU. puppet is the row to quote — it holds inside 1% across all four
+runs — and the dashes are the two runs shard was killed in. Against radv's 645
+us and lavapipe's 17.0 ms above, that is the third tier this entry was missing.
+
+**What is still not measured is the rung itself**, and the reason is narrower
+than "no readout": nothing sets `r_ssao_slices` or `r_ssao_blur_passes` during a
+browser run, so every number here is the shipping 2-slice, 1-blur pair. The
+route needs no new export — `EXPECTATIONS.quarry.console` in
+`web/tools/browser-e2e.mjs` already types whole console lines through a real
+keyboard and reads their effect back off quarry's own heartbeat. What it would
+take is typing the two variables early in the run and reading the same rows. One
+thing to design around: the report is a p50 over the run's **last** frames
+rather than over the whole run, so a line typed at boot is measured cleanly, but
+a line typed late would be averaged against frames that never had it.
 
 **What the rung buys, re-measured.** The scene is
 `forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`: a
@@ -122,7 +142,8 @@ own unbuilt row, not this entry's.
 
 **Coverage gaps.**
 
-- The browser tier is unmeasured, above.
+- The browser tier is measured for the shipping pair and unmeasured for the
+  rung, above — nothing sets either variable during a browser run.
 - D3D12 and Metal are unmeasured for the reason every row of theirs is — no
   Windows or Apple hardware here. CI's software adapters will run the new
   assertions but will time nothing.
@@ -1561,17 +1582,31 @@ forward pass per frame. Across the four runs that uploaded one, in ms:
 | viewer  | 237.158   | 191.151   | 231.977   | 237.494   |
 
 quarry's slowest run is **2.0x** its fastest and sparks' is **1.5x**, with no
-change to either demo between them. So the runner's software rasteriser varies
-by up to a factor of two, and that alone spans the 24-to-45-minute range shard
-shows — no stop is needed to explain it. The dashes are the two runs where shard
-was killed and wrote no log.
+change to either demo between them, and that spread alone spans the
+24-to-45-minute range shard shows — no stop is needed to explain it. The dashes
+are the two runs where shard was killed and wrote no log.
 
-**The same variance forbids attributing any of these numbers to a commit.**
-lantern reads 1647 ms at `458a5ed` and 2888 ms at `a1e5168`, which invites
-blaming the shadow cadence that landed between them; quarry moves by the same
-factor with nothing between its runs at all. One sample per commit cannot tell
-the two apart. Anything wanting a per-commit figure needs repeated runs of the
-same commit, which nothing here does.
+**The spread is the workload, not the machine — corrected 2026-08-31.** An
+earlier revision of this entry read the same table as the runner varying by a
+factor of two. The same logs refute it. They also time `ssao`, a full-screen
+pass whose cost is set by the resolution rather than by the scene, and across
+the same four runs puppet's reads 137.557, 136.668, 138.822 and 139.557 ms — a
+1% band — while quarry's forward pass halves. A runner running at half speed
+would have moved both. So the machine is steady and the demos reach different
+simulation states from run to run: the heavy ones do a different amount of work
+each time, which is why one can wander past a cap that fits it most of the time.
+
+That distinction decides what a fix would be. A slow machine is nothing this
+repo can address; a demo whose per-run work varies two-fold is, and the lever is
+either bounding what the gate drives the demo to do or timing a fixed stretch of
+it rather than whatever the run happened to reach. Neither is built.
+
+**None of these numbers can be attributed to a commit.** lantern reads 1647 ms
+at `458a5ed` and 2888 ms at `a1e5168`, which invites blaming the shadow cadence
+that landed between them; quarry moves by the same factor with nothing between
+its runs at all. One sample per commit cannot tell the two apart. Anything
+wanting a per-commit figure needs repeated runs of the same commit, which
+nothing here does.
 
 **The cap is raised to 90 rather than the gate weakened.** Job durations at run
 33375515324: breach completed in 39 minutes, puppet 21, lantern 16, quarry 12.
