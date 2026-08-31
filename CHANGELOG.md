@@ -159,6 +159,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A phone can open the debug console and type at it.**
+  `docs/plan/52-debug-console.md` slice 10's touch half, and it was two gaps
+  rather than one: `crcbl::engine::CONSOLE_KEY` is the backtick and nothing
+  else, so a finger had no route to the panel at all, and the panel had no keys
+  to type at once it was open. `crcbl::engine::ConsoleButton` is the first — a
+  **CONSOLE** button beside `PauseControl` in the top-right strip, drawn by the
+  loop rather than by each sample so no `apps/*` crate gains a line, and
+  hit-tested against contacts so a game holding the primary one does not take
+  it. `crcbl_ui::console::TouchKeyboard` is the second: a drawn ASCII keyboard
+  along the bottom of the frame, three layers — lower case, upper case, and one
+  holding the digits and every punctuation mark — that between them reach the
+  whole of the font atlas's printable range, with shift, a layer key, a space
+  bar, backspace and a return key that submits through the same
+  `ConsolePanel::submit` that **Send** and `Enter` call.
+
+  **Both appear only once a contact has arrived**, which is `PauseControl`'s own
+  rule and its reason: `ShellCaps::TOUCH` is set by a desktop with a touchscreen
+  too, a developer with a keyboard would lose a third of the frame to keys they
+  will never press, and a headless golden never touches glass, so no golden
+  frame moves. A run nobody has touched draws exactly what it drew before.
+
+  `ConsolePanel::point` answers `crcbl_ui::console::ConsoleInput` in place of
+  `Option<String>`, and `ConsoleLayout::covers` replaces the caller's own test
+  against `ConsoleLayout::panel` — the keyboard is drawn outside the panel, and
+  a tap on it that fell through would move the player every time a letter was
+  typed.
+
 - **The shadow atlas is cached: a frame whose lights, casters and camera have
   not moved does not draw it again.** `docs/plan/45-shadows.md`'s atlas rung,
   item 5. `crcbl_render::shadow::Selection` now holds its `AtlasAllocator` tiles

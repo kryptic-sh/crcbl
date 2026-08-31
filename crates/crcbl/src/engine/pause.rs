@@ -48,10 +48,13 @@ use glam::Vec2;
 
 /// The button's size in pixels: a deliberate target for a thumb, which is wider
 /// than the label needs.
-const SIZE: Vec2 = Vec2::new(112.0, 56.0);
+pub(super) const SIZE: Vec2 = Vec2::new(112.0, 56.0);
 
 /// How far it sits from the surface's top-right corner.
-const MARGIN: f32 = 12.0;
+///
+/// Read by [`console_button`](super::console_button) too, so the strip's
+/// spacing is one number rather than two that could drift apart.
+pub(super) const MARGIN: f32 = 12.0;
 
 /// The label, which is also what a test reads out of the frame to find it.
 pub const LABEL: &str = "PAUSE";

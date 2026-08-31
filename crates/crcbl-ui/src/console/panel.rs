@@ -14,6 +14,7 @@ use crate::menu::MenuStyle;
 use crate::text::FontAtlas;
 use crate::widget::{Button, ButtonState, NATURAL_FONT_SIZE, PointerInput, UiState, WidgetId};
 
+use super::keyboard::{KeyCap, KeyboardLayout, TouchKeyboard};
 use super::{ConsoleStyle, LogView, TextField};
 
 /// The share of the frame's height the console drops down over.
@@ -59,6 +60,25 @@ pub const MINIMUM_LOG_ROWS: usize = 6;
 /// scrolls sideways — which this field, having no horizontal scroll, cannot do.
 pub const MINIMUM_FIELD_COLUMNS: usize = 24;
 
+/// What one frame of pointer input at the console produced.
+///
+/// Returned by [`ConsolePanel::point`] rather than applied by it, so a tapped
+/// key and a typed one reach the field through the caller's one editing path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConsoleInput {
+    /// The pointer did nothing the console has anything to say about.
+    Nothing,
+    /// **Send** submitted this line, which is what `Enter` would have.
+    Submitted(String),
+    /// The on-screen keyboard was tapped on this key.
+    ///
+    /// Never [`KeyCap::Shift`] or [`KeyCap::Symbols`], which change the
+    /// keyboard's own layer and are swallowed by
+    /// [`TouchKeyboard::point`](super::TouchKeyboard::point), and never
+    /// [`KeyCap::Enter`], which comes back as [`ConsoleInput::Submitted`].
+    Key(KeyCap),
+}
+
 /// The console's widgets and the state that outlives a frame.
 ///
 /// Everything it draws is given to it: [`LogView::push_records`] takes the
@@ -76,10 +96,15 @@ pub struct ConsolePanel {
     /// The **Send** button's appearance, as the last [`ConsolePanel::point`]
     /// resolved it.
     send: ButtonState,
+    /// The on-screen keyboard, which is only laid out and drawn while
+    /// [`keyboard_shown`](ConsolePanel::keyboard_shown) is set.
+    keyboard: TouchKeyboard,
+    keyboard_shown: bool,
 }
 
 impl ConsolePanel {
-    /// An empty panel: no lines, no typed text, no candidates.
+    /// An empty panel: no lines, no typed text, no candidates, and no on-screen
+    /// keyboard.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -88,7 +113,33 @@ impl ConsolePanel {
             prefix: String::new(),
             candidates: Vec::new(),
             send: ButtonState::Idle,
+            keyboard: TouchKeyboard::new(),
+            keyboard_shown: false,
         }
+    }
+
+    /// The on-screen keyboard, to read — what a test asserts a layer against.
+    #[must_use]
+    pub const fn keyboard(&self) -> &TouchKeyboard {
+        &self.keyboard
+    }
+
+    /// Whether the on-screen keyboard is laid out and drawn at all.
+    ///
+    /// **Off by default**, because the keyboard is for a device that has no
+    /// other one: a machine with keys would lose
+    /// [`KEYBOARD_HEIGHT_FRACTION`](super::KEYBOARD_HEIGHT_FRACTION) of its
+    /// frame to a control it will never press. Whose device this is, is the
+    /// caller's question — `crcbl::debug_console::Console` answers it from the
+    /// first contact the run reports.
+    #[must_use]
+    pub const fn keyboard_shown(&self) -> bool {
+        self.keyboard_shown
+    }
+
+    /// Shows or hides the on-screen keyboard.
+    pub const fn show_keyboard(&mut self, shown: bool) {
+        self.keyboard_shown = shown;
     }
 
     /// The line being typed.
@@ -174,18 +225,24 @@ impl ConsolePanel {
         Some(line)
     }
 
-    /// Runs one frame of pointer input against `layout`, and reports a line the
-    /// **Send** button submitted.
+    /// Runs one frame of pointer input against `layout`, and reports what it
+    /// produced: a line **Send** or the keyboard's return key submitted, or a
+    /// key the on-screen keyboard was tapped on.
     ///
-    /// Press capture goes through `ui`, so a press that starts on the button and
-    /// is released off it submits nothing — the rule every other clickable
+    /// The keyboard's key is handed back rather than applied here, so that a
+    /// tapped `q` and a typed `q` reach the field down **one** path: the caller
+    /// owns the completion cycle a keystroke drops, and a panel that edited the
+    /// field behind its back would leave that cycle stale.
+    ///
+    /// Press capture goes through `ui`, so a press that starts on a button or a
+    /// key and is released off it does nothing — the rule every other clickable
     /// widget in this crate follows.
     pub fn point(
         &mut self,
         layout: &ConsoleLayout,
         ui: &mut UiState,
         pointer: PointerInput,
-    ) -> Option<String> {
+    ) -> ConsoleInput {
         let (min, max) = layout.send();
         let inside = pointer.pos.x >= min.x
             && pointer.pos.x <= max.x
@@ -193,7 +250,26 @@ impl ConsolePanel {
             && pointer.pos.y <= max.y;
         let (state, clicked) = ui.interact(SEND_ID, inside, pointer.down, pointer.released);
         self.send = state;
-        if clicked { self.submit() } else { None }
+        if clicked {
+            return self
+                .submit()
+                .map_or(ConsoleInput::Nothing, ConsoleInput::Submitted);
+        }
+        // Only when it is showing: a keyboard that hit-tested while hidden
+        // would claim taps over a rectangle nothing is drawn in.
+        if !self.keyboard_shown {
+            return ConsoleInput::Nothing;
+        }
+        match self.keyboard.point(layout.keyboard(), ui, pointer) {
+            None => ConsoleInput::Nothing,
+            // Through the same `submit` **Send** and `Enter` call, so a line
+            // sent from the keyboard and one sent from the button leave the
+            // field, the log's scroll and the completion in one state.
+            Some(KeyCap::Enter) => self
+                .submit()
+                .map_or(ConsoleInput::Nothing, ConsoleInput::Submitted),
+            Some(cap) => ConsoleInput::Key(cap),
+        }
     }
 
     /// Lays the panel out over an `extent`-sized framebuffer, at the largest
@@ -276,6 +352,13 @@ impl ConsolePanel {
         );
 
         let completion = self.completion_rows(screen, panel.1.y, text_pos.x, atlas, style);
+        // Laid out only when it is showing, so a hidden keyboard claims no
+        // pointer and costs no allocation on the frames nobody is typing.
+        let keyboard = if self.keyboard_shown {
+            self.keyboard.layout(screen)
+        } else {
+            KeyboardLayout::default()
+        };
 
         ConsoleLayout {
             style: *style,
@@ -287,6 +370,7 @@ impl ConsolePanel {
             text_pos,
             send,
             completion,
+            keyboard,
         }
     }
 
@@ -340,6 +424,12 @@ impl ConsolePanel {
             .render(dl, send_min, atlas, &style.button, self.send);
 
         self.render_completion(dl, layout, atlas);
+        // **After the candidates**, which hang off the panel's bottom edge and
+        // can reach the keyboard on a short frame. The keyboard is the half a
+        // finger presses, so it is the half that stays on top.
+        if self.keyboard_shown {
+            self.keyboard.render(dl, layout.keyboard(), atlas, style);
+        }
     }
 
     /// The candidate rows, hanging below the panel like Source's.
@@ -433,6 +523,7 @@ pub struct ConsoleLayout {
     text_pos: Vec2,
     send: (Vec2, Vec2),
     completion: Vec<(Vec2, Vec2)>,
+    keyboard: KeyboardLayout,
 }
 
 impl ConsoleLayout {
@@ -488,6 +579,28 @@ impl ConsoleLayout {
     #[must_use]
     pub fn completion(&self) -> &[(Vec2, Vec2)] {
         &self.completion
+    }
+
+    /// Where the on-screen keyboard's keys are, or a layout with no keys when
+    /// it is not showing.
+    #[must_use]
+    pub const fn keyboard(&self) -> &KeyboardLayout {
+        &self.keyboard
+    }
+
+    /// Whether the console is drawing anything over `point`.
+    ///
+    /// The panel **and** the on-screen keyboard, which is the whole reason this
+    /// is one call rather than the caller testing the panel's rectangle: the
+    /// keyboard is drawn outside the panel, along the frame's bottom edge, and a
+    /// tap on it that fell through to the game would move the player every time
+    /// a letter was typed.
+    #[must_use]
+    pub fn covers(&self, point: Vec2) -> bool {
+        let inside = |(min, max): (Vec2, Vec2)| {
+            point.x >= min.x && point.x <= max.x && point.y >= min.y && point.y <= max.y
+        };
+        inside(self.panel) || (!self.keyboard.keys().is_empty() && self.keyboard.contains(point))
     }
 
     /// How many rows of log this layout shows.
@@ -582,6 +695,113 @@ mod tests {
             down: false,
             released: true,
         }
+    }
+
+    /// The centre of the first key on the laid-out keyboard whose cap is `cap`.
+    fn key_centre(layout: &ConsoleLayout, cap: KeyCap) -> Vec2 {
+        let key = layout
+            .keyboard()
+            .keys()
+            .iter()
+            .find(|key| key.cap == cap)
+            .unwrap_or_else(|| panic!("the keyboard has no {cap:?} key"));
+        (key.min + key.max) * 0.5
+    }
+
+    /// **A hidden keyboard is not a keyboard drawn off screen**: it lays out no
+    /// keys, claims none of the frame, and takes no press.
+    ///
+    /// The half that matters is [`ConsoleLayout::covers`]. The console hands
+    /// that answer to the loop as "the press was mine", so a hidden keyboard
+    /// that still claimed its strip would take every tap along the bottom third
+    /// of the frame away from the game — on every desktop, where the keyboard
+    /// is never shown at all.
+    #[test]
+    fn a_hidden_keyboard_lays_out_nothing_and_claims_nothing() {
+        let atlas = atlas();
+        for extent in EXTENTS {
+            let mut panel = panel(&[], "");
+            assert!(!panel.keyboard_shown(), "a new panel showed a keyboard");
+            let layout = panel.layout(extent, &atlas);
+            assert!(
+                layout.keyboard().keys().is_empty(),
+                "a hidden keyboard laid out {} keys",
+                layout.keyboard().keys().len(),
+            );
+
+            // Where the keys would be if it were showing.
+            let mut shown = ConsolePanel::new();
+            shown.show_keyboard(true);
+            let visible = shown.layout(extent, &atlas);
+            let at = key_centre(&visible, KeyCap::Type('q'));
+
+            assert!(
+                !layout.covers(at),
+                "a hidden keyboard claimed {at} on a {extent:?} frame",
+            );
+            let mut ui = UiState::new();
+            panel.point(&layout, &mut ui, press_at(at));
+            assert_eq!(
+                panel.point(&layout, &mut ui, release_at(at)),
+                ConsoleInput::Nothing,
+                "a hidden keyboard took a press",
+            );
+            assert!(panel.field().is_empty());
+        }
+    }
+
+    /// **A tap on a key is reported as that key**, and the strip it was tapped
+    /// in is the console's so the game never sees the press.
+    #[test]
+    fn a_tap_on_the_keyboard_is_the_consoles_and_names_its_key() {
+        let atlas = atlas();
+        for extent in EXTENTS {
+            let mut panel = panel(&[], "");
+            panel.show_keyboard(true);
+            let layout = panel.layout(extent, &atlas);
+            let at = key_centre(&layout, KeyCap::Type('q'));
+            assert!(
+                layout.covers(at),
+                "the console did not claim its own key at {at} on {extent:?}",
+            );
+
+            let mut ui = UiState::new();
+            panel.point(&layout, &mut ui, press_at(at));
+            assert_eq!(
+                panel.point(&layout, &mut ui, release_at(at)),
+                ConsoleInput::Key(KeyCap::Type('q')),
+                "a tap on q on a {extent:?} frame reported nothing",
+            );
+        }
+    }
+
+    /// The keyboard is drawn only when it is showing, and it is drawn **last**
+    /// so the candidate rows cannot cover the keys they hang over.
+    #[test]
+    fn the_keyboard_is_drawn_only_when_it_is_showing() {
+        let atlas = atlas();
+        let extent = (600, 900);
+        let mut panel = panel(&["one"], "q");
+
+        let mut hidden = DrawList::new();
+        let layout = panel.layout(extent, &atlas);
+        panel.render(&mut hidden, &layout, &atlas, true);
+
+        panel.show_keyboard(true);
+        let mut shown = DrawList::new();
+        let layout = panel.layout(extent, &atlas);
+        panel.render(&mut shown, &layout, &atlas, true);
+
+        assert!(
+            shown.commands().len() > hidden.commands().len(),
+            "showing the keyboard drew nothing: {} commands either way",
+            hidden.commands().len(),
+        );
+        let labels = texts(&shown);
+        assert!(
+            labels.iter().any(|text| text == "SPACE"),
+            "the space bar was not drawn: {labels:?}",
+        );
     }
 
     /// **The panel is the top slice of the frame and everything is inside it**,
@@ -798,17 +1018,18 @@ mod tests {
         let (min, max) = layout.send();
         let on_button = (min + max) * 0.5;
         let mut ui = UiState::new();
-        assert_eq!(clicked.point(&layout, &mut ui, press_at(on_button)), None);
+        assert_eq!(
+            clicked.point(&layout, &mut ui, press_at(on_button)),
+            ConsoleInput::Nothing,
+        );
         assert_eq!(
             clicked.send_state(),
             ButtonState::Pressed,
             "the press did not reach the button's art",
         );
         assert_eq!(
-            clicked
-                .point(&layout, &mut ui, release_at(on_button))
-                .as_deref(),
-            Some("antialiasing smaa"),
+            clicked.point(&layout, &mut ui, release_at(on_button)),
+            ConsoleInput::Submitted("antialiasing smaa".to_owned()),
         );
         assert!(clicked.field().is_empty());
     }
@@ -855,11 +1076,17 @@ mod tests {
         let mut ui = UiState::new();
 
         content.point(&layout, &mut ui, press_at(on_button));
-        assert_eq!(content.point(&layout, &mut ui, release_at(elsewhere)), None);
+        assert_eq!(
+            content.point(&layout, &mut ui, release_at(elsewhere)),
+            ConsoleInput::Nothing,
+        );
         assert_eq!(content.field().text(), "quit", "the line was sent anyway");
 
         content.point(&layout, &mut ui, press_at(elsewhere));
-        assert_eq!(content.point(&layout, &mut ui, release_at(elsewhere)), None);
+        assert_eq!(
+            content.point(&layout, &mut ui, release_at(elsewhere)),
+            ConsoleInput::Nothing,
+        );
         assert_eq!(content.field().text(), "quit");
     }
 

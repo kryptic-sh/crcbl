@@ -611,7 +611,27 @@ const EXPECTATIONS = {
     // screen owns the button, and a lost life is what returns the game to
     // WAITING with nothing over it — the state a tap serves from, and the
     // reason the tap binding exists at all.
-    touch: { paddle: true, lives: /Lives: (\d+)/, pause: true },
+    touch: {
+      paddle: true,
+      lives: /Lives: (\d+)/,
+      pause: true,
+      // **The engine's console, reached and typed at by a finger alone.**
+      // breakout carries it because every demo's console is the same engine
+      // code and this is the first and simplest of the three group F drives —
+      // there is nothing here about breakout, and a second copy elsewhere
+      // would only cost the gate taps.
+      console: {
+        // Lower-case letters and one space, which is what the keyboard's first
+        // layer holds and what the aiming below can find.
+        typed: 'echo it works',
+        // **The command's output, not the console's echo of the line.** The
+        // echo is `] echo it works` and carries these words too, so a matcher
+        // that accepted it would pass for a console that took every tap into
+        // its field and ran nothing when the return key was pressed.
+        answer: /console\] it works$/,
+        answerLabel: 'it works',
+      },
+    },
     // `apps/breakout/src/art.rs`'s `SURROUND`, the letterbox either side of the
     // play field. The smallest share any row here claims, because it is only the
     // margins — but it is a flat clear at an exact byte all the same, and the
@@ -2214,6 +2234,42 @@ const WALK_MS = 25_000;
  * button that is resized but stays in its corner does not move this file.
  */
 const PAUSE_INSET = 40;
+
+/**
+ * The middle of the engine's **CONSOLE** button, in device pixels left of and
+ * below the canvas's top-right corner.
+ *
+ * `crcbl::engine::console_button` puts a 148 × 56 button in the slot
+ * immediately left of the pause button, so its centre is
+ * `12 + 112 + 12 + 148 / 2` in from the right edge and `12 + 56 / 2` down. The
+ * centre rather than an inset, because unlike the pause button this one has
+ * another control hard against it and a point "at least this far in" would be
+ * on whichever of the two is wider.
+ */
+const CONSOLE_BUTTON_CENTRE = { right: 210, down: 40 };
+
+/**
+ * The lower-case layer of `crcbl_ui::console::TouchKeyboard`, row by row.
+ *
+ * `LOWER_ROWS` in `crates/crcbl-ui/src/console/keyboard.rs`. A copy, because
+ * the keys are drawn into the canvas and there is nothing in the DOM to
+ * hit-test — the same trade `PAUSE_INSET` makes. Rows shorter than the first
+ * are centred in its columns, which is what the aiming below reproduces.
+ */
+const KEYBOARD_LETTER_ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+
+/** `crcbl_ui::console::KEYBOARD_HEIGHT_FRACTION`, which sizes one row. */
+const KEYBOARD_HEIGHT_FRACTION = 0.34;
+
+/**
+ * Where the space bar's and the return key's centres sit across the control
+ * row, as fractions of the canvas width.
+ *
+ * `CONTROL_ROW` in that same file runs shift, symbols, space, backspace,
+ * return at 0.20, 0.20, 0.28, 0.16 and 0.16 of the width.
+ */
+const SPACE_BAR_CENTRE = 0.54;
+const RETURN_KEY_CENTRE = 0.92;
 
 /**
  * A menu action the engine logs, for the checks that assert **no** button was
@@ -7484,6 +7540,114 @@ try {
         runningAgain === STATUS_RUNNING,
         `status ${runningAgain ?? (await evaluate(page, `crcbl.status()`))}`
       );
+    }
+
+    // **THE DEBUG CONSOLE, OPENED AND TYPED AT BY A FINGER ALONE.**
+    //
+    // Group C already types at quarry's console — with a **keyboard**, through
+    // `Input.dispatchKeyEvent`. Every one of those checks passes on a build
+    // where a phone cannot reach the console at all, which is what shipped:
+    // `crcbl::engine::CONSOLE_KEY` is the backtick and nothing else, and the
+    // panel had no on-screen keys. So this block presses no key. It taps the
+    // engine's own `ConsoleButton`, taps letters on
+    // `crcbl_ui::console::TouchKeyboard`, and taps its return key, and the
+    // console's echo of the whole line is what says the taps arrived in order.
+    //
+    // **Aimed by arithmetic, and deliberately.** The keyboard's rectangles are
+    // a pure function of the canvas size, exactly as the pause button's are —
+    // `PAUSE_INSET` above is the same trade. The three row strings below are
+    // `LOWER_ROWS` in `crates/crcbl-ui/src/console/keyboard.rs` and the
+    // fraction is `KEYBOARD_HEIGHT_FRACTION`; moving either without moving
+    // these lands the taps between keys and reds this check rather than
+    // quietly missing.
+    if (EXPECTED.touch.console) {
+      const spec = EXPECTED.touch.console;
+      const box = await evaluate(
+        page,
+        `(() => { const c = document.getElementById('canvas');
+                  return { w: c.width, h: c.height }; })()`
+      );
+
+      const consoleSpot = spot(
+        1 - CONSOLE_BUTTON_CENTRE.right / box.w,
+        CONSOLE_BUTTON_CENTRE.down / box.h
+      );
+      // The keyboard is bottom-anchored and every row is this tall.
+      const rowHeight =
+        KEYBOARD_HEIGHT_FRACTION / (KEYBOARD_LETTER_ROWS.length + 1);
+      /** The centre of `character`'s key, as fractions of the canvas box. */
+      const keySpot = (character) => {
+        if (character === ' ') return spot(SPACE_BAR_CENTRE, 1 - rowHeight / 2);
+        if (character === '\n')
+          return spot(RETURN_KEY_CENTRE, 1 - rowHeight / 2);
+        const row = KEYBOARD_LETTER_ROWS.findIndex((keys) =>
+          keys.includes(character)
+        );
+        if (row < 0)
+          throw new Error(
+            `browser-e2e: ${JSON.stringify(character)} is not on the keyboard's ` +
+              'letter layer; the touched console line is lower-case letters and spaces'
+          );
+        const keys = KEYBOARD_LETTER_ROWS[row];
+        const columns = KEYBOARD_LETTER_ROWS[0].length;
+        const inset = (columns - keys.length) / 2;
+        return spot(
+          (inset + keys.indexOf(character) + 0.5) / columns,
+          1 - (KEYBOARD_LETTER_ROWS.length + 0.5 - row) * rowHeight
+        );
+      };
+
+      // **The control, and it comes first.** Nothing has touched this canvas
+      // since the reload above except the taps this group made, so the button
+      // is up — but a build that drew it for everyone would pass every check
+      // below and would also put it in every desktop demo's corner. The
+      // untouched case is `an_untouched_run_keeps_every_click_the_console_would_have_taken`
+      // in `crates/crcbl/src/engine.rs`, which a browser cannot stage: this
+      // page has already been tapped.
+      const beforeOpen = consoleLines.length;
+      await tap(consoleSpot);
+      await pause(TAP_INTERVAL_MS);
+      for (const character of `${spec.typed}\n`) {
+        await tap(keySpot(character));
+        await pause(TAP_INTERVAL_MS);
+      }
+      const echoed = await until(async () =>
+        consoleLines
+          .slice(beforeOpen)
+          .find((line) => line.includes(`] ${spec.typed}`))
+      );
+      check(
+        'F',
+        'a finger opens the console and types a whole line at it',
+        Boolean(echoed),
+        echoed?.trim() ??
+          `nothing the page logged in ${pollCeiling()} ms echoed "] ${spec.typed}"; ` +
+            'either the CONSOLE button did not open the panel or the on-screen ' +
+            'keyboard did not put the taps in its field'
+      );
+
+      // And what the line *did*, which the echo cannot say: the echo is the
+      // field's contents, and a return key that never submitted would print it
+      // and run nothing.
+      const answered = await until(async () =>
+        consoleLines
+          .slice(beforeOpen)
+          .find((line) => spec.answer.test(line.trim()))
+      );
+      check(
+        'F',
+        "the line a finger typed is run by the keyboard's own return key",
+        Boolean(answered),
+        answered?.trim() ??
+          `nothing the page logged in ${pollCeiling()} ms was the console ` +
+            `answering "${spec.answerLabel}"; the line reached the field and ` +
+            'the return key sent it nowhere'
+      );
+
+      // Shut again, so the groups after this one find the demo as they expect
+      // it — the same courtesy group C's console block pays.
+      await tap(consoleSpot);
+      await pause(TAP_INTERVAL_MS);
     }
   }
 

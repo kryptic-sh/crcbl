@@ -568,6 +568,42 @@ case "$DEMO" in
         ;;
 esac
 
+# And the same argument once more for the console a **finger** reaches, which is
+# a different path from every line above: those all press keys, and a phone has
+# none. `crcbl::engine::ConsoleButton` and `crcbl_ui::console::TouchKeyboard`
+# are what a visitor on glass has instead, and quarry's block would go on
+# passing with both of them deleted. `breakout` alone, because every demo's
+# console is the same engine code and group F drives that one first.
+#
+# Two names, and they are a claim and its control:
+#
+#  - 'a finger opens the console and types a whole line at it' is the claim.
+#    Without it nothing asks whether a phone can reach the console at all.
+#  - 'the line a finger typed is run by the keyboard's own return key' is what
+#    stops the first passing for a console that echoes the field and runs
+#    nothing: the echo is printed before anything is executed.
+#
+# Renaming either check in the driver is meant to fail here and be renamed here
+# too.
+case "$DEMO" in
+    breakout)
+        TOUCH_TYPED="$(grep -F 'a finger opens the console and types a whole line at it' "${OUTPUT}.plain" || true)"
+        if [ -z "$TOUCH_TYPED" ]; then
+            echo "crcbl web e2e: the driver never opened $DEMO's console with a finger;" >&2
+            echo "               ConsoleButton and TouchKeyboard are ungated, and a phone" >&2
+            echo "               cannot reach the console at all" >&2
+            exit 1
+        fi
+        TOUCH_RAN="$(grep -F "the line a finger typed is run by the keyboard's own return key" "${OUTPUT}.plain" || true)"
+        if [ -z "$TOUCH_RAN" ]; then
+            echo "crcbl web e2e: the driver never checked that a tapped line runs; the echo" >&2
+            echo "               check beside it passes for a keyboard that fills the field" >&2
+            echo "               and a return key that submits nothing" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the same argument for the character controller, which is the one thing on
 # puppet's page that a visitor's own keys reach. Every other check in the driver
 # passes against a page whose input path is severed: that demo walks a circuit

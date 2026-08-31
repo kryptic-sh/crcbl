@@ -45,9 +45,10 @@ pub mod widget;
 
 pub use budget::{Bound, BudgetStats, MIN_PERCENTILE_SAMPLES};
 pub use console::{
-    CARET_BLINK, COMPLETION_ROWS, CONSOLE_HEIGHT_FRACTION, ConsoleLayout, ConsolePanel,
-    ConsoleStyle, LogLine, LogView, MINIMUM_FIELD_COLUMNS, MINIMUM_LOG_ROWS, PROMPT, SEND_ID,
-    SEND_LABEL, TextField, TextFieldStyle, caret_shown,
+    CARET_BLINK, COMPLETION_ROWS, CONSOLE_HEIGHT_FRACTION, ConsoleInput, ConsoleLayout,
+    ConsolePanel, ConsoleStyle, KEY_ID_BASE, KEY_ID_SPAN, KEYBOARD_HEIGHT_FRACTION, KeyBox, KeyCap,
+    KeyboardLayout, Layer, LogLine, LogView, MINIMUM_FIELD_COLUMNS, MINIMUM_LOG_ROWS, PROMPT,
+    SEND_ID, SEND_LABEL, TextField, TextFieldStyle, TouchKeyboard, caret_shown,
 };
 pub use debug::{
     DEFAULT_FRAME_WINDOW, DebugModule, DebugOverlay, DebugPanel, DebugRow, DebugSection,

@@ -2843,6 +2843,97 @@ opens, then an `EXPECTATIONS.<demo>.console` check that types `config <name>`
 and reads the effect off the demo's heartbeat, the way the `debug_view` check
 already does.
 
+### The touch console is browser-only in practice (2026-08-31)
+
+**No native backend reports a contact.** `crcbl_shell::ShellCaps::TOUCH` is set
+by the web backend and by `HeadlessShell`; `crates/crcbl-shell/src/caps.rs`
+asserts the Wayland backend does not set it, and X11, Win32 and AppKit do not
+either. So on a Linux tablet `crcbl::engine::ConsoleButton` never appears and
+`crcbl_ui::console::TouchKeyboard` never shows: the code is platform-neutral and
+the **shell** is the gap. Closing it is `wl_touch` / `XInput2` / `WM_POINTER` /
+`NSTouch` work in `crcbl-shell`, not console work.
+
+A **mouse** deliberately cannot substitute — `ConsoleButton::takes_pointer`
+answers `false` on a run with no contact, exactly as `PauseControl` does, so a
+desktop click on the corner still reaches the game.
+
+### What the touch keyboard does not offer (2026-08-31)
+
+- **No `Tab`, so completion is unreachable by finger.** The keyboard offers
+  characters, shift, the layer key, space, backspace and return. Completion is
+  the console's most useful affordance. The fix is either a `TAB` cap in the
+  control row or making the panel's candidate rows tappable, and the second is
+  better because the candidates are already drawn and already have rectangles
+  (`ConsoleLayout::completion`).
+- **No clipboard key.** `CONSOLE_PASTE_KEY` is `Ctrl`/`Meta`+`V` and a drawn
+  keyboard has no modifier to spell that with. It would want a `PASTE` cap of
+  its own, and it would be inert on the web anyway —
+  `crates/crcbl-shell/src/web/mod.rs` refuses the read, which is what
+  `EXPECTATIONS.quarry.console.pasteRefused` asserts.
+- **Shift is a plain toggle, not a phone's one-shot latch.** Chosen so `KeyF` —
+  the spelling `bind` takes — is not four taps of shift. Considered and
+  declined; revisit only if someone types prose at the console.
+
+### The touch console has never been on real glass (2026-08-31)
+
+`CONSOLE_HEIGHT_FRACTION` above and `KEYBOARD_HEIGHT_FRACTION` below
+deliberately leave a strip of the game between them, and `Layer::Symbols` is one
+row taller than a letter layer so that strip is thinner while it is up. Nobody
+here has a phone wired to the gate, so "the keys are big enough for a thumb" and
+"you can still see the effect of a command" are claims from arithmetic rather
+than from a device.
+
+The **CONSOLE** button is also drawn over the open panel's top-right corner,
+covering the first two log rows' right-hand end. That is deliberate — it is the
+only way a finger has to _close_ the console, so it has to stay where it was
+tapped — but it is a cosmetic cost nobody has looked at on a real screen. The
+alternatives considered and not chosen: move it to the panel's own bottom right
+while open (a target that moves under the thumb), or add a CLOSE cap to the
+keyboard's control row (a fifth key in a row already carrying shift, the layer
+key, space and backspace).
+
+### The first contact of a run can press a button that was never drawn (2026-08-31)
+
+`ConsoleButton::touched` gates `render` and `takes_pointer`, not
+`TouchButton::offer` — so the first finger to land sets the latch and is offered
+to the button in the same call, and if it happens to land in that corner it
+opens the console before anything was on screen there. `PauseControl::touch` has
+exactly the same shape and the same window, so this is consistency with the
+precedent rather than an oversight; closing it would mean refusing the offer
+until a frame has drawn the control, **in both places**.
+
+Found while sabotaging the browser check: setting `touched = false` left every
+check green, because the button still fires. That is what says this is a real
+property of the design and not a slip.
+
+### The browser gate drives the touch keyboard by arithmetic (2026-08-31)
+
+`CONSOLE_BUTTON_CENTRE`, `KEYBOARD_LETTER_ROWS`, `KEYBOARD_HEIGHT_FRACTION`,
+`SPACE_BAR_CENTRE` and `RETURN_KEY_CENTRE` in `web/tools/browser-e2e.mjs` are
+copies of constants in `crates/crcbl-ui/src/console/keyboard.rs` and
+`crates/crcbl/src/engine/console_button.rs`. The same trade `PAUSE_INSET`
+already makes, and it fails loudly rather than quietly when either side moves —
+the taps land between keys and the echo never appears — but it is a duplication
+and worth knowing about before the layout is changed.
+
+The touch console block also runs on `breakout` only. Every demo's console is
+the same engine code, so a second copy would only cost the gate taps; if
+breakout's group F block is ever removed, the guard in `web/run-browser-e2e.sh`
+moves with it.
+
+### `crates/crcbl/src/engine.rs` is 15,249 lines (2026-08-31)
+
+Measured with `wc -l` on 2026-08-31, after the touch-console slice added a
+`console_button` field, contact routing and three tests to it. The button itself
+went into a sibling module (`crates/crcbl/src/engine/console_button.rs`) beside
+`pause.rs` rather than into the file, which is the seam this module already has
+— `Loop`'s controls are each their own module — so the same seam is what a split
+would follow.
+
+Not attempted as part of that slice: it is its own task, it would collide with
+concurrent work in the same tree, and the rule is that a split moves code in one
+step and changes behaviour in another. Flagged rather than filed as done.
+
 ### `config` cannot write a file, and a file takes no arguments (2026-08-31)
 
 **Considered and left out, both.** Source's `writeconfig`/`host_writeconfig` has

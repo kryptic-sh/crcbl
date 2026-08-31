@@ -124,8 +124,10 @@ use crate::settings::VideoSettings;
 
 use crate::backend::GpuBackend;
 
+pub mod console_button;
 pub mod pause;
 
+pub use console_button::ConsoleButton;
 pub use pause::PauseControl;
 
 // ---------------------------------------------------------------------------
@@ -5601,6 +5603,13 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// [`crate::debug_console::engine_tables`] — and drawn last in the frame, so
     /// nothing covers it.
     console: crate::debug_console::Console,
+    /// The on-screen button that opens and closes the console.
+    ///
+    /// The loop's rather than each game's, unlike [`PauseControl`], because
+    /// nothing about the console is a game's — see
+    /// [`console_button`]. Drawn after the panel and hit-tested against
+    /// contacts.
+    console_button: ConsoleButton,
     /// The debug view this loop has already put into force, or [`None`] before
     /// the first frame has looked.
     ///
@@ -5794,6 +5803,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             pointer: PointerCapture::new(),
             debug: crcbl_ui::DebugOverlay::with_visible(config.debug_overlay),
             console,
+            console_button: ConsoleButton::new(),
             debug_view: None,
             passes: crcbl_render::PassStats::new(),
             paused: false,
@@ -5967,6 +5977,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // One call per event and none merged, because a tap is a `Began` and an
         // `Ended` in one batch and a game that only heard the last of them
         // would never see a finger land.
+        // **Where the console's own on-screen button is**, laid out from this
+        // frame's extent so a contact in this batch is hit-tested against the
+        // rectangle the frame is about to draw rather than the last one's.
+        let extent = self.gpu.extent();
+        self.console_button.layout(extent, self.gpu.atlas());
         for touch in std::mem::take(&mut pending.touches) {
             let at = normalised(touch.at, self.gpu.extent());
             // Before the bookkeeping below moves it: the first contact of a
@@ -5986,6 +6001,24 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             } else {
                 self.live_contacts.push((touch.contact, at));
             }
+            // **A finger has arrived**, which is what puts the console's own
+            // on-screen keyboard and this button on screen at all — see
+            // `crate::debug_console::Console::note_contact`. Every contact,
+            // including the ones the button below refuses, for that method's
+            // reason.
+            self.console.note_contact();
+            let update = TouchUpdate {
+                contact: touch.contact,
+                phase: touch.phase,
+                at,
+            };
+            // **The console's button before the menu and the game**, which is
+            // the order `console_took_pointer` already puts the panel in: the
+            // console is drawn over everything, so a finger that landed on it
+            // landed on nothing underneath.
+            if self.console_button.touch(update) {
+                continue;
+            }
             // The menu's turn at this finger, before the game's — the same
             // order the pointer's half above takes, and for the same reason: a
             // button fires on the batch the player pressed it in.
@@ -5994,11 +6027,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             {
                 self.apply(action)?;
             }
-            self.game.touch_event(TouchUpdate {
-                contact: touch.contact,
-                phase: touch.phase,
-                at,
-            });
+            self.game.touch_event(update);
         }
 
         // **The buttons and the wheel before the pointer**, so a press and the
@@ -6038,17 +6067,27 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // have had it. `showing` is
         // last frame's menu for the same reason the keyboard's claim is: the
         // panel the player tapped is the one that was on screen when they did.
-        let pressed = pending.pointer_pressed && !showing && !console_took_pointer;
+        let at = pointer_moved
+            .then_some(pending.pointer)
+            .flatten()
+            .map(|point| normalised(point, self.gpu.extent()));
+        // **The finger on the console's button is also the emulated pointer**,
+        // and a game bound to a pointer press would flap or serve on the way to
+        // opening the console. `ConsoleButton::takes_pointer` says so, and says
+        // `false` on every machine nobody has touched.
+        let console_button_took = self.console_button.takes_pointer(PointerUpdate {
+            at,
+            pressed: pending.pointer_pressed,
+            ..PointerUpdate::default()
+        });
+        let pressed =
+            pending.pointer_pressed && !showing && !console_took_pointer && !console_button_took;
         // `|| pressed` because a tap faster than a frame is one batch, and its
         // release has to go out with the press it answers — which on a phone is
         // every tap. Without it the game keeps the button down, and the *next*
         // tap raises no edge: the first one works and the second does nothing,
         // which is the shape a single-tap test cannot see.
         let released = pending.pointer_released && (self.pointer_in_game || pressed);
-        let at = pointer_moved
-            .then_some(pending.pointer)
-            .flatten()
-            .map(|point| normalised(point, self.gpu.extent()));
         // Delivered whether or not a menu is on screen, exactly as `at` is: a
         // place is not a command and neither is a movement, and a camera that
         // stopped following the hand while a panel was up would be a camera the
@@ -6078,6 +6117,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // opening over a held key, owed here for the same reason and discharged
         // the same way. The other direction needs nothing: the console claims
         // both edges of every key it takes, so the game sees matched pairs.
+        // **The on-screen button folds into the key's own request**, so the
+        // held-key repair below and the swallowed character above are the same
+        // code for a tap as for a press — a second toggle path would be a
+        // second place for a game to be left holding a key.
+        pending.toggle_console |= self.console_button.take_fired();
         if pending.toggle_console {
             if !self.console.is_open() {
                 let game = &mut self.game;
@@ -6240,6 +6284,10 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         let render_dt = self.frame_clock.render_dt();
         self.console
             .draw(&mut self.draw_list, extent, self.gpu.atlas(), render_dt);
+        // **Over the panel**, because it is the way out as much as the way in:
+        // a finger that opened the console has no key to close it with.
+        self.console_button
+            .render(&mut self.draw_list, self.gpu.atlas());
         self.gpu.take_draw_list(&mut self.draw_list);
         drop(draw);
 
@@ -14048,6 +14096,230 @@ mod tests {
             .filter(|record| record.target == crcbl_core::log::CONSOLE_TARGET)
             .map(|record| record.message.clone())
             .collect()
+    }
+
+    // ---- the console a finger reaches ---------------------------------------
+
+    /// A finger that lands at `at` and lifts, as a real backend reports it.
+    ///
+    /// [`primary_finger`] and not a bare contact, because the platform owes the
+    /// emulated pointer as well: on the web the same `pointerdown` that carries
+    /// the contact also drives `__crcbl_web_pointer_button`, and a test that
+    /// scripted only the contact would be modelling a platform that does not
+    /// exist. It is also what makes the "and the game never saw the press"
+    /// halves below mean anything.
+    fn glass(engine: &mut Hosted, at: glam::Vec2) {
+        use crcbl_core::input::TouchPhase;
+        primary_finger(engine, 1, TouchPhase::Began, at);
+        primary_finger(engine, 1, TouchPhase::Ended, at);
+    }
+
+    /// Gets the fixture's start menu out of the way and lets the surface settle.
+    ///
+    /// Both are preconditions for reading a press: `FakeGame` shows `PLAY`
+    /// until it is served and the loop keeps every press away from a game with
+    /// a panel up, and the fixture's framebuffer is resized to its window over
+    /// the first frames — so a control aimed at the size it was built with is
+    /// aimed at a corner that has since moved.
+    fn serve(engine: &mut Hosted) {
+        tap(engine, SERVE_KEY);
+        for _ in 0..3 {
+            step(engine);
+        }
+        assert!(
+            engine.menu_layout().is_none(),
+            "the fixture would not leave its start menu",
+        );
+    }
+
+    /// A mouse click at `at`, with no contact anywhere — a desktop's press.
+    fn click(engine: &mut Hosted, at: glam::Vec2) {
+        let window = engine.window;
+        let position = Some(crcbl_shell::PhysicalPoint {
+            x: f64::from(at.x),
+            y: f64::from(at.y),
+        });
+        for state in [
+            crcbl_shell::ButtonState::Pressed,
+            crcbl_shell::ButtonState::Released,
+        ] {
+            engine
+                .shell_mut()
+                .button(
+                    window,
+                    crcbl_core::input::PointerButton::Left,
+                    state,
+                    position,
+                )
+                .expect("the window is live");
+            step(engine);
+        }
+    }
+
+    /// Where the console panel puts `cap` on this frame, in framebuffer pixels.
+    fn key_at(engine: &Hosted, cap: crcbl_ui::console::KeyCap) -> glam::Vec2 {
+        let layout = engine
+            .console()
+            .panel()
+            .layout(engine.gpu().extent(), engine.gpu().atlas());
+        let key = layout
+            .keyboard()
+            .keys()
+            .iter()
+            .find(|key| key.cap == cap)
+            .unwrap_or_else(|| panic!("the on-screen keyboard has no {cap:?} key"));
+        (key.min + key.max) * 0.5
+    }
+
+    /// How many presses the game has been handed.
+    fn presses(engine: &Hosted) -> usize {
+        engine
+            .game
+            .pointers
+            .iter()
+            .filter(|pointer| pointer.pressed)
+            .count()
+    }
+
+    /// **A phone can open the console, type a command and run it, with no key
+    /// pressed anywhere.**
+    ///
+    /// The whole of `docs/plan/52-debug-console.md` slice 10's touch half, end
+    /// to end: a finger lands, the engine's own button appears and opens the
+    /// panel, the on-screen keyboard appears with it, and taps on it spell a
+    /// line that **Send** then runs. Every step is a contact or a pointer press
+    /// — nothing here presses a key, which is the point.
+    #[test]
+    fn a_finger_opens_the_console_types_a_line_and_sends_it() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = hosted(None);
+        serve(&mut engine);
+        let extent = engine.gpu().extent();
+
+        // The finger that opens it is also the one that puts the button on
+        // screen: `ConsoleButton::touch` latches on every contact, its own
+        // included, so the very first tap counts.
+        glass(&mut engine, ConsoleButton::centre(extent));
+        assert!(
+            engine.console().is_open(),
+            "a tap on the engine's console button did not open the panel",
+        );
+        assert!(
+            engine.console().panel().keyboard_shown(),
+            "the console opened for a finger with no keyboard to type at",
+        );
+
+        for character in ['e', 'c', 'h', 'o'] {
+            let at = key_at(&engine, crcbl_ui::console::KeyCap::Type(character));
+            glass(&mut engine, at);
+        }
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "echo",
+            "the keys a finger pressed did not spell the line",
+        );
+
+        // The space bar and a second word, because a value with a space in it is
+        // what decision 7's `debug_view ambient occlusion` rests on and a
+        // keyboard that could not type one would break it.
+        for character in [' ', 'h', 'i'] {
+            let at = key_at(&engine, crcbl_ui::console::KeyCap::Type(character));
+            glass(&mut engine, at);
+        }
+        assert_eq!(engine.console().panel().field().text(), "echo hi");
+
+        // **Sent from the keyboard's own return key**, not from **Send**: a
+        // thumb is already down there, and this is the path a phone takes.
+        let enter = key_at(&engine, crcbl_ui::console::KeyCap::Enter);
+        glass(&mut engine, enter);
+        let printed = console_lines(&logs);
+        assert!(
+            printed.iter().any(|line| line == "hi"),
+            "the line a finger sent never ran: {printed:?}",
+        );
+        assert!(
+            engine.console().panel().field().is_empty(),
+            "and the field kept the line it sent",
+        );
+    }
+
+    /// **Nothing the console draws for a finger takes a press from a run that
+    /// has never seen one.**
+    ///
+    /// The guard on the whole feature, and the one that is easiest to write so
+    /// it can never fail. Both of the console's on-screen controls appear only
+    /// once a contact has arrived, so on a desktop — and in every golden frame,
+    /// which touches no glass — a click where they would be is the game's, and
+    /// the console stays shut.
+    #[test]
+    fn an_untouched_run_keeps_every_click_the_console_would_have_taken() {
+        let mut engine = hosted(None);
+        serve(&mut engine);
+        let extent = engine.gpu().extent();
+
+        // The console button's corner.
+        click(&mut engine, ConsoleButton::centre(extent));
+        assert!(
+            !engine.console().is_open(),
+            "a mouse click opened a button that is not on screen",
+        );
+        assert_eq!(presses(&engine), 1, "and the game never got the click");
+
+        // And the strip the keyboard would occupy, with the console open: the
+        // keyboard is not shown on a run with no contact, so this is the game's
+        // too.
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        assert!(engine.console().is_open());
+        assert!(
+            !engine.console().panel().keyboard_shown(),
+            "a run nobody touched drew an on-screen keyboard",
+        );
+        let low = glam::Vec2::new(extent.0 as f32 * 0.5, extent.1 as f32 * 0.95);
+        click(&mut engine, low);
+        assert_eq!(
+            presses(&engine),
+            2,
+            "the console claimed a press where a hidden keyboard would be",
+        );
+        assert!(engine.console().panel().field().is_empty());
+    }
+
+    /// **A tap on the on-screen keyboard is the console's and never the
+    /// game's**, and the same place is the game's once the console is shut.
+    ///
+    /// The pair is the check. Without the second half this passes for a console
+    /// that swallowed every press for the rest of the run, which is the same
+    /// defect the other way round: a demo a finger can no longer play.
+    #[test]
+    fn a_key_tapped_on_the_keyboard_is_never_also_a_press_in_the_game() {
+        let mut engine = hosted(None);
+        serve(&mut engine);
+        let extent = engine.gpu().extent();
+        glass(&mut engine, ConsoleButton::centre(extent));
+        assert!(engine.console().is_open());
+
+        let at = key_at(&engine, crcbl_ui::console::KeyCap::Type('q'));
+        let before = presses(&engine);
+        glass(&mut engine, at);
+        assert_eq!(
+            presses(&engine),
+            before,
+            "a tap on the keyboard reached the game as a press: {:?}",
+            engine.game.pointers,
+        );
+        assert_eq!(engine.console().panel().field().text(), "q");
+
+        // Shut it, and the same point is the game's again.
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        assert!(!engine.console().is_open());
+        glass(&mut engine, at);
+        assert_eq!(
+            presses(&engine),
+            before + 1,
+            "a closed console kept claiming the strip its keyboard was in",
+        );
     }
 
     /// **The console key opens the panel, and the game never sees the key.**

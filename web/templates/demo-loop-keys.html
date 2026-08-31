@@ -19,10 +19,13 @@
   have it: asteroids has no touch controls at all (three concurrent controls
   have no good phone layout) and hud takes no game input.
 
-  The console is not in that row, and that is not an omission: it opens from
-  the backtick and from nothing else, and it has no on-screen keyboard to type
-  at — `docs/plan/52-debug-console.md` decision 6 records the gap. A finger has
-  no route to it, so a phone is told about the three it can reach.
+  The console has a row of its own below, because unlike the three above it is
+  reachable on every demo here rather than on the three with touch controls:
+  `crcbl::engine::ConsoleButton` is drawn by the **loop** rather than by each
+  sample, so no `apps/*` crate has to opt in. It appears under the same
+  condition as the pause button — once a contact has arrived — beside it in the
+  same corner, and it opens a panel that now draws its own on-screen keyboard.
+  `docs/plan/52-debug-console.md` decision 6 recorded both halves as a gap.
 -->
 <li class="key-row pointer-only">
   <span>Pause and resume</span>
@@ -43,4 +46,10 @@
 <li class="key-row touch-only">
   <span>Pause, fullscreen and the debug overlay</span>
   <span>keys — unless a control for them is listed above</span>
+</li>
+<li class="key-row touch-only">
+  <span>Debug console, and its on-screen keyboard</span>
+  <span
+    >the <strong>CONSOLE</strong> button, once you have touched the canvas</span
+  >
 </li>

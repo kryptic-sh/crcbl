@@ -10,6 +10,8 @@
 //! ```text
 //! ShellEvent ─→ Console::observe ─→ TextField / History / Registry::complete
 //!                     └ Enter ─→ Registry::execute ─→ log::console::print ─→ ring
+//! contact ──→ Console::note_contact ─→ the panel draws its on-screen keyboard
+//! pointer ──→ Console::point ─→ ConsoleInput ─→ Console::tapped / the same run
 //! frame ────→ Console::draw ─→ snapshot_since ─→ LogView ─→ DrawList
 //! ```
 //!
@@ -36,7 +38,7 @@ use crcbl_console::{Context, Fault, History, Registry, Table};
 use crcbl_core::input::{KeyCode, Modifiers, ScrollDelta};
 use crcbl_input::{ActionMap, Binding};
 use crcbl_shell::{ButtonState, ClipboardContent, ClipboardRequestId, ShellEvent};
-use crcbl_ui::console::{ConsolePanel, caret_shown};
+use crcbl_ui::console::{ConsoleInput, ConsolePanel, KeyCap, caret_shown};
 use crcbl_ui::{FontAtlas, PointerInput, UiState, draw_list::DrawList};
 
 use crate::settings::ConsoleHost;
@@ -596,30 +598,86 @@ impl Console {
         self.panel.log_mut().scroll_by(lines);
     }
 
-    /// Runs one frame of pointer input against the panel, and executes a line
-    /// the **Send** button submitted.
+    /// Runs one frame of pointer input against the panel, and applies what it
+    /// produced: a line **Send** or the keyboard's return key submitted, or a
+    /// key the on-screen keyboard was tapped on.
     ///
-    /// Answers whether the pointer was **over the panel**, which is what the
-    /// loop needs to know to keep the press away from a menu underneath: the
-    /// console is drawn over the top of the frame, so a click that lands on it
-    /// is not a click on whatever the panel is covering.
+    /// Answers whether the pointer was **over anything the console draws** —
+    /// the panel and the keyboard both, which
+    /// [`ConsoleLayout::covers`](crcbl_ui::console::ConsoleLayout::covers) is
+    /// the one call for. That is what the loop needs to keep the press away
+    /// from a menu or a game underneath: the console is drawn over the frame,
+    /// so a tap that lands on it is not a tap on what it is covering.
+    ///
+    /// **`false` while the console is shut**, before anything is laid out, so a
+    /// closed console claims nothing anywhere.
     pub fn point(&mut self, extent: (u32, u32), atlas: &FontAtlas, pointer: PointerInput) -> bool {
         if !self.open {
             return false;
         }
         let layout = self.panel.layout(extent, atlas);
-        let submitted = {
+        let produced = {
             let Self { panel, ui, .. } = self;
             panel.point(&layout, ui, pointer)
         };
-        if let Some(line) = submitted {
-            self.run(&line);
+        match produced {
+            ConsoleInput::Nothing => {}
+            ConsoleInput::Submitted(line) => {
+                self.run(&line);
+                self.clear_cycle();
+            }
+            ConsoleInput::Key(cap) => self.tapped(cap),
         }
-        let (min, max) = layout.panel();
-        pointer.pos.x >= min.x
-            && pointer.pos.x <= max.x
-            && pointer.pos.y >= min.y
-            && pointer.pos.y <= max.y
+        // **The keyboard as well as the panel.** It is drawn along the frame's
+        // bottom edge, outside the panel, so a caller testing only the panel's
+        // rectangle would hand every key press on to the game underneath.
+        layout.covers(pointer.pos)
+    }
+
+    /// A key the on-screen keyboard was tapped on, applied to the field.
+    ///
+    /// The same two edits [`Console::key`] makes for the physical `Backspace`
+    /// and for a [`ShellEvent::TextCommit`], reached from the other input
+    /// stream: a tapped `q` and a typed `q` have to leave the field, the
+    /// history and the completion cycle in the same state, and the way to be
+    /// sure of that is for both to end up here.
+    fn tapped(&mut self, cap: KeyCap) {
+        let field = self.panel.field_mut();
+        let moved = match cap {
+            KeyCap::Type(character) => {
+                let mut buffer = [0u8; 4];
+                field.insert(character.encode_utf8(&mut buffer));
+                true
+            }
+            KeyCap::Backspace => field.backspace(),
+            // `TouchKeyboard::point` swallows the two layer keys and the panel
+            // turns `Enter` into a submission, so none of the three arrives
+            // here; they change the keyboard or the line, not the caret.
+            KeyCap::Enter | KeyCap::Shift | KeyCap::Symbols => false,
+        };
+        if moved {
+            self.clear_cycle();
+        }
+    }
+
+    /// Notes that a contact has reached this run, which is what puts the
+    /// on-screen keyboard on screen.
+    ///
+    /// **The first finger to land is the evidence**, not
+    /// [`ShellCaps::TOUCH`](crcbl_shell::ShellCaps::TOUCH) — a desktop with a
+    /// touchscreen sets that too, and a developer with a keyboard would lose
+    /// [`KEYBOARD_HEIGHT_FRACTION`](crcbl_ui::console::KEYBOARD_HEIGHT_FRACTION)
+    /// of the frame to keys they will never press.
+    /// [`PauseControl`](crate::engine::PauseControl) gates its own button on
+    /// the same evidence for the same reason, and neither moves a golden frame:
+    /// a headless golden never touches glass.
+    ///
+    /// It never goes back. A run that has seen a finger is a run being played
+    /// with one, and a keyboard that vanished the moment a mouse moved would be
+    /// a keyboard that disappears under the thumb of anyone on a laptop with
+    /// both.
+    pub const fn note_contact(&mut self) {
+        self.panel.show_keyboard(true);
     }
 
     /// Draws the panel, after taking whatever the log ring has gained.

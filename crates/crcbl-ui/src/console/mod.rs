@@ -10,8 +10,9 @@
 //!
 //! ```text
 //! ConsolePanel ── layout(extent, atlas) ─→ ConsoleLayout ─→ render(&mut DrawList)
-//!    ├── LogView    the records, wrapped, coloured by level, newest at the bottom
-//!    └── TextField  the line being typed, and its caret
+//!    ├── LogView       the records, wrapped, coloured by level, newest at the bottom
+//!    ├── TextField     the line being typed, and its caret
+//!    └── TouchKeyboard the keys a finger presses, on a device that has no others
 //! ```
 //!
 //! The panel is the top [`CONSOLE_HEIGHT_FRACTION`] of the frame, Source's
@@ -21,6 +22,7 @@
 //! [`MenuStyle::pixel_art`]: crate::menu::MenuStyle::pixel_art
 
 mod field;
+mod keyboard;
 mod log_view;
 mod panel;
 
@@ -34,10 +36,14 @@ use crate::text::{FontAtlas, LINE_HEIGHT};
 use crate::widget::{NATURAL_FONT_SIZE, Style};
 
 pub use field::{TextField, TextFieldStyle};
+pub use keyboard::{
+    KEY_ID_BASE, KEY_ID_SPAN, KEYBOARD_HEIGHT_FRACTION, KeyBox, KeyCap, KeyboardLayout, Layer,
+    TouchKeyboard,
+};
 pub use log_view::{LogLine, LogView};
 pub use panel::{
-    COMPLETION_ROWS, CONSOLE_HEIGHT_FRACTION, ConsoleLayout, ConsolePanel, MINIMUM_FIELD_COLUMNS,
-    MINIMUM_LOG_ROWS, PROMPT, SEND_ID, SEND_LABEL,
+    COMPLETION_ROWS, CONSOLE_HEIGHT_FRACTION, ConsoleInput, ConsoleLayout, ConsolePanel,
+    MINIMUM_FIELD_COLUMNS, MINIMUM_LOG_ROWS, PROMPT, SEND_ID, SEND_LABEL,
 };
 
 /// How long the caret spends shown, and then hidden, before it repeats.

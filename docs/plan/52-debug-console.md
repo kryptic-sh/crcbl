@@ -285,9 +285,32 @@ same glyphs. The panel's own per-level view is a `LevelFilter` threshold, `Off`
 through `Trace`, rather than five independent toggles: a key that cycles it
 wants an order to cycle through, and the levels have one.
 
-Touch: the panel has no on-screen keyboard, so on a device with no keyboard the
-console opens (a Send button and history are usable) but typing is not. Recorded
-as a known gap, not designed around.
+**Touch — built 2026-08-31, and the gap was wider than this paragraph said.** It
+claimed the console opens on a device with no keyboard; it does not.
+`CONSOLE_KEY` is the backtick and nothing else, so a finger had no route to the
+panel at all — which `web/templates/demo-loop-keys.html` had already written
+down while this decision recorded only the missing keys. So both halves land
+together. `crcbl::engine::ConsoleButton` is the way in and out: a **CONSOLE**
+button in the same top-right strip as `PauseControl`, hit-tested against
+contacts for that control's reason, and drawn by the **loop** rather than by
+each sample — which is what keeps the exit criterion's "no per-app code".
+`crcbl_ui::console::TouchKeyboard` is what the open panel then offers: three
+layers reaching every printable character the atlas has, laid out from the
+frame's bottom edge so the control row a thumb rests on does not move when the
+layer does. Both are on screen only once a contact has arrived, `PauseControl`'s
+rule and its argument.
+
+**A drawn keyboard rather than a focused DOM element**, which is the platform's
+own answer on the one tier that has one. Three reasons, each in
+`crates/crcbl-ui/src/console/keyboard.rs`'s module docs: no native backend here
+reports a contact at all (`crates/crcbl-shell/src/caps.rs` asserts the Wayland
+backend does not set `ShellCaps::TOUCH`), so a DOM input would leave every other
+backend with the gap; `web/engine/shell.js` listens for `keydown` on the
+**canvas** and focuses it on every `pointerdown`, so an editable element focused
+while the console is open holds the focus the panel's own `Tab`, arrows,
+`PageUp`, `Escape` and `Ctrl`+`V` are read from; and the built-in atlas covers
+printable ASCII only, so a system keyboard's accented or CJK output would reach
+the field and draw as the not-def glyph.
 
 ### 7. The commands that ship
 
@@ -608,13 +631,39 @@ entry; the browser gate runs on every slice that touches a demo.
    file's own line numbers and the file runs on, with a closing count of lines
    run and lines failed — a file that half-applied says so.
 
-10. **Still to do, each its own slice**: the `SIM` flag over the transport; a
-    touch keyboard.
+10. **The console a finger reaches — landed 2026-08-31.**
+    `crcbl::engine::ConsoleButton` is the route in, beside `PauseControl` in the
+    corner that control's docs vetted, drawn by `Loop::frame` after the panel so
+    it is the way out as well; it reads contacts and answers `takes_pointer`, so
+    the finger that presses it does not also flap or serve.
+    `crcbl_ui::console::TouchKeyboard` is the panel's own keyboard:
+    `Layer::Lower`/`Upper`/`Symbols`, whose rows a test holds to the atlas's
+    whole printable range; `KeyCap::Shift` and `KeyCap::Symbols` are swallowed
+    by the keyboard and change its layer, `KeyCap::Enter` comes back as
+    `ConsoleInput::Submitted` through the same `ConsolePanel::submit` **Send**
+    calls, and everything else reaches the field through `Console::tapped`,
+    which makes the same two edits `Console::key` does so a tapped `q` and a
+    typed `q` leave the cycle in one state. Both controls are gated on
+    `Console::note_contact` and `ConsoleButton::touched`, so a run nobody has
+    touched draws and claims nothing — the guard is
+    `an_untouched_run_keeps_every_click_the_console_would_have_taken` in
+    `crates/crcbl/src/engine.rs`, and it was shown red by showing the keyboard
+    from the first frame and again by laying it out while it reports itself
+    hidden. `web/tools/browser-e2e.mjs`'s group F opens breakout's console with
+    a tap, types `echo it works` key by key and taps the return key, and reads
+    the console's own answer — not its echo, which is printed before anything
+    runs.
+
+11. **Still to do, its own slice**: the `SIM` flag over the transport (decision
+    9), which belongs with the determinism and network work rather than here.
 
 ## Exit criteria
 
 - `` ` `` opens the console in every `apps/*` demo, native and browser, with no
   per-app code beyond the one `GameGpu` forwarder.
+- …and a **tap on the CONSOLE button** opens it in every demo on a device that
+  has been touched, with no per-app code at all: the button and the keyboard are
+  both the loop's.
 - The panel shows the same lines as stderr, in order, coloured by level.
 - `help` prints every variable in `crcbl::settings::catalogue()` and every
   `convar!` in the workspace; a `convar!` missing from its crate's table is a

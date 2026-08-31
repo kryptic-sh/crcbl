@@ -105,6 +105,10 @@ on the mix that is already playing, `save` writes it to the settings file, and
 line per line. `Ctrl`+`V` pastes into the input line wherever the platform has a
 clipboard to read. The same keys work in the browser demos: the shim leaves
 `` ` `` to the engine and passes every character typed at the console through.
+On a device with no keys there is a **CONSOLE** button beside the pause button
+once the canvas has been touched, and the panel it opens draws its own keyboard:
+three layers, every printable character the engine's font has, and a return key
+that sends the line.
 
 `CRCBL_SHELL=x11` forces a windowing backend and `CRCBL_LOG=debug` prints every
 shell event.
