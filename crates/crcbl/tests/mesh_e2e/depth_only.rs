@@ -36,6 +36,7 @@
 use crate::area_light::{PRICE_WARMUP, price_frame};
 use crate::harness::Headless;
 use crate::mesh_scene::place;
+use crate::shadow_cache::turning_sun;
 use crcbl::hal::{CommandEncoderDesc, Features, PresentInfo, ResourceState, SubmitInfo};
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{Camera, ForwardRenderer, Projection, TransientPool};
@@ -122,7 +123,6 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<Vec<(u64, u64)
     // either way.
     let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
     let camera = field_camera();
-    let sun = crcbl::render::DirectionalLight::default();
     let (mut renderer, mut pool) = dunes_field(&headless);
     assert!(
         renderer.selects_levels(),
@@ -156,7 +156,7 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<Vec<(u64, u64)
             .acquire_next_frame(headless.swapchain)
             .expect("the ring always has an image");
         renderer
-            .begin_frame(device, &camera, &sun, extent)
+            .begin_frame(device, &camera, &turning_sun(index), extent)
             .expect("the uniform buffer is writable");
         let compiled = {
             let mut graph = crcbl::render::RenderGraph::new(headless.queue);

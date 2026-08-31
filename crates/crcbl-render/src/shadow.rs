@@ -1082,13 +1082,21 @@ pub struct Assignment {
 pub struct Selection {
     /// What holds slot `i`, or `None` if the slot is free.
     slots: [Option<Assignment>; LIGHT_SLOTS],
-    /// The atlas's free space, reset and spent by [`Selection::lay_out`] once
-    /// per [`Selection::update`].
+    /// The atlas's free space, spent and given back by [`Selection::lay_out`]
+    /// once per [`Selection::update`].
     ///
-    /// Kept here rather than rebuilt because it holds a `Vec` per level: a
-    /// selection is updated every frame and an allocator built fresh each time
-    /// would be [`TILE_LEVELS`] heap allocations a frame for no gain.
+    /// Kept here rather than rebuilt because it holds what every slot is
+    /// holding: since `docs/plan/45-shadows.md`'s static-caching rung a tile
+    /// outlives the frame it was allocated in, so an allocator built fresh each
+    /// frame would be one that could not describe what the image contains.
     allocator: AtlasAllocator,
+    /// The tile behind slot `i`'s rectangle, or [`None`] for a slot no map is
+    /// rendered into.
+    ///
+    /// The allocator's own handle rather than a second record of it: `rects` is
+    /// what everything else reads and this is what gives that rectangle back.
+    /// Indexed as `rects` is.
+    tiles: [Option<Tile>; TILES],
     /// Where atlas slot `i`'s map was rendered, or [`TileRect::EMPTY`] for a
     /// slot no map was rendered into.
     ///
@@ -1216,7 +1224,8 @@ impl Selection {
         self.lay_out(lights);
     }
 
-    /// Hands each occupied atlas slot a rectangle of the image.
+    /// Hands each occupied atlas slot a rectangle of the image, **keeping the
+    /// one it already holds wherever it can**.
     ///
     /// **The cascades first and always**, whatever the light budget did: the
     /// shadow pass draws them every frame, and a fragment samples them on a
@@ -1231,52 +1240,86 @@ impl Selection {
     /// reach, so there is no coverage to measure it by and every fragment the
     /// camera draws is a fragment it may shadow.
     ///
+    /// # Retention, which is what makes the image outlive the frame
+    ///
+    /// `docs/plan/45-shadows.md`'s static-caching rung: a slot that wants the
+    /// size it already holds keeps the *same texels*, and only a slot whose map
+    /// is gone or whose size changed hands its tile back to
+    /// [`AtlasAllocator::release`]. A frame that changed nothing therefore
+    /// re-derives exactly the rectangles the image was drawn with, which is the
+    /// precondition for not drawing it again — see
+    /// `ForwardRenderer::shadow_atlas_inputs`, which decides that.
+    ///
+    /// It also means the rectangles are a function of the frames before this
+    /// one and not of this one alone. What is *not* history-dependent is the
+    /// case every golden in the tree is blessed under: an empty allocator and a
+    /// frame whose maps all take whole cells lays out cell for cell in slot
+    /// order, and every frame after it that wants the same sizes keeps it.
+    ///
     /// # Coarsest first, and that is what makes the fit a fact
     ///
-    /// The requests are sorted by level before they are spent, so every whole
-    /// cell is handed out before anything subdivides one. There are at most
-    /// [`TILES`] requests — a cascade or a light tile each, which is what the
-    /// assertion beside [`LIGHT_TILES`] counts — and each is at most a whole
-    /// root, so after `j` level-0 requests there are `TILES - j` whole roots
-    /// left for at most that many remaining requests, none of which needs more
-    /// than one. The allocation therefore cannot run out, which is why the
-    /// failure below is `unreachable!` rather than a fallback: a fallback here
-    /// would be a map rendered into a rectangle another map is also using.
-    ///
+    /// The requests that still need a tile are sorted by level before they are
+    /// spent, so every whole cell is handed out before anything subdivides one.
     /// Spending a finer request first is what would break it — a level-1 request
     /// splits a root and leaves three quarters that no whole cell can use — and
     /// it is the only ordering constraint the allocator has.
+    ///
+    /// The allocation cannot run out, which is why the failure below is
+    /// `unreachable!` rather than a fallback: a fallback here would be a map
+    /// rendered into a rectangle another map is also using. There are at most
+    /// [`TILES`] slots — a cascade or a light tile each, which is what the
+    /// assertion beside [`LIGHT_TILES`] counts — and each wants at most a whole
+    /// root. A retained tile occupies at most one root, so `k` of them leave at
+    /// least `TILES - k` whole roots free against at most `TILES - k` remaining
+    /// requests, none of which needs more than one.
     fn lay_out(&mut self, lights: &[Light]) {
-        self.allocator.reset();
-        self.rects = [TileRect::EMPTY; TILES];
-        // Which level each light tile was asked for, or `None` where the tile is
-        // free. Per tile rather than per slot because a point light's run is
-        // `POINT_FACES` tiles of one level, and the atlas addresses tiles.
-        let mut levels: [Option<usize>; LIGHT_TILES] = [None; LIGHT_TILES];
+        // What each atlas slot wants this frame, or `None` where no map is
+        // rendered into it. Per slot rather than per light because a point
+        // light's run is `POINT_FACES` tiles of one level and the atlas
+        // addresses tiles.
+        let mut wanted: [Option<usize>; TILES] = [None; TILES];
+        for want in &mut wanted[..CASCADES] {
+            *want = Some(0);
+        }
         for assignment in self.slots.iter().flatten() {
             let Some(light) = lights.get(assignment.light) else {
                 continue;
             };
             let span = tile_span(light);
-            for tile in &mut levels[assignment.base..assignment.base + span] {
-                *tile = Some(assignment.level);
+            for tile in assignment.base..assignment.base + span {
+                wanted[light_tile(tile)] = Some(assignment.level);
             }
         }
 
-        // The slot and the level it wants, cascades first and then the held
-        // light tiles in tile order — an array rather than a `Vec` because the
-        // count is bounded by the atlas's own slots and this runs every frame.
-        let mut requests = [(0usize, 0usize); TILES];
-        let mut count = 0;
-        for slot in 0..CASCADES {
-            requests[count] = (slot, 0);
-            count += 1;
-        }
-        for (tile, level) in levels.iter().enumerate() {
-            let Some(level) = *level else {
+        // Give back every tile whose slot no longer wants exactly what it
+        // holds, **before** anything is allocated: the space a demoted light
+        // frees is space the frame's remaining requests may need, and a merge
+        // that ran after them would come too late to answer a whole cell.
+        for (slot, want) in wanted.iter().enumerate() {
+            let Some(held) = self.tiles[slot] else {
                 continue;
             };
-            requests[count] = (light_tile(tile), level);
+            if *want == Some(held.level()) {
+                continue;
+            }
+            self.allocator.release(held);
+            self.tiles[slot] = None;
+            self.rects[slot] = TileRect::EMPTY;
+        }
+
+        // The slots still owed a tile and the level each wants, in slot order —
+        // an array rather than a `Vec` because the count is bounded by the
+        // atlas's own slots and this runs every frame.
+        let mut requests = [(0usize, 0usize); TILES];
+        let mut count = 0;
+        for (slot, want) in wanted.iter().enumerate() {
+            let Some(level) = *want else {
+                continue;
+            };
+            if self.tiles[slot].is_some() {
+                continue;
+            }
+            requests[count] = (slot, level);
             count += 1;
         }
         // Stable, so the order within one level is still the slot order every
@@ -1288,6 +1331,7 @@ impl Selection {
             let tile = self.allocator.allocate(level).unwrap_or_else(|| {
                 unreachable!("a whole root cell per atlas slot, coarsest first")
             });
+            self.tiles[slot] = Some(tile);
             self.rects[slot] = tile.rect();
         }
     }
@@ -2523,6 +2567,183 @@ mod tests {
                  through a map that was rendered"
             );
         }
+    }
+
+    /// **A frame that changed nothing lays out on exactly the texels the last
+    /// one did**, which is the precondition every cached shadow map rests on:
+    /// the shader reads a rectangle out of `atlas_rects`, and a map not redrawn
+    /// this frame is only readable through the rectangle it *was* drawn into.
+    ///
+    /// The rectangles alone would be a weak claim — they were equal before this
+    /// rung too, because the allocator was replayed from empty in the same
+    /// order every frame. What says the tiles were *kept* rather than
+    /// re-derived is the second half: the allocation is compared against a
+    /// selection that has only ever seen this one frame, so the layout a
+    /// caching frame carries forward is still the layout a golden was blessed
+    /// under.
+    #[test]
+    fn a_still_frame_keeps_the_texels_the_last_one_drew_into() {
+        let camera = camera_at(Vec3::ZERO);
+        let lights = [
+            Light::Point(point_at(Vec3::new(0.0, 0.0, -3.0), 4.0)),
+            spot_light_at(Vec3::new(0.0, 0.0, -2.0), 2.0),
+        ];
+        let mut selection = Selection::default();
+        selection.update(&lights, &camera);
+        let first: Vec<TileRect> = (0..TILES).map(|slot| selection.atlas_rect(slot)).collect();
+        assert!(
+            first[..CASCADES].iter().all(|rect| rect.side == TILE),
+            "the cascades must hold whole cells for this to be about the lights: {first:?}"
+        );
+        for round in 0..4 {
+            selection.update(&lights, &camera);
+            let again: Vec<TileRect> = (0..TILES).map(|slot| selection.atlas_rect(slot)).collect();
+            assert_eq!(
+                again, first,
+                "round {round} moved a map that nothing asked to move"
+            );
+        }
+
+        let mut fresh = Selection::default();
+        fresh.update(&lights, &camera);
+        assert_eq!(
+            selection, fresh,
+            "a selection that has held its tiles for five frames must hold exactly what one \
+             that has just laid them out holds — allocator included, or the atlas is drifting \
+             towards a layout no golden was blessed under"
+        );
+    }
+
+    /// **Every tile a light stopped needing comes back**, merged, so an atlas
+    /// that has churned through lights is the atlas it started as.
+    ///
+    /// The leak assertion for `AtlasAllocator::release`'s only caller, and it
+    /// is deliberately about the allocator rather than about the rectangles: a
+    /// `lay_out` that released nothing would still hand out plausible
+    /// rectangles for a long time, and would then run out of atlas on a frame
+    /// nothing about the scene explains. Compared against a selection that has
+    /// only ever seen the empty list, so a quarter cell left out on loan is a
+    /// difference in the quadtree even while every rectangle still reads empty.
+    #[test]
+    fn a_light_that_leaves_hands_every_tile_it_held_back() {
+        let camera = camera_at(Vec3::ZERO);
+        let spot = spot_light_at(Vec3::new(0.0, 0.0, -1.0), 4.0);
+        let other = spot_light_at(Vec3::new(0.0, 0.0, -2.0), 2.0);
+        let point = Light::Point(point_at(Vec3::new(0.0, 0.0, -1.0), 4.0));
+        let mut selection = Selection::default();
+        for lights in [
+            vec![spot, other],
+            vec![point, other],
+            vec![point],
+            vec![],
+            vec![spot, other, point],
+            vec![point, point, point],
+            vec![spot_covering(WHOLE_CELL_COVERAGE / 8.0, &camera)],
+            vec![point, spot, point, other, point],
+        ] {
+            selection.update(&lights, &camera);
+        }
+        selection.update(&[], &camera);
+
+        let mut fresh = Selection::default();
+        fresh.update(&[], &camera);
+        assert_eq!(
+            selection, fresh,
+            "the atlas is not back where it started after every light left it"
+        );
+    }
+
+    /// **Demoting one light moves no other light\'s map**, which is the whole of
+    /// what holding a tile across frames buys over laying the atlas out again.
+    ///
+    /// This is the assertion a `lay_out` that released everything and replayed
+    /// the requests cannot pass, and it is the reason the retention is not
+    /// merely an optimisation: the requests are spent coarsest first, so a
+    /// light that demotes changes *where in that order* every request after it
+    /// falls, and a replay hands the light behind it a different root. The map
+    /// in that root was not redrawn — nothing about it changed — so a shader
+    /// reading the new rectangle reads its neighbour\'s texels.
+    ///
+    /// Built so the demoting light is the one that sorts *first*: with the
+    /// order the other way round a replay lands on the same answer by accident,
+    /// and the test would pass without the retention being there at all.
+    #[test]
+    fn demoting_one_light_leaves_the_maps_around_it_where_they_were() {
+        let camera = camera_at(Vec3::ZERO);
+        // The first is the brighter of the two, so it takes the first run and
+        // is the request the demotion reorders; the second is what must not
+        // move under it.
+        let near = spot_covering(WHOLE_CELL_COVERAGE * 4.0, &camera);
+        let steady = spot_covering(WHOLE_CELL_COVERAGE * 2.0, &camera);
+        let mut selection = Selection::default();
+        selection.update(&[near, steady], &camera);
+        assert_eq!(
+            selection.base_of(0),
+            Some(0),
+            "the brighter light must hold the first run for this to be about the reordering"
+        );
+        let before = selection.atlas_rect(light_tile(1));
+        assert_eq!(
+            before.side, TILE,
+            "the steady light must start on a whole cell"
+        );
+
+        selection.update(
+            &[spot_covering(WHOLE_CELL_COVERAGE / 8.0, &camera), steady],
+            &camera,
+        );
+        assert!(
+            selection.atlas_rect(light_tile(0)).side < TILE,
+            "the first light did not demote, so nothing reordered"
+        );
+        assert_eq!(
+            selection.atlas_rect(light_tile(1)),
+            before,
+            "the steady light\'s map moved because its neighbour demoted"
+        );
+    }
+
+    /// **A demotion gives the cell back whole**, so the space a light stopped
+    /// needing is space the next whole-cell request can have.
+    ///
+    /// The merge in [`AtlasAllocator::release`] read from the renderer's side:
+    /// a light demoted down the ladder splits a root, and the promotion back up
+    /// can only be answered by that same root if the four quarters — and the
+    /// sixteenths under them — merged on the way back.
+    #[test]
+    fn a_demoted_light_gives_its_cell_back_and_can_take_it_again() {
+        let camera = camera_at(Vec3::ZERO);
+        let near = [spot_covering(WHOLE_CELL_COVERAGE * 2.0, &camera)];
+        let far = [spot_covering(WHOLE_CELL_COVERAGE / 8.0, &camera)];
+        let tile = |selection: &Selection| selection.atlas_rect(light_tile(0)).side;
+
+        let mut selection = Selection::default();
+        selection.update(&near, &camera);
+        assert_eq!(
+            tile(&selection),
+            TILE,
+            "a near light must earn a whole cell"
+        );
+
+        selection.update(&far, &camera);
+        let demoted = tile(&selection);
+        assert!(
+            demoted < TILE,
+            "the far light kept a whole cell, so this test is not about a demotion"
+        );
+
+        selection.update(&near, &camera);
+        assert_eq!(
+            tile(&selection),
+            TILE,
+            "the cell the demotion released did not come back whole"
+        );
+        let mut fresh = Selection::default();
+        fresh.update(&near, &camera);
+        assert_eq!(
+            selection, fresh,
+            "a round trip down the ladder and back left the atlas fragmented"
+        );
     }
 
     /// An incumbent that leaves the list — or stops being eligible — frees its

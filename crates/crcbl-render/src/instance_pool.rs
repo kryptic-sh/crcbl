@@ -228,6 +228,8 @@ pub struct InstancePool {
     /// One past the highest element [`InstancePool::insert`] has ever handed
     /// out — what [`InstancePool::slot_count`] reports.
     high_water: u32,
+    /// How many times the mirror has been written — [`InstancePool::revision`].
+    revision: u64,
 }
 
 impl InstancePool {
@@ -315,6 +317,7 @@ impl InstancePool {
             moved_mark: vec![false; desc.capacity as usize],
             capacity: desc.capacity,
             high_water: 0,
+            revision: 0,
         })
     }
 
@@ -359,6 +362,31 @@ impl InstancePool {
     /// instance or a dead record — [`InstancePool::remove`] leaves one, and
     /// [`InstancePool::new`] clears the buffers so an untouched slot is one too
     /// — which is what makes walking the whole range safe.
+    /// How many times any element of the array has been written, over the
+    /// pool's whole life.
+    ///
+    /// **A number to compare with an older reading of itself, not to interpret**
+    /// — two readings that differ say the instances a pass draws are not the
+    /// ones it drew last time it looked, and two that agree say they are. What
+    /// wants that is a consumer whose output is a function of the array and can
+    /// be kept instead of recomputed: `ForwardRenderer`'s shadow atlas is the
+    /// one there is, and `docs/plan/45-shadows.md`'s static-caching rung is why.
+    ///
+    /// It moves on **every** write, including ones no draw could see: a rewrite
+    /// with identical bytes (which [`set`](Self::set) deliberately does not
+    /// filter), a re-point of a skinned object's bases, and the settling of a
+    /// `previous_transform` the frame after a move stopped. Reading it as "the
+    /// scene changed" is therefore conservative in the safe direction — it says
+    /// *changed* more often than a byte comparison would, and never says
+    /// *unchanged* when a byte moved.
+    ///
+    /// It counts writes rather than hashing the array because the array is the
+    /// pool's own capacity in bytes and this is read once a frame.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
     #[must_use]
     pub const fn slot_count(&self) -> u32 {
         self.high_water
@@ -679,9 +707,14 @@ impl InstancePool {
 
     /// Puts `instance` into the mirror at `index` and marks it dirty in every
     /// slot's range set.
+    ///
+    /// **The only thing that ever changes the mirror**, which is what makes
+    /// [`revision`](Self::revision) a total answer rather than a count of the
+    /// paths somebody remembered to instrument.
     fn write(&mut self, index: u32, instance: &GpuInstance) {
         let at = index as usize * INSTANCE_STRIDE;
         self.mirror[at..at + INSTANCE_STRIDE].copy_from_slice(&instance.to_bytes());
+        self.revision = self.revision.wrapping_add(1);
         for dirty in &mut self.dirty {
             dirty.mark(index);
         }
@@ -996,6 +1029,85 @@ mod tests {
         );
 
         pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **Every path that changes an instance moves the revision, and a frame
+    /// that changed nothing leaves it alone.**
+    ///
+    /// [`InstancePool::revision`]'s whole contract, and the thing a consumer
+    /// keeping something derived from the array — `ForwardRenderer`'s shadow
+    /// atlas — bets a frame's correctness on. The list is deliberately every
+    /// mutator this type has rather than a sample: a path that changed the
+    /// mirror without moving the number would be a caster that moved under a
+    /// shadow map nothing redrew.
+    #[test]
+    fn every_write_moves_the_revision_and_a_still_frame_does_not() {
+        let (recorder, device) = open();
+        let device = device.as_ref();
+        let mut pool = pool(device, 16);
+        let start = pool.revision();
+
+        let first = pool.insert(&instance(1)).expect("room");
+        let inserted = pool.revision();
+        assert!(inserted > start, "an insert did not move the revision");
+
+        assert!(pool.set(first, &instance(2)), "the handle is live");
+        let written = pool.revision();
+        assert!(written > inserted, "a rewrite did not move the revision");
+
+        assert!(
+            pool.set(first, &instance(2)),
+            "a rewrite with the same bytes is still a write — see `InstancePool::set`"
+        );
+        let repeated = pool.revision();
+        assert!(
+            repeated > written,
+            "a rewrite the pool does not filter must not be filtered here either"
+        );
+
+        assert!(pool.set_bases(first, 4, 8), "the handle is live");
+        let repointed = pool.revision();
+        assert!(repointed > repeated, "a re-point did not move the revision");
+
+        // A move to somewhere the record was not, so the settle below has a
+        // `previous_transform` to put back: rewriting an instance with the
+        // bytes it already holds leaves the two equal, and the carry-forward
+        // skips a record already at rest.
+        assert!(pool.set(first, &instance(3)), "the handle is live");
+        let moved = pool.revision();
+        assert!(moved > repointed, "a move did not move the revision");
+
+        // The frame after a move settles the record's `previous_transform`,
+        // which is a write and so a change this number reports. Conservative in
+        // the safe direction, and the reason the doc says so.
+        settle(&mut pool, device);
+        let settled = pool.revision();
+        assert!(
+            settled > moved,
+            "the carry-forward wrote the mirror without saying so"
+        );
+
+        // And now the pool is quiet: nothing was written, so nothing moves,
+        // however many frames go by.
+        for _ in 0..FRAMES * 3 {
+            pool.begin_frame(device).expect("the null device writes");
+        }
+        assert_eq!(
+            pool.revision(),
+            settled,
+            "a run of frames nobody wrote in moved the revision, so nothing derived from this \
+             array could ever be kept"
+        );
+
+        assert!(pool.remove(first), "the handle is live");
+        assert!(
+            pool.revision() > settled,
+            "a removal did not move the revision, so an instance that left the scene would go \
+             on casting a shadow"
+        );
+
+        pool.destroy(device);
         recorder.assert_valid();
     }
 

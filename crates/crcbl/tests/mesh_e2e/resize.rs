@@ -8,12 +8,11 @@
 
 use crate::harness::Headless;
 use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube};
+use crate::shadow_cache::turning_sun;
 use crcbl::hal::{
     CommandEncoderDesc, CompositeAlpha, PresentInfo, PresentMode, SubmitInfo, SwapchainDesc,
 };
-use crcbl::render::{
-    DirectionalLight, ForwardRenderer, PassKind, Projection, RenderGraph, TransientPool,
-};
+use crcbl::render::{ForwardRenderer, PassKind, Projection, RenderGraph, TransientPool};
 
 /// A resize storm, driven through the **render graph** rather than around it.
 ///
@@ -73,6 +72,12 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
     // halve has no pyramid at all, and `(17, 5)` in the list above is exactly
     // that case.
     let mut pyramid_seen = false;
+    // Every frame of the storm is drawn under a sun a degree further round than
+    // the last, so every frame redraws the shadow atlas — see
+    // `shadow_cache::turning_sun`. Without it the second frame at a size holds
+    // the maps the first drew, records no `shadow` pass, and the assertion that
+    // the atlas rendered at its own extent has nothing to check.
+    let mut lap = 0usize;
     for extent in sizes {
         device
             .reconfigure_swapchain(
@@ -101,8 +106,9 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
                 .acquire_next_frame(headless.swapchain)
                 .expect("an image");
             assert_eq!(acquired.extent, extent);
+            lap += 1;
             renderer
-                .begin_frame(device, &camera, &DirectionalLight::default(), extent)
+                .begin_frame(device, &camera, &turning_sun(lap), extent)
                 .expect("uniforms");
 
             let mut encoder = device.create_command_encoder(&CommandEncoderDesc {

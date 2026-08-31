@@ -154,6 +154,8 @@ use crcbl_shaders::{
     MESH, MESH_CLUSTER, Stage, TONEMAP, dfg, level_select, ltc, mesh, ssao, ssr, tonemap,
 };
 use glam::{Mat4, Quat, Vec3};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::camera::{Camera, DirectionalLight, Fog, Sky};
 use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
@@ -1368,6 +1370,51 @@ pub struct ForwardRenderer {
     /// free ones — so an unheld tile keeps the reversed-Z clear, which reads as
     /// "nothing stored, fully lit" wherever anything did sample it.
     shadow_lights: shadow::Selection,
+    /// Everything this frame's shadow atlas would be drawn from, as
+    /// [`ForwardRenderer::shadow_atlas_record`] spells it.
+    ///
+    /// Kept only to tell one frame's answer from the last one's: it is compared
+    /// and then replaced, and what travels from there is the number below.
+    shadow_atlas_inputs: Vec<u8>,
+    /// A number that moves whenever [`ForwardRenderer::shadow_atlas_inputs`]
+    /// does, and never comes back to a value it has had.
+    ///
+    /// So "the image already holds this" is one integer comparison, which is
+    /// what lets the pass body below carry the answer out of the graph.
+    shadow_atlas_id: u64,
+    /// The [`ForwardRenderer::shadow_atlas_id`] of the last shadow pass that
+    /// **ran**, written by that pass's own body.
+    ///
+    /// By the body rather than by the call that recorded it, and that is the
+    /// whole of why this is shared state rather than a plain field: a frame
+    /// whose graph was refused — or built and dropped — recorded a pass that
+    /// never executed, so the image still holds whatever the frame before it
+    /// left there. `a_refused_frame_leaves_the_shadow_atlas_where_it_was` is
+    /// that case, and it is the same boundary [`TransientPool`]'s ledger of
+    /// imported images uses for the same reason.
+    ///
+    /// Zero until a pass has run, and the id starts above it, so the first
+    /// frame of all draws.
+    shadow_atlas_drawn: Arc<AtomicU64>,
+    /// Whether this frame's atlas is the one already in the image, so the pass
+    /// that fills it can be left out altogether.
+    ///
+    /// Frozen by [`ForwardRenderer::begin_frame`] for
+    /// [`ForwardRenderer::frame_effects`]' reason: this call decides it and
+    /// `add_passes` acts on it, and a value that moved between them would skip
+    /// a cull whose draws were recorded, or the other way about.
+    shadow_atlas_cached: bool,
+    /// Whether this frame dispatches skinning, and so rewrites part of the
+    /// vertex pool the shadow pass draws from.
+    ///
+    /// The atlas's one **always redraw**: a skinned caster's vertices are
+    /// produced by a compute pass into the pool, so there is nothing on the
+    /// host to compare a frame's geometry against — the palette a caller hands
+    /// over is not the vertices, and the vertices are never read back. Set by
+    /// [`ForwardRenderer::begin_skinned_frame`], which is the only call that
+    /// can make it true, and cleared by [`ForwardRenderer::begin_frame`], which
+    /// dispatches none.
+    frame_skins: bool,
 
     /// Topic 03 §3.6's one permitted readback: the camera cull's statistics, on
     /// a delayed ring — see [`crate::cull_stats`], which is where the shape and
@@ -4618,6 +4665,16 @@ impl ForwardRenderer {
             shadow_groups,
             shadow_selection,
             shadow_lights: shadow::Selection::default(),
+            // Nothing has drawn the atlas, so the first frame draws it whatever
+            // it is asked for — which is also what gives the image a defined
+            // content before anything samples it. A record is never empty, so
+            // the first frame's is a change and takes the id past the zero
+            // below it.
+            shadow_atlas_inputs: Vec::new(),
+            shadow_atlas_id: 0,
+            shadow_atlas_drawn: Arc::new(AtomicU64::new(0)),
+            shadow_atlas_cached: false,
+            frame_skins: false,
             // [`FRAMES_IN_FLIGHT`], the number every other ring here is sized
             // by, so a slot has been through the whole loop before it is read.
             // `culls_clusters` rather than the device's feature bits: what
@@ -5138,6 +5195,7 @@ impl ForwardRenderer {
         // The instance pool owns the ring, so its slot is the frame index the
         // uniform buffer and the bind group below are picked with.
         self.frame = self.instances.rotate();
+        self.frame_skins = false;
         self.instances.flush(device)?;
         self.begin_frame_body(device, camera, light, extent)
     }
@@ -5193,6 +5251,9 @@ impl ForwardRenderer {
         extent: (u32, u32),
     ) -> Result<(), SkinningError> {
         self.frame = self.instances.rotate();
+        // An empty plan dispatches nothing — see [`Skinning::begin_frame`] — so
+        // it leaves the vertex pool where it was, and the shadow atlas with it.
+        self.frame_skins = !ranges.is_empty();
         skinning.begin_frame(device, self.frame, ranges)?;
         self.point_skinned_instances(skinning.parity());
         self.instances.flush(device)?;
@@ -5707,20 +5768,23 @@ impl ForwardRenderer {
         // shadows rather than a side effect of where a light was placed — and it
         // is the same statement for a spot or a point light, whose maps are
         // looked at through the camera's pixels just as a cascade's is.
-        if !self.frame_effects.contains(RenderEffects::SHADOWS) {
-            return Ok(());
-        }
+        // `docs/plan/45-shadows.md`'s static-caching rung, and the whole of the
+        // decision it makes: everything below is assembled first and written
+        // only if it differs from what the atlas was last *drawn* from. See
+        // [`ForwardRenderer::shadow_atlas_record`] for what the comparison
+        // covers and what it deliberately does not.
+        let shadows = self.frame_effects.contains(RenderEffects::SHADOWS);
         // The cascades select for the camera, so they take the camera's
         // selection eye — pinned along with the colour pass's, or a frozen cut
         // would draw under a shadow silhouette that was still following the
         // reviewer around.
         let eye = [selection_eye.x, selection_eye.y, selection_eye.z];
-        let write_view = |view: usize, view_proj: Mat4, from: Vec3| -> Result<(), HalError> {
+        let view_block = |view_proj: Mat4, from: Vec3| -> mesh::FrameUniforms {
             // The spread carries the normals view's switch into these blocks too,
             // and nothing reads it: `MeshModules::depth_pipeline` names no
             // fragment stage at all, so the atlas is filled by the geometry
             // stages alone whichever view the colour pass is drawing.
-            let block = mesh::FrameUniforms {
+            mesh::FrameUniforms {
                 view_proj: view_proj.to_cols_array(),
                 camera_position: from.extend(1.0).to_array(),
                 // **This view's budgets, not the camera's**, which is the pair
@@ -5745,62 +5809,170 @@ impl ForwardRenderer {
                 // says a cascade moved the way the viewer did.
                 previous_view_proj: view_proj.to_cols_array(),
                 ..uniforms
-            };
-            device.write_buffer(self.shadow_uniforms[self.frame][view], 0, &block.to_bytes())
+            }
         };
-        for cascade in 0..shadow::CASCADES {
-            let view_proj = cascades.view_proj[cascade];
-            write_view(
-                cascade,
-                view_proj,
-                camera.eye + direction * cascades.far[cascade],
-            )?;
-            self.shadow_draws[cascade].begin_frame(
-                device,
-                self.frame,
-                &Frustum::from_view_projection(view_proj),
-                instance_count,
-                eye,
-                self.shadow_lod_params,
+        // Which view gets which block, and which cull is parametrised with
+        // which frustum — **built before either is written**, because the
+        // record below has to be exactly what the atlas would be drawn from
+        // rather than a second derivation of it. A frame with shadows off fills
+        // neither: nothing draws into the atlas, so the pass's clear is the
+        // whole of what it will hold.
+        let mut views: Vec<(usize, mesh::FrameUniforms)> = Vec::with_capacity(SHADOW_VIEWS);
+        let mut culls: Vec<(usize, Frustum)> = Vec::with_capacity(SHADOW_CULLS);
+        if shadows {
+            for cascade in 0..shadow::CASCADES {
+                let view_proj = cascades.view_proj[cascade];
+                views.push((
+                    cascade,
+                    view_block(view_proj, camera.eye + direction * cascades.far[cascade]),
+                ));
+                culls.push((cascade, Frustum::from_view_projection(view_proj)));
+            }
+            for (slot, held) in self.shadow_lights.slots().iter().enumerate() {
+                let Some(held) = held else {
+                    continue;
+                };
+                // A selection's indices are into the list it was run over, which
+                // is this one — so this is a resolution rather than a check.
+                // Skipped rather than asserted all the same, because the
+                // alternative to a frame with one shadow missing is no frame at
+                // all.
+                let Some(light) = self.extra_lights.get(held.light) else {
+                    continue;
+                };
+                for face in 0..shadow::tile_span(light) {
+                    views.push((
+                        shadow_view(slot, face),
+                        view_block(
+                            Mat4::from_cols_array(&light_view_proj[held.base + face]),
+                            light.sphere().0,
+                        ),
+                    ));
+                }
+                let frustum = match light {
+                    Light::Point(point) => shadow::point_frustum(point),
+                    // A rectangle holds no slot, for the reason the
+                    // `light_view_proj` fill above gives, so it cannot reach
+                    // this loop; its tile's identity matrix is what this would
+                    // cull against if it did.
+                    Light::Spot(_) | Light::Rect(_) => Frustum::from_view_projection(
+                        Mat4::from_cols_array(&light_view_proj[held.base]),
+                    ),
+                };
+                culls.push((shadow_cull(slot), frustum));
+            }
+        }
+
+        let record = self.shadow_atlas_record(&views, &culls, eye, instance_count, shadows);
+        if record != self.shadow_atlas_inputs {
+            self.shadow_atlas_inputs = record;
+            self.shadow_atlas_id = self.shadow_atlas_id.wrapping_add(1);
+        }
+        self.shadow_atlas_cached = !self.frame_skins
+            && self.shadow_atlas_drawn.load(Ordering::Relaxed) == self.shadow_atlas_id;
+        if self.shadow_atlas_cached {
+            return Ok(());
+        }
+
+        for (view, block) in &views {
+            device.write_buffer(
+                self.shadow_uniforms[self.frame][*view],
+                0,
+                &block.to_bytes(),
             )?;
         }
-        for (slot, held) in self.shadow_lights.slots().iter().enumerate() {
-            let Some(held) = held else {
-                continue;
-            };
-            // A selection's indices are into the list it was run over, which is
-            // this one — so this is a resolution rather than a check. Skipped
-            // rather than asserted all the same, because the alternative to a
-            // frame with one shadow missing is no frame at all.
-            let Some(light) = self.extra_lights.get(held.light) else {
-                continue;
-            };
-            for face in 0..shadow::tile_span(light) {
-                write_view(
-                    shadow_view(slot, face),
-                    Mat4::from_cols_array(&light_view_proj[held.base + face]),
-                    light.sphere().0,
-                )?;
-            }
-            let frustum = match light {
-                Light::Point(point) => shadow::point_frustum(point),
-                // A rectangle holds no slot, for the reason the `light_view_proj`
-                // fill above gives, so it cannot reach this loop; its tile's
-                // identity matrix is what this would cull against if it did.
-                Light::Spot(_) | Light::Rect(_) => Frustum::from_view_projection(
-                    Mat4::from_cols_array(&light_view_proj[held.base]),
-                ),
-            };
-            self.shadow_draws[shadow_cull(slot)].begin_frame(
+        for (cull, frustum) in &culls {
+            self.shadow_draws[*cull].begin_frame(
                 device,
                 self.frame,
-                &frustum,
+                frustum,
                 instance_count,
                 eye,
                 self.shadow_lod_params,
             )?;
         }
         Ok(())
+    }
+
+    /// Everything the shadow atlas's contents are a function of, as bytes to
+    /// compare with the reading the image was last drawn from.
+    ///
+    /// # What is in it
+    ///
+    /// * **Every view's block and every cull's frustum**, exactly the values
+    ///   [`begin_frame_body`](Self::begin_frame_body) is about to write. Those
+    ///   carry the sun's cascade matrices, each shadowed light's matrices, the
+    ///   selection's atlas rectangles and this frame's shadow LOD budgets — so
+    ///   a light that moved, turned, changed radius or angle, gained or lost a
+    ///   tile, or landed in a different rectangle is a different reading, and so
+    ///   is a camera that moved, because a cascade is fitted to it.
+    /// * **The selection eye and the instance count**, which reach the culls
+    ///   beside the frusta and are in no block.
+    /// * [`InstancePool::revision`], which is every caster: a transform, a mesh,
+    ///   a material, a removal or a skinned re-point all pass through the one
+    ///   write that moves it. It is conservative — it moves for writes no map
+    ///   could show — and it is never still while a byte the shadow pass draws
+    ///   from has changed.
+    ///
+    /// The bytes are the blocks' own `to_bytes` — the encoding the GPU reads —
+    /// rather than the objects' memory, so no padding and no `f32` bit pattern
+    /// nobody wrote is in the comparison. Two readings that differ by `-0.0`
+    /// against `0.0` compare unequal and redraw, which is the safe direction.
+    ///
+    /// A skinned frame is **not** in here and is not meant to be: a record that
+    /// merely carried "this frame skins" would still match the last skinned
+    /// frame's and cache. [`ForwardRenderer::frame_skins`] is a separate veto on
+    /// the answer for that reason, and it is where that limit is written down.
+    ///
+    /// # What is deliberately not in it
+    ///
+    /// * **The mesh pool.** Its buffers are written by `build_geometry` and
+    ///   `residents` alone, both of which run inside
+    ///   [`with_scene`](Self::with_scene) before a renderer exists — this type
+    ///   exposes no way to upload or free a mesh afterwards. The one runtime
+    ///   caller of the suballocator is
+    ///   [`reserve_skinned`](Self::reserve_skinned), whose bytes are a skinned
+    ///   region's, and those are `frame_skins`' always-redraw case.
+    /// * **A frame with shadows off**, whose reading is the discriminator and
+    ///   nothing else: the pass records its clear and no draw, so what the
+    ///   atlas holds does not depend on the camera, the lights or the casters,
+    ///   and a frame that has already cleared it need not clear it again.
+    /// * **Materials, samplers and the colour pipeline.** `depth_pipeline`
+    ///   names no fragment stage, so nothing the atlas holds is a function of
+    ///   them.
+    fn shadow_atlas_record(
+        &self,
+        views: &[(usize, mesh::FrameUniforms)],
+        culls: &[(usize, Frustum)],
+        eye: [f32; 3],
+        instance_count: u32,
+        shadows: bool,
+    ) -> Vec<u8> {
+        // The view blocks are almost all of it, so this is one allocation a
+        // frame rather than a handful of regrowths. A hint, not a bound.
+        let mut record = Vec::with_capacity(SHADOW_VIEWS * mesh::FRAME_UNIFORMS_SIZE);
+        record.push(u8::from(shadows));
+        if !shadows {
+            return record;
+        }
+        record.extend_from_slice(&self.instances.revision().to_le_bytes());
+        record.extend_from_slice(&instance_count.to_le_bytes());
+        for value in eye {
+            record.extend_from_slice(&value.to_le_bytes());
+        }
+        for (view, block) in views {
+            record.extend_from_slice(&(*view as u32).to_le_bytes());
+            record.extend_from_slice(&block.to_bytes());
+        }
+        for (cull, frustum) in culls {
+            record.extend_from_slice(&(*cull as u32).to_le_bytes());
+            for plane in frustum.planes {
+                for value in plane.to_array() {
+                    record.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+        record
     }
 
     /// Puts an object in the scene and returns the handle that names it.
@@ -7509,10 +7681,32 @@ impl ForwardRenderer {
     /// That is the whole switch, and it is the same mechanism a free tile
     /// already had rather than a second one: no cull is dispatched and no
     /// viewport is drawn, the pass records its clear and nothing else, and every
-    /// comparison against the atlas comes back fully lit. The pass itself stays —
-    /// it is what *writes* that clear, and skipping it would leave the atlas
-    /// holding the last frame that did draw into it, or undefined memory on the
-    /// first frame of all.
+    /// comparison against the atlas comes back fully lit. The pass itself stays
+    /// on the frame that switches it off — it is what *writes* that clear, and a
+    /// frame that skipped it would leave the atlas holding the last frame that
+    /// did draw into it, or undefined memory on the first frame of all.
+    ///
+    /// # A cached atlas records nothing at all
+    ///
+    /// `docs/plan/45-shadows.md`'s static-caching rung. When
+    /// [`ForwardRenderer::shadow_atlas_cached`] says the image already holds
+    /// what this frame would draw, this adds **no cull and no pass**: the atlas
+    /// is imported so the passes that sample it have an edge to the resource,
+    /// and it keeps the contents an earlier frame left in it. That is why the
+    /// image is a persistent one with a tracked ledger entry rather than a
+    /// transient — nothing else in the frame can alias it, so what it holds is
+    /// what the last pass to write it wrote.
+    ///
+    /// **Whole-atlas rather than per-tile**, and the reason is the clear. The
+    /// only way this seam can clear a depth attachment is a pass-wide
+    /// [`LoadOp::Clear`], which covers every tile including the ones being
+    /// kept; the region-bounded alternatives are not portable — Metal's load
+    /// action and WebGPU's `loadOp` have no render area to bound them, so a
+    /// clear that covered part of the image on Vulkan and all of it on Metal
+    /// would be a cached tile that survives on one backend and is erased on
+    /// another. So one changed input redraws every tile, and the per-tile rung
+    /// needs a scissored depth clear this seam does not have. `docs/backlog.md`
+    /// carries it.
     fn add_shadow_pass(
         &self,
         graph: &mut RenderGraph<'_>,
@@ -7542,6 +7736,13 @@ impl ForwardRenderer {
                 final_state: ResourceState::ShaderRead,
             },
         );
+        // The cached frame's whole answer: the image above and nothing that
+        // touches it. It is already in `ShaderRead` — the frame that drew it
+        // handed it back that way — so the graph has no transition to make, and
+        // the passes that sample it read the maps an earlier frame left there.
+        if self.shadow_atlas_cached {
+            return (atlas, 0);
+        }
         let placeholder = graph.import_image(
             "shadow-placeholder",
             ImportedImage {
@@ -7706,7 +7907,13 @@ impl ForwardRenderer {
         // it move when the tile allocation does.
         let recorded = (views.len() * bucket_draws.calls.len()) as u64;
 
+        // What the image will hold once this body has run, carried into it so
+        // that *recording* the pass is not what claims the atlas was drawn — see
+        // [`ForwardRenderer::shadow_atlas_drawn`].
+        let drawn = Arc::clone(&self.shadow_atlas_drawn);
+        let drawn_id = self.shadow_atlas_id;
         pass.execute(move |ctx| {
+            drawn.store(drawn_id, Ordering::Relaxed);
             let encoder = ctx.encoder();
             bucket_draws.open(encoder);
             for (view, tile, cull) in &views {
@@ -7755,6 +7962,24 @@ impl ForwardRenderer {
     ///
     /// It is this frame's answer, written by [`Self::begin_frame`]: before the
     /// first frame every slot is free.
+    /// Whether this frame took the shadow atlas as an earlier frame left it,
+    /// rather than drawing it again.
+    ///
+    /// `docs/plan/45-shadows.md`'s static-caching rung, read back. True means
+    /// this frame recorded **no** shadow cull and no shadow pass, and every map
+    /// sampled through [`Self::shadow_lights`]'s rectangles is the one the last
+    /// frame that did draw put there — so a caller comparing two frames' pass
+    /// lists, draw counts or GPU timings has to know which of them redrew.
+    ///
+    /// Decided by [`Self::begin_frame`] out of everything the atlas's contents
+    /// are a function of — see `ForwardRenderer::shadow_atlas_record` — and it
+    /// answers `false` before the first frame, because no frame has been opened
+    /// and so none of them has held anything.
+    #[must_use]
+    pub const fn shadow_atlas_cached(&self) -> bool {
+        self.shadow_atlas_cached
+    }
+
     #[must_use]
     pub const fn shadow_lights(&self) -> &shadow::Selection {
         &self.shadow_lights
@@ -12817,12 +13042,17 @@ mod tests {
         let imported = swapchain_image(device);
         let mut recorded = Vec::with_capacity(SHADOW_LAPS);
 
-        for _ in 0..SHADOW_LAPS {
+        for lap in 0..SHADOW_LAPS {
             renderer
                 .begin_frame(
                     device,
                     &Camera::default(),
-                    &DirectionalLight::default(),
+                    // **A different sun each lap**, so every lap redraws the
+                    // atlas: this is a test about the barrier a frame that
+                    // writes the image declares, and a lap that cached would
+                    // record no pass and no transition at all. See
+                    // [`moving_sun`].
+                    &moving_sun(u32::try_from(lap).expect("a handful of laps")),
                     (64, 48),
                 )
                 .expect("write");
@@ -12882,9 +13112,9 @@ mod tests {
         assert_eq!(
             atlas_writes, SHADOW_LAPS,
             "{named} barrier(s) named the atlas or its placeholder across {SHADOW_LAPS} laps, \
-             {atlas_writes} of them taking the atlas into DepthStencilWrite — the shadow pass \
-             writes it every frame, so anything else means the loop above asserted on a stream \
-             that does not contain the transition it is about"
+             {atlas_writes} of them taking the atlas into DepthStencilWrite — every lap moved \
+             the sun, so every lap redraws the atlas, and anything else means the loop above \
+             asserted on a stream that does not contain the transition it is about"
         );
         let (_, ended) = tracked[0];
         assert_eq!(
@@ -12900,6 +13130,424 @@ mod tests {
         pool.destroy(device);
         device.destroy_image_view(imported.view);
         device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// A renderer with a shadowed spot beside the sun's cascades and a caster
+    /// for both to draw, which is the smallest scene the atlas cache has
+    /// anything to say about: without a light tile the only maps are the
+    /// cascades, and without a caster every tile is a clear.
+    fn shadow_cache_scene(
+        device: &dyn Device,
+        queue: QueueHandle,
+    ) -> (ForwardRenderer, InstanceHandle) {
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let cube = place_cube(&mut renderer, Mat4::IDENTITY);
+        renderer.set_lights(&[shadowable_spot(-1.0)]);
+        (renderer, cube)
+    }
+
+    /// Draws one frame and answers whether it drew the shadow atlas, **read two
+    /// ways that have to agree**.
+    ///
+    /// [`ForwardRenderer::shadow_atlas_cached`] is the renderer's own claim and
+    /// the recorded stream is what the device was actually told; either on its
+    /// own would be satisfied by a renderer that reported one thing and did the
+    /// other, which is precisely the failure a cache has. `seen` is the cursor
+    /// into the cumulative recorder, so each call reads its own frame.
+    fn drew_the_atlas(
+        recorder: &Recorder,
+        seen: &mut usize,
+        device: &dyn Device,
+        renderer: &mut ForwardRenderer,
+        queue: QueueHandle,
+        camera: &Camera,
+        sun: &DirectionalLight,
+    ) -> bool {
+        let drawn = frame_seen_from(device, renderer, queue, camera, sun);
+        let claimed = renderer.shadow_atlas_cached();
+        let commands = recorder.commands();
+        let opened = commands[*seen..].iter().any(|command| {
+            command
+                .opens_pass()
+                .is_some_and(|(_, label)| label == Some("shadow"))
+        });
+        *seen = commands.len();
+        drawn.release(device);
+        assert_eq!(
+            opened,
+            !claimed,
+            "the renderer reports cached = {claimed} and its frame {} a pass labelled `shadow`",
+            if opened { "opened" } else { "opened no" }
+        );
+        opened
+    }
+
+    /// **A frame over a scene nothing moved in does not draw the shadow atlas
+    /// again**, and what it saves is the whole of the atlas's work.
+    ///
+    /// `docs/plan/45-shadows.md`'s static-caching rung, and the observable it
+    /// otherwise has none for: the map a cached frame samples is byte for byte
+    /// the map the frame before it sampled, so no golden image and no readback
+    /// can tell the two frames apart. The recorded command stream can — and the
+    /// dispatch count is the half that says the *culls* went with the pass,
+    /// rather than the frame still paying for the draws it decided not to
+    /// record.
+    #[test]
+    fn a_frame_over_a_still_scene_does_not_draw_the_shadow_atlas_again() {
+        use crcbl_hal::null::Command;
+
+        // The blur count is a process-global console variable, and the frame's
+        // draw count below includes the full-screen triangle each blur records
+        // — so a concurrent test holding `r_ssao_blur_passes` at two would move
+        // it under this one. Held rather than merely read, which is the
+        // convention that variable's own test set.
+        let _blurs = ssao_blur_switch();
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let (mut renderer, _) = shadow_cache_scene(device, queue);
+        let camera = Camera::default();
+        let sun = DirectionalLight::default();
+
+        let mut seen = 0usize;
+        let dispatches = |recorder: &Recorder, from: usize| {
+            recorder.commands()[from..]
+                .iter()
+                .filter(|command| matches!(command, Command::Dispatch { .. }))
+                .count()
+        };
+
+        let at = seen;
+        assert!(
+            drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ),
+            "the first frame of all has to draw the atlas: nothing has put anything in it"
+        );
+        let first = dispatches(&recorder, at);
+        let drawing_draws = renderer.counters().draws;
+        let buckets = renderer.bucket_constants.len() as u64;
+        assert!(
+            renderer.shadow_lights().base_of(0).is_some(),
+            "the spot must hold a run for the count below to include a light slot's cull"
+        );
+        // The camera's own triple and topic 18's clustering dispatch, plus a
+        // triple per cascade and one for the spot's slot.
+        assert_eq!(
+            first,
+            DrawGen::MAX_PASSES as usize * (2 + shadow::CASCADES) + 1,
+            "the drawing frame did not record the culls this test is about skipping"
+        );
+
+        for round in 0..3 {
+            let at = seen;
+            assert!(
+                !drew_the_atlas(
+                    &recorder,
+                    &mut seen,
+                    device,
+                    &mut renderer,
+                    queue,
+                    &camera,
+                    &sun
+                ),
+                "round {round} redrew an atlas nothing had changed"
+            );
+            assert_eq!(
+                dispatches(&recorder, at),
+                DrawGen::MAX_PASSES as usize + 1,
+                "round {round} kept a shadow cull it had no pass to feed"
+            );
+            assert_eq!(
+                drawing_draws - renderer.counters().draws,
+                (shadow::CASCADES + 1) as u64 * buckets,
+                "round {round}: the frame's own draw count did not lose exactly the atlas's \
+                 calls — one per bucket per cascade, and one per bucket for the spot's tile"
+            );
+        }
+
+        renderer.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **Every input the atlas is drawn from redraws it**, one at a time.
+    ///
+    /// The half that stops "cached everything, for ever" from passing every
+    /// assertion above. Each arm moves exactly one thing and asserts the next
+    /// frame draws again — and then holds still and asserts it stops, so an arm
+    /// cannot pass by having broken the cache outright.
+    ///
+    /// The camera is in here because it is not obvious: a shadow map is drawn
+    /// from a light, not from the eye. But a cascade is fitted to the camera's
+    /// own frustum, and every shadow cull selects detail at the camera's pixels
+    /// — `SHADOW_LOD_BIAS` — so a moved eye is a different atlas.
+    ///
+    /// `settles` is how many still frames it takes to go quiet again, and it is
+    /// two for exactly one arm: `InstancePool`'s carry-forward puts a moved
+    /// instance's `previous_transform` back at rest on the frame *after* the
+    /// move, and that is a write, which is a change this record cannot tell
+    /// from any other. See `InstancePool::revision`, which says so.
+    #[test]
+    fn each_thing_the_atlas_is_drawn_from_redraws_it() {
+        let camera = Camera::default();
+        let sun = DirectionalLight::default();
+        let moved_camera = Camera {
+            eye: camera.eye + Vec3::X * 4.0,
+            ..camera
+        };
+        type Change = fn(&mut ForwardRenderer, InstanceHandle);
+        let arms: [(&str, Change, &Camera, &DirectionalLight, usize); 4] = [
+            (
+                "a caster moved",
+                |renderer, cube| {
+                    renderer.set_instance(
+                        cube,
+                        &InstanceDesc {
+                            mesh: DEMO_CUBE,
+                            material: DEMO_UNTINTED,
+                            transform: Mat4::from_translation(Vec3::X),
+                        },
+                    );
+                },
+                &camera,
+                &sun,
+                2,
+            ),
+            (
+                "a caster removed",
+                |renderer, cube| renderer.remove_instance(cube),
+                &camera,
+                &sun,
+                1,
+            ),
+            (
+                "the light moved",
+                |renderer, _| renderer.set_lights(&[shadowable_spot(1.5)]),
+                &camera,
+                &sun,
+                1,
+            ),
+            ("the camera moved", |_, _| {}, &moved_camera, &sun, 1),
+        ];
+
+        for (what, change, camera, sun, settles) in arms {
+            let (recorder, device, queue) = open();
+            let device = device.as_ref();
+            let (mut renderer, cube) = shadow_cache_scene(device, queue);
+            let mut seen = 0usize;
+            // Two frames, so the atlas is drawn and then held: the arm's own
+            // assertion is about a frame that would otherwise have cached.
+            for round in 0..2 {
+                let drew = drew_the_atlas(
+                    &recorder,
+                    &mut seen,
+                    device,
+                    &mut renderer,
+                    queue,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                );
+                assert_eq!(
+                    drew,
+                    round == 0,
+                    "{what}: the still frames before the change did not settle"
+                );
+            }
+
+            change(&mut renderer, cube);
+            assert!(
+                drew_the_atlas(
+                    &recorder,
+                    &mut seen,
+                    device,
+                    &mut renderer,
+                    queue,
+                    camera,
+                    sun
+                ),
+                "{what} and the atlas was not drawn again"
+            );
+            // And it goes quiet again in exactly `settles` frames, so the arm
+            // cannot pass by having broken the cache rather than by having
+            // invalidated it — and a change that started redrawing for ever
+            // fails here rather than going unnoticed.
+            for round in 0..settles {
+                assert_eq!(
+                    drew_the_atlas(
+                        &recorder,
+                        &mut seen,
+                        device,
+                        &mut renderer,
+                        queue,
+                        camera,
+                        sun
+                    ),
+                    round + 1 < settles,
+                    "{what}: the still frames after the change did not settle in {settles}"
+                );
+            }
+
+            renderer.destroy(device);
+            recorder.assert_valid();
+        }
+    }
+
+    /// **A frame with a skinned object in it always redraws the atlas**, and
+    /// that is a limit written down rather than a gap.
+    ///
+    /// A skinned caster's vertices are produced by a compute dispatch into the
+    /// pool, so there is nothing on the host to compare: the palette a caller
+    /// hands over is not the geometry, and the geometry is never read back. The
+    /// honest answer is to redraw, and the dishonest one is a map of a pose the
+    /// character has left.
+    #[test]
+    fn a_frame_with_a_skinned_object_never_caches_the_atlas() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut fixture = SkinnedFixture::build(device, queue);
+        fixture.renderer.set_lights(&[shadowable_spot(-1.0)]);
+        let imported = swapchain_image_at(device, TEST_EXTENT);
+        let mut pool = crate::TransientPool::new();
+
+        // The same palette and the same plan every lap, so nothing a host-side
+        // comparison could see has moved.
+        for lap in 0..3 {
+            fixture.begin(device);
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            fixture.renderer.add_skinned_passes(
+                &mut graph,
+                &pool,
+                target,
+                TEST_EXTENT,
+                &fixture.skinning,
+            );
+            let compiled = graph.compile(&pool).expect("a legal frame");
+            let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("skinned lap"),
+                queue,
+            });
+            compiled
+                .execute(device, &mut pool, encoder.as_mut(), None)
+                .expect("the graph executed");
+            device.destroy_command_buffer(encoder.finish().expect("recording succeeded"));
+            assert!(
+                !fixture.renderer.shadow_atlas_cached(),
+                "lap {lap} held a shadow map of a pose no host-side comparison can vouch for"
+            );
+        }
+
+        fixture.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **Switching the shadows off clears the atlas once, and then holds the
+    /// clear**, which is the same cache answering a frame that draws nothing.
+    ///
+    /// The switched-off frame is not itself a cached frame: the pass has to run
+    /// to write the reversed-Z clear that makes every comparison come back lit,
+    /// and the image holds the last drawn maps until it does. What *is* cached
+    /// is every frame after it, and the record for a switched-off frame is
+    /// deliberately blind to the camera and the casters, because nothing about
+    /// them reaches an atlas nothing draws into.
+    #[test]
+    fn switching_the_shadows_off_clears_the_atlas_once_and_then_holds_it() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let (mut renderer, cube) = shadow_cache_scene(device, queue);
+        let camera = Camera::default();
+        let sun = DirectionalLight::default();
+        let mut seen = 0usize;
+
+        assert!(
+            drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ),
+            "the first frame draws the maps"
+        );
+        renderer.set_effect_request(EffectRequest {
+            programmatic: EffectOverride::none().force(RenderEffects::SHADOWS, Some(false)),
+            ..EffectRequest::default()
+        });
+        assert!(
+            drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ),
+            "the frame that switched the shadows off has to run the pass that clears the maps \
+             out of the image"
+        );
+        assert!(
+            !drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ),
+            "a second switched-off frame cleared an atlas that was already clear"
+        );
+        // And nothing about the scene reaches a frame that draws no map: the
+        // caster moves and the atlas is still the clear it was.
+        renderer.set_instance(
+            cube,
+            &InstanceDesc {
+                mesh: DEMO_CUBE,
+                material: DEMO_UNTINTED,
+                transform: Mat4::from_translation(Vec3::X),
+            },
+        );
+        assert!(
+            !drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ),
+            "a caster moved with the shadows off, and the frame cleared the atlas over again"
+        );
+
+        renderer.set_effect_request(EffectRequest::default());
+        assert!(
+            drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ),
+            "switching the shadows back on has to draw the maps the clear replaced"
+        );
+
+        renderer.destroy(device);
         recorder.assert_valid();
     }
 
@@ -14252,7 +14900,12 @@ mod tests {
         let mut renderer =
             ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
 
-        let quiet = frame(device, &mut renderer, queue);
+        // A different sun in each of the two frames, so both of them redraw the
+        // shadow atlas: the claim below is that the layer's own call is the one
+        // draw the second frame gained, and a second frame that cached its
+        // atlas would have lost the atlas's draws at the same time. See
+        // [`moving_sun`].
+        let quiet = frame_moving_the_sun(device, &mut renderer, queue, 0);
         let without = renderer.counters().draws;
         assert_eq!(
             without,
@@ -14265,7 +14918,7 @@ mod tests {
         renderer
             .debug_draw()
             .line(Vec3::ZERO, Vec3::X, [1.0, 1.0, 1.0, 1.0]);
-        let drawn = frame(device, &mut renderer, queue);
+        let drawn = frame_moving_the_sun(device, &mut renderer, queue, 1);
         let with = renderer.counters().draws;
         assert_eq!(
             with,
@@ -14380,6 +15033,12 @@ mod tests {
     fn the_wireframe_view_swaps_the_colour_passs_pipeline_and_no_other() {
         use crcbl_hal::null::Command;
 
+        // The pipelines a frame binds include one per occlusion blur, and the
+        // blur count is a process-global console variable — so a concurrent
+        // test holding `r_ssao_blur_passes` at two adds a bind to one of the
+        // frames below and not to the others. It reddened this assertion on
+        // 2026-08-31 under a workspace `cargo test`.
+        let _blurs = ssao_blur_switch();
         let (recorder, device, queue) =
             open_with(Features::GPU_DRIVEN | Features::POLYGON_MODE_LINE);
         let device = device.as_ref();
@@ -14396,14 +15055,16 @@ mod tests {
         // The pipelines one frame binds, in record order. Cumulative recorder,
         // so each call takes the tail its own frame added.
         let mut seen = 0usize;
+        // A different sun each lap, so the shadow atlas is redrawn in every one
+        // of them: the comparison below is "which pipelines did this frame
+        // bind", and a lap that cached its atlas would bind the depth-only
+        // pipeline one fewer time for a reason that has nothing to do with the
+        // wireframe. See [`moving_sun`].
+        let mut lap = 0u32;
         let mut pipelines_in_a_frame = |renderer: &mut ForwardRenderer, pool: &mut _| {
+            lap += 1;
             renderer
-                .begin_frame(
-                    device,
-                    &Camera::default(),
-                    &DirectionalLight::default(),
-                    (64, 48),
-                )
+                .begin_frame(device, &Camera::default(), &moving_sun(lap), (64, 48))
                 .expect("write");
             let mut graph = crate::RenderGraph::new(queue);
             let target = graph.import_image("target", imported);
@@ -15627,14 +16288,67 @@ mod tests {
         );
     }
 
+    /// The default sun, turned a little further round for each `lap`.
+    ///
+    /// `docs/plan/45-shadows.md`'s static-caching rung means a second frame over
+    /// a scene nothing moved in records **no shadow pass at all** — see
+    /// [`ForwardRenderer::shadow_atlas_cached`]. That is the feature, and it is
+    /// a difference that every A/B drawing two frames from one renderer would
+    /// otherwise be measuring on top of the one it is about. Turning the sun is
+    /// the smallest input the atlas depends on: the cascades are refitted, so
+    /// the atlas is redrawn, and no pass, pipeline or draw of the frame moves
+    /// with it.
+    ///
+    /// Lap zero is [`DirectionalLight::default`] exactly, so a test whose first
+    /// frame is the ordinary one keeps the frame every other test draws.
+    fn moving_sun(lap: u32) -> DirectionalLight {
+        let sun = DirectionalLight::default();
+        // A degree a lap, about the axis the default direction is not parallel
+        // to. Small enough that every cascade still sees the scene, and large
+        // enough that the snapped cascade origin actually moves.
+        let turn = Mat4::from_rotation_y(
+            f32::from(u16::try_from(lap).expect("a handful of laps")) * std::f32::consts::PI
+                / 180.0,
+        );
+        DirectionalLight {
+            direction: turn.transform_vector3(sun.direction).normalize(),
+            ..sun
+        }
+    }
+
+    /// [`frame`] drawn under [`moving_sun`], so this frame's shadow atlas is
+    /// not the one the lap before it left in the image.
+    fn frame_moving_the_sun(
+        device: &dyn Device,
+        renderer: &mut ForwardRenderer,
+        queue: QueueHandle,
+        lap: u32,
+    ) -> Frame {
+        frame_lit_by(device, renderer, queue, &moving_sun(lap))
+    }
+
     fn frame(device: &dyn Device, renderer: &mut ForwardRenderer, queue: QueueHandle) -> Frame {
+        frame_lit_by(device, renderer, queue, &DirectionalLight::default())
+    }
+
+    fn frame_lit_by(
+        device: &dyn Device,
+        renderer: &mut ForwardRenderer,
+        queue: QueueHandle,
+        sun: &DirectionalLight,
+    ) -> Frame {
+        frame_seen_from(device, renderer, queue, &Camera::default(), sun)
+    }
+
+    fn frame_seen_from(
+        device: &dyn Device,
+        renderer: &mut ForwardRenderer,
+        queue: QueueHandle,
+        camera: &Camera,
+        sun: &DirectionalLight,
+    ) -> Frame {
         renderer
-            .begin_frame(
-                device,
-                &Camera::default(),
-                &DirectionalLight::default(),
-                TEST_EXTENT,
-            )
+            .begin_frame(device, camera, sun, TEST_EXTENT)
             .expect("write");
         let imported = swapchain_image(device);
         let mut graph = crate::RenderGraph::new(queue);

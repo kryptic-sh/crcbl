@@ -159,6 +159,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The shadow atlas is cached: a frame whose lights, casters and camera have
+  not moved does not draw it again.** `docs/plan/45-shadows.md`'s atlas rung,
+  item 5. `crcbl_render::shadow::Selection` now holds its `AtlasAllocator` tiles
+  **across** frames — a slot that wants the size it already has keeps the same
+  texels, and only a slot whose map is gone or whose size changed gives its tile
+  back through `AtlasAllocator::release`, which had no caller in the renderer
+  before this. `ForwardRenderer::begin_frame` compares everything the atlas's
+  contents are a function of against the reading the image was last _drawn_
+  from, and a frame that matches records no shadow cull and no shadow pass at
+  all. `ForwardRenderer::shadow_atlas_cached` reads the decision back, because a
+  cached frame and a redrawn one draw the same picture and nothing else can tell
+  them apart.
+
+  What invalidates it is every view block and cull frustum the pass would be
+  parametrised with — each light's transform, radius and cone, the sun, the
+  camera (a cascade is fitted to it), the atlas rectangles and the shadow LOD
+  budgets — plus `InstancePool::revision`, a new counter that moves on every
+  write to the instance array and so covers every caster, including a removed
+  one. A frame that dispatches skinning is always redrawn: a skinned caster's
+  vertices are written by a compute pass and there is nothing on the host to
+  compare.
+
+  **The unit is the whole atlas, not the tile.** One changed input redraws every
+  map, because the only portable way to clear a depth attachment through this
+  seam is a pass-wide `LoadOp::Clear` — Metal's load action and WebGPU's
+  `loadOp` have no render area to bound them — and per-tile caching needs a
+  scissored clear. `docs/backlog.md` carries it.
+
+- **`ForwardRenderer::shadow_atlas_cached`, `InstancePool::revision` and
+  `crcbl_render::shadow::Tile::level`** are new. **Breaking:**
+  `AtlasAllocator::reset` is gone — nothing calls it now that a tile outlives
+  the frame it was allocated in, and an allocator that could be emptied under
+  held handles was a way to hand the same texels out twice.
+
 - **The console runs a file of commands: `config <name>`.** Source's `exec`,
   under the name `docs/plan/52-debug-console.md` gives it. `config video` reads
   `video.cfg` out of the directory this run's `settings.toml` lives in — the

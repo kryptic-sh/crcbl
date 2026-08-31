@@ -87,6 +87,7 @@ mod motion;
 mod normal_map;
 mod render_scale;
 mod resize;
+mod shadow_cache;
 mod shadow_tiles;
 mod skinned_motion;
 mod smaa;

@@ -255,8 +255,8 @@ within tolerance and was left alone.
   light lights and does not occlude. That capacity is unchanged by the items
   below that have landed — they made the atlas divisible, not larger. The rung
   makes the atlas an **allocator rather than a grid**, in the shape Doom 2016
-  and Unity HDRP ship. **Items 1, 2 and 4 landed 2026-08-31**; 3 and 5 are what
-  is left. Item 2 is what first spends the allocator's levels, and 3 and 5 spend
+  and Unity HDRP ship. **Items 1, 2, 4 and 5 landed 2026-08-31**; 3 is what is
+  left. Item 2 is what first spends the allocator's levels, and 3 and 5 spend
   the frame.
   1. **Variable tile sizes — the allocator landed 2026-08-31.**
      `crcbl_render::shadow::AtlasAllocator` is a quadtree over each of the
@@ -352,8 +352,36 @@ within tolerance and was left alone.
      still the index — but into a _pool the allocator hands out from_ rather
      than into a fixed grid, which is what this item was for.
 
-  5. **Static caching** rides on it once tiles are stable across frames: a tile
-     whose light and covered instances did not move is not re-rendered at all.
+  5. **Static caching — landed 2026-08-31, at whole-atlas granularity.**
+     `crcbl_render::shadow::Selection` holds its tiles across frames: a slot
+     that wants the size it already has keeps the same texels, and only a slot
+     whose map is gone or whose level changed hands its tile back to
+     `AtlasAllocator::release`, which is what gives that function its first
+     caller in the renderer. `ForwardRenderer::begin_frame` then compares
+     everything the atlas is drawn from — every view's block and every cull's
+     frustum, the selection eye, the instance count and `InstancePool::revision`
+     — against the reading the image was last _drawn_ from, and a frame that
+     matches records no cull and no pass. `ForwardRenderer::shadow_atlas_cached`
+     is the readback.
+
+     **The record is committed by the pass's own body, not by the call that
+     records it**, and that is the subtle half: a frame whose graph is refused,
+     or built and dropped, has left the image exactly as it was, and a renderer
+     that had already moved its record on would then hold a map nothing drew.
+     `a_refused_frame_leaves_the_shadow_atlas_where_it_was` is the case.
+
+     **What did not land is the tile as the unit.** The DECIDED rule below says
+     "a lamp that swings costs exactly its own tiles"; what shipped is that one
+     changed input redraws every tile. The obstacle is the clear: this seam can
+     only clear a depth attachment pass-wide, and the region-bounded forms are
+     not portable — Metal's load action and WebGPU's `loadOp` have no render
+     area, so a partial clear would keep a tile on Vulkan and erase it on Metal.
+     Per-tile needs either a `clear_attachment`-with-rects call at the HAL seam
+     or a depth-writing clear quad scissored to the tile. `docs/backlog.md`
+     carries both, and the second half of the same entry: the camera is an input
+     to every tile — cascades are fitted to it and every shadow cull selects
+     detail at the camera's pixels — so the cache only hits on a frame the eye
+     did not move in.
 
   **DECIDED 2026-08-30, the user's rule for this rung:** the atlas is **dynamic
   and cached** — every light re-renders its tiles whenever it or an instance it
@@ -362,11 +390,14 @@ within tolerance and was left alone.
   and a lamp that swings costs exactly its own tiles. That makes items 3 and 5
   the rule rather than an option: the cadence tiers exist to bound the worst
   case when everything moves, and the cache is what makes the common case cheap.
-  A cached tile is not a bake — it is re-rendered the frame its inputs change,
-  and nothing about it survives a load. The budget row — how many shadowed local
-  lights a frame renders and the atlas's size on each of the three quality tiers
-  — is drafted in [39-capabilities.md](39-capabilities.md)'s tier table as
-  starting values to sweep on each tier's hardware.
+  Item 5 landed at whole-atlas granularity on 2026-08-31, so the second half of
+  that rule — a lamp that swings costing _only_ its own tiles — is not built;
+  `docs/backlog.md` carries what it needs. A cached tile is not a bake — it is
+  re-rendered the frame its inputs change, and nothing about it survives a load.
+  The budget row — how many shadowed local lights a frame renders and the
+  atlas's size on each of the three quality tiers — is drafted in
+  [39-capabilities.md](39-capabilities.md)'s tier table as starting values to
+  sweep on each tier's hardware.
 
   Checked by the goldens that stand — the sun's cascades and the four lights
   lantern shadows must not move — plus a scene with more lights than tiles that

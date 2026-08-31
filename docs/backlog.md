@@ -478,27 +478,80 @@ limits rather than fixed:
   not written back. A `bind aim mouse` spelling needs a parser for the other
   variants and a decision about what `Wasd` looks like on one line.
 
-## The shadow atlas allocator: what items 1 and 4 left (2026-08-31)
+## The shadow atlas: what items 1, 2, 4 and 5 left (2026-08-31)
 
-`docs/plan/45-shadows.md`'s atlas rung is five items;
-`crcbl_render::shadow::AtlasAllocator` and `FrameUniforms::shadow_atlas_rect`
-are items 1 and 4, and items 2 (priority and hysteresis), 3 (budget and cadence)
-and 5 (static caching) are what actually spend them. What the two that landed
-left behind:
+`docs/plan/45-shadows.md`'s atlas rung is five items; item 3 (a budget in tiles
+and rendered faces per frame, with the cadence tiers spending it) is the one
+that has not been built. What the four that landed left behind:
 
-- **`AtlasAllocator::release` has no caller in the renderer.**
-  `Selection::lay_out` resets the allocator and re-allocates every frame, so
-  nothing frees a tile. `release` and its merge exist because the static-caching
-  item is what will hold a tile across frames and hand back the one a light
-  stopped needing, and because an allocator that cannot free is not one. It is
-  exercised by `a_released_tile_s_space_is_reusable_at_its_own_size` and by
-  nothing else; the doc comment on `release` says so too.
-- **`MIN_TILE` and `TILE_LEVELS` are still unswept, and now so is the anchor.**
-  The priority rung set `WHOLE_CELL_COVERAGE` at a quarter of the frame's
-  height, and that number is the _conservative end of a sweep bounded by the
-  fixtures that must not move_ rather than the point at which a halved map stops
-  being worth its texels. Read as texels per pixel it is generous: a light at
-  the anchor gets about three shadow texels per screen pixel at 1080p. The
+- **The atlas caches whole, not per tile — and the obstacle is the clear.**
+  `ForwardRenderer::shadow_atlas_record` is one reading over every map, so a
+  single moved light redraws all of them. Making it per-tile needs a way to
+  clear one tile of a depth attachment, and this seam has none: a pass-wide
+  `LoadOp::Clear` is the only clear `crcbl_hal::CommandEncoder` offers for a
+  depth attachment, and the region-bounded forms are not portable — Vulkan's
+  `renderArea` bounds a clear, Metal's `MTLRenderPassDescriptor` load action and
+  WebGPU's `loadOp` do not, so a partial clear would keep a cached tile on one
+  backend and erase it on another. The two candidates are a
+  `clear_attachment`-with-rects call at the HAL seam (four backends to
+  implement, and WebGPU has no such call at all) or a depth-only clear quad — a
+  new `.slang` entry point with `depth_write` and `CompareOp::Always`, scissored
+  to the tile, which `Self::build_depth_fullscreen` already has the pipeline
+  shape for. Neither was in this slice's scope. Until then the plan's "a lamp
+  that swings costs exactly its own tiles" is not what ships.
+
+- **The camera invalidates every tile, so the cache only hits on a still eye.**
+  Cascades are fitted to the camera, and every shadow cull — a spot's and a
+  point's too — takes the camera's selection eye and `shadow_lod_params`, since
+  `SHADOW_LOD_BIAS` denominates the shadow budget in the camera's pixels. So a
+  frame that panned redraws the whole atlas even though no light and no caster
+  moved. This is what bounds the feature's value in a game rather than in an
+  editor, and unpicking it means asking whether a punctual light's shadow LOD
+  should be denominated in _its own_ texels instead — which is a measurement
+  rung, not a refactor, because the present rule is deliberate and is argued in
+  `ForwardRenderer::begin_frame_body`'s comment.
+
+- **A skinned frame never caches, by construction.**
+  `ForwardRenderer::frame_skins` vetoes the answer whenever
+  `begin_skinned_frame` was given a non-empty plan: the vertices are written by
+  a compute pass and there is nothing on the host to compare. A frame with an
+  idle character therefore pays for the whole atlas. Making it cheaper needs the
+  skinning pass to report that a palette did not change, which nothing asks it
+  for today.
+
+- **A moved instance costs two redraws, not one.** `InstancePool`'s
+  carry-forward settles a moved record's `previous_transform` on the frame
+  _after_ the move, which is a write, and `InstancePool::revision` cannot tell
+  it from any other. Conservative in the safe direction and measured — the
+  `settles` column in `each_thing_the_atlas_is_drawn_from_redraws_it` is 2 for
+  the moved-caster arm and 1 for every other — but it is a redraw nothing needs.
+  Filtering it would mean the revision knowing which writes change geometry,
+  which is a comparison per write.
+
+- **What the cache saves is unmeasured.** No `PassStats` run prices a cached
+  frame against a drawn one; the evidence that work is skipped is the null
+  backend's recorded stream (the dispatch count drops from
+  `DrawGen::MAX_PASSES * (2 + CASCADES) + 1` to `DrawGen::MAX_PASSES + 1`, and
+  the frame's own draw count loses one call per bucket per map). A price would
+  want a fixture that alternates a still frame with a moving one, which is what
+  `depth_only.rs` and `shadow_tiles.rs` now deliberately do _not_ do — both turn
+  the sun every frame so that the pass they price is a pass that runs.
+
+- **Three e2e fixtures now move the sun so their frames redraw.**
+  `crates/crcbl/tests/mesh_e2e/shadow_cache.rs`'s `turning_sun` is the helper,
+  and `depth_only.rs`'s price and `resize.rs`'s storm are its callers. Both were
+  static rigs whose second frame would have cached: the price would have had one
+  `shadow` sample and failed its percentile floor, and the storm's "the atlas
+  rendered at its own extent" assertion would have had no pass to check. That is
+  the feature working, and it is also a trap for the next static multi-frame
+  fixture anyone writes.
+
+- **`MIN_TILE` and `TILE_LEVELS` are still unswept, and so is the anchor.** The
+  priority rung set `WHOLE_CELL_COVERAGE` at a quarter of the frame's height,
+  and that number is the _conservative end of a sweep bounded by the fixtures
+  that must not move_ rather than the point at which a halved map stops being
+  worth its texels. Read as texels per pixel it is generous: a light at the
+  anchor gets about three shadow texels per screen pixel at 1080p. The
   parameter-free rule — one texel per pixel, where a map stops being oversampled
   — would demote **every** punctual light in the tree at the 256x192 the goldens
   are blessed at: measured 2026-08-31, `apps/lantern`'s corner downlight covers
@@ -508,11 +561,13 @@ left behind:
   measurement rung of its own. What it would buy is real — the atlas is heavily
   oversampled at golden resolutions — and what it needs is a quality sweep on
   fixtures that may be re-blessed.
+
 - **A demoted map's penumbra is wider in world units, and nothing measures it.**
   `SHADOW_FILTER_TEXELS` is a reach in _tile_ texels, so a light at a quarter of
   a root cell's side filters over four times the world distance. That is correct
   for a map four times coarser, and it is also the largest visible difference
   between a demoted light and a whole-cell one. No fixture compares the two.
+
 - **The demotion test's acne statistic is a stipple count, and the artefact is
   partly sub-pixel.** At the shipped anchor a map delivers roughly three texels
   per screen pixel at every level, so a receiver shadowing itself is filtered by
@@ -522,26 +577,70 @@ left behind:
   gate on and narrower than it would be if the map were coarser than the screen.
   A scene that put a demoted map under one texel per pixel would separate
   further; none exists.
+
 - **Detachment is not asked on a device, and the test says so.** Peter-panning
   is a gap of about the bias, and the bias on a demoted light in that fixture is
   a hundredth of a world unit against a caster a sixth of one tall — under a
   pixel at that camera. What holds that end is the assertion that the demoted
   pool still has a shadow in it at all, which catches a divisor that grew
   instead of shrinking.
+
 - **Only radv and lavapipe have priced the rung**, and the two runs differ in
   the camera's distance rather than in the tile alone — the far camera also
   selects a coarser cut in the shadow pass, since `SHADOW_LOD_BIAS` scales a
   budget denominated in the camera's pixels. Separating the two would need a
   knob that pinned the level, which nothing else would use.
-- **The atlas layout is the fixed grid only while every light clears the
-  anchor.** `Selection::lay_out` asks for each light's own level, coarsest
-  first, and stable-sorts so the order within one level is the slot order every
-  golden was blessed under — so a frame whose lights all reach
-  `WHOLE_CELL_COVERAGE` lays out exactly as before, cell for cell, and every
-  shadow golden and `crates/crcbl/tests/forward_e2e/shadow.rs`'s
-  `tile_origin`-addressed readbacks are untouched. Those readbacks still address
-  by `tile_origin` and would need `ForwardRenderer::shadow_lights`, which now
-  exists, the day a scene they cover demotes a light. None does.
+
+- **The atlas layout is the fixed grid only while every light clears the anchor,
+  and now it is also a function of the frames before this one.**
+  `Selection::lay_out` keeps the tile a slot already holds whenever the level is
+  unchanged and spends the rest coarsest-first in slot order, so a frame whose
+  maps all reach `WHOLE_CELL_COVERAGE` from an empty allocator lays out exactly
+  as the old grid did, cell for cell — and every frame after it keeps that. What
+  is new is that a light demoting and being promoted again can land somewhere
+  other than where a from-scratch layout would put it;
+  `a_demoted_light_gives_ its_cell_back_and_can_take_it_again` asserts it lands
+  back where it started for the one-light case, and nothing asserts it for a
+  churn of several. `crates/crcbl/tests/forward_e2e/shadow.rs`'s
+  `tile_origin`-addressed readbacks still address by `tile_origin` and would
+  need `ForwardRenderer::shadow_lights` the day a scene they cover demotes a
+  light. None does.
+
+## `r_ssao_blur_passes` is a process global and only its own test locks it (2026-08-31)
+
+`crcbl_render::forward`'s test module guards the occlusion blur count with
+`ssao_blur_switch()`, a `Mutex` that
+`a_second_occlusion_blur_is_a_pass_the_frame_records` takes while it sets
+`r_ssao_blur_passes` to two. Every other test that compares a whole pass list, a
+pipeline-bind list or a frame's draw count _reads_ that variable through
+`crate::ssao::blur_passes()` and takes no lock, so a run where those tests
+overlap sees a frame with an extra `ssao-blur-2` pass, an extra full-screen
+triangle and an extra pipeline bind.
+
+**Observed, not predicted.** Two went red that way under a workspace
+`cargo test` on 2026-08-31 —
+`the_wireframe_view_swaps_the_colour_passs_pipeline_and_no_other` and
+`a_frame_over_a_still_scene_does_not_draw_the_shadow_atlas_again` — and
+`the_debug_draw_layer_is_off_by_default_and_lands_before_the_tonemap` and
+`the_upscale_is_the_last_pass_and_only_below_full_scale` went red the same way
+in an earlier run of the same suite. Those that reddened now take the lock.
+
+**Still exposed**, none of which takes it:
+`each_effect_toggle_removes_exactly_the_passes_it_owns`,
+`the_debug_draw_layer_is_off_by_default_and_lands_before_the_tonemap`,
+`the_ground_grid_is_opt_in_and_lands_after_the_tonemap`,
+`the_grids_triangle_is_counted_only_while_it_is_on`,
+`the_debug_draw_layers_call_is_counted_in_the_frames_draws`,
+`the_upscale_is_the_last_pass_and_only_below_full_scale`,
+`the_graph_barriers_the_arguments_into_place_before_the_draws`,
+`the_pass_bound_is_the_widest_frame_the_renderer_records`, and
+`frame_switching_off`'s two callers.
+
+**The fix** is one `let _blurs = ssao_blur_switch();` each, or a stated rule
+that a frame-shape test takes it. It is a defect the ConVar introduced on
+2026-08-31 (`79a555a`), not the shadow-cache slice's, and touching ten tests
+belongs in its own change. Any new `ConVar` a frame's shape depends on has the
+same hazard.
 
 ## The render-quality programme (opened 2026-08-27)
 

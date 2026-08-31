@@ -17,7 +17,8 @@
 //! of them, in [`tile_origin`] order — and each subdivides on its own. That is
 //! the generalisation of the grid rather than a replacement for it: ask every
 //! root for its whole self and the layout is the grid, texel for texel, which
-//! is what this slice does and what keeps every shadow golden where it was.
+//! is what a frame whose maps all take whole cells still gets and what keeps
+//! every shadow golden where it was.
 //!
 //! # What a level is
 //!
@@ -26,15 +27,17 @@
 //! a quarter of the area, so a light demoted one level costs a quarter of what
 //! it did.
 //!
-//! **[`MIN_TILE`] is a floor nothing has measured.** No light asks for a tile
-//! below level 0 until that plan's priority rung exists, so no scene has yet
-//! shown where a halved map stops being worth its texels. [`TILE_LEVELS`] is a
-//! starting point with two bounds behind it and no measurement: the smallest
-//! tile is still far wider than the disc `mesh.slang` filters with — a map
-//! narrow enough for that reach spends its taps on its own edge clamp rather
-//! than on geometry — and one root divided that far already holds more maps
-//! than the light region has slots, so a deeper tree would be levels nothing
-//! could fill. `docs/backlog.md` carries the sweep.
+//! **[`MIN_TILE`] is a floor nothing has measured.** That plan's priority rung
+//! spends the levels above it — `super::tile_level` is the ladder — but the
+//! finest a scene in this tree reaches is a quarter of a cell's side, so
+//! nothing has yet shown where a halved map stops being worth its texels.
+//! [`TILE_LEVELS`] is a starting point with two bounds behind it and no
+//! measurement: the smallest tile is still far wider than the disc
+//! `mesh.slang` filters with — a map narrow enough for that reach spends its
+//! taps on its own edge clamp rather than on geometry — and one root divided
+//! that far already holds more maps than the light region has slots, so a
+//! deeper tree would be levels nothing could fill. `docs/backlog.md` carries
+//! the sweep.
 //!
 //! # Determinism, because the atlas is in every golden
 //!
@@ -144,6 +147,18 @@ pub struct Tile {
 }
 
 impl Tile {
+    /// Which of [`TILE_LEVELS`] sizes this tile is: 0 a whole root cell, each
+    /// one below a halving of it.
+    ///
+    /// Read by [`Selection::lay_out`](super::Selection) to decide whether the
+    /// tile a slot already holds is the size that slot wants this frame — which
+    /// is the whole of the static-caching rung's retention rule, and the reason
+    /// a level is readable off a handle at all.
+    #[must_use]
+    pub const fn level(self) -> usize {
+        self.level
+    }
+
     /// This tile's side in texels: [`TILE`] halved once per level.
     #[must_use]
     pub const fn side(self) -> u32 {
@@ -215,10 +230,13 @@ enum Node {
 
 /// The atlas's free space, as a quadtree over each of its [`TILES`] root cells.
 ///
-/// Reset once per frame by [`Selection`](super::Selection), which is this
-/// type's only caller in the renderer: a frame's allocation is a fresh
-/// arrangement of the same image, and the cadence rung of
-/// `docs/plan/45-shadows.md` is what will make a tile survive a frame.
+/// [`Selection`](super::Selection) is this type's only caller in the renderer,
+/// and it holds its tiles **across frames**: a slot that wants the size it
+/// already has keeps the rectangle it has, and only a slot whose size changed
+/// or whose map is gone hands one back through [`release`](Self::release).
+/// `docs/plan/45-shadows.md`'s static-caching rung is why — an atlas re-laid
+/// out from nothing every frame is one whose contents can never outlive the
+/// frame that drew them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AtlasAllocator {
     /// `nodes[level]` is the state of every node of that level, `nodes_at` of
@@ -251,18 +269,6 @@ impl AtlasAllocator {
         }
     }
 
-    /// Hands everything back, as [`new`](Self::new) left it.
-    ///
-    /// Every [`Tile`] handed out before this names space the allocator will
-    /// hand out again, which is why the renderer resets and re-allocates in one
-    /// place rather than keeping handles across the call.
-    pub fn reset(&mut self) {
-        for (level, nodes) in self.nodes.iter_mut().enumerate() {
-            let state = if level == 0 { Node::Free } else { Node::Absent };
-            nodes.fill(state);
-        }
-    }
-
     /// A tile of `level` — [`TILE`] halved `level` times — or `None` if the
     /// atlas has no room for one.
     ///
@@ -282,14 +288,12 @@ impl AtlasAllocator {
     /// it an atlas that had once handed out a quarter tile could never hand out
     /// a whole one again, however empty it was.
     ///
-    /// **Nothing in the renderer calls this yet**, and the tests are its only
-    /// callers: `Selection::lay_out` throws the whole atlas away with
-    /// [`reset`](Self::reset) and lays it out again from nothing every frame,
-    /// which is the cheapest thing that can be correct while every tile lives
-    /// exactly one frame. It is `docs/plan/45-shadows.md`'s static-caching rung
-    /// that gives a tile a lifetime longer than the frame it was drawn in, and
-    /// so gives this a caller — freeing one light's tiles while its neighbours
-    /// keep theirs is the whole of what that rung needs from an allocator.
+    /// `Selection::lay_out` is the caller: a slot whose map is gone, or whose
+    /// map wants a size other than the one it holds, gives its tile back here
+    /// before the frame's remaining requests are spent, and every other slot
+    /// keeps the rectangle it already had. Freeing one light's tiles while its
+    /// neighbours keep theirs is exactly what a tile with a lifetime longer
+    /// than one frame needs from an allocator.
     pub fn release(&mut self, tile: Tile) {
         let mut level = tile.level;
         let mut node = tile.node;
