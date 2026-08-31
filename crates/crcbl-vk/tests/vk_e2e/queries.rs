@@ -18,6 +18,7 @@ use crcbl_hal::{
     CommandEncoderDesc, ComputePassDesc, Features, PassTimestampWrites, PresentInfo, QueryKind,
     QuerySetDesc, SubmitInfo,
 };
+use glam::Vec3;
 
 /// How many timers it takes to see every pass a forward frame records.
 ///
@@ -26,6 +27,16 @@ use crcbl_hal::{
 /// stops matching the day a pass is added — which is the drift
 /// `ForwardRenderer::MAX_PASSES` exists to end.
 const TIMED_PASSES: u32 = crcbl_render::ForwardRenderer::MAX_PASSES;
+
+/// How far the sun moves between the timed frames, in render-space units on X
+/// before the direction is renormalised.
+///
+/// Enough that the cascade views a frame is fitted to differ from the last
+/// frame's, which is what makes the shadow atlas redraw and puts its passes in
+/// the report; small enough that the scene stays the one `mesh` blessed. The
+/// value is not a measurement — any non-zero nudge redraws — so it is here to
+/// be named rather than to be tuned.
+const SUN_NUDGE: f32 = 0.01;
 
 /// Timestamp queries, if the device has them: the profiler HUD's foundation,
 /// and the seam says it degrades rather than breaks without them.
@@ -160,18 +171,24 @@ fn per_pass_gpu_timers_report_real_numbers() {
         crcbl_render::PassTimers::new(device, 2, TIMED_PASSES).expect("the device reports timestamps");
     let camera = mesh_camera(crcbl_render::Projection::default());
 
-    // Enough frames for the timer ring to come round and resolve a slot.
-    for _ in 0..6 {
+    // Enough frames for the timer ring to come round and resolve a slot, and
+    // the sun somewhere different in each of them. `ForwardRenderer` holds the
+    // shadow atlas across frames and records neither a cull nor the depth-only
+    // pass for a frame whose inputs match the reading the image was last drawn
+    // from, so a still sun would leave the last frame — the one `latest`
+    // reports — with no shadow rows at all. This test is about the report a
+    // full frame produces, so every frame here is a full one.
+    let default_sun = crcbl_render::DirectionalLight::default();
+    for frame in 0..6 {
+        let sun = crcbl_render::DirectionalLight {
+            direction: (default_sun.direction + Vec3::X * (frame as f32 * SUN_NUDGE)).normalize(),
+            ..default_sun
+        };
         let acquired = device
             .acquire_next_frame(headless.swapchain)
             .expect("an image");
         renderer
-            .begin_frame(
-                device,
-                &camera,
-                &crcbl_render::DirectionalLight::default(),
-                MESH_EXTENT,
-            )
+            .begin_frame(device, &camera, &sun, MESH_EXTENT)
             .expect("uniforms");
         let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
             label: Some("timed frame"),
