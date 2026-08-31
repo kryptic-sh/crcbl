@@ -691,6 +691,51 @@ const fn shadow_cull(slot: usize) -> usize {
     shadow::CASCADES + slot
 }
 
+const _: () = assert!(
+    SHADOW_CULLS == shadow::GROUPS,
+    "a cull is a cadence group: `shadow::Cadence` schedules what this file \
+     dispatches, and two different counts would schedule a group nothing draws"
+);
+
+/// Vertices in the over-sized triangle `mesh.slang`'s `depthClearVertexMain`
+/// generates from `SV_VertexID`. No geometry is bound.
+const TILE_CLEAR_VERTICES: u32 = 3;
+
+const _: () = assert!(
+    crcbl_shaders::mesh::SHADOW_ATLAS_CLEAR_DEPTH == crcbl_hal::depth::CLEAR,
+    "the stage that resets one tile writes a depth the attachment's own clear \
+     does not, so a held tile and a cleared one would answer differently where \
+     nothing was drawn"
+);
+
+/// Narrows the shadow pass's viewport and scissor to one tile of the atlas.
+///
+/// The rectangle the allocator handed out — the same one the fragment stage
+/// samples through, out of [`shadow::Selection`]. The graph set a viewport over
+/// the whole atlas before the pass body ran, and this is what narrows it: the
+/// same clip-space matrix mapped into a different part of the image, and for a
+/// point light six different matrices into six of them off one visible set.
+///
+/// A function rather than the two calls inline, because the tile clear and the
+/// draws that follow it walk the same tiles and a viewport set one way for one
+/// of them would clear a rectangle nothing draws into.
+fn set_shadow_tile(encoder: &mut dyn crcbl_hal::CommandEncoder, tile: shadow::TileRect) {
+    let rect = Rect2d {
+        x: i32::try_from(tile.x).unwrap_or(i32::MAX),
+        y: i32::try_from(tile.y).unwrap_or(i32::MAX),
+        width: tile.side,
+        height: tile.side,
+    };
+    encoder.set_viewport(&Viewport {
+        x: rect.x as f32,
+        y: rect.y as f32,
+        width: rect.width as f32,
+        height: rect.height as f32,
+        ..Viewport::from_size(rect.width, rect.height)
+    });
+    encoder.set_scissor(&rect);
+}
+
 /// What the last executed graph left the renderer-owned import `image` in, as an
 /// [`ImportedImage::initial`].
 ///
@@ -1326,6 +1371,11 @@ pub struct ForwardRenderer {
     /// geometry stage as [`ForwardRenderer::mesh_pipeline`] where it comes from
     /// a mesh one, and no fragment stage in either case.
     shadow_pipeline: GraphicsPipelineHandle,
+    /// The pipeline that resets one tile of the atlas before it is redrawn, on a
+    /// frame that is keeping some of the others — see
+    /// [`MeshModules::depth_clear_pipeline`], which is where the whole argument
+    /// for it lives.
+    shadow_clear_pipeline: GraphicsPipelineHandle,
     /// One cull and draw-argument pass **per cascade and per shadowed light**,
     /// which is topic 18's "one cull dispatch per cascade against the same
     /// instance/geometry pools" with a shadowed light counting as a cascade does.
@@ -1370,19 +1420,29 @@ pub struct ForwardRenderer {
     /// free ones — so an unheld tile keeps the reversed-Z clear, which reads as
     /// "nothing stored, fully lit" wherever anything did sample it.
     shadow_lights: shadow::Selection,
-    /// Everything this frame's shadow atlas would be drawn from, as
-    /// [`ForwardRenderer::shadow_atlas_record`] spells it.
+    /// `[group]`: everything that group's maps would be drawn from, as
+    /// [`ForwardRenderer::shadow_group_record`] spells it.
     ///
     /// Kept only to tell one frame's answer from the last one's: it is compared
     /// and then replaced, and what travels from there is the number below.
-    shadow_atlas_inputs: Vec<u8>,
-    /// A number that moves whenever [`ForwardRenderer::shadow_atlas_inputs`]
-    /// does, and never comes back to a value it has had.
+    ///
+    /// **Per group rather than per atlas**, since the cadence rung: a group is a
+    /// cascade or a light slot's whole run of tiles, and holding one map while
+    /// redrawing another is the whole of what that rung buys.
+    shadow_group_inputs: Vec<Vec<u8>>,
+    /// `[group]`: a number that moves whenever that group's entry of
+    /// [`ForwardRenderer::shadow_group_inputs`] does, and never comes back to a
+    /// value it has had.
     ///
     /// So "the image already holds this" is one integer comparison, which is
     /// what lets the pass body below carry the answer out of the graph.
-    shadow_atlas_id: u64,
-    /// The [`ForwardRenderer::shadow_atlas_id`] of the last shadow pass that
+    shadow_group_id: Vec<u64>,
+    /// The number given to the shadow pass this renderer recorded last.
+    ///
+    /// Moves once per recorded pass, so the body below can say *which* pass ran
+    /// with one integer.
+    shadow_pass_id: u64,
+    /// The [`ForwardRenderer::shadow_pass_id`] of the last shadow pass that
     /// **ran**, written by that pass's own body.
     ///
     /// By the body rather than by the call that recorded it, and that is the
@@ -1393,17 +1453,81 @@ pub struct ForwardRenderer {
     /// that case, and it is the same boundary [`TransientPool`]'s ledger of
     /// imported images uses for the same reason.
     ///
-    /// Zero until a pass has run, and the id starts above it, so the first
-    /// frame of all draws.
-    shadow_atlas_drawn: Arc<AtomicU64>,
-    /// Whether this frame's atlas is the one already in the image, so the pass
-    /// that fills it can be left out altogether.
+    /// Zero until a pass has run, and the ids start above it, so the first frame
+    /// of all draws.
+    shadow_pass_ran: Arc<AtomicU64>,
+    /// What the shadow pass recorded last would leave the image holding, if its
+    /// body ran.
+    ///
+    /// Taken and applied by the next [`ForwardRenderer::begin_frame`], which is
+    /// the only place that can tell whether it did — see
+    /// [`ForwardRenderer::shadow_pass_ran`].
+    shadow_pending: Option<ShadowCommit>,
+    /// `[group]`: the id, the centre that group's maps were projected from and
+    /// how far they reach, as the record the **image** holds describes them.
+    ///
+    /// The id is what says a map is out of date. The centre and reach are what
+    /// say it is about somewhere else: a map whose own centre has moved further
+    /// than its own reach covers ground it was never drawn for, and holding
+    /// that is worse than a shadow that lags — see
+    /// [`ForwardRenderer::shadow_cadence_reset`].
+    shadow_group_held: Vec<(u64, Vec3, f32)>,
+    /// `[group]`: whether this frame redraws that group's maps.
     ///
     /// Frozen by [`ForwardRenderer::begin_frame`] for
     /// [`ForwardRenderer::frame_effects`]' reason: this call decides it and
     /// `add_passes` acts on it, and a value that moved between them would skip
     /// a cull whose draws were recorded, or the other way about.
+    shadow_group_redrawn: Vec<bool>,
+    /// Where every atlas slot's map was laid out on the frame the **image** was
+    /// drawn from, so a frame can tell whether the texels it is keeping still
+    /// describe the layout it is about to sample through.
+    ///
+    /// A layout that has moved is what makes a frame clear the whole attachment
+    /// and redraw every group: a tile left over from a different layout is
+    /// texels nothing this frame can account for. Promoted beside
+    /// [`ForwardRenderer::shadow_group_held`].
+    ///
+    /// [`None`] until a pass has drawn, which is **not** the layout a frame
+    /// with shadows off produces: an image no pass has touched holds undefined
+    /// memory rather than a clear, so the first frame of all has to write one
+    /// whatever it is asked for.
+    shadow_atlas_layout: Option<Vec<shadow::TileRect>>,
+    /// Whether any map this frame samples is one an earlier frame drew, rather
+    /// than one this frame did.
+    ///
+    /// The cadence's own readback — see
+    /// [`ForwardRenderer::shadow_atlas_cached`], which is this for the whole
+    /// atlas.
     shadow_atlas_cached: bool,
+    /// Whether this frame ignored the cadence because some map's region moved
+    /// out from under it — see [`ForwardRenderer::shadow_cadence_reset`].
+    shadow_cadence_reset: bool,
+    /// How many tiles this frame redraws — see
+    /// [`ForwardRenderer::shadow_faces_redrawn`].
+    shadow_faces_redrawn: u32,
+    /// A shadow cadence the caller pinned, or [`None`] to take the console's.
+    ///
+    /// [`ForwardRenderer::set_effect_request`]'s shape at this knob and for its
+    /// reason: `shadow::r_shadow_cadence` and `shadow::r_shadow_faces` are
+    /// process-global, and an application that wants a tier's own pair — or a
+    /// test that wants a frame nothing else in the process can move — needs one
+    /// that is not.
+    shadow_cadence_request: Option<shadow::Cadence>,
+    /// Whether this frame's shadow pass clears the whole attachment, rather
+    /// than loading it and resetting only the tiles it redraws.
+    ///
+    /// Frozen beside [`ForwardRenderer::shadow_group_redrawn`] and for its
+    /// reason: the decision is `begin_frame`'s and the recording is
+    /// `add_shadow_pass`'s, and a value that moved between them would load an
+    /// attachment whose tiles nothing had reset.
+    shadow_atlas_clears: bool,
+    /// How many frames have been opened, which is what the cadence is keyed to.
+    ///
+    /// **Monotonic, unlike [`ForwardRenderer::frame`]**, which is the index of
+    /// the frame in flight and wraps every [`FRAMES_IN_FLIGHT`]. A schedule
+    /// keyed to that would repeat every few frames and bound nothing.
+    shadow_frame: u64,
     /// Whether this frame dispatches skinning, and so rewrites part of the
     /// vertex pool the shadow pass draws from.
     ///
@@ -1713,6 +1837,16 @@ pub struct ForwardRenderer {
     /// frame appended. Both are direct draws of one instance, which is what
     /// [`ForwardRenderer::direct_draws`] adds up.
     recorded_debug_draw: u64,
+    /// How many tiles of the shadow atlas the last
+    /// [`add_passes`](ForwardRenderer::add_passes) reset with a draw rather
+    /// than with the attachment's own clear.
+    ///
+    /// Zero on every frame that clears the whole attachment, which is every
+    /// frame until the cadence is switched on — see
+    /// [`MeshModules::depth_clear_pipeline`]. One over-sized triangle of one
+    /// instance each, so it joins the full-screen draws rather than the
+    /// indirect ones.
+    recorded_tile_clears: u64,
 }
 
 /// What a partly-built [`ForwardRenderer`] has to give back.
@@ -4269,11 +4403,17 @@ impl ForwardRenderer {
         let mesh_pipeline =
             modules.color_pipeline(device, mesh_pipeline_layout, PolygonMode::Fill, "forward");
         let shadow_pipeline_result = modules.depth_pipeline(device, mesh_pipeline_layout);
+        // And the one that resets a tile, which the cadence rung needs and the
+        // attachment's load operation cannot express — see
+        // [`MeshModules::depth_clear_pipeline`].
+        let shadow_clear_result = modules.depth_clear_pipeline(device, mesh_pipeline_layout);
         modules.destroy(device);
         let mesh_pipeline = mesh_pipeline?;
         rollback.pipelines.push(mesh_pipeline);
         let shadow_pipeline = shadow_pipeline_result?;
         rollback.pipelines.push(shadow_pipeline);
+        let shadow_clear_pipeline = shadow_clear_result?;
+        rollback.pipelines.push(shadow_clear_pipeline);
 
         // --- the tonemap pass ---
         let tonemap_entries = [
@@ -4660,20 +4800,34 @@ impl ForwardRenderer {
             shadow_placeholder_view,
             shadow_sampler,
             shadow_pipeline,
+            shadow_clear_pipeline,
             shadow_draws: std::mem::take(&mut rollback.shadow_draws),
             shadow_uniforms,
             shadow_groups,
             shadow_selection,
             shadow_lights: shadow::Selection::default(),
-            // Nothing has drawn the atlas, so the first frame draws it whatever
-            // it is asked for — which is also what gives the image a defined
-            // content before anything samples it. A record is never empty, so
-            // the first frame's is a change and takes the id past the zero
-            // below it.
-            shadow_atlas_inputs: Vec::new(),
-            shadow_atlas_id: 0,
-            shadow_atlas_drawn: Arc::new(AtomicU64::new(0)),
+            // Nothing has drawn the atlas, so the first frame draws every group
+            // whatever it is asked for — which is also what gives the image a
+            // defined content before anything samples it. A record is never
+            // empty, so the first frame's is a change and takes every id past
+            // the zero below it.
+            shadow_group_inputs: vec![Vec::new(); SHADOW_CULLS],
+            shadow_group_id: vec![0; SHADOW_CULLS],
+            shadow_pass_id: 0,
+            shadow_pass_ran: Arc::new(AtomicU64::new(0)),
+            shadow_pending: None,
+            // A reach of zero, so every centre on the first frame is further
+            // from what the image holds than the nothing it holds reaches —
+            // which is the reset that frame should be.
+            shadow_group_held: vec![(0, Vec3::ZERO, 0.0); SHADOW_CULLS],
+            shadow_group_redrawn: vec![false; SHADOW_CULLS],
+            shadow_atlas_layout: None,
             shadow_atlas_cached: false,
+            shadow_cadence_reset: false,
+            shadow_faces_redrawn: 0,
+            shadow_cadence_request: None,
+            shadow_atlas_clears: true,
+            shadow_frame: 0,
             frame_skins: false,
             // [`FRAMES_IN_FLIGHT`], the number every other ring here is sized
             // by, so a slot has been through the whole loop before it is read.
@@ -4775,6 +4929,7 @@ impl ForwardRenderer {
             recorded_fullscreen: 0,
             // No frame has been recorded yet, on `recorded_fullscreen`'s terms.
             recorded_debug_draw: 0,
+            recorded_tile_clears: 0,
         })
     }
 
@@ -5817,16 +5972,28 @@ impl ForwardRenderer {
         // rather than a second derivation of it. A frame with shadows off fills
         // neither: nothing draws into the atlas, so the pass's clear is the
         // whole of what it will hold.
-        let mut views: Vec<(usize, mesh::FrameUniforms)> = Vec::with_capacity(SHADOW_VIEWS);
+        //
+        // **Grouped**, since the cadence rung: a group is a cascade or a light
+        // slot's whole run of tiles, it is what one cull covers, and it is what
+        // [`shadow::Cadence`] schedules. `regions` is the tier each group sits
+        // on, the centre its maps are projected from and how far they reach —
+        // the three things the schedule and the reset are decided from.
+        let mut views: Vec<(usize, usize, mesh::FrameUniforms)> = Vec::with_capacity(SHADOW_VIEWS);
         let mut culls: Vec<(usize, Frustum)> = Vec::with_capacity(SHADOW_CULLS);
+        let mut regions: [Option<(usize, Vec3, f32)>; SHADOW_CULLS] = [None; SHADOW_CULLS];
         if shadows {
-            for cascade in 0..shadow::CASCADES {
+            for (cascade, region) in regions.iter_mut().take(shadow::CASCADES).enumerate() {
                 let view_proj = cascades.view_proj[cascade];
-                views.push((
-                    cascade,
-                    view_block(view_proj, camera.eye + direction * cascades.far[cascade]),
-                ));
+                let centre = camera.eye + direction * cascades.far[cascade];
+                views.push((cascade, cascade, view_block(view_proj, centre)));
                 culls.push((cascade, Frustum::from_view_projection(view_proj)));
+                // **The cascade's own index is its tier**, which is the cadence
+                // rung's own words: the near cascade is re-rendered every frame
+                // and each one out doubles the period. Its reach is the sphere
+                // it was fitted to — see [`shadow::Cascades::far`] — so an eye
+                // that has moved further than that is an eye whose new sphere
+                // the held map does not reach at all.
+                *region = Some((cascade, centre, cascades.far[cascade]));
             }
             for (slot, held) in self.shadow_lights.slots().iter().enumerate() {
                 let Some(held) = held else {
@@ -5840,8 +6007,10 @@ impl ForwardRenderer {
                 let Some(light) = self.extra_lights.get(held.light) else {
                     continue;
                 };
+                let group = shadow_cull(slot);
                 for face in 0..shadow::tile_span(light) {
                     views.push((
+                        group,
                         shadow_view(slot, face),
                         view_block(
                             Mat4::from_cols_array(&light_view_proj[held.base + face]),
@@ -5859,22 +6028,145 @@ impl ForwardRenderer {
                         Mat4::from_cols_array(&light_view_proj[held.base]),
                     ),
                 };
-                culls.push((shadow_cull(slot), frustum));
+                culls.push((group, frustum));
+                // **The tile's own level is the tier**, so `shadow::coverage`
+                // decides how often a light's map is redrawn exactly as it
+                // decides how large that map is — one scorer, read twice, which
+                // is what the priority rung established. The reach is the
+                // light's own radius: a light that has moved further than that
+                // lights somewhere its held map says nothing about.
+                let (centre, reach) = light.sphere();
+                regions[group] = Some((held.level, centre, reach));
             }
         }
 
-        let record = self.shadow_atlas_record(&views, &culls, eye, instance_count, shadows);
-        if record != self.shadow_atlas_inputs {
-            self.shadow_atlas_inputs = record;
-            self.shadow_atlas_id = self.shadow_atlas_id.wrapping_add(1);
+        // The frame the cadence is keyed to, and the one thing in this whole
+        // decision that is not a function of the scene.
+        self.shadow_frame = self.shadow_frame.wrapping_add(1);
+
+        // The pass recorded last, if its body ran: what it drew is now what the
+        // image holds. Applied here rather than where it was recorded, for
+        // [`ForwardRenderer::shadow_pass_ran`]'s reason — a frame whose graph
+        // was refused left the image exactly as it was.
+        if let Some(pending) = self.shadow_pending.take()
+            && self.shadow_pass_ran.load(Ordering::Relaxed) == pending.id
+        {
+            for (group, held) in pending.groups.iter().enumerate() {
+                if let Some(held) = *held {
+                    self.shadow_group_held[group] = held;
+                }
+            }
+            if pending.layout.is_some() {
+                self.shadow_atlas_layout = pending.layout;
+            }
         }
-        self.shadow_atlas_cached = !self.frame_skins
-            && self.shadow_atlas_drawn.load(Ordering::Relaxed) == self.shadow_atlas_id;
+
+        // Where every map lands this frame. **A frame with shadows off is one
+        // more layout rather than a second kind of state**: the atlas holds a
+        // clear instead of maps, so its layout is the empty one, and the
+        // comparison below is what makes the frame that switches shadows off
+        // clear the image once and the frames after it cost nothing.
+        let layout: Vec<shadow::TileRect> = (0..shadow::TILES)
+            .map(|slot| {
+                if shadows {
+                    self.shadow_lights.atlas_rect(slot)
+                } else {
+                    shadow::TileRect::EMPTY
+                }
+            })
+            .collect();
+        // **A layout that has moved resets the whole atlas.** A tile left over
+        // from a different layout is texels nothing this frame can account for,
+        // and the only clear this seam has covers the whole attachment — so such
+        // a frame clears everything and redraws every group, with no cadence and
+        // no budget deciding otherwise.
+        let relaid = self.shadow_atlas_layout.as_ref() != Some(&layout);
+
+        // What each group would be drawn from, and which of them the image is
+        // already holding.
+        let mut wanted: [Option<shadow::Group>; SHADOW_CULLS] = [None; SHADOW_CULLS];
+        for (group, region) in regions.iter().enumerate() {
+            let Some((tier, centre, _)) = *region else {
+                continue;
+            };
+            let record = self.shadow_group_record(group, &views, &culls, eye, instance_count);
+            if record != self.shadow_group_inputs[group] {
+                self.shadow_group_inputs[group] = record;
+                self.shadow_group_id[group] = self.shadow_group_id[group].wrapping_add(1);
+            }
+            let (held_id, held_centre, held_reach) = self.shadow_group_held[group];
+            // A skinned frame's vertices are written by a compute pass into the
+            // pool, so nothing on the host can tell this group's maps from the
+            // last frame's — see [`ForwardRenderer::frame_skins`].
+            if !relaid && !self.frame_skins && held_id == self.shadow_group_id[group] {
+                continue;
+            }
+            wanted[group] = Some(shadow::Group {
+                faces: views.iter().filter(|(owner, _, _)| *owner == group).count(),
+                tier,
+                // The reset, per group: a map whose centre has moved further
+                // than its own reach is about somewhere else rather than a
+                // frame out of date. A group the image has never held reads as
+                // forced too, its reach being zero, which is the right answer
+                // for the first frame of all.
+                forced: relaid || centre.distance(held_centre) > held_reach,
+            });
+        }
+
+        // **The reset spends no budget**: a relaid atlas has nothing to hold, so
+        // every group it still has is redrawn whatever the console says.
+        let cadence = if relaid {
+            shadow::Cadence::EVERY_FRAME
+        } else {
+            self.shadow_cadence_request
+                .unwrap_or_else(shadow::Cadence::from_console)
+        };
+        let redraw = cadence.schedule(self.shadow_frame, &wanted);
+        self.shadow_group_redrawn.copy_from_slice(&redraw);
+        self.shadow_faces_redrawn = wanted
+            .iter()
+            .enumerate()
+            .filter(|(group, _)| redraw[*group])
+            .filter_map(|(_, want)| *want)
+            .map(|want| u32::try_from(want.faces).unwrap_or(u32::MAX))
+            .sum();
+        self.shadow_cadence_reset = wanted.iter().flatten().any(|want| want.forced);
+        // **Whether the pass clears the whole attachment or loads it.** Clearing
+        // is what shipped and is what a frame keeping nothing should do — every
+        // group it draws at all, it redraws. Loading is the cadence's own path,
+        // and there each redrawn tile is reset by
+        // [`MeshModules::depth_clear_pipeline`] instead.
+        self.shadow_atlas_clears = relaid
+            || regions
+                .iter()
+                .enumerate()
+                .all(|(group, region)| region.is_none() || redraw[group]);
+        // A relaid atlas records its pass even with nothing to draw into it: the
+        // clear *is* the frame's answer, and it is what a frame that switched
+        // shadows off leaves behind for anything that samples the maps.
+        self.shadow_atlas_cached = !relaid && !redraw.iter().any(|drawn| *drawn);
         if self.shadow_atlas_cached {
             return Ok(());
         }
 
-        for (view, block) in &views {
+        self.shadow_pass_id = self.shadow_pass_id.wrapping_add(1);
+        self.shadow_pending = Some(ShadowCommit {
+            id: self.shadow_pass_id,
+            groups: regions
+                .iter()
+                .enumerate()
+                .map(|(group, region)| {
+                    let (_, centre, reach) = (*region)?;
+                    redraw[group].then_some((self.shadow_group_id[group], centre, reach))
+                })
+                .collect(),
+            layout: self.shadow_atlas_clears.then_some(layout),
+        });
+
+        for (group, view, block) in &views {
+            if !redraw[*group] {
+                continue;
+            }
             device.write_buffer(
                 self.shadow_uniforms[self.frame][*view],
                 0,
@@ -5882,6 +6174,9 @@ impl ForwardRenderer {
             )?;
         }
         for (cull, frustum) in &culls {
+            if !redraw[*cull] {
+                continue;
+            }
             self.shadow_draws[*cull].begin_frame(
                 device,
                 self.frame,
@@ -5894,25 +6189,31 @@ impl ForwardRenderer {
         Ok(())
     }
 
-    /// Everything the shadow atlas's contents are a function of, as bytes to
+    /// Everything one group of the shadow atlas is a function of, as bytes to
     /// compare with the reading the image was last drawn from.
+    ///
+    /// A **group** is a cascade or a light slot's whole run of tiles — what one
+    /// cull covers and what [`shadow::Cadence`] schedules. Per group rather than
+    /// per atlas since the cadence rung: a lamp that swings makes its own group's
+    /// reading differ and leaves every other group's alone, which is what lets
+    /// the frame redraw its tiles and hold the rest.
     ///
     /// # What is in it
     ///
-    /// * **Every view's block and every cull's frustum**, exactly the values
+    /// * **The group's view blocks and its cull's frustum**, exactly the values
     ///   [`begin_frame_body`](Self::begin_frame_body) is about to write. Those
-    ///   carry the sun's cascade matrices, each shadowed light's matrices, the
-    ///   selection's atlas rectangles and this frame's shadow LOD budgets — so
-    ///   a light that moved, turned, changed radius or angle, gained or lost a
-    ///   tile, or landed in a different rectangle is a different reading, and so
-    ///   is a camera that moved, because a cascade is fitted to it.
-    /// * **The selection eye and the instance count**, which reach the culls
-    ///   beside the frusta and are in no block.
+    ///   carry the cascade's or the light's matrices, the selection's atlas
+    ///   rectangles and this frame's shadow LOD budgets — so a light that moved,
+    ///   turned, changed radius or angle, gained or lost a tile, or landed in a
+    ///   different rectangle is a different reading, and so is a camera that
+    ///   moved, because a cascade is fitted to it.
+    /// * **The selection eye and the instance count**, which reach the cull
+    ///   beside the frustum and are in no block.
     /// * [`InstancePool::revision`], which is every caster: a transform, a mesh,
     ///   a material, a removal or a skinned re-point all pass through the one
     ///   write that moves it. It is conservative — it moves for writes no map
-    ///   could show — and it is never still while a byte the shadow pass draws
-    ///   from has changed.
+    ///   could show, and for writes only some other group's map could — and it
+    ///   is never still while a byte the shadow pass draws from has changed.
     ///
     /// The bytes are the blocks' own `to_bytes` — the encoding the GPU reads —
     /// rather than the objects' memory, so no padding and no `f32` bit pattern
@@ -5933,38 +6234,35 @@ impl ForwardRenderer {
     ///   caller of the suballocator is
     ///   [`reserve_skinned`](Self::reserve_skinned), whose bytes are a skinned
     ///   region's, and those are `frame_skins`' always-redraw case.
-    /// * **A frame with shadows off**, whose reading is the discriminator and
-    ///   nothing else: the pass records its clear and no draw, so what the
-    ///   atlas holds does not depend on the camera, the lights or the casters,
-    ///   and a frame that has already cleared it need not clear it again.
+    /// * **Whether the frame has shadows at all**, which is the atlas's *layout*
+    ///   rather than any group's reading: a frame with shadows off gives every
+    ///   group no views and no cull, so none of them reaches this function, and
+    ///   `begin_frame_body`'s empty layout is what makes such a frame clear the
+    ///   image once and cost nothing after.
     /// * **Materials, samplers and the colour pipeline.** `depth_pipeline`
     ///   names no fragment stage, so nothing the atlas holds is a function of
     ///   them.
-    fn shadow_atlas_record(
+    fn shadow_group_record(
         &self,
-        views: &[(usize, mesh::FrameUniforms)],
+        group: usize,
+        views: &[(usize, usize, mesh::FrameUniforms)],
         culls: &[(usize, Frustum)],
         eye: [f32; 3],
         instance_count: u32,
-        shadows: bool,
     ) -> Vec<u8> {
-        // The view blocks are almost all of it, so this is one allocation a
-        // frame rather than a handful of regrowths. A hint, not a bound.
-        let mut record = Vec::with_capacity(SHADOW_VIEWS * mesh::FRAME_UNIFORMS_SIZE);
-        record.push(u8::from(shadows));
-        if !shadows {
-            return record;
-        }
+        // A point light's cube is the longest a group gets, so this is one
+        // allocation rather than a handful of regrowths. A hint, not a bound.
+        let mut record = Vec::with_capacity(shadow::POINT_FACES * mesh::FRAME_UNIFORMS_SIZE);
         record.extend_from_slice(&self.instances.revision().to_le_bytes());
         record.extend_from_slice(&instance_count.to_le_bytes());
         for value in eye {
             record.extend_from_slice(&value.to_le_bytes());
         }
-        for (view, block) in views {
+        for (_, view, block) in views.iter().filter(|(owner, _, _)| *owner == group) {
             record.extend_from_slice(&(*view as u32).to_le_bytes());
             record.extend_from_slice(&block.to_bytes());
         }
-        for (cull, frustum) in culls {
+        for (cull, frustum) in culls.iter().filter(|(cull, _)| *cull == group) {
             record.extend_from_slice(&(*cull as u32).to_le_bytes());
             for plane in frustum.planes {
                 for value in plane.to_array() {
@@ -6831,7 +7129,7 @@ impl ForwardRenderer {
             base_color: base_color_page,
             normal: normal_page,
         };
-        let (shadow_atlas, shadow_draws) = self.add_shadow_pass(
+        let (shadow_atlas, shadow_draws, shadow_tile_clears) = self.add_shadow_pass(
             graph,
             pool,
             &tile_selection,
@@ -7075,6 +7373,11 @@ impl ForwardRenderer {
         // indirect draws — `counters` counts both as submitted *and* drawn,
         // because the CPU knows what they cover.
         self.recorded_debug_draw = u64::from(self.debug_draw.records_pass(self.frame));
+        // The shadow pass's tile resets, on the same terms: one over-sized
+        // triangle of one instance per tile it redrew, and none at all on a
+        // frame that cleared the whole attachment — see
+        // [`MeshModules::depth_clear_pipeline`].
+        self.recorded_tile_clears = shadow_tile_clears;
         self.recorded_draws =
             shadow_draws + 2 * bucket_draws.calls.len() as u64 + self.direct_draws();
 
@@ -7697,16 +8000,23 @@ impl ForwardRenderer {
     /// transient — nothing else in the frame can alias it, so what it holds is
     /// what the last pass to write it wrote.
     ///
-    /// **Whole-atlas rather than per-tile**, and the reason is the clear. The
-    /// only way this seam can clear a depth attachment is a pass-wide
-    /// [`LoadOp::Clear`], which covers every tile including the ones being
-    /// kept; the region-bounded alternatives are not portable — Metal's load
-    /// action and WebGPU's `loadOp` have no render area to bound them, so a
-    /// clear that covered part of the image on Vulkan and all of it on Metal
-    /// would be a cached tile that survives on one backend and is erased on
-    /// another. So one changed input redraws every tile, and the per-tile rung
-    /// needs a scissored depth clear this seam does not have. `docs/backlog.md`
-    /// carries it.
+    /// # Per group, and what pays for the tiles it keeps
+    ///
+    /// `docs/plan/45-shadows.md`'s cadence rung. A **group** — a cascade, or a
+    /// light slot's whole run of tiles — is redrawn or held on its own, and
+    /// [`ForwardRenderer::shadow_group_redrawn`] is what says which. A frame
+    /// that holds nothing clears the whole attachment, which is the recording
+    /// that shipped before the rung; a frame that holds something **loads** the
+    /// attachment instead and resets each tile it redraws with
+    /// [`MeshModules::depth_clear_pipeline`], which is the portable statement of
+    /// a clear bounded to one tile.
+    ///
+    /// The attachment's own [`LoadOp::Clear`] cannot serve there: it covers
+    /// every tile including the ones being kept, and the region-bounded
+    /// alternatives are not portable — Metal's load action and WebGPU's
+    /// `loadOp` have no render area to bound them, so a clear that covered part
+    /// of the image on Vulkan and all of it on Metal would be a held tile that
+    /// survives on one backend and is erased on another.
     fn add_shadow_pass(
         &self,
         graph: &mut RenderGraph<'_>,
@@ -7715,7 +8025,7 @@ impl ForwardRenderer {
         occlusion_placeholder: ImageId,
         pages: MaterialPages,
         skinned: Option<BufferId>,
-    ) -> (ImageId, u64) {
+    ) -> (ImageId, u64, u64) {
         let shadows = self.frame_effects.contains(RenderEffects::SHADOWS);
         let (atlas_width, atlas_height) = shadow::atlas_extent();
         let atlas = graph.import_image(
@@ -7741,7 +8051,7 @@ impl ForwardRenderer {
         // handed it back that way — so the graph has no transition to make, and
         // the passes that sample it read the maps an earlier frame left there.
         if self.shadow_atlas_cached {
-            return (atlas, 0);
+            return (atlas, 0, 0);
         }
         let placeholder = graph.import_image(
             "shadow-placeholder",
@@ -7765,12 +8075,17 @@ impl ForwardRenderer {
         // cull is dispatched and its faces are drawn together or not at all, and
         // `begin_frame` filled that generator's parameters under exactly this
         // condition.
+        //
+        // **And only the ones this frame redraws**, since the cadence rung: a
+        // held slot keeps the texels it has, so recording its cull and its
+        // draws would be the same picture at the full price.
         let occupied: Vec<(usize, shadow::Assignment, &Light)> = self
             .shadow_lights
             .slots()
             .iter()
             .enumerate()
             .filter(|_| shadows)
+            .filter(|(slot, _)| self.shadow_group_redrawn[shadow_cull(*slot)])
             .filter_map(|(slot, held)| {
                 let held = (*held)?;
                 Some((slot, held, self.extra_lights.get(held.light)?))
@@ -7780,8 +8095,16 @@ impl ForwardRenderer {
         // One cull dispatch per cascade and per occupied slot, before the pass
         // that draws from them — **not one per tile**, which is topic 18's
         // fourth decision: a point light's six faces draw one visible set.
-        let cascades = if shadows { shadow::CASCADES } else { 0 };
-        let generated: Vec<(usize, GeneratedDraws)> = (0..cascades)
+        let cascades: Vec<usize> = if shadows {
+            (0..shadow::CASCADES)
+                .filter(|cascade| self.shadow_group_redrawn[*cascade])
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let generated: Vec<(usize, GeneratedDraws)> = cascades
+            .iter()
+            .copied()
             .chain(occupied.iter().map(|(slot, _, _)| shadow_cull(*slot)))
             .map(|cull| {
                 (
@@ -7806,8 +8129,12 @@ impl ForwardRenderer {
         // in a closure that outlives this borrow, and asking the selection for
         // it there would be a second reading of an allocation that has to be the
         // one the frame block was written from.
-        let mut views: Vec<(usize, shadow::TileRect, usize)> = (0..cascades)
-            .map(|cascade| (cascade, self.shadow_lights.atlas_rect(cascade), cascade))
+        let mut views: Vec<(usize, shadow::TileRect, usize)> = cascades
+            .iter()
+            .enumerate()
+            .map(|(position, cascade)| {
+                (*cascade, self.shadow_lights.atlas_rect(*cascade), position)
+            })
             .collect();
         for (index, (slot, held, light)) in occupied.iter().enumerate() {
             // A spot draws face 0 alone; a point light draws all six, each
@@ -7819,7 +8146,7 @@ impl ForwardRenderer {
                     shadow_view(*slot, face),
                     self.shadow_lights
                         .atlas_rect(shadow::light_tile(held.base + face)),
-                    cascades + index,
+                    cascades.len() + index,
                 ));
             }
         }
@@ -7832,7 +8159,16 @@ impl ForwardRenderer {
             // day a prepass existed.
             .depth(
                 atlas,
-                LoadOp::Clear,
+                // **Loaded on a frame that is keeping a tile**, which is the
+                // cadence rung's whole seam: a clear here covers the image, so
+                // the tiles this frame *does* redraw are reset one at a time by
+                // the pipeline below instead. A frame keeping nothing clears,
+                // which is what shipped.
+                if self.shadow_atlas_clears {
+                    LoadOp::Clear
+                } else {
+                    LoadOp::Load
+                },
                 StoreOp::Store,
                 crcbl_hal::ClearValue {
                     depth: crcbl_hal::depth::CLEAR,
@@ -7906,42 +8242,44 @@ impl ForwardRenderer {
         // what reports it, and reading it back off the same `Vec`s is what makes
         // it move when the tile allocation does.
         let recorded = (views.len() * bucket_draws.calls.len()) as u64;
+        // And the tile resets beside them, which are direct draws of one
+        // instance rather than indirect ones: a frame that cleared the whole
+        // attachment records none, and a frame that loaded it records one per
+        // tile it redraws.
+        let clears = if self.shadow_atlas_clears {
+            0
+        } else {
+            views.len() as u64
+        };
 
         // What the image will hold once this body has run, carried into it so
         // that *recording* the pass is not what claims the atlas was drawn — see
         // [`ForwardRenderer::shadow_atlas_drawn`].
-        let drawn = Arc::clone(&self.shadow_atlas_drawn);
-        let drawn_id = self.shadow_atlas_id;
+        let ran = Arc::clone(&self.shadow_pass_ran);
+        let pass_id = self.shadow_pass_id;
+        // The tiles this pass redraws have to be reset before anything is drawn
+        // into them, and on a frame that loaded the attachment there is nothing
+        // else that will — see [`MeshModules::depth_clear_pipeline`]. A frame
+        // that cleared has already had every tile reset by the attachment, so
+        // this is `None` and the recording is the one that shipped.
+        let clear = (!self.shadow_atlas_clears).then_some(self.shadow_clear_pipeline);
         pass.execute(move |ctx| {
-            drawn.store(drawn_id, Ordering::Relaxed);
+            ran.store(pass_id, Ordering::Relaxed);
             let encoder = ctx.encoder();
+            if let Some(clear) = clear {
+                encoder.bind_graphics_pipeline(clear);
+                for (_, tile, _) in &views {
+                    set_shadow_tile(encoder, *tile);
+                    encoder.draw(0..TILE_CLEAR_VERTICES, 0..1);
+                }
+            }
             bucket_draws.open(encoder);
             for (view, tile, cull) in &views {
-                // The rectangle this view draws into, as the allocator handed
-                // it out — the same rectangle the fragment stage samples
-                // through, out of `shadow::Selection`. The graph set a viewport
-                // over the whole atlas before this body ran, and this is what
-                // narrows it: the same clip-space matrix mapped into a different
-                // part of the image, and for a point light six different
-                // matrices into six of them off one visible set.
-                let rect = Rect2d {
-                    x: i32::try_from(tile.x).unwrap_or(i32::MAX),
-                    y: i32::try_from(tile.y).unwrap_or(i32::MAX),
-                    width: tile.side,
-                    height: tile.side,
-                };
-                encoder.set_viewport(&Viewport {
-                    x: rect.x as f32,
-                    y: rect.y as f32,
-                    width: rect.width as f32,
-                    height: rect.height as f32,
-                    ..Viewport::from_size(rect.width, rect.height)
-                });
-                encoder.set_scissor(&rect);
+                set_shadow_tile(encoder, *tile);
                 bucket_draws.record(encoder, groups[*view], &generated[*cull].1);
             }
         });
-        (atlas, recorded)
+        (atlas, recorded, clears)
     }
 
     /// Which lights hold the atlas's light tiles this frame, and where each
@@ -7971,13 +8309,93 @@ impl ForwardRenderer {
     /// frame that did draw put there — so a caller comparing two frames' pass
     /// lists, draw counts or GPU timings has to know which of them redrew.
     ///
-    /// Decided by [`Self::begin_frame`] out of everything the atlas's contents
-    /// are a function of — see `ForwardRenderer::shadow_atlas_record` — and it
-    /// answers `false` before the first frame, because no frame has been opened
-    /// and so none of them has held anything.
+    /// Decided by [`Self::begin_frame`] out of everything each group of the
+    /// atlas is a function of — see `ForwardRenderer::shadow_group_record` —
+    /// and it answers `false` before the first frame, because no frame has been
+    /// opened and so none of them has held anything.
+    ///
+    /// **Whole-atlas, and since the cadence rung a frame can be neither.** A
+    /// frame that redraws one map and holds another answers `false` here and
+    /// `false` from [`Self::shadow_slot_redrawn`] for the maps it held; the two
+    /// together are what say which.
     #[must_use]
     pub const fn shadow_atlas_cached(&self) -> bool {
         self.shadow_atlas_cached
+    }
+
+    /// Whether this frame redrew cascade `cascade`'s map, rather than keeping
+    /// the one an earlier frame put there.
+    ///
+    /// `docs/plan/45-shadows.md`'s cadence rung, read back. **The observable
+    /// that rung otherwise has none for**: a held map draws a shadow lagging its
+    /// caster by a frame or two, which is a perfectly plausible picture and one
+    /// a golden accepts — so nothing but this distinguishes a cadence that is
+    /// working from one that is not running at all.
+    ///
+    /// `false` for a `cascade` past [`shadow::CASCADES`] and before the first
+    /// frame, which is the same answer for the same reason: no map was drawn
+    /// there.
+    #[must_use]
+    pub fn shadow_cascade_redrawn(&self, cascade: usize) -> bool {
+        cascade < shadow::CASCADES && self.shadow_group_redrawn[cascade]
+    }
+
+    /// Whether this frame redrew the maps of light slot `slot` —
+    /// [`shadow::Selection::slots`]' index — rather than keeping the ones an
+    /// earlier frame put there.
+    ///
+    /// [`Self::shadow_cascade_redrawn`]'s answer for the light region, and a
+    /// point light's [`shadow::POINT_FACES`] faces answer together: they cull
+    /// once and draw one visible set, so they are redrawn or held as one.
+    #[must_use]
+    pub fn shadow_slot_redrawn(&self, slot: usize) -> bool {
+        slot < shadow::LIGHT_SLOTS && self.shadow_group_redrawn[shadow_cull(slot)]
+    }
+
+    /// How many tiles of the atlas this frame redrew.
+    ///
+    /// What [`shadow::r_shadow_faces`] is spent in, read back — so a test can
+    /// say the budget bound rather than that it was configured. A cascade costs
+    /// one and a point light's cube costs [`shadow::POINT_FACES`].
+    #[must_use]
+    pub const fn shadow_faces_redrawn(&self) -> u32 {
+        self.shadow_faces_redrawn
+    }
+
+    /// Pins the shadow cadence for this renderer, or hands it back to the
+    /// console.
+    ///
+    /// [`Self::set_effect_request`]'s shape at this knob:
+    /// [`shadow::r_shadow_cadence`] and [`shadow::r_shadow_faces`] are
+    /// process-global, so they are the *default* rather than the only answer —
+    /// an application drawing two views at two qualities, or a test that needs a
+    /// frame nothing else in the process can move, pins its own.
+    ///
+    /// [`None`] hands it back, which is what a renderer starts at.
+    ///
+    /// Read once per [`Self::begin_frame`], on `ForwardRenderer::frame_effects`'
+    /// terms: this call decides it and `add_passes` acts on it.
+    pub const fn set_shadow_cadence(&mut self, cadence: Option<shadow::Cadence>) {
+        self.shadow_cadence_request = cadence;
+    }
+
+    /// Whether this frame ignored the cadence for at least one map because the
+    /// region that map covers had moved out from under it.
+    ///
+    /// `docs/plan/45-shadows.md`'s "a moving light or camera cut resets it",
+    /// made precise: a map is *reset* rather than merely out of date when the
+    /// centre it is projected from has moved further than the map's own reach —
+    /// a light further than its own radius, or a cascade's eye further than the
+    /// sphere that cascade was fitted to. Holding such a map is not a shadow
+    /// that lags; it is a shadow of somewhere else.
+    ///
+    /// A frame whose atlas was **relaid** — a light gained, lost or resized a
+    /// tile, or shadows were switched on or off — answers `true` as well, and
+    /// that frame redraws every map it has: the only clear this seam can make
+    /// covers the whole image, so there is nothing left to hold.
+    #[must_use]
+    pub const fn shadow_cadence_reset(&self) -> bool {
+        self.shadow_cadence_reset
     }
 
     #[must_use]
@@ -9377,7 +9795,9 @@ impl ForwardRenderer {
     /// why [`counters`](Self::counters) adds this to both halves of its
     /// submitted/drawn pair.
     fn direct_draws(&self) -> u64 {
-        self.recorded_fullscreen * FULLSCREEN_DRAWS + self.recorded_debug_draw
+        self.recorded_fullscreen * FULLSCREEN_DRAWS
+            + self.recorded_debug_draw
+            + self.recorded_tile_clears
     }
 
     /// What the camera's cull kept, on the frame the ring has reached.
@@ -9436,6 +9856,7 @@ impl ForwardRenderer {
         device.destroy_bind_group_layout(self.tonemap_layout);
 
         device.destroy_graphics_pipeline(self.shadow_pipeline);
+        device.destroy_graphics_pipeline(self.shadow_clear_pipeline);
         for groups in self.shadow_groups {
             for group in groups {
                 device.destroy_bind_group(group);
@@ -9533,6 +9954,27 @@ impl ForwardRenderer {
     }
 }
 
+/// What the shadow pass a frame recorded would leave the image holding, held
+/// until the frame after can say whether its body ran.
+///
+/// `docs/plan/45-shadows.md`'s static-caching rung, per group: recording a pass
+/// is not drawing one, so nothing here is believed until
+/// [`ForwardRenderer::shadow_pass_ran`] carries this [`ShadowCommit::id`] back
+/// out of the graph.
+#[derive(Clone, Debug)]
+struct ShadowCommit {
+    /// The [`ForwardRenderer::shadow_pass_id`] the body publishes.
+    id: u64,
+    /// `[group]`: what the group's entry of
+    /// [`ForwardRenderer::shadow_group_held`] becomes for every group the pass
+    /// redraws, and [`None`] for the groups it holds.
+    groups: Vec<Option<(u64, Vec3, f32)>>,
+    /// The layout the pass draws under, where it clears the whole attachment —
+    /// and [`None`] where it loads, because a loading pass leaves every tile it
+    /// does not redraw exactly as it found it.
+    layout: Option<Vec<shadow::TileRect>>,
+}
+
 /// The shader modules a mesh pipeline is built from, with its entry points
 /// already resolved.
 ///
@@ -9556,6 +9998,14 @@ struct MeshModules {
     /// vertex pool and no attribute region at all. Unused on the mesh-shader
     /// path, where the geometry stage is `mesh_cluster.slang`'s either way.
     depth_vertex: &'static str,
+    /// `depthClearVertexMain`, which [`MeshModules::depth_clear_pipeline`]
+    /// builds the tile clear from: three corners off `SV_VertexID` and no input
+    /// at all, so it resets one tile of the atlas without reading a vertex.
+    ///
+    /// **The same stage on every path**, unlike the two above: a device with a
+    /// mesh stage still has a vertex stage, and a clear that produced no
+    /// geometry is a primitive, not a cluster.
+    depth_clear_vertex: &'static str,
     fragment: &'static str,
     /// `mesh_cluster.slang`'s, on the mesh-shader path alone.
     cluster: Option<ClusterStages>,
@@ -9633,6 +10083,7 @@ impl MeshModules {
         // of what the split-stream vertex pool bought.
         let vertex = named_entry(&MESH, "vertexMain", Stage::Vertex)?;
         let depth_vertex = named_entry(&MESH, "depthVertexMain", Stage::Vertex)?;
+        let depth_clear_vertex = named_entry(&MESH, "depthClearVertexMain", Stage::Vertex)?;
         let fragment = entry(&MESH, Stage::Fragment)?;
         // **Named rather than looked up by stage**, because the module has two
         // mesh entry points and a stage lookup would refuse an ambiguous one —
@@ -9706,6 +10157,7 @@ impl MeshModules {
             mesh,
             vertex,
             depth_vertex,
+            depth_clear_vertex,
             fragment,
             cluster,
         })
@@ -9854,6 +10306,60 @@ impl MeshModules {
                 color_targets: &[],
             }),
         }
+    }
+
+    /// The pipeline that resets one tile of the shadow atlas, so a pass can keep
+    /// some tiles and redraw others.
+    ///
+    /// `docs/plan/45-shadows.md`'s cadence rung needs a tile cleared on its own,
+    /// and the attachment's [`LoadOp`] cannot do it — a clear there covers the
+    /// whole image, and the region-bounded forms are not portable. This is the
+    /// portable statement of the same thing: `mesh.slang`'s
+    /// `depthClearVertexMain` covers the viewport the shadow pass has already
+    /// set over the tile, and the depth state below writes
+    /// [`depth::CLEAR`](crcbl_hal::depth) over whatever was there.
+    ///
+    /// **[`CompareOp::Always`] and writes on**, which is the pair that makes it a
+    /// clear rather than a draw: the tile holds the previous frame's depths, and
+    /// under the engine's [`CompareOp::Greater`] a clear value of zero would
+    /// fail against every one of them and leave the tile exactly as it was.
+    ///
+    /// **[`CullMode::None`]**, unlike [`MeshModules::primitive`]: the triangle
+    /// is generated from `SV_VertexID` rather than wound by an artist, so a
+    /// culling rule meant for scene geometry would decide whether the clear
+    /// happens at all.
+    ///
+    /// **A vertex pipeline on every path**, including the mesh-shader one: a
+    /// device with a mesh stage still has a vertex stage, and the clear has no
+    /// clusters to descend.
+    fn depth_clear_pipeline(
+        &self,
+        device: &dyn Device,
+        layout: PipelineLayoutHandle,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        device.create_graphics_pipeline(&GraphicsPipelineDesc {
+            label: Some("shadow tile clear"),
+            // The mesh layout, so binding this pipeline in the middle of the
+            // shadow pass does not disturb the bind group the draws around it
+            // are recorded with. The stage reads none of it.
+            layout,
+            vertex: ShaderEntry {
+                module: self.mesh,
+                entry_point: self.depth_clear_vertex,
+            },
+            fragment: None,
+            primitive: PrimitiveState {
+                cull_mode: CullMode::None,
+                polygon_mode: PolygonMode::Fill,
+                ..PrimitiveState::default()
+            },
+            depth_stencil: Some(DepthStencilState {
+                depth_compare: CompareOp::Always,
+                ..DepthStencilState::default()
+            }),
+            multisample: MultisampleState::default(),
+            color_targets: &[],
+        })
     }
 
     /// Releases both modules. The pipelines built from them stay valid.
@@ -13277,6 +13783,368 @@ mod tests {
         recorder.assert_valid();
     }
 
+    /// A cadence that holds every map one rung down for a frame, with the whole
+    /// atlas's worth of tiles to spend.
+    ///
+    /// Pinned through [`ForwardRenderer::set_shadow_cadence`] rather than set on
+    /// the console: [`shadow::r_shadow_cadence`] is process-global and the
+    /// shadow pass is in every frame's pass list, so a test that moved it would
+    /// change the frame every other test in this module draws.
+    const HOLD_TWO: shadow::Cadence = shadow::Cadence {
+        hold: 2,
+        faces: shadow::TILES,
+    };
+
+    /// How the shadow pass loaded its depth attachment, over the commands from
+    /// `from` on, and [`None`] where the frame recorded no such pass.
+    ///
+    /// **The observable the tile clear otherwise has none for.** A frame that
+    /// kept a tile and a frame that redrew every one of them sample maps that
+    /// may be identical, so nothing in the picture separates them; this is the
+    /// declaration that says which the device was told.
+    fn shadow_pass_depth_load(recorder: &Recorder, from: usize) -> Option<LoadOp> {
+        use crcbl_hal::null::Command;
+
+        recorder.commands()[from..].iter().find_map(|command| {
+            let Command::BeginRenderPass {
+                label,
+                depth_stencil_attachment,
+                ..
+            } = command
+            else {
+                return None;
+            };
+            if label.as_deref() != Some("shadow") {
+                return None;
+            }
+            depth_stencil_attachment
+                .as_ref()
+                .map(|attachment| attachment.depth_load)
+        })
+    }
+
+    /// Direct draws recorded inside the shadow pass, over the commands from
+    /// `from` on — which is one per tile the pass reset itself, the atlas's
+    /// geometry being drawn indirectly.
+    fn tile_clears_in_the_shadow_pass(recorder: &Recorder, from: usize) -> usize {
+        use crcbl_hal::null::Command;
+
+        let mut inside = false;
+        let mut clears = 0;
+        for command in &recorder.commands()[from..] {
+            if let Some((_, label)) = command.opens_pass() {
+                inside = label == Some("shadow");
+                continue;
+            }
+            if matches!(command, Command::EndRenderPass | Command::EndComputePass) {
+                inside = false;
+                continue;
+            }
+            if inside && matches!(command, Command::Draw { .. }) {
+                clears += 1;
+            }
+        }
+        clears
+    }
+
+    /// **The far cascade is redrawn every second frame and the near one every
+    /// frame**, on a scene where the eye moves and so every map is out of date.
+    ///
+    /// `docs/plan/45-shadows.md`'s cadence rung, and the observable it otherwise
+    /// has none for: a held map draws a shadow one frame behind its caster,
+    /// which is a plausible picture and one a golden accepts.
+    ///
+    /// The eye moves by a fraction of a cascade's own reach, so no frame is a
+    /// reset — that is asserted rather than assumed, because a reset would make
+    /// every frame redraw everything and this test would pass by having
+    /// switched the cadence off.
+    #[test]
+    fn the_far_cascade_is_held_on_the_frames_between_its_turns() {
+        let _blurs = ssao_blur_switch();
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let (mut renderer, _) = shadow_cache_scene(device, queue);
+        let sun = DirectionalLight::default();
+        renderer.set_shadow_cadence(Some(HOLD_TWO));
+
+        const FRAMES: usize = 8;
+        let mut near = 0;
+        let mut far = 0;
+        for step in 0..FRAMES {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a handful of frames, and the step is what is wanted"
+            )]
+            let camera = Camera {
+                eye: Camera::default().eye + Vec3::X * 0.05 * step as f32,
+                ..Camera::default()
+            };
+            let drawn = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
+            assert_eq!(
+                renderer.shadow_cadence_reset(),
+                step == 0,
+                "frame {step}: only the first frame has an atlas to lay out, and a reset \
+                 after it would redraw everything and leave nothing for the cadence to hold"
+            );
+            near += usize::from(renderer.shadow_cascade_redrawn(0));
+            far += usize::from(renderer.shadow_cascade_redrawn(1));
+            drawn.release(device);
+        }
+        assert_eq!(
+            near, FRAMES,
+            "the near cascade is fitted to the eye and is on the top rung: every frame"
+        );
+        assert_eq!(
+            far,
+            FRAMES / 2,
+            "the far cascade is one rung down, so every second frame"
+        );
+
+        renderer.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **A frame that keeps a tile loads the attachment and resets the tiles it
+    /// redraws itself**, and a frame that keeps none clears it — which is what
+    /// shipped.
+    ///
+    /// The half of the cadence a redraw count cannot see: holding a tile is only
+    /// worth anything if the tile survives, and the one clear this seam has
+    /// covers the whole image. A frame that loaded and reset nothing would draw
+    /// into tiles still holding the last frame's depths, and under reversed-Z a
+    /// caster that moved away would go on occluding.
+    #[test]
+    fn a_frame_that_keeps_a_tile_loads_the_attachment_and_resets_the_rest() {
+        let _blurs = ssao_blur_switch();
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let (mut renderer, _) = shadow_cache_scene(device, queue);
+        let sun = DirectionalLight::default();
+
+        // The first frame lays the atlas out, so it clears and redraws
+        // everything whatever the console says.
+        let first = frame_seen_from(device, &mut renderer, queue, &Camera::default(), &sun);
+        first.release(device);
+        assert_eq!(
+            shadow_pass_depth_load(&recorder, 0),
+            Some(LoadOp::Clear),
+            "the frame that lays the atlas out has nothing to keep"
+        );
+        assert_eq!(
+            tile_clears_in_the_shadow_pass(&recorder, 0),
+            0,
+            "and so resets no tile of its own"
+        );
+
+        renderer.set_shadow_cadence(Some(HOLD_TWO));
+        let mut seen = recorder.commands().len();
+        let mut loaded = 0;
+        for step in 1..4 {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a handful of frames, and the step is what is wanted"
+            )]
+            let camera = Camera {
+                eye: Camera::default().eye + Vec3::X * 0.05 * step as f32,
+                ..Camera::default()
+            };
+            let drawn = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
+            let load = shadow_pass_depth_load(&recorder, seen).expect("a shadow pass");
+            let clears = tile_clears_in_the_shadow_pass(&recorder, seen);
+            let faces = renderer.shadow_faces_redrawn() as usize;
+            if load == LoadOp::Load {
+                loaded += 1;
+                assert_eq!(
+                    clears, faces,
+                    "frame {step} loaded the attachment and reset {clears} of the {faces} \
+                     tiles it redrew"
+                );
+                assert!(
+                    faces < shadow::TILES,
+                    "frame {step} loaded an attachment while redrawing every tile"
+                );
+            } else {
+                assert_eq!(
+                    clears, 0,
+                    "frame {step} cleared the attachment and reset {clears} tiles again"
+                );
+            }
+            seen = recorder.commands().len();
+            drawn.release(device);
+        }
+        assert!(
+            loaded > 0,
+            "no frame kept a tile, so nothing here is about the load path"
+        );
+
+        renderer.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// A point light costs the budget every face it draws, not one.
+    ///
+    /// **The half of the budget its name is about.** `shadow_faces_redrawn` is
+    /// a sum over the groups a frame redrew of the maps each of them owns, and
+    /// a point light owns [`shadow::POINT_FACES`] of them. Every other check
+    /// here is built on the sun and a spot, which own one map each — so a face
+    /// count that answered `1` for every group would satisfy all of them, and
+    /// did: collapsing it passed the whole of `crcbl-render` and the mesh e2e
+    /// suite. This is what binds on the difference.
+    #[test]
+    fn a_point_light_costs_the_budget_every_face_it_draws() {
+        let _blurs = ssao_blur_switch();
+        let (_recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let _cube = place_cube(&mut renderer, Mat4::IDENTITY);
+        renderer.set_lights(&[shadowable_point(-1.0)]);
+        let sun = DirectionalLight::default();
+
+        // Every group is forced on the first frame — the image has held none of
+        // them — so this counts what a full redraw actually costs.
+        renderer.set_shadow_cadence(Some(shadow::Cadence::EVERY_FRAME));
+        let first = frame_seen_from(device, &mut renderer, queue, &Camera::default(), &sun);
+        first.release(device);
+        let point_faces = u32::try_from(shadow::POINT_FACES).expect("a handful of faces");
+        assert!(
+            renderer.shadow_lights().base_of(0).is_some(),
+            "the point must hold a run of tiles, or there is no multi-face group to count"
+        );
+        assert!(
+            renderer.shadow_faces_redrawn() >= point_faces,
+            "a frame that redrew a point light's whole cube reported {} faces, fewer than the \
+             {point_faces} it owns — so the budget is counting groups rather than the maps they \
+             draw, and a cube would slip past a budget of one",
+            renderer.shadow_faces_redrawn()
+        );
+    }
+
+    /// **A frame never redraws more tiles than the budget allows**, and every
+    /// map still gets its turn.
+    ///
+    /// The starvation half is what makes this more than an inequality: a
+    /// schedule that spent the budget on the same maps every frame would satisfy
+    /// the bound and never draw the rest at all.
+    #[test]
+    fn the_face_budget_bounds_a_frame_and_starves_no_map() {
+        let _blurs = ssao_blur_switch();
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let (mut renderer, _) = shadow_cache_scene(device, queue);
+        let sun = DirectionalLight::default();
+
+        let first = frame_seen_from(device, &mut renderer, queue, &Camera::default(), &sun);
+        first.release(device);
+        assert!(
+            renderer.shadow_lights().base_of(0).is_some(),
+            "the spot must hold a run, or the budget has only the cascades to bind on"
+        );
+
+        // One tile a frame: the two cascades and the spot's map cannot all fit,
+        // so something is held on every frame of the run below.
+        const BUDGET: u32 = 1;
+        renderer.set_shadow_cadence(Some(shadow::Cadence {
+            hold: 1,
+            faces: BUDGET as usize,
+        }));
+        const FRAMES: usize = 12;
+        let mut drew = [0usize; 3];
+        for step in 1..=FRAMES {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a handful of frames, and the step is what is wanted"
+            )]
+            let camera = Camera {
+                eye: Camera::default().eye + Vec3::X * 0.02 * step as f32,
+                ..Camera::default()
+            };
+            let drawn = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
+            assert!(
+                renderer.shadow_faces_redrawn() <= BUDGET,
+                "frame {step} redrew {} tiles against a budget of {BUDGET}",
+                renderer.shadow_faces_redrawn()
+            );
+            drew[0] += usize::from(renderer.shadow_cascade_redrawn(0));
+            drew[1] += usize::from(renderer.shadow_cascade_redrawn(1));
+            drew[2] += usize::from(renderer.shadow_slot_redrawn(0));
+            drawn.release(device);
+        }
+        for (map, count) in drew.iter().enumerate() {
+            assert!(
+                *count > 0,
+                "map {map} was never redrawn in {FRAMES} frames under a budget of \
+                 {BUDGET}: {drew:?}"
+            );
+        }
+
+        renderer.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **A light that jumps further than its own radius resets the cadence**,
+    /// and one that drifts inside it does not.
+    ///
+    /// `docs/plan/45-shadows.md`'s "a moving light or camera cut resets it",
+    /// made precise: a map whose centre has moved past the map's own reach is
+    /// not a frame out of date, it is about somewhere else — so it is redrawn on
+    /// the frame that notices rather than when its turn comes round. Both arms,
+    /// because a reset that fired on every move would be the cadence switched
+    /// off.
+    #[test]
+    fn a_light_that_jumps_past_its_own_radius_resets_the_cadence() {
+        let _blurs = ssao_blur_switch();
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let (mut renderer, _) = shadow_cache_scene(device, queue);
+        let sun = DirectionalLight::default();
+        let camera = Camera::default();
+        // The coarsest hold there is, so a redraw of the spot's map on the
+        // frames below is the reset and not its turn.
+        renderer.set_shadow_cadence(Some(shadow::Cadence {
+            hold: 8,
+            faces: shadow::TILES,
+        }));
+
+        let mut settle = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
+        settle.release(device);
+        for _ in 0..2 {
+            settle = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
+            settle.release(device);
+        }
+        assert!(
+            !renderer.shadow_cadence_reset(),
+            "the scene has settled, so nothing is about somewhere else"
+        );
+
+        // A drift well inside the light's own radius: out of date, not moved.
+        renderer.set_lights(&[shadowable_spot(-1.0 + 0.5)]);
+        let drifted = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
+        drifted.release(device);
+        assert!(
+            !renderer.shadow_cadence_reset(),
+            "a light that moved a sixteenth of its radius is a map a frame out of date"
+        );
+
+        // And a jump past it. `shadowable_spot`'s radius is what the reach is
+        // taken from, so this is a light standing where its own map says
+        // nothing.
+        renderer.set_lights(&[shadowable_spot(-1.0 + 40.0)]);
+        let jumped = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
+        jumped.release(device);
+        assert!(
+            renderer.shadow_cadence_reset(),
+            "a light that jumped five times its own radius must not hold its map"
+        );
+        assert!(
+            renderer.shadow_slot_redrawn(0),
+            "and the reset is only a reset if the map is actually redrawn"
+        );
+
+        renderer.destroy(device);
+        recorder.assert_valid();
+    }
+
     /// **Every input the atlas is drawn from redraws it**, one at a time.
     ///
     /// The half that stops "cached everything, for ever" from passing every
@@ -13825,6 +14693,20 @@ mod tests {
 
     /// A spot at `x` that [`shadow::Selection`] will give a tile: finite, a
     /// radius, a direction and a cone well inside the widest one allowed.
+    /// A shadowed point light, which is [`shadow::POINT_FACES`] maps rather
+    /// than one.
+    ///
+    /// The spot beside it is one tile and one face, so a scene built only from
+    /// spots cannot tell a budget counting **faces** from one counting groups —
+    /// which is what this exists to give a check something to bind on.
+    fn shadowable_point(x: f32) -> Light {
+        Light::Point(crate::light::PointLight {
+            position: Vec3::new(x, 2.0, 0.0),
+            radius: 8.0,
+            color: Vec3::ONE,
+        })
+    }
+
     fn shadowable_spot(x: f32) -> Light {
         Light::Spot(crate::light::SpotLight {
             position: Vec3::new(x, 2.0, 0.0),

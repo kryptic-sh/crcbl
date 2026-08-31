@@ -215,6 +215,56 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   a tap on it that fell through would move the player every time a letter was
   typed.
 
+- **The shadow atlas has a cadence and a budget: a frame where everything moved
+  at once no longer redraws every map.** `docs/plan/45-shadows.md`'s atlas rung,
+  item 3, and the last of the five. `crcbl_render::shadow::Cadence::schedule`
+  decides which of the atlas's **groups** — a cascade, or a light slot's whole
+  run of tiles, which is what one cull covers — a frame redraws out of the ones
+  whose maps the image no longer holds. It is a pure function of the frame
+  index, those groups and two limits: no clock, no iteration order and no
+  address, so a golden at a stated frame is the same golden on every run and
+  every driver.
+
+  **The tier is the ladder the tile size already walks.** A light's tier is the
+  quadtree level `shadow::tile_level` gave it, so `shadow::coverage` decides how
+  often a map is redrawn exactly as it decides how large that map is; a
+  cascade's tier is its own index, so the near cascade is redrawn every frame
+  and each one out doubles the period. Cadence is the outer gate and staleness
+  the inner one: a group whose inputs moved but whose turn has not come **holds
+  the texels it has** and is redrawn on its turn.
+
+  **Holding a tile needed a clear the attachment cannot give.** `mesh.slang`'s
+  new `depthClearVertexMain` and `MeshModules::depth_clear_pipeline` reset one
+  tile with a primitive over its own viewport — `CompareOp::Always`, depth
+  writes on, `SHADOW_ATLAS_CLEAR_DEPTH` — so a frame that keeps a tile **loads**
+  the attachment and resets only what it redraws, and a frame that keeps nothing
+  clears it, which is the recording that shipped. That also completes item 5's
+  rung at the group rather than at the whole image: a lamp that swings now costs
+  its own tiles and not every tile.
+
+  **A moving light or a camera cut resets it**, and the rule is derived rather
+  than tuned: a map whose own centre has moved further than its own reach — a
+  light past its radius, a cascade's eye past the sphere it was fitted to — is
+  about somewhere else rather than a frame out of date, so it bypasses the
+  period and is offered the budget first.
+  `ForwardRenderer::shadow_cadence_reset` is the readback. A frame whose atlas
+  was relaid — a light gained, lost or resized a tile, or shadows switched on or
+  off — resets wholesale and spends no budget.
+
+  **Both limits default to what shipped, so no golden moved.**
+  `crcbl_render::shadow::r_shadow_cadence` is the longest a map may be held, in
+  frames, and ships at 1; `crcbl_render::shadow::r_shadow_faces` is how many
+  tiles a frame may redraw, and ships at the whole atlas.
+  `ForwardRenderer::set_shadow_cadence` pins the pair per renderer, which is
+  what an application drawing two views at two qualities needs and what every
+  test that draws a frame uses — the two variables are process-global and the
+  shadow pass is in every frame's pass list.
+
+  `ForwardRenderer::shadow_cascade_redrawn`, `shadow_slot_redrawn`,
+  `shadow_faces_redrawn` and `shadow_cadence_reset` are new, and are the only
+  observables the rung has: a held map draws a shadow a frame or two behind its
+  caster, which is a plausible picture and one a golden accepts.
+
 - **The shadow atlas is cached: a frame whose lights, casters and camera have
   not moved does not draw it again.** `docs/plan/45-shadows.md`'s atlas rung,
   item 5. `crcbl_render::shadow::Selection` now holds its `AtlasAllocator` tiles

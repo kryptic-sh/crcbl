@@ -290,6 +290,16 @@ static const uint SHADOW_POINT_FACES = 6;
 /// drift test that pins `SHADOW_CASCADES` pins it.
 static const uint SHADOW_ATLAS_TILES = 16;
 
+/// The depth one tile of the shadow atlas is reset to before it is redrawn,
+/// matching `crcbl_shaders::mesh::SHADOW_ATLAS_CLEAR_DEPTH`.
+///
+/// The reversed-Z far plane, which is what `crcbl_hal::depth::CLEAR` is and what
+/// the pass loads the whole attachment with on a frame that redraws every tile.
+/// `depthClearVertexMain` is what writes it over one tile on a frame that does
+/// not, and the two have to be the same value or a held tile and a cleared tile
+/// would answer differently where nothing was drawn.
+static const float SHADOW_ATLAS_CLEAR_DEPTH = 0.0;
+
 /// Which atlas tile light tile `tile` of the light region was rendered into.
 ///
 /// The cascades take tiles `0 .. SHADOW_CASCADES` and the lights take the rest,
@@ -1737,6 +1747,33 @@ float4 depthVertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID)
         : mesh.base_vertex;
     float4 world = mul(instance.transform, float4(load_position(index + base_vertex), 1.0));
     return mul(frame.view_proj, world);
+}
+
+/// The stage that resets one tile of the shadow atlas to
+/// `SHADOW_ATLAS_CLEAR_DEPTH`, so a pass that keeps some tiles can still redraw
+/// others.
+///
+/// `docs/plan/45-shadows.md`'s cadence rung needs a tile to be cleared on its
+/// own, and the render-pass load operation cannot do it: a `LoadOp::Clear`
+/// covers the whole attachment, and the region-bounded forms are not portable —
+/// Metal's load action and WebGPU's `loadOp` have no render area, so a partial
+/// clear would keep a tile on one backend and erase it on another. A primitive
+/// covering the tile's own viewport, drawn through a pipeline that always passes
+/// the depth test and writes, is the portable statement of the same thing.
+///
+/// **No inputs at all**, which is what makes it a clear rather than a draw: the
+/// three corners come from `SV_VertexID` — `ssao.slang`'s over-sized triangle,
+/// the same three — and the depth is the constant above rather than anything
+/// projected. `crcbl_render::forward`'s shadow pass has already set the viewport
+/// and the scissor to the tile, so the primitive covers that tile and no other.
+[shader("vertex")]
+float4 depthClearVertexMain(uint index: SV_VertexID) : SV_Position
+{
+    float2 corner = float2(float((index << 1) & 2), float(index & 2));
+    return float4(
+        corner * float2(2.0, -2.0) + float2(-1.0, 1.0),
+        SHADOW_ATLAS_CLEAR_DEPTH,
+        1.0);
 }
 
 /// The smallest roughness the specular lobe is evaluated at.

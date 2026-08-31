@@ -192,6 +192,18 @@ pub const SHADOW_ATLAS_TILES: usize = SHADOW_CASCADES + SHADOW_LIGHT_TILES;
 /// measured in. Two copies of it would put the blocker search and the matrix it
 /// is inverting on different numbers, and the picture that produces is a
 /// penumbra scaled wrongly rather than anything that looks like a bug.
+/// The depth one tile of the shadow atlas is reset to before it is redrawn.
+///
+/// The reversed-Z far plane — `crcbl_hal::depth::CLEAR` — and this crate
+/// declares it because `mesh.slang`'s `depthClearVertexMain` writes it: a pass
+/// that keeps some tiles and redraws others cannot clear one tile through the
+/// attachment's load operation, so the tiles it does redraw are reset by a
+/// primitive covering each of them. A clear quad and a load-operation clear that
+/// disagreed would leave a held tile and a redrawn one answering differently
+/// where nothing was drawn, which is a shadow that appears and disappears with
+/// the cadence.
+pub const SHADOW_ATLAS_CLEAR_DEPTH: f32 = 0.0;
+
 pub const SHADOW_CASTER_REACH: f32 = 40.0;
 
 const _: () = assert!(
@@ -2393,6 +2405,16 @@ mod tests {
         // `sun_penumbra_texels` inverts. A shader holding a different one sizes
         // every penumbra by the ratio between the two — a picture, and a
         // plausible one, since no frame says how wide a penumbra should be.
+        // The tile clear's depth, read off the shader rather than restated: the
+        // pass's own `LoadOp::Clear` writes `crcbl_hal::depth::CLEAR` and this
+        // stage writes this, and a frame that keeps some tiles uses both — so
+        // two different values are a tile that reads as "nothing stored" on one
+        // path and as a caster at the near plane on the other.
+        assert_eq!(
+            shader_float(mesh, "SHADOW_ATLAS_CLEAR_DEPTH"),
+            SHADOW_ATLAS_CLEAR_DEPTH,
+            "mesh.slang clears a tile to a depth this crate does not declare"
+        );
         let reach = format!("static const float SHADOW_CASTER_REACH = {SHADOW_CASTER_REACH:?};");
         assert!(
             mesh.contains(&reach),

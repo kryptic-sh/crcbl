@@ -40,7 +40,7 @@ use crate::harness::Headless;
 use crate::mesh_scene::{place, render_mesh_lit};
 use crcbl::hal::Features;
 use crcbl::math::{Mat4, Vec3};
-use crcbl::render::shadow::{MIN_TILE, TILE, light_tile};
+use crcbl::render::shadow::{Cadence, MIN_TILE, TILE, light_tile};
 use crcbl::render::{
     Camera, DirectionalLight, ForwardRenderer, Light, Projection, SpotLight, TransientPool,
 };
@@ -531,6 +531,47 @@ const PRICE_EYES: [f32; 2] = [22.0, 88.0];
 /// overlay shows.
 const PRICED_PASS: &str = "shadow";
 
+/// How far one patch of the field is moved per frame while a price is being
+/// measured with `stirred` set, in world units.
+///
+/// Small enough that no map's contents change in any way a picture would show,
+/// and large enough to be a real translation rather than a rounding no `f32`
+/// records: the field's patches stand tens of units from the origin, and a drift
+/// under the last bit of a number that size is a write whose value never moves.
+const STIR_STEP: f32 = 1.0e-3;
+
+/// What one run of [`shadow_pass_prices`] measured, one entry per arm.
+///
+/// A type rather than a tuple of three arrays, which is what it was until
+/// clippy's `type_complexity` said so — and it reads better at the call sites,
+/// where the three are asked about for three different reasons.
+struct PricedShadowPass {
+    /// Each arm's `shadow`-pass p50 and p95 in nanoseconds, and [`None`] where
+    /// the device reports no way to time a pass at all.
+    prices: [Option<(u64, u64)>; 2],
+    /// The side of the tile the first light was given, in texels.
+    sides: [u32; 2],
+    /// The fewest tiles the arm redrew in any recorded frame.
+    faces: [u32; 2],
+}
+
+/// One half of a price: where the camera stands, and what cadence the renderer
+/// is pinned to while it draws.
+///
+/// **Two knobs and one rig**, because there are two rungs to price off the same
+/// field of dunes: the priority rung moves the eye and leaves the cadence alone,
+/// and the cadence rung leaves the eye alone and moves the budget. Both halves
+/// are drawn on alternating frames of one run, which is what makes the numbers
+/// comparable — see [`shadow_pass_prices`].
+#[derive(Clone, Copy, Debug)]
+struct PriceArm {
+    /// How far back the camera stands — [`price_camera`]'s argument.
+    eye: f32,
+    /// What `ForwardRenderer::set_shadow_cadence` is given, or [`None`] to take
+    /// the console's, which is every map redrawn every frame.
+    cadence: Option<Cadence>,
+}
+
 /// The camera for the price, `back` along `+z` and up, looking at the field.
 fn price_camera(back: f32) -> Camera {
     Camera {
@@ -566,7 +607,12 @@ fn price_lights() -> Vec<Light> {
 /// The two prices are [`None`] where the device reports no way to time a pass,
 /// on `depth_only.rs`'s terms exactly: a backend that cannot time a pass cannot
 /// price one, and the frames are drawn either way.
-fn shadow_pass_prices(extent: (u32, u32), frames: usize) -> ([Option<(u64, u64)>; 2], [u32; 2]) {
+fn shadow_pass_prices(
+    extent: (u32, u32),
+    frames: usize,
+    arms: [PriceArm; 2],
+    stirred: bool,
+) -> PricedShadowPass {
     use crcbl::hal::{CommandEncoderDesc, PresentInfo, ResourceState, SubmitInfo};
     use crcbl::shaders::dunes::DUNES_EXTENT;
 
@@ -581,9 +627,10 @@ fn shadow_pass_prices(extent: (u32, u32), frames: usize) -> ([Option<(u64, u64)>
     let mut pool = TransientPool::new();
     let step = 2.0 * DUNES_EXTENT;
     let first = -(PRICE_FIELD as f32 - 1.0) / 2.0;
+    let mut stir = None;
     for row in 0..PRICE_FIELD {
         for column in 0..PRICE_FIELD {
-            place(
+            let patch = place(
                 &mut renderer,
                 crcbl::render::scene::DEMO_DUNES,
                 crcbl::render::scene::DEMO_UNTINTED,
@@ -593,10 +640,12 @@ fn shadow_pass_prices(extent: (u32, u32), frames: usize) -> ([Option<(u64, u64)>
                     (first + row as f32) * step,
                 )),
             );
+            stir.get_or_insert(patch);
         }
     }
+    let stir = stir.expect("a field of at least one patch");
     renderer.set_lights(&price_lights());
-    let cameras = PRICE_EYES.map(price_camera);
+    let cameras = arms.map(|arm| price_camera(arm.eye));
     let sun = no_sun();
 
     let mut timers = timed.then(|| {
@@ -613,6 +662,11 @@ fn shadow_pass_prices(extent: (u32, u32), frames: usize) -> ([Option<(u64, u64)>
     ];
     let mut recorded = Vec::new();
     let mut sides = [0u32; 2];
+    // The **fewest** tiles either arm redrew in any recorded frame, which is
+    // what says a budget bound rather than merely being configured: a maximum
+    // would be satisfied by one busy frame among a run of cached ones, and a
+    // cached frame records no shadow pass at all.
+    let mut faces = [u32::MAX; 2];
 
     // Twice through, because each camera takes every other frame — and the
     // warm-up is doubled with them so both windows start in the steady state.
@@ -621,9 +675,38 @@ fn shadow_pass_prices(extent: (u32, u32), frames: usize) -> ([Option<(u64, u64)>
         let acquired = device
             .acquire_next_frame(headless.swapchain)
             .expect("the ring always has an image");
+        renderer.set_shadow_cadence(arms[eye].cadence);
+        // **A scene where everything moves at once**, which is the case the
+        // budget exists to bound and the only one in which a held map is
+        // holding anything: `InstancePool::revision` reaches every group's
+        // record, so one nudged patch makes every map out of date on every
+        // frame. Without it the arms alternate over a still scene, the atlas
+        // caches, and the pass this function is timing is not recorded at all.
+        if stirred {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a few hundred frames against a drift measured in millimetres"
+            )]
+            let drift = index as f32 * STIR_STEP;
+            renderer.set_instance(
+                stir,
+                &crcbl::render::InstanceDesc {
+                    mesh: crcbl::render::scene::DEMO_DUNES,
+                    material: crcbl::render::scene::DEMO_UNTINTED,
+                    transform: Mat4::from_translation(Vec3::new(
+                        first * step + drift,
+                        0.0,
+                        first * step,
+                    )),
+                },
+            );
+        }
         renderer
             .begin_frame(device, &cameras[eye], &sun, extent)
             .expect("the uniform buffer is writable");
+        if index >= 2 * PRICE_WARMUP {
+            faces[eye] = faces[eye].min(renderer.shadow_faces_redrawn());
+        }
         sides[eye] = renderer
             .shadow_lights()
             .base_of(0)
@@ -707,7 +790,11 @@ fn shadow_pass_prices(extent: (u32, u32), frames: usize) -> ([Option<(u64, u64)>
     renderer.destroy(device);
     pool.destroy(device);
     headless.finish();
-    (prices, sides)
+    PricedShadowPass {
+        prices,
+        sides,
+        faces,
+    }
 }
 
 /// **The rung's price**: what the shadow pass costs with four lights at whole
@@ -749,7 +836,12 @@ fn shadow_pass_prices(extent: (u32, u32), frames: usize) -> ([Option<(u64, u64)>
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
 fn a_demoted_rig_costs_no_more_in_the_shadow_pass_than_a_whole_cell_one() {
     let (extent, frames) = price_frame();
-    let (prices, sides) = shadow_pass_prices(extent, frames);
+    let PricedShadowPass { prices, sides, .. } = shadow_pass_prices(
+        extent,
+        frames,
+        PRICE_EYES.map(|eye| PriceArm { eye, cadence: None }),
+        false,
+    );
 
     // **The two rigs differed**, which is what makes the durations a comparison
     // rather than two measurements of one thing.
@@ -776,5 +868,101 @@ fn a_demoted_rig_costs_no_more_in_the_shadow_pass_than_a_whole_cell_one() {
         whole.1 as f64 / 1e6,
         demoted.0 as f64 / 1e6,
         demoted.1 as f64 / 1e6,
+    );
+}
+
+/// The budget the cadence half of the price is measured under, in tiles a frame
+/// may redraw.
+///
+/// The rig is four spot lights and the sun's two cascades, so a frame with
+/// everything moving wants six tiles; two is a third of that and binds on every
+/// frame. Deliberately not one — a budget under the largest map is the
+/// always-draw-something rule rather than a budget, and that is a different
+/// measurement.
+const PRICE_BUDGET: u32 = 2;
+
+/// **The cadence rung's price**: what the shadow pass costs with every map
+/// redrawn every frame against the same rig under a budget of
+/// [`PRICE_BUDGET`] tiles.
+///
+/// Prints rather than asserts a duration, on
+/// [`a_demoted_rig_costs_no_more_in_the_shadow_pass_than_a_whole_cell_one`]'s
+/// terms and for its reasons: a millisecond figure is a property of the machine
+/// it was measured on, and the two arms are drawn on alternating frames of one
+/// run so whatever contention the suite produces lands on both.
+///
+/// **What varies between the two, said plainly.** Only the budget. The camera,
+/// the lights, the geometry and every tile's size are identical — the eye does
+/// not move, so no light is demoted and no shadow cull selects a different cut.
+/// What the budgeted arm draws is a subset of what the other one draws, plus one
+/// tile-clear triangle per tile it does redraw.
+///
+/// The budget is asserted to have **bound**: without that the two arms are two
+/// measurements of one thing, which is the failure this rung's price is most
+/// likely to have.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_budgeted_frame_costs_less_in_the_shadow_pass_than_an_unbudgeted_one() {
+    let (extent, frames) = price_frame();
+    let PricedShadowPass {
+        prices,
+        sides,
+        faces,
+    } = shadow_pass_prices(
+        extent,
+        frames,
+        [
+            PriceArm {
+                eye: PRICE_EYES[0],
+                cadence: None,
+            },
+            PriceArm {
+                eye: PRICE_EYES[0],
+                cadence: Some(Cadence {
+                    hold: 1,
+                    faces: PRICE_BUDGET as usize,
+                }),
+            },
+        ],
+        true,
+    );
+
+    assert_eq!(
+        sides[0], sides[1],
+        "the two arms must hand the same light the same tile, or this priced the tile size \
+         rather than the budget"
+    );
+    assert!(
+        faces[0] > PRICE_BUDGET,
+        "the unbudgeted arm redrew as few as {} tiles on some frame, so the {PRICE_BUDGET} the \
+         other one is held to is not a budget at all — and a frame that redrew nothing records \
+         no shadow pass, which would leave the percentiles below measuring the frames that did",
+        faces[0]
+    );
+    assert_eq!(
+        faces[1], PRICE_BUDGET,
+        "the budgeted arm redrew {} tiles on some frame against a budget of {PRICE_BUDGET}",
+        faces[1]
+    );
+
+    let [Some(every), Some(budgeted)] = prices else {
+        eprintln!(
+            "{}: this backend reports no TIMESTAMP_QUERY, so the shadow pass is drawn and not \
+             priced",
+            crate::SUITE
+        );
+        return;
+    };
+    eprintln!(
+        "{}: shadow pass at {extent:?} over {frames} frames of each — every map every frame \
+         ({} tiles) p50 {:.3} ms p95 {:.3} ms, budget of {PRICE_BUDGET} tiles ({} tiles) p50 \
+         {:.3} ms p95 {:.3} ms",
+        crate::SUITE,
+        faces[0],
+        every.0 as f64 / 1e6,
+        every.1 as f64 / 1e6,
+        faces[1],
+        budgeted.0 as f64 / 1e6,
+        budgeted.1 as f64 / 1e6,
     );
 }

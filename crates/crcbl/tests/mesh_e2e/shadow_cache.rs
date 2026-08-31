@@ -30,6 +30,7 @@ use crate::harness::Headless;
 use crate::mesh_scene::{place, render_mesh_lit};
 use crcbl::hal::Features;
 use crcbl::math::{Mat4, Vec3};
+use crcbl::render::shadow::Cadence;
 use crcbl::render::{
     Camera, DirectionalLight, ForwardRenderer, InstanceDesc, InstanceHandle, Light, Projection,
     SpotLight, TransientPool,
@@ -338,6 +339,157 @@ fn a_cached_atlas_draws_the_frame_it_would_have_drawn() {
             across_the_cache, 0,
             "the frame that kept its atlas is not the frame that drew it, so the rectangles the \
              shader read are not the rectangles the maps were rendered into"
+        );
+    }));
+
+    teardown(headless, vec![(moved, moved_pool), (fresh, fresh_pool)]);
+    if let Err(panic) = verdict {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// The cadence this file's second test pins: every map is due every frame, and
+/// one tile is all a frame may redraw.
+///
+/// **The budget rather than the ladder**, because it is the shorter road to the
+/// frame this test is about: the scene has the sun's two cascades and the lamp's
+/// one map asking every frame, so a budget of one tile holds two of them on
+/// every frame and rotates which. Pinned through
+/// [`ForwardRenderer::set_shadow_cadence`] rather than set on the console, for
+/// the reason that method gives.
+const ONE_TILE_A_FRAME: Cadence = Cadence { hold: 1, faces: 1 };
+
+/// How many frames the run below draws after the caster moves.
+///
+/// Long enough for the rotation to serve every map that is asking several times
+/// over — the schedule's own tie-break turns by one group a frame, and there are
+/// `crcbl_render::shadow::GROUPS` of them.
+const CADENCE_FRAMES: usize = 12;
+
+/// **A frame that kept a tile draws the map it redrew, and the tile it kept
+/// stays kept.**
+///
+/// `docs/plan/45-shadows.md`'s cadence rung, on a device, and the half no host
+/// test can reach. A frame that holds a map cannot clear the attachment — the
+/// only clear this seam has covers the whole image — so it **loads** it and
+/// resets each tile it redraws with a primitive of its own. Two ways that goes
+/// wrong, and both draw a plausible picture:
+///
+/// * **The tile is not reset.** The map keeps the previous frame's depths, and
+///   under reversed-Z a caster that has walked away is still the nearest thing
+///   to the light: its shadow goes on being cast from where it used to be, on
+///   top of the shadow that is cast now.
+/// * **The load erases what it was meant to keep.** A held tile reads as the
+///   reversed-Z clear, which is "nothing stored" — so the light it belongs to
+///   stops occluding altogether.
+///
+/// The comparison is the same one
+/// [`a_cached_atlas_draws_the_frame_it_would_have_drawn`] makes: once the
+/// rotation has served the lamp's map after the move, the frame under test has
+/// to be the frame a renderer meeting the scene for the first time draws. The
+/// sun is black here, so the only map in the picture is the lamp's — a held
+/// cascade is a real lag and would be a different test.
+///
+/// And the hold is asserted to have happened at all: a run in which every frame
+/// redrew every map would satisfy the comparison with nothing held, which is
+/// exactly the cadence not running.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_frame_that_kept_a_tile_draws_the_map_it_redrew() {
+    let headless = Headless::open_at(EXTENT, Features::GPU_DRIVEN | Features::DEBUG_MARKERS);
+    let camera = floor_camera();
+    let sun = no_sun();
+
+    let (mut moved, mut moved_pool, caster) = lit_floor(&headless, CASTER_STEPS[0]);
+    moved.set_shadow_cadence(Some(ONE_TILE_A_FRAME));
+    let before = render_mesh_lit(&headless, &mut moved, &mut moved_pool, &camera, &sun, None);
+    moved.set_instance(
+        caster,
+        &InstanceDesc {
+            mesh: crcbl::render::scene::DEMO_PYRAMID,
+            material: crcbl::render::scene::DEMO_UNTINTED,
+            transform: caster_at(CASTER_STEPS[1]),
+        },
+    );
+
+    // Each frame after the move, with what the renderer says it did: whether
+    // the lamp's map was redrawn, and how many tiles the frame redrew at all.
+    let mut run = Vec::with_capacity(CADENCE_FRAMES);
+    for _ in 0..CADENCE_FRAMES {
+        let image = render_mesh_lit(&headless, &mut moved, &mut moved_pool, &camera, &sun, None);
+        run.push((
+            image,
+            moved.shadow_slot_redrawn(0),
+            moved.shadow_faces_redrawn(),
+        ));
+    }
+
+    // The reference: a renderer with the caster already where the move put it,
+    // so its first frame lays the atlas out and draws every map from nothing.
+    let (mut fresh, mut fresh_pool, _) = lit_floor(&headless, CASTER_STEPS[1]);
+    let reference = render_mesh_lit(&headless, &mut fresh, &mut fresh_pool, &camera, &sun, None);
+
+    let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let over_budget = run.iter().filter(|(_, _, faces)| *faces > 1).count();
+        assert_eq!(
+            over_budget, 0,
+            "{over_budget} frame(s) of the run redrew more than the one tile the pinned \
+             cadence allows, so nothing below is about a frame that kept anything"
+        );
+        let held = run.iter().filter(|(_, drew, _)| !*drew).count();
+        assert!(
+            held >= CADENCE_FRAMES / 2,
+            "only {held} of {CADENCE_FRAMES} frames held the lamp's map: the budget is not \
+             binding and this run has no load path in it"
+        );
+
+        let moved_by = differing(&before, &run[run.len() - 1].0);
+        eprintln!(
+            "{}: the caster's move changed {moved_by} pixels",
+            crate::SUITE
+        );
+        assert!(
+            moved_by >= MOVED_PIXELS,
+            "moving the caster changed {moved_by} pixels, under the {MOVED_PIXELS} this scene \
+             draws — the move did not land, and the comparison below would pass on an atlas \
+             that never redrew anything"
+        );
+
+        // The last frame of the run: the rotation has served the lamp's map by
+        // then, so its shadow is where the caster now stands and the picture is
+        // the reference's.
+        let (settled, _, _) = &run[run.len() - 1];
+        let against_reference = differing(settled, &reference);
+        eprintln!(
+            "{}: the frame after the run differs from the reference in {against_reference} \
+             pixels",
+            crate::SUITE
+        );
+        assert_eq!(
+            against_reference, 0,
+            "a frame drawn under the cadence differs from the frame a renderer meeting the \
+             same scene draws. The maps are the only state that carries across a frame here, \
+             so this is either a tile the load path failed to reset — the old caster still \
+             occluding — or a tile it erased"
+        );
+
+        // And the hold was visible while it lasted: the first frame after the
+        // move still shows the shadow the lamp's map was drawn with.
+        let (first, redrew_first, _) = &run[0];
+        assert!(
+            !redrew_first,
+            "the first frame after the move served the lamp, so there is no held frame here \
+             to compare"
+        );
+        let lagging = differing(first, &reference);
+        eprintln!(
+            "{}: the held frame lags the reference by {lagging} pixels",
+            crate::SUITE
+        );
+        assert!(
+            lagging > 0,
+            "the frame that held the lamp's map drew the reference exactly, so the map was \
+             redrawn after all and the cadence held nothing"
         );
     }));
 

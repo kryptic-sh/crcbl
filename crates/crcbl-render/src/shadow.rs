@@ -105,10 +105,12 @@
 //! one that is uniformly coarser.
 
 mod atlas;
+mod cadence;
 
 use glam::{Mat4, Vec3, Vec4Swizzles};
 
 pub use atlas::{AtlasAllocator, MIN_TILE, TILE_LEVELS, Tile, TileRect};
+pub use cadence::{Cadence, GROUPS, Group, r_shadow_cadence, r_shadow_faces};
 
 use crate::camera::Camera;
 use crate::cull::Frustum;
