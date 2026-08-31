@@ -92,7 +92,7 @@
 // e2e job as a known trap, and a harness whose browser never started would
 // otherwise print nothing and succeed.
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -2908,6 +2908,29 @@ const binary = findBrowser(fail);
 
 /** Everything the page logged, in order, so a failure can print it. */
 const consoleLines = [];
+
+// **The page log, written as it arrives rather than when the run ends.**
+//
+// The run's own `${SLUG}-${mode}.log` below is written in one call after the
+// last check, so a job the runner kills — a `timeout-minutes` cap firing — used
+// to leave the screenshot and nothing else, and where it stopped could not be
+// recovered from the artifact or from the step log, which flushes nothing
+// either. `docs/backlog.md`'s shard entry is the case: three runs in five have
+// died at the cap with no evidence of what they were doing.
+//
+// This one is appended per line and named without the adapter mode, because a
+// run that dies may never have chosen one. The upload step takes the whole of
+// `target/web-e2e` and runs `if: always()`, so it survives a cancellation.
+const LIVE_LOG = join(OUT, `${SLUG}-live.log`);
+writeFileSync(LIVE_LOG, '');
+
+// Records one page line in memory and on disk. Both, rather than deriving the
+// file from the array at the end: the array is what the checks read, and the
+// file is what outlives a killed process.
+const recordLine = (line) => {
+  consoleLines.push(line);
+  appendFileSync(LIVE_LOG, `${line}\n`);
+};
 /** WebGPU device errors, which Chrome reports through the Log domain. */
 const deviceErrors = [];
 /** Uncaught exceptions in page JS. */
@@ -3010,7 +3033,7 @@ try {
 
   const page = await openPage(browser);
   page.on('Runtime.consoleAPICalled', ({ type, args: values }) => {
-    consoleLines.push(
+    recordLine(
       `[${type}] ${values.map((v) => v.value ?? v.description ?? '').join(' ')}`
     );
   });
@@ -3020,7 +3043,7 @@ try {
     );
   });
   page.on('Log.entryAdded', ({ entry }) => {
-    consoleLines.push(`[${entry.source}.${entry.level}] ${entry.text}`);
+    recordLine(`[${entry.source}.${entry.level}] ${entry.text}`);
     // Dawn reports a rejected shader, an invalid pipeline or a refused submit
     // through the device's error callback, and Chrome surfaces those here.
     // `wgpu` does not turn any of them into a `Result`, so this is the only
