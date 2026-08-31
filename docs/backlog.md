@@ -2716,6 +2716,44 @@ still ship on D3D12 undetected.
 **Note:** this sits inside the deferral in `docs/plan/09-backends-metal-dx12.md`
 — it is parked, not owed.
 
+### `config`'s storage read is not covered by a check (2026-08-31)
+
+`crcbl::console_config::read_file` — the `SettingsStack::with_platform_storage`
+call, the `StorageError` mapping and the UTF-8 decode — is the one part of the
+command no test drives: exercising it means either writing into the config
+directory of whoever runs the suite or an injection seam that exists only for
+the test. Everything above it is covered (`file_named`, `run_text`, `enter`, the
+host-effect check, and the arm that refuses a run with no settings file).
+
+**What would close it:** `with_platform_storage` takes an `app_name` and
+resolves the root itself, so a `NativeStorage::at(temp_dir)` overload — or a
+`SettingsSource`-shaped parameter on `ConsoleHost` — would let a test point the
+read at a temporary directory on every platform. Left out deliberately: it is
+engine surface added for a test.
+
+### A browser has never run `config` (2026-08-31)
+
+The command compiles for `wasm32` and reads through the OPFS store, and the
+`StorageError::Pending` arm — the store not yet restored by the shim — is
+written from `crcbl_store::web`'s contract rather than from having seen it fire.
+Nothing in `web/tools/browser-e2e.mjs` types a `config` line, because the slice
+touched no demo.
+
+**What it would take:** a page that writes a `.cfg` into OPFS before the demo
+opens, then an `EXPECTATIONS.<demo>.console` check that types `config <name>`
+and reads the effect off the demo's heartbeat, the way the `debug_view` check
+already does.
+
+### `config` cannot write a file, and a file takes no arguments (2026-08-31)
+
+**Considered and left out, both.** Source's `writeconfig`/`host_writeconfig` has
+no counterpart here: `save` writes `settings.toml` and nothing dumps the
+console's current state as a runnable `.cfg`. A dump would have to decide which
+of several hundred variables are worth writing, and the `save`/`dump` pair
+already covers the settings half. Separately, Source's `.cfg` files are often
+`alias`-driven; this one is a flat list of lines, and nobody has asked for
+arguments or `alias`. Recorded so neither is re-derived.
+
 ### XDND action negotiation is copy, and only copy (2026-08-31)
 
 **Deliberate, not a gap in the handshake.** `crates/crcbl-shell/src/x11/xdnd.rs`

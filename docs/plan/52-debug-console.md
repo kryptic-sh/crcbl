@@ -291,20 +291,21 @@ as a known gap, not designed around.
 
 ### 7. The commands that ship
 
-| Command                 | Does                                                                                                                                     |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `help [name or prefix]` | every variable and command with its help, value, default and flags; with an argument, the matches only. The user's ask, verbatim         |
-| `find <substring>`      | names and help lines containing the text — Source's `find`, and the way a variable is discovered without knowing its prefix              |
-| `<var>`                 | prints `name = value (default: d) — help`                                                                                                |
-| `<var> <value>`         | sets, coerced through `Kind`; `<var> = <value>` is accepted because the user wrote it that way; a value outside the domain is refused    |
-| `toggle <bool var>`     | flips it                                                                                                                                 |
-| `reset <var>` / `reset` | back to the default; bare, every non-`ARCHIVE` variable                                                                                  |
-| `save`                  | writes the settings file; `dump` prints `SettingsStack::dump()`                                                                          |
-| `log <filter>`          | the live `CRCBL_LOG` filter                                                                                                              |
-| `echo`, `clear`         | Source's                                                                                                                                 |
-| `debug_view <name>`     | `shaded`, `normals`, `ambient occlusion`, `motion`, `heatmap`, `lod tint` — an `Enum` variable `r_debug_view` under the hood, everywhere |
-| `pause`, `quit`         | the pause toggle the loop already has; a clean `ExitReason`                                                                              |
-| `fps`                   | the frame-timing row's numbers as a line                                                                                                 |
+| Command                 | Does                                                                                                                                       |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `help [name or prefix]` | every variable and command with its help, value, default and flags; with an argument, the matches only. The user's ask, verbatim           |
+| `find <substring>`      | names and help lines containing the text — Source's `find`, and the way a variable is discovered without knowing its prefix                |
+| `<var>`                 | prints `name = value (default: d) — help`                                                                                                  |
+| `<var> <value>`         | sets, coerced through `Kind`; `<var> = <value>` is accepted because the user wrote it that way; a value outside the domain is refused      |
+| `toggle <bool var>`     | flips it                                                                                                                                   |
+| `reset <var>` / `reset` | back to the default; bare, every non-`ARCHIVE` variable                                                                                    |
+| `save`                  | writes the settings file; `dump` prints `SettingsStack::dump()`                                                                            |
+| `log <filter>`          | the live `CRCBL_LOG` filter                                                                                                                |
+| `echo`, `clear`         | Source's                                                                                                                                   |
+| `debug_view <name>`     | `shaded`, `normals`, `ambient occlusion`, `motion`, `heatmap`, `lod tint` — an `Enum` variable `r_debug_view` under the hood, everywhere   |
+| `pause`, `quit`         | the pause toggle the loop already has; a clean `ExitReason`                                                                                |
+| `fps`                   | the frame-timing row's numbers as a line                                                                                                   |
+| `config <name>`         | runs `<name>.cfg` from the settings directory — Source's `exec`. A bare name, never a path; a failed line is reported and the file runs on |
 
 A command with a `Fault` prints the fault and leaves state alone. Unknown names
 print "unknown command or variable, try `find`". **An enum value may hold a
@@ -584,8 +585,31 @@ entry; the browser gate runs on every slice that touches a demo.
    clipboard; a pasted newline joins two lines; and `bind` spells keys only, not
    the other `Binding` variants.
 
-9. **Still to do, each its own slice**: the `SIM` flag over the transport; a
-   `config` command that runs a file of commands; a touch keyboard.
+9. **`config` — landed 2026-08-31.** `crcbl::console_config` runs a file of
+   console lines through the same `Registry::execute`, the same `Context` and
+   the same **host** a typed line goes through, so no second execution path
+   exists to disagree with the first and what a file sets actually lands. It is
+   in `crcbl` rather than in `crcbl-console` because it has to reach a file and
+   that crate depends on nothing: the bytes come from
+   `SettingsStack::with_platform_storage`, the seam `save` already writes
+   through, which makes "the settings directory" one answer on both platforms —
+   the platform config directory natively, the page's OPFS store in a browser,
+   so a browser runs a config file for real rather than reporting that files do
+   not exist there.
+
+   The argument is a **bare name and never a path** — ASCII letters, digits, `-`
+   and `_`, with `.cfg` optional — refused by `file_named` before the storage
+   layer is asked for anything, which is decision 1's "no dependencies" meeting
+   the rule that a filesystem path is never built from console input. Two guards
+   bound recursion because they end different things: a file already running is
+   refused by name, which ends every cycle at its first repeat, and
+   `CONFIG_NESTING_LIMIT` bounds a chain of _distinct_ files, which no cycle
+   check can see. A failing line is reported as `file.cfg:3: …` against the
+   file's own line numbers and the file runs on, with a closing count of lines
+   run and lines failed — a file that half-applied says so.
+
+10. **Still to do, each its own slice**: the `SIM` flag over the transport; a
+    touch keyboard.
 
 ## Exit criteria
 

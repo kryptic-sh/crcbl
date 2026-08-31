@@ -159,6 +159,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The console runs a file of commands: `config <name>`.** Source's `exec`,
+  under the name `docs/plan/52-debug-console.md` gives it. `config video` reads
+  `video.cfg` out of the directory this run's `settings.toml` lives in — the
+  platform config directory natively, the page's OPFS store in a browser, both
+  through the `SettingsStack::with_platform_storage` seam `save` already writes
+  through — and runs every line through the same registry a typed line goes
+  through, against the same host, so what a file sets actually lands. Blank
+  lines and lines beginning `//` are skipped. **The argument is a bare name and
+  never a path**: ASCII letters, digits, `-` and `_`, with `.cfg` optional, so
+  `config ../../.ssh/id_ed25519` is a printed refusal rather than a read. A file
+  that runs itself, or two that run each other, is refused at the repeat, and
+  `crcbl::console_config::CONFIG_NESTING_LIMIT` files may be open at once. A
+  line that fails prints `video.cfg:3: <what went wrong>` and the file runs on,
+  with a closing line saying how many lines ran and how many failed — a file
+  that half-applied says so instead of looking like a success.
+
 - **The ambient occlusion pass can sweep four slice planes per pixel instead of
   two, and its blur can run twice.** Both are console variables declared beside
   the pass in `crcbl_render::ssao` — `r_ssao_slices` in `2..=4` and
