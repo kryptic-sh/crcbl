@@ -879,6 +879,48 @@ const EXPECTATIONS = {
       // empty clipboard.
       pasteRefused: 'paste: this backend has no clipboard to read',
     },
+    // **THE ONE CONSOLE LINE NOBODY TYPES.** `autoexec.cfg` is the only route
+    // into this engine that does not need a keyboard: `crcbl::engine::Loop::new`
+    // runs it once, out of this game's settings directory, before the first
+    // frame. The block at the end of group C seeds that file into the page's own
+    // OPFS store and boots the demo on it.
+    //
+    // **quarry carries it for the reason it carries the console checks above** —
+    // `Quarry::log_heartbeat` prints `view:` straight off
+    // `crcbl::debug_view::current()`, so what the file did is a reading rather
+    // than an inference — and because this is a demo whose frame runs the
+    // occlusion pass the file's second line is about.
+    autoexec: {
+      // The logical name `crcbl::console_config::run_autoexec` reads. What the
+      // file is called on the disk is the seeder's business; see the block.
+      key: 'autoexec.cfg',
+      // What the seeded file holds, a line each. The first is a comment, and
+      // the summary line below counts **two** lines rather than three — that is
+      // `console_config::run_text` skipping it, which a file the engine framed
+      // but never parsed could not produce.
+      lines: [
+        '// seeded by web/tools/browser-e2e.mjs',
+        'debug_view ambient occlusion',
+        'r_ssao_slices 4',
+      ],
+      // `run_text`'s last line: the file saying how much of it ran, and the
+      // only line in the log that is the *file* speaking rather than one of its
+      // commands.
+      ran: 'autoexec.cfg: 2 lines',
+      // The heartbeat field the first line moves, and the two values it takes:
+      // `DebugView::label`'s spelling of what the file asked for, and the
+      // default a boot with no autoexec comes up on.
+      view: /view: (.+?)\s\scull:/,
+      set: 'ambient occlusion',
+      fresh: 'shaded',
+      // The second line, read back through the registry's own getter:
+      // `Registry::run_statement` prints the value it re-reads *after* the set,
+      // and `crcbl_core::log::console::print` puts that line in the page's log.
+      // This is the knob the browser tier of the ambient-occlusion rung has to
+      // be able to move before a frame is timed —
+      // `crcbl_render::ssao::r_ssao_slices`, whose default is 2.
+      knob: 'r_ssao_slices = 4',
+    },
   },
   // **The sample whose subject does not move.** viewer is a tool rather than a
   // game: it opens a document and shows it, and left alone it would draw the
@@ -6453,6 +6495,289 @@ try {
     await toggleConsole();
   }
 
+  // **AND A CONSOLE LINE NOBODY TYPED, WHICH IS THE ONE ROUTE INTO THIS ENGINE
+  // THAT NEEDS NO KEYBOARD.** Only quarry has one, and it runs last in this
+  // group for the reason shard's save block does: it reboots the page twice.
+  //
+  // `crcbl::console_config::run_autoexec` reads `autoexec.cfg` out of this
+  // game's settings directory and runs its lines through the same registry the
+  // block above types at — `crcbl::engine::Loop::new` calls it once, after the
+  // console is gathered and before the first frame. Natively that directory is
+  // the platform's config directory; in a browser it is the page's OPFS store,
+  // and **nothing had ever run that half.** It is also the only way to
+  // configure a run that is over before anybody could type at it, which is what
+  // the browser tier of the ambient-occlusion rung has been waiting on: a frame
+  // budget cannot be measured against a variable the measurement cannot set.
+  //
+  // **EVERY REJECTION ON THAT PATH IS SILENT BY DESIGN**, which is what decides
+  // the shape of this block. `unframe` in `crates/crcbl-store/src/web/opfs.rs`
+  // drops a record that does not verify without a word, `split_physical`
+  // ignores a file name this store did not write, and `run_autoexec` treats
+  // "there is no such file" as the ordinary state of a machine rather than as
+  // an event. So a frame encoded wrongly here, a name off by its generation
+  // suffix, or a seed landing after `restoreOpfs` each produce a demo that
+  // boots perfectly and runs nothing — and a check that watched for an error,
+  // or for the demo to still be alive, would pass in every one of those cases.
+  // This block therefore asserts the **effect**, and in both directions:
+  //
+  // * the seeded boot's **first** heartbeat reads `view: ambient occlusion`.
+  //   quarry prints that field off `crcbl::debug_view::current()` every sixty
+  //   ticks and `app::assemble` writes that same variable from the command line
+  //   *before* `Loop::new`, so a first beat already carrying the file's value is
+  //   the file having run ahead of the first frame, which is the whole claim.
+  //   The file's own summary line is asserted beside it, because the view alone
+  //   would read this way for anything else that had moved it.
+  // * and the control that stops all of the above passing for a page that
+  //   always looks like that: **the same page with that one file removed comes
+  //   up on the default**. Two boots, one observable, asserted to differ.
+  //
+  // **The pass report `Loop::finish` logs is the more direct reading and is not
+  // available here.** `crcbl_render::PassStats` is fed from GPU timestamp
+  // queries and `Loop::finish` logs nothing at all when it has no rows, which
+  // is what a browser with no `timestamp-query` leaves it with: no `gpu passes`
+  // line appears anywhere in this gate's page log. An observable that is absent
+  // on the machine the gate runs on is not one to build a check from.
+  //
+  // **Seeded from the demo's own page, not from the harness's control page.**
+  // OPFS is per origin and both are on this one, so either could write it — but
+  // the control page opens a WebGPU device of its own to draw the readback
+  // control, and from group A on this run fails on any device error that
+  // channel reports. The demo page is already loaded, its store is read once at
+  // boot and never again, and the navigation below is what makes the write take
+  // effect.
+  if (EXPECTED.autoexec) {
+    const auto = EXPECTED.autoexec;
+
+    // `crates/crcbl-store/src/web/opfs.rs`'s record frame, as its `frame()`
+    // writes it and its `unframe()` verifies it: little-endian throughout,
+    // `CRWB`, a `u16` version, `u16` flags that are reserved and zero, a `u64`
+    // generation sequence, a `u32` payload length, then a SHA-256 of the first
+    // 20 header bytes followed by the payload.
+    //
+    // **The digest is `crypto.subtle`'s.** A checksum this file computed its
+    // own way would differ from `crcbl_shaders::sha256`'s on some input nobody
+    // tried, and the file would then be dropped in silence — the exact failure
+    // this block is written against.
+    const FRAME_MAGIC = 'CRWB';
+    const FRAME_VERSION = 1;
+    const FRAME_HEADER_BYTES = 52;
+    // The generation this seed claims. Any sequence restores — the store keeps
+    // whichever slot verifies with the highest one — and 1 is what the engine's
+    // own first write of a key carries.
+    const FRAME_SEQUENCE = 1;
+    // **What the file is called on the disk, which is the likeliest way this
+    // block does nothing at all.** The store keeps every key as two files,
+    // `key~0` and `key~1`, and ping-pongs between them so an interrupted write
+    // can only damage the copy nobody is reading; `physical_name` appends that
+    // suffix and `split_physical` is what refuses a name without one. A file
+    // written under the logical name alone is handed to wasm by `restoreOpfs`
+    // and dropped there. Slot 0, because a key the engine has not seen before
+    // is written to slot 1 — so a seed in 0 is the copy nothing else writes.
+    const FILE = `${auto.key}~0`;
+    const text = `${auto.lines.join('\n')}\n`;
+    const payloadBytes = new TextEncoder().encode(text).length;
+
+    /**
+     * Writes the file into the OPFS root, framed the way the store restores.
+     *
+     * Read back off the disk before it answers, rather than reporting what it
+     * built: what the next boot restores is the file, and a `createWritable`
+     * that resolved without landing anything is a seed that is not there.
+     */
+    const seed = async () =>
+      evaluate(
+        page,
+        `(async () => {
+           try {
+             const payload = new TextEncoder().encode(${JSON.stringify(text)});
+             const frame = new Uint8Array(${FRAME_HEADER_BYTES} + payload.length);
+             const header = new DataView(frame.buffer);
+             frame.set(new TextEncoder().encode(${JSON.stringify(FRAME_MAGIC)}), 0);
+             header.setUint16(4, ${FRAME_VERSION}, true);
+             header.setUint16(6, 0, true);
+             header.setBigUint64(8, ${FRAME_SEQUENCE}n, true);
+             header.setUint32(16, payload.length, true);
+             // The checksum covers the header fields as well as the body — a
+             // corrupted sequence number cannot promote a stale generation over
+             // a good one — so it is taken after the four writes above and not
+             // before them.
+             const digested = new Uint8Array(20 + payload.length);
+             digested.set(frame.subarray(0, 20), 0);
+             digested.set(payload, 20);
+             const sum = new Uint8Array(
+               await crypto.subtle.digest('SHA-256', digested)
+             );
+             frame.set(sum, 20);
+             frame.set(payload, ${FRAME_HEADER_BYTES});
+
+             const root = await navigator.storage.getDirectory();
+             const handle = await root.getFileHandle(${JSON.stringify(FILE)}, {
+               create: true,
+             });
+             const writable = await handle.createWritable();
+             await writable.write(frame);
+             await writable.close();
+             const written = new Uint8Array(
+               await (await handle.getFile()).arrayBuffer()
+             );
+             return {
+               bytes: written.length,
+               magic: String.fromCharCode(...written.slice(0, 4)),
+               text: new TextDecoder().decode(written.slice(${FRAME_HEADER_BYTES})),
+             };
+           } catch (error) {
+             return { error: String(error) };
+           }
+         })()`
+      );
+
+    const written = await seed();
+    const onDisk =
+      written?.error === undefined &&
+      written?.bytes === FRAME_HEADER_BYTES + payloadBytes &&
+      written?.magic === FRAME_MAGIC &&
+      written?.text === text;
+    check(
+      'C',
+      "the harness seeds an autoexec.cfg into the page's own OPFS",
+      onDisk,
+      written?.error !== undefined
+        ? `the OPFS write threw: ${written.error}`
+        : `${FILE} holds ${written?.bytes} bytes framed "${written?.magic}" ` +
+            `around ${auto.lines.length} line(s)` +
+            (onDisk
+              ? ''
+              : `, and that is not the ${FRAME_HEADER_BYTES + payloadBytes} bytes ` +
+                `of "${FRAME_MAGIC}" this seeder wrote — the file on the disk is ` +
+                'not the file the demo below was given')
+    );
+
+    /**
+     * Boots the page again and answers the first heartbeat it logs.
+     *
+     * The **first**, not the latest: this is a claim about a variable being in
+     * force before any frame was drawn, and a beat taken later would be
+     * satisfied by anything that had set it since.
+     */
+    const reboot = async () => {
+      const mark = { beats: hud().length, lines: consoleLines.length };
+      await page.send('Page.navigate', { url });
+      await until(async () =>
+        evaluate(page, `document.readyState === 'complete'`)
+      );
+      await until(async () => {
+        const status = await evaluate(page, `crcbl.status()`);
+        return status === STATUS_RUNNING ? status : null;
+      });
+      const first = await until(
+        async () =>
+          hud()
+            .slice(mark.beats)
+            .find((line) => auto.view.test(line)) ?? null
+      );
+      return { first, view: first?.match(auto.view)?.[1] ?? null, mark };
+    };
+
+    const seeded = await reboot();
+    const seededLines = consoleLines.slice(seeded.mark.lines);
+    const ran = seededLines.find((line) => line.includes(auto.ran));
+    check(
+      'C',
+      'a variable the seeded autoexec set is in force before the first frame',
+      seeded.view === auto.set && Boolean(ran),
+      seeded.first === null
+        ? `no heartbeat in ${pollCeiling()} ms after the reboot carried a view at all`
+        : `it came up "view: ${seeded.view}", and ` +
+            (ran
+              ? `the file itself said "${ran.split('] ').at(-1)?.trim()}"`
+              : `nothing it logged carried "${auto.ran}"`) +
+            (seeded.view === auto.set && ran
+              ? ''
+              : `; the file asked for "${auto.set}", and its own summary line ` +
+                `"${auto.ran}" is what says the file ran rather than something ` +
+                'else having moved the view')
+    );
+
+    // **The second line of the same file, read back through the registry's own
+    // getter.** `Registry::run_statement` re-reads a variable after setting it
+    // and prints what it read, so this line is the value the console holds and
+    // not an echo of the text — and it is the one the AO rung's browser tier
+    // will be measured with. It is asserted separately from the view because
+    // the two are different reaches: one is a variable this crate owns, the
+    // other is `crcbl-render`'s, gathered into the same registry from another
+    // crate's table.
+    const knob = seededLines.find((line) => line.includes(auto.knob));
+    check(
+      'C',
+      'and a render variable in another table is set by the same file',
+      Boolean(knob),
+      knob?.trim() ??
+        `nothing in the ${seededLines.length} line(s) this boot logged carried ` +
+          `"${auto.knob}"; the console prints a variable it has just set, so ` +
+          'either that line of the file did not run or it faulted'
+    );
+
+    // ---- and the control: the same page with that one file removed -----------
+    // **Removed by name, not by emptying the directory.** The wipe is the wider
+    // gesture and it would also take a `settings.toml` this page had written,
+    // which would make the boot below differ in more than the one thing this
+    // pair is about.
+    const removed = await evaluate(
+      page,
+      `(async () => {
+         try {
+           const root = await navigator.storage.getDirectory();
+           await root.removeEntry(${JSON.stringify(FILE)});
+           const left = [];
+           for await (const [name] of root.entries()) left.push(name);
+           return { left, gone: !left.includes(${JSON.stringify(FILE)}) };
+         } catch (error) {
+           return { error: String(error) };
+         }
+       })()`
+    );
+
+    const fresh = await reboot();
+    const freshLines = consoleLines.slice(fresh.mark.lines);
+    const control =
+      removed?.gone === true &&
+      fresh.view === auto.fresh &&
+      fresh.view !== seeded.view &&
+      !freshLines.some((line) => line.includes(auto.knob));
+    check(
+      'C',
+      'and with that file gone the same page boots on the default',
+      control,
+      removed?.gone !== true
+        ? `${FILE} would not go: ${JSON.stringify(removed)}`
+        : fresh.first === null
+          ? `no heartbeat in ${pollCeiling()} ms after the reboot carried a view at all`
+          : `it came up "view: ${fresh.view}" against the seeded boot's ` +
+            `"view: ${seeded.view}", with ` +
+            `${freshLines.filter((line) => line.includes(auto.knob)).length} ` +
+            `line(s) carrying "${auto.knob}"` +
+            (control
+              ? ''
+              : `; this boot must read the default "${auto.fresh}" and differ ` +
+                'from the seeded one, or the seeded reading above was never ' +
+                'the autoexec doing anything')
+    );
+
+    // **And the canvas gets its keyboard back**, exactly as shard's block hands
+    // it back: two navigations replaced the document, so the click group C made
+    // was on an element that no longer exists — and group E's first claim is
+    // that *blurring* the canvas pauses the demo, which a canvas that never had
+    // focus cannot do.
+    const handedBack = hud().length;
+    await clickAt(await focusPoint());
+    await until(async () =>
+      (await evaluate(page, `document.activeElement?.id ?? ''`)) === 'canvas'
+        ? true
+        : null
+    );
+    await until(async () => (hud().length > handedBack ? hud().length : null));
+  }
+
   group('D — it renders');
 
   // Sampled repeatedly rather than twice: a single pair could catch two frames
@@ -8095,8 +8420,34 @@ try {
   // and the false positive is gone. Per-kind ceilings were the alternative and
   // were not taken: they would put the engine's ring depths in this file, to be
   // silently wrong the day one changed.
+  //
+  // **And three windows were not enough either. This is four, and it is a
+  // stopgap.** The Pages run for `d0bc715` failed lantern here on `readbacks
+  // 2 -> 4 -> 5 -> 6` — the third false failure of this check across two demos,
+  // and the same ring saturating as the two above it: six is the ceiling the
+  // paragraph above names for lantern, the run stopped at exactly it, and the
+  // increments decelerated on the way there. A leak does not stop at a bound.
+  // What the runner's load had changed was the readback round trip, stretching
+  // it until occupancy took three whole windows to saturate — so three no
+  // longer contained the flat step that is what says it stopped.
+  //
+  // **A fourth window buys room for that step and buys nothing else.** It is
+  // still a number tuned against how loaded a runner happens to be, and a
+  // slower one moves it again. What ends this is the fix the paragraph above
+  // turns down only in its copied form: per-kind ceilings **read from the
+  // engine** — `liveObjects()` reporting each kind's own bound beside its
+  // count, so this check compares a count against a bound the engine states
+  // rather than inferring saturation from the shape of a curve, and the ring
+  // depths stay where they are declared instead of being duplicated here.
+  //
+  // The cost is another `FRAMES_WATCHED` frames per demo, which on the slowest
+  // of them is another two wall minutes — shard drew 15 of these 20 frames in
+  // 90 s, above. `FRAMES_WATCHED` is the wrong knob to have reached for
+  // instead: a longer window is longer in *every* window, and what was missing
+  // was one more chance for the ring to show a flat step rather than a longer
+  // look at the same one.
   const FRAMES_WATCHED = 20;
-  const WINDOWS = 3;
+  const WINDOWS = 4;
   const replayedNow = () => evaluate(page, `crcbl.gpu.stats().replayed`);
   const countsOf = (held) =>
     new Map((held ?? []).map(({ kind, count }) => [kind, count]));

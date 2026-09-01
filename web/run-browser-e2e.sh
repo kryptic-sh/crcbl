@@ -1003,6 +1003,35 @@ case "$DEMO" in
         ;;
 esac
 
+# And the same argument for the `autoexec.cfg` the driver seeds into quarry's
+# OPFS, which is the only thing anywhere that asks whether a console variable can
+# be set *before the first frame* in a browser. `Loop::new` runs that file after
+# the console is gathered and before any frame is drawn, and the whole reason it
+# exists is a run that is over before anybody could type — so a demo that never
+# ran it draws exactly the same picture, ticks at exactly the same rate, and
+# passes every other check on this page.
+#
+# The check is unusually easy to lose, because the store discards a record that
+# does not verify **without a word**: a wrong frame, a name missing its `~0`
+# generation suffix, or a write that lands after the shim has restored all leave
+# a page that boots perfectly and simply has no autoexec. That is why the block
+# in the driver asserts the seeded value against a control boot rather than
+# asserting that nothing went wrong, and why its name is matched here.
+#
+# One name is matched rather than four, because they are one block in the driver
+# and cannot go missing separately. Renaming it there is meant to fail here and
+# be renamed here too. `quarry` alone, because it is the demo the driver seeds.
+case "$DEMO" in
+    quarry)
+        SEEDED="$(grep -F 'a variable the seeded autoexec set is in force before the first frame' "${OUTPUT}.plain" || true)"
+        if [ -z "$SEEDED" ]; then
+            echo "crcbl web e2e: the driver never seeded an autoexec into the page's store;" >&2
+            echo "               the start-up config file in crates/crcbl/src/console_config.rs is ungated in a browser" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the strongest form of the same argument, for group H. Three of the driver's
 # checks assert that *nothing* was reported — no uncaught exception, no missing
 # asset, no WebGPU device error — and every one of them passes just as happily
