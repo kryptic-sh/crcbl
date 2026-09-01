@@ -2254,8 +2254,18 @@ the site a commit behind — it had not deployed since `00c92e3`.
 They are the `demos` matrix job now, one job per demo, each downloading the
 `site` artifact that `build` uploads before it drives anything, and `deploy`
 waits on both. The wall clock is the slowest single demo rather than the sum,
-`fail-fast: false` means one red gate no longer leaves thirteen unrun, and
-`deploy` fails loudly on a red gate instead of skipping.
+`fail-fast: false` means one red gate no longer leaves thirteen unrun, and a red
+gate is now **loud**: the Pages run itself goes red.
+
+**Precisely, because the distinction is the whole point of this entry** —
+observed 2026-09-02 on `d0bc715`, whose lantern gate failed. The
+`deploy to GitHub Pages` job still reports **`skipped`**, because
+`needs: [build, demos]` skips a job whose dependency failed; that has not
+changed and cannot be read as a failure on its own. What changed is that the
+_run_ carries the red instead of finishing green, so the commit wears a failing
+check rather than a passing one with a stale site behind it. Anyone reading the
+deploy job alone will still see "skipped" in both the old world and the new, so
+read the run.
 
 **What is still not fixed is the cap itself.** `web/tools/browser-e2e.mjs`
 scales its own per-check budgets to the machine it is on, so a slower frame
