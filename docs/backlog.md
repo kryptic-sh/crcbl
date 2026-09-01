@@ -1449,6 +1449,28 @@ fails to compile rather than asserting — but the run was not pristine, so a
 second capture is worth having before the mechanism is pinned on this evidence
 alone.
 
+**Narrowed further by reading `EffectRequest::resolve`, 2026-09-02.** It ends
+`chosen.union(programmatic.on).difference(programmatic.off).intersection(device)`,
+and `Antialiasing::SLOT` is the pair `ANTIALIASING | SMAA`, which the
+`Some(tier)` arm **clears before setting the chosen rung**. An empty slot in the
+failure — neither bit set — therefore means the resolved tier was
+`Antialiasing::None`, not that a bit was lost in transit. That is the thing to
+explain.
+
+Two of the four ways it could happen are already ruled out:
+
+- _The device clamp._ `ForwardRenderer` is built with
+  `device_effects: RenderEffects::all()` and its own docs say the clamp removes
+  nothing, so `.intersection(device)` cannot be clearing the slot.
+- _A racing accessor._ `effect_request` and `set_effect_request` are `const fn`
+  over a plain field, with no interior mutability, so the request cannot be
+  half-written while another thread reads it.
+
+What is left is that the request genuinely carried `Some(Antialiasing::None)`,
+or that `programmatic.off` held the bit — so the next step is the settings read
+that produces the tier, and specifically what it answers when the `antialiasing`
+key is absent, which is the case this test exercises.
+
 ## The render-quality programme (opened 2026-08-27)
 
 Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
