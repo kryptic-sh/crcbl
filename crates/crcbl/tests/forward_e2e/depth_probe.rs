@@ -883,6 +883,24 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl::hal::BindingFlags::empty(),
             },
+            // The contact-shadow channel, on the two rows above's terms.
+            // `docs/plan/45-shadows.md`'s march writes it and
+            // `mesh.slang` multiplies the directional term by it; this probe
+            // never runs that pass, but the module declares the global and a
+            // layout that leaves a declared descriptor uncovered is refused —
+            // on lavapipe and WARP it is a **segmentation fault** rather than a
+            // refusal, which is how it was found.
+            crcbl::hal::BindGroupLayoutEntry {
+                binding: 28,
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::SampledImage {
+                    view_type: crcbl::hal::ImageViewType::D2,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: crcbl::hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
@@ -984,6 +1002,15 @@ impl DepthProbe {
                 binding: 27,
                 array_index: 0,
                 resource: crcbl::hal::BindingResource::ImageView(ltc_table.view),
+            },
+            // The white texel again, which is what the renderer's own
+            // off-switch binds here: the contact channel is a visibility, so
+            // one everywhere is "nothing is in the way" and the sun term this
+            // probe measures is left exactly as the shading computed it.
+            crcbl::hal::BindGroupEntry {
+                binding: 28,
+                array_index: 0,
+                resource: crcbl::hal::BindingResource::ImageView(occlusion.view),
             },
         ];
         let group = device

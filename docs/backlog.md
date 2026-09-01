@@ -609,6 +609,36 @@ the five-item narrative, which `git log` and the changelog already hold. Doing
 it as one edit risks mangling a long file, so it wants to be its own change with
 its own diff review.
 
+## `depth_probe.rs` hand-writes `mesh.slang`'s binding table (2026-09-01)
+
+`crates/crcbl/tests/forward_e2e/depth_probe.rs` builds the mesh shader's bind
+group layout **by hand**, entry by entry, because the probe drives the module
+directly rather than through `ForwardRenderer`. Nothing holds that table to the
+set the shader actually declares, so **adding a binding to `mesh.slang` breaks
+it silently**, and it did: the contact-shadow channel at binding 28 landed in
+`382bb41` and three `depth_probe` tests began crashing.
+
+**The failure mode is what makes this worth a guard.** A layout that leaves a
+declared descriptor uncovered is supposed to be refused at pipeline creation —
+the file's own comments say so twice. On lavapipe and on WARP it is a
+**`SIGSEGV`** instead: no assertion, no validation line, no message naming the
+binding. And it is invisible where most work happens — `cargo test` does not run
+this suite, radv does not crash, and the eight gates run before the commit were
+all green. Only `crates/crcbl/tests/run-forward-e2e.sh` under a software adapter
+shows it.
+
+**What would close it.** `crcbl-dx12`'s `dxil.rs` already reflects the compiled
+module and asserts the descriptor classes it declares, in order, per shader — so
+the reflection needed to enumerate `mesh.slang`'s bindings exists in the tree
+already. A test that builds the probe's layout and compares its binding numbers
+against that reflected set would turn this from a segfault on two CI runners
+into a named failure on any machine. Until then the rule is: **a new binding in
+`mesh.slang` means editing this file too**, and proving it with
+`run-forward-e2e.sh` on lavapipe rather than with `cargo test`.
+
+`depth_probe.rs` is the only hand-written table of this kind — checked
+2026-09-01, `binding: 27` appears in no other file in the workspace.
+
 ## Screen-space contact shadows: what the rung left (2026-08-31)
 
 The pass is built and **parked outside `RenderEffects::DEFAULT_STACK`**, so
