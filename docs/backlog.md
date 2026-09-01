@@ -202,10 +202,45 @@ and differ. Both halves were shown red: corrupting one header byte after the
 digest takes three of the four checks down, and defeating the control takes down
 exactly the control.
 
-So the browser tier is no longer blocked. **What remains is the measurement
-itself** — the seeded file already sets `r_ssao_slices 4`, so pricing the rung
-is a matter of reading timings out of a seeded run against an unseeded one, not
-of format work.
+So the seeding works. **The measurement does not follow from it, and trying it
+found out why — 2026-09-02.**
+
+A `PassStats` report reaches the page log only when `Loop::finish` runs, and the
+gate loads the demo page many times while holding **one** log. The report that
+lands is the last boot's, and the last boot in the autoexec block is the
+_control_ — the one that removed the seeded file. Seeding the rung and reading
+the log therefore measures the unseeded configuration, which is exactly what
+happened: with `r_ssao_slices 4` and `r_ssao_blur_passes 2` both confirmed set
+at 0.0833 s, the report still came back with **20 labels and no `ssao-blur-2`**,
+so those frames had one blur. A second blur is a pass, and its label is the
+thing that makes this checkable rather than a matter of trust.
+
+**What that run did buy is a solid browser baseline for quarry**, twice, under
+SwiftShader at the gate's window size — the two runs agree to 1.3%:
+
+```text
+                p50        p95      share of frame
+frame       206.0 / 208.6 ms                 100%
+forward     137.3 / 142.1 ms   165.8 ms      ~67%
+ssao          4.07 / 4.18 ms     6.5 ms      ~2.0%
+ssao-blur     3.01 / 3.09 ms     5.2 ms      ~1.5%
+ssao-upsample 5.96 / 6.16 ms     7.7 ms      ~2.9%
+```
+
+**This is worth reading before the defaults decision, because it points the
+other way from what this entry has assumed.** The browser has been called the
+tier "most able to veto" the rung. On this evidence the whole AO chain is about
+**6.5% of a browser frame** and `forward` is two thirds of it, so doubling the
+gather buys a few percent of a frame that is dominated elsewhere. It is not the
+veto it was expected to be. Two caveats keep this from being the answer: these
+are the shipping two slices, not the rung, and SwiftShader is a software
+rasteriser whose cost mix is its own — the hardware-browser figures already in
+this entry (`ssao` 0.054 ms of a 0.678 ms frame) are a different shape again.
+
+**What the rung's browser number still needs** is for the _seeded_ boot to be
+the one that reports: a path that seeds, boots, runs the frame budget and reads
+the report before the control tears the file down. That is a harness addition,
+not format work, and it is the only thing left in front of the decision.
 
 **The other route is still wanted, and is now the only one for anything that is
 not a console variable.** Giving the AO knobs `[engine.video]` keys —
