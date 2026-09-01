@@ -79,7 +79,7 @@ gate's own window size:
 | shard   | 124.045 / — / 101.100 / —             | 102.244 / — / 78.570 / —              |
 
 So the shipping pair costs roughly **220 ms a frame** in a browser on a runner
-with no GPU. puppet is the row to quote — it holds inside 1% across all four
+with no GPU. puppet is the row to quote — it holds inside 2.1% across all four
 runs — and the dashes are the two runs shard was killed in. Against radv's 645
 us and lavapipe's 17.0 ms above, that is the third tier this entry was missing.
 
@@ -1605,7 +1605,7 @@ forward pass per frame. Across the four runs that uploaded one, in ms:
 | sparks  | 806.025   | 1254.571  | 835.170   | 1234.698  |
 | viewer  | 237.158   | 191.151   | 231.977   | 237.494   |
 
-quarry's slowest run is **2.0x** its fastest and sparks' is **1.5x**, with no
+quarry's slowest run is **2.0x** its fastest and sparks' is **1.6x**, with no
 change to either demo between them, and that spread alone spans the
 24-to-45-minute range shard shows — no stop is needed to explain it. The dashes
 are the two runs where shard was killed and wrote no log.
@@ -1615,7 +1615,7 @@ earlier revision of this entry read the same table as the runner varying by a
 factor of two. The same logs refute it. They also time `ssao`, a full-screen
 pass whose cost is set by the resolution rather than by the scene, and across
 the same four runs puppet's reads 137.557, 136.668, 138.822 and 139.557 ms — a
-1% band — while quarry's forward pass halves. A runner running at half speed
+2.1% band — while quarry's forward pass halves. A runner running at half speed
 would have moved both. So the machine is steady and the demos reach different
 simulation states from run to run: the heavy ones do a different amount of work
 each time, which is why one can wander past a cap that fits it most of the time.

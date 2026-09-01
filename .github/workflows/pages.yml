@@ -351,7 +351,7 @@ jobs:
   #     sparks    806.025  1254.571   835.170  1234.698
   #     breach   3907.520  4034.938  3480.389  3969.237
   #
-  # quarry's slowest run is 2.0x its fastest and sparks' is 1.5x, with no change
+  # quarry's slowest run is 2.0x its fastest and sparks' is 1.6x, with no change
   # to either demo between them — twice the work in the same job is far more
   # spread than a 39-minute job under a 45-minute cap can absorb.
   #
