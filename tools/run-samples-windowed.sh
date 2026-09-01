@@ -29,6 +29,14 @@
 # listening — but stating the intent is what keeps the gate honest if that ever
 # changes.
 #
+# # The autoexec, which nothing else can see
+#
+# The gate ends with two more runs of one sample under a scratch
+# `XDG_CONFIG_HOME` — one with an `autoexec.cfg` in it, one without. That pair
+# is the only configuration in this repository that can observe `Loop::new`
+# running the boot config file at all. `check_autoexec` below says why, and what
+# each half of it asserts.
+#
 # # One pass, not two
 #
 # `run-x11-e2e.sh` runs twice because it asserts things a window manager
@@ -45,7 +53,9 @@
 #                          gets dumped on failure.
 #
 # Everything `tools/x11-display.sh` reads applies too, `CRCBL_E2E_X11_WM`
-# included.
+# included. `XDG_CONFIG_HOME` is set by this script for the two autoexec runs
+# and for nothing else, so the developer's own config directory is never read
+# and never written.
 
 set -euo pipefail
 
@@ -333,6 +343,178 @@ self_test_validation() {
     echo "           provoked violation, so the validation check is live and checking"
 }
 
+# What the autoexec check below drives, seeds, and reads back.
+#
+# **`lantern` is chosen, not convenient.** It is in `SAMPLES` above, so this gate
+# already builds and runs it windowed; it draws ambient occlusion every frame;
+# and `r_ssao_blur_passes` is a console variable the renderer turns into a
+# *pass* — `crates/crcbl-render/src/ssao.rs` — so setting it moves something the
+# run reports about its own frame rather than only something the console echoed
+# back. `AUTOEXEC_BASE_PASS` is the blur that is in the frame either way, which
+# is what lets the absence of the second one be read as a missing pass rather
+# than as a missing report.
+AUTOEXEC_SAMPLE="lantern"
+AUTOEXEC_FILE="autoexec.cfg"
+AUTOEXEC_VAR="r_ssao_blur_passes"
+AUTOEXEC_VALUE="2"
+AUTOEXEC_BASE_PASS="ssao-blur"
+AUTOEXEC_PASS="ssao-blur-2"
+# The two config roots, set by `check_autoexec` and read by `autoexec_run`.
+AUTOEXEC_ROOT=""
+
+# `autoexec_run <label> <sample> <WxH> [sample args...]` — one windowed run of
+# `<sample>` with `XDG_CONFIG_HOME` pointed at `${AUTOEXEC_ROOT}/<label>`, and
+# the log it wrote kept under `<label>` for the checks below.
+#
+# `run_sample` is called rather than copied, so both of these runs are held to
+# the frame count, the shell, the extent, the teardown and the validation layer
+# exactly as the loop's runs were: a run that never reached a swapchain must not
+# be read for what its autoexec did. It exits the shell on failure, and the
+# subshell below is what would otherwise swallow that — hence the `|| exit`.
+#
+# **The environment is exported inside that subshell and nowhere else.**
+# `crcbl-store`'s `NativeStorage::config_root` is `dirs::config_dir()`, which
+# honours `XDG_CONFIG_HOME` on Linux; exporting it around the whole script would
+# move every sample above off the config directory the machine actually has, and
+# this gate has no business deciding what those runs read.
+autoexec_run() {
+    local label="$1" sample="$2"
+    shift
+    echo "crcbl e2e: running ${sample} against XDG_CONFIG_HOME=${AUTOEXEC_ROOT}/${label}"
+    (
+        export XDG_CONFIG_HOME="${AUTOEXEC_ROOT}/${label}"
+        run_sample "$@"
+    ) || exit $?
+    cp "${RUNTIME_DIR}/${sample}.log" "${RUNTIME_DIR}/autoexec-${label}.log"
+}
+
+# `autoexec_wants <label> <pattern> <what its absence means>` — fail unless the
+# run labelled `<label>` printed a line matching `<pattern>`.
+autoexec_wants() {
+    local label="$1" pattern="$2" meaning="$3"
+    local log="${RUNTIME_DIR}/autoexec-${label}.log"
+    if ! grep -qE "$pattern" "$log"; then
+        echo "crcbl e2e: the ${label} ${AUTOEXEC_SAMPLE} run printed no line matching" >&2
+        echo "           /${pattern}/, so ${meaning}" >&2
+        cat "$log" >&2
+        log_tail
+        exit 1
+    fi
+}
+
+# The same question inverted: fail if the run said it at all.
+autoexec_refuses() {
+    local label="$1" pattern="$2" meaning="$3"
+    local log="${RUNTIME_DIR}/autoexec-${label}.log"
+    if grep -qE "$pattern" "$log"; then
+        echo "crcbl e2e: the ${label} ${AUTOEXEC_SAMPLE} run printed a line matching" >&2
+        echo "           /${pattern}/, so ${meaning}" >&2
+        grep -nE "$pattern" "$log" >&2
+        cat "$log" >&2
+        log_tail
+        exit 1
+    fi
+}
+
+# **The only place `Loop::new`'s `run_autoexec` call is observed.**
+#
+# `crates/crcbl/src/console_config.rs` runs `autoexec.cfg` out of the platform
+# config directory once, after the console is gathered and before the first
+# frame, and *before the first frame* is the whole point: a variable set there
+# is set before anything reads it, which no other route into the console can
+# manage on a run that is over before a keyboard could reach it. Delete that
+# call and nothing on this board goes red. There is no unit-level home for the
+# assertion — a `Loop` needs a shell and a device — and every headless route
+# runs with `SettingsSource::None`, which by design reads no autoexec at all.
+# So "windowed, against a real settings directory" is not one way to ask the
+# question, it is the only one, and this script is already both.
+#
+# It is asked twice, and **the control run is not optional**: `r_ssao_blur_passes`
+# has a default, so a seeded run on its own cannot tell "the autoexec set it to
+# two" from "it was two anyway". The two runs differ in exactly one thing —
+# whether an `autoexec.cfg` exists in the config directory each was given.
+#
+# And each is graded on two kinds of evidence, because they answer different
+# questions. `autoexec.cfg: 1 line` says the file was found, parsed and run to
+# the end with nothing failing: `run_text` appends ", N of them failed" to that
+# same line when anything did, so matching it exactly is the zero-failure
+# assertion too. The `ssao-blur-2` **pass** says the value reached the renderer
+# before the frames were timed, which is what the call site actually claims — a
+# variable applied after the first frame would print the same console line and
+# change no pass at all.
+check_autoexec() {
+    # Read out of `SAMPLES` rather than written again here, so a sample dropped
+    # from the gate cannot leave this running something the loop above does not.
+    local entry="" candidate
+    for candidate in "${SAMPLES[@]}"; do
+        if [[ "$candidate" == "${AUTOEXEC_SAMPLE} "* ]]; then
+            entry="$candidate"
+        fi
+    done
+    if [ -z "$entry" ]; then
+        echo "crcbl e2e: ${AUTOEXEC_SAMPLE} is not in SAMPLES, so this check would be" >&2
+        echo "           driving a sample the gate no longer covers. Point" >&2
+        echo "           AUTOEXEC_SAMPLE at a listed sample that draws ambient" >&2
+        echo "           occlusion, or the pass assertions below stop meaning anything." >&2
+        exit 1
+    fi
+    local -a fields
+    read -r -a fields <<<"$entry"
+
+    # Both config roots live under `RUNTIME_DIR`: `tools/x11-display.sh` made it
+    # with `mktemp -d`, and removes it in the `EXIT`/`INT`/`TERM` trap it already
+    # owns — the same directory `VIEWER_MODEL` is written into. A `trap` of this
+    # script's own would *replace* that handler, and what it would leak is an X
+    # server, so this borrows the directory rather than the trap.
+    #
+    # Two roots rather than one reused: a sample saves its settings under
+    # `XDG_CONFIG_HOME` as it exits, so a control run following the seeded one
+    # through the same directory could read `${AUTOEXEC_VAR} = ${AUTOEXEC_VALUE}`
+    # back out of `settings.toml` and would prove nothing.
+    AUTOEXEC_ROOT="$(mktemp -d "${RUNTIME_DIR}/autoexec.XXXXXX")"
+    mkdir -p "${AUTOEXEC_ROOT}/seeded/${AUTOEXEC_SAMPLE}" "${AUTOEXEC_ROOT}/control"
+    printf '%s %s\n' "$AUTOEXEC_VAR" "$AUTOEXEC_VALUE" \
+        >"${AUTOEXEC_ROOT}/seeded/${AUTOEXEC_SAMPLE}/${AUTOEXEC_FILE}"
+    echo "crcbl e2e: seeded ${AUTOEXEC_SAMPLE}/${AUTOEXEC_FILE} with '${AUTOEXEC_VAR} ${AUTOEXEC_VALUE}'; the control directory is empty"
+
+    autoexec_run seeded "${fields[@]}"
+    autoexec_run control "${fields[@]}"
+
+    # The seeded run: the file ran, the variable took the value, and the
+    # renderer built the pass that value asks for.
+    autoexec_wants seeded "console\] ${AUTOEXEC_FILE}: 1 line$" \
+        "it ran no ${AUTOEXEC_FILE} at boot. Either Loop::new no longer calls
+           run_autoexec, or the file it reads is not the one seeded here, or a
+           line in it failed and the count says so."
+    autoexec_wants seeded "console\] ${AUTOEXEC_VAR} = ${AUTOEXEC_VALUE}$" \
+        "the file ran and ${AUTOEXEC_VAR} did not take the value it set."
+    autoexec_wants seeded "^[[:space:]]+${AUTOEXEC_PASS}[[:space:]]" \
+        "the value never reached the renderer before the frames were timed. The
+           console said it was set and the frame disagrees, which is the failure
+           running the autoexec before the first frame exists to prevent."
+
+    # The control run, which is what makes the three above mean anything. Its
+    # own pass report is read first: with no ${AUTOEXEC_BASE_PASS} row there is
+    # no report for ${AUTOEXEC_PASS} to be missing from, and every check under
+    # it would pass on a log that had lost the table entirely.
+    autoexec_wants control "^[[:space:]]+${AUTOEXEC_BASE_PASS}[[:space:]]" \
+        "it reported no ${AUTOEXEC_BASE_PASS} pass at all, so the absence of
+           ${AUTOEXEC_PASS} below would be a missing report rather than a
+           missing pass."
+    autoexec_refuses control "console\] ${AUTOEXEC_FILE}:" \
+        "it ran an ${AUTOEXEC_FILE} out of a directory this gate left empty —
+           XDG_CONFIG_HOME did not move the config root, and these two runs have
+           been reading the machine's own."
+    autoexec_refuses control "console\] ${AUTOEXEC_VAR} = " \
+        "something other than the autoexec sets ${AUTOEXEC_VAR}."
+    autoexec_refuses control "^[[:space:]]+${AUTOEXEC_PASS}[[:space:]]" \
+        "${AUTOEXEC_PASS} is in the frame with nothing having asked for it, so the
+           seeded run proves nothing about what read the file."
+
+    echo "crcbl e2e: ${AUTOEXEC_SAMPLE} ran ${AUTOEXEC_FILE} at boot and drew ${AUTOEXEC_PASS};"
+    echo "           the same run against an empty config directory did neither"
+}
+
 # See the equivalent block in `run-x11-e2e.sh` for why the loader probe is a
 # skip on a developer machine and a hard failure in CI. There is no null-backend
 # fallback here: a sample that never reached a swapchain is exactly what this
@@ -353,6 +535,9 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     # graded by the ordinary passes with nothing injected.
     read -r -a fields <<<"${SAMPLES[0]}"
     self_test_validation "${fields[@]}"
+    # And two more runs of one sample, which are the only thing on this board
+    # that can see the engine run its `autoexec.cfg` at boot.
+    check_autoexec
 else
     echo "crcbl e2e: no Vulkan loader; skipping the windowed sample pass" >&2
     if [ -n "${CI:-}" ]; then

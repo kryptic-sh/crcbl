@@ -643,27 +643,22 @@ including the file's own name — changing `AUTOEXEC` to anything else reddens
 `an_autoexec_that_is_there_runs_its_lines_and_its_effects_land`, because the
 summary line `run_text` prints carries the name. What is **not** covered:
 
-- **The engine call site has no automated gate, though it is now verified by
-  hand.** Delete `console.run_autoexec();` from `Loop::new` and nothing goes
-  red. There is no unit-level home for that assertion: a `Loop` needs a shell
-  and a device, and every route that can build one headlessly is a run with
-  `SettingsSource::None`, which by design reads no autoexec at all — so the only
-  configuration that can observe the call is a windowed run against a real
-  settings directory.
+- **The engine call site is gated only on Linux/X11.** It has a home now:
+  `tools/run-samples-windowed.sh` runs `lantern` twice under a scratch
+  `XDG_CONFIG_HOME`, seeded and not, and asserts the seeded run logs
+  `autoexec.cfg: 1 line`, sets the variable, and **draws an `ssao-blur-2` pass**
+  — the pass is the part that says the value reached the renderer before the
+  frames were timed, rather than only reaching the console. Removing
+  `console.run_autoexec();` from `Loop::new` takes that gate to exit 1, which is
+  the check that had never existed.
 
-  **Run by hand on 2026-09-02, with a control, and it works.** `lantern`
-  windowed under a private Xvfb (`tools/x11-display.sh`), `--frames 200`, with
-  `XDG_CONFIG_HOME` pointed at a scratch directory so no real config directory
-  was touched. Seeded with an `autoexec.cfg` holding `r_ssao_blur_passes 2`, the
-  run logs `console] r_ssao_blur_passes = 2` and `console] autoexec.cfg: 1 line`
-  at 0.34 s and its frame carries an **`ssao-blur-2`** pass; the control run,
-  identical but for an empty config directory, logs neither line and has no such
-  pass. So the wiring is real, and the variable lands before the pass list is
-  built — which is the whole claim.
+  The control run asserts `ssao-blur` is present _before_ asserting
+  `ssao-blur-2` is absent, so a run that reported no passes at all cannot pass
+  for a run that reported no second blur.
 
-  What is still missing is that nobody re-runs that. It wants a home in the
-  windowed-sample gate; until it has one, the call site is held by the compiler,
-  by review, and by one dated manual run.
+  What it does not cover: that gate is the X11 windowed suite, so the autoexec's
+  call site is unexercised on Wayland, Win32 and AppKit, and the local runs went
+  against radv rather than CI's software adapter.
 
 - **`Autoexec::Nowhere` and its `info!` line are untested.** Reaching that arm
   means `SettingsStack::with_platform_storage` answering `None` — natively "this
