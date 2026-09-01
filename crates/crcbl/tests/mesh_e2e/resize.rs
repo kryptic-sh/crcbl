@@ -72,6 +72,7 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
     // halve has no pyramid at all, and `(17, 5)` in the list above is exactly
     // that case.
     let mut pyramid_seen = false;
+    let mut occlusion_halved = false;
     // Every frame of the storm is drawn under a sun a degree further round than
     // the last, so every frame redraws the shadow atlas — see
     // `shadow_cache::turning_sun`. Without it the second frame at a size holds
@@ -153,6 +154,23 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
                     pyramid_seen = true;
                     let level: u32 = level.parse().expect("hiz-N names its level");
                     (extent.0 >> level, extent.1 >> level)
+                } else if matches!(pass.label(), "ssao" | "ssao-blur" | "ssao-blur-2") {
+                    // The gather and its blurs run at half the frame on each
+                    // axis, and the division is spelled out here for the
+                    // pyramid's reason above rather than asked of
+                    // `crcbl_render::ssao`. Rounded **up**: a floor would take a
+                    // frame narrower than the divisor to a zero-sized transient,
+                    // and would leave an odd axis one sample short of its own
+                    // last pixel.
+                    //
+                    // `ssao-upsample` is deliberately not in this list — it is
+                    // the pass that carries the channel back to the frame's own
+                    // size, so it belongs to the `extent` arm below and a
+                    // reconstruction that started rendering small would fail
+                    // here.
+                    occlusion_halved = true;
+                    let divisor = crcbl::shaders::ssao::RESOLUTION_DIVISOR;
+                    (extent.0.div_ceil(divisor), extent.1.div_ceil(divisor))
                 } else {
                     extent
                 };
@@ -213,6 +231,11 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
         pyramid_seen,
         "no Hi-Z pass in any frame of the storm, so the derived extent above \
          checked nothing"
+    );
+    assert!(
+        occlusion_halved,
+        "no occlusion gather in any frame of the storm, so the halved extent \
+         above checked nothing"
     );
 
     renderer.destroy(device);
