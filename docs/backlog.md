@@ -1375,7 +1375,7 @@ the `MapRequest` and the reparent it never sends, on the five-test filter above
 Nothing in this repository can see that, so it wants openbox run under a
 protocol tracer.
 
-## Two whole-workspace-only test flakes, neither a process global (2026-09-01)
+## Three whole-workspace-only test flakes, none a process global (2026-09-01)
 
 Both seen on 2026-09-01, both only under a full `cargo test`, both green when
 their own crate is run alone:
@@ -1399,11 +1399,55 @@ headless run precisely so a test never reads whichever home directory it
 executes in, and `lantern`'s own test helper sets `headless`. So the failing run
 opened no settings file at all. The mechanism is still unknown.
 
-**Not reproduced deliberately**, so the mechanism is a guess and the fix is
-unknown. What is solid is the observation: two samples' in-process runs disagree
-with themselves under workspace concurrency, at a rate high enough to redden CI
-occasionally. Next step is to run one of them in a loop under the whole
-workspace and capture the panic message, which neither attempt managed.
+**Reproduced deliberately on 2026-09-02, and the panic is captured** — eight
+consecutive `cargo test --workspace --no-fail-fast` runs, failing on the third.
+It was a **third** sample, not either of the two above:
+`viewer::gpu::tests::the_players_video_clamp_reaches_the_frame_and_survives_a_reload`,
+`apps/viewer/src/gpu.rs`:
+
+```text
+assertion `left == right` failed: `reflections = false` did not survive the
+re-export — a reload must not quietly restore an effect the player's settings
+took away
+  left: RenderEffects(SHADOWS | AMBIENT_OCCLUSION)
+ right: RenderEffects(SHADOWS | AMBIENT_OCCLUSION | ANTIALIASING)
+```
+
+**The bit that went missing is not the one under test.** The arm was
+`reflections = false`, and reflections were correctly absent from both sides;
+what the reload dropped is `ANTIALIASING`. That is the one layer the effect
+resolution treats as a rung selection rather than a clamp — `request_for` in the
+samples' `gpu.rs` carries `antialiasing: Option<Antialiasing>` beside the
+`video` clamp, and the samples' own doc comments call it out as the exception.
+So all three failures may be one bug in how the antialiasing rung survives a
+re-export, rather than three effect flags misbehaving.
+
+**Ruled out this session**, each by reading the code rather than by inference:
+
+- _A settings fixture on a shared path._ `settings_file` builds
+  `crcbl::store::MemoryStorage::new()` per call and writes the TOML into it, so
+  each test owns its storage and nothing touches a real directory.
+- _A console variable._ No `convar!` in the tree names an antialiasing knob, and
+  neither `viewer`'s nor `lantern`'s test module sets any console variable, so
+  the `r_ssao_blur_passes` hazard's shape does not fit.
+- _A shared effect override._ `request_for` builds
+  `EffectOverride::none().force(..)` as a local value; it is not a registry.
+
+**The reasoning that these must be outside the process is wrong, and that
+matters for where to look next.** The entry above argues that separate test
+binaries cannot share a static. True, but irrelevant:
+`cargo test -p viewer --lib` runs the _same_ binary with the _same_ thread pool
+as the workspace run does, so any intra-binary race is equally present in both.
+The only thing the workspace changes is CPU contention, and therefore
+interleaving. So a static shared between **one sample's own concurrent tests**
+is still very much a candidate, and is the thing to look at next.
+
+**Caveat on this reproduction:** the tree was clean and committed when the loop
+started, but an agent editing the AO shaders became active in it during the run.
+Nothing it touches reaches antialiasing resolution, and a half-written tree
+fails to compile rather than asserting — but the run was not pristine, so a
+second capture is worth having before the mechanism is pinned on this evidence
+alone.
 
 ## The render-quality programme (opened 2026-08-27)
 
