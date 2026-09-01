@@ -183,6 +183,47 @@ own unbuilt row, not this entry's.
   moved the whole line by a constant, or that kept every step at one level while
   wandering, would not be caught by it.
 
+## A plan's numbered slices are an addressing scheme (2026-08-31)
+
+**The standing rule is that shipped work leaves the plans**, and
+`docs/plan/52-debug-console.md`'s "Delivery, in order" is eleven numbered slices
+of which ten have landed — 251 lines of narrative that `git log` and the
+changelog already hold. Trimming it to the one deferred item was tried on
+2026-08-31 and **reverted**, because the numbers are cited from outside the
+document as identifiers:
+
+| citation                                            | names              |
+| --------------------------------------------------- | ------------------ |
+| `CHANGELOG.md`                                      | slice 10           |
+| `crates/crcbl/src/engine.rs` (four separate places) | slices 2, 5, 8, 10 |
+| `crates/crcbl/src/console_config.rs`                | slice 9            |
+| `apps/asteroids/src/app.rs`                         | slice 8            |
+| `web/tools/browser-e2e.mjs`                         | slice 7            |
+| `web/run-browser-e2e.sh`                            | slice 7            |
+
+Deleting the list leaves every one of those pointing at nothing, and one of them
+is the changelog, which is history rather than a document to rewrite.
+**`tools/check-doc-citations.sh` does not catch this** — it resolves paths, and
+every one of these paths still resolves; only the slice number inside it goes
+stale. So the trim passed every gate and was still wrong.
+
+**This needs a call, and the options are:**
+
+- **Leave it.** The plan carries shipped narrative forever, against the rule.
+- **Reduce each landed slice to one line** — number, name, landed date — so the
+  narrative goes but the identifier survives. Every citation keeps working. This
+  is the cheap option and it is what I would do.
+- **Delete the list and rewrite all ten citations** to name the thing rather
+  than the number. Correct, and it touches the changelog, which argues against
+  it.
+
+The same question applies to any plan whose delivery list is numbered and cited
+from outside it. **`45-shadows.md` is not one of them** — checked 2026-08-31:
+its five atlas items are referenced by number from exactly one place, this file,
+so trimming that list costs one line here and nothing else. The rule to carry
+forward is to grep for the numbers before trimming a list, rather than to assume
+either answer.
+
 ## What the debug console left as limits (2026-08-31)
 
 **The console shipped.** Every delivery slice in `docs/plan/52-debug-console.md`
