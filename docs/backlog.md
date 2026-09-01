@@ -22,21 +22,35 @@ gather and the blurs now run at `crcbl_render::ssao::half_extent` with a
 reconstruction pass after them, so every figure further down this entry was
 taken against a pass that no longer has that shape. Read off
 `forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step` — the same
-scene the table below uses — on both drivers, a single run each rather than the
-p50 over seven the older table used:
+scene the table below uses — on both drivers, **p50 over seven runs each**,
+which is what the older full-resolution table used and what this one now
+matches:
 
 ```text
-                    radv (RX 7900 XTX)             lavapipe
-slices blurs   edges worst    ssao   blur     edges worst    ssao    blur
-     2     1      37     5   281us   23us        38     5   3.60ms  1.71ms  ships
-     4     1     100     3   553us   23us        89     3   5.83ms  1.54ms
-     2     2       8     3   280us   23us         9     3   3.59ms  1.68ms
-     4     2       0     1   553us   23us         2     2   6.13ms  1.68ms  rung
+                    radv (RX 7900 XTX)                     lavapipe
+slices blurs  edges worst   ssao  blur blur2  |  edges worst    ssao    blur  blur2
+     2     1     37     5  277us  23us     —  |     38     5  3.73ms  1.62ms      —  ships
+     4     1    100     3  549us  23us     —  |     89     3  5.95ms  1.64ms      —
+     2     2      8     3  278us  23us  22us  |      9     3  3.51ms  1.63ms 1.27ms
+     4     2      0     1  550us  23us  22us  |      2     2  6.16ms  1.61ms 1.25ms  rung
 ```
 
+**The edge counts are the same integer in all seven runs of every row, on both
+drivers.** That is the finding the single-run table could not state and the
+reason this entry no longer needs more samples on the quality axis: the measure
+is a function of the scene and the shader, not of the run, so the 37-against-0
+that the rung buys is exact rather than a draw from a spread. Only the timings
+move between runs, and by very different amounts — the `ssao` pass holds inside
+**1.1%** of its p50 across seven runs on radv and inside **15.5%** on lavapipe,
+which is the software rasteriser's scheduling and is why a single lavapipe run
+was the weakest number in the old table.
+
+Gather plus both blurs, p50: **300 us** for the shipping pair and **595 us** for
+the rung on radv; **5.36 ms** and **9.01 ms** on lavapipe.
+
 Against this entry's older full-resolution table the whole pass got much cheaper
-on both tiers: the shipping pair went 645 us to 304 us on radv and 17.0 ms to
-5.31 ms on lavapipe.
+on both tiers: the shipping pair went 645 us to 300 us on radv and 17.0 ms to
+5.36 ms on lavapipe.
 
 **Two findings, and they point the same way.**
 
@@ -53,13 +67,13 @@ on both tiers: the shipping pair went 645 us to 304 us on radv and 17.0 ms to
   un-runged full-resolution pair — while taking the sharp-edge count to 0 and 2.
   Half-resolution paid for the rung outright on both native tiers.
 
-So the answer to "whether either default moves" now looks like **yes, both**, on
-both native tiers: it would undo the smoothness the halving cost and still run
-cheaper than the frame did before the halving. **It is still not a decision to
-take on single runs.** What it wants before it moves: this table as a p50 over
-several runs rather than one, and the browser tier, which still cannot be
-measured at all for the `autoexec.cfg` reason recorded below. The browser is the
-tier where the pass is most expensive, and so the one most able to veto it.
+So the answer to "whether either default moves" is **yes, both**, on both native
+tiers: it would undo the smoothness the halving cost and still run cheaper than
+the frame did before the halving. **Both native tiers are now measured to the
+standard this entry asked for**, so what is left in front of the decision is one
+thing rather than two: **the browser tier**, which still cannot be measured at
+all for the `autoexec.cfg` reason recorded below. The browser is the tier where
+the pass is most expensive, and so the one most able to veto it.
 
 **Blocker 1 is closed, and the answer was better than the question.** The old
 entry asked whether a rounding in the last place was acceptable for a 45 degree
