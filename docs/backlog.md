@@ -14210,6 +14210,49 @@ recorded anywhere else.
   `hal/channel` superseded the requirement, the plan's version should not be
   resurrected from git by the next reader.
 
+## The published site went 15 commits stale, and three causes did it (2026-09-02)
+
+`231175d` is the last commit whose Pages run deployed. Fifteen commits later the
+live site is still showing it. The five runs since break down as three different
+failures, which is the point — no single fix reaches all of them:
+
+- **`e450a0b`, `3fa0204`, `24a3cea` — `cancelled`.** Superseded by the next push
+  before they finished. This one was **self-inflicted**: I pushed three times
+  inside an hour, and each push cancelled the run in flight. `deploy` never ran
+  on any of them and none of the three shows as a failure, so the commits look
+  fine and the site simply did not move. The remedy costs nothing — batch
+  commits and push once — and it is only obvious after reading a run list.
+- **`d0bc715` — `failure`.** The lantern leak check false-fired on ring
+  saturation; see the entry on that check. A red demo skips `deploy`. Fixed.
+- **`f9982ae` — still running.** Every demo but `shard` finished; `shard`'s
+  render step passed 38 minutes with no step-level bound and only the job's
+  ninety to stop it.
+
+**What this says about the shape of the problem.** The site's freshness depends
+on _every_ demo gate passing _and_ on no push arriving first, so its failure
+modes are the union of everything that can go wrong in fifteen browser jobs plus
+a scheduling accident. Three of the five gaps are invisible in the commit's own
+checks: a cancelled run is not a red mark.
+
+**The decision this wants, and it is the user's.** Should `deploy` wait on every
+demo? Today one slow or flaky demo holds the whole site back, and the record
+above is what that costs in practice. The options, with what each actually
+trades:
+
+1. **Leave it.** The site is only ever published from a fully verified build,
+   which is the strongest claim, and it is what the current arrangement buys.
+   The cost is what happened here.
+2. **Let `deploy` depend on `build` plus a named subset**, with the slow or
+   unstable demos still gating the run's red/green but not the publish. The site
+   moves; a demo that breaks still shows red on the commit. The cost is that a
+   demo could be broken on the live site while the commit's check says so
+   elsewhere.
+3. **Bound the slow demo and treat a timeout as red rather than cancelled**, so
+   at least the failure is loud. Does not make the site any fresher on its own.
+
+Whichever it is, **a run that cannot deploy should say so where someone will see
+it** — nothing today distinguishes "published" from "built and discarded".
+
 ## `pages.yml` cancels the verification jobs it is not deploying (2026-08-22)
 
 **DECIDED 2026-08-30 — split the verification legs into their own workflow with
