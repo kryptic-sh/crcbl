@@ -127,9 +127,12 @@ struct SsaoParams
     /// View → clip, for projecting a sample point back to a pixel.
     float4x4 proj;
     /// `x` is the sampling radius in **world units** and `y` is how many planes
-    /// each pixel sweeps — see [`slice_count`], which is what reads it. `zw` pad
-    /// the row out to the sixteen bytes `std140` gives a uniform buffer, and
-    /// nothing reads them.
+    /// each pixel sweeps — see [`slice_count`], which is what reads it. `z` is
+    /// the intensity exponent `ssao_upsample.slang` raises its reconstruction
+    /// to, written by the host into the block all three of these passes share
+    /// and read by that one alone; `w` is what is left padding the row out to
+    /// the sixteen bytes `std140` gives a uniform buffer. Nothing in *this*
+    /// file reads either.
     ///
     /// **`y` is a count and not a quality enumeration**, so the shader has one
     /// number to clamp rather than a table to agree with a host about. It is

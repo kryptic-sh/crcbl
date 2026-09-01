@@ -245,10 +245,11 @@ pub use volumetric::FroxelBuffers;
 /// One list per crate, gathered by the engine at one seam —
 /// `docs/plan/52-debug-console.md` decision 2, whose worked example is this
 /// crate. It holds [`debug_draw::r_debug_draw`], the switch the debug draw
-/// layer reads once a frame, the occlusion pair's two —
+/// layer reads once a frame, the occlusion chain's three —
 /// `ssao::r_ssao_slices` and `ssao::r_ssao_blur_passes`, which
 /// `crate::ssao`'s header argues are two variables rather than one quality
-/// knob — and the shadow cadence's two, `shadow::r_shadow_cadence` and
+/// knob, and `ssao::r_ssao_intensity`, which that header argues is not on their
+/// ladder at all — and the shadow cadence's two, `shadow::r_shadow_cadence` and
 /// `shadow::r_shadow_faces`, which `crate::shadow`'s cadence module argues are
 /// two for the same kind of reason: how long a map may be held and how many
 /// may be redrawn at once are different purchases. `tests/console_table.rs` is
@@ -259,6 +260,7 @@ pub fn console_table() -> crcbl_console::Table {
         debug_draw::r_debug_draw,
         ssao::r_ssao_slices,
         ssao::r_ssao_blur_passes,
+        ssao::r_ssao_intensity,
         shadow::r_shadow_cadence,
         shadow::r_shadow_faces
     ]

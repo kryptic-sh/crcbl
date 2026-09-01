@@ -265,17 +265,27 @@ where they sat before the gather was halved, so the reconstruction is carrying
 the contrast the full-resolution pass had. The margin is unchanged, and so is
 the case for an intensity control below.
 
-**The industry answer is an AO intensity control**, applied to the scalar
-visibility before the tint — a power or a lerp toward one, which is what lets an
-artist ask for more occlusion than the horizon integral measured. This engine
-has no such knob: `SSAO_RADIUS` is a shader constant and nothing sets the AO
-strength from outside, which the occlusion-view entry already records as its own
-gap. Adding one would restore the contrast and the margin together, and it is
-the same knob the entry above on `SHADOW_TAPS` and a re-introduced SSAO tier
-wants a home for.
+**The industry answer is an AO intensity control, and it was built on
+2026-09-02** — `r_ssao_intensity`, a console variable in `crcbl_render::ssao`
+that `ssao_upsample.slang` raises its reconstructed visibility to, applied to
+the scalar occlusion before `mesh.slang` tints it. It is a power rather than a
+blend towards one, because a blend can only lift the answer back towards
+unoccluded and this knob exists to ask for more occlusion than the horizons
+found. Range `0.25 ..= 4.0`, argued from the curve's slope at an unoccluded
+surface.
+
+**What that does _not_ do is restore the margin, and this entry stays open for
+that reason.** The default is 1.0 and is exactly identity, so every figure above
+still describes the frame that ships: `AO_RATIO` still guards 5.8% where it once
+guarded 20%, and `AO_LIFT` 3.8% against more than 8%. The knob makes the
+contrast _recoverable_ — it does not recover it. **Whether the shipped default
+moves off 1.0 is the user's call**, and it is the same shape of decision as the
+`r_ssao_slices` and `r_ssao_blur_passes` defaults in this file's HIGH PRIORITY
+entry: three occlusion console variables now exist, none has an `[engine.video]`
+key, and no tier row spends any of them.
 
 **This is also the honest answer to "the AO looks weak"** if that comes up: the
-tint makes it weaker on purpose, and the fix is the intensity control rather
+tint makes it weaker on purpose, and the fix is turning the intensity up rather
 than removing the tint.
 
 ## What the half-resolution occlusion harness does not cover (2026-09-02)

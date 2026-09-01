@@ -461,6 +461,54 @@ const MAX_HALO: u8 = 4;
 /// below it.
 const MIN_HALO_CONTRAST: u8 = 60;
 
+/// The full-resolution columns the intensity curve is measured over.
+///
+/// The falloff [`the_blurred_occlusion_falloff_does_not_terrace`] reads, in the
+/// reconstruction's own pixels rather than the gather's: [`SILHOUETTE_SKIP`]
+/// columns of the pair's grid past the plate's edge, then [`WINDOW`] of them,
+/// each multiplied up by `crcbl_shaders::ssao::RESOLUTION_DIVISOR`. The skip is
+/// there for that constant's reason — the columns inside the filters' footprint
+/// of the silhouette are a different measurement — and the window is wide
+/// enough that the curve is checked across most of the falloff's range rather
+/// than at one visibility.
+const INTENSITY_COLUMNS: core::ops::Range<u32> = PLATE_COLUMNS.end
+    + SILHOUETTE_SKIP * crcbl::shaders::ssao::RESOLUTION_DIVISOR
+    ..PLATE_COLUMNS.end + (SILHOUETTE_SKIP + WINDOW) * crcbl::shaders::ssao::RESOLUTION_DIVISOR;
+
+/// How far a reconstructed level may sit from the power curve the intensity
+/// asked for, in 8-bit levels.
+///
+/// **The measurement is per column against a prediction**, not a direction: the
+/// shader raises the visibility it reconstructed to the exponent, so the
+/// unoccluded-by-`INTENSITY_DEFAULT` reading at a column predicts every other
+/// reading at that column exactly, up to what the channel can hold. Two
+/// roundings are in that comparison — the reading the prediction is made from
+/// and the reading it is compared against — and the first is amplified by the
+/// exponent's own slope, so a couple of levels at `INTENSITY_MAX` is the floor
+/// rather than a tolerance that could be tightened. Swept at [`EXTENT`] on
+/// 2026-09-02, on the two drivers this machine has: the worst column of the
+/// window was 2.2 levels off on radv and 2.4 on lavapipe. A curve that is the
+/// wrong shape misses by tens — applying the exponent to the occlusion rather
+/// than to the visibility takes the darkest column of this window to zero.
+const MAX_CURVE_ERROR: f64 = 4.0;
+
+/// The least the window's most occluded column must move between the default
+/// intensity and each end of the range, in 8-bit levels.
+///
+/// Anti-vacuity, on [`MIN_SWING`]'s terms and it is the whole point of the test:
+/// a knob that reached the shader and was thrown away would leave every reading
+/// identical, and [`MAX_CURVE_ERROR`] alone passes on that frame — the curve at
+/// the default predicts itself, at every intensity, exactly.
+///
+/// **The darkest column rather than the window's mean**, because the mean is
+/// mostly wall: the exponent moves a visibility of one not at all, so a
+/// statistic over the whole falloff is dominated by the columns the knob is
+/// least able to move. Swept at [`EXTENT`] on 2026-09-02, on the two drivers
+/// this machine has: the darkest column reads 175 at the default and moves +57
+/// at `INTENSITY_MIN` and -118 at `INTENSITY_MAX`, the same on radv and on
+/// lavapipe. This sits under half of the smaller of them.
+const MIN_INTENSITY_SWING: f64 = 30.0;
+
 /// The projected radius at the wall, in pixels — `occlusion_at`'s `reach`.
 ///
 /// The same arithmetic the shader does, on the host: project the two ends of a
@@ -907,6 +955,7 @@ fn run_passes(
     texels: &[u8],
     slices: u8,
     blurs: u32,
+    intensity: f32,
     chain: Chain,
 ) -> Run {
     let device = headless.device.as_ref();
@@ -990,6 +1039,7 @@ fn run_passes(
         proj: projection.to_cols_array(),
         radius: RADIUS,
         slices,
+        intensity,
     };
     let uniforms = device
         .create_buffer(&BufferDesc {
@@ -1460,6 +1510,7 @@ fn the_blurred_occlusion_falloff_does_not_terrace() {
         &texels,
         crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
         1,
+        crcbl::shaders::ssao::INTENSITY_DEFAULT,
         Chain::Gathered,
     );
 
@@ -1603,6 +1654,7 @@ fn the_tangential_occlusion_line_does_not_step() {
         &texels,
         crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
         1,
+        crcbl::shaders::ssao::INTENSITY_DEFAULT,
         Chain::Gathered,
     );
 
@@ -1620,6 +1672,7 @@ fn the_tangential_occlusion_line_does_not_step() {
             &texels,
             slices,
             blurs,
+            crcbl::shaders::ssao::INTENSITY_DEFAULT,
             Chain::Gathered,
         );
         let line: Vec<u8> = (0..DIAGONAL_LENGTH)
@@ -1768,6 +1821,7 @@ fn the_reconstruction_does_not_halo_a_silhouette() {
         &texels,
         crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
         1,
+        crcbl::shaders::ssao::INTENSITY_DEFAULT,
         Chain::Reconstructed,
     );
 
@@ -1818,6 +1872,198 @@ fn the_reconstruction_does_not_halo_a_silhouette() {
          `ssao_upsample.slang` — its depth weight has stopped rejecting a tap across the \
          silhouette. The bar's first columns are {edge:?}.",
         edge = &front[..MESSAGE_SAMPLES.min(front.len())],
+    );
+
+    headless.finish();
+}
+
+/// **The AO intensity must move the occlusion, along the curve it names, and
+/// must not move a frame that never asked for it.**
+///
+/// `ssao_upsample.slang`'s `ao_intensity` is the last thing the occlusion chain
+/// does: the reconstructed visibility raised to `camera.params.z`, before
+/// `mesh.slang` tints it. `docs/backlog.md` is where the knob is argued for —
+/// the multi-bounce tint narrowed the contrast of every occluded surface, and a
+/// power is what lets a frame ask for more occlusion than the horizon integral
+/// measured rather than only less.
+///
+/// # What is asserted, and why a direction is not enough
+///
+/// A test that only watched the occlusion get darker would pass on a shader
+/// that multiplied by a constant, or that applied the exponent to something
+/// else. So each column of the falloff is **predicted** from its own reading at
+/// the default and compared against what the device wrote: the exponent is a
+/// per-pixel function of the visibility, so a window spanning most of the
+/// falloff's range is a window where a wrong curve cannot fit. See
+/// [`MAX_CURVE_ERROR`] for the tolerance and where it comes from.
+///
+/// [`MIN_INTENSITY_SWING`] is the other half. The prediction at the default is
+/// the reading itself, so a knob that never reached the shader satisfies the
+/// curve exactly at every intensity — the check has to see the window actually
+/// move before the agreement means anything.
+///
+/// # The unwritten block
+///
+/// A producer that writes nothing leaves `params.z` as the padding it used to
+/// be, which reads as zero, and every visibility raised to zero is one — a
+/// frame with the occlusion silently switched off. The shader answers a zero
+/// with `INTENSITY_DEFAULT` instead, and this asserts the whole channel comes
+/// back **byte for byte** what the default produced, which is the strongest
+/// form that claim has: not "close", the same image.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_ao_intensity_scales_the_reconstructed_occlusion() {
+    let headless = Headless::open_at_format(EXTENT, None, Features::TIMESTAMP_QUERY);
+    let (width, height) = EXTENT;
+    let size = (width as f32, height as f32);
+    let projection = Projection::Perspective {
+        fov_y: FOV_Y,
+        near: NEAR,
+    }
+    .matrix(size.0 / size.1);
+
+    // The falloff scene, which is [`the_blurred_occlusion_falloff_does_not_terrace`]'s:
+    // a plate standing in front of a wall, read past its right edge. Nothing
+    // here needs the halo test's second surface — the question is what happens
+    // to a visibility, and this scene is where the reconstruction holds a range
+    // of them.
+    let wall = depth_of(projection, -WALL_Z);
+    let plate = lifted_depth(projection, PLATE_LIFT);
+    let texels = depth_image(|x, _| {
+        if PLATE_COLUMNS.contains(&x) {
+            plate
+        } else {
+            wall
+        }
+    });
+    let at_intensity = |intensity: f32| {
+        run_passes(
+            &headless,
+            projection,
+            &texels,
+            crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
+            1,
+            intensity,
+            Chain::Reconstructed,
+        )
+    };
+    let line = |run: &Run| -> Vec<u8> {
+        INTENSITY_COLUMNS
+            .map(|column| run.at(column, HALO_LINE_Y))
+            .collect()
+    };
+    let mean = |line: &[u8]| -> f64 {
+        line.iter().map(|level| f64::from(*level)).sum::<f64>() / line.len() as f64
+    };
+
+    let shipping = at_intensity(crcbl::shaders::ssao::INTENSITY_DEFAULT);
+    let unwritten = at_intensity(0.0);
+    let measured = line(&shipping);
+    let base = mean(&measured);
+
+    // Anti-vacuity before anything is predicted from it: a window of unoccluded
+    // wall would satisfy every curve at once, since one raised to anything is
+    // one.
+    let deepest = measured
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, level)| **level)
+        .map(|(step, _)| step)
+        .expect("a non-empty window");
+    let darkest = measured[deepest];
+    let lightest = *measured.iter().max().expect("a non-empty window");
+    assert!(
+        lightest - darkest >= MIN_SWING,
+        "the window at the default spans {darkest}..={lightest}, under the {MIN_SWING} levels \
+         this measurement needs: an exponent applied to a constant visibility is a constant, so \
+         there would be no curve here to check. Move {INTENSITY_COLUMNS:?} back into the plate's \
+         falloff."
+    );
+
+    let mut worst = 0.0f64;
+    let mut worst_at = (0.0f32, 0u32, 0u8, 0.0f64);
+    let mut swings = Vec::new();
+    for intensity in [
+        crcbl::shaders::ssao::INTENSITY_MIN,
+        crcbl::shaders::ssao::INTENSITY_MAX,
+    ] {
+        let run = at_intensity(intensity);
+        let asked = line(&run);
+        swings.push((
+            intensity,
+            f64::from(asked[deepest]) - f64::from(darkest),
+            mean(&asked) - base,
+        ));
+        for (step, (measured_level, asked_level)) in measured.iter().zip(&asked).enumerate() {
+            let visibility = f64::from(*measured_level) / f64::from(UNOCCLUDED);
+            let predicted = visibility.powf(f64::from(intensity)) * f64::from(UNOCCLUDED);
+            let error = (predicted - f64::from(*asked_level)).abs();
+            if error > worst {
+                worst = error;
+                worst_at = (
+                    intensity,
+                    INTENSITY_COLUMNS.start + u32::try_from(step).expect("a window of columns"),
+                    *asked_level,
+                    predicted,
+                );
+            }
+        }
+    }
+
+    eprintln!(
+        "{suite}: the occlusion window {INTENSITY_COLUMNS:?} means {base:.1} at the default and \
+         spans {darkest}..={lightest}; its darkest column moves {deep_min:+.0} at intensity {min} \
+         and {deep_max:+.0} at {max} (the window's mean {mean_min:+.1} and {mean_max:+.1}), and \
+         the worst column is {worst:.1} levels off the curve",
+        suite = crate::SUITE,
+        min = crcbl::shaders::ssao::INTENSITY_MIN,
+        max = crcbl::shaders::ssao::INTENSITY_MAX,
+        deep_min = swings[0].1,
+        deep_max = swings[1].1,
+        mean_min = swings[0].2,
+        mean_max = swings[1].2,
+    );
+
+    assert_eq!(
+        unwritten.image, shipping.image,
+        "a block whose `params.z` was never written did not produce the frame the default \
+         produces. Zero is what the padding this word used to be reads as, and every visibility \
+         raised to zero is one — so the frame this run wrote has no occlusion in it at all. \
+         `ao_intensity` in `ssao_upsample.slang` is what must answer a zero with \
+         `INTENSITY_DEFAULT` rather than clamp it up to `INTENSITY_MIN`."
+    );
+    for (intensity, swing, _) in &swings {
+        assert!(
+            swing.abs() >= MIN_INTENSITY_SWING,
+            "intensity {intensity} moved the window's darkest column, at {darkest}, by only \
+             {swing:.0} levels — under the {MIN_INTENSITY_SWING} this test needs to be measuring \
+             anything. The knob did not reach `camera.params.z`, or the reconstruction is not \
+             reading it: every other assertion here passes on a frame the intensity never \
+             touched, because the curve at the default predicts itself."
+        );
+    }
+    assert!(
+        swings[0].1 > 0.0 && swings[1].1 < 0.0,
+        "the curve runs the wrong way: intensity {min} moved the darkest column {a:+.0} levels \
+         and {max} moved it {b:+.0}. The channel carries visibility, so an exponent over one must \
+         darken it and one under it must lighten — a knob that can only lighten is the blend \
+         towards unoccluded `docs/backlog.md` refuses.",
+        min = swings[0].0,
+        max = swings[1].0,
+        a = swings[0].1,
+        b = swings[1].1,
+    );
+    assert!(
+        worst <= MAX_CURVE_ERROR,
+        "the reconstruction is not on the curve it was asked for: at intensity {intensity}, \
+         column {column} reads {level} where its own default reading predicts {predicted:.1} — \
+         {worst:.1} levels, against a bound of {MAX_CURVE_ERROR}. `ssao_upsample.slang` raises \
+         the visibility to `camera.params.z`, so every column's reading at the default predicts \
+         its reading at every other intensity.",
+        intensity = worst_at.0,
+        column = worst_at.1,
+        level = worst_at.2,
+        predicted = worst_at.3,
     );
 
     headless.finish();

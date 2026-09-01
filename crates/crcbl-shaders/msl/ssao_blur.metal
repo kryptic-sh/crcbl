@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 191 "shaders/ssao_blur.slang"
+#line 193 "shaders/ssao_blur.slang"
 int2 full_res_pixel_0(int2 pixel_0)
 {
     return pixel_0 * int2(int(2)) ;
@@ -35,18 +35,18 @@ struct KernelContext_0
 };
 
 
-#line 202 "shaders/ssao_blur.slang"
+#line 204 "shaders/ssao_blur.slang"
 float depth_at_0(int2 pixel_1, int2 extent_0, KernelContext_0 thread* kernelContext_0)
 {
 
     int3 _S1 = int3(clamp(pixel_1, int2(int(0), int(0)), extent_0 - int2(int(1), int(1))), int(0));
 
-#line 205
+#line 207
     return ((kernelContext_0->scene_depth_0).read(vec<uint,2>(((_S1)).xy), uint(((_S1)).z)));
 }
 
 
-#line 216
+#line 218
 float view_z_0(int2 pixel_2, float depth_0, float2 extent_1, KernelContext_0 thread* kernelContext_1)
 {
 
@@ -57,34 +57,34 @@ float view_z_0(int2 pixel_2, float depth_0, float2 extent_1, KernelContext_0 thr
 }
 
 
-#line 222
+#line 224
 struct pixelOutput_0
 {
     float output_0 [[color(0)]];
 };
 
 
-#line 222
+#line 224
 struct pixelInput_0
 {
     float2 uv_0 [[user(TEXCOORD)]];
 };
 
 
-#line 236
+#line 238
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S2 [[stage_in]], float4 position_0 [[position]], texture2d<float, access::sample> occlusion_1 [[texture(0)]], depth2d<float, access::sample> scene_depth_1 [[texture(1)]], SsaoParams_natural_0 constant* camera_1 [[buffer(0)]])
 {
 
-#line 236
+#line 238
     thread KernelContext_0 kernelContext_2;
 
-#line 236
+#line 238
     (&kernelContext_2)->occlusion_0 = occlusion_1;
 
-#line 236
+#line 238
     (&kernelContext_2)->scene_depth_0 = scene_depth_1;
 
-#line 236
+#line 238
     (&kernelContext_2)->camera_0 = camera_1;
 
     thread uint width_0;
@@ -92,7 +92,7 @@ struct pixelInput_0
     (*((&width_0)) = (occlusion_1).get_width(0)),(*((&height_0)) = (occlusion_1).get_height(0));
     int2 _S3 = int2(int(width_0), int(height_0));
 
-#line 247
+#line 249
     thread uint depth_width_0;
     thread uint depth_height_0;
     (*((&depth_width_0)) = (scene_depth_1).get_width(0)),(*((&depth_height_0)) = (scene_depth_1).get_height(0));
@@ -101,32 +101,32 @@ struct pixelInput_0
     int2 _S4 = int2(position_0.xy);
     int2 centre_texel_0 = full_res_pixel_0(_S4);
 
-#line 253
+#line 255
     float _S5 = depth_at_0(centre_texel_0, depth_extent_0, &kernelContext_2);
 
-#line 259
+#line 261
     if(_S5 <= 0.0f)
     {
 
-#line 259
+#line 261
         pixelOutput_0 _S6 = { 1.0f };
 
         return _S6;
     }
 
-#line 261
+#line 263
     float _S7 = view_z_0(centre_texel_0, _S5, depth_size_0, &kernelContext_2);
 
 
     float _S8 = (&kernelContext_2)->camera_0->params_0.x * 2.0f;
 
-#line 264
+#line 266
     int y_0 = int(-1);
 
-#line 264
+#line 266
     float total_0 = 0.0f;
 
-#line 264
+#line 266
     float weight_0 = 0.0f;
 
 
@@ -134,70 +134,70 @@ struct pixelInput_0
     for(;;)
     {
 
-#line 268
+#line 270
         if(y_0 < int(3))
         {
         }
         else
         {
 
-#line 268
+#line 270
             break;
         }
 
-#line 268
+#line 270
         int x_0 = int(-1);
 
         for(;;)
         {
 
-#line 270
+#line 272
             if(x_0 < int(3))
             {
             }
             else
             {
 
-#line 270
+#line 272
                 break;
             }
 
-#line 278
+#line 280
             int2 tap_0 = clamp(_S4 + int2(x_0, y_0), int2(int(0), int(0)), _S3 - int2(int(1), int(1)));
 
-#line 278
+#line 280
             bool _S9;
 
-#line 285
+#line 287
             if(x_0 != int(0))
             {
 
-#line 285
+#line 287
                 _S9 = true;
 
-#line 285
+#line 287
             }
             else
             {
 
-#line 285
+#line 287
                 _S9 = y_0 != int(0);
 
-#line 285
+#line 287
             }
 
-#line 285
+#line 287
             float share_0;
 
-#line 285
+#line 287
             if(_S9)
             {
                 int2 texel_0 = full_res_pixel_0(tap_0);
 
-#line 287
+#line 289
                 float _S10 = depth_at_0(texel_0, depth_extent_0, &kernelContext_2);
 
-#line 287
+#line 289
                 float _S11 = view_z_0(texel_0, _S10, depth_size_0, &kernelContext_2);
 
                 float away_0 = abs(_S11 - _S7);
@@ -207,65 +207,65 @@ struct pixelInput_0
                 if(_S10 <= 0.0f)
                 {
 
-#line 293
+#line 295
                     share_0 = 0.0f;
 
-#line 293
+#line 295
                 }
                 else
                 {
 
-#line 293
+#line 295
                     share_0 = saturate(1.0f - away_0 / _S8);
 
-#line 293
+#line 295
                 }
 
-#line 285
+#line 287
             }
             else
             {
 
-#line 285
+#line 287
                 share_0 = 1.0f;
 
-#line 285
+#line 287
             }
 
-#line 295
+#line 297
             int3 _S12 = int3(tap_0, int(0));
 
-#line 295
+#line 297
             float total_1 = total_0 + (((&kernelContext_2)->occlusion_0).read(vec<uint,2>(((_S12)).xy), uint(((_S12)).z)).x) * share_0;
             float weight_1 = weight_0 + share_0;
 
-#line 270
+#line 272
             x_0 = x_0 + int(1);
 
-#line 270
+#line 272
             total_0 = total_1;
 
-#line 270
+#line 272
             weight_0 = weight_1;
 
-#line 270
+#line 272
         }
 
-#line 268
+#line 270
         y_0 = y_0 + int(1);
 
-#line 268
+#line 270
     }
 
-#line 268
+#line 270
     pixelOutput_0 _S13 = { total_0 / weight_0 };
 
-#line 300
+#line 302
     return _S13;
 }
 
 
-#line 300
+#line 302
 struct vertexMain_Result_0
 {
     float4 position_1 [[position]];
@@ -273,7 +273,7 @@ struct vertexMain_Result_0
 };
 
 
-#line 180
+#line 182
 struct FullscreenOutput_0
 {
     float4 position_2;
@@ -281,41 +281,41 @@ struct FullscreenOutput_0
 };
 
 
-#line 180
+#line 182
 [[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], texture2d<float, access::sample> occlusion_2 [[texture(0)]], depth2d<float, access::sample> scene_depth_2 [[texture(1)]], SsaoParams_natural_0 constant* camera_2 [[buffer(0)]])
 {
 
-#line 180
+#line 182
     thread KernelContext_0 kernelContext_3;
 
-#line 180
+#line 182
     (&kernelContext_3)->occlusion_0 = occlusion_2;
 
-#line 180
+#line 182
     (&kernelContext_3)->scene_depth_0 = scene_depth_2;
 
-#line 180
+#line 182
     (&kernelContext_3)->camera_0 = camera_2;
 
-#line 228
+#line 230
     thread FullscreenOutput_0 output_1;
 
     float2 _S14 = float2(float((index_0 << 1U) & 2U), float(index_0 & 2U));
 
-#line 230
+#line 232
     (&output_1)->uv_2 = _S14;
     (&output_1)->position_2 = float4(_S14 * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
 
-#line 231
+#line 233
     thread vertexMain_Result_0 _S15;
 
-#line 231
+#line 233
     (&_S15)->position_1 = output_1.position_2;
 
-#line 231
+#line 233
     (&_S15)->uv_1 = output_1.uv_2;
 
-#line 231
+#line 233
     return _S15;
 }
 

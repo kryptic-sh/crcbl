@@ -5903,6 +5903,7 @@ impl ForwardRenderer {
                 proj: projection.to_cols_array(),
                 radius: SSAO_RADIUS,
                 slices: crate::ssao::slice_count(),
+                intensity: crate::ssao::intensity(),
             },
         )?;
         // The contact march's block: the same two matrices, and the sun in view
@@ -16326,6 +16327,7 @@ mod tests {
                 proj: [0.0; 16],
                 radius: 0.0,
                 slices,
+                intensity: ssao::INTENSITY_DEFAULT,
             }
             .to_bytes()
         };

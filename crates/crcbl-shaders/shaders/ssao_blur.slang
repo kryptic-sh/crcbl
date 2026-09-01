@@ -97,7 +97,9 @@ struct SsaoParams
     float4x4 proj;
     /// `x` is the sampling radius in **world units**, which is what
     /// [`DEPTH_TOLERANCE_RADII`] is a share of. `y` is the count of planes
-    /// `ssao.slang` swept and `zw` pad the row; nothing here reads them.
+    /// `ssao.slang` swept, `z` is the intensity exponent
+    /// `ssao_upsample.slang` raises its reconstruction to, and `w` pads the
+    /// row; nothing here reads any of the three.
     float4 params;
 };
 

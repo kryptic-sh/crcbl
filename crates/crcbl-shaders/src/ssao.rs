@@ -66,6 +66,55 @@ pub const SLICE_COUNT_DEFAULT: u8 = 2;
 /// table cannot otherwise reach.
 pub const SLICE_COUNT_MAX: u8 = 4;
 
+/// The AO intensity a producer that writes nothing gets, matching `static const
+/// float INTENSITY_DEFAULT` in `shaders/ssao_upsample.slang`.
+///
+/// One, and it is the exponent that changes nothing: the reconstruction returns
+/// the visibility its taps averaged, untouched. Every golden in this workspace
+/// was blessed here, and it is what a zero in [`SsaoParams::intensity`] is
+/// answered with rather than the floor a clamp would map it to — see that
+/// field, and `ao_intensity` in the shader.
+pub const INTENSITY_DEFAULT: f32 = 1.0;
+
+/// The weakest AO intensity the reconstruction will honour, matching `static
+/// const float INTENSITY_MIN` in `shaders/ssao_upsample.slang`.
+///
+/// The shader's constant carries the argument: the curve's slope at an
+/// unoccluded surface is the exponent itself, so a quarter is where four levels
+/// of the channel the blur wrote move the reconstruction by one.
+pub const INTENSITY_MIN: f32 = 0.25;
+
+/// The strongest AO intensity the reconstruction will honour, matching `static
+/// const float INTENSITY_MAX` in `shaders/ssao_upsample.slang`.
+///
+/// [`INTENSITY_MIN`] reciprocated, which is the only symmetry an exponent has,
+/// and the same argument from the other end: at four, one level of the gathered
+/// channel is four of the reconstructed one.
+pub const INTENSITY_MAX: f32 = 4.0;
+
+/// The three above are an intensity *control*, checked where they are written.
+///
+/// A compile-time block rather than a test, because every term is a constant and
+/// a test over constants is one nothing but this edit could make fail. What it
+/// holds: the default changes nothing, the floor weakens the measurement without
+/// reaching the exponent that erases it, and the ceiling is over the default — a
+/// control whose ceiling *is* the default can only ever weaken the occlusion,
+/// which is the half `docs/backlog.md` says is not the one wanted.
+const _: () = {
+    assert!(
+        INTENSITY_DEFAULT == 1.0,
+        "a default that is not one is a curve applied to every frame nobody asked to change"
+    );
+    assert!(
+        INTENSITY_MIN > 0.0 && INTENSITY_MIN < INTENSITY_DEFAULT,
+        "the floor must weaken the measurement without reaching the exponent that erases it"
+    );
+    assert!(
+        INTENSITY_MAX > INTENSITY_DEFAULT,
+        "an intensity control whose ceiling is the default can only weaken the occlusion"
+    );
+};
+
 /// Radians [`acos_approx`] is allowed to differ from `f64::acos`.
 ///
 /// Measured rather than chosen, over `-1..=1` at two million steps —
@@ -162,17 +211,32 @@ pub struct SsaoParams {
     /// what lets the shader read it back with a `uint` cast rather than a
     /// nearest-integer search.
     pub slices: u8,
+    /// The exponent `ssao_upsample.slang` raises the reconstructed visibility
+    /// to, which is how much occlusion a frame asks for against how much the
+    /// horizons measured.
+    ///
+    /// [`INTENSITY_DEFAULT`] is what ships and returns the measurement
+    /// untouched; [`INTENSITY_MIN`] and [`INTENSITY_MAX`] are the ends the
+    /// shader clamps into. **A zero is answered with [`INTENSITY_DEFAULT`]**
+    /// rather than with the floor, on [`slices`]' terms and for a sharper
+    /// version of its reason: a producer that writes nothing leaves this word
+    /// as the padding it used to be, and every visibility raised to zero is
+    /// one — a frame with no occlusion in it at all. `ao_intensity` in the
+    /// shader is where that is turned away.
+    ///
+    /// [`slices`]: Self::slices
+    pub intensity: f32,
 }
 
 impl SsaoParams {
     /// The block as the bytes a uniform buffer holds.
     ///
-    /// Little-endian throughout, and the two padding words after [`slices`] are
+    /// Little-endian throughout, and the padding word after [`intensity`] is
     /// written rather than left alone for [`crate::compute_probe::Params`]'s
     /// reason: the buffer is [`PARAMS_SIZE`] wide and a partial write leaves the
     /// tail undefined.
     ///
-    /// [`slices`]: Self::slices
+    /// [`intensity`]: Self::intensity
     #[must_use]
     pub fn to_bytes(self) -> [u8; PARAMS_SIZE] {
         let mut bytes = [0u8; PARAMS_SIZE];
@@ -185,7 +249,9 @@ impl SsaoParams {
         at += 4;
         bytes[at..at + 4].copy_from_slice(&f32::from(self.slices).to_le_bytes());
         at += 4;
-        debug_assert_eq!(at + 8, PARAMS_SIZE, "two padding words close the row");
+        bytes[at..at + 4].copy_from_slice(&self.intensity.to_le_bytes());
+        at += 4;
+        debug_assert_eq!(at + 4, PARAMS_SIZE, "one padding word closes the row");
         bytes
     }
 }
@@ -514,6 +580,7 @@ mod tests {
             proj,
             radius: 0.5,
             slices: SLICE_COUNT_MAX,
+            intensity: INTENSITY_MAX,
         }
         .to_bytes();
 
@@ -530,6 +597,72 @@ mod tests {
             &f32::from(SLICE_COUNT_MAX).to_le_bytes(),
             "the slice count did not survive the block as the number it went in as"
         );
-        assert!(bytes[136..].iter().all(|byte| *byte == 0), "{bytes:?}");
+        // The intensity rides in `params.z`, which the row used to pad with.
+        // The shader compares it against its own `INTENSITY_DEFAULT` to decide
+        // whether to touch the frame at all, so a value that did not arrive
+        // exactly is a golden that moved for a knob nobody set.
+        assert_eq!(
+            &bytes[136..140],
+            &INTENSITY_MAX.to_le_bytes(),
+            "the AO intensity did not survive the block as the number it went in as"
+        );
+        assert!(bytes[140..].iter().all(|byte| *byte == 0), "{bytes:?}");
+    }
+
+    /// The three intensities and the shader must name the same numbers.
+    ///
+    /// `the_far_plane_matches_the_constant_ssao_slang_declares`'s check, for its
+    /// reason: the shader compiles with any of them, and a ceiling that drifted
+    /// above the console's range is a value the host can ask for and the frame
+    /// silently clamps, while a default that drifted off one is every golden in
+    /// the tree moving for a knob nobody set.
+    #[test]
+    fn the_intensity_bounds_match_the_constants_ssao_upsample_slang_declares() {
+        let source = include_str!("../shaders/ssao_upsample.slang");
+        for declaration in [
+            format!("static const float INTENSITY_DEFAULT = {INTENSITY_DEFAULT:.1};"),
+            format!("static const float INTENSITY_MIN = {INTENSITY_MIN};"),
+            format!("static const float INTENSITY_MAX = {INTENSITY_MAX:.1};"),
+        ] {
+            assert!(
+                source.contains(&declaration),
+                "ssao_upsample.slang does not declare `{declaration}`; the intensity bounds \
+                 have drifted from the shader"
+            );
+        }
+    }
+
+    /// An unwritten `params.z` must be the default, and the default must be
+    /// applied by **not applying anything**.
+    ///
+    /// Two failures, both silent and both pictures. A zero clamped into the
+    /// range rather than answered with [`INTENSITY_DEFAULT`] is a producer that
+    /// wrote nothing getting a frame with no occlusion at all — every
+    /// visibility raised to zero is one — which is the failure
+    /// `the_slice_counts_match_the_constants_ssao_slang_declares` guards the
+    /// other field against. And a shader that reached `pow` at the default
+    /// would move every golden in this workspace by however much a target's
+    /// logarithm and exponential disagree with the identity, for a knob nobody
+    /// touched.
+    ///
+    /// A source check for `the_slice_tilt_is_signed_against_the_view_orthogonal_tangent`'s
+    /// reason: this crate carries no depth buffer to run the pass over. The
+    /// behavioural half is `crcbl`'s
+    /// `forward_e2e::occlusion::the_ao_intensity_scales_the_reconstructed_occlusion`,
+    /// which reads both cases back off a device.
+    #[test]
+    fn the_reconstruction_answers_an_unwritten_intensity_with_the_default() {
+        let source = include_str!("../shaders/ssao_upsample.slang");
+        for expression in [
+            "asked == 0.0 ? INTENSITY_DEFAULT : clamp(asked, INTENSITY_MIN, INTENSITY_MAX)",
+            "intensity == INTENSITY_DEFAULT ? visibility : pow(visibility, intensity)",
+        ] {
+            assert!(
+                source.contains(expression),
+                "ssao_upsample.slang no longer spells `{expression}`; either a block whose \
+                 `params.z` was never written switches the occlusion off entirely, or the \
+                 default no longer returns the visibility the horizons measured"
+            );
+        }
     }
 }

@@ -1125,6 +1125,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Menu::set_cycler`. `crcbl::engine`'s menu pass claims Left and Right over a
   cycler row as it does over a slider (`MenuSet::cycler_highlighted`).
 
+### Added
+
+- **`r_ssao_intensity`, a console variable that scales the occlusion the horizon
+  integral measured.** `ssao_upsample.slang` raises its reconstructed visibility
+  to that exponent, so a value above 1 asks for more occlusion than the ground
+  truth found and a value below 1 for less — the control the AO path had no way
+  to express, since `SSAO_RADIUS` is a shader constant and nothing set the
+  strength from outside. It rides in the occlusion block's spare `params.z`, so
+  no uniform layout moved.
+
+  **The default is 1.0 and is exactly identity**, spelled as a branch rather
+  than left to `pow(v, 1.0)` — which is not specified to return `v` bit for bit
+  on these targets and would have moved goldens for a knob nobody touched. The
+  range is `0.25 ..= 4.0`, argued from the curve's slope at an unoccluded
+  surface, which is the exponent itself: at 4 one level of the channel the blur
+  wrote becomes four of the reconstruction's, and at 0.25 it takes four levels
+  in to move one out. Zero is not the floor and is answered with the default —
+  `v` raised to zero is 1 everywhere, which is a frame with the occlusion
+  silently switched off, and an unwritten uniform word reads as zero.
+
+  Like `r_ssao_slices` and `r_ssao_blur_passes` it is a console variable and not
+  a quality preset: no `[engine.video]` key writes it and no tier row spends it.
+
 ### Changed
 
 - **Ambient occlusion is gathered at half resolution and reconstructed with a

@@ -64,10 +64,25 @@
 //! that bundled them could not say so. Both default to what ships, so a frame
 //! nobody has touched the console on is the frame every golden was blessed at.
 //!
-//! Neither is a quality preset, and neither is set by one.
+//! # The intensity is a third switch, and it buys nothing
+//!
+//! [`r_ssao_intensity`] is not on that ladder: it costs one comparison in the
+//! pass that already runs, and what it changes is how much of the occlusion the
+//! horizons measured a frame actually shows.
+//! `shaders/ssao_upsample.slang`'s `ao_intensity` is the whole of it — the
+//! reconstructed visibility raised to the exponent this writes, at the end of
+//! the chain and before `mesh.slang` tints it.
+//!
+//! **A power and not a blend towards one**, which is what lets it ask for
+//! *more* occlusion than the integral found: `docs/backlog.md` records the
+//! multi-bounce tint narrowing the contrast of every occluded surface, and a
+//! blend could only weaken it further. The default is the exponent that changes
+//! nothing, so this switch too leaves the frame every golden was blessed at.
+//!
+//! None of the three is a quality preset, and none is set by one.
 //! `crcbl::settings::presets` writes the `[engine.video]` keys of a tier, and
 //! `docs/plan/39-capabilities.md`'s tier table has no row for the occlusion
-//! pair — so these two stay what they are: variables declared beside the pass
+//! pair — so all three stay what they are: variables declared beside the pass
 //! that reads them, the way `crate::debug_draw`'s switch is. What a tier should
 //! spend on them is `docs/backlog.md`'s.
 
@@ -96,6 +111,11 @@ crcbl_console::convar! {
     pub static r_ssao_blur_passes: i64 in 1 ..= 2 = 1;
 }
 
+crcbl_console::convar! {
+    /// Exponent the measured occlusion is raised to: 1 ships, over it darkens.
+    pub static r_ssao_intensity: f32 in 0.25 ..= 4.0 = 1.0;
+}
+
 /// [`r_ssao_slices`] as the shader's uniform wants it.
 ///
 /// Clamped on the way through rather than trusted: the variable's own range is
@@ -109,6 +129,21 @@ pub(crate) fn slice_count() -> u8 {
         i64::from(ssao::SLICE_COUNT_MAX),
     );
     u8::try_from(asked).unwrap_or(ssao::SLICE_COUNT_DEFAULT)
+}
+
+/// [`r_ssao_intensity`] as the shader's uniform wants it.
+///
+/// Clamped on the way through for [`slice_count`]'s reason exactly: the
+/// variable's own range is the console's guard and this is the one that holds
+/// if `shaders/ssao_upsample.slang`'s bounds ever move inside it.
+/// `ao_intensity` clamps again on its side, which is where a value that never
+/// reached this function at all is caught — and where a zero is answered with
+/// `crcbl_shaders::ssao::INTENSITY_DEFAULT` rather than with the floor, because
+/// every visibility raised to zero is one and that frame has no occlusion in it.
+pub(crate) fn intensity() -> f32 {
+    r_ssao_intensity
+        .get_f32()
+        .clamp(ssao::INTENSITY_MIN, ssao::INTENSITY_MAX)
 }
 
 /// The extent the march and the blur run at: `extent` divided by
@@ -839,5 +874,33 @@ mod tests {
                  the upsample's clamp is standing in for a sample that is not there"
             );
         }
+    }
+
+    /// The console's range is the shader's range, and its default is the
+    /// exponent that changes nothing.
+    ///
+    /// `convar!` takes its bounds as literals — a macro cannot read a constant
+    /// — so the two numbers in the declaration above are a copy of
+    /// `crcbl_shaders::ssao`'s, and this is what holds them to it. A console
+    /// range wider than the shader's is a value a person can set and the frame
+    /// silently ignores; narrower, and part of the shader's range is
+    /// unreachable. Neither shows up as anything but a knob that does less than
+    /// it says.
+    #[test]
+    fn the_console_range_is_the_range_the_reconstruction_honours() {
+        assert_eq!(
+            r_ssao_intensity.kind(),
+            crcbl_console::Kind::Float {
+                min: ssao::INTENSITY_MIN,
+                max: ssao::INTENSITY_MAX,
+            },
+            "`r_ssao_intensity` accepts a range `shaders/ssao_upsample.slang` does not honour"
+        );
+        assert_eq!(
+            intensity(),
+            ssao::INTENSITY_DEFAULT,
+            "a frame nobody has touched the console on must reach the shader at the exponent \
+             every golden in this workspace was blessed under"
+        );
     }
 }

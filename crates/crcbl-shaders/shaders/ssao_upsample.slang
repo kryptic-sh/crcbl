@@ -69,7 +69,9 @@ struct SsaoParams
     float4x4 proj;
     /// `x` is the sampling radius in **world units**, which is what
     /// [`DEPTH_TOLERANCE_RADII`] is a share of. `y` is the count of planes
-    /// `ssao.slang` swept and `zw` pad the row; nothing here reads them.
+    /// `ssao.slang` swept, which nothing here reads, and `z` is the exponent
+    /// this pass raises its answer to — see [`ao_intensity`], the only reader
+    /// of it in the chain. `w` pads the row.
     float4 params;
 };
 
@@ -153,6 +155,38 @@ static const float DEPTH_TOLERANCE_RADII = 2.0;
 /// A negative power of two, so the share and every ratio it forms are exact.
 static const float NEAREST_TAP_FLOOR = 1.0 / 4096.0;
 
+/// The exponent a frame that asked for nothing gets, and the one exponent that
+/// changes nothing: `v` raised to it is `v`, for every visibility this pass can
+/// reconstruct.
+///
+/// `crcbl_shaders::ssao::INTENSITY_DEFAULT` is the Rust mirror, and
+/// `crcbl_render::ssao::r_ssao_intensity` is what a frame sets it from.
+static const float INTENSITY_DEFAULT = 1.0;
+
+/// The weakest exponent [`ao_intensity`] will answer with.
+///
+/// A quarter, which is [`INTENSITY_MAX`] reciprocated — the one symmetry an
+/// exponent has, since `k` and `1/k` are the two curves that undo each other.
+/// The argument for the number is the curve's slope at an unoccluded surface,
+/// which is the exponent itself: at a quarter it takes four levels of the
+/// `R8Unorm` channel `ssao_blur.slang` wrote to move this one by a level, so
+/// below it the pass is discarding the measurement it just made.
+///
+/// **Zero is not the bottom of the range and cannot be.** `v` raised to zero is
+/// one everywhere, which is a frame with no occlusion in it at all — see
+/// [`ao_intensity`], which is where a zero is turned away rather than clamped
+/// up to this.
+static const float INTENSITY_MIN = 0.25;
+
+/// The strongest exponent [`ao_intensity`] will answer with.
+///
+/// Four, by [`INTENSITY_MIN`]'s argument from the other end: the slope at an
+/// unoccluded surface is the exponent, so four is where one level of the
+/// channel the blur wrote becomes four levels of this one, and the terracing of
+/// a half-resolution `R8Unorm` gather is what an artist would then be looking
+/// at rather than the occlusion.
+static const float INTENSITY_MAX = 4.0;
+
 struct FullscreenOutput
 {
     float4 position : SV_Position;
@@ -197,6 +231,30 @@ float view_z(int2 pixel, float depth, float2 extent)
         1.0 - (float(pixel.y) + 0.5) / extent.y * 2.0);
     float4 view = mul(camera.inv_proj, float4(ndc, depth, 1.0));
     return view.z / view.w;
+}
+
+/// The exponent this frame asked the reconstructed visibility be raised to.
+///
+/// `camera.params.z`, which the host writes from a console variable — see
+/// `crcbl_render::ssao::r_ssao_intensity`. The horizons measured the occlusion
+/// and this is what lets an artist ask for more of it than they found: **a
+/// power and not a blend towards one**, because a blend can only lift the
+/// answer back towards unoccluded and the frame this knob exists for wants it
+/// darker than the integral came out.
+///
+/// **Zero is the default and not the floor.** A producer that never writes the
+/// field leaves the padding this word used to be, which reads as zero, and zero
+/// is the one exponent that cannot be honoured: every visibility raised to it
+/// is one, so the frame arrives with no occlusion in it whatsoever. A clamp on
+/// its own would answer [`INTENSITY_MIN`] there — a picture nobody asked for
+/// either — so the zero is answered with [`INTENSITY_DEFAULT`], which is the
+/// frame this file drew before the field existed. `ssao.slang`'s `slice_count`
+/// turns its own unwritten field away for that reason and this is the same
+/// reasoning applied to a value whose degenerate case is at the other end.
+float ao_intensity()
+{
+    float asked = camera.params.z;
+    return asked == 0.0 ? INTENSITY_DEFAULT : clamp(asked, INTENSITY_MIN, INTENSITY_MAX);
 }
 
 [shader("vertex")]
@@ -286,5 +344,13 @@ float fragmentMain(FullscreenOutput input) : SV_Target
         }
     }
     // At least the nearest sample's floor, by the construction above.
-    return total / weight;
+    float visibility = total / weight;
+    float intensity = ao_intensity();
+    // **The default is spelled as a branch rather than left to the power.**
+    // `pow(x, 1.0)` is not specified to return `x` bit for bit on any of these
+    // targets — it is a logarithm and an exponential on most of them — so every
+    // golden in this workspace would move a level here and there for a knob
+    // nobody had touched. The comparison is on a uniform, so a frame takes one
+    // side of it for every pixel and it decides nothing per pixel.
+    return intensity == INTENSITY_DEFAULT ? visibility : pow(visibility, intensity);
 }
