@@ -3957,10 +3957,11 @@ mod tests {
                 }
             }
             // `docs/plan/18-render-features.md`'s occlusion slice added the
-            // middle three, in this order and no other: the prepass has to write
+            // middle four, in this order and no other: the prepass has to write
             // the depth `ssao` reads, `ssao-blur` has to have raw occlusion to
-            // blur, and `forward` has to have the blurred channel before it can
-            // scale its ambient by it. A frame that runs them in any other order
+            // blur, `ssao-upsample` has to have a blurred half-resolution
+            // channel to widen, and `forward` has to have the full-resolution
+            // channel before it can scale its ambient by it. A frame that runs them in any other order
             // still draws — each pass reads whatever the last frame left in the
             // pooled transient — so the sequence is asserted here rather than
             // trusted to the graph.
@@ -3977,6 +3978,7 @@ mod tests {
                 ("render", "depth-prepass"),
                 ("render", "ssao"),
                 ("render", "ssao-blur"),
+                ("render", "ssao-upsample"),
                 ("render", "forward"),
                 // **The pyramid the march climbs, and it is part of the march
                 // rather than of the prepass**: `crcbl_render::hiz` records a

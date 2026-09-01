@@ -254,7 +254,14 @@ fn per_pass_gpu_timers_report_real_numbers() {
     // where a pass opens and closes, and a `PassKind::Copy` opens no scope at
     // all. `PassTimers` gives it no query pair and no row, rather than a row
     // reading 0.000 ms that a reader would take for a measurement.
-    expected.extend(["shadow", "depth-prepass", "ssao", "ssao-blur", "forward"]);
+    expected.extend([
+        "shadow",
+        "depth-prepass",
+        "ssao",
+        "ssao-blur",
+        "ssao-upsample",
+        "forward",
+    ]);
     // The Hi-Z pyramid the reflection march climbs, one pass per level and as
     // many levels as this extent has — from `crcbl_render::hiz` rather than
     // written out, on [`CASCADES`](crcbl_render::shadow::CASCADES)'s terms: a

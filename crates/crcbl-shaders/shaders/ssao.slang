@@ -29,6 +29,35 @@
 // disagreeing in the last bit moves the integral by a hair. The technique that
 // looked riskier for the goldens is the safer one.
 //
+// # It runs at half the scene extent, and reads depth at full
+//
+// One invocation of this pass covers a [`RESOLUTION_DIVISOR`]-square block of
+// the frame, so a frame marches a quarter of the horizons it used to. Occlusion
+// is a low-frequency field and the reference implementations halve it for
+// exactly that reason; `ssao_upsample.slang` is what puts it back, weighting the
+// half-resolution samples by how near their depth is to the full-resolution
+// pixel's so the field does not cross a silhouette on the way up.
+//
+// **Only the output is halved.** Every depth this file reads is the prepass's
+// own, at full resolution, through the texel [`full_res_pixel`] maps this
+// invocation to — so the march reaches the same distance through the same
+// texels and the normal is still reconstructed from neighbours one
+// full-resolution texel away. `depth_at`, `view_position` and `normal_at` are
+// untouched by the change, which matters beyond taste: `ssr.slang` and
+// `contact_shadows.slang` carry the same three bodies and
+// `crcbl_shaders::ssr`'s drift guard compares them as text. A half-resolution
+// depth of its own would be a second pass building a second pyramid, and
+// `docs/backlog.md` carries that as a rung of its own.
+//
+// **The dither tile is indexed by the pass's own pixel**, not by the texel it
+// stands for — see [`occlusion_at`], which is why the tile arrives there as an
+// argument. So the sixteen phases still land one per pixel of this pass, and the
+// tile they fill is [`RESOLUTION_DIVISOR`] times wider on screen than it was.
+// That is expected rather than a regression to paper over: `ssao_blur.slang`'s
+// footprint is this file's tile measured in the pixels the pair runs at, so it
+// still averages exactly one tile and no more. What is wider is the tile
+// itself, and therefore whatever residue of it the blur leaves.
+//
 // # Why the slice directions are a table and never a hash
 //
 // The determinism rule survives the technique change intact. Interleaved-
@@ -249,6 +278,18 @@ static const uint SLICE_STEPS = 4;
 /// a handful of pixels wide.
 static const float MIN_RADIUS_PIXELS = 2.0;
 
+/// The factor the occlusion chain's gather extent is divided by, on each axis.
+///
+/// **Occlusion is low-frequency, so it is not gathered per pixel.** This pass
+/// and `ssao_blur.slang` run over an image this many times smaller on each side
+/// — a quarter of the invocations — and `ssao_upsample.slang` reconstructs the
+/// full-resolution channel the forward pass binds. The header says what that
+/// costs and what it does not.
+///
+/// `crcbl_shaders::ssao::RESOLUTION_DIVISOR` is the Rust mirror and
+/// `crcbl_render::ssao::half_extent` is what sizes the images with it.
+static const int RESOLUTION_DIVISOR = 2;
+
 /// Half a turn's worth of horizon, which is where a hemisphere's edge is.
 ///
 /// Written out rather than derived, because it is a bound in the integral rather
@@ -331,6 +372,22 @@ struct FullscreenOutput
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
 };
+
+/// The full-resolution texel a pixel of this pass stands for.
+///
+/// The **top-left** of the block rather than its centre, because a block of an
+/// even side has no centre texel and every fetch in this pair is a `Load`: the
+/// alternative is a filtered value four rasterisers would each round their own
+/// way, which is the objection this file makes to everything else it refuses.
+///
+/// All three passes of the chain map the same way, which is what lets
+/// `ssao_blur.slang` weight a tap by the depth this file actually gathered it
+/// at, and `ssao_upsample.slang` know where each half-resolution sample sits.
+/// `crcbl_shaders::ssr`'s drift guard holds the three copies together.
+int2 full_res_pixel(int2 pixel)
+{
+    return pixel * RESOLUTION_DIVISOR;
+}
 
 /// The depth prepass's value at `pixel`, clamped into the image.
 ///
@@ -567,7 +624,16 @@ float2 turned(float2 seed, uint slice)
 ///
 /// **Replace this function, and only this function, to upgrade the technique.**
 /// It has been replaced once already, which is what that line was for.
-float occlusion_at(int2 pixel, float3 centre, float3 normal, int2 extent, float2 size)
+///
+/// `pixel` is the full-resolution texel this invocation marches from and `tile`
+/// is the dither index of the pixel it was invoked for — two arguments rather
+/// than one derivation, because the march wants full-resolution texels while the
+/// tile wants one entry per pixel of *this pass*. Deriving the tile from `pixel`
+/// here would index the tables with [`RESOLUTION_DIVISOR`]-strided coordinates,
+/// which collapses the sixteen phases onto the quarter of them that lands on an
+/// even row and column — a coarser dither than the file had before it was
+/// halved, in both tables at once.
+float occlusion_at(int2 pixel, uint tile, float3 centre, float3 normal, int2 extent, float2 size)
 {
     float radius = camera.params.x;
 
@@ -593,7 +659,6 @@ float occlusion_at(int2 pixel, float3 centre, float3 normal, int2 extent, float2
     // space puts the eye at the origin, so this is the position negated.
     float3 view = normalize(-centre);
 
-    uint tile = (uint(pixel.y) & 3u) * 4u + (uint(pixel.x) & 3u);
     float2 seed = SLICE_DIRECTIONS[tile];
     float offset = STEP_OFFSETS[tile];
     uint slices = slice_count();
@@ -710,14 +775,25 @@ float fragmentMain(FullscreenOutput input) : SV_Target
 {
     uint width;
     uint height;
-    // Read off the image rather than passed in the block: the pass renders at the
-    // depth buffer's own size by construction, and a second copy of that number
-    // in a uniform is a second thing that can be stale.
+    // Read off the image rather than passed in the block: the depth image is the
+    // one this pass reads every value from, and a second copy of its size in a
+    // uniform is a second thing that can be stale. It is **not** the size of the
+    // target — see [`RESOLUTION_DIVISOR`] — and nothing here wants that size: a
+    // pixel's dither entry comes off its own coordinate and everything else is
+    // measured in the full-resolution texels below.
     scene_depth.GetDimensions(width, height);
     int2 extent = int2(int(width), int(height));
     float2 size = float2(float(width), float(height));
 
-    int2 pixel = int2(input.position.xy);
+    // **Two pixel coordinates, and the difference is the whole of the halving.**
+    // `target` is the pixel of this pass — the target is
+    // [`RESOLUTION_DIVISOR`] times smaller on each side than the depth image
+    // above — and it is what indexes the dither tables. `pixel` is the
+    // full-resolution texel it stands for, and it is what every fetch below
+    // reads.
+    int2 target = int2(input.position.xy);
+    int2 pixel = full_res_pixel(target);
+    uint tile = (uint(target.y) & 3u) * 4u + (uint(target.x) & 3u);
     float depth = depth_at(pixel, extent);
     // Nothing was drawn here. Fully unoccluded, and — see [`DEPTH_FAR`] — the
     // only branch that keeps the unprojection from dividing by zero.
@@ -728,5 +804,5 @@ float fragmentMain(FullscreenOutput input) : SV_Target
 
     float3 centre = view_position(pixel, depth, size);
     float3 normal = normal_at(pixel, centre, extent, size);
-    return saturate(1.0 - occlusion_at(pixel, centre, normal, extent, size));
+    return saturate(1.0 - occlusion_at(pixel, tile, centre, normal, extent, size));
 }

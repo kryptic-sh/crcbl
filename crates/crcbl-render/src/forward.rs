@@ -7315,32 +7315,53 @@ impl ForwardRenderer {
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
         let scene_depth =
             graph.create_image("scene-depth", TransientImageDesc::scene_depth(extent));
-        // The occlusion pair's two transients, and **both are conditional**: a
-        // transient nothing reads or writes is a physical image taken out of the
-        // pool for a pass that does not exist. What the forward pass binds when
-        // they are absent is the 1×1 placeholder — see the pair below.
+        // The occlusion chain's transients, and **every one of them is
+        // conditional**: a transient nothing reads or writes is a physical image
+        // taken out of the pool for a pass that does not exist. What the forward
+        // pass binds when they are absent is the 1×1 placeholder — see the pair
+        // below.
+        //
+        // **Three of the four are at [`crate::ssao::half_extent`]**, which is
+        // where the march and the blurs run — see that module's header. Only the
+        // reconstruction's target is the scene's own size, because it is the
+        // image `mesh.slang` reads at `SV_Position`.
         //
         // The blur's target is requested first, which is the order the two were
         // requested in when only one of them was conditional. The pool hands out
         // physical images in request order, and an AO-on frame has to be the
-        // frame it was before this became a pair.
-        let occlusion_pair = effects.contains(RenderEffects::AMBIENT_OCCLUSION).then(|| {
+        // frame it was before this became a chain.
+        let occlusion_chain = effects.contains(RenderEffects::AMBIENT_OCCLUSION).then(|| {
+            let gathered = crate::ssao::half_extent(extent);
             let blurred = graph.create_image(
                 "ssao-blurred",
-                TransientImageDesc::ambient_occlusion(extent),
+                TransientImageDesc::ambient_occlusion(gathered),
             );
-            let raw = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(extent));
-            // The second blur's target, and requested **last** so the two above
-            // keep the physical images they had before this one could be asked
-            // for — the pool hands them out in request order, and a frame at the
-            // default switch has to be the frame it was.
+            let raw = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(gathered));
+            // The second blur's target, and requested **last of the small ones**
+            // so the two above keep the physical images they had before this one
+            // could be asked for — the pool hands them out in request order, and
+            // a frame at the default switch has to be the frame it was.
             let again = (self.frame_ssao_blurs > 1).then(|| {
                 graph.create_image(
                     "ssao-blurred-2",
-                    TransientImageDesc::ambient_occlusion(extent),
+                    TransientImageDesc::ambient_occlusion(gathered),
                 )
             });
-            (raw, blurred, again)
+            // The reconstruction's target, and the only one of these at the
+            // scene's extent. Requested after the small ones for their reason
+            // inverted: it is a different description, so it could not have
+            // aliased them whatever the order, and asking for it last leaves
+            // every request before it where it was.
+            let upsampled = graph.create_image(
+                "ssao-upsampled",
+                TransientImageDesc::ambient_occlusion(extent),
+            );
+            crate::ssao::OcclusionImages {
+                raw,
+                blurred,
+                again,
+                upsampled,
+            }
         });
         // The contact march's one transient, conditional for the occlusion
         // pair's reason: an image nothing reads or writes is a physical image
@@ -7698,11 +7719,8 @@ impl ForwardRenderer {
         // The placeholder's other job is unchanged — filling the binding for the
         // two depth-only passes, neither of which has a fragment stage and so
         // neither of which ever samples it.
-        let occlusion = match occlusion_pair {
-            Some((raw, blurred, again)) => {
-                self.ssao
-                    .add_passes(graph, frame, scene_depth, raw, blurred, again)
-            }
+        let occlusion = match occlusion_chain {
+            Some(images) => self.ssao.add_passes(graph, frame, scene_depth, images),
             None => occlusion_placeholder,
         };
         // `docs/plan/45-shadows.md`'s contact march, or the one texel that
@@ -13681,6 +13699,11 @@ mod tests {
                 "depth-prepass",
                 "ssao",
                 "ssao-blur",
+                // The reconstruction that ends the occlusion chain, between the
+                // blur it reads and the pass that binds what it wrote — see
+                // [`crate::ssao`]'s header on why the first two run smaller than
+                // the frame and this one does not.
+                "ssao-upsample",
                 "forward",
                 // The pyramid the march climbs, between the pass that wrote
                 // level 0 and the pass that reads the chain. Two levels at this
@@ -15612,7 +15635,7 @@ mod tests {
         for (off, gone) in [
             (
                 RenderEffects::AMBIENT_OCCLUSION,
-                ["ssao", "ssao-blur"].as_slice(),
+                ["ssao", "ssao-blur", "ssao-upsample"].as_slice(),
             ),
             (
                 RenderEffects::CONTACT_SHADOWS,
@@ -15971,64 +15994,187 @@ mod tests {
     ///
     /// **This test owns `r_ssao_blur_passes` for its duration**, through
     /// [`ssao_blur_switch`] and for [`debug_draw_switch`]'s reason.
-    /// The id [`Ssao::add_passes`] hands back is the image the last blur wrote.
+    /// The id [`Ssao::add_passes`] hands back is the reconstruction's target,
+    /// whichever blur ran into it.
     ///
-    /// **The one thing about that pair no other check can see.** The pass list
+    /// **The one thing about that chain no other check can see.** The pass list
     /// is identical either way, the graph accepts a written-and-never-read
     /// transient without complaint, and every golden is at one blur where the
-    /// two answers coincide — so a frame bound to the half-blurred image draws
+    /// two blur answers coincide — so a frame bound to the wrong image draws
     /// something nobody would question, which is exactly what the function's
     /// own doc warns about. Verified 2026-08-31 by returning `blurred` from the
     /// two-blur arm: `crcbl-render`'s unit tests, the forward and mesh e2e
     /// suites and lantern's golden all stayed green.
+    ///
+    /// **Since the halving it is a second silent failure and a louder one.**
+    /// Every working image is [`crate::ssao::half_extent`] of the frame, so a
+    /// returned working id is not merely a rougher channel — it is an image a
+    /// quarter of the size bound where `mesh.slang` reads at `SV_Position`,
+    /// which its clamp turns into occlusion smeared over the top-left quarter of
+    /// the frame rather than into an error.
     #[test]
-    fn the_occlusion_id_handed_back_is_the_last_blur_written() {
+    fn the_occlusion_id_handed_back_is_the_reconstruction_target() {
         let (_recorder, device, queue) = open();
         let device = device.as_ref();
         let mut ssao = Ssao::new(device, 1, ForwardRenderer::build_fullscreen).expect("built");
+        let gathered = crate::ssao::half_extent(TEST_EXTENT);
 
         let one = {
             let mut graph = crate::RenderGraph::new(queue);
             let depth =
                 graph.create_image("scene-depth", TransientImageDesc::scene_depth(TEST_EXTENT));
-            let raw =
-                graph.create_image("ssao", TransientImageDesc::ambient_occlusion(TEST_EXTENT));
+            let raw = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(gathered));
             let blurred = graph.create_image(
                 "ssao-blurred",
+                TransientImageDesc::ambient_occlusion(gathered),
+            );
+            let upsampled = graph.create_image(
+                "ssao-upsampled",
                 TransientImageDesc::ambient_occlusion(TEST_EXTENT),
             );
-            let got = ssao.add_passes(&mut graph, 0, depth, raw, blurred, None);
-            (got == blurred, got == raw)
+            let got = ssao.add_passes(
+                &mut graph,
+                0,
+                depth,
+                crate::ssao::OcclusionImages {
+                    raw,
+                    blurred,
+                    again: None,
+                    upsampled,
+                },
+            );
+            (got == upsampled, got == blurred || got == raw)
         };
-        assert!(one.0, "one blur finishes in the image it wrote");
-        assert!(!one.1, "and never in the raw channel the march wrote");
+        assert!(one.0, "one blur finishes in the reconstruction's image");
+        assert!(
+            !one.1,
+            "and never in one of the half-extent images the chain worked in"
+        );
 
         let two = {
             let mut graph = crate::RenderGraph::new(queue);
             let depth =
                 graph.create_image("scene-depth", TransientImageDesc::scene_depth(TEST_EXTENT));
-            let raw =
-                graph.create_image("ssao", TransientImageDesc::ambient_occlusion(TEST_EXTENT));
+            let raw = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(gathered));
             let blurred = graph.create_image(
                 "ssao-blurred",
-                TransientImageDesc::ambient_occlusion(TEST_EXTENT),
+                TransientImageDesc::ambient_occlusion(gathered),
             );
             let again = graph.create_image(
                 "ssao-blurred-2",
+                TransientImageDesc::ambient_occlusion(gathered),
+            );
+            let upsampled = graph.create_image(
+                "ssao-upsampled",
                 TransientImageDesc::ambient_occlusion(TEST_EXTENT),
             );
-            let got = ssao.add_passes(&mut graph, 0, depth, raw, blurred, Some(again));
-            (got == again, got == blurred)
+            let got = ssao.add_passes(
+                &mut graph,
+                0,
+                depth,
+                crate::ssao::OcclusionImages {
+                    raw,
+                    blurred,
+                    again: Some(again),
+                    upsampled,
+                },
+            );
+            (got == upsampled, got == again || got == blurred)
         };
         assert!(
             two.0,
-            "two blurs finish in the second one's image, which is the id the forward pass binds"
+            "two blurs finish in the reconstruction's image as well, which is the id the forward \
+             pass binds"
         );
         assert!(
             !two.1,
-            "and not in the half-blurred image the first blur wrote -- a frame bound to that one \
-             is a frame nobody would question"
+            "and not in a blur's own image -- a frame bound to one of those is a frame nobody \
+             would question"
         );
+    }
+
+    /// **The gather runs at half the frame and the reconstruction runs at all
+    /// of it** — or the halving is a description nobody rendered into.
+    ///
+    /// The pass list cannot see this: three passes with the right labels in the
+    /// right order is exactly what a chain that halved nothing would record. The
+    /// **render area** is where the halving is observable, and the graph derives
+    /// it from each pass's colour attachment — so this is the check that the
+    /// transients [`ForwardRenderer::add_passes`] created are the ones
+    /// [`crate::ssao::half_extent`] sized, and that the reconstruction was given
+    /// the frame-sized one.
+    ///
+    /// Neither mistake is an error anywhere else. Working images at the frame's
+    /// extent are four times the march and a reconstruction reading the corner
+    /// of its input; a frame-sized image handed to the march and a half-sized
+    /// one to the forward pass is occlusion smeared over a quarter of the
+    /// picture by `mesh.slang`'s clamp. Both are pictures.
+    ///
+    /// **This test owns `r_ssao_blur_passes` for its duration**, through
+    /// [`ssao_blur_switch`] and for that function's second reason: it looks the
+    /// occlusion chain's passes up by name, and a second blur arriving from
+    /// another thread's switch is a pass this frame did not ask for.
+    #[test]
+    fn the_occlusion_chain_gathers_at_half_the_frame_and_reconstructs_at_all_of_it() {
+        let _switch = ssao_blur_switch();
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+        renderer
+            .begin_frame(
+                device,
+                &Camera::default(),
+                &DirectionalLight::default(),
+                TEST_EXTENT,
+            )
+            .expect("write");
+        let mut graph = crate::RenderGraph::new(queue);
+        let target = graph.import_image("target", imported);
+        renderer.add_passes(&mut graph, &pool, target, TEST_EXTENT);
+        let compiled = graph.compile(&pool).expect("a legal frame");
+        let area_of = |label: &str| {
+            let pass = compiled
+                .passes()
+                .iter()
+                .find(|pass| pass.label() == label)
+                .unwrap_or_else(|| panic!("the frame records no `{label}` pass at all"));
+            let area = pass.render_area();
+            (area.width, area.height)
+        };
+
+        let gathered = crate::ssao::half_extent(TEST_EXTENT);
+        assert_ne!(
+            gathered, TEST_EXTENT,
+            "the fixture extent has to halve to something else, or every assertion below holds \
+             of a chain that halved nothing"
+        );
+        assert_eq!(
+            area_of("ssao"),
+            gathered,
+            "the march has to run over the gather extent"
+        );
+        assert_eq!(
+            area_of("ssao-blur"),
+            gathered,
+            "and so does the blur over what the march wrote"
+        );
+        assert_eq!(
+            area_of("ssao-upsample"),
+            TEST_EXTENT,
+            "the reconstruction writes the channel `mesh.slang` reads at `SV_Position`, so it \
+             runs at the frame's own extent"
+        );
+
+        drop(compiled);
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
     }
 
     #[test]

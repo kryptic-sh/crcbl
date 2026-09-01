@@ -31,27 +31,32 @@ fn vertexMain(@builtin(vertex_index) index_0 : u32) -> FullscreenOutput_0
     return output_0;
 }
 
-fn depth_at_0( pixel_0 : vec2<i32>,  extent_0 : vec2<i32>) -> f32
+fn full_res_pixel_0( pixel_0 : vec2<i32>) -> vec2<i32>
 {
-    var _S2 : vec3<i32> = vec3<i32>(clamp(pixel_0, vec2<i32>(i32(0), i32(0)), extent_0 - vec2<i32>(i32(1), i32(1))), i32(0));
+    return pixel_0 * vec2<i32>(i32(2));
+}
+
+fn depth_at_0( pixel_1 : vec2<i32>,  extent_0 : vec2<i32>) -> f32
+{
+    var _S2 : vec3<i32> = vec3<i32>(clamp(pixel_1, vec2<i32>(i32(0), i32(0)), extent_0 - vec2<i32>(i32(1), i32(1))), i32(0));
     return (textureLoad((scene_depth_0), ((_S2)).xy, ((_S2)).z));
 }
 
-fn view_position_0( pixel_1 : vec2<i32>,  depth_0 : f32,  extent_1 : vec2<f32>) -> vec3<f32>
+fn view_position_0( pixel_2 : vec2<i32>,  depth_0 : f32,  extent_1 : vec2<f32>) -> vec3<f32>
 {
-    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
+    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_2.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_2.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
     return view_0.xyz / vec3<f32>(view_0.w);
 }
 
-fn normal_at_0( pixel_2 : vec2<i32>,  centre_0 : vec3<f32>,  extent_2 : vec2<i32>,  size_0 : vec2<f32>) -> vec3<f32>
+fn normal_at_0( pixel_3 : vec2<i32>,  centre_0 : vec3<f32>,  extent_2 : vec2<i32>,  size_0 : vec2<f32>) -> vec3<f32>
 {
-    var _S3 : vec2<i32> = pixel_2 + vec2<i32>(i32(-1), i32(0));
+    var _S3 : vec2<i32> = pixel_3 + vec2<i32>(i32(-1), i32(0));
     var left_0 : vec3<f32> = view_position_0(_S3, depth_at_0(_S3, extent_2), size_0);
-    var _S4 : vec2<i32> = pixel_2 + vec2<i32>(i32(1), i32(0));
+    var _S4 : vec2<i32> = pixel_3 + vec2<i32>(i32(1), i32(0));
     var right_0 : vec3<f32> = view_position_0(_S4, depth_at_0(_S4, extent_2), size_0);
-    var _S5 : vec2<i32> = pixel_2 + vec2<i32>(i32(0), i32(-1));
+    var _S5 : vec2<i32> = pixel_3 + vec2<i32>(i32(0), i32(-1));
     var up_0 : vec3<f32> = view_position_0(_S5, depth_at_0(_S5, extent_2), size_0);
-    var _S6 : vec2<i32> = pixel_2 + vec2<i32>(i32(0), i32(1));
+    var _S6 : vec2<i32> = pixel_3 + vec2<i32>(i32(0), i32(1));
     var down_0 : vec3<f32> = view_position_0(_S6, depth_at_0(_S6, extent_2), size_0);
     var _S7 : f32 = centre_0.z;
     var horizontal_0 : vec3<f32>;
@@ -116,7 +121,7 @@ fn acos_approx_0( x_0 : f32) -> f32
     return _S11;
 }
 
-fn horizon_cosine_0( pixel_3 : vec2<i32>,  step_0 : vec2<f32>,  offset_0 : f32,  reach_0 : f32,  centre_1 : vec3<f32>,  view_1 : vec3<f32>,  radius_0 : f32,  extent_3 : vec2<i32>,  size_1 : vec2<f32>) -> f32
+fn horizon_cosine_0( pixel_4 : vec2<i32>,  step_0 : vec2<f32>,  offset_0 : f32,  reach_0 : f32,  centre_1 : vec3<f32>,  view_1 : vec3<f32>,  radius_0 : f32,  extent_3 : vec2<i32>,  size_1 : vec2<f32>) -> f32
 {
     var cosine_0 : f32 = -1.0f;
     var index_1 : u32 = u32(0);
@@ -129,7 +134,7 @@ fn horizon_cosine_0( pixel_3 : vec2<i32>,  step_0 : vec2<f32>,  offset_0 : f32, 
         {
             break;
         }
-        var tap_0 : vec2<i32> = pixel_3 + vec2<i32>(step_0 * vec2<f32>((reach_0 * (f32(index_1) + offset_0) / 4.0f)));
+        var tap_0 : vec2<i32> = pixel_4 + vec2<i32>(step_0 * vec2<f32>((reach_0 * (f32(index_1) + offset_0) / 4.0f)));
         var _S12 : i32 = tap_0.x;
         var _S13 : bool;
         if(_S12 < i32(0))
@@ -195,7 +200,7 @@ fn slice_visibility_0( h1_0 : f32,  cos_h1_0 : f32,  sin_h1_0 : f32,  h2_0 : f32
     return 0.25f * (- ((2.0f * cos_h1_0 * cos_h1_0 - 1.0f) * cos_gamma_0 + 2.0f * sin_h1_0 * cos_h1_0 * sin_gamma_0) + cos_gamma_0 + 2.0f * h1_0 * sin_gamma_0 + (- ((2.0f * cos_h2_0 * cos_h2_0 - 1.0f) * cos_gamma_0 + 2.0f * sin_h2_0 * cos_h2_0 * sin_gamma_0) + cos_gamma_0 + 2.0f * h2_0 * sin_gamma_0));
 }
 
-fn occlusion_at_0( pixel_4 : vec2<i32>,  centre_2 : vec3<f32>,  normal_0 : vec3<f32>,  extent_4 : vec2<i32>,  size_2 : vec2<f32>) -> f32
+fn occlusion_at_0( pixel_5 : vec2<i32>,  tile_0 : u32,  centre_2 : vec3<f32>,  normal_0 : vec3<f32>,  extent_4 : vec2<i32>,  size_2 : vec2<f32>) -> f32
 {
     var radius_1 : f32 = camera_0.params_0.x;
     var near_clip_0 : vec4<f32> = (((vec4<f32>(centre_2, 1.0f)) * (mat4x4<f32>(camera_0.proj_0.data_0[i32(0)][i32(0)], camera_0.proj_0.data_0[i32(1)][i32(0)], camera_0.proj_0.data_0[i32(2)][i32(0)], camera_0.proj_0.data_0[i32(3)][i32(0)], camera_0.proj_0.data_0[i32(0)][i32(1)], camera_0.proj_0.data_0[i32(1)][i32(1)], camera_0.proj_0.data_0[i32(2)][i32(1)], camera_0.proj_0.data_0[i32(3)][i32(1)], camera_0.proj_0.data_0[i32(0)][i32(2)], camera_0.proj_0.data_0[i32(1)][i32(2)], camera_0.proj_0.data_0[i32(2)][i32(2)], camera_0.proj_0.data_0[i32(3)][i32(2)], camera_0.proj_0.data_0[i32(0)][i32(3)], camera_0.proj_0.data_0[i32(1)][i32(3)], camera_0.proj_0.data_0[i32(2)][i32(3)], camera_0.proj_0.data_0[i32(3)][i32(3)]))));
@@ -220,7 +225,6 @@ fn occlusion_at_0( pixel_4 : vec2<i32>,  centre_2 : vec3<f32>,  normal_0 : vec3<
         return 0.0f;
     }
     var _S19 : vec3<f32> = normalize((vec3<f32>(0) - centre_2));
-    var tile_0 : u32 = ((u32(pixel_4.y) & (u32(3)))) * u32(4) + ((u32(pixel_4.x) & (u32(3))));
     var _S20 : u32 = slice_count_0();
     var slice_1 : u32 = u32(0);
     var visibility_0 : f32 = 0.0f;
@@ -259,8 +263,8 @@ fn occlusion_at_0( pixel_4 : vec2<i32>,  centre_2 : vec3<f32>,  normal_0 : vec3<
         }
         var gamma_0 : f32 = sign_gamma_0 * acos_approx_0(cos_gamma_1);
         var sin_gamma_1 : f32 = sign_gamma_0 * sqrt(saturate(1.0f - cos_gamma_1 * cos_gamma_1));
-        var cos_negative_0 : f32 = horizon_cosine_0(pixel_4, (vec2<f32>(0) - direction_0), STEP_OFFSETS_0[tile_0], reach_1, centre_2, _S19, radius_1, extent_4, size_2);
-        var cos_positive_0 : f32 = horizon_cosine_0(pixel_4, direction_0, STEP_OFFSETS_0[tile_0], reach_1, centre_2, _S19, radius_1, extent_4, size_2);
+        var cos_negative_0 : f32 = horizon_cosine_0(pixel_5, (vec2<f32>(0) - direction_0), STEP_OFFSETS_0[tile_0], reach_1, centre_2, _S19, radius_1, extent_4, size_2);
+        var cos_positive_0 : f32 = horizon_cosine_0(pixel_5, direction_0, STEP_OFFSETS_0[tile_0], reach_1, centre_2, _S19, radius_1, extent_4, size_2);
         var raw_low_0 : f32 = - acos_approx_0(cos_negative_0);
         var low_0 : f32 = gamma_0 - 1.57079637050628662f;
         var clamped_low_0 : bool = raw_low_0 < low_0;
@@ -352,14 +356,16 @@ fn fragmentMain( _S21 : pixelInput_0, @builtin(position) position_1 : vec4<f32>)
     var extent_5 : vec2<i32> = vec2<i32>(i32(width_0), i32(height_0));
     var size_3 : vec2<f32> = vec2<f32>(f32(width_0), f32(height_0));
     var _S22 : vec2<i32> = vec2<i32>(position_1.xy);
-    var depth_2 : f32 = depth_at_0(_S22, extent_5);
+    var pixel_6 : vec2<i32> = full_res_pixel_0(_S22);
+    var tile_1 : u32 = ((u32(_S22.y) & (u32(3)))) * u32(4) + ((u32(_S22.x) & (u32(3))));
+    var depth_2 : f32 = depth_at_0(pixel_6, extent_5);
     if(depth_2 <= 0.0f)
     {
         var _S23 : pixelOutput_0 = pixelOutput_0( 1.0f );
         return _S23;
     }
-    var centre_3 : vec3<f32> = view_position_0(_S22, depth_2, size_3);
-    var _S24 : pixelOutput_0 = pixelOutput_0( saturate(1.0f - occlusion_at_0(_S22, centre_3, normal_at_0(_S22, centre_3, extent_5, size_3), extent_5, size_3)) );
+    var centre_3 : vec3<f32> = view_position_0(pixel_6, depth_2, size_3);
+    var _S24 : pixelOutput_0 = pixelOutput_0( saturate(1.0f - occlusion_at_0(pixel_6, tile_1, centre_3, normal_at_0(pixel_6, centre_3, extent_5, size_3), extent_5, size_3)) );
     return _S24;
 }
 

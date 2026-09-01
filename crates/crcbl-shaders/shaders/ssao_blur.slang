@@ -36,6 +36,22 @@
 // one drops are the same ones, and what it gives up is margin against a
 // disagreement that may not be in any of them.
 //
+// # It runs where `ssao.slang` ran, which is not where the depth is
+//
+// The pair runs at a fraction of the scene extent — [`RESOLUTION_DIVISOR`] is
+// the factor and `ssao.slang`'s header is the argument — so this pass reads and
+// writes half-resolution images while the depth it weights by is the prepass's,
+// at full resolution. Two extents, therefore, and each fetch takes the one that
+// belongs to its image: the kernel walks and clamps in this pass's own pixels,
+// and every depth is read at the texel [`full_res_pixel`] maps a tap to. That is
+// the same texel `ssao.slang` gathered that tap's occlusion at, which is what
+// makes the weight a statement about the sample rather than about a pixel near
+// it.
+//
+// The kernel's footprint is unchanged in the pixels it is measured in, so it is
+// still exactly `ssao.slang`'s dither tile — the property the section above
+// rests on — and it is now [`RESOLUTION_DIVISOR`] times wider on screen.
+//
 // # The weight is on view-space Z, which is why this pass has a uniform block
 //
 // A reversed-Z difference is not a distance. The same one-metre gap is an
@@ -128,6 +144,11 @@ DepthTexture2D scene_depth;
 /// `crcbl_shaders::ssao::DEPTH_FAR` is the Rust mirror of both.
 static const float DEPTH_FAR = 0.0;
 
+/// The factor the occlusion chain's gather extent is divided by, on each axis:
+/// the constant `ssao.slang` declares under this name, and the argument for it
+/// is that file's header.
+static const int RESOLUTION_DIVISOR = 2;
+
 /// How far a tap's view-space depth may sit from the centre's before it counts
 /// for nothing, as a share of `ssao.slang`'s sampling radius.
 ///
@@ -161,6 +182,16 @@ struct FullscreenOutput
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
 };
+
+/// The full-resolution texel a pixel of this pass stands for.
+///
+/// `ssao.slang`'s function and its whole argument: the top-left of the block,
+/// mapped the same way by every pass of the chain, so the depth this kernel
+/// weights a tap by is the depth that tap's occlusion was gathered at.
+int2 full_res_pixel(int2 pixel)
+{
+    return pixel * RESOLUTION_DIVISOR;
+}
 
 /// The depth prepass's value at `pixel`, clamped into the image.
 ///
@@ -208,10 +239,20 @@ float fragmentMain(FullscreenOutput input) : SV_Target
     uint height;
     occlusion.GetDimensions(width, height);
     int2 extent = int2(int(width), int(height));
-    float2 size = float2(float(width), float(height));
+    // **The depth is the prepass's and is not this pass's size.** Read off its
+    // own image for the reason `ssao.slang` reads its extent that way — a second
+    // copy of a size is a second thing that can be stale — and kept apart from
+    // `extent` above because the two genuinely differ now: see
+    // [`RESOLUTION_DIVISOR`].
+    uint depth_width;
+    uint depth_height;
+    scene_depth.GetDimensions(depth_width, depth_height);
+    int2 depth_extent = int2(int(depth_width), int(depth_height));
+    float2 depth_size = float2(float(depth_width), float(depth_height));
     int2 pixel = int2(input.position.xy);
+    int2 centre_texel = full_res_pixel(pixel);
 
-    float centre_depth = depth_at(pixel, extent);
+    float centre_depth = depth_at(centre_texel, depth_extent);
     // Nothing was drawn here — see [`DEPTH_FAR`]. `ssao.slang` returned 1.0 at
     // this pixel and there is neither a surface to filter nor a view-space
     // position to weight the neighbours against.
@@ -219,7 +260,7 @@ float fragmentMain(FullscreenOutput input) : SV_Target
     {
         return 1.0;
     }
-    float centre_z = view_z(pixel, centre_depth, size);
+    float centre_z = view_z(centre_texel, centre_depth, depth_size);
     float tolerance = camera.params.x * DEPTH_TOLERANCE_RADII;
 
     float total = 0.0;
@@ -243,8 +284,9 @@ float fragmentMain(FullscreenOutput input) : SV_Target
             float share = 1.0;
             if (x != 0 || y != 0)
             {
-                float depth = depth_at(tap, extent);
-                float away = abs(view_z(tap, depth, size) - centre_z);
+                int2 texel = full_res_pixel(tap);
+                float depth = depth_at(texel, depth_extent);
+                float away = abs(view_z(texel, depth, depth_size) - centre_z);
                 // A `select` rather than an `if` around the accumulation: the
                 // far test is the only comparison in this pass that decides
                 // anything, and it is the one [`DEPTH_FAR`] argues for.

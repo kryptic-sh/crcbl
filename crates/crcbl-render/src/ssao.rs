@@ -1,18 +1,36 @@
-//! `docs/plan/18-render-features.md`'s screen-space ambient occlusion: the two
+//! `docs/plan/18-render-features.md`'s screen-space ambient occlusion: the
 //! full-screen passes between the depth prepass and the forward pass.
 //!
 //! ```text
-//! depth-prepass ──▶ scene-depth ──▶ ssao ──▶ ssao ──▶ ssao-blur ──▶ ssao-blurred
-//!                   │              (R8Unorm)            ▲           (R8Unorm)
-//!                   └───────────────────────────────────┘                │
-//!                                                       forward ◀────────┘
-//!                                                    (× frame.ambient)
+//!   pass    ssao ────────▶ ssao-blur ────────▶ ssao-upsample ────────▶ forward
+//!   writes  ssao           ssao-blurred        ssao-upsampled          (× frame.ambient)
+//!           └── half extent, R8Unorm ─┘        └─ scene extent, R8Unorm ─┘
 //! ```
 //!
+//! The prepass's `scene-depth` is read by all three of the occlusion passes and
+//! is the only input any of them has besides the one before it: the march
+//! gathers its horizons from it, the blur weights its kernel by it, and the
+//! reconstruction reconciles the two extents against it.
+//!
 //! A module of its own rather than more of [`crate::forward`], which is a file
-//! this crate is trying to stop growing: what lives here is two pipelines, two
-//! caches and the pass pair, and none of it is reachable from the geometry
-//! passes except through [`Ssao::add_passes`].
+//! this crate is trying to stop growing: what lives here is three pipelines,
+//! their caches and the pass chain, and none of it is reachable from the
+//! geometry passes except through [`Ssao::add_passes`].
+//!
+//! # The gather runs small and the reconstruction runs full
+//!
+//! `shaders/ssao.slang`'s `RESOLUTION_DIVISOR` is the factor and that file's
+//! header is the argument: occlusion is a low-frequency field, so the march and
+//! the blur run over an image [`half_extent`] of the scene's — a quarter of the
+//! invocations — and `shaders/ssao_upsample.slang` reconstructs the channel the
+//! forward pass binds. The reconstruction is depth-aware rather than bilinear,
+//! because the field is low-frequency **within a surface** and discontinuous
+//! across a silhouette; a distance weight alone draws the wall's occlusion as a
+//! rim around whatever stands in front of it.
+//!
+//! **Only [`Ssao::add_passes`]' last image is the scene's size**, and only
+//! [`half_extent`] decides the others'. A caller that sized them itself would be
+//! a second opinion about a division the shaders also hold.
 //!
 //! **The blur is not optional.** `shaders/ssao.slang` says why in full: its
 //! rotation table makes the raw result carry a 4×4 tile as banding, and each of
@@ -60,7 +78,7 @@ use crcbl_hal::{
     ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc,
     PipelineLayoutHandle, SampleType, ShaderStages, StoreOp, check_portable_storage_buffers,
 };
-use crcbl_shaders::{SSAO, SSAO_BLUR, ssao};
+use crcbl_shaders::{SSAO, SSAO_BLUR, SSAO_UPSAMPLE, ssao};
 
 use crate::graph::{ImageId, RenderGraph};
 
@@ -93,6 +111,29 @@ pub(crate) fn slice_count() -> u8 {
     u8::try_from(asked).unwrap_or(ssao::SLICE_COUNT_DEFAULT)
 }
 
+/// The extent the march and the blur run at: `extent` divided by
+/// `shaders/ssao.slang`'s `RESOLUTION_DIVISOR` on each axis, **rounded up**.
+///
+/// **Rounded up, which is what keeps a small frame drawable.** A floor takes
+/// every extent under the divisor to zero, and a zero-sized transient is an
+/// image no backend will create — so a one-pixel scene would be a frame that
+/// fails to build rather than a frame with one occlusion sample in it. The
+/// ceiling is also what keeps the two grids covering: every pixel of the scene
+/// has a sample at or before it, which is where
+/// `shaders/ssao_upsample.slang` reads its nearest tap. What it costs is at most
+/// one sample of overhang on an odd axis, whose taps the upsample clamps back
+/// into the image.
+///
+/// **The one place the division is spelled in this crate.** The shaders hold the
+/// same constant — `crcbl_shaders::ssao::RESOLUTION_DIVISOR` is the mirror they
+/// are checked against — and a second halving written somewhere else is an image
+/// the passes would render a fraction of, with nothing to say so but the
+/// picture.
+pub(crate) fn half_extent(extent: (u32, u32)) -> (u32, u32) {
+    let divisor = ssao::RESOLUTION_DIVISOR;
+    (extent.0.div_ceil(divisor), extent.1.div_ceil(divisor))
+}
+
 /// [`r_ssao_blur_passes`] as a pass count, clamped into what
 /// [`Ssao::add_passes`] can record.
 pub(crate) fn blur_passes() -> u32 {
@@ -102,7 +143,29 @@ pub(crate) fn blur_passes() -> u32 {
     u32::try_from(asked).unwrap_or(1)
 }
 
-/// Everything the occlusion pair owns.
+/// The images one frame's occlusion chain works in.
+///
+/// A shape rather than four positional arguments, and not only for
+/// [`Ssao::add_passes`]' argument count: three of these are the same thing — a
+/// working image at [`half_extent`] — and the fourth is the one that is not,
+/// which is exactly the distinction a positional list buries. `crate::forward`
+/// is what creates them, and [`Ssao::add_passes`] is where each one's contents
+/// and extent are stated.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OcclusionImages {
+    /// Where the march writes, at [`half_extent`].
+    pub(crate) raw: ImageId,
+    /// Where the first blur writes, at [`half_extent`].
+    pub(crate) blurred: ImageId,
+    /// Where a second blur writes, at [`half_extent`]. [`Some`] exactly when
+    /// [`r_ssao_blur_passes`] asked for one.
+    pub(crate) again: Option<ImageId>,
+    /// Where the reconstruction writes: the **frame's own extent**, and the
+    /// image the forward pass binds.
+    pub(crate) upsampled: ImageId,
+}
+
+/// Everything the occlusion chain owns.
 ///
 /// Built once by [`Ssao::new`] and released by [`Ssao::destroy`], which is the
 /// shape every other resource group in this crate has — see
@@ -146,6 +209,24 @@ pub(crate) struct Ssao {
     /// Empty of groups on every frame the switch is at its default, and the
     /// slots themselves cost a pointer each.
     blur_again_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
+    /// The reconstruction's pipeline.
+    ///
+    /// **Its own pipeline on the blur's layout**, and that pairing is the whole
+    /// of what the two passes share: `shaders/ssao_upsample.slang` declares the
+    /// same three bindings in the same order — the block, an `R8Unorm` occlusion
+    /// image, the scene's depth — so one layout describes both, while the shader
+    /// behind it answers a different question. Two layouts here would be two
+    /// descriptions of one shape to keep in step, and the seam would allocate a
+    /// second identical descriptor layout to hold them.
+    upsample_pipeline: GraphicsPipelineHandle,
+    /// `[frame]`: the reconstruction's group, cached against the blurred
+    /// occlusion view and the depth view together.
+    ///
+    /// **Its own ring rather than [`Ssao::blur_groups`] reused**, for
+    /// [`Ssao::blur_again_groups`]' reason exactly: this pass binds a different
+    /// occlusion image from the blur that precedes it, so one cache shared
+    /// between them would be rebuilt twice a frame.
+    upsample_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
 }
 
 impl Ssao {
@@ -158,21 +239,25 @@ impl Ssao {
     /// in the frame.
     pub(crate) const MAX_BLUR_PASSES: u32 = 2;
 
-    /// The most passes [`Ssao::add_passes`] can add to a frame: the march, and
-    /// every blur behind it.
+    /// The most passes [`Ssao::add_passes`] can add to a frame: the march, every
+    /// blur behind it, and the reconstruction that ends the chain.
     ///
     /// A **ceiling**, which is what `crate::forward`'s `RENDER_PASSES` needs
     /// from every term it adds up — see [`Ssao::passes`] for what a given frame
     /// actually records.
-    pub(crate) const MAX_PASSES: u32 = 1 + Self::MAX_BLUR_PASSES;
+    pub(crate) const MAX_PASSES: u32 = Self::passes(Self::MAX_BLUR_PASSES);
 
     /// Passes [`Ssao::add_passes`] adds to a frame that asked for `blurs` of
-    /// them: the occlusion march, and one per blur.
+    /// them: the occlusion march, one per blur, and the reconstruction.
+    ///
+    /// **The reconstruction is not conditional on anything.** It is what makes
+    /// the half-resolution chain a full-resolution channel — see this module's
+    /// header — so a frame that records the march records this as well.
     pub(crate) const fn passes(blurs: u32) -> u32 {
-        1 + blurs
+        1 + blurs + 1
     }
 
-    /// Builds both pipelines and the uniform ring.
+    /// Builds every pipeline and the uniform ring.
     ///
     /// `build_fullscreen` is handed in rather than duplicated: it is
     /// [`crate::forward`]'s, because the tonemap pass is the third caller and the
@@ -296,6 +381,18 @@ impl Ssao {
             blur_pipeline_layout,
             &targets,
         )?;
+        // **The blur's layout, and the same colour target.** The reconstruction
+        // writes the same `R8Unorm` channel at a different extent, and an extent
+        // is not part of a pipeline — the graph takes the render area from the
+        // attachment it was given. See [`Ssao::upsample_pipeline`] for why the
+        // layout is shared and the pipeline is not.
+        let upsample_pipeline = build_fullscreen(
+            device,
+            "ssao upsample",
+            &SSAO_UPSAMPLE,
+            blur_pipeline_layout,
+            &targets,
+        )?;
 
         let mut uniforms = Vec::with_capacity(frames);
         for _ in 0..frames {
@@ -318,6 +415,8 @@ impl Ssao {
             blur_pipeline,
             blur_groups: vec![None; frames],
             blur_again_groups: vec![None; frames],
+            upsample_pipeline,
+            upsample_groups: vec![None; frames],
         })
     }
 
@@ -339,20 +438,27 @@ impl Ssao {
         device.write_buffer(self.uniforms[frame], 0, &params.to_bytes())
     }
 
-    /// Adds the `ssao` pass and its blurs, in that order, and returns the image
-    /// the forward pass should read.
+    /// Adds the `ssao` pass, its blurs and the reconstruction, in that order,
+    /// and returns the image the forward pass should read.
     ///
-    /// `depth` must be the prepass's stored depth. `blurred` is where the first
-    /// blur writes, and `again` — [`Some`] exactly when [`r_ssao_blur_passes`]
-    /// asked for a second — is where the second one does. Every occlusion image
-    /// is the caller's so it can declare the read on the pass that consumes the
-    /// last of them: a pass declares its own accesses and this one cannot
-    /// declare the forward pass's.
+    /// `depth` must be the prepass's stored depth, at the scene's own extent.
+    /// [`OcclusionImages`] is where the chain works: its three working images
+    /// must all be [`half_extent`] of that depth, and its `upsampled` is the
+    /// full-extent channel the last pass writes. Every occlusion image is the
+    /// caller's so it can declare the read on the pass that consumes the last of
+    /// them: a pass declares its own accesses and this one cannot declare the
+    /// forward pass's.
+    ///
+    /// **The two extents are the caller's to get right and the graph is what
+    /// checks them.** A render pass takes its area from its colour attachment —
+    /// see `RenderGraph::compile` — so a working image handed in at the scene's
+    /// size is not an error anywhere, it is a march that runs four times and a
+    /// reconstruction that reads the corner of its input.
     ///
     /// **The returned id is the one to bind**, rather than the caller assuming
-    /// `blurred`, because which image holds the finished channel is this
-    /// function's business and gets it wrong silently — a forward pass bound to
-    /// the half-blurred image draws a frame nobody would question.
+    /// any particular image, because which one holds the finished channel is
+    /// this function's business and gets it wrong silently — a forward pass
+    /// bound to the half-resolution image draws a frame nobody would question.
     ///
     /// # Panics
     ///
@@ -362,10 +468,14 @@ impl Ssao {
         graph: &mut RenderGraph<'a>,
         frame: usize,
         depth: ImageId,
-        raw: ImageId,
-        blurred: ImageId,
-        again: Option<ImageId>,
+        images: OcclusionImages,
     ) -> ImageId {
+        let OcclusionImages {
+            raw,
+            blurred,
+            again,
+            upsampled,
+        } = images;
         let pipeline = self.pipeline;
         let pipeline_layout = self.pipeline_layout;
         let layout = self.layout;
@@ -374,14 +484,16 @@ impl Ssao {
         // `&mut self` shared between them is what the borrow checker refuses, and
         // it would be refusing something genuinely wrong — a pass body may run at
         // any point after it is declared.
-        let (groups, blur_groups, again_groups) = (
+        let (groups, blur_groups, again_groups, upsample_groups) = (
             &mut self.groups,
             &mut self.blur_groups,
             &mut self.blur_again_groups,
+            &mut self.upsample_groups,
         );
         let cached = &mut groups[frame];
         let blur_cached = &mut blur_groups[frame];
         let again_cached = &mut again_groups[frame];
+        let upsample_cached = &mut upsample_groups[frame];
 
         graph
             .add_render_pass("ssao")
@@ -421,24 +533,44 @@ impl Ssao {
                 encoder.draw(0..FULLSCREEN_VERTICES, 0..1);
             });
 
-        let blur = Blur {
+        let blur = Filter {
             uniforms,
             layout: self.blur_layout,
             pipeline_layout: self.blur_pipeline_layout,
             pipeline: self.blur_pipeline,
         };
         blur.add_pass(graph, "ssao-blur", blur_cached, raw, depth, blurred);
-        let Some(again) = again else {
-            return blurred;
+        let filtered = match again {
+            // The second blur reads the first one's output and writes its own
+            // image. **Not back into `raw`**, which would be a write-after-read
+            // on an image this same frame's march wrote and this same frame's
+            // first blur read: the graph would have to order it, the pool could
+            // not alias it, and the saving is one `R8Unorm` image on the frames
+            // that asked for this at all.
+            Some(again) => {
+                blur.add_pass(graph, "ssao-blur-2", again_cached, blurred, depth, again);
+                again
+            }
+            None => blurred,
         };
-        // The second blur reads the first one's output and writes its own
-        // image. **Not back into `raw`**, which would be a write-after-read on
-        // an image this same frame's march wrote and this same frame's first
-        // blur read: the graph would have to order it, the pool could not alias
-        // it, and the saving is one `R8Unorm` image on the frames that asked for
-        // this at all.
-        blur.add_pass(graph, "ssao-blur-2", again_cached, blurred, depth, again);
-        again
+        // The reconstruction, reading whichever blur ran last and the scene's
+        // depth, and writing the full-extent channel. **The same pass body as a
+        // blur**, because it is the same three bindings and one triangle — what
+        // differs is the pipeline and the extent of the image it was handed, and
+        // neither of those is something this function does differently.
+        let upsample = Filter {
+            pipeline: self.upsample_pipeline,
+            ..blur
+        };
+        upsample.add_pass(
+            graph,
+            "ssao-upsample",
+            upsample_cached,
+            filtered,
+            depth,
+            upsampled,
+        );
+        upsampled
     }
 
     /// Releases everything, in dependency order. The device must be idle.
@@ -448,10 +580,14 @@ impl Ssao {
             .into_iter()
             .chain(self.blur_groups)
             .chain(self.blur_again_groups)
+            .chain(self.upsample_groups)
             .flatten()
         {
             device.destroy_bind_group(cached.1);
         }
+        // Before the layout it was built against, which is the blur's — see
+        // [`Ssao::upsample_pipeline`].
+        device.destroy_graphics_pipeline(self.upsample_pipeline);
         device.destroy_graphics_pipeline(self.blur_pipeline);
         device.destroy_pipeline_layout(self.blur_pipeline_layout);
         device.destroy_bind_group_layout(self.blur_layout);
@@ -464,28 +600,36 @@ impl Ssao {
     }
 }
 
-/// The pipeline, layout and uniform block both blur passes share.
+/// The pipeline, layout and uniform block every pass behind the march shares.
 ///
-/// The second blur is the *same shader* reading the first one's output — see
-/// this module's header on why there can be a second at all — so what differs
-/// between the two passes is three image ids and a label, and everything else
-/// is this. Gathered into a type rather than passed as six arguments, and
-/// extracted the moment there were two callers rather than left as a copy of
-/// the pass body with two ids changed.
+/// All of them take one occlusion image, the scene's depth and the block, and
+/// draw one triangle into an `R8Unorm` target: the second blur is the *same
+/// shader* reading the first one's output — see this module's header on why
+/// there can be a second at all — and the reconstruction is a different shader
+/// on the same layout, which is [`Ssao::upsample_pipeline`]'s paragraph. So what
+/// differs between them is a pipeline, three image ids and a label, and
+/// everything else is this. Gathered into a type rather than passed as seven
+/// arguments, and extracted the moment there were two callers rather than left
+/// as a copy of the pass body with two ids changed.
 #[derive(Clone, Copy)]
-struct Blur {
+struct Filter {
     uniforms: BufferHandle,
     layout: BindGroupLayoutHandle,
     pipeline_layout: PipelineLayoutHandle,
     pipeline: GraphicsPipelineHandle,
 }
 
-impl Blur {
-    /// Adds one blur pass: `source` and `depth` in, `target` out.
+impl Filter {
+    /// Adds one pass: `source` and `depth` in, `target` out.
     ///
-    /// `cached` is this pass's own group ring slot — the two passes bind
-    /// different source images, so sharing one slot between them would rebuild
-    /// the group twice a frame.
+    /// `cached` is this pass's own group ring slot — each of these passes binds
+    /// a different source image, so sharing one slot between them would rebuild
+    /// the group once per pass per frame.
+    ///
+    /// **`target` is what decides the extent the pass runs at.** The graph takes
+    /// a render pass's area from its colour attachment, so the same body records
+    /// a half-extent blur and a full-extent reconstruction without either being
+    /// told which it is.
     fn add_pass<'a>(
         self,
         graph: &mut RenderGraph<'a>,
@@ -634,6 +778,66 @@ pub(crate) fn cached_group(
         Err(error) => {
             crcbl_core::log::error!("graph: {label} bind group failed: {error}");
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The gather extent **rounds up**, so no axis of a drawable frame reaches
+    /// zero.
+    ///
+    /// A floor is the spelling this would otherwise have, and it is wrong at
+    /// both ends: it takes a frame narrower than the divisor to a zero-width
+    /// transient, which is an image no backend creates and therefore a frame
+    /// that fails rather than a frame with one occlusion sample in it, and it
+    /// leaves an odd axis one sample short of its own last pixel — see
+    /// [`tests::every_pixel_of_a_frame_has_a_sample_at_or_before_it`].
+    ///
+    /// [`tests::every_pixel_of_a_frame_has_a_sample_at_or_before_it`]: fn@every_pixel_of_a_frame_has_a_sample_at_or_before_it
+    #[test]
+    fn the_gather_extent_rounds_up() {
+        assert_eq!(
+            half_extent((1920, 1080)),
+            (960, 540),
+            "an even frame halves exactly"
+        );
+        assert_eq!(
+            half_extent((1921, 1081)),
+            (961, 541),
+            "an odd axis keeps the sample its last pixel needs"
+        );
+        assert_eq!(
+            half_extent((1, 1)),
+            (1, 1),
+            "and the smallest frame there is still has one sample in it"
+        );
+    }
+
+    /// Every pixel of the frame has an occlusion sample at or before it.
+    ///
+    /// `shaders/ssao_upsample.slang` divides its pixel by the same constant to
+    /// find the first of the samples it reads, and clamps the result into the
+    /// image. That clamp is there for the *second* tap, which genuinely runs off
+    /// the edge; a gather extent that floored would put the last row and column
+    /// of an odd frame past the last sample as well, and the clamp would answer
+    /// silently for the first tap too — reconstructing the frame's far edge from
+    /// the sample before the one it wanted.
+    ///
+    /// Swept rather than spot-checked, because the property is about the odd
+    /// extents and a fixture is only ever one of them.
+    #[test]
+    fn every_pixel_of_a_frame_has_a_sample_at_or_before_it() {
+        for width in 1..=64u32 {
+            let (samples, _) = half_extent((width, width));
+            let nearest = (width - 1) / ssao::RESOLUTION_DIVISOR;
+            assert!(
+                nearest < samples,
+                "the last pixel of a {width}-wide frame reads sample {nearest} of {samples}, so \
+                 the upsample's clamp is standing in for a sample that is not there"
+            );
         }
     }
 }

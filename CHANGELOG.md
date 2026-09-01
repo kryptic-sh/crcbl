@@ -1127,6 +1127,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Ambient occlusion is gathered at half resolution and reconstructed with a
+  depth-aware upsample.** `ssao` and `ssao-blur` now run at
+  `crcbl_render::ssao::half_extent` — each axis divided by
+  `crcbl_shaders::ssao::RESOLUTION_DIVISOR`, rounded up — and a new
+  `ssao_upsample.slang` pass widens the result back to the scene extent, which
+  is the shape XeGTAO and the other reference implementations ship: occlusion is
+  low-frequency, so the samples that carry it do not need a pixel each. The
+  gather still reads the **full-resolution** depth prepass, so the march reaches
+  the same distance through the same texels and `ssr.slang` and
+  `contact_shadows.slang` keep sharing `depth_at`, `view_position` and
+  `normal_at` with it verbatim.
+
+  The reconstruction weighs every tap by **both** how near it is and how near
+  its surface is, reusing `ssao_blur.slang`'s `DEPTH_TOLERANCE_RADII` rather
+  than tuning a second number: a distance-only weight is a plain bilinear
+  upsample, which draws a rim of the background's occlusion around every object
+  standing in front of it. `RenderEffects::AMBIENT_OCCLUSION` is unchanged and
+  no setting moved, but the frame now records an `ssao-upsample` pass between
+  `ssao-blur` and `forward`, which is visible in the per-pass HUD and in
+  `Screenshot`'s pass list. The `ao` and `probes` golden images were re-blessed
+  for the shift.
+
+### Changed
+
 - **`crcbl_core::log`'s live filter moved out of `StderrLogger` into the
   module**, so one filter serves every sink: `filter` and `set_filter` answer
   for a registered foreign sink as well as for this crate's own logger, and

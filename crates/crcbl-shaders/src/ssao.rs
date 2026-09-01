@@ -30,6 +30,24 @@ pub const PARAMS_SIZE: usize = 64 + 64 + 16;
 /// position by dividing by nothing.
 pub const DEPTH_FAR: f32 = 0.0;
 
+/// The factor the occlusion pair's extent is divided by on each axis, matching
+/// `static const int RESOLUTION_DIVISOR` in `shaders/ssao.slang` and in the two
+/// shaders beside it.
+///
+/// **The occlusion passes do not run per pixel.** `ssao.slang` marches its
+/// horizons over an image this many times smaller on each side and
+/// `ssao_blur.slang` filters it there; `ssao_upsample.slang` is what
+/// reconstructs the full-resolution channel the forward pass binds, weighting
+/// each sample by how near its surface is to the pixel being written. Occlusion
+/// is low-frequency, so a quarter of the marches carries very nearly the same
+/// picture — the reference implementations halve it for that reason, and
+/// `ssao.slang`'s header is where the trade is argued.
+///
+/// `crcbl_render::ssao::half_extent` is what sizes the images with it, and it is
+/// the only place in the engine that may: a second halving spelled somewhere
+/// else is an image the passes would render a fraction of.
+pub const RESOLUTION_DIVISOR: u32 = 2;
+
 /// Planes through the eye each pixel sweeps by default, matching
 /// `static const uint SLICE_COUNT_DEFAULT` in `shaders/ssao.slang`.
 ///
@@ -176,21 +194,41 @@ impl SsaoParams {
 mod tests {
     use super::*;
 
-    /// The constant and the shader must name the same far plane.
+    /// The three shaders the occlusion channel passes through, in the order it
+    /// passes through them.
     ///
-    /// Nothing else can catch this: the shader compiles either way, and a
+    /// The constants below are declared in more than one of them — they are one
+    /// channel's worth of agreement rather than three shaders' opinions — and
+    /// this is the list the checks sweep. A pass added to the chain and left off
+    /// this list is a copy nothing holds.
+    const OCCLUSION_SOURCES: [(&str, &str); 3] = [
+        ("ssao.slang", include_str!("../shaders/ssao.slang")),
+        (
+            "ssao_blur.slang",
+            include_str!("../shaders/ssao_blur.slang"),
+        ),
+        (
+            "ssao_upsample.slang",
+            include_str!("../shaders/ssao_upsample.slang"),
+        ),
+    ];
+
+    /// The constant and the shaders must name the same far plane.
+    ///
+    /// Nothing else can catch this: the shaders compile either way, and a
     /// mismatch shows up only as an unoccluded sky or a division by zero on
     /// whatever machine happens to look. Reading the source is the check, and the
     /// source is hash-pinned by the manifest, so it is the same file the
     /// committed artifact was built from.
     #[test]
     fn the_far_plane_matches_the_constant_ssao_slang_declares() {
-        let source = include_str!("../shaders/ssao.slang");
         let declaration = format!("static const float DEPTH_FAR = {DEPTH_FAR:.1};");
-        assert!(
-            source.contains(&declaration),
-            "ssao.slang does not declare `{declaration}`; DEPTH_FAR has drifted from the shader"
-        );
+        for (name, source) in OCCLUSION_SOURCES {
+            assert!(
+                source.contains(&declaration),
+                "{name} does not declare `{declaration}`; DEPTH_FAR has drifted from the shaders"
+            );
+        }
     }
 
     /// The slice counts and the shader must name the same two numbers.
@@ -217,6 +255,101 @@ mod tests {
             source.contains("clamp(uint(camera.params.y), SLICE_COUNT_DEFAULT, SLICE_COUNT_MAX)"),
             "ssao.slang no longer clamps the requested count into those two, so a block whose \
              `params.y` was never written sweeps no slices and lights every surface"
+        );
+    }
+
+    /// Every shader of the occlusion trio must divide the extent by the same
+    /// number.
+    ///
+    /// `the_far_plane_matches_the_constant_ssao_slang_declares`'s check, and the
+    /// failure it catches is worse: three passes reading each other's images
+    /// while disagreeing about how the two grids line up still compile and still
+    /// draw. The blur would weight a tap by a stranger's depth and the upsample
+    /// would reconstruct a field shifted across the frame, and both are
+    /// pictures.
+    #[test]
+    fn the_resolution_divisor_matches_the_constant_the_shaders_declare() {
+        let declaration = format!("static const int RESOLUTION_DIVISOR = {RESOLUTION_DIVISOR};");
+        for (name, source) in OCCLUSION_SOURCES {
+            assert!(
+                source.contains(&declaration),
+                "{name} does not declare `{declaration}`; RESOLUTION_DIVISOR has drifted from \
+                 the shaders"
+            );
+        }
+    }
+
+    /// The reconstruction must weigh each tap by its **depth**, not only by its
+    /// distance.
+    ///
+    /// **No golden notices if it stops.** Measured 2026-09-02 by replacing
+    /// `ssao_upsample.slang`'s ramp with a constant one, which is a plain
+    /// bilinear upsample: `crcbl`'s `render_e2e` still reported 31 of 32 passing
+    /// with the same one golden over tolerance, and lantern's golden still
+    /// matched. The goldens are rendered at fixture sizes where the
+    /// half-resolution grid is a few samples across a silhouette, so the halo a
+    /// distance-only weight draws is under every tolerance they carry — and the
+    /// frame it is visible in is the 1920×1080 one no golden runs at.
+    ///
+    /// **`crcbl`'s `forward_e2e::occlusion::the_reconstruction_does_not_halo_a_silhouette`
+    /// is the behavioural check, and it runs that exact frame**: the same
+    /// sabotage makes a bar standing in front of a wall dip 45 levels there
+    /// against a bound of 4. This test is kept beside it rather than replaced by
+    /// it because that one is `#[ignore]`d and needs a GPU — it runs only under
+    /// `run-forward-e2e.sh`, so on a machine or a CI job with no device the
+    /// source check is the only thing left standing.
+    ///
+    /// It names the two halves that make the reconstruction depth-aware: the
+    /// ramp on the view-space difference, and the far-plane rejection that keeps
+    /// the sky out of a silhouette's rim. A shader that lost either is a shader
+    /// this test is about. Being a source check, it fails on a *rewording* that
+    /// is still bilateral; the behavioural test is what settles that case.
+    #[test]
+    fn the_reconstruction_weighs_a_tap_by_its_depth() {
+        let source = include_str!("../shaders/ssao_upsample.slang");
+        for expression in [
+            "saturate(1.0 - away / tolerance)",
+            "depth <= DEPTH_FAR ? 0.0 :",
+        ] {
+            assert!(
+                source.contains(expression),
+                "ssao_upsample.slang no longer contains `{expression}`, so its taps may be \
+                 weighted by distance alone -- which is a plain bilinear upsample, and a halo \
+                 along every silhouette that no golden in this workspace is rendered large \
+                 enough to catch"
+            );
+        }
+    }
+
+    /// The blur and the upsample must reject a tap at the same distance.
+    ///
+    /// They are two filters over the same two images answering the same question
+    /// — is this sample on the surface being written — and a tolerance that
+    /// drifted between them is a silhouette one of them crosses and the other
+    /// does not, which is a halo in the reconstruction that the blur's own
+    /// rejection was chosen to prevent. Neither shader has a Rust mirror of the
+    /// number, so this compares the two declarations against each other rather
+    /// than against a constant here.
+    #[test]
+    fn the_two_occlusion_filters_share_one_depth_tolerance() {
+        let declaration = "static const float DEPTH_TOLERANCE_RADII = ";
+        let tolerance_of = |source: &str| {
+            let at = source
+                .find(declaration)
+                .map(|at| at + declaration.len())
+                .expect("both filters declare a depth tolerance");
+            source[at..]
+                .split(';')
+                .next()
+                .expect("the declaration ends in a semicolon")
+                .to_string()
+        };
+        let blur = tolerance_of(include_str!("../shaders/ssao_blur.slang"));
+        let upsample = tolerance_of(include_str!("../shaders/ssao_upsample.slang"));
+        assert_eq!(
+            blur, upsample,
+            "ssao_blur.slang rejects a tap at {blur} radii and ssao_upsample.slang at \
+             {upsample}; the two filters have drifted"
         );
     }
 

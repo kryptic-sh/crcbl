@@ -31,15 +31,20 @@ fn vertexMain(@builtin(vertex_index) index_0 : u32) -> FullscreenOutput_0
     return output_0;
 }
 
-fn depth_at_0( pixel_0 : vec2<i32>,  extent_0 : vec2<i32>) -> f32
+fn full_res_pixel_0( pixel_0 : vec2<i32>) -> vec2<i32>
 {
-    var _S2 : vec3<i32> = vec3<i32>(clamp(pixel_0, vec2<i32>(i32(0), i32(0)), extent_0 - vec2<i32>(i32(1), i32(1))), i32(0));
+    return pixel_0 * vec2<i32>(i32(2));
+}
+
+fn depth_at_0( pixel_1 : vec2<i32>,  extent_0 : vec2<i32>) -> f32
+{
+    var _S2 : vec3<i32> = vec3<i32>(clamp(pixel_1, vec2<i32>(i32(0), i32(0)), extent_0 - vec2<i32>(i32(1), i32(1))), i32(0));
     return (textureLoad((scene_depth_0), ((_S2)).xy, ((_S2)).z));
 }
 
-fn view_z_0( pixel_1 : vec2<i32>,  depth_0 : f32,  extent_1 : vec2<f32>) -> f32
+fn view_z_0( pixel_2 : vec2<i32>,  depth_0 : f32,  extent_1 : vec2<f32>) -> f32
 {
-    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
+    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_2.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_2.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
     return view_0.z / view_0.w;
 }
 
@@ -59,17 +64,22 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
     var width_0 : u32;
     var height_0 : u32;
     {var dim = textureDimensions((occlusion_0));((width_0)) = dim.x;((height_0)) = dim.y;};
-    var extent_2 : vec2<i32> = vec2<i32>(i32(width_0), i32(height_0));
-    var size_0 : vec2<f32> = vec2<f32>(f32(width_0), f32(height_0));
-    var _S4 : vec2<i32> = vec2<i32>(position_1.xy);
-    var centre_depth_0 : f32 = depth_at_0(_S4, extent_2);
+    var _S4 : vec2<i32> = vec2<i32>(i32(width_0), i32(height_0));
+    var depth_width_0 : u32;
+    var depth_height_0 : u32;
+    {var dim = textureDimensions((scene_depth_0));((depth_width_0)) = dim.x;((depth_height_0)) = dim.y;};
+    var depth_extent_0 : vec2<i32> = vec2<i32>(i32(depth_width_0), i32(depth_height_0));
+    var depth_size_0 : vec2<f32> = vec2<f32>(f32(depth_width_0), f32(depth_height_0));
+    var _S5 : vec2<i32> = vec2<i32>(position_1.xy);
+    var centre_texel_0 : vec2<i32> = full_res_pixel_0(_S5);
+    var centre_depth_0 : f32 = depth_at_0(centre_texel_0, depth_extent_0);
     if(centre_depth_0 <= 0.0f)
     {
-        var _S5 : pixelOutput_0 = pixelOutput_0( 1.0f );
-        return _S5;
+        var _S6 : pixelOutput_0 = pixelOutput_0( 1.0f );
+        return _S6;
     }
-    var _S6 : f32 = view_z_0(_S4, centre_depth_0, size_0);
-    var _S7 : f32 = camera_0.params_0.x * 2.0f;
+    var _S7 : f32 = view_z_0(centre_texel_0, centre_depth_0, depth_size_0);
+    var _S8 : f32 = camera_0.params_0.x * 2.0f;
     var y_0 : i32 = i32(-1);
     var total_0 : f32 = 0.0f;
     var weight_0 : f32 = 0.0f;
@@ -92,36 +102,37 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
             {
                 break;
             }
-            var tap_0 : vec2<i32> = clamp(_S4 + vec2<i32>(x_0, y_0), vec2<i32>(i32(0), i32(0)), extent_2 - vec2<i32>(i32(1), i32(1)));
-            var _S8 : bool;
+            var tap_0 : vec2<i32> = clamp(_S5 + vec2<i32>(x_0, y_0), vec2<i32>(i32(0), i32(0)), _S4 - vec2<i32>(i32(1), i32(1)));
+            var _S9 : bool;
             if(x_0 != i32(0))
             {
-                _S8 = true;
+                _S9 = true;
             }
             else
             {
-                _S8 = y_0 != i32(0);
+                _S9 = y_0 != i32(0);
             }
             var share_0 : f32;
-            if(_S8)
+            if(_S9)
             {
-                var depth_1 : f32 = depth_at_0(tap_0, extent_2);
-                var away_0 : f32 = abs(view_z_0(tap_0, depth_1, size_0) - _S6);
+                var texel_0 : vec2<i32> = full_res_pixel_0(tap_0);
+                var depth_1 : f32 = depth_at_0(texel_0, depth_extent_0);
+                var away_0 : f32 = abs(view_z_0(texel_0, depth_1, depth_size_0) - _S7);
                 if(depth_1 <= 0.0f)
                 {
                     share_0 = 0.0f;
                 }
                 else
                 {
-                    share_0 = saturate(1.0f - away_0 / _S7);
+                    share_0 = saturate(1.0f - away_0 / _S8);
                 }
             }
             else
             {
                 share_0 = 1.0f;
             }
-            var _S9 : vec3<i32> = vec3<i32>(tap_0, i32(0));
-            var total_1 : f32 = total_0 + (textureLoad((occlusion_0), ((_S9)).xy, ((_S9)).z).x) * share_0;
+            var _S10 : vec3<i32> = vec3<i32>(tap_0, i32(0));
+            var total_1 : f32 = total_0 + (textureLoad((occlusion_0), ((_S10)).xy, ((_S10)).z).x) * share_0;
             var weight_1 : f32 = weight_0 + share_0;
             x_0 = x_0 + i32(1);
             total_0 = total_1;
@@ -129,7 +140,7 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
         }
         y_0 = y_0 + i32(1);
     }
-    var _S10 : pixelOutput_0 = pixelOutput_0( total_0 / weight_0 );
-    return _S10;
+    var _S11 : pixelOutput_0 = pixelOutput_0( total_0 / weight_0 );
+    return _S11;
 }
 

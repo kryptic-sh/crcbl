@@ -53,8 +53,8 @@ const REPORT_FLOOR: u64 = 2;
 const REPORT_BOUND: u64 = 32;
 
 /// The full-screen triangles a forward frame draws: `ssao`'s, `ssao-blur`'s,
-/// `ssr`'s, `ssr-blur`'s, the tonemap's, the antialiasing resolve's, and one per
-/// level of the Hi-Z pyramid the march climbs.
+/// `ssao-upsample`'s, `ssr`'s, `ssr-blur`'s, the tonemap's, the antialiasing
+/// resolve's, and one per level of the Hi-Z pyramid the march climbs.
 ///
 /// One instance each, submitted and drawn, and the only draws in a forward frame
 /// the CPU knows the count of. They are on both sides of the submitted/drawn
@@ -66,7 +66,7 @@ const REPORT_BOUND: u64 = 32;
 /// written down here: a pyramid that stopped being built would otherwise leave
 /// this constant right and the frame short.
 fn fullscreen_instances() -> u64 {
-    6 + u64::from(crcbl::render::hiz::levels_for(
+    7 + u64::from(crcbl::render::hiz::levels_for(
         crate::mesh_scene::MESH_EXTENT,
     ))
 }

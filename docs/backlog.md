@@ -16,6 +16,43 @@ in `crates/crcbl-render/src/ssao.rs` — `r_ssao_slices` in `2..=4` and
 `r_ssao_blur_passes` in `1..=2` — both defaulting to what shipped. What is left
 here is one decision: **whether either default moves.**
 
+**Half-resolution AO landed on 2026-09-02 and moved both halves of this
+decision. The radv tier has been re-measured; the other two have not.** The
+gather and the blurs now run at `crcbl_render::ssao::half_extent` with a
+reconstruction pass after them, so every figure further down this entry was
+taken against a pass that no longer has that shape. Read off
+`forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step` — the same
+scene the table below uses — on radv, single run rather than the p50 over seven
+the older table used:
+
+```text
+slices  blurs   sharp edges   worst step      ssao     each blur
+     2      1            37            5    281 us         23 us   what ships
+     4      1           100            3    553 us         23 us
+     2      2             8            3    280 us         23 us
+     4      2             0            1    553 us         23 us   the rung
+```
+
+**Two findings, and they point the same way.**
+
+- **Halving made the shipping configuration markedly less smooth on this axis: 1
+  sharp edge became 37.** The blur's footprint now spans twice as much of the
+  frame, so each tile phase pairs with a wider spread of distances from the
+  edge. This is a quality cost of the half-resolution rung, not a test-tuning
+  artefact, and it is the thing to weigh against that rung's speed.
+- **The rung has become cheaper than the pair it would replace used to be.**
+  Four slices and two blurs now cost about 600 us against the 645 us this
+  entry's older table measured for the _un-runged_ full-resolution pair — and it
+  takes the sharp-edge count to 0 with a worst step of 1. Half-resolution paid
+  for the rung.
+
+So the answer to "whether either default moves" now looks like **yes, both**, on
+the radv tier: it would undo the smoothness the halving cost and still run
+cheaper than the frame did a week ago. **It is not a decision to take on one
+tier and one run.** What it needs before it moves: the same table as a p50 over
+several runs, on lavapipe, and on a browser — and the browser tier still cannot
+be measured at all, for the `autoexec.cfg` reason this entry records below.
+
 **Blocker 1 is closed, and the answer was better than the question.** The old
 entry asked whether a rounding in the last place was acceptable for a 45 degree
 rotation. It never has to happen: the turn is done on `SLICE_DIRECTIONS`' own
@@ -224,13 +261,63 @@ wants a home for.
 tint makes it weaker on purpose, and the fix is the intensity control rather
 than removing the tint.
 
-## SSAO runs GTAO at full resolution and the banding is bought (2026-09-01)
+## What the half-resolution occlusion harness does not cover (2026-09-02)
+
+`crates/crcbl/tests/forward_e2e/occlusion.rs` moved to the half extent when the
+gather did, and grew `the_reconstruction_does_not_halo_a_silhouette`. Every
+threshold in it was swept on radv and lavapipe and each of its three tests was
+shown to go red under a sabotage of the thing it guards. What it still does not
+reach:
+
+- **Only a horizontal silhouette is measured.** The halo scene's bar spans every
+  row, so no vertical edge is exercised and a reconstruction that haloed on one
+  axis only would pass. The halo is also exactly **one pixel wide per edge** at
+  the shipping divisor, because `ssao_upsample.slang` taps `nearest` and
+  `nearest + 1` and no further — a larger `RESOLUTION_DIVISOR` would widen it,
+  and the test measures the single column that dips.
+- **`NEAREST_TAP_FLOOR` is not covered by anything.** Nothing in the harness
+  builds a surface thinner than the occlusion grid, which is the one case that
+  constant exists for: it is what keeps the reconstruction's divisor off zero
+  when every tap is rejected. It is the least-exercised line in that shader.
+- **One backend.** All of it ran on `vk`, on radv and lavapipe. Metal, D3D12 and
+  wgpu are unmeasured for all of these thresholds. The mechanisms are integer
+  and ratio arithmetic, so agreement is expected — but expected is not measured,
+  and see `crcbl-golden`'s header for how far two drivers do drift.
+- **`SILHOUETTE_SKIP` is wider than the observation needs.** Only the edge
+  column itself is disturbed — it reads 188 against its neighbour's 164 — so the
+  skip could be narrower. It was left at the blur footprint's width for that
+  argument's sake rather than re-fitted to the measurement.
+
+## The depth-aware upsample has one reader, not three (2026-09-02)
+
+`docs/plan/46-ambient-occlusion.md` planned the bilateral upsample as **one
+shader with three readers** — the AO pass, `47-reflections.md`'s march, and
+`51-volumetrics.md`'s composite, which already samples a froxel grid far below
+the frame's resolution and would trade its trilinear lookup for a depth-aware
+one. Only the AO reader was built, and that plan section has been deleted now
+that it ships. Both other documents still cite the shared upsample, so this
+entry is what those citations are owed.
+
+What actually exists is `crates/crcbl-shaders/shaders/ssao_upsample.slang`, and
+it is **AO-specific, not a shared pass**: it reads a single-channel `R8Unorm`
+occlusion image, hard-codes `RESOLUTION_DIVISOR` as its own scale factor, and
+returns `1.0` where nothing was drawn because unoccluded is the identity for the
+value it carries. A reflection colour and a froxel lookup share neither the
+channel count nor that far-plane fallback, so making it serve three readers is a
+generalisation with real design in it — a rung, not a binding somebody forgot to
+add.
+
+**`47-reflections.md`'s "no half-resolution SSR" row is priced on this being
+owed**, so that row's estimate is the thing to re-check first if the shared pass
+is ever attempted.
+
+## SSAO reads no depth pyramid and the banding is bought (2026-09-01)
 
 The user asked whether the AO pass is implemented the industry-standard way and
 optimized, having seen older engines produce SSAO without banding at a lower
 price. The audit says: **the technique is right and the way it is spent is
 not.** Nothing here is a bug — every item is a deliberate choice recorded in the
-shader header — but three of them are choices a shipping engine does not make.
+shader header — but each is a choice a shipping engine does not make.
 
 **The technique is correct.** `ssao.slang` is ground-truth ambient occlusion, a
 horizon search over slices through the eye, the same family as XeGTAO and the
@@ -238,13 +325,6 @@ Activision original. That is not the gap.
 
 **What it costs, in the order a fix would take them:**
 
-- **It runs at full resolution.** `TransientImageDesc::ambient_occlusion` in
-  `crcbl_render::graph` is `R8Unorm`, `mip_levels: 1`, and `crcbl_render`'s
-  forward pass builds it at the scene `extent`. The reference implementations
-  run AO at half resolution and bilaterally upsample it, because occlusion is
-  low-frequency and the depth-aware upsample is most of what the blur was
-  already doing. This is the single largest factor and it is a resource change
-  plus an upsample pass, not a shader rewrite.
 - **It reads no depth pyramid, and the one the engine has is the wrong one.**
   Every depth fetch in `ssao.slang` goes through one accessor, `depth_at`, and
   that accessor is `scene_depth.Load(int3(clamped, 0))` — mip 0, no sampler, no
@@ -263,7 +343,8 @@ Activision original. That is not the gap.
   pass producing an AO-shaped depth chain, not a binding the AO pass forgot to
   add — a rung, not an oversight.
 
-- **It spends about twenty full-res taps per pixel.** Sixteen for the horizons —
+- **It spends about twenty taps per gathered pixel**, every one of them into the
+  full-resolution depth image. Sixteen for the horizons —
   `slice_count() * 2 * SLICE_STEPS`, with `SLICE_COUNT_DEFAULT` 2 and
   `SLICE_STEPS` 4 — plus four more, because `ssao.slang` reconstructs the normal
   from its four neighbours rather than reading one. It reconstructs because the
@@ -292,11 +373,12 @@ byte-comparable goldens across four backends.** It is a real trade and it was
 made knowingly; it is not an oversight.
 
 **So the decision the user actually has to make** is whether the golden rule
-keeps buying it. The first two items above are pure wins and need no answer. The
-third does: either a temporal denoiser with the goldens moved to a
-tolerance-based comparison, or keep bit-exact determinism and accept the tile.
-That is a design call about how this project verifies rendering, not an AO fix,
-and it is why the AO path was not touched in the session that found this.
+keeps buying it. The pyramid item above needs no answer — it is a rung, and the
+tap note is not a defect at all. The banding does: either a temporal denoiser
+with the goldens moved to a tolerance-based comparison, or keep bit-exact
+determinism and accept the tile. That is a design call about how this project
+verifies rendering, not an AO fix, and it is why the AO path was not touched in
+the session that found this.
 
 **The number that did not reconcile has been measured, and the suspect was
 cleared.** This entry first recorded `docs/plan/46-ambient-occlusion.md`'s 0.255
@@ -20796,22 +20878,18 @@ reasons. What the first slice deferred or turned up:
   it needs `GreaterOrEqual` and depth invariance across four rasterisers, which
   only CI can settle. The engine now has per-pass GPU timers and frame counters,
   so that change can be **measured** rather than assumed when it is made.
-- **AO still runs at full resolution.** Half-resolution AO with an upsample was
-  the slice after the bilateral blur and has not been done. It is the one of the
-  two that costs quality for speed, so it wants the per-pass GPU timers pointed
-  at `ssao` and `ssao-blur` first — nobody has measured what the pair actually
-  costs.
 - **`SSAO_RADIUS` is 0.5 and was tuned against `Scene::Ao` alone.** It has not
   been retuned; it has been **measured** against a real room — see "The AO
   constants against lantern's room", which finds it sane at room scale. The
   kernel this bullet used to pair it with is gone: GTAO marches to the radius
   rather than sampling a table inside it, so the radius is now the only AO
   tuning constant outside the blur.
-- **`AO_RATIO` is 1.10 rather than a shadow-like 1.5**, and that is not
+- **`AO_RATIO` sits far nearer 1 than a shadow-like 1.5**, and that is not
   slackness: bands are read after the sRGB encode and AO scales ambient alone,
-  so a wall closing half a hemisphere cannot approach halving a pixel. Measured
-  1.162 with about ten LSB of separation, far past the one-level driver drift
-  the tolerance already absorbs.
+  so a wall closing half a hemisphere cannot approach halving a pixel. The
+  constant and the margin it was swept against live on `AO_RATIO` in
+  `crates/crcbl/tests/render_e2e.rs`; both have moved as the pass changed, so
+  this entry points at them rather than restating digits that go stale here.
 - **`crcbl_hal::SampleType::Depth`'s doc is now narrower than the type.** It
   says the variant means "read through a comparison sampler" and that the paired
   sampler must set `comparison: true`; the SSAO layout uses it with **no sampler
