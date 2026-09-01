@@ -2184,19 +2184,23 @@ the evidence. What the slice deferred or turned up:
   been a second technique nothing could reach. It is one `git show` away when
   the seam exists; the entry above on `SHADOW_TAPS` as a quality setting is the
   same question for shadows and the two want answering together.
-- **GTAO is the most expensive pass in lantern's frame, and that was measured
-  2026-08-28.** It doubled the AO pass's depth taps, eight to sixteen, and added
-  an `acos_approx` and a `sqrt` per tap. `crcbl_render::PassTimers` — which was
-  in the tree the whole time this entry said nothing could time it — puts `ssao`
-  at **0.255 ms, 25.9% of a 0.986 ms frame** on an RX 7900 XTX at 1920×1080,
-  against `forward`'s 0.199 ms, `ssr`'s 0.099 ms and `shadow`'s 0.070 ms — one
-  frame's rows, one view each. Re-taken 2026-08-28 as a distribution once
-  `crcbl_render::PassStats` existed: `ssao` at **0.258 ms p50 / 0.263 ms p95**,
-  26.0% of a 0.990 ms p50 total, summed across both views. What is **not**
-  measured is GTAO against the eight-tap hemisphere it replaced, because that
-  code is gone; recovering it is the `git show` the tier bullet above already
-  describes, and it is what a quality seam would need in order to offer the
-  cheaper rung honestly.
+- **GTAO was the most expensive pass in lantern's frame when this was measured
+  on 2026-08-28, and stopped being so on 2026-09-02.** It doubled the AO pass's
+  depth taps, eight to sixteen, and added an `acos_approx` and a `sqrt` per tap.
+  `crcbl_render::PassTimers` — which was in the tree the whole time this entry
+  said nothing could time it — puts `ssao` at **0.255 ms, 25.9% of a 0.986 ms
+  frame** on an RX 7900 XTX at 1920×1080, against `forward`'s 0.199 ms, `ssr`'s
+  0.099 ms and `shadow`'s 0.070 ms — one frame's rows, one view each. Re-taken
+  2026-08-28 as a distribution once `crcbl_render::PassStats` existed: `ssao` at
+  **0.258 ms p50 / 0.263 ms p95**, 26.0% of a 0.990 ms p50 total, summed across
+  both views. What is **not** measured is GTAO against the eight-tap hemisphere
+  it replaced, because that code is gone; recovering it is the `git show` the
+  tier bullet above already describes, and it is what a quality seam would need
+  in order to offer the cheaper rung honestly. **Half-resolution AO retired the
+  headline on 2026-09-02**: the whole occlusion chain now measures 0.141 ms
+  against the forward pass's 0.254 ms at the same extent on the same card, so
+  the forward pass is the frame's most expensive. The 0.255 ms figures above
+  stay as the dated measurement of the pass this entry was written about.
 - **GTAO made the depth buffer's last bits visible on a fourth scene.**
   `Scene::Probes` now needs an LSB budget in `path_lsb_channels`, joining
   `Dunes`, `PointShadow` and `Ssr` — two adjacent red channels, one level, on
@@ -2211,8 +2215,12 @@ the evidence. What the slice deferred or turned up:
 - **`SLICE_COUNT` is 2 and `SLICE_STEPS` is 4, chosen to sit near the eight taps
   the hemisphere took, not fitted.** Reference implementations run more slices
   with a temporal filter to hide the noise; this one has no temporal filter and
-  leans on `ssao_blur.slang` instead. What a third slice would buy has not been
-  rendered.
+  leans on `ssao_blur.slang` instead. **What more slices buy has since been
+  rendered**, on the tangential axis rather than as a picture: the table in this
+  file's HIGH PRIORITY entry measures two slices against four, on both native
+  drivers, with and without the second blur. `r_ssao_slices` is the console
+  variable that selects it, and whether the default moves is the decision that
+  entry is waiting on.
 - **The `probes` flatness assertion is the only guard that would have caught the
   tilt-sign bug**, and it is in the probe test rather than the AO one, by
   accident. `Scene::Ao` looks into a closed trough with no open flat surface
