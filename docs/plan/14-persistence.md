@@ -109,13 +109,26 @@ on the hot path.
   enumerated** — see the settings catalogue below and the two topics it points
   at.
 - Hot-apply where possible (volume, mouse sensitivity — immediate; vsync,
-  resolution — apply-on-confirm pattern provided by the engine). **Neither half
-  is built** (2026-08-27): there is no settings screen, so nothing has yet
-  needed either, and "provided by the engine" describes a helper that does not
-  exist. The live mechanisms both patterns would drive do exist —
-  `GpuContext::set_pacing` reconfigures a running swapchain and
-  `crcbl::engine::ModeRequest::toggle` switches display mode — so what is owed
-  is the confirm-and-revert flow around them, not the applying.
+  resolution — apply-on-confirm pattern provided by the engine). **The hot-apply
+  half is built; apply-on-confirm is not** (re-checked 2026-09-01, correcting a
+  2026-08-27 reading that said neither was and that no settings screen existed).
+  `crcbl::settings::apply` is the one place a key is written and applied
+  together, driving a `Stage`, and its `Applied` answer is exactly this
+  distinction: `Live` when the running process has a seam that shows the key,
+  `NextStart` when it has none. `apps/options` is a settings screen and drives
+  it — its `QUALITY` row writes a whole tier through
+  `crcbl::settings::presets::select` and the rows below it move on the frame it
+  lands — and `crcbl settings preset` reaches the same writer from a terminal,
+  where nothing has a seam and the answer is always `NextStart`.
+
+  What is still owed is the **confirm-and-revert flow**: nothing in
+  `crcbl::settings` mentions confirming or reverting, so a resolution change
+  that leaves a player looking at a black screen has no timer to put it back.
+  The live mechanisms it would drive exist — `GpuContext::set_pacing`
+  reconfigures a running swapchain and `crcbl::engine::ModeRequest::toggle`
+  switches display mode — so what is missing is the flow around them, not the
+  applying.
+
 - Key binds live in profile (RON) not settings TOML — they're per-player
   structured data (action → chord maps), and games extend the action set.
 
