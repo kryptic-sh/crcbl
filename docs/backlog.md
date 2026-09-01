@@ -1385,174 +1385,57 @@ the `MapRequest` and the reparent it never sends, on the five-test filter above
 Nothing in this repository can see that, so it wants openbox run under a
 protocol tracer.
 
-## Three whole-workspace-only test flakes, none a process global (2026-09-01)
+## One whole-workspace-only test flake is left, in the logger (2026-09-02)
 
-Both seen on 2026-09-01, both only under a full `cargo test`, both green when
-their own crate is run alone:
+The three sample flakes this entry used to carry were **one bug and it is
+fixed** — see `git log`. `ForwardRenderer::resolved_effects` removes _both_
+antialiasing bits for any debug view that is a readout rather than a picture,
+and `crcbl::debug_view` is one process-global value, so a test reading effects
+back while a sibling in the same binary held a readout view lost exactly
+`ANTIALIASING`. quarry's was the same mechanism with the roles swapped: its app
+writes that global on **every boot**, so an unguarded `run(..)` test stomped the
+guarded heatmap test back to `Shaded` and it read `HEATMAP: OFF`. The lock
+`crcbl::debug_view::for_test` takes only serialises against other takers, which
+is why holding it in `scripted` was not enough.
 
-- `lantern::app::tests::an_effect_flag_reaches_the_frame_and_the_summary` —
-  failed twice in four workspace runs, passed 5/5 under
-  `cargo test -p lantern --lib` and passed a later workspace run. Its assertions
-  are on `summary.paths.effects` and `effects_row()`, a bitflags value and a
-  string, so nothing about shading reaches it.
-- `quarry::app::tests::the_heatmap_flag_and_its_row_replace_the_tint_at_the_renderer`
-  — the overlay row read `HEATMAP: OFF`. Passed alone and on rerun.
-
-**They are not the `r_ssao_blur_passes` hazard**, which was a process global
-shared between threads of one binary and was fixed on 2026-09-01. These two are
-separate test _binaries_, so a static cannot reach across them: whatever they
-share is outside the process.
-
-**A settings file on a shared path was the obvious candidate and is ruled out**
-(2026-09-01): `crcbl::engine::SettingsSource::for_run` answers `None` for a
-headless run precisely so a test never reads whichever home directory it
-executes in, and `lantern`'s own test helper sets `headless`. So the failing run
-opened no settings file at all. The mechanism is still unknown.
-
-**Reproduced deliberately on 2026-09-02, and the panic is captured** — eight
-consecutive `cargo test --workspace --no-fail-fast` runs, failing on the third.
-It was a **third** sample, not either of the two above:
-`viewer::gpu::tests::the_players_video_clamp_reaches_the_frame_and_survives_a_reload`,
-`apps/viewer/src/gpu.rs`:
+What is left is a different one, seen twice in six whole-workspace runs on
+2026-09-02:
 
 ```text
-assertion `left == right` failed: `reflections = false` did not survive the
-re-export — a reload must not quietly restore an effect the player's settings
-took away
-  left: RenderEffects(SHADOWS | AMBIENT_OCCLUSION)
- right: RenderEffects(SHADOWS | AMBIENT_OCCLUSION | ANTIALIASING)
+crcbl-core: log::tests::logger_respects_the_filter_without_being_installed
+crates/crcbl-core/src/log.rs:1294
+assertion failed: !logger.enabled(
+    &Metadata::builder().level(Level::Info).target("any").build())
 ```
 
-**The bit that went missing is not the one under test.** The arm was
-`reflections = false`, and reflections were correctly absent from both sides;
-what the reload dropped is `ANTIALIASING`. That is the one layer the effect
-resolution treats as a rung selection rather than a clamp — `request_for` in the
-samples' `gpu.rs` carries `antialiasing: Option<Antialiasing>` beside the
-`video` clamp, and the samples' own doc comments call it out as the exception.
-So all three failures may be one bug in how the antialiasing rung survives a
-re-export, rather than three effect flags misbehaving.
+**It is the same family — a process global read by a test that does not own it —
+but the writer has not been found.** Established by reading, all of it negative:
 
-**Ruled out this session**, each by reading the code rather than by inference:
+- `with_filter` **does** serialise: it takes `FILTER_ORDER` for the whole body,
+  and no test in `log.rs` writes `FILTER` outside it.
+- `StderrLogger::enabled` is `self.permits(metadata) || capturing()`, and
+  `capturing()` is `CAPTURED.with(..)` — a genuine `thread_local`, so another
+  thread's capture cannot be what turns this on. That comment is accurate.
+- `store_filter` is the one writer that takes no order lock, but its only
+  non-test caller is the console `log` command, and the tests that drive that
+  live in `tests/console_log.rs` — a separate binary, so a separate process.
 
-- _A settings fixture on a shared path._ `settings_file` builds
-  `crcbl::store::MemoryStorage::new()` per call and writes the TOML into it, so
-  each test owns its storage and nothing touches a real directory.
-- _A console variable._ No `convar!` in the tree names an antialiasing knob, and
-  neither `viewer`'s nor `lantern`'s test module sets any console variable, so
-  the `r_ssao_blur_passes` hazard's shape does not fit.
-- _A shared effect override._ `request_for` builds
-  `EffectOverride::none().force(..)` as a local value; it is not a registry.
+So something moves `FILTER`, or the facade's max level, between `with_filter`
+writing it and the assertion reading it, and nothing found so far can. **Next
+step is instrumentation rather than more reading** — print the filter and
+`log::max_level()` at the failing assertion and run the workspace until it
+trips. The same rule that closed the debug-view one applies: four passes over
+the resolution path each ended in "deterministic", and the answer came from
+making the bug happen on demand instead.
 
-**The reasoning that these must be outside the process is wrong, and that
-matters for where to look next.** The entry above argues that separate test
-binaries cannot share a static. True, but irrelevant:
-`cargo test -p viewer --lib` runs the _same_ binary with the _same_ thread pool
-as the workspace run does, so any intra-binary race is equally present in both.
-The only thing the workspace changes is CPU contention, and therefore
-interleaving. So a static shared between **one sample's own concurrent tests**
-is still very much a candidate, and is the thing to look at next.
-
-**Caveat on this reproduction:** the tree was clean and committed when the loop
-started, but an agent editing the AO shaders became active in it during the run.
-Nothing it touches reaches antialiasing resolution, and a half-written tree
-fails to compile rather than asserting — but the run was not pristine, so a
-second capture is worth having before the mechanism is pinned on this evidence
-alone.
-
-**Narrowed further by reading `EffectRequest::resolve`, 2026-09-02.** It ends
-`chosen.union(programmatic.on).difference(programmatic.off).intersection(device)`,
-and `Antialiasing::SLOT` is the pair `ANTIALIASING | SMAA`, which the
-`Some(tier)` arm **clears before setting the chosen rung**. An empty slot in the
-failure — neither bit set — therefore means the resolved tier was
-`Antialiasing::None`, not that a bit was lost in transit. That is the thing to
-explain.
-
-Two of the four ways it could happen are already ruled out:
-
-- _The device clamp._ `ForwardRenderer` is built with
-  `device_effects: RenderEffects::all()` and its own docs say the clamp removes
-  nothing, so `.intersection(device)` cannot be clearing the slot.
-- _A racing accessor._ `effect_request` and `set_effect_request` are `const fn`
-  over a plain field, with no interior mutability, so the request cannot be
-  half-written while another thread reads it.
-
-What is left is that the request genuinely carried `Some(Antialiasing::None)`,
-or that `programmatic.off` held the bit — so the next step is the settings read
-that produces the tier, and specifically what it answers when the `antialiasing`
-key is absent, which is the case this test exercises.
-
-**That settings read is now ruled out too, and with it the whole deterministic
-half.** `viewer`'s `gpu.rs` never mentions antialiasing, so its `EffectRequest`
-carries `antialiasing: None` and `resolve` takes the arm that leaves the slot
-alone — the tier is never chosen, so `antialiasing_or_default` (whose fallback
-is `Antialiasing::from_effects(DEFAULT_STACK)`, and `DEFAULT_STACK` holds
-`ANTIALIASING` and not `SMAA`) is not on this path at all. `video_effects`
-starts from `RenderEffects::all()` and removes a bit only for a key explicitly
-`false`, over a `const` `VIDEO_KEYS` table with no lazy state, so a file saying
-only `reflections = false` yields `all()` minus `REFLECTIONS`. Both `camera` and
-`video` therefore carry `ANTIALIASING` every time.
-
-So three of the four layers are deterministic on this path and the device clamp
-removes nothing. **What is left is `programmatic.off`** — the only layer that
-can clear the bit here — **or something genuinely concurrent rather than a value
-computed wrongly.** Start there rather than re-walking the settings code: find
-what puts `ANTIALIASING` into a `programmatic` override anywhere in
-`apps/viewer`, and note that the sibling test just above the failing one drives
-`DebugView` re-exports, which is the nearest thing in that file to state shared
-between concurrent tests.
-
-**The suspect is named, the mechanism is not.** `apps/viewer/src/gpu.rs` has a
-test helper `without_the_resolve(renderer)` whose whole job is
-`EffectOverride::none().force(RenderEffects::ANTIALIASING, Some(false))` — it
-takes the resolve off so the texel-reading frames are not blended along a
-silhouette — and three sibling tests in that same binary call it. That is
-exactly the bit the flake loses, forced off by exactly the layer that reading
-`resolve` left as the only candidate.
-
-What is **not** established is how it could reach the failing test.
-`without_the_resolve` takes `&mut ForwardRenderer` and each caller builds its
-own, and that file declares no `static`, `OnceLock`, `Mutex` or `thread_local`
-for a renderer or device to be shared through. So either something below
-`ForwardRenderer` carries request or pipeline state between instances, or the
-resemblance is a coincidence and the cause is elsewhere. Worth an hour with a
-`dbg!` of the resolved `EffectRequest` in the failing arm before any fix is
-attempted — the shape fits too well to ignore and not well enough to act on.
-
-**The intra-binary hypothesis was tested on 2026-09-02 and is wrong.** The note
-above argued that because a single-crate run uses the same binary and thread
-pool as the workspace run, a race between one sample's own concurrent tests was
-still a candidate and the workspace only supplied CPU contention. Tested
-directly: `crcbl_viewer`'s test binary was built once and then run **48 times**
-— twelve rounds of four concurrent copies of the same binary, which is that
-binary's own threading plus heavy contention and no workspace build at all.
-**Zero failures.** At the roughly one-in-three rate the workspace runs showed,
-that predicts about sixteen. So contention on its own does not produce it, and
-the thing a workspace run supplies is something else.
-
-Two more mechanical candidates fell while testing that:
-
-- _A platform settings layer under the fixture._ `SettingsSource::open` answers
-  `Source(storage)` with `SettingsStack::from_storage(storage)` and nothing else
-  — no platform layer is stacked beneath a caller's storage, so the read really
-  is isolated from whatever home directory the run executes in.
-- _A narrowed device clamp._ `ForwardRenderer::device_effects` is assigned in
-  exactly one place, to `RenderEffects::all()`, and never reassigned. It cannot
-  be what removes the bit.
-
-**So every layer of `resolve` is deterministic for this test, and the binary
-alone will not reproduce it.** What is left is genuinely cross-process. The
-strongest remaining candidate is that a workspace run has many test binaries
-opening GPU devices at once, and that under that load `Gpu::from_context` takes
-a path — a fallback, a retry, a different adapter — on which the effect request
-never reaches the renderer it hands back. That is consistent with the shape of
-the failure, since the guard's own doc says deleting either `set_effect_request`
-line leaves the renderer on `EffectRequest::default`.
-
-**Next step, and it is instrumentation rather than more reading:** print the
-resolved `EffectRequest` _and_ the opened backend and adapter from
-`effects_opened_with`, then run the whole workspace until it trips. Reading the
-resolution path further is now known to be unproductive — four passes over it
-have each ended in "deterministic".
+**It did not reproduce in the ten workspace runs that verified the debug-view
+fixes**, which is not the same as being fixed: nothing in those commits touches
+`crcbl-core`'s logging. Either it is rarer than two-in-six suggested — ten clean
+runs would be about a 2% coincidence at that rate, so this is weak evidence
+against it — or it shares a cause with the debug-view bug through some route not
+identified here. Neither is established, and the sample that produced the
+two-in-six was taken with a `debug_view` test panicking in the same runs, which
+is a confounder worth removing before trusting either rate.
 
 ## The render-quality programme (opened 2026-08-27)
 

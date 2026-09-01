@@ -2065,6 +2065,19 @@ mod tests {
     fn the_players_video_clamp_reaches_the_frame_and_survives_a_reload() {
         use crcbl::engine::SettingsSource;
 
+        // **This reads the effects, so it owns the debug view for its
+        // duration.** `ForwardRenderer::resolved_effects` takes *both*
+        // antialiasing bits off for any view that is a readout rather than a
+        // picture, and `crcbl::debug_view` is one process-global value — so a
+        // sibling test in this binary that has set a readout view makes every
+        // comparison below come up one bit short, in the arm that happens to be
+        // running. That is the whole of the flake `docs/backlog.md` recorded as
+        // whole-workspace-only: nothing here is about settings or reloading, and
+        // the failure named `reflections` while the bit it lost was the
+        // antialiasing one. `for_test` also puts the view back to `Shaded`,
+        // which is the state these assertions are written against.
+        let _view = crcbl::debug_view::for_test();
+
         let (all_on, all_on_reloaded) = effects_opened_with(SettingsSource::None);
         assert_eq!(
             all_on,

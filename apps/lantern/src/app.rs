@@ -773,6 +773,12 @@ mod tests {
     /// the same numbers every time.
     #[test]
     fn a_headless_run_is_deterministic() {
+        // Owns the debug view: this sample writes that process-global on
+        // boot and reads effects back through it, and `scripted` is where
+        // the rest of these tests take the same lock. See
+        // `crcbl::debug_view::for_test`.
+        let _view = crcbl::debug_view::for_test();
+
         let first = run(&headless(24)).expect("headless runs everywhere");
         let second = run(&headless(24)).expect("headless runs everywhere");
         assert_eq!(first, second, "two identical runs must agree exactly");
@@ -793,6 +799,8 @@ mod tests {
     /// would report the floor on both axes.
     #[test]
     fn the_headless_summary_names_the_selected_paths() {
+        let _view = crcbl::debug_view::for_test();
+
         let summary = run(&headless(4)).expect("headless runs everywhere");
         assert_eq!(
             summary.paths.geometry,
@@ -816,6 +824,8 @@ mod tests {
     /// reporting `MeshShader` while claiming to have forced something.
     #[test]
     fn forcing_a_path_reaches_the_device_and_the_summary() {
+        let _view = crcbl::debug_view::for_test();
+
         let mut options = headless(4);
         options.forced.geometry = Some(crcbl::hal::GeometryPath::IndirectPerBatch);
         options.forced.binding = Some(crcbl::hal::BindingModel::ArrayPages);
@@ -841,6 +851,16 @@ mod tests {
     #[test]
     fn an_effect_flag_reaches_the_frame_and_the_summary() {
         use crcbl::render::RenderEffects;
+
+        // **Owns the debug view, for `viewer`'s
+        // `the_players_video_clamp_reaches_the_frame_and_survives_a_reload`
+        // reason.** This test goes through `run` rather than `scripted`, and
+        // `scripted` is where this sample's other tests take that lock — so
+        // without this line a sibling holding a readout view costs every
+        // assertion below both antialiasing bits, which
+        // `ForwardRenderer::resolved_effects` removes for any view that is not
+        // `Shaded`.
+        let _view = crcbl::debug_view::for_test();
 
         assert_eq!(
             run(&headless(4))

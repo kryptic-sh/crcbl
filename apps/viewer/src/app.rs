@@ -2355,6 +2355,12 @@ mod tests {
     /// separates it from a run that presented blank frames.
     #[test]
     fn a_headless_run_draws_the_document_and_stops() {
+        // Owns the debug view: this sample writes that process-global on
+        // boot and reads effects back through it, and `scripted` is where
+        // the rest of these tests take the same lock. See
+        // `crcbl::debug_view::for_test`.
+        let _view = crcbl::debug_view::for_test();
+
         let (_dir, options) = model_at(&fixture::quad_glb(fixture::QUAD_CENTRE), 8);
         let summary = run(&options).expect("the null backend runs everywhere");
         assert_eq!(summary.frames, 8);
@@ -3974,6 +3980,8 @@ mod tests {
     /// `docs/plan/sample/05-viewer.md` exists to catch.
     #[test]
     fn a_document_with_nothing_in_it_never_reaches_a_window() {
+        let _view = crcbl::debug_view::for_test();
+
         let (_dir, options) = model_at(&fixture::empty_glb(), 4);
         let error = run(&options).expect_err("an empty document is not a run");
         assert!(

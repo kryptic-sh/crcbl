@@ -334,8 +334,20 @@ mod tests {
         );
 
         drop(outer);
+        // **This thread's slot, not the global lock.** `VIEW_LOCK.try_lock()`
+        // would answer the same question and answer it wrongly under load: the
+        // lock is released by the line above, so any other test thread parked in
+        // `for_test` may hold it before the next statement runs, and a `try_lock`
+        // here then reports a guard that leaked when what really happened is
+        // that the release worked and somebody took their turn. Failing that
+        // way needs a second thread wanting the lock, which is why it only ever
+        // reddened a whole-workspace run.
+        //
+        // [`HELD`] is this thread's and cannot be raced. Emptying it is what
+        // releases the lock — the `MutexGuard` lives in there — so a `None` here
+        // *is* the release, observed at its source.
         assert!(
-            VIEW_LOCK.try_lock().is_ok(),
+            HELD.with_borrow(Option::is_none),
             "the outermost guard dropped without giving the lock back"
         );
         assert_eq!(current(), DebugView::Shaded);
