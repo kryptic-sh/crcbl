@@ -280,12 +280,19 @@ and on native it still runs cheaper than the frame did before AO was halved.
 **The other route is still wanted, and is now the only one for anything that is
 not a console variable.** Giving the AO knobs `[engine.video]` keys —
 `RENDER_SCALE_KEY` and `FRAME_LIMIT_KEY` are the pattern for a scalar key whose
-reader drives a renderer — is the step the preset entries below already call
-ordinary work, and it is what would let `high` differ from `medium` by something
-measured. An autoexec reaches a `convar!`; it cannot reach a `RenderEffects` bit
-that has no catalogue key, which is why the contact-shadow entry below is still
-blocked. Its cost is recorded: a new `VIDEO_KEYS` row shifts `toFader` in
-`browser-e2e.mjs` and the options browser gate has to be run locally.
+reader drives a renderer — is what would let `high` differ from `medium` by
+something measured. An autoexec reaches a `convar!`; it cannot reach a
+`RenderEffects` bit that has no catalogue key, which is why the contact-shadow
+entry below is still blocked.
+
+**It is not the chore this once said, and its cost is not the one recorded
+here** — both corrected 2026-09-02. A scalar catalogue key shifts nothing in
+`browser-e2e.mjs`, because `apps/options` builds its rows from `VIDEO_KEYS` plus
+hand-written scalar rows rather than from the catalogue; only a new `VIDEO_KEYS`
+entry moves `toFader`. The real cost is a design one, since a catalogue key
+generates a console variable named after itself and would sit beside the
+existing `r_ssao_slices`. The entry "The tier table is silent about six knobs a
+preset could write" carries the three routes and what each trades.
 
 **What the rung buys, re-measured.** The scene is
 `forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`: a
@@ -1291,13 +1298,55 @@ wrote a guessed cadence would move every golden with a moving light.
 **And each needs a settings key before a tier could write it even with the
 numbers in hand.** All four are `convar!` process globals; a preset writes the
 player's file, which `docs/plan/39-capabilities.md` fixes as "a layer of keys
-and not a second mechanism". So the route for each is two steps, in this order:
-a catalogue key in `crcbl::settings::catalogue` whose reader drives the variable
-— the road `RENDER_SCALE_KEY` already takes to
-`ForwardRenderer::set_render_scale` — and then a tier-table row saying what each
-column spends. The first is ordinary work; the second is the measurement.
-`crcbl::settings::presets`' header says the same thing where an implementor will
-read it.
+and not a second mechanism".
+
+**This entry used to call the first step "ordinary work" and point at
+`RENDER_SCALE_KEY` as the road. Read before starting, 2026-09-02: it is not that
+road, and it is a decision rather than a chore.** Two things in the tree decide
+it:
+
+- **A catalogue key generates a console variable named after the key.**
+  `settings::console_bindings` makes one `ARCHIVE` binding per catalogue entry,
+  and `crates/crcbl/tests/console_table.rs` asserts every key has one. So adding
+  `ssao_slices` would put a second console name beside the existing
+  `r_ssao_slices`, both steering one value. `RENDER_SCALE_KEY` is not the same
+  case: it has **no** competing `convar!`, so it never had to answer this.
+- **`crcbl-render` cannot read the settings stack.** Its manifest takes
+  `crcbl-console` and `crcbl-core` and neither `crcbl` nor `crcbl-store`, which
+  is _why_ these knobs are convars. So a settings value has to be written into
+  the convar from the umbrella crate at boot; the renderer cannot pull it.
+
+And `#[flags(ARCHIVE)]` on a `convar!` does **not** persist it — the flag is
+real and the macro takes it, but the only non-test code that reads it is
+`crcbl-console`'s `reset`, which skips archived variables. Everything that
+actually reaches `settings.toml` goes through the catalogue bindings.
+
+**So the routes are three, and the choice is the user's.**
+
+1. **A catalogue key that drives the convar.** Cheapest, and what this entry
+   assumed. The price is two console names for one value and a precedence rule
+   to write down — settings at boot, then `autoexec.cfg`, then whatever is
+   typed.
+2. **Make the convar the only name and teach the engine to persist `ARCHIVE`
+   ones** — a writer that walks the registry's archived variables into the stack
+   on `save`, and a boot-time reader. One name, it is what `FCVAR_ARCHIVE` means
+   in the console this was modelled on, `docs/plan/52-debug-console.md` names
+   that model in its opening lines, and **it solves all six knobs in this entry
+   at once** rather than two. Bigger, and it needs a namespace decision.
+3. **Settings-only, no console name**, with the value reaching the renderer
+   through an API call the way `render_scale` does. No duplication at all — and
+   it gives up the live tuning these knobs were added for, and costs a wiring
+   line in every sample, which is what `render_scale` pays today.
+
+Route 2 looks like the one that pays for itself; route 1 is defensible if only
+the AO pair ever matters. Nothing is built either way.
+
+**One correction to a cost recorded elsewhere in this file:** a _scalar_
+catalogue key does not shift `toFader` in `web/tools/browser-e2e.mjs`.
+`apps/options` builds its effect rows from `VIDEO_KEYS` and carries hand-written
+rows for `render_scale` and `frame_limit`, so a catalogue key adds no row on its
+own. Only a new `VIDEO_KEYS` entry, or a hand-added options row, moves that
+groove.
 
 ## `medium` and `high` are the same preset today (2026-08-31)
 
