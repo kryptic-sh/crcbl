@@ -429,5 +429,8 @@ occluded texels out of 32425 drawn. A population that thin cannot tell a working
 pass from a rounding step.
 
 This is milestone 1 of [sample/19-alcove.md](sample/19-alcove.md)'s three parts,
-and the one that document says to build first. The scene and the live radius and
-intensity controls are the other two, and neither exists.
+and the one that document says to build first. **The intensity control exists**
+— `crcbl_render::ssao::r_ssao_intensity`, a console variable the pass reads
+every frame — so what is left of that milestone is the scene and a live _radius_
+control, which has no knob of any kind. A console variable is live but it is not
+_shown_, which is half of what that sample asks a control to be.

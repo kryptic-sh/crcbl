@@ -85,8 +85,12 @@ Nothing else exists.
 ## Milestones
 
 1. **The scene, the AO-only view mode, and the shipped technique.** Radius and
-   intensity controls land here. **The view mode is done** — see the status
-   above; the scene and the two controls are what is left of this milestone.
+   intensity controls land here. **The view mode is done**, and intensity now
+   has a knob — `crcbl_render::ssao::r_ssao_intensity` is a console variable the
+   pass reads every frame. What is left of this milestone is the scene, a radius
+   control, which has no knob at all, and _showing_ both: this sample asks for
+   the two to be legible on screen, and a console variable is live without being
+   shown.
 2. **GTAO**, side by side with SSAO, with the silhouette-rim comparison the
    escalation clause cares about.
 3. **Bent-normal visualisation**, once GTAO produces one.
