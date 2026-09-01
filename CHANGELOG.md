@@ -1250,6 +1250,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The screen-space passes reconstruct view position from the four terms of
+  `inv_proj` that are not zero.** Both projection families the engine can build
+  — `perspective_infinite_reverse` and `orthographic` — invert to a matrix with
+  eight structural zeros, so the per-tap
+  `mul(camera.inv_proj, float4(ndc, depth, 1))` in `ssao`, `ssao_blur`, `ssr`,
+  `ssr_blur` and `contact_shadows` spent most of its multiplies on exact zeros.
+  The new shared `unproject` and `unproject_z` helpers keep only the surviving
+  terms; `x + 0.0 == x`, so every frame is bit-identical to before (`range` and
+  `practice` screenshots hash unchanged). Measured on an MX550 at 1264x1370 over
+  ten interleaved A-B rounds: `ssao` -0.047 ms (-1.2%), frame total -0.051 ms
+  (-0.6%), the after build faster in all ten pairs. The small size of the win is
+  itself the finding — these passes are bound by depth-fetch latency, not ALU.
+
 - **`crcbl_core::log`'s live filter moved out of `StderrLogger` into the
   module**, so one filter serves every sink: `filter` and `set_filter` answer
   for a registered foreign sink as well as for this crate's own logger, and

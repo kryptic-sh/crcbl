@@ -118,9 +118,20 @@ fn depth_at_0( pixel_0 : vec2<i32>,  extent_0 : vec2<i32>) -> f32
     return (textureLoad((scene_depth_0), ((_S9)).xy, ((_S9)).z));
 }
 
-fn view_position_0( pixel_1 : vec2<i32>,  depth_0 : f32,  extent_1 : vec2<f32>) -> vec3<f32>
+fn unproject_z_0( depth_0 : f32) -> vec2<f32>
 {
-    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
+    return vec2<f32>(camera_0.inv_proj_0.data_0[i32(2)][i32(2)] * depth_0 + camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)] * depth_0 + camera_0.inv_proj_0.data_0[i32(3)][i32(3)]);
+}
+
+fn unproject_0( ndc_0 : vec2<f32>,  depth_1 : f32) -> vec4<f32>
+{
+    var depth_row_0 : vec2<f32> = unproject_z_0(depth_1);
+    return vec4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)] * ndc_0.x + camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)] * ndc_0.y + camera_0.inv_proj_0.data_0[i32(3)][i32(1)], depth_row_0.x, depth_row_0.y);
+}
+
+fn view_position_0( pixel_1 : vec2<i32>,  depth_2 : f32,  extent_1 : vec2<f32>) -> vec3<f32>
+{
+    var view_0 : vec4<f32> = unproject_0(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_2);
     return view_0.xyz / vec3<f32>(view_0.w);
 }
 
@@ -284,9 +295,9 @@ fn dfg_at_0( n_dot_v_0 : f32,  roughness_3 : f32) -> vec2<f32>
     return fixed_pair_at_0(dfg_0, vec2<f32>(n_dot_v_0, roughness_3));
 }
 
-fn pixel_of_0( ndc_0 : vec2<f32>,  size_1 : vec2<f32>) -> vec2<f32>
+fn pixel_of_0( ndc_1 : vec2<f32>,  size_1 : vec2<f32>) -> vec2<f32>
 {
-    return vec2<f32>((ndc_0.x * 0.5f + 0.5f) * size_1.x, (0.5f - ndc_0.y * 0.5f) * size_1.y);
+    return vec2<f32>((ndc_1.x * 0.5f + 0.5f) * size_1.x, (0.5f - ndc_1.y * 0.5f) * size_1.y);
 }
 
 fn ndc_of_0( at_1 : vec2<f32>,  size_2 : vec2<f32>) -> vec2<f32>
@@ -388,15 +399,15 @@ fn hiz_at_0( level_0 : u32,  texel_1 : vec2<i32>,  extent_4 : vec2<i32>) -> f32
     }
 }
 
-fn view_z_of_0( depth_1 : f32) -> f32
+fn view_z_of_0( depth_3 : f32) -> f32
 {
-    var view_1 : vec4<f32> = (((vec4<f32>(0.0f, 0.0f, depth_1, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
-    return view_1.z / view_1.w;
+    var view_1 : vec2<f32> = unproject_z_0(depth_3);
+    return view_1.x / view_1.y;
 }
 
-fn thickness_at_0( advance_0 : f32,  depth_2 : f32) -> f32
+fn thickness_at_0( advance_0 : f32,  depth_4 : f32) -> f32
 {
-    return max(advance_0, abs(depth_2) * 0.01999999955296516f);
+    return max(advance_0, abs(depth_4) * 0.01999999955296516f);
 }
 
 struct pixelOutput_0
@@ -428,13 +439,13 @@ fn fragmentMain( _S60 : pixelInput_0, @builtin(position) position_1 : vec4<f32>)
     var surface_0 : vec4<f32> = (textureLoad((reflectivity_0), ((_S66)).xy, ((_S66)).z));
     var _S67 : f32 = surface_0.w;
     var sharpness_0 : f32 = sharpness_of_0(_S67);
-    var depth_3 : f32 = depth_at_0(_S65, extent_5);
-    if(depth_3 <= 0.0f)
+    var depth_5 : f32 = depth_at_0(_S65, extent_5);
+    if(depth_5 <= 0.0f)
     {
         var _S68 : pixelOutput_0 = pixelOutput_0( NOTHING_0 );
         return _S68;
     }
-    var origin_0 : vec3<f32> = view_position_0(_S65, depth_3, size_4);
+    var origin_0 : vec3<f32> = view_position_0(_S65, depth_5, size_4);
     var normal_0 : vec3<f32> = normal_at_0(_S65, origin_0, extent_5, size_4);
     var towards_0 : vec3<f32> = normalize(origin_0);
     var ray_0 : vec3<f32> = reflect(towards_0, normal_0);

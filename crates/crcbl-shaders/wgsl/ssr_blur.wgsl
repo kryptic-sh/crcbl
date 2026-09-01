@@ -38,10 +38,15 @@ fn depth_at_0( pixel_0 : vec2<i32>,  extent_0 : vec2<i32>) -> f32
     return (textureLoad((scene_depth_0), ((_S2)).xy, ((_S2)).z));
 }
 
-fn view_z_0( pixel_1 : vec2<i32>,  depth_0 : f32,  extent_1 : vec2<f32>) -> f32
+fn unproject_z_0( depth_0 : f32) -> vec2<f32>
 {
-    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
-    return view_0.z / view_0.w;
+    return vec2<f32>(camera_0.inv_proj_0.data_0[i32(2)][i32(2)] * depth_0 + camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)] * depth_0 + camera_0.inv_proj_0.data_0[i32(3)][i32(3)]);
+}
+
+fn view_z_0( pixel_1 : vec2<i32>,  depth_1 : f32,  extent_1 : vec2<f32>) -> f32
+{
+    var view_0 : vec2<f32> = unproject_z_0(depth_1);
+    return view_0.x / view_0.y;
 }
 
 struct pixelOutput_0
@@ -118,10 +123,10 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
             var share_0 : f32;
             if(_S11)
             {
-                var depth_1 : f32 = depth_at_0(tap_0, extent_2);
-                var away_0 : f32 = abs(view_z_0(tap_0, depth_1, size_0) - centre_z_0);
+                var depth_2 : f32 = depth_at_0(tap_0, extent_2);
+                var away_0 : f32 = abs(view_z_0(tap_0, depth_2, size_0) - centre_z_0);
                 var apart_0 : f32 = abs(tapped_0.w - sharpness_0);
-                if(depth_1 <= 0.0f)
+                if(depth_2 <= 0.0f)
                 {
                     share_0 = 0.0f;
                 }

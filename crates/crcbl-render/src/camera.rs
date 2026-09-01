@@ -948,4 +948,187 @@ mod tests {
         };
         let _ = camera.view();
     }
+
+    /// **Every projection this module builds inverts to the sparsity the
+    /// screen-space shaders read**, and the reduced form they use is the same
+    /// value rather than a close one.
+    ///
+    /// `ssao.slang`'s `unproject` — copied verbatim into `ssao_blur.slang`,
+    /// `ssr.slang`, `ssr_blur.slang` and `contact_shadows.slang`, and held
+    /// together by `crcbl_shaders::ssr`'s drift guard — keeps four terms of
+    /// `mul(inv_proj, float4(ndc, depth, 1.0))` and drops the rest, because
+    /// those entries are zero for both variants of [`Projection`]. Nothing on
+    /// the shader side can check that: a projection that broke the pattern
+    /// would reconstruct positions from the wrong entries and draw a wrong
+    /// picture on hardware, with no error anywhere. So it is checked here,
+    /// where the projections are built and where a third variant would be
+    /// added.
+    ///
+    /// The comparison is on **bits** rather than a tolerance, because the claim
+    /// is that the two forms agree exactly — dropping a term that is exactly
+    /// zero changes nothing, and a tolerance would also pass on one that had
+    /// drifted to a denormal, which is the case this exists to catch.
+    ///
+    /// What it cannot catch is a reduction reading the *wrong* entry, because
+    /// several of the ones it reads hold the same value in every matrix
+    /// reachable from here. That is
+    /// [`the_screen_space_unprojection_is_the_full_product_for_that_sparsity`],
+    /// which is where the entries are told apart.
+    #[test]
+    fn every_projection_inverts_to_the_sparsity_the_screen_space_shaders_read() {
+        // The entries `unproject` does not read, as (row, column). Every one of
+        // them must be exactly zero for the four terms it keeps to be the whole
+        // product.
+        const DROPPED: [(usize, usize); 8] = [
+            (0, 1),
+            (0, 2),
+            (1, 0),
+            (1, 2),
+            (2, 0),
+            (2, 1),
+            (3, 0),
+            (3, 1),
+        ];
+
+        let projections = [
+            (Projection::default(), ASPECT),
+            (
+                Projection::Perspective {
+                    fov_y: FRAC_PI_4,
+                    near: 0.1,
+                },
+                1264.0 / 1370.0,
+            ),
+            (
+                Projection::Perspective {
+                    fov_y: 0.3,
+                    near: 5.0,
+                },
+                0.5,
+            ),
+            (
+                Projection::Perspective {
+                    fov_y: 2.9,
+                    near: 0.001,
+                },
+                3.7,
+            ),
+            (
+                Projection::Orthographic {
+                    half_height: 10.0,
+                    near: 0.1,
+                    far: 1000.0,
+                },
+                ASPECT,
+            ),
+            (
+                Projection::Orthographic {
+                    half_height: 0.5,
+                    near: 1.0,
+                    far: 2.0,
+                },
+                0.25,
+            ),
+        ];
+
+        for (projection, aspect) in projections {
+            let inverse = projection.matrix(aspect).inverse();
+            let columns = inverse.to_cols_array();
+            // `to_cols_array` is column-major; the shader indexes
+            // `inv_proj[row][column]`, which is the logical element whichever
+            // way the target packs the block.
+            let at = |row: usize, column: usize| columns[column * 4 + row];
+
+            for (row, column) in DROPPED {
+                assert_eq!(
+                    at(row, column),
+                    0.0,
+                    "{projection:?} at aspect {aspect} inverts with a non-zero at \
+                     ({row}, {column}), which `unproject` in the screen-space shaders drops"
+                );
+            }
+
+            for ndc in [
+                glam::Vec2::ZERO,
+                glam::Vec2::new(-1.0, -1.0),
+                glam::Vec2::new(1.0, 1.0),
+                glam::Vec2::new(-0.731, 0.269),
+            ] {
+                for depth in [0.0, crcbl_hal::depth::NEAR, 0.5, 1.0e-4] {
+                    let full = inverse * glam::Vec4::new(ndc.x, ndc.y, depth, 1.0);
+                    let reduced = glam::Vec4::new(
+                        at(0, 0) * ndc.x + at(0, 3),
+                        at(1, 1) * ndc.y + at(1, 3),
+                        at(2, 2) * depth + at(2, 3),
+                        at(3, 2) * depth + at(3, 3),
+                    );
+                    assert_eq!(
+                        full.to_array().map(f32::to_bits),
+                        reduced.to_array().map(f32::to_bits),
+                        "{projection:?} at aspect {aspect}: the shaders' reduced unprojection \
+                         of {ndc:?} at depth {depth} is not the full product {full:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The other half of the claim above**: given that sparsity, the four
+    /// terms the shaders keep are the whole product — the right entries against
+    /// the right components.
+    ///
+    /// Separate from
+    /// [`every_projection_inverts_to_the_sparsity_the_screen_space_shaders_read`]
+    /// because the two guard different things, and because that one **cannot**
+    /// guard this. Every matrix it can reach has `(0, 3)` and `(1, 3)` at zero
+    /// — an infinite reversed-Z perspective is centred, and [`Projection`]
+    /// builds only a symmetric orthographic box — so a copy reading one of
+    /// those two in place of the other draws exactly the same frame and passes
+    /// it. Confirmed by mutating the reduction there and watching it stay
+    /// green, which is why this exists.
+    ///
+    /// So the matrix here is **synthetic**, with a different value in each of
+    /// the eight slots the reduction reads and a zero everywhere else. Nothing
+    /// builds one like it today; the point is that every kept term is
+    /// distinguishable, so an index that swapped two of them fails here rather
+    /// than waiting for the projection that first tells them apart. A jittered
+    /// projection is that projection — which is why `unproject` keeps the two
+    /// additions the engine's own matrices would let it drop.
+    #[test]
+    fn the_screen_space_unprojection_is_the_full_product_for_that_sparsity() {
+        // Column-major, as `Mat4::from_cols_array` takes it and
+        // `to_cols_array` gives it back. Reading down the columns, the
+        // non-zero entries are (0,0), (1,1), (2,2), (3,2) and the whole last
+        // column — the eight `unproject` reads.
+        let sparse = Mat4::from_cols_array(&[
+            2.5, 0.0, 0.0, 0.0, //
+            0.0, -3.25, 0.0, 0.0, //
+            0.0, 0.0, 0.75, -1.5, //
+            0.125, -0.375, 4.5, 1.25,
+        ]);
+        let columns = sparse.to_cols_array();
+        let at = |row: usize, column: usize| columns[column * 4 + row];
+
+        for ndc in [
+            glam::Vec2::new(-0.731, 0.269),
+            glam::Vec2::new(0.5, -0.125),
+            glam::Vec2::new(1.0, -1.0),
+        ] {
+            for depth in [crcbl_hal::depth::NEAR, 0.375, 1.0e-4] {
+                let full = sparse * glam::Vec4::new(ndc.x, ndc.y, depth, 1.0);
+                let reduced = glam::Vec4::new(
+                    at(0, 0) * ndc.x + at(0, 3),
+                    at(1, 1) * ndc.y + at(1, 3),
+                    at(2, 2) * depth + at(2, 3),
+                    at(3, 2) * depth + at(3, 3),
+                );
+                assert_eq!(
+                    full.to_array().map(f32::to_bits),
+                    reduced.to_array().map(f32::to_bits),
+                    "the shaders' reduced unprojection of {ndc:?} at depth {depth} is not the \
+                     full product {full:?}"
+                );
+            }
+        }
+    }
 }

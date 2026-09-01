@@ -21323,6 +21323,29 @@ reasons. What the first slice deferred or turned up:
   it needs `GreaterOrEqual` and depth invariance across four rasterisers, which
   only CI can settle. The engine now has per-pass GPU timers and frame counters,
   so that change can be **measured** rather than assumed when it is made.
+- **AO still runs at full resolution, and the pair is now measured: it is half
+  the GPU frame.** On an MX550 at 1264x1370 running `breach` on the range map,
+  the per-pass timers read `ssao` 3.734 ms and `ssao-blur` 0.631 ms against an
+  8.577 ms sum over every pass — 51%, with `forward` a distant second at 2.545
+  ms. Half-resolution AO with an upsample was the slice after the bilateral blur
+  and has not been done; it is the one of the two that costs quality for speed,
+  and it is now the only lever left that is worth its risk, because the tap
+  count is what `ssao` is spending. Reducing the arithmetic per tap has been
+  tried and is nearly free: see the `unproject` entry below.
+- **Per-tap ALU is not what these passes cost.** Dropping the eight structurally
+  zero terms out of the `mul(camera.inv_proj, ...)` every screen-space tap ran —
+  the `unproject` / `unproject_z` helpers shared across `ssao`, `ssao_blur`,
+  `ssr`, `ssr_blur` and `contact_shadows` — measured `ssao` -0.047 ms (-1.2%)
+  and the frame total -0.051 ms (-0.6%) over ten interleaved A-B rounds, after
+  faster in all ten. Real but tiny, and output bit-identical. The reading is
+  that `ssao` is bound by depth-fetch latency: any further work on it should cut
+  **taps**, not instructions. Two things were left on the table deliberately —
+  the one-off `mul(camera.inv_proj, float4(0, 0, 1, 1))` in `ssr.slang` and
+  `contact_shadows.slang` (once per invocation, not per tap, and not in the
+  drift guard's shared list), and the per-pass deltas for `ssr` (+0.024 ms),
+  which are not separable from drift: `forward`, which has no code change at
+  all, moved -0.022 ms in the same runs, so the per-pass noise floor here is
+  about +/-0.02 ms.
 - **`SSAO_RADIUS` is 0.5 and was tuned against `Scene::Ao` alone.** It has not
   been retuned; it has been **measured** against a real room — see "The AO
   constants against lantern's room", which finds it sane at room scale. The

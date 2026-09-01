@@ -81,9 +81,20 @@ fn depth_at_0( pixel_0 : vec2<i32>,  extent_0 : vec2<i32>) -> f32
     return (textureLoad((scene_depth_0), ((_S9)).xy, ((_S9)).z));
 }
 
-fn view_position_0( pixel_1 : vec2<i32>,  depth_0 : f32,  extent_1 : vec2<f32>) -> vec3<f32>
+fn unproject_z_0( depth_0 : f32) -> vec2<f32>
 {
-    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
+    return vec2<f32>(camera_0.inv_proj_0.data_0[i32(2)][i32(2)] * depth_0 + camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)] * depth_0 + camera_0.inv_proj_0.data_0[i32(3)][i32(3)]);
+}
+
+fn unproject_0( ndc_0 : vec2<f32>,  depth_1 : f32) -> vec4<f32>
+{
+    var depth_row_0 : vec2<f32> = unproject_z_0(depth_1);
+    return vec4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)] * ndc_0.x + camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)] * ndc_0.y + camera_0.inv_proj_0.data_0[i32(3)][i32(1)], depth_row_0.x, depth_row_0.y);
+}
+
+fn view_position_0( pixel_1 : vec2<i32>,  depth_2 : f32,  extent_1 : vec2<f32>) -> vec3<f32>
+{
+    var view_0 : vec4<f32> = unproject_0(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_2);
     return view_0.xyz / vec3<f32>(view_0.w);
 }
 
@@ -119,9 +130,9 @@ fn normal_at_0( pixel_2 : vec2<i32>,  centre_0 : vec3<f32>,  extent_2 : vec2<i32
     return normalize(cross(vertical_0, horizontal_0));
 }
 
-fn pixel_of_0( ndc_0 : vec2<f32>,  size_1 : vec2<f32>) -> vec2<f32>
+fn pixel_of_0( ndc_1 : vec2<f32>,  size_1 : vec2<f32>) -> vec2<f32>
 {
-    return vec2<f32>((ndc_0.x * 0.5f + 0.5f) * size_1.x, (0.5f - ndc_0.y * 0.5f) * size_1.y);
+    return vec2<f32>((ndc_1.x * 0.5f + 0.5f) * size_1.x, (0.5f - ndc_1.y * 0.5f) * size_1.y);
 }
 
 fn ndc_of_0( at_0 : vec2<f32>,  size_2 : vec2<f32>) -> vec2<f32>
@@ -190,15 +201,15 @@ fn cell_exit_0( at_1 : vec2<f32>,  forward_0 : vec2<f32>,  size_3 : f32,  reach_
     return max(min(along_x_0, along_y_0), nudge_0);
 }
 
-fn view_z_of_0( depth_1 : f32) -> f32
+fn view_z_of_0( depth_3 : f32) -> f32
 {
-    var view_1 : vec4<f32> = (((vec4<f32>(0.0f, 0.0f, depth_1, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
-    return view_1.z / view_1.w;
+    var view_1 : vec2<f32> = unproject_z_0(depth_3);
+    return view_1.x / view_1.y;
 }
 
-fn thickness_at_0( advance_0 : f32,  depth_2 : f32) -> f32
+fn thickness_at_0( advance_0 : f32,  depth_4 : f32) -> f32
 {
-    return max(advance_0, abs(depth_2) * 0.01999999955296516f);
+    return max(advance_0, abs(depth_4) * 0.01999999955296516f);
 }
 
 struct pixelOutput_0
@@ -222,13 +233,13 @@ fn fragmentMain( _S20 : pixelInput_0, @builtin(position) position_1 : vec4<f32>)
     var _S22 : f32 = f32(height_0);
     var size_4 : vec2<f32> = vec2<f32>(_S21, _S22);
     var _S23 : vec2<i32> = vec2<i32>(position_1.xy);
-    var depth_3 : f32 = depth_at_0(_S23, extent_3);
-    if(depth_3 <= 0.0f)
+    var depth_5 : f32 = depth_at_0(_S23, extent_3);
+    if(depth_5 <= 0.0f)
     {
         var _S24 : pixelOutput_0 = pixelOutput_0( 1.0f );
         return _S24;
     }
-    var origin_0 : vec3<f32> = view_position_0(_S23, depth_3, size_4);
+    var origin_0 : vec3<f32> = view_position_0(_S23, depth_5, size_4);
     var normal_0 : vec3<f32> = normal_at_0(_S23, origin_0, extent_3, size_4);
     var ray_0 : vec3<f32> = camera_0.to_light_0.xyz;
     var facing_0 : f32 = saturate(dot(normal_0, ray_0) / 0.10000000149011612f);

@@ -9,10 +9,11 @@
 //! This module also carries the guard that holds the **shared screen-space
 //! helpers** together — see
 //! [`tests::the_shared_screen_space_helpers_have_not_drifted`]. `ssr.slang`
-//! copies `depth_at`, `view_position` and `normal_at` out of `ssao.slang`
-//! verbatim and `ssr_blur.slang` copies `depth_at` and `view_z`, because this
-//! repo has no include mechanism by design; two copies is already the bug, and
-//! four without a guard is a drift with a schedule.
+//! copies `depth_at`, `unproject`, `view_position` and `normal_at` out of
+//! `ssao.slang` verbatim and `ssr_blur.slang` copies `depth_at`, `unproject`
+//! and `view_z`, because this repo has no include mechanism by design; two
+//! copies is already the bug, and four without a guard is a drift with a
+//! schedule.
 //!
 //! [`tests::the_shared_screen_space_helpers_have_not_drifted`]: self
 
@@ -226,8 +227,9 @@ mod tests {
 
     /// **The copies must be identical, character for character.**
     ///
-    /// `ssr.slang` re-declares `depth_at`, `view_position` and `normal_at`,
-    /// `ssr_blur.slang` re-declares `depth_at` and `view_z`, and
+    /// `ssr.slang` re-declares `depth_at`, `unproject`, `view_position` and
+    /// `normal_at`, `ssr_blur.slang` re-declares `depth_at`, `unproject` and
+    /// `view_z`, and
     /// `contact_shadows.slang` re-declares those three and the march's own five
     /// beside them, because the manifest hashes one source per artifact and an
     /// `#include` would be a file whose edits nothing downstream notices. Nothing else in the tree would
@@ -242,6 +244,12 @@ mod tests {
     fn the_shared_screen_space_helpers_have_not_drifted() {
         for signature in [
             "float depth_at(int2 pixel, int2 extent)",
+            // The two every reconstruction below goes through, and the widest
+            // copies here: all five of `SOURCES` carry both, because all five
+            // unproject something and the full form is written in terms of the
+            // depth-only one.
+            "float2 unproject_z(float depth)",
+            "float4 unproject(float2 ndc, float depth)",
             "float view_z(int2 pixel, float depth, float2 extent)",
             "float3 view_position(int2 pixel, float depth, float2 extent)",
             "float3 normal_at(int2 pixel, float3 centre, int2 extent, float2 size)",

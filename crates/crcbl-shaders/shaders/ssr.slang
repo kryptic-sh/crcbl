@@ -432,6 +432,62 @@ float depth_at(int2 pixel, int2 extent)
     return scene_depth.Load(int3(clamped, 0));
 }
 
+/// The two rows of the inverse projection that `depth` alone reaches: the
+/// unprojected `z` and the `w` a caller divides it by.
+///
+/// **Split out of [`unproject`] so that no caller computes a component it
+/// discards.** `ssr.slang`'s `view_z_of` and the two blurs' `view_z` want the
+/// depth alone, and routing them through the full unprojection leaves the other
+/// two components to a dead-code pass that may or may not run — a cost that
+/// depends on the driver rather than on this file. This way every component
+/// either function computes is one its caller reads, which is a property rather
+/// than a hope.
+///
+/// **Not a measured win.** The split was made after the `ssr` pass read
+/// 0.027 ms slower without it, and a paired re-measurement did not confirm
+/// that: passes with no code change at all move by as much between builds on
+/// the machine it was read on. What stands is the argument above, not a number.
+float2 unproject_z(float depth)
+{
+    return float2(
+        camera.inv_proj[2][2] * depth + camera.inv_proj[2][3],
+        camera.inv_proj[3][2] * depth + camera.inv_proj[3][3]);
+}
+
+/// The inverse projection applied to one clip-space point, with the terms that
+/// are structurally zero left out.
+///
+/// **The same value as `mul(camera.inv_proj, float4(ndc, depth, 1.0))`, not an
+/// approximation of it.** Both projections `crcbl_render::camera::Projection`
+/// builds — an infinite reversed-Z perspective and a reversed orthographic box
+/// — invert to a matrix whose only non-zero entries are the eight read below,
+/// so most of the general product's sixteen multiplies are against an exact
+/// zero, and adding an exact zero is exact. What holds that true of a
+/// projection added later is a pair of tests rather than this comment —
+/// `crcbl_render::camera`'s
+/// `every_projection_inverts_to_the_sparsity_the_screen_space_shaders_read`
+/// for the pattern and
+/// `the_screen_space_unprojection_is_the_full_product_for_that_sparsity` for
+/// the four terms below being the whole of it — because a projection that
+/// broke either would draw a wrong picture rather than fail to compile.
+///
+/// `camera.inv_proj[r][c]` is row `r`, column `c` — the same logical element
+/// `mul` reads, whatever layout the target packs the block in.
+///
+/// **The call count is the reason it is worth writing out.** `ssao.slang`
+/// unprojects once per horizon tap, once per neighbour the normal takes and
+/// once for the centre, so a pixel pays for the dropped terms over and over
+/// before the pass has shaded anything.
+float4 unproject(float2 ndc, float depth)
+{
+    float2 depth_row = unproject_z(depth);
+    return float4(
+        camera.inv_proj[0][0] * ndc.x + camera.inv_proj[0][3],
+        camera.inv_proj[1][1] * ndc.y + camera.inv_proj[1][3],
+        depth_row.x,
+        depth_row.y);
+}
+
 /// View-space position of the pixel at `pixel`, given the depth already fetched
 /// for it.
 ///
@@ -448,7 +504,7 @@ float3 view_position(int2 pixel, float depth, float2 extent)
     float2 ndc = float2(
         (float(pixel.x) + 0.5) / extent.x * 2.0 - 1.0,
         1.0 - (float(pixel.y) + 0.5) / extent.y * 2.0);
-    float4 view = mul(camera.inv_proj, float4(ndc, depth, 1.0));
+    float4 view = unproject(ndc, depth);
     return view.xyz / view.w;
 }
 
@@ -560,8 +616,8 @@ float hiz_at(uint level, int2 texel, int2 extent)
 /// a well-defined depth to compare a ray against.
 float view_z_of(float depth)
 {
-    float4 view = mul(camera.inv_proj, float4(0.0, 0.0, depth, 1.0));
-    return view.z / view.w;
+    float2 view = unproject_z(depth);
+    return view.x / view.y;
 }
 
 /// How far along `forward` the point `at` is from leaving its cell of `size`
