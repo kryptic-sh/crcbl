@@ -579,14 +579,28 @@ including the file's own name — changing `AUTOEXEC` to anything else reddens
 `an_autoexec_that_is_there_runs_its_lines_and_its_effects_land`, because the
 summary line `run_text` prints carries the name. What is **not** covered:
 
-- **The engine call site is compile-checked only.** Delete
-  `console.run_autoexec();` from `Loop::new` and nothing goes red. There is no
-  unit-level home for that assertion: a `Loop` needs a shell and a device, and
-  every route that can build one headlessly is a run with
-  `SettingsSource::None`, which by design reads no autoexec at all — so the one
-  configuration that could observe the call is a windowed run against a real
-  settings directory. The gate on the behaviour is proven; the wiring is held by
-  the compiler and by review.
+- **The engine call site has no automated gate, though it is now verified by
+  hand.** Delete `console.run_autoexec();` from `Loop::new` and nothing goes
+  red. There is no unit-level home for that assertion: a `Loop` needs a shell
+  and a device, and every route that can build one headlessly is a run with
+  `SettingsSource::None`, which by design reads no autoexec at all — so the only
+  configuration that can observe the call is a windowed run against a real
+  settings directory.
+
+  **Run by hand on 2026-09-02, with a control, and it works.** `lantern`
+  windowed under a private Xvfb (`tools/x11-display.sh`), `--frames 200`, with
+  `XDG_CONFIG_HOME` pointed at a scratch directory so no real config directory
+  was touched. Seeded with an `autoexec.cfg` holding `r_ssao_blur_passes 2`, the
+  run logs `console] r_ssao_blur_passes = 2` and `console] autoexec.cfg: 1 line`
+  at 0.34 s and its frame carries an **`ssao-blur-2`** pass; the control run,
+  identical but for an empty config directory, logs neither line and has no such
+  pass. So the wiring is real, and the variable lands before the pass list is
+  built — which is the whole claim.
+
+  What is still missing is that nobody re-runs that. It wants a home in the
+  windowed-sample gate; until it has one, the call site is held by the compiler,
+  by review, and by one dated manual run.
+
 - **`Autoexec::Nowhere` and its `info!` line are untested.** Reaching that arm
   means `SettingsStack::with_platform_storage` answering `None` — natively "this
   platform names no config directory", in a browser "this page installed no
