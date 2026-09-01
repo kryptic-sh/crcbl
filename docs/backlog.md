@@ -13634,6 +13634,38 @@ engine's ring depths in a JS test file, to be silently wrong the day one
 changed. If a future leak turns out to be slow enough to saturate within three
 windows, the answer is more windows, not a table of engine constants.
 
+**It happened a third time on 2026-09-02, and this one survived the three-window
+hardening.** `render lantern in a real browser` failed the Pages run for
+`d0bc715` with `readbacks 2 -> 4 -> 5 -> 6`. That is the same false positive
+again, and the arithmetic says so rather than the resemblance:
+`FRAMES_IN_FLIGHT` is 2 and `CullStatsRing::new` takes `frames_in_flight + 1`
+slots, so three per renderer; lantern's `gpu.rs` holds two, `renderer` and
+`monitor`; the ceiling is six, and the run stopped **at exactly six**. The
+increments decelerate — `+2`, `+1`, `+1` — which is a ring filling, and an
+unbounded leak does not stop at the bound.
+
+So a loaded runner can now stretch the round trip far enough that occupancy
+takes three whole windows to saturate, and three windows is no longer enough to
+see it stop. The cheap remedy is the one this entry already named: **more
+windows**, so the flat step after saturation is inside the sample.
+
+**This is the third occurrence, which is the trigger this entry set for the
+better fix.** It says a per-kind bound reported by the engine is "worth doing
+only if a second question wants the same thing" — three false failures on two
+demos is that. A `liveObjects()` that carried each kind's own ceiling would let
+the check compare against the bound directly rather than inferring saturation
+from the shape of a curve, and would not need a window count tuned against CI
+load at all. Adding a window is a stopgap and should be labelled one.
+
+**Not caused by the autoexec that landed in the same commit**, though the timing
+invites the reading: an autoexec run on a page with no `autoexec.cfg` reads the
+resident map once and allocates nothing, and `readbacks` counts `CullStatsRing`
+slots, which nothing on that path touches. The evidence is weaker than it looks
+in one respect worth stating — the three Pages runs between this commit and the
+last green lantern were **cancelled by my own pushes**, so there are no
+observations in between and "it first failed here" is not evidence it started
+here.
+
 Not fixed, and the reason this took a bisect to see: **`liveObjects()` reports
 totals with no way to say which kinds are ring-shaped.** A kind that carried its
 own bound would let the check compare against it directly instead of inferring
