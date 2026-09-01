@@ -126,6 +126,7 @@ mod bloom;
 pub mod button_skin;
 pub mod camera;
 pub mod cluster_pool;
+mod contact_shadows;
 pub mod counters;
 pub mod cull;
 pub mod cull_stats;

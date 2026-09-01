@@ -1449,6 +1449,42 @@ Texture2DArray<float4> normal_textures;
 [[vk::binding(27, 0)]]
 Texture2D<float4> ltc_matrix;
 
+/// `docs/plan/45-shadows.md`'s screen-space contact shadows, as
+/// `contact_shadows.slang` left them: one `R8Unorm` channel the size of the
+/// frame, `1.0` where the sun reaches the surface unobstructed.
+///
+/// # What it is, and what the cascades cannot say
+///
+/// `cascade_visibility` below biases its comparison by whole cascade texels,
+/// because that is the resolution the evidence has — and a bias large enough to
+/// stop acne is large enough to detach the shadow from the thing casting it.
+/// This channel is the same question asked of the *depth prepass*, at frame
+/// resolution, over a ray a fraction of a metre long: the sliver where a foot
+/// meets the floor, which no atlas texel is small enough to hold.
+///
+/// # Fetched by pixel, clamped, and multiplied into the sun alone
+///
+/// `contact_at` reads it exactly as `occlusion_at` reads `ambient_occlusion`,
+/// and that binding's declaration argues every part of it: a `Load` at
+/// `SV_Position.xy` needs no sampler and no texel-centre arithmetic, and the
+/// clamp against `GetDimensions` is what lets the off-switch be one texel rather
+/// than a frame-sized clear — an unclamped `Load` reads a 1×1 placeholder as
+/// *total* shadow at every pixel but one.
+///
+/// It multiplies `sun_visibility` and nothing else. A punctual light's contact
+/// is a march of its own along a different direction, and this channel was
+/// marched towards the sun; `docs/plan/45-shadows.md` carries that as the rung
+/// above this one.
+///
+/// **Appended past `ltc_matrix`, never inserted**, for the reason every binding
+/// above it gives: `crcbl-mtl` numbers a resource by counting the same-table
+/// entries of the layout list, and Slang numbers a stage's arguments by
+/// declaration order, so the two agree only while both ascend. 28 is past
+/// everything `mesh_cluster.slang` declares, so it needs no mirror there and no
+/// index anything already owns moves.
+[[vk::binding(28, 0)]]
+Texture2D<float> contact_shadow;
+
 /// The matrix that carries a mesh-space normal into `GpuInstance::transform`'s
 /// space, built out of that transform's own upper-left 3×3.
 ///
@@ -4028,6 +4064,22 @@ float occlusion_at(float2 position)
     return ambient_occlusion.Load(int3(texel, 0));
 }
 
+/// The contact-shadow channel under `position`, in `0..=1`, one meaning the sun
+/// reaches this surface unobstructed.
+///
+/// **The fetch is clamped to the image's extent** for `occlusion_at`'s reason
+/// exactly, and here the consequence is louder: unclamped, the renderer's 1×1
+/// white off-switch would read as total shadow at every pixel but one, and a
+/// frame drawn with the effect *off* would lose its sun entirely.
+float contact_at(float2 position)
+{
+    uint width;
+    uint height;
+    contact_shadow.GetDimensions(width, height);
+    int2 texel = min(int2(position), int2(width, height) - 1);
+    return contact_shadow.Load(int3(texel, 0));
+}
+
 /// This fragment's motion vector: where it is now minus where it was last
 /// frame, in texture coordinates.
 ///
@@ -4397,7 +4449,14 @@ FragmentOutput fragmentMain(VertexOutput input)
         if (light.kind == KIND_DIRECTIONAL)
         {
             reach = sun_visibility(input.world_position, to_light, n_dot_l, geometric_normal,
-                                   input.position.xy);
+                                   input.position.xy)
+                  // The contact term, and it multiplies where the cascades
+                  // *replace*: the atlas answers for everything a cascade texel
+                  // can resolve and this answers for the sliver under it, so the
+                  // two are independent occluders of the same light rather than
+                  // two opinions about one. `contact_shadow`'s declaration says
+                  // why it is the sun's alone.
+                  * contact_at(input.position.xy);
         }
         else if (light.kind == KIND_POINT)
         {

@@ -2153,8 +2153,26 @@ mod tests {
     /// ladder exists for, so they are named here as the ladder's and asserted to
     /// be **out** of the boolean table: a `smaa = false` row a player could
     /// still write is a row nothing reads.
+    ///
+    /// # The second exception, and it is an open question rather than a design
+    ///
+    /// `docs/plan/45-shadows.md`'s 2026-08-30 decision made
+    /// [`RenderEffects::CONTACT_SHADOWS`] "not a settings row of its own but a
+    /// tier item", so it is deliberately absent from [`VIDEO_KEYS`] and named in
+    /// [`TIER_ONLY`] here. **What that leaves owed is real**: the same decision
+    /// says the low quality preset clears the bit, and
+    /// [`crate::settings::presets`] clears an effect by writing its
+    /// [`VIDEO_KEYS`] row — `FOG_KEY` is how the froxel switch is spelled there
+    /// — so a bit with no row is a bit no preset can clear. Either this grows a
+    /// row or the presets grow a way to clear a bit without one;
+    /// `docs/backlog.md` carries the question.
     #[test]
     fn every_effect_has_a_key_and_no_two_share_one() {
+        /// Effects `docs/plan/39-capabilities.md`'s tiers own and a player's
+        /// file does not — see this test's header, which is where the one
+        /// member of this set is argued and what it still owes is stated.
+        const TIER_ONLY: RenderEffects = RenderEffects::CONTACT_SHADOWS;
+
         let mut covered = RenderEffects::empty();
         for (key, effect) in VIDEO_KEYS {
             assert!(
@@ -2171,10 +2189,16 @@ mod tests {
             !covered.intersects(slot),
             "the resolve slot is a boolean row as well as a ladder rung"
         );
+        assert!(
+            !covered.intersects(TIER_ONLY),
+            "a tier-only effect with a boolean row is a row a player can write and \
+             nothing decided to offer"
+        );
         assert_eq!(
-            covered.union(slot),
+            covered.union(slot).union(TIER_ONLY),
             RenderEffects::all(),
-            "an effect with no [engine.video] key is one a player cannot reach"
+            "an effect with no [engine.video] key, no ladder rung and no place in the tier \
+             set is one nothing can reach"
         );
     }
 

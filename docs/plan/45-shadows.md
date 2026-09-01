@@ -1042,6 +1042,27 @@ The ladder, in the order it should be climbed:
   tiers before it counts, per the standing rule, and a screen-space term, so it
   leaves no trace on a tile and stacks with every rung above.
 
+  **Built 2026-08-31, and building it found two things this decision got
+  wrong.** `RenderEffects::CONTACT_SHADOWS` and `crcbl_render::contact_shadows`
+  are the bit and the pass; `contact_shadows.slang` is `ssr.slang`'s march with
+  the level held at zero.
+  - **"Not a settings row" and "the low preset clears it" cannot both hold.**
+    `crcbl::settings::presets` clears an effect by writing that effect's
+    `VIDEO_KEYS` row, so a bit with no row is a bit no preset can reach. The
+    build took the "no row" half, which means the low tier does **not** clear it
+    today. Resolving this is the user's call and `docs/backlog.md` carries the
+    options; whichever way it goes belongs with the change that moves the bit
+    into `DEFAULT_STACK`, because that flip re-blesses every golden and the two
+    should be reviewed together.
+  - **The Hi-Z pyramid is the wrong tool here**, though this paragraph offers it
+    as an enabler. A hierarchical march exists to skip empty space over a long
+    ray; this ray is `MAX_STEPS` depth texels, so every cell the pyramid would
+    skip is one the march was about to leave. It is deliberately not read, and
+    the shader header says so.
+
+  The bit is **parked outside `DEFAULT_STACK`** until that flip, so no golden
+  has moved yet and nothing renders the term by default.
+
 Refused, with the reasons:
 
 - **VSM and EVSM.** Storing moments makes a shadow map filterable, so it can be

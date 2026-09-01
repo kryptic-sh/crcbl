@@ -975,13 +975,19 @@ mod tests {
                 // through the **same** sampler — which is why it adds an `Srv`
                 // here and no `Sampler`.
                 //
-                // Last is `docs/plan/44-lighting.md`'s area-light table at
-                // binding 27, and therefore `t13`: an `Rgba16Float`
+                // Then `docs/plan/44-lighting.md`'s area-light table at binding
+                // 27, and therefore `t13`: an `Rgba16Float`
                 // `Texture2D<float4>`, read by `Load` like the `DFG` pair beside
                 // it and taking no sampler for the same reason.
+                //
+                // Last is `docs/plan/45-shadows.md`'s contact-shadow channel at
+                // binding 28, and therefore `t14`: an `R8Unorm`
+                // `Texture2D<float>` read by `Load`, so it takes no sampler
+                // either — the occlusion channel's shape at the top of the list
+                // rather than a new one.
                 &[
                     Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv, Srv,
-                    Srv, Srv, Srv, Srv,
+                    Srv, Srv, Srv, Srv, Srv,
                 ],
             ),
             (

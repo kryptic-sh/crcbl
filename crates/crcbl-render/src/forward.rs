@@ -151,7 +151,8 @@ use crcbl_hal::{
 };
 use crcbl_shaders::meshlet::MeshClusters;
 use crcbl_shaders::{
-    MESH, MESH_CLUSTER, Stage, TONEMAP, dfg, level_select, ltc, mesh, ssao, ssr, tonemap,
+    MESH, MESH_CLUSTER, Stage, TONEMAP, contact_shadows, dfg, level_select, ltc, mesh, ssao, ssr,
+    tonemap,
 };
 use glam::{Mat4, Quat, Vec3};
 use std::sync::Arc;
@@ -159,6 +160,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::camera::{Camera, DirectionalLight, Fog, Sky};
 use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
+use crate::contact_shadows::ContactShadows;
 use crate::counters::FrameCounters;
 use crate::cull::Frustum;
 use crate::cull_stats::CullStatsRing;
@@ -500,6 +502,21 @@ const NORMAL_PAGE_BINDING: u32 = 26;
 /// goldens are compared across all four.
 const LTC_TABLE_BINDING: u32 = 27;
 
+/// The bind-group slot `docs/plan/45-shadows.md`'s contact-shadow channel is
+/// read through.
+///
+/// **Appended past [`LTC_TABLE_BINDING`], never inserted**, for that constant's
+/// reason exactly: `crcbl-mtl` gives a resource the next index in its Metal
+/// argument table by counting the same-table entries of this layout, and Slang
+/// numbers a stage's arguments by declaration order, so the two agree only while
+/// both ascend. 28 is past everything `mesh_cluster.slang` declares, so it needs
+/// no mirror there and no index anything already owns moves.
+///
+/// **No sampler**, like the occlusion channel: `mesh.slang`'s `contact_at` is a
+/// clamped `Load` at `SV_Position.xy`, and the channel is exactly the size of
+/// the frame on every pass that computed one.
+const CONTACT_SHADOW_BINDING: u32 = 28;
+
 /// [`crcbl_shaders::dfg::DFG_SIZE`] as an image extent.
 ///
 /// The table is square, and its size is a compile-time constant, so the
@@ -536,6 +553,21 @@ const SSAO_RADIUS: f32 = 0.5;
 /// this and the ambient term is untouched. Any other value would be a silent
 /// global ambient scale.
 const AMBIENT_OCCLUSION_NONE: u8 = 0xFF;
+
+/// The `R8Unorm` texel the sun reaches unobstructed: `1.0`, which is `0xFF`.
+///
+/// What [`ForwardRenderer::contact_shadow_placeholder`] holds, and therefore
+/// what `mesh.slang` reads on a frame drawing without
+/// [`RenderEffects::CONTACT_SHADOWS`] — it multiplies `sun_visibility` by this
+/// and the cascades have the last word alone. Any other value would be a silent
+/// global scale on the sun.
+///
+/// The same byte as [`AMBIENT_OCCLUSION_NONE`] and a constant of its own, for
+/// the reason [`LTC_SIZE_U32`] is not [`DFG_SIZE_U32`]: the two placeholders
+/// stand for different facts, and a day one of them wanted a different value
+/// should be an edit here rather than a search for which callers of a shared
+/// name meant which thing.
+const CONTACT_SHADOW_NONE: u8 = 0xFF;
 
 /// The reversed-Z far plane, in the two places that have to agree about it.
 ///
@@ -794,6 +826,7 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 const RENDER_PASSES: u32 = 6
     + DebugDraw::MAX_PASSES
     + Ssao::MAX_PASSES
+    + ContactShadows::PASSES
     + Hiz::PASSES
     + Ssr::PASSES
     + Volumetric::PASSES
@@ -886,6 +919,9 @@ fn fullscreen_passes(
     }
     if effects.contains(RenderEffects::AMBIENT_OCCLUSION) {
         passes += u64::from(Ssao::passes(ssao_blurs));
+    }
+    if effects.contains(RenderEffects::CONTACT_SHADOWS) {
+        passes += u64::from(ContactShadows::PASSES);
     }
     if effects.contains(RenderEffects::REFLECTIONS) {
         // The march's pair, and the pyramid it climbs — which is as long as the
@@ -1621,6 +1657,15 @@ pub struct ForwardRenderer {
     /// [`ResourceState::ShaderRead`] from the moment it exists and no pass has to
     /// declare it to give it a layout.
     ambient_occlusion_placeholder: UploadedTexture,
+    /// A 1×1 `R8Unorm` image holding [`CONTACT_SHADOW_NONE`], so a group of the
+    /// mesh layout can fill [`CONTACT_SHADOW_BINDING`] without naming a
+    /// contact-shadow image that does not exist yet.
+    ///
+    /// [`ForwardRenderer::ambient_occlusion_placeholder`]'s argument, one
+    /// binding along and with one difference worth stating: an unclamped `Load`
+    /// past this one's single texel would cost the frame its **sun**, not its
+    /// ambient. `mesh.slang`'s `contact_at` is what clamps it.
+    contact_shadow_placeholder: UploadedTexture,
     /// The split-sum `DFG` table as an `Rgba8Unorm` image — binding
     /// [`SPECULAR_DFG_BINDING`], read by multi-scatter energy compensation and
     /// by every area light's specular term.
@@ -1644,9 +1689,9 @@ pub struct ForwardRenderer {
     /// Kept because the occlusion image is a graph transient: its view is known
     /// only at execute time, so the camera's group has to be rebuilt inside the
     /// forward pass, and re-deriving twenty bindings there would mean carrying
-    /// half of `build`'s locals into the frame. Exactly one entry —
-    /// [`AMBIENT_OCCLUSION_BINDING`]'s — differs between the stored list and what
-    /// the rebuild writes.
+    /// half of `build`'s locals into the frame. Exactly two entries —
+    /// [`AMBIENT_OCCLUSION_BINDING`]'s and [`CONTACT_SHADOW_BINDING`]'s — differ
+    /// between the stored list and what the rebuild writes.
     mesh_group_entries: Vec<Vec<BindGroupEntry>>,
     /// `[frame]`: the entries [`ForwardRenderer::prepass_groups`] was built
     /// from, and `[frame][view]` those of [`ForwardRenderer::shadow_groups`].
@@ -1656,17 +1701,24 @@ pub struct ForwardRenderer {
     /// mesh layout a slot holds. Handles, so the cost is a few words a group.
     prepass_group_entries: Vec<Vec<BindGroupEntry>>,
     shadow_group_entries: Vec<Vec<Vec<BindGroupEntry>>>,
-    /// `[frame]`: the camera's group rebuilt against the blurred occlusion view,
-    /// cached against that view.
+    /// `[frame]`: the camera's group rebuilt against the two screen-space
+    /// channels the forward pass reads — the blurred occlusion and the contact
+    /// shadow — cached against both views together.
     ///
     /// [`ForwardRenderer::tonemap_groups`]'s shape, one per frame in flight
     /// because the group it replaces is per frame in flight. Rebuilt only when
-    /// the view changes, which is only on a resize.
+    /// a view changes, which is only on a resize or a toggle.
+    ///
+    /// **One cache for both channels rather than one each**, because they are
+    /// two bindings of *one* group: rebuilding it twice a frame would be a
+    /// descriptor write per pass per frame, which is what
+    /// [`crate::ssao::cached_group`] exists to avoid. Its key is every view, so
+    /// either one moving is a miss.
     ///
     /// [`ForwardRenderer::mesh_groups`] is the fallback and is *not* dead weight:
     /// it is what the depth prepass binds, because that pass runs before there is
     /// any occlusion to name.
-    ambient_occlusion_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
+    screen_channel_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
     /// `[frame]`: the depth prepass's group — the camera's, with the occlusion
     /// placeholder and **a culling-statistics buffer of its own**.
     ///
@@ -1748,6 +1800,9 @@ pub struct ForwardRenderer {
 
     /// `docs/plan/18-render-features.md`'s occlusion pair — see [`crate::ssao`].
     ssao: Ssao,
+    /// `docs/plan/45-shadows.md`'s contact-shadow march — see
+    /// [`crate::contact_shadows`].
+    contact_shadows: ContactShadows,
     /// `docs/plan/18-render-features.md`'s depth pyramid, which the reflection
     /// march climbs — see [`crate::hiz`].
     hiz: Hiz,
@@ -1898,6 +1953,9 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s occlusion pair, which owns two
     /// pipelines, two layouts and a ring of blocks.
     ssao: Option<Ssao>,
+    /// `docs/plan/45-shadows.md`'s contact-shadow march, which owns one
+    /// pipeline, one layout and a ring of blocks.
+    contact_shadows: Option<ContactShadows>,
     /// `docs/plan/18-render-features.md`'s depth pyramid, which owns one
     /// pipeline, one layout and a ring of blocks per level.
     hiz: Option<Hiz>,
@@ -1992,6 +2050,9 @@ impl Rollback {
         }
         if let Some(hiz) = self.hiz {
             hiz.destroy(device);
+        }
+        if let Some(contact_shadows) = self.contact_shadows {
+            contact_shadows.destroy(device);
         }
         if let Some(ssao) = self.ssao {
             ssao.destroy(device);
@@ -2123,6 +2184,13 @@ struct MeshGroup {
     /// the frame bound inside the forward pass and cached — the shape
     /// [`ForwardRenderer::tonemap_groups`] already has.
     ambient_occlusion: ImageViewHandle,
+    /// Binding [`CONTACT_SHADOW_BINDING`]. The contact-shadow channel for a
+    /// forward pass that marched one, and the white placeholder everywhere else
+    /// — see [`ForwardRenderer::contact_shadow_placeholder`].
+    ///
+    /// [`MeshGroup::ambient_occlusion`]'s terms exactly, including that every
+    /// group built at `build` names the placeholder.
+    contact_shadow: ImageViewHandle,
 }
 
 impl MeshGroup {
@@ -2350,6 +2418,13 @@ impl MeshGroup {
             binding: LTC_TABLE_BINDING,
             array_index: 0,
             resource: BindingResource::ImageView(shared.ltc_table),
+        });
+        // And the contact-shadow channel above that, last of the set and on the
+        // same ascending terms — see [`CONTACT_SHADOW_BINDING`].
+        entries.push(BindGroupEntry {
+            binding: CONTACT_SHADOW_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(self.contact_shadow),
         });
         entries
     }
@@ -3877,6 +3952,24 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
+        // `docs/plan/45-shadows.md`'s contact-shadow channel, last of the set —
+        // see [`CONTACT_SHADOW_BINDING`] on why last is structural rather than
+        // tidy.
+        //
+        // `geometry` beside `FRAGMENT` and `Float` for the occlusion channel's
+        // reasons exactly: it is the same `R8Unorm` shape, and Slang's Metal
+        // backend materialises every global into every entry point whether that
+        // stage reads it or not.
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: CONTACT_SHADOW_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+                sample_type: SampleType::Float,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
         let mesh_desc = BindGroupLayoutDesc {
             label: Some(MESH_LAYOUT_LABEL),
             entries: &mesh_entries,
@@ -4048,6 +4141,23 @@ impl ForwardRenderer {
             &[AMBIENT_OCCLUSION_NONE],
         )?;
         rollback.textures.push(ambient_occlusion_placeholder);
+
+        // The contact-shadow placeholder, beside the occlusion one and on its
+        // terms exactly: every group of this layout has to fill
+        // [`CONTACT_SHADOW_BINDING`], and most of them are built before the graph
+        // has a contact-shadow image to name. `0xFF` is `1.0` through `R8Unorm`,
+        // so a fragment that reads this one is a fragment the sun reaches
+        // unobstructed.
+        let contact_shadow_placeholder = upload_texture(
+            device,
+            queue,
+            "contact shadow placeholder",
+            Format::R8Unorm,
+            1,
+            1,
+            &[CONTACT_SHADOW_NONE],
+        )?;
+        rollback.textures.push(contact_shadow_placeholder);
 
         // The split-sum `DFG` table, uploaded once and read by every frame this
         // renderer will draw — `crcbl_shaders::dfg` is where it is integrated,
@@ -4251,6 +4361,8 @@ impl ForwardRenderer {
                 // one and caches it, and *this* group is what the depth prepass
                 // binds — which runs before there is any occlusion to name.
                 ambient_occlusion: ambient_occlusion_placeholder.view,
+                // The same, one binding along, and for the same reason.
+                contact_shadow: contact_shadow_placeholder.view,
             }
             .entries(&shared);
             let group = device.create_bind_group(&BindGroupDesc {
@@ -4265,7 +4377,7 @@ impl ForwardRenderer {
             // Kept so the forward pass can rebuild this group against the
             // occlusion image the graph realised, without re-deriving twenty
             // bindings out of fields that no longer exist by then. Exactly one
-            // entry differs — see [`ForwardRenderer::ambient_occlusion_groups`].
+            // entry differs — see [`ForwardRenderer::screen_channel_groups`].
             mesh_group_entries.push(entries);
 
             // The depth prepass's group: this one again, counting its clusters
@@ -4296,6 +4408,7 @@ impl ForwardRenderer {
                 group_state: emit.is_mesh().then(|| draws.group_state()),
                 shadow_map: shadow_atlas_view,
                 ambient_occlusion: ambient_occlusion_placeholder.view,
+                contact_shadow: contact_shadow_placeholder.view,
             }
             .entries(&shared);
             let group = device.create_bind_group(&BindGroupDesc {
@@ -4362,6 +4475,7 @@ impl ForwardRenderer {
                     // stage — so this slot exists only because Metal
                     // materialises every global into every entry point.
                     ambient_occlusion: ambient_occlusion_placeholder.view,
+                    contact_shadow: contact_shadow_placeholder.view,
                 }
                 .entries(&shared);
                 let group = device.create_bind_group(&BindGroupDesc {
@@ -4556,6 +4670,16 @@ impl ForwardRenderer {
         // pipelines and a ring of buffers, and `Ssao::destroy` is the one place
         // their release order lives.
         rollback.ssao = Some(Ssao::new(
+            device,
+            instance_buffers.len(),
+            Self::build_fullscreen,
+        )?);
+
+        // --- the screen-space contact-shadow march ---
+        //
+        // Stored whole for the pair above's reason, and after them because
+        // `Rollback::run` releases in the reverse order of construction.
+        rollback.contact_shadows = Some(ContactShadows::new(
             device,
             instance_buffers.len(),
             Self::build_fullscreen,
@@ -4850,12 +4974,13 @@ impl ForwardRenderer {
             tonemap_curve: tonemap::TonemapCurve::Clamp,
             target_format,
             ambient_occlusion_placeholder,
+            contact_shadow_placeholder,
             specular_dfg,
             ltc_table,
             mesh_group_entries,
             prepass_group_entries,
             shadow_group_entries,
-            ambient_occlusion_groups: vec![None; instance_buffers.len()],
+            screen_channel_groups: vec![None; instance_buffers.len()],
             prepass_groups,
             prepass_stats,
             // Off, and unbuilt: the grid is opt-in, so a caller that never asks
@@ -4875,6 +5000,10 @@ impl ForwardRenderer {
                 .ssao
                 .take()
                 .unwrap_or_else(|| unreachable!("the pair was placed in the rollback above")),
+            contact_shadows: rollback
+                .contact_shadows
+                .take()
+                .unwrap_or_else(|| unreachable!("the march was placed in the rollback above")),
             hiz: rollback
                 .hiz
                 .take()
@@ -5774,6 +5903,33 @@ impl ForwardRenderer {
                 proj: projection.to_cols_array(),
                 radius: SSAO_RADIUS,
                 slices: crate::ssao::slice_count(),
+            },
+        )?;
+        // The contact march's block: the same two matrices, and the sun in view
+        // space.
+        //
+        // **Rotated here rather than in the shader**, because the shader has no
+        // view matrix and no world-space anything: it walks a view-space ray in
+        // screen space, so the one rotation the frame needs happens once on the
+        // host instead of once per covered pixel. `Mat4::transform_vector3`
+        // takes the direction through the rotation and drops the translation,
+        // which is what a direction wants.
+        //
+        // `normalize_or_zero` for `sun_row`'s reason: a caller may hand this a
+        // zero direction, and the march reads a zero as "the sun is along the
+        // view axis at every pixel" and reports lit — which is the frame a
+        // scene with no sun should draw.
+        let to_light = camera
+            .view()
+            .transform_vector3(light.direction.normalize_or_zero())
+            .normalize_or_zero();
+        self.contact_shadows.begin_frame(
+            device,
+            self.frame,
+            contact_shadows::ContactShadowParams {
+                inv_proj: inv_projection.to_cols_array(),
+                proj: projection.to_cols_array(),
+                to_light: to_light.to_array(),
             },
         )?;
         // The reflection march's block: the same two matrices and nothing else.
@@ -7097,6 +7253,23 @@ impl ForwardRenderer {
             },
         );
 
+        // The contact-shadow placeholder, imported beside the occlusion one and
+        // on its terms exactly: every group of the mesh layout names this
+        // binding, and on a frame drawing without `RenderEffects::CONTACT_SHADOWS`
+        // it is what the forward pass binds.
+        let contact_placeholder = graph.import_image(
+            "contact-shadows-placeholder",
+            ImportedImage {
+                image: self.contact_shadow_placeholder.image,
+                view: self.contact_shadow_placeholder.view,
+                format: Format::R8Unorm,
+                extent: (1, 1),
+                initial: ResourceState::ShaderRead,
+                claim: InitialClaim::Tracked,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
+
         // §3.2's base-colour page, in every bind group of `mesh_layout` and so
         // read by all three of the passes that draw geometry. Like the
         // placeholder above it is already in `ShaderRead` and the graph has
@@ -7168,6 +7341,23 @@ impl ForwardRenderer {
                 )
             });
             (raw, blurred, again)
+        });
+        // The contact march's one transient, conditional for the occlusion
+        // pair's reason: an image nothing reads or writes is a physical image
+        // out of the pool for a pass that does not exist. Requested **after**
+        // the pair so that a frame with contact shadows off keeps the physical
+        // images it had before this rung existed — the pool hands them out in
+        // request order.
+        let contact_mask = effects.contains(RenderEffects::CONTACT_SHADOWS).then(|| {
+            graph.create_image(
+                "contact-shadows",
+                // The occlusion channel's description, and reused rather than
+                // copied: it is the same `R8Unorm` colour attachment at the
+                // same extent, and two descriptions of one shape are two
+                // things to keep in step. `TransientImageDesc`'s constructor
+                // says what the shape is for.
+                TransientImageDesc::ambient_occlusion(extent),
+            )
         });
         // **Created whatever the reflections are doing**, unlike the pair above.
         // It is one of the forward pass's colour attachments, which is in that
@@ -7515,6 +7705,24 @@ impl ForwardRenderer {
             }
             None => occlusion_placeholder,
         };
+        // `docs/plan/45-shadows.md`'s contact march, or the one texel that
+        // stands for "the sun reaches this surface" where it is switched off.
+        //
+        // The occlusion pair's arms exactly, and the clamp the off-arm rests on
+        // is `mesh.slang`'s `contact_at`. What differs is what it costs to get
+        // wrong: an unclamped `Load` past this placeholder's one texel would
+        // report *total* shadow at every pixel but one, so a frame with the
+        // effect off would lose its sun rather than its ambient.
+        //
+        // Recorded here, after the occlusion pair and before the forward pass,
+        // because the forward pass is what binds it — and the prepass it reads
+        // has already run.
+        let contact = match contact_mask {
+            Some(mask) => self
+                .contact_shadows
+                .add_passes(graph, frame, scene_depth, mask),
+            None => contact_placeholder,
+        };
 
         let pass = graph
             .add_render_pass("forward")
@@ -7570,6 +7778,12 @@ impl ForwardRenderer {
             // placeholder, which is in that layout already and has nothing to
             // transition.
             .read_image(occlusion)
+            // The contact-shadow channel this frame's sun is scaled by, declared
+            // on the occlusion channel's terms exactly: the march wrote it as a
+            // colour attachment a moment ago and this is the barrier into a
+            // shader-readable layout, or it is the imported placeholder and there
+            // is nothing to transition.
+            .read_image(contact)
             // **The page this pass's materials actually sample**, and the one
             // pass of the three where that is literally true. Declared so the
             // graph can order a caller's copy into a page layer against these
@@ -7615,39 +7829,45 @@ impl ForwardRenderer {
             _ => pass,
         };
 
-        // The camera's group rebuilt against the occlusion image the graph just
-        // realised, cached against its view — the shape the tonemap group below
-        // has, and for the same reason: a graph transient's view is not known
-        // until execute time. One entry of the stored list differs; see
-        // `ForwardRenderer::mesh_group_entries`.
+        // The camera's group rebuilt against the two screen-space channels the
+        // graph just realised, cached against both views — the shape the tonemap
+        // group below has, and for the same reason: a graph transient's view is
+        // not known until execute time. Two entries of the stored list differ;
+        // see `ForwardRenderer::mesh_group_entries`.
         //
         //
         // The rebuild is unconditional, so there is one shape of forward pass
-        // rather than two: the group is cached against the view it was built
+        // rather than two: the group is cached against the views it was built
         // from, so an AO-off frame naming the placeholder's view and an AO-on
         // frame naming the blur's target are the same code and one cache miss
-        // apiece when a toggle moves.
+        // apiece when a toggle moves. **The key is both views**, because a group
+        // naming two transients is stale as soon as either one moves.
         let entries = self.mesh_group_entries[self.frame].clone();
         let mesh_layout = self.mesh_layout;
-        let cached_mesh = &mut self.ambient_occlusion_groups[self.frame];
+        let cached_mesh = &mut self.screen_channel_groups[self.frame];
         pass.execute(move |ctx| {
             let view = ctx.image_view(occlusion);
+            let contact_view = ctx.image_view(contact);
             let device = ctx.device();
             let group = cached_group(
                 cached_mesh,
                 device,
-                &[(AMBIENT_OCCLUSION_BINDING, view)],
+                &[
+                    (AMBIENT_OCCLUSION_BINDING, view),
+                    (CONTACT_SHADOW_BINDING, contact_view),
+                ],
                 "mesh frame",
                 mesh_layout,
                 entries,
             )
             // Falling back to the group built at `build` rather than dropping
-            // the frame, and **the fallback costs the occlusion and nothing
-            // else**: that group names the 1×1 white placeholder, which
-            // `mesh.slang` clamps its `Load` into and reads as "nothing
-            // occludes". A descriptor failure therefore draws the frame this
-            // scene would have drawn with the effect switched off, rather than
-            // one with no ambient term in it.
+            // the frame, and **the fallback costs the occlusion and the contact
+            // shadow and nothing else**: that group names the two 1×1 white
+            // placeholders, which `mesh.slang` clamps its `Load`s into and reads
+            // as "nothing occludes" and "the sun reaches here". A descriptor
+            // failure therefore draws the frame this scene would have drawn with
+            // both effects switched off, rather than one with no ambient term
+            // and no sun in it.
             .unwrap_or(group);
             let encoder = ctx.encoder();
             bucket_draws.open(encoder);
@@ -8943,7 +9163,7 @@ impl ForwardRenderer {
         for group in &mut self.shadow_groups[frame] {
             swap(group);
         }
-        if let Some((_, stale)) = self.ambient_occlusion_groups[frame].take() {
+        if let Some((_, stale)) = self.screen_channel_groups[frame].take() {
             device.destroy_bind_group(stale);
         }
         self.slot_page_samplers[frame] = sampler;
@@ -9896,8 +10116,10 @@ impl ForwardRenderer {
         self.volumetric.destroy(device);
         self.ssr.destroy(device);
         self.hiz.destroy(device);
+        self.contact_shadows.destroy(device);
         self.ssao.destroy(device);
         self.ambient_occlusion_placeholder.destroy(device);
+        self.contact_shadow_placeholder.destroy(device);
         self.specular_dfg.destroy(device);
         self.ltc_table.destroy(device);
         self.normal_page.destroy(device);
@@ -9915,7 +10137,7 @@ impl ForwardRenderer {
             .into_iter()
             .chain(self.prepass_groups)
             .chain(
-                self.ambient_occlusion_groups
+                self.screen_channel_groups
                     .into_iter()
                     .flatten()
                     .map(|(_, group)| group),
@@ -15199,7 +15421,7 @@ mod tests {
         // is the one that has every effect in it, the ground grid's argument
         // exactly.
         renderer.set_effect_request(EffectRequest {
-            programmatic: EffectOverride::none().force(POST_EFFECTS, Some(true)),
+            programmatic: EffectOverride::none().force(OUTSIDE_THE_DEFAULT, Some(true)),
             ..EffectRequest::default()
         });
         let imported = swapchain_image_at(device, WIDEST_EXTENT);
@@ -15307,7 +15529,7 @@ mod tests {
         let imported = swapchain_image(device);
         let mut pool = crate::TransientPool::new();
 
-        // [`POST_EFFECTS`] forced on and then `off` forced off, on
+        // [`OUTSIDE_THE_DEFAULT`] forced on and then `off` forced off, on
         // [`frame_switching_off`]'s terms exactly: the default camera stack
         // leaves both of them out — see [`RenderEffects::DEFAULT_STACK`] — so a
         // control built on the default alone would have nothing for their arms
@@ -15318,7 +15540,7 @@ mod tests {
         let without = |renderer: &mut ForwardRenderer, off: RenderEffects| {
             renderer.set_effect_request(EffectRequest {
                 programmatic: EffectOverride::none()
-                    .force(POST_EFFECTS, Some(true))
+                    .force(OUTSIDE_THE_DEFAULT, Some(true))
                     .force(off, Some(false)),
                 ..EffectRequest::default()
             });
@@ -15352,6 +15574,12 @@ mod tests {
             (
                 RenderEffects::AMBIENT_OCCLUSION,
                 ["ssao", "ssao-blur"].as_slice(),
+            ),
+            (
+                RenderEffects::CONTACT_SHADOWS,
+                // One pass and no blur — `crate::contact_shadows`'s header says
+                // why the occlusion pair's second pass has no counterpart here.
+                ["contact-shadows"].as_slice(),
             ),
             (
                 RenderEffects::REFLECTIONS,
@@ -15493,6 +15721,123 @@ mod tests {
             from_the_atlas(&no_shadows),
             from_the_atlas(&all_on),
             "only the culls go: the atlas pass and everything after it are unchanged"
+        );
+
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **The contact march is a pass a frame records only when it was asked
+    /// for, and the mask it writes is what the forward pass then reads.**
+    ///
+    /// Two observables, because either alone is satisfied by a mistake the other
+    /// one catches:
+    ///
+    /// * **The compiled pass list.** `contact-shadows` appears between the
+    ///   prepass whose depth it marches and the forward pass that binds it, and
+    ///   appears at all only on the frame that asked. The toggle test above
+    ///   already says a frame loses this pass and nothing else; what is added
+    ///   here is *where* it sits, which is the half a set comparison cannot see
+    ///   — a march recorded after the pass that reads it compiles and draws a
+    ///   mask nothing ever looks at.
+    /// * **The forward pass's own barriers.** On the frame that marched, one
+    ///   more image is transitioned into [`ResourceState::ShaderRead`] before
+    ///   the forward pass opens than on the frame that did not — which is the
+    ///   mask leaving the colour attachment it was written as. That is what says
+    ///   the pass's output reaches the shading, rather than being written into a
+    ///   transient and dropped while the shader goes on reading the 1×1
+    ///   placeholder. The placeholder is imported in `ShaderRead` already and
+    ///   needs no transition, so it contributes nothing to this count and the
+    ///   difference is exactly the mask.
+    ///
+    /// [`RenderEffects::CONTACT_SHADOWS`] is out of the default camera stack
+    /// while its re-bless is pending — see that constant — so the `on` frame has
+    /// to force it and the `off` frame is what a view saying nothing draws.
+    #[test]
+    fn the_contact_march_is_recorded_only_when_asked_and_its_mask_reaches_the_forward_pass() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+
+        let frame = |renderer: &mut ForwardRenderer, on: bool| -> (Vec<String>, usize) {
+            renderer.set_effect_request(EffectRequest {
+                programmatic: EffectOverride::none()
+                    .force(RenderEffects::CONTACT_SHADOWS, Some(on)),
+                ..EffectRequest::default()
+            });
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    TEST_EXTENT,
+                )
+                .expect("write");
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, &pool, target, TEST_EXTENT);
+            let compiled = graph.compile(&pool).expect("a legal frame");
+            let labels: Vec<String> = compiled
+                .passes()
+                .iter()
+                .map(|pass| pass.label().to_string())
+                .collect();
+            let readable = compiled
+                .passes()
+                .iter()
+                .find(|pass| pass.label() == "forward")
+                .expect("every frame draws its geometry")
+                .barriers()
+                .images
+                .iter()
+                .filter(|barrier| barrier.to == ResourceState::ShaderRead)
+                .count();
+            (labels, readable)
+        };
+
+        let (marched, marched_reads) = frame(&mut renderer, true);
+        assert!(
+            renderer.effects().contains(RenderEffects::CONTACT_SHADOWS),
+            "the forced frame has to have resolved with the bit set"
+        );
+        let (bare, bare_reads) = frame(&mut renderer, false);
+        assert!(
+            !renderer.effects().contains(RenderEffects::CONTACT_SHADOWS),
+            "and the control frame without it"
+        );
+
+        assert!(
+            !bare.iter().any(|label| label == "contact-shadows"),
+            "a frame that did not ask must record no march at all: {bare:#?}"
+        );
+        let at = |labels: &[String], wanted: &str| {
+            labels
+                .iter()
+                .position(|label| label == wanted)
+                .unwrap_or_else(|| panic!("no `{wanted}` pass in {labels:#?}"))
+        };
+        let march = at(&marched, "contact-shadows");
+        assert!(
+            march > at(&marched, "depth-prepass"),
+            "the march reads the prepass's depth, so it cannot precede it: {marched:#?}"
+        );
+        assert!(
+            march < at(&marched, "forward"),
+            "and the forward pass binds what it wrote, so it cannot follow it: {marched:#?}"
+        );
+
+        assert_eq!(
+            marched_reads,
+            bare_reads + 1,
+            "the forward pass has to take one more image into `ShaderRead` on the frame that \
+             marched — the mask. Equal counts mean the pass wrote a transient the shading \
+             never reads."
         );
 
         renderer.destroy(device);
@@ -16322,7 +16667,7 @@ mod tests {
         // A shadowed light beside the cascades, so the atlas pass has draws to
         // lose rather than being empty either way.
         renderer.set_lights(&[shadowable_spot(-1.0)]);
-        // **[`POST_EFFECTS`] forced on, then `off` forced off.** The default
+        // **[`OUTSIDE_THE_DEFAULT`] forced on, then `off` forced off.** The default
         // camera stack leaves both of them out — see
         // [`RenderEffects::DEFAULT_STACK`] — so a control frame built on the
         // default alone would be measuring three effects and calling it five,
@@ -16331,7 +16676,7 @@ mod tests {
         // still resolves to off.
         renderer.set_effect_request(EffectRequest {
             programmatic: EffectOverride::none()
-                .force(POST_EFFECTS, Some(true))
+                .force(OUTSIDE_THE_DEFAULT, Some(true))
                 .force(off, Some(false)),
             ..EffectRequest::default()
         });
@@ -16404,6 +16749,12 @@ mod tests {
             (
                 RenderEffects::AMBIENT_OCCLUSION,
                 u64::from(Ssao::passes(crate::ssao::blur_passes())),
+            ),
+            // The contact march's one pass, and a constant rather than a
+            // function of anything: it has no blur behind it and no chain.
+            (
+                RenderEffects::CONTACT_SHADOWS,
+                u64::from(ContactShadows::PASSES),
             ),
             // The march's two passes and the reductions that feed them, which
             // is what makes this arm's number a function of the extent the way
@@ -17323,26 +17674,33 @@ mod tests {
     /// bug they exist to catch is a new effect joining the set and one site
     /// still measuring the old one while calling it the whole stack. They are
     /// held out of the default for different reasons — [`crate::effects`] gives
-    /// each — and share only that a test wanting the widest frame must ask.
-    const POST_EFFECTS: RenderEffects = RenderEffects::BLOOM
+    /// each, and [`RenderEffects::CONTACT_SHADOWS`]'s is the only one that is a
+    /// pending re-bless rather than a decision — and share only that a test
+    /// wanting the widest frame must ask.
+    ///
+    /// **Named for what it is rather than for what most of it is**: the set held
+    /// four post passes and a resolve when it was `POST_EFFECTS`, and the contact
+    /// march is neither.
+    const OUTSIDE_THE_DEFAULT: RenderEffects = RenderEffects::BLOOM
         .union(RenderEffects::ANTIALIASING)
         .union(RenderEffects::VOLUMETRIC_FOG)
         .union(RenderEffects::AUTO_EXPOSURE)
-        .union(RenderEffects::SMAA);
+        .union(RenderEffects::SMAA)
+        .union(RenderEffects::CONTACT_SHADOWS);
 
     /// Every effect this renderer draws is either in the default stack or in
-    /// [`POST_EFFECTS`].
+    /// [`OUTSIDE_THE_DEFAULT`].
     ///
-    /// The guard on the three sites above: they force [`POST_EFFECTS`] on and
+    /// The guard on the three sites above: they force [`OUTSIDE_THE_DEFAULT`] on and
     /// call the result "every effect", which is only true while nothing else is
-    /// held out. A sixth effect added outside the default stack and not added
+    /// held out. An effect added outside the default stack and not added
     /// here makes this red before it makes a pass-list assertion red — which is
     /// the useful order, since a pass list going red says a label moved and this
     /// says what actually happened.
     #[test]
     fn forcing_the_post_effects_on_reaches_every_effect_there_is() {
         assert_eq!(
-            RenderEffects::DEFAULT_STACK.union(POST_EFFECTS),
+            RenderEffects::DEFAULT_STACK.union(OUTSIDE_THE_DEFAULT),
             RenderEffects::all(),
             "an effect outside the default stack that no test forces on is an effect \
              the every-effect frames below have never drawn"

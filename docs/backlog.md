@@ -609,6 +609,64 @@ the five-item narrative, which `git log` and the changelog already hold. Doing
 it as one edit risks mangling a long file, so it wants to be its own change with
 its own diff review.
 
+## Screen-space contact shadows: what the rung left (2026-08-31)
+
+The pass is built and **parked outside `RenderEffects::DEFAULT_STACK`**, so
+nothing draws it by default and no golden has moved. What that leaves:
+
+- **The flip is a change of its own, and it owes four things.** Moving the bit
+  into `DEFAULT_STACK` re-blesses every golden in the workspace; it also owes a
+  README line (the pass list names SSAO and SSR and would then name this), the
+  preset wiring below, and the goldens that finally cover the picture.
+
+- **Nothing guards what the mask actually contains — proved, not assumed.**
+  Negating the sun direction in `ForwardRenderer::begin_frame`, so the march
+  walks directly away from the light, leaves the **entire `crcbl-render` suite
+  green**. That is the honest consequence of parking the bit: the tests are
+  structural — the pass is recorded when asked, the forward pass takes one more
+  image into `ShaderRead`, the mirrored constants match the shader, the uniform
+  packs — and no golden renders the term, because `apps/lantern`'s
+  `room::View::stack()` derives from `DEFAULT_STACK`. The flip closes this by
+  construction; until then the only evidence the march is correct is a manual
+  pixel diff (2846 pixels changed at 1080p, peak delta 107/255).
+
+- **The low preset cannot clear it, and the plan is self-contradictory.**
+  `docs/plan/45-shadows.md` says "not a settings row of its own but a tier item"
+  and also that the low preset clears the bit; `crcbl::settings::presets` clears
+  an effect by writing that effect's `VIDEO_KEYS` row, so a bit with no row is a
+  bit no preset can reach. The build took the "no row" half and named the bit in
+  a `TIER_ONLY` exception inside
+  `settings::tests::every_effect_has_a_key_and_no_two_share_one`. **The user's
+  call**, and the options are: give it a `VIDEO_KEYS` row (which puts it in
+  `apps/options`' menu and shifts `toFader` in `web/tools/browser-e2e.mjs`),
+  teach the presets to clear a keyless bit, or accept that the tier split waits.
+
+- **The browser tier is unpriced.** radv and lavapipe are measured; the third
+  tier is not, and pricing it needs the bit switched on for a demo the browser
+  gate drives.
+
+- **Punctual lights get no contact term.** The mask is marched towards the sun
+  and applied inside the shader's directional branch alone. A spot's or a
+  point's contact is a second march along a different direction — its own rung,
+  not an oversight.
+
+- **There is no debug view for the channel**, where ambient occlusion has one
+  (`debug_view ambient occlusion`). Reading the mask directly is the obvious way
+  to inspect a march that is wrong, and it is exactly what the coverage gap
+  above would want.
+
+- **`RAY_LENGTH` is not what binds at 1080p, which is worth knowing before
+  tuning it.** 0.25 m and 0.50 m produce bit-identical frames — 0 differing
+  pixels of 2,073,600 — because past about a quarter-metre the 15-pixel
+  `MAX_REACH` is the limit, not the world length. It stays a world length
+  because it does bind at lower resolutions and greater distances.
+
+- **`crcbl-dx12`'s `dxil.rs` case table claims "Every shader is listed" and
+  already does not list `ssao`, `ssr`, `bloom`, `smaa`, `volumetric` or `sky`.**
+  Nothing cross-checks it against the shader set, so the doc comment is a
+  factual claim that is false. Either the table is completed and a test holds it
+  to the set, or the comment stops claiming completeness.
+
 ## The shadow atlas: what items 1, 2, 4 and 5 left (2026-08-31)
 
 `docs/plan/45-shadows.md`'s atlas rung is five items; item 3 (a budget in tiles

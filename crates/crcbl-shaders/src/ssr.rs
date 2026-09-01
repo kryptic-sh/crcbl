@@ -186,7 +186,7 @@ mod tests {
     /// Adding another screen-space pass means adding it here; a pass that
     /// copied a helper and was not listed is a copy this guard does not hold,
     /// which is the state the guard exists to end.
-    const SOURCES: [(&str, &str); 4] = [
+    const SOURCES: [(&str, &str); 5] = [
         ("ssao.slang", include_str!("../shaders/ssao.slang")),
         (
             "ssao_blur.slang",
@@ -194,6 +194,10 @@ mod tests {
         ),
         ("ssr.slang", include_str!("../shaders/ssr.slang")),
         ("ssr_blur.slang", include_str!("../shaders/ssr_blur.slang")),
+        (
+            "contact_shadows.slang",
+            include_str!("../shaders/contact_shadows.slang"),
+        ),
     ];
 
     /// The body of the function named `signature` in `source`, brace to brace.
@@ -222,10 +226,11 @@ mod tests {
 
     /// **The copies must be identical, character for character.**
     ///
-    /// `ssr.slang` re-declares `depth_at`, `view_position` and `normal_at` and
-    /// `ssr_blur.slang` re-declares `depth_at` and `view_z`, because the
-    /// manifest hashes one source per artifact and an `#include` would be a file
-    /// whose edits nothing downstream notices. Nothing else in the tree would
+    /// `ssr.slang` re-declares `depth_at`, `view_position` and `normal_at`,
+    /// `ssr_blur.slang` re-declares `depth_at` and `view_z`, and
+    /// `contact_shadows.slang` re-declares those three and the march's own five
+    /// beside them, because the manifest hashes one source per artifact and an
+    /// `#include` would be a file whose edits nothing downstream notices. Nothing else in the tree would
     /// notice one copy being fixed and the others left: the shaders compile
     /// either way, and the failure is a reflection sampling a pixel the
     /// occlusion pass would have called a different one.
@@ -240,6 +245,15 @@ mod tests {
             "float view_z(int2 pixel, float depth, float2 extent)",
             "float3 view_position(int2 pixel, float depth, float2 extent)",
             "float3 normal_at(int2 pixel, float3 centre, int2 extent, float2 size)",
+            // The march's own five, shared by `ssr.slang` and
+            // `contact_shadows.slang` since the contact rung landed. They were
+            // one file's alone until then, which is exactly the state this
+            // guard exists to catch on the way past.
+            "float2 pixel_of(float2 ndc, float2 size)",
+            "float2 ndc_of(float2 at, float2 size)",
+            "float thickness_at(float advance, float depth)",
+            "float view_z_of(float depth)",
+            "float cell_exit(float2 at, float2 forward, float size, float reach)",
         ] {
             let copies: Vec<(&str, String)> = SOURCES
                 .iter()
@@ -455,6 +469,13 @@ mod tests {
     /// repo's no-`#include` reason, and a drift would leave the blur filtering
     /// over a length the march does not use with nothing to say so: the picture
     /// would simply be a little more or less smeared.
+    ///
+    /// `contact_shadows.slang` is the third copy, and it is a march again rather
+    /// than a filter: the number decides what its own crossing is allowed to
+    /// call a surface. **Every copy is compared, not the first two**, so a
+    /// fourth screen-space pass added to [`SOURCES`] is held to the same number
+    /// without this test being edited — the shape the count-of-two here used to
+    /// prevent.
     #[test]
     fn the_thickness_floor_matches_the_one_the_march_declares() {
         let declaration = "static const float THICKNESS_FLOOR = ";
@@ -467,18 +488,19 @@ mod tests {
             let end = rest.find(';').expect("the declaration ends in a semicolon");
             copies.push((name, &rest[..end]));
         }
-        assert_eq!(
-            copies.len(),
-            2,
-            "`THICKNESS_FLOOR` is declared in {copies:?}; the march and its blur are the two \
-             files that carry it, so this guard is holding the wrong number of copies together"
+        assert!(
+            copies.len() > 1,
+            "`THICKNESS_FLOOR` is declared in {copies:?}; a guard over one copy is holding \
+             nothing together — either the declaration moved or `SOURCES` is stale"
         );
-        assert_eq!(
-            copies[0].1, copies[1].1,
-            "{} and {} declare different thickness floors; the blur weights its kernel over a \
-             length the march does not use",
-            copies[0].0, copies[1].0
-        );
+        let (first_name, first) = copies[0];
+        for (name, floor) in &copies[1..] {
+            assert_eq!(
+                floor, &first,
+                "{first_name} and {name} declare different thickness floors; every march and \
+                 filter in this family credits a surface with the same least thickness"
+            );
+        }
     }
 
     /// The block the shader declares, member for member and in this order.

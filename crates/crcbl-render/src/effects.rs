@@ -198,6 +198,33 @@ bitflags::bitflags! {
         ///
         /// [`ForwardRenderer::add_passes`]: crate::forward::ForwardRenderer::add_passes
         const SMAA = 1 << 7;
+        /// Screen-space contact shadows — the short march along the sun's
+        /// direction through the depth prepass, whose `R8Unorm` channel scales
+        /// the sun's shadow term.
+        ///
+        /// `docs/plan/45-shadows.md`'s 2026-08-30 decision, and the rung the
+        /// shadow ladder reached after the rotated disc: the sliver where a foot
+        /// meets the floor or a book meets a shelf is finer than any atlas
+        /// texel, so no bias and no filter can close it — a bias large enough to
+        /// stop acne is large enough to detach the contact. `crate::shadow` is
+        /// what the atlas answers for and `crate::contact_shadows` is the pass.
+        ///
+        /// **A screen-space term, so it leaves no trace on a tile and stacks
+        /// with every rung above it**: it neither reads the atlas nor writes it,
+        /// and a frame that switches it off records one fewer full-screen pass
+        /// and binds the renderer's 1×1 white in its place.
+        ///
+        /// **Not in [`RenderEffects::DEFAULT_STACK`], and parked there rather
+        /// than argued out of it.** The decision puts it *in* the default stack,
+        /// with the low quality preset clearing it; what holds it out today is
+        /// that switching it on moves every golden the workspace has. That flip
+        /// and its re-bless is its own change — see the constant, which lists it
+        /// with the three bits that are out on the merits.
+        ///
+        /// The bit is numbered after the tiers it postdates rather than beside
+        /// the shadow bit it completes, so no existing flag's value moves —
+        /// [`SMAA`](Self::SMAA)'s rule.
+        const CONTACT_SHADOWS = 1 << 8;
     }
 }
 
@@ -225,6 +252,11 @@ impl RenderEffects {
     /// [`ANTIALIASING`](Self::ANTIALIASING), which *is* in here, and moving it
     /// to the higher tier moves every golden in the suite — a decision to take
     /// once both tiers have goldens rather than one to inherit.
+    /// [`CONTACT_SHADOWS`](Self::CONTACT_SHADOWS) is out for a fifth reason
+    /// that is not a reason at all: `docs/plan/45-shadows.md` decided it belongs
+    /// *here*, with the low preset clearing it, and it is parked outside only
+    /// until the re-bless its first frame forces is taken on its own. It is the
+    /// one member of this list that is expected to leave it.
     ///
     /// So the default is the most correct picture, no lens and the cheap
     /// antialiasing tier, and a view that wants more asks for it: through its
@@ -239,7 +271,15 @@ impl RenderEffects {
         Self::BLOOM
             .union(Self::VOLUMETRIC_FOG)
             .union(Self::AUTO_EXPOSURE)
-            .union(Self::SMAA),
+            .union(Self::SMAA)
+            // **Parked, not decided.** `docs/plan/45-shadows.md` puts
+            // [`CONTACT_SHADOWS`](Self::CONTACT_SHADOWS) *in* this stack and has
+            // the low preset clear it; it sits in this list because switching it
+            // on moves every golden in the workspace at once, and that re-bless
+            // is a change of its own rather than a rider on the change that
+            // built the pass. The other four are out on the merits and say so
+            // above; this one is out on timing and says so here.
+            .union(Self::CONTACT_SHADOWS),
     );
 
     /// Every effect and the one word a report spells it with, in bit order.
@@ -263,6 +303,7 @@ impl RenderEffects {
         (Self::VOLUMETRIC_FOG, "vfog"),
         (Self::AUTO_EXPOSURE, "autoexp"),
         (Self::SMAA, "smaa"),
+        (Self::CONTACT_SHADOWS, "contact"),
     ];
 
     /// This set as a debug panel row and a headless summary line spell it:
@@ -792,8 +833,9 @@ mod tests {
     /// consumer that does exactly that.
     ///
     /// What it guards is the claim [`RenderEffects::DEFAULT_STACK`]'s docs make:
-    /// the lens, the froxel volume, auto-exposure and the higher antialiasing
-    /// tier are what a view has to ask for, and they are the **only** ones. A
+    /// the lens, the froxel volume, auto-exposure, the higher antialiasing tier
+    /// and — until its re-bless is taken — the contact march are what a view has
+    /// to ask for, and they are the **only** ones. A
     /// default that quietly included one would have re-blessed every golden
     /// image in the tree, and each of them would still have been a plausible
     /// picture — which is the whole difficulty: a wrongly-defaulted post pass
@@ -801,7 +843,9 @@ mod tests {
     ///
     /// The antialiasing resolve was held out on the same terms for exactly one
     /// change, which is what re-blessed the suite; it is in the default now, and
-    /// this asserts that none of the other three followed it in.
+    /// this asserts that none of the other four followed it in.
+    /// [`RenderEffects::CONTACT_SHADOWS`] is the one on that path today, and
+    /// this is what will go red on the change that moves it.
     #[test]
     fn the_default_stack_is_the_light_transport_effects_and_a_view_can_still_ask() {
         assert_eq!(
@@ -811,12 +855,14 @@ mod tests {
                     .union(RenderEffects::VOLUMETRIC_FOG)
                     .union(RenderEffects::AUTO_EXPOSURE)
                     .union(RenderEffects::SMAA)
+                    .union(RenderEffects::CONTACT_SHADOWS)
             ),
         );
         let post = RenderEffects::BLOOM
             .union(RenderEffects::VOLUMETRIC_FOG)
             .union(RenderEffects::AUTO_EXPOSURE)
-            .union(RenderEffects::SMAA);
+            .union(RenderEffects::SMAA)
+            .union(RenderEffects::CONTACT_SHADOWS);
         assert!(!EffectRequest::default().camera.contains(post));
         assert!(
             !EffectRequest::default()
@@ -840,7 +886,8 @@ mod tests {
                 .force(RenderEffects::ANTIALIASING, Some(true))
                 .force(RenderEffects::VOLUMETRIC_FOG, Some(true))
                 .force(RenderEffects::AUTO_EXPOSURE, Some(true))
-                .force(RenderEffects::SMAA, Some(true)),
+                .force(RenderEffects::SMAA, Some(true))
+                .force(RenderEffects::CONTACT_SHADOWS, Some(true)),
             ..EffectRequest::default()
         };
         assert_eq!(forced.resolve(RenderEffects::all()), RenderEffects::all());

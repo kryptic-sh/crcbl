@@ -290,6 +290,10 @@ pub mod bloom;
 /// layouts that shader declares.
 pub mod ssao;
 
+/// The uniform block and the constants `contact_shadows.slang` reads, in the
+/// layouts that shader declares.
+pub mod contact_shadows;
+
 /// The uniform block and the roughness cutoff `ssr.slang` reads, in the layouts
 /// that shader declares — and the guard over the helpers it shares with
 /// `ssao.slang`.

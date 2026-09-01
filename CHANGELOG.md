@@ -188,6 +188,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Screen-space contact shadows, built and off by default.**
+  `RenderEffects::CONTACT_SHADOWS` is a new bit and
+  `crcbl_render::contact_shadows` is the pass behind it: a short march along the
+  sun's direction through the depth prepass, writing one `R8Unorm` channel that
+  scales the directional shadow term. It closes the sliver where a foot meets
+  the floor, which is finer than any cascade texel — a bias large enough to stop
+  acne is large enough to detach the contact. The shader is `ssr.slang`'s march
+  with the level held at zero; the Hi-Z pyramid is deliberately not climbed,
+  because a ray fifteen texels long skips nothing a hierarchy would find.
+
+  **It is not in `RenderEffects::DEFAULT_STACK`**, so no frame draws it unless a
+  camera asks, and no golden has moved. `docs/plan/45-shadows.md` decided it
+  belongs in the default with the low quality preset clearing it; that flip
+  re-blesses every golden in the workspace and is its own change. Priced at
+  0.069 ms p50 on an RX 7900 XTX and 5.574 ms on lavapipe, 1080p on
+  `apps/lantern` — cheaper there than SSAO, SSR, the shadow pass and the forward
+  pass itself.
+
 - **A phone can open the debug console and type at it.**
   `docs/plan/52-debug-console.md` slice 10's touch half, and it was two gaps
   rather than one: `crcbl::engine::CONSOLE_KEY` is the backtick and nothing
