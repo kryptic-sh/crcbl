@@ -902,6 +902,29 @@ impl DepthProbe {
                 flags: crcbl::hal::BindingFlags::empty(),
             },
         ];
+
+        // **This table is a hand-written copy of `mesh.slang`'s, and this is
+        // what holds the two together.** A layout that leaves a descriptor the
+        // module declares uncovered is supposed to be refused at pipeline
+        // creation — the entries above say so twice — but on lavapipe and WARP
+        // it is a `SIGSEGV` instead, naming nothing. That is how binding 28
+        // arrived: the contact-shadow channel landed in `mesh.slang`, this
+        // array did not gain it, and three tests in this file crashed on two CI
+        // runners while every gate on a developer's machine stayed green.
+        //
+        // `crcbl_shaders::mesh::DECLARED_BINDINGS` is parsed from the shader by
+        // a test in that crate, so the pair fails loudly and in order: there
+        // first, under a plain `cargo test`, and here if only this copy is
+        // stale.
+        let mut covered: Vec<u32> = entries.iter().map(|entry| entry.binding).collect();
+        covered.sort_unstable();
+        assert_eq!(
+            covered,
+            crcbl::shaders::mesh::DECLARED_BINDINGS,
+            "the probe's layout and mesh.slang's declared bindings disagree; a descriptor the \
+             module declares and this table omits is a segfault on a software adapter"
+        );
+
         let layout = device
             .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
                 label: Some("probe"),

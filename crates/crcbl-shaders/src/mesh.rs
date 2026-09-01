@@ -206,6 +206,30 @@ pub const SHADOW_ATLAS_CLEAR_DEPTH: f32 = 0.0;
 
 pub const SHADOW_CASTER_REACH: f32 = 40.0;
 
+/// Every descriptor binding `mesh.slang` declares in set 0, ascending.
+///
+/// **A list rather than a count, because the numbers are not contiguous** — the
+/// shader leaves gaps where bindings were retired, and a consumer that assumed
+/// `0..N` would cover descriptors the module does not declare and miss the ones
+/// it does.
+///
+/// This exists because a *hand-written* copy of this table is a real thing in
+/// the tree: `crcbl`'s `forward_e2e::depth_probe` drives the module directly
+/// rather than through `ForwardRenderer`, so it builds the whole bind group
+/// layout itself. Nothing held the two together, and on 2026-09-01 the
+/// contact-shadow channel arrived at binding 28, the probe's table did not gain
+/// it, and three of its tests **segfaulted** on lavapipe and WARP — the layout
+/// left a declared descriptor uncovered, which is supposed to be refused at
+/// pipeline creation and is not on a software adapter. Nothing named the
+/// binding; nothing named anything.
+///
+/// The test below holds this constant to the shader, and the probe holds its
+/// own table to this constant. So a binding added to `mesh.slang` and nowhere
+/// else fails here first, under a plain `cargo test`, on a machine with no GPU.
+pub const DECLARED_BINDINGS: [u32; 19] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 20, 21, 22, 23, 25, 26, 27, 28,
+];
+
 const _: () = assert!(
     (SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_ROWS) as usize == SHADOW_ATLAS_TILES,
     "every root cell of the atlas is one slot's, and every slot has a cell to \
@@ -2301,6 +2325,40 @@ pub fn open_box_vertex_bytes() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`DECLARED_BINDINGS`] is what `mesh.slang` actually declares.
+    ///
+    /// Parsed out of the source rather than mirrored by hand a second time: a
+    /// second hand-written copy would need a third thing to hold *it* together,
+    /// which is the regress this constant exists to end. Set 0 only — a
+    /// `[[vk::binding(n, 1)]]` would belong to a different layout.
+    #[test]
+    fn the_declared_bindings_are_the_ones_mesh_slang_declares() {
+        const SOURCE: &str = include_str!("../shaders/mesh.slang");
+
+        let declared: Vec<u32> = SOURCE
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("[[vk::binding(")?;
+                let (number, tail) = rest.split_once(',')?;
+                tail.trim_start().strip_prefix("0)]]")?;
+                number.trim().parse().ok()
+            })
+            .collect();
+
+        assert!(
+            !declared.is_empty(),
+            "no `[[vk::binding(n, 0)]]` was found in mesh.slang at all, so this guard is \
+             matching on a spelling the shader no longer uses and is holding nothing"
+        );
+        assert_eq!(
+            declared, DECLARED_BINDINGS,
+            "mesh.slang's set-0 bindings and `DECLARED_BINDINGS` disagree. A binding added to \
+             the shader has to be added here and to `forward_e2e::depth_probe`'s hand-written \
+             layout, or that suite segfaults on a software adapter with nothing naming the \
+             descriptor"
+        );
+    }
 
     /// The offsets `slangc` actually emitted for `FrameUniforms`, read out of
     /// the disassembly. If the shader's field order changes, this is what says
