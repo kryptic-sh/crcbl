@@ -45,7 +45,8 @@
 //!
 //! [`presets::select`] applies each key through a [`Stage`], and this process
 //! has none of the seams a [`Stage`] names: no renderer, no mixer, no loop. So
-//! [`NoEngine`] leaves every method at its [`Unsupported`] default and the
+//! [`NoEngine`] leaves every method at its [`crcbl::settings::Unsupported`]
+//! default and the
 //! answer is [`Applied::NextStart`] — written, and shown by the game's next
 //! start-up rather than by anything here. That is reported rather than dropped:
 //! it is the one thing a person cannot tell from the file.
