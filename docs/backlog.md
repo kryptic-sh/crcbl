@@ -13792,6 +13792,33 @@ takes three whole windows to saturate, and three windows is no longer enough to
 see it stop. The cheap remedy is the one this entry already named: **more
 windows**, so the flat step after saturation is inside the sample.
 
+**What the "better fix" actually costs, read 2026-09-02 before starting it.**
+This entry and the code both name it as `liveObjects()` reporting each kind's
+bound. That is harder than it sounds: `liveObjects` is `Replayer#liveObjects` in
+`web/engine/gpu-replay.js`, and it works by walking `Replayer.prototype`'s
+getters for `HandleTable`s and reporting `table.size`. **The replayer has no
+idea what a bound is** — `CullStatsRing`'s depth is an engine fact on the wasm
+side, and nothing in the command stream declares it. So that fix needs a new
+channel from the engine to the page saying "this kind is bounded at N", which is
+a change to the stream's contract, not a change to a JS check.
+
+**There is a cheaper discriminator, and this file already argues for it.** The
+comment above the constants says a leak that mints one object per frame "moves
+the count by the window size". That is the separation, and it needs no engine
+constants at all: a **ring** is bounded by its depth, which is single digits,
+while a **leak** grows by roughly `FRAMES_WATCHED` per window. So a rule like
+"flag only a kind whose total growth reaches the window size" excludes every
+ring by construction — six can never reach twenty — and still trips instantly on
+the acquire-path leak this check was written for, which climbs at 581 per
+second.
+
+The trade is real and should be weighed rather than assumed: today's rule
+catches _any_ monotone growth, so it would also catch a leak slower than one
+object per frame, and a magnitude rule would not. A combined rule — monotone
+across every window **and** total growth of at least the window size — keeps
+most of that and still excludes rings. Not built; the choice between "declare
+the bound properly" and "separate by magnitude" is the thing to decide first.
+
 **This is the third occurrence, which is the trigger this entry set for the
 better fix.** It says a per-kind bound reported by the engine is "worth doing
 only if a second question wants the same thing" — three false failures on two
