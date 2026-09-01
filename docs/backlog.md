@@ -179,49 +179,43 @@ before the first frame, out of the same settings directory `config` reads — th
 page's OPFS store in a browser. So a console variable can now be set ahead of
 everything that reads one, with no key map, no digits and no typing.
 
-**What is left is the harness half: nothing seeds a file into a demo's OPFS
-before it boots.** Whatever is seeded has to land before `restoreOpfs`, which
-`web/engine/demo.js` awaits before it calls `api.boot()`; the harness already
-navigates to a same-origin control page (`CONTROL_PATH`) before the demo, which
-is the hook. There are **two routes**, and the comparison is worth writing down
-because the reading that separates them is an hour nobody should spend twice.
+**The harness half landed the same day: the browser gate seeds an `autoexec.cfg`
+into quarry's OPFS and proves the demo ran it.** The seed is written from the
+demo's own page — same origin, and a fresh browser profile per `launch()` means
+preflight's browser shares no store with the run's — as a record frame built
+with `DataView` and `crypto.subtle.digest`, matching `opfs.rs`'s `frame()` field
+for field. The on-disk name is **`autoexec.cfg~0`**: on wasm the OPFS root _is_
+the settings directory, every key is kept as two generation files, and
+`split_physical` drops any delivered name without the suffix — so a file written
+as plain `autoexec.cfg` restores as nothing at all. Slot 0 because a key the
+engine has not seen is written to slot 1, leaving slot 0 the copy nothing else
+touches.
 
-- **Seed `autoexec.cfg` into OPFS directly.** The bytes have to be a valid
-  record frame — `crcbl-store`'s OPFS restore calls `unframe` and **rejects a
-  bad one silently**, by documented design — so the harness needs an encoder for
-  the layout `crates/crcbl-store/src/web/opfs.rs` owns: a 52-byte header of
-  magic, version, generation sequence and length, then a SHA-256 over the first
-  20 bytes and the payload. That is smaller and safer than it first looks. The
-  hash is `crypto.subtle.digest`, which the harness's secure context already
-  has, so nothing is hand-rolled but the field offsets.
+**The check asserts the effect against a control**, which is what the silent
+rejection demands: restore drops a frame that does not verify without a word, so
+a gate asserting only "no error" would pass with a bad frame, a wrong filename
+or a late write alike. The seeded boot has to read `view: ambient occlusion` in
+its first heartbeat, carry the file's own `autoexec.cfg: 2 lines` summary, and
+log `r_ssao_slices = 4` — a variable from another crate's table; the control
+run, the same page with that one file removed by name, has to come up `shaded`
+and differ. Both halves were shown red: corrupting one header byte after the
+digest takes three of the four checks down, and defeating the control takes down
+exactly the control.
 
-  **The silent rejection is what makes the check's shape load-bearing.** A gate
-  that asserted only "the demo ran without error" would pass with a malformed
-  frame, a wrong filename, or a seed written after `restoreOpfs` — three ways of
-  doing nothing at all. A gate that asserts the _effect_ — the variable at its
-  seeded value, against an unseeded control run showing the default — fails
-  loudly in every one of those cases. Written that way, the drift risk of a
-  second implementation of the format is bounded: the day the header changes,
-  the gate goes red rather than quiet.
+So the browser tier is no longer blocked. **What remains is the measurement
+itself** — the seeded file already sets `r_ssao_slices 4`, so pricing the rung
+is a matter of reading timings out of a seeded run against an unseeded one, not
+of format work.
 
-- **Give the two AO knobs `[engine.video]` keys, and let the engine write the
-  file.** `RENDER_SCALE_KEY` and `FRAME_LIMIT_KEY` are the pattern for a scalar
-  key whose reader drives a renderer. The harness then needs no encoder at all:
-  run the demo, set the value, `save`, reload — the second run reads what the
-  engine's own writer produced, and the format has no second implementation.
-
-**These are not competing, and the second is wanted regardless.** The keys are
-the step the two preset entries below already call for and call ordinary work,
-and they are what would let `high` differ from `medium` by something measured; a
-console variable is reachable from an autoexec but not from a preset or a
-settings screen. The seeding route is the cheaper unblock for the _measurement_
-specifically, and it doubles as the only thing that would exercise the start-up
-autoexec in a browser at all. The keys carry a cost the seeding does not, and it
-is measured: a new `VIDEO_KEYS` row shifts `toFader` in `browser-e2e.mjs` and
-the options browser gate has to be run locally.
-
-Until one of the two exists the browser tier of the AO rung stays unmeasured,
-and it is the last thing in front of the defaults decision.
+**The other route is still wanted, and is now the only one for anything that is
+not a console variable.** Giving the AO knobs `[engine.video]` keys —
+`RENDER_SCALE_KEY` and `FRAME_LIMIT_KEY` are the pattern for a scalar key whose
+reader drives a renderer — is the step the preset entries below already call
+ordinary work, and it is what would let `high` differ from `medium` by something
+measured. An autoexec reaches a `convar!`; it cannot reach a `RenderEffects` bit
+that has no catalogue key, which is why the contact-shadow entry below is still
+blocked. Its cost is recorded: a new `VIDEO_KEYS` row shifts `toFader` in
+`browser-e2e.mjs` and the options browser gate has to be run locally.
 
 **What the rung buys, re-measured.** The scene is
 `forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`: a
@@ -605,13 +599,12 @@ summary line `run_text` prints carries the name. What is **not** covered:
   means `SettingsStack::with_platform_storage` answering `None` — natively "this
   platform names no config directory", in a browser "this page installed no
   store" — and neither is reachable without touching real storage or a browser.
-- **Nothing browser-side was run.** The wasm32 rustdoc gate compiles the wasm
-  arm and executes none of it. The claim that the OPFS store is resident by the
-  time `Loop::new` runs rests on reading `web/engine/demo.js` — it awaits
-  `restoreOpfs` before `api.boot()`, and `boot()` is several frames ahead of
-  `Loop::new` — not on a browser having done it. The first thing that will
-  exercise it for real is the harness seeding described in the HIGH PRIORITY
-  entry above.
+- **The browser is exercised on one leg only.** The gate seeds an `autoexec.cfg`
+  into quarry's OPFS and asserts the demo ran it against an unseeded control,
+  which settles residency by observation — the file's lines land at 0.0833 s,
+  before the first frame. It has been run on the `swiftshader` leg
+  `--adapter auto` chose here. CI's macOS leg and a hardware adapter have not
+  run it.
 - **`Autoexec` is public API on `crcbl::console_config`**, returned by
   `Console::run_autoexec` and ignored by `Loop::new`. It is public because the
   three silent outcomes are indistinguishable from their output — a check that
