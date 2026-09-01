@@ -1738,16 +1738,6 @@ against the GGX lobe. What it did not do:
   backend are untried. So the 3.7x and 2.3x ratios in `docs/plan/44-lighting.md`
   are two drivers' numbers, and the browser tier's is still an ALU count rather
   than a measurement.
-- **The fill flag's shadow half is a guard that cannot fail.**
-  `crcbl_render::shadow::can_be_shadowed` opens with
-  `if light.is_fill() { return false; }`, and nothing reaches it: `fill` is a
-  field on `RectLight` alone, and the `Light::Rect` arm below refuses a
-  rectangle a tile regardless. Deleting the line leaves every test in
-  `crcbl-render` green — 426 + 43 + 2 on 2026-08-31 — so that half of the flag
-  is asserted by nothing. It becomes real, and testable, the moment `fill` moves
-  onto `PointLight` and `SpotLight`, which is the next item; the line is kept
-  and its doc now says it decides nothing today rather than claiming to be the
-  enforcement.
 - **No area light reaches `render_e2e` or the browser harness.** The frames
   above are `mesh_e2e`'s, which draws through `ForwardRenderer` directly. A
   frame in `crates/crcbl/tests/render_e2e.rs` needs a new
@@ -1769,11 +1759,6 @@ against the GGX lobe. What it did not do:
   drawing anything). So the WGSL artifacts can only be exercised through the
   browser harness, and a rectangle reaching one is gated on the
   `crcbl::screenshot::Scene` variant the bullet above is about.
-- **`fill` is on `RectLight` alone.** `crcbl_render::Light::is_fill` is the seam
-  and `shadow::can_be_shadowed` already refuses any fill light a tile, so the
-  flag generalises the moment `PointLight` and `SpotLight` grow the field. They
-  did not here because their struct literals are spread across `apps/**` and
-  `crates/crcbl/src`, which the slice did not own.
 - **Sphere, tube and disc are unbuilt.** The table serves them unchanged — the
   paper's own point — so what each needs is corners (a sphere and a tube are
   integrated as their silhouette quads) and a shape word in the row, not a

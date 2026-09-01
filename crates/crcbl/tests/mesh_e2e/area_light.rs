@@ -585,6 +585,7 @@ fn the_price_of_a_froxel_full_of_area_lights() {
                 position: ring(index),
                 radius: STRIP_REACH,
                 color: STRIP_COLOR / PRICE_LIGHTS as f32,
+                fill: false,
             })
         })
         .collect();

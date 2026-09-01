@@ -110,6 +110,7 @@ fn lamp() -> Light {
         direction: Vec3::ZERO - position,
         inner_angle: 0.5,
         outer_angle: 0.75,
+        fill: false,
     })
 }
 

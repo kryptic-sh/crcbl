@@ -551,6 +551,7 @@ pub fn lamps() -> Vec<Light> {
                 position: Vec3::new(0.0, (CEILING_Y - LAMP_DROP) as f32, z as f32),
                 radius: LAMP_RADIUS,
                 color: Vec3::new(1.0, 0.97, 0.92) * LAMP_INTENSITY,
+                fill: false,
             })
         })
         .collect()

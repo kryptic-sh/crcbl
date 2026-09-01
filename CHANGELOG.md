@@ -185,6 +185,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   vertices were quantised against, `MeshPool::upload` takes it, `GpuMesh`
   carries it to the shaders (`MESH_ENTRY_STRIDE` 36 → 52), and `SkinningDesc`
   gains `attribute_base`. No golden moved.
+- **`crcbl_render::PointLight` and `SpotLight` gain `fill: bool`.** The flag was
+  a field on `RectLight` alone, so every literal of the other two kinds — in
+  `apps/breach`, `apps/lantern`, `apps/shard`, `crcbl::screenshot` and the
+  render tests — names it now. `false` is the light that was there before.
 
 ### Added
 
@@ -591,12 +595,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   to the integrator in CI beside `cook-dfg`'s. No transcendental reaches the
   frame: the fit runs at cook time and the shader's per-edge term is the paper's
   published rational for `acos`.
-- **A light can be marked _fill_: it lights and does not glint, and casts no
-  shadow.** `crcbl_render::RectLight::fill` sets
-  `crcbl_shaders::light::FLAG_FILL` on the row; `mesh.slang` drops the specular
-  lobe and `crcbl_render::shadow`'s selection refuses the light a tile. It is
-  what lights the far end of a room without a bake. Rectangles only for now — a
-  `fill` field on `PointLight` and `SpotLight` is `docs/backlog.md`'s.
+- **A light of any kind can be marked _fill_: it lights and does not glint, and
+  casts no shadow.** `fill` is a field on `crcbl_render::PointLight`,
+  `SpotLight` and `RectLight` alike and sets `crcbl_shaders::light::FLAG_FILL`
+  on the row; `mesh.slang` drops the specular lobe and `crcbl_render::shadow`'s
+  selection refuses the light a tile. It is what lights the far end of a room
+  without a bake. A rectangle is refused a map for a second reason as well — it
+  has no centre of projection — so the shadow half of the flag is what a fill
+  point light or spot buys.
 
 - **`debug_view ambient occlusion` draws any renderer's debug channel, in every
   game.** The six views `crcbl_render::DebugView` has always had — `shaded`,

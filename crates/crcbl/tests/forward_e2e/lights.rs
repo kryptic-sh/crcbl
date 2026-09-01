@@ -62,6 +62,7 @@ fn everywhere(index: u32) -> Light {
         // Dim, because twenty of them are in the frame and this test is about
         // the counter rather than about the picture.
         color: Vec3::splat(0.01),
+        fill: false,
     })
 }
 
@@ -257,6 +258,7 @@ fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
         position: LIGHT_AT,
         radius: LIGHT_REACH,
         color: Vec3::new(4.0, 1.0, 1.0),
+        fill: false,
     })]);
     let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
     let with_sphere = assignments(&headless, &renderer);
@@ -269,6 +271,7 @@ fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
         direction: -LIGHT_AT,
         inner_angle: SPOT_INNER,
         outer_angle: SPOT_OUTER,
+        fill: false,
     })]);
     let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
     let with_cone = assignments(&headless, &renderer);
@@ -360,6 +363,7 @@ fn a_point_light_brightens_the_face_it_is_beside_and_not_the_frame() {
         // Bright enough to be unmistakable against the sun, which
         // `DirectionalLight::default` already puts above 1.0.
         color: Vec3::new(4.0, 1.0, 1.0),
+        fill: false,
     })]);
     let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
 

@@ -15028,6 +15028,7 @@ mod tests {
             position: Vec3::new(x, 2.0, 0.0),
             radius: 8.0,
             color: Vec3::ONE,
+            fill: false,
         })
     }
 
@@ -15039,6 +15040,7 @@ mod tests {
             direction: -Vec3::Y,
             inner_angle: 0.3,
             outer_angle: 0.6,
+            fill: false,
         })
     }
 

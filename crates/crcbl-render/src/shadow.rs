@@ -819,15 +819,14 @@ pub fn point_frustum(point: &PointLight) -> Frustum {
 /// no single view a map could be rendered from. All of them light without
 /// occluding.
 ///
-/// The fill test is the leading one and covers every kind, and **today it
-/// decides nothing**: [`RectLight::fill`](crate::RectLight::fill) is the only
-/// way a light can answer yes to
-/// [`is_fill`](crate::Light::is_fill), and the `Rect` arm below refuses a
-/// rectangle a tile whatever its flag says. Deleting the test changes no
-/// behaviour and reddens no test — measured on 2026-08-31, and
-/// `docs/backlog.md` carries it. It is kept because it is where the rule
-/// belongs the moment a point or spot light gains the flag, and because the
-/// alternative is remembering to add it then.
+/// The fill test is the leading one and covers every kind, and it is the only
+/// thing standing between a fill point light or spot and a tile: every variant
+/// carries [`fill`](crate::PointLight::fill) now, and the arms below judge a
+/// light by its shape alone. Delete the test and
+/// `a_fill_light_is_refused_a_tile_where_the_same_light_takes_one` goes red,
+/// which is what the flag's shadow half is asserted by. The `Rect` arm refuses
+/// a rectangle regardless, so on that kind alone the test still decides
+/// nothing.
 ///
 /// What *is* enforced is that this function is the only thing that hands a
 /// light a tile, so a fill light's row carries `NO_SHADOW_TILE` and
@@ -1631,6 +1630,7 @@ mod tests {
             direction,
             inner_angle: 0.2,
             outer_angle: 0.5,
+            fill: false,
         }
     }
 
@@ -1757,6 +1757,7 @@ mod tests {
             position,
             radius,
             color: Vec3::ONE,
+            fill: false,
         }
     }
 
@@ -1974,6 +1975,7 @@ mod tests {
             direction: Vec3::NEG_Y,
             inner_angle: 0.2,
             outer_angle: 0.5,
+            fill: false,
         })
     }
 
@@ -2140,6 +2142,57 @@ mod tests {
             &[held(2, 0), held(3, 1), held(4, 2), held(5, 3)],
             "the two brightest are ineligible, so the tiles go to the ones that are"
         );
+    }
+
+    /// **A fill light is refused a tile, where the same light not marked fill
+    /// takes one** — the flag's shadow half, which is [`can_be_shadowed`]'s
+    /// leading test and nothing else.
+    ///
+    /// The pair is the assertion. A fill light getting no tile is equally what
+    /// a build that shadowed nothing at all would report, so the run before it
+    /// is the same light with the flag cleared and it has to take tile 0. Only
+    /// `fill` differs between the two: the position, the radius and the cone
+    /// are copied from the one value.
+    #[test]
+    fn a_fill_light_is_refused_a_tile_where_the_same_light_takes_one() {
+        // Built once and copied with the flag set, so the pair below differs in
+        // `fill` and in nothing else — same position, same radius, same cone.
+        let point = point_at(Vec3::new(0.0, 0.0, -2.0), 4.0);
+        let spot = spot_at(Vec3::new(0.0, 0.0, -2.0), Vec3::NEG_Y);
+        let pairs = [
+            (
+                "point",
+                Light::Point(point),
+                Light::Point(PointLight {
+                    fill: true,
+                    ..point
+                }),
+            ),
+            (
+                "spot",
+                Light::Spot(spot),
+                Light::Spot(SpotLight { fill: true, ..spot }),
+            ),
+        ];
+        for (kind, casting, filling) in pairs {
+            let mut selection = Selection::default();
+            selection.update(&[casting], &camera_at(Vec3::ZERO));
+            assert_eq!(
+                selection.base_of(0),
+                Some(0),
+                "a {kind} light that is not fill must take the first tile, or \
+                 the refusal below would pass against a build that shadows \
+                 nothing"
+            );
+            let mut selection = Selection::default();
+            selection.update(&[filling], &camera_at(Vec3::ZERO));
+            assert_eq!(
+                selection.base_of(0),
+                None,
+                "a fill {kind} light lights without occluding, so it is handed \
+                 no tile at all"
+            );
+        }
     }
 
     /// **A point light and a spot are shadowed in the same frame**, which is what

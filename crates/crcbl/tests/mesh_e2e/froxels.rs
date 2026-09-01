@@ -117,6 +117,7 @@ fn column_lights() -> [Light; 2] {
             position: Vec3::new(0.9, 0.5, 1.1),
             radius: 1.6,
             color: Vec3::new(3.0, 1.0, 0.5),
+            fill: false,
         }),
         Light::Spot(SpotLight {
             position: Vec3::new(-0.4, 1.6, 0.4),
@@ -125,6 +126,7 @@ fn column_lights() -> [Light; 2] {
             direction: Vec3::new(0.1, -1.0, 0.05),
             inner_angle: 0.35,
             outer_angle: 0.6,
+            fill: false,
         }),
     ]
 }

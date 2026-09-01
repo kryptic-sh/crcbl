@@ -1391,6 +1391,7 @@ pub fn lamp(seconds: f32) -> Light {
         ),
         radius: LAMP_REACH,
         color: Vec3::new(1.0, 0.62, 0.28) * LAMP_INTENSITY,
+        fill: false,
     })
 }
 
@@ -1498,6 +1499,7 @@ pub fn spot() -> Light {
         direction: (SPOT_POOL - SPOT_AT).normalize(),
         inner_angle: SPOT_INNER_ANGLE,
         outer_angle: SPOT_OUTER_ANGLE,
+        fill: false,
     })
 }
 

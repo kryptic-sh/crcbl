@@ -658,6 +658,7 @@ fn spot_light() -> crcbl::render::Light {
         direction: -SPOT_LIGHT_AT,
         inner_angle: 0.18,
         outer_angle: 0.28,
+        fill: false,
     })
 }
 
@@ -943,6 +944,7 @@ fn point_light() -> crcbl::render::Light {
         position: crcbl::math::Vec3::new(0.0, POINT_LIGHT_UP, 0.0),
         radius: POINT_REACH,
         color: crcbl::math::Vec3::new(1.0, 0.95, 0.85) * 5.0,
+        fill: false,
     })
 }
 
@@ -1285,6 +1287,7 @@ fn pair_point_light() -> crcbl::render::Light {
         position: PAIR_POINT_AT,
         radius: PAIR_POINT_REACH,
         color: crcbl::math::Vec3::new(1.0, 0.95, 0.85) * 5.0,
+        fill: false,
     })
 }
 
@@ -1299,6 +1302,7 @@ fn pair_spot_light() -> crcbl::render::Light {
         direction: crcbl::math::Vec3::new(0.0, -PAIR_SPOT_AT.y, -PAIR_SPOT_AT.z),
         inner_angle: 0.18,
         outer_angle: 0.28,
+        fill: false,
     })
 }
 

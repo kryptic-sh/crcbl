@@ -245,6 +245,7 @@ pub fn spot() -> Light {
         direction: (vector(spot_pool()) - vector(at)).normalize(),
         inner_angle: SPOT_INNER_ANGLE,
         outer_angle: SPOT_OUTER_ANGLE,
+        fill: false,
     })
 }
 
@@ -278,6 +279,7 @@ pub fn torches(seconds: f64, lit: bool) -> Vec<Light> {
             position: Vec3::new(at.x as f32, at.y as f32, at.z as f32),
             radius: TORCH_REACH,
             color: TORCH_COLOR * TORCH_INTENSITY * flame(index, seconds) as f32,
+            fill: false,
         }));
     }
     lights

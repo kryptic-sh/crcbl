@@ -146,6 +146,7 @@ fn lamp(pool: Vec3, reach: f32) -> Light {
         direction: pool - position,
         inner_angle: 0.7 * CONE,
         outer_angle: CONE,
+        fill: false,
     })
 }
 

@@ -956,6 +956,7 @@ fn lamplit_cube_hdr(light_scattering: f32) -> HdrTarget {
         position: camera.eye + forward * LAMP_AHEAD + right * LAMP_ASIDE,
         radius: LAMP_RADIUS,
         color: crcbl::math::Vec3::new(0.0, 4.0, 0.0),
+        fill: false,
     })]);
     place_cube(&mut renderer);
     let mut hdr = Vec::new();

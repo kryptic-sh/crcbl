@@ -442,11 +442,9 @@ through WebGPU, so it should sit in the same band.
 
 **What the rung left**, all in `docs/backlog.md`: sphere, tube and disc shapes
 (the table serves them unchanged — they need corners and a shape field, not a
-second fit); textured area lights; `fill` on `PointLight` and `SpotLight`, which
-needs their struct literals across `apps/**` touched; a rectangle in the
-`crcbl::screenshot::Scene` list so the frame reaches `render_e2e` and the
-browser; area-light shadows; and `volumetric.slang` scattering a rectangle as a
-point at its centre.
+second fit); textured area lights; a rectangle in the `crcbl::screenshot::Scene`
+list so the frame reaches `render_e2e` and the browser; area-light shadows; and
+`volumetric.slang` scattering a rectangle as a point at its centre.
 
 ### What stays out, and why
 

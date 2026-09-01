@@ -478,6 +478,7 @@ fn scene_lights() -> [crcbl_render::Light; 3] {
             position: glam::Vec3::new(x, y, LIGHT_Z),
             radius: LIGHT_RADIUS,
             color: colour * LIGHT_INTENSITY,
+            fill: false,
         })
     };
     // **Each light's colour is chosen against the material under it**, because a
@@ -685,6 +686,7 @@ fn spot_light() -> crcbl_render::Light {
         direction: glam::Vec3::NEG_Y,
         inner_angle: (SPOT_CORE_RADIUS / SPOT_HEIGHT).atan(),
         outer_angle: (SPOT_EDGE_RADIUS / SPOT_HEIGHT).atan(),
+        fill: false,
     })
 }
 
@@ -1610,6 +1612,7 @@ fn spot_shadow_light() -> crcbl_render::Light {
         direction: -SPOT_SHADOW_LIGHT_AT,
         inner_angle: SPOT_SHADOW_INNER_ANGLE,
         outer_angle: SPOT_SHADOW_OUTER_ANGLE,
+        fill: false,
     })
 }
 
@@ -1687,6 +1690,7 @@ fn point_shadow_light() -> crcbl_render::Light {
         position: glam::Vec3::new(0.0, POINT_LIGHT_UP, 0.0),
         radius: POINT_REACH,
         color: glam::Vec3::new(1.0, 0.95, 0.85) * SPOT_INTENSITY,
+        fill: false,
     })
 }
 

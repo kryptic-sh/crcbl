@@ -53,6 +53,19 @@ pub struct PointLight {
     /// Colour premultiplied by intensity. **May exceed 1.0**, like the sun's:
     /// the scene target is `Rgba16Float` precisely so that it can.
     pub color: Vec3,
+    /// Whether this is a **fill** light: one that lights but casts no shadow and
+    /// adds no specular.
+    ///
+    /// `docs/plan/44-lighting.md`'s rung 5 asked for it beside the area lights.
+    /// It is how a stack with no baked bounce lights the far end of a room
+    /// without paying for a shadow map or leaving a highlight where no fixture
+    /// is. `crcbl_shaders::light::FLAG_FILL` is the row's bit;
+    /// [`shadow::Selection`](crate::shadow::Selection) refuses such a light a
+    /// tile and `mesh.slang` refuses it a lobe.
+    ///
+    /// **Every kind carries it**, on this field's terms exactly, and
+    /// [`Light::is_fill`] is where one question is asked of the three.
+    pub fill: bool,
 }
 
 /// A point light with a cone over it.
@@ -81,6 +94,9 @@ pub struct SpotLight {
     /// widens it to that if it is not, rather than emitting a row whose two
     /// cosines the shader would divide the wrong way round.
     pub outer_angle: f32,
+    /// Whether this is a **fill** light, on [`PointLight::fill`]'s terms
+    /// exactly: it lights, casts no shadow and adds no specular.
+    pub fill: bool,
 }
 
 /// A rectangle that radiates from one of its faces — `docs/plan/44-lighting.md`'s
@@ -144,21 +160,12 @@ pub struct RectLight {
     pub half_width: f32,
     /// Half its extent along `v`, which is `cross(tangent, direction)`.
     pub half_height: f32,
-    /// Whether this is a **fill** light: one that lights but casts no shadow and
-    /// adds no specular.
+    /// Whether this is a **fill** light, on [`PointLight::fill`]'s terms
+    /// exactly: it lights, casts no shadow and adds no specular.
     ///
-    /// `docs/plan/44-lighting.md`'s rung 5 asked for it beside the area lights.
-    /// It is how a stack with no baked bounce lights the far end of a room
-    /// without paying for a shadow map or leaving a highlight where no fixture
-    /// is. `crcbl_shaders::light::FLAG_FILL` is the row's bit;
-    /// [`shadow::Selection`](crate::shadow::Selection) refuses such a light a
-    /// tile and `mesh.slang` refuses it a lobe.
-    ///
-    /// **Only a rectangle carries it today.** The flag belongs on every light
-    /// and the row already has room for it on every kind; what it waits on is a
-    /// field on [`PointLight`] and [`SpotLight`], which is a breaking change to
-    /// two structs every sample in this workspace builds by literal.
-    /// `docs/backlog.md` carries it.
+    /// A rectangle is refused a shadow map for a second reason as well — it
+    /// radiates from a surface, so there is no centre of projection to render
+    /// one from — and on this kind the flag is the specular half alone.
     pub fill: bool,
 }
 
@@ -200,14 +207,15 @@ impl Light {
     /// Whether this light is a **fill** light: one that lights, casts no shadow
     /// and adds no specular.
     ///
-    /// A method on the enum rather than a field on each variant, so
+    /// A method on the enum rather than a match at each caller, so
     /// [`shadow::Selection`](crate::shadow::Selection) asks one question of a
-    /// light rather than three. [`RectLight::fill`] is the only variant that can
-    /// answer yes today and says why.
+    /// light rather than three. Every kind carries the field and
+    /// [`PointLight::fill`] is where it is described.
     #[must_use]
     pub const fn is_fill(&self) -> bool {
         match self {
-            Self::Point(_) | Self::Spot(_) => false,
+            Self::Point(point) => point.fill,
+            Self::Spot(spot) => spot.fill,
             Self::Rect(rect) => rect.fill,
         }
     }
@@ -232,6 +240,10 @@ impl Light {
         let shadow_tile = base_tile.map_or(light::NO_SHADOW_TILE, |base| {
             u32::try_from(base).unwrap_or(light::NO_SHADOW_TILE)
         });
+        // One reading of the flag for all three kinds, rather than an arm that
+        // could be the one to forget it: `is_fill` is the same question
+        // `shadow::Selection` asked before it refused this light a tile.
+        let flags = if self.is_fill() { light::FLAG_FILL } else { 0 };
         match self {
             Self::Point(point) => GpuLight {
                 position: point.position.extend(point.radius).to_array(),
@@ -241,7 +253,7 @@ impl Light {
                 kind: light::KIND_POINT,
                 cos_inner: 0.0,
                 shadow_tile,
-                flags: 0,
+                flags,
             },
             Self::Spot(spot) => {
                 // **Widened rather than trusted.** The shader divides by
@@ -262,7 +274,7 @@ impl Light {
                     kind: light::KIND_SPOT,
                     cos_inner: spot.inner_angle.cos(),
                     shadow_tile,
-                    flags: 0,
+                    flags,
                 }
             }
             Self::Rect(rect) => {
@@ -278,7 +290,7 @@ impl Light {
                     kind: light::KIND_RECT,
                     cos_inner: 0.0,
                     shadow_tile,
-                    flags: if rect.fill { light::FLAG_FILL } else { 0 },
+                    flags,
                 }
             }
         }
@@ -364,6 +376,7 @@ mod tests {
             position: Vec3::new(1.0, 2.0, 3.0),
             radius: 7.0,
             color: Vec3::new(0.25, 0.5, 0.75),
+            fill: false,
         })
         .row(None);
         assert_eq!(row.kind, light::KIND_POINT);
@@ -382,6 +395,7 @@ mod tests {
             direction: Vec3::new(0.0, -2.0, 0.0),
             inner_angle: 0.6,
             outer_angle: 0.2,
+            fill: false,
         };
         let row = Light::Spot(spot).row(None);
         assert_eq!(row.kind, light::KIND_SPOT);
@@ -409,9 +423,72 @@ mod tests {
             direction: -Vec3::Y,
             inner_angle: 0.2,
             outer_angle: 0.6,
+            fill: false,
         })
         .row(None);
         assert!((row.cos_inner - 0.2_f32.cos()).abs() < 1e-6);
         assert!((row.direction[3] - 0.6_f32.cos()).abs() < 1e-6);
+    }
+
+    /// **Every kind's row carries the fill bit**, which is the half of the flag
+    /// `mesh.slang` enforces — it drops the specular lobe on `FLAG_FILL` and
+    /// asks nothing about the kind.
+    ///
+    /// Each light is written twice, filled and not, so a row that set the bit
+    /// unconditionally fails here rather than reading as a light that is always
+    /// matte.
+    #[test]
+    fn a_fill_light_of_any_kind_carries_the_flag_into_its_row() {
+        let point = PointLight {
+            position: Vec3::ZERO,
+            radius: 5.0,
+            color: Vec3::ONE,
+            fill: false,
+        };
+        let spot = SpotLight {
+            position: Vec3::ZERO,
+            radius: 5.0,
+            color: Vec3::ONE,
+            direction: -Vec3::Y,
+            inner_angle: 0.2,
+            outer_angle: 0.6,
+            fill: false,
+        };
+        let rect = RectLight {
+            position: Vec3::ZERO,
+            radius: 5.0,
+            color: Vec3::ONE,
+            direction: -Vec3::Y,
+            tangent: Vec3::X,
+            half_width: 0.5,
+            half_height: 0.25,
+            fill: false,
+        };
+        for (kind, light) in [
+            ("point", Light::Point(point)),
+            ("spot", Light::Spot(spot)),
+            ("rect", Light::Rect(rect)),
+        ] {
+            assert_eq!(
+                light.row(None).flags,
+                0,
+                "an ordinary {kind} light's row must carry no flags"
+            );
+            let filled = match light {
+                Light::Point(point) => Light::Point(PointLight {
+                    fill: true,
+                    ..point
+                }),
+                Light::Spot(spot) => Light::Spot(SpotLight { fill: true, ..spot }),
+                Light::Rect(rect) => Light::Rect(RectLight { fill: true, ..rect }),
+            };
+            assert!(filled.is_fill(), "a filled {kind} light must answer yes");
+            assert_eq!(
+                filled.row(None).flags,
+                light::FLAG_FILL,
+                "a fill {kind} light's row must carry the bit `mesh.slang` drops \
+                 the specular on"
+            );
+        }
     }
 }
