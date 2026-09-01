@@ -1491,6 +1491,23 @@ what puts `ANTIALIASING` into a `programmatic` override anywhere in
 `DebugView` re-exports, which is the nearest thing in that file to state shared
 between concurrent tests.
 
+**The suspect is named, the mechanism is not.** `apps/viewer/src/gpu.rs` has a
+test helper `without_the_resolve(renderer)` whose whole job is
+`EffectOverride::none().force(RenderEffects::ANTIALIASING, Some(false))` — it
+takes the resolve off so the texel-reading frames are not blended along a
+silhouette — and three sibling tests in that same binary call it. That is
+exactly the bit the flake loses, forced off by exactly the layer that reading
+`resolve` left as the only candidate.
+
+What is **not** established is how it could reach the failing test.
+`without_the_resolve` takes `&mut ForwardRenderer` and each caller builds its
+own, and that file declares no `static`, `OnceLock`, `Mutex` or `thread_local`
+for a renderer or device to be shared through. So either something below
+`ForwardRenderer` carries request or pipeline state between instances, or the
+resemblance is a coincidence and the cause is elsewhere. Worth an hour with a
+`dbg!` of the resolved `EffectRequest` in the failing arm before any fix is
+attempted — the shape fits too well to ignore and not well enough to act on.
+
 ## The render-quality programme (opened 2026-08-27)
 
 Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
