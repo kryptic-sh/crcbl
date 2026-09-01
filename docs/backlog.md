@@ -256,6 +256,15 @@ where it used to guard 20%, and `AO_LIFT` 3.8% where it used to guard more than
 `crcbl_golden::Tolerance::RASTERISER` was measured for, so neither is fragile
 today, but the headroom for a future change to eat is a third of what it was.
 
+**Re-checked after half-resolution AO landed, 2026-09-02, and neither margin
+moved.** The halving was the obvious candidate for eating the headroom this
+entry is about, so both were read again on radv: the AO scene measures its walls
+at 70.8 and 70.5 against an open floor of 74.7, a ratio of 1.055, and lantern's
+contact corner goes 57.5 to 59.7 with occlusion on, a lift of 1.038. Both sit
+where they sat before the gather was halved, so the reconstruction is carrying
+the contrast the full-resolution pass had. The margin is unchanged, and so is
+the case for an intensity control below.
+
 **The industry answer is an AO intensity control**, applied to the scalar
 visibility before the tint — a power or a lerp toward one, which is what lets an
 artist ask for more occlusion than the horizon integral measured. This engine
@@ -1077,6 +1086,22 @@ prints `medium, high` for a file either of them wrote, so a run that selected
 `high` is not told it is on `medium`; that second name disappears on its own
 when the columns separate. Not a defect; recorded so the resemblance is not read
 as a copy-paste slip.
+
+**A concrete candidate to separate them arrived on 2026-09-02: the AO tangential
+rung.** The HIGH PRIORITY entry at the top of this file now has the rung
+measured on both native tiers, and it is affordable — four slices with two blurs
+costs less than the un-runged pair did before AO was halved, and it undoes the
+smoothness that halving cost. `r_ssao_slices` and `r_ssao_blur_passes` are
+console variables with no `[engine.video]` key and no tier row, which is exactly
+the two-step road the entry above this one describes: a catalogue key whose
+reader drives the variable, then a tier-table row saying what each column
+spends. Give them that and `high` would differ from `medium` by something
+measured rather than by a knob nobody has priced.
+
+Two things still gate it, and neither is work: **which tier gets which value is
+the user's call** — see "Whether any tier should be the default is still the
+user's call" below — and the browser tier is still unmeasured, which is where
+the extra slices are most likely to be refused.
 
 ## The tier table's CMAA2 cells are read as SMAA (2026-08-31)
 
