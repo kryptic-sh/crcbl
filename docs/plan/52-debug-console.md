@@ -15,65 +15,15 @@ an annotation-style way to expose a thing. Valve's Source engine (`ConVar`,
 the user's instruction.
 
 This document is the plan and the record of the decisions taken to write it. The
-delivery list at the end says which slices have landed; the rest is not built.
-The tree was read on 2026-08-30 for every "today" claim below; each names the
-file it came from.
+delivery list at the end says which slices have landed and is the thing to read
+for what exists.
 
-## Where the tree stands today
-
-- **Logging** — `crcbl_core::log` funnels every record through one path:
-  `StderrLogger::emit` in `crates/crcbl-core/src/log.rs`, which writes to
-  **stderr**, and on wasm `crcbl::web::WebLogger`, which queues lines a page
-  drains through `log_take`/`log_ptr` (`web/engine/log.js` routes them to the
-  browser console). The only readback is the thread-local test capture
-  (`log::capture()`); there is no process-wide ring a UI could read. `Level` and
-  `LevelFilter` are the `log` crate's; `CRCBL_LOG` is the filter.
-- **Text input** — `ShellEvent::TextCommit { text }` exists
-  (`crates/crcbl-shell/src/event.rs`) and every native backend emits it with the
-  layout applied: Wayland and X11 from `xkb_state_key_get_utf8`, Win32 from
-  `WM_CHAR`, AppKit through `NSTextInputClient`. The web backend emits **none**
-  (`crates/crcbl-shell/src/web/mod.rs` says so) and carries the typed character
-  only as `ShellEvent::Key`'s `keysym`, from `KeyboardEvent.key`. **The engine
-  loop drops `TextCommit` on the floor**: `Pending::observe`'s catch-all and
-  `MenuPump::observe` both pass it nowhere, and `HostedGame` has no text hook.
-- **The key** — `KeyCode::Backquote` (`crates/crcbl-core/src/input.rs`, the W3C
-  `code` name for the `` ` ``/`~` key) is mapped on all five backends and is
-  claimed by nothing. The engine's reserved keys are `F3` (debug overlay),
-  `Escape` (pause) and `F11` (fullscreen), in `crates/crcbl/src/engine.rs`.
-- **UI** — `crcbl_ui` has `DrawList` (`rect`, `rect_outline`, `line`,
-  `polyline`, `text`; no clip, no scissor), the 8×13 monospace `FontAtlas`
-  covering printable ASCII 32–126 (backtick and tilde included), `Menu` with
-  cycler and slider rows, `DebugPanel`, `HudPanel`. **There is no text field, no
-  caret and no keyboard focus anywhere** — focus is `Menu::selected`.
-  `FontAtlas::layout_line` returns per-glyph rectangles, which is what a caret
-  is built from.
-- **Settings** — `crcbl::settings` reads sixteen keys (six `[engine.video]`
-  effect booleans, `render_scale`, `frame_limit`, `antialiasing`,
-  `anisotropic_filtering`, six `[engine.audio]` gains) with a getter and a
-  setter each, and `settings::catalogue()` lists every engine key with a
-  **prose** domain string and a `KeyStatus` (`Read` or merely `Named`). The
-  store is `crcbl_store::SettingsStack` (`get<T>`, `set<T>`, `contains`, `dump`,
-  `save`). **Live application is per key and per app**: only
-  `GpuContext::set_pacing` applies live at the engine level; render scale,
-  anisotropy and antialiasing reach `ForwardRenderer` through each app's own
-  `Gpu` bundle, the frame limit through `HostedGame::take_pending_frame_limit`,
-  audio gains through each app's audio module. `apps/options` is the one screen
-  that reads, writes and applies them, and `apps/options/src/view.rs` already
-  renders `SettingsStack::dump()` as debug rows.
-- **Debug views** — `crcbl_render::DebugView` is `Shaded`, `Heatmap`, `LodTint`,
-  `Normals`, `AmbientOcclusion`, `Motion`, with five independent setters on
-  `ForwardRenderer` and one precedence resolver (`ForwardRenderer::debug_view`).
-  Wireframe is a separate switch. **Nothing engine-level sets a view**:
-  `GameGpu` exposes none, lantern hand-wires the AO view behind its pause panel,
-  the viewer binds `W` and `N`. The user wants every view in every build; today
-  each is one app's.
-- **Registries** — there is no command registry, no console-variable concept and
-  no autocomplete anywhere in the workspace. The nearest analogue is
-  `crcbl_input::ActionMap`, a string-keyed rebindable table with
-  `action_names()`.
-- **Hosts** — sixteen `apps/*` crates implement `HostedGame`; fifteen ship as
-  browser demos; `crates/crcbl-cli/templates/main.rs.tmpl` is a seventeenth
-  implementor that only the `cli-e2e` gate compiles.
+It opened with a survey of the tree as it stood before any of this was built —
+no text field, no command registry, no autocomplete, nothing engine-level
+setting a debug view. **That survey has been deleted**, because every claim in
+it is now false and a "today" section that describes a tree from before the work
+is worse than none: `git log` is the record of what changed, and the decisions
+below are what still binds.
 
 ## The decisions
 
