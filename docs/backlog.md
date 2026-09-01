@@ -6899,9 +6899,21 @@ waits that are bounded by _simulated_ time — "a foe engages the character" at
 ~4.8 s and "a foe's ability costs them health" at ~5.2 s, both from the
 harness's own "slowest 5" line — so both scale with the runner's slowdown rather
 than with its wall clock, which is exactly the multiplier this entry is about.
-shard's `pages.yml` step already carries a 20-minute timeout. No CI figure for
-shard exists at either size, so how much of the twenty minutes this leaves is
-not known.
+**shard's step carries no timeout of its own — corrected 2026-09-02.** This
+entry said it had twenty minutes. The twenty-minute steps in `pages.yml` belong
+to `probe-macos`, and that job is **disabled**: `if: false`, and it reports
+`skipped` on every run. The live `demos` matrix runs
+`Render ${{ matrix.demo }} in a real browser` with no step-level bound at all,
+so the only cap on shard is the job's `timeout-minutes: 90`.
+
+That matters in the direction this entry cares about, and it is worse than it
+read. Observed on the Pages run for `f9982ae`: every other demo finished, and
+shard's render step was still going **38 minutes** in — nearly twice the budget
+this entry believed it had, with an hour still to burn before anything stops it.
+A job the cap kills is `cancelled`, not failed, which is the mode `pages.yml`'s
+own header says has already silently held the site back three times. No CI
+figure for shard exists at either size, so how much of the ninety minutes it
+actually needs is still unknown.
 
 **And then its save block, which costs more than either.** Same machine, same
 adapter: 90 s and 51 checks before, 111 s and 54 checks after. None of the three
