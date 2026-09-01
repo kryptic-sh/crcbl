@@ -1022,14 +1022,29 @@ screen shows" — neither is implemented, and both are a re-bless. What a defaul
 would need: a decision about which tier each of the four backends and the
 browser opens on, and a golden re-bless for the ones that move.
 
-## `apps/options` offers no quality row (2026-08-31)
+## What the `apps/options` quality row did not cover (2026-09-01)
 
-The preset is reachable from the console, from `crcbl settings preset` and from
-`crcbl::settings::presets`, and from nowhere else. `apps/options`' menu is built
-from `VIDEO_KEYS` and four hand-written rows in `apps/options/src/menu.rs`, so a
-`QUALITY` cycler above them is a small change — but adding a row shifts
-`web/tools/browser-e2e.mjs`'s `toFader` index and moves the options browser
-gate, which was out of this slice's paths. Deliberately deferred, not forgotten.
+The `QUALITY` cycler is the top row of `apps/options`' menu; it writes a whole
+column of the tier table through `crcbl::settings::presets::select` and re-reads
+the render scale, the antialiasing rung and the fog switch into the rows below
+it. Verified by that sample's own tests and by the options browser gate, which
+walks past the new row to the MUSIC fader. What was not done:
+
+- **Nothing looked at the row.** No windowed run and no GPU; every check is over
+  `Screen::menu_kind` and the menu set it reconciles. Whether the caption fits
+  the panel's column is unverified, and this row's is the only hint on the
+  screen that can name two tiers at once — `medium, high`, which
+  `presets::label` writes while those two columns hold the same values.
+- **The row cannot reach `low` in one press from `custom`.** A stack on no tier
+  parks the cycler on the bottom rung, so `ArrowLeft` there does nothing and the
+  first press forward lands on `medium`; `low` is one wrap away. That is exactly
+  what an off-ladder anisotropy does on its own row, and it is deliberate — but
+  it is the one place the arrows do something other than what a player reaching
+  for the cheapest tier would guess.
+- **`RESET` leaves the row reading `custom`.** It writes the whole extent, the
+  game's own antialiasing rung and every effect on, which is no column of the
+  table. Correct, since no tier is a default — see the entry above — and written
+  down because from the screen it looks like a row that stopped working.
 
 ## What the preset slice did not verify (2026-08-31)
 
@@ -1195,10 +1210,26 @@ events so far: ["Resized"]; parent Some(21f), root 0x21f, origin Some((0, 0))
 window — and a `None` there would have meant the window was gone instead. That
 line came off a real reproduction, not a sabotage.
 
-**What would move it next:** find which earlier test leaves the state. The
-suite's one documented cross-test channel is the pointer, which `Session::open`
-already parks at the screen centre for exactly this reason, so it is something
-else. Everything but the drag family is still unbisected.
+**Bisected as far as it goes, and no single test is the cause** (2026-09-01).
+The suite runs in name order, and the target is 27th of 45. Its four immediate
+predecessors — `a_window_can_be_unmapped_and_mapped_again`,
+`a_window_created_borderless_does_not_report_its_own_request_as_the_answer`,
+`a_window_destroyed_while_a_drop_is_arriving_still_releases_the_source` and
+`a_window_has_no_size_until_it_is_pumped` — **reproduce it as a group**, 1
+failure in 8 runs of just those five tests. Each one paired with the target
+alone gives **0 in 12**.
+
+So it is cumulative rather than one poisoned predecessor: something that builds
+up over several windows being mapped and torn down, not a state one test leaves.
+That also explains why it survived the pointer being parked at the screen centre
+in `Session::open`, which is the suite's one documented cross-test channel and
+was the obvious suspect.
+
+**What would move it next:** the five-test filter above is a cheap harness for
+it — a repro in about seven seconds a run rather than the full suite's twenty.
+Watching openbox's own state across those five (its client list, or an
+`xtrace`-style log of what it does with each `MapRequest`) is the next step, and
+was not done.
 
 ## Two whole-workspace-only test flakes, neither a process global (2026-09-01)
 

@@ -28,10 +28,13 @@
 //! at start-up, so the row can write it honestly without a way to re-mode a
 //! live window — and `anisotropic_filtering`, `render_scale` and the effect
 //! switches of `crcbl::settings::VIDEO_KEYS`, which a `ForwardRenderer` takes
-//! and this sample has none to hand them to. The rest of
+//! and this sample has none to hand them to. Above all of those sits the
+//! quality row, which writes a whole column of
+//! `docs/plan/39-capabilities.md`'s tier table into the rows below it — see
+//! `Screen::set_quality`. The rest of
 //! `docs/plan/sample/20-options.md`'s video half — display mode, resolution,
-//! present mode, the quality tiers — is not here yet, and `docs/backlog.md`
-//! says what each of them is waiting on.
+//! present mode — is not here yet, and `docs/backlog.md` says what each of
+//! them is waiting on.
 //!
 //! **The video rows do not apply as they move.** Everything else here reaches
 //! its stage in the same call that writes its key; the ceiling reaches the loop
@@ -57,6 +60,7 @@ use crcbl::engine::{
 use crcbl::prelude::*;
 use crcbl::render::{Antialiasing, DEFAULT_ANISOTROPY, RenderEffects};
 use crcbl::settings::SharedSettings;
+use crcbl::settings::presets::QualityPreset;
 use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
 use crcbl::store::settings::SettingsStack;
 
@@ -283,6 +287,23 @@ pub struct Screen {
     antialiasing: Antialiasing,
     /// The tier this run **started** on, for `opened_anisotropy`'s reason.
     opened_antialiasing: Antialiasing,
+    /// The quality tier the `QUALITY` row's cycler is sitting on, or [`None`]
+    /// for a stack on no tier at all.
+    ///
+    /// **Where the next press starts from, and nothing else.** What the row
+    /// *shows* is [`Screen::quality_hint`], derived from the stack every
+    /// frame; this is the rung the widget is parked on, which the label cannot
+    /// supply because two columns of the tier table can hold the same values.
+    /// [`presets::selected`](crcbl::settings::presets::selected) answers the
+    /// cheaper of them, so a screen that re-derived the rung every frame would
+    /// snap back off `high` onto `medium` and could never reach `low` again:
+    /// every press from there would land on a rung that read back as the one
+    /// below it.
+    ///
+    /// Dropped the moment the covered keys stop holding it — a player who has
+    /// moved one of the rows below is on no tier, and the next press starts
+    /// from whichever tier the file does hold.
+    quality: Option<QualityPreset>,
 }
 
 /// The loop options runs in.
@@ -426,6 +447,7 @@ impl Screen {
         let effects = crcbl::settings::video_effects(&stack);
         let antialiasing =
             crcbl::settings::antialiasing(&stack).unwrap_or(crate::menu::DEFAULT_ANTIALIASING);
+        let quality = crcbl::settings::presets::selected(&stack);
         Self {
             stack: SharedSettings::new(stack),
             store,
@@ -453,6 +475,7 @@ impl Screen {
             opened_effects: effects,
             antialiasing,
             opened_antialiasing: antialiasing,
+            quality,
         }
     }
 
@@ -628,6 +651,69 @@ impl Screen {
     /// The dotted key of one `[engine.video]` row.
     fn video_key(name: &str) -> String {
         format!("{}.{name}", crcbl::settings::VIDEO_NAMESPACE)
+    }
+
+    /// Writes a whole quality tier and re-reads the rows it moved.
+    ///
+    /// Through [`crcbl::settings::presets::select`], which is the path the
+    /// console's `quality` command and `crcbl settings preset` already take.
+    /// A tier is a set of `[engine.video]` values, and there is one table that
+    /// spells them; a writer of its own here would be a second copy of it, and
+    /// the first hand-edit of the table would leave the screen offering
+    /// something no other caller does.
+    ///
+    /// **The re-read is the point of the row.** Every other setter moves one
+    /// value this screen already holds; this one writes three keys behind the
+    /// screen's back — the render scale, the antialiasing rung and the fog
+    /// switch — and the rows those belong to are drawn from [`Screen`]'s own
+    /// `scale`, `antialiasing` and `effects` rather than from the stack.
+    /// Leaving them stale would not merely show the wrong number: the next
+    /// switch a player flipped would go through [`Screen::set_effects`], which
+    /// writes *every* effect key from the set it holds, and would put the fog
+    /// switch back to what it was before the tier landed.
+    fn set_quality(&mut self, preset: QualityPreset) {
+        // Scoped for `Screen::write`'s reason — a `SharedSettings` is a
+        // `RefCell`, and the read below cannot open while this write is live.
+        let written = {
+            let mut stack = self.stack.stack_mut();
+            crcbl::settings::presets::select(&mut stack, preset, &mut self.audio)
+        };
+        if let Err(fault) = written {
+            self.saved = SaveState::Failed(fault.to_string());
+        }
+        self.edited();
+        let (scale, antialiasing, effects) = {
+            let stack = self.stack.stack();
+            (
+                crcbl::settings::render_scale(&stack),
+                crcbl::settings::antialiasing(&stack).unwrap_or(crate::menu::DEFAULT_ANTIALIASING),
+                crcbl::settings::video_effects(&stack),
+            )
+        };
+        self.scale = scale;
+        self.antialiasing = antialiasing;
+        self.effects = effects;
+        self.quality = Some(preset);
+    }
+
+    /// What the tier row says: every tier whose values the covered keys hold,
+    /// or `custom`.
+    ///
+    /// Derived from the stack on every frame rather than remembered, which is
+    /// [`crcbl::settings::presets`]' own rule — so a player who moves one of
+    /// the rows below this one sees it turn to `custom` on the next frame
+    /// instead of being told they are still on a tier they have left. It can
+    /// name two tiers at once, for the reason
+    /// [`label`](crcbl::settings::presets::label) gives: two columns of the
+    /// table can hold the same values, and naming only the first would read as
+    /// a write that went somewhere else.
+    ///
+    /// **No [`NEXT_START_MARK`](crate::menu::NEXT_START_MARK).** Every key a
+    /// tier writes has a row of its own below with its own mark, and this row
+    /// is a summary of those rows rather than a setting the run could be
+    /// under.
+    fn quality_hint(&self) -> String {
+        crcbl::settings::presets::label(&self.stack.stack())
     }
 
     /// Moves the frame ceiling, writing the key and marking the file unsaved.
@@ -942,6 +1028,39 @@ impl HostedGame for Screen {
     /// where [`crate::menu::stepped`]'s off-ladder rule needs it to be.
     fn menu_kind(&mut self, menus: &mut Menus, _paused: bool) -> MenuKind {
         if let Some(menu) = menus.get_mut(MenuKind::Settings) {
+            // **The tier row's step, read before everything under it.**
+            // Choosing a tier writes the render scale, the antialiasing rung
+            // and the fog switch, and `set_quality` re-reads all three into
+            // this screen; the blocks below draw their rows from exactly those
+            // fields. Reading the step first is what puts a chosen tier on the
+            // rows it moved in the frame it was chosen rather than a frame
+            // later.
+            //
+            // Only the step is read here. Where the widget is put back and what
+            // the row says are the last thing this pass does, because both are
+            // derived from the covered keys and a row further down may move one
+            // of them — see the tail of this method.
+            //
+            // `placed` guards the first frame as it does the faders: the set is
+            // born on the bottom rung and the file may say otherwise, which is
+            // a placement rather than a step.
+            let parked = crate::menu::quality_rung(self.quality);
+            if let Some(chosen) = menu.cycler(crate::menu::QUALITY_ID)
+                && self.placed
+                && chosen != parked
+            {
+                self.set_quality(crate::menu::quality_stepped(chosen));
+                // **Every row below has just had its value written behind its
+                // widget's back**, so for the rest of this pass a widget that
+                // disagrees with its value is a placement and not a step —
+                // which is the first frame's situation exactly, and `placed` is
+                // the flag that already says so. Without this the antialiasing
+                // cycler and the fog switch would each read the tier's write as
+                // a press of their own and undo it in the frame it landed. It
+                // goes back on at the end of the pass, below.
+                self.placed = false;
+            }
+
             for bus in Bus::ALL {
                 let id = crate::menu::fader_id(bus);
                 match menu.slider(id) {
@@ -1064,6 +1183,25 @@ impl HostedGame for Screen {
                 menu.set_cycler(id, crate::menu::switch_rung(self.effects.contains(*effect)));
                 menu.set_item_hint(id, self.effect_hint(*effect));
             }
+            // **The tier row, placed and captioned last.** Both halves are
+            // derived from the covered keys, and a row below this one may have
+            // moved one of them earlier in this very pass — so reading them at
+            // the top, where the step is read, would leave the row a frame
+            // behind the switch a player just flipped.
+            //
+            // The parked rung is only re-derived once the covered keys have
+            // stopped holding it; see [`Screen::quality`] for why it is
+            // remembered rather than computed from the stack every frame.
+            let held = crcbl::settings::presets::current_values(&self.stack.stack());
+            if !self.quality.is_some_and(|tier| tier.values() == held) {
+                self.quality = crcbl::settings::presets::selected(&self.stack.stack());
+            }
+            menu.set_cycler(
+                crate::menu::QUALITY_ID,
+                crate::menu::quality_rung(self.quality),
+            );
+            menu.set_item_hint(crate::menu::QUALITY_ID, self.quality_hint());
+
             menu.set_item_hint(crate::menu::SAVE_ID, self.saved.hint());
             self.placed = true;
         }
@@ -1480,6 +1618,7 @@ mod tests {
             Screen::menu_action(crate::menu::RESET_ID),
             Some(Action::Reset)
         );
+        assert_eq!(Screen::menu_action(crate::menu::QUALITY_ID), None);
         assert_eq!(Screen::menu_action(crate::menu::FRAME_CAP_ID), None);
         assert_eq!(Screen::menu_action(crate::menu::ANISOTROPY_ID), None);
         assert_eq!(Screen::menu_action(crate::menu::ANTIALIASING_ID), None);
@@ -2264,6 +2403,250 @@ mod tests {
             crcbl::settings::antialiasing(&screen.stack()),
             Some(crate::menu::DEFAULT_ANTIALIASING),
             "the screen reset a tier it never wrote",
+        );
+    }
+
+    /// The `[engine.video]` row of [`VIDEO_KEYS`](crcbl::settings::VIDEO_KEYS)
+    /// a quality tier writes, so a test can read the switch it moved without
+    /// writing its position down.
+    fn fog_switch() -> usize {
+        crcbl::settings::VIDEO_KEYS
+            .iter()
+            .position(|(_, effect)| *effect == RenderEffects::VOLUMETRIC_FOG)
+            .expect("the fog switch has a key")
+    }
+
+    /// **The file's tier reaches the row before a frame is drawn, and the walk
+    /// down to it is a placement rather than a step.**
+    ///
+    /// The set is born on the bottom rung — `HostedGame::menus` is a `fn()` and
+    /// cannot see a settings stack — so a screen opened over a file holding
+    /// `medium` finds the widget a rung below the tier it is on. Reading that
+    /// as a press would rewrite the player's whole `[engine.video]` section on
+    /// frame one, and onto the cheapest tier at that.
+    #[test]
+    fn the_tier_row_is_placed_from_the_file_without_writing_a_thing() {
+        let held = QualityPreset::Medium;
+        let (mut screen, mut menus) = screen(
+            "[engine.video]\nrender_scale = 1.0\nantialiasing = \"smaa\"\nvolumetric_fog = true\n",
+        );
+        assert_eq!(
+            crcbl::settings::presets::selected(&screen.stack()),
+            Some(held),
+            "the fixture has to open on a tier that is not the bottom rung",
+        );
+        assert_eq!(
+            rung(&mut menus, crate::menu::QUALITY_ID),
+            crate::menu::quality_rung(None),
+            "the set is born on the bottom rung",
+        );
+
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.edits(), 0, "placing the row was read as a step");
+        assert_eq!(
+            rung(&mut menus, crate::menu::QUALITY_ID),
+            crate::menu::quality_rung(Some(held)),
+            "the widget was not walked to the file's rung",
+        );
+        let said = hint(&mut menus, crate::menu::QUALITY_ID);
+        assert!(
+            said.split(", ").any(|named| named == held.name()),
+            "the row reads {said:?} for a file on {held:?}",
+        );
+    }
+
+    /// **`ENTER` on the tier row walks every column of the table and comes back
+    /// round**, writing each one into the keys as it goes.
+    ///
+    /// A file that says nothing is on no tier, so the row is parked on the
+    /// bottom rung and the first press steps to the one above it — the same
+    /// place a press from an off-ladder anisotropy lands. What matters is that
+    /// all three columns are reachable: `medium` and `high` hold the same
+    /// values today, so a row that re-derived its rung from
+    /// [`selected`](crcbl::settings::presets::selected) every frame would be
+    /// pulled back onto `medium` after every press and could never reach `low`
+    /// again.
+    #[test]
+    fn entering_the_tier_row_walks_every_column_of_the_table_and_comes_back() {
+        let (mut screen, mut menus) = screen("");
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            hint(&mut menus, crate::menu::QUALITY_ID),
+            crcbl::settings::presets::CUSTOM,
+            "a file that says nothing is on no tier",
+        );
+        assert_eq!(screen.edits(), 0, "placing the row was read as a step");
+
+        let walk: Vec<QualityPreset> = QualityPreset::ALL
+            .into_iter()
+            .cycle()
+            .skip(1)
+            .take(QualityPreset::ALL.len() + 1)
+            .collect();
+        for (presses, tier) in walk.into_iter().enumerate() {
+            press(&mut menus, crate::menu::QUALITY_ID);
+            reconcile(&mut screen, &mut menus);
+            assert_eq!(
+                crcbl::settings::presets::current_values(&screen.stack()),
+                tier.values(),
+                "press {} left the keys off {tier:?}",
+                presses + 1,
+            );
+            let said = hint(&mut menus, crate::menu::QUALITY_ID);
+            assert!(
+                said.split(", ").any(|named| named == tier.name()),
+                "the row reads {said:?} for {tier:?}",
+            );
+            assert_eq!(
+                screen.edits() as usize,
+                presses + 1,
+                "a tier is one edit, however many keys it wrote",
+            );
+        }
+    }
+
+    /// **The rows a tier writes show its values on the frame it was chosen**,
+    /// not a frame later and not the values they held before.
+    ///
+    /// This is the whole point of the row: a tier writes the render scale, the
+    /// antialiasing rung and the fog switch behind the screen's back, and those
+    /// three rows are drawn from `Screen`'s own fields rather than from the
+    /// stack. A row left stale would not merely read wrong — the next switch a
+    /// player flipped goes through `Screen::set_effects`, which writes every
+    /// effect key from the set it holds, and would put the fog switch back.
+    #[test]
+    fn a_chosen_tier_moves_the_rows_below_it_on_the_frame_it_lands() {
+        let (mut screen, mut menus) =
+            screen("[engine.video]\nrender_scale = 0.6\nvolumetric_fog = true\n");
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            hint(&mut menus, crate::menu::QUALITY_ID),
+            crcbl::settings::presets::CUSTOM,
+            "the fixture has to open on no tier for the walk below to be a walk",
+        );
+
+        // `low` is the bottom rung and the row is parked there while the file
+        // is on no tier, so `ENTER` reaches it by walking the table round once.
+        let low = QualityPreset::Low;
+        for _ in 0..QualityPreset::ALL.len() {
+            press(&mut menus, crate::menu::QUALITY_ID);
+            reconcile(&mut screen, &mut menus);
+        }
+        assert_eq!(
+            crcbl::settings::presets::current_values(&screen.stack()),
+            low.values(),
+            "the walk did not land on {low:?}",
+        );
+
+        // Every one of these is read on the same frame the tier landed on.
+        assert_eq!(
+            screen.render_scale(),
+            low.values().render_scale,
+            "the screen is still holding the scale it had before the tier landed",
+        );
+        assert_eq!(
+            screen.antialiasing(),
+            low.values().antialiasing,
+            "the screen is still holding the tier it had before the tier landed",
+        );
+        assert_eq!(
+            screen.effects().contains(RenderEffects::VOLUMETRIC_FOG),
+            low.values().volumetric_fog,
+            "the screen is still holding the effects it had before the tier landed",
+        );
+        let groove = menus
+            .get_mut(MenuKind::Settings)
+            .expect("the one menu")
+            .slider(crate::menu::RENDER_SCALE_ID)
+            .expect("the scale groove");
+        assert_eq!(
+            groove,
+            crate::menu::scale_handle_at(low.values().render_scale),
+            "the scale groove is still where it was before the tier landed",
+        );
+        assert!(
+            hint(&mut menus, crate::menu::RENDER_SCALE_ID)
+                .starts_with(&crate::menu::percent(low.values().render_scale)),
+            "the scale row reads {:?}",
+            hint(&mut menus, crate::menu::RENDER_SCALE_ID),
+        );
+        assert_eq!(
+            rung(&mut menus, crate::menu::ANTIALIASING_ID),
+            crate::menu::antialiasing_rung(low.values().antialiasing),
+            "the antialiasing row is still on the rung the file opened with",
+        );
+        assert_eq!(
+            rung(&mut menus, crate::menu::effect_id(fog_switch())),
+            crate::menu::switch_rung(low.values().volumetric_fog),
+            "the fog switch is still showing what it held before the tier landed",
+        );
+
+        // And the stale-mirror failure the re-read exists to stop: a switch
+        // flipped after the tier writes every effect key from what the screen
+        // holds, and would put the fog switch back if that were stale.
+        let shadows = crcbl::settings::VIDEO_KEYS
+            .iter()
+            .position(|(_, effect)| *effect == RenderEffects::SHADOWS)
+            .expect("the shadow switch has a key");
+        assert!(step(&mut menus, crate::menu::effect_id(shadows), false));
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            screen.effects().contains(RenderEffects::VOLUMETRIC_FOG),
+            low.values().volumetric_fog,
+            "flipping another switch put the tier's fog key back",
+        );
+    }
+
+    /// **The row reads `custom` for a stack no column of the table holds** —
+    /// including one the player hand-edited off a tier they had chosen.
+    ///
+    /// The label is derived from the keys every frame rather than remembered,
+    /// which is `crcbl::settings::presets`' own rule; this is what says the
+    /// derivation is actually running here rather than a word written once.
+    #[test]
+    fn the_tier_row_reads_custom_for_a_stack_no_column_holds() {
+        let (mut screen, mut menus) =
+            screen("[engine.video]\nrender_scale = 0.6\nantialiasing = \"none\"\n");
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            hint(&mut menus, crate::menu::QUALITY_ID),
+            crcbl::settings::presets::CUSTOM,
+            "a hand-edited stack was read as a tier",
+        );
+
+        press(&mut menus, crate::menu::QUALITY_ID);
+        reconcile(&mut screen, &mut menus);
+        let chosen = crcbl::settings::presets::selected(&screen.stack())
+            .expect("a press writes a whole column");
+        // **Every column holding those values, not just the cheapest one.**
+        // `medium` and `high` are the same set today, and a row that named
+        // only `selected`'s answer would tell a player who chose `high` they
+        // are on `medium` — which reads as a write that went somewhere else.
+        // Written as "every tier holding these values" so the day a key
+        // separates the two columns this asserts the one name rather than
+        // going red.
+        let named = hint(&mut menus, crate::menu::QUALITY_ID);
+        let every: Vec<&str> = QualityPreset::ALL
+            .into_iter()
+            .filter(|tier| tier.values() == chosen.values())
+            .map(QualityPreset::name)
+            .collect();
+        assert_eq!(
+            named.split(", ").collect::<Vec<_>>(),
+            every,
+            "the row reads {named:?} for the {chosen:?} it just wrote",
+        );
+
+        // One row below moved, and the row above says so on the same frame:
+        // the label is set at the end of the pass, after the switch wrote.
+        let fog = crate::menu::effect_id(fog_switch());
+        let on = screen.effects().contains(RenderEffects::VOLUMETRIC_FOG);
+        assert!(step(&mut menus, fog, !on));
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            hint(&mut menus, crate::menu::QUALITY_ID),
+            crcbl::settings::presets::CUSTOM,
+            "the row still claims {chosen:?} after a key it covers was moved",
         );
     }
 

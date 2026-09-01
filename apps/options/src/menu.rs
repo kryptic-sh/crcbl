@@ -33,6 +33,7 @@ use crcbl::audio::mixer::Bus;
 use crcbl::engine::{DEBUG_OVERLAY_ID, FIRST_GAME_ID, FULLSCREEN_ID, FrameLimit};
 use crcbl::render::{Antialiasing, DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEffects};
 use crcbl::settings::VIDEO_KEYS;
+use crcbl::settings::presets::{CUSTOM, QualityPreset};
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet, Slider};
 
 /// The id of `bus`'s fader, numbered in [`Bus::ALL`]'s order from the first id
@@ -342,6 +343,44 @@ pub const fn switch_rung(on: bool) -> usize {
 /// How many choices a switch's cycler has: off and on.
 pub const SWITCH_RUNGS: usize = 2;
 
+/// The id of the row that writes a whole quality tier.
+///
+/// Numbered past the last switch, which has nothing to do with where the row
+/// sits: [`menus`] decides the order and puts this one at the top, and no
+/// reader here turns an id into a position. Numbering it at the end is what
+/// keeps every other id where it was.
+pub const QUALITY_ID: crcbl::ui::WidgetId = effect_id(VIDEO_KEYS.len());
+
+/// The rung the tier row sits on for the tier
+/// [`selected`](crcbl::settings::presets::selected) answered — the bottom rung
+/// for a stack that is on none.
+///
+/// [`CUSTOM`] is not a rung, because there is no set of values to write for it:
+/// it is what the label reads when the covered keys are not any one tier's set,
+/// which includes a run that has never chosen anything. So a custom stack sits
+/// on the bottom rung and steps from there, the way an off-ladder anisotropy
+/// does — and the row still *says* `custom`, since its hint is
+/// [`label`](crcbl::settings::presets::label) and not the rung's name. The rung
+/// is only where the next press starts from.
+#[must_use]
+pub fn quality_rung(tier: Option<QualityPreset>) -> usize {
+    tier.and_then(|tier| QualityPreset::ALL.iter().position(|rung| *rung == tier))
+        .unwrap_or(0)
+}
+
+/// [`stepped`] over [`QualityPreset::ALL`]: the tier the widget chose.
+///
+/// Not [`stepped`] itself, for [`antialiasing_stepped`]'s reason — every tier
+/// is a rung, so there is no value between rungs for that function's rule to
+/// place.
+#[must_use]
+pub fn quality_stepped(chosen: usize) -> QualityPreset {
+    QualityPreset::ALL
+        .get(chosen)
+        .copied()
+        .unwrap_or(QualityPreset::ALL[0])
+}
+
 /// What this sample's own rows do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -452,6 +491,23 @@ pub const fn label(bus: Bus) -> &'static str {
 #[must_use]
 pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
     let mut items = vec![
+        // **The top row, because it writes the rows under it.** A tier is a
+        // writer and not a key — see [`crcbl::settings::presets`] — so choosing
+        // one moves the `RENDER SCALE`, `ANTIALIASING` and `VOLUMETRIC FOG`
+        // rows below rather than holding a value of its own, and a row that
+        // rewrites its neighbours belongs above them where a player can see
+        // what moved.
+        //
+        // Born on [`CUSTOM`], which is what the covered keys hold before
+        // anything has chosen a tier; the first frame reads the file's own
+        // answer over it like every other row here.
+        MenuItem::cycler(
+            QUALITY_ID,
+            "QUALITY",
+            CUSTOM,
+            QualityPreset::ALL.len(),
+            quality_rung(None),
+        ),
         MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
         MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
         // Beside `FULLSCREEN`, because both are `[engine.video]` and a player
@@ -882,6 +938,76 @@ mod tests {
         assert_eq!(effect_of(RENDER_SCALE_ID), None);
         assert_eq!(effect_of(effect_id(VIDEO_KEYS.len())), None);
         assert_eq!(effect_label("ambient_occlusion"), "AMBIENT OCCLUSION");
+    }
+
+    /// **The tier row is the first row on the screen, and every row a tier
+    /// writes is below it.**
+    ///
+    /// Choosing a tier rewrites the render scale, the antialiasing rung and one
+    /// of the effect switches, and a player watching those rows move cannot be
+    /// looking at a row underneath them. The position is also what
+    /// `web/tools/browser-e2e.mjs`'s `toFader` counts down from, so a row that
+    /// drifted would walk that gate onto a groove nobody asked for.
+    #[test]
+    fn the_tier_row_is_the_first_row_and_the_rows_it_writes_are_below_it() {
+        let mut menus = menus(&Bus::ALL.map(|bus| (bus, 1.0)));
+        menus.show(MenuKind::Settings);
+        let menu = menus.current().expect("the screen is always showing");
+        let ids: Vec<_> = menu.items().iter().map(|item| item.id).collect();
+        assert_eq!(
+            ids.first().copied(),
+            Some(QUALITY_ID),
+            "the tier row is not the first row on the screen",
+        );
+
+        let place = |id| {
+            ids.iter()
+                .position(|held| *held == id)
+                .unwrap_or_else(|| panic!("no row {id}"))
+        };
+        for below in [RENDER_SCALE_ID, ANTIALIASING_ID] {
+            assert!(place(QUALITY_ID) < place(below), "row {below} is above it");
+        }
+        for (index, (key, _)) in VIDEO_KEYS.iter().enumerate() {
+            assert!(
+                place(QUALITY_ID) < place(effect_id(index)),
+                "{key}'s switch is above the row that writes it",
+            );
+        }
+    }
+
+    /// **Every tier is a rung, in the table's own order, and a stack on no tier
+    /// sits on the bottom one.**
+    ///
+    /// A tier missing from the ladder would be a column a player could reach
+    /// from the console and not from the screen. `custom` is the one answer
+    /// that is not a rung — there is nothing to write for it — so it parks on
+    /// the bottom and the next press starts from there.
+    #[test]
+    fn every_tier_is_a_rung_and_a_stack_on_no_tier_sits_on_the_bottom() {
+        for (index, tier) in QualityPreset::ALL.into_iter().enumerate() {
+            assert_eq!(quality_rung(Some(tier)), index, "{tier:?}");
+            assert_eq!(quality_stepped(index), tier);
+        }
+        assert_eq!(quality_rung(None), 0, "custom is not a rung");
+
+        // A rung the widget cannot have chosen lands on the bottom rather than
+        // off the ladder — the widget clamps, so this is the arm nothing else
+        // exercises.
+        assert_eq!(
+            quality_stepped(QualityPreset::ALL.len()),
+            QualityPreset::ALL[0],
+        );
+        for word in QualityPreset::ALL
+            .map(QualityPreset::name)
+            .iter()
+            .chain(&[CUSTOM])
+        {
+            assert!(
+                word.bytes().all(|byte| byte.is_ascii_graphic()),
+                "the label {word:?} has to be in the atlas",
+            );
+        }
     }
 
     /// A value the groove cannot reach lands at an end of it rather than off

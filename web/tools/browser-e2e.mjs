@@ -1554,17 +1554,20 @@ const EXPECTATIONS = {
     settings: {
       // How many `ArrowDown`s reach the MUSIC fader from the row the panel
       // opens on, and how many more reach `SAVE`. `apps/options/src/menu.rs`'s
-      // `menus` lays the panel out as FULLSCREEN, DEBUG PANEL, FRAME CAP,
-      // ANISOTROPY, ANTIALIASING, RENDER SCALE, a switch per
+      // `menus` lays the panel out as QUALITY, FULLSCREEN, DEBUG PANEL, FRAME
+      // CAP, ANISOTROPY, ANTIALIASING, RENDER SCALE, a switch per
       // `crcbl::settings::VIDEO_KEYS`, a fader per `Bus::ALL` in that order,
       // then SAVE and RESET. **A row added or removed anywhere above MUSIC
       // moves `toFader`**, and the gate would then walk a groove nobody asked
       // it to — the `smaa` key did exactly that on 2026-08-30, and the gate
       // read MASTER moving while it waited on MUSIC. The same day's eighth
       // decision folded that key and `antialiasing` into the one ANTIALIASING
-      // row, which is two switches gone for one cycler and this count one
-      // lower. `toSave` counts only rows *below* MUSIC and has not moved.
-      toFader: 13,
+      // row, which is two switches gone for one cycler; the QUALITY row that
+      // writes a whole tier into the rows under it arrived on 2026-09-01 and
+      // put one back. `toSave` counts only rows *below* MUSIC and has not
+      // moved. `apps/options/src/menu.rs`'s own test that the tier row is the
+      // first row is what holds the top of that list in place.
+      toFader: 14,
       toSave: 5,
       // How far to walk the fader, in `Slider::KEY_STEP`s of a twentieth each.
       // Four steps down from the top is a handle at 0.8, and the square taper

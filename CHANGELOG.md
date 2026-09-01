@@ -188,6 +188,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/options` has a `QUALITY` row, so a quality tier is reachable from a
+  settings screen and not only from the console and `crcbl settings preset`.**
+  The top row of the panel cycles `QualityPreset::ALL` and writes the chosen
+  column through `crcbl::settings::presets::select` — the same path the
+  console's `quality` command takes — so the `RENDER SCALE`, `ANTIALIASING` and
+  `VOLUMETRIC FOG` rows below it move to that tier's values on the frame it was
+  chosen. Its caption is derived from the keys rather than stored: it reads
+  `custom` for a stack no column holds, including one moved off a tier by a row
+  below, and names both columns while `medium` and `high` hold the same values.
+
 - **A quality tier is reachable from a terminal:
   `crcbl settings preset [<TIER>]`.** A preset is a writer rather than a
   catalogue key, so `settings set` — which walks `crcbl::settings::catalogue` —
