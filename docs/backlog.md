@@ -438,12 +438,44 @@ slice loop by the dynamic count instead of `SLICE_COUNT_MAX`, on the theory that
 unrolling four slices while two ship costs occupancy, measured 0.481 ms against
 0.488 ms.
 
-What did change is the whole frame, 0.990 ms to 2.143 ms over the same period,
-with `shadow` 0.070 to 0.350 ms and `ssr` 0.099 to 0.218 ms as the atlas, the
-cascades, normal maps and the LTC widening landed. `ssao` is a full-screen pass
-but its cost is **not** scene-independent — `MIN_RADIUS_PIXELS` lets a distant
-or flat pixel leave the march early — so a denser room is the remaining
-candidate. That has not been isolated, and it is the open half of this.
+**None of the absolute figures above reproduce, and the discrepancy is not
+explained — 2026-09-02.** The same command on the same driver, `--release`, now
+measures a **0.890 ms** frame with `ssao` at **0.105 ms** (11.8%), against the
+2.143 ms and 0.488 ms recorded the day before. Four consecutive runs landed
+between 0.890 and 0.905 ms with `ssao` at 0.105 in every one, so the new figure
+is not the noisy one.
+
+The drop is not confined to AO, which is what makes it a measurement question
+rather than a rendering result: `shadow` 0.350 to 0.135 ms, `forward` 0.531 to
+0.256 ms, `ssr` 0.218 to 0.110 ms — a ratio near 2.05 on three passes that no
+commit in the window touches. AO's own 4.6x is that same factor times the
+halving.
+
+Three candidates were tested and none of them is it:
+
+- **GPU contention during the old run.** Refuted by reproducing the conditions:
+  with `run-forward-e2e.sh` hammering the same adapter concurrently, lantern
+  still measured 0.904 ms, `ssao` 0.105.
+- **The report's meaning changed.** It did not. `PassStats` has one commit since
+  2026-08-28 in `crcbl-render/src/pass_stats.rs`, and that is the commit that
+  introduced this format — before both measurements. A label is summed within a
+  frame and the occurrence count sits on the row, in both.
+- **Something landed that made the frame cheaper.** The only render commits in
+  the window are the albedo tint, the half-resolution gather, its test lock and
+  the intensity control. All four are AO; none can move `shadow`, `forward` or
+  `ssr`.
+
+So what remains is how the old run was taken — most likely a build profile or an
+environment difference that was not recorded with the number, which is the
+lesson worth keeping. **Treat every absolute figure in this entry dated
+2026-09-01 as unreproducible**, and re-measure rather than diffing against them.
+
+**That also dissolves this entry's open half rather than answering it.** The
+question was why `ssao` had grown from 0.255 to 0.488 ms and whether a denser
+room explained it. There is no growth to explain: the pass measures 0.105 ms
+today, below both. The scene-density hypothesis is withdrawn — it was reasoning
+from a number that does not stand — and `MIN_RADIUS_PIXELS` making the pass
+scene-dependent remains true and remains untested.
 
 ## A plan's numbered slices are an addressing scheme (2026-08-31)
 
