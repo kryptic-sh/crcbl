@@ -1064,28 +1064,33 @@ walks past the new row to the MUSIC fader. What was not done:
   `settings_cmd`'s `NoEngine`, which has no seam at all, and prints the clause
   `applied_names` gives it.
 
-## The unpicked antialiasing rung is not guarded by any check (2026-08-31)
+## The unpicked render scale and effect switches are not guarded by any frame (2026-08-31)
 
-`crcbl::settings::antialiasing_or_default` is what the console's `antialiasing`
-row and `presets::selected` both fall back to when the player has named no rung:
-`Antialiasing::from_effects(RenderEffects::DEFAULT_STACK)`. **Changing it to
-`Antialiasing::None` passes the whole of `crcbl`** — 363 tests, measured
-2026-08-31 by making exactly that edit — so nothing pins what antialiasing an
-unconfigured run resolves.
+The antialiasing half of this is closed:
+`crates/crcbl/tests/forward_e2e/antialiasing.rs` draws a frame from a settings
+stack nobody has touched and holds the rung
+`crcbl::settings::presets::current_values` resolves against the resolve passes
+the frame actually recorded, so a fallback that answered `Antialiasing::None` is
+a red suite instead of a silent frame with no resolve in it.
 
-**Pre-existing, not introduced by the preset slice**: that expression was inline
-in `read`'s `ANTIALIASING_KEY` arm before it was extracted, and was unguarded
-there too. What the slice changed is that it now has two readers instead of one,
-and its own doc comment says why they must agree — a row showing one rung while
-a preset compares against another makes the label disagree with the value beside
-it.
+**The same route is unguarded for the other `[engine.video]` keys.** Nothing
+draws a frame from an untouched stack and asserts what
+`crcbl::settings::render_scale` or the `VIDEO_KEYS` switches resolved to.
+`crates/crcbl/tests/mesh_e2e/render_scale.rs` covers the renderer's own knob —
+it calls `ForwardRenderer::set_render_scale` itself — and never reads a settings
+stack, so the settings-to-frame seam is the part with no check on it. Verified
+by searching `crates/crcbl/tests/` for readers of `crcbl::settings`: the new
+antialiasing module is the only frame test among them.
 
-**Why no check was added with the finding:** the assertion available at this
-level is tautological — comparing the helper against `DEFAULT_STACK` restates
-its body. The honest check is a frame-level one: draw from an untouched stack
-and assert the antialiasing resolve pass the default stack names is in the pass
-list. That is `crcbl-render`/e2e work rather than a settings test, and it would
-also close the same gap for `render_scale` and the effect switches.
+What would close it is the same shape as the antialiasing one, in the same
+module: resolve the key off an untouched stack through the public reader a
+start-up uses, hand the section to the renderer the way
+`GpuContext::effect_request` does, and assert against something the frame
+records rather than against the constant the reader is written in terms of — the
+render pass extents for the scale, the presence or absence of a pass for each
+switch. The reason it is not done here is scope: each key needs its own
+observable named and shown to go red, which is a slice rather than a rider on
+this one.
 
 ## Whether any tier should ship the shadow cadence switched on (2026-08-31)
 

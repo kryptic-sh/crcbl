@@ -25,6 +25,12 @@
 //! * [`page`] reads the base-colour page's mip levels back. A golden shows that
 //!   *some* level was blended in, never which bytes it held; a chain that was
 //!   uploaded one level off would still draw a plausible frame.
+//! * [`antialiasing`] reads the compiled pass list of a frame drawn from a
+//!   settings stack nobody has touched. Which rung an unconfigured run resolves
+//!   has no settings-level answer — the assertion available there restates the
+//!   constant the fallback is written in terms of — and a picture supplies none
+//!   either: a frame that quietly stopped resolving is a frame the next golden
+//!   gets blessed from.
 //!
 //! They lived in `crates/crcbl-vk/tests/vk_e2e/` and therefore ran on Vulkan
 //! alone, so Metal, D3D12 and wgpu had `render_e2e`'s black-box goldens and
@@ -73,6 +79,7 @@ pub(crate) const SUITE: &str = "crcbl forward e2e";
 // The suite's areas, one module each, all in `tests/forward_e2e/`. The root is
 // `tests/forward_e2e/main.rs`, so Cargo compiles the directory as one test
 // binary named `forward_e2e` and every `mod` here resolves beside the root.
+mod antialiasing;
 mod depth_probe;
 mod lights;
 mod occlusion;
