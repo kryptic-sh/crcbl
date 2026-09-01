@@ -71,10 +71,12 @@ So the answer to "whether either default moves" is **yes, both**, on both native
 tiers: it would undo the smoothness the halving cost and still run cheaper than
 the frame did before the halving. **Both native tiers are now measured to the
 standard this entry asked for**, so what is left in front of the decision is one
-thing rather than two: **the browser tier**, which still cannot be measured at
-all — a console variable can now be set before the first frame, but nothing gets
-the file that would set it into a demo's store; see below. The browser is the
-tier where the pass is most expensive, and so the one most able to veto it.
+thing rather than two: the browser tier — **and that was measured on 2026-09-02
+as well, so nothing is left in front of the decision.** It did not veto the
+rung; it came closer to endorsing it. See the browser table below, and note that
+this entry's long-standing assumption that the browser is "the tier most able to
+veto it" turned out to be false: AO is a smaller share of a browser frame than
+of either native one.
 
 **Blocker 1 is closed, and the answer was better than the question.** The old
 entry asked whether a rounding in the last place was acceptable for a 45 degree
@@ -237,10 +239,43 @@ are the shipping two slices, not the rung, and SwiftShader is a software
 rasteriser whose cost mix is its own — the hardware-browser figures already in
 this entry (`ssao` 0.054 ms of a 0.678 ms frame) are a different shape again.
 
-**What the rung's browser number still needs** is for the _seeded_ boot to be
-the one that reports: a path that seeds, boots, runs the frame budget and reads
-the report before the control tears the file down. That is a harness addition,
-not format work, and it is the only thing left in front of the decision.
+**And with that understood, the rung is now measured on the browser too.**
+Leaving the seeded file in place makes every later boot a seeded one, so the
+report that lands is a seeded boot's — confirmed by the label count, since
+`ssao-blur-2` is a pass and appears only when the second blur is really running.
+Two runs of each configuration, quarry under SwiftShader at the gate's window,
+p50 per pass in ms:
+
+```text
+                  baseline (2 slices, 1 blur)    rung (4 slices, 2 blurs)
+ssao                     4.07 / 4.18                  6.53 / 6.19
+ssao-blur                3.01 / 3.09                  3.30 / 3.33
+ssao-blur-2                  —                        3.30 / 3.35
+ssao-upsample            5.96 / 6.16                  5.91 / 6.18
+------------------------------------------------------------------------
+the AO chain            13.12 / 13.35                19.04 / 19.05
+forward                137.3  / 142.1               144.5  / 139.3
+the frame              206.0  / 208.6               215.8  / 211.3
+```
+
+**The AO chain lands on 19.04 and 19.05 ms in the two rung runs**, which is what
+makes this readable at all: the pass timings are far steadier than the frame
+totals, where `forward` alone moves 137.3 to 144.5 across runs and swamps the
+difference under test. Read the passes, not the frame.
+
+**The browser does not veto the rung, and this entry has had that backwards.**
+Gather plus blurs goes from 7.17 to 12.99 ms, **+81%** — which sits between
+radv's +98% and lavapipe's +68%, so the rung's relative cost is much the same on
+all three tiers. What differs is what it is a share _of_: the whole AO chain is
+**6.4% of a browser frame before and 8.9% after**, because a software rasteriser
+spends two thirds of its frame in `forward`. The tier this entry called "the one
+most able to veto it" is the tier where AO matters least.
+
+So **all three tiers are measured and nothing is blocking the decision.** It is
+the user's call, and the evidence now says the same thing on every tier: the
+rung takes the tangential sharp-edge count to 0 on radv and 2 on lavapipe, it
+costs about +80% of a pass that is a single-digit percentage of a browser frame,
+and on native it still runs cheaper than the frame did before AO was halved.
 
 **The other route is still wanted, and is now the only one for anything that is
 not a console variable.** Giving the AO knobs `[engine.video]` keys —
