@@ -454,8 +454,19 @@ halving.
 Three candidates were tested and none of them is it:
 
 - **GPU contention during the old run.** Refuted by reproducing the conditions:
-  with `run-forward-e2e.sh` hammering the same adapter concurrently, lantern
-  still measured 0.904 ms, `ssao` 0.105.
+  with **three concurrent lantern runs** drawing at 1080p on the same adapter,
+  the measured run still came in at 0.957 ms with `ssao` at 0.105 — a 6% cost on
+  the frame total and none at all on the pass in question, nowhere near 2.4x.
+
+  **The first attempt at this check was vacuous and is worth recording as
+  such.** It launched `run-forward-e2e.sh` as the load and measured 25 seconds
+  later; that suite runs its 21 checks in **1.268 s**, so it had exited long
+  before the measurement began and the "contention" run was against an idle GPU.
+  It reported 0.904 ms — a plausible number, indistinguishable from a real
+  result, and evidence of nothing. The redone check asserts the load is alive
+  immediately before _and_ immediately after the measured run, which is the
+  thing the first one never established.
+
 - **The report's meaning changed.** It did not. `PassStats` has one commit since
   2026-08-28 in `crcbl-render/src/pass_stats.rs`, and that is the commit that
   introduced this format — before both measurements. A label is summed within a
