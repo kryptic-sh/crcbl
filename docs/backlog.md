@@ -72,8 +72,9 @@ tiers: it would undo the smoothness the halving cost and still run cheaper than
 the frame did before the halving. **Both native tiers are now measured to the
 standard this entry asked for**, so what is left in front of the decision is one
 thing rather than two: **the browser tier**, which still cannot be measured at
-all for the `autoexec.cfg` reason recorded below. The browser is the tier where
-the pass is most expensive, and so the one most able to veto it.
+all — a console variable can now be set before the first frame, but nothing gets
+the file that would set it into a demo's store; see below. The browser is the
+tier where the pass is most expensive, and so the one most able to veto it.
 
 **Blocker 1 is closed, and the answer was better than the question.** The old
 entry asked whether a rounding in the last place was acceptable for a 45 degree
