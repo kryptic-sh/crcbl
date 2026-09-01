@@ -419,9 +419,8 @@ than removing the tint.
 
 `crates/crcbl/tests/forward_e2e/occlusion.rs` moved to the half extent when the
 gather did, and grew `the_reconstruction_does_not_halo_a_silhouette`. Every
-threshold in it was swept on radv and lavapipe and each of its three tests was
-shown to go red under a sabotage of the thing it guards. What it still does not
-reach:
+threshold in it was swept on radv and lavapipe and each of its tests was shown
+to go red under a sabotage of the thing it guards. What it still does not reach:
 
 - **Only a horizontal silhouette is measured.** The halo scene's bar spans every
   row, so no vertical edge is exercised and a reconstruction that haloed on one
@@ -429,10 +428,6 @@ reach:
   the shipping divisor, because `ssao_upsample.slang` taps `nearest` and
   `nearest + 1` and no further — a larger `RESOLUTION_DIVISOR` would widen it,
   and the test measures the single column that dips.
-- **`NEAREST_TAP_FLOOR` is not covered by anything.** Nothing in the harness
-  builds a surface thinner than the occlusion grid, which is the one case that
-  constant exists for: it is what keeps the reconstruction's divisor off zero
-  when every tap is rejected. It is the least-exercised line in that shader.
 - **One backend.** All of it ran on `vk`, on radv and lavapipe. Metal, D3D12 and
   wgpu are unmeasured for all of these thresholds. The mechanisms are integer
   and ratio arithmetic, so agreement is expected — but expected is not measured,

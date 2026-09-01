@@ -461,6 +461,67 @@ const MAX_HALO: u8 = 4;
 /// below it.
 const MIN_HALO_CONTRAST: u8 = 60;
 
+/// The one depth-image column the reconstruction's sliver stands in.
+///
+/// **Narrower than the occlusion grid and standing off it, which is the whole
+/// of the scene.** `ssao.slang` runs one invocation per block of
+/// `crcbl::shaders::ssao::RESOLUTION_DIVISOR` pixels on each axis and marches
+/// its horizons from the one texel `full_res_pixel` maps that block to, so a
+/// surface one column wide that misses every one of those texels has no sample
+/// of its own anywhere in the gathered channel. The test asserts that placement
+/// off the divisor rather than trusting this number to keep the parity it has.
+///
+/// **Past [`PLATE_COLUMNS`] and inside the plate's falloff**, so the wall the
+/// sliver's nearer tap reads is darkly occluded rather than the unoccluded white
+/// the sky beyond it gathers — see [`MIN_SLIVER_TAP_CONTRAST`], which is what
+/// that darkness is for. Clear of the few columns at the plate's own silhouette
+/// where the filters start rejecting taps, which is [`SILHOUETTE_SKIP`]'s
+/// territory and a different measurement.
+const SLIVER_COLUMN: u32 = 969;
+
+/// How far either side of [`HALO_LINE_Y`] [`SLIVER_ROWS`] reaches.
+///
+/// Two rows would cover both parities. This is many times that, because the
+/// equality is asserted per row and a band is what would name the row that
+/// disagreed — and because it walks `ssao.slang`'s dither tile over and over, so
+/// a phase of that tile which broke the reconstruction has nowhere in the band
+/// to hide.
+const SLIVER_ROW_REACH: u32 = 32;
+
+/// The rows the sliver is read along, as `start..end` in [`EXTENT`]'s pixels.
+///
+/// **Both row parities, deliberately.** `ssao_upsample.slang` takes one tap per
+/// axis where the two grids coincide and two where they do not, so an even row
+/// of the sliver drives the two-tap path and an odd row the four-tap one. Every
+/// tap of both is rejected in this scene — the extra pair lands on the same two
+/// columns one row-block down — and a band over both parities is what says so
+/// about both.
+///
+/// Centred on [`HALO_LINE_Y`], and a band rather than the one row the halo test
+/// reads because both parities are wanted — **not** because the level varies
+/// along it. It does not: the 2026-09-02 sweep found the whole band reading one
+/// value on radv and on lavapipe alike, which is `ssao_blur.slang` having
+/// flattened the dither tile by the time the reconstruction taps it, and this
+/// scene has no other reason to change down a column. The assertion is against
+/// the gathered channel read back from the same device rather than against a
+/// level written here, so a constant band is a constant equality and not a
+/// weaker one.
+const SLIVER_ROWS: core::ops::Range<u32> =
+    HALO_LINE_Y - SLIVER_ROW_REACH..HALO_LINE_Y + SLIVER_ROW_REACH;
+
+/// The least the sliver's two taps must differ by, in 8-bit levels.
+///
+/// Anti-vacuity, on [`MIN_HALO_CONTRAST`]'s terms, and it is what makes the
+/// equality this test asserts discriminating. The reconstruction has to answer
+/// with the *nearest* tap's own level; a scene whose other tap carried the same
+/// level would satisfy that whatever share the other tap was given, so the
+/// measurement would pass on a reconstruction that had stopped rejecting
+/// anything. Swept at [`OCCLUSION_EXTENT`] on 2026-09-02, on the two drivers
+/// this machine has: across [`SLIVER_ROWS`] the two taps sit 86 levels apart at
+/// their closest — occluded wall at 169 against the sky's unoccluded 255 — the
+/// same on radv and on lavapipe, and this sits well under it.
+const MIN_SLIVER_TAP_CONTRAST: u8 = 60;
+
 /// The full-resolution columns the intensity curve is measured over.
 ///
 /// The falloff [`the_blurred_occlusion_falloff_does_not_terrace`] reads, in the
@@ -2064,6 +2125,214 @@ fn the_ao_intensity_scales_the_reconstructed_occlusion() {
         column = worst_at.1,
         level = worst_at.2,
         predicted = worst_at.3,
+    );
+
+    headless.finish();
+}
+
+/// **A surface thinner than the occlusion grid still gets an answer, and the
+/// answer is the nearest sample there is.**
+///
+/// `ssao_upsample.slang`'s `NEAREST_TAP_FLOOR` is the share its nearest tap
+/// keeps however far that tap's surface turns out to be, and the pixel it exists
+/// for is the one this test builds: a foreground surface one column wide,
+/// standing off the gather's grid, whose every neighbouring sample is on another
+/// surface. Both of the shader's rejections then fire at once — the depth ramp
+/// reaches zero for a tap the tolerance puts on another surface, and the far
+/// plane takes no share at all — so without the floor the divisor is zero and
+/// the pixel divides nothing by nothing.
+///
+/// # Why the assertion is an equality and not a tolerance
+///
+/// With every tap's `share` at zero, `max(share, NEAREST_TAP_FLOOR)` leaves the
+/// nearest one holding the whole sum: `total` is that sample's own level times
+/// the floor and `weight` is the floor, so the quotient is the sample itself.
+/// The floor is a negative power of two, which makes both the multiply and the
+/// divide exact; `INTENSITY_DEFAULT` takes the branch that returns the
+/// visibility rather than raising it; and an `R8Unorm` level survives the round
+/// trip through a float. So the reconstruction must write back the **same byte**
+/// the gathered channel holds at that sample — which is what
+/// [`Chain::Gathered`] is read for here, at [`OCCLUSION_EXTENT`], from a second
+/// run of the same scene through the same passes.
+///
+/// # What this can and cannot see
+///
+/// [`MIN_SLIVER_TAP_CONTRAST`] is what makes the equality worth asserting: the
+/// sliver's other tap is the sky, which gathers unoccluded, and its nearest is
+/// occluded wall — so a reconstruction that stopped rejecting the far tap would
+/// land tens of levels away and this goes red.
+///
+/// **The nearest tap's own rejection is not observable from the output**, and
+/// this test does not pretend otherwise. That tap is the sole survivor either
+/// way, so `total / weight` is its level whether its share is the floor or the
+/// geometric weight it would have had — the two differ in `weight` alone and
+/// `weight` cancels. What that share being zero decides is whether the
+/// *divisor* is zero, and the only way to see that is to take the floor out of
+/// the shader: done on 2026-09-02, this test fails and its siblings do not.
+/// Everything asserted below about that tap is therefore asserted against the
+/// depth image the scene was built from rather than against the frame.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_reconstruction_answers_a_sliver_with_its_nearest_sample() {
+    let headless = Headless::open_at_format(EXTENT, None, Features::TIMESTAMP_QUERY);
+    let (width, height) = EXTENT;
+    let size = (width as f32, height as f32);
+    let projection = Projection::Perspective {
+        fov_y: FOV_Y,
+        near: NEAR,
+    }
+    .matrix(size.0 / size.1);
+
+    // The falloff scene with the frame's right-hand side taken away: the plate
+    // darkens the wall, the sliver stands one column wide in that darkness at
+    // [`HALO_LIFT`]'s distance in front of it, and everything past the sliver is
+    // the far plane — the sliver is the last surface in the frame, which is the
+    // shortest way to spell "the tap on its far side has no surface at all".
+    // What the reconstruction actually needs is only that one texel, and that is
+    // what is asserted below; `ssao_blur.slang` leaves early at a far centre, so
+    // the sample built on it reaches the reconstruction as unoccluded exactly.
+    let wall = depth_of(projection, -WALL_Z);
+    let plate = lifted_depth(projection, PLATE_LIFT);
+    let sliver = lifted_depth(projection, HALO_LIFT);
+    let texels = depth_image(|x, _| match x {
+        x if PLATE_COLUMNS.contains(&x) => plate,
+        x if x == SLIVER_COLUMN => sliver,
+        x if x > SLIVER_COLUMN => crcbl::shaders::ssao::DEPTH_FAR,
+        _ => wall,
+    });
+
+    // Where `ssao_upsample.slang` puts the sliver's taps: the sample the pixel
+    // sits after, how far past it the pixel is, and the full-resolution texel
+    // each of the two samples was gathered from. The shader's own arithmetic —
+    // `pixel / RESOLUTION_DIVISOR`, and `full_res_pixel` back the other way.
+    let divisor = crcbl::shaders::ssao::RESOLUTION_DIVISOR;
+    let nearest = SLIVER_COLUMN / divisor;
+    let offset = SLIVER_COLUMN % divisor;
+    let nearest_texel = nearest * divisor;
+    let along_texel = nearest_texel + divisor;
+
+    // The placement, asserted rather than assumed. A sliver on one of the
+    // gather's own texels is sampled by the gather, takes one tap, and takes it
+    // from its own surface — which is a pixel the floor has nothing to do with,
+    // and a scene this whole test would still be green on.
+    assert_ne!(
+        offset, 0,
+        "the sliver at column {SLIVER_COLUMN} sits on the gather's own grid, so \
+         `ssao_upsample.slang` reads one tap and reads it from the sliver's own sample. Nothing \
+         is rejected there and the nearest-tap floor is never reached. Move {SLIVER_COLUMN} off a \
+         multiple of {divisor}."
+    );
+
+    // The two surfaces the taps land on, read out of the image the scene was
+    // built from. This is what says the taps are rejected: the nearer one is the
+    // wall, which [`HALO_LIFT`] puts past both filters' depth tolerance from the
+    // sliver, and the further one is the far plane, which takes no share at all.
+    let depth_texel = |x: u32, y: u32| {
+        let at = ((y * EXTENT.0 + x) * 4) as usize;
+        f32::from_le_bytes(
+            texels[at..at + 4]
+                .try_into()
+                .expect("four bytes of depth per texel"),
+        )
+    };
+    for row in SLIVER_ROWS {
+        assert_eq!(
+            depth_texel(nearest_texel, row),
+            wall,
+            "the sliver's nearest tap at texel ({nearest_texel}, {row}) was gathered from \
+             something other than the wall, so what rejects it is not the depth the scene was \
+             built to reject it by"
+        );
+        assert_eq!(
+            depth_texel(along_texel, row),
+            crcbl::shaders::ssao::DEPTH_FAR,
+            "the sliver's other tap at texel ({along_texel}, {row}) was gathered from a surface \
+             rather than the far plane, so `ssao_upsample.slang`'s `depth <= DEPTH_FAR` is not \
+             what rejects it and this scene is not the all-rejected one"
+        );
+        assert_eq!(
+            depth_texel(SLIVER_COLUMN, row),
+            sliver,
+            "the sliver is not at column {SLIVER_COLUMN} on row {row}, so the pixel the \
+             reconstruction is read at is not on the thin surface this test is about"
+        );
+    }
+
+    // The same scene through the same passes, twice: once to the reconstruction
+    // at [`EXTENT`] and once stopping at the blur, whose output is the image the
+    // reconstruction taps.
+    let reconstructed = run_passes(
+        &headless,
+        projection,
+        &texels,
+        crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
+        1,
+        crcbl::shaders::ssao::INTENSITY_DEFAULT,
+        Chain::Reconstructed,
+    );
+    let gathered = run_passes(
+        &headless,
+        projection,
+        &texels,
+        crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
+        1,
+        crcbl::shaders::ssao::INTENSITY_DEFAULT,
+        Chain::Gathered,
+    );
+
+    let mut contrast = u8::MAX;
+    let mut written = Vec::new();
+    let mut mismatched = Vec::new();
+    for row in SLIVER_ROWS {
+        let block = row / divisor;
+        let near = gathered.at(nearest, block);
+        let along = gathered.at(nearest + 1, block);
+        contrast = contrast.min(near.abs_diff(along));
+        let level = reconstructed.at(SLIVER_COLUMN, row);
+        written.push(level);
+        if level != near {
+            mismatched.push((row, level, near, along));
+        }
+    }
+    let rows = written.len();
+    let darkest = *written.iter().min().expect("a non-empty band of rows");
+    let lightest = *written.iter().max().expect("a non-empty band of rows");
+
+    match reconstructed.pass("ssao-upsample") {
+        Some(ns) => eprintln!(
+            "{suite}: the ssao-upsample pass took {ns} ns at {width}×{height}; the sliver's \
+             {rows} rows reconstruct to {darkest}..={lightest}, off gathered taps at least \
+             {contrast} levels apart",
+            suite = crate::SUITE,
+        ),
+        None => eprintln!(
+            "{suite}: this device has no timestamp query, so the ssao-upsample pass is untimed \
+             here; the sliver's {rows} rows reconstruct to {darkest}..={lightest}, off gathered \
+             taps at least {contrast} levels apart",
+            suite = crate::SUITE,
+        ),
+    }
+
+    assert!(
+        contrast >= MIN_SLIVER_TAP_CONTRAST,
+        "the sliver's two taps are only {contrast} levels apart at their closest, under the \
+         {MIN_SLIVER_TAP_CONTRAST} this measurement needs: the equality below asks for the \
+         nearest tap's level, and a run whose other tap carries the same level satisfies it \
+         however that tap was weighted. The wall at texel {nearest_texel} is not occluded enough \
+         against the sky at {along_texel} — move {SLIVER_COLUMN} back into the plate's falloff."
+    );
+    assert!(
+        mismatched.is_empty(),
+        "the reconstruction did not answer the sliver with its nearest gathered sample: \
+         {shown:?}, as `(row, written, nearest sample, other tap)`, of {count} rows in \
+         {SLIVER_ROWS:?}. Every tap of this pixel is rejected — the nearest is wall past the \
+         filters' depth tolerance and the other is the far plane — so \
+         `ssao_upsample.slang`'s `NEAREST_TAP_FLOOR` is the whole divisor and \
+         `total / weight` is that one sample exactly. A reading pulled towards the other tap is \
+         a rejection that stopped rejecting; a reading that is neither is the divisor no longer \
+         being the floor.",
+        count = mismatched.len(),
+        shown = &mismatched[..MESSAGE_SAMPLES.min(mismatched.len())],
     );
 
     headless.finish();
