@@ -2538,20 +2538,23 @@ fn get_of_a_key_that_is_not_set_answers_and_exits_zero() {
     assert!(stderr(&table).contains("list"), "{}", stderr(&table));
 }
 
-/// **Reading creates nothing; only `set` creates the config directory.**
+/// **Reading creates nothing; only a write creates the config directory.**
 ///
 /// `SettingsStack::platform` is deliberately `mkdir`-free so that a start-up on
 /// a machine that has never had a settings file leaves it that way, and a CLI
 /// that created the directory just to report an empty file would undo that for
-/// every developer who ran `crcbl settings list` once.
+/// every developer who ran `crcbl settings list` once. Bare `preset` is a read
+/// like the other two: it reports the tier the file is on, and a machine with
+/// no file is on none.
 #[test]
-fn only_set_creates_the_config_directory() {
+fn only_a_write_creates_the_config_directory() {
     let temporary = TempDir::new("settings-mkdir");
     let home = temporary.path();
     let root = settings_root(home);
 
     assert_eq!(code(&settings(home, &["list"])), 0);
     assert_eq!(code(&settings(home, &["get", "engine.video.shadows"])), 0);
+    assert_eq!(code(&settings(home, &["preset"])), 0);
     assert!(
         !root.exists(),
         "reading settings created {}",
@@ -2692,5 +2695,163 @@ fn a_set_under_a_scalar_ancestor_fails_rather_than_discarding_it() {
         std::fs::read(&path).expect("the file is still there"),
         original,
         "a refused set rewrote the player's file"
+    );
+}
+
+/// **`preset <TIER>` writes every key that tier covers, and the engine's own
+/// readers answer with them.**
+///
+/// The end of the chain, for the branch that exists because a quality tier is
+/// not a catalogue key and `set` therefore cannot reach it: what is asserted is
+/// not that the command printed a tier but that `crcbl::settings::presets`
+/// reading the file back agrees the values are that column's.
+#[test]
+fn a_preset_writes_the_tier_the_engine_then_reads_back() {
+    use crcbl::settings::presets::{self, QualityPreset};
+
+    for tier in QualityPreset::ALL {
+        let temporary = TempDir::new("settings-preset");
+        let home = temporary.path();
+        let storage = NativeStorage::at(settings_root(home));
+
+        let written = settings(home, &["preset", tier.name()]);
+        assert_eq!(code(&written), 0, "{}", stderr(&written));
+        assert!(
+            stdout(&written).contains(&format!("quality = {}", tier.name())),
+            "the write did not report the tier it wrote: {}",
+            stdout(&written)
+        );
+        // The distinction the console's own `quality` command cannot report:
+        // this process holds no renderer, so the tier is the next start-up's.
+        assert!(
+            stdout(&written).contains("next start-up"),
+            "nothing said when the tier would be shown: {}",
+            stdout(&written)
+        );
+
+        assert_eq!(
+            presets::current_values(&SettingsStack::from_storage(&storage)),
+            tier.values(),
+            "`crcbl settings preset {}` wrote a file the engine does not read \
+             as that tier",
+            tier.name()
+        );
+    }
+}
+
+/// **Selecting the same tier twice leaves the same file.**
+///
+/// A preset is the one thing here that writes several keys at once, so a second
+/// run is the check that it writes *those* keys and nothing that accumulates.
+#[test]
+fn a_preset_selected_twice_leaves_the_file_it_left_the_first_time() {
+    let temporary = TempDir::new("settings-preset-twice");
+    let home = temporary.path();
+    let path = settings_root(home).join(SETTINGS_FILE);
+
+    assert_eq!(code(&settings(home, &["preset", "low"])), 0);
+    // As the text it is, so a failure here shows which line moved rather than
+    // two arrays of bytes.
+    let once = std::fs::read_to_string(&path).expect("the preset wrote a file");
+    assert_eq!(code(&settings(home, &["preset", "low"])), 0);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file is still there"),
+        once,
+        "the second selection moved a file the first one had already settled"
+    );
+}
+
+/// **A word that is not a tier is refused, names the tiers that exist, and
+/// writes nothing.**
+///
+/// `ultra` by name: `docs/plan/39-capabilities.md`'s catalogue row names it and
+/// its tier table has no column for it, so it is the word a person is most
+/// likely to try.
+#[test]
+fn a_word_that_is_not_a_tier_is_refused_and_offers_the_ones_that_are() {
+    use crcbl::settings::presets::QualityPreset;
+
+    let temporary = TempDir::new("settings-preset-unknown");
+    let home = temporary.path();
+    let root = settings_root(home);
+
+    let refused = settings(home, &["preset", "ultra"]);
+    assert_eq!(code(&refused), 1, "{}", stdout(&refused));
+    let said = stderr(&refused);
+    assert!(
+        said.contains("ultra"),
+        "the refusal did not name the word: {said}"
+    );
+    for tier in QualityPreset::ALL {
+        assert!(
+            said.contains(tier.name()),
+            "the refusal did not offer `{}`: {said}",
+            tier.name()
+        );
+    }
+    assert!(!root.exists(), "a refused tier created {}", root.display());
+}
+
+/// **Bare `preset` reports the tier the file is on, and `custom` when it is on
+/// none.**
+///
+/// All three answers a person can get, in the order they arrive at them: a
+/// machine that has selected nothing, one that has selected a tier, and one
+/// where a single key has since moved off it. The last is the point of deriving
+/// the label rather than storing it — `set` is right there, and a file edited
+/// by hand is the ordinary case.
+#[test]
+fn bare_preset_reports_the_tier_the_keys_are_on() {
+    use crcbl::settings::presets::CUSTOM;
+
+    let temporary = TempDir::new("settings-preset-bare");
+    let home = temporary.path();
+
+    let fresh = settings(home, &["preset"]);
+    assert_eq!(code(&fresh), 0, "{}", stderr(&fresh));
+    assert!(
+        stdout(&fresh).contains(&format!("quality = {CUSTOM}")),
+        "a file that selected nothing is on no tier: {}",
+        stdout(&fresh)
+    );
+    assert!(
+        stdout(&fresh).contains("low"),
+        "nothing said what to type instead: {}",
+        stdout(&fresh)
+    );
+
+    assert_eq!(code(&settings(home, &["preset", "low"])), 0);
+    let selected = settings(home, &["preset"]);
+    assert_eq!(code(&selected), 0, "{}", stderr(&selected));
+    assert!(
+        stdout(&selected).contains("quality = low"),
+        "the label did not read the tier back: {}",
+        stdout(&selected)
+    );
+
+    // One key off the tier, written the way a player moving one row would.
+    assert_eq!(
+        code(&settings(
+            home,
+            &["set", "engine.video.render_scale", "0.5"]
+        )),
+        0
+    );
+    let moved = settings(home, &["preset"]);
+    assert_eq!(code(&moved), 0, "{}", stderr(&moved));
+    assert!(
+        stdout(&moved).contains(&format!("quality = {CUSTOM}")),
+        "a moved key still reads as the tier it came from: {}",
+        stdout(&moved)
+    );
+
+    let json = stdout(&settings(home, &["--json", "preset"]));
+    assert!(
+        has_field(&json, "label", &format!("\"{CUSTOM}\"")),
+        "{json}"
+    );
+    assert!(
+        !json.contains("\"tier\":"),
+        "a read reported a tier it did not write: {json}"
     );
 }

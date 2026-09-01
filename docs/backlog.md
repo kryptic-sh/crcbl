@@ -245,15 +245,24 @@ Activision original. That is not the gap.
   low-frequency and the depth-aware upsample is most of what the blur was
   already doing. This is the single largest factor and it is a resource change
   plus an upsample pass, not a shader rewrite.
-- **It never reads the depth pyramid, which already exists.** Every depth fetch
-  in `ssao.slang` goes through one accessor, `depth_at`, and that accessor is
-  `scene_depth.Load(int3(clamped, 0))` — mip 0, no sampler, no pyramid.
-  Meanwhile `crcbl_render::hiz` builds a full chain,
-  `TransientImageDesc::hiz_level` describes it, and `ssr.slang`'s `hiz_at`
-  marches it. A horizon search is exactly the shape that wants it: the far steps
-  of a slice read pixels far apart and thrash the cache reading them at mip 0.
-  XeGTAO samples a coarser level as the step distance grows. The chain is built
-  and paid for every frame and the AO pass declines to bind it.
+- **It reads no depth pyramid, and the one the engine has is the wrong one.**
+  Every depth fetch in `ssao.slang` goes through one accessor, `depth_at`, and
+  that accessor is `scene_depth.Load(int3(clamped, 0))` — mip 0, no sampler, no
+  pyramid. A horizon search is exactly the shape that wants one: the far steps
+  of a slice read pixels far apart and thrash the cache at mip 0, and XeGTAO
+  samples a coarser level as the step distance grows.
+
+  **Corrected 2026-09-01 — this entry first called that a free win, and it is
+  not.** `crcbl_render::hiz` does build a chain, but `hiz.slang` reduces with
+  `max`, which under reversed-Z is the _nearest_ depth in each footprint. That
+  is the conservative reduction a ray march needs in order to skip empty space
+  safely, and it is the wrong input for an occlusion integral: every coarse tap
+  would report the closest surface it covers, so the horizon would be biased
+  toward occluded on every distant step. XeGTAO builds its own depth MIP for
+  this reason rather than reusing a culling pyramid. So the work here is a new
+  pass producing an AO-shaped depth chain, not a binding the AO pass forgot to
+  add — a rung, not an oversight.
+
 - **It spends about twenty full-res taps per pixel.** Sixteen for the horizons —
   `slice_count() * 2 * SLICE_STEPS`, with `SLICE_COUNT_DEFAULT` 2 and
   `SLICE_STEPS` 4 — plus four more, because `ssao.slang` reconstructs the normal
@@ -289,15 +298,29 @@ tolerance-based comparison, or keep bit-exact determinism and accept the tile.
 That is a design call about how this project verifies rendering, not an AO fix,
 and it is why the AO path was not touched in the session that found this.
 
-**One number does not reconcile.** `docs/plan/46-ambient-occlusion.md` quotes
-`ssao` at 0.255 ms on lantern, 1920x1080, radv. The sweep in the tangential rung
-entry at the top of this file quotes **582 us** for the same two-slice pass at
-the same resolution on the same driver — 2.3x apart. Candidates, none verified:
-the two may not be the same demo (the sweep does not name one), and the radial
-half `STEP_OFFSETS` shipped 2026-08-30, between the two measurements. Whichever
-is right, one of the two documents is quoting a figure that no longer holds, and
-any pricing of the items above starts from a re-measurement rather than from
-either row.
+**The number that did not reconcile has been measured, and the suspect was
+cleared.** This entry first recorded `docs/plan/46-ambient-occlusion.md`'s 0.255
+ms against the 582 µs in the sweep above — the same two-slice pass, same
+resolution, same driver, 2.3x apart — and named the tangential rung as the only
+AO change between the two dates. Re-measured 2026-09-01 on the same command,
+`lantern --headless --frames 400 --size 1920x1080` on radv: `ssao` is **0.488 ms
+p50 / 0.505 ms p95**, 22.8% of a 2.143 ms frame, and `forward` is ahead of it at
+0.531 ms.
+
+The rung did not cause it. Compiling the pre-rung `ssao.slang` against today's
+tree and running the same command measures **0.518 ms** — _slower_ than the
+0.488 ms the current shader takes — so the tangential rung made the pass
+slightly faster. A second guess was also tested and discarded: bounding the
+slice loop by the dynamic count instead of `SLICE_COUNT_MAX`, on the theory that
+unrolling four slices while two ship costs occupancy, measured 0.481 ms against
+0.488 ms.
+
+What did change is the whole frame, 0.990 ms to 2.143 ms over the same period,
+with `shadow` 0.070 to 0.350 ms and `ssr` 0.099 to 0.218 ms as the atlas, the
+cascades, normal maps and the LTC widening landed. `ssao` is a full-screen pass
+but its cost is **not** scene-independent — `MIN_RADIUS_PIXELS` lets a distant
+or flat pixel leave the march early — so a denser room is the remaining
+candidate. That has not been isolated, and it is the open half of this.
 
 ## A plan's numbered slices are an addressing scheme (2026-08-31)
 
@@ -1001,20 +1024,12 @@ browser opens on, and a golden re-bless for the ones that move.
 
 ## `apps/options` offers no quality row (2026-08-31)
 
-The preset is reachable from the console and from `crcbl::settings::presets` and
-from nowhere else. `apps/options`' menu is built from `VIDEO_KEYS` and four
-hand-written rows in `apps/options/src/menu.rs`, so a `QUALITY` cycler above
-them is a small change — but adding a row shifts `web/tools/browser-e2e.mjs`'s
-`toFader` index and moves the options browser gate, which was out of this
-slice's paths. Deliberately deferred, not forgotten.
-
-## `quality` is not reachable from `crcbl settings` (2026-08-31)
-
-`crcbl-cli`'s `settings get|set|list` walks `crcbl::settings::catalogue`, and a
-preset is a command rather than a catalogue key — so there is no
-`crcbl settings set quality medium`. A `crcbl settings preset <tier>` subcommand
-over `crcbl::settings::presets::select` is what would close it;
-`crates/crcbl-cli` was out of this slice's paths.
+The preset is reachable from the console, from `crcbl settings preset` and from
+`crcbl::settings::presets`, and from nowhere else. `apps/options`' menu is built
+from `VIDEO_KEYS` and four hand-written rows in `apps/options/src/menu.rs`, so a
+`QUALITY` cycler above them is a small change — but adding a row shifts
+`web/tools/browser-e2e.mjs`'s `toFader` index and moves the options browser
+gate, which was out of this slice's paths. Deliberately deferred, not forgotten.
 
 ## What the preset slice did not verify (2026-08-31)
 
@@ -1026,13 +1041,13 @@ over `crcbl::settings::presets::select` is what would close it;
   clamp every other write meets is a structural one — `select` calls
   `crcbl::settings::apply` and opens no second path to a renderer — and is not
   asserted by a test, because the clamp needs an adapter.
-- **The `quality` command cannot report `Applied::NextStart`.** A
+- **The `quality` console command cannot report `Applied::NextStart`.** A
   `ConsoleHost`'s stage is a `Deferred`, which records every seam and refuses
-  none, so the command always sees `Live` and prints no "next start" line. The
-  answer is on `presets::select` for a caller with a real stage —
-  `a_stage_with_no_seam_writes_the_tier_and_reports_the_next_start_up` covers
-  that — and a console that grows a `GpuStage` is where the line would be
-  wanted.
+  none, so the command always sees `Live` and prints no "next start" line. A
+  console that grows a `GpuStage` is where the line would be wanted. The answer
+  itself is no longer unreported: `crcbl settings preset` stages through
+  `settings_cmd`'s `NoEngine`, which has no seam at all, and prints the clause
+  `applied_names` gives it.
 
 ## The unpicked antialiasing rung is not guarded by any check (2026-08-31)
 
@@ -1120,9 +1135,13 @@ their own crate is run alone:
 **They are not the `r_ssao_blur_passes` hazard**, which was a process global
 shared between threads of one binary and was fixed on 2026-09-01. These two are
 separate test _binaries_, so a static cannot reach across them: whatever they
-share is outside the process. A settings or config file on a shared path is the
-obvious candidate — `crcbl-shared-working-tree` aside, several samples open a
-`SettingsSource` — and neither was chased.
+share is outside the process.
+
+**A settings file on a shared path was the obvious candidate and is ruled out**
+(2026-09-01): `crcbl::engine::SettingsSource::for_run` answers `None` for a
+headless run precisely so a test never reads whichever home directory it
+executes in, and `lantern`'s own test helper sets `headless`. So the failing run
+opened no settings file at all. The mechanism is still unknown.
 
 **Not reproduced deliberately**, so the mechanism is a guess and the fix is
 unknown. What is solid is the observation: two samples' in-process runs disagree

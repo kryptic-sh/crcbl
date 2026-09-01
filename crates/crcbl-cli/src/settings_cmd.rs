@@ -27,6 +27,29 @@
 //! time. Reporting a merged view this process cannot actually see would be
 //! inventing the half it is missing.
 //!
+//! # A quality tier is a branch and not a key
+//!
+//! `crcbl::settings::presets` is explicit that a preset is a writer rather than
+//! a reader: selecting one writes every `[engine.video]` key it covers and
+//! nothing stores the word. So there is no `settings set quality medium` to
+//! wire — `quality` is not a catalogue key and `set` walks the catalogue — and
+//! `preset` is its own branch for the same reason the engine makes it a console
+//! command instead of a key.
+//!
+//! It follows that the tier this prints is derived on the way out, from the
+//! keys, by [`presets::label`]. A file hand-edited off a tier between two runs
+//! of this command reads as `custom` on the second, with nothing here to keep
+//! in step.
+//!
+//! # A terminal is a process with no renderer
+//!
+//! [`presets::select`] applies each key through a [`Stage`], and this process
+//! has none of the seams a [`Stage`] names: no renderer, no mixer, no loop. So
+//! [`NoEngine`] leaves every method at its [`Unsupported`] default and the
+//! answer is [`Applied::NextStart`] — written, and shown by the game's next
+//! start-up rather than by anything here. That is reported rather than dropped:
+//! it is the one thing a person cannot tell from the file.
+//!
 //! # A file that will not parse fails the command
 //!
 //! [`SettingsStack::platform`] turns an unreadable settings file into an empty
@@ -37,6 +60,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crcbl::render::RenderEffects;
+use crcbl::settings::presets::{self, QualityPreset, QualityValues};
+use crcbl::settings::{
+    ANTIALIASING_KEY, Applied, RENDER_SCALE_KEY, Stage, VIDEO_KEYS, VIDEO_NAMESPACE,
+};
 use crcbl_store::settings::{SETTINGS_FILE, SettingsLayer, SettingsStack, StorageSettingsFile};
 use crcbl_store::{MemoryStorage, NativeStorage, StorageError, StorageSource};
 
@@ -49,8 +77,9 @@ use crate::report::{Failure, Outcome};
 /// # Errors
 ///
 /// [`Failure`] if the game cannot be named, if the platform names no config
-/// directory, if `settings.toml` is not readable TOML, if a `set` cannot be
-/// written, or if `get` finds a value it does not render.
+/// directory, if `settings.toml` is not readable TOML, if a `set` or a
+/// `preset` cannot be written, if `get` finds a value it does not render, or if
+/// `preset` is given a word that is not a quality tier.
 pub fn run(args: &SettingsArgs) -> Result<Outcome, Failure> {
     let app = app_name(args)?;
     let root = config_root(args, &app)?;
@@ -71,10 +100,15 @@ pub fn run(args: &SettingsArgs) -> Result<Outcome, Failure> {
             stack.add(SettingsLayer::UserFile(file));
             get(args, &stack, &app, &path)
         }
+        SettingsAction::Preset => {
+            let mut stack = SettingsStack::new();
+            stack.add(SettingsLayer::UserFile(file));
+            preset(args, stack, &storage, &app, &path)
+        }
     }
 }
 
-// ── The three branches ──────────────────────────────────────────────────────
+// ── The four branches ──────────────────────────────────────────────────────
 
 /// `crcbl settings list`.
 fn list(
@@ -239,6 +273,187 @@ fn set(
             ("value", value.json()),
         ],
     })
+}
+
+/// `crcbl settings preset [<TIER>]`.
+///
+/// The stack arrives by value because this branch is the only one that both
+/// reads and writes it: a tier is written into it and then the answer is read
+/// back *out* of it, so the line a person sees is what the file now holds
+/// rather than what the write was handed.
+fn preset(
+    args: &SettingsArgs,
+    mut stack: SettingsStack,
+    storage: &NativeStorage,
+    app: &str,
+    path: &Path,
+) -> Result<Outcome, Failure> {
+    let written = match args.tier.as_deref() {
+        // The bare form reads and nothing else, so it leaves a machine that has
+        // never had a config directory exactly as `list` and `get` do.
+        None => None,
+        Some(typed) => {
+            let tier = QualityPreset::from_name(typed).ok_or_else(|| {
+                Failure::new(format!(
+                    "`{typed}` is not a quality tier — try {}",
+                    tier_names()
+                ))
+                .with("tier", Json::string(typed))
+            })?;
+            let applied = presets::select(&mut stack, tier, &mut NoEngine).map_err(|fault| {
+                Failure::new(format!("cannot select `{typed}`: {fault}"))
+                    .with("path", Json::string(path.display().to_string()))
+            })?;
+            stack
+                .save(storage, Path::new(SETTINGS_FILE))
+                .map_err(|error| {
+                    Failure::new(format!("cannot write {}: {error}", path.display()))
+                        .with("path", Json::string(path.display().to_string()))
+                })?;
+            Some((tier, applied))
+        }
+    };
+
+    // Both forms answer from the stack, so a write and the read that follows it
+    // cannot disagree about what the file says.
+    let label = presets::label(&stack);
+    let rows = tier_keys(presets::current_values(&stack));
+    let listing = rows
+        .iter()
+        .map(|(key, value)| format!("{key} = {}", value.bare()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // The tier that was written, and not the label, on a write: two columns of
+    // the table can hold one set of values, and telling a person who selected
+    // `high` that they are on `medium` reads as a write that went somewhere
+    // else. `presets::label` says why the bare form names every match instead.
+    let (name, note) = match written {
+        Some((tier, applied)) => (
+            tier.name().to_owned(),
+            format!(", {}", applied_names(applied).1),
+        ),
+        None => (label.clone(), String::new()),
+    };
+    let mut human = format!("quality = {name} in {}{note}\n{listing}", path.display());
+    if written.is_none() && label == presets::CUSTOM {
+        human.push_str(&format!(
+            "\n`{}` is no tier: try {}",
+            presets::CUSTOM,
+            tier_names()
+        ));
+    }
+
+    let mut json = vec![
+        ("action", Json::string(SettingsAction::Preset.name())),
+        ("app", Json::string(app)),
+        ("path", Json::string(path.display().to_string())),
+        ("label", Json::string(&label)),
+    ];
+    if let Some((tier, applied)) = written {
+        // Absent rather than null on the bare form, which is `get`'s rule for a
+        // value that does not exist: a consumer branches on the field being
+        // there and never has to decide what a placeholder meant.
+        json.push(("tier", Json::string(tier.name())));
+        json.push(("applied", Json::string(applied_names(applied).0)));
+    }
+    json.push((
+        "values",
+        Json::Array(
+            rows.iter()
+                .map(|(key, value)| {
+                    Json::Object(vec![
+                        ("key", Json::string(key)),
+                        ("type", Json::string(value.type_name())),
+                        ("value", value.json()),
+                    ])
+                })
+                .collect(),
+        ),
+    ));
+
+    Ok(Outcome { human, json })
+}
+
+// ── What a tier is, from here ───────────────────────────────────────────────
+
+/// The [`Stage`] this process is: a settings file and no engine.
+///
+/// Every method left at its default, which is [`Unsupported`], and that is the
+/// truth here rather than a stub — `crcbl settings` opens no device, builds no
+/// mixer and runs no loop, so there is nothing in *this* process a written key
+/// could reach. [`presets::select`] therefore answers [`Applied::NextStart`]
+/// for every key, every time.
+///
+/// It is the reason this branch reports the answer at all. The engine's own
+/// `quality` console command drops it, because a `ConsoleHost` stages into a
+/// `Deferred` that records every seam and refuses none, so from there the
+/// answer is always [`Applied::Live`]; a terminal is the caller that has the
+/// other one to report.
+///
+/// [`Unsupported`]: crcbl::settings::Unsupported
+#[derive(Debug)]
+struct NoEngine;
+
+impl Stage for NoEngine {}
+
+/// The two names an [`Applied`] is reported under: the word `--json` carries,
+/// and the clause a person reads after the path.
+///
+/// Both arms rather than the one this process can produce, because the
+/// distinction is [`presets::select`]'s answer and not this file's guess — a
+/// branch that assumed the next start-up would print it over a caller that had
+/// already shown it.
+const fn applied_names(applied: Applied) -> (&'static str, &'static str) {
+    match applied {
+        Applied::Live => ("live", "and the running engine has it already"),
+        Applied::NextStart => ("next_start", "and the game reads it at its next start-up"),
+    }
+}
+
+/// The tiers a person can type, as the message that offers them.
+///
+/// From [`QualityPreset::ALL`] rather than written out: a column added to the
+/// engine's tier table is one this CLI offers the same day, and a list here
+/// would be a second copy that silently omits it.
+fn tier_names() -> String {
+    QualityPreset::ALL.map(QualityPreset::name).join(", ")
+}
+
+/// The `[engine.video]` keys a quality tier covers, each holding what `values`
+/// puts in it.
+///
+/// Rendered here rather than reused: `crcbl::settings::presets` renders the
+/// same three for the console, and that renderer is private, prose, and one
+/// shape — this branch needs two, a sentence and a `--json` record per key.
+/// What is *not* re-spelled is the keys: each name comes from the constant
+/// `crcbl::settings` spells it with, and the fog switch is looked up by the
+/// effect it clears because [`VIDEO_KEYS`] is the one table that names it. A
+/// table reordered under this file is then a lookup that fails loudly rather
+/// than a CLI quietly reporting the wrong switch.
+///
+/// The values land in this module's own [`Value`], so a tier's numbers print
+/// and serialise through exactly the code `get` and `set` print theirs with.
+fn tier_keys(values: QualityValues) -> [(String, Value); 3] {
+    let fog = VIDEO_KEYS
+        .into_iter()
+        .find(|(_, effect)| *effect == RenderEffects::VOLUMETRIC_FOG)
+        .expect("`VIDEO_KEYS` is the table that names the volumetric fog switch")
+        .0;
+    [
+        (
+            format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"),
+            Value::Float(f64::from(values.render_scale)),
+        ),
+        (
+            format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}"),
+            Value::Text(values.antialiasing.name().to_owned()),
+        ),
+        (
+            format!("{VIDEO_NAMESPACE}.{fog}"),
+            Value::Bool(values.volumetric_fog),
+        ),
+    ]
 }
 
 // ── The value, and the type it lands as ─────────────────────────────────────
@@ -726,6 +941,153 @@ mod tests {
         // before the status column said so nothing in the tree could tell a
         // person that.
         assert_eq!(stray, vec!["engine.video.size".to_string()]);
+    }
+
+    // ── preset ──────────────────────────────────────────────────────────
+
+    /// **A tier written from a terminal reaches the file and not this
+    /// process**, for every column of the table.
+    ///
+    /// The half the engine's own `quality` console command cannot report: a
+    /// `ConsoleHost` stages into a `Deferred`, which records every seam and
+    /// refuses none, so from there the answer is always [`Applied::Live`].
+    /// [`NoEngine`] is the other end of that, and it is what this branch
+    /// actually runs on — so if this ever reads [`Applied::Live`], the note the
+    /// command prints has become a lie.
+    #[test]
+    fn a_tier_written_from_a_terminal_is_read_at_the_next_start_up() {
+        for tier in QualityPreset::ALL {
+            let mut stack = SettingsStack::from_storage(&MemoryStorage::new());
+            assert_eq!(
+                presets::select(&mut stack, tier, &mut NoEngine)
+                    .expect("a memory stack accepts a write"),
+                Applied::NextStart,
+                "{tier:?} claimed a seam this process does not have",
+            );
+            assert_eq!(
+                presets::current_values(&stack),
+                tier.values(),
+                "{tier:?} did not reach the stack it was written to",
+            );
+        }
+    }
+
+    /// **Selecting the same tier twice leaves the same file**, byte for byte
+    /// and through the file rather than through the stack in hand — so a
+    /// script that runs the command on every start has nothing to undo.
+    #[test]
+    fn selecting_a_tier_a_second_time_writes_the_same_file() {
+        let storage = MemoryStorage::new();
+        let path = Path::new(SETTINGS_FILE);
+
+        let mut first = SettingsStack::from_storage(&storage);
+        presets::select(&mut first, QualityPreset::Low, &mut NoEngine)
+            .expect("a memory stack accepts a write");
+        first
+            .save(&storage, path)
+            .expect("memory storage accepts every write");
+        // As the text it is, so a failure here shows which line moved rather
+        // than two arrays of bytes.
+        let once = String::from_utf8(storage.read(path).expect("just written"))
+            .expect("a settings file is TOML text");
+
+        let mut again = SettingsStack::from_storage(&storage);
+        presets::select(&mut again, QualityPreset::Low, &mut NoEngine)
+            .expect("a memory stack accepts a write");
+        again
+            .save(&storage, path)
+            .expect("memory storage accepts every write");
+
+        assert_eq!(
+            String::from_utf8(storage.read(path).expect("just written"))
+                .expect("a settings file is TOML text"),
+            once,
+            "the second selection moved a file the first one had already settled",
+        );
+    }
+
+    /// **The keys this branch reports are the keys the tier wrote, holding the
+    /// values it wrote into them.**
+    ///
+    /// Both halves matter and neither is checkable without the other. A key
+    /// spelled wrong here is one `list` would call `unknown` and nothing would
+    /// ever read — the silent typo the status column exists for, arriving from
+    /// this CLI's own output — and a value rendered from the wrong field would
+    /// print a tier the file is not on.
+    #[test]
+    fn every_key_a_tier_reports_is_one_it_wrote_and_holds_the_value_reported() {
+        for tier in QualityPreset::ALL {
+            let mut stack = SettingsStack::from_storage(&MemoryStorage::new());
+            presets::select(&mut stack, tier, &mut NoEngine)
+                .expect("a memory stack accepts a write");
+            for (key, reported) in tier_keys(tier.values()) {
+                assert_eq!(
+                    status_of(&key),
+                    "read",
+                    "`{key}` is not a key the engine reads",
+                );
+                assert_eq!(
+                    Value::read(&stack, &key),
+                    Some(reported),
+                    "`{key}` for {tier:?}",
+                );
+            }
+        }
+    }
+
+    /// **One key off its tier is `custom`**, which is the word the bare form
+    /// prints and the reason it offers the tiers again.
+    ///
+    /// Written straight into the stack, the way a hand-edited file has it,
+    /// rather than through a second tier — the label must come off the tier
+    /// because the *keys* moved, not because something else was selected.
+    #[test]
+    fn a_key_moved_off_its_tier_is_reported_as_custom() {
+        let mut stack = SettingsStack::from_storage(&MemoryStorage::new());
+        presets::select(&mut stack, QualityPreset::Low, &mut NoEngine)
+            .expect("a memory stack accepts a write");
+        assert_eq!(presets::label(&stack), QualityPreset::Low.name());
+
+        let scale = format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}");
+        Value::Float(0.5)
+            .write(&mut stack, &scale)
+            .expect("a fresh stack has a user layer");
+        assert_eq!(
+            presets::label(&stack),
+            presets::CUSTOM,
+            "a moved key still reads as the tier it came from",
+        );
+    }
+
+    /// **The two ends a write can reach are named apart**, in both renderings:
+    /// a `--json` word a consumer branches on, and a clause a person reads.
+    #[test]
+    fn the_two_ends_a_write_can_reach_are_named_apart() {
+        let live = applied_names(Applied::Live);
+        let next = applied_names(Applied::NextStart);
+        assert_eq!(live.0, "live");
+        assert_eq!(next.0, "next_start");
+        assert_ne!(
+            live.1, next.1,
+            "a person reading the line cannot tell the two answers apart",
+        );
+    }
+
+    /// **The tiers offered are the engine's own**, so a column added to its
+    /// table is one this CLI offers the day it lands.
+    #[test]
+    fn the_names_offered_are_every_tier_the_engine_defines() {
+        assert!(
+            !QualityPreset::ALL.is_empty(),
+            "an empty ladder proves nothing"
+        );
+        let offered = tier_names();
+        for tier in QualityPreset::ALL {
+            assert!(
+                offered.contains(tier.name()),
+                "`{offered}` does not offer {tier:?}",
+            );
+        }
     }
 
     /// **Each of the four statuses, against a key that really has it.**

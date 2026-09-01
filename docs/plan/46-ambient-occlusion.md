@@ -372,9 +372,27 @@ it**: 0.255 ms, 25.9%, against `forward`'s 0.199 ms, `ssr`'s 0.099 ms,
 `crcbl_render::PassStats` existed to take one: the same run reports `ssao` at
 **0.258 ms p50 / 0.263 ms p95** and 26.0% of a 0.990 ms p50 total, summed across
 both of lantern's views rather than read off the room view's row. The
-single-frame reading above stands — it was not a fluke of the frame it came from
-— and `ssao` is still the most expensive pass in the frame, ahead of `forward`'s
-0.230 ms.
+single-frame reading above stands — it was not a fluke of the frame it came
+from.
+
+**Re-measured again 2026-09-01, and neither the ranking nor the figure holds.**
+The same command on the same machine now reports a 2.143 ms frame with `ssao` at
+**0.488 ms p50 / 0.505 ms p95**, 22.8%, and `forward` ahead of it at 0.531 ms
+and 24.8%. Every pass grew over the same period — `shadow` from 0.070 ms to
+0.350 ms, `ssr` from 0.099 ms to 0.218 ms — which is the shadow atlas, the
+cascades, normal maps and the LTC widening arriving, so the frame roughly
+doubling is work that was added rather than a regression.
+
+**The `ssao` pass is not where that came from, and this was checked rather than
+assumed.** `docs/backlog.md`'s 2026-08-31 sweep reads 582 µs for the same
+two-slice pass, against 0.258 ms here three days earlier, and the tangential
+rung is the only AO change between them — so the rung was the suspect. It is
+not: compiling the pre-rung `ssao.slang` against today's tree and running the
+same command measures **0.518 ms**, _slower_ than the 0.488 ms the current one
+takes. The rung made the pass slightly faster. A full-screen pass's cost is not
+scene-independent here — `MIN_RADIUS_PIXELS` lets a distant or flat pixel leave
+the march early — so a denser room is the remaining candidate, and it has not
+been isolated.
 
 **It is not a comparison.** The eight-tap hemisphere is deleted, so what GTAO
 costs _against what it replaced_ is not measurable from this tree — recovering

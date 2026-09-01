@@ -392,6 +392,7 @@ USAGE:
     crcbl settings [OPTIONS] list
     crcbl settings [OPTIONS] get <KEY>
     crcbl settings [OPTIONS] set <KEY> <VALUE>
+    crcbl settings [OPTIONS] preset [<TIER>]
 
 The file is `settings.toml` in the game's own config directory — on Linux that
 is ~/.config/<APP>/settings.toml, and it is whatever the platform names
@@ -404,8 +405,9 @@ project `crcbl run` and `crcbl build` work on. Outside a project, or in a
 workspace root that declares no package, there is nothing to derive it from and
 the command refuses rather than inventing a name.
 
-`list` and `get` only read. `set` is the only thing here that writes, and the
-only thing that creates the config directory — a game's start-up never does.
+`list` and `get` only read, and so does `preset` with no tier. `set` and
+`preset <TIER>` are the only things here that write, and the only things that
+create the config directory — a game's start-up never does.
 
 WHAT list SHOWS:
     The player's settings file, and nothing else. A game's compiled-in defaults
@@ -438,10 +440,27 @@ KEYS:
     A dotted path, `engine.video.shadows`. Each segment is ASCII letters,
     digits, `_` or `-`, which is what a TOML bare key is.
 
+WHAT preset DOES:
+    A quality tier is not a key: it is a name for a set of `[engine.video]`
+    values, and selecting one writes every key it covers. So `preset low` and
+    the `set` lines for those keys are the same edit to the same file, and
+    nothing stores the word `low` anywhere.
+
+    Bare `preset` prints the tier the file is on, which is derived from those
+    keys rather than remembered — `custom` is what it says when they are not
+    any one tier's set, which is a fresh file, a hand-edited one, and one key
+    moved off a tier alike. The engine owns the list of tiers, so a name it
+    does not know is refused with the names it does know.
+
+    A preset written from here reaches the game at its next start-up, and the
+    command says so: this process holds no renderer to show a setting in, so
+    there is nothing for the write to change until the game reads the file.
+
 EXIT CODES:
     0  the command answered, `get` on a key that is not set included
-    1  the command failed: the file could not be read or written, or `get` found
-       a table or a list, which it does not render — `list` shows those
+    1  the command failed: the file could not be read or written, `get` found
+       a table or a list, which it does not render — `list` shows those — or
+       `preset` was given a name that is not a quality tier
     2  the invocation was malformed
 
 OPTIONS:
@@ -926,6 +945,12 @@ pub enum SettingsAction {
     Get,
     /// Write one dotted key's value and persist the file.
     Set,
+    /// Print the quality tier the file is on, or write one.
+    ///
+    /// A tier is not a key — it is a name for a set of `[engine.video]` values
+    /// — so it is its own branch rather than a key `set` could write. See
+    /// [`crcbl::settings::presets`], which owns both the names and the values.
+    Preset,
 }
 
 impl SettingsAction {
@@ -935,6 +960,7 @@ impl SettingsAction {
             Self::List => "list",
             Self::Get => "get",
             Self::Set => "set",
+            Self::Preset => "preset",
         }
     }
 }
@@ -946,9 +972,9 @@ pub struct SettingsArgs {
     pub action: SettingsAction,
     /// The dotted key. Always `Some` for [`SettingsAction::Get`] and
     /// [`SettingsAction::Set`] and always `None` for
-    /// [`SettingsAction::List`] — the parser refuses the combinations that are
-    /// neither, the way [`LodArgs::output`] is refused on the branches that
-    /// write nothing.
+    /// [`SettingsAction::List`] and [`SettingsAction::Preset`] — the parser
+    /// refuses the combinations that are neither, the way [`LodArgs::output`]
+    /// is refused on the branches that write nothing.
     pub key: Option<String>,
     /// The value to write, as it was typed. Always `Some` for
     /// [`SettingsAction::Set`] and always `None` otherwise.
@@ -957,6 +983,18 @@ pub struct SettingsArgs {
     /// `settings_cmd`'s decision and is documented in [`SETTINGS_USAGE`], and
     /// making it here would put half the rule in the parser.
     pub value: Option<String>,
+    /// The quality tier to select, as it was typed. `None` on
+    /// [`SettingsAction::Preset`] is the bare form, which prints the tier the
+    /// file is on instead of moving it, and it is always `None` on the other
+    /// three.
+    ///
+    /// Text rather than a
+    /// [`QualityPreset`](crcbl::settings::presets::QualityPreset), for
+    /// [`value`](Self::value)'s reason: which words are tiers is
+    /// `crcbl::settings::presets`' knowledge, and a parser that held the list
+    /// would be a second copy of it that a new column has to be added to
+    /// twice.
+    pub tier: Option<String>,
     /// The game whose settings these are. `None` is "derive it from the project
     /// in the current directory", which is a filesystem question and so is left
     /// to the command.
@@ -1890,15 +1928,16 @@ fn parse_settings(mut args: impl Iterator<Item = OsString>) -> Invocation {
     }
 
     let Some((first, rest)) = positional.split_first() else {
-        return bad("`settings` needs a subcommand (list, get, set)");
+        return bad("`settings` needs a subcommand (list, get, set, preset)");
     };
     let action = match first.to_str() {
         Some("list") => SettingsAction::List,
         Some("get") => SettingsAction::Get,
         Some("set") => SettingsAction::Set,
+        Some("preset") => SettingsAction::Preset,
         _ => {
             return Invocation::BadUsage(format!(
-                "`settings` has no subcommand `{}` (known: list, get, set)",
+                "`settings` has no subcommand `{}` (known: list, get, set, preset)",
                 first.to_string_lossy()
             ));
         }
@@ -1907,9 +1946,13 @@ fn parse_settings(mut args: impl Iterator<Item = OsString>) -> Invocation {
     // How many arguments each branch takes, checked before any of them is
     // read: an extra one is a typo the shell split in two, not something to
     // drop silently.
+    //
+    // `preset` is the one branch that takes *up to* its count rather than
+    // exactly it: with a tier it writes one, without a tier it prints the one
+    // the file is on, and both are things a person types on purpose.
     let wanted = match action {
         SettingsAction::List => 0,
-        SettingsAction::Get => 1,
+        SettingsAction::Get | SettingsAction::Preset => 1,
         SettingsAction::Set => 2,
     };
     if rest.len() > wanted {
@@ -1921,7 +1964,7 @@ fn parse_settings(mut args: impl Iterator<Item = OsString>) -> Invocation {
     }
 
     let key = match action {
-        SettingsAction::List => None,
+        SettingsAction::List | SettingsAction::Preset => None,
         _ => {
             let Some(raw) = rest.first() else {
                 return Invocation::BadUsage(format!(
@@ -1957,10 +2000,25 @@ fn parse_settings(mut args: impl Iterator<Item = OsString>) -> Invocation {
         _ => None,
     };
 
+    let tier = match action {
+        SettingsAction::Preset => match rest.first() {
+            // A tier name lands in no file, so this is only the argv's own
+            // encoding: a word that is not text cannot be one of the names
+            // `crcbl::settings::presets` spells.
+            Some(raw) => match raw.to_str() {
+                Some(name) => Some(name.to_string()),
+                None => return not_text("settings", "quality tier", raw),
+            },
+            None => None,
+        },
+        _ => None,
+    };
+
     Invocation::Command(Command::Settings(SettingsArgs {
         action,
         key,
         value,
+        tier,
         app,
         config_dir,
         json,
@@ -3185,7 +3243,7 @@ mod tests {
     /// Each branch parses to its own action, and only the branches that take a
     /// key and a value carry them.
     #[test]
-    fn settings_parses_its_three_subcommands() {
+    fn settings_parses_its_four_subcommands() {
         let list = settings(&["settings", "list"]);
         assert_eq!(list.action, SettingsAction::List);
         assert_eq!((list.key.as_deref(), list.value.as_deref()), (None, None));
@@ -3199,6 +3257,40 @@ mod tests {
         assert_eq!(set.action, SettingsAction::Set);
         assert_eq!(set.key.as_deref(), Some("engine.video.shadows"));
         assert_eq!(set.value.as_deref(), Some("false"));
+
+        let preset = settings(&["settings", "preset", "low"]);
+        assert_eq!(preset.action, SettingsAction::Preset);
+        assert_eq!(preset.tier.as_deref(), Some("low"));
+        assert_eq!(
+            (preset.key.as_deref(), preset.value.as_deref()),
+            (None, None),
+            "a tier is not a key and not a value"
+        );
+    }
+
+    /// **`preset` is the one branch whose argument is optional**, and the
+    /// parser judges neither half of it: the bare form prints the tier the file
+    /// is on, and which words *are* tiers is `crcbl::settings::presets`'
+    /// knowledge — a parser holding that list would be a second copy of it.
+    #[test]
+    fn a_preset_takes_a_tier_or_nothing_and_the_parser_judges_neither() {
+        let bare = settings(&["settings", "preset"]);
+        assert_eq!(bare.action, SettingsAction::Preset);
+        assert_eq!(bare.tier, None);
+
+        // Not a tier, and still parsed: the refusal is the command's, so that
+        // it can name the tiers that do exist.
+        let nonsense = settings(&["settings", "preset", "ultra"]);
+        assert_eq!(nonsense.tier.as_deref(), Some("ultra"));
+
+        // Every other branch leaves it alone.
+        for argv in [
+            vec!["settings", "list"],
+            vec!["settings", "get", "a.b"],
+            vec!["settings", "set", "a.b", "c"],
+        ] {
+            assert_eq!(settings(&argv).tier, None, "{argv:?}");
+        }
     }
 
     /// `--app` and `--config-dir` are accepted on either side of the
@@ -3275,6 +3367,7 @@ mod tests {
             vec!["settings", "list", "a.b"],
             vec!["settings", "get", "a.b", "c"],
             vec!["settings", "set", "a.b", "c", "d"],
+            vec!["settings", "preset", "low", "medium"],
             vec!["settings", "get", ""],
             vec!["settings", "get", "a..b"],
             vec!["settings", "get", ".a"],
@@ -3320,6 +3413,7 @@ mod tests {
             vec!["settings", "-h"],
             vec!["settings", "get", "--help"],
             vec!["settings", "set", "a.b", "c", "--help"],
+            vec!["settings", "preset", "--help"],
         ] {
             assert_eq!(
                 parse_args(&argv),
@@ -3339,6 +3433,9 @@ mod tests {
             "set game.offset -- -7",
             "--app",
             "--config-dir",
+            // A tier is not a key, so `preset` is the one branch a person
+            // cannot guess the existence of from the other three.
+            "preset [<TIER>]",
         ] {
             assert!(
                 SETTINGS_USAGE.contains(value),

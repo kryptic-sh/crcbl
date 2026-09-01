@@ -158,9 +158,9 @@ The other commands: `build`, `screenshot` (offscreen render to a PNG), `replay`
 importer over one document and report what came out of it), `bench` (one fixed
 workload, timed and reported as a distribution), `sim` (the determinism harness:
 N ticks of a seed-generated world, and its state hash) and `settings` (`get`,
-`set` and `list` over a game's `settings.toml`, so a player setting is
-scriptable and not only reachable from a settings screen). Every one of them
-takes `--json`.
+`set`, `list` and `preset` over a game's `settings.toml`, so a player setting —
+or a whole quality tier — is scriptable and not only reachable from a settings
+screen). Every one of them takes `--json`.
 
 ### The demo site
 

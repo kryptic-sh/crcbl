@@ -133,8 +133,10 @@ What the verbs that exist still owe:
 - **`import <gltf>`'s `--out <dir>` is not built** and is refused by name, for
   the same reason: there is no on-disk scene format in this tree to write.
 - **`crcbl save` is topic 14's verb and is still unbuilt**;
-  `settings get\|set\|list` over `crcbl-store`'s stack is the whole of the
-  store's CLI surface.
+  `settings get\|set\|list\|preset` over `crcbl-store`'s stack is the whole of
+  the store's CLI surface. `preset` is the one that is not a catalogue key: it
+  writes a whole quality tier through `crcbl::settings::presets::select`, which
+  `set` could never reach because a preset is a writer rather than a key.
 - **`bench`'s device scenarios are not written** — `jobs` and `phys` are the
   headless pair, and [40-profiling.md](40-profiling.md) owns the rest.
 

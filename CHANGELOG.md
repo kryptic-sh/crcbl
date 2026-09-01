@@ -188,6 +188,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A quality tier is reachable from a terminal:
+  `crcbl settings preset [<TIER>]`.** A preset is a writer rather than a
+  catalogue key, so `settings set` — which walks `crcbl::settings::catalogue` —
+  could never reach one. The new branch calls `crcbl::settings::presets::select`
+  and writes every `[engine.video]` key the tier covers in one go. Bare `preset`
+  prints the tier the file is on, derived from those keys, and `custom` when
+  they are no one tier's set; an unknown name is refused with exit 1 and offers
+  the tiers from `QualityPreset::ALL`. Because a terminal holds no renderer, the
+  command stages through a `Stage` with no seams and reports
+  `Applied::NextStart` in words — the "next start-up" answer the engine's own
+  `quality` console command cannot produce, since a `ConsoleHost` stages into a
+  `Deferred` that refuses nothing.
+
 - **Ambient occlusion reaches the ambient term as a colour, not a grey number.**
   `mesh.slang`'s `multi_bounce_occlusion` is Jimenez et al. 2016's multi-bounce
   fit — a cubic in the scalar visibility whose coefficients are affine in the
