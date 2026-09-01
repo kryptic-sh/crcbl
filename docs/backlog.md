@@ -1518,6 +1518,42 @@ resemblance is a coincidence and the cause is elsewhere. Worth an hour with a
 `dbg!` of the resolved `EffectRequest` in the failing arm before any fix is
 attempted — the shape fits too well to ignore and not well enough to act on.
 
+**The intra-binary hypothesis was tested on 2026-09-02 and is wrong.** The note
+above argued that because a single-crate run uses the same binary and thread
+pool as the workspace run, a race between one sample's own concurrent tests was
+still a candidate and the workspace only supplied CPU contention. Tested
+directly: `crcbl_viewer`'s test binary was built once and then run **48 times**
+— twelve rounds of four concurrent copies of the same binary, which is that
+binary's own threading plus heavy contention and no workspace build at all.
+**Zero failures.** At the roughly one-in-three rate the workspace runs showed,
+that predicts about sixteen. So contention on its own does not produce it, and
+the thing a workspace run supplies is something else.
+
+Two more mechanical candidates fell while testing that:
+
+- _A platform settings layer under the fixture._ `SettingsSource::open` answers
+  `Source(storage)` with `SettingsStack::from_storage(storage)` and nothing else
+  — no platform layer is stacked beneath a caller's storage, so the read really
+  is isolated from whatever home directory the run executes in.
+- _A narrowed device clamp._ `ForwardRenderer::device_effects` is assigned in
+  exactly one place, to `RenderEffects::all()`, and never reassigned. It cannot
+  be what removes the bit.
+
+**So every layer of `resolve` is deterministic for this test, and the binary
+alone will not reproduce it.** What is left is genuinely cross-process. The
+strongest remaining candidate is that a workspace run has many test binaries
+opening GPU devices at once, and that under that load `Gpu::from_context` takes
+a path — a fallback, a retry, a different adapter — on which the effect request
+never reaches the renderer it hands back. That is consistent with the shape of
+the failure, since the guard's own doc says deleting either `set_effect_request`
+line leaves the renderer on `EffectRequest::default`.
+
+**Next step, and it is instrumentation rather than more reading:** print the
+resolved `EffectRequest` _and_ the opened backend and adapter from
+`effects_opened_with`, then run the whole workspace until it trips. Reading the
+resolution path further is now known to be unproductive — four passes over it
+have each ended in "deterministic".
+
 ## The render-quality programme (opened 2026-08-27)
 
 Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
