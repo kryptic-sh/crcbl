@@ -17,41 +17,49 @@ in `crates/crcbl-render/src/ssao.rs` — `r_ssao_slices` in `2..=4` and
 here is one decision: **whether either default moves.**
 
 **Half-resolution AO landed on 2026-09-02 and moved both halves of this
-decision. The radv tier has been re-measured; the other two have not.** The
+decision. Both native tiers have been re-measured; the browser has not.** The
 gather and the blurs now run at `crcbl_render::ssao::half_extent` with a
 reconstruction pass after them, so every figure further down this entry was
 taken against a pass that no longer has that shape. Read off
 `forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step` — the same
-scene the table below uses — on radv, single run rather than the p50 over seven
-the older table used:
+scene the table below uses — on both drivers, a single run each rather than the
+p50 over seven the older table used:
 
 ```text
-slices  blurs   sharp edges   worst step      ssao     each blur
-     2      1            37            5    281 us         23 us   what ships
-     4      1           100            3    553 us         23 us
-     2      2             8            3    280 us         23 us
-     4      2             0            1    553 us         23 us   the rung
+                    radv (RX 7900 XTX)             lavapipe
+slices blurs   edges worst    ssao   blur     edges worst    ssao    blur
+     2     1      37     5   281us   23us        38     5   3.60ms  1.71ms  ships
+     4     1     100     3   553us   23us        89     3   5.83ms  1.54ms
+     2     2       8     3   280us   23us         9     3   3.59ms  1.68ms
+     4     2       0     1   553us   23us         2     2   6.13ms  1.68ms  rung
 ```
+
+Against this entry's older full-resolution table the whole pass got much cheaper
+on both tiers: the shipping pair went 645 us to 304 us on radv and 17.0 ms to
+5.31 ms on lavapipe.
 
 **Two findings, and they point the same way.**
 
 - **Halving made the shipping configuration markedly less smooth on this axis: 1
-  sharp edge became 37.** The blur's footprint now spans twice as much of the
-  frame, so each tile phase pairs with a wider spread of distances from the
-  edge. This is a quality cost of the half-resolution rung, not a test-tuning
-  artefact, and it is the thing to weigh against that rung's speed.
-- **The rung has become cheaper than the pair it would replace used to be.**
-  Four slices and two blurs now cost about 600 us against the 645 us this
-  entry's older table measured for the _un-runged_ full-resolution pair — and it
-  takes the sharp-edge count to 0 with a worst step of 1. Half-resolution paid
-  for the rung.
+  sharp edge became 37 on radv and 38 on lavapipe.** The blur's footprint now
+  spans twice as much of the frame, so each tile phase pairs with a wider spread
+  of distances from the edge. This is a quality cost of the half-resolution
+  rung, not a test-tuning artefact, and it is the thing to weigh against that
+  rung's speed. The two drivers agree to within one edge on every row, which is
+  what makes these counts the pass's behaviour rather than one device's.
+- **The rung now costs less than the pair it would replace used to.** Four
+  slices and two blurs come to about 600 us on radv and 9.1 ms on lavapipe,
+  against the 645 us and 17.0 ms this entry's older table measured for the
+  un-runged full-resolution pair — while taking the sharp-edge count to 0 and 2.
+  Half-resolution paid for the rung outright on both native tiers.
 
 So the answer to "whether either default moves" now looks like **yes, both**, on
-the radv tier: it would undo the smoothness the halving cost and still run
-cheaper than the frame did a week ago. **It is not a decision to take on one
-tier and one run.** What it needs before it moves: the same table as a p50 over
-several runs, on lavapipe, and on a browser — and the browser tier still cannot
-be measured at all, for the `autoexec.cfg` reason this entry records below.
+both native tiers: it would undo the smoothness the halving cost and still run
+cheaper than the frame did before the halving. **It is still not a decision to
+take on single runs.** What it wants before it moves: this table as a p50 over
+several runs rather than one, and the browser tier, which still cannot be
+measured at all for the `autoexec.cfg` reason recorded below. The browser is the
+tier where the pass is most expensive, and so the one most able to veto it.
 
 **Blocker 1 is closed, and the answer was better than the question.** The old
 entry asked whether a rounding in the last place was acceptable for a 45 degree
