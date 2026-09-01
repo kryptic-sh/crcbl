@@ -1119,6 +1119,54 @@ saving would be six `DrawGen`s of device-local memory against half a light's
 draws. Declined; revisit only if a scene is measured spending most of a frame on
 one cube.
 
+## openbox intermittently never manages one x11 e2e window (2026-09-01)
+
+`x11 e2e (Xvfb)`'s openbox arm — step 8 of that CI job — fails at roughly one
+run in four, and it reddened `main` twice on 2026-09-01 (on `17a9d48` and
+`4e73d6e`, green on `ec6ea26` in between). Always the same test and message:
+
+```text
+test a_window_that_did_not_ask_for_drops_takes_none ... FAILED
+panicked at crates/crcbl-shell/tests/x11_e2e.rs:
+timed out after 20s waiting for the window manager to place the window;
+events so far: ["Resized"]
+```
+
+**It reproduces locally**, which the first look wrongly concluded it did not —
+five clean runs is not evidence at a one-in-four rate.
+`CRCBL_E2E_X11_WM=openbox crates/crcbl-shell/tests/run-x11-e2e.sh`, repeated,
+fails with the identical `27/45 tests run` signature CI shows.
+
+What was established, by instrumenting `Session::point_in`'s wait:
+
+- **openbox never manages that window.** `Peer::window_parent(xid)` answered
+  `Some(root)` on every one of ~1954 polls across the 20 seconds. It is not slow
+  reparenting and it is not a lost reply.
+- **The query is healthy.** The answers are `Some`, and `Peer::connection_error`
+  — added this session for exactly this ambiguity — does not fire, so the
+  connection is live throughout.
+- **openbox is alive.** The harness reports a window manager that exits, and
+  CI's captured log tail carries only its benign missing-menu-file warning.
+- **It is contention, not the window.** Run alone through the same harness,
+  `-E 'test(a_window_that_did_not_ask_for_drops_takes_none)'` passed 10 times
+  out of 10. It only fails alongside the other 44.
+
+**Ruled out:** a test stealing `SubstructureRedirect` from openbox, which would
+stop it managing anything — the only `SubstructureNotify | SubstructureRedirect`
+in `crates/crcbl-shell/src/x11/e2e.rs` is the destination mask of the EWMH
+`SendEvent` in `Peer::activate`, which is how a pager is _supposed_ to message a
+window manager, not a selection on the root.
+
+**Not diagnosed:** why openbox, under concurrent load from the other tests,
+drops this one window's `MapRequest` for longer than 20 seconds. Raising `WAIT`
+would hide it rather than answer it, and was deliberately not done.
+
+**What would move it next:** log whether the window was ever mapped, separately
+from whether it was reparented, so the two states are distinguishable in CI
+output — the current message names neither. `pump_until`'s `what` is a `&str`
+fixed before the loop, so carrying the observed parent into the failure needs
+that signature widened, which is why it is not already there.
+
 ## Two whole-workspace-only test flakes, neither a process global (2026-09-01)
 
 Both seen on 2026-09-01, both only under a full `cargo test`, both green when

@@ -638,6 +638,21 @@ impl Peer {
     /// really a window-relative one, and the failure lands somewhere else
     /// entirely.
     #[must_use]
+    /// The connection's error code, or [`None`] while it is healthy.
+    ///
+    /// **Every other query here answers [`None`] for two different reasons** —
+    /// the server said no, and the connection is no longer able to ask — and a
+    /// caller polling until one of them turns [`Some`] cannot tell "not yet"
+    /// from "never again". A shut connection answers `None` forever, so such a
+    /// poll runs to its deadline and then reports the thing it was waiting for
+    /// as the thing that failed, which is a false diagnosis rather than a slow
+    /// one. Callers that wait ask this first.
+    pub fn connection_error(&self) -> Option<i32> {
+        // SAFETY: the connection is live whether or not it carries an error.
+        let code = unsafe { (self.lib.connection_has_error)(self.connection) };
+        (code != 0).then_some(code)
+    }
+
     pub fn window_parent(&self, xid: u32) -> Option<u32> {
         // SAFETY: the connection and window are live; a null error pointer
         // discards the error and a null reply is handled below.

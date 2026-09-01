@@ -282,6 +282,20 @@ impl Session {
             if ready(self) {
                 return;
             }
+            // **A dead connection is reported as itself, not as a timeout.**
+            // Every `Peer` query answers `None` once the connection is gone, so
+            // a predicate polling one would sit here for the whole deadline and
+            // then name `what` as the thing that never happened — a diagnosis
+            // that sends the next reader after the wrong bug. This is the
+            // difference between "the window manager was slow" and "there was
+            // nothing left to ask".
+            if let Some(code) = self.peer.connection_error() {
+                panic!(
+                    "the X connection failed (xcb error {code}) while waiting for {what}; \
+                     events so far: {:?}",
+                    self.names()
+                );
+            }
             assert!(
                 Instant::now() < deadline,
                 "timed out after {WAIT:?} waiting for {what}; events so far: {:?}",
