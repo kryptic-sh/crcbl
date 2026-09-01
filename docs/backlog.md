@@ -1475,6 +1475,20 @@ a `docs/plan/43-render-standards.md` tier into either. Deliberately out of scope
 for that slice — the tier table it would read is itself unbuilt — and the shape
 is already there when it is wanted.
 
+**Still true as stated, and one thing near it changed on 2026-09-02.** An
+`autoexec.cfg` is a config file rather than a settings file, so it gives the
+cadence no route from a key or a preset and this entry stands. What it does give
+is a **measurement** route: `r_shadow_cadence` and `r_shadow_faces` are
+`convar!`s like `r_ssao_slices`, and a console variable can now be set before
+the first frame in a browser. `docs/plan/45-shadows.md` calls the browser tier
+unmeasured in two places — the tile-size saving and the cadence's own — and
+those figures are now obtainable by the method the ambient occlusion entry above
+used and proved: seed the file into the demo's store, let a seeded boot be the
+one that reports, and read the pass timings rather than the frame total.
+
+Not done here, and not to be read as done: nothing has measured the shadow
+cadence in a browser. Only the obstacle is gone.
+
 ## Per-face granularity inside a point light's cube: declined (2026-08-31)
 
 The cadence's unit is the cull, so a point light's `POINT_FACES` faces are
