@@ -315,9 +315,14 @@ of where the widened target is worth its bandwidth:
   pair the SSR section's refusal has been waiting for. The widening is the
   bandwidth low does not pay.
 
-The presets of foundation (g) select between the two; until they exist the bent
-pair is on where it is built and the scalar path is what a device without it
-runs. Both are priced on the three tiers before the rung counts.
+The presets of foundation (g) select between the two. **They exist now** —
+`crcbl::settings::presets` landed 2026-08-31 — so this rung wires into them
+rather than waiting for them, and it inherits their one open question: a preset
+clears an effect by writing that effect's `VIDEO_KEYS` row, so whichever knob
+selects the bent pair needs a row of its own or the presets need a way to write
+a keyless one. `docs/backlog.md` carries that question, raised by the
+contact-shadow rung, which hit it first. Both halves are priced on the three
+tiers before the rung counts.
 
 **What the pass costs, measured 2026-08-28.** `crcbl_render::PassTimers` times
 every pass in the graph and `apps/lantern` builds one, so the report comes out
