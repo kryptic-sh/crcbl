@@ -1757,10 +1757,18 @@ against the GGX lobe. What it did not do:
   of them being edited concurrently when it landed. It is the missing half of
   the browser tier's price, which `44-lighting.md` states by tap count instead
   of measuring.
-- **Only Vulkan has drawn a rectangle.** `mesh_e2e` names no backend, so
-  `CRCBL_GPU=mtl`/`dx12`/`wgpu` over `crates/crcbl/tests/run-mesh-e2e.sh` is the
-  whole of the missing evidence — the Metal, DXIL and WGSL artifacts are
-  compiled and committed and nothing has run them.
+- **Only Vulkan has drawn a rectangle, and only two of the three routes to the
+  rest are a harness run.** `mesh_e2e` names no backend, so
+  `CRCBL_GPU=mtl`/`dx12` over `crates/crcbl/tests/run-mesh-e2e.sh` is the
+  evidence Metal and D3D12 are missing — the artifacts are compiled and
+  committed and nothing has run them — but neither backend has hardware here.
+  **WebGPU is not that shape at all.** The backend is spelled `webgpu`, not
+  `wgpu`, and asking for it natively refuses rather than falling back:
+  `the crcbl-webgpu backend is not active in this build — it reaches a device only on wasm32, where it is the automatic backend`
+  (measured 2026-09-02, all 76 `mesh_e2e` tests panicking in the harness before
+  drawing anything). So the WGSL artifacts can only be exercised through the
+  browser harness, and a rectangle reaching one is gated on the
+  `crcbl::screenshot::Scene` variant the bullet above is about.
 - **`fill` is on `RectLight` alone.** `crcbl_render::Light::is_fill` is the seam
   and `shadow::can_be_shadowed` already refuses any fill light a tile, so the
   flag generalises the moment `PointLight` and `SpotLight` grow the field. They
