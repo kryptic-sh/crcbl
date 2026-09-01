@@ -1471,6 +1471,26 @@ or that `programmatic.off` held the bit — so the next step is the settings rea
 that produces the tier, and specifically what it answers when the `antialiasing`
 key is absent, which is the case this test exercises.
 
+**That settings read is now ruled out too, and with it the whole deterministic
+half.** `viewer`'s `gpu.rs` never mentions antialiasing, so its `EffectRequest`
+carries `antialiasing: None` and `resolve` takes the arm that leaves the slot
+alone — the tier is never chosen, so `antialiasing_or_default` (whose fallback
+is `Antialiasing::from_effects(DEFAULT_STACK)`, and `DEFAULT_STACK` holds
+`ANTIALIASING` and not `SMAA`) is not on this path at all. `video_effects`
+starts from `RenderEffects::all()` and removes a bit only for a key explicitly
+`false`, over a `const` `VIDEO_KEYS` table with no lazy state, so a file saying
+only `reflections = false` yields `all()` minus `REFLECTIONS`. Both `camera` and
+`video` therefore carry `ANTIALIASING` every time.
+
+So three of the four layers are deterministic on this path and the device clamp
+removes nothing. **What is left is `programmatic.off`** — the only layer that
+can clear the bit here — **or something genuinely concurrent rather than a value
+computed wrongly.** Start there rather than re-walking the settings code: find
+what puts `ANTIALIASING` into a `programmatic` override anywhere in
+`apps/viewer`, and note that the sibling test just above the failing one drives
+`DebugView` re-exports, which is the nearest thing in that file to state shared
+between concurrent tests.
+
 ## The render-quality programme (opened 2026-08-27)
 
 Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
