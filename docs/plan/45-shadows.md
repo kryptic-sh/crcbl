@@ -995,9 +995,18 @@ software rasteriser cutting by the same share says taps, not divergence.
 For scale, the same frame's whole report on radv at 1920×1080 — frame 397, 53
 passes over both views, 0.986 ms of GPU time — puts `ssao` at 0.255 ms and 25.9%
 of it, `forward` at 0.199 ms, `ssr` at 0.099 ms, `shadow` at 0.070 ms and the
-five Hi-Z levels at 0.018 ms between them. **GTAO is the most expensive pass in
-this frame**, which is a finding for
+five Hi-Z levels at 0.018 ms between them. GTAO was then the most expensive pass
+in the frame, which was a finding for
 [46-ambient-occlusion.md](46-ambient-occlusion.md) rather than for this page.
+
+**That last sentence stopped being true on 2026-09-02**, when the gather and its
+blurs moved to half resolution behind a reconstruction pass. Read off lantern's
+fixed-camera room at the same 1920×1080 on the same card — 22 labels for 0.899
+ms of p50, so a differently composed frame than the 53-pass figure above and not
+a like-for-like delta — the whole occlusion chain now comes to 0.141 ms against
+`forward`'s 0.254 ms and `shadow`'s 0.137 ms. **The forward pass is the frame's
+most expensive**, and the numbers in the paragraph above are kept as the dated
+measurement they were rather than as a description of the frame today.
 
 What is still true is that **nothing runs this on its own**: the numbers above
 came from a hand-run binary, there is no harness that records a pass's cost and
