@@ -1225,11 +1225,35 @@ That also explains why it survived the pointer being parked at the screen centre
 in `Session::open`, which is the suite's one documented cross-test channel and
 was the obvious suspect.
 
-**What would move it next:** the five-test filter above is a cheap harness for
-it — a repro in about seven seconds a run rather than the full suite's twenty.
-Watching openbox's own state across those five (its client list, or an
-`xtrace`-style log of what it does with each `MapRequest`) is the next step, and
-was not done.
+**openbox thinks it manages the window it has not reparented** (2026-09-01).
+Reading `_NET_CLIENT_LIST` off the root at the moment of failure, the window is
+**in it** while `window_parent` still answers the root:
+
+```text
+parent Some(21f), root 0x21f, origin Some((0, 0)),
+in _NET_CLIENT_LIST Some(true), list Some([400000])
+```
+
+So this is not a window openbox never saw. It accepted it, listed it as a
+client, and did not give it a frame.
+
+**Window ids are reused between tests, and that is not the cause.** Each test is
+its own process and the X server hands a fresh client the base the last one
+released, so two tests in this filter both get `0x400000` — printed, not
+assumed. That suggested openbox was refusing a `MapRequest` for an id it still
+believed it managed, which would have made the client-list entry a stale one
+from the dead client. **Measured and rejected:** making every `Session::open`
+wait for `_NET_CLIENT_LIST` to drain before creating any window gives 4 failures
+in 24 runs, against a baseline of 1 in 8 — no improvement, and no session ever
+failed that new wait, so the list really was empty when each test began. The
+entry seen at failure is therefore the live one for the current window. The
+change was reverted rather than kept as a fix that fixes nothing.
+
+**What would move it next:** an `xtrace`-style log of what openbox does between
+the `MapRequest` and the reparent it never sends, on the five-test filter above
+— which reproduces in about seven seconds a run against the full suite's twenty.
+Nothing in this repository can see that, so it wants openbox run under a
+protocol tracer.
 
 ## Two whole-workspace-only test flakes, neither a process global (2026-09-01)
 
