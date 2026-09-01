@@ -183,6 +183,81 @@ own unbuilt row, not this entry's.
   moved the whole line by a constant, or that kept every step at one level while
   wandering, would not be caught by it.
 
+## SSAO runs GTAO at full resolution and the banding is bought (2026-09-01)
+
+The user asked whether the AO pass is implemented the industry-standard way and
+optimized, having seen older engines produce SSAO without banding at a lower
+price. The audit says: **the technique is right and the way it is spent is
+not.** Nothing here is a bug — every item is a deliberate choice recorded in the
+shader header — but three of them are choices a shipping engine does not make.
+
+**The technique is correct.** `ssao.slang` is ground-truth ambient occlusion, a
+horizon search over slices through the eye, the same family as XeGTAO and the
+Activision original. That is not the gap.
+
+**What it costs, in the order a fix would take them:**
+
+- **It runs at full resolution.** `TransientImageDesc::ambient_occlusion` in
+  `crcbl_render::graph` is `R8Unorm`, `mip_levels: 1`, and `crcbl_render`'s
+  forward pass builds it at the scene `extent`. The reference implementations
+  run AO at half resolution and bilaterally upsample it, because occlusion is
+  low-frequency and the depth-aware upsample is most of what the blur was
+  already doing. This is the single largest factor and it is a resource change
+  plus an upsample pass, not a shader rewrite.
+- **It never reads the depth pyramid, which already exists.** Every depth fetch
+  in `ssao.slang` goes through one accessor, `depth_at`, and that accessor is
+  `scene_depth.Load(int3(clamped, 0))` — mip 0, no sampler, no pyramid.
+  Meanwhile `crcbl_render::hiz` builds a full chain,
+  `TransientImageDesc::hiz_level` describes it, and `ssr.slang`'s `hiz_at`
+  marches it. A horizon search is exactly the shape that wants it: the far steps
+  of a slice read pixels far apart and thrash the cache reading them at mip 0.
+  XeGTAO samples a coarser level as the step distance grows. The chain is built
+  and paid for every frame and the AO pass declines to bind it.
+- **It spends about twenty full-res taps per pixel.** Sixteen for the horizons —
+  `slice_count() * 2 * SLICE_STEPS`, with `SLICE_COUNT_DEFAULT` 2 and
+  `SLICE_STEPS` 4 — plus four more, because `ssao.slang` reconstructs the normal
+  from its four neighbours rather than reading one. It reconstructs because the
+  AO prepass has no colour target to have written a G-buffer normal into, which
+  is a consequence of the forward+ shape and not obviously worth changing; the
+  four taps are noted here so the tap budget is honest, not as a defect.
+
+**The banding is designed in, and that is the real decision.** Three things
+guarantee a visible tile:
+
+- `SLICE_DIRECTIONS[16]` and `STEP_OFFSETS[16]` are **ordered Bayer tables**
+  indexed by `pixel.xy & 3` — a fixed 4x4 pattern, identical in every frame.
+- `ssao_blur.slang`'s kernel is `KERNEL_FROM` `-1` to `KERNEL_TO` `3`, a 4x4
+  footprint chosen to match that tile exactly, so it averages the tile away
+  within one tile and no further.
+- **There is no temporal accumulation anywhere in the AO path.** Nothing
+  reprojects the previous frame's occlusion.
+
+The engines the user is comparing against get their smoothness from the two
+things this path deliberately does not have: a per-frame-varying noise (IGN or a
+hash) and a temporal filter to resolve it. `ssao.slang`'s header says why in so
+many words — noise and hashes "amplify float differences by construction, which
+is the opposite of what a golden needs", where an integer index into a constant
+array is bit-identical by inspection. **The banding is the price paid for
+byte-comparable goldens across four backends.** It is a real trade and it was
+made knowingly; it is not an oversight.
+
+**So the decision the user actually has to make** is whether the golden rule
+keeps buying it. The first two items above are pure wins and need no answer. The
+third does: either a temporal denoiser with the goldens moved to a
+tolerance-based comparison, or keep bit-exact determinism and accept the tile.
+That is a design call about how this project verifies rendering, not an AO fix,
+and it is why the AO path was not touched in the session that found this.
+
+**One number does not reconcile.** `docs/plan/46-ambient-occlusion.md` quotes
+`ssao` at 0.255 ms on lantern, 1920x1080, radv. The sweep in the tangential rung
+entry at the top of this file quotes **582 us** for the same two-slice pass at
+the same resolution on the same driver — 2.3x apart. Candidates, none verified:
+the two may not be the same demo (the sweep does not name one), and the radial
+half `STEP_OFFSETS` shipped 2026-08-30, between the two measurements. Whichever
+is right, one of the two documents is quoting a figure that no longer holds, and
+any pricing of the items above starts from a re-measurement rather than from
+either row.
+
 ## A plan's numbered slices are an addressing scheme (2026-08-31)
 
 **The standing rule is that shipped work leaves the plans**, and
