@@ -205,12 +205,28 @@ impl Session {
         let xid = self.xid(window);
         if self.has_window_manager() {
             let root = self.peer.root();
-            self.pump_until("the window manager to place the window", |session| {
-                session
-                    .peer
-                    .window_parent(xid)
-                    .is_some_and(|parent| parent != root)
-            });
+            self.pump_until_reporting(
+                "the window manager to place the window",
+                |session| {
+                    session
+                        .peer
+                        .window_parent(xid)
+                        .is_some_and(|parent| parent != root)
+                },
+                // What the predicate was reading, because this wait has failed
+                // in CI at about one run in four and passes alone — see
+                // `docs/backlog.md`. Which of the two states it ended in is the
+                // whole question: a parent that is still the root means the
+                // window manager never managed the window, and a `None` means
+                // the window was not there to ask about.
+                |session| {
+                    format!(
+                        "; parent {:x?}, root {root:#x}, origin {:?}",
+                        session.peer.window_parent(xid),
+                        session.peer.window_origin(xid),
+                    )
+                },
+            );
             // **Reparenting is not placement, and the gap between them is what
             // made this flake.** `openbox` puts the client inside a frame and
             // moves the frame *afterwards*, so an origin read the instant the
@@ -275,7 +291,25 @@ impl Session {
     /// server needs an interned atom, and interning caches. A probe that could
     /// only read state the shell had already delivered would push those tests
     /// back onto a fixed pump, which is the trap this exists to close.
-    fn pump_until(&mut self, what: &str, mut ready: impl FnMut(&mut Self) -> bool) {
+    fn pump_until(&mut self, what: &str, ready: impl FnMut(&mut Self) -> bool) {
+        self.pump_until_reporting(what, ready, |_| String::new());
+    }
+
+    /// [`pump_until`](Self::pump_until), with a description of the state the
+    /// predicate was reading added to the failure.
+    ///
+    /// **The bare form can only say what did not happen, which is the half a
+    /// reader already knows.** A wait that times out in CI and nowhere else is
+    /// exactly the one nobody can attach a debugger to, so what it prints is
+    /// the whole of the evidence: `report` runs once, at the deadline, and puts
+    /// the values the predicate was looking at into the panic. It is not run on
+    /// the happy path, so it may cost whatever a diagnosis costs.
+    fn pump_until_reporting(
+        &mut self,
+        what: &str,
+        mut ready: impl FnMut(&mut Self) -> bool,
+        report: impl FnOnce(&mut Self) -> String,
+    ) {
         let deadline = Instant::now() + WAIT;
         loop {
             self.pump();
@@ -296,11 +330,13 @@ impl Session {
                     self.names()
                 );
             }
-            assert!(
-                Instant::now() < deadline,
-                "timed out after {WAIT:?} waiting for {what}; events so far: {:?}",
-                self.names()
-            );
+            if Instant::now() >= deadline {
+                let names = self.names();
+                let detail = report(self);
+                panic!(
+                    "timed out after {WAIT:?} waiting for {what}; events so far:                      {names:?}{detail}"
+                );
+            }
             // Also exercises `ShellCaps::EVENT_WAIT`: a backend that claims it
             // and does not block would spin this loop, and one that blocks
             // forever would never reach the deadline check.

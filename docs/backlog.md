@@ -1182,11 +1182,23 @@ window manager, not a selection on the root.
 seconds after some earlier test has run. Raising `WAIT` would hide it rather
 than answer it, and was deliberately not done.
 
-**What would move it next:** log whether the window was ever mapped, separately
-from whether it was reparented, so the two states are distinguishable in CI
-output — the current message names neither. `pump_until`'s `what` is a `&str`
-fixed before the loop, so carrying the observed parent into the failure needs
-that signature widened, which is why it is not already there.
+**The failure now carries its own evidence.** `Session::pump_until_reporting`
+runs a closure at the deadline and puts what the predicate was reading into the
+panic, so the placement wait no longer needs a local reproduction to be read:
+
+```text
+timed out after 20s waiting for the window manager to place the window;
+events so far: ["Resized"]; parent Some(21f), root 0x21f, origin Some((0, 0))
+```
+
+`parent == root` is the whole diagnosis — the window manager never managed the
+window — and a `None` there would have meant the window was gone instead. That
+line came off a real reproduction, not a sabotage.
+
+**What would move it next:** find which earlier test leaves the state. The
+suite's one documented cross-test channel is the pointer, which `Session::open`
+already parks at the screen centre for exactly this reason, so it is something
+else. Everything but the drag family is still unbisected.
 
 ## Two whole-workspace-only test flakes, neither a process global (2026-09-01)
 
