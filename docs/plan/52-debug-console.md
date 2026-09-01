@@ -631,6 +631,24 @@ entry; the browser gate runs on every slice that touches a demo.
    file's own line numbers and the file runs on, with a closing count of lines
    run and lines failed — a file that half-applied says so.
 
+   **And one file runs without being asked — landed 2026-09-02.**
+   `console_config::AUTOEXEC` is Source's `autoexec.cfg`, run by
+   `Console::run_autoexec` from `Loop::new` after the console is gathered and
+   before the first frame, so a variable can be set ahead of everything that
+   reads one — which is the only way to configure a run that is over before
+   anybody could type: a frame-budget capture, a golden run, a demo started from
+   a launcher. Same file, same read, same `run_text`. What differs is the
+   silence: a run that reads no settings file runs no autoexec and asks no
+   storage for anything — `EngineLink::app_name` is the gate and
+   `with_platform_storage` is not, because natively that answers `Some` and
+   would hand a headless run `~/.config/<game>/autoexec.cfg` — and a machine
+   with no such file says nothing, since almost none have one and absence is not
+   an event. A file that is there and will not run is printed and the boot
+   carries on. The read is one read for both callers: `NotRead` splits its
+   failure so the boot can tell "no such file" from "could not read it", and
+   `NotRead::into_fault` collapses those back into the line `config` has always
+   printed.
+
 10. **The console a finger reaches — landed 2026-08-31.**
     `crcbl::engine::ConsoleButton` is the route in, beside `PauseControl` in the
     corner that control's docs vetted, drawn by `Loop::frame` after the panel so

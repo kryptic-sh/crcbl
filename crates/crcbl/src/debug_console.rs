@@ -835,6 +835,36 @@ impl Console {
         }
     }
 
+    /// Runs this game's `autoexec.cfg` through this console, if there is one.
+    ///
+    /// [`Loop::new`](crate::engine::Loop::new) calls this once, before the first
+    /// frame: `console_config::run_autoexec` is what decides whether there is a
+    /// file to run at all, and this is the console half of it — the
+    /// same registry, the same host and the same log every typed line goes
+    /// through, so a variable an autoexec sets is set for the run and not for a
+    /// context of its own.
+    ///
+    /// **No prompt line is echoed.** A typed line echoes one because somebody
+    /// typed it and the terminal has to show the exchange; nobody typed this.
+    /// Everything the file printed does reach the log, faults included: a
+    /// start-up that half-applied says so in the panel and on stderr.
+    pub fn run_autoexec(&mut self) -> crate::console_config::Autoexec {
+        let (did, lines, clear) = {
+            let Self { registry, host, .. } = self;
+            let mut cx = Context::new(registry, host);
+            let did = crate::console_config::run_autoexec(&mut cx);
+            let clear = cx.clear_requested();
+            (did, cx.into_lines(), clear)
+        };
+        for printed in &lines {
+            crcbl_core::log::console::print(printed);
+        }
+        if clear {
+            self.panel.log_mut().clear();
+        }
+        did
+    }
+
     /// `Tab`: fill in the prefix every candidate shares, then cycle them.
     fn complete(&mut self) {
         if !self.cycle.is_empty() {
@@ -961,5 +991,41 @@ mod tests {
             "an enum value may hold a space, so the token is everything after the name",
         );
         assert_eq!(completing("debug_view "), "");
+    }
+
+    /// **A run with no settings file runs no autoexec through the console
+    /// either**, and puts nothing in the log on its way to deciding that.
+    ///
+    /// The engine's own call, over a real [`Console`] rather than over a
+    /// [`Context`] a check built: `Loop::new` reaches
+    /// [`crate::console_config::run_autoexec`] only through this method, so a
+    /// method that forwarded to the wrong thing — or forwarded and then printed
+    /// anyway — would be caught nowhere else. The answer is asserted as well as
+    /// the silence because a golden run's silence and a machine with no
+    /// `autoexec.cfg` look identical from here.
+    #[test]
+    fn the_console_runs_no_autoexec_for_a_run_with_no_settings_file() {
+        let logs = crcbl_core::log::capture();
+        let tables: Vec<Table> = engine_tables()
+            .into_iter()
+            .map(|(_, table)| table)
+            .collect();
+        let host = ConsoleHost::new(crcbl_store::settings::SettingsStack::new());
+        let mut console = Console::new(&tables, host);
+
+        let did = console.run_autoexec();
+
+        assert_eq!(
+            did,
+            crate::console_config::Autoexec::NoSettingsFile,
+            "a console with nowhere to save must not read a config directory either",
+        );
+        let printed: Vec<String> = logs
+            .records()
+            .into_iter()
+            .filter(|record| record.target == crcbl_core::log::console::CONSOLE_TARGET)
+            .map(|record| record.message)
+            .collect();
+        assert!(printed.is_empty(), "{printed:?}");
     }
 }

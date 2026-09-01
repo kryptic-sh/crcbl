@@ -169,17 +169,24 @@ both found by trying, 2026-08-31.**
   so GPU timing had already stopped before the console group ran.
 
 So typing it later in the run can never work, whatever the key map does. The
-setting has to be applied before the frames are timed, and **nothing in the tree
-can do that today**: `crcbl::console_config::config` is registered in
-`crates/crcbl/src/lib.rs` as a console command and nothing else calls it, so
-there is no `autoexec.cfg` equivalent — no file runs on its own at start-up.
+setting has to be applied before the frames are timed.
 
-That is the natural unblock, and it is not test-only surface: Source runs an
-`autoexec.cfg` and this console was built in that shape deliberately, so an
-engine that ran one config file at boot is a feature the engine plausibly wants
-regardless of this measurement. It would also give the browser a route, since
-`config` already reads through the OPFS store, and a harness that seeded a file
-before the demo booted would need no key map, no digits and no typing at all.
+**The engine half of that landed on 2026-09-02 and this blocker is now half a
+blocker.** `console_config::AUTOEXEC` is Source's `autoexec.cfg`, run by
+`Console::run_autoexec` from `Loop::new` after the console is gathered and
+before the first frame, out of the same settings directory `config` reads — the
+page's OPFS store in a browser. So a console variable can now be set ahead of
+everything that reads one, with no key map, no digits and no typing.
+
+**What is left is the harness half: nothing seeds that file into a demo's OPFS
+before it boots.** The route is short and the format is already understood on
+the harness side — `web/tools/browser-e2e.mjs` reads saves back out of the OPFS
+root today and knows the record framing to do it (the `CRWB` header, the
+`CRCBLSVE` trailer and the generation slots `crates/crcbl-store/src/web/opfs.rs`
+ping-pongs), so seeding is writing that same frame rather than new format work.
+It has to land before `restoreOpfs`, which `web/engine/demo.js` awaits before it
+calls `api.boot()`. Until that exists the browser tier of the AO rung stays
+unmeasured, and it is the last thing in front of the defaults decision.
 
 **What the rung buys, re-measured.** The scene is
 `forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`: a
@@ -528,6 +535,41 @@ its five atlas items are referenced by number from exactly one place, this file,
 so trimming that list costs one line here and nothing else. The rule to carry
 forward is to grep for the numbers before trimming a list, rather than to assume
 either answer.
+
+## What the start-up autoexec left uncovered (2026-09-02)
+
+`console_config::run_autoexec` and `Console::run_autoexec` are covered by unit
+checks that were each shown to go red under a sabotage of the thing they guard,
+including the file's own name — changing `AUTOEXEC` to anything else reddens
+`an_autoexec_that_is_there_runs_its_lines_and_its_effects_land`, because the
+summary line `run_text` prints carries the name. What is **not** covered:
+
+- **The engine call site is compile-checked only.** Delete
+  `console.run_autoexec();` from `Loop::new` and nothing goes red. There is no
+  unit-level home for that assertion: a `Loop` needs a shell and a device, and
+  every route that can build one headlessly is a run with
+  `SettingsSource::None`, which by design reads no autoexec at all — so the one
+  configuration that could observe the call is a windowed run against a real
+  settings directory. The gate on the behaviour is proven; the wiring is held by
+  the compiler and by review.
+- **`Autoexec::Nowhere` and its `info!` line are untested.** Reaching that arm
+  means `SettingsStack::with_platform_storage` answering `None` — natively "this
+  platform names no config directory", in a browser "this page installed no
+  store" — and neither is reachable without touching real storage or a browser.
+- **Nothing browser-side was run.** The wasm32 rustdoc gate compiles the wasm
+  arm and executes none of it. The claim that the OPFS store is resident by the
+  time `Loop::new` runs rests on reading `web/engine/demo.js` — it awaits
+  `restoreOpfs` before `api.boot()`, and `boot()` is several frames ahead of
+  `Loop::new` — not on a browser having done it. The first thing that will
+  exercise it for real is the harness seeding described in the HIGH PRIORITY
+  entry above.
+- **`Autoexec` is public API on `crcbl::console_config`**, returned by
+  `Console::run_autoexec` and ignored by `Loop::new`. It is public because the
+  three silent outcomes are indistinguishable from their output — a check that
+  could see only printed lines cannot tell "no settings file" from "no such
+  file" from "never ran" — but nothing outside the crate consumes it yet. If it
+  should not be public surface, both can be `pub(crate)` at no cost to any
+  existing check.
 
 ## What the debug console left as limits (2026-08-31)
 

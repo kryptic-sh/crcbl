@@ -1,4 +1,5 @@
-//! `config`: running a file of console lines.
+//! `config`: running a file of console lines, and the one that runs itself at
+//! start-up.
 //!
 //! `docs/plan/52-debug-console.md` slice 9's "a `config` command that runs a
 //! file of commands" — Source's `exec`, under the name the plan gives it. A
@@ -47,6 +48,24 @@
 //! ran and how many of them failed — because a file that silently half-applied
 //! is the failure worth designing against, and a summary is the only thing that
 //! is read when the twenty lines above it scrolled past.
+//!
+//! # The one file that runs without being asked
+//!
+//! [`AUTOEXEC`] is Source's `autoexec.cfg`, and `run_autoexec` below is the
+//! engine running it: `Loop::new` calls it once, after the console is built and
+//! before the first frame, so a variable can be set *before* anything reads it.
+//! Without it there is no way to configure a run that is over before anyone could
+//! type — a frame-budget measurement, a golden capture, a demo started from a
+//! launcher — because every other route into the console needs a keyboard.
+//!
+//! It is the same file, read the same way, run through the same `run_text`.
+//! What differs is what it does when there is nothing to run: **it is silent.**
+//! A run that reads no settings file reads no autoexec either
+//! ([`Autoexec::NoSettingsFile`], the gate that keeps a golden run out of
+//! whichever home directory it executes in), and a machine that has no
+//! `autoexec.cfg` — which is almost every machine — says nothing at all. What it
+//! does *not* swallow is a file that is there and would not run: that is
+//! printed, and the boot carries on.
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -60,6 +79,14 @@ use crate::settings::ConsoleHost;
 /// The extension a config file carries: Source's own, and the one this command
 /// appends to a name that does not already have it.
 pub const CONFIG_SUFFIX: &str = ".cfg";
+
+/// The stem of the file the engine runs at start-up without being asked:
+/// Source's own name for it.
+///
+/// The file is this plus [`CONFIG_SUFFIX`], in the same settings directory
+/// `config` reads from — so it is a config file like any other and
+/// `config autoexec` runs the same lines again by hand. See `run_autoexec`.
+pub const AUTOEXEC: &str = "autoexec";
 
 /// How many config files may be running at once.
 ///
@@ -116,7 +143,11 @@ crcbl_console::concommand! {
                 "this run reads no settings file, so there is no directory to read `{file}` from"
             )));
         };
-        let text = read_file(&app_name, &file)?;
+        // Every reason a read did not produce text is one fault to whoever
+        // typed the name: they asked for this file, so "there is no such file"
+        // is an answer to the line and not the state the boot's autoexec treats
+        // it as.
+        let text = read_file(&app_name, &file).map_err(NotRead::into_fault)?;
         run_text(cx, &file, &text)
     }
 }
@@ -144,13 +175,69 @@ fn file_named(arg: &str) -> Result<String, Fault> {
     Ok(format!("{stem}{CONFIG_SUFFIX}"))
 }
 
+/// Why a config file's text is not in hand.
+///
+/// A shape of its own rather than one [`Fault`], because the boot's
+/// [`run_autoexec`] has to tell some of these apart and a typed `config` must
+/// not: a file nobody wrote is the ordinary state of a machine and not a
+/// failure, and a platform with nowhere to read from is not a fault of the
+/// file's. Whoever typed a name asked for that file and is told whichever it
+/// was, so [`into_fault`](Self::into_fault) is the one place they collapse back
+/// into the messages `config` has always printed.
+#[derive(Debug)]
+enum NotRead {
+    /// The settings directory holds no file of that name.
+    Missing(Fault),
+    /// There is no settings directory to look in: this platform names none, or
+    /// this page installed no store.
+    Nowhere(Fault),
+    /// The file is there and its text is not: an I/O error, a browser store
+    /// that has not restored it yet, bytes that are not UTF-8.
+    Unreadable(Fault),
+}
+
+impl NotRead {
+    /// How a storage error reads for `file`.
+    ///
+    /// Separate from the read itself so the checks below can hold it to those
+    /// answers over errors they build, rather than over whichever config
+    /// directory the suite is running in — the classification is the half a
+    /// silent boot depends on, and it is the half a read cannot demonstrate.
+    fn from_storage(error: &StorageError, file: &str) -> Self {
+        match error {
+            // The one that must not become a line at start-up, and the one
+            // `config` still reports word for word.
+            StorageError::NotFound(_) => {
+                Self::Missing(Fault::new(format!("`{file}` could not be read: {error}")))
+            }
+            // A browser read of something the shim has not restored yet is a
+            // state and not a failure — `crcbl_store::web` polls it — so the
+            // line says to ask again rather than that the file is missing.
+            StorageError::Pending(_) => Self::Unreadable(Fault::new(format!(
+                "`{file}` is not resident in this page's store yet — ask again in a moment"
+            ))),
+            error => Self::Unreadable(Fault::new(format!("`{file}` could not be read: {error}"))),
+        }
+    }
+
+    /// The line a caller that asked for this file by name prints.
+    fn into_fault(self) -> Fault {
+        match self {
+            Self::Missing(fault) | Self::Nowhere(fault) | Self::Unreadable(fault) => fault,
+        }
+    }
+}
+
 /// The text of `file`, out of the directory this run's settings live in.
 ///
 /// [`SettingsStack::with_platform_storage`] is the same seam `save` writes
 /// through, which is what makes "the settings directory" one answer rather than
 /// two: natively the platform config directory, in a browser the store the page
 /// installed.
-fn read_file(app_name: &str, file: &str) -> Result<String, Fault> {
+///
+/// **The one read**, for `config` and for the autoexec alike: a second copy of
+/// it would be a second answer to where the settings directory is.
+fn read_file(app_name: &str, file: &str) -> Result<String, NotRead> {
     let Some(read) =
         SettingsStack::with_platform_storage(app_name, |storage| storage.read(Path::new(file)))
     else {
@@ -166,18 +253,11 @@ fn read_file(app_name: &str, file: &str) -> Result<String, Fault> {
         #[cfg(target_arch = "wasm32")]
         let nowhere =
             format!("this page has installed no store, so there is nowhere to read `{file}` from");
-        return Err(Fault::new(nowhere));
+        return Err(NotRead::Nowhere(Fault::new(nowhere)));
     };
-    let bytes = read.map_err(|error| match error {
-        // A browser read of something the shim has not restored yet is a state
-        // and not a failure — `crcbl_store::web` polls it — so the line says to
-        // ask again rather than that the file is missing.
-        StorageError::Pending(_) => Fault::new(format!(
-            "`{file}` is not resident in this page's store yet — ask again in a moment"
-        )),
-        error => Fault::new(format!("`{file}` could not be read: {error}")),
-    })?;
-    String::from_utf8(bytes).map_err(|_| Fault::new(format!("`{file}` is not UTF-8 text")))
+    let bytes = read.map_err(|error| NotRead::from_storage(&error, file))?;
+    String::from_utf8(bytes)
+        .map_err(|_| NotRead::Unreadable(Fault::new(format!("`{file}` is not UTF-8 text"))))
 }
 
 /// Run every line of `text` as the config file `name`.
@@ -239,6 +319,106 @@ pub(crate) fn run_text(cx: &mut Context<'_>, name: &str, text: &str) -> Result<(
         cx.print(format!("{name}: {ran} {lines}, {failed} of them failed"));
     }
     Ok(())
+}
+
+/// What the boot's `autoexec.cfg` did.
+///
+/// Answered rather than only printed, because most of these are **silence**: a
+/// run with no settings file, a platform with nowhere to read from and a machine
+/// with no `autoexec.cfg` each print nothing by design, so a check that could see
+/// only the printed lines could not tell them from one another — nor any of them
+/// from a boot that never ran the autoexec at all.
+/// [`Loop::new`](crate::engine::Loop::new) carries on whichever it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Autoexec {
+    /// This run reads no settings file, so no storage was asked for anything.
+    ///
+    /// A golden run or a headless harness — see
+    /// [`SettingsSource::None`](crate::engine::SettingsSource) — and the gate is
+    /// deliberately this and not "the platform has a config directory":
+    /// natively it *has* one, and reading it is exactly what such a run must not
+    /// do.
+    NoSettingsFile,
+    /// There is nowhere to read from: this platform names no config directory,
+    /// or this page has installed no store.
+    Nowhere,
+    /// There is no `autoexec.cfg`, which is what almost every machine answers.
+    Missing,
+    /// It was read, and its lines were run — a line of it may still have
+    /// failed, which `run_text` reports as it goes.
+    Ran,
+    /// It is there and did not run: unreadable, not text, or refused by the
+    /// nesting guard. The reason was printed.
+    Unreadable,
+}
+
+/// Run this game's `autoexec.cfg`, if this run has one and it is there.
+///
+/// [`Loop::new`](crate::engine::Loop::new) calls this once through
+/// [`Console::run_autoexec`](crate::debug_console::Console::run_autoexec),
+/// before the first frame — see the module docs for why the file exists at all.
+///
+/// **The `app_name` gate is the first thing it does, and it is the important
+/// one.** A run whose [`ConsoleHost`] was never given a name reads nothing:
+/// `SettingsStack::with_platform_storage` would answer `Some` on a native
+/// headless run and hand back `~/.config/<game>/autoexec.cfg`, so "this platform
+/// has a config directory" is not a gate at all. It is the same refusal `config`
+/// and `save` make, worded as silence because nobody asked for this file.
+pub(crate) fn run_autoexec(cx: &mut Context<'_>) -> Autoexec {
+    let app_name = cx
+        .host()
+        .downcast_ref::<ConsoleHost>()
+        .expect("the engine's console is only ever run over a `ConsoleHost`")
+        .engine()
+        .app_name()
+        .map(str::to_owned);
+    let Some(app_name) = app_name else {
+        return Autoexec::NoSettingsFile;
+    };
+    let file = format!("{AUTOEXEC}{CONFIG_SUFFIX}");
+    let read = read_file(&app_name, &file);
+    run_read(cx, &file, read)
+}
+
+/// What the boot does with whatever the read of `file` answered.
+///
+/// Split from [`run_autoexec`] for [`run_text`]'s own reason: the read reaches
+/// the platform's settings directory, and the checks below drive this over an
+/// answer they hold rather than over whichever home directory the suite is
+/// running in.
+fn run_read(cx: &mut Context<'_>, file: &str, read: Result<String, NotRead>) -> Autoexec {
+    match read {
+        Ok(text) => {
+            // The only way this faults at boot is the nesting guard, which
+            // cannot be entered yet — but a start-up that quietly ran nothing is
+            // the failure this module is shaped against, so it is printed rather
+            // than dropped.
+            if let Err(fault) = run_text(cx, file, &text) {
+                cx.print(fault.to_string());
+                return Autoexec::Unreadable;
+            }
+            Autoexec::Ran
+        }
+        // **Absence is not an event.** Almost nobody writes an `autoexec.cfg`,
+        // and a start-up line saying they still have not would be in every log
+        // this engine ever produces.
+        Err(NotRead::Missing(_)) => Autoexec::Missing,
+        // Nothing is wrong with the run: a page with no store installed reads no
+        // settings file either. `info` rather than the console log, which is
+        // where a player reads the answer to what they typed.
+        Err(NotRead::Nowhere(reason)) => {
+            crcbl_core::log::info!("no {file} was run: {reason}");
+            Autoexec::Nowhere
+        }
+        // The file is there and its text is not, which nothing else will say.
+        // `StorageError::Pending` in particular means the page booted out of
+        // order — the shim restores the store before `boot()` — and somebody has
+        // to see that.
+        Err(NotRead::Unreadable(fault)) => {
+            cx.print(fault.to_string());
+            Autoexec::Unreadable
+        }
+    }
 }
 
 /// Claim `name` as running on this thread, or refuse it.
@@ -693,6 +873,142 @@ mod tests {
         assert_eq!(
             fault.message(),
             "this run reads no settings file, so there is no directory to read `video.cfg` from"
+        );
+    }
+
+    /// Run [`run_read`] over `read`, answering what it did, what the host it
+    /// ran against ended up holding, and what it printed.
+    ///
+    /// **One harness for the silent case and the loud one, deliberately.** "A
+    /// missing autoexec prints nothing" asserted on its own would pass just as
+    /// well over a `run_read` that did nothing whatever, so the check that a
+    /// file which *is* there runs goes through this same harness: between the
+    /// two of them the silence is a decision rather than an absence of code.
+    fn autoexec(read: Result<String, NotRead>) -> (Autoexec, Host, Vec<String>) {
+        let registry = registry();
+        let mut host = Host::default();
+        let mut cx = Context::new(&registry, &mut host);
+        let did = run_read(&mut cx, &format!("{AUTOEXEC}{CONFIG_SUFFIX}"), read);
+        let printed = cx.into_lines();
+        (did, host, printed)
+    }
+
+    /// **A machine with no `autoexec.cfg` boots in silence**, which is almost
+    /// every machine: a file nobody wrote is the ordinary state and not an
+    /// event, and a start-up line saying so would be in every log this engine
+    /// ever produced.
+    #[test]
+    fn a_missing_autoexec_prints_nothing_and_sets_nothing() {
+        let (did, host, printed) = autoexec(Err(NotRead::from_storage(
+            &StorageError::NotFound(Path::new("autoexec.cfg").to_path_buf()),
+            "autoexec.cfg",
+        )));
+        assert_eq!(did, Autoexec::Missing);
+        assert!(printed.is_empty(), "{printed:?}");
+        assert_eq!(host, Host::default(), "nothing ran, so nothing was set");
+    }
+
+    /// **An `autoexec.cfg` that is there runs, and what it sets lands on the
+    /// host** — the whole point of the file, and the half of the harness that
+    /// says the check above is asserting on a decision.
+    #[test]
+    fn an_autoexec_that_is_there_runs_its_lines_and_its_effects_land() {
+        let (did, host, printed) = autoexec(Ok("gain 7\necho ready".to_owned()));
+        assert_eq!(did, Autoexec::Ran);
+        assert_eq!(
+            host,
+            Host { gain: 7 },
+            "the line the file ran wrote through to the host the boot handed in",
+        );
+        assert_eq!(printed, ["gain = 7", "ready", "autoexec.cfg: 2 lines"]);
+    }
+
+    /// **A file that is there and cannot be read is reported**, because nothing
+    /// else will say so: a start-up that was configured and silently was not is
+    /// the failure worth printing for, and `StorageError::Pending` in a browser
+    /// means the page booted out of order.
+    #[test]
+    fn an_autoexec_that_could_not_be_read_is_reported() {
+        let (did, _host, printed) = autoexec(Err(NotRead::from_storage(
+            &StorageError::Pending(Path::new("autoexec.cfg").to_path_buf()),
+            "autoexec.cfg",
+        )));
+        assert_eq!(did, Autoexec::Unreadable);
+        assert!(
+            printed
+                .iter()
+                .any(|line| line.contains("not resident in this page's store yet")),
+            "{printed:?}"
+        );
+    }
+
+    /// **A run that reads no settings file runs no autoexec**, and asks no
+    /// storage for anything on the way to deciding that.
+    ///
+    /// The line that keeps a golden run or a headless harness out of whichever
+    /// home directory it executes in. Natively
+    /// `SettingsStack::with_platform_storage("quarry", ..)` answers `Some` and
+    /// would hand back `~/.config/quarry/autoexec.cfg` on a run that was never
+    /// meant to read a file at all, so "this platform has a config directory" is
+    /// not the gate — an unset `EngineLink::app_name` is.
+    ///
+    /// [`Autoexec`] is answered rather than only printed for this check: every
+    /// other silent outcome is silent too, so the empty output alone would not
+    /// say which of them held, and a gate replaced by a default name would still
+    /// print nothing on a machine with no `autoexec.cfg` to find.
+    #[test]
+    fn a_run_with_no_settings_file_runs_no_autoexec() {
+        static COMMANDS: &[&crcbl_console::ConCommand] = &[&super::config];
+        let registry = Registry::gather(&[Table::new(&[], &[], COMMANDS)])
+            .expect("no two entries claim one name");
+        let mut host = ConsoleHost::new(SettingsStack::new());
+        let mut cx = Context::new(&registry, &mut host);
+        let did = run_autoexec(&mut cx);
+        assert_eq!(
+            did,
+            Autoexec::NoSettingsFile,
+            "a host with no name to save under must not reach the platform's config directory",
+        );
+        let printed = cx.into_lines();
+        assert!(printed.is_empty(), "{printed:?}");
+    }
+
+    /// **Only "there is no such file" is the silent one.** The answers
+    /// [`NotRead`] splits a read into are what a silent boot rests on, and this
+    /// is the half a check driving text cannot demonstrate.
+    #[test]
+    fn a_read_that_found_nothing_is_the_only_one_the_boot_may_swallow() {
+        let path = Path::new("autoexec.cfg").to_path_buf();
+        assert!(matches!(
+            NotRead::from_storage(&StorageError::NotFound(path.clone()), "autoexec.cfg"),
+            NotRead::Missing(_)
+        ));
+        for error in [
+            StorageError::Pending(path.clone()),
+            StorageError::PermissionDenied(path.clone()),
+            StorageError::WrongType(path),
+        ] {
+            let read = NotRead::from_storage(&error, "autoexec.cfg");
+            assert!(
+                matches!(read, NotRead::Unreadable(_)),
+                "{error} is not a file that is simply not there: {read:?}"
+            );
+        }
+    }
+
+    /// **And what `config` prints for a file that is not there is unchanged**,
+    /// which is the thing splitting the read up could quietly have altered:
+    /// `config nosuchfile` answers the person who typed it.
+    #[test]
+    fn a_typed_config_still_names_the_file_it_could_not_read() {
+        let fault = NotRead::from_storage(
+            &StorageError::NotFound(Path::new("video.cfg").to_path_buf()),
+            "video.cfg",
+        )
+        .into_fault();
+        assert_eq!(
+            fault.message(),
+            "`video.cfg` could not be read: path not found: video.cfg"
         );
     }
 }

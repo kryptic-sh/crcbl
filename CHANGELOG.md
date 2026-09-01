@@ -188,6 +188,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **An `autoexec.cfg` runs at start-up, so a console variable can be set before
+  the first frame.** `Loop::new` runs the file out of the same settings
+  directory `config` reads from — the platform config directory natively, the
+  page's OPFS store in a browser — through the same `Registry::execute`, the
+  same host and the same per-line reporting a typed `config autoexec` goes
+  through, which is what makes a run that is over before anybody could type
+  configurable at all: a frame-budget capture, a golden run, a demo started from
+  a launcher. It is **silent** where there is nothing to run: a run that reads
+  no settings file (`SettingsSource::None` — a headless or golden run) reads no
+  autoexec either and asks no storage for anything, and a machine with no
+  `autoexec.cfg`, which is almost every machine, says nothing at all. A file
+  that is there and will not run — not resident yet in a browser store, not
+  UTF-8, an I/O error — is reported in the console log and the boot carries on.
+
 - **`apps/options` has a `QUALITY` row, so a quality tier is reachable from a
   settings screen and not only from the console and `crcbl settings preset`.**
   The top row of the panel cycles `QualityPreset::ALL` and writes the chosen

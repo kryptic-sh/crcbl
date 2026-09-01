@@ -5838,7 +5838,16 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             .map(|(_, table)| table)
             .chain(std::iter::once(G::console_table()))
             .collect();
-        let console = crate::debug_console::Console::new(&tables, host);
+        let mut console = crate::debug_console::Console::new(&tables, host);
+        // **The player's `autoexec.cfg`, before the first frame.** Here because
+        // this is where a console line can still be ahead of everything that
+        // reads a variable — a run with a frame budget is over before anybody
+        // could type one — and because the read is safe exactly here: the
+        // settings file was opened just above through the same storage, so this
+        // depends on no residency that call did not already depend on. A
+        // run with nothing to read runs nothing and says nothing; see
+        // `console_config::run_autoexec`.
+        console.run_autoexec();
         Self {
             shell: booted.shell,
             window: booted.window,
