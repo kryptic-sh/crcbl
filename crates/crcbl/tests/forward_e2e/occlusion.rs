@@ -196,12 +196,14 @@ const HALO_LIFT: f32 = RADIUS * 2.5;
 /// reconstruction has to resolve by depth.
 const HALO_COLUMNS: core::ops::Range<u32> = 965..1005;
 
-/// Wall columns read to the left of [`HALO_COLUMNS`], for the contrast the halo
-/// would be made of.
+/// Wall samples read on the near side of the bar, for the contrast the halo
+/// would be made of: columns left of [`HALO_COLUMNS`], rows above
+/// [`HALO_ROWS`].
 ///
 /// Four, which is clear of the bar's own reconstruction — the taps reach one
 /// sample forward and no further — and still inside the darkest part of the
-/// falloff.
+/// falloff. The same four on either axis, because it is the same reach measured
+/// in the same pixels.
 const HALO_MARGIN: u32 = 4;
 
 /// The row the reconstruction is read along, in [`EXTENT`]'s pixels.
@@ -209,7 +211,50 @@ const HALO_MARGIN: u32 = 4;
 /// The middle of the frame, as [`LINE_Y`] is in the gather's. The bar spans
 /// every row, so the halo this test is about is a property of the column alone
 /// and one row carries all of it.
+///
+/// **On the gather's own grid, which is what makes it one axis.** An even row
+/// leaves `ssao_upsample.slang`'s `offset.y` — and so its `span.y` — at zero,
+/// so every tap the halo test takes is displaced in `x` alone. [`HALO_LINE_X`]
+/// is the same statement with the axes exchanged, and the two of them are why
+/// the pair of halo tests is one measurement run once per axis rather than two
+/// frames that happen to differ.
 const HALO_LINE_Y: u32 = EXTENT.1 / 2;
+
+/// The screen rows [`the_reconstruction_does_not_halo_a_silhouette_down_a_column`]'s
+/// foreground bar covers, as `start..end`.
+///
+/// **[`HALO_COLUMNS`] turned a quarter turn.** The bar spans every column where
+/// that one spans every row, and it sits the same distance past
+/// [`PLATE_ROWS`]'s lower edge that that range sits past [`PLATE_COLUMNS`]'s
+/// right one — the same distance, in the same pixels, because the projected
+/// radius is the same count of them on both axes and so is the falloff it sets.
+/// It is as tall as that range is wide for the same reason.
+///
+/// **The start is odd on purpose**, which is [`HALO_COLUMNS`]'s clause on the
+/// other axis: a bar starting on an even row has its first pixel land on a
+/// sample of its own and reads one tap, so no tap is rejected and the
+/// measurement is a check wired to nothing. The test asserts that parity rather
+/// than trusting this number to keep it.
+///
+/// **The far edge is not a second measurement.** The last row is even, so it
+/// sits on the gather's grid and reads its own sample alone — the same shape as
+/// [`HALO_COLUMNS`], whose last column does too. One edge is measured on each
+/// axis, and see the test's header for what that leaves out.
+const HALO_ROWS: core::ops::Range<u32> = 545..585;
+
+/// The column the reconstruction is read down, in [`EXTENT`]'s pixels.
+///
+/// The middle of the frame, as [`HALO_LINE_Y`] is on the other axis. Where that
+/// one is a choice about which of many equivalent rows to read, this one is
+/// barely a choice at all: [`PLATE_ROWS`] and [`HALO_ROWS`] both span every
+/// column, so every column of the frame carries the same falloff and the same
+/// silhouette.
+///
+/// **On the gather's own grid** — see [`HALO_LINE_Y`], which is the same clause
+/// about the same parity on the other axis. `offset.x` is zero down this
+/// column, so every tap this measurement takes is displaced in `y` alone and
+/// what it reports is `ssao_upsample.slang`'s `y` axis by itself.
+const HALO_LINE_X: u32 = EXTENT.0 / 2;
 
 /// The screen columns the plate covers, as `start..end`.
 ///
@@ -222,6 +267,25 @@ const HALO_LINE_Y: u32 = EXTENT.1 / 2;
 /// past this edge it divides, with `full_res_pixel`'s rounding — see
 /// [`OCCLUSION_EXTENT`].
 const PLATE_COLUMNS: core::ops::Range<u32> = 640..960;
+
+/// The screen rows the occluder of the column-wise halo scene covers, as
+/// `start..end`.
+///
+/// **[`PLATE_COLUMNS`] turned a quarter turn**, and the plate of one scene
+/// only: [`the_reconstruction_does_not_halo_a_silhouette_down_a_column`] needs
+/// an occluder whose edge runs the other way, and the upright plate the rest of
+/// this file reads past cannot be it. Depth-image rows, for that constant's
+/// reason.
+///
+/// Its far edge is the frame's centre row, as that range's is the frame's
+/// centre column, and it covers as many rows as that one covers columns — which
+/// is the same argument rather than a resemblance: the span is chosen against
+/// the projected radius so the plate's own two edges never interact, and the
+/// projected radius is the same count of pixels on both axes because the pixels
+/// are square. Written as that span rather than as a second number for the same
+/// length.
+const PLATE_ROWS: core::ops::Range<u32> =
+    EXTENT.1 / 2 - (PLATE_COLUMNS.end - PLATE_COLUMNS.start)..EXTENT.1 / 2;
 
 /// The row the falloff is read along, in [`OCCLUSION_EXTENT`]'s pixels — the
 /// middle of the frame, far from every border.
@@ -431,34 +495,60 @@ const MESSAGE_SAMPLES: usize = 32;
 /// levels.
 ///
 /// **Swept before it was fixed**, at [`EXTENT`] on 2026-09-02, on the two
-/// drivers this machine has. The anti-baseline is `ssao_upsample.slang` with its
-/// depth ramp replaced by a constant one — which is a plain bilinear upsample,
-/// and is exactly the substitution `crcbl_shaders::ssao`'s
-/// `the_reconstruction_weighs_a_tap_by_its_depth` records nothing else in this
-/// workspace noticing:
+/// drivers this machine has, and **once per axis**: [`assert_no_halo`] is read
+/// by both halo tests, so a bound they share is one that had to be measured in
+/// both scenes. Two anti-baselines, because the edit that haloes on one axis
+/// and leaves the other exactly right is not the edit that haloes on both:
+///
+/// * `ssao_upsample.slang` with its depth ramp replaced by a constant one — a
+///   plain bilinear upsample, and exactly the substitution
+///   `crcbl_shaders::ssao`'s `the_reconstruction_weighs_a_tap_by_its_depth`
+///   records nothing else in this workspace noticing;
+/// * its `span` taking one lane's `offset` for both — the transposed index
+///   [`the_reconstruction_does_not_halo_a_silhouette_down_a_column`] exists for,
+///   which drops the second tap on the *other* axis and leaves this one
+///   untouched. Run both ways round, and the two tests answer it as
+///   complements: `offset.x` for both lanes reddens the column test alone, and
+///   `offset.y` for both reddens the row test alone.
 ///
 /// ```text
-///                                          radv   lavapipe
-/// the depth ramp replaced by a constant      45         44
-/// ssao_upsample.slang as it ships             0          0
+///                                       radv   lavapipe
+/// across a row, the ramp made constant    45         44
+/// across a row, span taking offset.y      89         89
+/// across a row, as it ships                0          0
+/// down a column, span taking offset.x     89         89
+/// down a column, as it ships               0          0
 /// ```
 ///
 /// **Zero, exactly, and that is the shape of the thing.** A tap across this
 /// silhouette is more than [`HALO_LIFT`]'s two and a half radii away, so its
 /// share is not small but nil, and the reconstruction returns the bar's own
 /// sample unchanged. The bound is four rather than nought so a channel rounding
-/// its last level does not go red on arithmetic; a bilinear reconstruction still
-/// has to lose nine tenths of its rim to pass.
+/// its last level does not go red on arithmetic; the shallowest of the three
+/// anti-baselines still has to lose nine tenths of its rim to pass.
+///
+/// **One sample deep, and the same on both axes.** Each transposition put its
+/// whole dip in the bar's first sample and left every other sample of the line
+/// at unoccluded, on radv and on lavapipe alike — the taps reach `nearest` and
+/// `nearest + 1` and no further, so only the sample standing between the two
+/// grids can see the other surface. Which is why each of the pair measures one
+/// column and one row respectively, and why a larger `RESOLUTION_DIVISOR` would
+/// widen both together.
 const MAX_HALO: u8 = 4;
 
 /// The least the bar must stand out from the wall behind it, in 8-bit levels.
 ///
 /// Anti-vacuity, on [`MIN_SWING`]'s terms: a halo is one surface's occlusion
 /// drawn onto another, so a wall as bright as the bar in front of it has nothing
-/// to draw and would pass [`MAX_HALO`] however the taps were weighted. The
-/// 2026-09-02 sweep measured a contrast of 89 levels on radv and on lavapipe
-/// alike — an unoccluded bar at 255 against wall at 166 — and this sits well
-/// below it.
+/// to draw and would pass [`MAX_HALO`] however the taps were weighted.
+///
+/// **Swept in both halo scenes**, on 2026-09-02, on radv and on lavapipe alike
+/// — the two drivers agreed to the level in each. Across a row the contrast is
+/// 89, an unoccluded bar at 255 against wall at 166; down a column it is 97,
+/// the same bar against wall at 158. The wall is the darker one there because a
+/// silhouette running the other way is not the same shape to the horizon
+/// search — `ssao.slang` sweeps a fixed table of slice directions, and it is
+/// not isotropic. This sits well below the smaller of the two.
 const MIN_HALO_CONTRAST: u8 = 60;
 
 /// The one depth-image column the reconstruction's sliver stands in.
@@ -1813,6 +1903,77 @@ fn the_tangential_occlusion_line_does_not_step() {
     headless.finish();
 }
 
+/// The halo measurement, and the two assertions it is: what the bar reads
+/// against what the wall behind it reads.
+///
+/// **One function because it is one measurement.** The pair of tests below
+/// differ in the scene they build and the line they read it along — a bar
+/// spanning every row, read across a row, and the same bar turned a quarter
+/// turn, read down a column — and in nothing after that. A halo is the
+/// background's occlusion arriving on the foreground, which is the bar's
+/// brightest sample less its darkest whichever way the silhouette runs, and
+/// [`MAX_HALO`] and [`MIN_HALO_CONTRAST`] are arguments about
+/// `ssao_upsample.slang` rather than about an axis: a change to either has to
+/// move both tests, so both read them from here.
+///
+/// `across` names what `span` counts — `"columns"` or `"rows"` — so the line
+/// this prints and the message it fails with say which of the pair spoke.
+///
+/// **What it cannot see is which axis it was handed.** It is given two lines of
+/// samples and knows nothing about where they came from, so a scene that read
+/// the wrong line, or the same line twice, is not something this can catch —
+/// that is the callers' territory, and each of them asserts its own placement.
+fn assert_no_halo(
+    run: &Run,
+    across: &str,
+    span: core::ops::Range<u32>,
+    front: &[u8],
+    behind: &[u8],
+) {
+    let (width, height) = EXTENT;
+    let lit = *front.iter().max().expect("a non-empty bar");
+    let dip = lit - *front.iter().min().expect("a non-empty bar");
+    let background = *behind.iter().min().expect("a non-empty wall margin");
+    let contrast = lit.saturating_sub(background);
+
+    match run.pass("ssao-upsample") {
+        Some(ns) => eprintln!(
+            "{suite}: the ssao-upsample pass took {ns} ns at {width}×{height}; the foreground bar \
+             across {across} {span:?} reads {lit} at its brightest and dips {dip} against a wall \
+             at {background}",
+            suite = crate::SUITE,
+        ),
+        None => eprintln!(
+            "{suite}: this device has no timestamp query, so the ssao-upsample pass is untimed \
+             here; the foreground bar across {across} {span:?} reads {lit} at its brightest and \
+             dips {dip} against a wall at {background}",
+            suite = crate::SUITE,
+        ),
+    }
+
+    // Anti-vacuity, on [`MIN_SWING`]'s terms: a halo is the difference between
+    // two surfaces, so a scene whose wall is as bright as its bar has nothing to
+    // draw one out of and would pass the assertion below however the taps were
+    // weighted.
+    assert!(
+        contrast >= MIN_HALO_CONTRAST,
+        "the bar reads {lit} and the wall behind it {background}, a contrast of {contrast} — under \
+         the {MIN_HALO_CONTRAST} levels this measurement needs to have anything to say. The wall \
+         beside the bar is not occluded enough to halo with: move the bar further inside the \
+         plate's falloff, or the plate closer to the wall."
+    );
+    assert!(
+        dip <= MAX_HALO,
+        "the reconstruction haloes: the foreground bar dips {dip} levels below its own {lit} \
+         inside {across} {span:?}, where {MAX_HALO} is the bound, against a wall reading \
+         {background}. The bar is a flat surface with nothing within {RADIUS} of it, so every \
+         pixel of it is unoccluded and the dip is the wall's occlusion arriving through \
+         `ssao_upsample.slang` — its depth weight has stopped rejecting a tap across the \
+         silhouette. The bar's first {across} are {edge:?}.",
+        edge = &front[..MESSAGE_SAMPLES.min(front.len())],
+    );
+}
+
 /// **The reconstruction must not draw the wall's occlusion around what stands
 /// in front of it.**
 ///
@@ -1894,46 +2055,114 @@ fn the_reconstruction_does_not_halo_a_silhouette() {
     let front: Vec<u8> = HALO_COLUMNS
         .map(|column| run.at(column, HALO_LINE_Y))
         .collect();
-    let lit = *front.iter().max().expect("a non-empty bar");
-    let dip = lit - *front.iter().min().expect("a non-empty bar");
-    let background = *behind.iter().min().expect("a non-empty wall margin");
-    let contrast = lit.saturating_sub(background);
+    assert_no_halo(&run, "columns", HALO_COLUMNS, &front, &behind);
 
-    match run.pass("ssao-upsample") {
-        Some(ns) => eprintln!(
-            "{suite}: the ssao-upsample pass took {ns} ns at {width}×{height}; the foreground bar \
-             reads {lit} at its brightest and dips {dip} against a wall at {background}",
-            suite = crate::SUITE,
-        ),
-        None => eprintln!(
-            "{suite}: this device has no timestamp query, so the ssao-upsample pass is untimed \
-             here; the foreground bar reads {lit} at its brightest and dips {dip} against a wall \
-             at {background}",
-            suite = crate::SUITE,
-        ),
+    headless.finish();
+}
+
+/// **The same halo, down a column: a silhouette whose edge runs the other way
+/// must not be blended across either.**
+///
+/// [`the_reconstruction_does_not_halo_a_silhouette`]'s scene turned a quarter
+/// turn. The occluder is [`PLATE_ROWS`] and the foreground is [`HALO_ROWS`],
+/// both spanning every column where that test's two span every row, and the
+/// reconstruction is read down [`HALO_LINE_X`] instead of along
+/// [`HALO_LINE_Y`]. The three depths, the chain, and both assertions are that
+/// test's — see [`assert_no_halo`], which is the measurement both of them are.
+///
+/// # Why the other axis is a measurement and not a symmetry
+///
+/// `ssao_upsample.slang` runs its two axes independently: `span` is
+/// `min(offset, int2(1, 1))` and the shares are `blend.x` and `blend.y`, one
+/// factor per axis. So a transposed index, a `.x` where a `.y` was meant, or an
+/// extent taken for the wrong axis is a defect that lands on one axis and
+/// leaves the other exactly right. The sibling reads a row across a silhouette
+/// that runs down the frame, so every tap it takes is displaced in `x`: it is
+/// green on a reconstruction whose `y` axis blends straight across a
+/// silhouette. This is the run that is not.
+///
+/// # One axis at a time
+///
+/// Both read lines sit on the gather's own grid — see [`HALO_LINE_X`] and
+/// [`HALO_LINE_Y`] — so each test holds the axis it is not measuring at a
+/// single tap and the two together are one measurement run once per axis.
+///
+/// # What it does not see
+///
+/// **One edge, one row of it.** [`HALO_ROWS`]'s far edge lands on the gather's
+/// grid and reads its own sample alone, so what is measured is the leading
+/// edge, exactly as the sibling measures the leading column of its bar. And the
+/// halo is one row deep at the divisor that ships: the taps reach `nearest` and
+/// `nearest + 1` and no further, so only the bar's first row can see a sample
+/// from the wall — a larger `RESOLUTION_DIVISOR` would widen it, and the
+/// 2026-09-02 sweep in [`MAX_HALO`] is what says that is where the anti-baseline
+/// puts its dip on this axis too.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_reconstruction_does_not_halo_a_silhouette_down_a_column() {
+    let headless = Headless::open_at_format(EXTENT, None, Features::TIMESTAMP_QUERY);
+    let (width, height) = EXTENT;
+    let size = (width as f32, height as f32);
+    let projection = Projection::Perspective {
+        fov_y: FOV_Y,
+        near: NEAR,
     }
+    .matrix(size.0 / size.1);
 
-    // Anti-vacuity, on [`MIN_SWING`]'s terms: a halo is the difference between
-    // two surfaces, so a scene whose wall is as bright as its bar has nothing to
-    // draw one out of and would pass the assertion below however the taps were
-    // weighted.
-    assert!(
-        contrast >= MIN_HALO_CONTRAST,
-        "the bar reads {lit} and the wall behind it {background}, a contrast of {contrast} — under \
-         the {MIN_HALO_CONTRAST} levels this measurement needs to have anything to say. The wall \
-         beside the bar is not occluded enough to halo with: move the bar further inside the \
-         plate's falloff, or the plate closer to the wall."
+    // The placement the measurement rests on, asserted rather than assumed —
+    // the sliver test's `assert_ne!` on the same arithmetic, for the same
+    // reason. A bar whose first row sat on the gather's grid would read one tap
+    // and read it from its own surface, so nothing would be rejected and this
+    // test would be green on a reconstruction with no depth weight at all; a
+    // read column off that grid would put an `x` tap in the answer and stop the
+    // pair being one axis each.
+    let divisor = crcbl::shaders::ssao::RESOLUTION_DIVISOR;
+    assert_ne!(
+        HALO_ROWS.start % divisor,
+        0,
+        "the bar's first row {row} sits on the gather's grid, so `ssao_upsample.slang` reads one \
+         tap and reads it from the bar's own sample. No tap is rejected there and the halo this \
+         measures cannot arise however the taps are weighted. Move {row} off a multiple of \
+         {divisor}.",
+        row = HALO_ROWS.start,
     );
-    assert!(
-        dip <= MAX_HALO,
-        "the reconstruction haloes: the foreground bar dips {dip} levels below its own {lit} \
-         inside {HALO_COLUMNS:?}, where {MAX_HALO} is the bound, against a wall reading \
-         {background}. The bar is a flat surface with nothing within {RADIUS} of it, so every \
-         pixel of it is unoccluded and the dip is the wall's occlusion arriving through \
-         `ssao_upsample.slang` — its depth weight has stopped rejecting a tap across the \
-         silhouette. The bar's first columns are {edge:?}.",
-        edge = &front[..MESSAGE_SAMPLES.min(front.len())],
+    assert_eq!(
+        HALO_LINE_X % divisor,
+        0,
+        "the column {HALO_LINE_X} the bar is read down is off the gather's grid, so every tap \
+         below is displaced in `x` as well as in `y` and a green run says nothing about the `y` \
+         axis on its own. Move it onto a multiple of {divisor}."
     );
+
+    let wall = depth_of(projection, -WALL_Z);
+    let plate = lifted_depth(projection, PLATE_LIFT);
+    let bar = lifted_depth(projection, HALO_LIFT);
+    let texels = depth_image(|_, y| {
+        if PLATE_ROWS.contains(&y) {
+            plate
+        } else if HALO_ROWS.contains(&y) {
+            bar
+        } else {
+            wall
+        }
+    });
+    let run = run_passes(
+        &headless,
+        projection,
+        &texels,
+        crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
+        1,
+        crcbl::shaders::ssao::INTENSITY_DEFAULT,
+        Chain::Reconstructed,
+    );
+
+    // The wall immediately above the bar, and the bar itself — both at
+    // [`EXTENT`], which is what the reconstruction wrote.
+    let behind: Vec<u8> = (HALO_ROWS.start - HALO_MARGIN..HALO_ROWS.start)
+        .map(|row| run.at(HALO_LINE_X, row))
+        .collect();
+    let front: Vec<u8> = HALO_ROWS.map(|row| run.at(HALO_LINE_X, row)).collect();
+    assert_no_halo(&run, "rows", HALO_ROWS, &front, &behind);
 
     headless.finish();
 }
