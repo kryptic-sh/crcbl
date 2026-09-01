@@ -641,9 +641,15 @@ nothing draws it by default and no golden has moved. What that leaves:
   `apps/options`' menu and shifts `toFader` in `web/tools/browser-e2e.mjs`),
   teach the presets to clear a keyless bit, or accept that the tier split waits.
 
-- **The browser tier is unpriced.** radv and lavapipe are measured; the third
-  tier is not, and pricing it needs the bit switched on for a demo the browser
-  gate drives.
+- **The browser tier is unpriced, and is blocked rather than merely undone.**
+  radv and lavapipe are measured; the third tier is not. Pricing it needs the
+  bit switched on for a demo the browser gate drives, and **nothing can switch
+  it on there**: the bit deliberately has no `VIDEO_KEYS` row, so it is
+  unreachable from a settings file and from the console, and there is no
+  `autoexec.cfg` equivalent to apply one at boot either — see the ambient
+  occlusion entry, which is stuck behind the same two doors. So this unblocks
+  itself the moment either the key question or the boot-config question is
+  answered; it needs no work of its own.
 
 - **Punctual lights get no contact term.** The mask is marched towards the sun
   and applied inside the shader's directional branch alone. A spot's or a
