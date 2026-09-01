@@ -14219,9 +14219,13 @@ failures, which is the point — no single fix reaches all of them:
   commits and push once — and it is only obvious after reading a run list.
 - **`d0bc715` — `failure`.** The lantern leak check false-fired on ring
   saturation; see the entry on that check. A red demo skips `deploy`. Fixed.
-- **`f9982ae` — still running.** Every demo but `shard` finished; `shard`'s
-  render step passed 38 minutes with no step-level bound and only the job's
-  ninety to stop it.
+- **`f9982ae` — deployed, in the end.** Every other demo finished while
+  `shard`'s render step ran 44 minutes, with no step-level bound and only the
+  job's ninety to stop it; it then finished on its own and
+  `deploy to GitHub Pages` succeeded. **So the site is current again as of this
+  commit** — the fifteen-commit gap above is closed history, not a live outage.
+  What it cost was real and the decision below still stands: the run took over
+  an hour because one demo needed most of it.
 
 **What this says about the shape of the problem.** The site's freshness depends
 on _every_ demo gate passing _and_ on no push arriving first, so its failure
