@@ -1104,49 +1104,6 @@ saving would be six `DrawGen`s of device-local memory against half a light's
 draws. Declined; revisit only if a scene is measured spending most of a frame on
 one cube.
 
-## `r_ssao_blur_passes` is a process global and only its own test locks it (2026-08-31)
-
-`crcbl_render::forward`'s test module guards the occlusion blur count with
-`ssao_blur_switch()`, a `Mutex` that
-`a_second_occlusion_blur_is_a_pass_the_frame_records` takes while it sets
-`r_ssao_blur_passes` to two. Every other test that compares a whole pass list, a
-pipeline-bind list or a frame's draw count _reads_ that variable through
-`crate::ssao::blur_passes()` and takes no lock, so a run where those tests
-overlap sees a frame with an extra `ssao-blur-2` pass, an extra full-screen
-triangle and an extra pipeline bind.
-
-A second session hit it independently on 2026-08-31 while building the shadow
-cadence, at roughly **one run in eight**, and named three more readers that take
-no lock: `a_switched_off_effect_is_work_the_frame_did_not_record`,
-`the_upscale_is_the_last_pass_and_only_below_full_scale` and
-`the_ground_grid_is_opt_in_and_lands_after_the_tonemap`. It cost that session an
-hour to rule out as its own doing, which is the cost of leaving it.
-
-**Observed, not predicted.** Two went red that way under a workspace
-`cargo test` on 2026-08-31 —
-`the_wireframe_view_swaps_the_colour_passs_pipeline_and_no_other` and
-`a_frame_over_a_still_scene_does_not_draw_the_shadow_atlas_again` — and
-`the_debug_draw_layer_is_off_by_default_and_lands_before_the_tonemap` and
-`the_upscale_is_the_last_pass_and_only_below_full_scale` went red the same way
-in an earlier run of the same suite. Those that reddened now take the lock.
-
-**Still exposed**, none of which takes it:
-`each_effect_toggle_removes_exactly_the_passes_it_owns`,
-`the_debug_draw_layer_is_off_by_default_and_lands_before_the_tonemap`,
-`the_ground_grid_is_opt_in_and_lands_after_the_tonemap`,
-`the_grids_triangle_is_counted_only_while_it_is_on`,
-`the_debug_draw_layers_call_is_counted_in_the_frames_draws`,
-`the_upscale_is_the_last_pass_and_only_below_full_scale`,
-`the_graph_barriers_the_arguments_into_place_before_the_draws`,
-`the_pass_bound_is_the_widest_frame_the_renderer_records`, and
-`frame_switching_off`'s two callers.
-
-**The fix** is one `let _blurs = ssao_blur_switch();` each, or a stated rule
-that a frame-shape test takes it. It is a defect the ConVar introduced on
-2026-08-31 (`79a555a`), not the shadow-cache slice's, and touching ten tests
-belongs in its own change. Any new `ConVar` a frame's shape depends on has the
-same hazard.
-
 ## Two whole-workspace-only test flakes, neither a process global (2026-09-01)
 
 Both seen on 2026-09-01, both only under a full `cargo test`, both green when
@@ -1160,11 +1117,11 @@ their own crate is run alone:
 - `quarry::app::tests::the_heatmap_flag_and_its_row_replace_the_tint_at_the_renderer`
   — the overlay row read `HEATMAP: OFF`. Passed alone and on rerun.
 
-**They are not the `r_ssao_blur_passes` hazard**, which is the entry above and
-is a process global shared between threads of one binary. These two are separate
-test _binaries_, so a static cannot reach across them: whatever they share is
-outside the process. A settings or config file on a shared path is the obvious
-candidate — `crcbl-shared-working-tree` aside, several samples open a
+**They are not the `r_ssao_blur_passes` hazard**, which was a process global
+shared between threads of one binary and was fixed on 2026-09-01. These two are
+separate test _binaries_, so a static cannot reach across them: whatever they
+share is outside the process. A settings or config file on a shared path is the
+obvious candidate — `crcbl-shared-working-tree` aside, several samples open a
 `SettingsSource` — and neither was chased.
 
 **Not reproduced deliberately**, so the mechanism is a guess and the fix is

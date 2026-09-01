@@ -12677,6 +12677,9 @@ mod tests {
     }
 
     /// [`debug_draw_switch`]'s lock.
+    ///
+    /// **First of the two**, when a test takes this and [`ssao_blur_switch`]
+    /// both — see that function for what the opposite order cost.
     static DEBUG_DRAW_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Takes `r_ssao_blur_passes` for this thread and puts it back at its
@@ -12685,6 +12688,38 @@ mod tests {
     /// [`debug_draw_switch`]'s shape exactly, for its reason: a plain
     /// `cargo test` run shares one process between tests, and a variable this
     /// one left moved is a frame the next test did not ask for.
+    ///
+    /// **Every test whose assertion depends on the shape of a frame takes this,
+    /// not only the one that moves the count.** The variable is a process
+    /// global and `cargo test` runs this module's tests on threads that share
+    /// it, so a frame built while
+    /// [`a_second_occlusion_blur_is_a_pass_the_frame_records`] holds two blurs
+    /// carries an `ssao-blur-2` pass, a full-screen triangle and a pipeline bind
+    /// that the test building it never asked for. Taking the guard both
+    /// serialises against that test and pins the count for the frames this one
+    /// builds.
+    ///
+    /// Two shapes need it, and the second is easy to miss. A test comparing a
+    /// frame against a **literal pass list** breaks whenever the count is two.
+    /// A test comparing **two frames it built itself** — a difference in draws,
+    /// an equality between pass lists, a "one pass longer" claim — breaks only
+    /// when the count *moves between them*, which is a narrower window and why
+    /// this reproduced at roughly one run in eight rather than every run.
+    ///
+    /// Both were established by experiment on 2026-09-01 rather than by
+    /// reading: pinning the count at two reddens the first shape, and making
+    /// `crate::ssao::blur_passes` alternate reddens the second.
+    ///
+    /// **A test taking this and [`debug_draw_switch`] takes that one first.**
+    /// These are two plain mutexes with no ordering between them, so two tests
+    /// acquiring both in opposite orders deadlock — which is not a hazard this
+    /// comment is guessing at: adding the guard to the two debug-draw tests
+    /// above their existing one did exactly that on 2026-09-01, and turned a
+    /// 0.2 second suite into one that had not finished in ten minutes. It is
+    /// invisible in a single-threaded run, where the same suite passes in a
+    /// second, so `--test-threads=1` is not a check for it.
+    ///
+    /// [`a_second_occlusion_blur_is_a_pass_the_frame_records`]: fn@a_second_occlusion_blur_is_a_pass_the_frame_records
     fn ssao_blur_switch() -> SsaoBlurSwitch {
         let guard = SSAO_BLUR_SWITCH
             .lock()
@@ -12807,6 +12842,7 @@ mod tests {
     /// What happens once the ring *has* come round is the test below.
     #[test]
     fn the_forward_counters_are_the_recorded_draws_and_admit_what_they_cannot_know() {
+        let _blurs = ssao_blur_switch();
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
@@ -13592,6 +13628,7 @@ mod tests {
     /// asserted on the compiled graph, which is pure and needs no device.
     #[test]
     fn the_graph_barriers_the_arguments_into_place_before_the_draws() {
+        let _blurs = ssao_blur_switch();
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
@@ -15264,6 +15301,7 @@ mod tests {
     /// off leaves the frame that was there before it existed.
     #[test]
     fn the_upscale_is_the_last_pass_and_only_below_full_scale() {
+        let _blurs = ssao_blur_switch();
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let mut renderer =
@@ -15519,6 +15557,7 @@ mod tests {
     /// the clear that reads as "fully lit".
     #[test]
     fn each_effect_toggle_removes_exactly_the_passes_it_owns() {
+        let _blurs = ssao_blur_switch();
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let mut renderer =
@@ -15863,6 +15902,7 @@ mod tests {
     /// one.
     #[test]
     fn the_ground_grid_is_opt_in_and_lands_after_the_tonemap() {
+        let _blurs = ssao_blur_switch();
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let mut renderer =
@@ -16217,6 +16257,7 @@ mod tests {
     #[test]
     fn the_debug_draw_layer_is_off_by_default_and_lands_before_the_tonemap() {
         let switch = debug_draw_switch();
+        let _blurs = ssao_blur_switch();
 
         let (recorder, device, queue) = open();
         let device = device.as_ref();
@@ -16300,6 +16341,7 @@ mod tests {
     #[test]
     fn the_debug_draw_layers_call_is_counted_in_the_frames_draws() {
         let switch = debug_draw_switch();
+        let _blurs = ssao_blur_switch();
 
         let (recorder, device, queue) = open();
         let device = device.as_ref();
@@ -16609,6 +16651,7 @@ mod tests {
     /// exactly one triangle, silently.
     #[test]
     fn the_grids_triangle_is_counted_only_while_it_is_on() {
+        let _blurs = ssao_blur_switch();
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let mut renderer =
@@ -16725,6 +16768,7 @@ mod tests {
     /// fails here and compiles perfectly.
     #[test]
     fn a_switched_off_effect_is_work_the_frame_did_not_record() {
+        let _blurs = ssao_blur_switch();
         let (control, instances, atlas_draws) = frame_switching_off(RenderEffects::empty());
         assert!(
             atlas_draws > 0,
@@ -16825,6 +16869,7 @@ mod tests {
     /// reading 0.000 ms would be a measurement nobody made.
     #[test]
     fn every_pass_of_the_frame_gets_a_timing_row() {
+        let _blurs = ssao_blur_switch();
         let recorder = Recorder::new();
         let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
@@ -17532,6 +17577,7 @@ mod tests {
     /// is the frame [`ForwardRenderer::add_passes`] would have built.
     #[test]
     fn a_frame_with_no_skinned_range_is_the_frame_add_passes_builds() {
+        let _blurs = ssao_blur_switch();
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let mut fixture = SkinnedFixture::build(device, queue);
