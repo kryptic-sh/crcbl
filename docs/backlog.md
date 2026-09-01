@@ -1026,11 +1026,21 @@ nothing draws it by default and no golden has moved. What that leaves:
   radv and lavapipe are measured; the third tier is not. Pricing it needs the
   bit switched on for a demo the browser gate drives, and **nothing can switch
   it on there**: the bit deliberately has no `VIDEO_KEYS` row, so it is
-  unreachable from a settings file and from the console, and there is no
-  `autoexec.cfg` equivalent to apply one at boot either — see the ambient
-  occlusion entry, which is stuck behind the same two doors. So this unblocks
-  itself the moment either the key question or the boot-config question is
-  answered; it needs no work of its own.
+  unreachable from a settings file and from the console alike.
+
+  **This entry used to say it was stuck behind two doors, and one of them opened
+  on 2026-09-02 without helping.** A start-up `autoexec.cfg` now exists, so the
+  boot-config door is no longer shut — but an autoexec runs _console lines_, and
+  this bit has no console line to run. `settings::console_bindings` generates
+  one variable per catalogue key, so a bit with no key has no variable, and
+  `RenderEffects::CONTACT_SHADOWS` is named in `TIER_ONLY` precisely because it
+  has none. The ambient occlusion entry was unblocked by the autoexec because
+  its knobs are `convar!`s that exist independently of the settings catalogue;
+  this one is not, and the difference is exactly that.
+
+  So it is down to one door, and it is the key question above: give the bit a
+  `VIDEO_KEYS` row, or teach the presets to clear a keyless bit. Neither is work
+  this entry can do on its own.
 
 - **Punctual lights get no contact term.** The mask is marched towards the sun
   and applied inside the shader's directional branch alone. A spot's or a
