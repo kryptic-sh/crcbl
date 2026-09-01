@@ -2557,6 +2557,227 @@ mod tests {
         );
     }
 
+    /// The three coefficients of `multi_bounce_occlusion`'s cubic, as
+    /// `(slope, offset)` pairs on the albedo, read out of `shaders/mesh.slang`.
+    ///
+    /// `shader_table`'s argument on a different shape. The fit is six numbers
+    /// transcribed from a paper into a shader, a second hand-written copy here
+    /// would be six more chances to fat-finger a digit, and nothing downstream
+    /// tells a wrong coefficient from the tint simply working — a bad one still
+    /// returns a plausible fraction and still shades. So the two tests below
+    /// assert what the *shape* of the fit has to be and take the numbers
+    /// themselves out of the source.
+    fn multi_bounce_coefficients() -> [(f64, f64); 3] {
+        const SOURCE: &str = include_str!("../shaders/mesh.slang");
+
+        let body = SOURCE
+            .split_once("float3 multi_bounce_occlusion(")
+            .expect("mesh.slang declares multi_bounce_occlusion")
+            .1;
+        let body = &body[..body.find("\n}").expect("an unterminated function body")];
+        ["a", "b", "c"].map(|name| {
+            let prefix = format!("float3 {name} = ");
+            let line = body
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("the cubic declares `{name}`"));
+            let (slope, offset) = line
+                .strip_suffix(';')
+                .expect("a declaration ends in a semicolon")
+                .split_once("* albedo")
+                .unwrap_or_else(|| panic!("`{name}` is not affine in the albedo"));
+            (
+                slope
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("`{name}`'s slope is not a number")),
+                offset
+                    .replace(' ', "")
+                    .parse()
+                    .unwrap_or_else(|_| panic!("`{name}`'s offset is not a number")),
+            )
+        })
+    }
+
+    /// `multi_bounce_occlusion`'s cubic on one channel, *before* its `max`.
+    ///
+    /// The `max` is left off deliberately. With it applied, "never darker than
+    /// the visibility it was handed" is true of any polynomial whatsoever and
+    /// the assertion asks nothing at all — so what the tests below measure is
+    /// where the raw fit sits relative to that visibility, and the presence of
+    /// the `max` in the shader is asserted against the source instead.
+    fn multi_bounce_cubic(visibility: f64, albedo: f64) -> f64 {
+        let [a, b, c] = multi_bounce_coefficients().map(|(slope, offset)| slope * albedo + offset);
+        ((visibility * a + b) * visibility + c) * visibility
+    }
+
+    /// `multi_bounce_occlusion` whole, clamps and all — the shader's own
+    /// arithmetic, so a test can ask what a fragment actually gets.
+    ///
+    /// [`multi_bounce_cubic`] is the half without them, which is where the
+    /// checks with teeth live: both clamps are constant at full visibility, so
+    /// an assertion phrased against this function alone would hold for any
+    /// polynomial whatsoever.
+    fn multi_bounce_tint(visibility: f64, albedo: f64) -> f64 {
+        multi_bounce_cubic(visibility, albedo)
+            .max(visibility)
+            .min(1.0)
+    }
+
+    /// **A fragment nothing occludes comes back all but untinted**, which is
+    /// what the renderer's occlusion off-switch rests on.
+    ///
+    /// `crcbl_render::forward` binds a 1×1 white image when it adds no occlusion
+    /// pass, and `occlusion_at` clamps its fetch to that image's one texel — so
+    /// with the effect off *every* fragment in the frame reaches
+    /// `multi_bounce_occlusion` at full visibility, and whatever the fit does
+    /// there it does to a frame that asked for no occlusion at all.
+    ///
+    /// **The published fit does not sum to exactly one, which is why the shader
+    /// clamps at both ends.** The cubic at full visibility is its three
+    /// coefficients added; that sum falls a little short of one for a black
+    /// albedo, where the `max` returns the one, and overshoots it above an
+    /// albedo of 0.8, where the `min` does.
+    ///
+    /// So this test has two halves, and only the second can fail on its own.
+    /// The clamped value is the contract and is exactly one by construction —
+    /// asserting it alone would pass against any clamp over any polynomial. The
+    /// bound on the *raw* fit is what keeps the six coefficients under a check:
+    /// `UNTINTED` is a measurement of the published numbers rather than a
+    /// tolerance picked to accommodate them, tight enough that moving any of the
+    /// six trips it, and it is what separates a clamp correcting a residual from
+    /// a clamp hiding a mistyped digit.
+    #[test]
+    fn the_multi_bounce_tint_leaves_an_unoccluded_fragment_alone() {
+        /// How far from one the *raw* fit may land when nothing occludes the
+        /// fragment — the residual the shader's `min` and `max` correct.
+        ///
+        /// Swept rather than guessed: across the albedo range the published fit
+        /// sits between zero and `4e-4` away from one, low at the dark end and
+        /// high at the bright one. This is that measurement with room for the
+        /// last place, so a coefficient mistyped in its fourth decimal moves the
+        /// sum by `1.1e-3` and trips it.
+        const UNTINTED: f64 = 5e-4;
+
+        const SOURCE: &str = include_str!("../shaders/mesh.slang");
+        let squeezed = SOURCE.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            squeezed.contains("return min(1.0, max(visibility, tinted));"),
+            "multi_bounce_occlusion no longer clamps its cubic to one, so a bright albedo \
+             rescales the ambient term of a frame that asked for no occlusion at all"
+        );
+
+        for step in 0..=100 {
+            let albedo = f64::from(step) / 100.0;
+
+            // The clamped value is the contract: with the effect off every
+            // fragment arrives at full visibility, and the ambient it had before
+            // this function existed is the ambient it must still have.
+            let tint = multi_bounce_tint(1.0, albedo);
+            assert_eq!(
+                tint, 1.0,
+                "at full visibility a {albedo} albedo has to come back as exactly one"
+            );
+
+            // Which on its own any clamp satisfies. This is the half that can
+            // still fail: the published fit has to land close enough to one that
+            // the clamp is correcting a least-squares residual rather than
+            // covering a coefficient somebody mistyped.
+            let raw = multi_bounce_cubic(1.0, albedo);
+            assert!(
+                (raw - 1.0).abs() < UNTINTED,
+                "at full visibility the raw fit gives a {albedo} albedo {raw}, too far from one \
+                 for the clamp above to be a correction rather than a cover-up"
+            );
+        }
+    }
+
+    /// **The tint can only ever add ambient light, never take it away** — and
+    /// the `max` in the shader is the whole of why.
+    ///
+    /// The cubic on its own does take it away: for a black albedo it runs below
+    /// the visibility it was handed across nearly the whole range. That is the
+    /// fit being honest rather than wrong — a surface absorbing everything sends
+    /// no bounce light back, so there is nothing for it to add — but a
+    /// screen-space pass that started *removing* light it never measured would
+    /// be a new artefact rather than a correction. The `max` hands the scalar
+    /// term back instead, and `DIP` is what says that `max` is load-bearing
+    /// rather than decoration: it is how far under the cubic has to go for the
+    /// clamp to have work to do.
+    ///
+    /// `LIFT` is the other end, and it is the claim the fit exists to make: a
+    /// bright albedo carries the visibility well clear of the scalar term,
+    /// because more of every bounce survives off a bright surface. A fit that
+    /// had collapsed to the identity would still satisfy every bound above and
+    /// would be doing nothing.
+    ///
+    /// `BLACK` closes the loop the other way: with the `max` applied, an albedo
+    /// of zero reproduces the scalar occlusion the pass measured. Not bit for
+    /// bit — the cubic grazes a hair *above* the visibility near the top of the
+    /// range, which the `max` does not clamp — so the bound is what that graze
+    /// measures.
+    #[test]
+    fn the_multi_bounce_tint_only_ever_adds_light() {
+        /// How far below the visibility the raw cubic must go somewhere in the
+        /// range, for the shader's `max` to be doing anything.
+        const DIP: f64 = 0.01;
+        /// How far above it the raw cubic must go somewhere, for the fit to be
+        /// tinting rather than passing its argument through.
+        const LIFT: f64 = 0.1;
+        /// How far the tint may sit from the scalar term for a black albedo.
+        const BLACK: f64 = 2e-6;
+
+        const SOURCE: &str = include_str!("../shaders/mesh.slang");
+        let squeezed = SOURCE.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            squeezed.contains(
+                "float3 tinted = ((visibility * a + b) * visibility + c) * visibility; \
+                 return min(1.0, max(visibility, tinted));"
+            ),
+            "multi_bounce_occlusion no longer clamps its cubic against the visibility it was \
+             handed, so the fit's dimming half now reaches the ambient term and every bound \
+             below is measuring a shape the shader does not have"
+        );
+        assert!(
+            squeezed.contains("multi_bounce_occlusion(occluded, diffuse_albedo)"),
+            "nothing in mesh.slang's shading calls multi_bounce_occlusion on the occlusion it \
+             fetched, so this is a test of a function no frame runs"
+        );
+
+        let mut deepest_dip: f64 = 0.0;
+        let mut brightest_lift: f64 = 0.0;
+        for albedo_step in 0..=20 {
+            let albedo = f64::from(albedo_step) / 20.0;
+            for step in 0..=1000 {
+                let visibility = f64::from(step) / 1000.0;
+                let cubic = multi_bounce_cubic(visibility, albedo);
+                deepest_dip = deepest_dip.max(visibility - cubic);
+                brightest_lift = brightest_lift.max(cubic - visibility);
+            }
+        }
+        assert!(
+            deepest_dip > DIP,
+            "the cubic never falls more than {deepest_dip} below the visibility it was handed, \
+             so the `max` guarding it has nothing to guard and the fit is not the one the doc \
+             comment describes"
+        );
+        assert!(
+            brightest_lift > LIFT,
+            "the cubic never rises more than {brightest_lift} above the visibility it was \
+             handed, so the tint adds no bounce light and the pass would be cheaper without it"
+        );
+
+        for step in 0..=1000 {
+            let visibility = f64::from(step) / 1000.0;
+            let tint = multi_bounce_tint(visibility, 0.0);
+            assert!(
+                (tint - visibility).abs() < BLACK,
+                "a black albedo turns a visibility of {visibility} into {tint}, where a surface \
+                 that reflects nothing has to hand back the occlusion the pass measured"
+            );
+        }
+    }
+
     /// **The motion view's threshold lies above the occlusion view's**, so one
     /// lane can carry six states.
     ///

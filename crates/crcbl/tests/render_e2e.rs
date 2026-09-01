@@ -996,12 +996,25 @@ const AO_BAND_AT: f32 = 0.7;
 /// quarter here. Occlusion also scales the ambient alone, so even a wall that
 /// closes half the hemisphere over a pixel cannot halve what that pixel shows.
 ///
-/// The frame this was set against measures the wall bands about a sixth below the
-/// open ones, so this is a floor with margin over that and far over the
-/// single-digit drift `crcbl_golden::Tolerance::RASTERISER` was measured for. What
-/// it separates is real: a pass that wrote a constant, or one whose result never
-/// reached the shading line, leaves every band equal and lands at exactly `1.00`.
-const AO_RATIO: f32 = 1.10;
+/// **Re-measured when the multi-bounce tint landed, and the separation it
+/// guards is genuinely smaller now.** The frame this was first set against
+/// measured the wall bands about a sixth below the open ones — a ratio of
+/// `1.198`, which `1.10` sat under with room to spare. `mesh.slang`'s
+/// `multi_bounce_occlusion` then began lifting the occluded bands, because
+/// light bouncing off a bright floor is exactly what a scalar horizon integral
+/// omits, and the same bands now read `70.6` against `74.7`: a ratio of
+/// `1.058`. That is the published fit doing what it is for rather than the
+/// occlusion weakening — the lift it applies at this scene's albedo accounts
+/// for the whole of the difference.
+///
+/// So this is a floor set at roughly half the measured separation, still far
+/// over the single-digit drift `crcbl_golden::Tolerance::RASTERISER` was
+/// measured for, and it still separates what it was written to separate: a pass
+/// that wrote a constant, or one whose result never reached the shading line,
+/// leaves every band equal and lands at exactly `1.00`. What it has lost is
+/// margin — `docs/backlog.md` carries that, and the AO intensity control that
+/// would buy it back.
+const AO_RATIO: f32 = 1.03;
 
 /// How far above the clear the open bands must measure.
 ///

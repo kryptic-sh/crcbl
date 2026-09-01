@@ -302,18 +302,53 @@ slice.
 **DECIDED 2026-08-30 — which tiers get which.** The user's call, on the question
 of where the widened target is worth its bandwidth:
 
-- **Low: scalar occlusion plus the multi-bounce tint.** The tint is Jimenez et
-  al. 2016's polynomial of the scalar term and the surface albedo — no second
-  target, no second pass, so the low tier gets coloured rather than grey
-  occlusion for nothing. Which scalar pass low runs, SSAO or GTAO, is a
-  measurement on that tier's hardware rather than a design choice, and it is why
-  the cheap-rung paragraph above still stands: the eight-tap body is gone, and
-  comes back behind a selector only if low measures for it.
+- **Low: scalar occlusion plus the multi-bounce tint. The tint has landed, and
+  it landed on every tier.** `mesh.slang`'s `multi_bounce_occlusion` is Jimenez
+  et al. 2016's polynomial of the scalar term and the surface albedo. It reads
+  no second target and adds no second pass, so there was no bandwidth for a
+  quality knob to buy back and it is unconditional: no `RenderEffects` bit, no
+  console variable, no settings key. What remains of low's half is which scalar
+  pass it runs, SSAO or GTAO, which is a measurement on that tier's hardware
+  rather than a design choice, and it is why the cheap-rung paragraph above
+  still stands: the eight-tap body is gone, and comes back behind a selector
+  only if low measures for it.
 - **Medium and high: bent normals plus specular occlusion.** The `R8Unorm`
   target widens to carry the bent direction beside the scalar, the ambient term
   is sampled along it, and the reflection term takes the cone's occlusion — the
   pair the SSR section's refusal has been waiting for. The widening is the
   bandwidth low does not pay.
+
+**The published fit is not exactly one at full visibility, and the occlusion
+off-switch is why that had to be fixed rather than measured.** The three
+coefficients sum to `0.9996 + 0.0005 * albedo` — a hair under one for a dark
+albedo, where the fit's own `max` returns the one, and a hair over it above an
+albedo of 0.8, where nothing in the published form catches it.
+`crcbl_render::forward` binds a 1×1 white image when it adds no occlusion pass,
+so with the effect off _every_ fragment in the frame arrives at full visibility,
+and a frame that asked for no occlusion has to be the frame it was before this
+function existed.
+
+So `multi_bounce_occlusion` clamps the top end too, and that `min` is the one
+place it departs from the paper. It is a correction rather than a preference:
+nothing occludes the fragment, so there is no bounce for the tint to add, and a
+multiplier above one there is inventing light out of a least-squares residual.
+It costs nothing anywhere else, because the cubic clears one at no other
+visibility in the range. `crcbl_shaders::mesh`'s
+`the_multi_bounce_tint_leaves_an_unoccluded_fragment_alone` holds both halves —
+the clamped identity, and a swept bound on the raw fit that keeps the six
+coefficients under a check the clamp would otherwise hide.
+
+**It narrows the occlusion contrast a scene shows, and two suites' claims were
+re-measured against that.** The tint lifts an occluded fragment by the colour of
+what occludes it, which is the point, and on a bright surface the lift is large:
+`crcbl`'s AO scene separated its wall bands from its open floor by a ratio of
+`1.198` and now separates them by `1.058`, and `apps/lantern`'s contact corner
+moved from a comfortable margin to `1.038`. Both match the published curve at
+those albedos, so this is the fit working rather than the occlusion weakening.
+`AO_RATIO` and `AO_LIFT` carry the new measurements and still land at exactly
+`1.00` for a pass that never reached the shading line. What they have lost is
+margin — `docs/backlog.md` carries that, and the AO intensity control that would
+buy it back.
 
 The presets of foundation (g) select between the two. **They exist now** —
 `crcbl::settings::presets` landed 2026-08-31 — so this rung wires into them

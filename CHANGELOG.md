@@ -188,6 +188,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Ambient occlusion reaches the ambient term as a colour, not a grey number.**
+  `mesh.slang`'s `multi_bounce_occlusion` is Jimenez et al. 2016's multi-bounce
+  fit — a cubic in the scalar visibility whose coefficients are affine in the
+  surface albedo — so light reaching the bottom of a crevice is both more than a
+  horizon integral measures and the colour of the crevice. It reads no second
+  target and adds no second pass, so it is unconditional on every tier: no
+  `RenderEffects` bit, no console variable, no settings key. Frames drawn with
+  occlusion switched off are unchanged, which the fit does not guarantee on its
+  own and a clamp at full visibility does.
+
+  It narrows the contrast an occluded corner shows, because lifting that corner
+  is what it does. `crcbl`'s `AO_RATIO` and `apps/lantern`'s `AO_LIFT` were
+  re-measured against it, and four goldens moved — `ao`, `probes`, `room` and
+  `live`.
+
 - **Screen-space contact shadows, built and off by default.**
   `RenderEffects::CONTACT_SHADOWS` is a new bit and
   `crcbl_render::contact_shadows` is the pass behind it: a short march along the

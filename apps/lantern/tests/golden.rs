@@ -294,7 +294,17 @@ const SPOT_SHADOW_LIFT: f32 = 1.5;
 /// *ambient* term alone, so what this block can gain is bounded by the share of
 /// it that is ambient — `docs/backlog.md` measures a quarter at a single wall.
 /// This is a claim about that term, not about the pixel.
-const AO_LIFT: f32 = 1.08;
+///
+/// **Smaller again since the multi-bounce tint**, which lifts an occluded
+/// fragment by the colour of what occludes it and so narrows the very gap this
+/// measures. The corner reads `57.5` with occlusion against `59.7` without, a
+/// ratio of `1.038` where the frame this was first set against left room for
+/// `1.08`. The claim it exists to catch is unchanged and still lands at exactly
+/// `1.00` — a corner that does not move when the pass is switched off, or a
+/// placeholder that is not white — but it is caught with less room than before.
+/// `docs/backlog.md` carries what that costs and how an AO intensity control
+/// would return it.
+const AO_LIFT: f32 = 1.02;
 
 /// A point on the front wall, dead ahead of [`room::monitor_camera`].
 ///

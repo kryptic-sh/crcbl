@@ -4080,6 +4080,62 @@ float contact_at(float2 position)
     return contact_shadow.Load(int3(texel, 0));
 }
 
+/// The scalar visibility `occlusion_at` hands back, turned into the per-channel
+/// one a coloured surface actually has.
+///
+/// Jimenez et al. 2016, "Practical Realtime Strategies for Accurate Indirect
+/// Occlusion" — the GTAO course notes — fit a cubic in the visibility whose
+/// three coefficients are affine in the surface's albedo, and the six numbers
+/// below are that fit transcribed rather than re-derived. What it answers is the
+/// thing a scalar occlusion term states wrongly: a horizon integral measures how
+/// much of the room is *hidden* from a point, but light does not stop at the
+/// first thing it meets — it goes on bouncing between the surface and the
+/// neighbours occluding it, and each bounce leaves tinted by what it bounced
+/// off. So the light reaching the bottom of a crevice is both more than the
+/// scalar says and the colour of the crevice, and the redder the wall the redder
+/// what survives.
+///
+/// **Never darker than what it was handed.** The `max` is part of the published
+/// fit and not a guard bolted onto it: for a dark albedo the cubic runs *below*
+/// the visibility across nearly the whole range — there is no bounce light off a
+/// surface that absorbs everything, so there is nothing for the fit to add — and
+/// the `max` is what returns the scalar term unchanged instead of inventing
+/// occlusion the pass never measured. This can therefore only ever add ambient,
+/// which is the whole of what it claims to do.
+///
+/// **Exactly one at full visibility, and that is enforced rather than
+/// observed.** `crcbl_render::forward` binds a 1×1 white image when it adds no
+/// occlusion pass, so with the effect off *every* fragment in the frame arrives
+/// here at full visibility, and the frame it draws has to be the frame it drew
+/// before this function existed. The published fit does not quite give that on
+/// its own: its three coefficients sum to `0.9996 + 0.0005 * albedo`, a hair
+/// under one for a dark albedo — where the `max` returns the one — and a hair
+/// over it above an albedo of 0.8, where nothing would catch it.
+///
+/// The `min` closes that end, and it is the one place this function departs
+/// from the paper. It is a correction rather than a taste: nothing occludes the
+/// fragment, so there is no bounce for the tint to add, and a multiplier above
+/// one there would be inventing light out of a least-squares residual. It costs
+/// nothing anywhere else, because the cubic clears one at no other visibility
+/// in the range. `crcbl_shaders::mesh`'s
+/// `the_multi_bounce_tint_leaves_an_unoccluded_fragment_alone` is what holds
+/// the identity, and it fails if the `min` goes.
+///
+/// **Every tier runs it.** It reads nothing the occlusion pass does not already
+/// write and adds no pass of its own, so there is no bandwidth for a quality
+/// knob to buy back and no `RenderEffects` bit selecting it.
+/// `docs/plan/46-ambient-occlusion.md`'s low tier is what asked for it, and the
+/// tier split there is about the *widened* target bent normals need — which this
+/// does not touch.
+float3 multi_bounce_occlusion(float visibility, float3 albedo)
+{
+    float3 a = 2.0404 * albedo - 0.3324;
+    float3 b = -4.7951 * albedo + 0.6417;
+    float3 c = 2.7552 * albedo + 0.6903;
+    float3 tinted = ((visibility * a + b) * visibility + c) * visibility;
+    return min(1.0, max(visibility, tinted));
+}
+
 /// This fragment's motion vector: where it is now minus where it was last
 /// frame, in texture coordinates.
 ///
@@ -4556,7 +4612,22 @@ FragmentOutput fragmentMain(VertexOutput input)
     // above rather than a new one: how much of the surrounding room a surface
     // can see is what modulates the environment reaching it, and the grid is an
     // environment.
-    float3 lit = diffuse_albedo * (irradiance * occluded + direct) + gloss;
+    //
+    // **And it reaches the ambient as a tint rather than as one number.** The
+    // scalar is how much of the room is hidden; what a coloured surface loses to
+    // that is not grey, because the light still arriving has bounced off its
+    // neighbours and carries their colour. `multi_bounce_occlusion` is the
+    // published fit for that and carries the derivation, including why an
+    // unoccluded fragment comes back all but unchanged.
+    //
+    // **Unconditional, on every tier.** It is arithmetic in a pass every tier
+    // already runs — no second target, no second pass — so there is nothing for
+    // a quality knob to buy back, and `docs/plan/46-ambient-occlusion.md`'s tier
+    // split is about the widened target bent normals want rather than about
+    // this.
+    float3 ambient_visibility = multi_bounce_occlusion(occluded, diffuse_albedo);
+
+    float3 lit = diffuse_albedo * (irradiance * ambient_visibility + direct) + gloss;
 
     // **Emission is added last and scaled by nothing.** Not by the occlusion,
     // which asks how much of the room reaches a surface and has no bearing on

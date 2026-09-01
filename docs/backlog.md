@@ -183,6 +183,47 @@ own unbuilt row, not this entry's.
   moved the whole line by a constant, or that kept every step at one level while
   wandering, would not be caught by it.
 
+## The multi-bounce tint narrowed AO's contrast, and two claims lost margin (2026-09-01)
+
+`mesh.slang`'s `multi_bounce_occlusion` shipped 2026-09-01 and does what it is
+for: it lifts an occluded fragment by the colour of what occludes it. On a
+bright surface that lift is large, and it comes straight out of the occlusion
+contrast a scene shows.
+
+Measured on radv, before and after:
+
+| claim                                      | scene                                    | was                     | is      |
+| ------------------------------------------ | ---------------------------------------- | ----------------------- | ------- |
+| `AO_RATIO` (`crcbl/tests/render_e2e.rs`)   | wall bands against open floor            | `1.198`                 | `1.058` |
+| `AO_LIFT` (`apps/lantern/tests/golden.rs`) | contact corner, occlusion on against off | comfortably over `1.08` | `1.038` |
+
+Both figures match the published curve at those scenes' albedos, so this is the
+fit working rather than the occlusion weakening — checked against the polynomial
+directly before either constant was touched. Both constants were re-measured and
+both still land at exactly `1.00` for a pass that never reached the shading
+line, which is the failure they exist to catch; that was verified by sabotage,
+feeding `multi_bounce_occlusion` a visibility of one so the occlusion never
+reaches the ambient term, and both went red.
+
+**What is left open is the margin.** `AO_RATIO` guards a separation of 5.8%
+where it used to guard 20%, and `AO_LIFT` 3.8% where it used to guard more than
+8%. Both are still far above the rasteriser drift
+`crcbl_golden::Tolerance::RASTERISER` was measured for, so neither is fragile
+today, but the headroom for a future change to eat is a third of what it was.
+
+**The industry answer is an AO intensity control**, applied to the scalar
+visibility before the tint — a power or a lerp toward one, which is what lets an
+artist ask for more occlusion than the horizon integral measured. This engine
+has no such knob: `SSAO_RADIUS` is a shader constant and nothing sets the AO
+strength from outside, which the occlusion-view entry already records as its own
+gap. Adding one would restore the contrast and the margin together, and it is
+the same knob the entry above on `SHADOW_TAPS` and a re-introduced SSAO tier
+wants a home for.
+
+**This is also the honest answer to "the AO looks weak"** if that comes up: the
+tint makes it weaker on purpose, and the fix is the intensity control rather
+than removing the tint.
+
 ## SSAO runs GTAO at full resolution and the banding is bought (2026-09-01)
 
 The user asked whether the AO pass is implemented the industry-standard way and
@@ -1105,6 +1146,32 @@ that a frame-shape test takes it. It is a defect the ConVar introduced on
 2026-08-31 (`79a555a`), not the shadow-cache slice's, and touching ten tests
 belongs in its own change. Any new `ConVar` a frame's shape depends on has the
 same hazard.
+
+## Two whole-workspace-only test flakes, neither a process global (2026-09-01)
+
+Both seen on 2026-09-01, both only under a full `cargo test`, both green when
+their own crate is run alone:
+
+- `lantern::app::tests::an_effect_flag_reaches_the_frame_and_the_summary` —
+  failed twice in four workspace runs, passed 5/5 under
+  `cargo test -p lantern --lib` and passed a later workspace run. Its assertions
+  are on `summary.paths.effects` and `effects_row()`, a bitflags value and a
+  string, so nothing about shading reaches it.
+- `quarry::app::tests::the_heatmap_flag_and_its_row_replace_the_tint_at_the_renderer`
+  — the overlay row read `HEATMAP: OFF`. Passed alone and on rerun.
+
+**They are not the `r_ssao_blur_passes` hazard**, which is the entry above and
+is a process global shared between threads of one binary. These two are separate
+test _binaries_, so a static cannot reach across them: whatever they share is
+outside the process. A settings or config file on a shared path is the obvious
+candidate — `crcbl-shared-working-tree` aside, several samples open a
+`SettingsSource` — and neither was chased.
+
+**Not reproduced deliberately**, so the mechanism is a guess and the fix is
+unknown. What is solid is the observation: two samples' in-process runs disagree
+with themselves under workspace concurrency, at a rate high enough to redden CI
+occasionally. Next step is to run one of them in a loop under the whole
+workspace and capture the panic message, which neither attempt managed.
 
 ## The render-quality programme (opened 2026-08-27)
 
