@@ -1147,9 +1147,17 @@ What was established, by instrumenting `Session::point_in`'s wait:
   connection is live throughout.
 - **openbox is alive.** The harness reports a window manager that exits, and
   CI's captured log tail carries only its benign missing-menu-file warning.
-- **It is contention, not the window.** Run alone through the same harness,
-  `-E 'test(a_window_that_did_not_ask_for_drops_takes_none)'` passed 10 times
-  out of 10. It only fails alongside the other 44.
+- **It depends on what ran before it, and it is _not_ contention.** An earlier
+  reading of this entry said it was; the thing that refutes it is in the harness
+  itself — `run-x11-e2e.sh` passes `--test-threads 1`, so the suite is already
+  serial and no two tests are ever live at once. What varies is the sequence:
+  run alone with `-E 'test(a_window_that_did_not_ask_for_drops_takes_none)'` it
+  passed 10 times out of 10, and in the full serial run it fails about one run
+  in four. So a test that ran earlier leaves the server, or openbox, in a state
+  this one then meets.
+- **Partly bisected.** Restricting to the drag family,
+  `-E 'test(/drag|drop|xdnd/)'`, passes 6 out of 6, so the predecessor that
+  matters is outside it. Which one it is has not been found.
 
 **Ruled out:** a test stealing `SubstructureRedirect` from openbox, which would
 stop it managing anything — the only `SubstructureNotify | SubstructureRedirect`
@@ -1157,9 +1165,22 @@ in `crates/crcbl-shell/src/x11/e2e.rs` is the destination mask of the EWMH
 `SendEvent` in `Peer::activate`, which is how a pager is _supposed_ to message a
 window manager, not a selection on the root.
 
-**Not diagnosed:** why openbox, under concurrent load from the other tests,
-drops this one window's `MapRequest` for longer than 20 seconds. Raising `WAIT`
-would hide it rather than answer it, and was deliberately not done.
+**Two interventions measured, neither shippable.** Against a matched baseline of
+2 failures in 8 runs:
+
+- Letting openbox settle for 3 seconds before the suite starts: **6 in 8**. So a
+  window-manager startup race is not the cause — a settle would have helped.
+  Eight runs a side is too few to claim it is actively worse.
+- `--test-threads=4`, overriding the harness's own `1`: **0 in 24**, which at
+  the baseline rate would happen by luck about one time in a thousand. Still not
+  a fix: the serial default looks deliberate, since these tests share one X
+  display and X selection ownership is a single-owner protocol, so running four
+  at once would trade this flake for clipboard races. It is evidence about
+  ordering, not a setting to change.
+
+**Not diagnosed:** why openbox leaves that window unmanaged for more than 20
+seconds after some earlier test has run. Raising `WAIT` would hide it rather
+than answer it, and was deliberately not done.
 
 **What would move it next:** log whether the window was ever mapped, separately
 from whether it was reparented, so the two states are distinguishable in CI
