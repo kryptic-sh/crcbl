@@ -21318,11 +21318,20 @@ than its size:
 `docs/plan/18-render-features.md`'s AO section holds the decisions and the
 reasons. What the first slice deferred or turned up:
 
-- **The forward pass still clears and re-writes depth**, so the prepass buys AO
-  its depth and nothing else — the overdraw win is deliberately deferred because
-  it needs `GreaterOrEqual` and depth invariance across four rasterisers, which
-  only CI can settle. The engine now has per-pass GPU timers and frame counters,
-  so that change can be **measured** rather than assumed when it is made.
+- **The overdraw win is taken, and what is still owed on it is CI.** The colour
+  pass loads the prepass's depth read-only and tests `GreaterOrEqual`
+  (`MeshModules::color_depth_stencil`), which measured the `forward` pass -0.399
+  ms (-15.6%) on the range map and -0.240 ms (-8.7%) on practice, over eight
+  order-alternating A-B rounds each. It rests on `SV_Position.z` invariance
+  between `depthVertexMain` and `vertexMain`, which nothing decorates for. What
+  was checked here: every scene in `render_e2e` reports identical pixel
+  statistics before and after, on **both** the `MeshShader` and `IndirectCount`
+  paths, on NVIDIA's Vulkan driver. What was **not** checked: the other three
+  rasterisers, because this machine has none of them, and the goldens themselves
+  — they are blessed on a different GPU and fail 15 of 32 here either way, so
+  the before/after equality is the oracle and the suite's own verdict is not. A
+  rasteriser that places the colour pass's fragment a hair farther than the
+  prepass did shows up as **holes**, not as an error.
 - **AO still runs at full resolution, and the pair is now measured: it is half
   the GPU frame.** On an MX550 at 1264x1370 running `breach` on the range map,
   the per-pass timers read `ssao` 3.734 ms and `ssao-blur` 0.631 ms against an

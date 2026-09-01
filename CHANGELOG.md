@@ -1250,6 +1250,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The colour pass shades each pixel once: it tests against the depth prepass
+  instead of clearing and rewriting depth.** The prepass has drawn the scene's
+  depth since the occlusion slice and the forward pass threw it away; it now
+  loads it read-only and tests `GreaterOrEqual`
+  (`DepthStencilState::equal_depth_read_only`), so the clustered-forward shading
+  of every hidden fragment is never run. Measured on an MX550 at 1264x1370 over
+  eight order-alternating A-B rounds per map: the `forward` pass -0.399 ms
+  (-15.6%) on `breach`'s range map and -0.240 ms (-8.7%) on practice, faster in
+  all sixteen pairs; whole-frame GPU -5.2% and -2.6%. Frames are bit-identical —
+  both maps' screenshots hash unchanged, and every scene in the render-e2e suite
+  reports the same pixel statistics on both the `MeshShader` and `IndirectCount`
+  geometry paths. A wireframe frame keeps the old clear-and-write shape, because
+  `PolygonMode::Line` does not reproduce a filled prepass's depths.
+
 - **The screen-space passes reconstruct view position from the four terms of
   `inv_proj` that are not zero.** Both projection families the engine can build
   — `perspective_infinite_reverse` and `orthographic` — invert to a matrix with

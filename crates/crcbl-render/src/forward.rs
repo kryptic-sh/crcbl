@@ -7527,20 +7527,20 @@ impl ForwardRenderer {
 
         let group = self.mesh_groups[self.frame];
         let emit = self.emit;
+        // The wireframe twin where a caller switched the view on, and `None`
+        // everywhere else — see `set_wireframe`. Written on `ground_grid`'s
+        // terms, and the `filter` is what keeps "switched on" from outrunning
+        // "built": the field is only `Some` after a build that succeeded.
+        //
+        // The depth prepass below takes `shadow_pipeline` and is untouched by
+        // this, which is the half that makes a wireframe frame legible: the
+        // occlusion pair still reads solid depth. **It is also what makes this
+        // one variable rather than two**: the colour pass's depth attachment
+        // branches on it as well, because a wireframe is not the geometry the
+        // prepass drew — see `MeshModules::color_depth_stencil`.
+        let wireframe = self.wireframe_pipeline.filter(|_| self.wireframe_on);
         let bucket_draws = BucketDraws {
-            // The wireframe twin where a caller switched the view on, and the
-            // filled pipeline everywhere else — see `set_wireframe`. Written on
-            // `ground_grid`'s terms, and the `filter` is what keeps "switched
-            // on" from outrunning "built": the field is only `Some` after a
-            // build that succeeded.
-            //
-            // The depth prepass below takes `shadow_pipeline` and is untouched
-            // by this, which is the half that makes a wireframe frame legible:
-            // the occlusion pair still reads solid depth.
-            pipeline: self
-                .wireframe_pipeline
-                .filter(|_| self.wireframe_on)
-                .unwrap_or(self.mesh_pipeline),
+            pipeline: wireframe.unwrap_or(self.mesh_pipeline),
             layout: self.mesh_pipeline_layout,
             indices: self.pool.index_buffer(),
             emit,
@@ -7607,25 +7607,25 @@ impl ForwardRenderer {
         // occlusion pass samples, and it is the only reason
         // `TransientImageDesc::scene_depth` carries `SAMPLED`.
         //
-        // # The overdraw win is deliberately not taken
+        // # The overdraw win, and what it rests on
         //
-        // With depth already in the buffer the forward pass could test
-        // `GreaterOrEqual` and stop writing — `PassBuilder::depth_read` and
-        // `DepthStencilState::equal_depth_read_only` both exist for it — and every
-        // hidden fragment of the clustered-forward shading would go away. It is
-        // not done here, and the reason is `SV_Position.z` invariance: the two
-        // pipelines are compiled separately from the same source, nothing in the
-        // shaders carries an invariance decoration, and a fragment the forward
-        // pass places a bit farther than the prepass did is *rejected* — which
-        // arrives as holes in the frame rather than as an error. Only CI's four
-        // rasterisers can settle whether that happens, and the engine now has
-        // per-pass GPU timers and frame counters, so it is a change that can be
-        // **measured** when it is made rather than assumed.
+        // With this depth in the buffer the colour pass tests `GreaterOrEqual`
+        // with writes off — `PassBuilder::depth_read` and
+        // `DepthStencilState::equal_depth_read_only` — so every hidden fragment's
+        // clustered-forward shading goes away. See
+        // `MeshModules::color_depth_stencil`.
         //
-        // So the forward pass below clears and writes depth exactly as it did
-        // before this pass existed. Note that it must *clear*: loading this
-        // prepass's depth under the default `Greater` test rejects every fragment
-        // of the same geometry, and the frame goes black.
+        // **It rests on `SV_Position.z` invariance between the two pipelines**,
+        // which the engine does not decorate for: a fragment the colour pass
+        // places a hair farther than this pass did is *rejected*, and that
+        // arrives as holes in the frame rather than as an error. Two things make
+        // it hold rather than hope. On the mesh path the two passes run the
+        // **same** geometry stage — `depth_pipeline`'s doc says so — so there is
+        // nothing to diverge. On the vertex path `depthVertexMain` is the same
+        // clip position written the same way as `vertexMain`'s, out of the same
+        // module compiled in one invocation. The observable is a screenshot:
+        // holes are not subtle, and the render-e2e goldens are what would catch
+        // them on a rasteriser this machine does not have.
         let depth_group = self.prepass_groups[self.frame];
         let prepass_draws = BucketDraws {
             pipeline: self.shadow_pipeline,
@@ -7766,22 +7766,24 @@ impl ForwardRenderer {
             // the camera's and is owed to the pass that first wants it; it is
             // the answer that reprojects onto itself rather than onto
             // somewhere undefined. `docs/backlog.md` carries what is owed.
-            .clear_color(motion, [0.0; 4])
-            // **Cleared and then *stored*, where every frame before the
-            // reflection slice discarded it.** `PassBuilder::clear_depth` is
-            // `LoadOp::Clear` with `StoreOp::Discard`, which is right for a pass
-            // nothing downstream reads the depth of — and the reflection march
-            // is downstream and reads exactly that. A discarded attachment is
-            // *undefined* afterwards, not "whatever was in it": a desktop driver
-            // hands back the values it just wrote and wgpu hands back the clear,
-            // so the same build drew reflections on one backend and none at all
-            // on the other, with nothing anywhere reporting an error.
-            //
-            // The prepass wrote the same depth into the same image, so this is a
-            // writeback of values already there and not a second depth buffer.
-            // The forward pass's own writes are what is kept, which is also the
-            // honest choice: the march is about the surfaces this frame *shaded*.
-            .depth(
+            .clear_color(motion, [0.0; 4]);
+        // **Loaded and stored rather than cleared, and read-only**, which is the
+        // half of the depth prepass that pays for the pass itself:
+        // `MeshModules::color_depth_stencil` tests `GreaterOrEqual` with writes
+        // off, so a fragment survives only where the prepass already put its
+        // surface — and the clustered-forward shading of everything a nearer
+        // surface goes on to cover is never run. It is stored because the
+        // reflection march is downstream and reads exactly this image; the
+        // values are the prepass's, which are this pass's own answer written by
+        // the same transform.
+        //
+        // **The wireframe frame keeps the old shape**, because
+        // `PolygonMode::Line` does not reproduce the prepass's depths — see
+        // `color_depth_stencil`. It must *clear*: loading the prepass's depth
+        // under the default `Greater` test rejects every fragment of the same
+        // geometry, and the frame goes black.
+        let pass = match wireframe {
+            Some(_) => pass.depth(
                 scene_depth,
                 LoadOp::Clear,
                 StoreOp::Store,
@@ -7789,7 +7791,10 @@ impl ForwardRenderer {
                     depth: crcbl_hal::depth::CLEAR,
                     ..crcbl_hal::ClearValue::default()
                 },
-            )
+            ),
+            None => pass.depth_read(scene_depth),
+        };
+        let pass = pass
             // The occlusion channel this frame's ambient term is scaled by. On
             // an AO-on frame the blur pass wrote it as a colour attachment a
             // moment ago, so this declaration is the barrier into a
@@ -10429,6 +10434,32 @@ impl MeshModules {
         Some(DepthStencilState::default())
     }
 
+    /// The colour pass's depth state, which is not the same shape as
+    /// [`MeshModules::depth_stencil`] because the depth prepass has already
+    /// drawn this geometry.
+    ///
+    /// **Filled: [`DepthStencilState::equal_depth_read_only`], so the shading is
+    /// paid for once per pixel.** The prepass runs the same draws through
+    /// `depthVertexMain` — or, on the mesh path, through the very same geometry
+    /// stage — so the depth already in the attachment is this pass's own answer,
+    /// and a `GreaterOrEqual` test with writes off keeps exactly the fragments
+    /// that would have won the write. What it removes is the clustered-forward
+    /// shading of every fragment a nearer one goes on to cover.
+    ///
+    /// **Lines: the writing default, because a wireframe is not the geometry the
+    /// prepass drew.** [`PolygonMode::Line`] rasterises the triangle's edges,
+    /// and an edge pixel's depth is interpolated along the line rather than
+    /// across the face, so testing it for equality against a filled prepass
+    /// rejects most of the wireframe. That frame keeps the pass shape this pass
+    /// had before the prepass existed — see the colour pass's depth attachment,
+    /// which branches on the same condition.
+    fn color_depth_stencil(polygon_mode: PolygonMode) -> Option<DepthStencilState> {
+        match polygon_mode {
+            PolygonMode::Fill => Some(DepthStencilState::equal_depth_read_only(Format::D32Float)),
+            _ => Self::depth_stencil(),
+        }
+    }
+
     /// The colour pass's pipeline, filled or wireframe.
     ///
     /// `label` names the caller — `"forward"` for the frame's own, `"wireframe"`
@@ -10442,6 +10473,7 @@ impl MeshModules {
         label: &str,
     ) -> Result<GraphicsPipelineHandle, HalError> {
         let primitive = Self::primitive(polygon_mode);
+        let depth_stencil = Self::color_depth_stencil(polygon_mode);
         let fragment = Some(ShaderEntry {
             module: self.mesh,
             entry_point: self.fragment,
@@ -10462,7 +10494,7 @@ impl MeshModules {
                 mesh_workgroup_size: Self::MESH_WORKGROUP_SIZE,
                 fragment,
                 primitive,
-                depth_stencil: Self::depth_stencil(),
+                depth_stencil,
                 multisample: MultisampleState::default(),
                 color_targets: &Self::COLOR_TARGETS,
             }),
@@ -10475,7 +10507,7 @@ impl MeshModules {
                 },
                 fragment,
                 primitive,
-                depth_stencil: Self::depth_stencil(),
+                depth_stencil,
                 multisample: MultisampleState::default(),
                 color_targets: &Self::COLOR_TARGETS,
             }),
@@ -16736,6 +16768,119 @@ mod tests {
             off,
             "switching the view off has to put the filled pipeline back, not just stop reporting \
              it",
+        );
+
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **The colour pass tests against the prepass's depth instead of clearing
+    /// and rewriting it, so each pixel is shaded once** — and a wireframe frame
+    /// does the opposite, because lines do not reproduce a filled prepass.
+    ///
+    /// Both halves have to hold together or the frame is wrong in one of two
+    /// ways, so both are asserted here. The attachment alone read-only while the
+    /// pipeline still wrote would be a pipeline writing to a read-only
+    /// attachment; the pipeline alone on `GreaterOrEqual` against an attachment
+    /// this pass had just *cleared* would reject every fragment and draw a black
+    /// frame. Neither shows up as an error — the first is a validation message
+    /// on one backend and undefined behaviour on the rest, the second is a
+    /// picture — which is why the observable is read off the compiled graph and
+    /// off the pipeline state rather than off a screenshot.
+    #[test]
+    fn the_colour_pass_shades_once_per_pixel_against_the_prepasss_depth() {
+        let (recorder, device, queue) =
+            open_with(Features::GPU_DRIVEN | Features::POLYGON_MODE_LINE);
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        place_demo(&mut renderer, DEMO_CUBE, DEMO_UNTINTED, Mat4::IDENTITY);
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+
+        // Each pass's depth attachment, off the graph's own dump: the label it
+        // was declared under, and the `load`/`store`/`write` triple the backend
+        // is handed. A pass with no depth attachment contributes nothing, which
+        // is what makes the lookup below a search rather than an index.
+        let depth_of = |renderer: &mut ForwardRenderer, pool: &mut _, label: &str| {
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    (64, 48),
+                )
+                .expect("write");
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, pool, target, (64, 48));
+            let dump = graph.compile(pool).expect("a legal frame").dump();
+            let mut pass = String::new();
+            let mut found = None;
+            for line in dump.lines() {
+                if let Some(rest) = line.split(" pass \"").nth(1) {
+                    pass = rest.trim_end_matches('"').to_string();
+                    if let Some((name, _)) = pass.split_once('"') {
+                        pass = name.to_string();
+                    }
+                }
+                if pass == label
+                    && let Some(at) = line.find("depth load=")
+                {
+                    // Without the slot note the dump appends: which physical
+                    // image the transient landed on is aliasing's business, not
+                    // this assertion's.
+                    let role = &line[at..];
+                    let role = role.split_once(" [").map_or(role, |(head, _)| head);
+                    found = Some(role.trim().to_string());
+                }
+            }
+            found.unwrap_or_else(|| panic!("no depth attachment on `{label}`:\n{dump}"))
+        };
+
+        assert_eq!(
+            depth_of(&mut renderer, &mut pool, "depth-prepass"),
+            "depth load=Clear store=Store write=yes",
+            "the prepass is what puts the depth there, so it clears, writes and keeps it",
+        );
+        assert_eq!(
+            depth_of(&mut renderer, &mut pool, "forward"),
+            "depth load=Load store=Store write=no",
+            "and the colour pass reads it: a clear here would throw away the prepass and \
+             pay for the overdraw again, and a write would be a second pass writing the \
+             same values",
+        );
+        assert_eq!(
+            MeshModules::color_depth_stencil(PolygonMode::Fill),
+            Some(DepthStencilState {
+                format: Format::D32Float,
+                depth_write: false,
+                depth_compare: CompareOp::GreaterOrEqual,
+                stencil: None,
+                bias: DepthBias::default(),
+            }),
+            "and the pipeline agrees with the attachment: equality against the prepass, \
+             reachable only through the `OrEqual` under reversed-Z",
+        );
+
+        renderer
+            .set_wireframe(device, true)
+            .expect("this device was asked for the line fill mode");
+        assert_eq!(
+            depth_of(&mut renderer, &mut pool, "forward"),
+            "depth load=Clear store=Store write=yes",
+            "a wireframe frame keeps the old shape: `PolygonMode::Line` interpolates depth \
+             along the edge rather than across the face, so testing it against a filled \
+             prepass rejects most of the wireframe — and *loading* that depth under the \
+             writing default's `Greater` would reject all of it",
+        );
+        assert_eq!(
+            MeshModules::color_depth_stencil(PolygonMode::Line),
+            MeshModules::depth_stencil(),
+            "which is the writing default, the same state the depth-only twin uses",
         );
 
         renderer.destroy(device);
