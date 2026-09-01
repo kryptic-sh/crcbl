@@ -14306,6 +14306,22 @@ modes are the union of everything that can go wrong in fifteen browser jobs plus
 a scheduling accident. Three of the five gaps are invisible in the commit's own
 checks: a cancelled run is not a red mark.
 
+**What the wait costs when nothing goes wrong** (measured 2026-09-02, over the
+four most recent green runs): the run's wall time is the slowest demo's, because
+`deploy` waits on all of them. `shard` was the longest job in every one, at 22,
+22, 47 and 49 minutes. `breach`, `lantern` and `puppet` are the next three, all
+in the 16-to-35-minute band, and `deploy` itself takes 14 seconds.
+
+**Those four numbers are two clusters, not a mean with a tail** — 22, 22, 47,
+49, with nothing between. Whatever the second cluster is, it doubles the site's
+latency and it is not rare: it is half of the last four runs, and the last two
+in a row. So a bound would be cutting into a job that routinely needs twenty
+minutes, and picking a bound means picking it above 49 or deciding the long
+cluster is itself the bug. **Nobody has looked at what `shard` does differently
+in the slow runs** — that is the unasked question under option 3, and it is
+cheap to answer next time one is caught, by diffing the render step's own log
+against a fast run.
+
 **The decision this wants, and it is the user's.** Should `deploy` wait on every
 demo? Today one slow or flaky demo holds the whole site back, and the record
 above is what that costs in practice. The options, with what each actually
