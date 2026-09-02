@@ -96,8 +96,11 @@ struct Session {
     shell: Box<dyn Shell>,
     peer: Peer,
     events: Vec<ShellEvent>,
-    /// Every window [`window`](Self::window) created, so [`Drop`] can withdraw
-    /// them.
+    /// Every window this session opened, so [`Drop`] can withdraw them.
+    ///
+    /// [`window`](Self::window) fills it; a test that calls `create_window`
+    /// directly has to push its handle here itself, and one that does not is
+    /// a flake in the *next* test rather than a tidiness lapse.
     ///
     /// **A process that exits with a window still mapped is not what a game
     /// does**, and `openbox` does not survive thirty of them: the connection
@@ -106,6 +109,27 @@ struct Session {
     /// `_NET_CLIENT_LIST`. From that point it focuses nothing new, so every
     /// focus-needing test for the rest of the run times out — which is exactly
     /// the tail of failures this suite had, and why each of them passed alone.
+    ///
+    /// # And the next test pays for it, because XIDs are reused
+    ///
+    /// The second failure is worse, because it lands on a *different* test.
+    /// Each test is its own process and the server hands a fresh client the
+    /// resource base the last one released, so every session's first window is
+    /// the same XID. A process that exits without withdrawing leaves `openbox`
+    /// still holding the `MapRequest` for a window that is now destroyed; it
+    /// manages it anyway — `openbox` 3.6.1's `client_get_area` reads the result
+    /// of a `XGetWindowAttributes` it never checked, so the client it registers
+    /// has uninitialised dimensions and no `WM_CLASS`, which is how its own
+    /// debug log names the case — and that dead client keeps the XID. The
+    /// next process creates its window, gets the same XID, and its
+    /// `MapRequest` is routed to the manager's *client* handler, whose whole
+    /// body is `if (!client->iconic) break;`. Nothing happens. The window is
+    /// never framed, and the next test that waits for placement waits out its
+    /// deadline.
+    ///
+    /// Withdrawing first is what closes it: `openbox`'s `window_manage` checks
+    /// its own queue for an unmap or destroy of the window it is about to
+    /// manage, and refuses when it finds one.
     windows: Vec<WindowId>,
     /// The longest any single [`pump`](Self::pump) has taken.
     ///
@@ -213,15 +237,18 @@ impl Session {
                         .window_parent(xid)
                         .is_some_and(|parent| parent != root)
                 },
-                // What the predicate was reading, because this wait has failed
-                // in CI at about one run in four and passes alone — see
-                // `docs/backlog.md`. Which of the two states it ended in is the
-                // whole question: a parent that is still the root means the
-                // window manager never managed the window, and a `None` means
-                // the window was not there to ask about.
+                // What the predicate was reading, because the two states it
+                // can end in are different bugs: a parent that is still the
+                // root means the window manager never managed *this* window,
+                // and a `None` means the window was not there to ask about.
+                //
+                // The first is what this wait failed with, at about one CI run
+                // in four, until every test was made to withdraw its window
+                // before its process exits — see [`Session::windows`] for the
+                // mechanism. A recurrence starts there.
                 |session| {
                     format!(
-                        "; parent {:x?}, root {root:#x}, origin {:?}",
+                        "; window {xid:#x}, parent {:x?}, root {root:#x}, origin {:?}",
                         session.peer.window_parent(xid),
                         session.peer.window_origin(xid),
                     )
@@ -699,10 +726,17 @@ fn capabilities_never_change_during_a_session() {
 #[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
 fn a_window_has_no_size_until_it_is_pumped() {
     let mut session = Session::open();
+    // Created directly rather than through `Session::window`, which pumps —
+    // and the whole subject here is the state *before* the first pump. The
+    // handle is handed to the session all the same, so [`Drop`] still
+    // withdraws and destroys it — see [`Session::windows`] for what `openbox`
+    // does with the window a process abandons, and which later test pays for
+    // it.
     let window = session
         .shell
         .create_window(&desc("unconfigured"))
         .expect("create_window");
+    session.windows.push(window);
 
     let state = session.shell.window_state(window).expect("state");
     assert!(!state.is_configured(), "no event has been delivered yet");

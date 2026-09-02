@@ -1569,154 +1569,38 @@ saving would be six `DrawGen`s of device-local memory against half a light's
 draws. Declined; revisit only if a scene is measured spending most of a frame on
 one cube.
 
-## openbox intermittently never manages one x11 e2e window (2026-09-01)
+## `Session::window`'s map wait cannot fail (2026-09-02)
 
-`x11 e2e (Xvfb)`'s openbox arm — step 8 of that CI job — fails at roughly one
-run in four, and it reddened `main` twice on 2026-09-01 (on `17a9d48` and
-`4e73d6e`, green on `ec6ea26` in between). Always the same test and message:
+`crates/crcbl-shell/tests/x11_e2e.rs`'s `Session::window` waits for
+`window_state(..).visible` before it calls `settle`, and its comment says
+"waiting for the map is waiting for the manager to have finished". It is not.
+`X11Shell::create_window` seeds that field from the _request_ —
+`visible: desc.visible` — and only `X11Shell::handle_map` ever replaces it with
+what the server said, so for the `WindowDesc::default` case (`visible: true`)
+the predicate is already true on the first pump and the wait returns having
+waited for nothing. Every window-manager test in the suite therefore starts
+asserting before `openbox` has framed its window; they pass because the work
+they go on to do gives it the time anyway. Found while diagnosing the openbox
+placement flake, which was a different bug — see `git log` for that one.
 
-```text
-test a_window_that_did_not_ask_for_drops_takes_none ... FAILED
-panicked at crates/crcbl-shell/tests/x11_e2e.rs:
-timed out after 20s waiting for the window manager to place the window;
-events so far: ["Resized"]
-```
+**Not fixed, because the honest fix is a seam decision rather than a test one.**
+`WindowState::visible` is documented as "whether the window is mapped and not
+minimized", so the correct value between `create_window` and the first
+`MapNotify` is `false`. The other backends do not agree with each other about
+it: Wayland's `create_window` seeds `visible: desc.visible` exactly as X11's
+does, Win32's seeds it from `is_showing(hwnd)`, and AppKit's `window_state` asks
+`isVisible` every time rather than remembering anything. `HeadlessShell` seeds
+the request too, and there it is defensible — nothing in the model is
+asynchronous, so the request _is_ what happened. Picking the honest value is
+therefore one answer for the whole seam and its tests, not a line in the X11
+shell.
 
-**It reproduces locally**, which the first look wrongly concluded it did not —
-five clean runs is not evidence at a one-in-four rate.
-`CRCBL_E2E_X11_WM=openbox crates/crcbl-shell/tests/run-x11-e2e.sh`, repeated,
-fails with the identical `27/45 tests run` signature CI shows.
-
-What was established, by instrumenting `Session::point_in`'s wait:
-
-- **openbox never manages that window.** `Peer::window_parent(xid)` answered
-  `Some(root)` on every one of ~1954 polls across the 20 seconds. It is not slow
-  reparenting and it is not a lost reply.
-- **The query is healthy.** The answers are `Some`, and `Peer::connection_error`
-  — added this session for exactly this ambiguity — does not fire, so the
-  connection is live throughout.
-- **openbox is alive.** The harness reports a window manager that exits, and
-  CI's captured log tail carries only its benign missing-menu-file warning.
-- **It depends on what ran before it, and it is _not_ contention.** An earlier
-  reading of this entry said it was; the thing that refutes it is in the harness
-  itself — `run-x11-e2e.sh` passes `--test-threads 1`, so the suite is already
-  serial and no two tests are ever live at once. What varies is the sequence:
-  run alone with `-E 'test(a_window_that_did_not_ask_for_drops_takes_none)'` it
-  passed 10 times out of 10, and in the full serial run it fails about one run
-  in four. So a test that ran earlier leaves the server, or openbox, in a state
-  this one then meets.
-- **Partly bisected.** Restricting to the drag family,
-  `-E 'test(/drag|drop|xdnd/)'`, passes 6 out of 6, so the predecessor that
-  matters is outside it. Which one it is has not been found.
-
-**Ruled out:** a test stealing `SubstructureRedirect` from openbox, which would
-stop it managing anything — the only `SubstructureNotify | SubstructureRedirect`
-in `crates/crcbl-shell/src/x11/e2e.rs` is the destination mask of the EWMH
-`SendEvent` in `Peer::activate`, which is how a pager is _supposed_ to message a
-window manager, not a selection on the root.
-
-**Two interventions measured, neither shippable.** Against a matched baseline of
-2 failures in 8 runs:
-
-- Letting openbox settle for 3 seconds before the suite starts: **6 in 8**. So a
-  window-manager startup race is not the cause — a settle would have helped.
-  Eight runs a side is too few to claim it is actively worse.
-- `--test-threads=4`, overriding the harness's own `1`: **0 in 24**, which at
-  the baseline rate would happen by luck about one time in a thousand. Still not
-  a fix: the serial default looks deliberate, since these tests share one X
-  display and X selection ownership is a single-owner protocol, so running four
-  at once would trade this flake for clipboard races. It is evidence about
-  ordering, not a setting to change.
-
-**Not diagnosed:** why openbox leaves that window unmanaged for more than 20
-seconds after some earlier test has run. Raising `WAIT` would hide it rather
-than answer it, and was deliberately not done.
-
-**The failure now carries its own evidence.** `Session::pump_until_reporting`
-runs a closure at the deadline and puts what the predicate was reading into the
-panic, so the placement wait no longer needs a local reproduction to be read:
-
-```text
-timed out after 20s waiting for the window manager to place the window;
-events so far: ["Resized"]; parent Some(21f), root 0x21f, origin Some((0, 0))
-```
-
-`parent == root` is the whole diagnosis — the window manager never managed the
-window — and a `None` there would have meant the window was gone instead. That
-line came off a real reproduction, not a sabotage.
-
-**Bisected as far as it goes, and no single test is the cause** (2026-09-01).
-The suite runs in name order, and the target is 27th of 45. Its four immediate
-predecessors — `a_window_can_be_unmapped_and_mapped_again`,
-`a_window_created_borderless_does_not_report_its_own_request_as_the_answer`,
-`a_window_destroyed_while_a_drop_is_arriving_still_releases_the_source` and
-`a_window_has_no_size_until_it_is_pumped` — **reproduce it as a group**, 1
-failure in 8 runs of just those five tests. Each one paired with the target
-alone gives **0 in 12**.
-
-So it is cumulative rather than one poisoned predecessor: something that builds
-up over several windows being mapped and torn down, not a state one test leaves.
-That also explains why it survived the pointer being parked at the screen centre
-in `Session::open`, which is the suite's one documented cross-test channel and
-was the obvious suspect.
-
-**openbox thinks it manages the window it has not reparented** (2026-09-01).
-Reading `_NET_CLIENT_LIST` off the root at the moment of failure, the window is
-**in it** while `window_parent` still answers the root:
-
-```text
-parent Some(21f), root 0x21f, origin Some((0, 0)),
-in _NET_CLIENT_LIST Some(true), list Some([400000])
-```
-
-So this is not a window openbox never saw. It accepted it, listed it as a
-client, and did not give it a frame.
-
-**Window ids are reused between tests, and that is not the cause.** Each test is
-its own process and the X server hands a fresh client the base the last one
-released, so two tests in this filter both get `0x400000` — printed, not
-assumed. That suggested openbox was refusing a `MapRequest` for an id it still
-believed it managed, which would have made the client-list entry a stale one
-from the dead client. **Measured and rejected:** making every `Session::open`
-wait for `_NET_CLIENT_LIST` to drain before creating any window gives 4 failures
-in 24 runs, against a baseline of 1 in 8 — no improvement, and no session ever
-failed that new wait, so the list really was empty when each test began. The
-entry seen at failure is therefore the live one for the current window. The
-change was reverted rather than kept as a fix that fixes nothing.
-
-**What would move it next:** an `xtrace`-style log of what openbox does between
-the `MapRequest` and the reparent it never sends, on the five-test filter above
-— which reproduces in about seven seconds a run against the full suite's twenty.
-Nothing in this repository can see that, so it wants openbox run under a
-protocol tracer.
-
-**Third occurrence on `main`, 2026-09-02** (`bc8af6f`, a commit touching one
-JavaScript comment and this file, so nothing that could reach X11). Same job,
-same step 8. Re-running the failed job alone went green, which is what cleared
-`main`.
-
-**Read on 2026-09-02, and it is this flake.** The attribution above was made
-without the log, from the job, the step and the diff being incapable of causing
-it — a guess that happened to be right. The log says:
-
-```text
-crcbl e2e: no window manager (set CRCBL_E2E_X11_WM to add one)
-test a_window_that_did_not_ask_for_drops_takes_none ... FAILED
-timed out after 20s waiting for the window manager to place the window;
-events so far: ["Resized"]; parent Some(21f), root 0x21f, origin Some((0, 0))
-Summary 27/45 tests run: 26 passed, 1 failed
-```
-
-Same test, same message, same `27/45`, and `parent == root` is the entry's own
-"openbox never manages that window" finding restated by the panic itself.
-
-**The log was retrievable all along and the recorded method was wrong.**
-`gh run view --log-failed` does die with `stream error: stream ID 1; CANCEL`,
-and a bare `gh api …/jobs/<id>/logs` prints
-`the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway`
-— which is the answer rather than a failure. With that flag the log comes back
-whole, and an earlier attempt's log too, through `…/runs/<id>/attempts/1/jobs`.
-Never diagnose a red run from its job name again.
+Verified by reading `create_window` and `window_state` in
+`crates/crcbl-shell/src/x11/shell.rs` and `handle_map` in
+`crates/crcbl-shell/src/x11/input.rs` — which is the only writer of
+`state.visible` after creation — and then against a real X server, under the
+harness's own Xvfb: an assertion that the field reads `false` before the first
+pump fails, and the failure names `true`.
 
 ## One whole-workspace-only test flake is left, in the logger (2026-09-02)
 
