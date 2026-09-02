@@ -14186,17 +14186,21 @@ four most recent green runs): the run's wall time is the slowest demo's, because
 22, 47 and 49 minutes. `breach`, `lantern` and `puppet` are the next three, all
 in the 16-to-35-minute band, and `deploy` itself takes 14 seconds.
 
-**Those numbers are two clusters, not a mean with a tail** — 22, 22, 44, 47, 49
-over the five most recent green runs, with nothing between 22 and 44. The long
-cluster is now **three of five and the last three in a row**, which is the
-opposite of a tail: on this evidence the slow shape is becoming the normal one,
-and it doubles the site's latency every time. So a bound would be cutting into a
-job that routinely needs twenty minutes, and picking one means picking it above
-49 or deciding the long cluster is itself the bug. **Nobody has looked at what
-`shard` does differently in the slow runs** — that is the unasked question under
-option 3, and it is cheap to answer next time one is caught, by diffing the
-render step's own log against a fast run. Note that a _diagnosis_ does not need
-the decision below: it would say whether the long cluster is a defect or the
+**`shard` ranges from 22 to 49 minutes across the six most recent green runs** —
+22, 22, 34, 44, 47, 49. That is a **spread, not two clusters**. This entry twice
+called it bimodal, on four points and then five with a gap in the middle, and
+the sixth run landed at 34 and filled the gap in. Two lessons, one about the job
+and one about reading it: the job's cost varies by more than a factor of two run
+to run for reasons nobody has looked at, and a gap in five samples is not a
+structure.
+
+That still bounds the decision, and more tightly than the bimodal reading did: a
+timeout has to sit above 49 to avoid failing a healthy run, which is more than
+twice the fastest observed, so it would police almost nothing. **Nobody has
+looked at what `shard` does differently in a slow run** — that is the unasked
+question under option 3, and it is cheap to answer next time one is caught, by
+diffing the render step's own log against a fast run. A _diagnosis_ needs none
+of the decisions below: it would say whether the variance is a defect or the
 demo's honest cost, which is what makes options 1 and 3 different questions.
 
 **The decision this wants, and it is the user's.** Should `deploy` wait on every
