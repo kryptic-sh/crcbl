@@ -14274,10 +14274,35 @@ claim below it that appears nowhere in the file. A plan written to describe work
 that does not exist yet is the highest-risk document there is, because every
 sentence in it is a candidate the day the work lands.
 
-Still unaudited: the numbered plans `00`-`17`, `19`-`49`, `51`, `52`, and the
-seventeen remaining `docs/plan/sample/` files — over 18,000 lines. Nothing has
-re-derived `03-horde.md`'s four measurement tables either; those figures are
-carried on trust and are the bulk of that document.
+Still unaudited among the plans: `00`-`17`, `20`, `22`-`49`, `51`, `52`, and the
+seventeen remaining `docs/plan/sample/` files — over 18,000 lines. `19-input.md`
+and `21-jobs.md` were audited on 2026-09-02 and yielded eight, six of them wrong
+on the day they were written. Nothing has re-derived `03-horde.md`'s four
+measurement tables; those figures are carried on trust and are the bulk of that
+document.
+
+**And this file itself was swept on 2026-09-02** for entries whose subject had
+shipped — one deleted, two clauses cut, five reworded. What that sweep did
+**not** open, listed so the next one starts here rather than re-deriving it:
+
+- the 2026-08-04 full-codebase review block and its per-crate findings, which
+  the sweep judged the highest-yield unread region;
+- `MTL2`-`MTL6`, `DX3` and the D3D12 swapchain slice (only `MTL1` and `DX2` were
+  opened);
+- the sample-audit entries for breakout, asteroids, horde, hud, orbit, flappy,
+  sparks, puppet and lantern, and the four `## Coverage gaps in the … audit`
+  runs;
+- roughly 4,500 lines of WebGPU and backend-parity entries in the middle of the
+  file, including "WebGPU has no blockers left";
+- the ~45 bullets of "What the debug console left as limits", of which three
+  were opened — the largest single entry here about work that shipped in the
+  last week;
+- the 2026-08-13/14 slice-plan archive beyond two entries.
+
+**No measured figure anywhere in this file has been re-taken.** Every table —
+the AO tangential sweep, the pass timings, the Pages wall-clock numbers — is
+carried on trust; the sweeps have only ever checked that the symbols and files
+those tables name still exist.
 
 **The platform-coverage entries were audited on 2026-09-02 and yielded six
 more.** "Has never run" proved the most rotten shape of all, because the answer
