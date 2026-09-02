@@ -1645,9 +1645,12 @@ against the GGX lobe. What it did not do:
   Apple Paravirtual device reports none — it drew the three light sets and
   printed that the price went unmeasured (2026-08-31, after the `expect` on
   `TIMESTAMP_QUERY` reddened the Metal job on `b61ed52`). WARP and the wgpu
-  backend are untried. So the 3.7x and 2.3x ratios in `docs/plan/44-lighting.md`
+  backend are untried. So the 3.4x and 2.3x ratios in `docs/plan/44-lighting.md`
   are two drivers' numbers, and the browser tier's is still an ALU count rather
-  than a measurement.
+  than a measurement. Those two were re-taken on 2026-09-02 after `b36be08` and
+  `38b2688` changed the passes they time — the desktop ratio moved from 3.7x,
+  lavapipe's did not move — so the pair is current and the browser's absence is
+  the only gap left in the row.
 - **The browser tier's price is still stated by tap count, not measured.** An
   area light now reaches `render_e2e` and the browser harness —
   `Scene::AreaLight` draws two mirrored strips differing only in `fill`, and it

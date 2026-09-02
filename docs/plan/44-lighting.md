@@ -414,20 +414,28 @@ so every fragment walks a full list, which is the worst case the grid allows:
 
 | forward pass, 1920×1080      | radv (RX 7900 XTX, Mesa 26.2.1) | lavapipe (same Mesa) |
 | ---------------------------- | ------------------------------- | -------------------- |
-| sun alone                    | 0.082 / 0.092 ms                | 10.242 / 10.656 ms   |
-| + a full froxel of point     | 0.203 / 0.231 ms                | 19.540 / 20.164 ms   |
-| + a full froxel of rectangle | 0.532 / 0.615 ms                | 31.455 / 32.138 ms   |
+| sun alone                    | 0.087 / 0.090 ms                | 9.730 / 10.303 ms    |
+| + a full froxel of point     | 0.225 / 0.231 ms                | 19.139 / 20.294 ms   |
+| + a full froxel of rectangle | 0.559 / 0.578 ms                | 30.937 / 32.037 ms   |
 
 p50 / p95, and the three rows are rendered **interleaved on one device**, a
 frame each per turn, so a burst of contention lands on all three alike —
 measured one set after another on lavapipe under the rest of the suite, the sun
 alone came out dearer than the sixteen area lights that followed it. Over the
-sun-only frame that is 7.6 µs per point light and 28.1 µs per rectangle on radv,
-and 0.581 ms against 1.326 ms on lavapipe — **a rectangle costs 3.7× a point
-light on the desktop tier and 2.3× on the software one**. The answer the row
-predicted, "on everywhere", holds: even lavapipe's full froxel of rectangles is
-a third of a 1080p frame it already spends ten milliseconds on, and no scene in
-this tree has sixteen area lights over every pixel.
+sun-only frame that is 8.6 µs per point light and 29.5 µs per rectangle on radv,
+and 0.588 ms against 1.325 ms on lavapipe — **a rectangle costs 3.4× a point
+light on the desktop tier and 2.3× on the software one**.
+
+**Re-taken 2026-09-02** after `b36be08` changed how the colour pass shades and
+`38b2688` changed the unprojection several of these passes use; the figures
+above are the new ones, radv's from the median of three runs. What moved is the
+desktop ratio, from 3.7× to 3.4×: both kinds of light got a little dearer per
+light and the punctual one got dearer faster. lavapipe did not move at all —
+0.588 ms against a recorded 0.581, and 1.325 against 1.326 — which is what says
+the desktop shift is real rather than a re-measurement artefact. The answer the
+row predicted, "on everywhere", holds: even lavapipe's full froxel of rectangles
+is a third of a 1080p frame it already spends ten milliseconds on, and no scene
+in this tree has sixteen area lights over every pixel.
 
 **The browser tier is stated rather than measured**, and the reason recorded
 here — that no scene with an area light reaches the browser harness — stopped
@@ -442,7 +450,7 @@ integrals of up to five edges each; an edge is a normalise, a dot, a 2D cross
 and the published rational, with a `sqrt` and a divide on the obtuse branch.
 Against a punctual light's two normalises and the GGX lobe's two `sqrt`s that is
 roughly an order of magnitude more ALU, which is what the two measured tiers put
-at 2.3× to 3.7×. The browser runs the same shader on the same silicon through
+at 2.3× to 3.4×. The browser runs the same shader on the same silicon through
 WebGPU, so it should sit in the same band.
 
 **What the rung left**, all in `docs/backlog.md`: sphere, tube and disc shapes

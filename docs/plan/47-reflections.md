@@ -282,14 +282,20 @@ The reason recorded here — that half-resolution AO was owed and unmeasured, an
 a second unmeasured quality-for-speed trade should not land before the timers
 had been pointed at the first — expired when half-resolution AO landed
 2026-09-02 and was swept on both drivers. **The reason that replaces it is a
-measurement: on this tier the march is not where the frame goes.** Two headless
+measurement: on this tier the march is not where the frame goes.** Headless
 `apps/lantern` runs at 960×720 on an RX 7900 XTX (radv), p50 over 37 frames, put
-`ssr` at 8.1% of a 1.32 ms frame and `ssr-blur` at 0.9%, with the five `hiz`
-levels adding 1.8% — against `shadow` at 27.9% and `forward` at 22.6%. Halving
+`ssr` at 8.2% of a 1.27 ms frame and `ssr-blur` at 1.0%, with the five `hiz`
+levels adding 1.8% — against `shadow` at 27.1% and `forward` at 21.9%. Halving
 the march's extent could return about four per cent of a frame, and it would
 spend the depth-aware upsample `46-ambient-occlusion.md` built for a single
 channel on a colour one, which that document's own backlog entry calls a rung
 rather than a binding.
+
+(These were first taken hours earlier and re-taken after `38b2688` and
+`b36be08`, which changed `ssr.slang` and the forward pass this measurement is a
+share **of**. The frame fell from 1.32 ms to 1.27 ms, so the march's absolute
+cost barely moved while its share rose slightly — which is the reason to quote a
+share and an absolute together rather than either alone.)
 
 **What would change the answer is the browser tier, and its number is not in
 hand.** A software rasteriser spends two thirds of a frame in `forward`, so
