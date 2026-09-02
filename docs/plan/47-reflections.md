@@ -280,17 +280,33 @@ and `docs/backlog.md` carries that as a coverage gap rather than as a claim.
 No temporal anything. No back-face or thickness buffer. No half-resolution SSR.
 The reason recorded here — that half-resolution AO was owed and unmeasured, and
 a second unmeasured quality-for-speed trade should not land before the timers
-had been pointed at the first — **no longer applies**: half-resolution AO landed
-2026-09-02 and was swept on both drivers. This row now wants a reason of its own
-or none. No `LightingPath` gate, which still has no consumer. **No specular
-occlusion**: AO scales the ambient term alone, a highlight is an image of a
-light, and a reflection is an image of the room in one direction — none of the
-three take the same occlusion factor, and if one is wanted it is its own term
-and its own decision. And **SSR on transparency is out, with the interaction
-recorded now**: a transparent surface writing the reflectivity attachment would
-overwrite the opaque `F0` behind it while the scene colour at that pixel is a
-blend. Every SSR has this; writing it down is what stops the transparency row
-rediscovering it as a bug.
+had been pointed at the first — expired when half-resolution AO landed
+2026-09-02 and was swept on both drivers. **The reason that replaces it is a
+measurement: on this tier the march is not where the frame goes.** Two headless
+`apps/lantern` runs at 960×720 on an RX 7900 XTX (radv), p50 over 37 frames, put
+`ssr` at 8.1% of a 1.32 ms frame and `ssr-blur` at 0.9%, with the five `hiz`
+levels adding 1.8% — against `shadow` at 27.9% and `forward` at 22.6%. Halving
+the march's extent could return about four per cent of a frame, and it would
+spend the depth-aware upsample `46-ambient-occlusion.md` built for a single
+channel on a colour one, which that document's own backlog entry calls a rung
+rather than a binding.
+
+**What would change the answer is the browser tier, and its number is not in
+hand.** A software rasteriser spends two thirds of a frame in `forward`, so
+every other pass is a smaller share there, not a larger one — but that is an
+argument, not a reading. Until 2026-09-02 the reading was impossible to take:
+the browser log cut the pass table at fifteen of twenty-three labels, `ssr`
+among the missing. It no longer does.
+
+The rest of this row is unchanged. No `LightingPath` gate, which still has no
+consumer. **No specular occlusion**: AO scales the ambient term alone, a
+highlight is an image of a light, and a reflection is an image of the room in
+one direction — none of the three take the same occlusion factor, and if one is
+wanted it is its own term and its own decision. And **SSR on transparency is
+out, with the interaction recorded now**: a transparent surface writing the
+reflectivity attachment would overwrite the opaque `F0` behind it while the
+scene colour at that pixel is a blend. Every SSR has this; writing it down is
+what stops the transparency row rediscovering it as a bug.
 
 ### Taken 2026-08-27: Hi-Z marching, and a colour pyramid that may already exist
 
