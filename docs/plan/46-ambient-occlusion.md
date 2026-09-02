@@ -318,6 +318,18 @@ of where the widened target is worth its bandwidth:
   pair the SSR section's refusal has been waiting for. The widening is the
   bandwidth low does not pay.
 
+  **This rung is not blocked by the normal-attachment refusal below, checked
+  2026-09-02.** The refusal is real and stands, and this rung does not need what
+  it refuses: GTAO's horizon search produces a bent direction as a by-product of
+  the sweep it already runs, off the same depth-derived normal, so nothing new
+  is attached to the forward pass. The one place the answer was not obvious is
+  the reconstruction's fallback — where the scalar's identity is `1.0`, a
+  direction has no such constant — and `shaders/ssao_upsample.slang` already
+  binds `scene_depth` at the frame's own extent and loads it, so the fallback
+  can be the depth-derived normal at that pixel. What the rung does cost is
+  bandwidth and the blur: a direction does not filter like a scalar, and
+  whatever the widened blur does it must renormalise.
+
 **The published fit is not exactly one at full visibility, and the occlusion
 off-switch is why that had to be fixed rather than measured.** The three
 coefficients sum to `0.9996 + 0.0005 * albedo` — a hair under one for a dark
