@@ -3,88 +3,104 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## lantern's window reveal flickers on the mesh path (2026-09-02)
+## The amplification payload arrives as zeroes, so the mesh path draws one instance per bucket (2026-09-02)
 
-**Reported by the user against the running demo, reproduced, and not root
-caused.** One face of the window opening in `apps/lantern`'s room — the right
-reveal/jamb, the bright vertical strip down the right edge of the window —
-disappears for a frame and comes back, every few frames. The sill below it stays
-put. It is geometry, not lighting.
+**Root caused and reproduced by two tests in this tree. The fix is designed and
+proven on the device; it is not written.** This is the cause of the lantern
+flicker the user reported, and of a static, much larger defect that was sitting
+in the tree unnoticed.
 
-**How to see it.**
-`cargo run --release --bin lantern -- --frames 120 --tick-hz 1 --fullscreen --camera fixed`
-and watch the window. `--tick-hz 1` freezes the scene, so anything that changes
-between frames is the defect rather than the lamp. Grabbing the screen with
-`grim -l 0 -s 0.5` and differencing consecutive grabs, the toggle is a quantised
-**3099 changed pixels** in the window region every time, with about 646 more
-elsewhere in the frame — the same face each time, not a shading wobble.
+**What is wrong.** `slangc` emits **two** distinct `TaskPayloadWorkgroupEXT`
+variables when a task entry point and its mesh partner are compiled into one
+SPIR-V module: `%__EmitMeshTasks_Payload`, which `taskMain` writes, and
+`%amplification`, which `amplifiedMeshMain` reads. Nothing writes the second. On
+this machine's NVIDIA MX550 (driver 610.57.04) the mesh stage is given the
+variable the task never wrote, so `ClusterPayload` arrives **all zeroes**. Every
+kept cluster therefore draws `cluster 0` of `instance slot 0` of its bucket,
+whatever cluster and instance it was dispatched for.
 
-**What it depends on**, each measured by holding everything else fixed:
+`spirv-val --target-env vulkan1.3` accepts the module, and the one-payload-per-
+entry-point rule it enforces is satisfied — two variables in one module is legal
+SPIR-V that this driver mishandles. Whether other drivers do is not measured.
 
-- **The `MeshShader` geometry path.** `--force-geometry indirect-count` and
-  `indirect-per-batch` both show none of it. This is the strongest single clue:
-  the amplification stage is the only thing those runs drop.
-- **More than one frame in flight.** Building with
-  `crcbl_render::forward::FRAMES_IN_FLIGHT` at `1` removes it entirely (300
-  samples, zero toggles, against 30 at `2`). So it is a cross-frame hazard, not
-  a bad per-frame decision.
+**Where it already shows.** Both of these are red on this machine today:
 
-**What it is not:**
+- `crcbl-vk`'s
+  `mesh_shader::an_amplification_stage_delivers_its_payload_to_the_mesh_stage`
+  fails with its own words: "a payload that arrived as all zeroes blackens the
+  whole triangle". It is the minimal reproduction. Note the rest of that suite
+  cannot run here at all — `Debug::assert_clean` requires
+  `VK_LAYER_KHRONOS_validation`, which is not installed, so every other test in
+  it fails before reaching its subject.
+- `crcbl`'s
+  `the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden`
+  fails with "23 below vs 702 above": **two of the cube scene's three pyramids
+  never draw**. All three are instances of one mesh, so they share a bucket, and
+  only the instance in slot 0 of that bucket's run is ever drawn.
 
-- Not shadows, AO or reflections — it survives `--no-shadows`, `--no-ao` and
-  `--no-reflections` together.
-- Not the lamp. The lamp's sweep appears as long smooth runs in any per-frame
-  signal; the defect is isolated single-frame flips. Conflating the two is what
-  made a first pass of this investigation wrongly blame the shadow cadence, and
-  a whole-image mean-luminance metric is not able to tell them apart. Freeze the
-  scene instead.
-- **Not the depth-prepass overdraw change**
-  (`MeshModules::color_depth_stencil`). Two builds differing only in that
-  commit, with the scene frozen, toggled 6 and 4 times in ~23 grabs —
-  indistinguishable. An earlier 30-against-4 reading came from the
-  lamp-phase-sensitive metric above and should not be believed.
-- **Not the per-cluster cull dropping it.** `CullStats::clusters` reported
-  exactly 19 survivors on every one of 2998 consecutive fullscreen frames, each
-  a distinct readback frame. The geometry is dispatched every frame and lost
-  after the amplification stage.
+**Why it reads as a flicker rather than as missing geometry.** Which instance
+lands in slot 0 of a bucket's run is decided by the order `cull.slang`'s
+survivors win `visible_count[INSTANCE_SURVIVOR_WORD].add(1)`, which is an atomic
+append with no defined order. So the single instance that draws changes from
+frame to frame, and a face appears and disappears. The order is stable for a
+given binary on a given device — three consecutive runs of the determinism test
+gave byte-identical results — which is why this looks deterministic and why any
+unrelated shader edit shifts which frames are affected.
 
-**Narrowed to the amplification stage's per-cluster cull.** Building with
-`culls_clusters` forced to `false` — the mesh path with no amplification stage,
-which `ForwardRenderer::new` already supports for a device with `MESH_SHADER`
-and no `TASK_SHADER`, and which the code describes as "same picture, more work"
-— all but removes it. Three paired 120-frame runs each, scene frozen, counting
-the 3099-pixel toggle: **8, 1, 5 with the stage on against 0, 0, 2 with it
-off**. Not absolute, and the residual 2 may be the detector catching a lamp
-change in that region, but the effect is large and repeatable.
+**The fix, proven on the device.** Two shapes were tried against the payload
+test; both make it pass every payload assertion:
 
-**It is not the LOD cut.** Forcing the finest level everywhere
-(`LOD_ERROR_BUDGET` at `1e-9`) left the toggle intact at the same 3099 quantum.
-So `cluster_is_selected` and `DrawGen::group_state` — the hysteresis state, and
-the only mutable buffer the stage reads that is deliberately not ringed — are
-both exonerated, which was this investigation's leading suspect and is wrong.
+1. Rewrite the module so both entry points share one payload variable
+   (`spirv-dis`, drop the second `OpVariable`, point its uses at the first,
+   `spirv-as`). Verified with `spirv-val`.
+2. Compile the task entry point and its mesh partner as **single-entry-point
+   modules**, which is what `slangc -entry <name>` already produces — one
+   payload variable each.
 
-That leaves **`cluster_survives`** in `mesh_cluster.slang`: the per-cluster
-frustum test and the normal-cone test. A window reveal seen at a grazing angle
-is exactly the marginal case for a normal cone, so a cone verdict that flips
-frame to frame fits the symptom — one face, all of it, in and out. Its inputs
-are the static meshlet cone, `instance.transform` from the instance pool, and
-the frame's camera; the pool and the camera block are both per-frame-slot, so
-what would have to differ between two in-flight slots is not yet identified.
+Splitting only the mesh side does **not** work: with the task stage still coming
+from the combined module the payload is still zeroes. It is the task module's
+duplication that matters.
 
-**Caveat on an earlier measurement in this entry's history.** `CullStats`
-survivor counts were used to argue the cull was not dropping anything. That
-argument is weak: `clear-counters` runs ten times a frame (once per cull —
-cascades, camera, monitor), so the readback reflects only what accumulated after
-the last clear and need not cover the main camera pass at all. Do not reuse it.
+Shape 2 is the recommended one. It needs no new build tools, it mirrors what the
+DXIL leg already does — `dxil/` is one container per entry point, and the
+manifest already records those as `entry:path:sha` — and `ShaderEntry` already
+carries a module handle per stage, so the HAL needs no change. What it costs is
+the artifact model: per-entry SPIR-V records in `spirv/manifest.txt`, the parser
+in `crcbl-shaders/src/manifest.rs`, the verification in `build.rs`, the
+generated accessors, and the call sites in `forward.rs` and the `crcbl-vk`
+tests. The four sources that declare an amplification stage are
+`mesh_cluster.slang`, `mesh_shader.slang`, `task_write_probe.slang` and
+`zero_dispatch_probe.slang`.
 
-**Next step if picked up.** Establish which of the two tests flips, by reading
-back `CLUSTER_SURVIVOR_WORD`, `CLUSTER_FRUSTUM_REJECT_WORD` and
-`CLUSTER_CONE_REJECT_WORD` for the camera pass specifically rather than for
-whichever cull cleared last. If it is the cone, compare the cone verdict's
-inputs between two consecutive frames' instance-pool slots — the pool uploads by
-delta with per-slot dirty ranges, so a slot holding a stale transform for one
-instance would flip a marginal cone test while being far too small to move the
-geometry visibly.
+Shape 1 is smaller but rewrites compiler output and would make `spirv-as` a
+pinned build tool, since `build.rs` recompiles with the pinned `slangc` and
+compares bytes — which is also why a patched artifact cannot simply be
+committed.
+
+The natural third option is closed and already documented in
+`mesh_shader.slang`: a module-scope `groupshared` payload, which is the spelling
+that would give one variable, is refused by Slang's Metal backend.
+
+**Superseded by the above — do not re-run these.** An earlier pass of this
+investigation blamed `cluster_survives` in `mesh_cluster.slang`, the per-cluster
+frustum and normal-cone tests. That is wrong. Disabling the per-cluster frustum
+test, the instance frustum test in `cull.slang`, both together, forcing every
+LOD group expanded, and forcing `keep` to `1` each produced **byte-identical**
+frames: for the cube scene nothing is culled and nothing is deselected, so the
+whole cull is a no-op there. Forcing a global memory barrier before every pass
+in `graph.rs` also changed nothing, which is what rules out a missing barrier.
+
+An earlier entry also argued from `CullStats` survivor counts that the cull was
+not dropping anything. That argument was weak for its own reason —
+`clear-counters` runs once per cull, ten times a frame, so the readback need not
+cover the camera pass — and it should not be reused either way.
+
+**The regression test exists and is red.**
+`the_cube_scene_draws_the_same_frame_on_every_pass_of_the_ring` in
+`crates/crcbl/tests/render_e2e.rs` (commit `56e9a39b`) draws 32 still frames and
+asserts they are identical. It reports 3 of 30 differing on the amplified mesh
+path and passes on a device without `Features::TASK_SHADER`. It will go green
+with the fix, and it is the guard against this returning.
 
 ## HIGH PRIORITY — the user's calls of 2026-08-30
 
