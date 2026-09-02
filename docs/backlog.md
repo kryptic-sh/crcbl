@@ -14094,13 +14094,16 @@ are the ones flagged as most likely to yield:
   sample-plan audit block of 2026-08-26/27, and the slice-plan archive at the
   end of the file.
 
-**One claim is flagged rather than asserted.** The debug-draw entry's account of
-what world-anchored text would take may understate the blocker: the price test
-runs under the mesh-e2e runner, and `web/tools/browser-e2e.mjs` states that no
-`gpu passes` line appears in its page log because the gate's browser negotiates
-no `timestamp-query`. If that reading is right, a caller appending a segment
-still gives the browser gate nothing to time. The harness's device-feature
-negotiation was not opened to settle it.
+**The one claim flagged rather than asserted has since been settled, and the
+comment it rested on was wrong.** `web/tools/browser-e2e.mjs` stated that no
+`gpu passes` line appears in its page log, because the gate's browser negotiates
+no `timestamp-query`. It does negotiate one: the `web-e2e-quarry` artifact of
+Pages run 33572221541 carries
+`gpu passes (p50 / p95 over the last 53 of 53 frames): 20 label(s)`. So a caller
+appending a debug-draw segment would give the browser gate something to time
+after all, and the debug-draw entry does not understate its blocker. The comment
+has been corrected to say what is actually true of that report — it lands only
+at `Loop::finish`, so the one that survives a many-boot run is the last boot's.
 
 ## The published site went 15 commits stale, and three causes did it (2026-09-02)
 

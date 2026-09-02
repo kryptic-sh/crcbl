@@ -6531,12 +6531,16 @@ try {
   //   always looks like that: **the same page with that one file removed comes
   //   up on the default**. Two boots, one observable, asserted to differ.
   //
-  // **The pass report `Loop::finish` logs is the more direct reading and is not
-  // available here.** `crcbl_render::PassStats` is fed from GPU timestamp
-  // queries and `Loop::finish` logs nothing at all when it has no rows, which
-  // is what a browser with no `timestamp-query` leaves it with: no `gpu passes`
-  // line appears anywhere in this gate's page log. An observable that is absent
-  // on the machine the gate runs on is not one to build a check from.
+  // **The pass report `Loop::finish` logs is the more direct reading, and it is
+  // the wrong one here — not a missing one.** It is present: a Pages run's
+  // `web-e2e-quarry` log carries `gpu passes (p50 / p95 over the last 53 of 53
+  // frames): 20 label(s)`, so this gate's browser does negotiate
+  // `timestamp-query` and `PassStats` does fill. What makes it useless for this
+  // check is *when* it lands. A report reaches the log only at `Loop::finish`,
+  // and this gate loads the demo page many times while holding one log, so the
+  // report that survives is the last boot's — which in this block is the
+  // control, the boot with the seeded file removed. Reading it would measure
+  // the configuration the check is asserting against.
   //
   // **Seeded from the demo's own page, not from the harness's control page.**
   // OPFS is per origin and both are on this one, so either could write it — but
