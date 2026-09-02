@@ -1627,13 +1627,16 @@ against the GGX lobe. What it did not do:
   (`it reaches a device only on wasm32, where it is the automatic backend`), so
   the browser harness is the only thing that could ever have exercised those
   artifacts.
-- **`fill` has a GPU frame for a rectangle and for nothing else.**
-  `Scene::AreaLight`'s two strips differ in that one field alone, and the
-  overhead camera makes the mirror exact — every other term is equal by
-  construction, so the specular lobe the flag removes is the only thing that can
-  separate them. That is the flag's first evidence from a frame rather than from
-  a host-level assertion. A fill **point or spot** still has none, and no
-  `apps/` sample sets `fill: true`, so the flag ships unexercised outside tests.
+- **`fill` is drawn on all three kinds, and no sample sets it.** The rectangle's
+  frame is `Scene::AreaLight`; the two punctual kinds got theirs on 2026-09-02 —
+  `Scene::FillLight` for the picture and `mesh_e2e/fill_light.rs` for the exact
+  comparison, two frames of one light with one boolean changed, so its
+  assertions are about bits rather than a ratio under a tolerance. Each kind
+  fails on its own: pinning `Light::is_fill`'s `Point` arm to `false` reddens
+  the point test and leaves the spot's green, which is the failure mode a
+  kind-agnostic flag actually has. What is still true is the last clause — no
+  `apps/` sample sets `fill: true`, so outside the suites the flag ships
+  unexercised.
 - **Sphere, tube and disc are unbuilt.** The table serves them unchanged — the
   paper's own point — so what each needs is corners (a sphere and a tube are
   integrated as their silhouette quads) and a shape word in the row, not a

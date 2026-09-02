@@ -386,7 +386,12 @@ const MIN_COLORS_AREA_LIGHT: usize = 16;
 /// swapped for `screenshot`'s `AREA_CAMERA_UP`.
 const AREA_PIXELS_PER_UNIT: f32 = (EXTENT.1 as f32 / 2.0) / (2.0 * 0.577_350_3);
 
-/// Where a point on [`Scene::AreaLight`]'s floor lands in the frame.
+/// Where a point on [`Scene::AreaLight`]'s or [`Scene::FillLight`]'s floor lands
+/// in the frame.
+///
+/// One mapping for the two scenes because they are drawn through one camera —
+/// `screenshot`'s `area_camera`, which both name — so a second copy here would
+/// be a second place a framing change has to land.
 ///
 /// [`point_pixel`]'s flip for [`point_pixel`]'s reason: the camera looks down
 /// `-Y` with `+Z` up, so world `+X` is the frame's left and world `+Z` is its
@@ -1053,8 +1058,12 @@ fn each_caster_darkens_its_own_side_of_the_point_light(image: &Image) {
     }
 }
 
-/// `docs/plan/44-lighting.md`'s **rectangular area light**, drawn — and the one
-/// frame in the tree with a fill light in it.
+/// `docs/plan/44-lighting.md`'s **rectangular area light**, drawn — and the
+/// first frame in the tree with a fill light in it;
+/// [`the_fill_light_scene_draws_two_gleams_of_four_and_matches_its_golden`] is
+/// the same claim on the two punctual kinds.
+///
+/// [`the_fill_light_scene_draws_two_gleams_of_four_and_matches_its_golden`]: fn@the_fill_light_scene_draws_two_gleams_of_four_and_matches_its_golden
 ///
 /// The golden is half of the evidence and cannot be the other half:
 /// `mesh.slang`'s linearly transformed cosine path draws *a* bright band under
@@ -1161,6 +1170,231 @@ fn the_fill_strip_lights_the_floor_without_gleaming_on_it(image: &Image) {
          {fill_far:.1} at the strip's end, so the ratios above are a comparison against a \
          half-frame the fill flag switched off"
     );
+}
+
+/// The anti-vacuity floor for [`Scene::FillLight`].
+///
+/// [`MIN_COLORS_AREA_LIGHT`]'s number for its reason: this frame is one flat
+/// floor under four smooth falloffs, so most of its colours are the highlights'
+/// own ramps and a count high enough to be interesting would be one that fails
+/// when a lobe gets broader. What it separates is "the four lights lit nothing"
+/// — a frame of clear colour, or one flat floor under the ambient — from a
+/// working one, and *which* of the four gleams is
+/// [`the_fill_lights_light_the_floor_without_gleaming_on_it`]'s claim.
+///
+/// [`the_fill_lights_light_the_floor_without_gleaming_on_it`]: fn@the_fill_lights_light_the_floor_without_gleaming_on_it
+const MIN_COLORS_FILL_LIGHT: usize = 16;
+
+/// How far from the frame's axis each of [`Scene::FillLight`]'s four highlights
+/// sits, in world units.
+///
+/// [`AREA_HIGHLIGHT_AT`]'s arithmetic, and it is arithmetic rather than a
+/// measurement for that constant's reason: with the eye on the axis at
+/// `screenshot`'s `AREA_CAMERA_UP` and a light `FILL_LIGHT_UP` above the floor,
+/// the floor point whose mirror direction reaches the light is the light's own
+/// horizontal offset scaled by `camera / (camera + up)`. `1.4 * 2.0 / 2.8`.
+///
+/// One number for all four, which is what the comparison rests on: each pair's
+/// two bands are mirror images across the axis the camera stands on.
+const FILL_HIGHLIGHT_AT: f32 = 1.0;
+
+/// How far along `z` each pair's highlights sit from the frame's centre: the
+/// point pair on `-z`, the spot pair on `+z`.
+///
+/// [`FILL_HIGHLIGHT_AT`]'s scaling applied to the other coordinate, because the
+/// mirror direction carries the whole horizontal offset and not just its `x`.
+/// `0.7 * 2.0 / 2.8`.
+const FILL_HIGHLIGHT_Z: f32 = 0.5;
+
+/// How far out along `x` each of [`Scene::FillLight`]'s lights hangs, in world
+/// units — which is where the floor directly under it is.
+///
+/// `screenshot`'s `FILL_LIGHT_AT` unchanged. The *pool* is under the light and
+/// the *gleam* is at [`FILL_HIGHLIGHT_AT`], and the two being different places
+/// is what lets one band say the fill light lights while another says it does
+/// not gleam.
+const FILL_POOL_AT: f32 = 1.4;
+
+/// How far along `z` each pool sits from the frame's centre, on the same terms.
+///
+/// `screenshot`'s `FILL_PAIR_Z` unchanged.
+const FILL_POOL_Z: f32 = 0.7;
+
+/// The half-extent of each band [`Scene::FillLight`] is measured over, in
+/// pixels.
+///
+/// **Square, where [`AREA_BAND`] is long and narrow**, and that is the shape of
+/// the thing being measured: a punctual light's highlight on a flat floor under
+/// an overhead eye is round. Swept out from the highlight's centre, the profile
+/// on radv reads `203.4` at the centre against `115.5` and `103.0` one tenth of
+/// a unit either side, so at `screenshot`'s framing the gleam is about a dozen
+/// pixels across and a band this size stays inside it.
+const FILL_BAND: (u32, u32) = (3, 3);
+
+/// How much brighter a lit light's highlight must be than its fill twin's
+/// mirror of it.
+///
+/// A floor rather than a prediction, and a much higher one than
+/// [`AREA_HIGHLIGHT_RATIO`] because a punctual light's lobe is tighter than a
+/// strip's: the two bands take identical sun, ambient, occlusion and diffuse by
+/// construction (see [`Scene::FillLight`]), so everything between them is the
+/// specular lobe.
+///
+/// Swept rather than guessed. radv reads `5.42` at the point pair's highlight
+/// and `4.84` at the spot pair's; lavapipe reads `5.42` and `4.83`, which is the
+/// whole spread between a hardware driver and the software rasteriser CI
+/// approximates. This is under half the smaller of them.
+const FILL_HIGHLIGHT_RATIO: f32 = 2.5;
+
+/// How far apart the mirrored pair of bands *between* the two highlights is
+/// allowed to be, in either direction.
+///
+/// **Where the claim is that the two halves are the same floor.** The band sits
+/// at [`FILL_HIGHLIGHT_AT`] from the axis — the same distance from the eye and
+/// from the axis as every highlight — and midway along `z` between the point
+/// pair's row and the spot pair's, where each lobe is spent. What is left there
+/// is the diffuse, the ambient and the sun, and the mirror makes all three
+/// equal.
+///
+/// Two-sided, and that is not decoration: the term the mirror does *not* carry
+/// by construction is the shadow, since a fill light is refused a tile and its
+/// twin takes one. Nothing in this frame casts, so the tile resolves to lit —
+/// but a bias or a filter that darkened the lit half would show up here as a
+/// ratio *under* one, which a one-sided bound would pass. Swept: radv reads
+/// `1.0169` and lavapipe `1.0164`, and the widest excursion anywhere in the
+/// frame's mirrored profile is `0.984` in the lit spot's penumbra. This is
+/// several times either.
+const FILL_MIRROR_TOLERANCE: f32 = 1.08;
+
+/// How far above the frame's axis each fill light's own pool must measure.
+///
+/// The anti-vacuity half, on [`AREA_FILL_LIT_FLOOR`]'s terms: a fill light that
+/// lit nothing at all would satisfy every ratio above while drawing half a frame
+/// of ambient. The pool is the floor directly under the fill light; the band it
+/// is compared against is on the mirror plane at the same `z`, which is
+/// **further** from that light than the pool is and *nearer* to its lit twin —
+/// so a fill light contributing nothing would leave the pool the darker of the
+/// two and this would go red rather than merely narrow.
+///
+/// Swept: radv separates the point pair's by `10.3` levels and the spot pair's
+/// by `20.6`, lavapipe by `10.6` and `20.7`. Half the smaller.
+const FILL_LIT_FLOOR: f32 = 5.0;
+
+/// `docs/plan/44-lighting.md`'s **fill flag on a point light and on a spot**,
+/// drawn.
+///
+/// The golden is half of the evidence and cannot be the other half: four
+/// punctual lights over a floor draw four pools whether or not any of them is a
+/// fill light, and a `Light::row` that set
+/// [`FLAG_FILL`](crcbl_shaders::light::FLAG_FILL) for a rectangle alone draws a
+/// frame with four gleams in it that still looks like a lighting rig. The
+/// picture is what says the frame is the reviewed one;
+/// [`the_fill_lights_light_the_floor_without_gleaming_on_it`] is what says which
+/// of those it is.
+///
+/// [`the_fill_lights_light_the_floor_without_gleaming_on_it`]: fn@the_fill_lights_light_the_floor_without_gleaming_on_it
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_fill_light_scene_draws_two_gleams_of_four_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::FillLight,
+        "fill_light",
+        EXTENT,
+        MIN_COLORS_FILL_LIGHT,
+        the_fill_lights_light_the_floor_without_gleaming_on_it,
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_fill_light_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::FillLight,
+        "fill_light",
+        MIN_COLORS_FILL_LIGHT,
+        the_fill_lights_light_the_floor_without_gleaming_on_it,
+    );
+}
+
+/// [`Scene::FillLight`]'s claim, in three parts: **a point light and a spot each
+/// gleam where they light, the fill flag takes the gleam from both kinds, and
+/// what it takes is the gleam and not the light.**
+///
+/// Two mirrored pairs of bands, one per kind, and the mirror is what makes each
+/// one evidence. The camera stands on the axis the four lights are mirrored
+/// about, the floor is one plane, and the sun points straight down — so the two
+/// bands of a pair are the same distance from the eye, carry the same normal,
+/// and take the same directional diffuse, ambient, occlusion, Lambert and
+/// falloff. The specular lobe the fill flag removes is the only term that can
+/// separate them.
+///
+/// * **At the point pair's highlight**, [`FILL_HIGHLIGHT_AT`] out on each side
+///   and [`FILL_HIGHLIGHT_Z`] along `-z`. The lit light's band must lead its
+///   fill twin's by [`FILL_HIGHLIGHT_RATIO`].
+/// * **At the spot pair's**, the same distance out and as far along `+z`. It
+///   must lead by the same ratio, and that is the half of this the rectangle's
+///   frame could never make: `mesh.slang` drops the lobe off one flag rather
+///   than off the kind, so a row builder that set the bit for one kind and not
+///   another passes one of these two and fails the other.
+/// * **Midway between the two rows**, at the same distance from the axis. Here
+///   the two must agree to within [`FILL_MIRROR_TOLERANCE`] in *either*
+///   direction — which is what says the flag removed a lobe rather than dimming
+///   a light, and what would catch a shadow term arriving on the lit half alone.
+///
+/// The fourth and fifth bands are the anti-vacuity floor and they are on the
+/// fill side alone: each fill light's own pool against the frame's axis at the
+/// same `z`, which must lead by [`FILL_LIT_FLOOR`]. Both take the same flat
+/// ambient and the same straight-down sun, and the axis band is *nearer* to the
+/// lit twin than the pool is — so what separates them is the fill light's own
+/// diffuse, which is what says the three claims above are not a comparison
+/// against a half-frame the flag switched off.
+fn the_fill_lights_light_the_floor_without_gleaming_on_it(image: &Image) {
+    let band = |x: f32, z: f32| block_brightness(image, area_pixel(x, z), FILL_BAND);
+    let point_lit = band(-FILL_HIGHLIGHT_AT, -FILL_HIGHLIGHT_Z);
+    let point_fill = band(FILL_HIGHLIGHT_AT, -FILL_HIGHLIGHT_Z);
+    let spot_lit = band(-FILL_HIGHLIGHT_AT, FILL_HIGHLIGHT_Z);
+    let spot_fill = band(FILL_HIGHLIGHT_AT, FILL_HIGHLIGHT_Z);
+    let mirror_lit = band(-FILL_HIGHLIGHT_AT, 0.0);
+    let mirror_fill = band(FILL_HIGHLIGHT_AT, 0.0);
+    let point_pool = band(FILL_POOL_AT, -FILL_POOL_Z);
+    let point_axis = band(0.0, -FILL_POOL_Z);
+    let spot_pool = band(FILL_POOL_AT, FILL_POOL_Z);
+    let spot_axis = band(0.0, FILL_POOL_Z);
+    eprintln!(
+        "crcbl render e2e: fill light — point {point_lit:.1} against {point_fill:.1}; spot \
+         {spot_lit:.1} against {spot_fill:.1}; between them {mirror_lit:.1} against \
+         {mirror_fill:.1}; the fill pools {point_pool:.1} and {spot_pool:.1} against \
+         {point_axis:.1} and {spot_axis:.1} on the axis"
+    );
+    for (kind, lit, filled) in [
+        ("point light", point_lit, point_fill),
+        ("spot", spot_lit, spot_fill),
+    ] {
+        assert!(
+            filled * FILL_HIGHLIGHT_RATIO < lit,
+            "the lit {kind}'s highlight must be unmistakably brighter than its fill twin's \
+             mirror of it: {lit:.1} against {filled:.1}, which is not a lobe the flag removed"
+        );
+    }
+    assert!(
+        mirror_lit < mirror_fill * FILL_MIRROR_TOLERANCE
+            && mirror_fill < mirror_lit * FILL_MIRROR_TOLERANCE,
+        "but between the two highlights, where neither lobe reaches, the two halves must be \
+         the same floor: {mirror_lit:.1} against {mirror_fill:.1} — so the flag is dimming a \
+         light rather than removing its lobe, or the lit half is carrying a shadow term its \
+         twin was refused a tile for"
+    );
+    for (kind, pool, axis) in [
+        ("point light", point_pool, point_axis),
+        ("spot", spot_pool, spot_axis),
+    ] {
+        assert!(
+            pool > axis + FILL_LIT_FLOOR,
+            "the fill {kind} must still light the floor under it: {pool:.1} against {axis:.1} \
+             on the axis, which is further from it and nearer its lit twin — so the ratios \
+             above are a comparison against a half-frame the fill flag switched off"
+        );
+    }
 }
 
 /// The anti-vacuity floor for [`Scene::Ao`].

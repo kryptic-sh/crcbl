@@ -49,7 +49,11 @@ impl HdrTarget {
     }
 
     /// The brightest linear channel anywhere in the target, and where it is.
-    fn peak(&self) -> (u32, u32, f32) {
+    ///
+    /// `pub(crate)` because `fill_light.rs` compares one frame's peak against
+    /// another's: the fill flag's whole subject is the highlight, and the
+    /// brightest texel of a frame is where the highlight is.
+    pub(crate) fn peak(&self) -> (u32, u32, f32) {
         let mut hottest = (0u32, 0u32, 0.0f32);
         for y in 0..MESH_EXTENT.1 {
             for x in 0..MESH_EXTENT.0 {

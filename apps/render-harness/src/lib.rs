@@ -133,6 +133,7 @@ const SCENES: &[(Scene, &str)] = &[
     (Scene::SpotShadow, "spot_shadow"),
     (Scene::PointShadow, "point_shadow"),
     (Scene::AreaLight, "area_light"),
+    (Scene::FillLight, "fill_light"),
     (Scene::Ao, "ao"),
     (Scene::Ssr, "ssr"),
     (Scene::Probes, "probes"),

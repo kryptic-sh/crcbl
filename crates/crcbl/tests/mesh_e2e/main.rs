@@ -79,6 +79,7 @@ mod area_light;
 mod debug_draw;
 mod depth_only;
 mod exposure;
+mod fill_light;
 mod froxels;
 mod goldens;
 mod hdr;

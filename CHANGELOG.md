@@ -16,6 +16,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The GPU pass table is logged one record per line, so a sink with a length
+  cap cannot swallow its tail.** It grows with the pass count, which made it the
+  first message to meet `crcbl::web`'s 1024-byte cap: a lantern browser-gate log
+  carried fifteen of twenty-three passes and stopped mid-number, with `ssr`,
+  `tonemap` and `ui-composite` absent. `PassStats::report`'s text is unchanged.
+
 - **A browser log line cut at the 1024-byte cap now says how much it lost.**
   `crcbl::web`'s sink truncated silently, so a long diagnostic ended at a
   plausible row and read as complete — `crcbl::engine`'s per-pass timing table
@@ -199,6 +205,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   render tests — names it now. `false` is the light that was there before.
 
 ### Added
+
+- **`crcbl screenshot --scene fill_light` draws a fill point light and a fill
+  spot, which nothing did before.** A new `crcbl::screenshot::Scene::FillLight`:
+  `Scene::AreaLight`'s dark glossy floor, overhead camera and straight-down sun
+  under four punctual lights — a point pair and a spot pair, each mirrored
+  across the frame's axis and each differing in `fill` alone.
+  `crcbl_shaders::light::FLAG_FILL` is kind-agnostic in `mesh.slang`, so until
+  now a row builder that set the bit for a rectangle and not for the two
+  punctual kinds drew every existing frame correctly. The scene reaches
+  `crates/crcbl/tests/render_e2e.rs` and `web/run-render-harness-e2e.sh` like
+  every other and passes there unexcused, so the WebGPU backend's fill flag is
+  compared against the same reference the native suites use. Its checker
+  measures each lit light's highlight against its fill twin's mirror of it,
+  requires the two halves to agree where neither lobe reaches, and requires each
+  fill light's own pool to lead the frame's axis — so a flag that dimmed a light
+  rather than removing its lobe, and a fill light that lit nothing at all, both
+  go red.
+
+- **`crates/crcbl/tests/mesh_e2e/fill_light.rs` proves the flag on the GPU for a
+  point light and for a spot.** Each is rendered twice over `area_light.rs`'s
+  slab, differing in `fill` alone, and the two linear scene targets are
+  compared: a real share of the frame must lose radiance, the frame's brightest
+  texel must lose most of itself, and nothing anywhere may gain any. The
+  rectangle's existing test now shares that comparison through `radiance_lost`.
+  Before this the flag's only GPU evidence was a rectangle's.
 
 - **`crcbl screenshot --scene area_light` draws a rectangular area light, and it
   is the first frame in the tree with a fill light in it.** A new

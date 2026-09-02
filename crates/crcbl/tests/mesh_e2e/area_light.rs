@@ -141,7 +141,14 @@ fn teardown(headless: Headless, renderer: ForwardRenderer, mut pool: TransientPo
 /// what the *shading* did belongs on the linear target, where nothing has been
 /// through a tonemap curve or an exposure yet; a claim about what the frame
 /// looks like belongs on the image.
-fn slab_frame(headless: &Headless, lights: &[Light]) -> (crcbl_golden::Image, HdrTarget) {
+///
+/// `pub(crate)` because `fill_light.rs` renders its two punctual pairs over this
+/// same slab: the fill flag is one flag and the surface it is measured on should
+/// not be a per-kind choice.
+pub(crate) fn slab_frame(
+    headless: &Headless,
+    lights: &[Light],
+) -> (crcbl_golden::Image, HdrTarget) {
     let (mut renderer, mut pool) = slab_scene(headless, lights);
     let mut hdr = Vec::new();
     let image = render_mesh_lit(
@@ -281,13 +288,47 @@ fn turning_the_rectangle_about_its_normal_moves_its_highlight() {
     );
 }
 
-/// **The fill flag removes the highlight and leaves the light.**
+/// How many texels of `fill` are dimmer than `lit` in any colour channel, and
+/// the largest amount any texel **gained**.
 ///
-/// Measured on the linear scene target rather than on the tonemapped image, and
-/// that is the whole design of this test: the two frames carry different total
-/// light, so the tonemap maps them differently and a texel with strictly less
-/// radiance can still come out one display level higher. The claim is about what
-/// the shading did, so it is made where the shading wrote.
+/// Measured on the linear scene targets rather than on the tonemapped images,
+/// and that is the whole design of every test that calls this: two frames
+/// carrying different total light are mapped differently, so a texel with
+/// strictly less radiance can still come out one display level higher. The claim
+/// is about what the shading did, so it is made where the shading wrote.
+///
+/// `pub(crate)` and here rather than in one of the two callers because
+/// `crcbl_shaders::light::FLAG_FILL` is kind-agnostic: this file asks the
+/// question of a rectangle and `fill_light.rs` asks it of a point light and a
+/// spot, and one comparison loop is one place a channel index or an alpha
+/// channel can be got wrong.
+pub(crate) fn radiance_lost(lit: &HdrTarget, fill: &HdrTarget) -> (u32, f32) {
+    let (width, height) = MESH_EXTENT;
+    let mut dimmed = 0;
+    let mut brightest_gain = 0.0f32;
+    for y in 0..height {
+        for x in 0..width {
+            let before = lit.pixel(x, y);
+            let after = fill.pixel(x, y);
+            // Alpha is a constant one on both, and would count every texel.
+            if (0..3).any(|channel| after[channel] < before[channel]) {
+                dimmed += 1;
+            }
+            for channel in 0..3 {
+                brightest_gain = brightest_gain.max(after[channel] - before[channel]);
+            }
+        }
+    }
+    (dimmed, brightest_gain)
+}
+
+/// **The fill flag removes the highlight and leaves the light**, on a
+/// rectangle.
+///
+/// Two frames of the same strip differing in `fill` alone, compared through
+/// [`radiance_lost`] — whose doc says why the comparison is on the linear target
+/// and not on the image. `fill_light.rs` asks the same question of the two
+/// punctual kinds.
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
 fn a_fill_light_keeps_its_diffuse_and_loses_its_highlight() {
@@ -297,22 +338,7 @@ fn a_fill_light_keeps_its_diffuse_and_loses_its_highlight() {
     headless.finish();
 
     let (width, height) = MESH_EXTENT;
-    let mut dimmed = 0;
-    let mut brightest_gain = 0.0f32;
-    for y in 0..height {
-        for x in 0..width {
-            let before = lit.pixel(x, y);
-            let after = fill.pixel(x, y);
-            // Alpha is a constant one on both, and would count every texel.
-            let lost = (0..3).any(|channel| after[channel] < before[channel]);
-            if lost {
-                dimmed += 1;
-            }
-            for channel in 0..3 {
-                brightest_gain = brightest_gain.max(after[channel] - before[channel]);
-            }
-        }
-    }
+    let (dimmed, brightest_gain) = radiance_lost(&lit, &fill);
     eprintln!(
         "{}: {dimmed} of {} texels lost radiance to the fill flag, the largest gain anywhere is \
          {brightest_gain}",

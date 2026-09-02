@@ -212,7 +212,8 @@ pub enum Scene {
     /// floor under two strip lights, looked straight down at.
     ///
     /// **The only frame in the tree that draws a polygon's highlight, and the
-    /// only one that draws a fill light at all.** `mesh.slang`'s linearly
+    /// first that drew a fill light at all** — [`Scene::FillLight`] is the same
+    /// experiment on the two punctual kinds. `mesh.slang`'s linearly
     /// transformed cosine path compiled to all four targets and lit no pixel in
     /// any golden here, and neither did the flag that takes a light's specular
     /// lobe away — a rectangle read as a point at its own centre, one whose `v`
@@ -254,6 +255,42 @@ pub enum Scene {
     /// for where the strips hang, and `area_sun` for the sun that makes the
     /// mirror a control.
     AreaLight,
+    /// `docs/plan/44-lighting.md`'s **fill flag on the two punctual kinds**: the
+    /// same dark glossy floor under four lights — a point pair and a spot pair,
+    /// each mirrored across the frame's axis and each differing in `fill` alone.
+    ///
+    /// **The only frame in the tree that draws a fill point light or a fill
+    /// spot.** [`Scene::AreaLight`] is the flag's other picture and it draws the
+    /// flag on a rectangle; `crcbl_shaders::light::FLAG_FILL` is kind-agnostic
+    /// in `mesh.slang`, so a `Light::row` that set the bit for one kind and not
+    /// the others — or a shading path that dropped the lobe on the rectangle's
+    /// arm alone — draws that scene exactly right and this one wrong.
+    ///
+    /// It is that scene's floor, camera and sun rather than a second set of
+    /// each: `area_scene` builds the floor, `AREA_ALBEDO` is where its darkness
+    /// is argued and measured, `area_camera` is the framing and `area_sun` is
+    /// the sun. What differs is the light list — see `fill_light_pairs`.
+    ///
+    /// # Why the mirror is exact
+    ///
+    /// Reflecting the scene about the plane `x = 0` maps this light list onto
+    /// itself with `fill` swapped: every lit light lands on its own fill twin,
+    /// at the same height, the same reach, the same colour and the same cone.
+    /// So two mirrored floor points take the same total diffuse — the same sum
+    /// in a different order — and, the camera being on that plane and the sun
+    /// pointing straight down, the same ambient, the same occlusion and the same
+    /// directional term. What is left is the specular lobe, which a fill light
+    /// contributes nothing to, and `tests/render_e2e.rs` measures it at each lit
+    /// light's highlight against that highlight's mirror.
+    ///
+    /// The one term the mirror does **not** carry by construction is the
+    /// shadow: `crcbl_render::shadow::Selection` refuses a fill light a tile and
+    /// hands its twin one. Nothing in this frame casts — the floor is the only
+    /// geometry — so both halves are fully lit, and that is a claim rather than
+    /// an assumption: `tests/render_e2e.rs` measures a mirrored pair of bands
+    /// out where neither highlight reaches and holds them to a tolerance its
+    /// own sweep set.
+    FillLight,
     /// `docs/plan/18-render-features.md`'s **screen-space ambient occlusion**:
     /// the inside of a box, looked straight down into, lit almost entirely by
     /// ambient.
@@ -1784,12 +1821,17 @@ const AREA_ALBEDO: f32 = 0.15;
 /// arrangement exactly.
 const AREA_FLOOR: usize = 3;
 
-/// [`Scene::AreaLight`]'s scene: the engine's own, with the dark glossy floor
-/// row appended.
+/// [`Scene::AreaLight`]'s and [`Scene::FillLight`]'s scene: the engine's own,
+/// with the dark glossy floor row appended.
 ///
 /// A description of its own for [`Scene::Bloom`]'s reason — this is one of two
 /// fixtures needing a material the demo scene does not have — and the only thing
 /// that differs is that one row.
+///
+/// **One description for the two scenes rather than one each.** They are the
+/// same experiment on two light kinds and the floor is the control: a row that
+/// moved in one of them and not the other would leave the pair comparable only
+/// by eye.
 fn area_scene() -> crate::render::scene::SceneDesc<'static> {
     let mut scene = crate::render::scene::demo();
     scene.materials.push(crate::shaders::mesh::GpuMaterial {
@@ -1884,12 +1926,12 @@ const AREA_RADIANCE: glam::Vec3 = glam::Vec3::new(8.8, 7.92, 6.76);
 /// each is tens of pixels across at the golden suite's 256×192.
 const AREA_CAMERA_UP: f32 = 2.0;
 
-/// The camera [`Scene::AreaLight`] is drawn with: straight down at the floor,
-/// on [`spot_camera`]'s terms exactly.
+/// The camera [`Scene::AreaLight`] and [`Scene::FillLight`] are drawn with:
+/// straight down at the floor, on [`spot_camera`]'s terms exactly.
 ///
-/// **On the axis the two strips are mirrored about**, which is the whole of what
-/// makes the comparison a control rather than an estimate: an off-axis eye sees
-/// the two highlights at different angles, and the specular lobe is a function
+/// **On the axis the lights are mirrored about**, which is the whole of what
+/// makes either comparison a control rather than an estimate: an off-axis eye
+/// sees the two halves at different angles, and the specular lobe is a function
 /// of that angle.
 fn area_camera() -> Camera {
     Camera {
@@ -1906,7 +1948,8 @@ fn area_camera() -> Camera {
     }
 }
 
-/// The sun [`Scene::AreaLight`] runs under: **straight down**, and barely there.
+/// The sun [`Scene::AreaLight`] and [`Scene::FillLight`] run under: **straight
+/// down**, and barely there.
 ///
 /// Both halves are load-bearing, on [`ao_sun`]'s terms and for a second reason
 /// of this scene's own.
@@ -1964,6 +2007,141 @@ fn area_strips() -> [crcbl_render::Light; 2] {
     [
         area_strip(-AREA_STRIP_AT, false),
         area_strip(AREA_STRIP_AT, true),
+    ]
+}
+
+/// How far above the floor each of [`Scene::FillLight`]'s four lights hangs.
+///
+/// **The gleam and the pool have to be different places, and this is what puts
+/// them apart.** With the eye on the axis at [`AREA_CAMERA_UP`], a light at
+/// horizontal offset `p` puts its specular highlight at `p` scaled by
+/// `camera / (camera + up)` — [`AREA_STRIP_UP`]'s arithmetic — while its
+/// brightest diffuse is under the light itself. A light on the floor would put
+/// the two in the same spot and a light at the camera's own height would leave
+/// the gleam on the axis, and in neither case would a band at the highlight be
+/// measuring a lobe.
+const FILL_LIGHT_UP: f32 = 0.8;
+
+/// How far out along `x` each of [`Scene::FillLight`]'s lights hangs from the
+/// frame's axis.
+///
+/// [`AREA_STRIP_AT`]'s offset for its reason: far enough out that the lit half's
+/// highlight and the fill half's mirror of it are separate objects in the
+/// picture with open floor between them, and near enough that both are inside
+/// the frame with margin at [`AREA_CAMERA_UP`]'s framing.
+const FILL_LIGHT_AT: f32 = 1.4;
+
+/// How far out along `z` each **pair** sits from the frame's centre: the point
+/// pair on `-z`, the spot pair on `+z`.
+///
+/// One frame carries both kinds because the flag is one flag — `Light::row`
+/// sets [`FLAG_FILL`](crcbl_shaders::light::FLAG_FILL) from `Light::is_fill`,
+/// which is one question asked of three variants — so a scene that drew the
+/// kinds separately would be two frames of the same claim.
+///
+/// Split along `z` rather than `x` because `x` is the axis the mirror is about:
+/// separating the pairs along it would put a point light and a spot light on
+/// opposite sides of that mirror, and the two halves would then differ in a
+/// light's *kind* as well as in its `fill`. Far enough apart that the four
+/// highlights are four separate objects in the frame, and near enough that all
+/// four are inside it — every size this scene is drawn at is wider than it is
+/// tall, so this axis has the less room of the two.
+const FILL_PAIR_Z: f32 = 0.7;
+
+/// The radius of each [`Scene::FillLight`] spot's bright core where it lands on
+/// the floor.
+///
+/// Written as a radius on the floor rather than as a half-angle, which is also
+/// how [`fill_spot`] passes it — [`SPOT_CORE_RADIUS`]'s convention. Wide enough
+/// to reach past the spot's own highlight, which sits [`FILL_LIGHT_AT`] and
+/// [`FILL_PAIR_Z`] scaled by [`FILL_LIGHT_UP`]'s factor away from the point
+/// under the light: a highlight sitting in the penumbra would have the cone's
+/// ramp multiplying it, and the ramp is not what this frame is about.
+const FILL_SPOT_CORE: f32 = 0.6;
+
+/// The radius at which each of those cones has closed, on the same terms.
+///
+/// Comfortably outside [`FILL_SPOT_CORE`] so the cone is visibly a cone in the
+/// picture — a spot whose penumbra is a step is one no reader can tell from a
+/// point light — and the band between the two is where the frame says which kind
+/// the row was read as.
+const FILL_SPOT_EDGE: f32 = 0.95;
+
+/// How far each of [`Scene::FillLight`]'s lights reaches from its own position.
+///
+/// [`AREA_REACH`]'s figure for its reason, and its own constant rather than that
+/// one so the two scenes' framings stay independent: the quartic window
+/// `crcbl_render::PointLight::radius` documents is nowhere near its zero
+/// anywhere in the picture, so what shapes this frame is the inverse square, the
+/// cone and the lobe rather than the radius.
+const FILL_REACH: f32 = 12.0;
+
+/// The colour each of [`Scene::FillLight`]'s four lights carries, intensity
+/// included.
+///
+/// Near-white on [`spot_light`]'s terms: the floor is [`AREA_ALBEDO`]'s grey and
+/// a coloured light would tint a frame whose whole subject is a *level*.
+///
+/// **Under one, where [`AREA_RADIANCE`] is well over it**, and the two are not
+/// comparable figures: a rectangle's is the radiance leaving a face and this is
+/// a punctual light's intensity, which the inverse square then divides by a
+/// distance under a unit. **It is the exposure and not the contrast**, on that
+/// constant's terms — every term in the frame scales with it, so it moves where
+/// the highlights sit in the display range and not how far each leads its
+/// mirror.
+///
+/// Swept rather than guessed. At four times this figure the highlight's band
+/// read a flat `255.0` of a possible `255` and the frame's brightest channel was
+/// saturated with it, which is a golden whose highlight has no falloff left in
+/// it; here the band reads `203.4` and the brightest channel anywhere in the
+/// frame is `232`.
+const FILL_INTENSITY: glam::Vec3 = glam::Vec3::new(0.5, 0.475, 0.425);
+
+/// One of [`Scene::FillLight`]'s point lights: on the point pair's row at `x`,
+/// and a fill light or not.
+fn fill_point(x: f32, fill: bool) -> crcbl_render::Light {
+    crcbl_render::Light::Point(crcbl_render::PointLight {
+        position: glam::Vec3::new(x, FILL_LIGHT_UP, -FILL_PAIR_Z),
+        radius: FILL_REACH,
+        color: FILL_INTENSITY,
+        fill,
+    })
+}
+
+/// One of [`Scene::FillLight`]'s spots: on the spot pair's row at `x`, pointing
+/// straight down, and a fill light or not.
+///
+/// Straight down, and the mirror is what fixes that: reflecting about `x = 0`
+/// has to carry each cone onto its twin's, so the aim may have no `x` component
+/// at all. Straight down is the one such aim that also puts the cone's axis
+/// through the brightest part of its own pool, which is what keeps the two
+/// cones' footprints the same shape as well as the same size.
+fn fill_spot(x: f32, fill: bool) -> crcbl_render::Light {
+    crcbl_render::Light::Spot(crcbl_render::SpotLight {
+        position: glam::Vec3::new(x, FILL_LIGHT_UP, FILL_PAIR_Z),
+        radius: FILL_REACH,
+        color: FILL_INTENSITY,
+        // Along the cone, away from the light — `spot_light`'s convention, which
+        // `crcbl_render::SpotLight::direction` is where it is spelled out.
+        direction: glam::Vec3::NEG_Y,
+        inner_angle: (FILL_SPOT_CORE / FILL_LIGHT_UP).atan(),
+        outer_angle: (FILL_SPOT_EDGE / FILL_LIGHT_UP).atan(),
+        fill,
+    })
+}
+
+/// [`Scene::FillLight`]'s four lights: a point pair and a spot pair, the
+/// ordinary one of each out along `-x` and the fill one out along `+x`.
+///
+/// A helper rather than four literals at the call site, on [`area_strips`]'
+/// terms: this is the one place the mirror can be read, and there is no way for
+/// a height, a reach or a colour to drift between a light and its twin.
+fn fill_light_pairs() -> [crcbl_render::Light; 4] {
+    [
+        fill_point(-FILL_LIGHT_AT, false),
+        fill_point(FILL_LIGHT_AT, true),
+        fill_spot(-FILL_LIGHT_AT, false),
+        fill_spot(FILL_LIGHT_AT, true),
     ]
 }
 
@@ -2433,6 +2611,34 @@ impl SceneState {
                     ..EffectRequest::default()
                 });
                 renderer.set_lights(&area_strips());
+                Self::Forward {
+                    camera: area_camera(),
+                    light: area_sun(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::FillLight => {
+                // `Scene::AreaLight`'s floor, placed the same way and through
+                // the same row, and one more reason of this scene's own for the
+                // floor being the only thing in it: a fill light is refused a
+                // shadow tile and its lit twin is handed one, so a caster here
+                // would put a shadow on one half of the mirror and nothing on
+                // the other, and the difference the bands measure would be a
+                // shadow wearing the fill flag's name.
+                let mut renderer =
+                    ForwardRenderer::with_scene(device, queue, format, &area_scene())?;
+                place(&mut renderer, DEMO_CUBE, AREA_FLOOR, spot_floor());
+                // **The reflection pair, refused**, on `Scene::AreaLight`'s
+                // terms exactly: this is that floor and it carries that
+                // roughness, which is under `ssr.slang`'s cutoff, so a march
+                // over the depth buffer would write into the pixels the
+                // highlights are measured in.
+                renderer.set_effect_request(EffectRequest {
+                    programmatic: EffectOverride::none()
+                        .force(RenderEffects::REFLECTIONS, Some(false)),
+                    ..EffectRequest::default()
+                });
+                renderer.set_lights(&fill_light_pairs());
                 Self::Forward {
                     camera: area_camera(),
                     light: area_sun(),
