@@ -123,8 +123,11 @@ separable:
   lavapipe, and on its own it is a regression. With four slices it is what takes
   the line to zero on both tiers.
 
-Whether that becomes a quality preset is `docs/plan/43-render-standards.md`'s
-own unbuilt row, not this entry's.
+Whether a tier should spend anything on these two knobs is not this entry's
+question. `docs/plan/43-render-standards.md`'s preset row is built — the seam
+landed 2026-08-31 — but its tier table has no cell for either knob, which is
+what "The tier table is silent about six knobs a preset could write" below is
+about.
 
 **Giving the AO knobs `[engine.video]` keys is a separate, still-wanted route**,
 and the only one for anything that is not a console variable — an autoexec
@@ -231,8 +234,9 @@ shader with three readers** — the AO pass, `47-reflections.md`'s march, and
 `51-volumetrics.md`'s composite, which already samples a froxel grid far below
 the frame's resolution and would trade its trilinear lookup for a depth-aware
 one. Only the AO reader was built, and that plan section has been deleted now
-that it ships. Both other documents still cite the shared upsample, so this
-entry is what those citations are owed.
+that it ships. `docs/plan/51-volumetrics.md` still cites the shared upsample, so
+this entry is what that citation is owed. `47-reflections.md` does not cite it
+at all — checked whole-file for "upsample", "bilateral" and "depth-aware".
 
 What actually exists is `crates/crcbl-shaders/shaders/ssao_upsample.slang`, and
 it is **AO-specific, not a shared pass**: it reads a single-channel `R8Unorm`
@@ -243,9 +247,10 @@ channel count nor that far-plane fallback, so making it serve three readers is a
 generalisation with real design in it — a rung, not a binding somebody forgot to
 add.
 
-**`47-reflections.md`'s "no half-resolution SSR" row is priced on this being
-owed**, so that row's estimate is the thing to re-check first if the shared pass
-is ever attempted.
+**`47-reflections.md`'s "no half-resolution SSR" row is stale now, not
+conditionally later.** It is priced on half-resolution AO being "already owed
+and unmeasured" (that document, the row itself), and half-resolution AO landed
+and was swept on 2026-09-02. That row wants re-checking today.
 
 ## SSAO reads no depth pyramid and the banding is bought (2026-09-01)
 
@@ -528,8 +533,11 @@ limits rather than fixed:
 - **The web sink's ring push is verified natively, not in a browser.**
   `crcbl::web` is deliberately not `wasm32`-gated, so
   `the_web_sink_rings_a_line_its_filter_refused` in `crates/crcbl/src/web.rs`
-  exercises the real `WebLogger::log`; nothing reads the ring in a browser until
-  the panel exists, so the browser gate can only show the change is harmless.
+  exercises the real `WebLogger::log`. The panel reads the ring in a browser —
+  `crcbl_ui`'s `LogView` drains it — but no browser check asserts what the ring
+  _holds_: the gate's console lines come from `Runtime.consoleAPICalled`, which
+  is the sink's own output rather than the ring. So the browser gate can still
+  only show the change is harmless.
 - **`log` joins its arguments with a comma**, so `log warn crcbl_vk=trace` reads
   as the two-directive list a space-separated typing meant. Safe only because a
   filter directive never contains a space — unlike an `Enum` value, which
@@ -1155,10 +1163,11 @@ reader drives the variable, then a tier-table row saying what each column
 spends. Give them that and `high` would differ from `medium` by something
 measured rather than by a knob nobody has priced.
 
-Two things still gate it, and neither is work: **which tier gets which value is
+One thing still gates it, and it is not work: **which tier gets which value is
 the user's call** — see "Whether any tier should be the default is still the
-user's call" below — and the browser tier is still unmeasured, which is where
-the extra slices are most likely to be refused.
+user's call" below. The browser tier is no longer the second gate; it was
+measured 2026-09-02 and did not refuse the extra slices. The HIGH PRIORITY entry
+at the top of this file carries that table.
 
 ## The tier table's CMAA2 cells are read as SMAA (2026-08-31)
 
@@ -1179,10 +1188,7 @@ a preset mechanism to be set from, and still have neither a settings key nor a
 tier-table row, so the decision is exactly where it was: it needs the visible
 cost measured per tier (how far a shadow lags at that tier's frame rate and
 light speed), then a row in `docs/plan/39-capabilities.md`'s tier table, then a
-`shadow_cadence` catalogue key. The companion entry "The shadow cadence has no
-route from a settings file or a preset" can lose its "the tier table it would
-read is itself unbuilt" clause: the reader is built, the table row is what is
-missing.
+`shadow_cadence` catalogue key.
 
 ## Whether any tier should be the default is still the user's call (2026-08-31)
 
@@ -1298,8 +1304,7 @@ been verified on radv and on lavapipe and nowhere else.
 `ForwardRenderer::set_shadow_cadence` pins the pair per renderer and the two
 console variables are the global default. Nothing reads a `settings.toml` key or
 a `docs/plan/43-render-standards.md` tier into either. Deliberately out of scope
-for that slice — the tier table it would read is itself unbuilt — and the shape
-is already there when it is wanted.
+for that slice, and the shape is already there when it is wanted.
 
 **Still true as stated, and one thing near it changed on 2026-09-02.** An
 `autoexec.cfg` is a config file rather than a settings file, so it gives the
@@ -2343,11 +2348,12 @@ What it did not cover:
   is covered; no golden and no browser gate looks at what it draws. The row is
   no longer the only place a reviewer reaches this view — the console's
   `debug_view ambient occlusion` reaches it in every sample with a renderer.
-- **Nothing sets the AO radius or intensity from outside.** `SSAO_RADIUS` is a
-  `forward.rs` constant and there is no intensity term at all, so the two live
-  controls `docs/plan/sample/19-alcove.md` puts in milestone 1 beside this view
-  have nothing to drive. They want the same graphics-quality seam the entry
-  above wants for `SHADOW_TAPS` and for a re-introduced SSAO tier.
+- **Nothing sets the AO radius from outside.** `SSAO_RADIUS` is a `forward.rs`
+  constant, so one of the two live controls `docs/plan/sample/19-alcove.md` puts
+  in milestone 1 beside this view still has nothing to drive. The other does:
+  intensity shipped 2026-09-02 as `crcbl_render::ssao::r_ssao_intensity`, read
+  by `ao_intensity()` in `ssao_upsample.slang`. The radius wants the same
+  graphics-quality seam the entry above wants for `SHADOW_TAPS`.
 
 ### The normal offset scallops one silhouette's foot (2026-08-28)
 
@@ -12969,9 +12975,6 @@ the honest reachable state on this machine is four rows, not zero.
   loader. It is small and does one thing, but it is a hand-rolled module loader
   on the path every demo boots through — worth remembering it exists when a
   browser changes how `WebAssembly.instantiateStreaming` behaves.
-- **The Pages deploy for the un-link commit never ran.** GitHub returned 503 on
-  `actions/deploy-pages` during an outage; the _build_ job passed every gate.
-  The site on Pages is therefore one commit behind until that deploy is re-run.
 
 ### What the exports-table gate does not hold
 
