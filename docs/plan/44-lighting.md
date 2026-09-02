@@ -429,22 +429,28 @@ predicted, "on everywhere", holds: even lavapipe's full froxel of rectangles is
 a third of a 1080p frame it already spends ten milliseconds on, and no scene in
 this tree has sixteen area lights over every pixel.
 
-**The browser tier is stated rather than measured**, because no scene with an
-area light reaches the browser harness yet — `docs/backlog.md` carries that gap.
-By count, a rectangle costs a fragment four extra `Load`s (the transform's
-bilinear tap, which shares its texel coordinates with the `dfg` read) and two
-polygon integrals of up to five edges each; an edge is a normalise, a dot, a 2D
-cross and the published rational, with a `sqrt` and a divide on the obtuse
-branch. Against a punctual light's two normalises and the GGX lobe's two `sqrt`s
-that is roughly an order of magnitude more ALU, which is what the two measured
-tiers put at 2.3× to 3.7×. The browser runs the same shader on the same silicon
-through WebGPU, so it should sit in the same band.
+**The browser tier is stated rather than measured**, and the reason recorded
+here — that no scene with an area light reaches the browser harness — stopped
+being the reason on 2026-09-02, when `Scene::AreaLight` and `Scene::FillLight`
+both joined `apps/render-harness`'s list and began being compared against the
+radv reference every run. What a scene buys is a **frame**, not a **price**:
+nothing times a rectangle's shading against a punctual light's on that tier, so
+the figure below is still an ALU count. `docs/backlog.md` carries the gap. By
+count, a rectangle costs a fragment four extra `Load`s (the transform's bilinear
+tap, which shares its texel coordinates with the `dfg` read) and two polygon
+integrals of up to five edges each; an edge is a normalise, a dot, a 2D cross
+and the published rational, with a `sqrt` and a divide on the obtuse branch.
+Against a punctual light's two normalises and the GGX lobe's two `sqrt`s that is
+roughly an order of magnitude more ALU, which is what the two measured tiers put
+at 2.3× to 3.7×. The browser runs the same shader on the same silicon through
+WebGPU, so it should sit in the same band.
 
 **What the rung left**, all in `docs/backlog.md`: sphere, tube and disc shapes
 (the table serves them unchanged — they need corners and a shape field, not a
-second fit); textured area lights; a rectangle in the `crcbl::screenshot::Scene`
-list so the frame reaches `render_e2e` and the browser; area-light shadows; and
-`volumetric.slang` scattering a rectangle as a point at its centre.
+second fit); textured area lights; area-light shadows; and `volumetric.slang`
+scattering a rectangle as a point at its centre. The `crcbl::screenshot::Scene`
+entry this list also asked for shipped 2026-09-02, so it is gone from here —
+`git log` is where it lives now.
 
 ### What stays out, and why
 
