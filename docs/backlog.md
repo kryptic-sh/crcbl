@@ -3,6 +3,78 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## lantern's window reveal flickers on the mesh path (2026-09-02)
+
+**Reported by the user against the running demo, reproduced, and not root
+caused.** One face of the window opening in `apps/lantern`'s room — the right
+reveal/jamb, the bright vertical strip down the right edge of the window —
+disappears for a frame and comes back, every few frames. The sill below it stays
+put. It is geometry, not lighting.
+
+**How to see it.**
+`cargo run --release --bin lantern -- --frames 120 --tick-hz 1 --fullscreen --camera fixed`
+and watch the window. `--tick-hz 1` freezes the scene, so anything that changes
+between frames is the defect rather than the lamp. Grabbing the screen with
+`grim -l 0 -s 0.5` and differencing consecutive grabs, the toggle is a quantised
+**3099 changed pixels** in the window region every time, with about 646 more
+elsewhere in the frame — the same face each time, not a shading wobble.
+
+**What it depends on**, each measured by holding everything else fixed:
+
+- **The `MeshShader` geometry path.** `--force-geometry indirect-count` and
+  `indirect-per-batch` both show none of it. This is the strongest single clue:
+  the amplification stage is the only thing those runs drop.
+- **More than one frame in flight.** Building with
+  `crcbl_render::forward::FRAMES_IN_FLIGHT` at `1` removes it entirely (300
+  samples, zero toggles, against 30 at `2`). So it is a cross-frame hazard, not
+  a bad per-frame decision.
+
+**What it is not:**
+
+- Not shadows, AO or reflections — it survives `--no-shadows`, `--no-ao` and
+  `--no-reflections` together.
+- Not the lamp. The lamp's sweep appears as long smooth runs in any per-frame
+  signal; the defect is isolated single-frame flips. Conflating the two is what
+  made a first pass of this investigation wrongly blame the shadow cadence, and
+  a whole-image mean-luminance metric is not able to tell them apart. Freeze the
+  scene instead.
+- **Not the depth-prepass overdraw change**
+  (`MeshModules::color_depth_stencil`). Two builds differing only in that
+  commit, with the scene frozen, toggled 6 and 4 times in ~23 grabs —
+  indistinguishable. An earlier 30-against-4 reading came from the
+  lamp-phase-sensitive metric above and should not be believed.
+- **Not the per-cluster cull dropping it.** `CullStats::clusters` reported
+  exactly 19 survivors on every one of 2998 consecutive fullscreen frames, each
+  a distinct readback frame. The geometry is dispatched every frame and lost
+  after the amplification stage.
+
+**The open suspect.** `DrawGen::group_state` — `docs/plan/25-lod.md`'s
+hysteresis state — is **deliberately one buffer and not a ring**, and it is the
+only mutable thing the amplification stage reads that is not per-frame-slot (the
+instance pool, the draw arguments, the survivor list and the runs are all
+ringed). `mesh_cluster.slang`'s `cluster_is_selected` reads it twice per
+cluster. Against that: a flipped selection would drop the cluster from the
+dispatch, and the survivor count says nothing is dropped. So either the vector
+is something else, or the flip is one that keeps the count.
+
+**One concrete inconsistency found on the way, unfixed and of unknown
+consequence.** `DrawGen`'s field docs say the buffer "arrives in
+`ShaderReadWrite` because that is what the last frame left it in", and
+`read_draw_sources` says declaring it "puts it back into `ShaderReadWrite` at
+the end of the graph". It does not: the reading passes declare it with
+`PassBuilder::read_buffer`, which is `ResourceState::ShaderRead`. The emitted
+barrier still names `SHADER_STORAGE_READ | SHADER_STORAGE_WRITE` over
+`ALL_COMMANDS` (`crcbl-vk`'s `conv.rs`), so the write-after-read does appear to
+be ordered on Vulkan and this may be a documentation bug rather than a defect —
+but the comment and the code disagree about a cross-frame invariant, which is
+worth settling either way.
+
+**Next step if picked up.** The count-preserving explanations are the ones left:
+confirm whether the prepass's and the colour pass's amplification runs agree
+within a frame (both run it on the mesh path), and whether the mesh stage emits
+the face while the raster drops it. A wireframe frame during a toggle would
+separate "not emitted" from "emitted and not shaded".
+
 ## HIGH PRIORITY — the user's calls of 2026-08-30
 
 The items the user ranked above the lighting order. They stay at the top of this
