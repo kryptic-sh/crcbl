@@ -3379,17 +3379,18 @@ fn draw_scene_on_every_geometry_path(
     // difference the two submissions made, and the tolerance a *different*
     // rasteriser is allowed would hide exactly that. See [`path_lsb_channels`]
     // for why `Dunes` alone is not held to zero.
-    let budget = path_lsb_channels(scene);
+    let (budget, worst_allowed) = path_lsb_channels(scene);
     let (differing, worst) = channels_differing(best, lesser);
     eprintln!(
         "crcbl render e2e: {name} on {best_path:?} against {lesser_path:?} — {differing} \
-         channel(s) differ, worst by {worst}, budget {budget} ({colors} distinct colour(s))"
+         channel(s) differ, worst by {worst}, budget {budget} channel(s) at {worst_allowed} \
+         level(s) ({colors} distinct colour(s))"
     );
     assert!(
-        worst <= 1 && differing <= budget,
+        worst <= worst_allowed && differing <= budget,
         "{best_path:?} and {lesser_path:?} draw the {name} scene differently: {differing} \
          channel(s) differ, the worst by {worst} — this scene allows at most {budget} \
-         channel(s) and only ever by one, and this is a different picture"
+         channel(s) and only ever by {worst_allowed}, and this is a different picture"
     );
 }
 
@@ -3468,17 +3469,43 @@ fn draw_scene_on_every_geometry_path(
 ///
 /// All five budgets are two orders of magnitude under anything a level that
 /// failed to draw would produce — the failure this exists for moves whole
-/// clusters, not one channel. `worst <= 1` is the other half and is not budgeted
-/// at all: a reflection that landed on the wrong surface moves a channel by far
-/// more than one, so it fails here whatever the count.
-const fn path_lsb_channels(scene: Scene) -> usize {
+/// clusters, not one channel.
+///
+/// # The magnitude, and the one scene that needed more than a level
+///
+/// The second half of the bound used to be a flat `worst <= 1` for every scene:
+/// a reflection that landed on the wrong surface moves a channel by far more
+/// than one, so it fails whatever the count. That half is **still one level
+/// everywhere but `Probes`**, and is returned per scene rather than written into
+/// the assertion so that widening it stays a scene's decision with a measurement
+/// attached, the way the counts above already are.
+///
+/// `Probes` is two, since `docs/plan/46-ambient-occlusion.md`'s bent-normal rung
+/// landed on 2026-09-02. Its entry above says a last-bit depth difference can
+/// flip which tap wins a horizon; until that rung the flip could only move the
+/// occlusion **scalar**, which scales the ambient and so moves a channel by a
+/// fraction of it. The bent direction is downstream of the same max and the
+/// ambient is now sampled *along* it, so a flipped tap turns the probe lookup by
+/// a step instead of dimming it — a first-order change where the scalar's was
+/// second-order. Measured at **9 channels, worst by 2**, out of the frame's
+/// 196608: identical on the Ubuntu runner's Mesa 25.2.8 / LLVM 20.1.2 and on
+/// Arch's Mesa 26.2.1 / LLVM 22.1.8, and radv answers zero as it does for all
+/// five. The individual pixels were not enumerated, unlike `Probes`' pre-rung
+/// pair — `docs/backlog.md` carries that as the gap it is.
+///
+/// **This is a guard that got weaker, and it is recorded as one rather than
+/// absorbed.** Two levels out of 256 on nine channels is still three orders of
+/// magnitude under a cluster that failed to draw, so the teeth this exists for
+/// are intact; what is gone is the ability of *this* scene to catch a
+/// one-to-two-level regression in the probe term.
+const fn path_lsb_channels(scene: Scene) -> (usize, u8) {
     match scene {
-        Scene::Dunes => 16,
-        Scene::PointShadow => 16,
-        Scene::Ssr => 16,
-        Scene::Probes => 16,
-        Scene::Ao => 16,
-        _ => 0,
+        Scene::Dunes => (16, 1),
+        Scene::PointShadow => (16, 1),
+        Scene::Ssr => (16, 1),
+        Scene::Probes => (16, 2),
+        Scene::Ao => (16, 1),
+        _ => (0, 1),
     }
 }
 

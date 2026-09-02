@@ -2766,9 +2766,9 @@ fn the_bent_direction_leans_out_of_the_occluded_band() {
     let leaning = run.bent_at(BENT_LEANING_COLUMN, HALO_LINE_Y);
     let open = run.bent_at(BENT_OPEN_COLUMN, HALO_LINE_Y);
     eprintln!(
-        "{suite}: the bent direction is {leaning:?} at column {BENT_LEANING_COLUMN}, {}, and \
-         {open:?} at column {BENT_OPEN_COLUMN}, which is clear of it",
-        "which is just past the plate's edge",
+        "{suite}: the bent direction is {leaning:?} at column {BENT_LEANING_COLUMN}, which is \
+         just past the plate's edge, and {open:?} at column {BENT_OPEN_COLUMN}, which is clear \
+         of it",
         suite = crate::SUITE,
     );
 

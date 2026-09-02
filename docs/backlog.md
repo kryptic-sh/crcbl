@@ -263,6 +263,45 @@ key, and no tier row spends any of them.
 tint makes it weaker on purpose, and the fix is turning the intensity up rather
 than removing the tint.
 
+## The bent normals weakened one cross-path guard, and it is recorded (2026-09-02)
+
+`crates/crcbl/tests/render_e2e.rs`'s
+`the_probes_scene_draws_the_same_frame_on_every_geometry_path` compares the
+mesh-shader and indirect-count paths on one adapter, and its bound used to be
+"at most `path_lsb_channels(scene)` channels, and **only ever by one level**".
+The magnitude half is now per scene and `Probes` is allowed two.
+
+**Why it moved, and it is the feature rather than a defect.**
+`path_lsb_channels`' own entry already recorded that a last-bit depth difference
+can flip which tap wins a horizon in `ssao.slang`'s integral. Before the
+bent-normal rung a flip could only move the occlusion **scalar**, which scales
+the ambient — second order in the pixel. The direction is downstream of the same
+max, and `mesh.slang` now samples the probe irradiance _along_ it, so a flipped
+tap turns the lookup rather than dimming it. Measured at **9 channels, worst by
+2** out of 196608, identical on the runner's Mesa 25.2.8 / LLVM 20.1.2 and on
+Arch's Mesa 26.2.1 / LLVM 22.1.8; radv answers zero.
+
+**What is owed:**
+
+- **The differing pixels were not enumerated.** `Probes`' pre-rung entry names
+  its two exactly — the red channel of `(137, 17)` and `(138, 17)` — and this
+  one names none, because `channels_differing` returns counts and the harness
+  prints no coordinates. Adding a coordinate to that print, behind the suite's
+  existing `--nocapture` output, would close it and would say whether the nine
+  are the old two plus neighbours or a different region entirely.
+- **Whether the damping is worth taking.** The remedy recorded under the
+  bent-normal slice for a different reason — slerp the bent direction back
+  towards the shading normal by the occlusion scalar, in `mesh.slang`'s
+  `bent_normal_at` — would also damp this, by making a lightly-occluded pixel
+  depend on the horizon direction not at all. Whether it takes `Probes` back to
+  one level is unmeasured, and it is a picture change, so it is not a thing to
+  do purely to restore a guard.
+- **The user's call on whether that trade is acceptable at all.** Two levels out
+  of 256 on nine channels is three orders of magnitude under the failure this
+  guard exists for — a cluster that did not draw — so its teeth are intact. What
+  is gone is this scene's ability to catch a one-to-two-level regression in the
+  probe term specifically.
+
 ## The backlog audit of 2026-09-02, and what it did not reach
 
 Ten entries were checked against the tree and eight had drifted; the corrections
