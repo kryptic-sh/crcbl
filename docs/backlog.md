@@ -1451,6 +1451,20 @@ the `MapRequest` and the reparent it never sends, on the five-test filter above
 Nothing in this repository can see that, so it wants openbox run under a
 protocol tracer.
 
+**Third occurrence on `main`, 2026-09-02** (`bc8af6f`, a commit touching one
+JavaScript comment and this file, so nothing that could reach X11). Same job,
+same step 8. Re-running the failed job alone went green, which is what cleared
+`main`.
+
+One thing that made it slower to diagnose than it should have been, worth
+knowing before the next one: **the job log could not be retrieved.**
+`gh run view --log-failed` died with `stream error: stream ID 1; CANCEL`, and
+`gh api …/jobs/<id>/logs` reported `HTTP 200` with a 117 KB `Content-Length`
+while piping zero bytes. So the panic message was never read, and the
+attribution rests on the job, the step, and the diff being incapable of causing
+it. If the log is wanted next time, fetch the redirect target directly rather
+than through `gh`.
+
 ## One whole-workspace-only test flake is left, in the logger (2026-09-02)
 
 The three sample flakes this entry used to carry were **one bug and it is
