@@ -189,5 +189,8 @@ Consequence to state plainly: **local-multiplayer device assignment is blocked
 on Win32, X11 and AppKit** — not merely unscheduled — and a test asserting two
 devices are distinguishable passes vacuously on those three. On Wayland it does
 not, which makes seat granularity a shipping route for the slice this document
-lists as blocked rather than a thing to build first. `docs/backlog.md` carries
-the per-backend detail, and carried this same omission until 2026-09-02.
+lists as blocked rather than a thing to build first — a route by construction,
+not by evidence: nothing in the tree brings up a second seat, so the counter's
+increment is read rather than exercised, and `docs/backlog.md` carries that as
+the gap. `docs/backlog.md` carries the per-backend detail, and carried this same
+omission until 2026-09-02.

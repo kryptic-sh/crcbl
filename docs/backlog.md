@@ -4769,11 +4769,17 @@ device assignment. `19-input.md`'s 2026-08-09 correction said `DeviceId` names a
 device _kind_ on **every** backend, and both it and this entry left out Wayland,
 where the `wl_seat` handler allocates a fresh id per seat — that landed thirteen
 days before the correction was written. So a test asserting two devices are
-distinguishable passes vacuously on Win32, X11 and AppKit and does not on
-Wayland, and seat granularity is a shipping route for the slice rather than
-something to build first. "Re-read the correction; it still describes the tree"
-is what this entry said for three weeks, which is why re-reading a claim is not
-the same as re-checking it.
+distinguishable passes vacuously on Win32, X11 and AppKit, and on Wayland it
+would have something to say — except that **no such test exists and nothing in
+the tree brings up a second seat**, so the per-seat counter is verified by
+reading it, not by running it. A nested-sway e2e with two seats is what would
+change that, and whether the harness's compositor can be made to offer one has
+not been checked. The mechanism is a counter increment in the registry handler,
+so seat granularity is a shipping route for the slice rather than something to
+build first — but it is a route argued from the code, not one demonstrated.
+"Re-read the correction; it still describes the tree" is what this entry said
+for three weeks, which is why re-reading a claim is not the same as re-checking
+it.
 
 ### Replay: the container is flat, and every `crcbl replay` subverb is owed (2026-08-27)
 
