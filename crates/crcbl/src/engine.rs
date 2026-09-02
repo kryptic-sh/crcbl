@@ -6826,8 +6826,18 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // `docs/plan/45-shadows.md` to be medians of five hand-run binaries.
         // `PassStats` has been fed every distinct frame; this is its p50 and
         // p95 per pass.
+        //
+        // **One record per line, not one record carrying every line.** A sink
+        // may cap a record's length, and this is the longest thing the engine
+        // logs — it grows with the pass count, so it is the message that meets
+        // any such cap first. `crcbl::web`'s browser sink caps at
+        // `MAX_LOG_LINE`, and a lantern gate log carried fifteen of
+        // twenty-three passes before this split. `report`'s own text is
+        // unchanged; only how many records carry it is.
         if !self.passes.is_empty() {
-            log::info!("{}", self.passes.report().trim_end());
+            for line in self.passes.report().trim_end().lines() {
+                log::info!("{line}");
+            }
         }
         // **The CPU half of the same report.** `FrameTimings` above is GPU
         // timestamps; this is the monotonic clock the loop was actually driven

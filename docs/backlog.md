@@ -281,17 +281,18 @@ count.
 
 The cap is not arbitrary: 512 queued lines at 1024 bytes bounds the shim's share
 of wasm memory at half a megabyte, and a page that never drains must not grow it
-without bound. Two routes, neither taken:
+without bound. Raising it would buy headroom rather than a rule — the label
+count only grows, so whatever number replaced 1024 would be the next date this
+entry got rewritten.
 
-- **Raise the cap.** One line, and it buys headroom rather than a rule — the
-  label count only grows, so whatever number replaces 1024 is the next date this
-  entry gets rewritten.
-- **Emit the table as one line per pass.** No cap interaction at all and it is
-  what the native harnesses effectively do. The price is that
-  `web/tools/browser-e2e.mjs` parses the single `gpu passes` line for its label
-  count, so the gate moves with the format.
-
-Not decided, and not urgent until something actually needs the browser figure.
+**Taken instead: `Loop::finish` logs one record per line.** `PassStats::report`
+is unchanged; only how many records carry it is, so the cap is never met and no
+number had to be guessed. This entry first priced that route as moving the gate
+with the format, on the belief that `web/tools/browser-e2e.mjs` parses the
+`gpu passes` line for its label count. **It does not** — the only mention of
+that line in the file is a comment explaining why the report is the wrong
+reading for the check it sits beside, since a report lands at `Loop::finish` and
+that gate holds one log across many boots. Nothing anywhere parses the table.
 
 ## SSAO reads no depth pyramid and the banding is bought (2026-09-01)
 
