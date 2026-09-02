@@ -1501,21 +1501,38 @@ but the writer has not been found.** Established by reading, all of it negative:
   live in `tests/console_log.rs` — a separate binary, so a separate process.
 
 So something moves `FILTER`, or the facade's max level, between `with_filter`
-writing it and the assertion reading it, and nothing found so far can. **Next
-step is instrumentation rather than more reading** — print the filter and
-`log::max_level()` at the failing assertion and run the workspace until it
-trips. The same rule that closed the debug-view one applies: four passes over
-the resolution path each ended in "deterministic", and the answer came from
-making the bug happen on demand instead.
+writing it and the assertion reading it.
 
-**It did not reproduce in the ten workspace runs that verified the debug-view
-fixes**, which is not the same as being fixed: nothing in those commits touches
-`crcbl-core`'s logging. Either it is rarer than two-in-six suggested — ten clean
-runs would be about a 2% coincidence at that rate, so this is weak evidence
-against it — or it shares a cause with the debug-view bug through some route not
-identified here. Neither is established, and the sample that produced the
-two-in-six was taken with a `debug_view` test panicking in the same runs, which
-is a confounder worth removing before trusting either rate.
+**Instrumented and reproduced, 2026-09-02, and `capturing()` is now ruled out by
+observation rather than by reading.** A hunt ran the workspace repeatedly with
+the filter, `max_level()`, `permits`, `capturing()`, the installed flag and the
+thread printed at the failing assertions. It tripped twice, and the second trip
+is the informative one: **`the_ring_holds_records_the_filter_refused`
+(`log.rs:1241`) also fails**, and that test asserts `!logger.permits(..)`
+_directly_ — it never calls `enabled`, so it has no `capturing()` disjunct to
+blame. Both failures are therefore about the filter the logger is holding, not
+about capture state. The third bullet above is confirmed rather than merely
+argued.
+
+**The writer is still unnamed.** The hunt was stopped at four hours, mid-way
+through instrumenting to identify it, so this is a narrowed question rather than
+an answer: what writes `FILTER` (or the facade's max level) while `with_filter`
+holds `FILTER_ORDER`, given that `store_filter`'s only non-test caller lives in
+a different binary. Two tests are known to observe it, which is a second
+foothold the earlier work did not have.
+
+**The diagnostics are committed**, so the next trip on any machine prints its
+own filter, permits, capturing, installed flag and thread instead of a bare
+`assertion failed`. That is the one thing that made this cheap to pick up again;
+it was verified by inverting the assertion and reading the rendered message, not
+by assuming it formats.
+
+**Rate: not established, and the older figure is contaminated.** The two-in-six
+sample was taken while a `debug_view` test panicked in the same runs. It then
+did not reproduce in ten workspace runs that had nothing to do with logging, and
+reproduced twice in this hunt's runs — whose count was not recovered before the
+agent was stopped, so no rate can be quoted from it either. Anyone resuming
+should count runs explicitly rather than inherit a number.
 
 ## The render-quality programme (opened 2026-08-27)
 

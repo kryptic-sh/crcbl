@@ -1252,7 +1252,11 @@ mod tests {
                         .target(quiet)
                         .build()
                 ),
-                "the directive silences that target, so none of its records reach stderr",
+                "the directive silences that target, so none of its records reach stderr \
+                 — filter {filter:?}, max level {max_level}, installed {installed}",
+                filter = *read_filter(),
+                max_level = ::log::max_level(),
+                installed = is_installed(),
             );
             assert!(
                 logger.permits(&Metadata::builder().level(Level::Info).target(loud).build()),
@@ -1291,7 +1295,19 @@ mod tests {
                         .build()
                 )
             );
-            assert!(!logger.enabled(&Metadata::builder().level(Level::Info).target("any").build()));
+            let meta = Metadata::builder().level(Level::Info).target("any").build();
+            assert!(
+                !logger.enabled(&meta),
+                "an uninstalled logger admits nothing at the default level \
+                 — filter {filter:?}, max level {max_level}, permits {permits}, \
+                 capturing {capturing}, installed {installed}, thread {thread:?}",
+                filter = *read_filter(),
+                max_level = ::log::max_level(),
+                permits = logger.permits(&meta),
+                capturing = capturing(),
+                installed = is_installed(),
+                thread = std::thread::current().name(),
+            );
             assert!(
                 logger.enabled(
                     &Metadata::builder()
