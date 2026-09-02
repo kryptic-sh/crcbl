@@ -289,10 +289,20 @@ entry got rewritten.
 is unchanged; only how many records carry it is, so the cap is never met and no
 number had to be guessed. This entry first priced that route as moving the gate
 with the format, on the belief that `web/tools/browser-e2e.mjs` parses the
-`gpu passes` line for its label count. **It does not** — the only mention of
-that line in the file is a comment explaining why the report is the wrong
-reading for the check it sits beside, since a report lands at `Loop::finish` and
-that gate holds one log across many boots. Nothing anywhere parses the table.
+`gpu passes` line for its label count. It does not — the only mention of that
+line in the file is a comment on why the report is the wrong reading for the
+check it sits beside. **But the entry then said "nothing anywhere parses the
+table", and that was false, and it reddened CI on `5a1c1ef`.**
+`tools/run-samples-windowed.sh` matches an individual **row** —
+`^[[:space:]]+ssao-blur-2[[:space:]]` — to prove an `autoexec.cfg` variable
+reached the renderer before the frames were timed, and the rows stopped
+beginning with whitespace the moment each got its own record. The searches
+behind the absence claim were for `gpu passes` and `label(s)`, so a consumer
+that greps a row was never in their reach: an absence claim is only as wide as
+the search under it. The patterns are anchored on the `crcbl::engine]` target
+now, which is both correct and stricter. Note the direction of the near miss —
+one of the three is an `autoexec_refuses`, and a refusal whose pattern has
+stopped matching anything passes.
 
 ## SSAO reads no depth pyramid and the banding is bought (2026-09-01)
 

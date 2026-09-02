@@ -442,6 +442,16 @@ autoexec_refuses() {
 # before the frames were timed, which is what the call site actually claims — a
 # variable applied after the first frame would print the same console line and
 # change no pass at all.
+#
+# **The pass rows are matched by their log target, not by leading whitespace.**
+# They used to be continuation lines of one multi-line record, so they began
+# with spaces; since `Loop::finish` logs the table one record per line — which
+# it does so a sink with a length cap cannot swallow the table's tail — each row
+# carries the ordinary `crcbl::engine]` prefix. Anchoring on that prefix is
+# also stricter than `^[[:space:]]`: only the table's own records can match it,
+# where an indented line of prose could match the old pattern. Note which way
+# this fails: `autoexec_refuses` on a pattern that has stopped matching anything
+# is a check wired to nothing, and it passes.
 check_autoexec() {
     # Read out of `SAMPLES` rather than written again here, so a sample dropped
     # from the gate cannot leave this running something the loop above does not.
@@ -488,7 +498,7 @@ check_autoexec() {
            line in it failed and the count says so."
     autoexec_wants seeded "console\] ${AUTOEXEC_VAR} = ${AUTOEXEC_VALUE}$" \
         "the file ran and ${AUTOEXEC_VAR} did not take the value it set."
-    autoexec_wants seeded "^[[:space:]]+${AUTOEXEC_PASS}[[:space:]]" \
+    autoexec_wants seeded "crcbl::engine\][[:space:]]+${AUTOEXEC_PASS}[[:space:]]" \
         "the value never reached the renderer before the frames were timed. The
            console said it was set and the frame disagrees, which is the failure
            running the autoexec before the first frame exists to prevent."
@@ -497,7 +507,7 @@ check_autoexec() {
     # own pass report is read first: with no ${AUTOEXEC_BASE_PASS} row there is
     # no report for ${AUTOEXEC_PASS} to be missing from, and every check under
     # it would pass on a log that had lost the table entirely.
-    autoexec_wants control "^[[:space:]]+${AUTOEXEC_BASE_PASS}[[:space:]]" \
+    autoexec_wants control "crcbl::engine\][[:space:]]+${AUTOEXEC_BASE_PASS}[[:space:]]" \
         "it reported no ${AUTOEXEC_BASE_PASS} pass at all, so the absence of
            ${AUTOEXEC_PASS} below would be a missing report rather than a
            missing pass."
@@ -507,7 +517,7 @@ check_autoexec() {
            been reading the machine's own."
     autoexec_refuses control "console\] ${AUTOEXEC_VAR} = " \
         "something other than the autoexec sets ${AUTOEXEC_VAR}."
-    autoexec_refuses control "^[[:space:]]+${AUTOEXEC_PASS}[[:space:]]" \
+    autoexec_refuses control "crcbl::engine\][[:space:]]+${AUTOEXEC_PASS}[[:space:]]" \
         "${AUTOEXEC_PASS} is in the frame with nothing having asked for it, so the
            seeded run proves nothing about what read the file."
 
