@@ -190,11 +190,11 @@ half that dispatches them cannot disagree.
 - **Programmatic** is wired: `ForwardRenderer::set_effect_request`, and
   `apps/lantern`'s `--no-shadows` / `--no-ao` / `--no-reflections` drive it.
   There is no `--no-bloom`, and there is nothing for one to turn off: bloom is
-  the one effect **not** in `RenderEffects::DEFAULT_STACK`, so a view that has
-  declared no render stack — which is every view in this workspace but the
-  `Scene::Bloom` fixture — is not drawing it to begin with. The reason is on
-  that constant: the other three approximate light transport present in the
-  scene, and a camera given no stack has been given no lens.
+  **one of the five effects** `RenderEffects::DEFAULT_STACK` subtracts, so a
+  view that has declared no render stack — which is every view in this workspace
+  but the `Scene::Bloom` fixture — is not drawing it to begin with. The reason
+  is on that constant: the other three approximate light transport present in
+  the scene, and a camera given no stack has been given no lens.
 - **Device** is wired to `DeviceCaps` and **removes nothing**, which is a fact
   about these three effects rather than an unfinished clamp —
   [46-ambient-occlusion.md](46-ambient-occlusion.md) says it of the occlusion

@@ -456,7 +456,7 @@ list so the frame reaches `render_e2e` and the browser; area-light shadows; and
   and can bring the rest.
 - **Parallax occlusion mapping.** A per-pixel march with a dependent texture
   read, for an effect normal mapping already approximates; it is a rung above
-  normal maps rather than beside them, and there is no normal map yet.
+  normal maps rather than beside them.
 - **Burley diffuse is refused — the user's call, 2026-08-30.** It was unranked
   until then: its fifth powers are Schlick's and decompose into multiplies
   exactly as `ggx_lobe`'s do, so the determinism argument that rules out AgX

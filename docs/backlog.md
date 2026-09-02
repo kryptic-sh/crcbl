@@ -14109,6 +14109,26 @@ are the ones flagged as most likely to yield:
   sample-plan audit block of 2026-08-26/27, and the slice-plan archive at the
   end of the file.
 
+**The plan documents were audited on 2026-09-02 too, and yielded sixteen** — the
+highest rate of any pass. The rule that finished work leaves the plans had not
+been holding: `ROADMAP.md`'s phase table carried no marker for a sample that
+shipped and is gated on every push, and named a blocker that had shipped a week
+earlier; `43-render-standards.md`'s delivery table still put contact shadows at
+the head of a queue they left on 2026-09-01. A delivery table is the worst place
+in the repository to be wrong, because it is read as the index of what exists.
+
+What that pass did **not** reach: plans `00`-`42` entirely, and all of
+`docs/plan/sample/` except `05-viewer.md`, `11-breach.md` and `14-quarry.md`.
+`sample/20-options.md` — the plan for a sample that shipped — and
+`sample/03-horde.md` are the two to open first. `50-irradiance-probes.md` was
+only grepped, and its subject moved on 2026-08-30, so it is the likeliest of the
+render-quality set to be stale.
+
+Separately, and an omission rather than a wrong sentence:
+**`46-ambient-occlusion.md` never says its own pass runs at half resolution**,
+which it has since 2026-09-02. The AO topic document not carrying the AO pass's
+current shape is worth someone's attention.
+
 **The platform-coverage entries were audited on 2026-09-02 and yielded six
 more.** "Has never run" proved the most rotten shape of all, because the answer
 moved into CI without anyone revisiting the prose — a claim that is still true

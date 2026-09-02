@@ -31,12 +31,13 @@ The list exists now, so these are settled.
   — that was tried and refused, and
   [43-render-standards.md](43-render-standards.md)'s row (f) says why — but it
   is the same rule with the same band, and the two constants name each other.
-- **The atlas is a fixed tile grid** — and the rung that replaces the grid is
-  pulled forward below, 2026-08-30. The sun's cascades take the first tiles, and
-  the rest are handed out one per spot and six per point until they run out. A
-  light that gets no tile **still lights and simply does not occlude**, which is
-  the honest degradation and is what makes the budget a quality knob rather than
-  a correctness cliff.
+- **The atlas was a fixed tile grid**, and the allocator that replaced it landed
+  2026-08-31 (`crcbl_render::shadow::AtlasAllocator`); what follows describes
+  the grid this decision was taken against. The sun's cascades take the first
+  tiles, and the rest are handed out one per spot and six per point until they
+  run out. A light that gets no tile **still lights and simply does not
+  occlude**, which is the honest degradation and is what makes the budget a
+  quality knob rather than a correctness cliff.
 
 **Order of work: spot before point**, even though point is the MVP row and spot
 is polish. A spot is one tile and one matrix — the sun's machinery with a
@@ -225,9 +226,8 @@ within tolerance and was left alone.
 - Render graph: cascades = depth targets owned by the graph; barriers/layout
   automatic like every pass. **The debug half of this row is unbuilt**: there is
   no cascade-split overlay and no shadow-map inspector panel.
-  `ForwardRenderer::debug_view` offers three views — the LOD screen-error
-  heatmap, the DAG-level tint and world-space normals — and none of them is
-  about shadows.
+  `ForwardRenderer::debug_view` offers a heatmap, a DAG-level tint, world-space
+  normals, ambient occlusion and motion — and none of them is about shadows.
 - Skinned casters (topic 17) come free via the skinned-output pool region.
 - **Spot and point shadows are built, and not as this line first described
   them.** The 2026-08-13 decision above replaced the cube map with six atlas
@@ -1042,7 +1042,7 @@ The ladder, in the order it should be climbed:
   high tiers, off on low.** A short march along the light's direction through
   the depth prepass, per fragment, that closes the contact gap no bias and no
   filter can: the sliver where a foot meets the floor or a book meets a shelf,
-  finer than any atlas texel. `docs/plan/43-render-standards.md` §7 ranks it the
+  finer than any atlas texel. `docs/plan/43-render-standards.md` §5 ranks it the
   cheapest real win among the screen-space marches, and it needs nothing the
   tree lacks — the prepass is there, the Hi-Z pyramid is there. The user took
   the recommendation as given: not a settings row of its own but a tier item —
@@ -1051,7 +1051,7 @@ The ladder, in the order it should be climbed:
   tiers before it counts, per the standing rule, and a screen-space term, so it
   leaves no trace on a tile and stacks with every rung above.
 
-  **Built 2026-08-31, and building it found two things this decision got
+  **Built 2026-09-01, and building it found two things this decision got
   wrong.** `RenderEffects::CONTACT_SHADOWS` and `crcbl_render::contact_shadows`
   are the bit and the pass; `contact_shadows.slang` is `ssr.slang`'s march with
   the level held at zero.

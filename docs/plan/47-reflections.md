@@ -277,10 +277,12 @@ and `docs/backlog.md` carries that as a coverage gap rather than as a claim.
 
 ### What is left to later rows
 
-No temporal anything. No back-face or thickness buffer. No half-resolution SSR —
-half-res AO is already owed and unmeasured, and a second unmeasured
-quality-for-speed trade should not land before the timers have been pointed at
-the first. No `LightingPath` gate, which still has no consumer. **No specular
+No temporal anything. No back-face or thickness buffer. No half-resolution SSR.
+The reason recorded here — that half-resolution AO was owed and unmeasured, and
+a second unmeasured quality-for-speed trade should not land before the timers
+had been pointed at the first — **no longer applies**: half-resolution AO landed
+2026-09-02 and was swept on both drivers. This row now wants a reason of its own
+or none. No `LightingPath` gate, which still has no consumer. **No specular
 occlusion**: AO scales the ambient term alone, a highlight is an image of a
 light, and a reflection is an image of the room in one direction — none of the
 three take the same occlusion factor, and if one is wanted it is its own term
