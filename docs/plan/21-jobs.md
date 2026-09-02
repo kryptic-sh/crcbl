@@ -169,7 +169,10 @@ by the determinism rule.
   because producer is behind) surfaced in the inspector.
 - A headless sim runnable at any worker count. `crcbl sim` is the determinism
   harness — `--ticks`, `--tick-rate` and `--seed` — and a worker count is what
-  it would gain to make the killer test below runnable; nothing exposes one yet.
+  it would gain to make the killer test below runnable.
+  **`crcbl bench --scenario jobs --workers <N>` already exposes one** — `0` is
+  the serial baseline — so what is missing is the knob on `crcbl sim`, not the
+  knob.
 
 ## Testing (topic 12)
 
@@ -209,9 +212,16 @@ Two things about the wasm side decide how the rest of this document reads.
 an artifact loaded by a page with no shim degrades exactly as `Inline` did. One
 page implements the shim — `web/jobs/`, driven by `web/run-jobs-e2e.sh`, which
 brings workers up in a real browser and asserts Rust ran on a stack and a
-thread-local of its own. **No demo page does**: nothing under `web/demos/`
-references `web/engine/jobs.js` or the `__crcbl_web_jobs_*` ABI, so every
-published artifact still degrades to single-threaded.
+thread-local of its own. **The evidence below used to be offered for "no demo
+page does", and it does not support that**: `web/run-horde-threads-e2e.sh`
+drives `demos/horde/` — the page a visitor loads, with the loader swapped for
+one that constructs a shared memory — and asserts the sim reaches two threads,
+which `web/build.sh` explains is a gate on the demo path rather than on a page
+written to pass it. What is true is narrower and still worth saying: nothing
+under `web/demos/` references `web/engine/jobs.js` or the `__crcbl_web_jobs_*`
+ABI, because the shim lives in the loader `--threads` substitutes; and the
+**published** site is the unthreaded build, so every artifact a visitor
+downloads still degrades to single-threaded.
 
 **`Pool` can be driven from the browser's main thread**, and the opposite was
 asserted here for a while on a reading of std's sources rather than a
@@ -373,9 +383,12 @@ is the constraint that already forbids a `crcbl::run(game)`.
    service-worker shim, or a proxy that adds the headers) stays available as a
    later choice and gates nothing.
 2. Subsystem threads, in the order topic 21 already lists. **Only the pool's
-   workers actually start through the seam.** `crcbl-audio` spawns its DSP
-   thread with a bare `std::thread::spawn` in `crates/crcbl-audio/src/lib.rs`,
-   which is a lane that predates the seam and does not use it; and nothing on
+   workers actually start through the seam.** The one bare `std::thread::spawn`
+   in `crates/crcbl-audio/src/lib.rs` is `open_null`'s polling thread — the
+   headless stream for tests and CI, not the DSP thread, which cpal creates
+   inside `build_output_stream`. So no code in this workspace spawns the DSP
+   thread and the seam could not own it even in principle; this bullet used to
+   call it a lane that predates the seam and declines to use it. And nothing on
    any platform spawns an input, sim, net or io thread at all. The topology at
    the top of this file is still a design.
 
@@ -444,12 +457,15 @@ gate is a gate.
   **The table is wrong as written.**
 - **loom and TSAN are specified; Miri is what runs.** The testing section asks
   for loom-style exhaustive tests on the primitives and a TSAN job in scheduled
-  CI. Neither exists. What exists is a **weekly**
-  `cargo miri test -p crcbl-jobs` in `cron.yml`, which models memory ordering
-  more thoroughly than any test on x86-64 can — a `Release` store and a
-  `Relaxed` one compile identically there, so Miri is load-bearing rather than
-  supplementary. One gap follows: an ordering regression can sit on `main` for
-  up to a week.
+  CI. Neither exists. What exists is `cargo miri test --tests -p crcbl-jobs` as
+  `miri-jobs` in `ci.yml`, **per pull request and per push**, which models
+  memory ordering more thoroughly than any test on x86-64 can — a `Release`
+  store and a `Relaxed` one compile identically there, so Miri is load-bearing
+  rather than supplementary. This bullet said weekly, and named the week-long
+  window as the gap that followed; the job moved to per-commit six and a half
+  hours after that was written, precisely because the weekly one had sat red for
+  six days unwatched. `cron.yml`'s census still names `-p crcbl-jobs`, so a
+  weekly run does exist — it is simply not the gate any more.
 
   This bullet used to name a second gap — that nothing runs the primitives on a
   weakly-ordered machine, and an aarch64 runner would be independent evidence.
@@ -468,5 +484,8 @@ gate is a gate.
   measurement someone once took: `./web/build.sh --threads` builds every demo
   crate that way and gates each artifact's worker-capable surface with
   `web/tools/check-exports.mjs --threads`. It needs `rust-src` on
-  `nightly-2026-07-02`. No CI job runs it — no runner has the nightly — so it is
-  a local gate, in the same position as `web/run-browser-e2e.sh`.
+  `nightly-2026-07-02`, and `.github/workflows/ci.yml`'s `jobs-worker-e2e`
+  installs exactly that toolchain and component and runs both gates on every
+  push and pull request. This bullet called it a local gate with no runner for
+  the nightly; the job landed the same day the sentence did, five hours later,
+  and the sentence outlived five later edits to this file.

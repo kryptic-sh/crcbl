@@ -98,14 +98,14 @@ document are still the plan.
 
 ## Device backends (zero 3rd-party rule, topic 15 discipline)
 
-| Device                 | Backend                                                                                                                                                                                       | Lands                            |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
-| Keyboard/mouse         | already in shell backends                                                                                                                                                                     | P0                               |
-| Gamepad Linux          | evdev directly (`/dev/input/event*`, ioctl caps, force-feedback later)                                                                                                                        | P10                              |
-| Gamepad Windows        | XInput (hand FFI; GameInput later if needed)                                                                                                                                                  | P14                              |
-| Gamepad macOS          | GameController framework (objc FFI)                                                                                                                                                           | P14                              |
-| Gamepad Web            | Gamepad API via the JS shim                                                                                                                                                                   | P10-ish (cheap, with wasm demos) |
-| **On-screen controls** | `crcbl_ui::touch`'s `TouchStick` and `TouchButton` hit-test raw contacts and report through `ActionMap::virtual_stick` / `virtual_button`, so a `Binding::Virtual` is a device like any other | shipped                          |
+| Device                 | Backend                                                                                                                                                                                                                                                                                                                                                                           | Lands                            |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| Keyboard/mouse         | already in shell backends                                                                                                                                                                                                                                                                                                                                                         | P0                               |
+| Gamepad Linux          | evdev directly (`/dev/input/event*`, ioctl caps, force-feedback later)                                                                                                                                                                                                                                                                                                            | P10                              |
+| Gamepad Windows        | XInput (hand FFI; GameInput later if needed)                                                                                                                                                                                                                                                                                                                                      | P14                              |
+| Gamepad macOS          | GameController framework (objc FFI)                                                                                                                                                                                                                                                                                                                                               | P14                              |
+| Gamepad Web            | Gamepad API via the JS shim                                                                                                                                                                                                                                                                                                                                                       | P10-ish (cheap, with wasm demos) |
+| **On-screen controls** | `crcbl_ui::touch`'s `TouchStick` reaches `ActionMap::virtual_stick` end to end — `apps/horde` binds `Binding::Virtual` beside `Binding::Wasd` on one action, so a virtual stick is a device like any other. `virtual_button` is API-only: the two production `TouchButton` users, the pause and console buttons, read the widget's own `take_fired` and never touch an action map | stick shipped; button unjoined   |
 
 **The stylesheet the table used to promise is not what shipped, and the reason
 is worth keeping.** A control's palette is one `crcbl_ui::touch::CONTROL_STYLE`
@@ -133,14 +133,14 @@ assignment is post-MVP but the device-id plumbing supports it from day one.
 
 ## Delivery
 
-| Slice                                                                                                                                                                                                                                                                                                                                      | Phase                                           |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
-| Action layer + kb/mouse — **patterns, contexts and the RON binding asset are not built**, per the section above: an action carries no pattern list, there is no context stack, and nothing parses a binding file.                                                                                                                          | P2 (replaces the raw-input pipeline plan there) |
-| Profile rebind storage + glyph hints — **neither built**, checked 2026-08-23: `crcbl-store` has no profile or binding type (its only cross-session helper is `record.rs`, one number for the samples' high scores) and `crcbl-input` contains no glyph anything. `ActionMap::rebind` exists and is in-memory only — nothing serialises it. | unbuilt                                         |
-| Rebind UI in settings screen; input inspector                                                                                                                                                                                                                                                                                              | P10                                             |
-| Gamepad: evdev (Linux) + Web Gamepad API                                                                                                                                                                                                                                                                                                   | P10                                             |
-| Gamepad: XInput / GameController                                                                                                                                                                                                                                                                                                           | P14                                             |
-| Local-multiplayer device assignment, haptics                                                                                                                                                                                                                                                                                               | post-MVP                                        |
+| Slice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Phase                                           |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Action layer + kb/mouse — **patterns, contexts and the RON binding asset are not built**, per the section above: an action carries no pattern list, there is no context stack, and nothing parses a binding file.                                                                                                                                                                                                                                                                                                                                                                                       | P2 (replaces the raw-input pipeline plan there) |
+| Profile rebind storage + glyph hints — **neither built**, checked 2026-08-23: `crcbl-store` has no profile or binding type and `crcbl-input` contains no glyph anything, and `ActionMap::rebind` is in-memory only — nothing serialises it. This row used to add that `record.rs` was the crate's only cross-session helper, which was 24 days out of date when the "checked" date was written on it: `crcbl-store::settings` persists `settings.toml` through `SettingsStack::save`, which is the mechanism a rebind file sits on. So what is owed is the binding **schema**, not a persistence layer. | unbuilt                                         |
+| Rebind UI in settings screen; input inspector                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | P10                                             |
+| Gamepad: evdev (Linux) + Web Gamepad API                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | P10                                             |
+| Gamepad: XInput / GameController                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | P14                                             |
+| Local-multiplayer device assignment, haptics                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | post-MVP                                        |
 
 Samples: breakout onward consume actions from S1 — proving the layer before
 gamepads even exist. What breakout actually declares is `left` and `right` as
@@ -164,11 +164,19 @@ same character.
 
 ## Correction (2026-08-09)
 
-**`DeviceId` names a device _kind_, not a device, on every backend that has
-one.** Win32, X11 and AppKit all report a constant per family. The layered
-design above declares "per-device id" at the shell boundary and states that "the
-device-id plumbing supports [local multiplayer] from day one" — it does not,
-today, on any platform, and the device registry cannot tell two keyboards apart.
+**`DeviceId` names a device _kind_ on Win32, X11 and AppKit — and this
+correction used to say "on every backend", which left out the one that
+disagrees.** Those three report a constant per family. **Wayland does not**: the
+`wl_seat` handler allocates a fresh id from a counter, so the id names a _seat_,
+and `Seat`'s own doc in `crates/crcbl-shell/src/wayland/mod.rs` answers this
+plan by name — a multi-seat session is how Linux does local multiplayer, and it
+produces exactly the distinct ids that layer needs. The per-seat id predated
+this correction by thirteen days.
+
+The layered design above declares "per-device id" at the shell boundary and
+states that "the device-id plumbing supports [local multiplayer] from day one".
+On the three constant-per-family backends it does not, and the registry cannot
+tell two keyboards apart there.
 
 Per-backend routes exist and none is free: Windows is best placed
 (`RAWINPUTHEADER::hDevice` identifies the physical device on every `WM_INPUT`,
@@ -177,7 +185,9 @@ and a handle needs a table and a hotplug story); macOS and Linux both end at
 IOKit and evdev respectively, which is the same slice as unaccelerated raw
 motion.
 
-Consequence to state plainly: **local-multiplayer device assignment is
-blocked**, not merely unscheduled, and any test asserting two devices are
-distinguishable would pass vacuously today. `docs/backlog.md` carries the
-per-backend detail.
+Consequence to state plainly: **local-multiplayer device assignment is blocked
+on Win32, X11 and AppKit** — not merely unscheduled — and a test asserting two
+devices are distinguishable passes vacuously on those three. On Wayland it does
+not, which makes seat granularity a shipping route for the slice this document
+lists as blocked rather than a thing to build first. `docs/backlog.md` carries
+the per-backend detail, and carried this same omission until 2026-09-02.

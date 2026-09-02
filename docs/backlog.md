@@ -4723,12 +4723,20 @@ browser-hosted single-player game with mods has no containment at all.
 
 **Built:** `ActionMap`, `ActionDecl`, the three `ActionKind`s, `Binding::Key`,
 `MouseButton`, `Virtual`, `PointerPosition`, `KeyAxis`, `Wasd`, and
-`virtual_button`/`virtual_stick` driving `crcbl_ui::touch`.
+`virtual_stick` driving `crcbl_ui::touch`'s `TouchStick` — `apps/horde` is the
+caller. `virtual_button` is built and **unjoined**: no production code calls it,
+because the two `TouchButton` users read the widget's own `take_fired` instead.
 
-**Blocked, not merely unscheduled:** local-multiplayer device assignment, per
-`19-input.md`'s 2026-08-09 correction — `DeviceId` names a device _kind_ on
-every backend, so any test asserting two devices are distinguishable would pass
-vacuously. Re-read the correction; it still describes the tree.
+**Blocked on three backends of four, corrected 2026-09-02:** local-multiplayer
+device assignment. `19-input.md`'s 2026-08-09 correction said `DeviceId` names a
+device _kind_ on **every** backend, and both it and this entry left out Wayland,
+where the `wl_seat` handler allocates a fresh id per seat — that landed thirteen
+days before the correction was written. So a test asserting two devices are
+distinguishable passes vacuously on Win32, X11 and AppKit and does not on
+Wayland, and seat granularity is a shipping route for the slice rather than
+something to build first. "Re-read the correction; it still describes the tree"
+is what this entry said for three weeks, which is why re-reading a claim is not
+the same as re-checking it.
 
 ### Replay: the container is flat, and every `crcbl replay` subverb is owed (2026-08-27)
 
