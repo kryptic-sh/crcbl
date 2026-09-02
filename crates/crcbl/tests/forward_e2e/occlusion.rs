@@ -306,8 +306,74 @@ const RADIUS: f32 = 0.5;
 /// baseline to have, and the assertion below is on the runs themselves.
 const SLICE_STEPS_HINT: u32 = 4;
 
-/// The `R8Unorm` texel a fully unoccluded pixel carries.
+/// The `Rgba8Unorm` texel a fully unoccluded pixel carries in `r`.
 const UNOCCLUDED: u8 = 0xFF;
+
+/// The column [`the_bent_direction_leans_out_of_the_occluded_band`] reads the
+/// leaning direction at, in [`EXTENT`]'s pixels.
+///
+/// Just past [`PLATE_COLUMNS`]' right edge and clear of the silhouette both
+/// filters disturb — [`SILHOUETTE_SKIP`] counts that disturbance in the
+/// gather's pixels and this is the same distance in the frame's. The plate is
+/// then the whole `-x` half of this pixel's neighbourhood, which is what makes
+/// the sign of the answer a fact about the scene rather than about a threshold.
+///
+/// [`the_bent_direction_leans_out_of_the_occluded_band`]: fn@the_bent_direction_leans_out_of_the_occluded_band
+const BENT_LEANING_COLUMN: u32 =
+    PLATE_COLUMNS.end + SILHOUETTE_SKIP * crcbl::shaders::ssao::RESOLUTION_DIVISOR;
+
+/// The column the same test reads open wall at, in [`EXTENT`]'s pixels.
+///
+/// Well past the end of the falloff — the 2026-09-02 sweep in
+/// [`SILHOUETTE_SKIP`] puts that at eighty-three of the gather's columns, and
+/// this is several times further — so nothing within [`RADIUS`] of this pixel
+/// occludes it and its bisector is the surface's own normal.
+const BENT_OPEN_COLUMN: u32 = 1600;
+
+/// How far off `+Z` an unoccluded pixel's bent direction may lean on `x`.
+///
+/// **Measured, and the failure it is placed against is a real one.** On radv
+/// 2026-09-02 the open column read `0.0039` — one `Rgba8Unorm` step, which is
+/// the encoded zero and nothing else — while the sum-of-bisectors accumulation
+/// `ssao.slang`'s `occlusion_at` rejects read `-0.294` there. This sits between
+/// them with room on both sides.
+const MAX_OPEN_LEAN: f32 = 0.02;
+
+/// How far towards `+x` the bent direction must lean at
+/// [`BENT_LEANING_COLUMN`].
+///
+/// **Measured, and deliberately well under what that column reads**: on radv
+/// 2026-09-02 it read `0.318`. What the test is about is that the direction
+/// leans at all and leans the right way, so a bound near the measurement would
+/// be a test that goes red on the next legitimate change to the sweep's
+/// weighting.
+const MIN_OCCLUDED_LEAN: f32 = 0.05;
+
+/// How much of the reconstructed frame must carry a bent direction rather than
+/// the sentinel.
+///
+/// The scene is a wall with one plate on it, so the only pixels with no
+/// direction are the plate's own silhouette and whatever cancels there — and on
+/// radv 2026-09-02 not even those: every one of the frame's pixels carried a
+/// direction. This is placed under that so a silhouette that begins to cancel
+/// is not a failure, while a frame that went mostly sentinel — which would make
+/// the length bound a check over nothing — is.
+const MIN_DIRECTED_SHARE: f64 = 0.9;
+
+/// How far off unit length a decoded bent direction may be.
+///
+/// **`Rgba8Unorm` quantisation and nothing else, derived rather than tuned.**
+/// A channel rounds to the nearest of 255 steps, so it is off by at most half a
+/// step — `0.5/255` encoded and twice that decoded — and all three can be off
+/// at once, which is `sqrt(3) * 2 * 0.5 / 255`, under `0.0068`. This is that
+/// rounded up.
+///
+/// Both sides of it were measured on radv 2026-09-02. The shipping chain's own
+/// worst is `5.0e-3` where the reconstruction leaves it, and replacing
+/// `ssao_blur.slang`'s `normalize` with its argument — a blur that writes the
+/// mean of its taps — takes it to `2.2e-2`. The test reports the figure on
+/// every run, so a chain creeping towards the bound is visible before it fails.
+const MAX_UNIT_LENGTH_ERROR: f32 = 0.008;
 
 /// Columns of the gradient skipped at the plate's silhouette.
 ///
@@ -851,7 +917,7 @@ fn fullscreen_pipeline(
             dxil: &shader.dxil_containers(),
         })
         .expect("a shader module");
-    let targets = [ColorTargetState::opaque(Format::R8Unorm)];
+    let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
     let pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
         label: Some(label),
         layout,
@@ -963,10 +1029,12 @@ impl Passes {
     }
 }
 
-/// One `R8Unorm` target of `extent`, sampled by the pass after it.
+/// One `Rgba8Unorm` target of `extent`, sampled by the pass after it.
 ///
-/// The extent is a parameter because the chain has two: the gather and the blur
-/// write [`OCCLUSION_EXTENT`] and the reconstruction writes [`EXTENT`].
+/// `crcbl_render::TransientImageDesc::ambient_occlusion`'s format: `r` the
+/// visibility scalar and `gba` the bent direction. The extent is a parameter
+/// because the chain has two: the gather and the blur write
+/// [`OCCLUSION_EXTENT`] and the reconstruction writes [`EXTENT`].
 fn occlusion_image(
     device: &dyn Device,
     label: &str,
@@ -977,7 +1045,7 @@ fn occlusion_image(
             label: Some(label),
             image_type: ImageType::D2,
             extent: Extent3d::d2(extent.0, extent.1),
-            format: Format::R8Unorm,
+            format: Format::Rgba8Unorm,
             mip_levels: 1,
             samples: 1,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED | ImageUsage::TRANSFER_SRC,
@@ -988,7 +1056,7 @@ fn occlusion_image(
             label: Some(label),
             image,
             view_type: ImageViewType::D2,
-            format: Format::R8Unorm,
+            format: Format::Rgba8Unorm,
             range: ImageSubresourceRange {
                 aspect: ImageAspect::COLOR,
                 base_mip: 0,
@@ -1017,9 +1085,10 @@ fn colour_range() -> ImageSubresourceRange {
 /// The whole final channel, and what each pass cost — the two things every test
 /// here wants and none can get from another's readback.
 struct Run {
-    /// The last pass's occlusion, one byte per pixel and [`Run::extent`]`.0`
-    /// bytes to a row. Whole rather than the one line a test reads, because the
-    /// tangential line is a diagonal and a diagonal is not a copy region.
+    /// The last pass's occlusion, [`TEXEL_BYTES`] per pixel and
+    /// [`Run::extent`]`.0` of them to a row. Whole rather than the one line a
+    /// test reads, because the tangential line is a diagonal and a diagonal is
+    /// not a copy region.
     image: Vec<u8>,
     /// The extent [`Run::image`] was read back at, which is the extent of
     /// whichever pass ended the chain — see [`Chain`].
@@ -1036,9 +1105,27 @@ struct Run {
 }
 
 impl Run {
-    /// This run's value at `(x, y)`, in the pixels of the pass that produced it.
+    /// This run's **visibility** at `(x, y)`, in the pixels of the pass that
+    /// produced it: the `r` channel, which is the whole of what the chain wrote
+    /// before the target was widened and what every gradient here measures.
     fn at(&self, x: u32, y: u32) -> u8 {
-        self.image[(y * self.extent.0 + x) as usize]
+        self.image[self.texel(x, y)]
+    }
+
+    /// This run's **bent direction** at `(x, y)`, decoded out of `gba`.
+    ///
+    /// `ssao.slang`'s `encode_bent` undone — `gba * 2 - 1` — so a pixel the
+    /// chain had no direction for comes back at very nearly the origin and
+    /// every other one comes back a unit vector. `crcbl_shaders::ssao::
+    /// BENT_NORMAL_MIN_LENGTH` is where those two are separated.
+    fn bent_at(&self, x: u32, y: u32) -> [f32; 3] {
+        let at = self.texel(x, y);
+        [1, 2, 3].map(|channel| f32::from(self.image[at + channel]) / 255.0 * 2.0 - 1.0)
+    }
+
+    /// Where `(x, y)`'s texel starts in [`Run::image`].
+    fn texel(&self, x: u32, y: u32) -> usize {
+        (y * self.extent.0 + x) as usize * TEXEL_BYTES
     }
 
     /// What one pass cost, by label.
@@ -1066,6 +1153,45 @@ struct Measured {
     sharp: usize,
     /// The largest difference any neighbouring pair had.
     worst: u8,
+}
+
+/// Bytes one texel of the occlusion channel holds.
+///
+/// `crcbl_render::TransientImageDesc::ambient_occlusion` is `Rgba8Unorm`: `r`
+/// the visibility scalar and `gba` the bent direction. Named because it is the
+/// stride of every readback below and the divisor of every row pitch, and a
+/// four spelled at each of those is four places to miss when the channel next
+/// changes shape.
+const TEXEL_BYTES: usize = 4;
+
+/// The console variables the occlusion chain reads, as one frame asked for
+/// them.
+///
+/// A type rather than four positional arguments to [`run_passes`], which
+/// `crcbl::hal`'s own `too_many_arguments` floor is what forced and which the
+/// call sites wanted anyway: `2, 1, 1.0, true` says nothing at a call site and
+/// `..Knobs::SHIPPING` says exactly what a test is varying.
+#[derive(Clone, Copy)]
+struct Knobs {
+    /// `crcbl_render::ssao::r_ssao_slices`.
+    slices: u8,
+    /// `crcbl_render::ssao::r_ssao_blur_passes`.
+    blurs: u32,
+    /// `crcbl_render::ssao::r_ssao_intensity`.
+    intensity: f32,
+    /// `crcbl_render::ssao::r_ssao_bent_normals`.
+    bent_normals: bool,
+}
+
+impl Knobs {
+    /// What a frame nobody has touched the console on runs at, and what every
+    /// golden in this workspace was blessed under.
+    const SHIPPING: Self = Self {
+        slices: crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
+        blurs: 1,
+        intensity: crcbl::shaders::ssao::INTENSITY_DEFAULT,
+        bent_normals: true,
+    };
 }
 
 /// Where a run's chain ends, and therefore what extent its readback is in.
@@ -1104,11 +1230,15 @@ fn run_passes(
     headless: &Headless,
     projection: Mat4,
     texels: &[u8],
-    slices: u8,
-    blurs: u32,
-    intensity: f32,
+    knobs: Knobs,
     chain: Chain,
 ) -> Run {
+    let Knobs {
+        slices,
+        blurs,
+        intensity,
+        bent_normals,
+    } = knobs;
     let device = headless.device.as_ref();
     let (width, height) = EXTENT;
     let (gather_width, gather_height) = OCCLUSION_EXTENT;
@@ -1188,9 +1318,17 @@ fn run_passes(
     let params = SsaoParams {
         inv_proj: projection.inverse().to_cols_array(),
         proj: projection.to_cols_array(),
+        // **The identity, and that is what makes the bent direction readable
+        // here.** The scene below is arithmetic rather than geometry — there is
+        // no camera, only a projection — so view space *is* world space, and
+        // the direction `ssao.slang` rotates through this comes back in the
+        // frame the depths were written in. A rotation would be one more thing
+        // between the horizons and the assertion.
+        inv_view: Mat4::IDENTITY.to_cols_array(),
         radius: RADIUS,
         slices,
         intensity,
+        bent_normals,
     };
     let uniforms = device
         .create_buffer(&BufferDesc {
@@ -1284,6 +1422,7 @@ fn run_passes(
         Chain::Gathered => OCCLUSION_EXTENT,
         Chain::Reconstructed => EXTENT,
     };
+    let read_bytes = read_width as usize * TEXEL_BYTES;
 
     // The whole channel, not a row: the tangential line is a diagonal, and a
     // copy region cannot be one. At [`EXTENT`] this is two megabytes, which is
@@ -1293,7 +1432,12 @@ fn run_passes(
         .limits
         .optimal_buffer_copy_offset_alignment
         .max(4);
-    let pitch = u64::from(read_width).next_multiple_of(alignment);
+    // In **bytes**, which is not the same as in texels since the channel was
+    // widened — `crates/crcbl/tests/forward_e2e/page.rs` reads an `Rgba8Unorm`
+    // image the same way, and `buffer_row_length` below is the texel count this
+    // divides back to.
+    let row_bytes = u64::from(read_width) * TEXEL_BYTES as u64;
+    let pitch = row_bytes.next_multiple_of(alignment);
     let staging = device
         .create_buffer(&BufferDesc {
             label: Some("ssao image"),
@@ -1513,7 +1657,8 @@ fn run_passes(
     encoder.copy_image_to_buffer(&BufferImageCopy {
         buffer: staging,
         buffer_offset: 0,
-        buffer_row_length: u32::try_from(pitch).expect("a row of a 1080p frame"),
+        buffer_row_length: u32::try_from(pitch / TEXEL_BYTES as u64)
+            .expect("a row of a 1080p frame"),
         buffer_image_height: read_height,
         image: source.0,
         image_subresource: ImageSubresourceLayers {
@@ -1535,10 +1680,10 @@ fn run_passes(
 
     let mut padded = poisoned((pitch * u64::from(read_height)) as usize);
     headless.readback(staging, pitch * u64::from(read_height), &mut padded);
-    let mut image = Vec::with_capacity((read_width * read_height) as usize);
+    let mut image = Vec::with_capacity((read_width * read_height) as usize * TEXEL_BYTES);
     for row in 0..read_height {
         let at = (u64::from(row) * pitch) as usize;
-        image.extend_from_slice(&padded[at..at + read_width as usize]);
+        image.extend_from_slice(&padded[at..at + read_bytes]);
     }
 
     let timings = match timers {
@@ -1659,9 +1804,7 @@ fn the_blurred_occlusion_falloff_does_not_terrace() {
         &headless,
         projection,
         &texels,
-        crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
-        1,
-        crcbl::shaders::ssao::INTENSITY_DEFAULT,
+        Knobs::SHIPPING,
         Chain::Gathered,
     );
 
@@ -1803,9 +1946,7 @@ fn the_tangential_occlusion_line_does_not_step() {
         &headless,
         projection,
         &texels,
-        crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
-        1,
-        crcbl::shaders::ssao::INTENSITY_DEFAULT,
+        Knobs::SHIPPING,
         Chain::Gathered,
     );
 
@@ -1821,9 +1962,11 @@ fn the_tangential_occlusion_line_does_not_step() {
             &headless,
             projection,
             &texels,
-            slices,
-            blurs,
-            crcbl::shaders::ssao::INTENSITY_DEFAULT,
+            Knobs {
+                slices,
+                blurs,
+                ..Knobs::SHIPPING
+            },
             Chain::Gathered,
         );
         let line: Vec<u8> = (0..DIAGONAL_LENGTH)
@@ -2041,9 +2184,7 @@ fn the_reconstruction_does_not_halo_a_silhouette() {
         &headless,
         projection,
         &texels,
-        crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
-        1,
-        crcbl::shaders::ssao::INTENSITY_DEFAULT,
+        Knobs::SHIPPING,
         Chain::Reconstructed,
     );
 
@@ -2150,9 +2291,7 @@ fn the_reconstruction_does_not_halo_a_silhouette_down_a_column() {
         &headless,
         projection,
         &texels,
-        crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
-        1,
-        crcbl::shaders::ssao::INTENSITY_DEFAULT,
+        Knobs::SHIPPING,
         Chain::Reconstructed,
     );
 
@@ -2231,9 +2370,10 @@ fn the_ao_intensity_scales_the_reconstructed_occlusion() {
             &headless,
             projection,
             &texels,
-            crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
-            1,
-            intensity,
+            Knobs {
+                intensity,
+                ..Knobs::SHIPPING
+            },
             Chain::Reconstructed,
         )
     };
@@ -2494,18 +2634,14 @@ fn the_reconstruction_answers_a_sliver_with_its_nearest_sample() {
         &headless,
         projection,
         &texels,
-        crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
-        1,
-        crcbl::shaders::ssao::INTENSITY_DEFAULT,
+        Knobs::SHIPPING,
         Chain::Reconstructed,
     );
     let gathered = run_passes(
         &headless,
         projection,
         &texels,
-        crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
-        1,
-        crcbl::shaders::ssao::INTENSITY_DEFAULT,
+        Knobs::SHIPPING,
         Chain::Gathered,
     );
 
@@ -2562,6 +2698,295 @@ fn the_reconstruction_answers_a_sliver_with_its_nearest_sample() {
          being the floor.",
         count = mismatched.len(),
         shown = &mismatched[..MESSAGE_SAMPLES.min(mismatched.len())],
+    );
+
+    headless.finish();
+}
+
+/// **The bent direction leans out of the occluded band**, rather than being a
+/// constant the pass could have written without looking at the depth.
+///
+/// `docs/plan/46-ambient-occlusion.md`'s second half of the AO rung: the same
+/// horizon sweep that measures how much of the room is hidden also reports which
+/// way what is left of it lies, and `mesh.slang` samples its ambient irradiance
+/// along that direction. What makes it worth having is that it *moves* — a
+/// surface beside an occluder is lit from away from the occluder — and a
+/// direction that never moves lights every frame exactly as the shading normal
+/// already did.
+///
+/// # The scene and what the right answer is
+///
+/// [`the_blurred_occlusion_falloff_does_not_terrace`]'s wall and plate, read
+/// through the whole chain at [`EXTENT`]. The wall is a plane of constant view
+/// depth, so its view-space normal is exactly `+Z` everywhere — and the block's
+/// `inv_view` is the identity here, so the direction comes back in that frame.
+///
+/// * **Far from the plate the wall is unoccluded**, and an unoccluded pixel's
+///   two horizons clamp to the plane of the surface. Their bisector is the
+///   surface's own tilt inside each slice, which is the normal — so the
+///   direction there is `+Z` and its `x` is nothing.
+/// * **Just past the plate's right edge the wall is occluded from the left**,
+///   because that is where the plate is. The visible arc is the half that is
+///   not the plate, so its bisector leans towards `+x`.
+///
+/// The measure is therefore `x` at the two places, and the assertion is that the
+/// occluded one leans and the open one does not. A constant direction — the
+/// sabotage this test exists for — gives the same `x` at both.
+///
+/// [`the_blurred_occlusion_falloff_does_not_terrace`]: fn@the_blurred_occlusion_falloff_does_not_terrace
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_bent_direction_leans_out_of_the_occluded_band() {
+    let headless = Headless::open_at_format(EXTENT, None, Features::TIMESTAMP_QUERY);
+    let (width, height) = EXTENT;
+    let size = (width as f32, height as f32);
+    let projection = Projection::Perspective {
+        fov_y: FOV_Y,
+        near: NEAR,
+    }
+    .matrix(size.0 / size.1);
+
+    let wall = depth_of(projection, -WALL_Z);
+    let plate = lifted_depth(projection, PLATE_LIFT);
+    let texels = depth_image(|x, _| {
+        if PLATE_COLUMNS.contains(&x) {
+            plate
+        } else {
+            wall
+        }
+    });
+    let run = run_passes(
+        &headless,
+        projection,
+        &texels,
+        Knobs::SHIPPING,
+        Chain::Reconstructed,
+    );
+
+    let leaning = run.bent_at(BENT_LEANING_COLUMN, HALO_LINE_Y);
+    let open = run.bent_at(BENT_OPEN_COLUMN, HALO_LINE_Y);
+    eprintln!(
+        "{suite}: the bent direction is {leaning:?} at column {BENT_LEANING_COLUMN}, {}, and \
+         {open:?} at column {BENT_OPEN_COLUMN}, which is clear of it",
+        "which is just past the plate's edge",
+        suite = crate::SUITE,
+    );
+
+    assert!(
+        open[0].abs() <= MAX_OPEN_LEAN,
+        "the open wall's bent direction leans {} on x, over the {MAX_OPEN_LEAN} an unoccluded \
+         plane of constant depth is allowed: nothing occludes column \
+         {BENT_OPEN_COLUMN}, so its bisector is the surface's own normal and that normal is \
+         `+Z`. The whole direction read {open:?}.",
+        open[0],
+    );
+    assert!(
+        leaning[0] >= MIN_OCCLUDED_LEAN,
+        "the occluded wall's bent direction leans only {} on x, under the {MIN_OCCLUDED_LEAN} \
+         this measurement needs. Column {BENT_LEANING_COLUMN} sits just past the right edge of a \
+         plate covering {PLATE_COLUMNS:?}, so the half of its hemisphere towards `-x` is the \
+         plate and the bisector of what is left has to lean the other way. The whole direction \
+         read {leaning:?}, against {open:?} on open wall.",
+        leaning[0],
+    );
+
+    headless.finish();
+}
+
+/// **Both filters leave the bent direction a unit vector**, whatever they
+/// averaged.
+///
+/// A weighted mean of unit vectors is not one — it is shorter the more the taps
+/// disagree, and shortest exactly where the neighbourhood is busiest, which is
+/// at every silhouette in the frame. `ssao_blur.slang` and
+/// `ssao_upsample.slang` therefore renormalise, and this is what says they did:
+/// a direction whose length carries the filter's own disagreement is a term
+/// `mesh.slang`'s irradiance never meant to have, and it is invisible in a
+/// picture because a short direction still points somewhere.
+///
+/// # Both, and separately, because the last one covers for the others
+///
+/// The chain is read twice — once where the blur leaves it and once where the
+/// reconstruction does — and the length bound is asserted on each. Reading only
+/// the end of the chain guards nothing about the blur: `ssao_upsample.slang`
+/// renormalises whatever it is handed, so a blur that stopped renormalising is
+/// invisible there. That was measured on 2026-09-02 rather than reasoned about
+/// — the blur's `normalize` was replaced by its argument and the reconstructed
+/// half of this test stayed green.
+///
+/// # It asserts the sweep ran, not only that it passed
+///
+/// Every texel is one of two things — a unit direction or the zero sentinel —
+/// and a frame that was *all* sentinel would satisfy the length bound
+/// vacuously. So the count of pixels carrying a direction is asserted against
+/// [`MIN_DIRECTED_SHARE`] as well: this scene is a wall with a plate on it and
+/// nothing else, so all but the plate's own silhouette has a direction.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_filters_leave_the_bent_direction_a_unit_vector() {
+    let headless = Headless::open_at_format(EXTENT, None, Features::TIMESTAMP_QUERY);
+    let size = (EXTENT.0 as f32, EXTENT.1 as f32);
+    let projection = Projection::Perspective {
+        fov_y: FOV_Y,
+        near: NEAR,
+    }
+    .matrix(size.0 / size.1);
+
+    let wall = depth_of(projection, -WALL_Z);
+    let plate = lifted_depth(projection, PLATE_LIFT);
+    let texels = depth_image(|x, _| {
+        if PLATE_COLUMNS.contains(&x) {
+            plate
+        } else {
+            wall
+        }
+    });
+    let threshold = crcbl::shaders::ssao::BENT_NORMAL_MIN_LENGTH;
+    for (what, chain) in [
+        ("ssao_blur.slang", Chain::Gathered),
+        ("ssao_upsample.slang", Chain::Reconstructed),
+    ] {
+        let run = run_passes(&headless, projection, &texels, Knobs::SHIPPING, chain);
+        let (run_width, run_height) = run.extent;
+        let mut directed = 0u64;
+        let mut worst = 0.0f32;
+        let mut worst_at = (0, 0);
+        for y in 0..run_height {
+            for x in 0..run_width {
+                let bent = run.bent_at(x, y);
+                let length = bent
+                    .iter()
+                    .map(|component| component * component)
+                    .sum::<f32>()
+                    .sqrt();
+                if length < threshold {
+                    continue;
+                }
+                directed += 1;
+                let off = (length - 1.0).abs();
+                if off > worst {
+                    worst = off;
+                    worst_at = (x, y);
+                }
+            }
+        }
+        let pixels = u64::from(run_width) * u64::from(run_height);
+        let share = directed as f64 / pixels as f64;
+        eprintln!(
+            "{suite}: {directed} of {pixels} pixels ({share:.4}) carry a bent direction where \
+             {what} left them, and the longest of them is off unit length by {worst:e} at \
+             {worst_at:?}",
+            suite = crate::SUITE,
+        );
+
+        assert!(
+            share >= MIN_DIRECTED_SHARE,
+            "only {share:.4} of what {what} wrote carries a bent direction, under the \
+             {MIN_DIRECTED_SHARE} this scene owes: a wall with one plate on it has a direction \
+             everywhere but the plate's own silhouette, and a frame that is mostly sentinel \
+             makes the length bound below a check over nothing"
+        );
+        assert!(
+            worst <= MAX_UNIT_LENGTH_ERROR,
+            "a bent direction {what} wrote, at {worst_at:?}, is off unit length by {worst:e} — \
+             over the {MAX_UNIT_LENGTH_ERROR:e} `Rgba8Unorm` quantisation alone can account \
+             for. That filter is writing the mean of its taps instead of renormalising it, \
+             which is a direction whose length carries the filter's own disagreement; see \
+             `ssao_blur.slang`'s `encode_bent`."
+        );
+    }
+
+    headless.finish();
+}
+
+/// **The bent-direction switch writes the sentinel and leaves the scalar
+/// alone.**
+///
+/// `crcbl_render::ssao::r_ssao_bent_normals` off is the frame the chain drew
+/// before the target was widened, and both halves of that are checked here: the
+/// three direction channels come back as the sentinel everywhere — which
+/// `mesh.slang` answers with the shading normal, so the ambient term is
+/// unsteered — and the visibility channel is **byte for byte** what the same
+/// scene produced with the switch on.
+///
+/// The second half is the one worth having. The direction rides in the same
+/// texel as the scalar and is accumulated in the same loop, so a change that
+/// perturbed the scalar while gathering it would move every golden in the
+/// workspace for a reason no golden could name.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_bent_direction_switch_writes_the_sentinel_and_leaves_the_scalar_alone() {
+    let headless = Headless::open_at_format(EXTENT, None, Features::TIMESTAMP_QUERY);
+    let (width, height) = EXTENT;
+    let size = (width as f32, height as f32);
+    let projection = Projection::Perspective {
+        fov_y: FOV_Y,
+        near: NEAR,
+    }
+    .matrix(size.0 / size.1);
+
+    let wall = depth_of(projection, -WALL_Z);
+    let plate = lifted_depth(projection, PLATE_LIFT);
+    let texels = depth_image(|x, _| {
+        if PLATE_COLUMNS.contains(&x) {
+            plate
+        } else {
+            wall
+        }
+    });
+    let on = run_passes(
+        &headless,
+        projection,
+        &texels,
+        Knobs::SHIPPING,
+        Chain::Reconstructed,
+    );
+    let off = run_passes(
+        &headless,
+        projection,
+        &texels,
+        Knobs {
+            bent_normals: false,
+            ..Knobs::SHIPPING
+        },
+        Chain::Reconstructed,
+    );
+
+    let sentinel = crcbl::shaders::ssao::BENT_NORMAL_NONE;
+    let mut steered = Vec::new();
+    let mut moved = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let texel = (y * width + x) as usize * TEXEL_BYTES;
+            if off.image[texel + 1..texel + TEXEL_BYTES] != [sentinel; 3]
+                && steered.len() < MESSAGE_SAMPLES
+            {
+                steered.push((
+                    x,
+                    y,
+                    off.image[texel + 1],
+                    off.image[texel + 2],
+                    off.image[texel + 3],
+                ));
+            }
+            if off.image[texel] != on.image[texel] && moved.len() < MESSAGE_SAMPLES {
+                moved.push((x, y, on.image[texel], off.image[texel]));
+            }
+        }
+    }
+
+    assert!(
+        steered.is_empty(),
+        "the chain wrote a bent direction with `r_ssao_bent_normals` off, at \
+         `(x, y, g, b, a)` {steered:?}: every one of those three channels has to be the \
+         {sentinel:#04x} `crcbl_shaders::ssao::BENT_NORMAL_NONE` names, which is what \
+         `mesh.slang` answers with the shading normal"
+    );
+    assert!(
+        moved.is_empty(),
+        "the visibility channel moved when the bent direction was switched off, at \
+         `(x, y, on, off)` {moved:?}. The scalar is gathered by the same loop and the switch \
+         must not touch it — every golden in this workspace is a picture of that channel."
     );
 
     headless.finish();

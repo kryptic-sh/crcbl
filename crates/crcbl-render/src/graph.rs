@@ -3095,22 +3095,29 @@ impl TransientImageDesc {
         }
     }
 
-    /// A screen-space occlusion channel: `R8Unorm`, rendered into and then
+    /// A screen-space occlusion channel: `Rgba8Unorm`, rendered into and then
     /// fetched.
     ///
-    /// `docs/plan/18-render-features.md`'s AO pair — `ssao.slang` writes one of
-    /// these and `ssao_blur.slang` reads it and writes another, which is why this
-    /// is one description rather than two that agree today.
+    /// `docs/plan/18-render-features.md`'s AO chain — `ssao.slang` writes one of
+    /// these, `ssao_blur.slang` reads it and writes another and
+    /// `ssao_upsample.slang` writes the last, which is why this is one
+    /// description rather than three that agree today.
     ///
-    /// One channel and eight bits: the value is a fraction of a hemisphere that a
-    /// 4×4 box blur has just averaged sixteen samples into, so the quantisation
-    /// is far below what the blur already smoothed away — and it is a quarter of
-    /// the bandwidth of the smallest four-channel format.
+    /// **`r` is the visibility and `gba` are the bent direction.** Eight bits
+    /// each: the scalar is a fraction of a hemisphere a 4×4 kernel has just
+    /// averaged sixteen samples into, and the direction is a unit vector three
+    /// filters have averaged and renormalised, so the quantisation is far below
+    /// what either has already smoothed away. `ssao.slang`'s header carries the
+    /// encoding and why it is three channels rather than an octahedral pair.
+    ///
+    /// **It was `R8Unorm` until the bent direction arrived**, and the three
+    /// channels are the bandwidth `docs/plan/46-ambient-occlusion.md`'s tier
+    /// split is about.
     #[must_use]
     pub const fn ambient_occlusion(extent: (u32, u32)) -> Self {
         Self {
             extent,
-            format: Format::R8Unorm,
+            format: Format::Rgba8Unorm,
             usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::SAMPLED),
             samples: 1,
             mip_levels: 1,

@@ -904,10 +904,11 @@ impl FrameUniforms {
     /// third target, stretched by [`MOTION_VIEW_SCALE`] and centred on grey,
     /// instead of shading.
     ///
-    /// **The outermost sentinel now**, and this is the one the shader has to
-    /// test first — it clears every threshold below it.
+    /// **It clears every threshold below it**, so the shader has to test it
+    /// before all of them.
     /// `the_motion_view_threshold_lies_above_the_occlusion_view` holds the
-    /// interleaving.
+    /// interleaving. It is no longer the outermost — see
+    /// [`BENT_NORMAL_VIEW_ON`](Self::BENT_NORMAL_VIEW_ON).
     ///
     /// A **fragment**-stage view like the occlusion one, so it draws on every
     /// `GeometryPath` rather than on the mesh-shader path alone: both geometry
@@ -920,6 +921,29 @@ impl FrameUniforms {
     ///
     /// `crcbl_render::ForwardRenderer::set_motion_view` is what writes it.
     pub const MOTION_VIEW_ON: f32 = 5.0;
+
+    /// [`ambient`](Self::ambient)`.w` for the **bent-normal view**:
+    /// `mesh.slang`'s fragment stage draws the direction the occlusion channel
+    /// carries beside its scalar, as `n * 0.5 + 0.5`, instead of shading.
+    ///
+    /// **The outermost sentinel now**, and this is the one the shader has to
+    /// test first — it clears every threshold below it.
+    /// `the_bent_normal_view_threshold_lies_above_the_motion_view` holds the
+    /// interleaving.
+    ///
+    /// It draws the **channel** and not the shading's use of it, which is the
+    /// occlusion view's rule: a fragment the gather had no direction for reads
+    /// as the mid grey the zero sentinel encodes to, and a frame drawing
+    /// without `RenderEffects::AMBIENT_OCCLUSION` is that grey everywhere,
+    /// because the 1×1 image the renderer binds in place of a computed channel
+    /// holds `crcbl_shaders::ssao::BENT_NORMAL_NONE` in all three of those
+    /// channels.
+    ///
+    /// A **fragment**-stage view like the occlusion and motion ones, so it
+    /// draws on every `GeometryPath`.
+    ///
+    /// `crcbl_render::ForwardRenderer::set_bent_normal_view` is what writes it.
+    pub const BENT_NORMAL_VIEW_ON: f32 = 6.0;
 
     /// The bytes a uniform buffer holds, in `std140` order.
     #[must_use]
@@ -2406,10 +2430,22 @@ mod tests {
         // And the ambient term sums it. Named against `probe_irradiance`
         // beside it: the two are the same kind of environment and the sum is
         // what makes them add rather than one replacing the other.
+        //
+        // **Along the bent normal and not the shading one**, which is
+        // `docs/plan/46-ambient-occlusion.md`'s rung: the direction the
+        // occlusion channel carries is the one an environment is sampled along,
+        // and a sky evaluated at the shading normal instead is the frame this
+        // file drew before the channel was widened.
         assert!(
-            mesh.contains("frame.ambient.rgb + sky_irradiance(normal)"),
-            "mesh.slang's ambient term no longer adds the sky, so `set_sky` writes a lane \
-             nothing reads"
+            mesh.contains("frame.ambient.rgb + sky_irradiance(bent_normal)"),
+            "mesh.slang's ambient term no longer adds the sky along the bent normal, so either \
+             `set_sky` writes a lane nothing reads or the occlusion channel's direction is not \
+             steering anything"
+        );
+        assert!(
+            mesh.contains("probe_irradiance(input.world_position, bent_normal)"),
+            "mesh.slang's ambient term no longer samples the irradiance grid along the bent \
+             normal"
         );
     }
 
@@ -2822,6 +2858,52 @@ mod tests {
             !cluster.contains("MOTION_VIEW"),
             "mesh_cluster.slang has grown a MOTION_VIEW; the interleaving now has to hold in two \
              files and this test only checks one"
+        );
+    }
+
+    /// The bent-normal view's threshold lies above the motion view's, and its
+    /// branch is tested before every other one.
+    ///
+    /// `the_motion_view_threshold_lies_above_the_occlusion_view`'s check, one
+    /// sentinel further out, and the failure is the same shape: a frame asking
+    /// for the bent-normal view carries a `w` that clears every threshold below
+    /// it, so a branch tested out of order draws whichever view caught it first
+    /// — a picture, and one nobody asked for.
+    ///
+    /// The bent-normal view is `mesh.slang`'s alone, like the occlusion and
+    /// motion views: it reads the occlusion channel and nothing the geometry
+    /// stages produce, so `mesh_cluster.slang` declares no `BENT_NORMAL_VIEW`.
+    /// The absence is asserted, because one appearing there later would be a
+    /// second place the interleaving has to hold.
+    #[test]
+    fn the_bent_normal_view_threshold_lies_above_the_motion_view() {
+        let mesh = include_str!("../shaders/mesh.slang");
+        let bent = shader_float(mesh, "BENT_NORMAL_VIEW");
+        assert!(
+            FrameUniforms::MOTION_VIEW_ON < bent && bent < FrameUniforms::BENT_NORMAL_VIEW_ON,
+            "mesh.slang switches at {bent}, which does not separate the motion view's {} from \
+             the bent-normal view's {}",
+            FrameUniforms::MOTION_VIEW_ON,
+            FrameUniforms::BENT_NORMAL_VIEW_ON,
+        );
+
+        let bent_at = mesh
+            .find("if (frame.ambient.w >= BENT_NORMAL_VIEW)")
+            .expect("mesh.slang's fragment stage tests the bent-normal view");
+        let motion_at = mesh
+            .find("if (frame.ambient.w >= MOTION_VIEW)")
+            .expect("mesh.slang's fragment stage tests the motion view");
+        assert!(
+            bent_at < motion_at,
+            "the bent-normal test must come first, or a frame asking for it is caught by the \
+             motion threshold and draws the motion vectors instead"
+        );
+
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        assert!(
+            !cluster.contains("BENT_NORMAL_VIEW"),
+            "mesh_cluster.slang has grown a BENT_NORMAL_VIEW; the interleaving now has to hold \
+             in two files and this test only checks one"
         );
     }
 

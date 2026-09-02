@@ -4,7 +4,7 @@
 //! ```text
 //!   pass    ssao ────────▶ ssao-blur ────────▶ ssao-upsample ────────▶ forward
 //!   writes  ssao           ssao-blurred        ssao-upsampled          (× frame.ambient)
-//!           └── half extent, R8Unorm ─┘        └─ scene extent, R8Unorm ─┘
+//!           └─ half extent, Rgba8Unorm ┘      └ scene extent, Rgba8Unorm ┘
 //! ```
 //!
 //! The prepass's `scene-depth` is read by all three of the occlusion passes and
@@ -64,6 +64,22 @@
 //! that bundled them could not say so. Both default to what ships, so a frame
 //! nobody has touched the console on is the frame every golden was blessed at.
 //!
+//! # The bent direction is the fourth switch, and it is the one that is on
+//!
+//! [`r_ssao_bent_normals`] is what `docs/plan/46-ambient-occlusion.md` calls
+//! the second half of the rung: the same horizon sweep that measures how much
+//! of the room is hidden also reports which way what is left of it lies, and
+//! `mesh.slang` samples its ambient irradiance along that direction instead of
+//! along the shading normal. `shaders/ssao.slang`'s header is where the
+//! encoding and the sweep's by-product are argued.
+//!
+//! **It defaults on, which is the one switch here that does not default to what
+//! shipped before it.** The other three exist to buy quality a tier may not
+//! want to pay for; this one is the rung. What it costs is the three channels
+//! the target widened by — `R8Unorm` to `Rgba8Unorm` — and the arithmetic in
+//! the pass that already runs, and what turning it off restores is the zero
+//! sentinel every consumer answers with the shading normal.
+//!
 //! # The intensity is a third switch, and it buys nothing
 //!
 //! [`r_ssao_intensity`] is not on that ladder: it costs one comparison in the
@@ -79,12 +95,14 @@
 //! blend could only weaken it further. The default is the exponent that changes
 //! nothing, so this switch too leaves the frame every golden was blessed at.
 //!
-//! None of the three is a quality preset, and none is set by one.
+//! None of the four is a quality preset, and none is set by one.
 //! `crcbl::settings::presets` writes the `[engine.video]` keys of a tier, and
 //! `docs/plan/39-capabilities.md`'s tier table has no row for the occlusion
-//! pair — so all three stay what they are: variables declared beside the pass
+//! chain — so all four stay what they are: variables declared beside the pass
 //! that reads them, the way `crate::debug_draw`'s switch is. What a tier should
-//! spend on them is `docs/backlog.md`'s.
+//! spend on them is `docs/backlog.md`'s, and so is the open question a
+//! `VIDEO_KEYS` row would answer: a preset clears an effect by writing that
+//! effect's key, so a knob a preset selects needs a row of its own.
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
@@ -116,6 +134,11 @@ crcbl_console::convar! {
     pub static r_ssao_intensity: f32 in 0.25 ..= 4.0 = 1.0;
 }
 
+crcbl_console::convar! {
+    /// Gather a bent direction beside the scalar and steer the ambient by it.
+    pub static r_ssao_bent_normals: bool = true;
+}
+
 /// [`r_ssao_slices`] as the shader's uniform wants it.
 ///
 /// Clamped on the way through rather than trusted: the variable's own range is
@@ -144,6 +167,18 @@ pub(crate) fn intensity() -> f32 {
     r_ssao_intensity
         .get_f32()
         .clamp(ssao::INTENSITY_MIN, ssao::INTENSITY_MAX)
+}
+
+/// [`r_ssao_bent_normals`] as the shader's uniform wants it.
+///
+/// **On by default**, unlike the two switches above, which default to what
+/// ships: the direction is what `docs/plan/46-ambient-occlusion.md` calls the
+/// half of the AO rung worth having, so the frame a person gets without
+/// touching anything is the one with it. Turning it off leaves the gather
+/// writing the zero sentinel, and every consumer answers that with the shading
+/// normal it already had — see `shaders/ssao.slang`'s `bent_normals`.
+pub(crate) fn bent_normals() -> bool {
+    r_ssao_bent_normals.get_bool()
 }
 
 /// The extent the march and the blur run at: `extent` divided by
@@ -407,7 +442,7 @@ impl Ssao {
             push_constants: None,
         })?;
 
-        let targets = [ColorTargetState::opaque(Format::R8Unorm)];
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
         let pipeline = build_fullscreen(device, "ssao", &SSAO, pipeline_layout, &targets)?;
         let blur_pipeline = build_fullscreen(
             device,

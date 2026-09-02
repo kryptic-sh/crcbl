@@ -619,6 +619,24 @@ static const float OCCLUSION_VIEW = 3.5;
 /// touched.
 static const float MOTION_VIEW = 4.5;
 
+/// The switch for the **bent-normal view**, which draws the direction the
+/// occlusion channel carries beside its scalar.
+///
+/// The same lane once more and the outermost sentinel there is:
+/// `crcbl_shaders::mesh::FrameUniforms::BENT_NORMAL_VIEW_ON` is what the host
+/// writes, and this threshold lies above the motion view's so this test wins.
+/// `the_bent_normal_view_threshold_lies_above_the_motion_view` is what holds
+/// the interleaving.
+///
+/// **It draws the channel and not the shading's use of it**, which is the
+/// occlusion view's rule exactly: `gba` passes straight through, so the picture
+/// is the conventional `n * 0.5 + 0.5` the normals view already uses and a
+/// pixel with no direction reads as the mid grey the sentinel encodes to.
+/// Drawing the fallback instead would show this file's own shading normal
+/// wherever the channel said nothing, which is a picture of `bent_normal_at`
+/// rather than of what the occlusion pass produced.
+static const float BENT_NORMAL_VIEW = 5.5;
+
 /// How far the motion view stretches a motion vector before centring it on
 /// grey.
 ///
@@ -1290,8 +1308,23 @@ StructuredBuffer<GpuLight> lights;
 StructuredBuffer<uint> cluster_lights;
 
 /// `docs/plan/18-render-features.md`'s screen-space ambient occlusion, as
-/// `ssao_blur.slang` left it: one `R8Unorm` channel the size of the frame, `1.0`
-/// where nothing occludes.
+/// `ssao_upsample.slang` left it: one `Rgba8Unorm` channel the size of the
+/// frame, `r` the visibility — `1.0` where nothing occludes — and `gba` the
+/// **bent direction**, in world space and encoded `xyz * 0.5 + 0.5`.
+///
+/// # The direction says where the light still comes from
+///
+/// The scalar can only dim the ambient term. The bent direction is the average
+/// unblocked direction over the hemisphere the same horizon sweep measured, so
+/// the environment can be sampled *along* it — see `bent_normal_at` and the
+/// irradiance sum in `fragmentMain`, which is the whole of what the widened
+/// target buys. `ssao.slang`'s header is where the encoding and the sweep's
+/// by-product are argued.
+///
+/// **A zero-length direction is the sentinel for "no bent direction here"**,
+/// and `bent_normal_at` answers it with the fragment's own shading normal —
+/// which is what makes the 1×1 placeholder below and a pixel the gather had
+/// nothing to say about one case with one answer.
 ///
 /// # Fetched by pixel, not sampled, and clamped to the image
 ///
@@ -1316,14 +1349,15 @@ StructuredBuffer<uint> cluster_lights;
 /// the terms `shadow_atlas`' placeholder is bound: the slot has to be filled
 /// because Slang's Metal backend materialises every global into every entry
 /// point, and the honest filler for "no occlusion was computed" is the value that
-/// occludes nothing. So this file has no branch for the feature being off.
+/// occludes nothing — and, in the three channels beside it, the direction that
+/// steers nothing. So this file has no branch for the feature being off.
 ///
 /// **Last of the set, and that is structural.** `mesh_cluster.slang` declares up
 /// to 19 and mirrors 20 and 21; 22 is past all of them, so it needs no mirror
 /// there and no Metal argument-table index moves. See `SHADOW_ATLAS_BINDING`'s
 /// note in `crcbl_render::forward` on why the list stays ascending.
 [[vk::binding(22, 0)]]
-Texture2D<float> ambient_occlusion;
+Texture2D<float4> ambient_occlusion;
 
 /// `docs/plan/18-render-features.md`'s irradiance grid, row by row — the
 /// `FrameUniforms::probe_*` header above says where they are.
@@ -4044,7 +4078,23 @@ float3 shading_normal_of(uint layer,
                      + tangent_space.z * basis.normal);
 }
 
-/// The occlusion channel under `position`, in `0..=1`, one meaning unoccluded.
+/// How long a decoded bent direction has to be to be a direction at all.
+///
+/// **`ssao.slang`'s constant, and it has to be that one.** That file and the
+/// two filters behind it carry the argument in full: a real direction survives
+/// `Rgba8Unorm` as a unit vector to within about a hundredth, the zero sentinel
+/// decodes to under a hundredth, and half way between them is a threshold no
+/// rounding on any target can reach from either side. A number of this file's
+/// own would be the consumer disagreeing with the producer about whether a
+/// pixel was handed a direction.
+///
+/// `crcbl_shaders::ssao::BENT_NORMAL_MIN_LENGTH` is the Rust mirror and
+/// `the_bent_normal_length_matches_the_constant_the_shaders_declare` is what
+/// holds all four declarations together.
+static const float BENT_NORMAL_MIN_LENGTH = 0.5;
+
+/// The occlusion channel under `position`: the visibility in `r` and the
+/// encoded bent direction in `gba`.
 ///
 /// **The fetch is clamped to the image's extent**, which is what makes the
 /// renderer's 1×1 white off-switch read as "nothing occludes" instead of as
@@ -4052,16 +4102,36 @@ float3 shading_normal_of(uint layer,
 /// length. It costs nothing on a frame-sized channel, where every fragment is
 /// inside the image already.
 ///
-/// Shared by the shading below and by the occlusion view, so the view is the
-/// buffer the shading multiplies by rather than a second reading of it that
-/// could clamp differently.
-float occlusion_at(float2 position)
+/// Shared by the shading below and by the two occlusion views, so a view is the
+/// buffer the shading reads rather than a second reading of it that could clamp
+/// differently.
+float4 occlusion_at(float2 position)
 {
     uint width;
     uint height;
     ambient_occlusion.GetDimensions(width, height);
     int2 texel = min(int2(position), int2(width, height) - 1);
     return ambient_occlusion.Load(int3(texel, 0));
+}
+
+/// The direction the ambient term is sampled along: the channel's bent
+/// direction where there is one, and `shading_normal` where there is not.
+///
+/// **The fallback is this fragment's own normal and not a reconstruction.** The
+/// sentinel means the gather had no preferred direction to report — an
+/// unoccluded surface, a march too short to run, slices that cancelled — or
+/// that no occlusion pass ran at all, and in every one of those cases the
+/// honest answer is the direction the surface already faces. That is also the
+/// frame this file drew before the channel was widened, which is what lets the
+/// feature be data rather than a branch on a switch.
+///
+/// **Normalised after the decode**, because `Rgba8Unorm` quantises: the channel
+/// holds a unit vector to within about a hundredth, and an irradiance evaluated
+/// along a short normal is an irradiance scaled by a rounding step.
+float3 bent_normal_at(float4 occlusion, float3 shading_normal)
+{
+    float3 decoded = occlusion.gba * 2.0 - 1.0;
+    return length(decoded) < BENT_NORMAL_MIN_LENGTH ? shading_normal : normalize(decoded);
 }
 
 /// The contact-shadow channel under `position`, in `0..=1`, one meaning the sun
@@ -4195,6 +4265,27 @@ FragmentOutput fragmentMain(VertexOutput input)
     // the eye separates. A pixel at rest is grey in `rg` to within one
     // half-float step — `MOTION_VIEW_SCALE` says why not exactly — and it is
     // the only observer the subtraction has until a pass reads the attachment.
+    // **The bent-normal view, outermost because its sentinel is.** The direction
+    // the occlusion channel carries under this fragment, drawn as the normals
+    // view draws a normal — `n * 0.5 + 0.5`, so +X is red, +Y green and +Z blue
+    // — which is the encoding the channel already holds, passed through. A
+    // fragment with no bent direction is the mid grey the zero sentinel encodes
+    // to, and a frame drawing without `RenderEffects::AMBIENT_OCCLUSION` is
+    // that grey everywhere, because the 1×1 placeholder holds the sentinel too.
+    if (frame.ambient.w >= BENT_NORMAL_VIEW)
+    {
+        FragmentOutput bent;
+        // Straight into the `Rgba16Float` scene target, on the occlusion view's
+        // terms: every channel is in `[0, 1]`, and the tonemap resolves that as
+        // the identity at the default exposure.
+        bent.lit = float4(occlusion_at(input.position.xy).gba, 1.0);
+        // Not reflective, for the normals view's reason: `ssr.slang` must march
+        // nothing off a debug picture.
+        bent.reflectivity = NO_REFLECTION;
+        bent.motion = motion;
+        return bent;
+    }
+
     if (frame.ambient.w >= MOTION_VIEW)
     {
         FragmentOutput moved;
@@ -4240,7 +4331,7 @@ FragmentOutput fragmentMain(VertexOutput input)
     if (frame.ambient.w >= OCCLUSION_VIEW)
     {
         FragmentOutput occlusion;
-        float value = occlusion_at(input.position.xy);
+        float value = occlusion_at(input.position.xy).r;
         // Straight into the `Rgba16Float` scene target, on the normals view's
         // terms: the tonemap resolves it as `saturate(colour * exposure)`, the
         // identity on `[0, 1]` at the default exposure, so the channel reaches
@@ -4573,7 +4664,17 @@ FragmentOutput fragmentMain(VertexOutput input)
     // total occlusion — the binding's own declaration argues that at length. It
     // costs nothing on a frame-sized channel, where every fragment is inside the
     // image already.
-    float occluded = occlusion_at(input.position.xy);
+    float4 occlusion_texel = occlusion_at(input.position.xy);
+    float occluded = occlusion_texel.r;
+
+    // **The direction the ambient term is sampled along.** The same sweep that
+    // measured how much of the room is hidden also reported which way what is
+    // left of it lies, and a surface in a corner is lit by the opening rather
+    // than by the wall its normal points at. `bent_normal_at` is where the
+    // sentinel — no direction here, or no occlusion pass at all — comes back as
+    // this fragment's own shading normal, which is the term this line had
+    // before the channel was widened.
+    float3 bent_normal = bent_normal_at(occlusion_texel, normal);
 
     // Ambient is not the sun and keeps its full value in shadow, which is what
     // stops a shadowed surface from being black. The association here is the one
@@ -4591,8 +4692,13 @@ FragmentOutput fragmentMain(VertexOutput input)
     // §8. It is added and not chosen between, because a scene may have a sky
     // above it and bounce light around it, and both reach a diffuse surface as
     // an L1 environment. A frame with no sky adds exactly zero.
-    float3 irradiance = frame.ambient.rgb + sky_irradiance(normal)
-                      + probe_irradiance(input.world_position, normal);
+    //
+    // **Both directional terms take the bent normal, and the flat one cannot.**
+    // `frame.ambient.rgb` is a constant over the sphere — there is no direction
+    // to sample it along — while the sky and the probe grid are L1 environments
+    // evaluated at a normal, which is exactly the hook a bent direction is for.
+    float3 irradiance = frame.ambient.rgb + sky_irradiance(bent_normal)
+                      + probe_irradiance(input.world_position, bent_normal);
 
     // **The ambient scales the diffuse albedo, so a metal has no ambient
     // term** — and that is the model rather than an omission. A conductor

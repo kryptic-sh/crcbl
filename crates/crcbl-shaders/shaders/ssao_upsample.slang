@@ -37,6 +37,22 @@
 // header still says why: its footprint is exactly `ssao.slang`'s tile, measured
 // in the pixels the two of them run at, and nothing here widens to a tile.
 //
+// # The bent direction rides the same weights and is renormalised
+//
+// `ssao.slang`'s header says what the four channels are: `r` is the visibility
+// and `gba` are the bent direction, encoded `xyz * 0.5 + 0.5`. Each tap's
+// direction takes **exactly the share its scalar takes** — the two are one
+// sample and a reconstruction that weighted them differently would be putting
+// the direction on a surface the scalar came off — and the sum is decoded,
+// accumulated and renormalised before it is written. `ssao_blur.slang`'s header
+// argues the renormalise in full; the same argument holds here, and a
+// half-resolution neighbourhood spanning a silhouette is exactly where a
+// weighted mean of unit vectors is shortest.
+//
+// **The intensity exponent is the scalar's alone.** It says how much of the
+// occlusion the horizons measured a frame shows, which is a question about a
+// magnitude; a direction has none to raise.
+//
 // # Determinism
 //
 // The rule the pair is built on survives this pass intact. There is no noise, no
@@ -67,11 +83,17 @@ struct SsaoParams
     /// it; nothing here does, and it is declared because the block's layout is
     /// the block's layout.
     float4x4 proj;
+    /// View → world. `ssao.slang` rotates the bent direction out of view space
+    /// with it before it is ever written; nothing here does, and it is declared
+    /// for `proj`'s reason exactly.
+    float4x4 inv_view;
     /// `x` is the sampling radius in **world units**, which is what
     /// [`DEPTH_TOLERANCE_RADII`] is a share of. `y` is the count of planes
     /// `ssao.slang` swept, which nothing here reads, and `z` is the exponent
     /// this pass raises its answer to — see [`ao_intensity`], the only reader
-    /// of it in the chain. `w` pads the row.
+    /// of it in the chain. `w` is that file's bent-direction switch, which
+    /// nothing here reads either: this pass reconstructs whatever the gather
+    /// wrote, and the sentinel reconstructs to the sentinel.
     float4 params;
 };
 
@@ -79,17 +101,18 @@ struct SsaoParams
 ConstantBuffer<SsaoParams> camera;
 
 /// The filtered occlusion `ssao_blur.slang` wrote, at the pair's own extent and
-/// fetched by integer pixel.
+/// fetched by integer pixel: the visibility in `r` and the encoded bent
+/// direction in `gba`.
 ///
-/// `Texture2D<float>` and not `DepthTexture2D`, and **no sampler**: both are
+/// `Texture2D<float4>` and not `DepthTexture2D`, and **no sampler**: both are
 /// `ssao_blur.slang`'s bindings exactly, for that file's reasons — this is an
-/// ordinary single-channel `R8Unorm` colour image, and a filtering sampler is
-/// four rasterisers rounding a texel centre their own way.
+/// ordinary `Rgba8Unorm` colour image, and a filtering sampler is four
+/// rasterisers rounding a texel centre their own way.
 ///
 /// The three bindings of this pass are that file's three, in its order, which is
 /// what lets `crcbl_render::ssao` build one bind group layout for both.
 [[vk::binding(1, 0)]]
-Texture2D<float> occlusion;
+Texture2D<float4> occlusion;
 
 /// The depth prepass's output, at the **scene's** extent rather than the pair's.
 ///
@@ -131,6 +154,15 @@ static const int RESOLUTION_DIVISOR = 2;
 /// `the_two_occlusion_filters_share_one_depth_tolerance` is what holds the two
 /// declarations together.
 static const float DEPTH_TOLERANCE_RADII = 2.0;
+
+/// How long a decoded bent direction has to be to be a direction at all.
+///
+/// **`ssao_blur.slang`'s constant, and it has to be that one.** That file
+/// carries the argument in full: it separates a decoded unit vector from the
+/// decoded zero sentinel, and the two are nowhere near each other. A second
+/// number here would be two filters over one channel disagreeing about whether
+/// a pixel was handed a direction.
+static const float BENT_NORMAL_MIN_LENGTH = 0.5;
 
 /// The share the nearest half-resolution sample keeps however far its surface
 /// turns out to be.
@@ -257,6 +289,53 @@ float ao_intensity()
     return asked == 0.0 ? INTENSITY_DEFAULT : clamp(asked, INTENSITY_MIN, INTENSITY_MAX);
 }
 
+/// The bent direction a texel of the occlusion channel carries: a **unit
+/// vector**, or exactly zero where the texel holds the sentinel.
+///
+/// `ssao_blur.slang`'s function, and its whole argument.
+///
+/// `ssao.slang`'s `encode_bent` undone — `gba * 2 - 1` — and then resolved to
+/// one of those two, which is what the encoding can hold. The resolve is not
+/// cosmetic: the zero sentinel survives `Rgba8Unorm` as a *short* vector rather
+/// than as nothing, and a filter that weighted taps by their decoded length
+/// would divide that residue by itself and hand back the unit diagonal
+/// `(1, 1, 1)` normalised — a direction nothing in the frame suggested, on
+/// every pixel of a frame that asked for no bent direction at all.
+///
+/// **The comparison decides nothing two drivers could decide differently.** It
+/// separates a length of about one from a length under a hundredth — see
+/// [`BENT_NORMAL_MIN_LENGTH`] — so it is the kind of comparison this pass's
+/// headers argue is acceptable, next to the `DEPTH_FAR` equality.
+float3 decode_bent(float4 texel)
+{
+    float3 decoded = texel.gba * 2.0 - 1.0;
+    return length(decoded) < BENT_NORMAL_MIN_LENGTH ? float3(0.0, 0.0, 0.0) : normalize(decoded);
+}
+
+/// A summed bent direction back as the three channels beside the scalar.
+///
+/// `ssao_blur.slang`'s function, and its whole argument.
+///
+/// **The mean and not the sum.** Each tap contributed a unit vector scaled by
+/// its share, so dividing by the shares that carried a direction gives a vector
+/// of length at most one — a coherence, which is what
+/// [`BENT_NORMAL_MIN_LENGTH`] is a threshold on. Taps that carried the sentinel
+/// contributed neither a direction nor a share, so they neither steer the mean
+/// nor shorten it.
+///
+/// **The renormalise is here and not at the call site**, so the two filters
+/// cannot differ about it: a weighted mean of unit vectors is not a unit vector,
+/// and a direction whose length carries the filter's own disagreement is a term
+/// the shading never meant to have.
+float3 encode_bent(float3 summed, float weight)
+{
+    float3 mean = weight > 0.0 ? summed / weight : float3(0.0, 0.0, 0.0);
+    float3 direction = length(mean) < BENT_NORMAL_MIN_LENGTH
+        ? float3(0.0, 0.0, 0.0)
+        : normalize(mean);
+    return direction * 0.5 + 0.5;
+}
+
 [shader("vertex")]
 FullscreenOutput vertexMain(uint index: SV_VertexID)
 {
@@ -268,7 +347,7 @@ FullscreenOutput vertexMain(uint index: SV_VertexID)
 }
 
 [shader("fragment")]
-float fragmentMain(FullscreenOutput input) : SV_Target
+float4 fragmentMain(FullscreenOutput input) : SV_Target
 {
     // **Three extents, and every one of them is read off its own image.** The
     // occlusion is the pair's, the depth is the scene's, and the target is the
@@ -291,7 +370,9 @@ float fragmentMain(FullscreenOutput input) : SV_Target
     // weight its neighbours against.
     if (centre_depth <= DEPTH_FAR)
     {
-        return 1.0;
+        // Full visibility and the sentinel, which is what the whole block this
+        // pixel sits in carries — see [`DEPTH_FAR`].
+        return float4(1.0, encode_bent(float3(0.0, 0.0, 0.0), 0.0));
     }
     float centre_z = view_z(pixel, centre_depth, depth_size);
     float tolerance = camera.params.x * DEPTH_TOLERANCE_RADII;
@@ -314,6 +395,10 @@ float fragmentMain(FullscreenOutput input) : SV_Target
 
     float total = 0.0;
     float weight = 0.0;
+    // The bent direction's accumulator and its own divisor —
+    // `ssao_blur.slang`'s pair, for that file's reasons.
+    float3 bent = float3(0.0, 0.0, 0.0);
+    float bent_weight = 0.0;
     for (int y = 0; y <= span.y; ++y)
     {
         for (int x = 0; x <= span.x; ++x)
@@ -339,7 +424,16 @@ float fragmentMain(FullscreenOutput input) : SV_Target
             // [`NEAREST_TAP_FLOOR`], which is also why this is a `max` and not a
             // branch around the accumulation.
             share = (x == 0 && y == 0) ? max(share, NEAREST_TAP_FLOOR) : share;
-            total += occlusion.Load(int3(tap, 0)) * share;
+            float4 sample = occlusion.Load(int3(tap, 0));
+            float3 direction = decode_bent(sample);
+            // One where the tap carried a direction and exactly zero where it
+            // carried the sentinel, since `decode_bent` answers with a unit
+            // vector or with nothing. It is what the direction's mean is over —
+            // a sentinel tap neither steers it nor shortens it.
+            float carried = dot(direction, direction);
+            total += sample.r * share;
+            bent += direction * share;
+            bent_weight += carried * share;
             weight += share;
         }
     }
@@ -352,5 +446,8 @@ float fragmentMain(FullscreenOutput input) : SV_Target
     // golden in this workspace would move a level here and there for a knob
     // nobody had touched. The comparison is on a uniform, so a frame takes one
     // side of it for every pixel and it decides nothing per pixel.
-    return intensity == INTENSITY_DEFAULT ? visibility : pow(visibility, intensity);
+    float shown = intensity == INTENSITY_DEFAULT ? visibility : pow(visibility, intensity);
+    // The exponent is the scalar's alone — see the header. A direction has no
+    // magnitude to raise, and raising one would only bend it towards an axis.
+    return float4(shown, encode_bent(bent, bent_weight));
 }

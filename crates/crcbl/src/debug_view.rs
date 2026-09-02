@@ -58,6 +58,7 @@ crcbl_console::convar! {
         "normals",
         "ambient occlusion",
         "motion",
+        "bent normal",
     ] = "shaded";
 }
 
@@ -88,13 +89,14 @@ crcbl_console::concommand! {
 /// The order [`r_debug_view`] declares its names in. The `convar!` needs
 /// literals, so the names are written twice; `the_variable_names_are_the_
 /// renderers_labels` is what holds the copy to [`DebugView::label`].
-const VIEWS: [DebugView; 6] = [
+const VIEWS: [DebugView; 7] = [
     DebugView::Shaded,
     DebugView::Heatmap,
     DebugView::LodTint,
     DebugView::Normals,
     DebugView::AmbientOcclusion,
     DebugView::Motion,
+    DebugView::BentNormal,
 ];
 
 /// Where `view` sits in [`VIEWS`].
@@ -114,6 +116,7 @@ const fn slot(view: DebugView) -> usize {
         DebugView::Normals => 3,
         DebugView::AmbientOcclusion => 4,
         DebugView::Motion => 5,
+        DebugView::BentNormal => 6,
     }
 }
 

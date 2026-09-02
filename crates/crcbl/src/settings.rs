@@ -1343,26 +1343,27 @@ pub fn apply_video_to(
 ///
 /// In
 /// [`ForwardRenderer::debug_view`](crcbl_render::ForwardRenderer::debug_view)'s
-/// own precedence order — motion, occlusion, heatmap, LOD, normals — so
-/// `debug_view` of a renderer this was
+/// own precedence order — bent normal, motion, occlusion, heatmap, LOD, normals
+/// — so `debug_view` of a renderer this was
 /// applied to answers back the view it was handed, whichever it was. That
 /// round trip is what
 /// `every_debug_view_sets_exactly_the_switch_its_precedence_reads_back` asserts
 /// without a device.
 ///
-/// A `match` on the whole enum rather than five comparisons, so a
+/// A `match` on the whole enum rather than a row of comparisons, so a
 /// [`DebugView`](crcbl_render::DebugView) variant added later fails to compile
 /// here instead of silently drawing the shaded frame.
 #[must_use]
-pub const fn debug_view_switches(view: crcbl_render::DebugView) -> [bool; 5] {
+pub const fn debug_view_switches(view: crcbl_render::DebugView) -> [bool; 6] {
     use crcbl_render::DebugView as V;
     match view {
-        V::Shaded => [false, false, false, false, false],
-        V::Motion => [true, false, false, false, false],
-        V::AmbientOcclusion => [false, true, false, false, false],
-        V::Heatmap => [false, false, true, false, false],
-        V::LodTint => [false, false, false, true, false],
-        V::Normals => [false, false, false, false, true],
+        V::Shaded => [false, false, false, false, false, false],
+        V::BentNormal => [true, false, false, false, false, false],
+        V::Motion => [false, true, false, false, false, false],
+        V::AmbientOcclusion => [false, false, true, false, false, false],
+        V::Heatmap => [false, false, false, true, false, false],
+        V::LodTint => [false, false, false, false, true, false],
+        V::Normals => [false, false, false, false, false, true],
     }
 }
 
@@ -1371,7 +1372,7 @@ pub const fn debug_view_switches(view: crcbl_render::DebugView) -> [bool; 5] {
 /// **The body every bundle's
 /// [`GameGpu::set_debug_view`](crate::engine::GameGpu::set_debug_view) forwards
 /// to**, on [`apply_video_to`]'s terms. It writes **every** switch rather than
-/// the one the view names, because the five are independent and
+/// the one the view names, because they are independent and
 /// [`ForwardRenderer::debug_view`](crcbl_render::ForwardRenderer::debug_view)
 /// resolves them by precedence: leaving an outer one standing would draw a view
 /// nobody asked for. [`debug_view_switches`] is the table.
@@ -1379,7 +1380,8 @@ pub const fn set_debug_view_on(
     renderer: &mut crcbl_render::ForwardRenderer,
     view: crcbl_render::DebugView,
 ) {
-    let [motion, occlusion, heatmap, lod, normals] = debug_view_switches(view);
+    let [bent, motion, occlusion, heatmap, lod, normals] = debug_view_switches(view);
+    renderer.set_bent_normal_view(bent);
     renderer.set_motion_view(motion);
     renderer.set_occlusion_view(occlusion);
     renderer.set_heatmap(heatmap);
@@ -3159,16 +3161,17 @@ mod tests {
 
     /// **Every debug view turns on exactly the switch
     /// [`crcbl_render::ForwardRenderer::debug_view`] reads it back off**, and
-    /// leaves the other four alone.
+    /// leaves every other switch alone.
     ///
     /// The renderer needs a device and these do not, so this asserts the table
-    /// against that function's precedence order directly: motion, occlusion,
-    /// heatmap, LOD, normals. A view that set two switches would be drawn as
-    /// whichever is outermost, silently.
+    /// against that function's precedence order directly: bent normal, motion,
+    /// occlusion, heatmap, LOD, normals. A view that set two switches would be
+    /// drawn as whichever is outermost, silently.
     #[test]
     fn every_debug_view_sets_exactly_the_switch_its_precedence_reads_back() {
         use crcbl_render::DebugView as V;
         let order = [
+            V::BentNormal,
             V::Motion,
             V::AmbientOcclusion,
             V::Heatmap,
@@ -3177,7 +3180,7 @@ mod tests {
         ];
         assert_eq!(
             debug_view_switches(V::Shaded),
-            [false; 5],
+            [false; 6],
             "the shaded frame is every switch off",
         );
         for (index, view) in order.into_iter().enumerate() {
@@ -3186,6 +3189,11 @@ mod tests {
                 switches.iter().filter(|on| **on).count(),
                 1,
                 "{view:?} sets more than one switch",
+            );
+            assert_eq!(
+                switches.len(),
+                order.len(),
+                "the table has a switch no view names, or one it does not"
             );
             assert!(
                 switches[index],

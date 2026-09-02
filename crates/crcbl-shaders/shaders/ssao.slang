@@ -1,8 +1,32 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
 // `docs/plan/18-render-features.md`'s screen-space ambient occlusion: the pass
-// that reads the depth prepass and writes one `R8Unorm` channel the forward
-// pass multiplies its **ambient** term by.
+// that reads the depth prepass and writes the `Rgba8Unorm` channel the forward
+// pass modulates and steers its **ambient** term with.
+//
+// # What the four channels are
+//
+// `r` is the visibility scalar this file has always written — `1.0` where
+// nothing occludes — and every reader of it is unchanged. `gba` are the **bent
+// direction**: the average unblocked direction over the hemisphere, in world
+// space, encoded `xyz * 0.5 + 0.5`. `mesh.slang` samples its ambient irradiance
+// along it instead of along the shading normal, which is the whole of what the
+// widened target buys — a scalar can only dim the ambient term, where a
+// direction says which part of the room is still reaching the surface.
+//
+// **A zero-length direction is the sentinel for "no bent direction here"**, and
+// it is what a pixel with nothing to measure writes: an unoccluded surface, a
+// march too short to run, a slice set that weighed nothing.
+// `crcbl_shaders::ssao::BENT_NORMAL_MIN_LENGTH` is the length a consumer tests
+// against, and `mesh.slang` answers the sentinel with its own shading normal.
+// Encoding zero writes `0.5` into each of the three channels, which quantises
+// to the same `0x80` the renderer's 1×1 placeholder holds — so "no occlusion
+// pass ran" and "no bent direction at this pixel" are one case with one answer.
+//
+// **No octahedral encoding.** Three channels have no seam, no branch and no
+// decode; and averaging-then-renormalising is then the obvious operation for
+// the two filters behind this pass, where an octahedral pair would have to be
+// decoded, averaged and re-folded at every tap.
 //
 // # It reads depth and nothing else
 //
@@ -126,13 +150,31 @@ struct SsaoParams
     float4x4 inv_proj;
     /// View → clip, for projecting a sample point back to a pixel.
     float4x4 proj;
+    /// View → world, for the bent direction alone.
+    ///
+    /// **Everything else in this file is view space and stays there.** The
+    /// horizons, the tilt and the integral are all questions about the
+    /// neighbourhood of a surface, and view space is where that neighbourhood
+    /// is isotropic and the eye is at the origin — see `SsaoParams::inv_proj`.
+    /// The bent direction is the one value that leaves this pass, and its
+    /// consumer is `mesh.slang`'s ambient term, which evaluates a **world**-
+    /// space L1 environment: `sky_irradiance` and `probe_irradiance` both take
+    /// a world-space normal, and `FrameUniforms` carries no rotation that could
+    /// take a view-space one there. So the rotation happens here, once per
+    /// gathered pixel at [`RESOLUTION_DIVISOR`]-squared of the frame, rather
+    /// than once per shaded fragment.
+    ///
+    /// `ssr.slang` carries the same member under the same name and reaches it
+    /// the same way, for the same reason: a view-space ray that has to address
+    /// the world-space probe grid.
+    float4x4 inv_view;
     /// `x` is the sampling radius in **world units** and `y` is how many planes
     /// each pixel sweeps — see [`slice_count`], which is what reads it. `z` is
     /// the intensity exponent `ssao_upsample.slang` raises its reconstruction
     /// to, written by the host into the block all three of these passes share
-    /// and read by that one alone; `w` is what is left padding the row out to
-    /// the sixteen bytes `std140` gives a uniform buffer. Nothing in *this*
-    /// file reads either.
+    /// and read by that one alone. `w` is the bent-direction switch — see
+    /// [`bent_normals`], which is what reads it, and which is the one lane of
+    /// this row *this* file reads besides `y`.
     ///
     /// **`y` is a count and not a quality enumeration**, so the shader has one
     /// number to clamp rather than a table to agree with a host about. It is
@@ -299,6 +341,30 @@ static const int RESOLUTION_DIVISOR = 2;
 /// than an angle anything computes: a horizon may not rise past the plane of the
 /// surface, and this is that plane.
 static const float HALF_PI = 1.5707964;
+
+/// How long the **mean** of a set of bent directions has to be before anything
+/// in this chain calls it a direction.
+///
+/// It answers one question at three points — here over the slices, and in
+/// `ssao_blur.slang` and `ssao_upsample.slang` over their taps — and the
+/// question is always whether the directions being averaged agree enough to
+/// have an average. Each of them is a unit vector, so the mean's length is a
+/// coherence in `0..=1`: one where they all point the same way, zero where they
+/// cancel exactly, a half where two of them are a third of a turn apart. It is
+/// **not** a brightness, which is the whole reason it is a mean and not a sum —
+/// a dark pixel with a well-defined way out is the case the bent direction
+/// exists for, and it is coherent.
+///
+/// Below it there is no preferred direction and the zero sentinel goes out.
+/// The same value also separates a decoded unit vector from a decoded sentinel,
+/// which is the consumers' half of it: `ssao.slang`'s header states the
+/// encoding, a sentinel decodes to under a hundredth of a unit, and half way
+/// between the two is a threshold no rounding on any target can reach.
+///
+/// `crcbl_shaders::ssao::BENT_NORMAL_MIN_LENGTH` is the Rust mirror, and
+/// `ssao_blur.slang`, `ssao_upsample.slang` and `mesh.slang` declare the same
+/// value under this name.
+static const float BENT_NORMAL_MIN_LENGTH = 0.5;
 
 /// The polynomial [`acos_approx`] evaluates, index `i` the coefficient of `x^i`.
 ///
@@ -660,6 +726,24 @@ uint slice_count()
     return clamp(uint(camera.params.y), SLICE_COUNT_DEFAULT, SLICE_COUNT_MAX);
 }
 
+/// Whether this frame asked for the bent direction beside the scalar.
+///
+/// `camera.params.w`, which the host writes from a console variable — see
+/// `crcbl_render::ssao::r_ssao_bent_normals`.
+///
+/// **Zero is off, and that is the degenerate this way round on purpose.** A
+/// producer that never writes the field leaves the padding this word used to
+/// be, which reads as zero — and a frame with no bent direction is the frame
+/// this file drew before the channel was widened, because every consumer
+/// answers the sentinel with the shading normal it already had.
+/// `slice_count`'s field cannot be defaulted that way (a zero there sweeps no
+/// planes and lights every surface), which is why the two lanes turn an
+/// unwritten block away in opposite directions.
+bool bent_normals()
+{
+    return camera.params.w != 0.0;
+}
+
 /// One entry of [`SLICE_DIRECTIONS`] turned into slice `slice`'s marching
 /// direction, still unnormalised.
 ///
@@ -679,10 +763,66 @@ float2 turned(float2 seed, uint slice)
     return (slice & 1u) != 0u ? float2(-eighth.y, eighth.x) : eighth;
 }
 
-/// How much of the hemisphere over `centre` is blocked, in `0..=1`.
+/// How much of the hemisphere over `centre` is blocked, in `x`; the **bent
+/// direction** in `yzw`, in world space and either a unit vector or exactly
+/// zero.
 ///
 /// **Replace this function, and only this function, to upgrade the technique.**
 /// It has been replaced once already, which is what that line was for.
+///
+/// # The bent direction is the sweep's own by-product
+///
+/// Jimenez et al., *Practical Real-Time Strategies for Accurate Indirect
+/// Occlusion*, SIGGRAPH 2016 — the same course notes [`slice_visibility`]
+/// transcribes its integral from — take the bent normal per slice as the
+/// **bisector of the visible arc**, the direction half way between the two
+/// horizons, and accumulate it over the slices weighted by what that slice
+/// could see. So the two horizon angles this file already found are the whole
+/// of the input: nothing marches again, nothing new is fetched, and no normal
+/// attachment is wanted — which is what keeps this rung inside the refusal the
+/// header states.
+///
+/// **The bisector's cosine and sine come out of the horizons' without a
+/// trigonometric call**, which is the same determinism argument [`acos_approx`]
+/// exists for. `cos(h1 + h2)` and `sin(h1 + h2)` are the angle-sum identities
+/// over the four values `slice_visibility` is already handed, and the half
+/// angle follows from `cos(2t) = 1 - 2 sin^2 t = 2 cos^2 t - 1` — two square
+/// roots, both exactly specified. Both horizons are clamped into the hemisphere
+/// over the surface, so their mean lies in `-pi/2 ..= pi/2`, where the cosine
+/// is never negative and the sine takes the sign of `h1 + h2`.
+///
+/// # What each slice contributes is a *turn of the normal*, not a direction
+///
+/// **This is the one place the accumulation is not the obvious sum, and the
+/// obvious sum is wrong.** A slice's bisector lives in the slice plane, which
+/// contains the eye — so summing the bisectors of several slices pulls the
+/// answer towards the view direction by an amount that depends on nothing but
+/// where the pixel is on screen. Measured on this suite's own wall: at a column
+/// two thirds across a 1920-wide frame, a *completely unoccluded* plane facing
+/// the camera came back seventeen degrees off its own normal, and it would have
+/// swung as the camera panned. Ambient light that follows the eye across flat
+/// open geometry is exactly what a bent normal is supposed to stop.
+///
+/// So a slice contributes the surface normal **turned by the angle its bisector
+/// sits from that slice's own unoccluded answer** — which is `gamma`, since an
+/// unblocked slice's two horizons clamp to the plane of the surface and their
+/// bisector is the surface's own tilt. The turn is about the slice's axis, by
+/// Rodrigues, and its cosine and sine are angle differences over values the
+/// loop already holds.
+///
+/// Two properties follow, and both are load-bearing:
+///
+/// * **An unoccluded pixel gets its own normal, exactly.** Every turn is zero,
+///   every slice contributes `normal`, and the mean is `normal` whatever the
+///   weights were. A frame with nothing occluding anything is therefore the
+///   frame this pass produced before the channel was widened.
+/// * **The answer does not depend on where the pixel sits on screen**, because
+///   the frame it is accumulated in is the surface's rather than the eye's.
+///
+/// `crcbl`'s `forward_e2e::occlusion::the_bent_direction_leans_out_of_the_occluded_band`
+/// is what holds both: it reads open wall and occluded wall in one frame, and
+/// the sum-of-bisectors this replaced fails its open-wall half by an order of
+/// magnitude.
 ///
 /// `pixel` is the full-resolution texel this invocation marches from and `tile`
 /// is the dither index of the pixel it was invoked for — two arguments rather
@@ -692,8 +832,12 @@ float2 turned(float2 seed, uint slice)
 /// which collapses the sixteen phases onto the quarter of them that lands on an
 /// even row and column — a coarser dither than the file had before it was
 /// halved, in both tables at once.
-float occlusion_at(int2 pixel, uint tile, float3 centre, float3 normal, int2 extent, float2 size)
+float4 occlusion_at(int2 pixel, uint tile, float3 centre, float3 normal, int2 extent, float2 size)
 {
+    // The sentinel: no occlusion measured and no direction to report. Every
+    // early return below hands this back, and each of them is a pixel with
+    // nothing to say — see [`BENT_NORMAL_MIN_LENGTH`].
+    const float4 unoccluded = float4(0.0, 0.0, 0.0, 0.0);
     float radius = camera.params.x;
 
     // The radius in pixels, measured rather than derived from a projection
@@ -704,14 +848,14 @@ float occlusion_at(int2 pixel, uint tile, float3 centre, float3 normal, int2 ext
     float4 far_clip = mul(camera.proj, float4(centre + float3(radius, 0.0, 0.0), 1.0));
     if (near_clip.w <= 0.0 || far_clip.w <= 0.0)
     {
-        return 0.0;
+        return unoccluded;
     }
     float reach = abs(far_clip.x / far_clip.w - near_clip.x / near_clip.w) * 0.5 * size.x;
     if (reach < MIN_RADIUS_PIXELS)
     {
         // Too small to march. See [`MIN_RADIUS_PIXELS`]: every sample would read
         // the centre's own texel, and the answer to that is no occlusion.
-        return 0.0;
+        return unoccluded;
     }
 
     // Towards the eye, which is the axis every horizon is measured from. View
@@ -724,6 +868,13 @@ float occlusion_at(int2 pixel, uint tile, float3 centre, float3 normal, int2 ext
 
     float visibility = 0.0;
     float weight = 0.0;
+    // The bent direction's accumulator, in view space until the rotation below.
+    // Each slice adds its bisector scaled by that slice's own weight *and* by
+    // what it could see, which is the paper's weighting: a slice that sees
+    // nothing has no unblocked direction to contribute.
+    bool bent_wanted = bent_normals();
+    float3 bent = float3(0.0, 0.0, 0.0);
+    float bent_weight = 0.0;
     // **Bounded by the constant and left early by the count**, rather than
     // running to `slices` directly: the trip count stays something the compiler
     // can see, so the two slices that ship still unroll. The test is on a
@@ -805,17 +956,61 @@ float occlusion_at(int2 pixel, uint tile, float3 centre, float3 normal, int2 ext
         float sin_h2 =
             clamped_high ? cos_gamma : sqrt(saturate(1.0 - cos_positive * cos_positive));
 
-        visibility += projected_length
-                    * slice_visibility(h1, cos_h1, sin_h1, h2, cos_h2, sin_h2,
-                                       cos_gamma, sin_gamma);
+        float slice_visible = slice_visibility(h1, cos_h1, sin_h1, h2, cos_h2, sin_h2,
+                                               cos_gamma, sin_gamma);
+        visibility += projected_length * slice_visible;
         weight += projected_length;
+
+        if (bent_wanted)
+        {
+            // The bisector of the visible arc, at `(h1 + h2) / 2` from `view`
+            // and turning towards `tangent` — the direction `gamma` and both
+            // horizons are signed against, so the same sense answers for all
+            // three. See this function's header for why the half angle needs no
+            // `sin` or `cos` call.
+            float cos_sum = cos_h1 * cos_h2 - sin_h1 * sin_h2;
+            float cos_half = sqrt(saturate(0.5 * (1.0 + cos_sum)));
+            float sin_half = sqrt(saturate(0.5 * (1.0 - cos_sum)));
+            // Signed off the angles themselves rather than off `sin(h1 + h2)`:
+            // the two agree everywhere except where the mean is exactly a
+            // quarter turn, which is both horizons clamped hard to one side and
+            // the one case where the sine of the doubled angle is zero while
+            // the half angle's is not.
+            sin_half = (h1 + h2) < 0.0 ? -sin_half : sin_half;
+            // How far the bisector sits from this slice's unoccluded answer,
+            // which is `gamma` — the angle-difference identities over the four
+            // values above, so still no trigonometric call.
+            float cos_turn = cos_half * cos_gamma + sin_half * sin_gamma;
+            float sin_turn = sin_half * cos_gamma - cos_half * sin_gamma;
+            // The normal turned by that angle about the slice's axis —
+            // Rodrigues, with the cross term negated because the sense the
+            // horizons are signed in is `view` towards `tangent`, and
+            // `cross(view, tangent)` is `-axis`.
+            float3 turned_normal = normal * cos_turn
+                                 - cross(axis, normal) * sin_turn
+                                 + axis * (dot(normal, axis) * (1.0 - cos_turn));
+            float share = projected_length * slice_visible;
+            bent += turned_normal * share;
+            bent_weight += share;
+        }
     }
 
     if (weight <= 0.0)
     {
-        return 0.0;
+        return unoccluded;
     }
-    return saturate(1.0 - visibility / weight);
+    float occlusion = saturate(1.0 - visibility / weight);
+    // No slice contributed, or the ones that did cancelled each other out —
+    // see [`BENT_NORMAL_MIN_LENGTH`]. Either way there is no preferred
+    // direction to report, and the sentinel is the honest answer.
+    if (bent_weight <= 0.0 || length(bent / bent_weight) < BENT_NORMAL_MIN_LENGTH)
+    {
+        return float4(occlusion, 0.0, 0.0, 0.0);
+    }
+    // View → world for the one value that leaves this pass. `float4(_, 0.0)`
+    // drops the translation, which is what a direction wants — `ssr.slang`
+    // rotates its reflected ray through the same member the same way.
+    return float4(occlusion, normalize(mul(camera.inv_view, float4(bent, 0.0)).xyz));
 }
 
 [shader("vertex")]
@@ -829,8 +1024,17 @@ FullscreenOutput vertexMain(uint index: SV_VertexID)
     return output;
 }
 
+/// The bent direction as the three channels beside the scalar: `xyz * 0.5 +
+/// 0.5`, and a zero direction lands on `0.5` in each — the value `Rgba8Unorm`
+/// quantises to `0x80`, which is the byte the renderer's 1×1 placeholder holds.
+/// See the header.
+float3 encode_bent(float3 direction)
+{
+    return direction * 0.5 + 0.5;
+}
+
 [shader("fragment")]
-float fragmentMain(FullscreenOutput input) : SV_Target
+float4 fragmentMain(FullscreenOutput input) : SV_Target
 {
     uint width;
     uint height;
@@ -858,10 +1062,11 @@ float fragmentMain(FullscreenOutput input) : SV_Target
     // only branch that keeps the unprojection from dividing by zero.
     if (depth <= DEPTH_FAR)
     {
-        return 1.0;
+        return float4(1.0, encode_bent(float3(0.0, 0.0, 0.0)));
     }
 
     float3 centre = view_position(pixel, depth, size);
     float3 normal = normal_at(pixel, centre, extent, size);
-    return saturate(1.0 - occlusion_at(pixel, tile, centre, normal, extent, size));
+    float4 gathered = occlusion_at(pixel, tile, centre, normal, extent, size);
+    return float4(saturate(1.0 - gathered.x), encode_bent(gathered.yzw));
 }

@@ -263,6 +263,85 @@ key, and no tier row spends any of them.
 tint makes it weaker on purpose, and the fix is turning the intensity up rather
 than removing the tint.
 
+## What the bent-normal slice left owed (2026-09-02)
+
+The direction ships and steers the ambient — `docs/plan/46-ambient-occlusion.md`
+records what is now true. What it did not do:
+
+- **Specular occlusion, which is the other half the plan asks for.** It needs a
+  cone angle beside the direction and the channel does not carry one:
+  `Rgba8Unorm` is spent, so the angle wants either a second image or a swap to
+  an octahedral pair in `.gb` with the angle in `.a` — the encoding the slice
+  turned down for a three-channel direction with no seam and no fold. Until it
+  exists, `docs/plan/46-ambient-occlusion.md`'s SSR refusal stands and is
+  correct.
+
+- **The tier split the 2026-08-30 decision asked for.** The user's call was
+  scalar-only on low and the widened target on medium and high. What landed is
+  the widening on _every_ tier, because
+  `crcbl_render::TransientImageDesc::ambient_occlusion` is one format and a
+  per-tier format means a second pipeline, a second bind-group layout and a
+  second `mesh.slang` binding type. `crcbl_render::ssao::r_ssao_bent_normals`
+  turns off the _arithmetic_ and nothing turns off the bandwidth. Whether low
+  should set it — and through what, since a console variable is not reachable
+  from a preset — is the same open question as the two knobs in this file's HIGH
+  PRIORITY entry and the contact-shadow entry: it wants an `[engine.video]` key
+  or a tier-table cell, and has neither.
+
+- **The widening's own bandwidth cost is unmeasured, and the switch cannot
+  measure it.** Both arms of `r_ssao_bent_normals` write `Rgba8Unorm`, so the
+  0.002 ms and 0.004 ms the filters pay is arithmetic alone. Pricing the format
+  would mean compiling a chain that writes one channel.
+
+- **The direction is written in world space, not the view space the brief asked
+  for.** Every other part of the encoding decision is as specified. The reason
+  is that `mesh.slang`'s consumers — `sky_irradiance` and `probe_irradiance` —
+  evaluate world-space L1 environments, and `crcbl_shaders::mesh::FrameUniforms`
+  carries `view_proj` and no view matrix, so a view-space channel would need
+  that struct to grow a member. It cannot grow one from inside `crcbl-shaders`
+  alone: `crcbl-dx12`'s device builds `FrameUniforms` field by field with no
+  `..Default::default()` spread, so every backend's construction site has to
+  move with it. Instead `SsaoParams` gained `inv_view` and `ssao.slang` rotates
+  once per half-resolution gathered pixel, which is also cheaper than rotating
+  once per shaded fragment. Deriving the camera basis from `view_proj` was
+  considered and declined: it depends on the projection matrix's sparsity and
+  breaks under TAA jitter. If a later reader wants view space, the cost is that
+  `FrameUniforms` change, not a redesign.
+
+- **A normal-mapped surface loses its map's perturbation in the ambient term.**
+  Wherever a direction exists, the ambient is now sampled along it, and the
+  gather's direction is built off the depth-reconstructed _geometric_ normal —
+  `ssao.slang` has no normal attachment and deliberately does not want one. So
+  the shading normal's high-frequency detail reaches the direct and specular
+  terms and no longer reaches the sky and probe terms. Whether that is visible
+  was not measured. The remedy if it is: slerp the bent direction back towards
+  the shading normal in `mesh.slang`'s `bent_normal_at` by an amount the
+  occlusion scalar sets — full occlusion keeps the bent answer, none keeps the
+  shading normal — which is what the direction already does at the sentinel, but
+  continuous. Not built.
+
+- **`docs/plan/52-debug-console.md` is stale about the view list.** Decision 6
+  says `DebugView::label`'s "six names" and decision 7's table spells six; there
+  are seven now, `bent normal` being the one neither has. That file was outside
+  this slice's permitted paths.
+
+- **Two gates were not run.** `crates/crcbl/tests/run-windowed-e2e.sh` opens a
+  window, and nothing in this slice was allowed to. The browser gate was not run
+  either — the shaders regenerate for every backend and the WGSL is in the tree,
+  but no browser executed it here. CI is the verdict on both.
+
+- **`apps/lantern`'s `SSR_HIT_TOLERANCE` widened from 0.10 to 0.15 rather than
+  being blessed.** `zero_probes_only_remove_the_ssr_and_rough_fallbacks`
+  measures, so a golden bless is not available to it. Brighter ambient on the
+  reflected surface means zeroing the probe rows removes more of it: the hit
+  moved 53.7 to 47.1 on radv (12.3%) and 54.1 to 47.7 on llvmpipe (11.8%), and
+  the A/B against `r_ssao_bent_normals` showed the _zeroed_ reading unmoved, so
+  the rung widened the remainder rather than changing the hit. The failure the
+  constant guards — a fallback substituted for the hit, which reads at or below
+  1.0 — is still an order of magnitude away. Not a defect, recorded because a
+  widened tolerance is a thing a later reader should be able to check rather
+  than trust.
+
 ## What the half-resolution occlusion harness does not cover (2026-09-02)
 
 `crates/crcbl/tests/forward_e2e/occlusion.rs` moved to the half extent when the

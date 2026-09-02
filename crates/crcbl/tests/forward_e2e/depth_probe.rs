@@ -624,19 +624,29 @@ impl DepthProbe {
             .expect("a comparison sampler");
 
         // `mesh.slang`'s occlusion channel, bound white so the probe's ambient
-        // term is unscaled — `crcbl::render::forward`'s placeholder, by hand,
+        // term is unscaled and holding the bent direction's zero sentinel so it
+        // is unsteered — `crcbl::render::forward`'s placeholder, by hand,
         // because this file builds its own layout out of the same shader. One
         // texel against a frame of `MESH_EXTENT`, so the ambient term is unscaled
         // only if the shader clamps its fetch; see the field, and the test that
         // asks.
+        //
+        // `crcbl::shaders::ssao::BENT_NORMAL_NONE` rather than a byte spelled
+        // here: `mesh.slang`'s `bent_normal_at` reads any other value as a
+        // direction and would sample this probe's ambient along a world axis.
         let occlusion = crcbl::render::upload_texture(
             device,
             headless.queue,
             "probe ssao placeholder",
-            Format::R8Unorm,
+            Format::Rgba8Unorm,
             1,
             1,
-            &[0xFF],
+            &[
+                0xFF,
+                crcbl::shaders::ssao::BENT_NORMAL_NONE,
+                crcbl::shaders::ssao::BENT_NORMAL_NONE,
+                crcbl::shaders::ssao::BENT_NORMAL_NONE,
+            ],
         )
         .expect("a one-texel white image");
 

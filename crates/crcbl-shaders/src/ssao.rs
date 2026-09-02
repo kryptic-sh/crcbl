@@ -9,12 +9,12 @@
 //! `ssao_blur.slang` has no module of its own, because it has no block and no
 //! constant a caller has to match — it reads one texture and writes one channel.
 
-/// Bytes of the uniform block: two `float4x4` and one `float4` row.
+/// Bytes of the uniform block: three `float4x4` and one `float4` row.
 ///
 /// `std140` gives a `float4x4` four sixteen-byte columns and a `float4` one row,
 /// and the total is already a multiple of sixteen, so there is no tail padding
 /// to write. See [`SsaoParams::to_bytes`].
-pub const PARAMS_SIZE: usize = 64 + 64 + 16;
+pub const PARAMS_SIZE: usize = 64 + 64 + 64 + 16;
 
 /// The reversed-Z far plane, matching `static const float DEPTH_FAR` in
 /// `shaders/ssao.slang`.
@@ -115,6 +115,39 @@ const _: () = {
     );
 };
 
+/// How long the mean of a set of bent directions has to be before anything in
+/// the occlusion chain calls it a direction, matching `static const float
+/// BENT_NORMAL_MIN_LENGTH` in `shaders/ssao.slang` and in the three shaders
+/// beside it.
+///
+/// **One value, one question, four declarations.** `ssao.slang` averages the
+/// bisectors of its slices, the two filters average their taps, and
+/// `mesh.slang` decodes what arrives; each of them is asking whether the
+/// directions it has agree enough to have an average. Every direction going in
+/// is a unit vector, so the mean's length is a coherence in `0..=1` — one where
+/// they all point the same way, zero where they cancel — and this is where
+/// "they cancelled" begins.
+///
+/// It is also what separates a decoded direction from the decoded sentinel: the
+/// zero direction encodes to `0.5` in each channel and [`BENT_NORMAL_NONE`] is
+/// the byte that lands on, which decodes back to under a hundredth of a unit
+/// while a real direction survives `Rgba8Unorm` to within about the same. Half
+/// way between those is a threshold no rounding on any target can reach from
+/// either side.
+pub const BENT_NORMAL_MIN_LENGTH: f32 = 0.5;
+
+/// The byte each of the three bent-direction channels holds where there is no
+/// direction.
+///
+/// `ssao.slang` writes the zero direction as `0.0 * 0.5 + 0.5`, which an
+/// `Rgba8Unorm` target quantises to this — so a pixel the gather had nothing to
+/// say about and the 1×1 placeholder `crcbl_render::forward` binds when no
+/// occlusion pass runs hold the same bytes, and "no pass ran" and "no direction
+/// here" are one case with one answer. See [`BENT_NORMAL_MIN_LENGTH`], which is
+/// what a consumer tests, and `mesh.slang`'s `bent_normal_at`, which answers it
+/// with the shading normal.
+pub const BENT_NORMAL_NONE: u8 = 0x80;
+
 /// Radians [`acos_approx`] is allowed to differ from `f64::acos`.
 ///
 /// Measured rather than chosen, over `-1..=1` at two million steps —
@@ -190,6 +223,17 @@ pub struct SsaoParams {
     /// View → clip, for projecting a sample point back to the pixel whose depth
     /// answers for it.
     pub proj: [f32; 16],
+    /// View → world, for the bent direction alone.
+    ///
+    /// The occlusion integral is entirely a view-space question — see
+    /// [`inv_proj`] — and the bent direction is the one value that leaves the
+    /// pass. Its consumer is `mesh.slang`'s ambient term, which evaluates a
+    /// world-space L1 environment, so the rotation happens in `ssao.slang`
+    /// before the channel is ever written. `crcbl_shaders::ssr::SsrParams`
+    /// carries the same member under the same name for the same reason.
+    ///
+    /// [`inv_proj`]: Self::inv_proj
+    pub inv_view: [f32; 16],
     /// The sampling radius, in world units.
     ///
     /// A depth bias sat beside it until GTAO replaced the hemisphere of depth
@@ -226,22 +270,42 @@ pub struct SsaoParams {
     ///
     /// [`slices`]: Self::slices
     pub intensity: f32,
+    /// Whether the gather writes a bent direction beside the scalar.
+    ///
+    /// **A `false` is what an unwritten word means**, and that is the
+    /// degenerate this way round deliberately: the lane used to be the row's
+    /// padding, an unwritten uniform buffer reads as zero there, and a frame
+    /// with no bent direction is the frame the chain drew before the channel
+    /// was widened — every consumer answers the sentinel with the shading
+    /// normal it already had. [`slices`] cannot be defaulted that way, which is
+    /// why the two lanes turn an unwritten block away in opposite directions.
+    ///
+    /// `crcbl_render::ssao::r_ssao_bent_normals` is what a frame sets it from,
+    /// and `bent_normals` in `shaders/ssao.slang` is the reader.
+    ///
+    /// [`slices`]: Self::slices
+    pub bent_normals: bool,
 }
 
 impl SsaoParams {
     /// The block as the bytes a uniform buffer holds.
     ///
-    /// Little-endian throughout, and the padding word after [`intensity`] is
-    /// written rather than left alone for [`crate::compute_probe::Params`]'s
-    /// reason: the buffer is [`PARAMS_SIZE`] wide and a partial write leaves the
-    /// tail undefined.
+    /// Little-endian throughout, and every word of the row is written: the
+    /// buffer is [`PARAMS_SIZE`] wide and a partial write leaves the tail
+    /// undefined, which is [`crate::compute_probe::Params`]'s reason. The row's
+    /// last word was that padding until [`bent_normals`] took it.
     ///
-    /// [`intensity`]: Self::intensity
+    /// [`bent_normals`]: Self::bent_normals
     #[must_use]
     pub fn to_bytes(self) -> [u8; PARAMS_SIZE] {
         let mut bytes = [0u8; PARAMS_SIZE];
         let mut at = 0;
-        for value in self.inv_proj.into_iter().chain(self.proj) {
+        for value in self
+            .inv_proj
+            .into_iter()
+            .chain(self.proj)
+            .chain(self.inv_view)
+        {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
@@ -251,7 +315,12 @@ impl SsaoParams {
         at += 4;
         bytes[at..at + 4].copy_from_slice(&self.intensity.to_le_bytes());
         at += 4;
-        debug_assert_eq!(at + 4, PARAMS_SIZE, "one padding word closes the row");
+        // The switch rides as a float because the row is a `float4`, and the
+        // shader tests it against zero rather than for equality with one — see
+        // `bent_normals` there.
+        bytes[at..at + 4].copy_from_slice(&f32::from(u8::from(self.bent_normals)).to_le_bytes());
+        at += 4;
+        debug_assert_eq!(at, PARAMS_SIZE, "the row closes the block");
         bytes
     }
 }
@@ -428,7 +497,12 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_struct_ssao_slang_declares() {
         let source = include_str!("../shaders/ssao.slang");
-        for declaration in ["float4x4 inv_proj;", "float4x4 proj;", "float4 params;"] {
+        for declaration in [
+            "float4x4 inv_proj;",
+            "float4x4 proj;",
+            "float4x4 inv_view;",
+            "float4 params;",
+        ] {
             assert!(
                 source.contains(declaration),
                 "ssao.slang does not declare `{declaration}`"
@@ -436,9 +510,10 @@ mod tests {
         }
         let inv_proj = source.find("float4x4 inv_proj;").expect("just checked");
         let proj = source.find("float4x4 proj;").expect("just checked");
+        let inv_view = source.find("float4x4 inv_view;").expect("just checked");
         let params = source.find("float4 params;").expect("just checked");
         assert!(
-            inv_proj < proj && proj < params,
+            inv_proj < proj && proj < inv_view && inv_view < params,
             "ssao.slang declares the block in a different order than `to_bytes` writes it"
         );
     }
@@ -570,30 +645,40 @@ mod tests {
 
     /// The layout claim, checked rather than asserted in prose.
     #[test]
-    fn the_block_is_two_matrices_and_a_padded_row() {
+    fn the_block_is_three_matrices_and_a_row() {
         let mut inv_proj = [0.0f32; 16];
         inv_proj[0] = 1.0;
         let mut proj = [0.0f32; 16];
         proj[15] = 2.0;
-        let bytes = SsaoParams {
+        let mut inv_view = [0.0f32; 16];
+        inv_view[0] = 3.0;
+        inv_view[15] = 4.0;
+        let params = SsaoParams {
             inv_proj,
             proj,
+            inv_view,
             radius: 0.5,
             slices: SLICE_COUNT_MAX,
             intensity: INTENSITY_MAX,
-        }
-        .to_bytes();
+            bent_normals: true,
+        };
+        let bytes = params.to_bytes();
 
         assert_eq!(bytes.len(), PARAMS_SIZE);
         assert_eq!(&bytes[0..4], &1.0f32.to_le_bytes());
         assert_eq!(&bytes[124..128], &2.0f32.to_le_bytes());
-        assert_eq!(&bytes[128..132], &0.5f32.to_le_bytes());
+        // The third matrix, which is where the bent direction's rotation rides
+        // — swapping it with either of the two above draws a picture rather
+        // than failing, so both of its ends are read.
+        assert_eq!(&bytes[128..132], &3.0f32.to_le_bytes());
+        assert_eq!(&bytes[188..192], &4.0f32.to_le_bytes());
+        assert_eq!(&bytes[192..196], &0.5f32.to_le_bytes());
         // The count rides in `params.y` as a float, and **the whole point is
         // that the trip is exact**: the shader casts it straight back to a
         // `uint`, so a value that arrived a hair under would floor to one less
         // and sweep a plane fewer than the host asked for.
         assert_eq!(
-            &bytes[132..136],
+            &bytes[196..200],
             &f32::from(SLICE_COUNT_MAX).to_le_bytes(),
             "the slice count did not survive the block as the number it went in as"
         );
@@ -602,11 +687,143 @@ mod tests {
         // whether to touch the frame at all, so a value that did not arrive
         // exactly is a golden that moved for a knob nobody set.
         assert_eq!(
-            &bytes[136..140],
+            &bytes[200..204],
             &INTENSITY_MAX.to_le_bytes(),
             "the AO intensity did not survive the block as the number it went in as"
         );
-        assert!(bytes[140..].iter().all(|byte| *byte == 0), "{bytes:?}");
+        // And `params.w`, which was the row's last padding word until the bent
+        // direction took it. The shader tests it against zero, so what matters
+        // is that an asked-for direction does not arrive as one.
+        assert_eq!(
+            &bytes[204..208],
+            &1.0f32.to_le_bytes(),
+            "the bent-direction switch did not survive the block"
+        );
+        let off = SsaoParams {
+            bent_normals: false,
+            ..params
+        }
+        .to_bytes();
+        assert_eq!(
+            &off[204..208],
+            &0.0f32.to_le_bytes(),
+            "a frame that asked for no bent direction has to reach the shader as the zero the \
+             lane held when it was padding"
+        );
+    }
+
+    /// The bent-direction constants and the shaders must name the same numbers.
+    ///
+    /// `the_far_plane_matches_the_constant_ssao_slang_declares`'s check, for its
+    /// reason, and here the failure is quieter than most: a threshold that
+    /// drifted in one of the four declarations is a filter calling a cancelled
+    /// average a direction — or calling a real one the sentinel — which draws a
+    /// frame lit slightly wrongly and reports nothing.
+    ///
+    /// **All four**, because the mean is thresholded in the gather and in both
+    /// filters and the decoded length is thresholded in `mesh.slang`; a shader
+    /// left off this list is a copy nothing holds. `mesh.slang` is not in
+    /// [`OCCLUSION_SOURCES`] — it is the consumer rather than a pass of the
+    /// chain — so it is named here.
+    #[test]
+    fn the_bent_normal_length_matches_the_constant_the_shaders_declare() {
+        let declaration =
+            format!("static const float BENT_NORMAL_MIN_LENGTH = {BENT_NORMAL_MIN_LENGTH};");
+        for (name, source) in OCCLUSION_SOURCES
+            .into_iter()
+            .chain([("mesh.slang", include_str!("../shaders/mesh.slang"))])
+        {
+            assert!(
+                source.contains(&declaration),
+                "{name} does not declare `{declaration}`; the bent-direction threshold has \
+                 drifted from the shaders"
+            );
+        }
+    }
+
+    /// The encoded sentinel is the byte [`BENT_NORMAL_NONE`] names, and it
+    /// decodes to a length the threshold rejects.
+    ///
+    /// **This is the whole of why the placeholder and a gathered pixel can be
+    /// the same case.** The shader writes `direction * 0.5 + 0.5` and the
+    /// target quantises; if that byte were not the placeholder's, a frame with
+    /// no occlusion pass would decode to some direction and the ambient term
+    /// would be steered by a rounding step. Both halves are arithmetic this
+    /// crate can do, so neither is left to a comment.
+    #[test]
+    fn the_zero_direction_encodes_to_the_placeholders_byte() {
+        let encoded = 0.0f32.mul_add(0.5, 0.5);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the product is a channel level in 0..=255 by construction"
+        )]
+        let byte = (encoded * 255.0 + 0.5) as u8;
+        assert_eq!(
+            byte, BENT_NORMAL_NONE,
+            "the zero direction does not quantise to the byte the renderer's placeholder holds"
+        );
+        let decoded = f32::from(BENT_NORMAL_NONE) / 255.0 * 2.0 - 1.0;
+        let length = (3.0f32 * decoded * decoded).sqrt();
+        assert!(
+            length < BENT_NORMAL_MIN_LENGTH,
+            "the sentinel decodes to a length of {length}, which BENT_NORMAL_MIN_LENGTH \
+             ({BENT_NORMAL_MIN_LENGTH}) does not reject"
+        );
+        // And from the other side, so the threshold is not a bound nothing
+        // approaches: a unit direction survives the same quantisation, and the
+        // worst it can come back as is a channel level short on every axis.
+        let worst = 1.0f32 / 3.0f32.sqrt() - 1.0 / 255.0;
+        let unit = (3.0f32 * worst * worst).sqrt();
+        assert!(
+            unit > BENT_NORMAL_MIN_LENGTH,
+            "a quantised unit direction comes back at {unit}, which BENT_NORMAL_MIN_LENGTH \
+             ({BENT_NORMAL_MIN_LENGTH}) rejects as a sentinel"
+        );
+    }
+
+    /// The gather must accumulate a bent direction and rotate it into world
+    /// space, and the two filters must renormalise what they average.
+    ///
+    /// **No golden notices if either stops**, which is
+    /// `the_reconstruction_weighs_a_tap_by_its_depth`'s situation exactly: a
+    /// constant direction and a correctly-varying one both light a 256×192
+    /// fixture within its tolerance, and a direction that is merely the wrong
+    /// *length* changes nothing at all until something normalises it. The
+    /// behavioural checks are `crcbl`'s
+    /// `forward_e2e::occlusion::the_bent_direction_leans_out_of_the_occluded_corner`
+    /// and `the_filters_leave_the_bent_direction_a_unit_vector`, and both are
+    /// `#[ignore]`d and need a GPU — so on a machine or a CI job with no device
+    /// these source checks are the only thing left standing.
+    #[test]
+    fn the_bent_direction_is_gathered_filtered_and_renormalised() {
+        assert!(
+            include_str!("../shaders/ssao.slang")
+                .contains("normalize(mul(camera.inv_view, float4(bent, 0.0)).xyz)"),
+            "ssao.slang no longer rotates the accumulated bent direction into world space, so \
+             `mesh.slang` would steer its ambient term by a view-space vector and the lighting \
+             would swing with the camera"
+        );
+        for (name, source) in [
+            (
+                "ssao_blur.slang",
+                include_str!("../shaders/ssao_blur.slang"),
+            ),
+            (
+                "ssao_upsample.slang",
+                include_str!("../shaders/ssao_upsample.slang"),
+            ),
+        ] {
+            assert!(
+                source.contains("float3 mean = weight > 0.0 ? summed / weight"),
+                "{name}'s `encode_bent` no longer takes the mean of its taps"
+            );
+            assert!(
+                source.contains(": normalize(mean);"),
+                "{name}'s `encode_bent` no longer renormalises, so the direction it writes \
+                 carries the filter's own disagreement as a length"
+            );
+        }
     }
 
     /// The three intensities and the shader must name the same numbers.

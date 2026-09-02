@@ -90,6 +90,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The ambient-occlusion image is `Rgba8Unorm`, and the structs that describe
+  it grew.** `crcbl_render::TransientImageDesc::ambient_occlusion` changed
+  format; anything sampling that image reads a `float4` and gets the scalar in
+  `.r`. `crcbl_shaders::ssao::SsaoParams` gained `inv_view: [f32; 16]` (between
+  `proj` and the parameter row) and `bent_normals: bool` (the row's last word,
+  previously padding), so `PARAMS_SIZE` is 208 rather than 144.
+  `crcbl_render::DebugView` gained `BentNormal` and
+  `crcbl::settings::debug_view_switches` answers `[bool; 6]` rather than
+  `[bool; 5]`, with the new switch first.
+
 - **`HostedGame` gains `settings`, and `ConsoleHost` holds a shared stack.**
   `HostedGame::settings(&self) -> Option<crcbl::settings::SharedSettings>`
   defaults to `None`, so no existing implementor has to write anything.
@@ -205,6 +215,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   render tests — names it now. `false` is the light that was there before.
 
 ### Added
+
+- **The occlusion pass gathers a bent normal beside its scalar, and the ambient
+  term is sampled along it.** GTAO's sweep already finds both horizons per
+  slice; the direction is that sweep's by-product rather than a second gather,
+  so `ssao` costs the same as it did (0.106 ms p50 on an RX 7900 XTX at
+  1920×1080, unchanged with the direction off). The target widened from
+  `R8Unorm` to `Rgba8Unorm`: `.r` is the visibility scalar every existing reader
+  had, `.gba` are the world-space direction as `xyz * 0.5 + 0.5`. `mesh.slang`
+  passes it to `sky_irradiance` and `probe_irradiance` in place of the shading
+  normal, so an occluded surface now takes its sky and probe light from where
+  the light can actually reach it rather than from the whole hemisphere scaled
+  down. A zero-length direction is the sentinel for "no direction here" and the
+  consumer falls back to its own shading normal, which is also what the
+  renderer's 1×1 placeholder encodes — so a frame drawn with no occlusion pass
+  is byte-identical to before. The blur and the reconstruction renormalise, and
+  they cost 0.002 ms and 0.004 ms more for it. `r_ssao_bent_normals` is the
+  console switch and it is **on**; `debug_view bent normal` draws the channel.
+  Jimenez et al. 2016 is the reference, and the accumulation departs from the
+  paper's bisector in one way that `shaders/ssao.slang` explains: a slice's
+  bisector lies in a plane containing the eye, so summing bisectors leans the
+  answer towards the camera by an amount that depends on where the pixel sits on
+  screen — measured at seventeen degrees off an unoccluded plane's own normal —
+  and the sum is over the surface normal turned by each slice's deviation
+  instead.
 
 - **`crcbl screenshot --scene fill_light` draws a fill point light and a fill
   spot, which nothing did before.** A new `crcbl::screenshot::Scene::FillLight`:

@@ -223,14 +223,13 @@ gracefully exactly where the shipped pass cliffs, which makes it better for the
 goldens rather than worse** — and that, rather than a quality opinion, is what
 reopens it.
 
-**Bent normals are the second half, and they are what make this worth more than
-a quality bump.** A scalar occlusion can only _scale_ the ambient term; a bent
-normal is a direction the ambient term can be sampled _along_, which is exactly
-the hook the irradiance-probe section left open — `probe_irradiance` already
-takes a normal and would take that one. It is also the honest route to specular
-occlusion, which the SSR section refuses outright and refuses **correctly**: a
-scalar AO is the wrong term for a reflection, and a bent normal with a cone
-angle is the right one. That refusal stands until this pair exists.
+**Bent normals were the second half and they have landed** — see "The bent
+direction" below. What is left of the argument that asked for them is the part
+they have not paid off yet: a bent normal with a cone angle is the honest route
+to **specular occlusion**, which the SSR section refuses outright and refuses
+**correctly**, because a scalar AO is the wrong term for a reflection. The
+direction exists now; the cone angle does not, and that refusal stands until it
+does.
 
 **SSAO stays as the cheap tier** rather than being deleted, on the antialiasing
 ladder's own FXAA-under-SMAA pattern: eight taps and a comparison is a real
@@ -295,10 +294,6 @@ needs a selector to choose it and there is none, so keeping the eight-tap body
 would have been a second technique nothing could reach. `docs/backlog.md`
 carries it.
 
-**Bent normals are still owed**, and they are the half that makes this more than
-a quality bump. They need the `R8Unorm` target widened, so they are their own
-slice.
-
 **DECIDED 2026-08-30 — which tiers get which.** The user's call, on the question
 of where the widened target is worth its bandwidth:
 
@@ -312,23 +307,19 @@ of where the widened target is worth its bandwidth:
   rather than a design choice, and it is why the cheap-rung paragraph above
   still stands: the eight-tap body is gone, and comes back behind a selector
   only if low measures for it.
-- **Medium and high: bent normals plus specular occlusion.** The `R8Unorm`
-  target widens to carry the bent direction beside the scalar, the ambient term
-  is sampled along it, and the reflection term takes the cone's occlusion — the
-  pair the SSR section's refusal has been waiting for. The widening is the
-  bandwidth low does not pay.
+- **Medium and high: bent normals plus specular occlusion.** The bent half is
+  built — see below. **The tier split is not**, and that is what is left of this
+  bullet: the widening was taken on every tier rather than on two, because the
+  target's format is one description
+  (`crcbl_render::TransientImageDesc::ambient_occlusion`) and a per-tier format
+  would be a second pipeline, a second bind-group layout and a second
+  `mesh.slang` binding type. What a tier can turn off is the _arithmetic_, and
+  `crcbl_render::ssao::r_ssao_bent_normals` is that switch. Whether low should
+  set it, and through what, is `docs/backlog.md`'s — the same open question the
+  contact-shadow rung hit about a preset needing a `VIDEO_KEYS` row to clear.
 
-  **This rung is not blocked by the normal-attachment refusal below, checked
-  2026-09-02.** The refusal is real and stands, and this rung does not need what
-  it refuses: GTAO's horizon search produces a bent direction as a by-product of
-  the sweep it already runs, off the same depth-derived normal, so nothing new
-  is attached to the forward pass. The one place the answer was not obvious is
-  the reconstruction's fallback — where the scalar's identity is `1.0`, a
-  direction has no such constant — and `shaders/ssao_upsample.slang` already
-  binds `scene_depth` at the frame's own extent and loads it, so the fallback
-  can be the depth-derived normal at that pixel. What the rung does cost is
-  bandwidth and the blur: a direction does not filter like a scalar, and
-  whatever the widened blur does it must renormalise.
+  Specular occlusion is still owed and still needs a cone angle the channel does
+  not carry.
 
 **The published fit is not exactly one at full visibility, and the occlusion
 off-switch is why that had to be fixed rather than measured.** The three
@@ -443,6 +434,107 @@ move whenever the pass does.
 measured on both axes, the reconstruction is held to the nearest gathered sample
 for a sliver that misses the grid entirely, and every threshold in it was swept
 on radv and lavapipe.
+
+### The bent direction, and what steering the ambient by it cost (built 2026-09-02)
+
+The occlusion target is `Rgba8Unorm`. `r` is the visibility scalar every reader
+of it already had; `gba` are the **bent direction** in world space, encoded
+`xyz * 0.5 + 0.5`, and `mesh.slang` samples `sky_irradiance` and
+`probe_irradiance` along it instead of along the shading normal. The flat
+`FrameUniforms::ambient` term is not steered, because a constant over the sphere
+has no direction to be sampled along.
+
+**A zero-length direction is the sentinel**, and it is what a pixel with nothing
+to measure writes — the sky, a march the `MIN_RADIUS_PIXELS` floor left before
+it ran, slices whose turns cancelled. An _unoccluded_ pixel is not that case: it
+gets its own normal back exactly, which is the accumulation's whole point.
+`crcbl_shaders::ssao::BENT_NORMAL_MIN_LENGTH` is the length every consumer
+tests, `BENT_NORMAL_NONE` is the byte the encoded zero quantises to, and the
+renderer's 1×1 placeholder holds that byte in all three channels — so "no
+occlusion pass ran" and "no direction at this pixel" are one case with one
+answer, and `mesh.slang`'s `bent_normal_at` answers it with the fragment's own
+shading normal. **Nothing reconstructs a normal in the consumer.** The tier
+bullet this section replaces expected the fallback to have to be the
+depth-derived normal at that pixel, and it does not: a fragment that has no bent
+direction is one whose own shading normal is the answer, and the fragment is
+already holding it.
+
+**Three channels and no octahedral pair.** No seam, no fold, no decode at every
+tap — and averaging-then-renormalising is then the obvious operation for the
+blur and the reconstruction, which is what a direction needs and a scalar does
+not.
+
+**The sum is over turns of the normal, not over the bisectors.** This is the one
+thing the design as written did not survive contact with a measurement. A
+slice's bisector lives in the slice plane, and every slice plane contains the
+eye — so summing bisectors pulls the answer towards the view direction by an
+amount that depends only on where the pixel is on screen. Measured: at a column
+two thirds across a 1920-wide frame, a completely unoccluded plane facing the
+camera came back **seventeen degrees off its own normal**, and it would have
+swung as the camera panned. So each slice instead contributes the surface normal
+turned by the angle its bisector sits from that slice's own unoccluded answer,
+which is `gamma`. An unoccluded pixel then gets its own normal exactly, whatever
+the weights were, and the answer no longer depends on screen position.
+`ssao.slang`'s `occlusion_at` carries the derivation and `crcbl`'s
+`forward_e2e::occlusion::the_bent_direction_leans_out_of_the_occluded_band`
+holds both halves in one frame.
+
+**The sentinel does not survive quantisation as nothing**, which is the second
+thing a measurement caught. `BENT_NORMAL_NONE` decodes to a short vector rather
+than to zero, and a filter that weighted taps by their decoded length divided
+that residue by itself and handed back the unit diagonal — on every pixel of a
+frame that asked for no bent direction at all. `decode_bent` in both filters
+resolves a tap to a unit vector or to exactly nothing, and that is why.
+
+**Reachability is a console variable and nothing else.**
+`crcbl_render::ssao::r_ssao_bent_normals` sits beside the chain's other three,
+is **on by default** — the other three default to what shipped before them,
+because they buy quality on top of a rung, and this one is the rung — and rides
+in `SsaoParams`' last word, which was the row's padding. A producer that never
+writes it gets the frame the chain drew before the channel was widened. There is
+no `RenderEffects` bit and no `VIDEO_KEYS` row; the settings row is
+`docs/backlog.md`'s open question, unchanged.
+
+`debug_view bent normal` draws the channel's three direction bytes as the
+colour, on the occlusion view's terms: the channel and not the shading's use of
+it, so a pixel with no direction reads as the mid grey the sentinel encodes to
+and a frame drawing without `RenderEffects::AMBIENT_OCCLUSION` is that grey
+everywhere.
+
+**What it cost, measured 2026-09-02.**
+`lantern --headless --frames 400 --size 1920x1080` under `RUST_LOG=info`, median
+of three runs each on an RX 7900 XTX (radv, Mesa 26.2.1), summed across both of
+lantern's views:
+
+| pass            | direction on          | direction off         |
+| --------------- | --------------------- | --------------------- |
+| `ssao`          | 0.106 p50 / 0.108 p95 | 0.106 p50 / 0.107 p95 |
+| `ssao-blur`     | 0.023 / 0.024         | 0.021 / 0.022         |
+| `ssao-upsample` | 0.033 / 0.034         | 0.029 / 0.030         |
+
+All in milliseconds. The gather is unmoved — the horizons were already found and
+the turn is a handful of multiplies on values the loop held — and the two
+filters pay 0.002 ms and 0.004 ms for a decode, a mean and a renormalise per
+tap. The frame's own p50 was 0.894/0.898/0.907 ms with the direction on and
+0.879/0.904/0.903 ms with it off, which is to say the total is noise at this
+scale.
+
+**What that measurement does _not_ price is the widening**, and it cannot: the
+target is `Rgba8Unorm` on both sides of the switch, so what the switch turns off
+is the arithmetic and not the bandwidth. Recovering the `R8Unorm` figure would
+mean compiling a chain that writes one channel — the same exercise the tier note
+above describes for the eight-tap body, against a tree that no longer has one.
+`docs/backlog.md` carries it.
+
+**Two goldens moved and both were reviewed before blessing.** `crcbl`'s `probes`
+scene, whose diff is the ceiling and floor bands — the surfaces a room occludes
+most, and where a directional probe grid is most sensitive to which way the
+ambient is sampled — and `apps/lantern`'s `room` and `live`, whose diff is the
+wall junctions, the corners and the rim of the box and nothing else. Every other
+golden in the workspace is unmoved. `apps/lantern`'s `SSR_HIT_TOLERANCE` was
+re-measured rather than blessed: the reflected surface is brighter now, so
+zeroing the probe rows removes more of it, and that constant's doc carries the
+before-and-after on both adapters.
 
 ### The occlusion view
 

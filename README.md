@@ -44,10 +44,10 @@ What is real today:
   AppKit, Win32, the browser canvas, and a headless backend that CI runs
   everything through.
 - **A GPU-driven forward renderer.** Culling and draw generation on the GPU, a
-  shadow pass, depth prepass, SSAO, SSR, clustered lights — point, spot and
-  rectangular area lights shaded by linearly transformed cosines — tonemapping
-  and a screen-space grid, with mesh shaders and bindless where the device has
-  them.
+  shadow pass, depth prepass, ground-truth ambient occlusion with bent normals,
+  SSR, clustered lights — point, spot and rectangular area lights shaded by
+  linearly transformed cosines — tonemapping and a screen-space grid, with mesh
+  shaders and bindless where the device has them.
 - **glTF import** with meshlet building, a cluster DAG and QEM simplification.
 - **A server-authoritative game stack** — fixed-tick simulation, snapshots,
   interpolation, an ECS, physics, input mapping, audio, persistence and a job
@@ -96,22 +96,23 @@ opens the debug console — `help` lists every command and every setting the
 engine reads, `antialiasing smaa` sets one for the running frame,
 `debug_view ambient occlusion` draws a renderer's debug channel instead of the
 shaded picture (`shaded`, `heatmap`, `lod tint`, `normals`, `ambient occlusion`,
-`motion`), `toggle` and `reset` flip and restore one, `bind` lists what drives
-every action in a sample that has them and `bind fire KeyJ` moves one, and `log`
-prints the log filter and `log warn,crcbl_vk=trace` installs one for the running
-process — in a browser as well as a terminal — `master_volume 0.5` moves a bus
-on the mix that is already playing, `save` writes it to the settings file, and
-`config video` runs `video.cfg` out of that same settings directory, one console
-line per line. An **`autoexec.cfg`** in that directory needs no asking: the
-engine runs it once at start-up, before the first frame, which is the only way
-to set a variable in a run that is over before anybody could type — a
-`--frames N` capture, say. A machine without one boots in silence. `Ctrl`+`V`
-pastes into the input line wherever the platform has a clipboard to read. The
-same keys work in the browser demos: the shim leaves `` ` `` to the engine and
-passes every character typed at the console through. On a device with no keys
-there is a **CONSOLE** button beside the pause button once the canvas has been
-touched, and the panel it opens draws its own keyboard: three layers, every
-printable character the engine's font has, and a return key that sends the line.
+`motion`, `bent normal`), `toggle` and `reset` flip and restore one, `bind`
+lists what drives every action in a sample that has them and `bind fire KeyJ`
+moves one, and `log` prints the log filter and `log warn,crcbl_vk=trace`
+installs one for the running process — in a browser as well as a terminal —
+`master_volume 0.5` moves a bus on the mix that is already playing, `save`
+writes it to the settings file, and `config video` runs `video.cfg` out of that
+same settings directory, one console line per line. An **`autoexec.cfg`** in
+that directory needs no asking: the engine runs it once at start-up, before the
+first frame, which is the only way to set a variable in a run that is over
+before anybody could type — a `--frames N` capture, say. A machine without one
+boots in silence. `Ctrl`+`V` pastes into the input line wherever the platform
+has a clipboard to read. The same keys work in the browser demos: the shim
+leaves `` ` `` to the engine and passes every character typed at the console
+through. On a device with no keys there is a **CONSOLE** button beside the pause
+button once the canvas has been touched, and the panel it opens draws its own
+keyboard: three layers, every printable character the engine's font has, and a
+return key that sends the line.
 
 `CRCBL_SHELL=x11` forces a windowing backend and `CRCBL_LOG=debug` prints every
 shell event.

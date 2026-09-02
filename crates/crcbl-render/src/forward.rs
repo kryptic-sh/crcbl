@@ -341,8 +341,12 @@ pub enum DebugView {
     /// [`ForwardRenderer::set_occlusion_view`].
     AmbientOcclusion,
     /// The motion vector each fragment wrote, stretched and centred on grey —
-    /// [`ForwardRenderer::set_motion_view`]. **Wins over every other view.**
+    /// [`ForwardRenderer::set_motion_view`].
     Motion,
+    /// The bent direction the occlusion channel carries beside its scalar, as
+    /// `n * 0.5 + 0.5` — [`ForwardRenderer::set_bent_normal_view`]. **Wins over
+    /// every other view.**
+    BentNormal,
 }
 
 impl DebugView {
@@ -356,6 +360,7 @@ impl DebugView {
             Self::Normals => "normals",
             Self::AmbientOcclusion => "ambient occlusion",
             Self::Motion => "motion",
+            Self::BentNormal => "bent normal",
         }
     }
 }
@@ -545,14 +550,30 @@ const LTC_SIZE_U32: u32 = ltc::LTC_SIZE as u32;
 /// objects a unit apart still do not shade each other at all.
 const SSAO_RADIUS: f32 = 0.5;
 
-/// The `R8Unorm` texel that occludes nothing: `1.0`, which is `0xFF`.
+/// The `Rgba8Unorm` texel that occludes nothing and steers nothing.
 ///
 /// What [`ForwardRenderer::ambient_occlusion_placeholder`] holds, and therefore
 /// what `mesh.slang` reads on a frame drawing without
-/// [`RenderEffects::AMBIENT_OCCLUSION`] — it multiplies `frame.ambient.rgb` by
-/// this and the ambient term is untouched. Any other value would be a silent
-/// global ambient scale.
-const AMBIENT_OCCLUSION_NONE: u8 = 0xFF;
+/// [`RenderEffects::AMBIENT_OCCLUSION`].
+///
+/// **`r` is `0xFF`, which is `1.0`**: the shading multiplies its ambient by
+/// this and the term is untouched. Any other value would be a silent global
+/// ambient scale.
+///
+/// **`gba` are [`ssao::BENT_NORMAL_NONE`], which decodes to a zero-length
+/// direction** — the sentinel the occlusion chain writes wherever it has no
+/// bent direction to report, and which `mesh.slang`'s `bent_normal_at` answers
+/// with the fragment's own shading normal. So "no occlusion pass ran" and "no
+/// direction at this pixel" are one case with one answer, and a frame drawn
+/// with the effect off is the frame this renderer drew before the channel was
+/// widened. Encoding a direction here instead would tilt every ambient term in
+/// such a frame towards one world axis.
+const AMBIENT_OCCLUSION_NONE: [u8; 4] = [
+    0xFF,
+    ssao::BENT_NORMAL_NONE,
+    ssao::BENT_NORMAL_NONE,
+    ssao::BENT_NORMAL_NONE,
+];
 
 /// The `R8Unorm` texel the sun reaches unobstructed: `1.0`, which is `0xFF`.
 ///
@@ -562,11 +583,11 @@ const AMBIENT_OCCLUSION_NONE: u8 = 0xFF;
 /// and the cascades have the last word alone. Any other value would be a silent
 /// global scale on the sun.
 ///
-/// The same byte as [`AMBIENT_OCCLUSION_NONE`] and a constant of its own, for
-/// the reason [`LTC_SIZE_U32`] is not [`DFG_SIZE_U32`]: the two placeholders
-/// stand for different facts, and a day one of them wanted a different value
-/// should be an edit here rather than a search for which callers of a shared
-/// name meant which thing.
+/// The same byte as [`AMBIENT_OCCLUSION_NONE`]'s first and a constant of its
+/// own, for the reason [`LTC_SIZE_U32`] is not [`DFG_SIZE_U32`]: the two
+/// placeholders stand for different facts, and a day one of them wanted a
+/// different value should be an edit here rather than a search for which
+/// callers of a shared name meant which thing.
 const CONTACT_SHADOW_NONE: u8 = 0xFF;
 
 /// The reversed-Z far plane, in the two places that have to agree about it.
@@ -1349,6 +1370,15 @@ pub struct ForwardRenderer {
     /// `the_debug_views_resolve_in_one_order_however_they_are_set` is what holds
     /// this side to it.
     motion_view: bool,
+    /// Whether the colour pass draws the occlusion channel's bent direction
+    /// instead of shading — see
+    /// [`set_bent_normal_view`](ForwardRenderer::set_bent_normal_view).
+    ///
+    /// **Wins over every other view**, on [`motion_view`](Self::motion_view)'s
+    /// terms: it is the outermost sentinel in the lane, and
+    /// `crcbl_shaders`' `the_bent_normal_view_threshold_lies_above_the_motion_view`
+    /// is what holds the shader's branch order to it.
+    bent_normal_view: bool,
 
     /// Where [`begin_frame`](ForwardRenderer::begin_frame) projects
     /// `docs/plan/25-lod.md`'s selection from, when that is not the camera's own
@@ -4127,18 +4157,18 @@ impl ForwardRenderer {
         // graph has an occlusion image to name.
         //
         // **Uploaded rather than cleared**, unlike the depth placeholder above,
-        // and the byte is the whole point: `0xFF` is `1.0` through `R8Unorm`, so
-        // a fragment that reads this one is a fragment nothing occludes. Left
-        // undefined it would be a random ambient scale on any frame that fell
-        // back to it.
+        // and the four bytes are the whole point — see
+        // [`AMBIENT_OCCLUSION_NONE`], which is where each of them is argued.
+        // Left undefined this would be a random ambient scale *and* a random
+        // direction to steer it along, on any frame that fell back to it.
         let ambient_occlusion_placeholder = upload_texture(
             device,
             queue,
             "ssao placeholder",
-            Format::R8Unorm,
+            Format::Rgba8Unorm,
             1,
             1,
-            &[AMBIENT_OCCLUSION_NONE],
+            &AMBIENT_OCCLUSION_NONE,
         )?;
         rollback.textures.push(ambient_occlusion_placeholder);
 
@@ -4913,6 +4943,7 @@ impl ForwardRenderer {
             heatmap: false,
             occlusion_view: false,
             motion_view: false,
+            bent_normal_view: false,
             // Following the camera, on the line above's terms: the selection eye
             // is the camera's until a caller pins it, so a renderer nobody calls
             // `set_frozen_selection_eye` on hands `begin_frame` exactly what it
@@ -5901,9 +5932,15 @@ impl ForwardRenderer {
             ssao::SsaoParams {
                 inv_proj: inv_projection.to_cols_array(),
                 proj: projection.to_cols_array(),
+                // View → world, for the bent direction alone: the gather works
+                // in view space and its one output has to reach `mesh.slang`'s
+                // world-space ambient term. The same expression the reflection
+                // pass's block carries, a few lines below.
+                inv_view: camera.view().inverse().to_cols_array(),
                 radius: SSAO_RADIUS,
                 slices: crate::ssao::slice_count(),
                 intensity: crate::ssao::intensity(),
+                bent_normals: crate::ssao::bent_normals(),
             },
         )?;
         // The contact march's block: the same two matrices, and the sun in view
@@ -9614,6 +9651,56 @@ impl ForwardRenderer {
         self.motion_view
     }
 
+    /// Draws the occlusion channel's **bent direction** instead of shading.
+    ///
+    /// The three channels beside the visibility scalar, passed through as the
+    /// colour: the conventional `n * 0.5 + 0.5`, so +X reads red, +Y green and
+    /// +Z blue, which is the mapping
+    /// [`set_normals_view`](Self::set_normals_view) already uses for a surface
+    /// normal. A fragment the occlusion pass had no direction for reads as the
+    /// mid grey the zero sentinel encodes to.
+    ///
+    /// # What it is for
+    ///
+    /// The bent direction is what the ambient term is sampled *along*, and a
+    /// composited frame cannot show it: ambient times albedo times a
+    /// direction-dependent irradiance is one colour, and a direction that is
+    /// subtly wrong looks like a lighting choice. This draws the direction
+    /// alone, which is how a corner that leans the wrong way out of its own
+    /// wall is a thing a reviewer sees rather than infers.
+    ///
+    /// # What it draws with occlusion switched off
+    ///
+    /// Mid grey, everywhere. A frame without
+    /// [`RenderEffects::AMBIENT_OCCLUSION`] binds a 1×1 placeholder holding
+    /// [`BENT_NORMAL_NONE`](crcbl_shaders::ssao::BENT_NORMAL_NONE) in those
+    /// three channels, and this view shows that image rather than pretending to
+    /// a direction nothing computed — which is the same answer the shading
+    /// takes, since `mesh.slang` reads that sentinel as "use the shading
+    /// normal".
+    ///
+    /// # It builds nothing and adds no pass
+    ///
+    /// One lane of the frame's uniform block, on
+    /// [`set_normals_view`](Self::set_normals_view)'s terms exactly, and like
+    /// the occlusion view it needs nothing from the geometry stage — so it
+    /// draws on every [`GeometryPath`].
+    ///
+    /// **Wins over every other view when several are on**; see
+    /// [`debug_view`](Self::debug_view), which is that order stated once.
+    pub const fn set_bent_normal_view(&mut self, on: bool) {
+        self.bent_normal_view = on;
+    }
+
+    /// Whether the colour pass draws the bent direction instead of shading.
+    ///
+    /// **What was asked for, not what is drawn**, on
+    /// [`lod_view`](Self::lod_view)'s terms.
+    #[must_use]
+    pub const fn bent_normal_view(&self) -> bool {
+        self.bent_normal_view
+    }
+
     /// Pins the eye `docs/plan/25-lod.md`'s selection is projected from, so the
     /// cut stops following the camera.
     ///
@@ -9719,7 +9806,9 @@ impl ForwardRenderer {
     /// differently by a menu row, a debug panel and the picture.
     #[must_use]
     pub const fn debug_view(&self) -> DebugView {
-        if self.motion_view {
+        if self.bent_normal_view {
+            DebugView::BentNormal
+        } else if self.motion_view {
             DebugView::Motion
         } else if self.occlusion_view {
             DebugView::AmbientOcclusion
@@ -9738,6 +9827,7 @@ impl ForwardRenderer {
     /// carries.
     const fn debug_view_lane(&self) -> f32 {
         match self.debug_view() {
+            DebugView::BentNormal => mesh::FrameUniforms::BENT_NORMAL_VIEW_ON,
             DebugView::Motion => mesh::FrameUniforms::MOTION_VIEW_ON,
             DebugView::AmbientOcclusion => mesh::FrameUniforms::OCCLUSION_VIEW_ON,
             DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
@@ -11011,75 +11101,84 @@ mod tests {
         let camera = Camera::default();
         let light = DirectionalLight::default();
 
-        for motion in [false, true] {
-            for occlusion in [false, true] {
-                for heatmap in [false, true] {
-                    for lod in [false, true] {
-                        for normals in [false, true] {
-                            renderer.set_motion_view(motion);
-                            renderer.set_occlusion_view(occlusion);
-                            renderer.set_heatmap(heatmap);
-                            renderer.set_lod_view(lod);
-                            renderer.set_normals_view(normals);
-                            let set = format!(
-                                "motion={motion} occlusion={occlusion} heatmap={heatmap} \
-                                 lod={lod} normals={normals}"
-                            );
-                            // Each switch reads back what it was set to, whatever
-                            // the others are: a caller's toggle is about the
-                            // caller's setting, and only `debug_view` is about the
-                            // picture.
-                            assert_eq!(renderer.motion_view(), motion);
-                            assert_eq!(renderer.occlusion_view(), occlusion);
-                            assert_eq!(renderer.heatmap(), heatmap);
-                            assert_eq!(renderer.lod_view(), lod);
-                            assert_eq!(renderer.normals_view(), normals);
+        for bent in [false, true] {
+            for motion in [false, true] {
+                for occlusion in [false, true] {
+                    for heatmap in [false, true] {
+                        for lod in [false, true] {
+                            for normals in [false, true] {
+                                renderer.set_bent_normal_view(bent);
+                                renderer.set_motion_view(motion);
+                                renderer.set_occlusion_view(occlusion);
+                                renderer.set_heatmap(heatmap);
+                                renderer.set_lod_view(lod);
+                                renderer.set_normals_view(normals);
+                                let set = format!(
+                                    "bent={bent} motion={motion} occlusion={occlusion} \
+                                 heatmap={heatmap} lod={lod} normals={normals}"
+                                );
+                                // Each switch reads back what it was set to, whatever
+                                // the others are: a caller's toggle is about the
+                                // caller's setting, and only `debug_view` is about the
+                                // picture.
+                                assert_eq!(renderer.bent_normal_view(), bent);
+                                assert_eq!(renderer.motion_view(), motion);
+                                assert_eq!(renderer.occlusion_view(), occlusion);
+                                assert_eq!(renderer.heatmap(), heatmap);
+                                assert_eq!(renderer.lod_view(), lod);
+                                assert_eq!(renderer.normals_view(), normals);
 
-                            let expected = if motion {
-                                DebugView::Motion
-                            } else if occlusion {
-                                DebugView::AmbientOcclusion
-                            } else if heatmap {
-                                DebugView::Heatmap
-                            } else if lod {
-                                DebugView::LodTint
-                            } else if normals {
-                                DebugView::Normals
-                            } else {
-                                DebugView::Shaded
-                            };
-                            assert_eq!(renderer.debug_view(), expected, "{set}");
+                                let expected = if bent {
+                                    DebugView::BentNormal
+                                } else if motion {
+                                    DebugView::Motion
+                                } else if occlusion {
+                                    DebugView::AmbientOcclusion
+                                } else if heatmap {
+                                    DebugView::Heatmap
+                                } else if lod {
+                                    DebugView::LodTint
+                                } else if normals {
+                                    DebugView::Normals
+                                } else {
+                                    DebugView::Shaded
+                                };
+                                assert_eq!(renderer.debug_view(), expected, "{set}");
 
-                            renderer
-                                .begin_frame(device.as_ref(), &camera, &light, (64, 48))
-                                .expect("write");
-                            let block = recorder
-                                .buffer_bytes(renderer.uniforms[renderer.frame])
-                                .expect("begin_frame wrote the block");
-                            let sentinel = match expected {
-                                DebugView::Motion => mesh::FrameUniforms::MOTION_VIEW_ON,
-                                DebugView::AmbientOcclusion => {
-                                    mesh::FrameUniforms::OCCLUSION_VIEW_ON
-                                }
-                                DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
-                                DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
-                                DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
-                                DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
-                            };
-                            assert_eq!(
-                                &block[AMBIENT_W..AMBIENT_W + 4],
-                                &sentinel.to_le_bytes(),
-                                "{set} resolved to {expected:?}, and the lane says otherwise"
-                            );
-                            // And the resolve comes off for every one of them:
-                            // these frames are read back as data, so their colours
-                            // have to stay the ones the shader wrote — see
-                            // `resolved_effects`.
-                            assert_eq!(
-                                renderer.effects().contains(RenderEffects::ANTIALIASING),
-                                expected == DebugView::Shaded,
-                                "{set}"
-                            );
+                                renderer
+                                    .begin_frame(device.as_ref(), &camera, &light, (64, 48))
+                                    .expect("write");
+                                let block = recorder
+                                    .buffer_bytes(renderer.uniforms[renderer.frame])
+                                    .expect("begin_frame wrote the block");
+                                let sentinel = match expected {
+                                    DebugView::BentNormal => {
+                                        mesh::FrameUniforms::BENT_NORMAL_VIEW_ON
+                                    }
+                                    DebugView::Motion => mesh::FrameUniforms::MOTION_VIEW_ON,
+                                    DebugView::AmbientOcclusion => {
+                                        mesh::FrameUniforms::OCCLUSION_VIEW_ON
+                                    }
+                                    DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
+                                    DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
+                                    DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
+                                    DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
+                                };
+                                assert_eq!(
+                                    &block[AMBIENT_W..AMBIENT_W + 4],
+                                    &sentinel.to_le_bytes(),
+                                    "{set} resolved to {expected:?}, and the lane says otherwise"
+                                );
+                                // And the resolve comes off for every one of them:
+                                // these frames are read back as data, so their colours
+                                // have to stay the ones the shader wrote — see
+                                // `resolved_effects`.
+                                assert_eq!(
+                                    renderer.effects().contains(RenderEffects::ANTIALIASING),
+                                    expected == DebugView::Shaded,
+                                    "{set}"
+                                );
+                            }
                         }
                     }
                 }
@@ -14954,7 +15053,7 @@ mod tests {
                 ImportedImage {
                     image: occlusion,
                     view: renderer.ambient_occlusion_placeholder.view,
-                    format: Format::R8Unorm,
+                    format: Format::Rgba8Unorm,
                     extent: (1, 1),
                     initial: ResourceState::ShaderRead,
                     claim: InitialClaim::Tracked,
@@ -16359,9 +16458,11 @@ mod tests {
             ssao::SsaoParams {
                 inv_proj: [0.0; 16],
                 proj: [0.0; 16],
+                inv_view: [0.0; 16],
                 radius: 0.0,
                 slices,
                 intensity: ssao::INTENSITY_DEFAULT,
+                bent_normals: crate::ssao::bent_normals(),
             }
             .to_bytes()
         };

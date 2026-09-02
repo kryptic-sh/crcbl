@@ -168,21 +168,30 @@ const MIRROR_FRACTION_OF_PLASTER: f32 = 0.14;
 /// with the probe environment, so zeroing the probes removes exactly that
 /// remainder and what is left is the screen hit alone.
 ///
-/// **The march is what moved it, not the mirror.** It was 6% against a measured
-/// 5.1% until `ssr.slang` was rebuilt on the Hi-Z pyramid on 2026-08-27, which
-/// resolves a crossing to a single texel instead of to a 1.5-pixel stride and so
-/// measures how far past the surface the ray got on a finer basis — a lower
-/// confidence for the same hit, and a larger remainder. The point reads 46.8 ->
-/// 43.4 on llvmpipe and 46.7 -> 43.3 on the discrete adapter, 7.3% either way,
-/// and the hit colour itself is unchanged: with the confidence forced to one
-/// both marches read 53. So 10%, on the old constant's terms — margin over a
-/// measured difference the two adapters agree on.
+/// **The march moved it once and the bent normals moved it again**, and neither
+/// was the mirror. It was 6% against a measured 5.1% until `ssr.slang` was
+/// rebuilt on the Hi-Z pyramid on 2026-08-27, which resolves a crossing to a
+/// single texel instead of to a 1.5-pixel stride and so measures how far past
+/// the surface the ray got on a finer basis — a lower confidence for the same
+/// hit, and a larger remainder. That took it to 10% against a measured 7.3%.
+///
+/// `docs/plan/46-ambient-occlusion.md`'s bent-normal rung then widened the
+/// remainder itself. What the surface behind this hit reflects is lit by the
+/// probe grid, and that grid is now sampled along the occlusion channel's bent
+/// direction rather than along the shading normal — so the reflected surface is
+/// brighter, and zeroing the rows removes more of it. Measured 2026-09-02: the
+/// point reads 53.7 -> 47.1 on the discrete adapter and 54.1 -> 47.7 on
+/// llvmpipe, about 12% either way, against 49.7 -> 47.1 with
+/// `crcbl_render::ssao::r_ssao_bent_normals` off — and the *zeroed* reading is
+/// unmoved by the switch, which is what says the rung widened the remainder
+/// rather than changing the hit. So 15%, on the old constant's terms: margin
+/// over a measured difference the two adapters agree on.
 ///
 /// The teeth are unchanged. A fallback substituted for the hit is not a few per
 /// cent: with the probe rows zeroed the fallback reads at most 1.0, which the
 /// miss point in the same test pins at 20.3 -> 0.0, so that failure lands an
 /// order of magnitude below this threshold whichever of the two it is.
-const SSR_HIT_TOLERANCE: f32 = 0.10;
+const SSR_HIT_TOLERANCE: f32 = 0.15;
 
 /// How much brighter the foot of the mirror panel is than its face further up.
 ///

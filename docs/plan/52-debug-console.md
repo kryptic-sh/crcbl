@@ -264,21 +264,21 @@ the field and draw as the not-def glyph.
 
 ### 7. The commands that ship
 
-| Command                 | Does                                                                                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `help [name or prefix]` | every variable and command with its help, value, default and flags; with an argument, the matches only. The user's ask, verbatim           |
-| `find <substring>`      | names and help lines containing the text — Source's `find`, and the way a variable is discovered without knowing its prefix                |
-| `<var>`                 | prints `name = value (default: d) — help`                                                                                                  |
-| `<var> <value>`         | sets, coerced through `Kind`; `<var> = <value>` is accepted because the user wrote it that way; a value outside the domain is refused      |
-| `toggle <bool var>`     | flips it                                                                                                                                   |
-| `reset <var>` / `reset` | back to the default; bare, every non-`ARCHIVE` variable                                                                                    |
-| `save`                  | writes the settings file; `dump` prints `SettingsStack::dump()`                                                                            |
-| `log <filter>`          | the live `CRCBL_LOG` filter                                                                                                                |
-| `echo`, `clear`         | Source's                                                                                                                                   |
-| `debug_view <name>`     | `shaded`, `normals`, `ambient occlusion`, `motion`, `heatmap`, `lod tint` — an `Enum` variable `r_debug_view` under the hood, everywhere   |
-| `pause`, `quit`         | the pause toggle the loop already has; a clean `ExitReason`                                                                                |
-| `fps`                   | the frame-timing row's numbers as a line                                                                                                   |
-| `config <name>`         | runs `<name>.cfg` from the settings directory — Source's `exec`. A bare name, never a path; a failed line is reported and the file runs on |
+| Command                 | Does                                                                                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `help [name or prefix]` | every variable and command with its help, value, default and flags; with an argument, the matches only. The user's ask, verbatim                        |
+| `find <substring>`      | names and help lines containing the text — Source's `find`, and the way a variable is discovered without knowing its prefix                             |
+| `<var>`                 | prints `name = value (default: d) — help`                                                                                                               |
+| `<var> <value>`         | sets, coerced through `Kind`; `<var> = <value>` is accepted because the user wrote it that way; a value outside the domain is refused                   |
+| `toggle <bool var>`     | flips it                                                                                                                                                |
+| `reset <var>` / `reset` | back to the default; bare, every non-`ARCHIVE` variable                                                                                                 |
+| `save`                  | writes the settings file; `dump` prints `SettingsStack::dump()`                                                                                         |
+| `log <filter>`          | the live `CRCBL_LOG` filter                                                                                                                             |
+| `echo`, `clear`         | Source's                                                                                                                                                |
+| `debug_view <name>`     | `shaded`, `normals`, `ambient occlusion`, `bent normal`, `motion`, `heatmap`, `lod tint` — an `Enum` variable `r_debug_view` under the hood, everywhere |
+| `pause`, `quit`         | the pause toggle the loop already has; a clean `ExitReason`                                                                                             |
+| `fps`                   | the frame-timing row's numbers as a line                                                                                                                |
+| `config <name>`         | runs `<name>.cfg` from the settings directory — Source's `exec`. A bare name, never a path; a failed line is reported and the file runs on              |
 
 A command with a `Fault` prints the fault and leaves state alone. Unknown names
 print "unknown command or variable, try `find`". **An enum value may hold a
@@ -457,8 +457,8 @@ entry; the browser gate runs on every slice that touches a demo.
    running mixer, which needs a `HostedGame` seam the loop does not have.
 
 6. **Every debug view everywhere — landed 2026-08-31.** `crcbl::debug_view` is
-   the module: the `r_debug_view` enum variable over `DebugView::label`'s six
-   names, the `debug_view` command decision 7's table spells (`debug_view` alone
+   the module: the `r_debug_view` enum variable over every `DebugView::label`
+   name, the `debug_view` command decision 7's table spells (`debug_view` alone
    prints, `debug_view ambient occlusion` sets — the value keeps its space),
    `current`/`set`/`toggle` for a sample's own row, and `for_test`, a guard that
    serialises the checks which move a process-global and hands it back `Shaded`.
