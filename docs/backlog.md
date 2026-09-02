@@ -4556,9 +4556,11 @@ express it. Doc corrected; the gap is real and stays.
 
 **Not built:** the element tree (block/span builder), the CSS-subset parser,
 cascade and specificity, `default.css`, the flex layout engine, stylesheet hot
-reload, the UI inspector, the entity inspector, the console, the debug-draw
-controls panel, focus/`:focus`/`:engaged`, spatial navigation and the reserved
-`ui_move`/`ui_accept`/`ui_back` action set.
+reload, the UI inspector, the entity inspector, the debug-draw controls panel,
+focus/`:focus`/`:engaged`, spatial navigation and the reserved
+`ui_move`/`ui_accept`/`ui_back` action set. **The console is built** — it landed
+2026-08-30/31 as `crcbl-console` with `crcbl_ui`'s panel, and this file's "What
+the debug console left as limits" entry is what still stands about it.
 
 **What is built:** `crates/crcbl-ui`'s `draw_list` (`DrawList`, `DrawCommand`,
 `Vertex2d`), `text` (`FontAtlas` — a built-in **monospace bitmap** ASCII font,
@@ -5859,8 +5861,11 @@ paths on the same scene.
 **programmatic** one is built and is what both `--no-shadows` / `--no-ao` /
 `--no-reflections` and the pause menu's `SHADOWS` / `AO` / `REFLECTIONS` rows
 drive; the **camera-stack** one has a consumer now, the in-scene monitor asking
-for `room::MONITOR_STACK`. `[engine.video]` still has no source in this tree, so
-milestone 4's "toggle matrix across all three layers" is two thirds done.
+for `room::MONITOR_STACK`. The `[engine.video]` layer has a source too — the
+settings file reaches the room through `ctx.video_effects()`, asserted by
+`the_players_video_clamp_reaches_both_views`, and `crcbl settings set` and the
+quality presets write the block. All three layers exist, so milestone 4's
+"toggle matrix across all three layers" is done.
 
 **Also:** no device in the tree clamps an effect, so the `UNAVAILABLE` arm of a
 menu row is covered by a unit test that constructs the device set rather than by
@@ -17640,17 +17645,19 @@ Per-crate review passes explicitly disproved these before publishing anything:
   without TIMESTAMP_QUERY" is unreachable (create_query_set errors first);
   `present`'s queue must be present-capable but the seam never says so;
   `AcquiredFrame` carries no swapchain identity.
-- **wgpu**: unclosed pass / draws-outside-pass silently no-op where the null
-  backend records validation errors; creation calls not routed through
-  `checked()` (descriptor errors surface one `take_error` drain late); null
-  `create_image_view` never validates format/subresource; `set_scissor` with
-  `rect.x == i32::MIN` overflows `x - rect.x`; abandoned encoders leak one pool
-  entry; `create_buffer` size within 3 bytes of u64::MAX panics on alignment;
-  `copy_layout` bytes_per_row wraps on adversarial extents; `write_buffer`
-  alignment differs between backends; offscreen surface formats differ
-  (Rgba16Float offered by wgpu, refused by null); `SwapchainSlot::suboptimal` is
-  dead state; two pending signals of the same timeline value pass the check;
-  null `semaphore_value` always returns 0.
+- **null**: `create_image_view` never validates format/subresource;
+  `semaphore_value` always returns 0.
+
+  The rest of this bullet was about **`crcbl-wgpu`, which was deleted on
+  2026-08-21** — unclosed passes no-opping, `checked()` routing, abandoned
+  encoders leaking a pool entry, the wgpu/null format disagreement,
+  `SwapchainSlot::suboptimal`. Those name nothing now. A few were written
+  without saying which backend they were about (`set_scissor` at `i32::MIN`,
+  `create_buffer` within 3 bytes of `u64::MAX`, `copy_layout`'s `bytes_per_row`
+  wrap, two pending signals of one timeline value); rather than guess, they are
+  recorded here as **claims that would have to be re-derived against `null`** by
+  anyone who wants them, not as findings that still stand.
+
 - **render**: cross-frame mixed-state transient handoff (single-mip production
   transients only); cross-frame queue-ownership release dropped (no second queue
   in use); `begin_frame`'s `atlas` argument is layout-only; pool transient view
@@ -17712,9 +17719,11 @@ GAPS — reported honestly:
   fragment was received). The horde finding (45) was independently verified
   against the code; **flappy's zero-finding verdict is the agent's claim, not
   independently confirmed** — nothing in flappy was verified by me.
-- **`crates/crcbl/src/engine.rs:3301-5105` (the test module)** and
+- **`crates/crcbl/src/engine.rs`'s test module** and
   `crates/crcbl-ecs/src/{world,schedule}.rs` internals were not read by any
-  review pass.
+  review pass. The line range this used to cite no longer points at that module
+  — `engine.rs` has more than doubled since — so the gap has to be re-derived
+  from the file rather than followed.
 - **`crates/crcbl-net/fuzz/corpus/`** binary seeds — exercised via
   `include_bytes!`, not read as code.
 - **wgpu internals** (the wgpu/wgpu-core dependency) were consulted for specific
@@ -17725,13 +17734,6 @@ GAPS — reported honestly:
 
 ## What MTL1 left open on the Metal backend
 
-- **It advertises Tier B, and a tier-aware caller will believe it.**
-  `DeviceCaps::tier` is derived, and `DRAW_INDIRECT_COUNT` /
-  `MULTI_DRAW_INDIRECT` stay off until the command slice picks Metal's indirect
-  path (indirect command buffers, per `docs/plan/09-backends-metal-dx12.md`'s
-  mapping table). Correct today and documented in the crate docs, but it is
-  visible behaviour: once anything selects on tier, macOS takes the Tier B
-  branch.
 - **The engine has never stated a minimum macOS version.** `adapter.rs` sends
   `supportsBCTextureCompression` among others, which dates the floor to macOS
   11; `objc2` does not gate on availability, so an older system raises an
@@ -17917,9 +17919,9 @@ never run in public CI.
 ### `BackendKind` would need a variant — and that is not a problem
 
 `crcbl_hal::BackendKind` is a closed enum —
-`Vulkan | Wgpu | Metal | Dx12 | Null` — so a console backend needs a new variant
-(naming a console is not an NDA breach) or a `Custom(&'static str)`, because a
-private crate cannot add one to a public enum it does not control.
+`Vulkan | WebGpu | Metal | Dx12 | Null` — so a console backend needs a new
+variant (naming a console is not an NDA breach) or a `Custom(&'static str)`,
+because a private crate cannot add one to a public enum it does not control.
 
 **Add it when a console backend actually exists.** This was first written up as
 something to settle before the seam freezes, on the grounds that a new variant
@@ -17944,10 +17946,6 @@ speculative machinery this codebase deletes rather than keeps.
   image could abort rather than receive an `Err`.** How far descriptor
   pre-validation should go on this backend is undecided, and it is a question
   the other backends do not have.
-- **`conv`'s `ALL` format list is hand-maintained.** The staleness guard asserts
-  the last sorted entry is `Bc7RgbaUnormSrgb`, which catches an appended format
-  and not an inserted one. Small, and the compiler catches the half that
-  matters.
 
 ## `render_area` does not exist in Metal, and clears diverge because of it
 
@@ -17979,13 +17977,12 @@ backends must then be re-verified.
   the wait actually orders two submissions needs an observation _between_ them,
   which is a race rather than an assertion, so it is not attempted. Stated as a
   gap.
-- **Query sets stay refused**, deliberately and with the argument in
-  `create_query_set`'s docs: this backend builds no `MTLCounterSampleBuffer` on
-  any device, the CI Mac advertises no `counterSets`, and reporting the feature
-  would oblige a `timestamp_period_ns` Metal has no fixed answer for.
-  Half-building it would give real timings on some Macs and zeroes on others.
-  The seam's own half is no longer an obstacle — `PassTimestampWrites` asks for
-  a sample only at a pass boundary, which is where Metal samples.
+- **Query sets are built, and read closed on the CI Mac.** `create_query_set`
+  builds an `MTLCounterSampleBuffer` for both timestamp and pipeline-statistics
+  kinds, and the adapter reports each feature off real `counterSets` /
+  `supportsCounterSampling` queries. What stays unmeasured is that runner: CI's
+  Mac advertises no `counterSets`, so both features read clear there and every
+  Metal timing this project has is absent rather than zero.
 - **`device.rs` has outgrown one file and should be split** — the pools, the
   resource create/destroy pairs, submission and readback are separable
   responsibilities. Wants to be a move-only change so a reviewer can see it is
@@ -18116,33 +18113,6 @@ moved rather than went away:
   in `crates/crcbl-mtl/Cargo.toml`. It adds no package to the graph — `block2`
   was already in `Cargo.lock` as an `objc2` sibling — but a direct dependency is
   a decision, so it is flagged here for ratification rather than kept silently.
-- **`DESCRIPTOR_INDEXING` was withdrawn, deliberately.** Bind groups exist as
-  flat argument tables now, so there is no runtime-sized array;
-  `create_bind_group_layout` refuses every `BindingFlags`, and a backend
-  refusing them must not report the feature. Nothing above the seam is blocked;
-  it returns with argument buffers, which need Slang to emit
-  argument-buffer-shaped MSL — if the flag is wanted back, the honest route is
-  scheduling that shader work, not flipping the bit.
-- **`DRAW_INDIRECT_COUNT` is unreachable in this backend's shape.** The count
-  lives in GPU memory, and Metal's only execution that reads one is
-  `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
-  `MTLIndirectCommandBuffer` whose commands must **already exist** — from the
-  CPU, which does not know GPU-side draw arguments, or from a compute kernel,
-  which would have to run before the render encoder was opened. The emulation
-  (issue `max_draw_count` draws) is silently wrong. Closing this needs either
-  deferred command recording or a seam that hands the backend its indirect work
-  before the pass opens.
-
-  **Superseded 2026-08-09, and independently corroborated.** "Metal stays Tier
-  B" no longer means anything — there are no tiers, per
-  `docs/plan/39-capabilities.md`. Metal reports the flag clear and the renderer
-  selects another `GeometryPath`; with mesh shaders as the primary path this
-  affects only the fallback. And the finding is not a `crcbl-mtl` limitation:
-  `wgpu-types` documents `MULTI_DRAW_INDIRECT_COUNT` as DX12 and Vulkan only,
-  and `wgpu-hal`'s Metal backend contains no multi-draw code at all. Two
-  implementations, one answer. The seam-reshape option stays on the table and is
-  logged under _User decisions_ at the top of this file.
-
 - **A partially filled bind group leaves its unfilled argument-table slots
   holding whatever the previous bind put there.** Not checked, because
   `update_bind_group` makes create-then-fill a legal pattern. Vulkan leaves the
@@ -18283,10 +18253,12 @@ The device-and-resources slice. Everything below is in `crates/crcbl-dx12`.
   descriptor rule in the slice is checked up front precisely because the
   `Create*View` calls return `void`; this one was left to the runtime.
 
-- **`max_sample_count` and `max_storage_buffer_range` are still at the seam's
-  floor.** Both need per-format `CheckFeatureSupport` queries, which the format
-  table DX2 added now makes possible — the reason `adapter.rs` gives for
-  deferring them no longer holds.
+- **`max_sample_count` is still at the seam's floor**, and the format table DX2
+  added is what would lift it: the D3D12 query answers per format. Note this
+  applies to that limit alone. `max_storage_buffer_range` is at the floor for an
+  unrelated reason `adapter.rs` states and which still holds — D3D12's cap is a
+  _texel_ count exponent, and the byte range it implies depends on a view's
+  element stride that no adapter query knows.
 
 - **`device.rs`'s implementation half is still over the size a module should
   reach.** The seam DX2 named — the descriptor validation, `check_image`,
