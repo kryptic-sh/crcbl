@@ -1634,9 +1634,19 @@ against the GGX lobe. What it did not do:
   assertions are about bits rather than a ratio under a tolerance. Each kind
   fails on its own: pinning `Light::is_fill`'s `Point` arm to `false` reddens
   the point test and leaves the spot's green, which is the failure mode a
-  kind-agnostic flag actually has. What is still true is the last clause — no
-  `apps/` sample sets `fill: true`, so outside the suites the flag ships
-  unexercised.
+  kind-agnostic flag actually has.
+
+  **What is left is that no `apps/` sample sets `fill: true`, and that is a
+  decision rather than a chore — the user's, 2026-09-02.** `apps/lantern` is the
+  obvious home: `44-lighting.md` says the flag exists for "how a no-bake stack
+  lights the far end of a room", and lantern is a room. But
+  `sample/13-lantern.md` does not ask for one, and adding a light changes the
+  sample's picture and re-blesses its goldens on every backend — a change to
+  what a reviewed frame looks like, not a coverage fix. Weigh that against what
+  it buys, which is modest now that both punctual kinds have frames of their
+  own: the flag would be exercised on a path a visitor sees rather than only in
+  the suites.
+
 - **Sphere, tube and disc are unbuilt.** The table serves them unchanged — the
   paper's own point — so what each needs is corners (a sphere and a tube are
   integrated as their silhouette quads) and a shape word in the row, not a
