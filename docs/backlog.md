@@ -10,21 +10,21 @@ file until they ship.
 
 ### The ambient occlusion tangential rung is built and is not the default
 
-**Both halves exist now.** The radial half shipped 2026-08-30 (`STEP_OFFSETS` in
-`ssao.slang`). The tangential half shipped 2026-08-31 as two console variables
-in `crates/crcbl-render/src/ssao.rs` — `r_ssao_slices` in `2..=4` and
-`r_ssao_blur_passes` in `1..=2` — both defaulting to what shipped. What is left
-here is one decision: **whether either default moves.**
+**Both halves exist and all three tiers are measured. What is left is one
+decision, and it is the user's: whether either default moves.**
 
-**Half-resolution AO landed on 2026-09-02 and moved both halves of this
-decision. Both native tiers have been re-measured; the browser has not.** The
-gather and the blurs now run at `crcbl_render::ssao::half_extent` with a
-reconstruction pass after them, so every figure further down this entry was
-taken against a pass that no longer has that shape. Read off
-`forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step` — the same
-scene the table below uses — on both drivers, **p50 over seven runs each**,
-which is what the older full-resolution table used and what this one now
-matches:
+The radial half shipped 2026-08-30 (`STEP_OFFSETS` in `ssao.slang`). The
+tangential half shipped 2026-08-31 as two console variables in
+`crates/crcbl-render/src/ssao.rs` — `r_ssao_slices` in `2..=4` and
+`r_ssao_blur_passes` in `1..=2` — both defaulting to what shipped.
+
+Every figure below was re-taken after half-resolution AO landed on 2026-09-02,
+which changed the shape of the pass; anything measured against the
+full-resolution chain has been dropped rather than carried forward, because it
+describes a pass that no longer exists.
+
+**Native, p50 over seven runs each**, read off
+`forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`:
 
 ```text
                     radv (RX 7900 XTX)                     lavapipe
@@ -36,215 +36,24 @@ slices blurs  edges worst   ssao  blur blur2  |  edges worst    ssao    blur  bl
 ```
 
 **The edge counts are the same integer in all seven runs of every row, on both
-drivers.** That is the finding the single-run table could not state and the
-reason this entry no longer needs more samples on the quality axis: the measure
-is a function of the scene and the shader, not of the run, so the 37-against-0
-that the rung buys is exact rather than a draw from a spread. Only the timings
-move between runs, and by very different amounts — the `ssao` pass holds inside
-**1.1%** of its p50 across seven runs on radv and inside **15.5%** on lavapipe,
-which is the software rasteriser's scheduling and is why a single lavapipe run
-was the weakest number in the old table.
+drivers**, so the 37-against-0 the rung buys is exact rather than a draw from a
+spread. Only the timings move, and by very different amounts — the `ssao` pass
+holds inside **1.1%** of its p50 on radv and **15.5%** on lavapipe, which is the
+software rasteriser's scheduling.
 
-Gather plus both blurs, p50: **300 us** for the shipping pair and **595 us** for
-the rung on radv; **5.36 ms** and **9.01 ms** on lavapipe.
+Gather plus both blurs, p50: **300 us** shipping and **595 us** for the rung on
+radv; **5.36 ms** and **9.01 ms** on lavapipe. Before the halving the shipping
+pair was 645 us and 17.0 ms, so **the rung now costs less than the pair it would
+replace used to** on both native tiers.
 
-Against this entry's older full-resolution table the whole pass got much cheaper
-on both tiers: the shipping pair went 645 us to 300 us on radv and 17.0 ms to
-5.36 ms on lavapipe.
+**Halving made the shipping configuration markedly less smooth on this axis: 1
+sharp edge became 37 on radv and 38 on lavapipe.** The blur's footprint spans
+twice as much of the frame, so each tile phase pairs with a wider spread of
+distances from the edge. That is the quality cost to weigh the rung's price
+against, and the two drivers agree to within one edge on every row.
 
-**Two findings, and they point the same way.**
-
-- **Halving made the shipping configuration markedly less smooth on this axis: 1
-  sharp edge became 37 on radv and 38 on lavapipe.** The blur's footprint now
-  spans twice as much of the frame, so each tile phase pairs with a wider spread
-  of distances from the edge. This is a quality cost of the half-resolution
-  rung, not a test-tuning artefact, and it is the thing to weigh against that
-  rung's speed. The two drivers agree to within one edge on every row, which is
-  what makes these counts the pass's behaviour rather than one device's.
-- **The rung now costs less than the pair it would replace used to.** Four
-  slices and two blurs come to about 600 us on radv and 9.1 ms on lavapipe,
-  against the 645 us and 17.0 ms this entry's older table measured for the
-  un-runged full-resolution pair — while taking the sharp-edge count to 0 and 2.
-  Half-resolution paid for the rung outright on both native tiers.
-
-So the answer to "whether either default moves" is **yes, both**, on both native
-tiers: it would undo the smoothness the halving cost and still run cheaper than
-the frame did before the halving. **Both native tiers are now measured to the
-standard this entry asked for**, so what is left in front of the decision is one
-thing rather than two: the browser tier — **and that was measured on 2026-09-02
-as well, so nothing is left in front of the decision.** It did not veto the
-rung; it came closer to endorsing it. See the browser table below, and note that
-this entry's long-standing assumption that the browser is "the tier most able to
-veto it" turned out to be false: AO is a smaller share of a browser frame than
-of either native one.
-
-**Blocker 1 is closed, and the answer was better than the question.** The old
-entry asked whether a rounding in the last place was acceptable for a 45 degree
-rotation. It never has to happen: the turn is done on `SLICE_DIRECTIONS`' own
-integers rather than on a unit vector. `(x, y) -> (x - y, x + y)` is the 45
-degree rotation scaled by `sqrt(2)`, and `normalize` divides the scale back out,
-so `sqrt(2)/2` is never spelled. The table's pairs are `(2,0)`, `(1,1)`,
-`(0,±2)`, `(1,±1)`, `(1,±2)`, `(2,±1)` and their negations; the turn sends them
-to components of magnitude at most 3 — `(2,1) -> (1,3)`, `(1,2) -> (-1,3)` —
-every one exactly representable, so the float adds are exact. The only rounding
-left is the `normalize` the first slice has always made; bounded generously at
-eight units in the last place it turns a direction by under `7e-7` radians, two
-orders of magnitude under `crcbl_shaders::ssao::MAX_ACOS_ERROR`, about a
-ten-thousandth of one `R8Unorm` level, and under a hundredth of a texel at any
-reach a 4K frame can hold. `ssao.slang`'s `SLICE_COUNT_MAX` carries the
-arithmetic.
-
-One thing genuinely moved: the second slice used to be an exact quarter turn of
-the normalised first and is now the `normalize` of a quarter-turned integer
-vector. Bit-identical wherever `normalize` is a reciprocal square root and a
-multiply, possibly a last place apart otherwise. Measured identical on both
-local drivers, and no golden moved.
-
-**Blocker 2 is closed on two tiers and open on the third.** Measured 2026-08-31,
-p50 over seven runs, 1920x1080, every pass timed separately:
-
-```text
-                                  radv (RX 7900 XTX)     lavapipe
-ssao, 2 slices                             582 us         11.9 ms
-ssao, 4 slices                            1245 us         21.4 ms
-one ssao-blur                               63 us          5.1 ms
---------------------------------------------------------------------
-the pair that ships                        645 us         17.0 ms
-   + the second blur only          710 us  (+10%)   21.9 ms  (+29%)
-   + the extra slices only        1308 us (+103%)   26.5 ms  (+56%)
-   the rung, both               1369 us (+112%)   31.4 ms  (+85%)
-```
-
-The 2026-08-30 note's "+69% on the `ssao` pass on radv" was low: it is **+114%**
-on that pass. The two purchases price very differently by tier, which is why
-they are two variables: the second blur is a tenth of the pair on radv and
-nearly a third of it on lavapipe — the bandwidth-bound behaviour the old entry
-predicted, and the reason a low tier should not be handed one switch that sets
-both.
-
-**The browser row is no longer blank for what ships, and the earlier claim that
-it needed new code was wrong.** This entry used to say a browser number wanted
-either a `__crcbl_web_*` export or a `said(...)` assertion in the harness, and
-that no browser had been run. Both are false: `Loop::finish` logs
-`crcbl_render::PassStats::report` on every tier, `web/tools/browser-e2e.mjs`
-captures it, and the browser gate uploads it as `web-e2e-<demo>` on **every**
-Pages run. The numbers were already there. Read off four runs — 33353650899,
-33360958824, 33368904505, 33371443850 — as p50 ms under SwiftShader at the
-gate's own window size:
-
-| demo    | `ssao` p50, four runs                 | one `ssao-blur` p50, four runs        |
-| ------- | ------------------------------------- | ------------------------------------- |
-| puppet  | 137.557 / 136.668 / 138.822 / 139.557 | 82.304 / 81.926 / 83.065 / 83.181     |
-| breach  | 165.533 / 166.913 / 146.490 / 166.904 | 104.102 / 104.976 / 106.950 / 104.558 |
-| quarry  | 134.992 / 117.800 / 133.753 / 137.897 | 76.793 / 90.667 / 79.855 / 79.657     |
-| lantern | 90.895 / 123.062 / 140.170 / 161.271  | 69.528 / 99.923 / 114.112 / 100.596   |
-| shard   | 124.045 / — / 101.100 / —             | 102.244 / — / 78.570 / —              |
-
-So the shipping pair costs roughly **220 ms a frame** in a browser on a runner
-with no GPU. puppet is the row to quote — it holds inside 2.1% across all four
-runs — and the dashes are the two runs shard was killed in. Against radv's 645
-us and lavapipe's 17.0 ms above, that is the third tier this entry was missing.
-
-**A browser on real hardware, measured 2026-08-31.** quarry through Chrome on an
-RX 7900 XTX, `--adapter hardware`, canvas 959x463: `ssao` **0.054 ms** p50 and
-one `ssao-blur` **0.017 ms**, 8.0% and 2.6% of a 0.678 ms frame. Not comparable
-in absolute terms to the 1920x1080 native figures above — 4.7x fewer pixels and
-a different scene — but it is the tier a visitor to the Pages URL actually gets,
-and it says the shipping pair is under a tenth of a millisecond there.
-
-**The rung itself is still unmeasured on any browser, and two things block it —
-both found by trying, 2026-08-31.**
-
-- **The gate cannot type a digit.** `physical()` inside the console block of
-  `web/tools/browser-e2e.mjs` maps a space, an underscore and `a`–`z`, and
-  throws on anything else: `no US-layout key for "4"`. So `r_ssao_slices 4` is
-  untypeable by the only route that reaches the console. Three lines would add
-  `Digit0`–`Digit9`; nothing else in the tree wants them yet, which is why they
-  were not added speculatively.
-- **A line typed in the console group is too late to be timed at all**, and this
-  is the real obstacle. With the digits patched in locally the console did take
-  both lines — the page logged `r_ssao_slices = 4` and `r_ssao_blur_passes = 2`
-  — and the reported figures did not move by so much as a microsecond: 0.054 and
-  0.017 ms, identical to the baseline run. The proof of why is the label count.
-  A second blur is a _pass_, so a frame that had one reports `ssao-blur-2`; the
-  report says **19 label(s)** in both runs. No timed frame ever carried the
-  change. The run drew 157 frames while the report covers "the last 75 of 75",
-  so GPU timing had already stopped before the console group ran.
-
-So typing it later in the run can never work, whatever the key map does. The
-setting has to be applied before the frames are timed.
-
-**The engine half of that landed on 2026-09-02 and this blocker is now half a
-blocker.** `console_config::AUTOEXEC` is Source's `autoexec.cfg`, run by
-`Console::run_autoexec` from `Loop::new` after the console is gathered and
-before the first frame, out of the same settings directory `config` reads — the
-page's OPFS store in a browser. So a console variable can now be set ahead of
-everything that reads one, with no key map, no digits and no typing.
-
-**The harness half landed the same day: the browser gate seeds an `autoexec.cfg`
-into quarry's OPFS and proves the demo ran it.** The seed is written from the
-demo's own page — same origin, and a fresh browser profile per `launch()` means
-preflight's browser shares no store with the run's — as a record frame built
-with `DataView` and `crypto.subtle.digest`, matching `opfs.rs`'s `frame()` field
-for field. The on-disk name is **`autoexec.cfg~0`**: on wasm the OPFS root _is_
-the settings directory, every key is kept as two generation files, and
-`split_physical` drops any delivered name without the suffix — so a file written
-as plain `autoexec.cfg` restores as nothing at all. Slot 0 because a key the
-engine has not seen is written to slot 1, leaving slot 0 the copy nothing else
-touches.
-
-**The check asserts the effect against a control**, which is what the silent
-rejection demands: restore drops a frame that does not verify without a word, so
-a gate asserting only "no error" would pass with a bad frame, a wrong filename
-or a late write alike. The seeded boot has to read `view: ambient occlusion` in
-its first heartbeat, carry the file's own `autoexec.cfg: 2 lines` summary, and
-log `r_ssao_slices = 4` — a variable from another crate's table; the control
-run, the same page with that one file removed by name, has to come up `shaded`
-and differ. Both halves were shown red: corrupting one header byte after the
-digest takes three of the four checks down, and defeating the control takes down
-exactly the control.
-
-So the seeding works. **The measurement does not follow from it, and trying it
-found out why — 2026-09-02.**
-
-A `PassStats` report reaches the page log only when `Loop::finish` runs, and the
-gate loads the demo page many times while holding **one** log. The report that
-lands is the last boot's, and the last boot in the autoexec block is the
-_control_ — the one that removed the seeded file. Seeding the rung and reading
-the log therefore measures the unseeded configuration, which is exactly what
-happened: with `r_ssao_slices 4` and `r_ssao_blur_passes 2` both confirmed set
-at 0.0833 s, the report still came back with **20 labels and no `ssao-blur-2`**,
-so those frames had one blur. A second blur is a pass, and its label is the
-thing that makes this checkable rather than a matter of trust.
-
-**What that run did buy is a solid browser baseline for quarry**, twice, under
-SwiftShader at the gate's window size — the two runs agree to 1.3%:
-
-```text
-                p50        p95      share of frame
-frame       206.0 / 208.6 ms                 100%
-forward     137.3 / 142.1 ms   165.8 ms      ~67%
-ssao          4.07 / 4.18 ms     6.5 ms      ~2.0%
-ssao-blur     3.01 / 3.09 ms     5.2 ms      ~1.5%
-ssao-upsample 5.96 / 6.16 ms     7.7 ms      ~2.9%
-```
-
-**This is worth reading before the defaults decision, because it points the
-other way from what this entry has assumed.** The browser has been called the
-tier "most able to veto" the rung. On this evidence the whole AO chain is about
-**6.5% of a browser frame** and `forward` is two thirds of it, so doubling the
-gather buys a few percent of a frame that is dominated elsewhere. It is not the
-veto it was expected to be. Two caveats keep this from being the answer: these
-are the shipping two slices, not the rung, and SwiftShader is a software
-rasteriser whose cost mix is its own — the hardware-browser figures already in
-this entry (`ssao` 0.054 ms of a 0.678 ms frame) are a different shape again.
-
-**And with that understood, the rung is now measured on the browser too.**
-Leaving the seeded file in place makes every later boot a seeded one, so the
-report that lands is a seeded boot's — confirmed by the label count, since
-`ssao-blur-2` is a pass and appears only when the second blur is really running.
-Two runs of each configuration, quarry under SwiftShader at the gate's window,
-p50 per pass in ms:
+**Browser, quarry under SwiftShader at the gate's window size**, two runs of
+each configuration, p50 per pass in ms:
 
 ```text
                   baseline (2 slices, 1 blur)    rung (4 slices, 2 blurs)
@@ -258,50 +67,31 @@ forward                137.3  / 142.1               144.5  / 139.3
 the frame              206.0  / 208.6               215.8  / 211.3
 ```
 
-**The AO chain lands on 19.04 and 19.05 ms in the two rung runs**, which is what
-makes this readable at all: the pass timings are far steadier than the frame
+Read the passes, not the frame: the pass timings are far steadier than the
 totals, where `forward` alone moves 137.3 to 144.5 across runs and swamps the
-difference under test. Read the passes, not the frame.
+difference under test. The label count is what makes the rung runs checkable — a
+second blur is a _pass_, so `ssao-blur-2` appears only when one really ran.
 
-**The browser does not veto the rung, and this entry has had that backwards.**
-Gather plus blurs goes from 7.17 to 12.99 ms, **+81%** — which sits between
-radv's +98% and lavapipe's +68%, so the rung's relative cost is much the same on
-all three tiers. What differs is what it is a share _of_: the whole AO chain is
-**6.4% of a browser frame before and 8.9% after**, because a software rasteriser
-spends two thirds of its frame in `forward`. The tier this entry called "the one
-most able to veto it" is the tier where AO matters least.
+**The browser does not veto the rung, and this entry had that backwards for
+weeks.** Gather plus blurs goes 7.17 to 12.99 ms, **+81%**, between radv's +98%
+and lavapipe's +68% — so the rung's relative cost is much the same on all three
+tiers. What differs is what it is a share _of_: the whole AO chain is **6.4% of
+a browser frame before and 8.9% after**, because a software rasteriser spends
+two thirds of its frame in `forward`. The tier called "most able to veto it" is
+the tier where AO matters least.
 
-So **all three tiers are measured and nothing is blocking the decision.** It is
-the user's call, and the evidence now says the same thing on every tier: the
-rung takes the tangential sharp-edge count to 0 on radv and 2 on lavapipe, it
-costs about +80% of a pass that is a single-digit percentage of a browser frame,
-and on native it still runs cheaper than the frame did before AO was halved.
+**A browser on real hardware, 2026-08-31**: quarry through Chrome on an RX 7900
+XTX, `--adapter hardware`, canvas 959x463 — `ssao` **0.054 ms** p50 and one
+`ssao-blur` **0.017 ms**, 8.0% and 2.6% of a 0.678 ms frame. Not comparable in
+absolute terms to the 1920x1080 native figures, but it is the tier a visitor to
+the Pages URL actually gets.
 
-**The other route is still wanted, and is now the only one for anything that is
-not a console variable.** Giving the AO knobs `[engine.video]` keys —
-`RENDER_SCALE_KEY` and `FRAME_LIMIT_KEY` are the pattern for a scalar key whose
-reader drives a renderer — is what would let `high` differ from `medium` by
-something measured. An autoexec reaches a `convar!`; it cannot reach a
-`RenderEffects` bit that has no catalogue key, which is why the contact-shadow
-entry below is still blocked.
-
-**It is not the chore this once said, and its cost is not the one recorded
-here** — both corrected 2026-09-02. A scalar catalogue key shifts nothing in
-`browser-e2e.mjs`, because `apps/options` builds its rows from `VIDEO_KEYS` plus
-hand-written scalar rows rather than from the catalogue; only a new `VIDEO_KEYS`
-entry moves `toFader`. The real cost is a design one, since a catalogue key
-generates a console variable named after itself and would sit beside the
-existing `r_ssao_slices`. The entry "The tier table is silent about six knobs a
-preset could write" carries the three routes and what each trades.
-
-**What the rung buys, re-measured.** The scene is
-`forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`: a
-half-plane occluder whose edge runs along `(3, 2)` — deliberately not the
-frame's diagonal, which is the orientation an eighth-turned slice runs parallel
-to — and a 480-sample line parallel to that edge, so every sample sits at the
-same perpendicular distance and the true answer is smooth. The measure is how
-many neighbouring pairs differ by two levels or more. Identical in all seven
-runs on each tier:
+**What the rung buys.** The scene is a half-plane occluder whose edge runs along
+`(3, 2)` — deliberately not the frame's diagonal, which is the orientation an
+eighth-turned slice runs parallel to — and a 480-sample line parallel to that
+edge, so every sample sits at the same perpendicular distance and the true
+answer is smooth. The measure is how many neighbouring pairs differ by two
+levels or more. Identical in all seven runs on each tier:
 
 ```text
 slices  blurs     radv   lavapipe
@@ -313,19 +103,15 @@ anti-baseline: one plane orientation across the whole tile
      2      1      148        172
 ```
 
-Two findings worth keeping:
-
 - **The second blur on its own makes it worse** — 1 to 2 on radv, 1 to 5 on
   lavapipe. Widening the footprint over a field that still carries the same tile
   spreads the step rather than removing it. It is only worth having with the
   extra slices.
 - **The extra slices add four plane orientations, not sixteen.** Reduced modulo
   a half turn, the sixteen entries of `SLICE_DIRECTIONS` point along eight
-  orientations, and the quarter turn permutes that set onto itself — so two and
-  four slices per pixel used to give the blur's neighbourhood the same eight.
-  The eighth turn is the only turn that leaves the set; it takes the
-  neighbourhood to twelve. The old entry's "a blur neighbourhood spans
-  thirty-two planes" counted slice _instances_, not orientations.
+  orientations, and the quarter turn permutes that set onto itself. The eighth
+  turn is the only turn that leaves the set; it takes the neighbourhood to
+  twelve.
 
 **What the user still has to decide.** Only the two defaults, and they are
 separable:
@@ -340,13 +126,20 @@ separable:
 Whether that becomes a quality preset is `docs/plan/43-render-standards.md`'s
 own unbuilt row, not this entry's.
 
+**Giving the AO knobs `[engine.video]` keys is a separate, still-wanted route**,
+and the only one for anything that is not a console variable — an autoexec
+reaches a `convar!`, but not a `RenderEffects` bit with no catalogue key, which
+is why the contact-shadow entry below is still blocked. It is a design decision
+rather than a chore, because a catalogue key generates a console variable named
+after itself and would sit beside the existing `r_ssao_slices`. The entry "The
+tier table is silent about six knobs a preset could write" carries the three
+routes and what each trades.
+
 **Coverage gaps.**
 
-- The browser tier is measured for the shipping pair and unmeasured for the
-  rung, above — nothing sets either variable during a browser run.
-- D3D12 and Metal are unmeasured for the reason every row of theirs is — no
-  Windows or Apple hardware here. CI's software adapters will run the new
-  assertions but will time nothing.
+- D3D12 and Metal are unmeasured, for the reason every row of theirs is — no
+  Windows or Apple hardware here. CI's software adapters run the assertions but
+  time nothing.
 - `MAX_SHARP_EDGES` is swept on radv and lavapipe only. The rung assertion
   `rung.sharp < blurred_twice.sharp` measured `0 < 2` on radv and `0 < 5` on
   lavapipe; the radv margin is one step, so WARP and SwiftShader see that
