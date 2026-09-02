@@ -214,9 +214,12 @@ than removing the tint.
 ## What the half-resolution occlusion harness does not cover (2026-09-02)
 
 `crates/crcbl/tests/forward_e2e/occlusion.rs` moved to the half extent when the
-gather did, and grew `the_reconstruction_does_not_halo_a_silhouette`. Every
-threshold in it was swept on radv and lavapipe and each of its tests was shown
-to go red under a sabotage of the thing it guards. What it still does not reach:
+gather did, and grew three tests for the reconstruction: the horizontal halo
+check, the vertical one that holds the other axis, and
+`the_reconstruction_answers_a_sliver_with_its_nearest_sample`, which is what
+covers `NEAREST_TAP_FLOOR`. Every threshold in it was swept on radv and lavapipe
+and each of its tests was shown to go red under a sabotage of the thing it
+guards. What it still does not reach:
 
 - **One backend.** All of it ran on `vk`, on radv and lavapipe. Metal, D3D12 and
   wgpu are unmeasured for all of these thresholds. The mechanisms are integer
@@ -234,9 +237,10 @@ shader with three readers** — the AO pass, `47-reflections.md`'s march, and
 `51-volumetrics.md`'s composite, which already samples a froxel grid far below
 the frame's resolution and would trade its trilinear lookup for a depth-aware
 one. Only the AO reader was built, and that plan section has been deleted now
-that it ships. `docs/plan/51-volumetrics.md` still cites the shared upsample, so
-this entry is what that citation is owed. `47-reflections.md` does not cite it
-at all — checked whole-file for "upsample", "bilateral" and "depth-aware".
+that it ships. `docs/plan/51-volumetrics.md`'s row 3 no longer cites a shared
+pass — it says the generalisation is that row's own rung. `47-reflections.md`
+does not cite it at all — checked whole-file for "upsample", "bilateral" and
+"depth-aware".
 
 What actually exists is `crates/crcbl-shaders/shaders/ssao_upsample.slang`, and
 it is **AO-specific, not a shared pass**: it reads a single-channel `R8Unorm`
