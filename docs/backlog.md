@@ -14162,15 +14162,18 @@ four most recent green runs): the run's wall time is the slowest demo's, because
 22, 47 and 49 minutes. `breach`, `lantern` and `puppet` are the next three, all
 in the 16-to-35-minute band, and `deploy` itself takes 14 seconds.
 
-**Those four numbers are two clusters, not a mean with a tail** — 22, 22, 47,
-49, with nothing between. Whatever the second cluster is, it doubles the site's
-latency and it is not rare: it is half of the last four runs, and the last two
-in a row. So a bound would be cutting into a job that routinely needs twenty
-minutes, and picking a bound means picking it above 49 or deciding the long
-cluster is itself the bug. **Nobody has looked at what `shard` does differently
-in the slow runs** — that is the unasked question under option 3, and it is
-cheap to answer next time one is caught, by diffing the render step's own log
-against a fast run.
+**Those numbers are two clusters, not a mean with a tail** — 22, 22, 44, 47, 49
+over the five most recent green runs, with nothing between 22 and 44. The long
+cluster is now **three of five and the last three in a row**, which is the
+opposite of a tail: on this evidence the slow shape is becoming the normal one,
+and it doubles the site's latency every time. So a bound would be cutting into a
+job that routinely needs twenty minutes, and picking one means picking it above
+49 or deciding the long cluster is itself the bug. **Nobody has looked at what
+`shard` does differently in the slow runs** — that is the unasked question under
+option 3, and it is cheap to answer next time one is caught, by diffing the
+render step's own log against a fast run. Note that a _diagnosis_ does not need
+the decision below: it would say whether the long cluster is a defect or the
+demo's honest cost, which is what makes options 1 and 3 different questions.
 
 **The decision this wants, and it is the user's.** Should `deploy` wait on every
 demo? Today one slow or flaky demo holds the whole site back, and the record
