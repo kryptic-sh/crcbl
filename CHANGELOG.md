@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A browser log line cut at the 1024-byte cap now says how much it lost.**
+  `crcbl::web`'s sink truncated silently, so a long diagnostic ended at a
+  plausible row and read as complete — `crcbl::engine`'s per-pass timing table
+  is the message that hits the cap, and a gate log showed fifteen of its
+  twenty-three passes with nothing to say the rest existed. A cut line now ends
+  in `[…N bytes cut]`, matching what the same queue already did for a page that
+  stops draining. The cap is unchanged.
+
 - **A run has one settings stack, so a key set on a settings screen is what the
   console prints.** `Loop::new` opened a `SettingsSource::for_run(...)` stack of
   its own for the `ConsoleHost` while `apps/options` owned a second one over the

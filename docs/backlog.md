@@ -256,6 +256,37 @@ conditionally later.** It is priced on half-resolution AO being "already owed
 and unmeasured" (that document, the row itself), and half-resolution AO landed
 and was swept on 2026-09-02. That row wants re-checking today.
 
+## The browser log cuts a line at 1024 bytes, and the pass table is longer (2026-09-02)
+
+`crcbl::web`'s `MAX_LOG_LINE` is 1024 bytes and the sink truncates there. Since
+2026-09-02 it says so — a cut line ends in a marker naming the bytes it lost,
+matching what the same queue already did for a page that stops draining — but
+the cap itself has not moved, so **the message that hits it most is the one
+worth reading**: `crcbl::engine`'s per-pass timing table.
+
+Measured on `ba91af3`'s Pages artifact, `web-e2e-lantern`: the table announces
+`23 label(s)` and the log carries fifteen, ending mid-number inside `hiz-2`. The
+eight it loses are the tail of the frame — `ssr`, `ssr-blur`, the remaining
+`hiz` levels, tonemap, ui, upscale. So **the browser tier's SSR price cannot be
+read out of a gate log at all**, which is what `47-reflections.md`'s "no
+half-resolution SSR" row wants before it can have a reason of its own, and what
+`44-lighting.md`'s area-light row means by the browser figure still being an ALU
+count.
+
+The cap is not arbitrary: 512 queued lines at 1024 bytes bounds the shim's share
+of wasm memory at half a megabyte, and a page that never drains must not grow it
+without bound. Two routes, neither taken:
+
+- **Raise the cap.** One line, and it buys headroom rather than a rule — the
+  label count only grows, so whatever number replaces 1024 is the next date this
+  entry gets rewritten.
+- **Emit the table as one line per pass.** No cap interaction at all and it is
+  what the native harnesses effectively do. The price is that
+  `web/tools/browser-e2e.mjs` parses the single `gpu passes` line for its label
+  count, so the gate moves with the format.
+
+Not decided, and not urgent until something actually needs the browser figure.
+
 ## SSAO reads no depth pyramid and the banding is bought (2026-09-01)
 
 The user asked whether the AO pass is implemented the industry-standard way and

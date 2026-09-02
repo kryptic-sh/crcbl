@@ -128,6 +128,23 @@ const MAX_LOG_LINES: usize = 512;
 /// The longest log line handed to the shim, in bytes.
 const MAX_LOG_LINE: usize = 1024;
 
+/// What a cut line ends with, so a truncated message cannot read as a whole
+/// one.
+///
+/// The queue's other loss — a page that stops draining — already reports its
+/// count rather than swallowing it, and a line cut in the middle is the same
+/// kind of loss with the same reason to be loud: the messages that reach the
+/// cap are the long diagnostic tables, which end at a plausible-looking row and
+/// give a reader no way to tell the rest was ever there.
+const TRUNCATION_MARKER: &str = " […{} bytes cut]";
+
+/// The room [`TRUNCATION_MARKER`] needs once its count is filled in, so a cut
+/// line plus its marker still fits inside [`MAX_LOG_LINE`].
+///
+/// Sized for the widest count a `usize` can produce, which is what makes the
+/// bound hold for every input rather than for the ones tried.
+const TRUNCATION_MARKER_MAX: usize = TRUNCATION_MARKER.len() + usize::MAX.ilog10() as usize + 1;
+
 /// The queue [`log_take`] drains.
 #[derive(Default)]
 struct LogQueue {
@@ -248,15 +265,20 @@ impl log::Log for WebLogger {
                 args = record.args(),
             );
             // Byte truncation would split a UTF-8 sequence; `char_indices` finds
-            // the last boundary at or before the limit.
+            // the last boundary at or before the limit. The limit is short of
+            // the cap by the room the marker needs, so the cut line and its
+            // marker together still fit.
             if line.len() > MAX_LOG_LINE {
+                let budget = MAX_LOG_LINE - TRUNCATION_MARKER_MAX;
                 let end = line
                     .char_indices()
                     .map(|(i, _)| i)
-                    .take_while(|i| *i <= MAX_LOG_LINE)
+                    .take_while(|i| *i <= budget)
                     .last()
                     .unwrap_or(0);
+                let dropped = line.len() - end;
                 line.truncate(end);
+                line.push_str(&TRUNCATION_MARKER.replace("{}", &dropped.to_string()));
             }
             queue.lines.push_back(line);
         });
@@ -1234,8 +1256,62 @@ mod tests {
         let line = taken.first().expect("the line was queued");
         assert!(line.len() <= MAX_LOG_LINE, "not truncated: {}", line.len());
         assert!(
-            line.chars().last().is_some_and(|c| c == 'é'),
+            line.ends_with("bytes cut]"),
+            "a cut line must say so: {line}",
+        );
+        let body = line
+            .split(" […")
+            .next()
+            .expect("split always yields a first part");
+        assert!(
+            body.chars().last().is_some_and(|c| c == 'é'),
             "the cut landed inside a character",
+        );
+    }
+
+    /// **A cut line names how many bytes went missing.**
+    ///
+    /// The queue's other loss — a page that stops draining — reports its count,
+    /// and this one used to swallow its own: the line simply ended, at a
+    /// plausible row of whatever table it was carrying. That is the failure
+    /// this project keeps meeting, a partial result reading as a whole one, and
+    /// it hid the tail of `crcbl::engine`'s per-pass timing table from every
+    /// browser gate log.
+    ///
+    /// The count is asserted exactly, not merely for being present, because a
+    /// marker carrying the wrong number is the same defect wearing a fix.
+    #[test]
+    fn a_cut_line_reports_how_much_it_lost() {
+        let _order = filter_at("info");
+        drain();
+
+        let target = "tt";
+
+        // The prefix the sink renders — a timestamp, a level and the target —
+        // measured rather than reconstructed, because a test that spells the
+        // format string a second time asserts against its own copy of it.
+        write_line(target, "x");
+        let prefix = drain().first().expect("the control line was queued").len() - "x".len();
+
+        let message = "a".repeat(MAX_LOG_LINE);
+        write_line(target, &message);
+
+        let taken = drain();
+        let line = taken.first().expect("the line was queued");
+        assert!(line.len() <= MAX_LOG_LINE, "over the cap: {}", line.len());
+
+        // Every character is one byte here, so the arithmetic is exact: the
+        // whole line would have been the prefix plus the message, and what
+        // survived is everything up to the marker.
+        let kept = line
+            .split(" […")
+            .next()
+            .expect("split always yields a first part")
+            .len();
+        let dropped = prefix + message.len() - kept;
+        assert!(
+            line.ends_with(&format!(" […{dropped} bytes cut]")),
+            "the marker must name the bytes it lost, and name them right: {line}",
         );
     }
 
