@@ -365,6 +365,131 @@ const POINT_SHADOW_BAND: (u32, u32) = (6, 6);
 /// has the same value in both.
 const POINT_SHADOW_RATIO: f32 = 1.5;
 
+/// The anti-vacuity floor for [`Scene::AreaLight`].
+///
+/// [`MIN_COLORS_AO`]'s number rather than the shadow scenes', and for its
+/// reason: this frame is one flat floor under two smooth falloffs, so most of
+/// its colours are the highlights' own ramps and a count high enough to be
+/// interesting would be one that fails when a lobe gets broader. What it
+/// separates is "the rectangles lit nothing" — a frame of clear colour, or one
+/// flat floor under the ambient — from a working one, and the *shape* of the
+/// two highlights is [`the_fill_strip_lights_the_floor_without_gleaming_on_it`]'s
+/// claim.
+///
+/// [`the_fill_strip_lights_the_floor_without_gleaming_on_it`]: fn@the_fill_strip_lights_the_floor_without_gleaming_on_it
+const MIN_COLORS_AREA_LIGHT: usize = 16;
+
+/// How many pixels of the frame one world unit of [`Scene::AreaLight`]'s floor
+/// is.
+///
+/// [`POINT_PIXELS_PER_UNIT`]'s arithmetic with that scene's camera height
+/// swapped for `screenshot`'s `AREA_CAMERA_UP`.
+const AREA_PIXELS_PER_UNIT: f32 = (EXTENT.1 as f32 / 2.0) / (2.0 * 0.577_350_3);
+
+/// Where a point on [`Scene::AreaLight`]'s floor lands in the frame.
+///
+/// [`point_pixel`]'s flip for [`point_pixel`]'s reason: the camera looks down
+/// `-Y` with `+Z` up, so world `+X` is the frame's left and world `+Z` is its
+/// top.
+fn area_pixel(x: f32, z: f32) -> (u32, u32) {
+    let column = EXTENT.0 as f32 / 2.0 - x * AREA_PIXELS_PER_UNIT;
+    let row = EXTENT.1 as f32 / 2.0 - z * AREA_PIXELS_PER_UNIT;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "every band below is inside the frame, which the block reader asserts"
+    )]
+    (column as u32, row as u32)
+}
+
+/// How far from the frame's axis each of [`Scene::AreaLight`]'s highlights sits,
+/// in world units.
+///
+/// **The mirror image of the strip in the floor, and it is arithmetic rather
+/// than a measurement.** With the eye on the axis at `AREA_CAMERA_UP` and a
+/// strip `AREA_STRIP_UP` above the floor at `AREA_STRIP_AT`, the mirror
+/// direction at a floor point `p` leaves along `p` itself and reaches the
+/// strip's height at `p * (1 + up / camera)` — so the point whose reflection
+/// lands on the strip's centre is the strip's own `x` scaled by
+/// `camera / (camera + up)`. `1.4 * 2.0 / 2.8`.
+///
+/// One number for both, which is what the whole comparison rests on: the two
+/// bands it names are mirror images across the axis the camera stands on.
+const AREA_HIGHLIGHT_AT: f32 = 1.0;
+
+/// How far from each highlight's centre the second and third pairs of bands sit,
+/// in world units.
+///
+/// **One distance, taken twice: once along the rectangle and once across it.**
+/// That is what turns two ratios into a claim about a *shape*. The strip's
+/// mirror image in the floor is `AREA_STRIP_LONG` scaled by the factor
+/// [`AREA_HIGHLIGHT_AT`] uses — about `0.61` long — and a few hundredths wide,
+/// and the lobe `crcbl_render::scene::PYRAMID_ROUGHNESS` gives spreads that
+/// width to about a quarter of a unit. So this distance is inside the
+/// reflection one way and outside it the other, and a highlight that reaches
+/// equally far in both is not a rectangle's.
+///
+/// Swept rather than guessed. On radv the profile out from the highlight's
+/// centre reads, in mean channel level, `194.6` at the centre, `192.2` at `0.40`
+/// along and `188.8` at `0.48` along — the reflection's own end is at about
+/// `0.60`, where it falls to `84.5` — against `98.7` at `0.40` across and `97.6`
+/// here. Far enough out that the lobe's spread across the strip is spent, near
+/// enough that the band is still well inside the reflection's length and inside
+/// the frame: the outermost band's own edge lands five pixels off it.
+const AREA_OFFSET: f32 = 0.45;
+
+/// How far along the strips' axis the anti-vacuity band sits, in world units.
+///
+/// Past the end of the reflection — which runs to about `0.61`, so this band
+/// carries no specular at all — and far enough out that the rectangle's
+/// *diffuse* has fallen off with the distance to it. The sun's diffuse and the
+/// ambient are flat over a flat floor, so neither differs between this band and
+/// the one under the strip; the sun's own lobe does, being a function of the
+/// view angle, and at `screenshot`'s `area_sun` key it is nowhere near the
+/// `24.8` levels radv separates the two by.
+const AREA_FAR: f32 = 1.0;
+
+/// The half-extent of each band [`Scene::AreaLight`] is measured over, in
+/// pixels.
+///
+/// **Narrow across the strips and long along them**, which is the shape of the
+/// thing being measured: at [`AREA_PIXELS_PER_UNIT`] the highlight is about
+/// twenty pixels across at half its height and about a hundred and ten along,
+/// so a band as wide as it is tall would average most of its own area off the
+/// highlight and report the floor beside it.
+const AREA_BAND: (u32, u32) = (3, 6);
+
+/// How much brighter a strip's highlight must be than the fill strip's mirror of
+/// it.
+///
+/// [`SPOT_SHADOW_RATIO`]'s number for its reason — what survives the falloff,
+/// Lambert and the tonemap is which side leads and by how much in proportion —
+/// and it is a floor rather than a prediction. The two bands take identical sun,
+/// ambient, occlusion and diffuse by construction (see [`Scene::AreaLight`]), so
+/// everything between them is the specular lobe. radv reads `2.38` at the
+/// highlight's centre and `2.48` [`AREA_OFFSET`] along it.
+const AREA_HIGHLIGHT_RATIO: f32 = 1.5;
+
+/// How far apart the two bands *across* the strips are allowed to be.
+///
+/// Just above one, because the claim there is that they are the **same**: at
+/// [`AREA_OFFSET`] across the rectangle the reflection is spent, so the fill
+/// flag has nothing left to remove and the two mirrored bands are the same
+/// floor. radv reads `1.026`, so this is three times the excess actually
+/// measured — and it is not a knob: a lobe that reached this far across would
+/// have to be a round one, and a round one wide enough to do that fails
+/// [`AREA_HIGHLIGHT_RATIO`] at the same distance along.
+const AREA_ACROSS_TOLERANCE: f32 = 1.08;
+
+/// How far above the far band the fill strip's own band must measure.
+///
+/// The anti-vacuity half of the ratios above, on [`SPOT_SHADOW_LIT_FLOOR`]'s
+/// terms and with that constant's number: a fill light that lit nothing at all
+/// would satisfy every ratio here while drawing half a frame of ambient, and
+/// this is what says the light on that side is a light. radv separates the two
+/// by `24.8` levels.
+const AREA_FILL_LIT_FLOOR: f32 = 10.0;
+
 /// What channel order [`OffscreenSetup::draw_and_readback`]'s bytes are in.
 ///
 /// The same three lines as `crcbl-cli`'s `screenshot::channel_order` and
@@ -926,6 +1051,116 @@ fn each_caster_darkens_its_own_side_of_the_point_light(image: &Image) {
              floor here for a shadow to be a shadow against"
         );
     }
+}
+
+/// `docs/plan/44-lighting.md`'s **rectangular area light**, drawn — and the one
+/// frame in the tree with a fill light in it.
+///
+/// The golden is half of the evidence and cannot be the other half:
+/// `mesh.slang`'s linearly transformed cosine path draws *a* bright band under
+/// a strip whether or not it is reading the rectangle's corners, and a fill flag
+/// wired to nothing draws two identical bands. The picture is what says the
+/// frame is the reviewed one;
+/// [`the_fill_strip_lights_the_floor_without_gleaming_on_it`] is what says which
+/// of those it is.
+///
+/// [`the_fill_strip_lights_the_floor_without_gleaming_on_it`]: fn@the_fill_strip_lights_the_floor_without_gleaming_on_it
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_area_light_scene_draws_its_strip_highlight_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::AreaLight,
+        "area_light",
+        EXTENT,
+        MIN_COLORS_AREA_LIGHT,
+        the_fill_strip_lights_the_floor_without_gleaming_on_it,
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_area_light_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::AreaLight,
+        "area_light",
+        MIN_COLORS_AREA_LIGHT,
+        the_fill_strip_lights_the_floor_without_gleaming_on_it,
+    );
+}
+
+/// [`Scene::AreaLight`]'s claim, in three parts: **the rectangle gleams along
+/// its own length and not across it, and the fill flag takes the gleam away and
+/// leaves the light.**
+///
+/// Four mirrored pairs of bands, and the mirror is what makes each one evidence.
+/// The camera stands on the axis the two strips are mirrored about, the floor is
+/// one plane, and the sun points straight down — so the two bands of a pair are
+/// the same distance from the eye, carry the same normal, and take the same
+/// directional diffuse, ambient, occlusion, Lambert and falloff. The specular
+/// lobe the fill flag removes is the only term that can separate them.
+///
+/// * **At each highlight's centre**, [`AREA_HIGHLIGHT_AT`] out on each side. The
+///   ordinary strip's band must lead its fill mirror by
+///   [`AREA_HIGHLIGHT_RATIO`]. A fill flag that never reached the specular term
+///   leaves the two equal.
+/// * **[`AREA_OFFSET`] out along the strips.** It must still lead by that ratio,
+///   which is what says the highlight has the rectangle's *length*.
+/// * **[`AREA_OFFSET`] out across them** — the same distance from the same
+///   centre. Here the two must be equal to within
+///   [`AREA_ACROSS_TOLERANCE`].
+///
+/// **The second and third are one claim and neither is it alone.** A point light
+/// wearing a rectangle's row draws a round highlight, and a round highlight
+/// reaches the same distance whichever way it is walked: wide enough to pass the
+/// third's equality and it is too narrow to pass the second's ratio, wide enough
+/// to pass the second and it fails the third. Taken at one distance in two
+/// directions, the pair is the shape of the thing rather than its brightness —
+/// and shape is the whole of what a polygon integral adds to a punctual light.
+///
+/// The fourth pair is the anti-vacuity floor, and it is on the fill side alone:
+/// its band against one [`AREA_FAR`] out along the strip, which must lead by
+/// [`AREA_FILL_LIT_FLOOR`]. Both take the same flat ambient and the same
+/// straight-down sun, so what separates them is the fill rectangle's own diffuse
+/// falling off with the distance to it — which is what says the three ratios
+/// above are not a comparison against a half-frame the flag switched off.
+fn the_fill_strip_lights_the_floor_without_gleaming_on_it(image: &Image) {
+    let band = |x: f32, z: f32| block_brightness(image, area_pixel(x, z), AREA_BAND);
+    let lit_centre = band(-AREA_HIGHLIGHT_AT, 0.0);
+    let fill_centre = band(AREA_HIGHLIGHT_AT, 0.0);
+    let lit_along = band(-AREA_HIGHLIGHT_AT, AREA_OFFSET);
+    let fill_along = band(AREA_HIGHLIGHT_AT, AREA_OFFSET);
+    let lit_across = band(-AREA_HIGHLIGHT_AT - AREA_OFFSET, 0.0);
+    let fill_across = band(AREA_HIGHLIGHT_AT + AREA_OFFSET, 0.0);
+    let fill_far = band(AREA_HIGHLIGHT_AT, AREA_FAR);
+    eprintln!(
+        "crcbl render e2e: area light — centre {lit_centre:.1} against {fill_centre:.1}; \
+         {AREA_OFFSET} along {lit_along:.1} against {fill_along:.1}; {AREA_OFFSET} across \
+         {lit_across:.1} against {fill_across:.1}; the fill strip {fill_centre:.1} against \
+         {fill_far:.1} at its end"
+    );
+    assert!(
+        fill_centre * AREA_HIGHLIGHT_RATIO < lit_centre,
+        "the strip's own highlight must be unmistakably brighter than the fill strip's mirror \
+         of it: {lit_centre:.1} against {fill_centre:.1}, which is not a lobe the flag removed"
+    );
+    assert!(
+        fill_along * AREA_HIGHLIGHT_RATIO < lit_along,
+        "and it must still lead {AREA_OFFSET} of a unit along the rectangle: {lit_along:.1} \
+         against {fill_along:.1} — a highlight that dies this far along is one the \
+         rectangle's length had no say in"
+    );
+    assert!(
+        lit_across < fill_across * AREA_ACROSS_TOLERANCE,
+        "but the same distance across the rectangle the two must be the same floor: \
+         {lit_across:.1} against {fill_across:.1}, so this highlight reaches as far across the \
+         strip as along it and it is a point light's lobe rather than a polygon's"
+    );
+    assert!(
+        fill_centre > fill_far + AREA_FILL_LIT_FLOOR,
+        "the fill strip must still light the floor under it: {fill_centre:.1} against \
+         {fill_far:.1} at the strip's end, so the ratios above are a comparison against a \
+         half-frame the fill flag switched off"
+    );
 }
 
 /// The anti-vacuity floor for [`Scene::Ao`].

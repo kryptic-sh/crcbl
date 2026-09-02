@@ -1550,27 +1550,31 @@ against the GGX lobe. What it did not do:
   backend are untried. So the 3.7x and 2.3x ratios in `docs/plan/44-lighting.md`
   are two drivers' numbers, and the browser tier's is still an ALU count rather
   than a measurement.
-- **No area light reaches `render_e2e` or the browser harness.** The frames
-  above are `mesh_e2e`'s, which draws through `ForwardRenderer` directly. A
-  frame in `crates/crcbl/tests/render_e2e.rs` needs a new
-  `crcbl::screenshot::Scene` variant, and that variant has to be named in
-  `crates/crcbl/src/screenshot.rs`, `crates/crcbl-cli/src/args.rs` and
-  `apps/render-harness/src/lib.rs` — three files outside the rung's slice, two
-  of them being edited concurrently when it landed. It is the missing half of
-  the browser tier's price, which `44-lighting.md` states by tap count instead
-  of measuring.
-- **Only Vulkan has drawn a rectangle, and only two of the three routes to the
-  rest are a harness run.** `mesh_e2e` names no backend, so
+- **The browser tier's price is still stated by tap count, not measured.** An
+  area light now reaches `render_e2e` and the browser harness —
+  `Scene::AreaLight` draws two mirrored strips differing only in `fill`, and it
+  is compared on radv, lavapipe and SwiftShader. What that buys is a _frame_,
+  not a _price_: nothing times the rectangle's shading against a punctual
+  light's on any tier, so `44-lighting.md`'s browser figure is still an ALU
+  count.
+- **Metal and D3D12 have never drawn a rectangle; WGSL now has.**
+  `Scene::AreaLight` reaches the browser harness, so SwiftShader draws one every
+  run and matches the radv golden at a max channel delta of 1. What is left is
+  the two backends with no hardware here: `mesh_e2e` names no backend, so
   `CRCBL_GPU=mtl`/`dx12` over `crates/crcbl/tests/run-mesh-e2e.sh` is the
-  evidence Metal and D3D12 are missing — the artifacts are compiled and
-  committed and nothing has run them — but neither backend has hardware here.
-  **WebGPU is not that shape at all.** The backend is spelled `webgpu`, not
-  `wgpu`, and asking for it natively refuses rather than falling back:
-  `the crcbl-webgpu backend is not active in this build — it reaches a device only on wasm32, where it is the automatic backend`
-  (measured 2026-09-02, all 76 `mesh_e2e` tests panicking in the harness before
-  drawing anything). So the WGSL artifacts can only be exercised through the
-  browser harness, and a rectangle reaching one is gated on the
-  `crcbl::screenshot::Scene` variant the bullet above is about.
+  evidence that is missing, and the artifacts are compiled and committed with
+  nothing having run them. Note the WGSL route was never a native harness run —
+  asking for `webgpu` natively refuses rather than falling back
+  (`it reaches a device only on wasm32, where it is the automatic backend`), so
+  the browser harness is the only thing that could ever have exercised those
+  artifacts.
+- **`fill` has a GPU frame for a rectangle and for nothing else.**
+  `Scene::AreaLight`'s two strips differ in that one field alone, and the
+  overhead camera makes the mirror exact — every other term is equal by
+  construction, so the specular lobe the flag removes is the only thing that can
+  separate them. That is the flag's first evidence from a frame rather than from
+  a host-level assertion. A fill **point or spot** still has none, and no
+  `apps/` sample sets `fill: true`, so the flag ships unexercised outside tests.
 - **Sphere, tube and disc are unbuilt.** The table serves them unchanged — the
   paper's own point — so what each needs is corners (a sphere and a tube are
   integrated as their silhouette quads) and a shape word in the row, not a

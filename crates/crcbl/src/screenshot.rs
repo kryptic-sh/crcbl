@@ -208,6 +208,52 @@ pub enum Scene {
     /// stops distinguishing anything — and `POINT_CASTER_AT` for where the
     /// casters stand.
     PointShadow,
+    /// `docs/plan/44-lighting.md`'s **rectangular area light**: a dark glossy
+    /// floor under two strip lights, looked straight down at.
+    ///
+    /// **The only frame in the tree that draws a polygon's highlight, and the
+    /// only one that draws a fill light at all.** `mesh.slang`'s linearly
+    /// transformed cosine path compiled to all four targets and lit no pixel in
+    /// any golden here, and neither did the flag that takes a light's specular
+    /// lobe away — a rectangle read as a point at its own centre, one whose `v`
+    /// axis came out negated, or a fill flag wired to nothing draws a plausible
+    /// picture in each case and leaves every other golden in this file
+    /// untouched.
+    ///
+    /// It is `tests/mesh_e2e/area_light.rs`'s lighting set-up rather than a new
+    /// one: the same strip, at the same half-extents and the same hue, over the
+    /// same tighter lobe. What differs is that there are **two of them**,
+    /// mirrored across the frame's axis and differing in exactly one field —
+    /// one is a fill light and the other is not — so one frame carries both of
+    /// that file's claims instead of a pair of frames it can only compare
+    /// off-line. The two figures this scene does move are the ones its own
+    /// framing forced, and each says so where it stands: `AREA_ALBEDO` and
+    /// `AREA_RADIANCE`.
+    ///
+    /// # Why the mirror is exact
+    ///
+    /// The camera looks straight down the axis the strips are mirrored about,
+    /// the floor is one flat plane, and the sun points **straight down** —
+    /// [`Scene::Ao`]'s third reason, buying more here than a missing shadow.
+    /// Two points mirrored across that axis are the same distance from the eye,
+    /// carry the same normal, and take the same directional diffuse, the same
+    /// ambient, the same occlusion, and the same Lambert and falloff from each
+    /// of the two strips. The one term left that can separate them is the
+    /// specular lobe the fill flag removes, which is what
+    /// `tests/render_e2e.rs` measures — at the highlight's centre, along the
+    /// rectangle's length, and across its width, because a point light wearing
+    /// a rectangle's row passes the first two and fails the third.
+    ///
+    /// The floor is the cube through a **dark, glossy** row of this scene's own
+    /// — see `AREA_ALBEDO`, which is where the darkness is argued and measured.
+    /// Its roughness is `crcbl_render::scene::PYRAMID_ROUGHNESS`, the tighter
+    /// lobe `tests/mesh_e2e/area_light.rs`'s `SLAB_MATERIAL` picked that row
+    /// for: an area light's claim is about the *edge* of its highlight, and the
+    /// neutral row's broad lobe smears a strip and a point into the same soft
+    /// blob. See this module's `area_camera` for the framing, `AREA_STRIP_AT`
+    /// for where the strips hang, and `area_sun` for the sun that makes the
+    /// mirror a control.
+    AreaLight,
     /// `docs/plan/18-render-features.md`'s **screen-space ambient occlusion**:
     /// the inside of a box, looked straight down into, lit almost entirely by
     /// ambient.
@@ -1707,6 +1753,220 @@ fn point_shadow_caster(offset: glam::Vec3) -> glam::Mat4 {
         * glam::Mat4::from_scale(glam::Vec3::splat(POINT_CASTER_SCALE))
 }
 
+/// The base-colour factor [`Scene::AreaLight`]'s floor shades through.
+///
+/// **Dark, and that is what makes the highlight the subject.** A rectangle's
+/// specular lobe is `F0` of the radiance leaving its face — four per cent for a
+/// dielectric — and this camera is nearly head-on to the floor, which is the one
+/// angle where Fresnel adds nothing to that four per cent. The rectangle's
+/// *diffuse* has no such factor, so on an ordinary floor it is the larger term
+/// everywhere including inside the highlight.
+///
+/// Measured, not argued: the first frame of this scene put the floor through the
+/// demo scene's tinted row and read a mean channel level of `255.0` inside the
+/// highlight against `198.8` on its fill mirror — a ratio of `1.28`, with the
+/// highlight clipped flat across the whole band, which is a golden that cannot
+/// carry the edge it exists to show. Darkening the albedo does not touch the
+/// specular term at all; at this factor the same measurement reads `194.6`
+/// against `81.7`, unclipped.
+///
+/// A **grey** factor rather than a second tint, so the floor's colour is the
+/// cube's own `+Y` face darkened and nothing else, and the roughness stays
+/// `crcbl_render::scene::PYRAMID_ROUGHNESS`: the lobe is what
+/// `tests/mesh_e2e/area_light.rs` chose that row for, and the lobe is what this
+/// scene keeps.
+const AREA_ALBEDO: f32 = 0.15;
+
+/// [`Scene::AreaLight`]'s floor row, in the description `area_scene` builds.
+///
+/// The demo scene's three rows and this one after them, so the three every other
+/// fixture names keep the indices they have always had — `BLOOM_EMITTER`'s
+/// arrangement exactly.
+const AREA_FLOOR: usize = 3;
+
+/// [`Scene::AreaLight`]'s scene: the engine's own, with the dark glossy floor
+/// row appended.
+///
+/// A description of its own for [`Scene::Bloom`]'s reason — this is one of two
+/// fixtures needing a material the demo scene does not have — and the only thing
+/// that differs is that one row.
+fn area_scene() -> crate::render::scene::SceneDesc<'static> {
+    let mut scene = crate::render::scene::demo();
+    scene.materials.push(crate::shaders::mesh::GpuMaterial {
+        base_color: [AREA_ALBEDO, AREA_ALBEDO, AREA_ALBEDO, 1.0],
+        roughness: crate::render::scene::PYRAMID_ROUGHNESS,
+        ..crate::shaders::mesh::GpuMaterial::UNTINTED
+    });
+    debug_assert_eq!(
+        scene.materials.len() - 1,
+        AREA_FLOOR,
+        "the floor row is the one past the demo scene's three"
+    );
+    scene
+}
+
+/// How far above the floor [`Scene::AreaLight`] hangs each of its two strips.
+///
+/// **A rectangle's highlight is its own mirror image in the floor**, and the
+/// mirror is what this height sets. With the eye on the axis, the reflection of
+/// a strip sits at the strip's own position scaled by
+/// `AREA_CAMERA_UP / (AREA_CAMERA_UP + AREA_STRIP_UP)` and is scaled by the same
+/// factor — about seven tenths here, which puts [`AREA_STRIP_AT`]'s strips'
+/// reflections at `1.0` from the axis and makes each about `0.61` long.
+///
+/// Low enough that the strip subtends a wide angle, which is what stops the
+/// highlight collapsing into the lobe's own round blob: a light smaller than the
+/// lobe draws a shape the *lobe* chose, and the whole claim here is that the
+/// shape is the *rectangle's*. High enough that its reflection and its diffuse
+/// pool are not the same spot, so the fill strip's side of the frame has a pool
+/// with no gleam in it rather than nothing at all.
+const AREA_STRIP_UP: f32 = 0.8;
+
+/// Half the length of each of [`Scene::AreaLight`]'s strips, along `z`.
+///
+/// `tests/mesh_e2e/area_light.rs`'s `STRIP_LONG` unchanged, because the whole
+/// point of this scene is that it is that file's light rather than a second
+/// rectangle nobody has looked at.
+const AREA_STRIP_LONG: f32 = 0.85;
+
+/// Half its width, across that axis.
+///
+/// That file's `STRIP_SHORT` unchanged, and an order of magnitude under
+/// [`AREA_STRIP_LONG`] for its reason: a near-square strip is its own rotation,
+/// and a highlight that reaches as far across as it does along is one no
+/// assertion can tell from a point light's.
+const AREA_STRIP_SHORT: f32 = 0.07;
+
+/// How far out along `x` each of [`Scene::AreaLight`]'s strips hangs from the
+/// frame's axis.
+///
+/// The strips lie along `z` and are separated along `x`, which is the
+/// arrangement that fits: each highlight runs about `0.6` up and down the frame
+/// and reaches about `0.25` either side of its own axis once the lobe has
+/// spread the reflection's few hundredths, so two of them side by side leave
+/// most of the frame's width between them while both stay well inside its
+/// height.
+///
+/// Far enough out that the two highlights are separate objects in the picture —
+/// a frame where they touch has no floor between them for the comparison to
+/// stand on — and near enough that both are inside the frame with margin. At
+/// [`AREA_CAMERA_UP`]'s framing the frame covers about `1.54` of floor either
+/// side of the axis and each highlight lands at about `1.0`.
+const AREA_STRIP_AT: f32 = 1.4;
+
+/// How far each strip's influence reaches from its own centre, in world units.
+///
+/// Comfortably past the frame's far corner, on `tests/mesh_e2e/area_light.rs`'s
+/// `STRIP_REACH`'s terms: the quartic window `crcbl_render::RectLight::radius`
+/// documents is then nowhere near its zero anywhere in the picture, so what
+/// shapes this frame is the polygon integral and not the radius.
+const AREA_REACH: f32 = 12.0;
+
+/// The radiance leaving each strip's face.
+///
+/// `tests/mesh_e2e/area_light.rs`'s `STRIP_COLOR` at two fifths, keeping its hue
+/// exactly. Well above one for that constant's reason — the scene target is
+/// `Rgba16Float` and the tonemap is what brings it down — and below it for this
+/// scene's: over `AREA_ALBEDO`'s floor the full figure clipped the highlight
+/// flat, and a band of saturated pixels is a golden with no edge in it. **This
+/// is the exposure and not the contrast**: every term in the frame scales with
+/// it, so it moves where the highlight sits in the display range and not how far
+/// it leads the floor beside it. At this figure the highlight's band reads
+/// `194.6` of a possible `255`.
+const AREA_RADIANCE: glam::Vec3 = glam::Vec3::new(8.8, 7.92, 6.76);
+
+/// How far above the floor [`Scene::AreaLight`]'s camera stands.
+///
+/// Sets the scale of the picture on [`POINT_CAMERA_UP`]'s terms — the frame's
+/// short half-axis on the floor is `up * tan(30°)` — and, with
+/// [`AREA_STRIP_UP`], where each highlight lands. High enough that both
+/// highlights and the floor either side of them are in frame; low enough that
+/// each is tens of pixels across at the golden suite's 256×192.
+const AREA_CAMERA_UP: f32 = 2.0;
+
+/// The camera [`Scene::AreaLight`] is drawn with: straight down at the floor,
+/// on [`spot_camera`]'s terms exactly.
+///
+/// **On the axis the two strips are mirrored about**, which is the whole of what
+/// makes the comparison a control rather than an estimate: an off-axis eye sees
+/// the two highlights at different angles, and the specular lobe is a function
+/// of that angle.
+fn area_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, AREA_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        // `Y` is the view direction, so `up` cannot also be `Y`; `+Z` puts the
+        // world's `+Z` axis at the top of the frame, which is the axis the
+        // strips run along.
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// The sun [`Scene::AreaLight`] runs under: **straight down**, and barely there.
+///
+/// Both halves are load-bearing, on [`ao_sun`]'s terms and for a second reason
+/// of this scene's own.
+///
+/// * **Straight down** — a directional light along the view axis over a flat
+///   floor contributes the same diffuse everywhere and a specular term that
+///   depends only on the distance from the frame's centre. Two points mirrored
+///   across the frame's axis therefore take *identical* sun, which is what makes
+///   the mirror an exact control. Under the default sun's tilt they would not,
+///   and the difference between them would be a sun term wearing the fill flag's
+///   name. `crcbl_render::shadow` picks a second up vector for exactly this
+///   direction, so the cascades are built rather than degenerate.
+/// * **Barely there** — the claim is a ratio between the two mirrored
+///   highlights, and a sun bright enough to be a large part of either is a sun
+///   that decides the ratio. Turned down rather than removed, for
+///   [`dimmed_sun`]'s reason: a sun that stopped contributing is a light row
+///   that stopped working, and a scene without one would not notice.
+fn area_sun() -> crcbl_render::DirectionalLight {
+    crcbl_render::DirectionalLight {
+        direction: glam::Vec3::Y,
+        ..dimmed_sun(0.03, 0.09)
+    }
+}
+
+/// One of [`Scene::AreaLight`]'s strips: lying along `z` at `x`, facing straight
+/// down, and a fill light or not.
+///
+/// The half-extents stay with the axes rather than with the light — `tangent` is
+/// the rectangle's `u` axis and `half_width` is measured along it — so the two
+/// strips are the same rectangle in the same orientation and `fill` really is
+/// the only field between them.
+fn area_strip(x: f32, fill: bool) -> crcbl_render::Light {
+    crcbl_render::Light::Rect(crcbl_render::RectLight {
+        position: glam::Vec3::new(x, AREA_STRIP_UP, 0.0),
+        radius: AREA_REACH,
+        color: AREA_RADIANCE,
+        // Away from the panel, at the floor below it — the convention
+        // `crcbl_render::RectLight::direction` states.
+        direction: glam::Vec3::NEG_Y,
+        tangent: glam::Vec3::Z,
+        half_width: AREA_STRIP_LONG,
+        half_height: AREA_STRIP_SHORT,
+        fill,
+    })
+}
+
+/// [`Scene::AreaLight`]'s two strips: the ordinary one out along `-x`, the fill
+/// one out along `+x`.
+///
+/// Two rows that differ in one boolean and in the sign of one coordinate. A
+/// helper rather than two literals at the call site, so there is one place the
+/// pair can be read and no way for a field to drift between them — which is the
+/// same argument [`place_pyramids`] makes about the geometry it places.
+fn area_strips() -> [crcbl_render::Light; 2] {
+    [
+        area_strip(-AREA_STRIP_AT, false),
+        area_strip(AREA_STRIP_AT, true),
+    ]
+}
+
 /// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
 /// light — which is what a clear value on an sRGB attachment means.
 ///
@@ -2143,6 +2403,39 @@ impl SceneState {
                 Self::Forward {
                     camera: point_shadow_camera(),
                     light: spot_sun(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::AreaLight => {
+                // **The floor alone, and it is the cube.** Nothing stands on it,
+                // for `Scene::Spot`'s reason and one sharper: an area light's
+                // whole difference from a point light is the *shape* of its
+                // highlight, and a second object in the frame is something a
+                // reader — or an assertion — can take that shape off instead.
+                // The cube is placed rather than parked, so it is still the
+                // first insertion and still holds the pool slot every other
+                // forward scene gives it, and it is placed through the dark
+                // glossy row `area_scene` appends for it.
+                let mut renderer =
+                    ForwardRenderer::with_scene(device, queue, format, &area_scene())?;
+                place(&mut renderer, DEMO_CUBE, AREA_FLOOR, spot_floor());
+                // **The reflection pair, refused**, on `Scene::Probes`' terms
+                // and with a sharper exposure: this floor carries
+                // `PYRAMID_ROUGHNESS`, which is under `ssr.slang`'s cutoff, so a
+                // march over the depth buffer would write into exactly the
+                // pixels the highlight is measured in. It would also put this
+                // scene in `tests/render_e2e.rs`'s `path_lsb_channels` budget
+                // for a term the scene is not about — with the pair refused, the
+                // two geometry paths draw this frame byte for byte.
+                renderer.set_effect_request(EffectRequest {
+                    programmatic: EffectOverride::none()
+                        .force(RenderEffects::REFLECTIONS, Some(false)),
+                    ..EffectRequest::default()
+                });
+                renderer.set_lights(&area_strips());
+                Self::Forward {
+                    camera: area_camera(),
+                    light: area_sun(),
                     renderer: Box::new(renderer),
                 }
             }

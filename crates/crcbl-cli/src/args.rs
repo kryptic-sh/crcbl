@@ -163,6 +163,8 @@ OPTIONS:
                            spot                one spot cone on a floor
                            spot_shadow         that cone with a caster in it
                            point_shadow        one point light, two casters
+                           area_light          a strip light and a fill strip
+                                               over a dark glossy floor
                            ao                  the inside of a box, ambient only
                            ssr                 a pyramid reflected in a smooth
                                                floor
@@ -1235,6 +1237,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::Spot,
         Scene::SpotShadow,
         Scene::PointShadow,
+        Scene::AreaLight,
         Scene::Ao,
         Scene::Ssr,
         Scene::Bloom,
@@ -1259,6 +1262,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::Spot => "spot",
         Scene::SpotShadow => "spot_shadow",
         Scene::PointShadow => "point_shadow",
+        Scene::AreaLight => "area_light",
         Scene::Ao => "ao",
         Scene::Ssr => "ssr",
         Scene::Bloom => "bloom",

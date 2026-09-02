@@ -192,6 +192,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl screenshot --scene area_light` draws a rectangular area light, and it
+  is the first frame in the tree with a fill light in it.** A new
+  `crcbl::screenshot::Scene::AreaLight`: a dark glossy floor under two strip
+  lights, mirrored across the frame's axis and differing in exactly one field —
+  one is a fill light and the other is not — looked straight down at, with the
+  sun straight down so the mirror is an exact control. Until now `mesh.slang`'s
+  linearly transformed cosine path and `crcbl_render::Light::is_fill` had
+  picture evidence only in `tests/mesh_e2e/area_light.rs`, which no golden and
+  no browser run compares; this scene reaches `crates/crcbl/tests/render_e2e.rs`
+  and `web/run-render-harness-e2e.sh` like every other, so the WebGPU backend's
+  rectangle is now compared against the same reference the native suites use. It
+  passes there unexcused. Its two tests assert the highlight leads its fill
+  mirror at the reflection's centre and along the rectangle's length while the
+  two are the same floor the same distance _across_ it — the pair a point light
+  wearing a rectangle's row cannot pass both halves of — and that the fill strip
+  still lights the floor under it.
+
 - **An `autoexec.cfg` runs at start-up, so a console variable can be set before
   the first frame.** `Loop::new` runs the file out of the same settings
   directory `config` reads from — the platform config directory natively, the
