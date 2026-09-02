@@ -140,13 +140,21 @@ pub struct AppKitShell {
     /// Whether this process was allowed to become a regular, focusable
     /// application. See [`app::Bootstrap`].
     policy_accepted: bool,
+    /// The delegate, **declared before the [`Shared`] it points into**.
+    ///
+    /// Rust drops a struct's fields in declaration order, so this is what makes
+    /// [`Delegate::drop`] — which removes the `DELEGATES` entry — run while the
+    /// `Rc` below is still alive. The order is load-bearing rather than
+    /// incidental: a delegate still in that table can be handed a [`Shared`]
+    /// that has already been freed, and the two lines being the other way round
+    /// is a use-after-free waiting for a callback to arrive between them.
+    delegate: Delegate,
     /// What the delegate callbacks write into.
     ///
     /// An `Rc` because [`Delegate`] holds a raw pointer into it that must stay
-    /// valid for as long as the delegate is registered — which
-    /// [`drop`](Self::drop) guarantees by dropping the delegate first.
+    /// valid for as long as the delegate is registered, which the field above
+    /// guarantees by being dropped first.
     shared: Rc<Shared>,
-    delegate: Delegate,
     windows: Pool<AppWindow>,
     /// The screens in AppKit's own space, for placement. See [`monitors`] for
     /// why both forms are kept.
@@ -1620,8 +1628,9 @@ impl Drop for AppKitShell {
     /// be gone while the `Rc` is still alive, which is what doing it here, before
     /// the fields are dropped, guarantees. [`Delegate::drop`] then removes the
     /// registry entry before the `Rc` itself is dropped, and Rust's field drop
-    /// order puts `delegate` before `shared` because that is the order they are
-    /// declared in.
+    /// order is what puts it there — `delegate` is **declared before** `shared`
+    /// for exactly this reason, and swapping the two declarations would undo
+    /// this argument without touching a line of code inside this function.
     ///
     /// Three pieces of **desktop-wide** state are handed back first, for the
     /// reason the Win32 backend gives about its cursor clip: a shell dropped by

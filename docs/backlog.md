@@ -17972,10 +17972,7 @@ Per-crate review passes explicitly disproved these before publishing anything:
   call; semaphore-reuse safety depends on the `slots = image_count + 1`
   throttle; `submit` never checks the CB's pool family matches the queue;
   `untag`'s `unreachable!` panics on a forged handle.
-- **appkit**: the field drop order is the _opposite_ of what the comment claims
-  (shell.rs:149-150 vs 1605-1607 — `shared` drops first; nothing dereferences it
-  between the drops today, a future field or an AppKit call in `Drop` makes it a
-  UAF); the first-responder-after-`setStyleMask:` hazard is logged, never
+- **appkit**: the first-responder-after-`setStyleMask:` hazard is logged, never
   re-issued (known open item); the borderless-origin defect is the tracked open
   item in this backlog.
 - **win32**: `ScreenToClient` return ignored in the wheel arm (proc.rs:679);
