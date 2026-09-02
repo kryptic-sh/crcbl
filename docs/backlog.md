@@ -29,11 +29,25 @@ describes a pass that no longer exists.
 ```text
                     radv (RX 7900 XTX)                     lavapipe
 slices blurs  edges worst   ssao  blur blur2  |  edges worst    ssao    blur  blur2
-     2     1     37     5  277us  23us     —  |     38     5  3.73ms  1.62ms      —  ships
-     4     1    100     3  549us  23us     —  |     89     3  5.95ms  1.64ms      —
-     2     2      8     3  278us  23us  22us  |      9     3  3.51ms  1.63ms 1.27ms
-     4     2      0     1  550us  23us  22us  |      2     2  6.16ms  1.61ms 1.25ms  rung
+     2     1     37     5  275us  19us     —  |     38     5  3.53ms  1.61ms      —  ships
+     4     1    100     3  543us  19us     —  |     89     3  5.90ms  1.56ms      —
+     2     2      8     3  275us  19us  19us  |      9     3  3.49ms  1.55ms 1.25ms
+     4     2      0     1  544us  19us  19us  |      2     2  5.90ms  1.51ms 1.25ms  rung
 ```
+
+**Re-taken 2026-09-02 after `38b2688`, which changed this pass**, splitting the
+inverse-projection so no caller computes a component it discards — `ssao.slang`
+and `ssao_blur.slang` are both in that commit. **Every quality figure is
+unchanged**: all eight edge counts and all eight worst-steps came back as the
+same integers on both drivers, seven runs each, so the rung still buys 37 sharp
+edges down to 0. The timings moved only where that commit touched: the blur
+falls 23 us to 19 us on radv, and lavapipe's whole column drifts a few per cent
+low, inside the 15.5 % spread this entry already records for it. The numbers
+above are the new medians.
+
+This is also the **first table in this file whose figures have ever been
+re-taken** rather than carried forward — see the coverage note near the end,
+which is what prompted it.
 
 **The edge counts are the same integer in all seven runs of every row, on both
 drivers**, so the 37-against-0 the rung buys is exact rather than a draw from a
@@ -41,10 +55,11 @@ spread. Only the timings move, and by very different amounts — the `ssao` pass
 holds inside **1.1%** of its p50 on radv and **15.5%** on lavapipe, which is the
 software rasteriser's scheduling.
 
-Gather plus both blurs, p50: **300 us** shipping and **595 us** for the rung on
-radv; **5.36 ms** and **9.01 ms** on lavapipe. Before the halving the shipping
-pair was 645 us and 17.0 ms, so **the rung now costs less than the pair it would
-replace used to** on both native tiers.
+Gather plus blurs, summing the medians above: **294 us** shipping and **582 us**
+for the rung on radv; **5.14 ms** and **8.66 ms** on lavapipe. Before the
+halving the shipping pair was 645 us and 17.0 ms, so **the rung still costs less
+than the pair it would replace used to** on both native tiers — by a wider
+margin than when this was written, since `38b2688` took a few per cent off both.
 
 **Halving made the shipping configuration markedly less smooth on this axis: 1
 sharp edge became 37 on radv and 38 on lavapipe.** The blur's footprint spans
@@ -14299,10 +14314,18 @@ shipped — one deleted, two clauses cut, five reworded. What that sweep did
   last week;
 - the 2026-08-13/14 slice-plan archive beyond two entries.
 
-**No measured figure anywhere in this file has been re-taken.** Every table —
-the AO tangential sweep, the pass timings, the Pages wall-clock numbers — is
-carried on trust; the sweeps have only ever checked that the symbols and files
-those tables name still exist.
+**Almost no measured figure in this file has been re-taken.** The exception is
+the AO tangential sweep, re-measured on both drivers on 2026-09-02 after
+`38b2688` changed the pass it times — every quality figure came back identical
+and the timings moved a few per cent, so the table now carries new medians and
+the same conclusion. Every other table — the area-light prices, the browser pass
+timings, the Pages wall-clock numbers — is still carried on trust; the sweeps
+have only ever checked that the symbols and files those tables name still exist.
+
+**What re-taking one cost**: fourteen harness runs and about a minute. The
+reason to do it is not that a figure was wrong but that nothing would have said
+so if it were — a shader change landed in the pass a decision rests on, and the
+table went on reading as current.
 
 **The platform-coverage entries were audited on 2026-09-02 and yielded six
 more.** "Has never run" proved the most rotten shape of all, because the answer
