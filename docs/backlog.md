@@ -166,6 +166,43 @@ routes and what each trades.
   moved the whole line by a constant, or that kept every step at one level while
   wandering, would not be caught by it.
 
+## The `forward` timing bundles two clears, and a baseline row would split them (2026-09-02)
+
+**Raised by the user**, on reading the area-light prices: is the `forward`
+measurement timing things that are not the forward pass?
+
+**Mostly no, and the boundary is worth writing down.** `forward` at
+`crates/crcbl-render/src/forward.rs`'s `add_render_pass("forward")` is the
+opaque geometry draw plus its shading. `mesh.slang`'s per-light loop is inside
+it deliberately — a forward+ renderer has no separate lighting pass to move it
+to. Everything else carries its own label: `light-cluster`, `shadow`,
+`depth-prepass`, `sky`, `grid`, `debug-draw`, `sprites`, and every post pass.
+
+**Two things do ride along, and they are different cases.**
+
+- **The froxel clustering is outside `forward` and every price in
+  `44-lighting.md` excluded it.** Measured 2026-09-02: 0.002 ms for the sun
+  alone, 0.007 ms for sixteen lights, the same for rectangles as for point
+  lights, stable over three runs at 1920×1080/400 frames. So 0.31 µs per light,
+  kind-independent — which corroborates `mesh_e2e/rect_bound.rs` from the other
+  side, since the pass bounds a rectangle by a sphere exactly as a point light.
+  That plan now reports shading and clustering together.
+- **Two full-extent attachment clears are inside `forward` and cannot be taken
+  out.** `clear_color` is a `LoadOp::Clear` (`graph.rs`), fused into the render
+  pass's begin; giving it its own timestamp means giving it its own pass and a
+  second full-target write, so the renderer would get slower to make the number
+  tidier. **Not worth doing, and the reason is the measurement's, not the
+  renderer's.**
+
+**What would attribute them honestly, and is not built: a zero-geometry baseline
+row in the price fixture.** Time `forward` on a frame with the same attachments
+and an empty draw list; that is the clear-plus-pass-begin floor, and subtracting
+it turns `forward` into the draw's own cost. It changes no renderer code and
+costs one extra configuration per price run. It matters for any figure quoted as
+a **share** of a frame — `forward` is 21.9% of a headless lantern frame with the
+clears in it — and not for the per-light prices, where the clears are constant
+across rows and cancel in the subtraction.
+
 ## The multi-bounce tint narrowed AO's contrast, and two claims lost margin (2026-09-01)
 
 `mesh.slang`'s `multi_bounce_occlusion` shipped 2026-09-01 and does what it is

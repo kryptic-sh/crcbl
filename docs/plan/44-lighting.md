@@ -426,6 +426,27 @@ sun-only frame that is 8.6 µs per point light and 29.5 µs per rectangle on rad
 and 0.588 ms against 1.325 ms on lavapipe — **a rectangle costs 3.4× a point
 light on the desktop tier and 2.3× on the software one**.
 
+**What this table measures, and what it leaves out (2026-09-02).** `forward` is
+the opaque geometry draw and its shading — `mesh.slang`'s per-light loop is
+inside it, which is what forward+ means. Clustering is **not**: `light-cluster`
+is its own compute pass, and it scales with the light count too — 0.002 ms for
+the sun alone against 0.007 ms once sixteen lights arrive, the same figure for
+sixteen rectangles as for sixteen point lights, stable across three runs. That
+is **0.31 µs per light of clustering**, on top of the shading below, and it is
+kind-independent for the reason `mesh_e2e/rect_bound.rs` measures separately:
+`light_cluster.slang` bounds a rectangle by a sphere exactly as it bounds a
+point light. So a point light truly costs about 8.9 µs and a rectangle about
+29.8 µs, and the ratio with clustering folded in is 3.3× rather than 3.4×.
+
+The `forward` figures also carry two full-extent attachment clears, which
+**cannot** be split out: `clear_color` is a `LoadOp::Clear` fused into the pass
+begin, so timing it separately would mean adding a pass and a full-target write
+— a slower renderer bought for a tidier number. They are constant across all
+three rows, so they cancel in every subtraction below; what they do affect is
+any reading of `forward` as a _share_ of a frame. `docs/backlog.md` carries the
+zero-geometry baseline row that would attribute them without changing the
+renderer.
+
 **Re-taken 2026-09-02** after `b36be08` changed how the colour pass shades and
 `38b2688` changed the unprojection several of these passes use; the figures
 above are the new ones, radv's from the median of three runs. What moved is the
