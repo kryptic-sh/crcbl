@@ -1519,6 +1519,55 @@ Texture2D<float4> ltc_matrix;
 [[vk::binding(28, 0)]]
 Texture2D<float> contact_shadow;
 
+/// `docs/plan/50-irradiance-probes.md`'s per-probe **visibility map**: one layer
+/// per row of `probes`, `PROBE_VISIBILITY_EXTENT` texels square, `r` the mean
+/// distance from that probe to the nearest static surface in a direction and `g`
+/// the mean of its square. `crcbl_shaders::probe_visibility` owns the layout,
+/// the octahedral mapping and the Chebyshev bound this file evaluates against
+/// it, and `crcbl_render::probe_visibility` is what captures it.
+///
+/// # What it is for
+///
+/// Majercik et al. 2019's contribution, and the one thing that makes a probe
+/// grid stop leaking: a fragment further from a probe than the wall that probe
+/// can see in the fragment's own direction is *behind* that wall, and takes none
+/// of the probe's light. `probe_irradiance` weighs each of its eight corners by
+/// it. Without it a room's probes light the room next door through the wall
+/// between them, which is the defect the whole rung is about.
+///
+/// # Read by four `Load`s and a blend written out, for `specular_dfg`'s reason
+///
+/// A hardware filter is fixed-function arithmetic whose weights four rasterisers
+/// compute independently, and this engine's goldens are compared across all
+/// four. It also means the image's format need not be filterable — `rg32float`
+/// is not, without WebGPU's `float32-filterable` — and it costs no sampler, so
+/// no index of Metal's sampler argument table moves.
+///
+/// **A `float4` element on a two-channel image**, read as `.xy`: the third and
+/// fourth channels of such a fetch are the format's own zero and one on every
+/// backend, and declaring the wider element is what `ambient_occlusion` does
+/// over its own narrower use.
+///
+/// # Bound on every path, and a one-texel image is the off switch
+///
+/// `crcbl_render::forward` binds a 1×1×1 image holding
+/// `crcbl_shaders::probe_visibility::FAR` when nothing has been captured or when
+/// `r_probe_visibility` is off. No surface is further away than that, so every
+/// probe keeps all of its weight and this file has no branch for the feature
+/// being absent — the same shape as the white 1×1 image `ambient_occlusion`
+/// falls back to. The fetch is clamped against `GetDimensions` for that
+/// binding's reason, which is what makes the one-texel image readable by the
+/// same code as a captured one.
+///
+/// **Appended past `contact_shadow`, never inserted**, for the reason every
+/// binding above it gives: `crcbl-mtl` numbers a resource by counting the
+/// same-table entries of the layout list, and Slang numbers a stage's arguments
+/// by declaration order, so the two agree only while both ascend. 29 is past
+/// everything `mesh_cluster.slang` declares, so it needs no mirror there and no
+/// index anything already owns moves.
+[[vk::binding(29, 0)]]
+Texture2DArray<float4> probe_visibility;
+
 /// The matrix that carries a mesh-space normal into `GpuInstance::transform`'s
 /// space, built out of that transform's own upper-left 3×3.
 ///
@@ -3661,28 +3710,194 @@ uint froxel_of(float2 pixel, float depth)
     return (index * grid_y + tile_y) * grid_x + tile_x;
 }
 
-/// One row of the probe table, by grid cell, clamped into the buffer.
+/// Texels along one side of a visibility map's interior — the part that holds
+/// directions. `crcbl_shaders::probe_visibility::SIDE`, and
+/// `the_visibility_map_constants_match_the_ones_mesh_slang_declares` is what
+/// holds the two to each other.
+static const float PROBE_VISIBILITY_SIDE = 16.0;
+
+/// Texels of wrapped border on each side of that interior, which is what lets
+/// the blend below read four ordinary neighbours everywhere.
+/// `crcbl_shaders::probe_visibility::BORDER`.
+static const float PROBE_VISIBILITY_BORDER = 1.0;
+
+/// How far along its own normal a shaded point is moved before its distance to a
+/// probe is measured, in world units.
+/// `crcbl_shaders::probe_visibility::SURFACE_BIAS`, where the reason is argued:
+/// without it a floor is exactly as far from the probe above it as the floor
+/// that probe recorded, and shadows itself.
+static const float PROBE_SURFACE_BIAS = 0.05;
+
+/// The share of its trilinear weight a fully occluded corner keeps.
+/// `crcbl_shaders::probe_visibility::OCCLUDED_WEIGHT`, where the reason is
+/// argued: it is what stops the weighted sum's divisor reaching zero, and what
+/// makes a fragment whose every corner is occluded fall back to the plain
+/// trilinear result rather than to black.
+static const float PROBE_OCCLUDED_WEIGHT = 0.0001;
+
+/// `+1` for a positive or zero value and `-1` for a negative one — the
+/// octahedral mapping's `signNotZero`.
+///
+/// Not `sign`, which answers zero for zero: the fold below multiplies by this,
+/// and a zero factor would collapse a direction lying in an axis plane onto the
+/// square's centre.
+float sign_not_zero(float value)
+{
+    return value >= 0.0 ? 1.0 : -1.0;
+}
+
+/// A unit direction as a point of the octahedral square, each component in
+/// `-1..1` — `crcbl_shaders::probe_visibility::oct_encode`, and the same
+/// paper's: Cigolle et al. 2014, *A Survey of Efficient Representations for
+/// Independent Unit Vectors*.
+///
+/// **The fold is on `+Y`/`-Y`**, because this engine's world is `+Y` up: the
+/// seam then runs around and below the horizon rather than through the ceiling
+/// and the floor, which are the two directions a probe in a room has the most to
+/// say about.
+///
+/// The `max` in the divisor is not defensive about a caller — the direction from
+/// a probe to a biased shading point is never zero — it is what keeps the
+/// division finite for the degenerate volume, where every probe stands at the
+/// grid's origin and a fragment may sit exactly on one.
+float2 oct_encode(float3 direction)
+{
+    float norm = abs(direction.x) + abs(direction.y) + abs(direction.z);
+    float2 p = direction.xz / max(norm, 1e-20);
+    if (direction.y < 0.0)
+    {
+        p = float2((1.0 - abs(p.y)) * sign_not_zero(p.x),
+                   (1.0 - abs(p.x)) * sign_not_zero(p.y));
+    }
+    return p;
+}
+
+/// The two depth moments probe `index`'s map holds along `direction`, blended
+/// bilinearly — `crcbl_shaders::probe_visibility::ProbeVisibility::moments`.
+///
+/// `table_tap`'s addressing and `table_tap`'s reason: a texel holds the value at
+/// its own centre, so a direction's place in the interior is
+/// `uv * SIDE + BORDER - 0.5`, and the two neighbours either side of it are
+/// inside the bordered layer whatever the direction. The clamp is against
+/// `GetDimensions` rather than against those constants, on `occlusion_at`'s
+/// terms: it makes the fetch a fact about the image, which is what lets the
+/// one-texel off-switch be read by this same code.
+float2 probe_moments(uint index, float3 direction)
+{
+    uint width;
+    uint height;
+    uint layers;
+    probe_visibility.GetDimensions(width, height, layers);
+    float2 extent = float2(float(width), float(height));
+    float2 scaled = (oct_encode(direction) * 0.5 + 0.5) * PROBE_VISIBILITY_SIDE
+                  + PROBE_VISIBILITY_BORDER - 0.5;
+    float2 low = clamp(floor(scaled), float2(0.0, 0.0), extent - 1.0);
+    float2 high = min(low + 1.0, extent - 1.0);
+    float2 weight = clamp(scaled - low, 0.0, 1.0);
+    int layer = int(min(index, max(layers, 1u) - 1u));
+
+    float2 c00 = probe_visibility.Load(int4(int(low.x), int(low.y), layer, 0)).xy;
+    float2 c10 = probe_visibility.Load(int4(int(high.x), int(low.y), layer, 0)).xy;
+    float2 c01 = probe_visibility.Load(int4(int(low.x), int(high.y), layer, 0)).xy;
+    float2 c11 = probe_visibility.Load(int4(int(high.x), int(high.y), layer, 0)).xy;
+    return lerp(lerp(c00, c10, weight.x), lerp(c01, c11, weight.x), weight.y);
+}
+
+/// The share of its trilinear weight the probe at `probe_position` keeps for a
+/// surface at `world_position` facing `normal` —
+/// `crcbl_shaders::probe_visibility::ProbeVisibility::weight`.
+///
+/// **The Chebyshev bound**, cubed: for a depth distribution of mean `μ` and
+/// variance `σ²`, the share of it at least `d - μ` beyond the mean is at most
+/// `σ² / (σ² + (d - μ)²)`, which reads as a visibility that is one in front of
+/// the mean surface and falls off behind it at a width the texel's own
+/// disagreement sets. Donnelly & Lauritzen 2006 is where the bound entered
+/// graphics and Majercik et al. 2019 §3 is where it is applied to a probe, cube
+/// and all.
+///
+/// The query point is moved off the surface by `PROBE_SURFACE_BIAS` first; that
+/// constant is where the reason is. The floor is `PROBE_OCCLUDED_WEIGHT`, and
+/// `probe_irradiance` is where what it buys is argued.
+float probe_weight(uint index, float3 probe_position, float3 world_position, float3 normal)
+{
+    float3 to_probe = probe_position - (world_position + normal * PROBE_SURFACE_BIAS);
+    float to_surface = length(to_probe);
+    // The map is indexed by the direction the probe looks *out* along.
+    float2 moments = probe_moments(index, -to_probe);
+    // Clamped because the two moments are blended independently and a texel
+    // between two disagreeing neighbours can land a hair under `mean²`, which
+    // is a negative variance and a visibility above one.
+    float variance = max(moments.y - moments.x * moments.x, 0.0);
+    float behind = to_surface - moments.x;
+    float bound = variance / (variance + behind * behind);
+    float visible = to_surface <= moments.x ? 1.0 : bound * bound * bound;
+    return max(visible, PROBE_OCCLUDED_WEIGHT);
+}
+
+/// Which row of the probe table a grid cell is, clamped into the buffer.
 ///
 /// The clamp is against `probe_counts.w` — the product the host wrote — for the
 /// reason `ambient_occlusion`'s `GetDimensions` clamp exists: it makes the fetch
 /// a fact about the buffer rather than a promise about whoever filled the
 /// header. `max(total, 1)` is what keeps the empty grid on row 0, which every
 /// table has because a buffer of no bytes is not a buffer.
-GpuProbe probe_at(uint3 cell)
+///
+/// **It is also the layer of `probe_visibility`**, which is what makes the row
+/// and the map one probe: `crcbl_render::probe_visibility::capture` writes its
+/// layers in the same `x`-fastest order the table's rows are in.
+uint probe_row(uint3 cell)
 {
     uint index = (cell.z * frame.probe_counts.y + cell.y) * frame.probe_counts.x + cell.x;
-    return probes[min(index, max(frame.probe_counts.w, 1u) - 1u)];
+    return min(index, max(frame.probe_counts.w, 1u) - 1u);
 }
 
-/// Two probes blended coefficient by coefficient — one axis of the trilinear
-/// interpolation below.
-GpuProbe lerp_probe(GpuProbe a, GpuProbe b, float t)
+/// One corner of the trilinear gather: its coefficients already scaled by the
+/// weight it keeps, and that weight beside them.
+///
+/// Both halves ride through the same seven blends below, so what comes out is
+/// `Σ trilinear·visibility·coefficients` over the eight corners and
+/// `Σ trilinear·visibility` — a weighted mean waiting for its divisor.
+/// `crcbl_shaders::probe::WeightedProbe` is the host mirror.
+struct WeightedProbe
 {
-    GpuProbe blended;
-    blended.sh_r = lerp(a.sh_r, b.sh_r, t);
-    blended.sh_g = lerp(a.sh_g, b.sh_g, t);
-    blended.sh_b = lerp(a.sh_b, b.sh_b, t);
+    /// The row, every coefficient already multiplied by `weight`.
+    GpuProbe sh;
+    /// What this corner counts for: its visibility, never below
+    /// `PROBE_OCCLUDED_WEIGHT`.
+    float weight;
+};
+
+/// Two corners blended coefficient by coefficient and weight by weight — one
+/// axis of the trilinear interpolation below.
+WeightedProbe lerp_probe(WeightedProbe a, WeightedProbe b, float t)
+{
+    WeightedProbe blended;
+    blended.sh.sh_r = lerp(a.sh.sh_r, b.sh.sh_r, t);
+    blended.sh.sh_g = lerp(a.sh.sh_g, b.sh.sh_g, t);
+    blended.sh.sh_b = lerp(a.sh.sh_b, b.sh.sh_b, t);
+    blended.weight = lerp(a.weight, b.weight, t);
     return blended;
+}
+
+/// The corner at grid cell `cell`: its row, scaled by what that probe's
+/// visibility map says a surface at `world_position` facing `normal` keeps of
+/// it.
+///
+/// `spacing` is the grid's step, which the caller derives once from the header's
+/// reciprocal rather than eight times here.
+WeightedProbe probe_corner(uint3 cell, float3 spacing, float3 world_position, float3 normal)
+{
+    uint row = probe_row(cell);
+    GpuProbe stored = probes[row];
+    float3 at = frame.probe_origin.xyz + float3(cell) * spacing;
+    float weight = probe_weight(row, at, world_position, normal);
+
+    WeightedProbe corner;
+    corner.sh.sh_r = stored.sh_r * weight;
+    corner.sh.sh_g = stored.sh_g * weight;
+    corner.sh.sh_b = stored.sh_b * weight;
+    corner.weight = weight;
+    return corner;
 }
 
 /// The irradiance `docs/plan/18-render-features.md`'s probe grid gives a surface
@@ -3696,22 +3911,43 @@ GpuProbe lerp_probe(GpuProbe a, GpuProbe b, float t)
 /// A scene with no probes carries counts of zero and a reciprocal spacing of
 /// zero. Then `last` is zero on every axis, the grid coordinate is zero, both
 /// corners of every axis are probe 0, and that row is the zeroed one every table
-/// starts as — so the three dot products are zero and `frame.ambient.rgb + 0.0`
-/// is `frame.ambient.rgb` **exactly**, on every target. That is what let the
-/// grid land with no golden re-blessed.
+/// starts as — so every weighted coefficient is exactly zero, the divisor is
+/// positive, `0 / w` is zero, and `frame.ambient.rgb + 0.0` is
+/// `frame.ambient.rgb` **exactly**, on every target. That is what let the grid
+/// land with no golden re-blessed, and what lets the visibility test below join
+/// it on the same terms.
 ///
 /// # Interpolated coefficients, not interpolated evaluations
 ///
 /// The eight corners are blended as *coefficients* and evaluated once, so the
-/// whole lookup is seven blends, three dot products and one clamp whatever the
-/// grid's size — where evaluating each corner first would be twenty-four dot
-/// products. It is also the more correct of the two: irradiance is linear in the
-/// coefficients until the clamp, and clamping once at the end is clamping the
-/// interpolated field rather than eight samples of it.
+/// whole lookup is seven blends, three dot products, one divide and one clamp
+/// whatever the grid's size — where evaluating each corner first would be
+/// twenty-four dot products. It is also the more correct of the two: irradiance
+/// is linear in the coefficients until the clamp, and clamping once at the end
+/// is clamping the interpolated field rather than eight samples of it.
 ///
 /// The clamp itself is not defensive. L1 is a truncated series and a truncated
 /// series rings: an environment concentrated in one direction evaluates negative
 /// on the far side, and a surface there would *subtract* light.
+///
+/// # Each corner is weighed by whether it can see the surface
+///
+/// `docs/plan/50-irradiance-probes.md`'s rung, and the one thing that makes a
+/// probe grid stop leaking: a corner's weight is its trilinear share times
+/// `probe_weight`, which is the Chebyshev bound of that probe's visibility map
+/// in the direction of this fragment. A probe on the far side of a wall is
+/// further away than the wall it recorded, so it keeps nothing and its light
+/// does not come through. The coefficients ride through the same seven blends
+/// already scaled by that weight and the weights ride beside them, so the sum is
+/// a weighted mean and the divide at the end is what makes it one — the
+/// evaluation order above is untouched.
+///
+/// **Every corner occluded is the plain trilinear result, not black.** The
+/// weight never falls below `PROBE_OCCLUDED_WEIGHT`, so the divisor cannot reach
+/// zero; and when *every* corner is at that floor it divides straight back out,
+/// leaving exactly the unweighted blend. A fragment inside geometry, which is
+/// the case that reaches it, keeps the light it had before this rung rather than
+/// becoming a hole in the room.
 ///
 /// # Outside the grid clamps to its surface
 ///
@@ -3736,21 +3972,35 @@ float3 probe_irradiance(float3 world_position, float3 normal)
     // weighed out rather than wrapped around.
     uint3 hi = uint3(min(base + 1.0, last));
 
-    // Seven blends over the coefficients. The far corner's weight reaches
-    // exactly zero at the boundary where the cell index changes — `lerp(a, b,
-    // 0.0)` is `a` — so a fragment landing in cell `i` at `f≈1` and one landing
-    // in cell `i+1` at `f≈0` compute the same value, which is the whole of this
-    // grid's determinism argument.
-    GpuProbe x00 = lerp_probe(probe_at(uint3(lo.x, lo.y, lo.z)), probe_at(uint3(hi.x, lo.y, lo.z)), f.x);
-    GpuProbe x10 = lerp_probe(probe_at(uint3(lo.x, hi.y, lo.z)), probe_at(uint3(hi.x, hi.y, lo.z)), f.x);
-    GpuProbe x01 = lerp_probe(probe_at(uint3(lo.x, lo.y, hi.z)), probe_at(uint3(hi.x, lo.y, hi.z)), f.x);
-    GpuProbe x11 = lerp_probe(probe_at(uint3(lo.x, hi.y, hi.z)), probe_at(uint3(hi.x, hi.y, hi.z)), f.x);
-    GpuProbe y0 = lerp_probe(x00, x10, f.y);
-    GpuProbe y1 = lerp_probe(x01, x11, f.y);
-    GpuProbe cell = lerp_probe(y0, y1, f.z);
+    // The spacing the header carries the reciprocal of, so a corner's world
+    // position can be named. An axis with no reciprocal has no step to take and
+    // every probe on it stands at the origin's coordinate — which is the
+    // degenerate volume, and `ProbeVolume::position` on the host agrees.
+    float3 inv = frame.probe_inv_spacing.xyz;
+    float3 spacing = float3(inv.x != 0.0 ? 1.0 / inv.x : 0.0,
+                            inv.y != 0.0 ? 1.0 / inv.y : 0.0,
+                            inv.z != 0.0 ? 1.0 / inv.z : 0.0);
+
+    // Seven blends over the coefficients and their weights. The far corner's
+    // weight reaches exactly zero at the boundary where the cell index changes —
+    // `lerp(a, b, 0.0)` is `a` — so a fragment landing in cell `i` at `f≈1` and
+    // one landing in cell `i+1` at `f≈0` compute the same value, which is the
+    // whole of this grid's determinism argument.
+    WeightedProbe x00 = lerp_probe(probe_corner(uint3(lo.x, lo.y, lo.z), spacing, world_position, normal),
+                                   probe_corner(uint3(hi.x, lo.y, lo.z), spacing, world_position, normal), f.x);
+    WeightedProbe x10 = lerp_probe(probe_corner(uint3(lo.x, hi.y, lo.z), spacing, world_position, normal),
+                                   probe_corner(uint3(hi.x, hi.y, lo.z), spacing, world_position, normal), f.x);
+    WeightedProbe x01 = lerp_probe(probe_corner(uint3(lo.x, lo.y, hi.z), spacing, world_position, normal),
+                                   probe_corner(uint3(hi.x, lo.y, hi.z), spacing, world_position, normal), f.x);
+    WeightedProbe x11 = lerp_probe(probe_corner(uint3(lo.x, hi.y, hi.z), spacing, world_position, normal),
+                                   probe_corner(uint3(hi.x, hi.y, hi.z), spacing, world_position, normal), f.x);
+    WeightedProbe y0 = lerp_probe(x00, x10, f.y);
+    WeightedProbe y1 = lerp_probe(x01, x11, f.y);
+    WeightedProbe cell = lerp_probe(y0, y1, f.z);
 
     float4 basis = float4(normal, 1.0);
-    return max(float3(dot(cell.sh_r, basis), dot(cell.sh_g, basis), dot(cell.sh_b, basis)),
+    return max(float3(dot(cell.sh.sh_r, basis), dot(cell.sh.sh_g, basis), dot(cell.sh.sh_b, basis))
+                   / cell.weight,
                float3(0.0, 0.0, 0.0));
 }
 

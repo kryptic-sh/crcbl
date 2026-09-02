@@ -467,15 +467,16 @@ const BLEND_OP = ['Add', 'Subtract', 'ReverseSubtract', 'Min', 'Max'];
 /**
  * `tag::SAMPLE_TYPE_*` — what a sampled image's texels mean to the shader.
  *
- * Two rows and the loudest failure of any table this size. `crcbl_hal` carries
- * this field on the *layout* rather than reading it off the bound view because
- * **WebGPU does**: `GPUTextureBindingLayout.sampleType` is a member of a bind
- * group layout entry, and a depth-format view is only bindable through a slot
- * that says `'depth'`. So the two rows are not two spellings of a preference —
- * they are two different layouts, and a code folded into its neighbour produces
- * one the browser then refuses every bind group against, naming the group.
+ * The loudest failure of any table this size. `crcbl_hal` carries this field on
+ * the *layout* rather than reading it off the bound view because **WebGPU
+ * does**: `GPUTextureBindingLayout.sampleType` is a member of a bind group
+ * layout entry, a depth-format view is only bindable through a slot that says
+ * `'depth'`, and an `rg32float` one only through a slot that says
+ * `'unfilterable-float'`. So the rows are not spellings of a preference — they
+ * are different layouts, and a code folded into its neighbour produces one the
+ * browser then refuses every bind group against, naming the group.
  */
-const SAMPLE_TYPE = ['Float', 'Depth'];
+const SAMPLE_TYPE = ['Float', 'Depth', 'UnfilterableFloat'];
 
 /**
  * `tag::BINDING_KIND_*`, and the one table here whose rows have **bodies**.

@@ -673,7 +673,7 @@ fn build(
     // drawn without it would be a picture of a different room — see `Arm::fog`
     // for the one arm that takes it out on purpose.
     renderer.set_fog(arm.fog);
-    if let Err(error) = room::place(&mut renderer, arm.view) {
+    if let Err(error) = room::place(device, queue, &mut renderer, arm.view) {
         renderer.destroy(device);
         return Err(crcbl::screenshot::OffscreenError::Hal(
             crcbl::hal::HalError::InvalidDescriptor(format!(

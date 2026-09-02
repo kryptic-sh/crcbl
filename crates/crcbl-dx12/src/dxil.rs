@@ -980,14 +980,21 @@ mod tests {
                 // `Texture2D<float4>`, read by `Load` like the `DFG` pair beside
                 // it and taking no sampler for the same reason.
                 //
-                // Last is `docs/plan/45-shadows.md`'s contact-shadow channel at
+                // Then `docs/plan/45-shadows.md`'s contact-shadow channel at
                 // binding 28, and therefore `t14`: an `R8Unorm`
                 // `Texture2D<float>` read by `Load`, so it takes no sampler
                 // either — the occlusion channel's shape at the top of the list
                 // rather than a new one.
+                //
+                // Last is `docs/plan/50-irradiance-probes.md`'s per-probe
+                // visibility maps at binding 29, and therefore `t15`: an
+                // `Rg32Float` `Texture2DArray<float4>` read by `Load`, which is
+                // a second `Texture2DArray` taking no sampler — the normal
+                // page's shape without that row's shared sampler, because an
+                // unfilterable format has none to share.
                 &[
                     Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv, Srv,
-                    Srv, Srv, Srv, Srv, Srv,
+                    Srv, Srv, Srv, Srv, Srv, Srv,
                 ],
             ),
             (

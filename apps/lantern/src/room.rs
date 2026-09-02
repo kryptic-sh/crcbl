@@ -1283,13 +1283,22 @@ impl View {
 /// takes any affine matrix now — the shaders build the normal transform out of
 /// it — so this is a simplicity the room keeps rather than a rule it obeys.
 ///
+/// It also **captures the room's probe visibility**, once every object is
+/// standing, which is why it takes the device and the queue.
+///
 /// # Errors
 ///
 /// [`InstancePoolError::PoolFull`] if [`CAPACITIES`]'s instance count does not
 /// cover the room, which is a mistake in this file rather than a condition a run
 /// can be in — but it is the caller that would have to report it, so it is
-/// returned rather than unwrapped.
-pub fn place(renderer: &mut ForwardRenderer, view: View) -> Result<usize, InstancePoolError> {
+/// returned rather than unwrapped. [`InstancePoolError::Hal`] if the probe
+/// visibility capture could not be uploaded.
+pub fn place(
+    device: &dyn crcbl::hal::Device,
+    queue: crcbl::hal::QueueHandle,
+    renderer: &mut ForwardRenderer,
+    view: View,
+) -> Result<usize, InstancePoolError> {
     let mut placed = 0;
     for (mesh, material, seen) in OBJECTS {
         if !view.draws(seen) {
@@ -1302,6 +1311,17 @@ pub fn place(renderer: &mut ForwardRenderer, view: View) -> Result<usize, Instan
         })?;
         placed += 1;
     }
+    // **The capture belongs here and not at the call sites**, because a room
+    // that is placed and whose probes have not recorded it is a room whose
+    // probes light through its walls — and the app and the golden test are two
+    // callers, so a capture at each of them is a capture one of them can be
+    // written without. It was: the golden suite drew this room for a day with
+    // its probes unweighted while the app's frames had them weighed, and the two
+    // are supposed to be the same room.
+    //
+    // See `ForwardRenderer::capture_probe_visibility` for why it is a call at
+    // all rather than part of `with_scene`: a description carries no instances.
+    renderer.capture_probe_visibility(device, queue)?;
     Ok(placed)
 }
 

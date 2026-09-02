@@ -546,6 +546,7 @@ pub fn probes() -> ProbeGrid {
 mod tests {
     use super::*;
     use crcbl::shaders::probe::irradiance_at;
+    use crcbl::shaders::probe_visibility::ProbeVisibility;
 
     /// How many times brighter the ambient beside a brazier has to be than the
     /// ambient out in the corridor.
@@ -800,7 +801,13 @@ mod tests {
                     #[allow(clippy::cast_possible_truncation)]
                     let point = [at.x as f32, at.y as f32, at.z as f32];
                     let normal = [0.0, 1.0, 0.0];
-                    let read = irradiance_at(&grid.volume, &grid.probes, point, normal);
+                    let read = irradiance_at(
+                        &grid.volume,
+                        &grid.probes,
+                        &ProbeVisibility::NONE,
+                        point,
+                        normal,
+                    );
                     let want = grid.probes[index].irradiance(normal);
                     for channel in 0..3 {
                         assert!(
@@ -880,7 +887,13 @@ mod tests {
         let luminance = |at: DVec3| {
             #[allow(clippy::cast_possible_truncation)]
             let point = [at.x as f32, at.y as f32, at.z as f32];
-            let value = irradiance_at(&grid.volume, &grid.probes, point, [0.0, 1.0, 0.0]);
+            let value = irradiance_at(
+                &grid.volume,
+                &grid.probes,
+                &ProbeVisibility::NONE,
+                point,
+                [0.0, 1.0, 0.0],
+            );
             0.2126f32.mul_add(value[0], 0.7152f32.mul_add(value[1], 0.0722 * value[2]))
         };
 

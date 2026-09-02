@@ -1651,12 +1651,14 @@ export function webgpuShaderStageFor(visibility) {
 /**
  * `crcbl_hal::SampleType` as `GPUTextureBindingLayout.sampleType`.
  *
- * `Float` is `'float'` — filterable — rather than `'unfilterable-float'`,
- * because that is what the variant means: `SampleType`'s own docs call it
- * "ordinary filterable colour texels". `Depth` is `'depth'`, which is the row
- * that makes this table load-bearing: a depth-format view is bindable only
- * through a slot that says `'depth'`, and a comparison sampler is bindable only
- * beside one.
+ * `Float` is `'float'` — filterable — because that is what the variant means:
+ * `SampleType`'s own docs call it "ordinary filterable colour texels".
+ * `UnfilterableFloat` is `'unfilterable-float'`, and it is the row a
+ * `rg32float` view needs: without the `float32-filterable` feature — which
+ * `FEATURE_MAP` above does not request — such a view is refused against a
+ * `'float'` slot however the shader reads it. `Depth` is `'depth'`: a
+ * depth-format view is bindable only through a slot that says `'depth'`, and a
+ * comparison sampler is bindable only beside one.
  *
  * WebGPU's other two — `'sint'` and `'uint'` — have no seam variant, which is
  * `SampleType`'s own decision rather than a gap here: "integer and multisampled
@@ -1664,7 +1666,11 @@ export function webgpuShaderStageFor(visibility) {
  * nothing constructs is a variant no backend's mapping was ever checked
  * against."
  */
-const SAMPLE_TYPE = Object.freeze({ Float: 'float', Depth: 'depth' });
+const SAMPLE_TYPE = Object.freeze({
+  Float: 'float',
+  Depth: 'depth',
+  UnfilterableFloat: 'unfilterable-float',
+});
 
 /**
  * The `GPUStorageTextureAccess` a `BindingKind::StorageImage`'s `read_only`

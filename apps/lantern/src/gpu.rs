@@ -487,9 +487,11 @@ impl Gpu {
         // Every object each view draws, in one fixed order — see `room::place`,
         // and `room::Seen` for why the monitor's own renderer is given fewer of
         // them than the main one.
-        let placed = match room::place(&mut renderer, room::View::Main)
-            .and_then(|placed| room::place(&mut monitor, room::View::Monitor).map(|_| placed))
-        {
+        let placed = match room::place(ctx.device(), ctx.queue(), &mut renderer, room::View::Main)
+            .and_then(|placed| {
+                room::place(ctx.device(), ctx.queue(), &mut monitor, room::View::Monitor)
+                    .map(|_| placed)
+            }) {
             Ok(placed) => placed,
             Err(error) => {
                 monitor.destroy(ctx.device());

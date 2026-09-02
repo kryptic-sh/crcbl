@@ -152,6 +152,10 @@ pub mod nine_slice;
 pub mod orbit;
 pub mod pass_stats;
 mod probe;
+
+/// The per-probe visibility capture the probe grid is weighed by, and the
+/// image `mesh.slang` reads it out of.
+mod probe_visibility;
 pub mod scene;
 pub mod shadow;
 pub mod skinning;
@@ -264,6 +268,7 @@ pub fn console_table() -> crcbl_console::Table {
         ssao::r_ssao_blur_passes,
         ssao::r_ssao_intensity,
         ssao::r_ssao_bent_normals,
+        probe_visibility::r_probe_visibility,
         shadow::r_shadow_cadence,
         shadow::r_shadow_faces
     ]

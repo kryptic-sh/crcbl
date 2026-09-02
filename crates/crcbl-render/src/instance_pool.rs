@@ -503,6 +503,27 @@ impl InstancePool {
             .then(|| self.read(handle.index()))
     }
 
+    /// Every live element of the array, in slot order.
+    ///
+    /// **The records the device would draw**, decoded from the same mirror the
+    /// buffers are filled from — including
+    /// [`GpuInstance::LIVE`](crcbl_shaders::mesh::GpuInstance::LIVE), which the
+    /// pool sets, so a caller filters on the bit rather than on a second list
+    /// it kept. Slots nothing has written are cleared, and a cleared record has
+    /// the bit off.
+    ///
+    /// Added for `crate::probe_visibility`, which needs the scene as it stands
+    /// rather than as it was described: a probe's visibility map is about where
+    /// the walls *are*, and the walls arrive through
+    /// [`InstancePool::insert`] rather than through the description.
+    #[must_use]
+    pub fn live(&self) -> Vec<GpuInstance> {
+        (0..self.high_water)
+            .map(|index| self.read(index))
+            .filter(|record| record.flags & GpuInstance::LIVE != 0)
+            .collect()
+    }
+
     /// Which element of the array `handle` is, or `None` if the handle is stale.
     ///
     /// This is the number a shader indexes with, which is why it is public: a

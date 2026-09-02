@@ -70,7 +70,7 @@ pub type ComputePipelineHandle = Handle<ComputePipeline>;
 /// the interpretation off the view's format and ignore this — each backend's
 /// conversion says where it drops it.
 ///
-/// Two variants and not four: integer and multisampled sampled images are
+/// Three variants and not five: integer and multisampled sampled images are
 /// things no shader in this engine declares, and a variant nothing constructs is
 /// a variant no backend's mapping was ever checked against.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -78,6 +78,21 @@ pub enum SampleType {
     /// Ordinary filterable colour texels — a `Texture2D<float4>`.
     #[default]
     Float,
+    /// Float texels a hardware filter cannot blend: WebGPU's
+    /// `'unfilterable-float'`.
+    ///
+    /// **A format's filterability is not the shader's choice, and WebGPU checks
+    /// it at bind time.** `r32float`, `rg32float` and `rgba32float` are
+    /// unfilterable without the `float32-filterable` feature, and a view of one
+    /// handed to a slot declaring [`Float`](SampleType::Float) is refused —
+    /// "None of the supported sample types (UnfilterableFloat) ... match the
+    /// expected sample types (Float)" — however the shader goes on to read it.
+    /// A slot of this kind may be read by `Load`/`textureLoad` and by a
+    /// non-filtering sampler, and by nothing else.
+    ///
+    /// The other three backends take the interpretation off the view's format
+    /// and ignore this exactly as they ignore [`Float`](SampleType::Float).
+    UnfilterableFloat,
     /// A depth texture read through a comparison sampler: HLSL's
     /// `Texture2D<float>` beside a `SamplerComparisonState`, WGSL's
     /// `texture_depth_2d`.

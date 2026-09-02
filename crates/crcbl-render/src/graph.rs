@@ -3077,10 +3077,12 @@ impl TransientImageDesc {
     /// physical image for it.
     ///
     /// **A depth format rather than `R32Float`.** `shaders/hiz.slang`'s header
-    /// carries the whole of it: `R32Float` is unfilterable in WebGPU, so binding
-    /// one would need a third [`SampleType`](crcbl_hal::SampleType) across four
-    /// backends, and the pyramid would be a different texture type from the
-    /// prepass that is its own level 0.
+    /// carries the whole of it: `R32Float` is unfilterable in WebGPU, and the
+    /// pyramid would be a different texture type from the prepass that is its
+    /// own level 0. The seam has since grown
+    /// [`SampleType::UnfilterableFloat`](crcbl_hal::SampleType::UnfilterableFloat)
+    /// for the probe visibility maps, so the first half of that reason is now
+    /// answerable; the second is not, and it is the one that decided this.
     ///
     /// [`scene_depth`]: TransientImageDesc::scene_depth
     /// [`bloom_mip`]: TransientImageDesc::bloom_mip

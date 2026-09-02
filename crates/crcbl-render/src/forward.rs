@@ -191,7 +191,9 @@ use crate::sky_pass::SkyPass;
 use crate::smaa::Smaa;
 use crate::ssao::{Ssao, cached_group};
 use crate::ssr::{Ssr, SsrImages};
-use crate::texture::{UploadedTexture, upload_texture, upload_texture_mip_layers};
+use crate::texture::{
+    UploadedTexture, upload_texture, upload_texture_layers, upload_texture_mip_layers,
+};
 use crate::transient::{TransientImageDesc, TransientPool};
 use crate::upscale::Upscale;
 use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages};
@@ -522,6 +524,28 @@ const LTC_TABLE_BINDING: u32 = 27;
 /// the frame on every pass that computed one.
 const CONTACT_SHADOW_BINDING: u32 = 28;
 
+/// The bind-group slot `docs/plan/50-irradiance-probes.md`'s per-probe
+/// visibility maps are read through: one `Rg32Float` layer per probe.
+///
+/// **Appended past [`CONTACT_SHADOW_BINDING`], never inserted**, for that
+/// constant's reason exactly: `crcbl-mtl` gives a resource the next index in its
+/// Metal argument table by counting the same-table entries of this layout, and
+/// Slang numbers a stage's arguments by declaration order, so the two agree only
+/// while both ascend. 29 is past everything `mesh_cluster.slang` declares, so it
+/// needs no mirror there and no index anything already owns moves —
+/// `msl/mesh.metal` puts it at `texture(7)`, the next free index of that table.
+///
+/// **A texture rather than a storage buffer, and that is forced**: the raster
+/// path's vertex stage is already at every storage buffer a WebGPU device
+/// guarantees, which is the same reason [`SPECULAR_DFG_BINDING`] is an image.
+///
+/// **No sampler**, like the occlusion channel and both cooked tables:
+/// `mesh.slang`'s `probe_moments` is four clamped `Load`s and a blend written
+/// out, because a hardware filter's weights are fixed-function arithmetic four
+/// rasterisers compute independently — and because `Rg32Float` is not a
+/// filterable format on WebGPU without an optional feature.
+const PROBE_VISIBILITY_BINDING: u32 = 29;
+
 /// [`crcbl_shaders::dfg::DFG_SIZE`] as an image extent.
 ///
 /// The table is square, and its size is a compile-time constant, so the
@@ -589,6 +613,28 @@ const AMBIENT_OCCLUSION_NONE: [u8; 4] = [
 /// different value should be an edit here rather than a search for which
 /// callers of a shared name meant which thing.
 const CONTACT_SHADOW_NONE: u8 = 0xFF;
+
+/// The one `Rg32Float` texel that occludes nothing: a mean distance of
+/// [`probe_visibility::FAR`](crcbl_shaders::probe_visibility::FAR) and its
+/// square.
+///
+/// What [`ForwardRenderer::probe_visibility_placeholder`] holds, and therefore
+/// what `mesh.slang` reads on a frame drawn before anything was captured or with
+/// `r_probe_visibility` off. No surface in any scene is further away than that,
+/// so `probe_weight` answers one for every probe and every fragment, and the
+/// grid is the unweighted trilinear blend it was before this rung — which is
+/// what makes the off position bit-identical rather than merely close.
+///
+/// Any *smaller* value would be a silent occluder: every probe in every scene
+/// would read as being behind a wall, and the whole grid would collapse onto
+/// `PROBE_OCCLUDED_WEIGHT`.
+fn probe_visibility_none() -> [u8; crcbl_shaders::probe_visibility::TEXEL_BYTES] {
+    let mut texel = [0u8; crcbl_shaders::probe_visibility::TEXEL_BYTES];
+    let far = crcbl_shaders::probe_visibility::FAR;
+    texel[..4].copy_from_slice(&far.to_le_bytes());
+    texel[4..].copy_from_slice(&(far * far).to_le_bytes());
+    texel
+}
 
 /// The reversed-Z far plane, in the two places that have to agree about it.
 ///
@@ -1696,6 +1742,26 @@ pub struct ForwardRenderer {
     /// past this one's single texel would cost the frame its **sun**, not its
     /// ambient. `mesh.slang`'s `contact_at` is what clamps it.
     contact_shadow_placeholder: UploadedTexture,
+    /// A 1×1×1 `Rg32Float` image holding [`probe_visibility_none`], so a group
+    /// of the mesh layout can fill [`PROBE_VISIBILITY_BINDING`] before anything
+    /// has been captured — and so the console switch has something to name when
+    /// the maps are turned off.
+    ///
+    /// [`ForwardRenderer::ambient_occlusion_placeholder`]'s argument, with the
+    /// same clamp on the shader's side: `mesh.slang`'s `probe_moments` clamps
+    /// against `GetDimensions`, so all four of its taps land on this image's one
+    /// texel and every probe reads as unobstructed.
+    probe_visibility_placeholder: UploadedTexture,
+    /// The captured maps, one `Rg32Float` layer per probe — `None` until
+    /// [`ForwardRenderer::capture_probe_visibility`] has run, which is every
+    /// frame drawn by a caller that never calls it.
+    probe_visibility: Option<UploadedTexture>,
+    /// The scene's static triangles, kept for that capture and for nothing else.
+    ///
+    /// Empty for a description that reserved no probes, which is what makes the
+    /// retention cost of this rung zero for every caller that does not use it —
+    /// see [`crate::probe_visibility`].
+    probe_occluders: crate::probe_visibility::Occluders,
     /// The split-sum `DFG` table as an `Rgba8Unorm` image — binding
     /// [`SPECULAR_DFG_BINDING`], read by multi-scatter energy compensation and
     /// by every area light's specular term.
@@ -2221,6 +2287,15 @@ struct MeshGroup {
     /// [`MeshGroup::ambient_occlusion`]'s terms exactly, including that every
     /// group built at `build` names the placeholder.
     contact_shadow: ImageViewHandle,
+    /// Binding [`PROBE_VISIBILITY_BINDING`]. The captured per-probe visibility
+    /// maps for the camera's pass, and the one-texel placeholder everywhere
+    /// else — see [`ForwardRenderer::probe_visibility_placeholder`].
+    ///
+    /// [`MeshGroup::ambient_occlusion`]'s terms, with one difference: the image
+    /// is not a graph transient but an ordinary uploaded texture, so what makes
+    /// this a per-frame swap is the console switch and whether a capture has
+    /// happened yet — neither of which is known at `build`.
+    probe_visibility: ImageViewHandle,
 }
 
 impl MeshGroup {
@@ -2455,6 +2530,13 @@ impl MeshGroup {
             binding: CONTACT_SHADOW_BINDING,
             array_index: 0,
             resource: BindingResource::ImageView(self.contact_shadow),
+        });
+        // And the probe visibility maps above that, last of the set and on the
+        // same ascending terms — see [`PROBE_VISIBILITY_BINDING`].
+        entries.push(BindGroupEntry {
+            binding: PROBE_VISIBILITY_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(self.probe_visibility),
         });
         entries
     }
@@ -3062,6 +3144,11 @@ impl ForwardRenderer {
         // reads a bounding box out of, and a DAG's coarser levels approximate
         // the same surface inside the same box.
         let mesh_ids: Vec<u32> = residents.iter().map(ResidentMesh::id).collect();
+        // The scene's own triangles, kept for the probe-visibility capture and
+        // for nothing else — and kept at all only when the description reserves
+        // a probe, so a scene without one pays no memory for this rung. Taken
+        // here because `scene` is the caller's and is read once.
+        let probe_occluders = crate::probe_visibility::Occluders::from_scene(scene, &mesh_ids);
         // The same list one level down: what a caller reserving a skinned region
         // names its mesh with. Read here beside the ids rather than from
         // `residents` later, because the descriptions this came from are the
@@ -4000,6 +4087,31 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
+        // `docs/plan/50-irradiance-probes.md`'s per-probe visibility maps, last
+        // of the set — see [`PROBE_VISIBILITY_BINDING`] on why last is
+        // structural.
+        //
+        // `D2Array` has to be *declared*, not merely bound: WebGPU compares the
+        // dimension a layout entry claims against the view handed to it at
+        // pipeline creation, which is the normal page's own note.
+        // `UnfilterableFloat` for the same reason and measured the same way: the
+        // image is `Rg32Float`, which is unfilterable without WebGPU's
+        // `float32-filterable`, and this slot declared `Float` made Chromium
+        // refuse the whole mesh bind group — "None of the supported sample types
+        // (UnfilterableFloat) ... match the expected sample types (Float)" —
+        // which took every 3D demo's frame to black. Reading it only with `Load`
+        // does not lift that: the check is on the layout against the view's
+        // format, not on how the shader gets at it.
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: PROBE_VISIBILITY_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2Array,
+                sample_type: SampleType::UnfilterableFloat,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
         let mesh_desc = BindGroupLayoutDesc {
             label: Some(MESH_LAYOUT_LABEL),
             entries: &mesh_entries,
@@ -4188,6 +4300,22 @@ impl ForwardRenderer {
             &[CONTACT_SHADOW_NONE],
         )?;
         rollback.textures.push(contact_shadow_placeholder);
+
+        // The probe-visibility placeholder, on the two above it's terms: every
+        // group of this layout has to fill [`PROBE_VISIBILITY_BINDING`], and
+        // nothing has been captured when they are built. One texel of
+        // [`probe_visibility_none`], which no surface is further away than, so a
+        // probe read through it keeps all of its weight.
+        let probe_visibility_placeholder = upload_texture_layers(
+            device,
+            queue,
+            "probe visibility placeholder",
+            Format::Rg32Float,
+            1,
+            1,
+            &[&probe_visibility_none()],
+        )?;
+        rollback.textures.push(probe_visibility_placeholder);
 
         // The split-sum `DFG` table, uploaded once and read by every frame this
         // renderer will draw — `crcbl_shaders::dfg` is where it is integrated,
@@ -4393,6 +4521,7 @@ impl ForwardRenderer {
                 ambient_occlusion: ambient_occlusion_placeholder.view,
                 // The same, one binding along, and for the same reason.
                 contact_shadow: contact_shadow_placeholder.view,
+                probe_visibility: probe_visibility_placeholder.view,
             }
             .entries(&shared);
             let group = device.create_bind_group(&BindGroupDesc {
@@ -4406,8 +4535,9 @@ impl ForwardRenderer {
             mesh_groups.push(group);
             // Kept so the forward pass can rebuild this group against the
             // occlusion image the graph realised, without re-deriving twenty
-            // bindings out of fields that no longer exist by then. Exactly one
-            // entry differs — see [`ForwardRenderer::screen_channel_groups`].
+            // bindings out of fields that no longer exist by then. Only the
+            // screen-space channels and the probe visibility maps differ — see
+            // [`ForwardRenderer::screen_channel_groups`].
             mesh_group_entries.push(entries);
 
             // The depth prepass's group: this one again, counting its clusters
@@ -4439,6 +4569,7 @@ impl ForwardRenderer {
                 shadow_map: shadow_atlas_view,
                 ambient_occlusion: ambient_occlusion_placeholder.view,
                 contact_shadow: contact_shadow_placeholder.view,
+                probe_visibility: probe_visibility_placeholder.view,
             }
             .entries(&shared);
             let group = device.create_bind_group(&BindGroupDesc {
@@ -4506,6 +4637,7 @@ impl ForwardRenderer {
                     // materialises every global into every entry point.
                     ambient_occlusion: ambient_occlusion_placeholder.view,
                     contact_shadow: contact_shadow_placeholder.view,
+                    probe_visibility: probe_visibility_placeholder.view,
                 }
                 .entries(&shared);
                 let group = device.create_bind_group(&BindGroupDesc {
@@ -5006,6 +5138,13 @@ impl ForwardRenderer {
             target_format,
             ambient_occlusion_placeholder,
             contact_shadow_placeholder,
+            probe_visibility_placeholder,
+            // Nothing has been captured, so every frame drawn before
+            // `capture_probe_visibility` reads the placeholder and weighs every
+            // probe at one — which is the frame this renderer drew before the
+            // maps existed.
+            probe_visibility: None,
+            probe_occluders,
             specular_dfg,
             ltc_table,
             mesh_group_entries,
@@ -6561,6 +6700,102 @@ impl ForwardRenderer {
         self.instances.remove(handle);
     }
 
+    /// Captures a visibility map for every probe, from the static geometry
+    /// standing in the scene right now.
+    ///
+    /// `docs/plan/50-irradiance-probes.md`'s rung: each probe records how far
+    /// away the nearest surface is in every direction, and `mesh.slang`'s
+    /// `probe_irradiance` then weighs each of a fragment's eight probes by
+    /// whether it can *see* that fragment — so a probe on the far side of a wall
+    /// contributes nothing and a room stops lighting the room next door.
+    /// This crate's own `probe_visibility` module is the capture and
+    /// [`crcbl_shaders::probe_visibility`] is the format.
+    ///
+    /// # Call it once, after the scene's walls are placed
+    ///
+    /// **A description carries no instances** — [`SceneDesc`] is meshes,
+    /// materials, a page and the probe rows, and the objects arrive afterwards
+    /// through [`ForwardRenderer::add_instance`] — so there is nothing for a
+    /// capture inside [`ForwardRenderer::with_scene`] to be about. This is the
+    /// call that has the room in it, and an application makes it once its static
+    /// geometry is placed.
+    ///
+    /// A caller that never makes it draws exactly the frame this renderer drew
+    /// before the maps existed: every group names the one-texel placeholder,
+    /// which no surface is further away than, and every probe keeps all of its
+    /// weight.
+    ///
+    /// **It is a capture of geometry and not a bake of light.** Nothing about
+    /// the lights is recorded, every one of them still moves, and the rows the
+    /// probes carry are untouched.
+    ///
+    /// # What it sees, and what it does not
+    ///
+    /// Every instance live in the pool when it is called, at the transform it
+    /// then has, drawn from its mesh's level-0 triangles. Objects that move
+    /// afterwards keep the occlusion they had here, which is the accepted limit
+    /// this technique has everywhere it is used — a probe volume is about the
+    /// walls. Recapturing after a wall moves is this call again.
+    ///
+    /// **The device must be idle.** The previous capture's image is released
+    /// here, and a frame in flight may still be reading it.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the upload. The previous maps are kept on the failing
+    /// path, so a renderer that has captured once and then failed goes on
+    /// drawing with what it had.
+    pub fn capture_probe_visibility(
+        &mut self,
+        device: &dyn Device,
+        queue: QueueHandle,
+    ) -> Result<(), HalError> {
+        let placed: Vec<crate::probe_visibility::Occluder> = self
+            .instances
+            .live()
+            .into_iter()
+            .map(|record| crate::probe_visibility::Occluder {
+                mesh: record.mesh,
+                transform: Mat4::from_cols_array(&record.transform),
+            })
+            .collect();
+        let captured =
+            crate::probe_visibility::capture(&self.probe_volume, &self.probe_occluders, &placed);
+        if captured.probes() == 0 {
+            // No probes, or nothing placed for a map to be about. Leaving the
+            // placeholder bound is the honest answer, and it is what a scene
+            // with no probes has always read.
+            return Ok(());
+        }
+        let layers: Vec<&[u8]> = captured
+            .bytes()
+            .chunks_exact(crcbl_shaders::probe_visibility::LAYER_BYTES)
+            .collect();
+        let extent = crcbl_shaders::probe_visibility::EXTENT;
+        let uploaded = upload_texture_layers(
+            device,
+            queue,
+            "probe visibility",
+            Format::Rg32Float,
+            extent,
+            extent,
+            &layers,
+        )?;
+        // The cached groups name the view this replaces, so they go before it
+        // does — a bind group outliving the image it names is a validation
+        // error on every backend that checks, and a use-after-free on the ones
+        // that do not.
+        for slot in &mut self.screen_channel_groups {
+            if let Some((_, stale)) = slot.take() {
+                device.destroy_bind_group(stale);
+            }
+        }
+        if let Some(previous) = self.probe_visibility.replace(uploaded) {
+            previous.destroy(device);
+        }
+        Ok(())
+    }
+
     /// Resolves a description's mesh and material indices into the table ids the
     /// GPU reads.
     ///
@@ -7891,10 +8126,11 @@ impl ForwardRenderer {
         };
 
         // The camera's group rebuilt against the two screen-space channels the
-        // graph just realised, cached against both views — the shape the tonemap
-        // group below has, and for the same reason: a graph transient's view is
-        // not known until execute time. Two entries of the stored list differ;
-        // see `ForwardRenderer::mesh_group_entries`.
+        // graph just realised, cached against both views and the probe
+        // visibility maps — the shape the tonemap group below has, and for the
+        // same reason: a graph transient's view is not known until execute time.
+        // Three entries of the stored list differ; see
+        // `ForwardRenderer::mesh_group_entries`.
         //
         //
         // The rebuild is unconditional, so there is one shape of forward pass
@@ -7905,6 +8141,16 @@ impl ForwardRenderer {
         // naming two transients is stale as soon as either one moves.
         let entries = self.mesh_group_entries[self.frame].clone();
         let mesh_layout = self.mesh_layout;
+        // The captured probe-visibility maps, or the one-texel placeholder when
+        // nothing has been captured or the console switch is off. It rides
+        // through the same cache as the two channels beside it — it is not a
+        // graph transient, but it does change between frames when the switch
+        // moves, and a group cached against a view it no longer names is the
+        // failure that cache exists to stop.
+        let probe_visibility_view = match &self.probe_visibility {
+            Some(captured) if crate::probe_visibility::enabled() => captured.view,
+            _ => self.probe_visibility_placeholder.view,
+        };
         let cached_mesh = &mut self.screen_channel_groups[self.frame];
         pass.execute(move |ctx| {
             let view = ctx.image_view(occlusion);
@@ -7916,6 +8162,7 @@ impl ForwardRenderer {
                 &[
                     (AMBIENT_OCCLUSION_BINDING, view),
                     (CONTACT_SHADOW_BINDING, contact_view),
+                    (PROBE_VISIBILITY_BINDING, probe_visibility_view),
                 ],
                 "mesh frame",
                 mesh_layout,
@@ -10234,6 +10481,10 @@ impl ForwardRenderer {
         self.ssao.destroy(device);
         self.ambient_occlusion_placeholder.destroy(device);
         self.contact_shadow_placeholder.destroy(device);
+        self.probe_visibility_placeholder.destroy(device);
+        if let Some(captured) = self.probe_visibility {
+            captured.destroy(device);
+        }
         self.specular_dfg.destroy(device);
         self.ltc_table.destroy(device);
         self.normal_page.destroy(device);

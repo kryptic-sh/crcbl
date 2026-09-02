@@ -18,16 +18,41 @@ day.** The grid below stays, and everything that _fills_ it changes:
   outlives its inputs), whatever thread computed it. Both are replaced by the
   updater below in the slice that lands it; until then they stand, documented
   here as the thing being removed.
-- **Each probe gains a visibility map**: a small octahedral depth + depth² image
-  (Majercik et al. 2019's contribution, and the one thing that makes a probe
-  grid stop leaking). `probe_irradiance` weights each of a fragment's eight
-  probes by a Chebyshev visibility test against it, so a probe on the far side
-  of a wall gets no weight. The maps are **rendered, not baked**: a depth cube
-  per probe from the static geometry, drawn on load and again on demand for the
-  probes a static-geometry change touches — the same shape as a reflection
-  capture, a runtime capture of geometry rather than of light. Dynamic objects
-  are not in them and do not occlude the bounce, which is the accepted limit
-  (Enlighten's too).
+- **Each probe gains a visibility map — this half has landed.** A 16×16
+  octahedral depth + depth² map per probe (Majercik et al. 2019's contribution,
+  and the one thing that makes a probe grid stop leaking), with a one-texel
+  replicated border so a bilinear read across the seam is continuous.
+  `probe_irradiance` weights each of a fragment's eight probes by a Chebyshev
+  visibility test against it, so a probe on the far side of a wall gets no
+  weight. `crcbl_shaders::probe_visibility` owns the layout, the octahedral
+  mapping and the bound, and is the Rust mirror the render tests compare the
+  shader against; `crcbl_render::probe_visibility` captures the maps, on the CPU
+  for now, by intersecting the scene's resident static triangles.
+
+  Where it departs from what the paragraphs below describe as intended: the
+  storage is a `Rg32Float` 2D **array**, one layer per probe, not a cube array —
+  no sampler, four `Load`s and a written-out bilinear. That does not keep it off
+  WebGPU's filterability rule, which is the one thing this slice got wrong and
+  had to fix: the check is on the layout entry against the view's format, not on
+  how the shader reads it, so Chromium refused the whole mesh bind group and
+  every 3D demo drew black. `crcbl_hal::SampleType` grew a third variant,
+  `UnfilterableFloat`, mapped through `crcbl-webgpu`'s wire codes and
+  `web/engine/`'s tables; the other three backends take the interpretation off
+  the view's format and ignore it, as they already ignored `Float`. The capture
+  is `ForwardRenderer::capture_probe_visibility(device, queue)`, an explicit
+  call after the static geometry is placed, **not** part of `with_scene`: a
+  `SceneDesc` carries meshes, materials and probes and no instances, so a
+  capture inside `with_scene` would see an empty world. And recapture — on
+  scroll, or when static geometry changes — is not written; the maps are
+  captured once. Dynamic objects are not in them and do not occlude the bounce,
+  which is the accepted limit (Enlighten's too).
+
+  Reachability is `r_probe_visibility`, a console variable declared beside the
+  pass, defaulting on; off rebinds the 1×1 placeholder every scene without
+  probes already reads. A scene with no probes is byte-identical to the frame
+  before this landed, which the probes golden was used to prove: with the
+  capture disabled it compares at zero differing pixels.
+
 - **The raster updater, every frame, on all four backends**: the sun's near
   cascade (and any lamp the application asks for) also writes flux and normal —
   a reflective shadow map — and one compute pass gathers the RSM into every
@@ -58,13 +83,14 @@ are per level, so [43-render-standards.md](43-render-standards.md) §5's C1 (one
 storage buffer) holds with an offset per level.
 
 **Captured on load, then on scroll — never baked.** The visibility maps for the
-whole initial window are rendered when a scene loads; after that only the slab a
-scroll exposes is rendered, in the frame it appears, and a probe whose static
-geometry changed is re-rendered on demand. The lighting rows are never stored
-across a load: they are recomputed every frame by the updater, which is what
-keeps the sun and every lamp dynamic. "Baked on load" in conversation means this
-capture, and the word the plan uses for it is _captured_, because what is stored
-is geometry.
+whole initial window are captured when a scene loads — that much runs; after
+that only the slab a scroll exposes should be captured, in the frame it appears,
+and a probe whose static geometry changed re-captured on demand. Neither of the
+last two exists yet, and neither can until the clipmap does. The lighting rows
+are never stored across a load: they are recomputed every frame by the updater,
+which is what keeps the sun and every lamp dynamic. "Baked on load" in
+conversation means this capture, and the word the plan uses for it is
+_captured_, because what is stored is geometry.
 
 **One base, two sample producers — nothing else is bespoke.** The pipeline is
 the same on every tier, and the two tiers differ in exactly one stage:
@@ -102,13 +128,24 @@ withdrawn — leaking is the defect the decision is about. This section supersed
 the August account of the authored irradiance, which was removed from this file
 on 2026-08-30 rather than left standing beside it.
 
-**Pricing, before it is built.** Visibility capture: 6 × 32² depth per probe,
-thousands of probes in a few hundred milliseconds on desktop, amortised over
-frames on the browser tier. Per frame: the RSM's two extra targets on the near
-cascade and one gather pass — the DDGI-class budget of roughly half a
+**What the visibility half costs, measured.**
+`apps/lantern --headless --frames 400 --size 1920x1080` on radv (RX 7900 XTX,
+Mesa 26.2.1), median of three runs. The capture is a one-off at load and costs
+**16.8 ms for 60 probes against 12 occluder meshes** (the room's second view, 10
+occluders, takes 15.2 ms) — CPU, single-threaded, ray-cast against the resident
+triangles. The per-frame price of the weighting does not resolve: the `forward`
+pass reports **0.293 ms p50 with `r_probe_visibility` on against 0.302 ms with
+it off**, which is inside the 0.02 ms spread the same three runs show, so the
+eight extra octahedral fetches per fragment cost less than this instrument can
+see.
+
+**Pricing for the halves not built.** Per frame: the RSM's two extra targets on
+the near cascade and one gather pass — the DDGI-class budget of roughly half a
 millisecond to a millisecond at 1080p on desktop; the browser tier takes a
-smaller grid. Each figure is measured on the three tiers before the rung counts,
-per the standing rule.
+smaller grid. A clipmap of thousands of probes makes the capture above the
+number to watch, and at 0.28 ms per probe it is the one that has to move to the
+GPU or off the load path. Each figure is measured on the three tiers before the
+rung counts, per the standing rule.
 
 **Order.** Among the raster lighting items this rebuild comes after LTC area
 lights, the shadow atlas and the AO tint, and **ahead of the atmosphere** — the
@@ -248,13 +285,16 @@ path behind a selector, not a capability that could have been a uniform.
 
 ### Determinism: the SSR argument does not transfer, and does not need to
 
-The evaluation is three dot products, seven lerps and one `max`. There is **no
-comparison between two fetched values anywhere in it** — SSR's exposure is that
-the first tap whose comparison flips _is_ the answer, and a probe lookup has no
-tap and no flip. The one discontinuous quantity is the grid cell index, and it
-is provably not a hazard: the trilinear weight on the far corner reaches exactly
-zero at the boundary where the index changes, so a driver landing in cell `i` at
-`f≈1` and one landing in cell `i+1` at `f≈0` compute the same value.
+The evaluation is a chain of lerps, three dot products, a divide and one `max`.
+There is **no comparison whose branches disagree at the point it flips** — SSR's
+exposure is that the first tap whose comparison flips _is_ the answer, and a
+probe lookup has no tap. Two flips exist and neither is a hazard. The grid cell
+index: the trilinear weight on the far corner reaches exactly zero at the
+boundary where the index changes, so a driver landing in cell `i` at `f≈1` and
+one landing in cell `i+1` at `f≈0` compute the same value. And `probe_weight`'s
+`to_surface <= moments.x`: at the point it flips, `behind` is zero, so the
+Chebyshev bound is `variance / variance` — one, which is what the other branch
+returns. Both sides of both flips meet.
 
 So a probe golden goes under `Tolerance::RASTERISER` like every other 3D golden.
 
@@ -265,8 +305,12 @@ So a probe golden goes under `Tolerance::RASTERISER` like every other 3D golden.
   constant environment of radiance `L` integrates to irradiance `π·L`, and the
   L1 band's transfer coefficient is `2π/3`. A transcription slip there would
   pass every other test in this tree.
-- **The bit-identity gate**: slice 1 re-blesses nothing. If any golden moves,
-  the additive-zero property is broken. Shown red by perturbing one coefficient.
+- **The bit-identity gate**: slice 1 re-blessed nothing, and the property it
+  guards is now the narrower one that a scene with **no probes** is unchanged —
+  the visibility slice moved every golden that has them, which is what a grid
+  that stops leaking is supposed to do. The unchanged half was shown by
+  disabling the capture and re-comparing the probes golden: zero differing
+  pixels.
 - **`Scene::Probes`**: the open box with ambient at zero and the sun right down,
   so every pixel is the probe term and nothing else — the anti-vacuity condition
   `Scene::Ao` already relies on. Two probes with opposite-coloured L1, and the
@@ -274,3 +318,11 @@ So a probe golden goes under `Tolerance::RASTERISER` like every other 3D golden.
   this document mandates for anything a tolerance cannot bound. A flat ambient
   gives ratio 1.0 and a zero volume gives a black frame, so it fails in both
   directions rather than asserting what unfinished code already returns.
+- **The leak test**, `a_probe_behind_a_wall_lights_nothing_through_it`: one
+  fixture drawn twice, with and without a wall between a lit probe and the band
+  it would otherwise light. The walled −X band must drop by at least
+  `LEAK_RATIO`, and the +X band must _gain_ by `LEAK_MIN_GAIN` levels because
+  the same wall hides the black probe that was a quarter of its blend — so a run
+  that simply darkened the room fails it too. Shown red by forcing the Chebyshev
+  weight to a constant `1.0`, which reports both bands identical across the
+  pair.

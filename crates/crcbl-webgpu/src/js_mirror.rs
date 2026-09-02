@@ -1381,7 +1381,11 @@ fn stream_mirror() -> FileMirror {
             (
                 "SAMPLE_TYPE",
                 "SAMPLE_TYPE",
-                codes![SAMPLE_TYPE_FLOAT, SAMPLE_TYPE_DEPTH],
+                codes![
+                    SAMPLE_TYPE_FLOAT,
+                    SAMPLE_TYPE_DEPTH,
+                    SAMPLE_TYPE_UNFILTERABLE_FLOAT,
+                ],
             ),
             (
                 "BINDING_KIND",
@@ -2017,12 +2021,12 @@ fn gpu_stream_js_mirrors_every_command_tag_and_enum_code_tag_rs_declares() {
         "gpu-stream.js's enum table count moved; the mirror above has to move with it"
     );
     assert_eq!(
-        ordered_codes, 94,
+        ordered_codes, 95,
         "gpu-stream.js's enum code count moved; the mirror above has to move with it"
     );
     assert_eq!(
         claimed.len(),
-        173,
+        174,
         "the tag.rs constants gpu-stream.js mirrors moved; the mirror above has to move with it"
     );
 }
@@ -2465,7 +2469,7 @@ fn every_wire_code_tag_rs_declares_is_named_in_web_engine_js() {
     }
     assert_eq!(
         declared.len(),
-        269,
+        270,
         "tag.rs's value-constant count moved; the mirror above has to move with it"
     );
     assert_eq!(
@@ -2473,7 +2477,7 @@ fn every_wire_code_tag_rs_declares_is_named_in_web_engine_js() {
             .iter()
             .filter(|name| mirrored.contains(*name))
             .count(),
-        230,
+        231,
         "tag.rs's mirrored-constant count moved; the mirror above has to move with it"
     );
 }

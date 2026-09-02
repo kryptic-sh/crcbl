@@ -248,6 +248,11 @@ pub mod light;
 /// spherical-harmonic evaluation it does it with.
 pub mod probe;
 
+/// The per-probe octahedral visibility map `mesh.slang` weighs each of a
+/// fragment's eight probes against, in the layout that shader reads — and the
+/// Rust mirror of the Chebyshev test it does it with.
+pub mod probe_visibility;
+
 /// The cluster record `mesh_cluster.slang` indexes, in the layout that shader
 /// declares. `crcbl_scene::meshlet` is what builds them.
 pub mod meshlet;

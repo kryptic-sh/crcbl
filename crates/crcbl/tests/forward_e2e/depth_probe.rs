@@ -130,6 +130,12 @@ struct DepthProbe {
     /// terms exactly — the real cooked one, bound because the module declares
     /// it. No frame this probe draws holds an area light, so nothing reads it.
     ltc_table: crcbl::render::UploadedTexture,
+    /// `mesh.slang`'s per-probe visibility maps, as the renderer's own
+    /// off-switch binds them: one layer of one texel holding
+    /// `crcbl::shaders::probe_visibility::FAR`, so every probe reads as
+    /// unobstructed and the irradiance this probe measures is the unweighted
+    /// trilinear blend.
+    probe_visibility: crcbl::render::UploadedTexture,
     base_color_sampler: crcbl::hal::SamplerHandle,
     /// A 1×1 `D32Float` image standing in for topic 18's shadow atlas, and its
     /// **comparison** sampler.
@@ -679,6 +685,31 @@ impl DepthProbe {
         )
         .expect("the cooked LTC table uploads");
 
+        // And `mesh.slang`'s per-probe visibility maps, bound as the renderer's
+        // own off-switch binds them: one layer of one texel holding
+        // `crcbl::shaders::probe_visibility::FAR`, which no surface is further
+        // away than, so `probe_weight` answers one for every probe and the
+        // irradiance this probe measures is the unweighted trilinear blend.
+        // `upload_texture_layers` rather than `upload_texture` because the
+        // module declares a `Texture2DArray`, and WebGPU compares the view type
+        // against the layout's at pipeline creation.
+        let probe_visibility = {
+            let far = crcbl::shaders::probe_visibility::FAR;
+            let mut texel = [0u8; crcbl::shaders::probe_visibility::TEXEL_BYTES];
+            texel[..4].copy_from_slice(&far.to_le_bytes());
+            texel[4..].copy_from_slice(&(far * far).to_le_bytes());
+            crcbl::render::upload_texture_layers(
+                device,
+                headless.queue,
+                "probe visibility placeholder",
+                Format::Rg32Float,
+                1,
+                1,
+                &[&texel],
+            )
+            .expect("a one-texel visibility placeholder")
+        };
+
         let entries = [
             crcbl::hal::BindGroupLayoutEntry {
                 binding: 0,
@@ -911,6 +942,23 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl::hal::BindingFlags::empty(),
             },
+            // `docs/plan/50-irradiance-probes.md`'s per-probe visibility maps,
+            // on the row above's terms and with two differences that matter:
+            // the module declares a `Texture2DArray`, so this entry has to as
+            // well — WebGPU refuses a pipeline whose layout claims a dimension
+            // the bound view does not have — and the image is `Rg32Float`,
+            // which is unfilterable there, so the slot must say so too.
+            crcbl::hal::BindGroupLayoutEntry {
+                binding: 29,
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::SampledImage {
+                    view_type: crcbl::hal::ImageViewType::D2Array,
+                    sample_type: SampleType::UnfilterableFloat,
+                },
+                count: 1,
+                flags: crcbl::hal::BindingFlags::empty(),
+            },
         ];
 
         // **This table is a hand-written copy of `mesh.slang`'s, and this is
@@ -1045,6 +1093,14 @@ impl DepthProbe {
                 array_index: 0,
                 resource: crcbl::hal::BindingResource::ImageView(occlusion.view),
             },
+            // The one-texel visibility placeholder, which is what makes this
+            // probe's probe term the unweighted trilinear blend the Rust mirror
+            // predicts.
+            crcbl::hal::BindGroupEntry {
+                binding: 29,
+                array_index: 0,
+                resource: crcbl::hal::BindingResource::ImageView(probe_visibility.view),
+            },
         ];
         let group = device
             .create_bind_group(&crcbl::hal::BindGroupDesc {
@@ -1131,6 +1187,7 @@ impl DepthProbe {
             occlusion,
             specular_dfg,
             ltc_table,
+            probe_visibility,
             base_color_sampler,
             shadow_atlas,
             shadow_atlas_view,
@@ -1155,6 +1212,7 @@ impl DepthProbe {
         self.occlusion.destroy(device);
         self.specular_dfg.destroy(device);
         self.ltc_table.destroy(device);
+        self.probe_visibility.destroy(device);
         device.destroy_buffer(self.visible_instances);
         device.destroy_buffer(self.mesh_table);
         device.destroy_buffer(self.probes);

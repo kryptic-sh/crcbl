@@ -38,8 +38,8 @@
 //! set to [`CompareOp::Always`] and writes on. `shaders/hiz.slang`'s header
 //! gives the reason in full — it keeps the pyramid the same texture type as the
 //! prepass at level 0, so the march reads all six bindings through one
-//! `DepthTexture2D` spelling and the seam needs no third
-//! [`SampleType`] for an unfilterable `R32Float`.
+//! `DepthTexture2D` spelling rather than binding an unfilterable `R32Float`
+//! beside a depth one.
 //!
 //! # The off-switch
 //!
@@ -50,7 +50,6 @@
 //! rather than a resource it requires.
 //!
 //! [`CompareOp::Always`]: crcbl_hal::CompareOp
-//! [`SampleType`]: crcbl_hal::SampleType
 
 use crcbl_hal::{
     BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,

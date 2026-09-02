@@ -2600,11 +2600,14 @@ const PROBE_INTERPOLATION_DELTA: f32 = 5.0;
 ///   function, which [`srgb_encode`] is.
 ///
 /// So what is left for this tolerance to cover is 8-bit rounding, the sRGB
-/// encode's own precision, and half a pixel of disagreement about where a
-/// fragment centre is. Measured over six channel/band pairs at **0.13 levels at
-/// worst on radv** and **0.18 on lavapipe** — a five-fold margin under this
-/// budget, with the rest of it left for the encode's own allowance on a backend
-/// nothing here has run.
+/// encode's own precision, half a pixel of disagreement about where a fragment
+/// centre is, and — since the visibility weighting arrived — the divide by a
+/// summed weight the two sides each compute in their own float order. Measured
+/// over six channel/band pairs at **0.20 levels at worst on radv** and **0.80 on
+/// lavapipe**, which is the whole of the headroom the software rasteriser has
+/// left: the weighting cost this comparison the margin it used to carry, and a
+/// backend noisier than llvmpipe would need this budget raised rather than the
+/// disagreement explained away.
 ///
 /// **What it can and cannot catch was measured too**, by scaling the mirror's
 /// result and watching this go red: a systematic error of 2% moves the worst
@@ -2666,6 +2669,15 @@ fn predicted_block_channel(centre: (u32, u32), half: (u32, u32), index: usize) -
         let irradiance = crcbl::shaders::probe::irradiance_at(
             &grid.volume,
             &grid.probes,
+            // **Every probe fully visible, and that is a claim rather than a
+            // convenience.** The fixture's two probes stand in open air over a
+            // flat floor with nothing between them and it, so the visibility
+            // capture `SceneState` runs for this scene must give every corner
+            // its whole weight — and if it does not, the device's frame and this
+            // prediction part company and this comparison is what says so. See
+            // `crcbl_shaders::probe_visibility`, where `NONE` is the map that
+            // occludes nothing.
+            &crcbl::shaders::probe_visibility::ProbeVisibility::NONE,
             probe_world(x, y),
             [0.0, 1.0, 0.0],
         );
@@ -2675,6 +2687,107 @@ fn predicted_block_channel(centre: (u32, u32), half: (u32, u32), index: usize) -
     }
     assert!(count > 0, "an empty block predicts nothing");
     total / count as f32
+}
+
+/// How many times brighter the `-X` band must be with the wall taken away.
+///
+/// **A ratio, so no uniform change can satisfy it**, and a floor set under what
+/// the pair measures rather than at it: the run that landed this reads `0.00`
+/// levels with the wall and about `123` without, which is every level the probe
+/// had. Four is a floor with room for every backend's own arithmetic and still
+/// far above the two levels `crcbl_golden::Tolerance::RASTERISER` allows two
+/// frames of one scene to differ by.
+const LEAK_RATIO: f32 = 4.0;
+
+/// The least the `+X` band must **gain** when the wall is added, in levels.
+///
+/// The other half of the opposite-directions claim, and a number rather than a
+/// bare inequality because the band is bright and 8-bit rounding alone can move
+/// it by a level: the run that landed this reads about 205 open and 233 walled,
+/// which is a gain of nearly thirty. Ten is a floor well under that and well
+/// over the two levels `crcbl_golden::Tolerance::RASTERISER` allows.
+const LEAK_MIN_GAIN: f32 = 10.0;
+
+/// The least the unobstructed `-X` band must measure, in levels of 255.
+///
+/// The anti-vacuity half: without it a fixture that drew a black frame both ways
+/// would satisfy every ratio below by dividing nothing by nothing. Set well under
+/// the level the fixture is built to reach — see
+/// `crcbl::screenshot::probe_leak_grid`, whose radiance is chosen so the
+/// brightest band stays inside the swapchain.
+const LEAK_MIN_LEVELS: f32 = 40.0;
+
+/// **The rung's claim, on the device: a probe on the far side of a wall lights
+/// nothing through it.**
+///
+/// One room drawn twice, differing in a single instance — the divider on the
+/// plane `x = 0`. `crcbl::screenshot::probe_leak_forward` is the fixture, and its
+/// grid holds one black probe at `-X` and one lit probe at `+X`, so the only
+/// light in the frame starts on the far side of that wall from the `-X` band.
+///
+/// **The two bands move in opposite directions, and that is what nothing else
+/// can fake.** Anything that darkened the frame — a wall's own occlusion, a
+/// shadow, an exposure change — moves both bands the same way.
+///
+/// * The `-X` band **loses** its light, because the wall now stands between it
+///   and the only probe that has any.
+/// * The `+X` band **gains**, because the same wall stands between it and the
+///   *black* probe, whose quarter of the blend was dragging it down.
+///
+/// A frame in which the visibility test did nothing draws both bands identically
+/// with the wall and without it, and fails both.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_probe_behind_a_wall_lights_nothing_through_it() {
+    crcbl_core::log::init_logging();
+
+    let frame = |wall: bool| {
+        let setup =
+            OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, move |device, queue, format| {
+                crcbl::screenshot::probe_leak_forward(device, queue, format, wall)
+            })
+            .unwrap_or_else(|why| panic!("a GPU backend opens for the probe leak scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format))
+            .expect("the readback is exactly one image")
+    };
+
+    let walled = frame(true);
+    let open = frame(false);
+    // The green channel: the lit probe holds a neutral environment, so all three
+    // carry the measurement and one of them is enough. Green is the channel a
+    // tint anywhere in the chain would be least likely to spare.
+    let band = |image: &Image, x: f32| block_channel(image, probe_pixel(x, 0.0), PROBE_BAND, 1);
+    let at = crcbl::screenshot::LEAK_BAND_AT;
+    let (near_walled, near_open) = (band(&walled, -at), band(&open, -at));
+    let (far_walled, far_open) = (band(&walled, at), band(&open, at));
+    eprintln!(
+        "crcbl render e2e: probe leak — -X band {near_walled:.2} walled against \
+         {near_open:.2} open; +X band {far_walled:.2} against {far_open:.2}"
+    );
+
+    assert!(
+        near_open >= LEAK_MIN_LEVELS,
+        "with nothing in the way the -X band must carry the lit probe's quarter of the \
+         blend, and it measures {near_open:.2} of the {LEAK_MIN_LEVELS} this fixture is \
+         built to reach — the probe term is not in this frame at all"
+    );
+    assert!(
+        near_walled * LEAK_RATIO < near_open,
+        "the -X band must lose the probe the wall now hides: {near_walled:.2} walled \
+         against {near_open:.2} open, which is not the {LEAK_RATIO}× drop a probe on the \
+         far side of a wall costs — light is leaking through it"
+    );
+    assert!(
+        far_open + LEAK_MIN_GAIN < far_walled,
+        "and the +X band must *gain* by at least {LEAK_MIN_GAIN} level(s), because the same \
+         wall hides the black probe that was a quarter of its blend: {far_walled:.2} walled \
+         against {far_open:.2} open — two bands moving the same way is one thing dimming the \
+         room, not a visibility test"
+    );
 }
 
 #[test]

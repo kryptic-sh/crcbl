@@ -988,7 +988,7 @@ fn a_binding_kind_code_no_variant_claims_is_refused_rather_than_folded_into_a_ne
         })
     ));
     let mut bytes = whole;
-    bytes[LAYOUT_KIND_AT + 2] = tag::SAMPLE_TYPE_DEPTH + 1;
+    bytes[LAYOUT_KIND_AT + 2] = tag::SAMPLE_TYPE_UNFILTERABLE_FLOAT + 1;
     assert!(matches!(
         decode_stream(&bytes),
         Err(DecodeError::InvalidEnum {

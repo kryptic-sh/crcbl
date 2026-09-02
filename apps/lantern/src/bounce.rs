@@ -400,6 +400,7 @@ pub fn probes() -> ProbeGrid {
 mod tests {
     use super::*;
     use crcbl::shaders::probe::irradiance_at;
+    use crcbl::shaders::probe_visibility::ProbeVisibility;
 
     /// The red-to-blue ratio of a colour, which is what every claim about the
     /// bounce's tint is measured in.
@@ -538,7 +539,13 @@ mod tests {
                     let index = ((z * PROBE_COUNTS[1] + y) * PROBE_COUNTS[0] + x) as usize;
                     let at = probe_position([x, y, z]);
                     assert_eq!(
-                        irradiance_at(&grid.volume, &grid.probes, at.to_array(), normal),
+                        irradiance_at(
+                            &grid.volume,
+                            &grid.probes,
+                            &ProbeVisibility::NONE,
+                            at.to_array(),
+                            normal,
+                        ),
                         grid.probes[index].irradiance(normal),
                         "the grid reads a different row at probe ({x}, {y}, {z})'s own \
                          position {at:?}"
@@ -589,7 +596,13 @@ mod tests {
         // The back wall's normal, which is the surface the golden reads this on.
         let facing = [0.0, 0.0, 1.0];
         let received = |rows: &[GpuProbe], at: Vec3| {
-            let probe = irradiance_at(&grid.volume, rows, at.to_array(), facing);
+            let probe = irradiance_at(
+                &grid.volume,
+                rows,
+                &ProbeVisibility::NONE,
+                at.to_array(),
+                facing,
+            );
             redness((Vec3::from(probe) + ambient).to_array())
         };
 

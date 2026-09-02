@@ -1641,6 +1641,8 @@ pub const fn blend_op_from_code(code: u8) -> Option<BlendOp> {
 pub const SAMPLE_TYPE_FLOAT: u8 = 0x00;
 /// [`SampleType::Depth`] — a depth texture read through a comparison sampler.
 pub const SAMPLE_TYPE_DEPTH: u8 = 0x01;
+/// [`SampleType::UnfilterableFloat`] — float texels no hardware filter blends.
+pub const SAMPLE_TYPE_UNFILTERABLE_FLOAT: u8 = 0x02;
 
 /// The wire code for a [`SampleType`].
 #[must_use]
@@ -1648,21 +1650,24 @@ pub const fn sample_type_code(sample_type: SampleType) -> u8 {
     match sample_type {
         SampleType::Float => SAMPLE_TYPE_FLOAT,
         SampleType::Depth => SAMPLE_TYPE_DEPTH,
+        SampleType::UnfilterableFloat => SAMPLE_TYPE_UNFILTERABLE_FLOAT,
     }
 }
 
 /// The [`SampleType`] a wire code names, or `None` if it names none.
 ///
 /// **`None` rather than [`SampleType::Float`] as a default**, tempting though it
-/// is for a two-variant enum whose first variant is what nearly every binding
-/// wants: a `Depth` slot arriving as `Float` is a layout WebGPU accepts and then
-/// refuses every depth view against, with the error naming the *bind group*
-/// rather than the layout that was wrong.
+/// is for an enum whose first variant is what nearly every binding wants: a
+/// `Depth` slot arriving as `Float` is a layout WebGPU accepts and then refuses
+/// every depth view against, with the error naming the *bind group* rather than
+/// the layout that was wrong, and an `UnfilterableFloat` slot arriving as
+/// `Float` fails the same way against every `rg32float` view.
 #[must_use]
 pub const fn sample_type_from_code(code: u8) -> Option<SampleType> {
     match code {
         SAMPLE_TYPE_FLOAT => Some(SampleType::Float),
         SAMPLE_TYPE_DEPTH => Some(SampleType::Depth),
+        SAMPLE_TYPE_UNFILTERABLE_FLOAT => Some(SampleType::UnfilterableFloat),
         _ => None,
     }
 }
@@ -2607,7 +2612,11 @@ mod tests {
             assert_eq!(blend_op_from_code(blend_op_code(op)), Some(op));
         }
 
-        let sample_type = [SampleType::Float, SampleType::Depth];
+        let sample_type = [
+            SampleType::Float,
+            SampleType::Depth,
+            SampleType::UnfilterableFloat,
+        ];
         let codes: Vec<u8> = sample_type.iter().map(|t| sample_type_code(*t)).collect();
         assert_eq!(
             distinct(&codes),
@@ -2862,7 +2871,10 @@ mod tests {
             None
         );
         assert_eq!(blend_op_from_code(BLEND_OP_MAX + 1), None);
-        assert_eq!(sample_type_from_code(SAMPLE_TYPE_DEPTH + 1), None);
+        assert_eq!(
+            sample_type_from_code(SAMPLE_TYPE_UNFILTERABLE_FLOAT + 1),
+            None
+        );
         assert_eq!(device_type_from_code(DEVICE_TYPE_OTHER + 1), None);
         assert_eq!(format_from_code(FORMAT_BC7_RGBA_UNORM_SRGB + 1), None);
         assert_eq!(present_mode_from_code(PRESENT_MODE_IMMEDIATE + 1), None);

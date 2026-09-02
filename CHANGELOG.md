@@ -14,6 +14,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **Per-probe visibility maps, so the irradiance probe grid stops leaking
+  through walls.** Each probe carries a 16×16 octahedral depth + depth² map
+  captured from the scene's static geometry, and `mesh.slang`'s
+  `probe_irradiance` weighs each of a fragment's eight probes by a Chebyshev
+  visibility test against it — a probe on the far side of a wall gets no weight.
+  New `crcbl_shaders::probe_visibility` (the layout, the octahedral mapping and
+  the bound) and `ForwardRenderer::capture_probe_visibility`, which an
+  application calls once its static geometry is placed. `r_probe_visibility`
+  turns the weighting off and defaults on; a scene with no probes draws the
+  frame it drew before.
+
+- **`crcbl_hal::SampleType::UnfilterableFloat`**, for binding a float format no
+  hardware filter can blend. WebGPU refuses an `rg32float` view against a layout
+  entry declaring `Float` whatever the shader does with it, and the refusal
+  invalidates the whole bind group.
+
+### Changed
+
+- **`crcbl_shaders::probe::irradiance_at` takes the volume's visibility maps**
+  as a new `&ProbeVisibility` argument. `&ProbeVisibility::NONE` gives the
+  unweighted result callers had before.
+
+- **`lantern::room::place` takes a device and a queue**, because it captures the
+  room's probe visibility.
+
 ### Fixed
 
 - **The GPU pass table is logged one record per line, so a sink with a length

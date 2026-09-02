@@ -1571,6 +1571,198 @@ pub fn probe_grid() -> crate::render::scene::ProbeGrid {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The probe-leak fixture
+// ---------------------------------------------------------------------------
+
+/// How wide [`probe_leak_forward`]'s room is, in world units.
+///
+/// Wide enough that its `±X` walls stay well outside the frame, so the only
+/// vertical surface in the picture is the divider — and so the divider is the
+/// only thing that can be between a probe and a band.
+const LEAK_ROOM_WIDTH: f32 = 6.0;
+
+/// How deep it is. [`PROBE_ROOM_DEPTH`], for that constant's reason: both `±Z`
+/// walls stay in frame, so the room reads as a room.
+const LEAK_ROOM_DEPTH: f32 = PROBE_ROOM_DEPTH;
+
+/// How tall it is, and therefore how tall the divider is.
+///
+/// [`PROBE_ROOM_HEIGHT`]. The divider is the room's full height, so a probe
+/// cannot see over it — a shorter wall would leave a path from the far probe to
+/// the near floor, and the fixture would be measuring the wall's height rather
+/// than the visibility test.
+const LEAK_ROOM_HEIGHT: f32 = PROBE_ROOM_HEIGHT;
+
+/// How thick the divider is.
+///
+/// Thin enough to cover almost none of the floor the camera sees, and thick
+/// enough to be several times a probe map's angular resolution at this range —
+/// a divider a ray could pass through diagonally would occlude some directions
+/// and not others, and the fixture would read as a partial drop.
+const LEAK_WALL_THICKNESS: f32 = 0.1;
+
+/// How far either side of the divider the two probes stand.
+///
+/// It is also the grid's spacing, so the fraction the trilinear blend gives a
+/// band is that band's own distance from a probe over this — which is what
+/// `tests/render_e2e.rs` computes its predictions from.
+const LEAK_PROBE_REACH: f32 = 1.5;
+
+/// The radiance of the constant environment the `+X` probe holds.
+///
+/// Chosen so the brightest band stays under what the swapchain holds:
+/// [`PROBE_RADIANCE`]'s reasoning with a constant environment in place of two
+/// poles, where the peak is `π · L` times the floor's albedo times the weight
+/// the blend gives that probe. **The band that decides it is the `+X` one with
+/// the wall in place**, which takes the whole of that probe rather than three
+/// quarters of it — the first value tried put both `+X` bands over one, and
+/// `tonemap.slang`'s `saturate` then made the gain this fixture measures a
+/// tenth of a level instead of tens.
+const LEAK_RADIANCE: f32 = 0.35;
+
+/// How far above the floor [`probe_leak_forward`]'s camera stands.
+///
+/// [`PROBE_CAMERA_UP`], so the frame maps world to pixels exactly as
+/// [`Scene::Probes`]' does and `tests/render_e2e.rs` reuses that inverse rather
+/// than deriving a second one.
+pub const LEAK_CAMERA_UP: f32 = PROBE_CAMERA_UP;
+
+/// Where the two bands are measured, in world units either side of the divider.
+///
+/// Half of `LEAK_PROBE_REACH`, so the trilinear blend gives the near probe
+/// three quarters and the far one a quarter — both bands read *both* probes,
+/// which is what the measurement needs. It is also well outside
+/// `crcbl_render::ForwardRenderer`'s occlusion radius from the divider, so the
+/// ambient-occlusion pass is not what moves the band.
+pub const LEAK_BAND_AT: f32 = 0.75;
+
+/// [`probe_leak_forward`]'s room: the open box at [`LEAK_ROOM_WIDTH`] ×
+/// [`LEAK_ROOM_HEIGHT`] × [`LEAK_ROOM_DEPTH`], floor on the plane `y = 0`.
+fn leak_room() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5 * LEAK_ROOM_HEIGHT, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::new(
+            LEAK_ROOM_WIDTH,
+            LEAK_ROOM_HEIGHT,
+            LEAK_ROOM_DEPTH,
+        ))
+}
+
+/// The divider: the demo cube squashed into a slab on the plane `x = 0`, the
+/// room's full height and depth.
+fn leak_wall() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5 * LEAK_ROOM_HEIGHT, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::new(
+            LEAK_WALL_THICKNESS,
+            LEAK_ROOM_HEIGHT,
+            LEAK_ROOM_DEPTH,
+        ))
+}
+
+/// [`probe_leak_forward`]'s volume: two probes on the `x` axis, one either side
+/// of the divider, at half the room's height.
+///
+/// **The `-X` probe is black and the `+X` probe is a constant environment**, so
+/// the only light in the frame is the one on the far side of the wall from the
+/// `-X` band. That asymmetry is the fixture: with the wall in place the `-X`
+/// band must lose it, and the `+X` band — which the same wall cuts off from the
+/// *black* probe — must gain.
+///
+/// Public so `tests/render_e2e.rs` predicts the frame from the rows the device
+/// was actually given, on [`probe_grid`]'s terms.
+#[must_use]
+pub fn probe_leak_grid() -> crate::render::scene::ProbeGrid {
+    // A constant environment, projected the only correct way — see
+    // `probe_grid`, which argues why a fixture authors an environment and
+    // projects it rather than writing coefficients.
+    let solid_angle = 4.0 * std::f32::consts::PI / 6.0;
+    let mut lit = crate::shaders::probe::GpuProbe::ZERO;
+    for direction in [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ] {
+        lit.accumulate(direction, [LEAK_RADIANCE; 3], solid_angle);
+    }
+    crate::render::scene::ProbeGrid {
+        volume: crate::shaders::probe::ProbeVolume {
+            origin: [-LEAK_PROBE_REACH, 0.5 * LEAK_ROOM_HEIGHT, 0.0],
+            inv_spacing: [1.0 / (2.0 * LEAK_PROBE_REACH), 0.0, 0.0],
+            counts: [2, 1, 1],
+        },
+        probes: vec![crate::shaders::probe::GpuProbe::ZERO, lit],
+    }
+}
+
+/// The camera it is drawn with: straight down at the floor, on
+/// [`probe_camera`]'s terms exactly.
+fn leak_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, LEAK_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// **The leak fixture**: one room, two probes, and a wall between them that is
+/// there or is not.
+///
+/// `docs/plan/50-irradiance-probes.md`'s rung is that a probe on the far side of
+/// a wall from a surface contributes nothing to it. Nothing in a single frame
+/// says whether that happened — a room lit by a probe grid looks like a room —
+/// so the claim is a comparison of one scene against itself with the wall taken
+/// away, which is what makes `wall` a parameter here rather than a second
+/// [`Scene`]. [`aa_forward`] and [`ssr_forward`] are public for the same reason.
+///
+/// Every band the comparison reads is the probe term and nothing else: the sun's
+/// direct and flat ambient terms are zero — `probe_sun` — the floor is one
+/// flat quad of one albedo, and the reflection pair is refused so no specular
+/// can reach it.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built or the capture cannot
+/// be uploaded.
+pub fn probe_leak_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    wall: bool,
+) -> Result<ForwardScene, OffscreenError> {
+    let probes = probe_leak_grid();
+    let mut scene = crate::render::scene::demo();
+    scene.capacities.probes = probes.volume.total();
+    scene.probes = probes;
+    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
+    // On `Scene::Probes`' terms: the measured pixels are diffuse probe
+    // irradiance, and a rough surface's reflection would put specular into them.
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(crcbl_render::RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, leak_room());
+    if wall {
+        place(&mut renderer, DEMO_CUBE, DEMO_UNTINTED, leak_wall());
+    }
+    // **After the geometry and before the frame**, which is the whole shape of
+    // the capture — see `ForwardRenderer::capture_probe_visibility`. The two
+    // arms of this fixture differ in exactly what this call then records.
+    renderer.capture_probe_visibility(device, queue)?;
+    Ok(ForwardScene {
+        camera: leak_camera(),
+        sun: probe_sun(),
+        renderer: Box::new(renderer),
+    })
+}
+
 /// The engine's own description with [`probe_grid`] in it, and nothing else
 /// changed.
 ///
@@ -2799,6 +2991,15 @@ impl SceneState {
                     ..EffectRequest::default()
                 });
                 place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, probe_room());
+                // The room is placed, so the probes can record it — see
+                // `ForwardRenderer::capture_probe_visibility`, which is a call
+                // rather than part of `with_scene` because a description has no
+                // instances in it. Both probes stand in open air above this
+                // floor and neither is behind anything, so what the capture buys
+                // *here* is that the fixture exercises the read at all; the
+                // leak it exists to stop is checked where geometry stands
+                // between a probe and a surface.
+                renderer.capture_probe_visibility(device, queue)?;
                 Self::Forward {
                     camera: probe_camera(),
                     light: probe_sun(),

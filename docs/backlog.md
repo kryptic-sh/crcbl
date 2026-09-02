@@ -263,6 +263,46 @@ key, and no tier row spends any of them.
 tint makes it weaker on purpose, and the fix is turning the intensity up rather
 than removing the tint.
 
+## Probe visibility: what the slice did not do (2026-09-02)
+
+The maps and the Chebyshev weighting ship — `docs/plan/50-irradiance-probes.md`
+records what is now true. What is owed:
+
+- **Recapture is not written.** `ForwardRenderer::capture_probe_visibility`
+  captures once, from whatever `InstancePool` holds when it is called. Nothing
+  re-captures when static geometry changes and there is no scroll path — that
+  waits on the clipmap, the next slice of the same plan. A scene that moves a
+  wall after load keeps the visibility of the wall's old position.
+- **The capture is CPU and single-threaded**, one ray per texel per probe
+  against every resident triangle with no acceleration structure. Measured at
+  **0.28 ms per probe** — 16.8 ms for lantern's 60 probes against 12 occluder
+  meshes, median of three. A clipmap of thousands of probes cannot pay that at
+  load, so this is the piece that has to move to the GPU, off the load path, or
+  both, and it is the number the clipmap slice is priced against.
+  `crcbl_render::probe_visibility`'s module header carries the cost model.
+- **Dynamic objects are not in the maps** and do not occlude the bounce — the
+  accepted limit of the raster tier, per the plan's own decision.
+- **The old bakes still stand.** `apps/lantern`'s `bounce` module and
+  `apps/shard`'s `light::probes` compute their probe rows once at load and were
+  deliberately left alone; the 2026-08-30 decision replaces them with the RSM
+  updater, which is a later slice.
+- **The probes mirror comparison spent most of its lavapipe headroom.**
+  `PROBE_MIRROR_LEVELS` is 1.0 and the shader-against-mirror disagreement now
+  measures 0.20 levels on radv and **0.80 on lavapipe**, against 0.13 and 0.18
+  before the weighting — the divide by a summed weight is evaluated in a
+  different float order on each side. The budget was **not** widened and the
+  test still catches a systematic error of about 1.5% (measured: 2% moves the
+  worst pair by 1.64 levels and fails, 1% moves it 0.8 and does not). A software
+  backend noisier than llvmpipe would redden it, and the constant's doc says so.
+- **Verified on Vulkan (radv and lavapipe) and WebGPU (Chromium) only.** The
+  D3D12 and Metal paths type-check on their own targets and their DXIL and MSL
+  artifacts regenerate, but no run on Windows or Apple hardware exists — there
+  is none here. `SampleType::UnfilterableFloat` is a no-op on both, which is
+  what makes that acceptable rather than a gap; the `D2Array` binding at index
+  29 is not.
+- **Not reviewed:** whether the maps' memory — `EXTENT² × 8` bytes a probe, 25
+  KiB for the 60 here — needs a cap once the clipmap decides the probe count.
+
 ## The bent normals weakened one cross-path guard, and it is recorded (2026-09-02)
 
 `crates/crcbl/tests/render_e2e.rs`'s

@@ -48,6 +48,8 @@
 //! frame drawn with no probes is bit-identical to one drawn before this module
 //! existed — which is what lets the data path land with no golden re-blessed.
 
+use crate::probe_visibility::ProbeVisibility;
+
 /// Bytes per [`GpuProbe`], and the stride of the probe-table storage buffer.
 ///
 /// Three `float4`s, no padding: one per colour channel. `std430` rounds a
@@ -333,6 +335,33 @@ impl ProbeVolume {
             .saturating_mul(self.counts[2])
     }
 
+    /// Where probe `cell` stands, in world space.
+    ///
+    /// The grid's own arithmetic run backwards: the header carries the
+    /// *reciprocal* spacing, so this multiplies by its reciprocal in turn. An
+    /// axis whose reciprocal is zero has no spacing to step along and every
+    /// probe on it stands at the origin's coordinate — which is what the
+    /// degenerate volume a scene with no probes uploads collapses to, and what
+    /// `probe_irradiance` in `shaders/mesh.slang` computes for the same cell.
+    ///
+    /// It is what the visibility test needs and the irradiance lookup never
+    /// did: a Chebyshev bound is about the distance from a *probe* to a
+    /// surface, where a trilinear blend only ever needed the fraction between
+    /// two of them.
+    #[must_use]
+    pub fn position(&self, cell: [u32; 3]) -> [f32; 3] {
+        let mut at = [0.0f32; 3];
+        for axis in 0..3 {
+            let step = if self.inv_spacing[axis] == 0.0 {
+                0.0
+            } else {
+                1.0 / self.inv_spacing[axis]
+            };
+            at[axis] = self.origin[axis] + cell[axis] as f32 * step;
+        }
+        at
+    }
+
     /// The bytes the grid header occupies in the frame block, in `std140`
     /// order.
     ///
@@ -361,14 +390,44 @@ impl ProbeVolume {
     }
 }
 
+/// One corner of the trilinear gather: its coefficients already scaled by the
+/// weight it keeps, and that weight beside them.
+///
+/// **Both halves are blended through the same seven `lerp`s**, so what comes out
+/// the far end is `Σ trilinearᵢ · visibilityᵢ · coefficientsᵢ` over the eight
+/// corners and `Σ trilinearᵢ · visibilityᵢ` — a weighted mean waiting for its
+/// divisor. Evaluating the basis once on that mean is what keeps the whole
+/// lookup three dot products whatever the grid's size, and it is the more
+/// correct of the two orders for [`irradiance_at`]'s own reason: irradiance is
+/// linear in the coefficients until the clamp.
+#[derive(Clone, Copy)]
+struct WeightedProbe {
+    /// The row, every coefficient already multiplied by [`Self::weight`].
+    sh: GpuProbe,
+    /// What this corner counts for.
+    weight: f32,
+}
+
+impl WeightedProbe {
+    /// Blended towards `other` by `t`, on [`GpuProbe::lerp`]'s terms and in the
+    /// same spelling.
+    fn lerp(self, other: Self, t: f32) -> Self {
+        Self {
+            sh: self.sh.lerp(other.sh, t),
+            weight: self.weight + t * (other.weight - self.weight),
+        }
+    }
+}
+
 /// The irradiance the volume gives a surface at `world_position` facing
 /// `normal`, in linear RGB — **the Rust mirror of `probe_irradiance` in
 /// `shaders/mesh.slang`**.
 ///
-/// Trilinear over the eight probes surrounding the point, and the interpolation
-/// is over the *coefficients* rather than over eight evaluations of them: that
-/// is what makes the whole lookup three dot products, seven blends and one
-/// clamp, whatever the grid's size.
+/// Trilinear over the eight probes surrounding the point, each corner's weight
+/// scaled by how much of that probe `visibility` says the surface can see, and
+/// the interpolation is over the *coefficients* rather than over eight
+/// evaluations of them: that is what makes the whole lookup three dot products,
+/// seven blends and one clamp, whatever the grid's size.
 ///
 /// A point outside the grid clamps to its surface rather than fading out, which
 /// is the same choice the shadow atlas's sampler makes at a cascade's edge: an
@@ -381,10 +440,29 @@ impl ProbeVolume {
 /// with at least one zeroed row, so the degenerate volume's fetch of row 0 is
 /// in bounds there and a scene whose probe count disagrees with its volume is
 /// refused before it is uploaded at all.
+///
+/// # The divisor cannot be zero, and every corner occluded is not black
+///
+/// [`ProbeVisibility::weight`] never returns less than
+/// [`OCCLUDED_WEIGHT`](crate::probe_visibility::OCCLUDED_WEIGHT), so the summed
+/// weight cannot reach zero and a fragment whose every corner is occluded gets
+/// that constant divided straight back out — the plain trilinear result, which
+/// is the light such a fragment had before the visibility test existed. A
+/// fragment inside geometry keeps looking like the surface around it rather
+/// than becoming a hole.
+///
+/// # A grid of nothing is still exactly zero
+///
+/// A scene with no probes reads row 0, which is zeroed, so every corner's
+/// coefficients are zero, the weighted sum is zero, and zero divided by a
+/// positive weight is zero **exactly** — before the clamp and after it. That is
+/// what lets the visibility test land with no golden of a scene without probes
+/// re-blessed, exactly as the grid itself did.
 #[must_use]
 pub fn irradiance_at(
     volume: &ProbeVolume,
     probes: &[GpuProbe],
+    visibility: &ProbeVisibility,
     world_position: [f32; 3],
     normal: [f32; 3],
 ) -> [f32; 3] {
@@ -402,7 +480,7 @@ pub fn irradiance_at(
         fraction[axis] = grid - base;
     }
 
-    let row = |x: u32, y: u32, z: u32| -> GpuProbe {
+    let corner = |x: u32, y: u32, z: u32| -> WeightedProbe {
         // In `u64` because the shader's `uint` arithmetic wraps where this
         // would panic, and a wrapped index is then clamped into the table
         // below either way.
@@ -410,10 +488,26 @@ pub fn irradiance_at(
             * u64::from(volume.counts[0])
             + u64::from(x);
         let bound = u64::from(volume.total().saturating_sub(1));
-        probes
-            .get(usize::try_from(index.min(bound)).unwrap_or(usize::MAX))
+        let row = index.min(bound);
+        let sh = probes
+            .get(usize::try_from(row).unwrap_or(usize::MAX))
             .copied()
-            .unwrap_or(GpuProbe::ZERO)
+            .unwrap_or(GpuProbe::ZERO);
+        let weight = visibility.weight(
+            u32::try_from(row).unwrap_or(u32::MAX),
+            volume.position([x, y, z]),
+            world_position,
+            normal,
+        );
+        let scale = |band: [f32; 4]| band.map(|value| value * weight);
+        WeightedProbe {
+            sh: GpuProbe {
+                sh_r: scale(sh.sh_r),
+                sh_g: scale(sh.sh_g),
+                sh_b: scale(sh.sh_b),
+            },
+            weight,
+        }
     };
     // `min` against the axis's last probe rather than `+ 1` outright: at the
     // far face of the grid there is no next probe, and the fraction there is
@@ -424,18 +518,29 @@ pub fn irradiance_at(
         (cell[2] + 1).min(last[2] as u32),
     ];
 
-    let x0 = row(cell[0], cell[1], cell[2]).lerp(row(next[0], cell[1], cell[2]), fraction[0]);
-    let x1 = row(cell[0], next[1], cell[2]).lerp(row(next[0], next[1], cell[2]), fraction[0]);
-    let x2 = row(cell[0], cell[1], next[2]).lerp(row(next[0], cell[1], next[2]), fraction[0]);
-    let x3 = row(cell[0], next[1], next[2]).lerp(row(next[0], next[1], next[2]), fraction[0]);
+    let x0 = corner(cell[0], cell[1], cell[2]).lerp(corner(next[0], cell[1], cell[2]), fraction[0]);
+    let x1 = corner(cell[0], next[1], cell[2]).lerp(corner(next[0], next[1], cell[2]), fraction[0]);
+    let x2 = corner(cell[0], cell[1], next[2]).lerp(corner(next[0], cell[1], next[2]), fraction[0]);
+    let x3 = corner(cell[0], next[1], next[2]).lerp(corner(next[0], next[1], next[2]), fraction[0]);
     let y0 = x0.lerp(x1, fraction[1]);
     let y1 = x2.lerp(x3, fraction[1]);
-    y0.lerp(y1, fraction[2]).irradiance(normal)
+    let blended = y0.lerp(y1, fraction[2]);
+
+    let channel = |sh: &[f32; 4]| {
+        ((sh[0] * normal[0] + sh[1] * normal[1] + sh[2] * normal[2] + sh[3]) / blended.weight)
+            .max(0.0)
+    };
+    [
+        channel(&blended.sh.sh_r),
+        channel(&blended.sh.sh_g),
+        channel(&blended.sh.sh_b),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probe_visibility::ProbeVisibility;
     use std::f32::consts::PI;
 
     /// Samples of a sphere, as `(direction, solid_angle)` pairs.
@@ -651,7 +756,7 @@ mod tests {
         for position in [[0.0; 3], [1.0, -2.0, 3.5], [-1e4, 1e4, 0.0]] {
             for normal in directions() {
                 assert_eq!(
-                    irradiance_at(&volume, &[], position, normal),
+                    irradiance_at(&volume, &[], &ProbeVisibility::NONE, position, normal),
                     [0.0; 3],
                     "at {position:?} facing {normal:?}"
                 );
@@ -667,7 +772,13 @@ mod tests {
         };
         assert_ne!(bright.irradiance([0.0, 0.0, 1.0]), [0.0; 3]);
         assert_eq!(
-            irradiance_at(&volume, &[bright], [3.0, 4.0, 5.0], [0.0, 0.0, 1.0]),
+            irradiance_at(
+                &volume,
+                &[bright],
+                &ProbeVisibility::NONE,
+                [3.0, 4.0, 5.0],
+                [0.0, 0.0, 1.0],
+            ),
             bright.irradiance([0.0, 0.0, 1.0]),
             "a one-row table is addressed even by the degenerate volume, so what \
              makes a probe-less scene add nothing is the row being zero"
@@ -705,12 +816,30 @@ mod tests {
         // of the cell below carries weight zero and the near corner of the cell
         // above carries all of it.
         assert_eq!(
-            irradiance_at(&volume, &probes, [1.0, 0.0, 0.0], normal),
+            irradiance_at(
+                &volume,
+                &probes,
+                &ProbeVisibility::NONE,
+                [1.0, 0.0, 0.0],
+                normal
+            ),
             probes[1].irradiance(normal)
         );
         // And the two sides converge on it rather than jumping.
-        let below = irradiance_at(&volume, &probes, [1.0 - 1e-6, 0.0, 0.0], normal);
-        let above = irradiance_at(&volume, &probes, [1.0 + 1e-6, 0.0, 0.0], normal);
+        let below = irradiance_at(
+            &volume,
+            &probes,
+            &ProbeVisibility::NONE,
+            [1.0 - 1e-6, 0.0, 0.0],
+            normal,
+        );
+        let above = irradiance_at(
+            &volume,
+            &probes,
+            &ProbeVisibility::NONE,
+            [1.0 + 1e-6, 0.0, 0.0],
+            normal,
+        );
         for channel in 0..3 {
             assert!(
                 (below[channel] - above[channel]).abs() < 1e-4,
@@ -720,11 +849,23 @@ mod tests {
         // The grid really is interpolating, or the two assertions above would
         // hold for a lookup that ignored the position entirely.
         assert_ne!(
-            irradiance_at(&volume, &probes, [0.5, 0.0, 0.0], normal),
+            irradiance_at(
+                &volume,
+                &probes,
+                &ProbeVisibility::NONE,
+                [0.5, 0.0, 0.0],
+                normal
+            ),
             probes[0].irradiance(normal)
         );
         assert_ne!(
-            irradiance_at(&volume, &probes, [0.5, 0.0, 0.0], normal),
+            irradiance_at(
+                &volume,
+                &probes,
+                &ProbeVisibility::NONE,
+                [0.5, 0.0, 0.0],
+                normal
+            ),
             probes[1].irradiance(normal)
         );
     }
@@ -748,8 +889,15 @@ mod tests {
             .collect();
         // The constant band alone, so the irradiance a normal reads back is the
         // row's own number.
-        let at =
-            |x: f32, y: f32, z: f32| irradiance_at(&volume, &probes, [x, y, z], [1.0, 0.0, 0.0])[0];
+        let at = |x: f32, y: f32, z: f32| {
+            irradiance_at(
+                &volume,
+                &probes,
+                &ProbeVisibility::NONE,
+                [x, y, z],
+                [1.0, 0.0, 0.0],
+            )[0]
+        };
         assert_eq!(at(0.0, 0.0, 0.0), 0.0);
         assert_eq!(at(1.0, 0.0, 0.0), 1.0, "x steps by one row");
         assert_eq!(at(0.0, 1.0, 0.0), 2.0, "y steps by the x count");

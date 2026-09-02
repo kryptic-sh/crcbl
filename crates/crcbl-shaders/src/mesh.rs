@@ -226,8 +226,8 @@ pub const SHADOW_CASTER_REACH: f32 = 40.0;
 /// The test below holds this constant to the shader, and the probe holds its
 /// own table to this constant. So a binding added to `mesh.slang` and nowhere
 /// else fails here first, under a plain `cargo test`, on a machine with no GPU.
-pub const DECLARED_BINDINGS: [u32; 19] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 20, 21, 22, 23, 25, 26, 27, 28,
+pub const DECLARED_BINDINGS: [u32; 20] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 20, 21, 22, 23, 25, 26, 27, 28, 29,
 ];
 
 const _: () = assert!(
