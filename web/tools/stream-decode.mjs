@@ -2090,8 +2090,12 @@ async function main() {
     "a SampledImage's view_type is refused where no ImageViewType claims it"
   );
   checkRefused(
-    streamOf(header, layoutBody({ kind: [2, 1, 2] })), // one past SampleType::Depth
-    { kind: 'InvalidEnum', field: 'BindingKind::sample_type', code: 2 },
+    // One past `SampleType::UnfilterableFloat`, which is the last row. This
+    // case pins the *first unclaimed* code, so it moves every time the enum
+    // grows — `2` was the unclaimed one until the unfilterable row landed, and
+    // this assertion is what noticed.
+    streamOf(header, layoutBody({ kind: [2, 1, 3] })),
+    { kind: 'InvalidEnum', field: 'BindingKind::sample_type', code: 3 },
     'a SampleType code no variant claims is refused rather than folded into Float'
   );
   // The two bitflags words, which are the fields a `from_bits_truncate` would
