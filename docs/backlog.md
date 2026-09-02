@@ -225,10 +225,16 @@ guards. What it still does not reach:
   wgpu are unmeasured for all of these thresholds. The mechanisms are integer
   and ratio arithmetic, so agreement is expected — but expected is not measured,
   and see `crcbl-golden`'s header for how far two drivers do drift.
-- **`SILHOUETTE_SKIP` is wider than the observation needs.** Only the edge
-  column itself is disturbed — it reads 188 against its neighbour's 164 — so the
-  skip could be narrower. It was left at the blur footprint's width for that
-  argument's sake rather than re-fitted to the measurement.
+- **`SILHOUETTE_SKIP` narrowing: considered 2026-09-02, declined.** Only the
+  edge column itself is disturbed — it reads 188 against its neighbour's 164 —
+  so the skip looks wider than the observation needs. Two things say leave it.
+  The value is the blur kernel's own width (`-1..=2`, four pixels), which is a
+  _reason_ the next reader can check; a fitted number is a measurement that
+  silently stops being true when the kernel changes. And the gain is at most one
+  column of falloff: the sweep note says the rise is monotonic "from the fourth
+  column", which does not settle whether that means `edge + 3` or `edge + 4`,
+  and settling it costs a GPU sweep to buy a single column. Revisit only if the
+  blur footprint changes, which moves the principled value anyway.
 
 ## The depth-aware upsample has one reader, not three (2026-09-02)
 
