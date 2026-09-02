@@ -48,32 +48,43 @@ elsewhere in the frame — the same face each time, not a shading wobble.
   a distinct readback frame. The geometry is dispatched every frame and lost
   after the amplification stage.
 
-**The open suspect.** `DrawGen::group_state` — `docs/plan/25-lod.md`'s
-hysteresis state — is **deliberately one buffer and not a ring**, and it is the
-only mutable thing the amplification stage reads that is not per-frame-slot (the
-instance pool, the draw arguments, the survivor list and the runs are all
-ringed). `mesh_cluster.slang`'s `cluster_is_selected` reads it twice per
-cluster. Against that: a flipped selection would drop the cluster from the
-dispatch, and the survivor count says nothing is dropped. So either the vector
-is something else, or the flip is one that keeps the count.
+**Narrowed to the amplification stage's per-cluster cull.** Building with
+`culls_clusters` forced to `false` — the mesh path with no amplification stage,
+which `ForwardRenderer::new` already supports for a device with `MESH_SHADER`
+and no `TASK_SHADER`, and which the code describes as "same picture, more work"
+— all but removes it. Three paired 120-frame runs each, scene frozen, counting
+the 3099-pixel toggle: **8, 1, 5 with the stage on against 0, 0, 2 with it
+off**. Not absolute, and the residual 2 may be the detector catching a lamp
+change in that region, but the effect is large and repeatable.
 
-**One concrete inconsistency found on the way, unfixed and of unknown
-consequence.** `DrawGen`'s field docs say the buffer "arrives in
-`ShaderReadWrite` because that is what the last frame left it in", and
-`read_draw_sources` says declaring it "puts it back into `ShaderReadWrite` at
-the end of the graph". It does not: the reading passes declare it with
-`PassBuilder::read_buffer`, which is `ResourceState::ShaderRead`. The emitted
-barrier still names `SHADER_STORAGE_READ | SHADER_STORAGE_WRITE` over
-`ALL_COMMANDS` (`crcbl-vk`'s `conv.rs`), so the write-after-read does appear to
-be ordered on Vulkan and this may be a documentation bug rather than a defect —
-but the comment and the code disagree about a cross-frame invariant, which is
-worth settling either way.
+**It is not the LOD cut.** Forcing the finest level everywhere
+(`LOD_ERROR_BUDGET` at `1e-9`) left the toggle intact at the same 3099 quantum.
+So `cluster_is_selected` and `DrawGen::group_state` — the hysteresis state, and
+the only mutable buffer the stage reads that is deliberately not ringed — are
+both exonerated, which was this investigation's leading suspect and is wrong.
 
-**Next step if picked up.** The count-preserving explanations are the ones left:
-confirm whether the prepass's and the colour pass's amplification runs agree
-within a frame (both run it on the mesh path), and whether the mesh stage emits
-the face while the raster drops it. A wireframe frame during a toggle would
-separate "not emitted" from "emitted and not shaded".
+That leaves **`cluster_survives`** in `mesh_cluster.slang`: the per-cluster
+frustum test and the normal-cone test. A window reveal seen at a grazing angle
+is exactly the marginal case for a normal cone, so a cone verdict that flips
+frame to frame fits the symptom — one face, all of it, in and out. Its inputs
+are the static meshlet cone, `instance.transform` from the instance pool, and
+the frame's camera; the pool and the camera block are both per-frame-slot, so
+what would have to differ between two in-flight slots is not yet identified.
+
+**Caveat on an earlier measurement in this entry's history.** `CullStats`
+survivor counts were used to argue the cull was not dropping anything. That
+argument is weak: `clear-counters` runs ten times a frame (once per cull —
+cascades, camera, monitor), so the readback reflects only what accumulated after
+the last clear and need not cover the main camera pass at all. Do not reuse it.
+
+**Next step if picked up.** Establish which of the two tests flips, by reading
+back `CLUSTER_SURVIVOR_WORD`, `CLUSTER_FRUSTUM_REJECT_WORD` and
+`CLUSTER_CONE_REJECT_WORD` for the camera pass specifically rather than for
+whichever cull cleared last. If it is the cone, compare the cone verdict's
+inputs between two consecutive frames' instance-pool slots — the pool uploads by
+delta with per-slot dirty ranges, so a slot holding a stale transform for one
+instance would flip a marginal cone test while being far too small to move the
+geometry visibly.
 
 ## HIGH PRIORITY — the user's calls of 2026-08-30
 
