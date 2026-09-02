@@ -11,14 +11,24 @@
 //!
 //! # What it is, plainly
 //!
-//! An observation point, not a backend. It owns a [`StreamChannel`] because
-//! nothing else does yet: `crcbl::backend`'s registry entry for
-//! [`BackendKind::WebGpu`](crcbl_hal::BackendKind::WebGpu) still refuses, so no
-//! engine code calls [`install`] and the seven transport
-//! exports answer `0` on every frame of every demo. **When the backend arrives
-//! and installs its own channel, this module has done its job and goes**, taking
-//! its exports with it — and it refuses rather than fights on the way,
-//! because [`install`] will not replace a live channel.
+//! An observation point, not a backend. It owns a [`StreamChannel`] so that a
+//! page with no backend running can still drive one.
+//!
+//! **The backend has arrived, and only the native half refuses.**
+//! `crcbl::backend`'s registry entry for
+//! [`BackendKind::WebGpu`](crcbl_hal::BackendKind::WebGpu) answers
+//! `WEBGPU_NOT_IMPLEMENTED` on native, but on `wasm32` — the only target a
+//! demo runs on — it opens a real
+//! [`WebGpuInstanceOpen`](crate::WebGpuInstanceOpen), which installs a channel
+//! of its own. So inside a demo this module's [`install`] finds a live channel
+//! and refuses rather than fights, and the transport exports below answer `0`
+//! there. That `0` is the backend holding the channel, not the backend being
+//! absent.
+//!
+//! **What it is still for is the page that has no backend to ask**: the probe
+//! harness calls `navigator.gpu` through the exports below before any engine
+//! start-up, which is the one thing no node tool can reach. It goes when
+//! nothing drives that page any more, taking its exports with it.
 //!
 //! # Exports
 //!
