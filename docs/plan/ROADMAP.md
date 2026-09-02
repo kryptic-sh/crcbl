@@ -268,14 +268,16 @@ never built.
 
 ## Known gaps, carried forward deliberately
 
-- **XDND on X11** is not implemented (`ShellCaps::DRAG_DROP` is honestly clear
-  there); owed before the editor's asset browser at P12. **And it is not the
-  only one**: `08-editor.md` claims OS file drop is "editor work, not seam work"
-  because the shell carries file-list mimes from day one, and that is false on
-  three of four desktop backends — Win32 publishes `text/uri-list` as a
-  registered format rather than reading `CF_HDROP`, macOS reads only
-  `public.file-url`, and X11 has no XDND at all. `docs/backlog.md` carries the
-  detail.
+- **OS file drop is no longer a gap on any desktop backend, and this bullet used
+  to say it was on three of four.** The error was reading the _clipboard_ code
+  and concluding about _drops_: on Win32 they are unrelated mechanisms, as
+  `win32/dnd.rs` opens by saying. All four receive — Wayland's data device,
+  `win32/dnd.rs` (`DragAcceptFiles` + `WM_DROPFILES`), AppKit's
+  `registerForDraggedTypes:` + `performDragOperation:`, and X11's `x11/xdnd.rs`
+  (XDND version 5, receiving, landed 2026-08-31) — and each sets
+  `ShellCaps::DRAG_DROP`. So `08-editor.md`'s "this is editor work, not seam
+  work" is now correct rather than false. What no backend does is drag **out**,
+  which `15-windowing.md` scopes away deliberately.
 - **Render scale has no renderer half.** `15-windowing.md` locks two display
   modes and defines borderless as "internal render target at chosen resolution,
   upscale-blit to native surface"; `18-render-features.md` orders the post chain

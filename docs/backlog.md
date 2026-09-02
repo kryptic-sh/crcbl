@@ -4665,14 +4665,17 @@ hand-edited scene text"; and `docs/plan/sample/08-arena.md`, which wants an
 editor-built map. Every other `docs/plan/sample/*.md` has a matching `apps/`
 dir. `08-editor.md` now records this.
 
-**Its 2026-08-09 shell corrections re-verified and still hold:** `CF_HDROP`
-appears nowhere in `crates/crcbl-shell/src`; Win32 publishes `text/uri-list` as
-`Encoding::Registered` (`win32/clipboard.rs`); AppKit reads `public.file-url`
-(`appkit/pasteboard.rs`, which also records that `NSFilenamesPboardType` is
-deprecated); X11 takes XDND version 5 receiving (`x11/xdnd.rs`). So OS file
-drag-drop into the asset browser is still **seam work owed before the editor
-wants it**, not editor work — but what is left is the Win32 and AppKit halves,
-not X11's.
+**Its 2026-08-09 shell corrections were re-verified twice and the conclusion was
+wrong both times; corrected 2026-09-02.** Each cited fact is about the
+**clipboard** and the conclusion drawn was about **drops**, which on Win32 are
+an unrelated mechanism — `win32/dnd.rs` opens by saying so, and that is the
+module the drop actually goes through. All four desktop backends receive file
+drops today and each sets `ShellCaps::DRAG_DROP`: Wayland's data device,
+`win32/dnd.rs` (`DragAcceptFiles` plus `WM_DROPFILES`), AppKit's
+`registerForDraggedTypes:` and `performDragOperation:`, and `x11/xdnd.rs` (XDND
+version 5, receiving). So `08-editor.md`'s "this is editor work, not seam work"
+is right and nothing is owed here. The lesson is the citation one: three true
+`grep` results about one mechanism supported a confident claim about another.
 
 ### Wasm module hosting: nothing but the static binding exists (2026-08-27)
 
