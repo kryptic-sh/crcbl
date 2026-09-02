@@ -3,6 +3,24 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## 277 published commits carry a `Claude-Session:` trailer — declined to rewrite (2026-09-02)
+
+**Decided by the user; do not re-propose.** Commit messages must carry no
+assistant attribution, and new commits do not. But 277 commits already on
+`origin/main` carry a `Claude-Session:` trailer, the oldest being the initial
+scaffold — so stripping them would rewrite all 2190 commits on the branch and
+need a force-push.
+
+That was offered and declined. The cost is every SHA on `main` changing, every
+clone and every link to a SHA breaking, and
+`origin/dependabot/cargo/patch-6105cfa557` — which branches off that history —
+being orphaned. The trailers are noise in old messages and nothing reads them,
+so the history stays as it is.
+
+The rule going forward is in the global agent instructions: no attribution
+trailer on any new commit. Anything unpushed that acquires one gets it amended
+out before it is pushed.
+
 ## The amplification payload arrives as zeroes, so the mesh path draws one instance per bucket (2026-09-02)
 
 **Root caused and reproduced by two tests in this tree. The fix is designed and
