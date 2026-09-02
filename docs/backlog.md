@@ -14059,6 +14059,49 @@ recorded anywhere else.
   `hal/channel` superseded the requirement, the plan's version should not be
   resurrected from git by the next reader.
 
+## The backlog's own claims were audited, and not all of it (2026-09-02)
+
+Two read-only audits checked this file's absence claims — "nothing does X", "X
+is unbuilt", "blocked on Y" — against the tree, because each of those goes stale
+silently when the work lands and nothing recomputes prose. Eighteen were wrong
+and are fixed; see `git log` for what each said.
+
+**The failure has a shape worth knowing.** A fact that appears in three entries
+is fixed in one, because entries are maintained where they are read. Every wrong
+claim found was contradicted either by the tree or by another paragraph of this
+same file — several of them a few dozen lines away, in the same entry. Two more
+were arguments resting on a line count that had since quadrupled, and one was a
+non-gap recorded expressly so nobody would re-audit it, which is what let it rot
+for three weeks after the crate it described was split into ten modules.
+
+**What was audited.** Everything from the top of the file through the
+2026-09-01/02 entries, and a systematic sweep of the older half: every
+backticked path resolved against the tree, and every backticked identifier of
+six characters or more diffed against the identifiers in `crates`, `apps`,
+`web`, `tools`, `docs/plan` and `.github`. Roughly seventy claims were opened
+and read in their own file.
+
+**What was not, and where to look first.** The sweeps above covered the whole
+file; the _reading_ did not. These entries had no claim individually opened, and
+are the ones flagged as most likely to yield:
+
+- "What the Win32 backend has and has not been run against" and "What the AppKit
+  backend has and has not been run against" — dense with "has never run" claims,
+  which is exactly the shape that goes stale, and neither was opened.
+- "P5B — the job system, and the two decisions in front of it" — a large entry
+  carrying many absence claims.
+- The 2026-08-04 full-codebase review, the MTL1-MTL6 and DX2/DX3 entries, the
+  sample-plan audit block of 2026-08-26/27, and the slice-plan archive at the
+  end of the file.
+
+**One claim is flagged rather than asserted.** The debug-draw entry's account of
+what world-anchored text would take may understate the blocker: the price test
+runs under the mesh-e2e runner, and `web/tools/browser-e2e.mjs` states that no
+`gpu passes` line appears in its page log because the gate's browser negotiates
+no `timestamp-query`. If that reading is right, a caller appending a segment
+still gives the browser gate nothing to time. The harness's device-feature
+negotiation was not opened to settle it.
+
 ## The published site went 15 commits stale, and three causes did it (2026-09-02)
 
 `231175d` is the last commit whose Pages run deployed. Fifteen commits later the
