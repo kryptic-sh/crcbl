@@ -355,6 +355,30 @@ require_undeclared_artifact_absent() {
     fi
 }
 
+# An entry-point name as a snake_case filename segment.
+#
+# Entry points are `lowerCamelCase` because that is what the SPIR-V
+# `OpEntryPoint` carries and what a pipeline matches against, so the *name* is
+# fixed. File names are ours, and every other artifact in this tree is
+# snake_case, so `amplifiedMeshMain` becomes `amplified_mesh` rather than
+# putting one camelCase segment in the middle of a snake_case path.
+#
+# **The `Main` suffix is dropped**, because every entry point in this tree
+# carries it — it is Slang's convention for the function a stage enters at, not
+# a distinguishing part of the name — so keeping it would put the same six
+# characters in every artifact filename. A name that does not end in it keeps
+# every character it has, and one that is *only* `Main` is refused rather than
+# reduced to an empty segment.
+entry_file_segment() {
+    local name="${1%Main}"
+    if [ -z "$name" ]; then
+        echo "crcbl shaders: entry point '$1' has no name beyond the 'Main' suffix," >&2
+        echo "  so it has no filename segment. Rename the entry point." >&2
+        exit 1
+    fi
+    echo "$name" | sed 's/\([a-z0-9]\)\([A-Z]\)/\1_\2/g' | tr '[:upper:]' '[:lower:]'
+}
+
 # The DXIL profile prefix for one of `spirv-dis`' execution models, or nothing
 # for a model no graphics or compute profile covers.
 #
@@ -498,6 +522,23 @@ for SOURCE in "${SHADERS[@]}"; do
         exit 1
     fi
 
+    # **The filename segments must stay distinct.** They are the entry-point
+    # names with a shared suffix removed, so two entry points differing only in
+    # that suffix would land on one path and the second artifact would overwrite
+    # the first — with the manifest recording both under the same file.
+    SEEN_SEGMENTS=""
+    for PAIR in ${ENTRY_POINTS//,/ }; do
+        SEGMENT=" $(entry_file_segment "${PAIR%%:*}")"
+        case "$SEEN_SEGMENTS" in
+        *"$SEGMENT "*)
+            echo "crcbl shaders: $SOURCE has two entry points whose filename segment is" >&2
+            echo "  '${SEGMENT# }', so one artifact would overwrite the other." >&2
+            exit 1
+            ;;
+        esac
+        SEEN_SEGMENTS="$SEEN_SEGMENTS$SEGMENT "
+    done
+
     # **A shader with an amplification stage also gets one SPIR-V module per
     # task and mesh entry point**, beside the combined one every stage is
     # otherwise drawn from.
@@ -526,7 +567,7 @@ for SOURCE in "${SHADERS[@]}"; do
     for PAIR in ${ENTRY_POINTS//,/ }; do
         ENTRY="${PAIR%%:*}"
         MODEL="${PAIR##*:}"
-        SPIRV_ENTRY_ARTIFACT="spirv/${NAME}.${ENTRY}.spv"
+        SPIRV_ENTRY_ARTIFACT="spirv/${NAME}.$(entry_file_segment "$ENTRY").spv"
         if [ "$HAS_TASK_STAGE" -eq 0 ] || { [ "$MODEL" != "taskext" ] && [ "$MODEL" != "meshext" ]; }; then
             # Not a stage that needs one. Say so if a rename left the artifact
             # behind, rather than committing a module nothing reads.
@@ -574,7 +615,7 @@ for SOURCE in "${SHADERS[@]}"; do
     for PAIR in ${ENTRY_POINTS//,/ }; do
         ENTRY="${PAIR%%:*}"
         MODEL="${PAIR##*:}"
-        DXIL_ARTIFACT="dxil/${NAME}.${ENTRY}.dxil"
+        DXIL_ARTIFACT="dxil/${NAME}.$(entry_file_segment "$ENTRY").dxil"
         if ! declares dxil; then
             require_undeclared_artifact_absent dxil "$DXIL_ARTIFACT"
             continue
