@@ -59,8 +59,11 @@ pathfinding wearing a tree costume, and that is the cap doing its job.
 ## Milestones
 
 1. 1k enemies seeking player, culling stats on HUD (stage 6-ish start, scene
-   from file).
-2. Combat loop complete (damage, XP, level-up UI) — after stage 7.
+   from file). **Done** — "Where this stands" below describes the seeking swarm
+   and `SceneStats` on the debug panel.
+2. Combat loop complete (damage, XP, level-up UI) — after stage 7. **Done** —
+   contact damage, XP gems and the pick-one-of-three level-up all landed; see
+   the same section.
 3. Scale push: raise counts until a budget breaks; file engine findings; record
    the numbers in this doc. **Done — see "The scale push (milestone 3),
    measured" below.** The budget that broke is the tick's, not the render's.
@@ -165,7 +168,7 @@ because they are not the same conditions.
 
 | What    | Which                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CPU     | AMD Ryzen 9 9950X3D, 32 threads. **Single-threaded**: there is no `crcbl-jobs` (P8) and no parallel ECS schedule, so every number here is one core.                                                                                                                                                                                                                                                                                                            |
+| CPU     | AMD Ryzen 9 9950X3D, 32 threads. **These numbers were taken single-threaded**, before `crcbl-jobs` existed and with no parallel ECS schedule, so every one of them is one core. `steer_enemies` has since gone onto `crcbl_jobs::pool`'s `par_for` — see below — so the table describes the run, not the tree.                                                                                                                                                 |
 | GPU     | AMD Radeon RX 7900 XTX, radv (Mesa 26.1.6). `lavapipe` is installed and was not used.                                                                                                                                                                                                                                                                                                                                                                          |
 | Build   | `cargo build --release -p horde`.                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Window  | **There is none.** The build environment has no `DISPLAY` and no `WAYLAND_DISPLAY`, so every run is `--headless`, which gives `crcbl-vk` an **offscreen image ring** at 960 × 720 rather than a swapchain on a surface. It is the same acquire → record → submit → present code path — `SurfaceTarget::Offscreen` exists so that it is — but it is **not** a windowed present and it is not vsynced. The windowed native path is still compiled and never run. |
@@ -411,12 +414,12 @@ very different amounts to it:
   nothing else in the pass reads — order-independent by construction, which is
   the easiest possible thing to parallelise. Sixteen cores on a converged ten
   thousand would take 84 ms to something like 6 ms if it scaled, and it should:
-  there is no shared mutable state in the pass at all. Before that, two named
-  single-threaded wins sit in front of it and neither has been taken:
-  `PhysicsSystem::overlap_sphere` returns an owned `Vec` (two heap allocations
-  per enemy per tick, 1.2 million a second at ten thousand) and `PhysicsSystem`
-  has no `body_mut` (two hash operations to change one `DVec3`). Both are in
-  `docs/backlog.md`.
+  there is no shared mutable state in the pass at all. The two single-threaded
+  wins that used to sit in front of it — an owned `Vec` per `overlap_sphere`
+  call, and no `body_mut` to change one `DVec3` without two hash operations —
+  **have both been taken**, as this document records further down:
+  `overlap_sphere_into` takes a `QueryScratch` and `PhysicsSystem::body_mut`
+  exists.
 - **P7 buys this sample almost nothing.** GPU culling replaces a CPU cull that
   costs 28 µs at ten thousand; indirect draws replace two draw calls; instance
   deltas replace an upload of 2 750 × 64 bytes. The whole render path is 0.12 ms

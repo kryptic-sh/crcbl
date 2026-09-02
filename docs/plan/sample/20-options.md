@@ -70,11 +70,13 @@ subject is a settings screen, on the same ground `apps/hud` is exempt. **Exempt
 from rules 2 and 10**: no game state, no `World`, no `GameModule` — the settings
 are the content.
 
-## Status: the audio half is built, the video half is not
+## Status: both halves are on the screen
 
-`apps/options` exists and edits the audio buses; the rest of the catalogue is
-still only reachable from a text editor. Very little of what is left is
-machinery. Verified against the tree on 2026-08-28:
+`apps/options` edits the audio buses and the video and graphics catalogue alike
+— the quality tier, fullscreen, the debug panel, the frame cap, anisotropy,
+antialiasing, render scale and a switch per `VIDEO_KEYS` row, laid out above the
+faders. Very little of what is left is machinery. Verified against the tree on
+2026-08-28:
 
 - **Storage and the layered stack are built**, native and wasm, read and write.
 - **A setting is writable from an application**, as of 2026-08-28.
@@ -83,8 +85,7 @@ machinery. Verified against the tree on 2026-08-28:
   `crcbl::settings` has `set_video`, `set_video_effects`, `set_antialiasing`,
   `set_render_scale`, `set_anisotropic_filtering` and `set_audio_gain` beside
   its readers, with `SettingsSource::open` and `SettingsSource::save` as the
-  pair a screen holds. The paragraph above this section still says the only
-  writer is a command line; that was true when it was written and is not now.
+  pair a screen holds.
 - **`crates/crcbl/src/settings.rs` reads every `RenderEffects` boolean of
   `VIDEO_KEYS`, `antialiasing`, `render_scale`, `anisotropic_filtering`,
   `frame_limit` and every `[engine.audio]` bus volume.** `frame_limit` is the
@@ -98,14 +99,11 @@ machinery. Verified against the tree on 2026-08-28:
   sfx, ui, voice and ambience; `Mixer::set_bus_gain` and `bus_gain` are the gain
   stage, `Bus::settings_key` is the spelling, and
   `SettingsSource::apply_audio_gains` is what four samples already call at
-  start-up. The claim below this line — that there is neither a bus nor a master
-  — was true of an earlier tree.
+  start-up.
 - **There is a settings UI, and it edits the audio half.** `apps/options` is
   built: `menu::menus` lays out a fader per bus over the styled widget set,
   `app::Screen` reconciles the faders against the keys every frame, and `SAVE`
-  writes the user layer through `SettingsSource::save`. What the workspace still
-  has no screen for is the video and graphics halves — milestones 2 and 3 —
-  which is now the largest single thing this sample owes.
+  writes the user layer through `SettingsSource::save`.
 - **The faders reach a gain stage**, as of 2026-08-28:
   `apps/options/src/audio.rs` banks a looping tone on `Bus::Music`, a noise tick
   once a `TICK_PERIOD` on `Bus::Sfx` and a click on `Bus::Ui`, and `Screen::set`
@@ -210,12 +208,18 @@ machinery. Verified against the tree on 2026-08-28:
    done**, in `apps/options`'s `FRAME CAP` row — the cheapest of the four,
    because `crcbl::settings::frame_limit` is the only one of them with a reader
    today — and the `ANISOTROPY`, `ANTIALIASING` and `RENDER SCALE` rows and the
-   effect switches are the graphics half's keys on the screen, ahead of the
-   tiers. What the other three need first is somewhere for a change to land: a
+   effect switches are on the screen too, below the tier row rather than ahead
+   of it. What the other three need first is somewhere for a change to land: a
    display mode or a resolution is applied to a live window, not read once at
    start-up, so each of them wants a seam this sample does not have yet.
 3. **The graphics half**: the quality tiers over the technique ladders, the
-   preset and its custom escape hatch.
+   preset and its custom escape hatch. **Done**, in two parts:
+   `crcbl::settings::presets` is the tier writer (`QualityPreset`, `select`,
+   `selected`, `CUSTOM`) and the screen's `QUALITY` row is the first row on it,
+   above every key it writes. Touching any of those keys drops the label to
+   custom, derived each frame rather than stored, and
+   `the_tier_row_is_the_first_row_and_the_rows_it_writes_are_below_it` holds the
+   layout. `crcbl settings preset` is the command-line half.
 4. **The browser half held to the same bar**, including the no-store case.
 
 ## Exit criteria

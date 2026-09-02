@@ -14138,12 +14138,21 @@ earlier; `43-render-standards.md`'s delivery table still put contact shadows at
 the head of a queue they left on 2026-09-01. A delivery table is the worst place
 in the repository to be wrong, because it is read as the index of what exists.
 
-What that pass did **not** reach: plans `00`-`42` entirely, and all of
-`docs/plan/sample/` except `05-viewer.md`, `11-breach.md` and `14-quarry.md`.
-`sample/20-options.md` — the plan for a sample that shipped — and
-`sample/03-horde.md` are the two to open first. `50-irradiance-probes.md` was
-only grepped, and its subject moved on 2026-08-30, so it is the likeliest of the
-render-quality set to be stale.
+A second pass on 2026-09-02 took `sample/20-options.md`, `sample/03-horde.md`,
+`50-irradiance-probes.md` and `18-render-features.md`, and found seventeen more.
+**The plan for a shipped sample was the worst document audited anywhere** —
+`20-options.md` still carried the heading "the audio half is built, the video
+half is not" over a screen that has laid out the whole video catalogue since
+2026-08-28, and two self-corrections whose referents no longer existed: one
+correcting a paragraph that had itself been corrected, and one warning about a
+claim below it that appears nowhere in the file. A plan written to describe work
+that does not exist yet is the highest-risk document there is, because every
+sentence in it is a candidate the day the work lands.
+
+Still unaudited: the numbered plans `00`-`17`, `19`-`49`, `51`, `52`, and the
+seventeen remaining `docs/plan/sample/` files — over 18,000 lines. Nothing has
+re-derived `03-horde.md`'s four measurement tables either; those figures are
+carried on trust and are the bulk of that document.
 
 **The platform-coverage entries were audited on 2026-09-02 and yielded six
 more.** "Has never run" proved the most rotten shape of all, because the answer

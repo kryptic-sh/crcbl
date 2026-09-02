@@ -98,9 +98,9 @@ cost is one compute pass and two extra shadow-pass targets — the first thing o
 the ladder below that the user judged worth having on every tier. The DDGI
 rejection below stands on its temporal half and falls on its ray-tracing half;
 the light-field-probe rejection ("no leaking defect yet to justify them") is
-withdrawn — leaking is the defect the decision is about. The section "The
-irradiance is authored, not baked and not computed at runtime" describes what
-shipped in August and is superseded by this one.
+withdrawn — leaking is the defect the decision is about. This section supersedes
+the August account of the authored irradiance, which was removed from this file
+on 2026-08-30 rather than left standing beside it.
 
 **Pricing, before it is built.** Visibility capture: 6 × 32² depth per probe,
 thousands of probes in a few hundred milliseconds on desktop, amortised over
@@ -154,11 +154,11 @@ determinism argument rests on.
   costs one `max(…, 0)` at this grid density. Recorded as the drop-in if ringing
   is ever seen.
 - **A 3D texture with hardware trilinear.** `ImageType::D3` exists in the seam
-  but nothing outside `null`'s tests has ever created one, `texture.rs` knows
-  only the `D2Array` upload path, and hardware filter weights are vendor tables
-  — the exact class of filtered read the AO and SSR designs spent their
-  determinism arguments avoiding. An 8-tap manual lerp over a cache-resident
-  table costs less and risks nothing.
+  and `crcbl-webgpu`'s HAL tests create one, but no production path does:
+  `texture.rs` knows only the `D2Array` upload path, and hardware filter weights
+  are vendor tables — the exact class of filtered read the AO and SSR designs
+  spent their determinism arguments avoiding. An 8-tap manual lerp over a
+  cache-resident table costs less and risks nothing.
 - **A compute pass writing a probe volume.** One of the two reasons given here
   has gone: it was that `crcbl-wgpu` refused `BindingKind::StorageImage`
   outright, and that crate was deleted 2026-08-21 — `crcbl-webgpu` answers
@@ -173,17 +173,20 @@ determinism argument rests on.
 ### A gather bake needs an intersector this tree does not have
 
 Casting rays at scene triangles is what a gather bake is, and this tree has **no
-ray-triangle intersector and no BVH**. `crcbl-phys`'s `query` module has
-ray-vs-sphere, ray-vs-AABB and ray-vs-capsule and nothing else. Writing both,
-plus an artifact format and a manifest entry, is its own topic-sized piece of
-work and must not be smuggled into this row. The precedent for when it comes is
-real — `cook-clusters` is a committed-artifact generator with a `--check` mode,
-and `spirv/manifest.txt` is how such an artifact is hashed.
+ray-triangle intersector**. `crcbl-phys`'s `query` module has ray-vs-sphere,
+ray-vs-AABB and ray-vs-capsule and nothing else. It does have a BVH —
+`crcbl_phys::Bvh`, which predates this section — so the acceleration structure
+is not the missing half. Writing both, plus an artifact format and a manifest
+entry, is its own topic-sized piece of work and must not be smuggled into this
+row. The precedent for when it comes is real — `cook-clusters` is a
+committed-artifact generator with a `--check` mode, and `spirv/manifest.txt` is
+how such an artifact is hashed.
 
 ### Additive, which is what makes it safe to land empty
 
 ```
-float3 irradiance = frame.ambient.rgb + probe_irradiance(world_position, normal);
+float3 irradiance = frame.ambient.rgb + sky_irradiance(normal)
+                  + probe_irradiance(input.world_position, normal);
 ```
 
 A scene with no probes uploads a volume of zeroes, and `x + 0 == x` exactly on
