@@ -1508,14 +1508,28 @@ JavaScript comment and this file, so nothing that could reach X11). Same job,
 same step 8. Re-running the failed job alone went green, which is what cleared
 `main`.
 
-One thing that made it slower to diagnose than it should have been, worth
-knowing before the next one: **the job log could not be retrieved.**
-`gh run view --log-failed` died with `stream error: stream ID 1; CANCEL`, and
-`gh api …/jobs/<id>/logs` reported `HTTP 200` with a 117 KB `Content-Length`
-while piping zero bytes. So the panic message was never read, and the
-attribution rests on the job, the step, and the diff being incapable of causing
-it. If the log is wanted next time, fetch the redirect target directly rather
-than through `gh`.
+**Read on 2026-09-02, and it is this flake.** The attribution above was made
+without the log, from the job, the step and the diff being incapable of causing
+it — a guess that happened to be right. The log says:
+
+```text
+crcbl e2e: no window manager (set CRCBL_E2E_X11_WM to add one)
+test a_window_that_did_not_ask_for_drops_takes_none ... FAILED
+timed out after 20s waiting for the window manager to place the window;
+events so far: ["Resized"]; parent Some(21f), root 0x21f, origin Some((0, 0))
+Summary 27/45 tests run: 26 passed, 1 failed
+```
+
+Same test, same message, same `27/45`, and `parent == root` is the entry's own
+"openbox never manages that window" finding restated by the panic itself.
+
+**The log was retrievable all along and the recorded method was wrong.**
+`gh run view --log-failed` does die with `stream error: stream ID 1; CANCEL`,
+and a bare `gh api …/jobs/<id>/logs` prints
+`the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway`
+— which is the answer rather than a failure. With that flag the log comes back
+whole, and an earlier attempt's log too, through `…/runs/<id>/attempts/1/jobs`.
+Never diagnose a red run from its job name again.
 
 ## One whole-workspace-only test flake is left, in the logger (2026-09-02)
 
@@ -1662,10 +1676,36 @@ against the GGX lobe. What it did not do:
   integrated as their silhouette quads) and a shape word in the row, not a
   second fit. Textured area lights need a page and a filtered fetch, and are a
   rung above that.
-- **A rectangle is culled as a sphere.** `light_cluster.slang` reads
-  `position.xyz` and `position.w` and nothing else, so a long thin strip is
-  bounded by a sphere that fits it loosely and reaches more froxels than it
-  lights. Correct, and wasteful in proportion to the aspect ratio.
+- **A rectangle is culled as a sphere — measured 2026-09-02, and the waste is
+  not what this entry claimed.** It said the sphere reaches more froxels than
+  the rectangle lights, wastefully in proportion to the aspect ratio. The
+  aspect-ratio half is false: `mesh.slang`'s rect arm applies
+  `range_window(distance to the centre, position.w)`, which reaches exactly zero
+  at the same radius the cull tests, so **the sphere is the shading's support
+  rather than a loose box around it**. `mesh_e2e/rect_bound.rs` reads the
+  cluster grid back and finds byte-identical froxel sets from aspect ratio 1 to
+  64 at a fixed radius, on radv and lavapipe alike. Where the sphere does grow
+  with the shape it grows because `RectLight::radius` tells the caller to put it
+  past the half-diagonal so the panel does not fade before its own edge — the
+  shading model's reach, not the cull's slack.
+
+  What is genuinely removable is the half-space **behind** the panel, which is
+  what `light_cluster.slang`'s own `KIND_RECT` comment already names: 5.8% of a
+  rectangle's froxels at a fixed radius and 12–20% once the radius follows the
+  half-diagonal, and that is an over-estimate, since a bound in the pass would
+  test the froxel's AABB and that straddles the plane more often than the froxel
+  does. A wasted assignment does cost full price — 99.7% of a useful one on
+  radv, 96.3% on lavapipe, because there is no early out for a back-facing
+  receiver — but scaled against rectangles' share of a forward pass that ceiling
+  is single-digit per cent of a frame, in a fixture where sixteen rectangles
+  fill every froxel facing away.
+
+  **Not built, and the trigger is a scene rather than a rung**: one dot product
+  per froxel-light pair, the same shape as the existing spot-cone arm, worth
+  adding if a scene ever appears with many panels facing out of the frustum and
+  lit geometry behind them. Today the froxels behind a panel are usually inside
+  a wall and outside the frustum, which is what that shader comment says.
+
 - **`volumetric.slang` scatters a rectangle as a point at its centre.** It
   declares `KIND_RECT` — the drift guards demand every shader spell the same row
   — and deliberately does not read it. A strip in fog therefore draws a

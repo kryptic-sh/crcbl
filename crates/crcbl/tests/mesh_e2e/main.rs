@@ -86,6 +86,7 @@ mod hdr;
 mod lod;
 mod motion;
 mod normal_map;
+mod rect_bound;
 mod render_scale;
 mod resize;
 mod shadow_cache;

@@ -82,7 +82,12 @@ const STRIP_REACH: f32 = 12.0;
 /// still carries the sun, and every other golden in this suite is drawn under
 /// [`DirectionalLight::default`]. The ambient is kept so the slab's unlit half
 /// is a surface rather than a hole.
-fn dim_sun() -> DirectionalLight {
+///
+/// `pub(crate)` because [`rect_bound`](crate::rect_bound) draws the same slab
+/// under the same sun: its subject is which froxels a rectangle is listed in,
+/// and a second sun would be a second frame shape between its counts and the
+/// prices here.
+pub(crate) fn dim_sun() -> DirectionalLight {
     let full = DirectionalLight::default();
     DirectionalLight {
         color: full.color * 0.06,
@@ -111,7 +116,15 @@ fn strip(along: Vec3, fill: bool) -> Light {
 
 /// A renderer and a pool on `headless`, with the slab in the frame and `lights`
 /// set.
-fn slab_scene(headless: &Headless, lights: &[Light]) -> (ForwardRenderer, TransientPool) {
+///
+/// `pub(crate)` for [`dim_sun`]'s reason:
+/// [`rect_bound`](crate::rect_bound) measures a rectangle's cluster list over
+/// this same slab, and the surface a light is counted over should not be a
+/// per-question choice.
+pub(crate) fn slab_scene(
+    headless: &Headless,
+    lights: &[Light],
+) -> (ForwardRenderer, TransientPool) {
     let mut renderer =
         ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
             .expect("the forward renderer builds");
@@ -454,7 +467,13 @@ const PRICE_LIGHTS: usize = crcbl_shaders::light::CLUSTER_LIGHT_CAPACITY as usiz
 /// the same numbers the debug overlay shows and the same accumulator
 /// `apps/lantern`'s headless report uses — so this measures what a frame costs
 /// rather than what a benchmark harness costs.
-fn forward_pass_prices(
+///
+/// `pub(crate)` because [`rect_bound`](crate::rect_bound) prices a third
+/// question against the same slab — what rectangles that contribute nothing
+/// cost — and the interleaving, the warmup and the `None` a backend without
+/// timestamps answers with are the parts of this that took a wrong measurement
+/// to get right. A second copy would be a second place to get them wrong.
+pub(crate) fn forward_pass_prices(
     sets: &[&[Light]],
     extent: (u32, u32),
     frames: usize,
