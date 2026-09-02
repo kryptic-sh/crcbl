@@ -14160,16 +14160,16 @@ it on Windows and macOS. The golden legs are unaffected, which is why the
 workflow still looks like it is verifying things.
 
 **Still open, and it is the user's call**, because it is about runner minutes
-rather than correctness. `pages.yml` sets `cancel-in-progress: true` at the
-workflow level, with the comment "a superseded deploy is worth cancelling; two
-of them racing to publish is not". That argument is right about the **deploy**
-and is applied to the whole run, including three verification jobs that are not
-deploys. Job-level `concurrency:` cannot rescue them — workflow-level
-cancellation kills the run outright, whatever a job declares. The deploy is not
-gated on the harness, so the site ships either way and what a cancellation costs
-is only the signal. Now that the leg is minutes rather than hours the stake is
-smaller, but a burst of pushes still lands with none of the three legs having
-answered:
+rather than correctness. `pages.yml` sets `cancel-in-progress` at the workflow
+level for everything but a tag push, on the argument that a superseded deploy is
+worth cancelling while two racing to publish are not. That argument is right
+about the **deploy** and is applied to the whole run, including three
+verification jobs that are not deploys. Job-level `concurrency:` cannot rescue
+them — workflow-level cancellation kills the run outright, whatever a job
+declares. The deploy is not gated on the harness, so the site ships either way
+and what a cancellation costs is only the signal. Now that the leg is minutes
+rather than hours the stake is smaller, but a burst of pushes still lands with
+none of the three legs having answered:
 
 - _Leave it._ Cheapest, and the gate does answer on a quiet branch — but least
   often exactly when the tree is moving fastest.
@@ -17922,9 +17922,10 @@ backends must then be re-verified.
   Half-building it would give real timings on some Macs and zeroes on others.
   The seam's own half is no longer an obstacle — `PassTimestampWrites` asks for
   a sample only at a pass boundary, which is where Metal samples.
-- **`device.rs` is 4057 lines and should be split** — the pools, the resource
-  create/destroy pairs, submission and readback are separable responsibilities.
-  Wants to be a move-only change so a reviewer can see it is only a move.
+- **`device.rs` has outgrown one file and should be split** — the pools, the
+  resource create/destroy pairs, submission and readback are separable
+  responsibilities. Wants to be a move-only change so a reviewer can see it is
+  only a move.
 - **`DepthStencilAttachment::read_only` is read and deliberately not acted on.**
   Metal has no image layouts, so there is nothing to set.
 
@@ -18598,11 +18599,11 @@ buying hardware. It is a real and widely-hit gap, but **it is not our failure**
   **WARP** on Windows. macOS has no equivalent, which is why this gap is
   macOS-shaped rather than general.
 
-**Actionable consequence, cheap:** `crcbl-dx12` has no e2e at all, and the
-Windows runner has a real desktop session. **WARP is the D3D12 software
-rasteriser that would close that gap the same way lavapipe closes Vulkan's** —
-no hardware purchase, no self-hosted runner. That is the better next investment
-than a Mac mini, and it is not blocked on anything.
+**The consequence this named was acted on.**
+`crates/crcbl-dx12/tests/run-dx12-e2e.sh` runs on `windows-latest` pinned to
+WARP, which is the D3D12 software rasteriser closing that gap the way lavapipe
+closes Vulkan's. macOS still has no equivalent, which is the whole of what makes
+this gap macOS-shaped.
 
 ### Settled: the render layer runs on all four backends
 
@@ -18747,17 +18748,15 @@ is bit-identical through it. What is not settled:
 
 ### Owed by the GPU cull pass
 
-- **The visible list has no consumer**, deliberately: indirect draw generation
-  is its own slice. The pass is built in the e2e rather than in
-  `ForwardRenderer` precisely because Metal would refuse it in a live frame.
 - **Dead instance slots.** `InstancePool::remove` does not rewrite the element
   and the pass iterates `0..instance_count`, so a removed slot is culled on
   stale contents. The liveness bit wants to be `GpuInstance::flags`, which is
   still reserved and defines nothing. Today the count is the caller's problem.
-- **No WGSL execution of `cull.slang` anywhere.** It compiles for wgsl and is
-  run only on radv and lavapipe; the cross-backend script compares rendered
-  scenes and this pass renders nothing. A compute-only differential harness is
-  the missing piece, and it will be needed again for every later compute pass.
+- **No compute-only differential harness for `cull.slang`.** Every browser demo
+  dispatches `cull.wgsl` now that `DrawGen` consumes the survivor list, so the
+  pass does execute under WGSL — but only as part of a rendered frame, compared
+  as pixels. Nothing compares the pass's own output across backends, and that
+  harness will be wanted again for every later compute pass.
 - `cull.slang` **re-declares** `GpuInstance` and `GpuMesh` because the compile
   script hashes one source per artifact and there is no shared header. A drift
   test compares the field lines of both files; a shared-include mechanism would
@@ -19380,10 +19379,8 @@ with thin coverage. The "tests that cannot fail" findings all shipped — see
 `git log` for the thirteen. What is below is what did not, each with the
 evidence that produced it, so the next session does not re-derive it.
 
-Two results are deliberately recorded as **non**-gaps, because both look like
-gaps and re-auditing them costs a day: `crcbl-scene` has zero tests and is
-correct — `src/lib.rs` is thirteen lines of doc and no items, and it says the
-`Scene` type arrives with its phase. And the "ECS replication roundtrip"
+One result is deliberately recorded as a **non**-gap, because it looks like one
+and re-auditing it costs a day: the "ECS replication roundtrip"
 `docs/plan/12-testing.md` asks for exists already, as
 `a_lossless_run_leaves_the_clients_state_hash_equal_to_the_servers` in
 `crates/crcbl-net/tests/replication.rs`, with loss and reorder variants beside
@@ -20535,9 +20532,10 @@ All were real, all are fixed, and all three are invisible to a mouse:
   `pointercancel` and scrolls the page 233px, and all three are asserted. But it
   proves Chromium's gesture recogniser honours the rule, not a real phone's.
   **Nothing here has run on a phone.**
-- **`web/tools/browser-e2e.mjs` is 2107 lines.** Group F is self-contained apart
-  from `check`/`evaluate`/`until`/`hud`, so the seam is obvious; splitting it
-  means handing a driver's closures to a module. Worth doing, not done.
+- **`web/tools/browser-e2e.mjs` has outgrown one file.** Group F is
+  self-contained apart from `check`/`evaluate`/`until`/`hud`, so the seam is
+  obvious; splitting it means handing a driver's closures to a module. Worth
+  doing, not done.
 - **The paddle is read out of the rendered frame, not the HUD.** Breakout's HUD
   carries `Ball x` and `reset_ball` pins the ball while it is unlaunched, so no
   logged value moves with the paddle; the check counts blue pixels in the bottom
@@ -21604,9 +21602,10 @@ Also recorded from the hand-authored import slice:
 - **Multi-primitive meshes resolve but are untested**: one DAG per primitive
   with the chain depth taken as the shallowest, and no fixture exercises more
   than one primitive.
-- **Nothing consumes `resolve_lod`.** The geometry it resolves never reaches a
-  GPU pool; wiring it to `crcbl-render` is the slice that would make hand LODs
-  visible.
+- **Nothing on the GPU path consumes `resolve_lod`.** `crcbl lod stats` calls it
+  through `crcbl-cli`'s `lod_cmd`, so it is exercised — but the geometry it
+  resolves never reaches a GPU pool, and wiring it to `crcbl-render` is the
+  slice that would make hand LODs visible.
 
 ## The host-visible-write rule has now cost two devices, and the seam could enforce it
 
@@ -22660,8 +22659,10 @@ appending the mesh binding after `AMBIENT_OCCLUSION_BINDING` needed no
   is what draws the environment specular. Coherent rather than a defect, and
   `--no-reflections` showing it is honest.
 - **The bake tool is deferred on a hard prerequisite**, not on taste: a gather
-  bake needs a ray-triangle intersector and a BVH, and `crcbl-phys` has neither
-  — only ray-vs-sphere, ray-vs-AABB and ray-vs-capsule.
+  bake needs a ray-triangle intersector, and the workspace has none —
+  `crcbl-phys` offers ray-vs-sphere, ray-vs-AABB and ray-vs-capsule. The BVH
+  half of that prerequisite is no longer missing: `crcbl_phys::Bvh` is built and
+  `PhysicsWorld` holds one.
 
 ## The probes fixture is a full-frame gradient, and WARP will not have it (2026-08-14)
 
@@ -24358,24 +24359,25 @@ leaves:
   the plan calls the easy one to get wrong: the settings silently do not persist
   and the screen is the only thing that can say so.
 
-  Reaching it needs a page whose shim skips `installOpfs`, which nothing on the
-  site does — every demo's `prepare()` installs both backends. The cheapest
+  Reaching it needs a page whose shim skips the OPFS backend, which nothing on
+  the site does — every demo's `prepare()` installs both. (`restoreOpfs` in
+  `web/engine/storage.js` is the call; there is no `installOpfs`.) The cheapest
   shape is a query parameter the options shim reads, in the way
   `web/demos/breach/main.js` reads `?map=`, since the gate already navigates
   with one to boot a second configuration.
 
-- **Every read key has a row; the graphics tiers are untouched.** `FRAME CAP`
-  landed on 2026-08-28; `ANISOTROPY`, `RENDER SCALE` and the seven effect
-  switches on 2026-08-29; and they are the whole of `[engine.video]` that has a
-  screen. Display mode, resolution and present mode are still absent, and each
-  is harder than those for the same reason: the cap is a number the loop reads
-  once at start-up and the anisotropy, scale and effects ones a renderer takes
-  when it opens, so a row that writes the key and says `(next start)` is the
-  honest whole of any of them, while the other three are applied to a **live
-  window** and therefore need a seam this sample does not have — something a
-  screen can call to re-mode or re-size the window it is drawn in, and something
-  that reports what the window system actually did with the request. Nothing but
-  `apps/viewer` hands `anisotropic_filtering` to
+- **Every read key has a row, and the graphics tiers now do too.** `FRAME CAP`
+  landed on 2026-08-28; `ANISOTROPY`, `RENDER SCALE` and the `VIDEO_KEYS` effect
+  switches on 2026-08-29; `ANTIALIASING` and the `QUALITY` row that writes a
+  whole tier column followed. Display mode, resolution and present mode are
+  still absent, and each is harder than those for the same reason: the cap is a
+  number the loop reads once at start-up and the anisotropy, scale and effects
+  ones a renderer takes when it opens, so a row that writes the key and says
+  `(next start)` is the honest whole of any of them, while the other three are
+  applied to a **live window** and therefore need a seam this sample does not
+  have — something a screen can call to re-mode or re-size the window it is
+  drawn in, and something that reports what the window system actually did with
+  the request. Nothing but `apps/viewer` hands `anisotropic_filtering` to
   `ForwardRenderer::set_anisotropy`: lantern, quarry and the scaffold call
   neither `set_render_scale` nor `set_anisotropy`, and that pairing is one
   decision — when the samples pick the scale up, they pick this up beside it.
