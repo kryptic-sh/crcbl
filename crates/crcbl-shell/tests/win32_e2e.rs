@@ -35,10 +35,11 @@
 //! # What is deliberately not here
 //!
 //! **The sample-level pass.** The Linux suites drive a running game and press
-//! F11 at it; that needs a renderer, and `crcbl-vk` has no software device on a
-//! `windows-latest` runner. `docs/plan/ROADMAP.md`'s 2026-08-04 correction says
-//! so in as many words and schedules it for P14. It is recorded in
-//! `docs/backlog.md` as the gap it is rather than approximated here.
+//! F11 at it. What is missing is that suite, not a renderer to run it against:
+//! `windows-latest` has had one since 2026-08-10, when `vk-e2e-windows` began
+//! registering a lavapipe ICD, and `dx12-e2e` presents through a real `HWND` on
+//! WARP. It is recorded in `docs/backlog.md` as the gap it is rather than
+//! approximated here.
 //!
 //! Also absent, each for a reason `docs/backlog.md` carries: a **real** drag and
 //! drop (the shell allocates the `HDROP` in the target's own context, so no test

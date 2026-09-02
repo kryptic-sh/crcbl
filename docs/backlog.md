@@ -4358,11 +4358,12 @@ Two separate gaps, both still open:
 ### loom and TSAN are specified; only Miri runs (2026-08-27)
 
 Carried forward unchanged from `21-jobs.md`'s 2026-08-09 correction and re-read,
-not re-verified by running anything: `cargo miri test -p crcbl-jobs` runs
-**weekly** in `cron.yml`, so an ordering regression can sit on `main` for up to
-a week. The aarch64-runner idea was tested on 2026-08-23 and rejected with
-evidence (weakened orderings went green on macOS). If that coverage is wanted,
-the instrument is a targeted stress harness with a failure counter.
+not re-verified by running anything: `cargo miri test --tests -p crcbl-jobs`
+runs **per commit**, as `ci.yml`'s `miri-jobs` job. `cron.yml`'s weekly Miri
+sweep still names the crate in its six-crate list, so this one is covered twice.
+The aarch64-runner idea was tested on 2026-08-23 and rejected with evidence
+(weakened orderings went green on macOS). If that coverage is wanted, the
+instrument is a targeted stress harness with a failure counter.
 
 ## Wholly unbuilt topics
 
@@ -14085,14 +14086,17 @@ and read in their own file.
 file; the _reading_ did not. These entries had no claim individually opened, and
 are the ones flagged as most likely to yield:
 
-- "What the Win32 backend has and has not been run against" and "What the AppKit
-  backend has and has not been run against" — dense with "has never run" claims,
-  which is exactly the shape that goes stale, and neither was opened.
-- "P5B — the job system, and the two decisions in front of it" — a large entry
-  carrying many absence claims.
 - The 2026-08-04 full-codebase review, the MTL1-MTL6 and DX2/DX3 entries, the
   sample-plan audit block of 2026-08-26/27, and the slice-plan archive at the
   end of the file.
+
+**The platform-coverage entries were audited on 2026-09-02 and yielded six
+more.** "Has never run" proved the most rotten shape of all, because the answer
+moved into CI without anyone revisiting the prose — a claim that is still true
+of this Linux machine and false of `windows-latest` reads as verified either
+way. What that pass did _not_ open: P5B's browser and wasm bullets, the Win32
+`ffi.rs` size and offset assertions, and the AppKit "every type encoding" bullet
+against `ffi::ENC_*`.
 
 **The one claim flagged rather than asserted has since been settled, and the
 comment it rested on was wrong.** `web/tools/browser-e2e.mjs` stated that no
@@ -15103,17 +15107,15 @@ likely thing to give.
 **The atomics are checked by Miri and by nothing else.** x86-64 is
 total-store-order, so a `Release` store and a `Relaxed` one compile to the same
 instruction and weakening one is invisible to any test on this machine — which
-is why the Miri job is load-bearing. It runs **weekly, in `cron.yml`**, a
-deliberate choice: the full crate list is minutes of interpretation per PR, and
-the per-commit value is concentrated in one small crate. The consequences to
-keep in mind: **an ordering regression can sit on `main` for up to a week**, so
-any change to the atomics is expected to be run under
-`cargo miri test -p crcbl-jobs` (~23 s for its 40 tests) before it is pushed —
-written into the crate docs where somebody editing the atomics will see it — and
-**after a dependency lands, trigger the cron manually**
-(`gh workflow run cron.yml`) rather than waiting for Monday; the weekly job went
-red on 2026-08-03 for want of a `libasound2-dev` install and was found only
-because it was briefly on the per-PR path.
+is why the Miri job is load-bearing. **It runs per commit**, as `ci.yml`'s
+`miri-jobs` job — moved there 2026-08-23 on the argument that the per-commit
+value is concentrated in this one small crate, while the full crate list is
+minutes of interpretation per PR and stays weekly in `cron.yml`. So an ordering
+regression is caught on the push that introduces it, and the pre-push ritual and
+manual cron trigger this entry used to prescribe are no longer needed. The
+weekly job went red on 2026-08-03 for want of a `libasound2-dev` install and was
+found only because it was briefly on the per-PR path, which is the argument that
+moved it.
 
 **The primitives DO run on a weakly-ordered machine, and this entry said they
 did not.** Corrected 2026-08-23: the entry asked for an aarch64 runner as
@@ -15726,15 +15728,22 @@ sequence.**
   to `u16` leaves every assertion green). `DEVMODEW` is the one with two unions
   in it and the one to re-read if a refresh rate ever looks implausible;
   `RAWMOUSE` if a raw delta does.
-- **No input has ever been delivered by a real device.** The suite drives the
-  window procedure with `SendMessageW` — the real procedure against the real
-  cached state, but not the real message stream. Nothing has confirmed that a
-  real keyboard's `lParam` carries what `keys::scancode` expects, or that
-  `GetMessageTime` answers for the message being dispatched.
-- **`WM_INPUT` is untestable from CI and is untested.** A raw report needs an
-  `HRAWINPUT` only the system can produce, so `input::read_raw_mouse` and the
-  `RIM_TYPE_MOUSE` check have never run; the absolute path needs a machine that
-  produces absolute reports (a remote-desktop session or a tablet). W4's
+- **No input has ever been delivered by a real device.** Injection is not
+  hardware: nothing has confirmed that a real keyboard's `lParam` carries what
+  `keys::scancode` expects, or that `GetMessageTime` answers for the message
+  being dispatched. Note the limitation belongs to the **in-crate** tests, which
+  drive the window procedure with `SendMessageW` — the real procedure against
+  the real cached state, but not the real message stream. The e2e suite does
+  better: it injects with `SendInput` from a second process
+  (`tests/bin/send_input_win32.rs`), so its messages are posted, queued,
+  translated and dispatched. That is what found `TranslateMessage` missing from
+  the pump.
+- **`WM_INPUT`'s absolute path is untested; its relative path is not.** W4's
+  `injected_motion_arrives_as_raw_relative_motion_for_mouselook` waits for a
+  `raw_delta`, which only `input::read_raw_mouse` and the `RIM_TYPE_MOUSE` check
+  produce, and `win32-e2e` runs it on `windows-latest` every push. What has
+  never run is the **absolute** report, which needs a machine that produces one
+  (a remote-desktop session or a tablet). W4's
   `injected_motion_arrives_as_raw_relative_motion_for_mouselook` assumes
   `SendInput` feeds the raw stack on a `windows-latest` image — the single
   assertion most likely to be answered by the runner rather than by the backend;
@@ -15769,9 +15778,13 @@ sequence.**
   unexercised; only the budget arithmetic is covered, on Linux. The clipboard
   tests also share the desktop's clipboard — two Windows suites in parallel
   would interfere, which is why the e2e suite is `--test-threads 1`.
-- **No sample-level pass, and there cannot be one yet.** The Linux suites run
-  the sandbox and press F11 at it; that needs a renderer, and `windows-latest`
-  has no Vulkan device, so this waits on a D3D12 path.
+- **No sample-level pass, and what blocks it is a missing job rather than a
+  missing renderer.** The Linux suites run the sandbox and press F11 at it.
+  `windows-latest` has had a renderer since 2026-08-10 — `vk-e2e-windows` runs
+  the forward suite against a registered lavapipe ICD, and `dx12-e2e` runs six
+  harnesses on WARP including a swapchain acquired and presented on a real
+  `HWND`. There is simply no Windows counterpart to `samples-windowed` or
+  `windowed-e2e`.
 
 ### Owed on the Win32 backend
 
@@ -15913,7 +15926,12 @@ macOS this is the gap it would hide in); and the pure modules (`geometry`,
   Win32's `desktop::take_foreground`.
 - **The sample-level F11 pass.** Needs a renderer, and macOS has no Vulkan at
   all — permanently, per the 2026-08-05 decision that Apple platforms are Metal
-  only. It waits on `crcbl-mtl` reaching a swapchain, not on a gate.
+  only. It no longer waits on `crcbl-mtl` reaching a swapchain: that landed the
+  same day, and `create_swapchain`/`surface_caps` are live. It waits on a runner
+  with a window server. `ci.yml` holds
+  `a_layer_swapchain_acquires_a_drawable_and_presents_it` out of `mtl-e2e` for
+  exactly that reason — a detached `CAMetalLayer` in a headless container has no
+  surface to vend a drawable from.
 - **A real drag and drop.** A drag needs a _source_ application with a mouse
   held down over a Finder item, which `CGEventPost` alone does not provide;
   `performDragOperation:` and the real `draggingLocation`/pasteboardItems
