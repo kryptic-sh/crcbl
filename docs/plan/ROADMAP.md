@@ -278,13 +278,21 @@ never built.
   `ShellCaps::DRAG_DROP`. So `08-editor.md`'s "this is editor work, not seam
   work" is now correct rather than false. What no backend does is drag **out**,
   which `15-windowing.md` scopes away deliberately.
-- **Render scale has no renderer half.** `15-windowing.md` locks two display
-  modes and defines borderless as "internal render target at chosen resolution,
-  upscale-blit to native surface"; `18-render-features.md` orders the post chain
-  around it. `ShellCaps::HW_UPSCALE` exists and the spatial half is built —
-  `crcbl_render::upscale`, entered through `ForwardRenderer::set_render_scale`
-  (2026-08-27). What is still owed before borderless is the temporal half, which
-  `43-render-standards.md` §7 owns.
+- **Render scale reaches two samples, and that is the gap — not the renderer.**
+  This bullet was headed "Render scale has no renderer half" and then said in
+  its own body that the half was built, which it is: `crcbl_render::upscale`
+  entered through `ForwardRenderer::set_render_scale` (2026-08-27), the
+  `[engine.video] render_scale` key reading into it, and `apps/options` carrying
+  the slider. That is what borderless asks for — `15-windowing.md` defines the
+  mode as "internal render target at chosen resolution, upscale-blit to native
+  surface", which is the spatial pass — so nothing is owed before it. The
+  _temporal_ upscaler this bullet named is not a near-term row at all;
+  `43-render-standards.md` §7 refuses the history buffer deliberately, on the
+  same determinism argument `51-volumetrics.md` refuses temporal reprojection
+  on. What is real is reach: `apps/viewer` and `apps/options` are the only
+  samples that wire the value, because a renderer call is not a setting the
+  engine applies for you, and `docs/backlog.md` carries that as the cost of the
+  route it took.
 - **Two shader stops, both closed, both worth remembering (P5.9, P5.13).** Every
   SPIR-V artifact the engine ships declares `OpCapability DrawParameters` —
   Slang emits it because `SV_VertexID` lowers to
