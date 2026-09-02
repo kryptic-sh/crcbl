@@ -177,16 +177,6 @@ sentence names, and `gltf_e2e.rs` is feature-gated out of a default
 could have escaped. Not audited at all: `docs/plan/*`, `CHANGELOG.md`,
 `apps/*/src/**` module docs, `web/style.css`, `web/templates/layout.html`.
 
-### Coverage the cancelled CI runs never gave
-
-Four commits in a row — `3c0ceb5`, `398160e` and the two between — had **both**
-their CI and Pages runs cancelled by the next push, so none of them has a
-verdict. Salvaged from `398160e`'s cancelled run before it died:
-`build + test (macos-latest)` and `build the demo site` were `success`, while
-`mtl e2e (macos-latest)` and `deploy to GitHub Pages` were `cancelled`. So **the
-GPU probe capture has no Metal verdict** — its MSL artifacts compile and nothing
-has run them — and the live site is still behind.
-
 ## HIGH PRIORITY — the user's calls of 2026-08-30
 
 The items the user ranked above the lighting order. They stay at the top of this
@@ -506,12 +496,14 @@ records what is now true. What is owed:
   test still catches a systematic error of about 1.5% (measured: 2% moves the
   worst pair by 1.64 levels and fails, 1% moves it 0.8 and does not). A software
   backend noisier than llvmpipe would redden it, and the constant's doc says so.
-- **Verified on Vulkan (radv and lavapipe) and WebGPU (Chromium) only.** The
-  D3D12 and Metal paths type-check on their own targets and their DXIL and MSL
-  artifacts regenerate, but no run on Windows or Apple hardware exists — there
-  is none here. `SampleType::UnfilterableFloat` is a no-op on both, which is
-  what makes that acceptable rather than a gap; the `D2Array` binding at index
-  29 is not.
+- **Verified on all four backends, and the numbers agree exactly.** CI's run of
+  `b40413c` drew `a_probe_behind_a_wall_lights_nothing_through_it` on Metal
+  (`mtl e2e`, macOS) and D3D12 (`dx12 e2e`, WARP), and both report the same
+  bands as radv and lavapipe do here —
+  `-X 0.00 walled against 123.50 open; +X 230.00 against 202.80`, character for
+  character. With the browser gate that is Vulkan, Metal, D3D12 and WebGPU. What
+  is still true is that no run on **real** Windows or Apple hardware exists —
+  WARP is a software rasteriser and the macOS runner is a paravirtual device.
 - **Not reviewed:** whether the maps' memory — `EXTENT² × 8` bytes a probe, 25
   KiB for the 60 here — needs a cap once the clipmap decides the probe count.
 
