@@ -498,6 +498,73 @@ for SOURCE in "${SHADERS[@]}"; do
         exit 1
     fi
 
+    # **A shader with an amplification stage also gets one SPIR-V module per
+    # task and mesh entry point**, beside the combined one every stage is
+    # otherwise drawn from.
+    #
+    # `slangc` gives a module holding a task entry point and its mesh partner
+    # *two* `TaskPayloadWorkgroupEXT` variables — `__EmitMeshTasks_Payload`,
+    # which the task writes, and one named for the mesh stage's `in payload`
+    # parameter, which nothing writes. `spirv-val` accepts that, and the rule it
+    # enforces is per entry point rather than per module, so it is legal SPIR-V.
+    # An NVIDIA driver nonetheless hands the mesh stage the variable the task
+    # never wrote, and the payload arrives as zeroes: every kept cluster then
+    # draws cluster 0 of instance slot 0 of its bucket. Compiling one entry point
+    # at a time leaves one payload variable per module, which is the shape every
+    # driver is exercised on.
+    #
+    # Splitting only the mesh side does not work — with the task stage still
+    # coming from the combined module the payload is still zeroes — so both
+    # halves of the pair are emitted here.
+    SPIRV_ENTRY_LINES=()
+    HAS_TASK_STAGE=0
+    for PAIR in ${ENTRY_POINTS//,/ }; do
+        if [ "${PAIR##*:}" = "taskext" ]; then
+            HAS_TASK_STAGE=1
+        fi
+    done
+    for PAIR in ${ENTRY_POINTS//,/ }; do
+        ENTRY="${PAIR%%:*}"
+        MODEL="${PAIR##*:}"
+        SPIRV_ENTRY_ARTIFACT="spirv/${NAME}.${ENTRY}.spv"
+        if [ "$HAS_TASK_STAGE" -eq 0 ] || { [ "$MODEL" != "taskext" ] && [ "$MODEL" != "meshext" ]; }; then
+            # Not a stage that needs one. Say so if a rename left the artifact
+            # behind, rather than committing a module nothing reads.
+            if [ -e "$SPIRV_ENTRY_ARTIFACT" ]; then
+                echo "crcbl shaders: $SOURCE:$ENTRY needs no single-entry SPIR-V module," >&2
+                echo "  but $SPIRV_ENTRY_ARTIFACT exists. \`git rm $SPIRV_ENTRY_ARTIFACT\`." >&2
+                STATUS=1
+            fi
+            continue
+        fi
+        FRESH_SPIRV_ENTRY="$WORK/${NAME}.${ENTRY}.spv"
+
+        echo "crcbl shaders: compiling $SOURCE:$ENTRY → SPIR-V"
+        "$SLANGC" "$SOURCE" \
+            -target spirv \
+            -profile "$SLANG_PROFILE" \
+            -emit-spirv-directly \
+            -fvk-use-entrypoint-name \
+            -D CRCBL_TARGET_SPIRV=1 \
+            -entry "$ENTRY" \
+            -o "$FRESH_SPIRV_ENTRY"
+
+        if command -v spirv-val >/dev/null 2>&1; then
+            spirv-val --target-env vulkan1.3 "$FRESH_SPIRV_ENTRY"
+        fi
+
+        if [ "$CHECK_ONLY" -eq 1 ]; then
+            if ! cmp -s "$FRESH_SPIRV_ENTRY" "$SPIRV_ENTRY_ARTIFACT"; then
+                echo "crcbl shaders: $SPIRV_ENTRY_ARTIFACT does not match a fresh compile of $SOURCE." >&2
+                echo "  Run crates/crcbl-shaders/tools/compile-shaders.sh and commit the result." >&2
+                STATUS=1
+            fi
+        else
+            cp "$FRESH_SPIRV_ENTRY" "$SPIRV_ENTRY_ARTIFACT"
+        fi
+        SPIRV_ENTRY_LINES+=("spirv-entry = ${ENTRY}:${SPIRV_ENTRY_ARTIFACT}:$(sha256sum "$FRESH_SPIRV_ENTRY" | cut -d' ' -f1)")
+    done
+
     # **DXIL is one container per entry point**, unlike the other three targets.
     # `dxc` compiles a single `-E`, and a graphics pipeline state object takes
     # one bytecode blob per stage, so there is nothing for a module carrying two
@@ -583,6 +650,9 @@ for SOURCE in "${SHADERS[@]}"; do
         echo "targets = ${DECLARED// /, }"
         echo "spirv = $ARTIFACT"
         echo "spirv-sha256 = $(sha256sum "$FRESH" | cut -d' ' -f1)"
+        if [ "${#SPIRV_ENTRY_LINES[@]}" -gt 0 ]; then
+            printf '%s\n' "${SPIRV_ENTRY_LINES[@]}"
+        fi
         if declares wgsl; then
             echo "wgsl = $WGSL_ARTIFACT"
             echo "wgsl-sha256 = $(sha256sum "$FRESH_WGSL" | cut -d' ' -f1)"

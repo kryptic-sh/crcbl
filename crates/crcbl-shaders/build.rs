@@ -48,7 +48,7 @@ mod manifest;
 #[path = "src/sha256.rs"]
 mod sha256;
 
-use manifest::{DxilArtifact, Manifest, ShaderRecord, parse_manifest};
+use manifest::{EntryArtifact, Manifest, ShaderRecord, parse_manifest};
 use sha256::sha256_hex;
 
 fn main() {
@@ -97,16 +97,21 @@ fn main() {
             check_hash(&root.join(artifact), hash, record, target.artifact_name());
         }
 
-        // One container per entry point, so this is a loop where the columns
-        // above are a pair of scalars.
-        for artifact in &record.dxil {
-            println!("cargo::rerun-if-changed={}", artifact.path);
-            check_hash(
-                &root.join(&artifact.path),
-                &artifact.sha256,
-                record,
-                &format!("DXIL artifact for `{}`", artifact.entry_point),
-            );
+        // Addressed per entry point, so these are loops where the columns above
+        // are a pair of scalars.
+        for (kind, artifacts) in [
+            ("DXIL artifact", &record.dxil),
+            ("single-entry SPIR-V module", &record.spirv_entries),
+        ] {
+            for artifact in artifacts {
+                println!("cargo::rerun-if-changed={}", artifact.path);
+                check_hash(
+                    &root.join(&artifact.path),
+                    &artifact.sha256,
+                    record,
+                    &format!("{kind} for `{}`", artifact.entry_point),
+                );
+            }
         }
 
         check_hash(&source_path, &record.source_sha256, record, "source");
@@ -125,21 +130,26 @@ fn main() {
                 &root,
                 Target::SpirV,
                 &record.spirv,
-                &spirv_path,
+                None,
             );
-            for (target, artifact, _) in optional {
-                if artifact.is_empty() {
-                    continue;
-                }
+            // The single-entry modules, each compiled the way the script
+            // compiles it: the same flags with one `-entry` added.
+            for artifact in &record.spirv_entries {
                 recompile(
                     slangc,
                     &manifest,
                     record,
                     &root,
-                    target,
-                    artifact,
-                    &root.join(artifact),
+                    Target::SpirV,
+                    &artifact.path,
+                    Some(&artifact.entry_point),
                 );
+            }
+            for (target, artifact, _) in optional {
+                if artifact.is_empty() {
+                    continue;
+                }
+                recompile(slangc, &manifest, record, &root, target, artifact, None);
             }
         }
 
@@ -172,7 +182,18 @@ fn main() {
                         || "b\"\"".to_string(),
                         |artifact| optional_include(&artifact.path),
                     );
-                format!("EntryPoint::new({name:?}, Stage::{stage}, {dxil}), ")
+                // The single-entry SPIR-V module, where the stage needs one.
+                // `b""` — which `EntryPoint::spirv` reports as absent — for
+                // every entry point drawn from the combined module.
+                let spirv = record
+                    .spirv_entries
+                    .iter()
+                    .find(|artifact| artifact.entry_point == *name)
+                    .map_or_else(
+                        || "b\"\"".to_string(),
+                        |artifact| optional_include(&artifact.path),
+                    );
+                format!("EntryPoint::new({name:?}, Stage::{stage}, {dxil}, {spirv}), ")
             })
             .collect();
 
@@ -443,6 +464,10 @@ impl Target {
 const HLSL_DEFINE: &str = "CRCBL_TARGET_HLSL=1";
 
 /// Recompiles one shader to one target and demands byte-for-byte equality.
+///
+/// `entry` names a single entry point to compile, for the single-entry SPIR-V
+/// modules an amplification stage needs — see `EntryArtifact`. `None` compiles
+/// the whole source, which is every other artifact.
 fn recompile(
     slangc: &str,
     manifest: &Manifest,
@@ -450,10 +475,17 @@ fn recompile(
     root: &Path,
     target: Target,
     artifact: &str,
-    committed: &Path,
+    entry: Option<&str>,
 ) {
-    let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo always sets OUT_DIR"))
-        .join(format!("{}.check.{}", record.name, target.flag()));
+    // Always `root.join(artifact)`, so it is derived here rather than passed:
+    // two parameters that must agree are two that can stop agreeing.
+    let committed = root.join(artifact);
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo always sets OUT_DIR")).join(
+        match entry {
+            Some(entry) => format!("{}.{entry}.check.{}", record.name, target.flag()),
+            None => format!("{}.check.{}", record.name, target.flag()),
+        },
+    );
     let mut command = Command::new(slangc);
     command
         // From the crate root, naming the source the way the manifest does —
@@ -476,6 +508,9 @@ fn recompile(
         command.arg("-emit-spirv-directly");
         command.arg("-fvk-use-entrypoint-name");
     }
+    if let Some(entry) = entry {
+        command.args(["-entry", entry]);
+    }
     let status = command.arg("-o").arg(&out).status();
     match status {
         Ok(status) if status.success() => {}
@@ -492,7 +527,7 @@ fn recompile(
             return;
         }
     }
-    let (Ok(fresh), Ok(old)) = (std::fs::read(&out), std::fs::read(committed)) else {
+    let (Ok(fresh), Ok(old)) = (std::fs::read(&out), std::fs::read(&committed)) else {
         return;
     };
     if fresh != old {
@@ -519,7 +554,7 @@ fn recompile_dxil(
     manifest: &Manifest,
     record: &ShaderRecord,
     root: &Path,
-    artifact: &DxilArtifact,
+    artifact: &EntryArtifact,
 ) {
     let Some((_, model)) = record
         .entry_points

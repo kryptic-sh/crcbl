@@ -385,14 +385,22 @@ pub enum Stage {
     Task,
 }
 
-/// One `OpEntryPoint` in a compiled module, and the DXIL compiled for it.
+/// One `OpEntryPoint` in a compiled module, and the artifacts compiled for it
+/// alone.
 ///
 /// **The DXIL lives here rather than on [`Shader`] because a container holds one
 /// entry point.** `dxc` compiles a single `-E` per invocation and a D3D12
 /// pipeline state object takes one bytecode blob per stage, so there is nothing
-/// a container carrying a whole module could be handed to — where the SPIR-V,
-/// WGSL and MSL artifacts each carry every entry point of their module and sit
-/// on the shader.
+/// a container carrying a whole module could be handed to — where the WGSL and
+/// MSL artifacts each carry every entry point of their module and sit on the
+/// shader.
+///
+/// **The single-entry SPIR-V module lives here for a different reason**, and
+/// only the stages of a shader with an amplification stage have one: `slangc`
+/// gives a module holding a task entry point and its mesh partner two distinct
+/// `TaskPayloadWorkgroupEXT` variables, and a driver that hands the mesh stage
+/// the one the task never wrote delivers a payload of zeroes. Every other stage
+/// is still drawn from [`Shader::spirv`], which carries the whole module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EntryPoint {
     name: &'static str,
@@ -400,16 +408,40 @@ pub struct EntryPoint {
     /// The DXIL container for this entry point. `&[]` when not compiled
     /// (DX4+).
     dxil_bytes: &'static [u8],
+    /// The SPIR-V module holding this entry point alone. `&[]` for a stage that
+    /// is drawn from the shader's combined module, which is all but the task and
+    /// mesh stages of a shader with an amplification stage.
+    spirv_bytes: &'static [u8],
 }
 
 impl EntryPoint {
     /// Names an entry point. Called only by the generated table.
     #[must_use]
-    pub const fn new(name: &'static str, stage: Stage, dxil_bytes: &'static [u8]) -> Self {
+    pub const fn new(
+        name: &'static str,
+        stage: Stage,
+        dxil_bytes: &'static [u8],
+        spirv_bytes: &'static [u8],
+    ) -> Self {
         Self {
             name,
             stage,
             dxil_bytes,
+            spirv_bytes,
+        }
+    }
+
+    /// The single-entry SPIR-V module for this entry point as raw bytes, or
+    /// `None` where the stage is drawn from the shader's combined module.
+    ///
+    /// [`Shader::spirv_for`] is what a caller wants: it decodes this into the
+    /// words `crcbl_hal::ShaderModuleDesc::spirv` takes, and caches the decode.
+    #[must_use]
+    pub const fn spirv_bytes(&self) -> Option<&'static [u8]> {
+        if self.spirv_bytes.is_empty() {
+            None
+        } else {
+            Some(self.spirv_bytes)
         }
     }
 
@@ -444,6 +476,27 @@ impl EntryPoint {
     }
 }
 
+/// Decodes a committed `.spv` artifact's bytes into SPIR-V words.
+///
+/// # Panics
+///
+/// If the length is not a multiple of four. `build.rs` hash-checks every
+/// artifact, so this cannot happen for a manifest that agrees with the tree —
+/// but `chunks_exact` would otherwise *drop* the trailing partial word of a
+/// truncated `.spv` and hand the driver a silently shortened module.
+fn decode_words(name: &str, bytes: &[u8]) -> Vec<u32> {
+    let chunks = bytes.chunks_exact(4);
+    assert!(
+        chunks.remainder().is_empty(),
+        "shader `{name}`: the committed SPIR-V is {} bytes, which is not a whole number of \
+         32-bit words — the artifact is truncated",
+        bytes.len(),
+    );
+    chunks
+        .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .collect()
+}
+
 /// A compiled shader, and where it came from.
 #[derive(Debug)]
 pub struct Shader {
@@ -459,6 +512,9 @@ pub struct Shader {
     entry_points: &'static [EntryPoint],
     /// The SPIR-V byte stream decoded into words, once.
     words: OnceLock<Vec<u32>>,
+    /// Each entry point's single-entry module decoded into words, once, in
+    /// `entry_points` order. Empty for an entry point that has no such module.
+    entry_words: OnceLock<Vec<Vec<u32>>>,
 }
 
 /// The SPIR-V magic number, as the first word of any valid module.
@@ -485,6 +541,7 @@ impl Shader {
             msl_bytes,
             entry_points,
             words: OnceLock::new(),
+            entry_words: OnceLock::new(),
         }
     }
 
@@ -522,19 +579,45 @@ impl Shader {
     /// silently shortened module.
     #[must_use]
     pub fn spirv(&self) -> &[u32] {
-        self.words.get_or_init(|| {
-            let chunks = self.spirv_bytes.chunks_exact(4);
-            assert!(
-                chunks.remainder().is_empty(),
-                "shader `{}`: the committed SPIR-V is {} bytes, which is not a whole number of \
-                 32-bit words — the artifact is truncated",
-                self.name,
-                self.spirv_bytes.len(),
-            );
-            chunks
-                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        self.words
+            .get_or_init(|| decode_words(self.name, self.spirv_bytes))
+    }
+
+    /// The SPIR-V module holding `entry` alone, or `None` where that stage is
+    /// drawn from the combined module [`spirv`](Self::spirv) returns.
+    ///
+    /// A caller building a pipeline stage asks for this first and falls back to
+    /// the combined module, which is what `crcbl_render`'s cluster pipelines do:
+    /// the task stage and its mesh partner must each come from a module carrying
+    /// one `TaskPayloadWorkgroupEXT` variable, and every other stage is
+    /// indifferent. See [`EntryPoint`].
+    ///
+    /// `None` for a name that is not one of this shader's entry points, which is
+    /// the same answer as a name that has no module of its own — a caller that
+    /// falls back is correct either way, and `entry_point` is what refuses an
+    /// unknown name.
+    ///
+    /// # Panics
+    ///
+    /// On [`spirv`](Self::spirv)'s terms, for a truncated artifact.
+    #[must_use]
+    pub fn spirv_for(&self, entry: &str) -> Option<&[u32]> {
+        let words = self.entry_words.get_or_init(|| {
+            self.entry_points
+                .iter()
+                .map(|point| match point.spirv_bytes() {
+                    Some(bytes) => decode_words(self.name, bytes),
+                    None => Vec::new(),
+                })
                 .collect()
-        })
+        });
+        let at = self
+            .entry_points
+            .iter()
+            .position(|point| point.name() == entry)?;
+        // An entry point with no module of its own decodes to no words, and
+        // `None` is the answer that sends the caller to the combined module.
+        Some(words[at].as_slice()).filter(|words| !words.is_empty())
     }
 
     /// The compiled WGSL source, valid UTF-8, or `None` for a shader with no
@@ -749,9 +832,9 @@ mod tests {
     #[test]
     fn an_ambiguous_stage_resolves_to_nothing() {
         static ENTRIES: [EntryPoint; 3] = [
-            EntryPoint::new("shadowVs", Stage::Vertex, b""),
-            EntryPoint::new("mainVs", Stage::Vertex, b""),
-            EntryPoint::new("mainFs", Stage::Fragment, b""),
+            EntryPoint::new("shadowVs", Stage::Vertex, b"", b""),
+            EntryPoint::new("mainVs", Stage::Vertex, b"", b""),
+            EntryPoint::new("mainFs", Stage::Fragment, b"", b""),
         ];
         let ambiguous = Shader::new(
             "ambiguous",
@@ -890,7 +973,7 @@ mod tests {
     /// `Option`s for.
     #[test]
     fn a_shader_without_a_text_artifact_reports_none() {
-        static BARE: [EntryPoint; 1] = [EntryPoint::new("mainVs", Stage::Vertex, b"")];
+        static BARE: [EntryPoint; 1] = [EntryPoint::new("mainVs", Stage::Vertex, b"", b"")];
         let spirv_only = Shader::new(
             "spirv-only",
             "shaders/spirv-only.slang",
@@ -906,7 +989,8 @@ mod tests {
 
         // And a column that *is* present reads back, so `None` above is the
         // absence rule rather than a decode that never returns anything.
-        static ENTRIES: [EntryPoint; 1] = [EntryPoint::new("mainVs", Stage::Vertex, b"DXBC-ish")];
+        static ENTRIES: [EntryPoint; 1] =
+            [EntryPoint::new("mainVs", Stage::Vertex, b"DXBC-ish", b"")];
         static PRESENT: Shader = Shader::new(
             "text-only",
             "shaders/text-only.slang",
@@ -1082,8 +1166,8 @@ mod tests {
     #[test]
     fn a_shader_without_dxil_has_no_containers() {
         static BARE: [EntryPoint; 2] = [
-            EntryPoint::new("mainVs", Stage::Vertex, b""),
-            EntryPoint::new("mainPs", Stage::Fragment, b""),
+            EntryPoint::new("mainVs", Stage::Vertex, b"", b""),
+            EntryPoint::new("mainPs", Stage::Fragment, b"", b""),
         ];
         let spirv_only = Shader::new(
             "spirv-only",
@@ -1100,8 +1184,8 @@ mod tests {
         // that one, rather than padding the list out with the container it does
         // not have.
         static PARTIAL: [EntryPoint; 2] = [
-            EntryPoint::new("mainVs", Stage::Vertex, b"DXBC-ish"),
-            EntryPoint::new("mainPs", Stage::Fragment, b""),
+            EntryPoint::new("mainVs", Stage::Vertex, b"DXBC-ish", b""),
+            EntryPoint::new("mainPs", Stage::Fragment, b"", b""),
         ];
         let half = Shader::new(
             "half",

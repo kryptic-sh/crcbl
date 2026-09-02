@@ -15,18 +15,24 @@
 //! already assumes. Anything richer would be a reason to reconsider; nothing
 //! here wants to be.
 
-/// One compiled DXIL container, and the entry point it holds.
+/// One compiled artifact holding a single entry point, and which one.
 ///
-/// **DXIL is the one target with an artifact per entry point rather than per
-/// shader.** `dxc` compiles a single `-E`, and a D3D12 pipeline state object
-/// takes one bytecode blob per stage, so a container carrying two entry points
-/// would be something no call could consume. The path and the digest therefore
-/// arrive on one manifest line together with the entry point they belong to,
-/// where the other targets use a `path` key and a matching `-sha256` key that
-/// can drift apart.
+/// **Two targets are addressed per entry point rather than per shader**, and
+/// for unrelated reasons. `dxc` compiles a single `-E`, and a D3D12 pipeline
+/// state object takes one bytecode blob per stage, so a DXIL container carrying
+/// two entry points would be something no call could consume. SPIR-V needs it
+/// only where a shader has an amplification stage: `slangc` gives a module with
+/// a task entry point and its mesh partner in it **two** distinct
+/// `TaskPayloadWorkgroupEXT` variables, the task writes one and the mesh stage
+/// reads the other, and at least one driver then delivers a payload of zeroes.
+/// One entry point per module is one payload variable per module.
+///
+/// Either way the path and the digest arrive on one manifest line together with
+/// the entry point they belong to, where a per-shader target uses a `path` key
+/// and a matching `-sha256` key that can drift apart.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DxilArtifact {
-    /// Entry point the container holds, as it appears in `entry-points`.
+pub struct EntryArtifact {
+    /// Entry point the artifact holds, as it appears in `entry-points`.
     pub entry_point: String,
     /// Artifact path, relative to the crate root.
     pub path: String,
@@ -65,6 +71,14 @@ pub struct ShaderRecord {
     pub spirv: String,
     /// SHA-256 of the SPIR-V artifact, lower-case hex.
     pub spirv_sha256: String,
+    /// Single-entry-point SPIR-V modules, for the entry points that need one.
+    ///
+    /// Empty for all but a shader declaring an amplification stage, where the
+    /// task entry point and every mesh entry point get one — see
+    /// [`EntryArtifact`] for what a shared module does to the task payload. The
+    /// combined [`spirv`](Self::spirv) module is still built and is still what
+    /// every other stage is drawn from.
+    pub spirv_entries: Vec<EntryArtifact>,
     /// Compiled WGSL artifact path, relative to the crate root. Empty when
     /// this shader has no WGSL output (pre-P5 artifacts).
     pub wgsl: String,
@@ -77,7 +91,7 @@ pub struct ShaderRecord {
     pub msl_sha256: String,
     /// Compiled DXIL containers, one per entry point, in `entry-points` order.
     /// Empty when this shader has no DXIL output (pre-DX4 artifacts).
-    pub dxil: Vec<DxilArtifact>,
+    pub dxil: Vec<EntryArtifact>,
     /// Entry points the artifact exposes, as `(name, stage)`.
     pub entry_points: Vec<(String, String)>,
 }
@@ -148,6 +162,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
                     targets: Vec::new(),
                     spirv: String::new(),
                     spirv_sha256: String::new(),
+                    spirv_entries: Vec::new(),
                     wgsl: String::new(),
                     wgsl_sha256: String::new(),
                     msl: String::new(),
@@ -238,38 +253,19 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 set_once(&mut record.msl_sha256, hash, key, line_number)?;
             }
             (Some(record), "dxil") => {
-                let mut fields = value.split(':');
-                let (Some(entry_point), Some(path), Some(sha256), None) =
-                    (fields.next(), fields.next(), fields.next(), fields.next())
-                else {
-                    return Err(format!(
-                        "line {line_number}: DXIL artifact {value:?} must be \
-                         `entry-point:path:sha256`"
-                    ));
-                };
-                let (entry_point, path) = (entry_point.trim(), path.trim());
-                if entry_point.is_empty() || path.is_empty() {
-                    return Err(format!(
-                        "line {line_number}: DXIL artifact {value:?} names an empty entry point \
-                         or path"
-                    ));
-                }
-                if record
-                    .dxil
-                    .iter()
-                    .any(|artifact| artifact.entry_point == entry_point)
-                {
-                    return Err(format!(
-                        "line {line_number}: entry point `{entry_point}` has two DXIL artifacts; \
-                         one of them would be unreachable"
-                    ));
-                }
-                let sha256 = hex(sha256.trim(), line_number)?;
-                record.dxil.push(DxilArtifact {
-                    entry_point: entry_point.to_string(),
-                    path: path.to_string(),
-                    sha256,
-                });
+                let artifact = entry_artifact(value, line_number, "DXIL")?;
+                refuse_second_artifact(&record.dxil, &artifact, line_number, "DXIL")?;
+                record.dxil.push(artifact);
+            }
+            (Some(record), "spirv-entry") => {
+                let artifact = entry_artifact(value, line_number, "single-entry SPIR-V")?;
+                refuse_second_artifact(
+                    &record.spirv_entries,
+                    &artifact,
+                    line_number,
+                    "single-entry SPIR-V",
+                )?;
+                record.spirv_entries.push(artifact);
             }
             (Some(record), "entry-points") => {
                 for pair in value.split(',') {
@@ -434,24 +430,79 @@ fn finish(record: ShaderRecord, line_number: usize) -> Result<ShaderRecord, Stri
         ));
     }
     check_targets(&record, line_number)?;
-    // A DXIL container is addressed by the entry point it holds, so one naming
-    // an entry point the shader does not declare is a container nothing can
-    // ever ask for — and, far more likely, a generator that renamed an entry
+    // A per-entry artifact is addressed by the entry point it holds, so one
+    // naming an entry point the shader does not declare is an artifact nothing
+    // can ever ask for — and, far more likely, a generator that renamed an entry
     // point in one place and not the other.
-    for artifact in &record.dxil {
-        if !record
-            .entry_points
-            .iter()
-            .any(|(name, _)| *name == artifact.entry_point)
-        {
-            return Err(format!(
-                "line {line_number}: section [{}] has a DXIL artifact for `{}`, which is not one \
-                 of its entry points",
-                record.name, artifact.entry_point
-            ));
+    for (target, artifacts) in [
+        ("DXIL", &record.dxil),
+        ("single-entry SPIR-V", &record.spirv_entries),
+    ] {
+        for artifact in artifacts {
+            if !record
+                .entry_points
+                .iter()
+                .any(|(name, _)| *name == artifact.entry_point)
+            {
+                return Err(format!(
+                    "line {line_number}: section [{}] has a {target} artifact for `{}`, which is \
+                     not one of its entry points",
+                    record.name, artifact.entry_point
+                ));
+            }
         }
     }
     Ok(record)
+}
+
+/// Parses one `entry-point:path:sha256` manifest value.
+///
+/// `target` names the artifact kind in the error, so a malformed `dxil` line and
+/// a malformed `spirv-entry` line say which one they are rather than both
+/// reporting the shape they share.
+fn entry_artifact(value: &str, line_number: usize, target: &str) -> Result<EntryArtifact, String> {
+    let mut fields = value.split(':');
+    let (Some(entry_point), Some(path), Some(sha256), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Err(format!(
+            "line {line_number}: {target} artifact {value:?} must be `entry-point:path:sha256`"
+        ));
+    };
+    let (entry_point, path) = (entry_point.trim(), path.trim());
+    if entry_point.is_empty() || path.is_empty() {
+        return Err(format!(
+            "line {line_number}: {target} artifact {value:?} names an empty entry point or path"
+        ));
+    }
+    Ok(EntryArtifact {
+        entry_point: entry_point.to_string(),
+        path: path.to_string(),
+        sha256: hex(sha256.trim(), line_number)?,
+    })
+}
+
+/// Refuses a second artifact of one kind for an entry point already carrying
+/// one, which is a generator that emitted the same module twice — the second
+/// would be unreachable, and which of the two a reader took would be a matter of
+/// iteration order.
+fn refuse_second_artifact(
+    have: &[EntryArtifact],
+    artifact: &EntryArtifact,
+    line_number: usize,
+    target: &str,
+) -> Result<(), String> {
+    if have
+        .iter()
+        .any(|existing| existing.entry_point == artifact.entry_point)
+    {
+        return Err(format!(
+            "line {line_number}: entry point `{}` has two {target} artifacts; one of them would \
+             be unreachable",
+            artifact.entry_point
+        ));
+    }
+    Ok(())
 }
 
 /// Holds a record to the targets it declares.

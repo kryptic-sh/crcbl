@@ -235,6 +235,29 @@ impl MeshShaderResources {
             "the target declaration is what stops a broken WGSL artifact existing"
         );
 
+        // **A module per stage, each carrying that stage's own SPIR-V.** A
+        // module holding `taskMain` and `amplifiedMeshMain` together carries two
+        // `TaskPayloadWorkgroupEXT` variables — the task writes one and the mesh
+        // stage reads the other — and this device then delivers a payload of
+        // zeroes, which is exactly what the amplification test below asserts
+        // against. `crcbl_shaders::EntryPoint` carries the argument.
+        let stage_module = |entry_point: &str| {
+            device
+                .create_shader_module(&crcbl_hal::ShaderModuleDesc {
+                    label: Some("mesh_shader.slang"),
+                    spirv: crcbl_shaders::MESH_SHADER
+                        .spirv_for(entry_point)
+                        .unwrap_or_else(|| crcbl_shaders::MESH_SHADER.spirv()),
+                    wgsl: crcbl_shaders::MESH_SHADER.wgsl(),
+                    msl: crcbl_shaders::MESH_SHADER.msl(),
+                    dxil: &[],
+                })
+                .expect("the committed SPIR-V is accepted")
+        };
+        let mesh_only_module = stage_module("meshMain");
+        let amplified_mesh_module = stage_module("amplifiedMeshMain");
+        let task_module = stage_module("taskMain");
+
         let color_targets = [crcbl_hal::ColorTargetState::opaque(headless.format)];
         let describe = |label, mesh_entry, task| MeshPipelineDesc {
             label: Some(label),
@@ -246,7 +269,11 @@ impl MeshShaderResources {
             // they are here because Metal cannot.
             task_workgroup_size: [1, 1, 1],
             mesh: ShaderEntry {
-                module,
+                module: if mesh_entry == "meshMain" {
+                    mesh_only_module
+                } else {
+                    amplified_mesh_module
+                },
                 entry_point: mesh_entry,
             },
             mesh_workgroup_size: [3, 1, 1],
@@ -274,7 +301,7 @@ impl MeshShaderResources {
                     "amplified mesh triangle",
                     "amplifiedMeshMain",
                     Some(ShaderEntry {
-                        module,
+                        module: task_module,
                         entry_point: "taskMain",
                     }),
                 ))
@@ -284,6 +311,9 @@ impl MeshShaderResources {
         // The seam promises pipelines built from a module stay valid once it is
         // destroyed, and every draw below happens after the module is gone.
         device.destroy_shader_module(module);
+        device.destroy_shader_module(mesh_only_module);
+        device.destroy_shader_module(amplified_mesh_module);
+        device.destroy_shader_module(task_module);
 
         Self {
             vertices,

@@ -10594,7 +10594,20 @@ struct MeshModules {
 /// The geometry half of a mesh-shader pipeline: `mesh_cluster.slang`'s module
 /// and the stages taken out of it.
 struct ClusterStages {
-    module: ShaderModuleHandle,
+    /// The module the mesh stage is built from, and the one the task stage is,
+    /// which are **two modules rather than one**.
+    ///
+    /// `mesh_cluster.slang` compiles to a combined module carrying every entry
+    /// point and to one module per stage, and these are the per-stage ones. A
+    /// module holding a task entry point and its mesh partner carries two
+    /// `TaskPayloadWorkgroupEXT` variables — the task writes one, the mesh stage
+    /// reads the other — and an NVIDIA driver then delivers a payload of zeroes,
+    /// which draws cluster 0 of instance slot 0 of every bucket and nothing
+    /// else. See `crcbl_shaders::EntryPoint`.
+    mesh_module: ShaderModuleHandle,
+    /// The task stage's own module, on the same terms. [`None`] exactly when
+    /// [`task`](Self::task) is.
+    task_module: Option<ShaderModuleHandle>,
     /// Which of the module's two mesh entry points this path builds — the
     /// amplified one where the device has a task stage to feed it.
     mesh: &'static str,
@@ -10711,23 +10724,44 @@ impl MeshModules {
                 // run rather than a copy that agrees today.
                 // `mesh_cluster.slang`'s header carries the argument, and its
                 // `VertexOutput` is what the two agree through.
-                let module = match device.create_shader_module(&ShaderModuleDesc {
-                    label: Some("mesh_cluster.slang"),
-                    spirv: MESH_CLUSTER.spirv(),
-                    // `None`, and it is the whole reason this is a second file:
-                    // WGSL cannot express a mesh stage at all.
-                    wgsl: MESH_CLUSTER.wgsl(),
-                    msl: MESH_CLUSTER.msl(),
-                    dxil: &MESH_CLUSTER.dxil_containers(),
-                }) {
+                // **One module per stage, each carrying that stage's own
+                // SPIR-V.** Only the SPIR-V differs between them: MSL is one
+                // artifact per source whatever the stage, and a DXIL container
+                // is already per entry point, so both are handed over unchanged
+                // and the backends that read them see what they always did.
+                let stage_module = |entry_point: &str| {
+                    device.create_shader_module(&ShaderModuleDesc {
+                        label: Some("mesh_cluster.slang"),
+                        // The combined module where this stage has none of its
+                        // own, which is every stage of every other shader.
+                        spirv: MESH_CLUSTER
+                            .spirv_for(entry_point)
+                            .unwrap_or_else(|| MESH_CLUSTER.spirv()),
+                        // `None`, and it is the whole reason this is a second
+                        // file: WGSL cannot express a mesh stage at all.
+                        wgsl: MESH_CLUSTER.wgsl(),
+                        msl: MESH_CLUSTER.msl(),
+                        dxil: &MESH_CLUSTER.dxil_containers(),
+                    })
+                };
+                let mesh_module = match stage_module(cluster_mesh) {
                     Ok(module) => module,
                     Err(error) => {
                         device.destroy_shader_module(mesh);
                         return Err(error);
                     }
                 };
+                let task_module = match task.map(stage_module).transpose() {
+                    Ok(module) => module,
+                    Err(error) => {
+                        device.destroy_shader_module(mesh);
+                        device.destroy_shader_module(mesh_module);
+                        return Err(error);
+                    }
+                };
                 Some(ClusterStages {
-                    module,
+                    mesh_module,
+                    task_module,
                     mesh: cluster_mesh,
                     task,
                 })
@@ -10816,13 +10850,16 @@ impl MeshModules {
             Some(cluster) => device.create_mesh_pipeline(&MeshPipelineDesc {
                 label: Some(&format!("{label} mesh cluster")),
                 layout,
-                task: cluster.task.map(|entry_point| ShaderEntry {
-                    module: cluster.module,
-                    entry_point,
-                }),
+                task: cluster
+                    .task
+                    .zip(cluster.task_module)
+                    .map(|(entry_point, module)| ShaderEntry {
+                        module,
+                        entry_point,
+                    }),
                 task_workgroup_size: Self::TASK_WORKGROUP_SIZE,
                 mesh: ShaderEntry {
-                    module: cluster.module,
+                    module: cluster.mesh_module,
                     entry_point: cluster.mesh,
                 },
                 mesh_workgroup_size: Self::MESH_WORKGROUP_SIZE,
@@ -10883,13 +10920,16 @@ impl MeshModules {
             Some(cluster) => device.create_mesh_pipeline(&MeshPipelineDesc {
                 label: Some("shadow cascade mesh cluster"),
                 layout,
-                task: cluster.task.map(|entry_point| ShaderEntry {
-                    module: cluster.module,
-                    entry_point,
-                }),
+                task: cluster
+                    .task
+                    .zip(cluster.task_module)
+                    .map(|(entry_point, module)| ShaderEntry {
+                        module,
+                        entry_point,
+                    }),
                 task_workgroup_size: Self::TASK_WORKGROUP_SIZE,
                 mesh: ShaderEntry {
-                    module: cluster.module,
+                    module: cluster.mesh_module,
                     entry_point: cluster.mesh,
                 },
                 mesh_workgroup_size: Self::MESH_WORKGROUP_SIZE,
@@ -10969,11 +11009,14 @@ impl MeshModules {
         })
     }
 
-    /// Releases both modules. The pipelines built from them stay valid.
+    /// Releases every module. The pipelines built from them stay valid.
     fn destroy(self, device: &dyn Device) {
         device.destroy_shader_module(self.mesh);
         if let Some(cluster) = self.cluster {
-            device.destroy_shader_module(cluster.module);
+            device.destroy_shader_module(cluster.mesh_module);
+            if let Some(task) = cluster.task_module {
+                device.destroy_shader_module(task);
+            }
         }
     }
 }

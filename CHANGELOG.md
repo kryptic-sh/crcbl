@@ -45,6 +45,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The mesh path draws every instance again, not one per bucket.** `slangc`
+  gives a SPIR-V module holding a task entry point and its mesh partner two
+  distinct `TaskPayloadWorkgroupEXT` variables — the task writes one, the mesh
+  stage reads the other — and an NVIDIA driver then delivered a `ClusterPayload`
+  of zeroes, so every kept cluster drew cluster 0 of instance slot 0 of its
+  bucket. Which instance that was is decided by the culling pass's atomic append
+  order, so geometry appeared and disappeared between frames; the cube scene
+  drew one of its three pyramids. `spirv-val` accepts such a module, and the
+  rule it enforces is per entry point, so nothing caught it offline.
+  `tools/compile-shaders.sh` now also emits one SPIR-V module per task and mesh
+  entry point for a shader with an amplification stage, recorded as
+  `spirv-entry` lines in `spirv/manifest.txt`, and `crcbl_shaders::Shader`
+  exposes them through the new `spirv_for`; `ForwardRenderer` builds those two
+  stages from a module each. Every other stage still comes from the combined
+  module, and no shader source changed.
+
 - **The GPU pass table is logged one record per line, so a sink with a length
   cap cannot swallow its tail.** It grows with the pass count, which made it the
   first message to meet `crcbl::web`'s 1024-byte cap: a lantern browser-gate log
