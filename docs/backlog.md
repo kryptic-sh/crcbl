@@ -40,6 +40,82 @@ is telling you something".
 Installing the layer would also give synchronisation validation, which is the
 tool this session wanted twice and did without.
 
+## In flight on 2026-09-02, and what a lost session would lose
+
+Written down deliberately: this entry exists so the state below survives a
+compacted or dropped session. **Delete each item as it lands.**
+
+### The rebase owes three things, and one of them can silently undo a bug fix
+
+Local `main` sat 1 ahead / 8 behind `origin/main` while a write agent held the
+tree dirty, so the rebase could not run yet. When it does:
+
+- **`crates/crcbl-render/src/forward.rs` must keep building the task and mesh
+  stages from one SPIR-V module each.** That is the fix in
+  `759c7eb fix(shaders): a task stage gets a module to itself`: slangc puts two
+  `TaskPayloadWorkgroupEXT` variables in a module holding a task entry point and
+  its mesh partner, the mesh stage reads the one nothing wrote, and
+  `ClusterPayload` arrives as zeroes so every kept cluster draws cluster 0 of
+  instance slot 0. `spirv-val` accepts the module because its one-payload rule
+  is per entry point. **Taking the agent's side of that hunk compiles and passes
+  every offline check while restoring the bug.** Resolve by hand, re-read the
+  merged function, then sabotage it and confirm the test goes red.
+- **Every shader artifact the in-flight agent generated is under the old
+  naming** and must be deleted by name and regenerated from the merged sources
+  with `origin/main`'s `compile-shaders.sh`, whose `entry_file_segment` produces
+  the snake_case names (`probe_capture.fragment.dxil`, not
+  `probe_capture.fragmentMain.dxil`). Then confirm `spirv/manifest.txt` still
+  carries `spirv-entry` lines for `mesh_cluster`'s task, mesh and amplified-mesh
+  modules — if those vanish, the fix above is gone.
+- **`docs/backlog.md` conflicts**: `b40413c` and `296be13` edit it upstream
+  while the local commit rewrote the 2026-08-04 hardening list.
+
+### The determinism test's guard fails devices that cannot run the path
+
+`render_e2e`'s `the_cube_scene_draws_the_same_frame_on_every_pass_of_the_ring`
+(new in `cb3dc8b`) **reds two CI jobs on `main`** —
+`dx12 e2e (software adapter)` and `mtl e2e (macos-latest)`. Neither device has
+`TASK_SHADER`, so the scene draws through `IndirectCount` and the test's second
+guard fires:
+
+```text
+this test is about the per-cluster stage and this device drew through
+IndirectCount with an amplification stage of false — a green run here would be
+reporting on code the defect is not in
+```
+
+The intent is right and the test is otherwise well built — it passes on lavapipe
+having genuinely taken the mesh path (`amplification stage: true`). But a device
+that **cannot** exercise the defect deserves a skip, not a failure. The tree
+already has the idiom: quarry's
+`no amplification stage on this device, so there is no per-cluster cut to read`,
+with the vk harness's
+`every mesh-path test had an amplification stage to run on` as the assertion
+that the skip never becomes universal. Follow those two rather than inventing a
+third.
+
+### The README, the other docs and the demo site text are unaudited
+
+The user asked on 2026-09-02 for `README.md`, `web/README.md`, the demo site's
+prose (`web/pages/index.html` and each `web/pages/<demo>.html`),
+`crates/crcbl-cli/templates/README.md.tmpl` and the project-level `//!` crate
+docs to be checked against what the tree actually is, and corrected. A read pass
+against `origin/main` was commissioned; **nothing has been changed yet.** Known
+shapes to check: demo lists that disagree between `apps/`, `web/demos/` and
+`web/pages/`; any surviving reference to `crcbl-wgpu`, deleted 2026-08-21;
+counts of crates, demos and backends; and features described as planned that
+have since shipped.
+
+### Coverage the cancelled CI runs never gave
+
+Four commits in a row — `3c0ceb5`, `398160e` and the two between — had **both**
+their CI and Pages runs cancelled by the next push, so none of them has a
+verdict. Salvaged from `398160e`'s cancelled run before it died:
+`build + test (macos-latest)` and `build the demo site` were `success`, while
+`mtl e2e (macos-latest)` and `deploy to GitHub Pages` were `cancelled`. So **the
+GPU probe capture has no Metal verdict** — its MSL artifacts compile and nothing
+has run them — and the live site is still behind.
+
 ## HIGH PRIORITY — the user's calls of 2026-08-30
 
 The items the user ranked above the lighting order. They stay at the top of this
