@@ -5890,27 +5890,16 @@ frame **per lighting path**" cannot be met with one path.
 sample's entire reason for existing — that a human has compared the two lighting
 paths on the same scene.
 
-### The `[engine.video]` layer of the toggle resolution order has no source (2026-08-27)
+### No device in the tree clamps a lantern effect (2026-08-27)
 
-**Partly built.** Topic 39's resolution order has three layers. The
-**programmatic** one is built and is what both `--no-shadows` / `--no-ao` /
-`--no-reflections` and the pause menu's `SHADOWS` / `AO` / `REFLECTIONS` rows
-drive; the **camera-stack** one has a consumer now, the in-scene monitor asking
-for `room::MONITOR_STACK`. The `[engine.video]` layer has a source too — the
-settings file reaches the room through `ctx.video_effects()`, asserted by
-`the_players_video_clamp_reaches_both_views`, and `crcbl settings set` and the
-quality presets write the block. All three layers exist, so milestone 4's
-"toggle matrix across all three layers" is done.
-
-**Also:** no device in the tree clamps an effect, so the `UNAVAILABLE` arm of a
-menu row is covered by a unit test that constructs the device set rather than by
-a machine that reports one.
-
-**Corrected while auditing:** this doc listed the **Pages web demo** and **a CI
-leg that runs the golden suite** as still owed. Both are built —
-`apps/lantern/src/web.rs`, `web/demos/lantern/`, the `lantern` row in `DEMOS`,
-and a `Draw lantern's room on lavapipe` step in `.github/workflows/ci.yml`
-running `apps/lantern/tests/run-lantern-golden.sh` under the validation layers.
+**Coverage gap, not a defect.** The `UNAVAILABLE` arm of a pause-menu row — the
+state a row takes when the device cannot draw that effect — is covered by
+`a_row_the_device_cannot_draw_reads_as_unavailable`, a unit test that constructs
+the device set by hand. No machine or CI adapter here reports a clamp, so the
+arm has never been reached by a real device. It would take a backend that
+withholds a feature the menu offers; `apps/lantern/src/gpu.rs`'s `Forced` is the
+nearest thing in the tree and it withholds geometry and binding features, not
+effects.
 
 ### The four `crcbl-render` findings the monitor left are unfixed (2026-08-27)
 

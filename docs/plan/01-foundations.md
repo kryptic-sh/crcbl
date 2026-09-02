@@ -76,6 +76,7 @@ crcbl/
 │   ├── crcbl-audio/        # topic 13: mixer + spatial cue grammar
 │   ├── crcbl-store/        # topic 14: saves, settings, profiles, replays
 │   ├── crcbl-jobs/         # topic 21: the seam every engine thread starts through
+│   ├── crcbl-console/      # topic 52: convar/concommand registry, headless
 │   ├── crcbl-cli/          # topic 11: `crcbl` binary — headless control
 │   └── crcbl/              # umbrella: re-exports, engine setup helpers
 ├── apps/

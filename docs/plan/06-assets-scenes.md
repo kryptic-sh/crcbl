@@ -33,10 +33,14 @@ config** where ubiquity and editor support win. Both get comments.
 **LFS is deliberately not enabled yet** and that file carries the reason:
 everything binary through P8 is small, golden images are re-blessed often (which
 LFS handles worse than plain git), and a `filter=lfs` line breaks `git commit`
-outright on a clone without the git-lfs binary. It turns on when the P9 glTF
-corpus lands — and when it does, every `actions/checkout` step in CI must gain
-`lfs: true` in the same commit, or CI silently tests against pointer files.
-Cooked outputs are build artifacts, never tracked.
+outright on a clone without the git-lfs binary. The glTF corpus that was
+expected to force the question arrived without it: `tools/fetch-shelf.sh`
+fetches the Khronos shelf at a pinned commit and verifies it against
+`apps/viewer/assets/shelf.sha256`, and the single committed model is small
+enough to track plainly. So LFS is now waiting on some _other_ binary this tree
+does not have yet — and whenever that arrives, every `actions/checkout` step in
+CI must gain `lfs: true` in the same commit, or CI silently tests against
+pointer files. Cooked outputs are build artifacts, never tracked.
 
 ## Scene format: directory of chunk files
 

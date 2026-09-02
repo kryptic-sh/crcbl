@@ -290,10 +290,11 @@ impl crcbl::ui::DebugModule for Unbuilt {
         section.row_str("metal", "reflection only: SSR hit or baked probe");
         section.row_str("bounce wall", "one analytic bounce, no GI solve");
         // The per-effect toggles used to be a row here, and so did both unwired
-        // request layers. The camera one has a source now — the monitor's view
-        // asks for its own stack, and the `paths` section's `monitor` row is
-        // what that resolved to — so what is left owed is `[engine.video]`.
-        section.row_str("toggle layers", "camera: monitor; no [engine.video]");
+        // request layers. Both have sources now — the monitor's view asks for
+        // its own stack, which the `paths` section's `monitor` row reports, and
+        // the settings block reaches `request_for` through `video_effects` — so
+        // this row names where each layer comes from rather than what is owed.
+        section.row_str("toggle layers", "camera: monitor; video: settings");
         section.row_str("monitor", "one frame behind: fed at the frame's tail");
     }
 }

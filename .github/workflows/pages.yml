@@ -386,10 +386,13 @@ jobs:
           - flappy
           - asteroids
           - horde
-          # hud is the one demo that takes no input, so the driver dispatches no
-          # key for it and reads "the simulation is advancing" off the ticker's
-          # own rng cursor instead. Its `EXPECTATIONS` row in
-          # `web/tools/browser-e2e.mjs` is what says so.
+          # hud is the one demo that takes no input at all — `HostedGame::key_event`
+          # is empty by design and a scripted ticker drives the page — so group C
+          # reads "the simulation is advancing" off the ticker's own rng cursor.
+          # It is not the only row the driver dispatches no key for: `key: null`
+          # says "no start key", which several demos that do take input carry
+          # because they open with no waiting state to leave. Each row in
+          # `web/tools/browser-e2e.mjs` gives its own reason.
           - hud
           # quarry and lantern are the site's two 3D demos, and until 2026-08
           # neither ran here for one cause: `crcbl-render`'s draw-argument pass

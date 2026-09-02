@@ -179,9 +179,11 @@ indexed by `SV_InstanceID`, so a sprite is an instance but not a mesh range and
 it does not go through `draw_gen`'s buckets. What the locked decision was
 protecting still holds — it is one pass in the same graph, on the same device,
 with the same computed barriers, and there is no second renderer. The
-**transparent pass this section also names is unbuilt**: the only alpha blending
-in the renderer is that pass's and `crcbl_render::ui_pass`'s, and the opaque
-binning is `draw_gen`'s fixed bucket table rather than a sort.
+**transparent pass this section also names is unbuilt**: the passes that blend
+do so each for its own overlay — `ui_pass`, `grid.rs` premultiplied and
+`debug_draw.rs` alpha — and none of them sorts, because none of them draws scene
+geometry. The opaque binning is still `draw_gen`'s fixed bucket table rather
+than a sort.
 
 ### 3.5 Meshlet geometry — the primary path (MVP)
 
@@ -251,8 +253,11 @@ never take a fallback executes it anyway, and a golden per path. The
 `BindingModel` half is open by §3.2's own record — `Bindless` has no
 implementation, so there is no combination to render — and it stays open until
 the page's one-extent bound is what someone needs lifted. The last criterion is
-met. The first two are unverified here: nothing in the tree holds ten thousand
-instances (`apps/horde` is the scale sample and holds a thousand), and no
+met. The first two are unverified here — but the fixture for the first exists:
+`apps/horde`'s `--max-enemies` ceiling defaults below the target and `--prefill`
+stages a whole arena before the first frame precisely so the target is reachable
+without waiting on the spawner, which `apps/horde/src/args.rs` says would take
+over ten minutes. What is missing is a recorded measurement at that size, and no
 RenderDoc capture is recorded anywhere.
 
 ## Risks

@@ -119,14 +119,18 @@ mistake in any of them shows. It also gives the Pages site the 3D flagship this
 doc asks for; every browser figure recorded before it came from a 2D sample.
 
 **Every renderer feature it leans on already existed** — shadows, effects and
-probes in `crates/crcbl-render/` — and none of them gained a line on shard's
-behalf. Nor did `crcbl-store`: the save is `crcbl::store::save::SaveWriter`'s
-container, the platform data directory natively and OPFS in a browser, and what
-is this sample's is the payload inside the one sector and which directory it
-goes in. Nor did `crcbl-phys`: `apps/shard/src/camera.rs` is a **third** rig on
-the one `CharacterController`, after `apps/puppet`'s orbit and `apps/breach`'s
-first person, and it is the one whose camera the player barely controls — fixed
-elevation, fixed distance, a yaw that moves in quarter turns.
+probes in `crates/crcbl-render/` — but saying none of them gained a line on
+shard's behalf was wrong within the hour it was written: `e2c3584`, "let a
+second point light cast", changed `shadow.rs`, `forward.rs` and `mesh.slang` and
+names this sample as the cause. Leaning on a feature is how its gaps get found;
+what the sample did not need was a new feature. Nor did `crcbl-store`: the save
+is `crcbl::store::save::SaveWriter`'s container, the platform data directory
+natively and OPFS in a browser, and what is this sample's is the payload inside
+the one sector and which directory it goes in. Nor did `crcbl-phys`:
+`apps/shard/src/camera.rs` is a **third** rig on the one `CharacterController`,
+after `apps/puppet`'s orbit and `apps/breach`'s first person, and it is the one
+whose camera the player barely controls — fixed elevation, fixed distance, a yaw
+that moves in quarter turns.
 
 **The zone is one authored table and everything else is read off it**: a floor
 slab per open tile, a solid block per wall tile, pillars, a dais, braziers, and

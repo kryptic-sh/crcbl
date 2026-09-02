@@ -311,11 +311,16 @@ validation-report assertion once, for all of them.
   `crates/crcbl-scene/src/gltf_fixture.rs` behind the `gltf-fixture` feature
   builds a triangle document and its `.glb` container, and that crate's
   `Cargo.toml` gives the reason: a binary container is a fixture nobody
-  reviewing a change can read. There is no Khronos sample subset in the tree and
-  no committed `.glb`/`.gltf` anywhere; vendoring one is what `.gitattributes`
-  says LFS turns on for, and it is still owed. The scene save→load→hash
-  roundtrip cannot exist yet either — there is no scene format to save
-  ([06-assets-scenes.md](06-assets-scenes.md)).
+  reviewing a change can read. The Khronos subset arrived by a route neither
+  this document nor [06-assets-scenes.md](06-assets-scenes.md) anticipated,
+  which is why LFS never had to turn on: `tools/fetch-shelf.sh` pulls it at a
+  pinned upstream commit and checks it against
+  `apps/viewer/assets/shelf.sha256`, a per-file manifest, while one model —
+  Suzanne — is committed so the default viewer run needs no fetch at all
+  (`.gitignore` whitelists that one directory and ignores the rest of the
+  shelf). So the corpus is a fetch plus a pin, not a vendored tree. The scene
+  save→load→hash roundtrip cannot exist yet either — there is no scene format to
+  save ([06-assets-scenes.md](06-assets-scenes.md)).
 - `crcbl-ui`: draw-list snapshot tests (widget tree → draw-command list compare
   — no GPU needed); hit-test unit grid.
 - Editor: random-command/undo property test (stage 8 exit criterion) runs

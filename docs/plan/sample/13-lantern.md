@@ -142,16 +142,17 @@ left owed.
   the device permits — and an effect the device cannot draw reads `UNAVAILABLE`
   rather than `OFF`, so the panel never offers a tick that does nothing.
 
-  **This is two thirds of milestone 4's matrix, not the whole of it.** Every
-  effect is reachable from the programmatic layer, from the menu and from the
-  command line, and the camera stack has a source now — the in-scene monitor's
-  view asks for `room::MONITOR_STACK`, which is every effect but the
-  reflections, through a `ForwardRenderer` of its own. `[engine.video]` still
-  has no source in this tree, so a toggle "exercising all three layers" is not
-  something the sample can yet do. No device here clamps an effect either, so
-  the `UNAVAILABLE` arm is covered by a unit test that constructs the device set
-  — `a_row_the_device_cannot_draw_reads_as_unavailable` — rather than by a
-  machine that reports one.
+  **This is milestone 4's matrix.** Every effect is reachable from the
+  programmatic layer, from the menu and from the command line; the camera stack
+  has a source — the in-scene monitor's view asks for `room::MONITOR_STACK`,
+  which is every effect but the reflections, through a `ForwardRenderer` of its
+  own; and `[engine.video]` has one too, read by `apps/lantern/src/gpu.rs`'s
+  `video_effects` call and folded with the other two by `request_for`, which
+  `the_players_video_clamp_reaches_both_views` holds against both views. No
+  device here clamps an effect either, so the `UNAVAILABLE` arm is covered by a
+  unit test that constructs the device set —
+  `a_row_the_device_cannot_draw_reads_as_unavailable` — rather than by a machine
+  that reports one.
 
 - **A golden frame with six structural claims in front of it**
   (`apps/lantern/tests/golden.rs`): the sun reaches the floor through the
@@ -200,12 +201,12 @@ which is the configuration a general solve would change most.
 ### Still owed at this milestone, and where
 
 Recorded in `docs/backlog.md` rather than here: ray tracing and the acceleration
-structures, and the `[engine.video]` layer of the toggle resolution order (the
-programmatic one is built and is what both the `--no-*` flags and the pause
-menu's rows drive, and the camera one is the in-scene monitor's). The monitor
-itself left findings in `crcbl-render` — duplicate imports, an undeclared page
-read, one view per renderer and one view per offscreen run — all of them in the
-backlog.
+structures. All three layers of the toggle resolution order have sources now —
+the programmatic one drives both the `--no-*` flags and the pause menu's rows,
+the camera one is the in-scene monitor's, and `[engine.video]` reaches the
+request through `gpu.rs`'s `video_effects` read. The monitor itself left
+findings in `crcbl-render` — duplicate imports, an undeclared page read, one
+view per renderer and one view per offscreen run — all of them in the backlog.
 
 **Two things this list used to carry are built, and saying they are not was the
 worse error.** The **Pages web demo** exists: `apps/lantern/src/web.rs` is the
@@ -222,11 +223,15 @@ is a check that cannot fail where it matters.
 
 ## Milestones
 
-1. Scene + raster path complete: shadows for every light type, SSAO, SSR,
-   irradiance probes (P7B proof).
+**1 and 4 are built** — the sections above are the record of each. What is left
+is the ray-traced half, which waits on the acceleration structures the backlog
+carries.
+
+1. ~~Scene + raster path complete: shadows for every light type, SSAO, SSR,
+   irradiance probes (P7B proof).~~
 2. Acceleration structures + ray-traced shadows and AO (P7C).
 3. Ray-traced reflections and GI; side-by-side and A/B-flip modes.
-4. Toggle matrix across all three layers; forced-path runs; Pages demo.
+4. ~~Toggle matrix across all three layers; forced-path runs; Pages demo.~~
 
 ## Exit criteria
 

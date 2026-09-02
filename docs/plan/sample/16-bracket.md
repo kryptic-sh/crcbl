@@ -98,12 +98,16 @@ nothing else produces.
 
 ## Milestones
 
-1. Queue + pairing + a rating that moves, all local over `InMemoryTransport`.
+**1, 4 and the web-demo half of 5 are built** — "Where this stands" below is the
+record. The networked milestones are what remain.
+
+1. ~~Queue + pairing + a rating that moves, all local over
+   `InMemoryTransport`.~~
 2. Real transport: native client to native server over UDP, found by direct
    address or LAN discovery.
 3. Signed results: identity, result signing, rejection paths shown to fail.
-4. Synthetic population driver + convergence assertions in CI.
-5. Ladder persistence, restart survival, and the single-player web demo.
+4. ~~Synthetic population driver + convergence assertions in CI.~~
+5. Ladder persistence and restart survival; the single-player web demo is built.
 
 ## Where this stands
 
