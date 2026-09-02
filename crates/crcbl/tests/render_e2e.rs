@@ -2950,6 +2950,148 @@ fn the_shader_and_the_rust_mirror_agree_about_the_irradiance(image: &Image) {
     );
 }
 
+/// **A scene that does not move draws the same frame every time.**
+///
+/// Every other test in this suite draws **one** frame per device and compares it
+/// against a golden or against another path's single frame. A frame that is
+/// correct on its own and different from the frame before it passes all of them,
+/// which is how `docs/backlog.md`'s "lantern's window reveal flickers on the mesh
+/// path" reached a shipped tree: one face of a room drops out for a frame and
+/// comes back, with the scene frozen, and nothing in the suite looks at two
+/// frames at once.
+///
+/// **What it asserts is that there is no second frame.** The pose is fixed —
+/// `OffscreenSetup` draws at `t = 0` every time — the scene does not animate and
+/// no input arrives, so every frame after the first is drawn from inputs
+/// identical to its predecessor's. The comparison is on the readback bytes with
+/// no tolerance, because there is no mechanism by which a still frame may differ
+/// at all.
+///
+/// **Frame zero is excluded, and only frame zero.** The first frame of a run
+/// fills caches the others inherit: the shadow atlas is drawn rather than reused,
+/// and the culling-statistics ring has nothing in it yet. Everything from frame
+/// one on is steady state.
+///
+/// **[`FRAMES`] passes of the ring, because the hazard is between frames rather
+/// than inside one.** The renderer keeps `FRAMES_IN_FLIGHT` frames of state and
+/// rotates through them, so a slot disagreeing with its neighbour only shows once
+/// the ring has come round several times. At the time this was written the defect
+/// reproduced on 16 of 63 frames, so this many is a wide margin and still well
+/// under a second of GPU time.
+///
+/// **The two guards in front of the comparison are what stop it passing
+/// vacuously.** This test asserts frames are *equal*, and a device that drew
+/// nothing satisfies that perfectly — thirty-two identical blank frames are
+/// thirty-two identical frames. So the frame is first shown to hold the scene,
+/// with [`MIN_COLORS_CUBE`] and the inspector the golden test uses. And the run
+/// is shown to have gone through the amplification stage, because that is where
+/// the defect lives: on a device without [`Features::TASK_SHADER`] this scene
+/// draws through a stage that selects and culls nothing, and a green run there
+/// would be reporting on code the defect is not in. Forcing the same scene onto
+/// [`GeometryPath::IndirectCount`] gave 0 differing frames against the mesh
+/// path's 16, which is what makes that second guard the difference between a
+/// test and a coin toss.
+///
+/// [`Scene::Cube`] rather than the DAG scene: it is the simplest scene that
+/// reproduces, and on the mesh path its geometry goes through the same
+/// per-cluster stage a larger one would.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_cube_scene_draws_the_same_frame_on_every_pass_of_the_ring() {
+    crcbl_core::log::init_logging();
+
+    /// Frames to draw, several passes of the frame ring.
+    const FRAMES: usize = 32;
+
+    let mesh_stage = Features::MESH_SHADER.union(Features::TASK_SHADER);
+    let setup = OffscreenSetup::open_with(
+        EXTENT.0,
+        EXTENT.1,
+        Scene::Cube,
+        OffscreenSetup::OPTIONAL_FEATURES.union(mesh_stage),
+    )
+    .unwrap_or_else(|why| panic!("a GPU backend opens for the cube scene: {why}"));
+    let mut setup = Offscreen::guard(SUITE, setup);
+    let path = setup.caps().geometry_path();
+    let amplifies = setup
+        .adapter()
+        .caps
+        .features
+        .contains(Features::TASK_SHADER);
+    eprintln!(
+        "crcbl render e2e: cube on {backend} adapter {adapter:?} — drew through {path:?}, \
+         amplification stage: {amplifies}",
+        backend = setup.backend(),
+        adapter = setup.adapter().name,
+    );
+
+    let format = setup.format();
+    let mut frames: Vec<Vec<u8>> = Vec::with_capacity(FRAMES);
+    for index in 0..FRAMES {
+        let ((width, height), pixels) = setup
+            .draw_and_readback()
+            .unwrap_or_else(|why| panic!("cube frame {index} renders on {path:?}: {why}"));
+        assert_eq!(
+            (width, height),
+            EXTENT,
+            "frame {index} drew a different extent"
+        );
+        frames.push(pixels);
+    }
+    // Before any assertion, on `draw_scene_on_every_geometry_path`'s terms: a
+    // device lost mid-run, or a frame the validation layer refused, surfaces
+    // here and nowhere else.
+    setup.finish();
+
+    // **And the run went through the stage the hazard is in.**
+    assert!(
+        amplifies && path == GeometryPath::MeshShader,
+        "this test is about the per-cluster stage and this device drew through {path:?} \
+         with an amplification stage of {amplifies} — a green run here would be reporting \
+         on code the defect is not in"
+    );
+
+    // **The order matters.** The equality is asserted first so that a run which
+    // flickers reports the flicker; the two guards after it are what stop a
+    // *passing* run being vacuous, and a run that reaches them has already shown
+    // every frame identical, so whichever frame they inspect is every frame.
+    let unstable: Vec<(usize, usize)> = frames
+        .iter()
+        .enumerate()
+        .skip(2)
+        .map(|(index, frame)| {
+            (
+                index,
+                frame.iter().zip(&frames[1]).filter(|(a, b)| a != b).count(),
+            )
+        })
+        .filter(|(_, differing)| *differing > 0)
+        .collect();
+    assert!(
+        unstable.is_empty(),
+        "{} of {} still frames differ from frame 1, as (frame, differing bytes of {}): \
+         {unstable:?} — the pose, the scene and the effects are identical across all of \
+         them, so geometry that comes and goes between passes of the ring is what this \
+         reads as",
+        unstable.len(),
+        FRAMES - 2,
+        frames[1].len(),
+    );
+
+    // **The frame holds the scene**, asserted on the very frame the equality
+    // below rests on rather than on some other one.
+    let baseline = Image::from_readback(EXTENT.0, EXTENT.1, &frames[1], channel_order(format))
+        .expect("the readback is exactly one image");
+    let colors = baseline.distinct_colors(MIN_COLORS_CUBE);
+    assert!(
+        colors >= MIN_COLORS_CUBE,
+        "a cube frame with {colors} distinct colour(s) (counted to {MIN_COLORS_CUBE}) is not \
+         evidence — blank frames are identical to one another, and this test would pass on \
+         them"
+    );
+    the_cube_scene_drew_its_geometry_and_every_material_column(&baseline);
+}
+
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
 fn the_dunes_scene_draws_its_cluster_dag_and_matches_its_golden() {
