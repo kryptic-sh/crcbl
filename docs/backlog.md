@@ -18026,20 +18026,41 @@ Per-crate review passes explicitly disproved these before publishing anything:
 
 ### Hardening (correct today, fragile — explicitly not defects)
 
+**Re-triaged against the tree on 2026-09-02**, every claim in this list. The
+heading no longer holds for all of it: three claims were **never accurate** and
+say so in place (vk's `untag`, the QOA saturation, render's "documented"
+allocations), several the tree has since answered were deleted, and four are
+**defects rather than fragility** — `write_buffer`'s memory rule differing
+across backends, view-format compatibility being three rules across four
+backends, vk's `submit` not checking the command buffer's queue family, and the
+missing re-handshake after a forged `Accept`. Those four are the ones to fix
+first; the rest of the list is unchanged in kind, sharpened where the triage
+found the original wording named the lesser half of a problem.
+
 - **net**: `baseline_tick = 0` is wire-ambiguous (delta.rs:824/866-869;
   unreachable — the server never encodes against tick 0); a forged `Accept`
-  permanently wedges the client (unauthenticated handshake by design); `Reject`
+  permanently wedges the client (unauthenticated handshake by design) — the
+  missing half is **recovery**: `Client::handle_handshake_result` accepts any
+  generation-matching `Accept` and nothing ever re-handshakes, while
+  `auth_failure_count` is incremented in two places and read only by tests, and
+  the `Reject` path already has the two-strike logic to mirror; `Reject`
   `msg_len` is u16 with a silent cast on encode (codec.rs:399); key rotation on
   reconnect trusts a cleartext token (documented); reject messages disclose
   server identifiers pre-auth.
-- **vk**: acquire path waits on the armed fence with `u64::MAX` _while holding
-  the device lock_ — a compositor that never returns an image hangs every device
-  call; semaphore-reuse safety depends on the `slots = image_count + 1`
-  throttle; `submit` never checks the CB's pool family matches the queue;
-  `untag`'s `unreachable!` panics on a forged handle.
-- **appkit**: the first-responder-after-`setStyleMask:` hazard is logged, never
-  re-issued (known open item); the borderless-origin defect is the tracked open
-  item in this backlog.
+- **vk**: the acquire path waits with `u64::MAX` _while holding the device lock_
+  — a compositor that never returns an image hangs every device call, and
+  **both** waits are under it, the armed fence and `acquire_next_image` itself;
+  the code comment shows only the unarmed-fence case was considered;
+  semaphore-reuse safety depends on the `slots = image_count + 1` throttle — and
+  the in-code comment claiming the acquire fence is what makes reuse provably
+  safe overstates it: the fence proves the signal completed, not that the
+  caller's submit-side wait retired; `submit` never checks the CB's pool family
+  matches the queue, which `queue_of` makes reachable — it really does build
+  distinct graphics, async-compute and transfer families, and this is the one
+  handle misuse in that backend that is silent UB rather than a `HalError`. The
+  `untag` claim was **never true**: `Handle` stores a `NonZeroU32` generation
+  behind a private constructor, so no handle can carry generation 0 and
+  `from_bits` cannot fail — the index is masked, not checked.
 - **win32**: `ScreenToClient` return ignored in the wheel arm (proc.rs:679);
   `GlobalLock` failure reads as `ClipboardContent::Empty` (documented);
   registered-format payloads lose a trailing NUL; 0×0 descriptor creates a
@@ -18054,15 +18075,29 @@ Per-crate review passes explicitly disproved these before publishing anything:
   `Conn::drain` treats any negative return as a permanent disconnect; e2e
   `attach_shm_buffer` stride×height truncates to i32 (test scaffolding); a 4 GB
   keymap file costs a 4 GB virtual mapping.
-- **hal**: `ColorAttachment::resolve`'s required state is never documented; the
-  reference frame destroys the command buffer right after present (wrong pattern
-  to copy); `write_buffer`'s error doc says "not host-visible" but the
-  requirement is `HostUpload` specifically; `query_results` "returns zeros
+- **hal**: the reference frame destroys the command buffer right after present
+  (wrong pattern to copy); **`write_buffer`'s memory rule is not the same on
+  every backend** — the trait doc and `null` require
+  `MemoryLocation::HostUpload` while `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl`
+  gate on `is_mappable()` and so admit `HostReadback`, which dx12's own
+  `write_buffer_writes_host_visible_memory_and_refuses_what_d3d12_cannot_map`
+  asserts succeeds. `hal_seam_e2e.rs`'s cross-backend test covers only
+  `HostUpload` and `DeviceLocal`, so the divergence is untested and code that
+  works on the three native backends errors under the reference one. Pick one
+  rule, then align the doc and the outlier; `query_results` "returns zeros
   without TIMESTAMP_QUERY" is unreachable (create_query_set errors first);
   `present`'s queue must be present-capable but the seam never says so;
   `AcquiredFrame` carries no swapchain identity.
-- **null**: `create_image_view` never validates format/subresource;
-  `semaphore_value` always returns 0.
+- **null**: `create_image_view` never validates format or subresource — and the
+  finding behind it is that **view-format compatibility is three different rules
+  across four backends**. `ImageViewDesc::format` documents that a view "may
+  differ from the image's format for sRGB reinterpretation"; `crcbl-dx12`
+  refuses any differing format outright, `crcbl-mtl` refuses only when either
+  side is depth or stencil, and `crcbl-vk` and `null` do not check at all. The
+  field's documented purpose is therefore broken on D3D12, and
+  `ImageViewDesc::check` covers mips and layers only. `crcbl-dx12` and
+  `crcbl-mtl` also keep hand-rolled copies of the subresource rule that
+  `ImageViewDesc::check` already owns.
 
   The rest of this bullet was about **`crcbl-wgpu`, which was deleted on
   2026-08-21** — unclosed passes no-opping, `checked()` routing, abandoned
@@ -18070,47 +18105,81 @@ Per-crate review passes explicitly disproved these before publishing anything:
   `SwapchainSlot::suboptimal`. Those name nothing now. A few were written
   without saying which backend they were about (`set_scissor` at `i32::MIN`,
   `create_buffer` within 3 bytes of `u64::MAX`, `copy_layout`'s `bytes_per_row`
-  wrap, two pending signals of one timeline value); rather than guess, they are
-  recorded here as **claims that would have to be re-derived against `null`** by
-  anyone who wants them, not as findings that still stand.
+  wrap, two pending signals of one timeline value). Re-derived against `null`:
+  **`set_scissor` at `i32::MIN` is a real three-way divergence** — `null`
+  records it unchecked, `crcbl-vk` passes it to `vkCmdSetScissor` (a VUID
+  violation), `crcbl-mtl` clamps negatives to zero and `crcbl-dx12` refuses it,
+  and the seam documents no rule. **`create_buffer` near `u64::MAX` aborts**:
+  null's mappable path is `vec![0u8; size]`, which aborts the process where the
+  trait doc promises `OutOfDeviceMemory`. **The `copy_layout` claim names
+  nothing** and is dropped — no `copy_layout`, `bytes_per_row` or `row_pitch`
+  exists in `crcbl-hal` or `crcbl-webgpu`, the seam's field is
+  `BufferImageCopy::buffer_row_length`, and null does no size arithmetic in
+  `copy_buffer_to_image`. **The double timeline signal is answered**: null's
+  `submit` keeps an `advanced` list and refuses a second signal that does not
+  move past the first.
 
 - **render**: cross-frame mixed-state transient handoff (single-mip production
   transients only); cross-frame queue-ownership release dropped (no second queue
   in use); `begin_frame`'s `atlas` argument is layout-only; pool transient view
-  covers every mip; per-frame CPU allocations are small and documented;
-  `upload_texture`'s expected-size math can overflow u64 (unreachable with real
-  memory).
+  covers every mip; per-frame CPU allocations are small but **not** documented —
+  `graph.rs`'s "a plain index keeps compilation allocation-free" is false, since
+  every `create_image`/`create_buffer`/`add_render_pass`/`add_compute_pass`
+  allocates a `String` per frame and `compile` allocates several `Vec`s;
+  `upload_texture`'s expected-size math can overflow u64 and the "unreachable"
+  qualifier is **wrong** — `texture::upload` computes `expected` before
+  comparing against `pixels.len()`, so a `u32::MAX` extent with an empty slice
+  panics in dev builds instead of returning the documented `InvalidDescriptor`.
 - **core/ecs/input**: wrong-kind bindings silently produce permanently idle
-  actions (user-profile typo, no diagnostic); `set_enabled(true)` doesn't
-  resolve immediately; `with_capacity(usize::MAX)` overflow is pre-empted by the
-  vec capacity check; `Held` duration quantizes to f32 after ~19 days uptime.
-- **phys**: `world_mut()` lets a caller desync `collider_to_entity`;
+  actions — the "user-profile typo" vector named here does not exist (there is
+  no keybinding file), but the debug console is one: `apply_bind` only ever
+  installs `Binding::Key`, so binding an `Axis2` action to a key succeeds,
+  echoes back, and leaves a dead action; `set_enabled(true)` doesn't resolve
+  immediately (deliberate, pinned by a test); `with_capacity(usize::MAX)`
+  overflow is pre-empted by the vec capacity check.
+- **phys**: `world_mut()` lets a caller desync `collider_to_entity` — and it has
+  **zero callers in the workspace**, so deleting it is the whole fix;
   `ThrustForce` fields are pub (unnormalized direction silently scales thrust);
-  negative collider radii bypass the constructors; per-tick `Vec<Entity>` in
-  `step` is negligible.
+  negative collider radii bypass the constructors — whose guards are
+  `debug_assert!`, so a release build takes one through the front door too and
+  `Aabb::is_empty` then drops the collider from the BVH; per-tick `Vec<Entity>`
+  in `step` is negligible.
 - **audio/store**: `opfs.rs` write-before-ready can be replaced by a later
-  generation restore; `settings.rs get` falls through on a type error in a
-  hand-edited file; `voice_mixes()`/`voice_count()` take the audio thread's
-  mutex (HUD polling can stall audio); qoa.rs:349 saturates where the reference
-  wraps (adversarial LMS weights only).
+  generation restore — `write` does not gate on `inner.restored` the way
+  `delete` and `list` do, and seeds `(seq, slot)` at `(1, 1)`, so a disk file at
+  a higher generation silently overwrites the newer local write, and `write`'s
+  own doc claims the opposite; `settings.rs get` falls through on a type error
+  in a hand-edited file; `voice_mixes()`/`voice_count()` take the audio thread's
+  mutex (HUD polling can stall audio, and `voice_mixes` allocates while holding
+  it). The QOA saturation claim was **never true**: `prediction` is shadowed by
+  `prediction >> 13` on the line above, so the sum cannot reach the saturation
+  point, and the two places that genuinely rely on C `int` wrapping already use
+  `wrapping_add`/`wrapping_mul` with a comment saying why. This decoder cannot
+  differ from a conforming one on any input.
 - **ui**: `FrameStats::with_window` aborts on a huge caller-supplied window;
   public float style fields are unclamped (0/negative → inverted geometry);
   `Text` top-left-anchor holds only for the built-in metrics; trailing-newline
   labels measure one line too tall; per-frame allocations are documented.
 - **sprite/wl-scanner**: JSON recursion depth (~30-50k nested objects overflow
-  the stack; sidecars trusted); `emit::KEYWORDS` omits
-  `self`/`Self`/`super`/`union` (loud compile error, not silent mis-generation);
-  `worst_pixels` collects all differing pixels then truncates (up to ~230 MB on
-  an all-different 4K frame); `escape_ident`/`camel_case` collisions name the
+  the stack; sidecars trusted); `emit::KEYWORDS` omits `self`/`Self`/`super`
+  (loud compile error, not silent mis-generation) — `union` is contextual and a
+  legal identifier, so that half was never a gap, and the real defect is that
+  `KEYWORDS` _contains_ `"crate"`, which has no legal raw form; `worst_pixels`
+  collects all differing pixels then truncates (up to ~230 MB on an
+  all-different 4K frame); `escape_ident`/`camel_case` collisions name the
   generated file, not the XML line.
 - **cli/engine**: `channel_order`'s `_ => Rgba` arm would silently mislabel a
   future non-8-bit format (unreachable today); F11 toggle runs before the
   `destroyed` check; the pointer hit-test runs before `draw_menu`
-  (one-frame-late menu clicks); failed `PendingGpuContext`/`GpuContext::finish`
-  drops surfaces without `destroy_surface` (vk cleans up with a warning);
+  (one-frame-late menu clicks — **deliberate**: `engine.rs`'s `showing` binding
+  is commented "last frame's menu, deliberately", so this is a wording fix, not
+  a behaviour one); failed `PendingGpuContext`/`GpuContext::finish` drops
+  surfaces without `destroy_surface` (vk cleans up with a warning);
   `request_open`/ `start_device` accept a (0,0) extent (swapchain creation fails
-  loudly); sandbox `--frames 0` accepted while bare rejects it; sandbox
-  `--backend` usage text names only vk/null while more parse.
+  loudly); sandbox `--frames 0` accepted while bare rejects it; sandbox's
+  `--backend` usage text now names every backend and is guarded by a test, but
+  the `ENVIRONMENT` block's `CRCBL_GPU` line still says "(vk, null)" and the
+  guard does not scan it.
 - **apps**: asteroids score is u32 (debug panic after ~43M small rocks); muzzle
   spawn wraps to the far side at the field edge; fire press during respawn is
   consumed (no edge buffering); breakout destroys a brick even when not
