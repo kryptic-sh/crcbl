@@ -21,104 +21,24 @@ The rule going forward is in the global agent instructions: no attribution
 trailer on any new commit. Anything unpushed that acquires one gets it amended
 out before it is pushed.
 
-## The amplification payload arrives as zeroes, so the mesh path draws one instance per bucket (2026-09-02)
+## `crcbl-vk`'s device suite cannot run on this machine (2026-09-02)
 
-**Root caused and reproduced by two tests in this tree. The fix is designed and
-proven on the device; it is not written.** This is the cause of the lantern
-flicker the user reported, and of a static, much larger defect that was sitting
-in the tree unnoticed.
+**A coverage gap, stated as one.** Every test in `crcbl-vk`'s `vk_e2e` suite
+ends in `Debug::assert_clean`, which refuses to pass unless
+`VK_LAYER_KHRONOS_validation` actually loaded — a test that goes green because
+the layer was missing proves nothing, and that is deliberate. The layer is not
+installed here (Arch: `vulkan-validation-layers`), so all 61 of them fail at
+that assertion whatever their subject did.
 
-**What is wrong.** `slangc` emits **two** distinct `TaskPayloadWorkgroupEXT`
-variables when a task entry point and its mesh partner are compiled into one
-SPIR-V module: `%__EmitMeshTasks_Payload`, which `taskMain` writes, and
-`%amplification`, which `amplifiedMeshMain` reads. Nothing writes the second. On
-this machine's NVIDIA MX550 (driver 610.57.04) the mesh stage is given the
-variable the task never wrote, so `ClusterPayload` arrives **all zeroes**. Every
-kept cluster therefore draws `cluster 0` of `instance slot 0` of its bucket,
-whatever cluster and instance it was dispatched for.
+They still carry evidence: a test that fails at its _own_ assertion line rather
+than at `debug.rs`'s got that far, which is how
+`an_amplification_stage_delivers_its_payload_to_the_mesh_stage` was found to be
+the minimal reproduction of the task-payload defect. Reading which line a
+failure names is the difference between "this suite cannot run" and "this suite
+is telling you something".
 
-`spirv-val --target-env vulkan1.3` accepts the module, and the one-payload-per-
-entry-point rule it enforces is satisfied — two variables in one module is legal
-SPIR-V that this driver mishandles. Whether other drivers do is not measured.
-
-**Where it already shows.** Both of these are red on this machine today:
-
-- `crcbl-vk`'s
-  `mesh_shader::an_amplification_stage_delivers_its_payload_to_the_mesh_stage`
-  fails with its own words: "a payload that arrived as all zeroes blackens the
-  whole triangle". It is the minimal reproduction. Note the rest of that suite
-  cannot run here at all — `Debug::assert_clean` requires
-  `VK_LAYER_KHRONOS_validation`, which is not installed, so every other test in
-  it fails before reaching its subject.
-- `crcbl`'s
-  `the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden`
-  fails with "23 below vs 702 above": **two of the cube scene's three pyramids
-  never draw**. All three are instances of one mesh, so they share a bucket, and
-  only the instance in slot 0 of that bucket's run is ever drawn.
-
-**Why it reads as a flicker rather than as missing geometry.** Which instance
-lands in slot 0 of a bucket's run is decided by the order `cull.slang`'s
-survivors win `visible_count[INSTANCE_SURVIVOR_WORD].add(1)`, which is an atomic
-append with no defined order. So the single instance that draws changes from
-frame to frame, and a face appears and disappears. The order is stable for a
-given binary on a given device — three consecutive runs of the determinism test
-gave byte-identical results — which is why this looks deterministic and why any
-unrelated shader edit shifts which frames are affected.
-
-**The fix, proven on the device.** Two shapes were tried against the payload
-test; both make it pass every payload assertion:
-
-1. Rewrite the module so both entry points share one payload variable
-   (`spirv-dis`, drop the second `OpVariable`, point its uses at the first,
-   `spirv-as`). Verified with `spirv-val`.
-2. Compile the task entry point and its mesh partner as **single-entry-point
-   modules**, which is what `slangc -entry <name>` already produces — one
-   payload variable each.
-
-Splitting only the mesh side does **not** work: with the task stage still coming
-from the combined module the payload is still zeroes. It is the task module's
-duplication that matters.
-
-Shape 2 is the recommended one. It needs no new build tools, it mirrors what the
-DXIL leg already does — `dxil/` is one container per entry point, and the
-manifest already records those as `entry:path:sha` — and `ShaderEntry` already
-carries a module handle per stage, so the HAL needs no change. What it costs is
-the artifact model: per-entry SPIR-V records in `spirv/manifest.txt`, the parser
-in `crcbl-shaders/src/manifest.rs`, the verification in `build.rs`, the
-generated accessors, and the call sites in `forward.rs` and the `crcbl-vk`
-tests. The four sources that declare an amplification stage are
-`mesh_cluster.slang`, `mesh_shader.slang`, `task_write_probe.slang` and
-`zero_dispatch_probe.slang`.
-
-Shape 1 is smaller but rewrites compiler output and would make `spirv-as` a
-pinned build tool, since `build.rs` recompiles with the pinned `slangc` and
-compares bytes — which is also why a patched artifact cannot simply be
-committed.
-
-The natural third option is closed and already documented in
-`mesh_shader.slang`: a module-scope `groupshared` payload, which is the spelling
-that would give one variable, is refused by Slang's Metal backend.
-
-**Superseded by the above — do not re-run these.** An earlier pass of this
-investigation blamed `cluster_survives` in `mesh_cluster.slang`, the per-cluster
-frustum and normal-cone tests. That is wrong. Disabling the per-cluster frustum
-test, the instance frustum test in `cull.slang`, both together, forcing every
-LOD group expanded, and forcing `keep` to `1` each produced **byte-identical**
-frames: for the cube scene nothing is culled and nothing is deselected, so the
-whole cull is a no-op there. Forcing a global memory barrier before every pass
-in `graph.rs` also changed nothing, which is what rules out a missing barrier.
-
-An earlier entry also argued from `CullStats` survivor counts that the cull was
-not dropping anything. That argument was weak for its own reason —
-`clear-counters` runs once per cull, ten times a frame, so the readback need not
-cover the camera pass — and it should not be reused either way.
-
-**The regression test exists and is red.**
-`the_cube_scene_draws_the_same_frame_on_every_pass_of_the_ring` in
-`crates/crcbl/tests/render_e2e.rs` (commit `56e9a39b`) draws 32 still frames and
-asserts they are identical. It reports 3 of 30 differing on the amplified mesh
-path and passes on a device without `Features::TASK_SHADER`. It will go green
-with the fix, and it is the guard against this returning.
+Installing the layer would also give synchronisation validation, which is the
+tool this session wanted twice and did without.
 
 ## HIGH PRIORITY — the user's calls of 2026-08-30
 
