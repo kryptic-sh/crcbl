@@ -273,13 +273,41 @@ records what is now true. What is owed:
   re-captures when static geometry changes and there is no scroll path — that
   waits on the clipmap, the next slice of the same plan. A scene that moves a
   wall after load keeps the visibility of the wall's old position.
-- **The capture is CPU and single-threaded**, one ray per texel per probe
-  against every resident triangle with no acceleration structure. Measured at
-  **0.28 ms per probe** — 16.8 ms for lantern's 60 probes against 12 occluder
-  meshes, median of three. A clipmap of thousands of probes cannot pay that at
-  load, so this is the piece that has to move to the GPU, off the load path, or
-  both, and it is the number the clipmap slice is priced against.
-  `crcbl_render::probe_visibility`'s module header carries the cost model.
+- **The capture's cube faces are point-sampled, and the resolution was argued
+  rather than swept.** `crcbl_render::probe_capture::FACE` is 64 texels because
+  half a face texel is under a degree, a twentieth of the octahedral texel it
+  stands for and well inside `SURFACE_BIAS`. That bound is arithmetic, not a
+  measurement: nobody has compared a GPU-captured layer against the ray-cast one
+  texel by texel. What is measured is that no golden moved and that the leak
+  test's bands are the numbers the host cast produced, on radv and lavapipe.
+- **The pipelines are built and destroyed inside every
+  `capture_probe_visibility` call.** Right for a load-time one-off — the 0.93 ms
+  figure includes them — but the clipmap's recapture-on-scroll runs this per
+  frame, and hoisting `probe_capture`'s `Transients` into the renderer is the
+  first thing that slice will want.
+- **The chunk loop has no permanent test.**
+  `crcbl_render::probe_capture::PROBES_PER_CHUNK` is one atlas's worth of tiles,
+  so every scene in the tree captures in one chunk and the multi-chunk path is
+  dead code in CI. It was exercised once, by hand, by forcing the constant to 7:
+  `run-render-e2e.sh` stayed 37/37 with identical leak and mirror numbers and
+  `run-lantern-golden.sh` stayed 8/8. A scene with more probes than one chunk
+  holds, or a test-only override of that constant, would make it a standing
+  check.
+- **The host tests of what a map _contains_ went with the ray caster.**
+  `the_intersector_reports_the_distance_along_the_ray`,
+  `a_probe_in_a_box_records_the_walls_it_is_inside`,
+  `a_wall_between_a_probe_and_a_surface_takes_the_probes_weight` and
+  `a_floor_keeps_the_probe_standing_over_it` were unit tests of the CPU capture
+  and could not survive it. What stands in their place is `render_e2e`'s
+  `a_probe_behind_a_wall_lights_nothing_through_it` (the wall claim, on a
+  device) and the `Probes` scene's mirror comparison (the floor claim: it only
+  holds while every probe over that floor keeps its full weight), plus
+  `probe_capture`'s own host tests of the capture's arithmetic — that every
+  texel direction's major-axis face contains it and projects inside its tile,
+  that a direction and the point one unit along it project to the same tile
+  coordinate, that the tiles partition the atlas, and that the far plane reaches
+  every corner of the scene from every probe. The net change is that the
+  _content_ claims are now GPU-only.
 - **Dynamic objects are not in the maps** and do not occlude the bounce — the
   accepted limit of the raster tier, per the plan's own decision.
 - **The old bakes still stand.** `apps/lantern`'s `bounce` module and

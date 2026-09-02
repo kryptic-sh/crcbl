@@ -23,9 +23,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   visibility test against it — a probe on the far side of a wall gets no weight.
   New `crcbl_shaders::probe_visibility` (the layout, the octahedral mapping and
   the bound) and `ForwardRenderer::capture_probe_visibility`, which an
-  application calls once its static geometry is placed. `r_probe_visibility`
-  turns the weighting off and defaults on; a scene with no probes draws the
-  frame it drew before.
+  application calls once its static geometry is placed. The capture runs **on
+  the GPU** — six 90° views per probe into a tile atlas, resolved by a compute
+  pass — and costs 0.93 ms for lantern's 60 probes on an RX 7900 XTX.
+  `r_probe_visibility` turns the weighting off and defaults on; a scene with no
+  probes draws the frame it drew before.
 
 - **`crcbl_hal::SampleType::UnfilterableFloat`**, for binding a float format no
   hardware filter can blend. WebGPU refuses an `rg32float` view against a layout

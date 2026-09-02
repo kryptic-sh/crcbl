@@ -153,8 +153,12 @@ pub mod orbit;
 pub mod pass_stats;
 mod probe;
 
-/// The per-probe visibility capture the probe grid is weighed by, and the
-/// image `mesh.slang` reads it out of.
+/// The GPU pass that fills a probe's visibility map: a depth cube per probe,
+/// resolved into the octahedral layer `mesh.slang` reads.
+mod probe_capture;
+
+/// The static geometry a probe's visibility map is captured from, and the
+/// console variable that decides whether the frame reads one.
 mod probe_visibility;
 pub mod scene;
 pub mod shadow;

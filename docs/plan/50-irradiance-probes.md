@@ -26,8 +26,25 @@ day.** The grid below stays, and everything that _fills_ it changes:
   visibility test against it, so a probe on the far side of a wall gets no
   weight. `crcbl_shaders::probe_visibility` owns the layout, the octahedral
   mapping and the bound, and is the Rust mirror the render tests compare the
-  shader against; `crcbl_render::probe_visibility` captures the maps, on the CPU
-  for now, by intersecting the scene's resident static triangles.
+  shader against; `crcbl_render::probe_visibility` keeps the static triangles a
+  map is about, and `crcbl_render::probe_capture` fills it **on the device**, as
+  the producer table below always said it would — a depth cube per probe.
+
+  **The capture is six 90° views per probe into one tile atlas**, drawn from the
+  scene's own triangles by `probe_capture.slang` — `crcbl_render::shadow`'s
+  `+X, -X, +Y, -Y, +Z, -Z` face order and its 90° reversed-Z matrix, but not its
+  pass: that atlas is a per-frame tile budget handed out to a light list by the
+  render graph, and a capture wants six tiles a probe at load with no light in
+  the room. What the tiles hold is **distance**, in `R32Float`, rather than a
+  depth, because the resolve wants a distance and the fragment stage already has
+  one. `probe_octahedral.slang` then reads one tile texel per octahedral texel
+  and writes the two moments. Neither shader transcribes any of the mapping: the
+  direction table and the face each direction falls in are evaluated on the host
+  — by `crcbl_shaders::probe_visibility::texel_direction` and
+  `crcbl_render::probe_capture::face_of` — and arrive as data, so there is one
+  place each rule is written. Probes past what one 2048² atlas holds are
+  captured in chunks that share an encoder and take turns in it, which is what
+  keeps the memory flat as the count grows.
 
   Where it departs from what the paragraphs below describe as intended: the
   storage is a `Rg32Float` 2D **array**, one layer per probe, not a cube array —
@@ -130,22 +147,26 @@ on 2026-08-30 rather than left standing beside it.
 
 **What the visibility half costs, measured.**
 `apps/lantern --headless --frames 400 --size 1920x1080` on radv (RX 7900 XTX,
-Mesa 26.2.1), median of three runs. The capture is a one-off at load and costs
-**16.8 ms for 60 probes against 12 occluder meshes** (the room's second view, 10
-occluders, takes 15.2 ms) — CPU, single-threaded, ray-cast against the resident
-triangles. The per-frame price of the weighting does not resolve: the `forward`
-pass reports **0.293 ms p50 with `r_probe_visibility` on against 0.302 ms with
-it off**, which is inside the 0.02 ms spread the same three runs show, so the
-eight extra octahedral fetches per fragment cost less than this instrument can
-see.
+Mesa 26.2.1), median of three runs, reported by the app's own
+`lantern: probe visibility captured …` line. The capture is a one-off at load
+and costs **0.93 ms for 60 probes against 12 occluder meshes** (the room's
+second view, 10 occluders, takes 0.84 ms), end to end — the pipelines, the
+atlas, the six views a probe, the resolve, the copy and the `wait_idle`. That is
+**16 µs a probe against the 0.28 ms the host ray cast took**, a factor of
+eighteen, and it is the number the clipmap is priced against. The per-frame
+price of the weighting does not resolve: the `forward` pass reports **0.293 ms
+p50 with `r_probe_visibility` on against 0.302 ms with it off**, which is inside
+the 0.02 ms spread the same three runs show, so the eight extra octahedral
+fetches per fragment cost less than this instrument can see.
 
 **Pricing for the halves not built.** Per frame: the RSM's two extra targets on
 the near cascade and one gather pass — the DDGI-class budget of roughly half a
 millisecond to a millisecond at 1080p on desktop; the browser tier takes a
-smaller grid. A clipmap of thousands of probes makes the capture above the
-number to watch, and at 0.28 ms per probe it is the one that has to move to the
-GPU or off the load path. Each figure is measured on the three tiers before the
-rung counts, per the standing rule.
+smaller grid. A clipmap of a few thousand probes is now a capture of tens of
+milliseconds rather than seconds, which is a load path rather than a redesign;
+what it still needs is the slab recapture, so that a scroll pays for the probes
+it exposed and not for the level. Each figure is measured on the three tiers
+before the rung counts, per the standing rule.
 
 **Order.** Among the raster lighting items this rebuild comes after LTC area
 lights, the shadow atlas and the AO tint, and **ahead of the atmosphere** — the

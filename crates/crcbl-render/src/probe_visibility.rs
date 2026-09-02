@@ -1,13 +1,13 @@
-//! The per-probe visibility capture: the octahedral depth and depth² map
-//! `mesh.slang` weighs each probe by, filled from the scene's own static
-//! triangles.
+//! The per-probe visibility capture: the scene's own static triangles, kept for
+//! the GPU pass that draws them from every probe.
 //!
 //! ```text
 //!  SceneDesc::meshes ──▶ Occluders::from_scene ─┐
-//!                                               ├─▶ capture ──▶ ProbeVisibility
-//!  the instances placed so far ─────────────────┘                   │
-//!                                                   upload_texture_layers ▼
-//!                                             one Rg32Float layer per probe → 29
+//!                                               ├─▶ world_triangles ─┐
+//!  the instances placed so far ─────────────────┘                    │
+//!                                                                    ▼
+//!                                          crate::probe_capture ──▶ one
+//!                                          Rg32Float layer per probe → 29
 //! ```
 //!
 //! `docs/plan/50-irradiance-probes.md`'s decision of 2026-08-30. The grid stays
@@ -18,7 +18,8 @@
 //! direction is behind a wall from it and takes none of its light.
 //! [`crcbl_shaders::probe_visibility`] owns the image's layout, the octahedral
 //! mapping and the Chebyshev bound, because those are a contract with the
-//! shader; this module owns filling it.
+//! shader; [`crate::probe_capture`] owns filling it; and this module owns the
+//! geometry it is filled *from*.
 //!
 //! # It is a capture of geometry, and it is not a bake
 //!
@@ -28,26 +29,25 @@
 //! them still lights the probes through the rows, and nothing here outlives the
 //! geometry it was taken from. A reflection capture is the same shape.
 //!
-//! # Cast on the host, against triangles, and what that costs
+//! # The triangles are kept on the host, and drawn on the device
 //!
-//! One ray per texel per probe — [`EXTENT`](crcbl_shaders::probe_visibility::EXTENT)² of them each — against the
-//! triangles of every instance placed when [`capture`](crate::probe_visibility::capture) is called, with no
-//! acceleration structure between them. That is `probes × EXTENT² × triangles`
-//! ray/triangle tests, paid once, and it is the honest shape for the scenes this
-//! engine draws today; `docs/backlog.md` carries what it would take to put a
-//! `crcbl_phys::Bvh` under it, which is the answer when a scene's triangle count
-//! makes the product matter.
+//! [`Occluders`](crate::probe_visibility::Occluders) holds each resident mesh's
+//! level-0 triangles and
+//! [`world_triangles`](crate::probe_visibility::world_triangles) places them,
+//! which is the whole of this module's work: one transform per vertex per
+//! capture, and then a soup the capture pass uploads and rasterises six times
+//! per probe. The walk is here rather than in
+//! the pass because a mesh may be a cluster DAG, whose level-0 triangles have
+//! to be gathered before anything can draw them, and because a scene that
+//! reserves no probes must not pay even that.
 //!
-//! **Nothing is retained for a scene with no probes.** [`Occluders::from_scene`](crate::probe_visibility::Occluders::from_scene)
+//! **Nothing is retained for a scene with no probes.**
+//! [`Occluders::from_scene`](crate::probe_visibility::Occluders::from_scene)
 //! keeps the description's positions and indices only when the scene reserves
 //! room for a probe, so a caller that never authors one pays neither the memory
 //! nor the capture — the same shape as the grid itself adding exactly zero.
 
 use crcbl_shaders::mesh::{self, MeshVertex};
-use crcbl_shaders::probe::ProbeVolume;
-use crcbl_shaders::probe_visibility::{
-    EXTENT, FAR, LAYER_BYTES, ProbeVisibility, TEXEL_BYTES, texel_direction,
-};
 use glam::Mat4;
 
 use crate::scene::{Geometry, SceneDesc};
@@ -163,11 +163,13 @@ pub(crate) struct Occluder {
     pub(crate) transform: Mat4,
 }
 
-/// Every static triangle in world space, three positions each.
+/// Every static triangle in world space, three positions each — the soup
+/// [`crate::probe_capture`] uploads and draws.
 ///
-/// Built once per capture rather than transforming inside the ray loop, because
-/// each triangle is then transformed once instead of once per ray.
-fn world_triangles(geometry: &Occluders, occluders: &[Occluder]) -> Vec<[[f32; 3]; 3]> {
+/// Each vertex is transformed once per instance rather than once per triangle
+/// corner, because a mesh's index buffer names the same vertex three times on
+/// average and the transform is the expensive half.
+pub(crate) fn world_triangles(geometry: &Occluders, occluders: &[Occluder]) -> Vec<[[f32; 3]; 3]> {
     let mut soup = Vec::new();
     for placed in occluders {
         let Some(mesh) = geometry.triangles(placed.mesh) else {
@@ -196,113 +198,9 @@ fn world_triangles(geometry: &Occluders, occluders: &[Occluder]) -> Vec<[[f32; 3
     soup
 }
 
-/// How far along `direction` from `origin` the ray meets the triangle, or
-/// `None` if it misses.
-///
-/// **Möller & Trumbore 1997**, *Fast, Minimum Storage Ray/Triangle
-/// Intersection*, written out: the barycentric solve by Cramer's rule, with no
-/// precomputed plane equation and no division until the ray is known to hit.
-/// Two-sided, because a probe standing inside geometry sees that geometry's
-/// back faces and the distance to them is exactly what says it is inside.
-///
-/// `EPSILON` is what rejects a ray in the triangle's own plane, where the
-/// determinant is zero and the barycentric coordinates are a division by it.
-fn ray_triangle(origin: [f32; 3], direction: [f32; 3], triangle: &[[f32; 3]; 3]) -> Option<f32> {
-    const EPSILON: f32 = 1.0e-8;
-    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-    let cross = |a: [f32; 3], b: [f32; 3]| {
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-    };
-    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-
-    let edge1 = sub(triangle[1], triangle[0]);
-    let edge2 = sub(triangle[2], triangle[0]);
-    let pvec = cross(direction, edge2);
-    let determinant = dot(edge1, pvec);
-    if determinant.abs() < EPSILON {
-        return None;
-    }
-    let inv = 1.0 / determinant;
-    let tvec = sub(origin, triangle[0]);
-    let u = dot(tvec, pvec) * inv;
-    if !(0.0..=1.0).contains(&u) {
-        return None;
-    }
-    let qvec = cross(tvec, edge1);
-    let v = dot(direction, qvec) * inv;
-    if v < 0.0 || u + v > 1.0 {
-        return None;
-    }
-    let distance = dot(edge2, qvec) * inv;
-    // Behind the probe, which is a different direction's business.
-    (distance > 0.0).then_some(distance)
-}
-
-/// The distance from `origin` along `direction` to the nearest triangle, or
-/// [`FAR`] if the ray leaves the scene without meeting one.
-fn nearest(origin: [f32; 3], direction: [f32; 3], triangles: &[[[f32; 3]; 3]]) -> f32 {
-    let mut best = FAR;
-    for triangle in triangles {
-        if let Some(distance) = ray_triangle(origin, direction, triangle)
-            && distance < best
-        {
-            best = distance;
-        }
-    }
-    best
-}
-
-/// The visibility image for `volume`, captured against the static geometry
-/// `occluders` place.
-///
-/// One layer per probe in the table's own `x`-fastest order, so layer `i` is
-/// probe row `i` — which is what lets the shader index the image with the same
-/// number it indexes the probe table with.
-///
-/// A volume with no probes, or a scene with nothing placed, captures nothing and
-/// returns [`ProbeVisibility::NONE`]: there is no geometry for a map to be about,
-/// and the value that occludes nothing is the honest answer.
-pub(crate) fn capture(
-    volume: &ProbeVolume,
-    geometry: &Occluders,
-    occluders: &[Occluder],
-) -> ProbeVisibility {
-    let probes = volume.total();
-    if probes == 0 || geometry.is_empty() {
-        return ProbeVisibility::NONE;
-    }
-    let triangles = world_triangles(geometry, occluders);
-    let mut layers = vec![0u8; probes as usize * LAYER_BYTES];
-    let mut at = 0usize;
-    for z in 0..volume.counts[2].max(1) {
-        for y in 0..volume.counts[1].max(1) {
-            for x in 0..volume.counts[0].max(1) {
-                let origin = volume.position([x, y, z]);
-                for texel_y in 0..EXTENT {
-                    for texel_x in 0..EXTENT {
-                        let distance =
-                            nearest(origin, texel_direction(texel_x, texel_y), &triangles);
-                        layers[at..at + 4].copy_from_slice(&distance.to_le_bytes());
-                        layers[at + 4..at + 8]
-                            .copy_from_slice(&(distance * distance).to_le_bytes());
-                        at += TEXEL_BYTES;
-                    }
-                }
-            }
-        }
-    }
-    debug_assert_eq!(at, layers.len());
-    ProbeVisibility::new(layers)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_shaders::probe_visibility::OCCLUDED_WEIGHT;
 
     /// A unit cube's twelve triangles, centred on the origin, wound so its
     /// normals face outwards. Placed by a transform, it is a wall or a room.
@@ -336,174 +234,64 @@ mod tests {
         }
     }
 
-    /// The intersector against distances written out by hand — a slip in the
-    /// barycentric solve would pass every capture test here, because nothing
-    /// else in this tree knows what the right answer was.
+    /// **The placement is where a wall's world position comes from**, and it is
+    /// the only arithmetic left on the host: an instance's transform applied to
+    /// its mesh's own vertices, once per vertex rather than once per triangle
+    /// corner.
+    ///
+    /// Written out against a scaled, translated cube whose corners are known by
+    /// hand, because a transposed matrix or a transform applied in the wrong
+    /// order would still produce a plausible-looking box somewhere else.
     #[test]
-    fn the_intersector_reports_the_distance_along_the_ray() {
-        // A triangle in the plane `z = 2`, spanning the first quadrant.
-        let triangle = [[0.0, 0.0, 2.0], [4.0, 0.0, 2.0], [0.0, 4.0, 2.0]];
-        assert_eq!(
-            ray_triangle([0.5, 0.5, 0.0], [0.0, 0.0, 1.0], &triangle),
-            Some(2.0),
-            "straight at it from two units away"
-        );
-        // Twice the direction is half the parameter: the distance is in units
-        // of `direction`, which is why every caller hands it a unit vector.
-        assert_eq!(
-            ray_triangle([0.5, 0.5, 0.0], [0.0, 0.0, 2.0], &triangle),
-            Some(1.0)
-        );
-        // Past the triangle's hypotenuse, inside its bounding box.
-        assert_eq!(
-            ray_triangle([3.0, 3.0, 0.0], [0.0, 0.0, 1.0], &triangle),
-            None
-        );
-        // Behind the origin.
-        assert_eq!(
-            ray_triangle([0.5, 0.5, 3.0], [0.0, 0.0, 1.0], &triangle),
-            None
-        );
-        // In the triangle's own plane.
-        assert_eq!(
-            ray_triangle([0.5, 0.5, 2.0], [1.0, 0.0, 0.0], &triangle),
-            None
-        );
-        // From the far side: two-sided, because a probe inside geometry has to
-        // see the back of it.
-        assert_eq!(
-            ray_triangle([0.5, 0.5, 5.0], [0.0, 0.0, -1.0], &triangle),
-            Some(3.0)
-        );
-    }
-
-    /// **A probe inside a room records the room**: every direction meets a wall
-    /// at the distance the room's own dimensions give.
-    #[test]
-    fn a_probe_in_a_box_records_the_walls_it_is_inside() {
-        // A four-unit cube about the origin, one probe at its centre.
-        let volume = ProbeVolume {
-            origin: [0.0, 0.0, 0.0],
-            inv_spacing: [0.0, 0.0, 0.0],
-            counts: [1, 1, 1],
-        };
+    fn a_placed_mesh_puts_its_triangles_where_the_transform_says() {
         let placed = [Occluder {
             mesh: 0,
-            transform: Mat4::from_scale(glam::Vec3::splat(4.0)),
+            transform: Mat4::from_translation(glam::Vec3::new(10.0, 0.0, 0.0))
+                * Mat4::from_scale(glam::Vec3::new(4.0, 2.0, 6.0)),
         }];
-        let map = capture(&volume, &one_cube(), &placed);
-        assert_eq!(map.probes(), 1);
-        // Straight at a face is the half extent.
-        for axis in [
-            [1.0f32, 0.0, 0.0],
-            [-1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, -1.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, -1.0],
-        ] {
-            let measured = map.moments(0, axis)[0];
-            assert!(
-                (measured - 2.0).abs() <= 0.05,
-                "straight at a face of a four-unit cube measured {measured}"
-            );
-        }
-        // **Every texel is inside the box**, between its half extent and its
-        // half diagonal — the statement that the probe is enclosed, which one
-        // ray leaking out through a gap in the winding would break and no
-        // single direction would show.
-        let (mut low, mut high) = (f32::MAX, 0.0f32);
-        for y in 0..EXTENT {
-            for x in 0..EXTENT {
-                let distance = map.texel(0, x, y)[0];
-                low = low.min(distance);
-                high = high.max(distance);
+        let soup = world_triangles(&one_cube(), &placed);
+        assert_eq!(soup.len(), 12, "a cube is twelve triangles");
+        let (mut low, mut high) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for triangle in &soup {
+            for corner in triangle {
+                for axis in 0..3 {
+                    low[axis] = low[axis].min(corner[axis]);
+                    high[axis] = high[axis].max(corner[axis]);
+                }
             }
         }
-        assert!(
-            low >= 2.0 - 1.0e-4 && high <= 2.0 * 3.0f32.sqrt() + 1.0e-4,
-            "a probe at the centre of a four-unit cube recorded distances from {low} to \
-             {high}, and everything it can see is between 2 and 2√3 away"
-        );
-        // And the moments are consistent: the second is the square of the
-        // first, texel by texel, because one ray filled both.
-        let straight = map.texel(0, EXTENT / 2, EXTENT / 2);
-        assert!((straight[1] - straight[0] * straight[0]).abs() <= 1.0e-3 * straight[1]);
-    }
-
-    /// **The rung's whole claim, on the host**: a probe with a wall between it
-    /// and a surface keeps none of its weight, and the same probe with the wall
-    /// taken away keeps all of it.
-    ///
-    /// The wall is the only thing that differs between the two runs, so nothing
-    /// else — the probe's place, the surface's place, the map's resolution —
-    /// can be what moved the answer.
-    #[test]
-    fn a_wall_between_a_probe_and_a_surface_takes_the_probes_weight() {
-        // The probe stands at `x = +1`, the shaded point on the floor at
-        // `x = -1`, and the wall is a thin slab on the plane `x = 0`.
-        let volume = ProbeVolume {
-            origin: [1.0, 1.0, 0.0],
-            inv_spacing: [0.0, 0.0, 0.0],
-            counts: [1, 1, 1],
-        };
-        let floor = [-1.0f32, 0.0, 0.0];
-        let up = [0.0f32, 1.0, 0.0];
-        let wall = Occluder {
-            mesh: 0,
-            transform: Mat4::from_scale(glam::Vec3::new(0.05, 6.0, 6.0)),
-        };
-        let ground = Occluder {
-            mesh: 0,
-            transform: Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0))
-                * Mat4::from_scale(glam::Vec3::new(8.0, 1.0, 8.0)),
-        };
-
-        let open = capture(&volume, &one_cube(), &[ground]);
-        let walled = capture(&volume, &one_cube(), &[ground, wall]);
-        let position = volume.position([0, 0, 0]);
-        let seen = open.weight(0, position, floor, up);
-        let hidden = walled.weight(0, position, floor, up);
-        eprintln!("crcbl probes: probe weight {seen:.4} in the open, {hidden:.6} behind a wall");
-        assert!(
-            seen >= 0.99,
-            "with nothing in the way the probe must keep its weight, and it kept {seen}"
-        );
-        assert_eq!(
-            hidden, OCCLUDED_WEIGHT,
-            "a probe on the far side of a wall must keep only the floor weight"
-        );
-    }
-
-    /// The surface bias is what stops a floor shadowing itself against the probe
-    /// directly above it — the case the whole grid rests on, and the one a
-    /// capture with no bias gets wrong on half its fragments.
-    #[test]
-    fn a_floor_keeps_the_probe_standing_over_it() {
-        let volume = ProbeVolume {
-            origin: [0.0, 1.0, 0.0],
-            inv_spacing: [0.0, 0.0, 0.0],
-            counts: [1, 1, 1],
-        };
-        let ground = Occluder {
-            mesh: 0,
-            transform: Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0))
-                * Mat4::from_scale(glam::Vec3::new(12.0, 1.0, 12.0)),
-        };
-        let map = capture(&volume, &one_cube(), &[ground]);
-        let position = volume.position([0, 0, 0]);
-        for offset in [0.0f32, 0.25, 0.5, 1.0, 2.0] {
-            let point = [offset, 0.0, 0.0];
-            let weight = map.weight(0, position, point, [0.0, 1.0, 0.0]);
+        // The unit cube scaled by (4, 2, 6) and moved ten along `x`.
+        for (axis, (want_low, want_high)) in [(8.0, 12.0), (-1.0, 1.0), (-3.0, 3.0)]
+            .into_iter()
+            .enumerate()
+        {
             assert!(
-                weight >= 0.99,
-                "the floor {offset} unit(s) from under the probe kept only {weight} of it, \
-                 which is the floor shadowing itself"
+                (low[axis] - want_low).abs() <= 1.0e-5 && (high[axis] - want_high).abs() <= 1.0e-5,
+                "axis {axis} spans {} to {}, not {want_low} to {want_high}",
+                low[axis],
+                high[axis]
             );
         }
     }
 
-    /// A scene that reserves no probes retains no geometry and captures nothing,
+    /// An instance naming a mesh the capture did not keep places nothing, and
+    /// does not take the meshes that were kept with it.
+    #[test]
+    fn an_unkept_mesh_places_no_triangles() {
+        let placed = [
+            Occluder {
+                mesh: 7,
+                transform: Mat4::IDENTITY,
+            },
+            Occluder {
+                mesh: 0,
+                transform: Mat4::IDENTITY,
+            },
+        ];
+        assert_eq!(world_triangles(&one_cube(), &placed).len(), 12);
+    }
+
+    /// A scene that reserves no probes retains no geometry and places nothing,
     /// which is what keeps the cost of the feature zero for every caller that
     /// does not use it.
     #[test]
@@ -513,10 +301,7 @@ mod tests {
         let ids: Vec<u32> = (0..scene.meshes.len() as u32).collect();
         let geometry = Occluders::from_scene(&scene, &ids);
         assert!(geometry.is_empty());
-        assert_eq!(
-            capture(&scene.probes.volume, &geometry, &[]),
-            ProbeVisibility::NONE
-        );
+        assert!(world_triangles(&geometry, &[]).is_empty());
     }
 
     /// A scene that does reserve probes keeps every mesh's triangles, under the

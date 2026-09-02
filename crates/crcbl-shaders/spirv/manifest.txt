@@ -264,6 +264,33 @@ dxil = amplifiedMeshMain:dxil/mesh_shader.amplifiedMeshMain.dxil:7f0a91482a7f898
 dxil = fragmentMain:dxil/mesh_shader.fragmentMain.dxil:fb6542d1fa84d15525bb7cd86438bf382bcafbfee6645791f494eebdde3c3129
 entry-points = meshMain:meshext, taskMain:taskext, amplifiedMeshMain:meshext, fragmentMain:fragment
 
+[probe_capture]
+source = shaders/probe_capture.slang
+source-sha256 = f4018706580a26140b957a48a68c5fa1a3f065a6fb99d45514dd6499b7ba0c74
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/probe_capture.spv
+spirv-sha256 = 904bfff87388388a96054d5dec690fad78fd4cb697ce7ac996e819f3f758c636
+wgsl = wgsl/probe_capture.wgsl
+wgsl-sha256 = e49094a49f0021b697e94f72f7ccbdd0509b71b91cbff4621277d7ea13f0b461
+msl = msl/probe_capture.metal
+msl-sha256 = 6886fd40c9ff1694bfd0504d21da2d6925e98298075baa53be2f6dc414978829
+dxil = vertexMain:dxil/probe_capture.vertexMain.dxil:882b5609d3a403b8a5b9d51c08dc7f917a3fec2aaf74fca9897f73df501a9a3d
+dxil = fragmentMain:dxil/probe_capture.fragmentMain.dxil:786eb8331b2eea0c306936d7d3de88cc51c2e6cf9fa650626dc02a20c8bb2083
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[probe_octahedral]
+source = shaders/probe_octahedral.slang
+source-sha256 = 6d09c8dcd72cf0a056fa1d7d70044c40654f33ad62f96c1c7de562293c888354
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/probe_octahedral.spv
+spirv-sha256 = 4a595c47b6fe823badabbe76fef42b35255c0c90d77644f7dc5b7a96f484105a
+wgsl = wgsl/probe_octahedral.wgsl
+wgsl-sha256 = 9e0ed6d2a69c5b6f763b46239c0a110337d3d9e09253058071eb5d098b4eb0d0
+msl = msl/probe_octahedral.metal
+msl-sha256 = de2ccb337d85117d8d58587bb87fbe78d6f8dbd0c7678b46502e6070d0cc4398
+dxil = computeMain:dxil/probe_octahedral.computeMain.dxil:b51acfcc1948a3dda990f4efa6684426d275caa7eb4a374b81c5691d47bec2bb
+entry-points = computeMain:glcompute
+
 [push_constant_probe]
 source = shaders/push_constant_probe.slang
 source-sha256 = f0fac90dc866f84b7b112e37e8a06273e3621ee6b0e46c382936f42598f5b27d

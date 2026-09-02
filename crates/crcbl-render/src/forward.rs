@@ -6708,8 +6708,9 @@ impl ForwardRenderer {
     /// `probe_irradiance` then weighs each of a fragment's eight probes by
     /// whether it can *see* that fragment — so a probe on the far side of a wall
     /// contributes nothing and a room stops lighting the room next door.
-    /// This crate's own `probe_visibility` module is the capture and
-    /// [`crcbl_shaders::probe_visibility`] is the format.
+    /// This crate's own `probe_capture` module is the pass, `probe_visibility`
+    /// is the geometry it draws, and [`crcbl_shaders::probe_visibility`] is the
+    /// format.
     ///
     /// # Call it once, after the scene's walls are placed
     ///
@@ -6732,7 +6733,8 @@ impl ForwardRenderer {
     /// # What it sees, and what it does not
     ///
     /// Every instance live in the pool when it is called, at the transform it
-    /// then has, drawn from its mesh's level-0 triangles. Objects that move
+    /// then has, rasterised from its mesh's level-0 triangles into six 90°
+    /// faces per probe. Objects that move
     /// afterwards keep the occlusion they had here, which is the accepted limit
     /// this technique has everywhere it is used — a probe volume is about the
     /// walls. Recapturing after a wall moves is this call again.
@@ -6742,7 +6744,7 @@ impl ForwardRenderer {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from the upload. The previous maps are kept on the failing
+    /// [`HalError`] from the capture. The previous maps are kept on the failing
     /// path, so a renderer that has captured once and then failed goes on
     /// drawing with what it had.
     pub fn capture_probe_visibility(
@@ -6759,28 +6761,19 @@ impl ForwardRenderer {
                 transform: Mat4::from_cols_array(&record.transform),
             })
             .collect();
-        let captured =
-            crate::probe_visibility::capture(&self.probe_volume, &self.probe_occluders, &placed);
-        if captured.probes() == 0 {
+        let Some(uploaded) = crate::probe_capture::capture(
+            device,
+            queue,
+            &self.probe_volume,
+            &self.probe_occluders,
+            &placed,
+        )?
+        else {
             // No probes, or nothing placed for a map to be about. Leaving the
             // placeholder bound is the honest answer, and it is what a scene
             // with no probes has always read.
             return Ok(());
-        }
-        let layers: Vec<&[u8]> = captured
-            .bytes()
-            .chunks_exact(crcbl_shaders::probe_visibility::LAYER_BYTES)
-            .collect();
-        let extent = crcbl_shaders::probe_visibility::EXTENT;
-        let uploaded = upload_texture_layers(
-            device,
-            queue,
-            "probe visibility",
-            Format::Rg32Float,
-            extent,
-            extent,
-            &layers,
-        )?;
+        };
         // The cached groups name the view this replaces, so they go before it
         // does — a bind group outliving the image it names is a validation
         // error on every backend that checks, and a use-after-free on the ones

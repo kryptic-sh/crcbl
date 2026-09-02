@@ -1321,7 +1321,22 @@ pub fn place(
     //
     // See `ForwardRenderer::capture_probe_visibility` for why it is a call at
     // all rather than part of `with_scene`: a description carries no instances.
+    //
+    // **Timed, and the number is reported**, because it is the one the clipmap
+    // slice is priced against — `docs/plan/50-irradiance-probes.md` records what
+    // it costs today, and a capture that quietly grew a millisecond a probe is
+    // exactly the regression that plan's next rung cannot survive. Native only:
+    // `std::time::Instant::now` panics on `wasm32-unknown-unknown`, and the web
+    // build measures with the page's own clock or not at all.
+    #[cfg(not(target_arch = "wasm32"))]
+    let started = std::time::Instant::now();
     renderer.capture_probe_visibility(device, queue)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    crcbl::log::info!(
+        "lantern: probe visibility captured for {} probe(s) from {placed} object(s) in {:.2} ms",
+        CAPACITIES.probes,
+        started.elapsed().as_secs_f64() * 1000.0
+    );
     Ok(placed)
 }
 
