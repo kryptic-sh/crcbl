@@ -2389,10 +2389,14 @@ cancellation into a two-minute failure carrying a number. It needs a per-demo
 threshold, and a threshold wants a sweep of the factor across runs — the sweep
 above is of the forward pass, which is not the same measurement.
 
-### The audio buses ship without a reader or a wire slot (2026-08-28)
+### The audio buses have no wire slot and no limiter (2026-08-28)
 
-`docs/plan/13-audio.md`'s bus decision is built in `crcbl-audio`. Two halves of
-it is not, deliberately out of that slice:
+`docs/plan/13-audio.md`'s bus decision is built in `crcbl-audio`. **The reader
+this entry was also headed for shipped on 2026-08-28**:
+`SettingsSource::apply_audio_gains` hands the player's bus volumes to a mixer at
+start-up and asteroids, breakout, flappy and horde all call it, with
+`apps/options` reading the same keys for its faders. Two halves are still not
+built, deliberately out of that slice:
 
 - **`AudioEvent` carries no bus.** The plan already prices this: a 28-byte wire
   format gaining a route becomes 29 or 32, and `WIRE_SIZE` plus both round-trip
@@ -3415,11 +3419,12 @@ The counter-argument is real: flattening is what lets `main.rs` write
   `Any` is implemented only for `'static` types, so `settings::ConsoleHost`
   cannot hold a borrow of the renderer, the mixer or the clock — it records into
   `settings::Deferred` instead. `Loop::drain_console` (slice 5) reads
-  `take_video` into `GameGpu::apply_video` and `take_frame_limit` into
-  `Clock::set_limit` once a frame; `take_gains` has no destination, which is the
-  console section above. If the arrangement is ever unwanted, the alternative is
-  a `Binding` host bound by something other than `Any` — a change to
-  `crcbl-console`'s public shape, not to this module.
+  `take_video` into `GameGpu::apply_video`, `take_frame_limit` into
+  `Clock::set_limit` and `take_gains` into `HostedGame::set_bus_gain`, once a
+  frame, printing a named refusal when a game supplies no mixer. If the
+  arrangement is ever unwanted, the alternative is a `Binding` host bound by
+  something other than `Any` — a change to `crcbl-console`'s public shape, not
+  to this module.
 - **`settings::Stage::set_frame_limit`'s only implementor is `Deferred`.** A
   console write is live — the loop drains the recorded limit into its own
   `Clock` — but `apps/options` applies its rows through `GpuStage`, which
@@ -3697,8 +3702,9 @@ and `the_aces_curve_keeps_the_shading_the_clamp_flattens` in
 list leans on the overlay as the mitigation for CSM artefact whack-a-mole. That
 risk arrived — the fifth and sixth decisions in that document are the record of
 fighting it — and was resolved by measurement through `apps/lantern`'s review
-frames instead. `ForwardRenderer::debug_view` offers `DebugView::Heatmap`,
-`DebugView::LodTint` and `DebugView::Normals`, and nothing about shadows.
+frames instead. `ForwardRenderer::debug_view` offers `Shaded`, `Heatmap`,
+`LodTint`, `Normals`, `AmbientOcclusion` and `Motion` — six variants and nothing
+about shadows.
 
 **What it would take.** The debug draw layer above for the split overlay; the
 inspector is a UI panel sampling the `D32Float` atlas, which needs a
@@ -4068,21 +4074,6 @@ highlights and nothing can draw a drop cursor until the button comes up.
 **What it would take:** a `DragOver`-shaped event on the seam carrying window,
 position and whether the payload is acceptable, then a use of it in each backend
 — X11's is already computed and thrown away.
-
-### The `[engine.video]` settings layer has no source (2026-08-27)
-
-**Not built.** `docs/plan/39-capabilities.md`'s toggle model resolves four
-layers in `crcbl_render::effects` (`EffectRequest::resolve`), and two of them
-have no producer: there is no render-stack RON and nothing in the workspace
-reads RON, and `crcbl_store::settings` reads the `[engine.video]` namespace
-while nothing builds a stack at startup. The fields exist so the _order_ can be
-shown to apply; only a test writes them.
-
-**What it would take:** the settings-screen exposure the doc schedules at P10,
-plus whatever builds a stack at startup.
-
-**Deliberate, not a stub** — the doc argues this and the argument is intact; the
-pruning pass compressed the Delivery table down to this one open row.
 
 ### Error-scope granularity was measured and adopted; the plan still says otherwise (2026-08-27)
 
@@ -4666,21 +4657,34 @@ file.
 `lfs: true` to **every** `actions/checkout` step in CI, or CI silently tests
 against pointer files. `.gitattributes` says so; nothing enforces it.
 
-**Trigger:** the P9 glTF corpus. Which is the next entry.
+**Trigger: unknown, as of 2026-09-02.** It used to be the P9 glTF corpus, and
+that corpus arrived without needing LFS — fetched at a pinned commit and checked
+against a sha256 manifest, with one small model committed plainly. So this waits
+on some _other_ binary the tree does not have yet.
 
 ### No vendored glTF corpus; the fixture is synthesized in code (2026-08-27)
 
-**Not built.** `git ls-files` finds zero committed `.glb`/`.gltf` anywhere, and
-`crates/crcbl-scene` has no `tests/` directory. What exists is
+**Corrected 2026-09-02: `git ls-files` finds
+`apps/viewer/assets/shelf/Suzanne/glTF/Suzanne.gltf`**, a real Khronos CC0
+document, and `apps/viewer/src/shelf.rs`'s
+`the_default_model_loads_from_the_committed_shelf` puts it through the importer
+on every machine. The rest of the Khronos subset is fetched at a pinned upstream
+commit against a per-file sha256 (`tools/fetch-shelf.sh`), and CI runs the fetch
+in `test (linux)`. What is still true is the narrow half: `crates/crcbl-scene`
+has no `tests/` directory. What exists is
 `crates/crcbl-scene/src/gltf_fixture.rs` behind the `gltf-fixture` feature: a
 triangle document and its `.glb` container built in code, with the rationale in
 that crate's `Cargo.toml` — a binary container is a fixture nobody reviewing a
 change can read.
 
 **Considered and kept:** the synthesized fixture is the right shape for importer
-unit tests and should stay. What is missing is the Khronos sample subset that
-`12-testing.md`'s anchor list asks for — real documents with sparse accessors,
-extensions, odd component types — which is the corpus LFS turns on for.
+unit tests and should stay. The Khronos sample subset `12-testing.md`'s anchor
+list asks for — real documents with sparse accessors, extensions, odd component
+types — is now on disk after a fetch. **Nothing walks it**: the only test over
+the fetched eight checks the files exist
+(`every_shelf_file_is_on_disk_once_the_shelf_is_fetched`), so no fetched
+document is parsed by any assertion. That is the gap now, and the entry below on
+turning the measurement into a gate is where it belongs.
 
 ### Coverage gates one workspace floor, not per-crate thresholds (2026-08-27)
 
@@ -4736,11 +4740,14 @@ a measured constant is wanted). Every sample hand-rolls its own HUD instead.
 write scope, and the correction's condition (the widget set landing) has not
 happened.
 
-### No system outside `crcbl-render` contributes a `DebugModule` (2026-08-27)
+### The netgraph is the last `DebugModule` nobody wrote (2026-08-27)
 
-**Partially built.** The composition claim holds and has a real second
-implementer: `crcbl_render::timing::FrameTimings` and
-`crcbl_render::counters::FrameCounters` both implement `DebugModule`.
+**This entry was headed "No system outside `crcbl-render` contributes a
+`DebugModule`" until 2026-09-02, and its own evidence never supported that: both
+implementers it named were inside `crcbl-render`.** There are twenty-nine
+implementations now, `crcbl-ui`'s `BudgetStats` and `FrameStats` and
+`apps/options`'s `FileView` among them, so composition across crates is
+demonstrated many times over.
 
 **Still open:** the netgraph. `crcbl-client` does not depend on `crcbl-ui` and
 there is no `NetGraph` anything in the tree — `grep -ri netgraph` over `crates/`
@@ -8379,13 +8386,20 @@ rather than argued.
 
 ### DECISION NEEDED — how the glTF corpus becomes a gate
 
-The importer's 98.3% against `KhronosGroup/glTF-Sample-Assets` is a hand-run
-shell loop from 2026-08-19, recorded further down this file. Nothing stops it
-regressing: `crates/crcbl/tests/gltf_e2e.rs` is one synthetic textured quad, and
-`docs/plan/12-testing.md` asks for a "Khronos samples subset **vendored**" that
-does not exist — the repository holds zero `.gltf` or `.glb` files, on purpose.
-Turning the measurement into a gate is cheap in code and needs a call on where
-the models come from:
+**The decision below was taken, and taken as (b) — but only half of it was
+built, so this entry is now about the missing half.** `tools/fetch-shelf.sh`
+pulls a named subset of `KhronosGroup/glTF-Sample-Assets` at a pinned commit,
+verifies it against `apps/viewer/assets/shelf.sha256`, and CI calls it in
+`test (linux)`; one model is committed plainly so a default run needs no fetch
+at all. What did **not** get built is the gate: the only test over the fetched
+models asserts their files exist, so nothing parses one, and the importer's
+98.3% against that suite is still a hand-run shell loop from 2026-08-19 with
+nothing stopping it regressing. `crates/crcbl/tests/gltf_e2e.rs` remains one
+synthetic textured quad.
+
+The three routes are kept below because the objection to (a) is now spent — the
+tree does hold a committed model — and because whichever way the assertion is
+written it still faces the two content-policy questions at the end.
 
 - **(a) Vendor a pinned subset.** A dozen or two models committed in a corpus
   directory beside `crcbl-scene`'s own tests, so the gate is hermetic, runs
@@ -23762,10 +23776,15 @@ was landed as a move, and these are the things it deliberately did not fix.
 
 ### `asset_source` has no caller in any sample
 
-All four samples that define it — asteroids, breakout, flappy, horde — export
-`pub fn asset_source() -> Option<Rc<FetchSource>>` and nothing in the workspace
-calls it. `opfs_store` is genuinely used (`crate::best` in three of them,
-`crate::high_score` in breakout). `asset_source` is the speculative half.
+The four samples that define it — asteroids, breakout, flappy, horde — export
+`pub fn asset_source() -> Option<Rc<FetchSource>>` and none of the four calls
+it. `opfs_store` is genuinely used (`crate::best` in three of them,
+`crate::high_score` in breakout).
+
+**It is no longer the speculative half, though: `apps/viewer` has a caller.**
+`apps/viewer/src/shelf.rs` resolves every browser shelf key through it, which
+makes the viewer the pattern any of the four would copy rather than an argument
+for deleting the accessor.
 
 Left alone because the task was a move and deleting it is a public-API change to
 four sample crates in the same commit as the migration. It is **not** a wasm
@@ -24622,10 +24641,10 @@ leaves:
   applied to a **live window** and therefore need a seam this sample does not
   have — something a screen can call to re-mode or re-size the window it is
   drawn in, and something that reports what the window system actually did with
-  the request. Nothing but `apps/viewer` hands `anisotropic_filtering` to
-  `ForwardRenderer::set_anisotropy`: lantern, quarry and the scaffold call
-  neither `set_render_scale` nor `set_anisotropy`, and that pairing is one
-  decision — when the samples pick the scale up, they pick this up beside it.
+  the request. `crcbl::settings::apply_video_to` applies the scale and the
+  anisotropy together, and lantern and quarry both call it — lantern on both of
+  its renderers. The scaffold template is the one that applies neither, because
+  it builds no `ForwardRenderer` at all.
 
 - **Coverage gap: nothing restarts.** The round trip is covered by the tests in
   `apps/options/src/app.rs` over `MemoryStorage`, which is what
