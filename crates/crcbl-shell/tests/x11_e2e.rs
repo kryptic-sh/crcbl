@@ -334,7 +334,7 @@ impl Session {
                 let names = self.names();
                 let detail = report(self);
                 panic!(
-                    "timed out after {WAIT:?} waiting for {what}; events so far:                      {names:?}{detail}"
+                    "timed out after {WAIT:?} waiting for {what}; events so far: {names:?}{detail}"
                 );
             }
             // Also exercises `ShellCaps::EVENT_WAIT`: a backend that claims it

@@ -34,7 +34,20 @@ fi
 
 # `(?<!\\)` is what excludes a literal `\n` followed by indentation: the `n` is
 # a letter, and the run after it is the line the author asked for.
-pattern='"[^"]*(?<!\\)[a-z,;.] {6,}[a-z][^"]*"'
+#
+# **Three clauses, and each earns its place by what it lets through otherwise.**
+# The clause before the run accepts `:` as well as `,;.` and a letter, because a
+# wrapped sentence very often breaks right after a colon introducing a value.
+# The clause after it accepts `{` as well as a letter, because what follows that
+# colon is usually a format placeholder rather than a word. Those two widenings
+# alone would also flag deliberately aligned output — a label, a run of padding,
+# then a column — so the literal must additionally contain two words separated
+# by a single space *before* the run, which a `label      {value}` line does not
+# have and a wrapped sentence always does. Both widenings were added on
+# 2026-09-02 after a stray run reached a CI panic message with the guard green:
+# a gate that reports success while the thing it names sits in the tree is worse
+# than no gate.
+pattern='"[^"]*[a-z] [a-z][^"]*(?<!\\)[a-z,;.:] {6,}[a-z{][^"]*"'
 
 if grep -nP "$pattern" "${files[@]}"; then
   printf '\nEach line above is a string literal wrapped without the trailing\n'

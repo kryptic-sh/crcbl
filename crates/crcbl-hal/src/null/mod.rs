@@ -2336,7 +2336,7 @@ impl NullDevice {
             return Ok(());
         }
         Err(HalError::InvalidDescriptor(format!(
-            "binding {binding} is given {bound} bytes of a buffer, over this device's {what} of              {ceiling}"
+            "binding {binding} is given {bound} bytes of a buffer, over this device's {what} of {ceiling}"
         )))
     }
 
