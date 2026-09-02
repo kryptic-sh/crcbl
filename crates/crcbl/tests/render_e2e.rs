@@ -3380,17 +3380,23 @@ fn draw_scene_on_every_geometry_path(
     // rasteriser is allowed would hide exactly that. See [`path_lsb_channels`]
     // for why `Dunes` alone is not held to zero.
     let (budget, worst_allowed) = path_lsb_channels(scene);
-    let (differing, worst) = channels_differing(best, lesser);
+    let (differing, worst, named) = channels_differing(best, lesser);
+    let where_ = if named.is_empty() {
+        "none".to_string()
+    } else {
+        named.join("; ")
+    };
     eprintln!(
         "crcbl render e2e: {name} on {best_path:?} against {lesser_path:?} — {differing} \
          channel(s) differ, worst by {worst}, budget {budget} channel(s) at {worst_allowed} \
-         level(s) ({colors} distinct colour(s))"
+         level(s) ({colors} distinct colour(s)); the first are {where_}"
     );
     assert!(
         worst <= worst_allowed && differing <= budget,
         "{best_path:?} and {lesser_path:?} draw the {name} scene differently: {differing} \
          channel(s) differ, the worst by {worst} — this scene allows at most {budget} \
-         channel(s) and only ever by {worst_allowed}, and this is a different picture"
+         channel(s) and only ever by {worst_allowed}, and this is a different picture. The \
+         first are {where_}"
     );
 }
 
@@ -3490,8 +3496,17 @@ fn draw_scene_on_every_geometry_path(
 /// second-order. Measured at **9 channels, worst by 2**, out of the frame's
 /// 196608: identical on the Ubuntu runner's Mesa 25.2.8 / LLVM 20.1.2 and on
 /// Arch's Mesa 26.2.1 / LLVM 22.1.8, and radv answers zero as it does for all
-/// five. The individual pixels were not enumerated, unlike `Probes`' pre-rung
-/// pair — `docs/backlog.md` carries that as the gap it is.
+/// five.
+///
+/// **The sensitive pixels moved rather than grew, which is worth stating
+/// because the obvious guess is wrong.** The pre-rung pair above is at
+/// `(137, 17)` and `(138, 17)`, and neither of those channels differs now. What
+/// differs instead is a contiguous cluster along the top edge — `(131, 3)`
+/// through `(139, 1)`, in blue and red — measured on Arch's Mesa 26.2.1; both
+/// two-level channels are blue, `(132, 1)` reading 15 against 13 and `(132, 2)`
+/// reading 55 against 53. Adjacent pixels in one neighbourhood is what a single
+/// flipped tap looks like, and it is the evidence for the mechanism above; a
+/// scatter across the frame would have been evidence against it.
 ///
 /// **This is a guard that got weaker, and it is recorded as one rather than
 /// absorbed.** Two levels out of 256 on nine channels is still three orders of
@@ -3509,16 +3524,44 @@ const fn path_lsb_channels(scene: Scene) -> (usize, u8) {
     }
 }
 
-/// How many channels of `left` and `right` differ, and by how much at worst.
-fn channels_differing(left: &Image, right: &Image) -> (usize, u8) {
-    left.pixels()
-        .iter()
-        .zip(right.pixels())
-        .filter(|(one, other)| one != other)
-        .fold((0usize, 0u8), |(count, worst), (one, other)| {
-            (count + 1, worst.max(one.abs_diff(*other)))
-        })
+/// How many channels of `left` and `right` differ, by how much at worst, and
+/// where the first [`DIFFERING_CHANNELS_NAMED`] of them are.
+///
+/// **The coordinates exist because a count is not a diagnosis.**
+/// [`path_lsb_channels`] argues each of its budgets from a mechanism, and the
+/// evidence for that argument is *which* channels moved — adjacent pixels of one
+/// silhouette read as one tap flipping, while a scatter across the frame reads
+/// as something else entirely. Two of those entries name their pixels because
+/// somebody went and found them by hand; this returns them, so the next one does
+/// not have to.
+fn channels_differing(left: &Image, right: &Image) -> (usize, u8, Vec<String>) {
+    let width = left.width() as usize;
+    let mut count = 0usize;
+    let mut worst = 0u8;
+    let mut named = Vec::new();
+    for (index, (one, other)) in left.pixels().iter().zip(right.pixels()).enumerate() {
+        if one == other {
+            continue;
+        }
+        count += 1;
+        worst = worst.max(one.abs_diff(*other));
+        if named.len() < DIFFERING_CHANNELS_NAMED {
+            let pixel = index / 4;
+            let channel = ["r", "g", "b", "a"][index % 4];
+            let (x, y) = (pixel % width, pixel / width);
+            named.push(format!("{channel} of ({x}, {y}) {one} against {other}"));
+        }
+    }
+    (count, worst, named)
 }
+
+/// How many differing channels [`channels_differing`] names before it stops.
+///
+/// A bound rather than the whole list: a genuine break moves thousands, and a
+/// failure message that prints thousands is one nobody reads. Every budget in
+/// [`path_lsb_channels`] is under this, so a run inside its budget names all of
+/// them and the ones this is written for are exactly the runs that fit.
+const DIFFERING_CHANNELS_NAMED: usize = 24;
 
 /// [`Scene::Cube`]'s anti-vacuity claim: a corner still holding the clear, and a
 /// centre that is not it.

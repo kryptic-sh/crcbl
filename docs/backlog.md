@@ -279,16 +279,13 @@ the ambient — second order in the pixel. The direction is downstream of the sa
 max, and `mesh.slang` now samples the probe irradiance _along_ it, so a flipped
 tap turns the lookup rather than dimming it. Measured at **9 channels, worst by
 2** out of 196608, identical on the runner's Mesa 25.2.8 / LLVM 20.1.2 and on
-Arch's Mesa 26.2.1 / LLVM 22.1.8; radv answers zero.
+Arch's Mesa 26.2.1 / LLVM 22.1.8; radv answers zero. The differing channels are
+a contiguous cluster along the top edge rather than the pre-rung pair, which is
+what one flipped tap looks like — `path_lsb_channels`' own entry carries the
+coordinates.
 
 **What is owed:**
 
-- **The differing pixels were not enumerated.** `Probes`' pre-rung entry names
-  its two exactly — the red channel of `(137, 17)` and `(138, 17)` — and this
-  one names none, because `channels_differing` returns counts and the harness
-  prints no coordinates. Adding a coordinate to that print, behind the suite's
-  existing `--nocapture` output, would close it and would say whether the nine
-  are the old two plus neighbours or a different region entirely.
 - **Whether the damping is worth taking.** The remedy recorded under the
   bent-normal slice for a different reason — slerp the bent direction back
   towards the shading normal by the occlusion scalar, in `mesh.slang`'s
