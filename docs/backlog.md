@@ -263,6 +263,35 @@ key, and no tier row spends any of them.
 tint makes it weaker on purpose, and the fix is turning the intensity up rather
 than removing the tint.
 
+## The backlog audit of 2026-09-02, and what it did not reach
+
+Ten entries were checked against the tree and eight had drifted; the corrections
+are applied in place above, and the two that were wholly spent — the
+`debug_view` guard flake and a `FrameArena` bullet asserting a defect the doc
+does not have — are deleted. Recorded here is only the **scope**, so the next
+sweep knows where to start rather than re-deriving it.
+
+**What was verified**: the `debug_view` flake, the four-file size table, the
+`probe.rs` split argument, the DXIL register-class coverage, the settings
+catalogue's key counts, the `CRCBL_ADAPTER` entry's reader claim, the
+`crcbl-wgpu` parity bookkeeping, the "no test owns a real `ForwardRenderer`"
+bullet, the `FrameArena` doc claim, and the read-only-depth "only pass" clause.
+
+**What was not reached, and is where a next pass should go**:
+
+- The MTL4/MTL5/MTL6 and DX2/DX3 regions, and the D3D12 swapchain slice.
+- The four `## Coverage gaps in the … audit` runs, and the sample-audit entries
+  for orbit, flappy, sparks, puppet, lantern, breach and shard.
+- The 2026-08-13/14 slice-plan archive at the end of the file.
+- Roughly four thousand lines of the un-headed middle region between the sample
+  audit and the D3D12 deferred blocks — two entries in it were opened.
+- **Every measured table except the file-size one.** The area-light prices, the
+  browser pass timings and the Pages wall-clock figures are still carried on
+  trust; only the table a shell command could settle was re-taken.
+- **The Hardening list in the 2026-08-04 full-codebase review**, which is the
+  highest-yield unread region left: one of its roughly seventy bullets was
+  opened and it was wrong.
+
 ## What the bent-normal slice left owed (2026-09-02)
 
 The direction ships and steers the ambient — `docs/plan/46-ambient-occlusion.md`
@@ -815,15 +844,6 @@ limits rather than fixed:
   horde — a forward to the wrong bus would compile. `apps/options`' override is
   the exception: it moves the screen's own fader as well, and
   `a_gain_typed_at_the_console_moves_the_fader` drives it.
-- **`debug_view::tests::a_second_guard_on_one_thread_nests_instead_of_waiting`
-  is itself a flake under `cargo test`.** Its last two assertions read the view
-  lock's `try_lock` after dropping a guard, and another thread's `for_test()`
-  can take the lock in between, so "the outermost guard dropped without giving
-  the lock back" fires on code that is correct. Measured at two failures in
-  about 70 `cargo test -p crcbl --lib` runs on 2026-08-31, on a tree whose only
-  other change was the log filter and the audio-gain seam. `nextest` gives it a
-  process and never sees it. The fix is to assert the release without racing for
-  it — hold the lock's own state rather than probing a global `try_lock`.
 - **`fps` reads the loop's own frame clock, not the GPU's.**
   `debug_console::EngineLink::set_frame_timing` is fed
   `FrameClock::render_dt_secs` once a frame, so the number is the wall time
@@ -3306,13 +3326,23 @@ temporal SSR, temporal upscaling, per-object motion blur and SSGI's
 accumulation, it gets more expensive as more shaders index past the instance
 stride, and it needs the user's call on when to spend the re-bless.
 
-### `registers_are_assigned_per_class_in_declaration_order` covers half the shaders (2026-08-27)
+### `registers_are_assigned_per_class_in_declaration_order` covers a third of the shaders (2026-08-27)
 
 That test in `crates/crcbl-dx12/src/dxil.rs` says "Every shader is listed, not
-only the compute ones" and it is not true: `crates/crcbl-shaders/dxil/` holds
-thirty-three shaders and the case table names seventeen (2026-08-29). The post
-stack is most of what is missing, along with `grid`, `skinning`, the mesh-shader
-pair and the probe fixtures; `hiz` and `exposure` were added when they were
+only the compute ones" and it is not true. **Re-counted 2026-09-02, and the
+entry's own figures were wrong as well as stale**: its `cases` table names
+thirteen shaders — `BINDLESS_PROBE`, `COMPUTE_PROBE`, `CULL`, `DRAW_GEN`,
+`EXPOSURE`, `FXAA`, `HIZ`, `LIGHT_CLUSTER`, `MESH`, `SPRITE`, `TONEMAP`,
+`TRIANGLE`, `UI` — against the thirty-nine shader sources with DXIL in
+`crates/crcbl-shaders/dxil/`. So a third, not a half, and the gap is wider than
+when this was written rather than narrower.
+
+The post stack is most of what is missing, along with `grid`, `skinning`, the
+mesh-shader pair, `contact_shadows`, `debug_draw`, `volumetric`,
+`volumetric_composite`, `ssao_upsample` and `upscale`. The probe fixtures this
+entry used to name are only partly missing: `bindless_probe` and `compute_probe`
+are covered, while `push_constant_probe`, `task_write_probe` and
+`zero_dispatch_probe` are not. `hiz` and `exposure` were added when they were
 built, which is what keeps turning the gap up.
 
 **What it costs:** the failure the test exists to catch — a root signature
@@ -3381,12 +3411,11 @@ and the residual is a fade constant rather than a wrong pixel.
 
 ### `apps/quarry`'s device harness ignores `CRCBL_ADAPTER` (2026-08-27)
 
-`crcbl::adapter::pin` is read by `crcbl::screenshot`'s `OffscreenSetup` and by
-nothing else, so a suite built on `crcbl::engine`'s `GpuContext` — which is
-`apps/quarry/tests/device/harness.rs` — opens whatever the backend enumerated
-first however the variable is set. The harness even prints the mismatch: its
-fixture line reports the adapter it opened beside `CRCBL_ADAPTER=cpu`, and on
-this machine that reads
+`crcbl::engine`'s `GpuContextDesc` has no adapter field, so a suite built on
+`GpuContext` — which is `apps/quarry/tests/device/harness.rs` — opens whatever
+the backend enumerated first however the variable is set. The harness even
+prints the mismatch: its fixture line reports the adapter it opened beside
+`CRCBL_ADAPTER=cpu`, and on this machine that reads
 `"AMD Radeon RX 7900 XTX (RADV NAVI31)" (CRCBL_ADAPTER=cpu)`.
 
 **What it costs:** quarry's six goldens cannot be verified against the software
@@ -3394,10 +3423,15 @@ path locally at all, which is the path CI compares them on. They were blessed on
 the discrete adapter — which is what their module docs ask for — and verified
 there only.
 
-**The fix** is to have `GpuContext` select through `crcbl::adapter::select` the
-way `OffscreenSetup` does, rather than to teach the harness a second mechanism.
-Not taken here because it is a change to the engine's device opening and this
-was a rendering change.
+**The fix** is to have `GpuContext` select through `crcbl::adapter::select`
+rather than to teach the harness a second mechanism, and **there are three
+precedents rather than the one this entry used to name** (re-checked
+2026-09-02): `crcbl::screenshot`'s `OffscreenSetup`,
+`crates/crcbl/tests/gpu_scene/harness.rs`'s `select_adapter` and
+`crates/crcbl/tests/hal_seam_e2e.rs` all resolve the pin that way, while
+`render_e2e.rs`, `tiling_e2e.rs`, `gltf_e2e.rs` and quarry's own harness read it
+only to print. Not taken here because it is a change to the engine's device
+opening and this was a rendering change.
 
 ### MSAA was reopened rather than reversed (2026-08-27)
 
@@ -3425,14 +3459,18 @@ should instead be a shared crate the three depend on is undecided**, and the
 reason it is undecided is that this workspace has no precedent for one sample
 crate depending on another.
 
-### The settings catalogue is mostly keys with no reader
+### The settings catalogue's named keys have no reader
 
-`crates/crcbl/src/settings.rs` reads four boolean keys and maps each to a
-`RenderEffects` bit, and since 2026-08-28 the six `[engine.audio]` bus volumes
-through `audio_gains` and `[engine.video] render_scale` through `video`.
-Everything else the catalogue names — display mode, resolution, present mode,
-frame cap, the quality tiers — has a defined home in the TOML convention and
-nothing that reads it.
+**The heading used to say "mostly keys with no reader" and that is no longer
+true, re-measured 2026-09-02.** `crates/crcbl/src/settings.rs`'s `VIDEO_KEYS`
+maps a `RenderEffects` bit for each of `shadows`, `ambient_occlusion`,
+`reflections`, `bloom`, `volumetric_fog` and `auto_exposure`; `catalogue()`
+emits those beside the antialiasing, render-scale, anisotropy and frame-limit
+keys and the six `[engine.audio]` bus gains, so most of what it names is read.
+
+What is still owed is the `Named` half — `NAMED_VIDEO_KEYS`: display mode,
+monitor, resolution, present mode, brightness, HDR output, UI scale and field of
+view. Each has a defined home in the TOML convention and nothing that reads it.
 
 **The writer half is no longer the gap, as of 2026-08-28.**
 `SettingsStack::with_platform_storage` lends the storage `platform` used to
@@ -3587,14 +3625,22 @@ The counter-argument is real: flattening is what lets `main.rs` write
   not in the type. Giving `Unsupported` a `Refused(HalError)` arm is the
   alternative; it was declined because every caller today does the same thing
   with both answers.
-- **No test owns a real `ForwardRenderer`.** `debug_view_switches` is asserted
-  against `ForwardRenderer::debug_view`'s precedence order without a device, and
-  `apply_video_to`'s body is covered only by compiling. Slice 5 proved the
-  _loop_ reaches `GameGpu::apply_video` with the section a console line asked
-  for — `setting_a_variable_through_the_console_reaches_the_bundle`, against a
-  fake bundle — and nothing yet drives a real renderer through it. That is slice
-  6's, whose exit criterion ("`debug_view ambient occlusion` shows the AO
-  channel in a demo that never exposed it") is the real proof.
+- **`apply_video_to`'s body is still covered only by compiling.**
+  `debug_view_switches` is asserted against `ForwardRenderer::debug_view`'s
+  precedence order without a device, and slice 5 proved the _loop_ reaches
+  `GameGpu::apply_video` with the section a console line asked for —
+  `setting_a_variable_through_the_console_reaches_the_bundle`, against a fake
+  bundle.
+
+  **The debug-view half of this is closed**, re-checked 2026-09-02: this bullet
+  used to end "nothing yet drives a real renderer through it. That is slice
+  6's", and slice 6 shipped. `apps/quarry/tests/device/console.rs`'s
+  `the_console_puts_the_occlusion_view_on_a_sample_that_never_had_a_row_for_it`
+  and `the_occlusion_view_draws_the_grey_channel_and_not_the_shaded_face` open a
+  real `Quarry` — and so a real `ForwardRenderer::with_scene` — drive
+  `crcbl::settings::set_debug_view_on` and read the pixels back. What is left is
+  `apply_video_to` itself, which no device test drives.
+
 - **`crcbl-console` still has no `Kind: Display`, and nothing wants one yet.**
   The brief expected `crcbl settings list` to print the domain; it does not —
   that command reads `CatalogueKey::status` and nothing else. Slice 5's `help`
@@ -7800,9 +7846,15 @@ conservatism rather than description, and `conv`'s
 `write_states_expand_to_write_accesses` requires the two to move together.
 
 **Measured** against CI's own layer 1.3.275 and lavapipe from Ubuntu, driving
-`cargo test -p viewer` with `CRCBL_GPU=vk` and the fatal sync gate on — the
-viewer's ground grid is the only pass in this workspace that tests depth without
-writing it and is last to touch the image:
+`cargo test -p viewer` with `CRCBL_GPU=vk` and the fatal sync gate on. The
+viewer's ground grid was chosen because it tests depth without writing it and is
+last to touch the image — **it is no longer the only pass that reads depth
+read-only**, re-checked 2026-09-02: `crcbl_render::sky_pass`,
+`crcbl_render::debug_draw` (which cites `crate::grid`'s terms in its own
+comment) and `forward.rs`'s wireframe fill path all take `depth_read` or
+`DepthStencilState::equal_depth_read_only`. Whether any of them is _last_ to
+touch the image in a frame was not established, so the fixture stands as
+measured and this note only retires the "only pass" clause:
 
 | store op | vk access mask | `is_write` | result                                          |
 | -------- | -------------- | ---------- | ----------------------------------------------- |
@@ -11504,25 +11556,18 @@ rows per backend, counted from `DIVERGENCES`:
 | dx12    | yes           | 2    | 2        |
 | wgpu    | **no**        | 12   | **7**    |
 
-Two things follow, and neither is obvious from the crate's own contents:
+**The bookkeeping this entry opened is closed, and only the coverage half is
+still live** (re-checked 2026-09-02). The `crcbl-wgpu` crate is gone,
+`BackendKind::is_parity_target` with it, and `parity_blockers()` in
+`crates/crcbl-hal/src/capability.rs` now filters on
+`entry.backend.is_gpu() && entry.kind.blocks_parity()`. The prediction this
+entry made held: the blocker count is still six — two `Dx12` and four `Metal` —
+because wgpu's rows were deleted rather than closed, and WebGPU has none left.
 
-1. **`crcbl-wgpu` is hiding seven blocking rows.** They do not appear in
-   `parity_blockers()` only because `BackendKind::is_parity_target` answers
-   `false` for it. Deleting the crate deletes those rows — it does not close
-   them, and the blocker count stays at six either way.
-2. **The deletion makes `is_parity_target` vestigial.** Its only other `false`
-   is `BackendKind::Null`, which carries no divergence row at all, so after wgpu
-   goes the filter removes nothing.
-   `crcbl_wgpu_is_outside_the_goal_by_construction` already asserts that it
-   removes _something_ — `hidden > 0`, spelled "this exclusion is a filter that
-   removes nothing and the test above proves nothing" — so **that test will fail
-   by design on the day of the deletion.** That is the test working, not
-   breaking.
-
-**A third consequence, and it is about coverage rather than bookkeeping:
-`crcbl-wgpu` is the only backend the native seam suite can open on Linux that
-refuses anything.** Measured on 2026-08-20 by reading the suite's own parity
-listing per backend:
+**What is still live is coverage rather than bookkeeping: `crcbl-wgpu` was the
+only backend the native seam suite could open on Linux that refused anything,
+and it is gone.** Measured on 2026-08-20, before the deletion, by reading the
+suite's own parity listing per backend:
 
 - **`vk` declares all 24 capabilities supported.** Every one. So on Vulkan the
   suite exercises "declared supported must work" and **never** the other
@@ -11534,7 +11579,7 @@ listing per backend:
 That second half of goal 1's contract is genuinely asserted, not printed: the
 driver's table fails `(Support::No, Exercise::Worked)` — "declares unsupported
 something it performs" — and the exercises panic on a refusal that is not
-`HalError::Unsupported` specifically. **Those arms run on `wgpu` and on nothing
+`HalError::Unsupported` specifically. **Those arms ran on `wgpu` and on nothing
 else the Linux job can open.** `crcbl-webgpu` has 13 rows but the seam suite is
 a native binary and cannot open it (browser probe groups AE/AF cover it
 instead); `crcbl-dx12` has 2 and `crcbl-mtl` 4, on the two slowest and least
@@ -11547,13 +11592,6 @@ grew the arm" rather than an API that cannot do it, so they exercise the
 _suite's_ machinery rather than any real divergence. But after the deletion the
 Linux seam job tests one direction of the parity contract and the other lives
 only on Windows and macOS runners.
-
-So the deletion's parity half was: drop `is_parity_target` and its call in
-`parity_blockers`, or keep it for `Null` alone and rewrite that test to say so.
-**The first was taken.** `parity_blockers` now filters on `BackendKind::is_gpu`,
-`is_parity_target` is gone, and `every_gpu_backend_is_inside_the_goal` in
-`crates/crcbl-hal/src/capability.rs` is the test that replaced
-`crcbl_wgpu_is_outside_the_goal_by_construction`.
 
 ### MEASURED — vk↔WebGPU replaces vk↔wgpu as the cross-backend oracle
 
@@ -14187,44 +14225,42 @@ before any declaration is trusted.
 
 ## Four source files are past the size where anyone can hold them (2026-08-22)
 
-Measured with `git ls-files '*.rs' | xargs wc -l`, not estimated:
+Measured with `git ls-files '*.rs' | xargs wc -l`, not estimated. Re-measured
+2026-09-02, and **the ordering has changed**:
+`crates/crcbl-render/src/forward.rs` and `crates/crcbl/src/engine.rs` have each
+grown by roughly half again and both now sit above
+`crates/crcbl-dx12/src/device.rs`, which is the one file this entry used to
+excuse because `crcbl-dx12` is DEFERRED. That excuse now covers the smallest of
+the four. `crates/crcbl-webgpu/src/probe.rs` is still the largest by a wide
+margin. `crates/crcbl/tests/hal_seam_e2e.rs` and `apps/horde/src/game.rs` have
+since joined the same size class and are named nowhere in this entry.
 
-| file                                 |  lines |
-| ------------------------------------ | -----: |
-| `crates/crcbl-webgpu/src/probe.rs`   | 19,915 |
-| `crates/crcbl-dx12/src/device.rs`    | 12,932 |
-| `crates/crcbl-render/src/forward.rs` | 10,905 |
-| `crates/crcbl/src/engine.rs`         | 10,749 |
+**`forward.rs` and `engine.rs` have no expiry and nobody has looked for their
+seams.** That sentence used to close this entry as an aside; it is now the
+entry. `probe.rs` at least has an argument attached, below.
 
-`crcbl-dx12` is DEFERRED, so its file is not a question anyone has to answer
-now. The other three are live, and `probe.rs` is the one worth a decision.
+`probe.rs` carries several responsibilities that have visible seams already:
+request encoding, the `StreamChannel` transport, the wasm export shim
+(`pub mod shim`), the replayer, and the reply format — and `mod tests` is
+roughly a third of it. Splitting along those seams is mechanical.
 
-**Re-measured 2026-08-23 and `probe.rs` has grown by about 2,900 lines since**,
-which is the part worth watching: two browser-gate slices — the indexed limit
-readers and group AI's first-instance contrast — each added a probe, its state
-machine, its exports and its tests to this one file, because that is where every
-probe lives. The growth is not drift; it is the file doing its job. It is also
-the argument for the decision below getting an answer rather than being deferred
-again, since every future group lands here too.
+**The argument against splitting it rested on a false premise, corrected
+2026-09-02.** Its module doc said the module was transitional because
+`crcbl::backend`'s registry entry for `BackendKind::WebGpu` "still refuses, so
+nothing installs the channel". That entry refuses **on native only**:
+`crcbl::backend`'s registration is `auto: cfg!(target_arch = "wasm32")` and its
+`open` starts a real `crcbl_webgpu::WebGpuInstanceOpen`, whose `start` calls
+`channel.install()`. On `wasm32` — the only target a demo runs on — the backend
+has arrived and does install its own channel; the probe's exports read zero
+there because `crcbl_webgpu::web::install` refuses to replace a live channel,
+which is the opposite reason. `probe.rs`'s own header was rewritten to say so.
 
-**`probe.rs` is roughly 13,000 lines of code and 6,900 of tests** —
-`pub mod shim` starts at 10,752 and `mod tests` at 13,048 — and it carries
-several responsibilities that have visible seams already: request encoding, the
-`StreamChannel` transport, the wasm export shim, the replayer, and the reply
-format. Splitting along those seams is mechanical.
-
-**The argument against splitting it is in its own module doc**, which says the
-module is transitional: `crcbl::backend`'s registry entry for
-`BackendKind::WebGpu` still refuses, so nothing installs the channel, and "when
-the backend arrives and installs its own channel, this module has done its job
-and goes". Reorganising a file that is scheduled for deletion buys nothing and
-costs a diff nobody wants to review.
-
-So the decision is genuinely open and it is the user's: **split it now** because
-"it goes when the backend lands" has been true for a while and every session
-that touches WebGPU pays the whole file to change any of it; or **leave it** and
-accept that cost until the backend actually lands, on the grounds that the split
-is wasted work if it does. Nothing here is blocked either way.
+So "it goes when the backend lands" is not a deferral any more: the backend has
+landed and the module did not go, because what it is still for is the probe page
+that reaches `navigator.gpu` before any engine start-up. The decision is the
+user's and it is now between **split it** and **delete the parts the shipped
+backend replaced**, rather than between splitting and waiting. Nothing here is
+blocked either way.
 
 `forward.rs` and `engine.rs` have no such expiry and no one has looked for their
 seams; that is a gap in this entry, not a judgement that they are fine.
@@ -18024,8 +18060,7 @@ Per-crate review passes explicitly disproved these before publishing anything:
   memory).
 - **core/ecs/input**: wrong-kind bindings silently produce permanently idle
   actions (user-profile typo, no diagnostic); `set_enabled(true)` doesn't
-  resolve immediately; `FrameArena` doc claims "neither Send nor Sync" (it is
-  Send, only !Sync); `with_capacity(usize::MAX)` overflow is pre-empted by the
+  resolve immediately; `with_capacity(usize::MAX)` overflow is pre-empted by the
   vec capacity check; `Held` duration quantizes to f32 after ~19 days uptime.
 - **phys**: `world_mut()` lets a caller desync `collider_to_entity`;
   `ThrustForce` fields are pub (unnormalized direction silently scales thrust);
