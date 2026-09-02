@@ -391,6 +391,11 @@ pub fn probes() -> ProbeGrid {
             // the room from the wrong place.
             inv_spacing: (Vec3::ONE / spacing()).to_array(),
             counts: PROBE_COUNTS,
+            // **One level.** The clipmap's coarser levels are for a world
+            // larger than the room this baker walks, and the rung that fills
+            // them is the RSM updater that replaces this module — see
+            // `docs/plan/50-irradiance-probes.md`.
+            levels: 1,
         },
         probes: rows,
     }

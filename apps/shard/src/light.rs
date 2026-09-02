@@ -537,6 +537,10 @@ pub fn probes() -> ProbeGrid {
             // light the zone from the wrong place.
             inv_spacing: f32s(DVec3::ONE / spacing()),
             counts: PROBE_COUNTS,
+            // One level, on `apps/lantern`'s `bounce::probes` terms: the zone
+            // is the extent this gather covers, and the updater that fills a
+            // clipmap's coarser levels is what replaces this bake.
+            levels: 1,
         },
         probes: rows,
     }

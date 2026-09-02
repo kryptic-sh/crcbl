@@ -524,9 +524,16 @@ mod tests {
         let inv_view = source
             .find("float4x4 inv_view;")
             .expect("ssr.slang declares `float4x4 inv_view;`");
-        let probe_origin = source
-            .find("float4 probe_origin;")
-            .expect("ssr.slang declares `float4 probe_origin;`");
+        // The clipmap header's own four rows are held in order by
+        // `crate::probe`'s `the_grid_header_matches_the_block_the_shaders_declare`,
+        // which checks every file that declares them; this only has to place
+        // the group between the matrices and the pyramid row.
+        let probe_counts = source
+            .find("uint4 probe_counts;")
+            .expect("ssr.slang declares `uint4 probe_counts;`");
+        let probe_inv_spacing = source
+            .find("float4 probe_level_inv_spacing[PROBE_LEVELS];")
+            .expect("ssr.slang declares `float4 probe_level_inv_spacing[PROBE_LEVELS];`");
         let hiz = source
             .find("uint4 hiz;")
             .expect("ssr.slang declares `uint4 hiz;`");
@@ -536,8 +543,9 @@ mod tests {
         assert!(
             inv_proj < proj
                 && proj < inv_view
-                && inv_view < probe_origin
-                && probe_origin < hiz
+                && inv_view < probe_counts
+                && probe_counts < probe_inv_spacing
+                && probe_inv_spacing < hiz
                 && hiz < sky,
             "ssr.slang declares the block in a different order than `to_bytes` writes it"
         );
@@ -555,6 +563,7 @@ mod tests {
             origin: [4.0, 5.0, 6.0],
             inv_spacing: [7.0, 8.0, 9.0],
             counts: [10, 11, 12],
+            levels: 1,
         };
         let bytes = SsrParams {
             inv_proj,
@@ -578,21 +587,28 @@ mod tests {
         assert_eq!(&bytes[0..4], &1.0f32.to_le_bytes());
         assert_eq!(&bytes[124..128], &2.0f32.to_le_bytes());
         assert_eq!(&bytes[128..132], &3.0f32.to_le_bytes());
-        assert_eq!(&bytes[192..196], &4.0f32.to_le_bytes());
-        assert_eq!(&bytes[236..240], &1320u32.to_le_bytes());
-        // The pyramid row, which is the last sixteen bytes: the level count in
-        // `x` and nothing in the three lanes `std140` padded it out to.
-        assert_eq!(&bytes[240..244], &3u32.to_le_bytes());
-        assert_eq!(&bytes[244..256], &[0u8; 12]);
+        // The clipmap header, whose first row is the counts and whose fourth
+        // lane is the rows the whole table holds. Level 0's origin is the
+        // volume's own, at the head of the per-level rows.
+        let probes = 192;
+        assert_eq!(&bytes[probes..probes + 4], &10u32.to_le_bytes());
+        assert_eq!(&bytes[probes + 12..probes + 16], &1320u32.to_le_bytes());
+        assert_eq!(&bytes[probes + 32..probes + 36], &4.0f32.to_le_bytes());
+        // The pyramid row past the header: the level count in `x` and nothing
+        // in the three lanes `std140` padded it out to.
+        let hiz = probes + crate::probe::PROBE_VOLUME_SIZE;
+        assert_eq!(&bytes[hiz..hiz + 4], &3u32.to_le_bytes());
+        assert_eq!(&bytes[hiz + 4..hiz + 16], &[0u8; 12]);
         // And the sky's three rows past it, which is where the block now ends.
+        let sky = hiz + 16;
         for (lane, expected) in (13u32..=24).enumerate() {
-            let at = 256 + lane * 4;
+            let at = sky + lane * 4;
             assert_eq!(
                 &bytes[at..at + 4],
                 &(expected as f32).to_le_bytes(),
                 "the sky's lane {lane} at offset {at}"
             );
         }
-        assert_eq!(256 + 48, PARAMS_SIZE);
+        assert_eq!(sky + 48, PARAMS_SIZE);
     }
 }

@@ -254,7 +254,7 @@ const _: () = assert!(
 ///
 /// One `float4x4` (64), two `float4` (16 each), [`SHADOW_CASCADES`] more
 /// `float4x4`, two closing `float4`, a `uint4`, [`SHADOW_LIGHT_TILES`] more
-/// `float4x4`, the irradiance grid's [`PROBE_VOLUME_SIZE`] header, the LOD and
+/// `float4x4`, the irradiance clipmap's [`PROBE_VOLUME_SIZE`] header, the LOD and
 /// fog rows, the sky's three spherical-harmonic rows, the previous frame's
 /// `float4x4`, the vertex pool's `uint4` and [`SHADOW_ATLAS_TILES`] `float4` of
 /// atlas rectangles. Checked against the `Offset` decorations `slangc` emits by
@@ -664,9 +664,14 @@ pub struct FrameUniforms {
     /// is additive: a scene with no probes evaluates to exactly zero and the
     /// shader has no branch for it. See [`crate::probe`].
     ///
-    /// **Last in the block**, for [`light_view_proj`](Self::light_view_proj)'s
-    /// reason exactly: no existing member's offset moves, so every golden
-    /// blessed before this member existed still matches.
+    /// **The members after it were appended**, for
+    /// [`light_view_proj`](Self::light_view_proj)'s reason exactly: no existing
+    /// member's offset moved, so every golden blessed before each of them
+    /// existed still matches. The clipmap is the one change that could not keep
+    /// that discipline — this member grew from three `std140` rows to
+    /// [`PROBE_VOLUME_SIZE`] and moved every member after it — and no golden
+    /// moved anyway, because the offsets are a contract between this struct and
+    /// `mesh.slang`'s block, and the two changed together.
     ///
     /// [`ProbeVolume::default`]: crate::probe::ProbeVolume::default
     pub probes: ProbeVolume,
@@ -3214,17 +3219,20 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 1648,
-            "at two cascades, fourteen light tiles and sixteen atlas rectangles"
+            FRAME_UNIFORMS_SIZE, 1760,
+            "at two cascades, fourteen light tiles, four probe levels and \
+             sixteen atlas rectangles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
-        // 224, 240, 256, 272, 1168, 1184, 1200, 1216, 1232, 1248, 1264, 1280,
-        // 1296, 1312, 1376, 1392 — and
+        // 224, 240, 256, 272, 1168, 1184, 1200, 1264, 1328, 1344, 1360, 1376,
+        // 1392, 1408, 1424, 1488, 1504 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64` beside
-        // `%_arr_mat4v4float_int_14`, which is the light array's own length, and
-        // `%_arr_v4float_int_16 ArrayStride 16`, which is the atlas
-        // rectangles'. Three of the middle rows are the grid header's, which
-        // this side writes as one group; then the fog's two and the sky's three.
+        // `%_arr_mat4v4float_int_14`, which is the light array's own length,
+        // `%_arr_v4float_int_4 ArrayStride 16`, which is a probe level array's,
+        // and `%_arr_v4float_int_16 ArrayStride 16`, which is the atlas
+        // rectangles'. Four of the middle rows are the clipmap header's — the
+        // counts, the level row and the two per-level arrays — which this side
+        // writes as one group; then the fog's two and the sky's three.
         // Read out of `spirv/mesh.spv` with `spirv-dis`, not derived from the
         // arithmetic below — that is the point of them.
         let cascades = 64 * SHADOW_CASCADES;
@@ -3309,6 +3317,7 @@ mod tests {
                 origin: [60.0, 61.0, 62.0],
                 inv_spacing: [63.0, 64.0, 65.0],
                 counts: [2, 3, 4],
+                levels: 1,
             },
             lod_params: [70.0, 71.0, 72.0, 73.0],
             fog_params: [80.0, 81.0, 82.0, 83.0],
@@ -3370,29 +3379,41 @@ mod tests {
                 144 + cascades + 64 * index
             );
         }
-        // And the grid header past the end of them, row by row: three `std140`
-        // rows with a padding lane in each of the first two, and the total in
-        // the last one's.
+        // And the clipmap header past the end of them, row by row: the counts
+        // and their total, the level row, and then a `std140` row per level for
+        // the origin and for the reciprocal spacing, each with a padding lane.
         let probes = 144 + cascades + lights;
         assert_eq!(
-            [at(probes), at(probes + 4), at(probes + 8)],
-            [60.0, 61.0, 62.0],
-            "the probe grid's origin"
+            [
+                word_at(probes),
+                word_at(probes + 4),
+                word_at(probes + 8),
+                word_at(probes + 12)
+            ],
+            [2, 3, 4, 24],
+            "the probe grid's counts and the rows the whole clipmap holds"
         );
         assert_eq!(
-            [at(probes + 16), at(probes + 20), at(probes + 24)],
-            [63.0, 64.0, 65.0],
-            "the probe grid's reciprocal spacing"
+            [word_at(probes + 16), word_at(probes + 20)],
+            [1, 24],
+            "the live level count and the rows one level holds"
+        );
+        // Level 0's rows are the fields the volume was given, unchanged: the
+        // offset a coarser level is placed by is a multiplication by zero
+        // there, which is what makes a one-level volume the grid it was.
+        assert_eq!(
+            [at(probes + 32), at(probes + 36), at(probes + 40)],
+            [60.0, 61.0, 62.0],
+            "level 0's origin"
         );
         assert_eq!(
             [
-                word_at(probes + 32),
-                word_at(probes + 36),
-                word_at(probes + 40),
-                word_at(probes + 44)
+                at(probes + 32 + 16 * crate::probe::PROBE_LEVELS),
+                at(probes + 36 + 16 * crate::probe::PROBE_LEVELS),
+                at(probes + 40 + 16 * crate::probe::PROBE_LEVELS)
             ],
-            [2, 3, 4, 24],
-            "the probe grid's counts and their product"
+            [63.0, 64.0, 65.0],
+            "level 0's reciprocal spacing"
         );
         // And the selection numbers past the header, which is where the block
         // now ends. Every lane, because all four are `float`s of one width and

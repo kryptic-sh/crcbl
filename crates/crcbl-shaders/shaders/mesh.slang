@@ -290,6 +290,16 @@ static const uint SHADOW_POINT_FACES = 6;
 /// drift test that pins `SHADOW_CASCADES` pins it.
 static const uint SHADOW_ATLAS_TILES = 16;
 
+/// How many clipmap levels the irradiance volume's header carries room for,
+/// matching `crcbl_shaders::probe::PROBE_LEVELS`.
+///
+/// `docs/plan/50-irradiance-probes.md`'s layered density: a few concentric
+/// levels of one grid, each twice the last, so a fragment near the middle reads
+/// dense probes and one far out reads sparse ones. Sizes
+/// `FrameUniforms::probe_level_origin` and its reciprocal twin, so this is a
+/// layout number and the same drift test that pins `SHADOW_CASCADES` pins it.
+static const uint PROBE_LEVELS = 4;
+
 /// The depth one tile of the shadow atlas is reset to before it is redrawn,
 /// matching `crcbl_shaders::mesh::SHADOW_ATLAS_CLEAR_DEPTH`.
 ///
@@ -434,27 +444,44 @@ struct FrameUniforms
     /// so adding it moved no existing member's offset — which is what let the
     /// cascade goldens stay byte-identical across the change that introduced it.
     float4x4 light_view_proj[SHADOW_LIGHT_TILES];
-    /// Where probe `(0, 0, 0)` of the irradiance grid is, in world space; `w`
-    /// unused. Matching `crcbl_shaders::probe::ProbeVolume`.
+    /// `xyz`: how many probes **each level** of the irradiance clipmap holds on
+    /// each axis — the same count every level, which is what makes a coarser
+    /// level cover more world rather than hold more probes. `w`: how many rows
+    /// `probes` holds across every level, and the bound every fetch below is
+    /// clamped against. Matching `crcbl_shaders::probe::ProbeVolume`.
     ///
-    /// **These three were last in the block when they arrived**, on
-    /// `light_view_proj`'s terms exactly: no existing member's offset moved, so
-    /// every golden blessed before the grid existed still matched. The rows
-    /// below have each been appended the same way since.
-    float4 probe_origin;
-    /// One over the grid's spacing on each axis; `w` unused.
-    ///
-    /// Inverted on the host so this stage multiplies rather than divides. An
-    /// axis whose reciprocal is zero collapses onto probe 0, which is what the
-    /// grid of a scene with no probes carries.
-    float4 probe_inv_spacing;
-    /// `xyz`: how many probes the grid holds on each axis. `w`: their product,
-    /// which is how many rows `probes` holds and the bound every fetch below is
-    /// clamped against.
+    /// **The rows below were appended after these**, each on
+    /// `light_view_proj`'s terms: no existing member's offset moved, so every
+    /// golden blessed before it existed still matched. The clipmap is the one
+    /// change that did not keep that discipline — growing this group from three
+    /// rows to `2 · PROBE_LEVELS + 2` moved every member after it — and it could
+    /// not: what moved is the *shape* of a member the block already had, and
+    /// nothing after it moved relative to anything else. No golden moved either,
+    /// because the offsets are a contract between this file and
+    /// `crcbl_shaders::mesh::FRAME_UNIFORMS_SIZE` and the two changed together.
     ///
     /// All zero for a scene with no probes, and `probe_irradiance` then returns
     /// exactly zero with no branch anywhere — see it.
     uint4 probe_counts;
+    /// `x`: how many clipmap levels are live, never more than `PROBE_LEVELS`.
+    /// `y`: how many rows one level holds, which is also where each next level's
+    /// rows begin. `z` and `w` are the sixteen-byte row's padding.
+    uint4 probe_levels;
+    /// Where probe `(0, 0, 0)` of each level stands, in world space; `w` unused.
+    ///
+    /// **Uploaded rather than derived here.** Where a level stands is one rule,
+    /// `crcbl_shaders::probe::ProbeVolume::level_origin` is where it is written,
+    /// and this stage reads the answer — exactly as `probe_octahedral.slang`
+    /// reads a direction table rather than evaluating the octahedral mapping a
+    /// second time. The rows past `probe_levels.x` are zeroed and nothing reads
+    /// them.
+    float4 probe_level_origin[PROBE_LEVELS];
+    /// One over each level's spacing on each axis; `w` unused.
+    ///
+    /// Inverted on the host so this stage multiplies rather than divides. An
+    /// axis whose reciprocal is zero collapses onto probe 0, which is what the
+    /// grid of a scene with no probes carries.
+    float4 probe_level_inv_spacing[PROBE_LEVELS];
     /// `docs/plan/25-lod.md`'s selection numbers, as `draw_gen.slang`'s
     /// `DrawGenParams::lod_params` carries them: `x` pixels per unit of length
     /// one unit from the eye, `y` the budget a group's projected error must
@@ -3735,6 +3762,14 @@ static const float PROBE_SURFACE_BIAS = 0.05;
 /// trilinear result rather than to black.
 static const float PROBE_OCCLUDED_WEIGHT = 0.0001;
 
+/// How much of a clipmap level's half-extent the blend into the next level out
+/// occupies. `crcbl_shaders::probe::LEVEL_BAND`, where the reason is argued: a
+/// point on level `k`'s boundary stands at exactly half of level `k+1`'s
+/// half-extent, so a band wider than half an extent would still be fading level
+/// `k` where the fragment beside it has already gone wholly to level `k+1` —
+/// which is the step this blend exists to remove.
+static const float PROBE_LEVEL_BAND = 0.25;
+
 /// `+1` for a positive or zero value and `-1` for a negative one — the
 /// octahedral mapping's `signNotZero`.
 ///
@@ -3843,11 +3878,14 @@ float probe_weight(uint index, float3 probe_position, float3 world_position, flo
 /// table has because a buffer of no bytes is not a buffer.
 ///
 /// **It is also the layer of `probe_visibility`**, which is what makes the row
-/// and the map one probe: `crcbl_render::probe_visibility::capture` writes its
-/// layers in the same `x`-fastest order the table's rows are in.
-uint probe_row(uint3 cell)
+/// and the map one probe: `crcbl_render::probe_capture` writes its layers in the
+/// same order the table's rows are in — `x`-fastest within a level, and the
+/// levels one after another finest first, which is what `probe_levels.y` steps
+/// over here.
+uint probe_row(uint level, uint3 cell)
 {
-    uint index = (cell.z * frame.probe_counts.y + cell.y) * frame.probe_counts.x + cell.x;
+    uint index = frame.probe_levels.y * level
+               + (cell.z * frame.probe_counts.y + cell.y) * frame.probe_counts.x + cell.x;
     return min(index, max(frame.probe_counts.w, 1u) - 1u);
 }
 
@@ -3879,17 +3917,18 @@ WeightedProbe lerp_probe(WeightedProbe a, WeightedProbe b, float t)
     return blended;
 }
 
-/// The corner at grid cell `cell`: its row, scaled by what that probe's
-/// visibility map says a surface at `world_position` facing `normal` keeps of
-/// it.
+/// The corner at cell `cell` of clipmap level `level`: its row, scaled by what
+/// that probe's visibility map says a surface at `world_position` facing
+/// `normal` keeps of it.
 ///
-/// `spacing` is the grid's step, which the caller derives once from the header's
-/// reciprocal rather than eight times here.
-WeightedProbe probe_corner(uint3 cell, float3 spacing, float3 world_position, float3 normal)
+/// `origin` and `spacing` are the level's own, which the caller reads and
+/// inverts once rather than eight times here.
+WeightedProbe probe_corner(uint level, uint3 cell, float3 origin, float3 spacing,
+                           float3 world_position, float3 normal)
 {
-    uint row = probe_row(cell);
+    uint row = probe_row(level, cell);
     GpuProbe stored = probes[row];
-    float3 at = frame.probe_origin.xyz + float3(cell) * spacing;
+    float3 at = origin + float3(cell) * spacing;
     float weight = probe_weight(row, at, world_position, normal);
 
     WeightedProbe corner;
@@ -3900,11 +3939,12 @@ WeightedProbe probe_corner(uint3 cell, float3 spacing, float3 world_position, fl
     return corner;
 }
 
-/// The irradiance `docs/plan/18-render-features.md`'s probe grid gives a surface
-/// at `world_position` facing `normal`, in linear RGB.
+/// The irradiance one clipmap level of `docs/plan/18-render-features.md`'s probe
+/// grid gives a surface at `world_position` facing `normal`, in linear RGB.
 ///
-/// Mirrored on the host by `crcbl_shaders::probe::irradiance_at`, which is where
-/// the spherical harmonics are checked against the literature they come from.
+/// Mirrored on the host by `crcbl_shaders::probe::level_irradiance_at`, which is
+/// where the spherical harmonics are checked against the literature they come
+/// from.
 ///
 /// # A grid of nothing evaluates to zero, and there is no branch
 ///
@@ -3949,20 +3989,24 @@ WeightedProbe probe_corner(uint3 cell, float3 spacing, float3 world_position, fl
 /// the case that reaches it, keeps the light it had before this rung rather than
 /// becoming a hole in the room.
 ///
-/// # Outside the grid clamps to its surface
+/// # Outside the level clamps to its surface
 ///
 /// The same choice the shadow sampler makes at a cascade's edge: an environment
 /// does not stop at the last probe, and fading to zero there would put a seam in
-/// mid-air. What it costs is that a room's lighting extends past its probes,
-/// which is a gradient rather than an artefact.
-float3 probe_irradiance(float3 world_position, float3 normal)
+/// mid-air. `probe_irradiance` is what makes that clamp invisible where a finer
+/// level ends and a coarser one goes on.
+float3 probe_level_irradiance(uint level, float3 world_position, float3 normal)
 {
     // The last addressable probe on each axis. `max(…, 0)` is what keeps an axis
     // with no probes — or with exactly one — addressing probe 0 rather than
     // probe -1.
     float3 last = max(float3(frame.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
-    float3 grid = clamp((world_position - frame.probe_origin.xyz) * frame.probe_inv_spacing.xyz,
-                        float3(0.0, 0.0, 0.0), last);
+    // Where this level stands and how far apart its probes are, read rather than
+    // derived: `crcbl_shaders::probe::ProbeVolume` wrote these rows, so there is
+    // one place the clipmap's geometry is decided.
+    float3 origin = frame.probe_level_origin[level].xyz;
+    float3 inv = frame.probe_level_inv_spacing[level].xyz;
+    float3 grid = clamp((world_position - origin) * inv, float3(0.0, 0.0, 0.0), last);
     float3 base = floor(grid);
     float3 f = grid - base;
 
@@ -3976,7 +4020,6 @@ float3 probe_irradiance(float3 world_position, float3 normal)
     // position can be named. An axis with no reciprocal has no step to take and
     // every probe on it stands at the origin's coordinate — which is the
     // degenerate volume, and `ProbeVolume::position` on the host agrees.
-    float3 inv = frame.probe_inv_spacing.xyz;
     float3 spacing = float3(inv.x != 0.0 ? 1.0 / inv.x : 0.0,
                             inv.y != 0.0 ? 1.0 / inv.y : 0.0,
                             inv.z != 0.0 ? 1.0 / inv.z : 0.0);
@@ -3986,14 +4029,14 @@ float3 probe_irradiance(float3 world_position, float3 normal)
     // `lerp(a, b, 0.0)` is `a` — so a fragment landing in cell `i` at `f≈1` and
     // one landing in cell `i+1` at `f≈0` compute the same value, which is the
     // whole of this grid's determinism argument.
-    WeightedProbe x00 = lerp_probe(probe_corner(uint3(lo.x, lo.y, lo.z), spacing, world_position, normal),
-                                   probe_corner(uint3(hi.x, lo.y, lo.z), spacing, world_position, normal), f.x);
-    WeightedProbe x10 = lerp_probe(probe_corner(uint3(lo.x, hi.y, lo.z), spacing, world_position, normal),
-                                   probe_corner(uint3(hi.x, hi.y, lo.z), spacing, world_position, normal), f.x);
-    WeightedProbe x01 = lerp_probe(probe_corner(uint3(lo.x, lo.y, hi.z), spacing, world_position, normal),
-                                   probe_corner(uint3(hi.x, lo.y, hi.z), spacing, world_position, normal), f.x);
-    WeightedProbe x11 = lerp_probe(probe_corner(uint3(lo.x, hi.y, hi.z), spacing, world_position, normal),
-                                   probe_corner(uint3(hi.x, hi.y, hi.z), spacing, world_position, normal), f.x);
+    WeightedProbe x00 = lerp_probe(probe_corner(level, uint3(lo.x, lo.y, lo.z), origin, spacing, world_position, normal),
+                                   probe_corner(level, uint3(hi.x, lo.y, lo.z), origin, spacing, world_position, normal), f.x);
+    WeightedProbe x10 = lerp_probe(probe_corner(level, uint3(lo.x, hi.y, lo.z), origin, spacing, world_position, normal),
+                                   probe_corner(level, uint3(hi.x, hi.y, lo.z), origin, spacing, world_position, normal), f.x);
+    WeightedProbe x01 = lerp_probe(probe_corner(level, uint3(lo.x, lo.y, hi.z), origin, spacing, world_position, normal),
+                                   probe_corner(level, uint3(hi.x, lo.y, hi.z), origin, spacing, world_position, normal), f.x);
+    WeightedProbe x11 = lerp_probe(probe_corner(level, uint3(lo.x, hi.y, hi.z), origin, spacing, world_position, normal),
+                                   probe_corner(level, uint3(hi.x, hi.y, hi.z), origin, spacing, world_position, normal), f.x);
     WeightedProbe y0 = lerp_probe(x00, x10, f.y);
     WeightedProbe y1 = lerp_probe(x01, x11, f.y);
     WeightedProbe cell = lerp_probe(y0, y1, f.z);
@@ -4002,6 +4045,107 @@ float3 probe_irradiance(float3 world_position, float3 normal)
     return max(float3(dot(cell.sh.sh_r, basis), dot(cell.sh.sh_g, basis), dot(cell.sh.sh_b, basis))
                    / cell.weight,
                float3(0.0, 0.0, 0.0));
+}
+
+/// How far out of the **finest** clipmap level `world_position` stands, in that
+/// level's own half-extents: zero at its centre and one on its boundary.
+///
+/// `crcbl_shaders::probe::ProbeVolume::level_reach` is the host mirror, and this
+/// body is character for character the one `ssr.slang` carries — that pass
+/// evaluates the same clipmap, and `crcbl_shaders::probe`'s
+/// `the_shaders_pick_a_level_the_way_this_module_does` is what holds the two
+/// copies together.
+///
+/// **Only the finest level is measured**, because every level is concentric with
+/// it and twice as wide: level `k`'s reach is this one halved `k` times, which
+/// is what lets `probe_level_of` walk the levels without touching their rows.
+///
+/// **An axis with no extent is contained everywhere.** A grid one probe deep, or
+/// one whose reciprocal spacing is zero, has no boundary on that axis to be
+/// outside of — it clamps onto probe 0 for every point — so it contributes
+/// nothing here rather than dividing by its zero extent.
+float probe_level_reach(float3 world_position, float3 origin, float3 inv_spacing, float3 last)
+{
+    float reach = 0.0;
+    for (uint axis = 0; axis < 3; ++axis)
+    {
+        if (last[axis] == 0.0 || inv_spacing[axis] == 0.0)
+            continue;
+        float grid = (world_position[axis] - origin[axis]) * inv_spacing[axis];
+        reach = max(reach, abs(2.0 * grid / last[axis] - 1.0));
+    }
+    return reach;
+}
+
+/// Which clipmap level a point of `probe_level_reach` `reach` reads, and what
+/// share of the read belongs to that level rather than to the next one out: `x`
+/// the level, `y` the share.
+///
+/// `crcbl_shaders::probe::ProbeVolume::level_of` is the host mirror, and this
+/// body is `ssr.slang`'s character for character.
+///
+/// The finest level whose reach is inside one is the level, and the share ramps
+/// from zero on that level's boundary to one `PROBE_LEVEL_BAND` of an extent
+/// inside it. The coarsest level has nothing to blend towards and takes the
+/// whole share, which is the clamp-at-the-edge the single grid always did.
+///
+/// **The two sides of a level switch meet.** On level `k`'s boundary the share
+/// is exactly zero, so the read there is wholly level `k+1`; a point a hair
+/// further out picks level `k+1`, whose own reach is half of one — past the
+/// band, so its share is exactly one and the read is wholly level `k+1` again.
+/// That is the same shape of argument the trilinear cell index already rests on.
+float2 probe_level_of(float reach, uint levels)
+{
+    for (uint level = 0; level + 1 < levels; ++level)
+    {
+        float at = reach * exp2(-float(level));
+        if (at < 1.0)
+            return float2(float(level), saturate((1.0 - at) / PROBE_LEVEL_BAND));
+    }
+    return float2(float(levels - 1), 1.0);
+}
+
+/// The irradiance the whole clipmap gives a surface at `world_position` facing
+/// `normal`, in linear RGB.
+///
+/// Mirrored on the host by `crcbl_shaders::probe::irradiance_at`. The finest
+/// level that contains the point, faded into the next one out over a band at its
+/// edge — `probe_level_reach` and `probe_level_of` are the rule and
+/// `probe_level_irradiance` is the read within a level.
+///
+/// # A one-level volume is exactly one gather
+///
+/// The coarsest level takes the whole share, so a volume of one level evaluates
+/// `probe_level_irradiance` of level 0 and nothing else — the arithmetic this
+/// function was before the clipmap, unchanged and in the same order. That is
+/// what let the levels land with no golden re-blessed, and it is also why a
+/// scene that wants one grid pays nothing for the ones it did not ask for.
+///
+/// # Two terms rather than a `lerp`
+///
+/// `coarse * (1 - share) + fine * share` returns `fine` **exactly** at a share
+/// of one and `coarse` exactly at zero, where `lerp` would return
+/// `coarse + (fine - coarse)` and lose the low bits of either end. That
+/// exactness is what makes the switch at a level's boundary meet, and it is the
+/// same spelling `ssr.slang` composites its screen hit with, for the same
+/// reason.
+float3 probe_irradiance(float3 world_position, float3 normal)
+{
+    float3 last = max(float3(frame.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
+    uint levels = clamp(frame.probe_levels.x, 1u, PROBE_LEVELS);
+    float reach = probe_level_reach(world_position,
+                                    frame.probe_level_origin[0].xyz,
+                                    frame.probe_level_inv_spacing[0].xyz,
+                                    last);
+    float2 pick = probe_level_of(reach, levels);
+    uint level = uint(pick.x);
+    float share = pick.y;
+
+    float3 fine = probe_level_irradiance(level, world_position, normal);
+    if (share >= 1.0)
+        return fine;
+    float3 coarse = probe_level_irradiance(level + 1, world_position, normal);
+    return coarse * (1.0 - share) + fine * share;
 }
 
 /// The irradiance the gradient sky gives a surface facing `normal`.

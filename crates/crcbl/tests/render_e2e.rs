@@ -2790,6 +2790,242 @@ fn a_probe_behind_a_wall_lights_nothing_through_it() {
     );
 }
 
+/// How far along `x` the clipmap profile is read, in world units.
+///
+/// Level 0's boundary is one [`crcbl::screenshot::probe_clipmap_grid`] spacing
+/// from the centre and its band opens a quarter of that inside, so a sweep this
+/// long carries the flat interior, the whole band and a stretch of pure level 1
+/// past it. It stops well short of the `+X` wall: what is left between them is
+/// more than `crcbl_render::ForwardRenderer`'s occlusion radius, so the
+/// occlusion over every pixel read here is one rather than merely near it —
+/// the same condition [`PROBE_BAND_AT`] is chosen under.
+const CLIPMAP_SWEEP_TO: f32 = 1.1;
+
+/// The half-height of the column each sample of the profile averages, in
+/// pixels.
+///
+/// The field is a function of `x` alone, so averaging *down* the frame costs no
+/// gradient at all and takes the 8-bit rounding out of a per-pixel difference —
+/// which is the quantity this profile is measured in. **One column wide**, and
+/// that is not an oversight: a sample two columns wide would share a column
+/// with the sample beside it and halve the very step this measures. Narrow
+/// enough on `z` to stay in the floor's flat middle, far from both `±Z` walls.
+const CLIPMAP_COLUMN: u32 = 5;
+
+/// How much steeper than an even ramp one step of the profile may be, in linear
+/// light.
+///
+/// **The number the band blend is held to.** Level 0's band is
+/// `crcbl_shaders::probe::LEVEL_BAND` of its half-extent, which this fixture
+/// puts about fifteen pixels of the profile inside; the share therefore moves a
+/// fifteenth per pixel and — *in linear light* — so does the value, while a
+/// level **switch** moves all of it in one step. The measurement is taken in
+/// linear light rather than in the frame's levels for exactly that reason: the
+/// sRGB curve is three times steeper near black than a straight line is, so a
+/// perfectly even blend still shows a threefold step in levels and the ceiling
+/// would have to be loosened to a number that no longer separates the two
+/// cases. The run that landed this measures a worst step of **1.07 times** the
+/// even ramp on both radv and lavapipe, and a level switch — the whole 0.82 of
+/// travel in one sample against a ramp of 0.054 — misses this ceiling by more
+/// than a factor of seven.
+const CLIPMAP_STEP_RAMPS: f32 = 2.0;
+
+/// The least the profile must travel end to end, in linear light.
+///
+/// The anti-vacuity half, and it is what makes the step assertion above a check
+/// rather than a formality: a frame that read one level the whole way is flat,
+/// takes no step anywhere, and would satisfy any ceiling. The two levels are a
+/// red and a blue constant environment of
+/// `crcbl::screenshot::probe_clipmap_grid`'s radiance, so each channel travels
+/// the whole way from that environment's reflected radiance to nothing — which
+/// is `π · radiance · albedo`, and this is well under it.
+const CLIPMAP_MIN_TRAVEL: f32 = 0.4;
+
+/// How far the profile may sit from what
+/// [`crcbl_shaders::probe::irradiance_at`](crcbl::shaders::probe::irradiance_at)
+/// predicts for it, in levels of 255.
+///
+/// [`PROBE_MIRROR_LEVELS`]' forward model exactly — the same floor, the same
+/// camera, the same sun with its direct and ambient terms at zero, the same
+/// reflection refusal — so the same list of exactly-zero and exactly-one steps
+/// applies and what is left to cover is 8-bit rounding, the sRGB encode's
+/// precision and half a pixel of disagreement about where a fragment centre is.
+///
+/// **It is the check on the level pick itself.** The mirror decides which level
+/// a point reads and in what share, so a shader that picked a different level,
+/// or ramped over a different band, disagrees by tens of levels across the
+/// blend rather than by a fraction of one. Measured over the whole profile at
+/// **0.66 levels at worst on radv** and **0.67 on lavapipe**; the budget is a
+/// little wider than `PROBE_MIRROR_LEVELS`' because this profile is read one
+/// column at a time where the field has a steep gradient, so half a pixel of
+/// disagreement about a fragment's centre is worth more of a level here and
+/// there is no block average to take the 8-bit rounding out along `x`.
+const CLIPMAP_MIRROR_LEVELS: f32 = 1.5;
+
+/// The sRGB transfer function run backwards, from the frame's levels to the
+/// linear light behind them.
+///
+/// [`srgb_encode`]'s inverse, and the profile above is differenced through it
+/// because the step it measures is a *fraction of a blend*, which is a linear
+/// quantity: the encode alone turns an even ramp into a curve three times
+/// steeper at one end than at the other.
+fn srgb_decode(encoded: f32) -> f32 {
+    if encoded <= 0.040_449_935 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// **The clipmap's claim, on the device: a fragment crossing a level boundary
+/// fades rather than steps, and it fades the way the host says it does.**
+///
+/// `docs/plan/50-irradiance-probes.md`'s layered density.
+/// `crcbl::screenshot::probe_clipmap_forward` is the fixture: one room, one
+/// flat floor, and a volume of two levels whose rows are a red constant
+/// environment and a blue one. Every row of a level is identical, so the
+/// trilinear gather inside a level is flat and the **only** thing that can move
+/// a pixel along the floor is which level it read and in what share.
+///
+/// Two things are measured over one profile across the boundary:
+///
+/// * **It does not step.** The largest difference between neighbouring samples,
+///   in linear light, is held under [`CLIPMAP_STEP_RAMPS`] times what an even
+///   ramp across the band would take — a level *change* puts the whole travel
+///   into one sample and misses it by a factor of five.
+/// * **It is the profile the host predicts.** Every sample is compared against
+///   `crcbl_shaders::probe::irradiance_at` over the rows the device was given,
+///   which is what holds `mesh.slang`'s level pick and band to the mirror
+///   rather than merely to smoothness — a shader that faded over the wrong
+///   width, or into the wrong level, is smooth and wrong.
+///
+/// The two together fail in both directions: a flat frame misses
+/// [`CLIPMAP_MIN_TRAVEL`], a switching one misses the step ceiling, and one
+/// that fades over its own band misses the mirror.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_fragment_crossing_a_clipmap_level_fades_into_it() {
+    crcbl_core::log::init_logging();
+
+    let setup = OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, |device, queue, format| {
+        crcbl::screenshot::probe_clipmap_forward(device, queue, format)
+    })
+    .unwrap_or_else(|why| panic!("a GPU backend opens for the probe clipmap scene: {why}"));
+    let mut setup = Offscreen::guard(SUITE, setup);
+    let format = setup.format();
+    let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+    setup.finish();
+    let image =
+        Image::from_readback(width, height, &pixels, channel_order(format)).expect("one image");
+
+    // The profile: every column of the frame from the room's centre out to
+    // `CLIPMAP_SWEEP_TO`, each averaged down a short strip of the floor.
+    let grid = crcbl::screenshot::probe_clipmap_grid();
+    let albedo = probe_floor_albedo();
+    let centre = probe_pixel(0.0, 0.0);
+    let outer = probe_pixel(CLIPMAP_SWEEP_TO, 0.0);
+    assert!(
+        outer.0 < centre.0,
+        "world +X must be the frame's left, which is what `probe_pixel` says"
+    );
+    let rows =
+        || centre.1.saturating_sub(CLIPMAP_COLUMN)..(centre.1 + CLIPMAP_COLUMN).min(EXTENT.1);
+
+    let mut measured: Vec<[f32; 3]> = Vec::new();
+    let mut predicted: Vec<[f32; 3]> = Vec::new();
+    for column in outer.0..=centre.0 {
+        let mut got = [0.0f32; 3];
+        let mut want = [0.0f32; 3];
+        let mut count = 0u32;
+        for y in rows() {
+            let pixel = image.pixel(column, y).expect("inside the frame");
+            // The same pixels, through `predicted_block_channel`'s forward
+            // model — evaluated per pixel because the field has a gradient
+            // across the strip and the sRGB encode is not linear, so the mean
+            // of the encodes is not the encode of the mean.
+            let irradiance = crcbl::shaders::probe::irradiance_at(
+                &grid.volume,
+                &grid.probes,
+                // Every probe of every level stands in open air inside the room
+                // — which is what `probe_clipmap_grid`'s spacing is chosen for
+                // — so the capture this fixture runs must leave every corner
+                // its whole weight, and this comparison is what says so.
+                &crcbl::shaders::probe_visibility::ProbeVisibility::NONE,
+                probe_world(column, y),
+                [0.0, 1.0, 0.0],
+            );
+            for channel in 0..3 {
+                got[channel] += f32::from(pixel[channel]);
+                want[channel] +=
+                    srgb_encode((albedo[channel] * irradiance[channel]).min(1.0)) * 255.0;
+            }
+            count += 1;
+        }
+        assert!(count > 0, "an empty column measures nothing");
+        measured.push(got.map(|sum| sum / count as f32));
+        predicted.push(want.map(|sum| sum / count as f32));
+    }
+    assert!(
+        measured.len() > 2,
+        "a profile of {} sample(s) has no neighbouring pair to compare",
+        measured.len()
+    );
+
+    let apart = |a: [f32; 3], b: [f32; 3]| {
+        (0..3).fold(0.0f32, |worst, channel| {
+            worst.max((a[channel] - b[channel]).abs())
+        })
+    };
+    // The travel and the step in linear light, where a blend is even; the
+    // mirror comparison stays in the frame's own levels, which is the unit
+    // `PROBE_MIRROR_LEVELS` is written in.
+    let linear: Vec<[f32; 3]> = measured
+        .iter()
+        .map(|sample| sample.map(|level| srgb_decode(level / 255.0)))
+        .collect();
+    let travel = apart(linear[0], linear[linear.len() - 1]);
+    let step = linear
+        .windows(2)
+        .fold(0.0f32, |worst, pair| worst.max(apart(pair[0], pair[1])));
+    let miss = measured
+        .iter()
+        .zip(&predicted)
+        .fold(0.0f32, |worst, (got, want)| worst.max(apart(*got, *want)));
+
+    // What an even ramp across the band would take per sample, which is the
+    // unit the step is judged in. The band is `LEVEL_BAND` of level 0's
+    // half-extent, read out of the volume rather than written down again.
+    let half_extent = 0.5 * (grid.volume.counts[0] - 1) as f32 * grid.volume.level_spacing(0)[0];
+    let band_samples = crcbl::shaders::probe::LEVEL_BAND * half_extent * PROBE_PIXELS_PER_UNIT;
+    let ramp = travel / band_samples;
+    eprintln!(
+        "crcbl render e2e: probe clipmap — {} samples travel {travel:.4} in linear light, \
+         the worst step is {step:.4} against a {ramp:.4} ramp, and the mirror misses by \
+         {miss:.2} level(s)",
+        measured.len()
+    );
+
+    assert!(
+        travel >= CLIPMAP_MIN_TRAVEL,
+        "the profile must cross from one level to the other: it travelled {travel:.4} of \
+         the {CLIPMAP_MIN_TRAVEL} this fixture is built to, which is a frame that read one \
+         level the whole way"
+    );
+    assert!(
+        step <= CLIPMAP_STEP_RAMPS * ramp,
+        "one sample of the profile moved {step:.4}, past the {:.4} that is \
+         {CLIPMAP_STEP_RAMPS} times an even ramp across the band — the read changed level \
+         rather than fading into it",
+        CLIPMAP_STEP_RAMPS * ramp
+    );
+    assert!(
+        miss <= CLIPMAP_MIRROR_LEVELS,
+        "the frame and `crcbl_shaders::probe::irradiance_at` disagree by {miss:.2} \
+         level(s), past the {CLIPMAP_MIRROR_LEVELS} this comparison allows — the shader \
+         picks a level, or fades into it, differently from the host that decides both"
+    );
+}
+
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
 fn the_probes_scene_lights_its_room_and_matches_its_golden() {

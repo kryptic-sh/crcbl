@@ -7385,11 +7385,7 @@ pub(crate) mod tests {
             shadow_params: [0.0; 4],
             cluster_grid: [0; 4],
             light_view_proj: [[0.0; 16]; SHADOW_LIGHT_TILES],
-            probes: ProbeVolume {
-                origin: [0.0; 3],
-                inv_spacing: [0.0; 3],
-                counts: [0; 3],
-            },
+            probes: ProbeVolume::default(),
             lod_params: [1.0, 1.0, 1.0, 0.0],
             // No fog: a zero density is what makes the fragment stage's
             // composite the identity, so this probe reads the shading rather

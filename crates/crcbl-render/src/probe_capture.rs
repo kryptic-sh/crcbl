@@ -238,14 +238,22 @@ fn scene_far(triangles: &[[[f32; 3]; 3]], probes: &[Vec3]) -> f32 {
     far * 1.01
 }
 
-/// Every probe of `volume`, in the table's own `x`-fastest order — layer `i` of
-/// the image is probe row `i`.
+/// Every probe of `volume`, in the table's own order — layer `i` of the image
+/// is probe row `i`.
+///
+/// **The clipmap's levels one after another, finest first**, each of them
+/// `x`-fastest within itself. That is
+/// [`ProbeVolume::level_row`](crcbl_shaders::probe::ProbeVolume::level_row)'s
+/// order and `mesh.slang`'s `probe_row` reads it, which is what makes a row and
+/// a layer one probe across the whole volume rather than only within a level.
 fn probe_positions(volume: &ProbeVolume) -> Vec<Vec3> {
     let mut positions = Vec::with_capacity(volume.total() as usize);
-    for z in 0..volume.counts[2].max(1) {
-        for y in 0..volume.counts[1].max(1) {
-            for x in 0..volume.counts[0].max(1) {
-                positions.push(Vec3::from_array(volume.position([x, y, z])));
+    for level in 0..volume.level_count() {
+        for z in 0..volume.counts[2].max(1) {
+            for y in 0..volume.counts[1].max(1) {
+                for x in 0..volume.counts[0].max(1) {
+                    positions.push(Vec3::from_array(volume.position(level, [x, y, z])));
+                }
             }
         }
     }
@@ -1382,5 +1390,51 @@ mod tests {
     #[test]
     fn an_empty_scene_still_has_a_far_plane() {
         assert!(scene_far(&[], &[Vec3::ZERO]) >= MIN_FAR);
+    }
+
+    /// **One capture covers every level of the clipmap**, and layer `i` stands
+    /// where probe row `i` does.
+    ///
+    /// The layer order is the whole of what makes a row and a visibility map one
+    /// probe, and nothing else in the tree can catch it drifting: `mesh.slang`'s
+    /// `probe_row` reads a layer index it computed itself, so a capture that
+    /// walked its levels in another order draws a room lit through the wrong
+    /// walls and no assertion anywhere says which. The positions are checked
+    /// against [`ProbeVolume::position`], which is where the clipmap's geometry
+    /// is decided.
+    #[test]
+    fn a_capture_walks_every_level_in_the_order_the_table_is_in() {
+        let volume = ProbeVolume {
+            origin: [-2.0, 1.0, -3.0],
+            inv_spacing: [0.5, 1.0, 0.25],
+            counts: [3, 2, 2],
+            levels: 3,
+        };
+        let positions = probe_positions(&volume);
+        assert_eq!(
+            positions.len(),
+            volume.total() as usize,
+            "a capture must have one layer per row of the whole table"
+        );
+        for level in 0..volume.level_count() {
+            for z in 0..volume.counts[2] {
+                for y in 0..volume.counts[1] {
+                    for x in 0..volume.counts[0] {
+                        let row = volume.level_row(level)
+                            + (z * volume.counts[1] + y) * volume.counts[0]
+                            + x;
+                        assert_eq!(
+                            positions[row as usize],
+                            Vec3::from_array(volume.position(level, [x, y, z])),
+                            "row {row} is level {level}'s cell ({x}, {y}, {z})"
+                        );
+                    }
+                }
+            }
+        }
+        // Anti-vacuity: a coarser level really does stand somewhere else, so
+        // the equalities above are not comparing one grid against itself three
+        // times over.
+        assert_ne!(positions[0], positions[volume.per_level() as usize]);
     }
 }

@@ -95,6 +95,12 @@
 /// pair's block would make a pass that is meant to stand alone depend on that
 /// pair having run. `crcbl_shaders::ssr::SsrParams` is the Rust mirror and
 /// `crcbl_render::forward` is what writes it.
+/// How many clipmap levels the irradiance volume's header carries room for,
+/// matching `crcbl_shaders::probe::PROBE_LEVELS` and `mesh.slang`'s copy. Sizes
+/// two arrays of the block below, so a file that thought it was smaller would
+/// read every member after them at the wrong offset.
+static const uint PROBE_LEVELS = 4;
+
 struct SsrParams
 {
     /// Clip → view. Reversed-Z and possibly infinite, so `w` is what carries the
@@ -106,9 +112,16 @@ struct SsrParams
     float4x4 inv_view;
     /// Matching `crcbl_shaders::probe::ProbeVolume`; kept in this pass's block
     /// because a probe lookup needs it before it can address the storage table.
-    float4 probe_origin;
-    float4 probe_inv_spacing;
+    ///
+    /// `probe_counts.xyz` is the probes one clipmap level holds on each axis and
+    /// `.w` is the rows the whole table holds; `probe_levels.x` is how many
+    /// levels are live and `.y` how many rows one of them owns. The per-level
+    /// origin and reciprocal spacing are uploaded rather than derived here, for
+    /// the reason `mesh.slang`'s copy of these rows gives.
     uint4 probe_counts;
+    uint4 probe_levels;
+    float4 probe_level_origin[PROBE_LEVELS];
+    float4 probe_level_inv_spacing[PROBE_LEVELS];
     /// `x` is how many levels of the Hi-Z pyramid this frame built, which is the
     /// deepest level the march may climb to; the other three lanes are the
     /// sixteen-byte row's padding.
@@ -650,10 +663,11 @@ static const float PROBE_TRANSFER_L0 = 3.14159265358979323846;
 /// `2π/3`. Specular lookup undoes it to recover approximate L1 radiance.
 static const float PROBE_TRANSFER_L1 = 2.0943951023931954923;
 
-/// The grid's manually trilinear L1 radiance evaluation in the reflection
-/// direction. The stored coefficients are irradiance: undo the clamped-cosine
-/// transfer per band before evaluating them. A zero volume addresses row zero of
-/// the zeroed table and returns exactly zero.
+/// How much of a clipmap level's half-extent the blend into the next level out
+/// occupies, matching `crcbl_shaders::probe::LEVEL_BAND` and `mesh.slang`'s
+/// copy. That module is where the reason is argued.
+static const float PROBE_LEVEL_BAND = 0.25;
+
 /// One texel of `sky_prefilter` or of `dfg` as the two shares it encodes.
 ///
 /// Each channel pair arrives as the stored bytes over 255, a conversion every
@@ -733,24 +747,87 @@ float3 sky_prefiltered(float3 direction, float roughness)
     return camera.sky[1].rgb * horizon + far * weights.x + opposite * weights.y;
 }
 
-float3 probe_environment(float3 world_position, float3 direction)
+/// How far out of the **finest** clipmap level `world_position` stands, in that
+/// level's own half-extents: zero at its centre and one on its boundary.
+///
+/// `crcbl_shaders::probe::ProbeVolume::level_reach` is the host mirror, and this
+/// body is character for character the one `mesh.slang` carries — that pass
+/// evaluates the same clipmap, and `crcbl_shaders::probe`'s
+/// `the_shaders_pick_a_level_the_way_this_module_does` is what holds the two
+/// copies together.
+///
+/// **Only the finest level is measured**, because every level is concentric with
+/// it and twice as wide: level `k`'s reach is this one halved `k` times, which
+/// is what lets `probe_level_of` walk the levels without touching their rows.
+///
+/// **An axis with no extent is contained everywhere.** A grid one probe deep, or
+/// one whose reciprocal spacing is zero, has no boundary on that axis to be
+/// outside of — it clamps onto probe 0 for every point — so it contributes
+/// nothing here rather than dividing by its zero extent.
+float probe_level_reach(float3 world_position, float3 origin, float3 inv_spacing, float3 last)
+{
+    float reach = 0.0;
+    for (uint axis = 0; axis < 3; ++axis)
+    {
+        if (last[axis] == 0.0 || inv_spacing[axis] == 0.0)
+            continue;
+        float grid = (world_position[axis] - origin[axis]) * inv_spacing[axis];
+        reach = max(reach, abs(2.0 * grid / last[axis] - 1.0));
+    }
+    return reach;
+}
+
+/// Which clipmap level a point of `probe_level_reach` `reach` reads, and what
+/// share of the read belongs to that level rather than to the next one out: `x`
+/// the level, `y` the share.
+///
+/// `crcbl_shaders::probe::ProbeVolume::level_of` is the host mirror, and this
+/// body is `mesh.slang`'s character for character. That module is where the
+/// argument for why the two sides of a level switch meet is written.
+float2 probe_level_of(float reach, uint levels)
+{
+    for (uint level = 0; level + 1 < levels; ++level)
+    {
+        float at = reach * exp2(-float(level));
+        if (at < 1.0)
+            return float2(float(level), saturate((1.0 - at) / PROBE_LEVEL_BAND));
+    }
+    return float2(float(levels - 1), 1.0);
+}
+
+/// One clipmap level's manually trilinear L1 radiance evaluation in the
+/// reflection direction. The stored coefficients are irradiance: undo the
+/// clamped-cosine transfer per band before evaluating them. A zero volume
+/// addresses row zero of the zeroed table and returns exactly zero.
+///
+/// **No visibility weighting**, which is where this and `mesh.slang`'s gather
+/// deliberately differ: a reflection asks what a direction sees, and the
+/// Chebyshev bound is about what a *surface* can see of a probe.
+float3 probe_level_environment(uint level, float3 world_position, float3 direction)
 {
     float3 last = max(float3(camera.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
-    float3 grid = clamp((world_position - camera.probe_origin.xyz) * camera.probe_inv_spacing.xyz,
-                        float3(0.0, 0.0, 0.0), last);
+    // Where this level stands and how far apart its probes are, read rather than
+    // derived: `crcbl_shaders::probe::ProbeVolume` wrote these rows, so there is
+    // one place the clipmap's geometry is decided.
+    float3 origin = camera.probe_level_origin[level].xyz;
+    float3 inv = camera.probe_level_inv_spacing[level].xyz;
+    float3 grid = clamp((world_position - origin) * inv, float3(0.0, 0.0, 0.0), last);
     float3 base = floor(grid);
     float3 f = grid - base;
     uint3 lo = uint3(base);
     uint3 hi = uint3(min(base + 1.0, last));
     uint total = max(camera.probe_counts.w, 1u) - 1u;
-    uint index000 = min((lo.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + lo.x, total);
-    uint index100 = min((lo.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + hi.x, total);
-    uint index010 = min((lo.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + lo.x, total);
-    uint index110 = min((lo.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + hi.x, total);
-    uint index001 = min((hi.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + lo.x, total);
-    uint index101 = min((hi.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + hi.x, total);
-    uint index011 = min((hi.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + lo.x, total);
-    uint index111 = min((hi.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + hi.x, total);
+    // The level's own rows, which begin `probe_levels.y` apart — the order
+    // `crcbl_render::probe_capture` writes and `mesh.slang`'s `probe_row` reads.
+    uint first = camera.probe_levels.y * level;
+    uint index000 = min(first + (lo.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + lo.x, total);
+    uint index100 = min(first + (lo.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + hi.x, total);
+    uint index010 = min(first + (lo.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + lo.x, total);
+    uint index110 = min(first + (lo.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + hi.x, total);
+    uint index001 = min(first + (hi.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + lo.x, total);
+    uint index101 = min(first + (hi.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + hi.x, total);
+    uint index011 = min(first + (hi.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + lo.x, total);
+    uint index111 = min(first + (hi.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + hi.x, total);
     GpuProbe x00 = probes[index000];
     GpuProbe x10 = probes[index010];
     GpuProbe x01 = probes[index001];
@@ -776,6 +853,34 @@ float3 probe_environment(float3 world_position, float3 direction)
                    dot(cell.sh_g.xyz / PROBE_TRANSFER_L1, direction) + cell.sh_g.w / PROBE_TRANSFER_L0,
                    dot(cell.sh_b.xyz / PROBE_TRANSFER_L1, direction) + cell.sh_b.w / PROBE_TRANSFER_L0),
                float3(0.0, 0.0, 0.0));
+}
+
+/// The whole clipmap's L1 radiance in the reflection direction: the finest level
+/// that contains the point, faded into the next one out over a band at its edge.
+///
+/// `mesh.slang`'s `probe_irradiance` in the shape a reflection wants —
+/// `probe_level_reach` and `probe_level_of` are shared with it character for
+/// character, and the two-term composite is the same spelling this file already
+/// blends a screen hit with, for the same reason: it returns either end exactly.
+/// A volume of one level evaluates one gather and nothing else, which is what
+/// keeps a scene that asks for a single grid bit-identical.
+float3 probe_environment(float3 world_position, float3 direction)
+{
+    float3 last = max(float3(camera.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
+    uint levels = clamp(camera.probe_levels.x, 1u, PROBE_LEVELS);
+    float reach = probe_level_reach(world_position,
+                                    camera.probe_level_origin[0].xyz,
+                                    camera.probe_level_inv_spacing[0].xyz,
+                                    last);
+    float2 pick = probe_level_of(reach, levels);
+    uint level = uint(pick.x);
+    float share = pick.y;
+
+    float3 fine = probe_level_environment(level, world_position, direction);
+    if (share >= 1.0)
+        return fine;
+    float3 coarse = probe_level_environment(level + 1, world_position, direction);
+    return coarse * (1.0 - share) + fine * share;
 }
 
 [shader("vertex")]

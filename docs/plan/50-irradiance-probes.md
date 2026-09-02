@@ -85,26 +85,75 @@ day.** The grid below stays, and everything that _fills_ it changes:
   shader readers are the same on both tiers; only the pass that writes the rows
   differs. That is what "the diffuse GI twin" in this file's title now means.
 
-**Layered density, camera-centred (the user's addition, 2026-08-30).** One
-uniform grid over a whole scene is either too coarse near the camera or too
-large far from it. The volume is a **clipmap**: a small number of levels (three
-or four), each a fixed probe count centred on the camera, level `k` spaced `2^k`
-times level 0 — dense probes where the camera is, sparse ones in the distance,
-and a world that can be any size because the levels are camera-relative. A level
-scrolls with the camera in whole probe steps with **toroidal addressing**, so
-moving one cell exposes one slab of new probes and every other probe keeps its
-rows and its visibility map. A fragment reads the finest level that contains it,
-blended over a band at each level's edge so a level change never pops; within a
-level the read is the trilinear gather and the Chebyshev weighting above. Rows
-are per level, so [43-render-standards.md](43-render-standards.md) §5's C1 (one
-storage buffer) holds with an offset per level.
+**Layered density, camera-centred (the user's addition, 2026-08-30) — the levels
+have landed; the scrolling has not.** One uniform grid over a whole scene is
+either too coarse near the camera or too large far from it. The volume is a
+**clipmap**: a small number of levels (three or four), each a fixed probe count
+centred on one point, level `k` spaced `2^k` times level 0 — dense probes in the
+middle, sparse ones out at the edge, and a world that can be any size because
+the levels are relative to that point. A fragment reads the finest level that
+contains it, blended over a band at each level's edge; within a level the read
+is the trilinear gather and the Chebyshev weighting above. Rows are per level,
+so [43-render-standards.md](43-render-standards.md) §5's C1 (one storage buffer)
+holds with an offset per level.
+
+What the levels slice built, and where each rule lives:
+
+- `crcbl_shaders::probe::ProbeVolume` gained `levels`, and the header it writes
+  is now the counts, the level row, and **an origin and a reciprocal spacing per
+  level**. Where a level stands and how far apart its probes are is one rule —
+  `ProbeVolume::level_origin` and `level_inv_spacing` — and the shaders read the
+  rows rather than deriving them, which is what `probe_capture` already does
+  with the octahedral direction table. Level 0's rows are the fields the volume
+  was given _bit for bit_, because the offset a coarser level is placed by is a
+  multiplication by zero there.
+- **Which level a fragment reads is arithmetic a fragment must do**, so it is
+  written twice and held together rather than derived twice: `probe_level_reach`
+  and `probe_level_of` are the same body in `mesh.slang` and `ssr.slang`,
+  character for character, checked by
+  `the_shaders_pick_a_level_the_way_this_module_does`, and mirrored on the host
+  by `ProbeVolume::level_reach` and `level_of`. The reach is the Chebyshev norm
+  of the point in level 0's normalised coordinates, and every coarser level's
+  reach is that one halved — so the pick touches only level 0's rows.
+- **The band is `LEVEL_BAND` of a half-extent, and half is its ceiling.** The
+  levels are concentric and each is twice the last, so a point on level `k`'s
+  boundary stands at exactly half of level `k+1`'s half-extent; a band wider
+  than that would still be fading level `k` where the fragment beside it has
+  gone wholly to `k+1`, which is the step the blend exists to remove. The
+  composite is `coarse · (1 − share) + fine · share` rather than a `lerp`, for
+  the reason the reflection design gives: it returns either end exactly, so the
+  two sides of a level switch compute the same value.
+- **A one-level volume is one gather and nothing else.** The coarsest level
+  takes the whole share, so the arithmetic is what it was before the clipmap, in
+  the same order — no golden moved, and a scene that wants one grid pays nothing
+  for the levels it did not ask for.
+- **One capture still covers the whole volume.** A level's rows are a range of
+  the one table and the visibility image keeps one layer per row across every
+  level, so `capture_probe_visibility` is the call it always was;
+  `a_capture_walks_every_level_in_the_order_the_table_is_in` is what holds the
+  layer order to `ProbeVolume::position`.
+
+What it did **not** build, and what each would take:
+
+- **Scrolling.** There is no toroidal addressing, no camera-follow and no
+  per-frame re-centring: the volume is centred once, where the scene places it,
+  and `ProbeVolume::origin` is authored rather than tracked. Adding it means a
+  per-level whole-probe-step offset in the header, a modulo in `probe_row`, and
+  a rule for which probes a step invalidates.
+- **Recapture.** `capture_probe_visibility` is still the load-time call; the
+  slab a scroll would expose is not captured, and a probe whose static geometry
+  changed is not re-captured on demand. Neither can exist before scrolling does.
+- **The updater.** `apps/lantern`'s `bounce` and `apps/shard`'s `light::probes`
+  still bake their rows at load, both now declaring `levels: 1`, and the RSM
+  gather that replaces them is a later slice.
 
 **Captured on load, then on scroll — never baked.** The visibility maps for the
-whole initial window are captured when a scene loads — that much runs; after
-that only the slab a scroll exposes should be captured, in the frame it appears,
-and a probe whose static geometry changed re-captured on demand. Neither of the
-last two exists yet, and neither can until the clipmap does. The lighting rows
-are never stored across a load: they are recomputed every frame by the updater,
+whole volume are captured when a scene loads — that much runs, and since the
+levels landed it covers every level of the clipmap in the one call; after that
+only the slab a scroll exposes should be captured, in the frame it appears, and
+a probe whose static geometry changed re-captured on demand. Neither of the last
+two exists yet, and neither can until the volume scrolls. The lighting rows are
+never stored across a load: they are recomputed every frame by the updater,
 which is what keeps the sun and every lamp dynamic. "Baked on load" in
 conversation means this capture, and the word the plan uses for it is
 _captured_, because what is stored is geometry.

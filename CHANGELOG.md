@@ -14,6 +14,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Changed
+
+- **`crcbl_shaders::probe::ProbeVolume` is a clipmap.** It gained a `levels`
+  field: `origin` and `inv_spacing` now describe level 0 alone, `counts` is the
+  probe count _every_ level holds, and level `k` is spaced `2^k` times level 0
+  about the same centre. `total()` is one level's probes times the level count,
+  and `per_level()`, `level_count()`, `level_row()`, `level_origin()`,
+  `level_spacing()`, `level_inv_spacing()`, `level_reach()` and `level_of()` are
+  new. `position()` takes a level, and `irradiance_at` splits into
+  `level_irradiance_at` (one level) and `irradiance_at` (the clipmap). Every
+  caller must add `levels` — `levels: 1` reproduces the uniform grid exactly,
+  and no golden in this tree moved.
+- **A fragment reads the finest level containing it, faded into the next.**
+  `probe_irradiance` and `ssr.slang`'s `probe_environment` pick a level from
+  `probe_level_reach` / `probe_level_of` and blend over a band
+  `crcbl_shaders::probe::LEVEL_BAND` wide at each level's edge, so a level
+  change never pops. A one-level volume evaluates one gather and nothing else.
+- **`ForwardRenderer::capture_probe_visibility` covers every level** in the call
+  it always was: a level's rows are a range of the one probe table, and the
+  visibility image keeps one layer per row across the whole clipmap.
+- **The frame uniform block grew** to carry a per-level origin and reciprocal
+  spacing: `PROBE_VOLUME_SIZE` is 160 where it was 48, and
+  `mesh::FRAME_UNIFORMS_SIZE` moved with it. Where a level stands is decided on
+  the host and uploaded rather than derived in two shading languages.
+
 ### Added
 
 - **Per-probe visibility maps, so the irradiance probe grid stops leaking

@@ -1566,6 +1566,10 @@ pub fn probe_grid() -> crate::render::scene::ProbeGrid {
             origin: [-0.5 * PROBE_BLEND_WIDTH, 0.5 * PROBE_ROOM_HEIGHT, 0.0],
             inv_spacing: [1.0 / PROBE_BLEND_WIDTH, 0.0, 0.0],
             counts: [2, 1, 1],
+            // **One level**, so this fixture and its golden are the uniform
+            // grid they were before the clipmap: a single level clamps at its
+            // own edge and blends towards nothing.
+            levels: 1,
         },
         probes: vec![end(red, blue), end(blue, red)],
     }
@@ -1692,6 +1696,10 @@ pub fn probe_leak_grid() -> crate::render::scene::ProbeGrid {
             origin: [-LEAK_PROBE_REACH, 0.5 * LEAK_ROOM_HEIGHT, 0.0],
             inv_spacing: [1.0 / (2.0 * LEAK_PROBE_REACH), 0.0, 0.0],
             counts: [2, 1, 1],
+            // One level, on `probe_grid`'s terms: the claim this fixture makes
+            // is about a wall, and a second level would put a second read
+            // between the wall and the band.
+            levels: 1,
         },
         probes: vec![crate::shaders::probe::GpuProbe::ZERO, lit],
     }
@@ -1758,6 +1766,143 @@ pub fn probe_leak_forward(
     renderer.capture_probe_visibility(device, queue)?;
     Ok(ForwardScene {
         camera: leak_camera(),
+        sun: probe_sun(),
+        renderer: Box::new(renderer),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The clipmap fixture
+// ---------------------------------------------------------------------------
+
+/// How far apart [`probe_clipmap_grid`]'s **level 0** probes stand, in world
+/// units.
+///
+/// Three probes a level, so level 0 reaches this far either side of the room's
+/// centre and level 1 reaches twice that. **What sets it is that every probe of
+/// every level has to stand inside the room**: level 1's outermost pair is two
+/// of these from the centre, and the walls are at half of
+/// [`PROBE_ROOM_WIDTH`]. A probe standing in a wall would record that wall as
+/// the nearest surface in every downward direction and the Chebyshev test would
+/// take its light off the floor — which is the visibility rung working, and
+/// would leave this fixture measuring it instead of the level pick.
+const PROBE_CLIPMAP_SPACING: f32 = 0.8;
+
+/// How many probes each of [`probe_clipmap_grid`]'s levels holds along `x`.
+///
+/// Three: two endpoints and a middle, which is the fewest that puts a probe at
+/// the centre of each level. `y` and `z` hold one, so the field is a function
+/// of `x` alone — [`probe_grid`]'s shape, for [`probe_grid`]'s reason.
+const PROBE_CLIPMAP_COUNT: u32 = 3;
+
+/// The radiance of the constant environment each of its levels holds, in linear
+/// RGB.
+///
+/// [`LEAK_RADIANCE`]'s size and [`PROBE_RADIANCE`]'s reasoning: a constant
+/// environment of radiance `L` reaches a surface as `π·L`, and the floor face's
+/// albedo scales that — so the brightest floor pixel stays under what the
+/// swapchain holds and `tonemap.slang`'s `saturate` never touches the
+/// measurement.
+const PROBE_CLIPMAP_RADIANCE: f32 = 0.35;
+
+/// **The clipmap fixture's volume**: two levels of one grid, the fine one red
+/// and the coarse one blue.
+///
+/// `docs/plan/50-irradiance-probes.md`'s layered density. The claim it exists
+/// for is that a fragment reads the finest level containing it and *fades* into
+/// the next one rather than switching — so the two levels are made as different
+/// as two rows can be, and each level's rows are made identical to each other:
+///
+/// * **Every row of a level is the same constant environment**, so the
+///   trilinear gather within a level is flat and the only thing that can move a
+///   pixel along the floor is which level it read and in what share.
+/// * **The two levels are different colours**, so a shader that picked the
+///   wrong level draws the wrong colour rather than a slightly wrong
+///   brightness. A constant environment has no linear band at all, which is
+///   deliberate: [`Scene::Probes`] is where the spherical harmonic's linear
+///   half is measured, and this fixture is about the level pick alone.
+///
+/// Public so `tests/render_e2e.rs` evaluates the Rust mirror over the rows the
+/// device was actually given, on [`probe_grid`]'s terms exactly.
+#[must_use]
+pub fn probe_clipmap_grid() -> crate::render::scene::ProbeGrid {
+    let solid_angle = 4.0 * std::f32::consts::PI / 6.0;
+    let constant = |radiance: [f32; 3]| {
+        let mut probe = crate::shaders::probe::GpuProbe::ZERO;
+        for direction in [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ] {
+            probe.accumulate(direction, radiance, solid_angle);
+        }
+        probe
+    };
+    let volume = crate::shaders::probe::ProbeVolume {
+        origin: [-PROBE_CLIPMAP_SPACING, 0.5 * PROBE_ROOM_HEIGHT, 0.0],
+        inv_spacing: [1.0 / PROBE_CLIPMAP_SPACING, 0.0, 0.0],
+        counts: [PROBE_CLIPMAP_COUNT, 1, 1],
+        levels: 2,
+    };
+    // The levels one after another, finest first — `ProbeGrid::probes` says so
+    // and `ProbeVolume::level_row` is what indexes it.
+    let mut probes = Vec::with_capacity(volume.total() as usize);
+    for radiance in [
+        [PROBE_CLIPMAP_RADIANCE, 0.0, 0.0],
+        [0.0, 0.0, PROBE_CLIPMAP_RADIANCE],
+    ] {
+        for _ in 0..volume.per_level() {
+            probes.push(constant(radiance));
+        }
+    }
+    crate::render::scene::ProbeGrid { volume, probes }
+}
+
+/// **The clipmap fixture**: [`Scene::Probes`]' room and camera over a volume of
+/// two levels.
+///
+/// Public rather than a [`Scene`] for [`probe_leak_forward`]'s reason: what it
+/// measures is a *profile across one frame* — the floor's colour along `x` as
+/// the read crosses level 0's edge — which no golden of a single image says
+/// anything about, and which `tests/render_e2e.rs` reads pixel by pixel against
+/// `crcbl_shaders::probe::irradiance_at`.
+///
+/// Every pixel it measures is the probe term and nothing else, on
+/// [`probe_leak_forward`]'s terms exactly: `probe_sun` leaves the direct and
+/// flat ambient contributions at zero, the floor is one quad of one albedo, and
+/// the reflection pair is refused.
+///
+/// **The visibility capture runs**, and it is part of what this fixture is
+/// about: one capture has to cover every level of the clipmap, which it does
+/// because a level's rows are a range of the same table and the image keeps one
+/// layer per row.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built or the capture cannot
+/// be uploaded.
+pub fn probe_clipmap_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+) -> Result<ForwardScene, OffscreenError> {
+    let probes = probe_clipmap_grid();
+    let mut scene = crate::render::scene::demo();
+    scene.capacities.probes = probes.volume.total();
+    scene.probes = probes;
+    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(crcbl_render::RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, probe_room());
+    renderer.capture_probe_visibility(device, queue)?;
+    Ok(ForwardScene {
+        camera: probe_camera(),
         sun: probe_sun(),
         renderer: Box::new(renderer),
     })

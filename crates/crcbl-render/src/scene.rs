@@ -493,11 +493,13 @@ pub struct ProbeGrid {
     /// Where the grid is, how far apart its probes are, and how many there are
     /// on each axis.
     pub volume: probe::ProbeVolume,
-    /// One row per probe, **`x`-fastest**: index
-    /// `(z · counts.y + y) · counts.x + x`.
+    /// One row per probe, the clipmap's levels one after another finest first
+    /// and **`x`-fastest** within each: index
+    /// `level_row(level) + (z · counts.y + y) · counts.x + x`.
     ///
     /// Its length must be [`volume`](Self::volume)'s
-    /// [`total`](probe::ProbeVolume::total), which
+    /// [`total`](probe::ProbeVolume::total) — one level's worth *per level* —
+    /// which
     /// [`ForwardRenderer::with_scene`](crate::forward::ForwardRenderer::with_scene)
     /// checks before it creates anything, through this type's own `check`.
     pub probes: Vec<probe::GpuProbe>,
@@ -508,10 +510,11 @@ impl ProbeGrid {
     /// [`ForwardRenderer::with_scene`](crate::forward::ForwardRenderer::with_scene)
     /// before it creates anything.
     ///
-    /// The one thing that has to hold: the volume's counts multiply out to
-    /// exactly as many rows as there are probes. **That is what bounds the
-    /// shader's fetch**, and it is not a tidiness — `mesh.slang` addresses a
-    /// cell through the counts, so a grid claiming more probes than it carries
+    /// The one thing that has to hold: the volume's counts, multiplied out and
+    /// taken once per level, come to exactly as many rows as there are probes.
+    /// **That is what bounds the shader's fetch**, and it is not a tidiness —
+    /// `mesh.slang` addresses a cell through the counts and a level through the
+    /// rows one level holds, so a grid claiming more probes than it carries
     /// would read rows the description never wrote, and one claiming fewer would
     /// leave part of the volume unlit while the table held the light for it.
     ///
@@ -524,11 +527,12 @@ impl ProbeGrid {
             return Ok(());
         }
         Err(HalError::InvalidDescriptor(format!(
-            "the probe grid is {}×{}×{}, which is {total} probe(s), and the \
-             description carries {}",
+            "the probe grid is {}×{}×{} over {} level(s), which is {total} \
+             probe(s), and the description carries {}",
             self.volume.counts[0],
             self.volume.counts[1],
             self.volume.counts[2],
+            self.volume.level_count(),
             self.probes.len()
         )))
     }
@@ -1252,10 +1256,33 @@ mod tests {
                 counts: [2, 1, 1],
                 inv_spacing: [1.0; 3],
                 origin: [0.0; 3],
+                levels: 1,
             },
-            probes: two,
+            probes: two.clone(),
         }
         .check()
         .expect("two probes on a 2×1×1 grid");
+
+        // **A level is a whole copy of the grid**, so a two-level clipmap of
+        // the same counts needs twice the rows — a check that only multiplied
+        // the counts would accept this pair the wrong way round.
+        let clipmap = probe::ProbeVolume {
+            counts: [2, 1, 1],
+            inv_spacing: [1.0; 3],
+            origin: [0.0; 3],
+            levels: 2,
+        };
+        ProbeGrid {
+            volume: clipmap,
+            probes: two.clone(),
+        }
+        .check()
+        .expect_err("a two-level clipmap of two probes a level needs four rows");
+        ProbeGrid {
+            volume: clipmap,
+            probes: vec![probe::GpuProbe::ZERO; 4],
+        }
+        .check()
+        .expect("four rows fill a two-level clipmap of two probes a level");
     }
 }
