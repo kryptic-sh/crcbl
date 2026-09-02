@@ -4744,10 +4744,10 @@ happened.
 
 **This entry was headed "No system outside `crcbl-render` contributes a
 `DebugModule`" until 2026-09-02, and its own evidence never supported that: both
-implementers it named were inside `crcbl-render`.** There are twenty-nine
-implementations now, `crcbl-ui`'s `BudgetStats` and `FrameStats` and
-`apps/options`'s `FileView` among them, so composition across crates is
-demonstrated many times over.
+implementers it named were inside `crcbl-render`.** `DebugModule` is implemented
+in `crcbl-ui` and in fifteen `apps/` crates now — `crcbl-ui`'s `BudgetStats` and
+`FrameStats` and `apps/options`'s `FileView` among them — against two inside
+`crcbl-render`, so composition across crates is demonstrated many times over.
 
 **Still open:** the netgraph. `crcbl-client` does not depend on `crcbl-ui` and
 there is no `NetGraph` anything in the tree — `grep -ri netgraph` over `crates/`
