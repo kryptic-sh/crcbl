@@ -14145,11 +14145,6 @@ What that pass did **not** reach: plans `00`-`42` entirely, and all of
 only grepped, and its subject moved on 2026-08-30, so it is the likeliest of the
 render-quality set to be stale.
 
-Separately, and an omission rather than a wrong sentence:
-**`46-ambient-occlusion.md` never says its own pass runs at half resolution**,
-which it has since 2026-09-02. The AO topic document not carrying the AO pass's
-current shape is worth someone's attention.
-
 **The platform-coverage entries were audited on 2026-09-02 and yielded six
 more.** "Has never run" proved the most rotten shape of all, because the answer
 moved into CI without anyone revisiting the prose — a claim that is still true

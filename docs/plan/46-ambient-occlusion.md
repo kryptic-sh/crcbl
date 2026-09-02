@@ -399,6 +399,39 @@ costs _against what it replaced_ is not measurable from this tree — recovering
 it is the `git show` the tier note above describes, and a quality seam that
 offered the cheaper rung would need exactly that number to be honest about it.
 
+### Half resolution, and the reconstruction that carries it (built 2026-09-02)
+
+> **Built, and this section describes the pass as it stands.** Everything above
+> describes a gather at the frame's own extent, which is not what runs.
+
+The gather and both blurs run at `crcbl_render::ssao::half_extent`, and
+`ssao_upsample.slang` carries the result back to the frame. That shader is
+**depth-aware rather than bilinear**, which is the whole reason it can exist: a
+full-resolution pixel beside a silhouette has half-resolution neighbours on the
+_other_ surface, and weighting those by distance alone averages the background's
+occlusion into the foreground's rim.
+
+Its tap loop reads the block's own sample and the next one along each axis — one
+tap where the two grids coincide, two where they do not — and weights each by
+distance and by how near its surface is, on the depth tolerance
+`ssao_blur.slang` shares. A tap on the far plane takes no share at all. The
+nearest tap keeps a floor it cannot lose, so a pixel whose every tap is rejected
+— a surface thinner than the occlusion grid — still has a divisor rather than
+dividing zero by zero.
+
+**What it cost is quality on the tangential axis**, not correctness: the blur's
+footprint now spans twice as much of the frame, so each tile phase pairs with a
+wider spread of distances from an edge, and the shipping slice/blur pair became
+markedly less smooth there. `docs/backlog.md`'s HIGH PRIORITY entry carries the
+measurements on all three tiers and the decision they inform — whether the
+tangential rung's defaults move — and is where those numbers belong, since they
+move whenever the pass does.
+
+`crates/crcbl/tests/forward_e2e/occlusion.rs` is the harness: the silhouette is
+measured on both axes, the reconstruction is held to the nearest gathered sample
+for a sliver that misses the grid entirely, and every threshold in it was swept
+on radv and lavapipe.
+
 ### The occlusion view
 
 `lantern`'s pause panel has an `AO VIEW` row, deliberately below its `AO` row
