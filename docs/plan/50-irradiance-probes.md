@@ -231,15 +231,37 @@ tree's own terms — one workgroup per probe reducing once means the `groupshare
 tree is paid once rather than per producer, and a row is still a function of one
 dispatch.
 
-**The open question is extent, and it is a cost question.** The sun's map is
-`RSM_SIDE = 64`, whose gather is 0.047 ms on radv over 4096 texels; a point
-light is **six** faces of that, so a naive reuse of the same extent for
-`apps/lantern`'s lamp alone would be seven times the texels the gather walks
-today. A punctual face wants an extent of its own, swept the way `RSM_SIDE` was
-— 16, 24 and 32 against the frame and against the tint the fixture measures —
-and the light budget wants a rule: every occupied tile, or the highest-ranked
-light only. Neither is decided, and neither should be guessed. Price it on radv,
-on lavapipe and in the browser before the rung counts, per the standing rule.
+**The draw half is measured, and it is cheap.** A point light is six faces, so
+the first question was whether six more RSM views could be afforded at all. On
+radv, `lantern --headless --frames 400 --size 1920x1080`, p50 of three, with the
+`rsm` pass recording its draws one to seven times over:
+
+```text
+  view-draws      rsm p50      frame p50
+       1            0.061          1.252
+       2            0.073          1.268
+       4            0.097          1.287
+       7            0.136          1.332
+```
+
+Linear at **0.0125 ms of `rsm` per extra view's draws**, and the frame follows
+at 0.0133 — so a point light's six extra faces are **0.075 ms, about 6% of that
+frame**. That is a rung's ordinary price rather than the third of a frame a
+per-view estimate suggested. Two things it does not measure, and both make it a
+floor rather than an answer: it repeats one view's draws into one set of
+targets, so it carries no second render pass, no attachment clear and no target
+switch; and it draws at `RSM_SIDE`, where a punctual face should be smaller.
+
+**What is still unpriced is the gather, and that is where the extent goes.** The
+gather walks every texel of every producer for every probe, so it scales with
+total texels rather than with views: seven punctual faces at a side of 32 are
+7168 texels against the sun's 4096, which would put the pass near 0.13 ms from
+0.049. At a side of 16 they are 1792 and it is cheaper than the sun's alone. So
+the extent is the knob that decides this rung's cost, and it wants the sweep
+`RSM_SIDE` got — 16, 24 and 32, against the frame and against the tint the
+fixture measures. The light budget wants a rule beside it: every occupied tile,
+or the highest-ranked light only. Neither is decided. Price both on radv, on
+lavapipe and in the browser before the rung counts, per the standing rule.
 
 **The fixture is already half-written.** `apps/lantern`'s frame claim 6 —
 `room::TINTED_PLASTER` against `UNTINTED_PLASTER`, a red-to-blue ratio the
