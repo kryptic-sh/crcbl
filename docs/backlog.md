@@ -110,30 +110,6 @@ under a running waiter is the suspected trigger. Read and Write still work.
 **This is why the five commits are unverified**, not a judgement that they are
 fine. Resume by re-running the gate set above from scratch.
 
-### The determinism test's guard fails devices that cannot run the path
-
-`render_e2e`'s `the_cube_scene_draws_the_same_frame_on_every_pass_of_the_ring`
-(new in `cb3dc8b`) **reds two CI jobs on `main`** —
-`dx12 e2e (software adapter)` and `mtl e2e (macos-latest)`. Neither device has
-`TASK_SHADER`, so the scene draws through `IndirectCount` and the test's second
-guard fires:
-
-```text
-this test is about the per-cluster stage and this device drew through
-IndirectCount with an amplification stage of false — a green run here would be
-reporting on code the defect is not in
-```
-
-The intent is right and the test is otherwise well built — it passes on lavapipe
-having genuinely taken the mesh path (`amplification stage: true`). But a device
-that **cannot** exercise the defect deserves a skip, not a failure. The tree
-already has the idiom: quarry's
-`no amplification stage on this device, so there is no per-cluster cut to read`,
-with the vk harness's
-`every mesh-path test had an amplification stage to run on` as the assertion
-that the skip never becomes universal. Follow those two rather than inventing a
-third.
-
 ### The docs and the demo site describe an older engine (audited, not yet fixed)
 
 The user asked on 2026-09-02 for the README, the other docs and the site's text

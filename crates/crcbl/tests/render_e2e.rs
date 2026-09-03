@@ -3228,6 +3228,15 @@ fn the_shader_and_the_rust_mirror_agree_about_the_irradiance(image: &Image) {
 /// path's 16, which is what makes that second guard the difference between a
 /// test and a coin toss.
 ///
+/// **Cannot-run and did-not-work are different answers, and this separates
+/// them.** A device with no [`Features::TASK_SHADER`] declines above and says
+/// so; failing it instead would red every backend whose hardware simply has no
+/// amplification stage, which is what `dx12 e2e` on WARP and `mtl e2e` on the
+/// macOS runner did for a day. What stays an assertion is the case that is
+/// genuinely wrong: a device that *has* the stage and still drew another path.
+/// So the skip is bounded by a capability rather than by a result, and it
+/// cannot quietly widen to cover a real failure.
+///
 /// [`Scene::Cube`] rather than the DAG scene: it is the simplest scene that
 /// reproduces, and on the mesh path its geometry goes through the same
 /// per-cluster stage a larger one would.
@@ -3261,6 +3270,22 @@ fn the_cube_scene_draws_the_same_frame_on_every_pass_of_the_ring() {
         adapter = setup.adapter().name,
     );
 
+    // **A device with no amplification stage cannot exercise this, and saying so
+    // is not the same as passing.** The defect lives in the per-cluster task
+    // stage; without [`Features::TASK_SHADER`] this scene draws through a path
+    // that selects and culls nothing, and thirty-two identical frames there
+    // would be a green light wired to code the hazard is not in. `crcbl-vk` on
+    // lavapipe is where CI actually runs it — `apps/quarry`'s `read_the_cut`
+    // declines on the same terms and in the same words.
+    if !amplifies {
+        eprintln!(
+            "{SUITE}: no amplification stage on this device, so there is no per-cluster ring to \
+             watch — that is every device without TASK_SHADER and every non-mesh path"
+        );
+        setup.finish();
+        return;
+    }
+
     let format = setup.format();
     let mut frames: Vec<Vec<u8>> = Vec::with_capacity(FRAMES);
     for index in 0..FRAMES {
@@ -3280,11 +3305,15 @@ fn the_cube_scene_draws_the_same_frame_on_every_pass_of_the_ring() {
     setup.finish();
 
     // **And the run went through the stage the hazard is in.**
+    //
+    // A device *with* the stage that still drew another path is a fault worth
+    // failing on — path selection is then disagreeing with the features it was
+    // opened for. A device *without* it has already been skipped above, because
+    // it could not have exercised this either way.
     assert!(
-        amplifies && path == GeometryPath::MeshShader,
-        "this test is about the per-cluster stage and this device drew through {path:?} \
-         with an amplification stage of {amplifies} — a green run here would be reporting \
-         on code the defect is not in"
+        path == GeometryPath::MeshShader,
+        "this device has an amplification stage but drew through {path:?} — the per-cluster \
+         stage this test is about was not the one that ran"
     );
 
     // **The order matters.** The equality is asserted first so that a run which
