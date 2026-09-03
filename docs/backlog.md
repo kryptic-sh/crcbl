@@ -13561,6 +13561,25 @@ is exercised only against the stub. Nothing verifies what a real Dawn does with
 `maxAnisotropy: 16`. Deliberate — the probe exists for the `lod_max` sentinel,
 and an anisotropy probe would be measuring the machine rather than the seam.
 
+### The specular probe fallback is not gated by probe visibility
+
+Found by auditing `docs/plan/50-irradiance-probes.md` against the tree on
+2026-09-03. `mesh.slang`'s `probe_irradiance` weights each of a fragment's eight
+probes by a Chebyshev test against that probe's visibility map — `probe_weight`
+and `probe_moments`, reading the `probe_visibility` array — which is the whole
+reason the grid stops leaking. `ssr.slang`'s `probe_level_environment` gathers
+the same eight rows and blends them with **no visibility term**: the shader
+contains no `probe_visibility` binding at all. So where a screen-space
+reflection falls back to the probe grid, it still reads through a wall.
+
+Not a regression — the SSR fallback never had it. Closing it is the
+`probe_weight`/`probe_moments` pair and the `probe_visibility` binding added to
+`ssr.slang`, held to `mesh.slang`'s copy the way `probe_level_of` already is by
+`the_shaders_pick_a_level_the_way_this_module_does`. Left out of the clipmap
+slice because that slice was about placement; recorded here so it is not
+mistaken for shipped, which the plan's pipeline diagram did state until the same
+audit corrected it.
+
 ### Cross-format image views were declined, and the seam now says a view keeps its image's format
 
 `ImageViewDesc::format` used to document itself as free to differ from the

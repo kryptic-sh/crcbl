@@ -172,17 +172,37 @@ the same on every tier, and the two tiers differ in exactly one stage:
         │
   integrate ── shared: samples → L1 irradiance rows + octahedral depth/depth²
         │
-  shading read ── shared: level pick, trilinear, Chebyshev weight, SSR fallback
+  shading read ── shared: level pick, trilinear, SSR fallback
+                  diffuse only: Chebyshev weight
 ```
+
+**The diagram is the design, not the tree.** Of the placement box only the
+clipmap exists; of the producers only the raster capture's distance half; and
+the shading read's Chebyshev weight is on the diffuse path alone. Audited
+2026-09-03 — what is built and what is not is the list above, and these are the
+two the diagram used to state as shipped:
+
+- **Relocation does not exist**, and nothing it needs does either. No code
+  counts backfaces per probe and none moves or disables one, because the capture
+  writes distance and distance² and no backface channel, so the "both producers
+  report backfaces" premise has nothing behind it on the raster tier. It lands
+  with the producer that first reports one.
+- **The Chebyshev weight is on `mesh.slang` only.** `probe_weight` and
+  `probe_moments` there gate every one of a fragment's eight probes by its
+  visibility map; `ssr.slang`'s `probe_level_environment` reads the same eight
+  rows with no visibility term at all. So the specular fallback still leaks
+  through a wall where the diffuse term does not. Closing it is `probe_weight`'s
+  body and the `probe_visibility` binding in the SSR shader — the same two
+  functions, held together the way `probe_level_of` already is.
 
 The producer's contract is a sample buffer of a fixed layout; the integrate
 pass, the storage, the relocation rule (a probe whose samples are mostly
-backfaces sits inside a wall and is moved or disabled — DDGI's rule, answered by
-both producers because both report backfaces) and the shader read never know
-which producer ran. What the RT producer buys over the raster one is dynamic
-occluders in the visibility and, if C2's temporal question is ever answered yes,
-a second and further bounce by reading the previous frame's rows; single bounce
-is the rule on both until then.
+backfaces sits inside a wall and is moved or disabled — DDGI's rule, to be
+answered by both producers once both report backfaces) and the shader read never
+know which producer ran. What the RT producer buys over the raster one is
+dynamic occluders in the visibility and, if C2's temporal question is ever
+answered yes, a second and further bounce by reading the previous frame's rows;
+single bounce is the rule on both until then.
 
 **What this amends.** The GI decision of 2026-08-30 said the tier below ray
 tracing has no bounce term; it now has this one, because it is leak-free and its
