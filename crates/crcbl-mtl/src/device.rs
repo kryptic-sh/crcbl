@@ -1850,11 +1850,10 @@ impl Device for MetalDevice {
     fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), HalError> {
         let state = self.state();
         let entry = lookup(&state.buffers, "buffer", buffer, &*self.inner)?;
-        if !entry.location.is_mappable() {
+        if entry.location != MemoryLocation::HostUpload {
             return Err(HalError::InvalidDescriptor(format!(
-                "write_buffer needs a host-visible buffer; this one is {:?}, which Metal can \
-                 only reach through a blit from a staging buffer — record a copy_buffer_to_buffer \
-                 instead",
+                "write_buffer needs HostUpload memory; this one is {:?}, which Metal reaches \
+                 through a blit from a staging buffer — record a copy_buffer_to_buffer instead",
                 entry.location
             )));
         }

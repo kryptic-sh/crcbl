@@ -2634,6 +2634,29 @@ fn write_buffer_writes_host_visible_memory_and_refuses_what_it_cannot_map() {
          failure: {error}"
     );
 
+    // **Mappable is not the rule; `HostUpload` is** — and this is the case that
+    // was missing, so the seam had no opinion where the backends disagreed.
+    // `HostReadback` *can* be mapped, so a backend gating on `is_mappable()`
+    // accepts a write into it: `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` all did
+    // until 2026-09-03, while `null` refused, and the same call therefore
+    // succeeded on every native backend and errored on the reference one. It is
+    // the cached, debug-only readback ring a copy fills, not an upload target.
+    let readback = device
+        .create_buffer(&BufferDesc {
+            label: Some("readback"),
+            size: 16,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a host-readback buffer");
+    let error = device
+        .write_buffer(readback, 0, &[0xAA; 16])
+        .expect_err("a readback buffer is mappable and is still not an upload target");
+    assert!(
+        matches!(error, HalError::InvalidDescriptor(_)),
+        "writing into readback memory is a caller bug named in the descriptor: {error}"
+    );
+
     // Four bytes at offset 13 run three past the end of a sixteen-byte buffer.
     let error = device
         .write_buffer(upload, 13, &[1, 2, 3, 4])

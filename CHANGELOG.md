@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`write_buffer` requires `HostUpload` on every backend.** `crcbl-vk`,
+  `crcbl-dx12` and `crcbl-mtl` gated on "is this memory mappable", which also
+  admits `MemoryLocation::HostReadback`, while the trait doc and the `null`
+  reference backend required `HostUpload` — so the same call succeeded on all
+  three native backends and returned `InvalidDescriptor` on the reference one. A
+  readback buffer is the cached, debug-only ring a copy fills, not an upload
+  target. The cross-backend seam test now covers `HostReadback`, which it never
+  did, so the divergence cannot return silently.
 - **`crcbl-vk` refuses a command buffer submitted to a queue of another family**
   instead of handing the mismatch to the driver. Vulkan requires a pool's queue
   family to match the queue it is submitted to and defines nothing about what

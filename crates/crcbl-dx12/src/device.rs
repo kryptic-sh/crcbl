@@ -2430,10 +2430,11 @@ impl Device for Dx12Device {
     fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), HalError> {
         let state = self.state();
         let entry = handle::lookup(&state.buffers, "buffer", buffer, self.inner.owner)?;
-        if !entry.location.is_mappable() {
+        if entry.location != MemoryLocation::HostUpload {
             return Err(HalError::InvalidDescriptor(format!(
-                "write_buffer needs a host-visible buffer; this one is {:?}, which D3D12 can only \
-                 reach through a copy from an upload buffer (the DX12 command slice)",
+                "write_buffer needs HostUpload memory; this one is {:?}, which D3D12 reaches \
+                 through a copy from an upload buffer (the DX12 command slice). A readback heap \
+                 is mappable and still not an upload target",
                 entry.location
             )));
         }
@@ -9879,34 +9880,45 @@ pub(crate) mod tests {
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn write_buffer_writes_host_visible_memory_and_refuses_what_d3d12_cannot_map() {
         let (_instance, device) = open_device();
-        let readback = device
-            .create_buffer(&buffer(16, MemoryLocation::HostReadback))
-            .expect("a readback buffer");
 
         // Two writes, so the result is fully determined whatever D3D12 left in
         // the fresh allocation: fill, then overwrite a window at an offset.
-        device
-            .write_buffer(readback, 0, &[0xAA; 16])
-            .expect("the whole range");
-        device
-            .write_buffer(readback, 4, &[0x01, 0x02, 0x03, 0x04])
-            .expect("a window at an offset");
-        let mut expected = [0xAA_u8; 16];
-        expected[4..8].copy_from_slice(&[0x01, 0x02, 0x03, 0x04]);
-        assert_eq!(
-            read_back(&device, readback, 16),
-            expected,
-            "write_buffer either wrote nothing or ignored the offset"
-        );
-
-        // An upload buffer is write-combined, so it is written and not read
-        // here — the acceptance is the assertion.
+        // Read back through the mapping even though an upload heap is
+        // write-combined — reading it is slow rather than wrong, and this is
+        // the only buffer `write_buffer` is allowed to have touched.
         let upload = device
             .create_buffer(&buffer(16, MemoryLocation::HostUpload))
             .expect("an upload buffer");
         device
-            .write_buffer(upload, 0, &[0x7F; 16])
+            .write_buffer(upload, 0, &[0xAA; 16])
             .expect("HostUpload is what write_buffer is for");
+        device
+            .write_buffer(upload, 4, &[0x01, 0x02, 0x03, 0x04])
+            .expect("a window at an offset");
+        let mut expected = [0xAA_u8; 16];
+        expected[4..8].copy_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(
+            read_back(&device, upload, 16),
+            expected,
+            "write_buffer either wrote nothing or ignored the offset"
+        );
+
+        // **Mappable is not the rule; HostUpload is.** A readback heap can be
+        // mapped and is still refused, because the seam documents
+        // `write_buffer` as an upload path and `HostReadback` is the cached,
+        // debug-only ring a copy fills. This backend gated on `is_mappable()`
+        // until 2026-09-03, so the same call succeeded here and errored on the
+        // reference backend.
+        let readback = device
+            .create_buffer(&buffer(16, MemoryLocation::HostReadback))
+            .expect("a readback buffer");
+        let error = device
+            .write_buffer(readback, 0, &[0xAA; 16])
+            .expect_err("a readback heap is not an upload target");
+        let HalError::InvalidDescriptor(text) = error else {
+            panic!("expected InvalidDescriptor, got {error:?}");
+        };
+        assert!(text.contains("HostReadback"), "{text}");
 
         let private = device
             .create_buffer(&buffer(16, MemoryLocation::DeviceLocal))

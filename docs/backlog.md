@@ -18109,13 +18109,13 @@ Per-crate review passes explicitly disproved these before publishing anything:
 heading no longer holds for all of it: three claims were **never accurate** and
 say so in place (vk's `untag`, the QOA saturation, render's "documented"
 allocations), several the tree has since answered were deleted, and four are
-**defects rather than fragility** — `write_buffer`'s memory rule differing
-across backends, view-format compatibility being three rules across four
-backends, and the missing re-handshake after a forged `Accept`. (The fourth,
-vk's `submit` not checking the command buffer's queue family, shipped on
-2026-09-03.) Those three are the ones to fix first; the rest of the list is
-unchanged in kind, sharpened where the triage found the original wording named
-the lesser half of a problem.
+**defects rather than fragility** — view-format compatibility being three rules
+across four backends, and the missing re-handshake after a forged `Accept`. (The
+other two, vk's `submit` not checking the command buffer's queue family and
+`write_buffer`'s memory rule differing across backends, shipped on 2026-09-03.)
+Those two are the ones to fix first; the rest of the list is unchanged in kind,
+sharpened where the triage found the original wording named the lesser half of a
+problem.
 
 - **net**: `baseline_tick = 0` is wire-ambiguous (delta.rs:824/866-869;
   unreachable — the server never encodes against tick 0); a forged `Accept`
@@ -18153,18 +18153,10 @@ the lesser half of a problem.
   `attach_shm_buffer` stride×height truncates to i32 (test scaffolding); a 4 GB
   keymap file costs a 4 GB virtual mapping.
 - **hal**: the reference frame destroys the command buffer right after present
-  (wrong pattern to copy); **`write_buffer`'s memory rule is not the same on
-  every backend** — the trait doc and `null` require
-  `MemoryLocation::HostUpload` while `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl`
-  gate on `is_mappable()` and so admit `HostReadback`, which dx12's own
-  `write_buffer_writes_host_visible_memory_and_refuses_what_d3d12_cannot_map`
-  asserts succeeds. `hal_seam_e2e.rs`'s cross-backend test covers only
-  `HostUpload` and `DeviceLocal`, so the divergence is untested and code that
-  works on the three native backends errors under the reference one. Pick one
-  rule, then align the doc and the outlier; `query_results` "returns zeros
-  without TIMESTAMP_QUERY" is unreachable (create_query_set errors first);
-  `present`'s queue must be present-capable but the seam never says so;
-  `AcquiredFrame` carries no swapchain identity.
+  (wrong pattern to copy); `query_results` "returns zeros without
+  TIMESTAMP_QUERY" is unreachable (create_query_set errors first); `present`'s
+  queue must be present-capable but the seam never says so; `AcquiredFrame`
+  carries no swapchain identity.
 - **null**: `create_image_view` never validates format or subresource — and the
   finding behind it is that **view-format compatibility is three different rules
   across four backends**. `ImageViewDesc::format` documents that a view "may

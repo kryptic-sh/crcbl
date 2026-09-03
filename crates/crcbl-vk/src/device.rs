@@ -1894,9 +1894,11 @@ impl Device for VkDevice {
     fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), HalError> {
         let state = self.inner.state();
         let entry = lookup(&state.buffers, "buffer", buffer, &self.inner)?;
-        if !entry.location.is_mappable() {
+        if entry.location != MemoryLocation::HostUpload {
             return Err(HalError::InvalidDescriptor(format!(
-                "write_buffer needs a mappable buffer; this one is {:?}",
+                "write_buffer needs HostUpload memory; this one is {:?}. HostReadback is mappable \
+                 but cached and write-combined for reading, so it is a copy target rather than an \
+                 upload one — record a copy_buffer_to_buffer instead",
                 entry.location
             )));
         }
