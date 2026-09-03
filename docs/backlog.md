@@ -176,6 +176,40 @@ in both this file and `docs/plan/46-ambient-occlusion.md`.
   margin they happen to have; the two drivers that were swept read 0 and 2
   against a bound of 8.
 
+## What the plan audit of 2026-09-03 did not reach
+
+Plans 43, 51 and 52 were audited against the tree and eleven false claims were
+corrected in `2ee32c1`. What that pass could not check, stated as a gap rather
+than as a reason:
+
+- **Every measured figure in all three docs was taken on trust.**
+  `43-render-standards.md`'s normal-map cost, its row (a) and row (e) timings
+  and the LTC speed-ups; `51-volumetrics.md`'s transmittance comparison, its
+  froxel counts and its sample fractions; `52-debug-console.md`'s decision-10
+  cost claims. Re-checking any of them means running the GPU harnesses, which
+  the audit was told not to do because another agent held the GPU. This is the
+  same shape of drift that produced the AO table's four wrong integers: a figure
+  carried across a change to the pass it measures.
+- **The golden re-bless claims in `43-render-standards.md` §2 rung 2** — the
+  five named goldens, `room` moving 360 pixels by at most thirteen, `live`
+  moving past tolerance — are unverified.
+- **`51-volumetrics.md`'s rungs were checked by symbol and test _name_, not by
+  behaviour.** The host-side arithmetic was read; that each pass does what the
+  prose says it does was not.
+- **"No RSM updater exists" is scoped to a grep over `crates/*/src`** for
+  `reflective shadow` and `RSM`, not to an exhaustive read. It is the premise
+  under which `43-render-standards.md`'s delivery row now keeps the updater as
+  owed, so it is worth a second look before that row is deleted.
+- **The comparand claims cannot be checked from this tree at all** — "Unity HDRP
+  does not do this", Lumen's hybrid, what a KTX2 importer supports. They stand
+  or fall on the reading that produced them.
+- **The sibling ladders 45, 46, 47, 49 and 50 were not opened.**
+  `43-render-standards.md` §1 summarises each in one word and those cells are
+  unassessed, except where the AO and probe work of the same day bears on them.
+- **`52-debug-console.md`'s browser assertions were spot-checked, not
+  enumerated**: `web/tools/browser-e2e.mjs` was read only around the console,
+  autoexec and touch groups.
+
 ## The `forward` timing bundles two clears, and a baseline row would split them (2026-09-02)
 
 **Raised by the user**, on reading the area-light prices: is the `forward`
