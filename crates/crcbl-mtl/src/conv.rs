@@ -300,27 +300,31 @@ pub(crate) fn view_texture_type(
 /// that permits views and nothing else. So the empty case returns `Unknown`
 /// alone and the non-empty case never contains it.
 ///
-/// # Why `PixelFormatView` is set on every colour image
+/// # Why `PixelFormatView` is set on no image at all
 ///
-/// [`ImageViewDesc::format`](crcbl_hal::ImageViewDesc::format) is documented as
-/// free to differ from its image's "for sRGB reinterpretation", and Metal
-/// requires that intent to be declared at *texture* creation — by which time
-/// the view does not exist and nothing in [`ImageDesc`](crcbl_hal::ImageDesc)
-/// says whether one is coming. Refusing the reinterpretation instead would take
-/// away the one capability the seam names, so the flag goes on unconditionally
-/// for colour formats.
+/// It used to go on every colour image, and the reason was
+/// [`ImageViewDesc::format`](crcbl_hal::ImageViewDesc::format): that field was
+/// documented as free to differ from its image's "for sRGB reinterpretation",
+/// Metal requires the intent to be declared at *texture* creation — by which
+/// time the view does not exist and nothing in
+/// [`ImageDesc`](crcbl_hal::ImageDesc) says whether one is coming — so the flag
+/// went on unconditionally rather than take the capability away.
 ///
-/// It is not free: `PixelFormatView` can cost lossless bandwidth compression on
-/// some Apple GPUs. Narrowing it needs the seam to carry the view formats a
-/// caller intends, the way WebGPU's `viewFormats` does, and that is a seam
-/// change rather than a backend one.
+/// **On 2026-09-03 the seam took it away**, because no backend delivered it as
+/// they create images and D3D12 structurally cannot without a typeless
+/// resource. A view's format must now equal its image's, `ImageViewDesc::check`
+/// refuses anything else before a backend sees it, and this backend's
+/// `create_image_view` refuses it again. So the flag now buys a permission
+/// nothing can reach, and it is not free: `PixelFormatView` can cost lossless
+/// bandwidth compression on some Apple GPUs. It is off.
 ///
-/// Depth and stencil images do not get it. Metal permits no reinterpretation
-/// between depth formats — they are their own compatibility class — so the flag
-/// would buy exactly nothing and still cost, and `device.rs` refuses a
-/// differing view format on a depth image with a clean error rather than
-/// letting Metal raise.
-pub(crate) fn texture_usage(usage: ImageUsage, format: Format) -> MTLTextureUsage {
+/// Turning it back on is the second half of offering reinterpretation for real,
+/// whose first half is the seam carrying the view formats a caller intends, the
+/// way WebGPU's `viewFormats` does. `docs/backlog.md` carries why that was
+/// declined. Depth and stencil never had it: Metal permits no reinterpretation
+/// between depth formats, they are their own compatibility class, so it would
+/// have bought nothing there even while the seam named the capability.
+pub(crate) fn texture_usage(usage: ImageUsage) -> MTLTextureUsage {
     let mut out = MTLTextureUsage::empty();
     if usage.contains(ImageUsage::SAMPLED) {
         out |= MTLTextureUsage::ShaderRead;
@@ -337,9 +341,6 @@ pub(crate) fn texture_usage(usage: ImageUsage, format: Format) -> MTLTextureUsag
     // allocate the storage for. The swapchain slice owns that path.
     if out.is_empty() {
         return MTLTextureUsage::Unknown;
-    }
-    if !format.is_depth_stencil() {
-        out |= MTLTextureUsage::PixelFormatView;
     }
     out
 }
@@ -913,40 +914,48 @@ mod tests {
     /// answer must be a real permission set.
     #[test]
     fn transfer_only_usage_is_unknown_and_nothing_is_or_ed_into_it() {
-        let transfer_only = texture_usage(
-            ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
-            Format::Rgba8Unorm,
-        );
+        let transfer_only = texture_usage(ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST);
         assert_eq!(transfer_only, MTLTextureUsage::Unknown);
         assert!(
             !transfer_only.contains(MTLTextureUsage::PixelFormatView),
             "ORing into Unknown narrows it from everything to one thing"
         );
 
-        let sampled = texture_usage(ImageUsage::SAMPLED, Format::Rgba8Unorm);
+        let sampled = texture_usage(ImageUsage::SAMPLED);
         assert!(sampled.contains(MTLTextureUsage::ShaderRead));
         assert!(
-            sampled.contains(MTLTextureUsage::PixelFormatView),
-            "an sRGB view of a linear colour image must be creatable"
+            !sampled.contains(MTLTextureUsage::PixelFormatView),
+            "the seam refuses a reinterpreting view, so the permission that \
+             costs lossless compression buys nothing"
         );
 
-        let storage = texture_usage(ImageUsage::STORAGE, Format::Rgba16Float);
+        let storage = texture_usage(ImageUsage::STORAGE);
         assert!(storage.contains(MTLTextureUsage::ShaderRead));
         assert!(storage.contains(MTLTextureUsage::ShaderWrite));
 
-        let colour = texture_usage(ImageUsage::COLOR_ATTACHMENT, Format::Rgba16Float);
+        let colour = texture_usage(ImageUsage::COLOR_ATTACHMENT);
         assert!(colour.contains(MTLTextureUsage::RenderTarget));
     }
 
-    /// A depth attachment is a render target and never a format view.
+    /// A depth attachment is a render target and never a format view — and
+    /// since 2026-09-03 neither is anything else.
     #[test]
-    fn depth_images_are_render_targets_without_pixel_format_view() {
-        let depth = texture_usage(ImageUsage::DEPTH_STENCIL_ATTACHMENT, Format::D32Float);
+    fn no_image_asks_for_a_pixel_format_view() {
+        let depth = texture_usage(ImageUsage::DEPTH_STENCIL_ATTACHMENT);
         assert!(depth.contains(MTLTextureUsage::RenderTarget));
-        assert!(
-            !depth.contains(MTLTextureUsage::PixelFormatView),
-            "Metal has no compatible reinterpretation of a depth format"
-        );
+        for usage in [
+            texture_usage(ImageUsage::DEPTH_STENCIL_ATTACHMENT),
+            texture_usage(ImageUsage::SAMPLED),
+            texture_usage(ImageUsage::STORAGE),
+            texture_usage(ImageUsage::COLOR_ATTACHMENT),
+            texture_usage(ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT),
+        ] {
+            assert!(
+                !usage.contains(MTLTextureUsage::PixelFormatView),
+                "a view's format equals its image's, so no texture asks to be \
+                 reinterpreted: {usage:?}"
+            );
+        }
     }
 
     /// Reversed-Z is produced above this seam, so the comparison must arrive

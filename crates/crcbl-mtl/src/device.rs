@@ -561,11 +561,13 @@ pub(crate) struct DeviceInner {
 //   one is already under the `Mutex`.
 // * The only use of `contents` outside the tests is `write_buffer`, which copies
 //   into the pointer while holding that same lock and never lets it escape.
-//   (`tests::read_back` is the other caller and takes the same lock; it exists
-//   because reading the bytes is the only way to observe that `write_buffer`
-//   wrote anything.) There is no persistent mapping handed across the seam — the
-//   seam has no shape for one, which is the argument `Device::write_buffer`
-//   makes for being a copy.
+//   (`tests::read_back` and `tests::fill_mapped` are the other callers and take
+//   the same lock; the first exists because reading the bytes is the only way to
+//   observe that `write_buffer` wrote anything, and the second because
+//   `write_buffer` will not touch a `HostReadback` buffer at all, so the poison
+//   a readback test needs has no other way in.) There is no persistent mapping
+//   handed across the seam — the seam has no shape for one, which is the
+//   argument `Device::write_buffer` makes for being a copy.
 // * Retain and release are atomic in the Objective-C runtime, so moving a
 //   `Retained` between threads and dropping it on another is sound on its own.
 //
@@ -2137,7 +2139,7 @@ impl Device for MetalDevice {
         let descriptor = MTLTextureDescriptor::new();
         descriptor.setTextureType(conv::texture_type(desc.image_type, layers, desc.samples));
         descriptor.setPixelFormat(conv::pixel_format(desc.format));
-        descriptor.setUsage(conv::texture_usage(desc.usage, desc.format));
+        descriptor.setUsage(conv::texture_usage(desc.usage));
         // An image is device-local — `MTLStorageMode::Private` — and
         // `ImageDesc` has no field that could say otherwise; see
         // `MemoryLocation`. Metal ignores a `Private` texture's cache mode, so
@@ -2222,12 +2224,15 @@ impl Device for MetalDevice {
         let entry = lookup(&state.images, "image", desc.image, &*self.inner)?;
         // **No reinterpretation at all, not merely none involving depth.** This
         // guard used to fire only when a depth or stencil format was on one
-        // side, while its own reasoning — that the texture was not created with
-        // `MTLTextureUsagePixelFormatView`, so asking for another format raises
-        // rather than returning an error — applies to every format equally. A
-        // colour reinterpretation therefore reached Metal and raised, which is
-        // not an error a caller can catch. `ImageViewDesc::format` is where the
-        // seam's rule and the cost of offering the capability are written.
+        // side, because a colour texture was created with
+        // `MTLTextureUsagePixelFormatView` and Metal really would cut the view
+        // — the seam named the capability, so this backend paid for it. It does
+        // not any more: `ImageViewDesc::format` must equal the image's, so
+        // `conv::texture_usage` stopped asking for the flag and its cost in
+        // lossless compression, and a colour reinterpretation would now do what
+        // a depth one always did — raise, which is not an error a caller can
+        // catch. `ImageViewDesc::format` is where the seam's rule and the cost
+        // of offering the capability for real are written.
         if desc.format != entry.format {
             return Err(HalError::InvalidDescriptor(format!(
                 "a view of a {:?} image cannot reinterpret it as {:?}: this backend creates \
@@ -3394,6 +3399,44 @@ pub(crate) mod tests {
         unsafe { core::slice::from_raw_parts(contents.as_ptr().cast::<u8>(), len) }.to_vec()
     }
 
+    /// Fills the first `len` bytes of a host-visible buffer with `byte`,
+    /// straight through the same mapped pointer [`read_back`] reads.
+    ///
+    /// **This is how a readback buffer gets its poison, and why it is not
+    /// `write_buffer`.** That call takes [`MemoryLocation::HostUpload`] only —
+    /// see its own guard for the whole argument — because a `HostReadback`
+    /// buffer is the *destination* of a device-side copy, which Metal reaches by
+    /// a blit. Priming the poison with a recorded `copy_buffer_to_buffer` would
+    /// answer the guard and lose the point: every readback test would then
+    /// depend on the copy path it exists to observe. So the poison goes in the
+    /// one way that is neither, and is available because the buffer is `Shared`
+    /// and mappable — exactly the property `read_back` already relies on.
+    ///
+    /// The fill is read back and asserted rather than trusted. A poison that
+    /// silently wrote nothing would leave every test using it asserting against
+    /// whatever Metal happened to leave in a fresh allocation, which is a check
+    /// that passes whether or not the GPU work it guards ever ran.
+    pub(crate) fn fill_mapped(device: &MetalDevice, handle: BufferHandle, byte: u8, len: usize) {
+        {
+            let state = device.state();
+            let entry = lookup(&state.buffers, "buffer", handle, &*device.inner)
+                .expect("the buffer is live and this device's");
+            assert!(entry.location.is_mappable(), "not a writable buffer");
+            assert!(len as u64 <= entry.size, "writing past the buffer");
+            let contents = entry.raw.contents();
+            // SAFETY: `contents` covers `entry.size` bytes of a live `Shared`
+            // allocation, `len` was just asserted to be within it, and the write
+            // happens under the device lock before anything is submitted. The
+            // pointer does not escape this block.
+            unsafe { core::ptr::write_bytes(contents.as_ptr().cast::<u8>(), byte, len) };
+        }
+        // The lock is released above, because `read_back` takes it again.
+        assert!(
+            read_back(device, handle, len).iter().all(|&at| at == byte),
+            "the fill did not land, so nothing asserted against it would be a check"
+        );
+    }
+
     // --- handle tagging, with no device in it -------------------------------
     //
     // Every other test in this file goes through a live `MTLDevice`, which
@@ -3673,13 +3716,15 @@ pub(crate) mod tests {
     }
 
     /// A host-readable buffer, poisoned so an absent copy cannot pass.
+    ///
+    /// The poison arrives through [`fill_mapped`] rather than `write_buffer`,
+    /// which refuses a `HostReadback` buffer outright; that helper carries why
+    /// the mapped write is the right answer here and a recorded copy is not.
     fn readback_buffer(device: &MetalDevice, size: u64) -> BufferHandle {
         let handle = device
             .create_buffer(&buffer(size, MemoryLocation::HostReadback))
             .expect("a readback buffer");
-        device
-            .write_buffer(handle, 0, &vec![POISON; size as usize])
-            .expect("HostReadback is host-visible");
+        fill_mapped(device, handle, POISON, size as usize);
         handle
     }
 
@@ -5420,40 +5465,57 @@ using namespace metal;\n\
         }
     }
 
-    /// `write_buffer` writes, at the offset it was given, and refuses the
-    /// location Metal cannot reach without a blit.
+    /// `write_buffer` writes, at the offset it was given, and refuses every
+    /// location that is not [`MemoryLocation::HostUpload`].
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn write_buffer_writes_host_visible_memory_and_refuses_what_metal_cannot_map() {
         let (_instance, device) = open_device();
-        let readback = device
-            .create_buffer(&buffer(16, MemoryLocation::HostReadback))
-            .expect("a readback buffer");
 
         // Two writes, so the result is fully determined whatever Metal left in
-        // the fresh allocation: fill, then overwrite a window at an offset.
-        device
-            .write_buffer(readback, 0, &[0xAA; 16])
-            .expect("the whole range");
-        device
-            .write_buffer(readback, 4, &[0x01, 0x02, 0x03, 0x04])
-            .expect("a window at an offset");
-        let mut expected = [0xAA_u8; 16];
-        expected[4..8].copy_from_slice(&[0x01, 0x02, 0x03, 0x04]);
-        assert_eq!(
-            read_back(&device, readback, 16),
-            expected,
-            "write_buffer either wrote nothing or ignored the offset"
-        );
-
-        // An upload buffer is write-combined, so it is written and not read
-        // here — the acceptance is the assertion.
+        // the fresh allocation: fill, then overwrite a window at an offset. The
+        // proof reads back through the mapping, off the upload buffer, because
+        // that is now the only buffer `write_buffer` is allowed to have touched.
+        // An upload allocation is `Shared` here rather than write-combined, so
+        // reading it is ordinary memory traffic and not a hazard.
         let upload = device
             .create_buffer(&buffer(16, MemoryLocation::HostUpload))
             .expect("an upload buffer");
         device
-            .write_buffer(upload, 0, &[0x7F; 16])
+            .write_buffer(upload, 0, &[0xAA; 16])
             .expect("HostUpload is what write_buffer is for");
+        device
+            .write_buffer(upload, 4, &[0x01, 0x02, 0x03, 0x04])
+            .expect("a window at an offset");
+        let mut expected = [0xAA_u8; 16];
+        expected[4..8].copy_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(
+            read_back(&device, upload, 16),
+            expected,
+            "write_buffer either wrote nothing or ignored the offset"
+        );
+
+        // **Mappable is not the rule; `HostUpload` is.** A `HostReadback`
+        // buffer is `Shared` on this backend exactly as an upload one is, and
+        // is still refused: the seam documents `write_buffer` as the upload
+        // path, and a readback buffer is the destination a device-side copy
+        // fills. This gated on `is_mappable()` until 2026-09-03, so the same
+        // call succeeded here and errored on the reference backend — which is
+        // the disagreement this arm exists to keep from coming back.
+        let readback = device
+            .create_buffer(&buffer(16, MemoryLocation::HostReadback))
+            .expect("a readback buffer");
+        let error = device
+            .write_buffer(readback, 0, &[0xAA; 16])
+            .expect_err("a readback buffer is not an upload target");
+        let HalError::InvalidDescriptor(text) = error else {
+            panic!("expected InvalidDescriptor, got {error:?}");
+        };
+        assert!(text.contains("HostReadback"), "{text}");
+        assert!(
+            text.contains("copy_buffer_to_buffer"),
+            "the refusal must say what would make it work: {text}"
+        );
 
         let private = device
             .create_buffer(&buffer(16, MemoryLocation::DeviceLocal))
@@ -5470,9 +5532,12 @@ using namespace metal;\n\
             "the refusal must say what would make it work: {text}"
         );
 
-        // Out of range is the other refusal the seam names.
+        // Out of range is the other refusal the seam names, and it is asked on
+        // the **upload** buffer: the location check runs first, so on any other
+        // location the range would never be reached and this would be a second
+        // copy of the arm above wearing the wrong name.
         let error = device
-            .write_buffer(readback, 13, &[0u8; 4])
+            .write_buffer(upload, 13, &[0u8; 4])
             .expect_err("13..17 does not fit in 16 bytes");
         assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
 
@@ -5556,14 +5621,35 @@ using namespace metal;\n\
         );
     }
 
-    /// The sRGB reinterpretation the seam names, exercised end to end.
+    /// **A linear image refuses a view of its sRGB partner**, and the refusal
+    /// names both formats.
     ///
-    /// This is what `MTLTextureUsagePixelFormatView` is set for. Without it
-    /// Metal refuses the view, so this is the assertion that keeps the flag
-    /// from being "optimised away" later.
+    /// This test asserted the opposite until 2026-09-03. What changed is the
+    /// seam, not this backend's ability:
+    /// [`ImageViewDesc::format`](crcbl_hal::ImageViewDesc::format) is now
+    /// documented as a format that **must equal the image's own**, because
+    /// reinterpretation is a capability no backend here delivers as it creates
+    /// images today and one of them structurally cannot — D3D12 permits a
+    /// differing view format only on a *typeless* resource. A promise only
+    /// Vulkan kept is worse than no promise: a caller taking it up got a working
+    /// view on one backend and a failure on the others. The seam doc carries
+    /// what offering it for real would cost.
+    ///
+    /// **The refusal has to be this backend's own rather than Metal's**, which
+    /// is why `create_image_view` compares the two formats itself for colour
+    /// exactly as it always did for depth. Metal answers a pixel-format view it
+    /// will not make by raising an Objective-C exception, not by returning an
+    /// error, and nothing a caller writes in Rust can catch that — so a guard
+    /// narrowed back to depth and stencil would not merely let this view
+    /// through, it would take the process down.
+    ///
+    /// Red when that guard narrows: the `expect_err` becomes an `Ok`, or the
+    /// raise happens. Red too if the message stops naming what was asked for or
+    /// what the image actually is, which is the difference between an error a
+    /// caller can act on and one that only says "no".
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn a_linear_image_can_be_viewed_as_its_srgb_partner() {
+    fn a_linear_image_refuses_a_view_of_its_srgb_partner() {
         let (_instance, device) = open_device();
         let image = device
             .create_image(&ImageDesc {
@@ -5576,7 +5662,7 @@ using namespace metal;\n\
                 usage: ImageUsage::SAMPLED,
             })
             .expect("a linear image");
-        let view = device
+        let error = device
             .create_image_view(&ImageViewDesc {
                 label: Some("sRGB view"),
                 image,
@@ -5584,7 +5670,37 @@ using namespace metal;\n\
                 format: Format::Rgba8UnormSrgb,
                 range: ImageSubresourceRange::all(Format::Rgba8Unorm),
             })
-            .expect("an sRGB view of a linear image");
+            .expect_err("a view's format must equal its image's");
+        let HalError::InvalidDescriptor(text) = error else {
+            panic!("expected InvalidDescriptor, got {error:?}");
+        };
+
+        let source = format!("{:?}", Format::Rgba8Unorm);
+        let requested = format!("{:?}", Format::Rgba8UnormSrgb);
+        assert!(
+            text.contains(&requested),
+            "the refusal must name the format that was asked for: {text}"
+        );
+        // The image's own name is a *prefix* of the sRGB one, so a `contains`
+        // would pass on a message that only ever said `Rgba8UnormSrgb`. This
+        // asks for an occurrence that is not the start of that longer name.
+        assert!(
+            text.match_indices(&source)
+                .any(|(at, _)| !text[at..].starts_with(&requested)),
+            "the refusal must name the image's own format too: {text}"
+        );
+
+        // A view in the image's own format is still made, so the refusal is
+        // about the reinterpretation and not about this image.
+        let view = device
+            .create_image_view(&ImageViewDesc {
+                label: Some("linear view"),
+                image,
+                view_type: ImageViewType::D2,
+                format: Format::Rgba8Unorm,
+                range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+            })
+            .expect("a whole-image view in the image's own format");
         device.destroy_image_view(view);
         device.destroy_image(image);
     }

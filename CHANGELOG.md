@@ -27,6 +27,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   all five can. A caller that passed a differing format got backend-dependent
   behaviour before and gets `HalError::InvalidDescriptor` everywhere now.
 
+  One consequence is a saving rather than a loss: `crcbl-mtl` set
+  `MTLTextureUsagePixelFormatView` on every colour image to keep the promise,
+  and that flag can disable lossless bandwidth compression on some Apple GPUs.
+  With nothing able to reach the permission it grants, `conv::texture_usage`
+  stops asking for it.
+
 ### Fixed
 
 - **A forged `Accept` no longer wedges the client permanently.** The handshake

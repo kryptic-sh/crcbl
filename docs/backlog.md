@@ -103,19 +103,28 @@ What that pass did **not** settle:
   buried deeper than that has never been checked. Four were corrected
   (`crcbl-hal`, `crcbl-webgpu`, `crcbl-ui`, `crcbl-anim`); the rest are unread
   rather than clean.
-- **Not audited at all:** `docs/plan/*`, `CHANGELOG.md`, `apps/*/src/**` module
-  docs beyond `apps/breach/src/web.rs`, `web/style.css` and
-  `web/templates/layout.html`.
+- **Not audited at all:** `CHANGELOG.md` and `apps/*/src/**` module docs beyond
+  `apps/breach/src/web.rs`. Of `docs/plan/*`, only `50-irradiance-probes.md` and
+  `18-render-features.md` have been checked against the tree (2026-09-03) — and
+  the first held two false "shipped" claims, so the other fifty are unread
+  rather than clean. `web/style.css` and `web/templates/layout.html` **are**
+  audited now and carry nothing checkable: the template is markup with one
+  factual claim, "MIT", which matches `LICENSE` and the workspace manifest, and
+  the stylesheet's two prose comments describe its own policy.
 - **Two site pages still disagree about which frame is heaviest.** `quarry.html`
   says "the heaviest frame the site ships" and `lantern.html` "one of the two
   heaviest", while `.github/workflows/pages.yml` measured shard slowest at 87.0x
   against breach's 51.1x. `index.html` was corrected to say shard; those two
   were left, because the right fix is a measured number per page rather than
   another adjective.
-- **`README.md` documents `--backend vk|mtl|dx12|null`** while
-  `crates/crcbl/src/backend.rs` also parses `webgpu`. Whether that omission is
-  deliberate — a native `webgpu` backend being unusable rather than unnamed —
-  was not established, so nothing was changed.
+- ~~`README.md` documents `--backend vk|mtl|dx12|null` while `backend.rs` also
+  parses `webgpu`~~ — **settled 2026-09-03, and the README is right.**
+  `crates/crcbl/src/backend.rs` registers the name so `CRCBL_GPU=webgpu` does
+  not read as a typo, and a native `open` of it refuses by name: there is no
+  desktop WebGPU implementation to encode the command stream against, and
+  `crcbl_webgpu` is a `wasm32`-only dependency the native build cannot even
+  name. So the flag's list is the list of backends a native run can select,
+  which is what it claims to be.
 
 ## HIGH PRIORITY — the user's calls of 2026-08-30
 
@@ -18479,11 +18488,6 @@ speculative machinery this codebase deletes rather than keeps.
 
 ## What MTL2 left open on the Metal backend
 
-- **`MTLTextureUsagePixelFormatView` is set on every colour image,
-  unconditionally.** It can disable lossless bandwidth compression on some Apple
-  GPUs. Narrowing it needs the seam to carry intended view formats the way
-  WebGPU's `viewFormats` does, which is a HAL change and so was not made.
-  Recorded in `conv::texture_usage`'s docs.
 - **Metal validates descriptors by raising, not by returning nil**, and an
   Objective-C exception crossing into Rust aborts the process. `create_image`
   guards the rules confirmable from the headers and deliberately invents no rule

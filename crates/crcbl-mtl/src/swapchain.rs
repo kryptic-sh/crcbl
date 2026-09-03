@@ -1238,6 +1238,7 @@ mod tests {
     use objc2_quartz_core::CALayer;
 
     use crate::MetalInstance;
+    use crate::device::tests::fill_mapped;
     use crate::instance::tests::{desc as device_desc, open as open_instance};
 
     /// The size every offscreen test configures at.
@@ -1689,9 +1690,11 @@ mod tests {
                 memory: MemoryLocation::HostReadback,
             })
             .expect("a host-readable staging buffer");
-        device
-            .write_buffer(staging, 0, &vec![POISON; EXTENT_BYTES])
-            .expect("a HostReadback buffer is Shared and so is writable");
+        // Through the mapping rather than `write_buffer`, which takes
+        // `MemoryLocation::HostUpload` only: this buffer is a copy's
+        // destination, and `crate::device::tests::fill_mapped` carries the rest
+        // of that argument.
+        fill_mapped(&device, staging, POISON, EXTENT_BYTES);
 
         let frame = device.acquire_next_frame(swapchain).expect("a ring image");
         let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
