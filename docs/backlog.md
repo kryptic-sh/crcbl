@@ -45,30 +45,57 @@ tool this session wanted twice and did without.
 Written down deliberately: this entry exists so the state below survives a
 compacted or dropped session. **Delete each item as it lands.**
 
-### The rebase owes three things, and one of them can silently undo a bug fix
+### The rebase is done; five local commits are unpushed and UNVERIFIED
 
-Local `main` sat 1 ahead / 8 behind `origin/main` while a write agent held the
-tree dirty, so the rebase could not run yet. When it does:
+The rebase onto `b40413c` completed.
+`f9d3b20 feat(shaders): the probe volume is a clipmap of levels` sits on top of
+four docs commits, the working tree is clean, and **nothing is pushed**.
 
-- **`crates/crcbl-render/src/forward.rs` must keep building the task and mesh
-  stages from one SPIR-V module each.** That is the fix in
-  `759c7eb fix(shaders): a task stage gets a module to itself`: slangc puts two
-  `TaskPayloadWorkgroupEXT` variables in a module holding a task entry point and
-  its mesh partner, the mesh stage reads the one nothing wrote, and
-  `ClusterPayload` arrives as zeroes so every kept cluster draws cluster 0 of
-  instance slot 0. `spirv-val` accepts the module because its one-payload rule
-  is per entry point. **Taking the agent's side of that hunk compiles and passes
-  every offline check while restoring the bug.** Resolve by hand, re-read the
-  merged function, then sabotage it and confirm the test goes red.
-- **Every shader artifact the in-flight agent generated is under the old
-  naming** and must be deleted by name and regenerated from the merged sources
-  with `origin/main`'s `compile-shaders.sh`, whose `entry_file_segment` produces
-  the snake_case names (`probe_capture.fragment.dxil`, not
-  `probe_capture.fragmentMain.dxil`). Then confirm `spirv/manifest.txt` still
-  carries `spirv-entry` lines for `mesh_cluster`'s task, mesh and amplified-mesh
-  modules — if those vanish, the fix above is gone.
-- **`docs/backlog.md` conflicts**: `b40413c` and `296be13` edit it upstream
-  while the local commit rewrote the 2026-08-04 hardening list.
+The hazard this entry was written about did not materialise: the clipmap slice
+never touched `crates/crcbl-render/src/forward.rs`, so
+`759c7eb fix(shaders): a task stage gets a module to itself` had no local rival
+and came through untouched. **It was checked rather than assumed** —
+`spirv/mesh_cluster.{task,mesh,amplified_mesh}.spv` all exist under the new
+snake*case names, regenerated from the \_merged* `mesh_cluster.slang`, with
+fresh hashes on their `spirv-entry` lines in `spirv/manifest.txt`. That
+regeneration was load-bearing: the artifact bytes the local commit carried had
+been compiled by the pre-rename script, so without it the fix would have been
+formally present and stale.
+
+**What is owed before this can be pushed, none of it done:**
+
+- **The whole gate set has never run on the merged tree.** Neither side was ever
+  compiled against the other. Owed:
+  `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`,
+  `cargo fmt --all -- --check`,
+  `cargo test --workspace --all-features --locked`, both `cargo doc` legs, the
+  wasm clippy leg, `tools/check-doc-citations.sh`,
+  `tools/check-wrapped-strings.sh`, every `crates/crcbl/tests/run-*-e2e.sh` on
+  radv and render-e2e on lavapipe, and the web gates.
+- **A different-axis sabotage of the clipmap.** The implementing agent named the
+  hole in its own tests: `ProbeVolume::level_origin`'s `1 − 2^k` offset sign,
+  which nothing in the CPU suite would catch on a symmetric fixture, and the
+  agreement between `probe_positions`' level-major order and `probe_row`'s
+  `probe_levels.y · level` on a scene with asymmetric per-level geometry.
+- **The `Claude-Session:` trailers must come off all five commits** before the
+  push, per this file's own entry above — the user confirmed that on 2026-09-03
+  when a session-level instruction said otherwise. They are unpushed, so this is
+  an ordinary amend and needs no force-push.
+- **`crcbl_shaders::mesh::FRAME_UNIFORMS_SIZE == 1760`** and the `std140` offset
+  comment in `the_uniform_block_matches_the_offsets_slangc_emits` were derived
+  from `spirv-dis` before the rebase. If anything in the eight incoming commits
+  also grew the frame block, that literal is where it shows up.
+
+### The Bash tool died mid-verification on 2026-09-03
+
+Every invocation returns exit 1 with no output, `true` and `/bin/echo ok`
+included; one call returned 134. It broke immediately after an
+`until [ -f "$D/done" ]` waiter against the session scratchpad, which had
+already been wiped once earlier in the same session — a scratchpad vanishing
+under a running waiter is the suspected trigger. Read and Write still work.
+
+**This is why the five commits are unverified**, not a judgement that they are
+fine. Resume by re-running the gate set above from scratch.
 
 ### The determinism test's guard fails devices that cannot run the path
 
