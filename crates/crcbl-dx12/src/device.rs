@@ -2407,7 +2407,7 @@ impl Device for Dx12Device {
 
     /// Copies `data` into a host-visible buffer.
     ///
-    /// # `DeviceLocal` is refused, never silently dropped
+    /// # Anything but `HostUpload` is refused, never silently dropped
     ///
     /// A [`MemoryLocation::DeviceLocal`] buffer lives on the default heap, which
     /// `ID3D12Resource::Map` rejects — D3D12's only route into one is a copy
@@ -2417,6 +2417,14 @@ impl Device for Dx12Device {
     /// `InvalidDescriptor` … if the buffer is not host-visible") and what
     /// `crcbl-vk` and `crcbl-mtl` answer for the same call, so the backends
     /// disagree about nothing.
+    ///
+    /// [`MemoryLocation::HostReadback`] is refused beside it, and that one is
+    /// worth saying out loud because D3D12 *will* map it: a readback heap is
+    /// cached, CPU-readable memory a copy fills, so it is mappable and still not
+    /// an upload target. This backend gated on "is it mappable" until
+    /// 2026-09-03, which let the same call succeed here and fail on the
+    /// reference backend. A test that wants a sentinel in a readback buffer
+    /// writes it through the mapping itself — see `tests::prime`.
     ///
     /// # The map ranges are not decoration
     ///
@@ -2458,25 +2466,11 @@ impl Device for Dx12Device {
                 "write_buffer offset {offset} does not fit this host's address space"
             ))
         })?;
-        // **A readback heap is told nothing was written, even though it was.**
-        // `pWrittenRange` is what the CPU promises the *GPU* will need to see,
-        // and a `D3D12_HEAP_TYPE_READBACK` allocation is stuck in `COPY_DEST`,
-        // so the GPU can never read what the CPU put there. D3D12's debug layer
-        // says so by name — "Readback resources can be written by the CPU but
-        // there's not much utility … The range should be empty (Begin >= End)"
-        // — and it is a warning this backend's tests treat as a failure, which
-        // is how it was found rather than shipped.
-        //
-        // The bytes are still there for the CPU: these heaps are write-back
-        // cached, so the caller's own later read sees them. Only the promise to
-        // the GPU is withdrawn, because it was never true.
-        let written = if entry.location == MemoryLocation::HostReadback {
-            D3D12_RANGE { Begin: 0, End: 0 }
-        } else {
-            D3D12_RANGE {
-                Begin: begin,
-                End: begin + data.len(),
-            }
+        // The exact range written, unconditionally: the only location that
+        // reaches here is the upload heap, which the GPU does read.
+        let written = D3D12_RANGE {
+            Begin: begin,
+            End: begin + data.len(),
         };
         // Begin == End says "the CPU read nothing", which is what this call
         // does.
@@ -4905,9 +4899,7 @@ pub(crate) mod tests {
                 memory: MemoryLocation::HostReadback,
             })
             .expect("a readback buffer");
-        device
-            .write_buffer(handle, 0, &vec![POISON; bytes])
-            .expect("a readback buffer is host-visible");
+        prime(device, handle, &vec![POISON; bytes]);
         handle
     }
 
@@ -5098,6 +5090,74 @@ pub(crate) mod tests {
             entry.raw.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
         }
         bytes
+    }
+
+    /// Writes `data` into a readback buffer straight through D3D12's mapping,
+    /// bypassing the seam — the write half of [`read_back`].
+    ///
+    /// [`Device::write_buffer`] is the obvious way to prime a buffer and it is
+    /// the wrong one here. Since 2026-09-03 the seam documents that call as an
+    /// *upload* path and every backend refuses a
+    /// [`MemoryLocation::HostReadback`] buffer, because on D3D12 the only route
+    /// into one the GPU can see is a copy. Priming a readback with a sentinel is
+    /// a test's business rather than the seam's: it is how "the GPU wrote this"
+    /// stays distinguishable from "nothing touched this", and it is not a claim
+    /// about `write_buffer` at all. Going through the mapping keeps each of
+    /// those tests independent of a rule none of them is about, and leaves
+    /// `write_buffer_writes_host_visible_memory_and_refuses_what_d3d12_cannot_map`
+    /// as the one place that rule is asserted.
+    ///
+    /// **The written range stays empty even though bytes were written.**
+    /// `pWrittenRange` is what the CPU promises the *GPU* will need to see, and
+    /// a `D3D12_HEAP_TYPE_READBACK` allocation is stuck in `COPY_DEST`, so the
+    /// GPU can never read what the CPU put there. D3D12's debug layer says so by
+    /// name — "Readback resources can be written by the CPU but there's not much
+    /// utility … The range should be empty (Begin >= End)" — and [`Validated`]
+    /// grades that warning a failure, so a range naming the write would red
+    /// every caller. The bytes are still there for the CPU: these heaps are
+    /// write-back cached, so both [`read_back`] and `poll_readback` see them.
+    ///
+    /// [`Validated`]: debug::Validated
+    fn prime(device: &Dx12Device, handle: BufferHandle, data: &[u8]) {
+        let state = device.state();
+        let entry = handle::lookup(&state.buffers, "buffer", handle, device.inner.owner)
+            .expect("the buffer is live and this device's");
+        assert_eq!(
+            entry.location,
+            MemoryLocation::HostReadback,
+            "prime is the readback half; an upload buffer is written through write_buffer, which \
+             is the call the seam has for it"
+        );
+        assert!(
+            data.len() as u64 <= entry.size,
+            "priming {} bytes past the buffer's {}",
+            data.len(),
+            entry.size
+        );
+        // Begin == End says "the CPU read nothing", which is true of this call:
+        // it only writes.
+        let read_nothing = D3D12_RANGE { Begin: 0, End: 0 };
+        let mut mapped: *mut core::ffi::c_void = core::ptr::null_mut();
+        // SAFETY: `entry.raw` is a live buffer on a readback heap — asserted
+        // just above — and subresource 0 is the only one a buffer has. Both
+        // range pointers name live locals, and `mapped` is a live local the call
+        // writes through.
+        unsafe { entry.raw.Map(0, Some(&read_nothing), Some(&mut mapped)) }
+            .expect("mapping a readback heap for a write");
+        assert!(!mapped.is_null(), "Map wrote no pointer");
+        // SAFETY: `mapped` covers `entry.size` bytes of a live host-visible
+        // allocation and `data.len()` was just asserted to be within it. The
+        // source is a caller's own slice, which cannot alias a mapping D3D12
+        // handed out on this line, and the copy happens under the device lock
+        // with nothing in flight that writes the same range.
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), mapped.cast::<u8>(), data.len());
+        }
+        // SAFETY: the matching `Unmap`, with the empty written range this
+        // function's doc argues for.
+        unsafe {
+            entry.raw.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
+        }
     }
 
     /// The square target the triangle is drawn into.
@@ -8295,9 +8355,7 @@ pub(crate) mod tests {
             device: &Dx12Device,
             record: impl FnOnce(&mut dyn CommandEncoder),
         ) -> Vec<u8> {
-            device
-                .write_buffer(self.readback, 0, &vec![POISON; SQUARE_BYTES])
-                .expect("a readback buffer is host-visible");
+            prime(device, self.readback, &vec![POISON; SQUARE_BYTES]);
             let pass = clear_pass(
                 self.view,
                 CLEAR,
@@ -9767,7 +9825,7 @@ pub(crate) mod tests {
         assert_eq!(
             drain(&device, request, 64),
             vec![POISON; 64],
-            "nothing was submitted, so the readback is what write_buffer left"
+            "nothing was submitted, so the readback is what the priming left"
         );
 
         // A destroyed readback stops resolving.
@@ -9935,11 +9993,23 @@ pub(crate) mod tests {
             "the refusal must say what would make it work: {text}"
         );
 
-        // Out of range is the other refusal the seam names.
+        // Out of range is the other refusal the seam names, and it is asserted
+        // against the *upload* buffer on purpose: the location gate answers
+        // first, so the same call on `readback` comes back refused for its heap
+        // and proves nothing about the range. Both refusals are
+        // `InvalidDescriptor`, which is why the text is read rather than the
+        // variant alone — a range check that never ran would otherwise pass
+        // here.
         let error = device
-            .write_buffer(readback, 13, &[0u8; 4])
+            .write_buffer(upload, 13, &[0u8; 4])
             .expect_err("13..17 does not fit in 16 bytes");
-        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        let HalError::InvalidDescriptor(text) = error else {
+            panic!("expected InvalidDescriptor, got {error:?}");
+        };
+        assert!(
+            text.contains("13..17"),
+            "the refusal must name the range that did not fit: {text}"
+        );
 
         for handle in [readback, upload, private] {
             device.destroy_buffer(handle);
@@ -11656,9 +11726,7 @@ pub(crate) mod tests {
         let primer: Vec<u8> = core::iter::repeat_n(QUERY_POISON, TIMED_QUERIES as usize)
             .flat_map(u64::to_le_bytes)
             .collect();
-        device
-            .write_buffer(resolved, 0, &primer)
-            .expect("a readback heap is writable from the CPU");
+        prime(&device, resolved, &primer);
         run(&device, |encoder| {
             encoder.resolve_query_set(set, 0..TIMED_QUERIES, resolved, 0);
         });
