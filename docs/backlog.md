@@ -110,12 +110,22 @@ lavapipe       7.072   15.421        72.042   80.152
   the frame to 19.1%. A software rasteriser pays for the sixteen extra `Load`s
   per pixel in a way a discrete GPU does not.
 
-**The browser tier is still owed**, and it is the tier this matters to — the
-figure above is its closest proxy and it is the worst of the three. The method
-is cheap now that the comparison worktree exists: build the browser bundle from
-a worktree at `55d0eba` and from `HEAD`, and read `ssr` out of quarry's pass
-table at the gate's window size, which is how
-`docs/plan/50-irradiance-probes.md`'s other browser figures were taken.
+**The browser tier was measured on hardware and behaves like radv, not like
+lavapipe.** quarry through Chrome on an RDNA-3 adapter at the gate's 959x463,
+`web/run-browser-e2e.sh` on the `hardware` adapter, three runs each side: `ssr`
+**0.036 ms p50 before against 0.053 after**, identical to the printed digit in
+all three runs of each, and the frame **0.720 to 0.737 ms** — +47% on the pass,
+exactly the +0.017 ms the pass grew, and **+2.4% of the frame**. So both GPU
+tiers pay 47% and only the software rasteriser pays 118%.
+
+**The software browser tier cannot be measured on this machine.** Pinning
+`CRCBL_WEB_E2E_ADAPTER=swiftshader` gets an adapter — "a WebGPU adapter is
+granted — google swiftshader" — and then group A's known-colour clear reads back
+nothing, so the gate refuses the render checks and no pass table is logged:
+"this browser cannot report canvas pixels with any adapter mode". CI's Pages leg
+is the only place that reading exists. That is a standing limit on every browser
+_timing_ question here, not only this one, and it is why the local browser
+figure above is a discrete GPU's.
 
 **The candidate that would pay for it, not yet costed.** `ssr.slang`'s
 `probe_environment` is evaluated for every non-far pixel including fully rough

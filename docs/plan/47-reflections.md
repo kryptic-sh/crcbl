@@ -313,12 +313,26 @@ share **of**. The frame fell from 1.32 ms to 1.27 ms, so the march's absolute
 cost barely moved while its share rose slightly — which is the reason to quote a
 share and an absolute together rather than either alone.)
 
-**What would change the answer is the browser tier, and its number is not in
-hand.** A software rasteriser spends two thirds of a frame in `forward`, so
-every other pass is a smaller share there, not a larger one — but that is an
-argument, not a reading. Until 2026-09-02 the reading was impossible to take:
-the browser log cut the pass table at fifteen of twenty-three labels, `ssr`
-among the missing. It no longer does.
+**What would change the answer is the browser tier, and half of that number is
+now in hand.** A software rasteriser spends two thirds of a frame in `forward`,
+so every other pass is a smaller share there, not a larger one — that used to be
+an argument rather than a reading, and until 2026-09-02 the reading was
+impossible to take at all: the browser log cut the pass table at fifteen of
+twenty-three labels, `ssr` among the missing. It no longer does.
+
+Taken 2026-09-04: quarry through Chrome on an RDNA-3 adapter at the gate's
+959x463, `web/run-browser-e2e.sh` on the `hardware` adapter, p50 over 85 frames
+and identical to the printed digit in three runs — `ssr` **0.053 ms, 7.2% of a
+0.737 ms frame**, with `ssr-blur` at 1.8% and the five `hiz` levels adding 0.046
+ms between them. So the march is a slightly _smaller_ share of a browser frame
+on hardware than of the native one above, which is the direction the argument
+predicted.
+
+**The browser's software tier is the half still missing, and it cannot be taken
+here.** Pinning the gate to SwiftShader grants the adapter and then reads back
+no canvas pixels, so the gate refuses the render checks and logs no pass table —
+"this browser cannot report canvas pixels with any adapter mode". CI's Pages leg
+is the only place that reading exists. `docs/backlog.md` carries it.
 
 The rest of this row is unchanged. No `LightingPath` gate, which still has no
 consumer. **No specular occlusion**: AO scales the ambient term alone, a

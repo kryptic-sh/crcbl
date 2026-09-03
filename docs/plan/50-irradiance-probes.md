@@ -241,9 +241,18 @@ other inside the run-to-run spread. On lavapipe the pass **more than doubles**,
 +8.35 ms, and the frame follows it: +11.3%, with `ssr` going from 9.9% of the
 frame to 19.1%. The difference is where the two tiers spend a pixel: sixteen
 extra `Load`s per fragment are nothing beside a discrete GPU's bandwidth and are
-most of a software rasteriser's inner loop. The browser tier is unmeasured and
-is the one this bears on; `docs/backlog.md` carries that and the candidate that
-would pay for it, which is evaluating the fallback only where the march actually
+most of a software rasteriser's inner loop.
+
+**The browser tier, on hardware, sides with radv**: quarry through Chrome on an
+RDNA-3 adapter at the gate's 959x463, three runs each side, reads `ssr` **0.036
+ms p50 before against 0.053 after** — identical to the printed digit in every
+run — with the frame at **0.720 against 0.737 ms**. That is +47% on the pass and
++2.4% of the frame, the same multiplier radv pays. So it is the _software_
+rasteriser that is the outlier, and the browser's software tier is the one
+reading nobody here can take: pinning the gate to SwiftShader grants the adapter
+and then reads back no pixels at all, so it logs no pass table.
+`docs/backlog.md` carries that limit and the candidate that would pay for the
+software cost, which is evaluating the fallback only where the march actually
 missed rather than for every non-far pixel.
 
 **Pricing for the halves not built.** Per frame: the RSM's two extra targets on
