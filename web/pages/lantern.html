@@ -159,8 +159,9 @@ meta-->
     that — Chrome's SwiftShader stops at ten — so the pipeline was never created
     and this canvas stayed black. It binds eight today, which is the minimum
     every conforming WebGPU implementation guarantees, and the room draws on
-    SwiftShader as well as on hardware. Expect it to be slow there: this is one
-    of the two heaviest frames on the site.
+    SwiftShader as well as on hardware. Expect it to be slow there: a full
+    lighting stack is among the site's heaviest frames. Shard is the slowest
+    demo here, and the Pages workflow's own measurements are what say so.
   </div>
   <!--include demo-console-note-->
 </section>

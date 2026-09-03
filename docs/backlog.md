@@ -111,12 +111,6 @@ What that pass did **not** settle:
   audited now and carry nothing checkable: the template is markup with one
   factual claim, "MIT", which matches `LICENSE` and the workspace manifest, and
   the stylesheet's two prose comments describe its own policy.
-- **Two site pages still disagree about which frame is heaviest.** `quarry.html`
-  says "the heaviest frame the site ships" and `lantern.html` "one of the two
-  heaviest", while `.github/workflows/pages.yml` measured shard slowest at 87.0x
-  against breach's 51.1x. `index.html` was corrected to say shard; those two
-  were left, because the right fix is a measured number per page rather than
-  another adjective.
 - ~~`README.md` documents `--backend vk|mtl|dx12|null` while `backend.rs` also
   parses `webgpu`~~ — **settled 2026-09-03, and the README is right.**
   `crates/crcbl/src/backend.rs` registers the name so `CRCBL_GPU=webgpu` does
