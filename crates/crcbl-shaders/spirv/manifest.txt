@@ -287,15 +287,15 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [probe_gather]
 source = shaders/probe_gather.slang
-source-sha256 = 2212abbe5455ea627e89c1a7e1a88bc06dcb9968984937b21aad98ca864f172e
+source-sha256 = 4985b44e4945f099553873a47dc8fb94f55461798ed736bf0d9b53b22fb407ad
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/probe_gather.spv
-spirv-sha256 = 8015b47e193c1b5b86d55cbe5fa3cb332dcc59da13a901d754f37157bd440c18
+spirv-sha256 = a25e5d6f0367ae073ec1ae861a74e4c813406a54aa6e87b6c8a68bcf29ebda21
 wgsl = wgsl/probe_gather.wgsl
-wgsl-sha256 = c017a9c2d11f2a60fbb6ceefca4cbad7b52afdf6dc6f336b81b7d72bd3c4cb43
+wgsl-sha256 = 64d1e339cb7727b97a54eac124c923bb0e79b039ef9d93dce362a93e99b4f42b
 msl = msl/probe_gather.metal
-msl-sha256 = 72522a67a2c7ce93c73adb55b26b45ff04465893951b5c1e34c4e5a29f308878
-dxil = computeMain:dxil/probe_gather.compute.dxil:4de757a73c5a8db9cbf4f8d94da1efd2cac9155ea11f50ebf34517c64c5d7a48
+msl-sha256 = 5b9d2a405530a047416c4a1d5f1d21a112bb902a5f213eade12442ade512ed0f
+dxil = computeMain:dxil/probe_gather.compute.dxil:1bedef67a35ab4fa03e65749245815bcd1439fb445b29e03a8e8f4352b11ffac
 entry-points = computeMain:glcompute
 
 [probe_octahedral]

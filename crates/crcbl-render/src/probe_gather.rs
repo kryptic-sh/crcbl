@@ -1,9 +1,10 @@
 //! The compute pass that reads the reflective shadow map into every probe row.
 //!
 //! ```text
-//!  crate::rsm's three targets ─┐
-//!  the captured visibility maps ┼─▶ probe_gather.slang ─▶ crate::probe's rows
-//!  ProbeVolume::position, as data ┘   one workgroup per probe
+//!  crate::rsm's two maps' targets ─┐
+//!  the captured visibility maps ───┼─▶ probe_gather.slang ─▶ crate::probe's rows
+//!  ProbeVolume::position, as data ─┤     one workgroup per probe,
+//!  the punctual producer rows ─────┘     walking every producer
 //! ```
 //!
 //! `docs/plan/50-irradiance-probes.md`'s raster updater, second half.
@@ -19,6 +20,15 @@
 //! writable binding goes. So this is a bind group layout of its own, four
 //! entries of which are images and two of which are buffers, and the table's
 //! device-local memory is what makes the write legal at all — see [`crate::probe`].
+//!
+//! # One dispatch walks the sun's map and every punctual face
+//!
+//! `probe_gather.slang` ends in a plain store, so a second dispatch over the
+//! same rows would erase the first's rather than add to it. Walking every
+//! producer inside one dispatch is what keeps that store a store — and it pays
+//! the shader's `groupshared` reduction once rather than once per producer, and
+//! leaves a row a function of one dispatch, which is `docs/backlog.md`'s survey
+//! constraint C2.
 //!
 //! # The probe positions arrive as data
 //!
@@ -38,7 +48,9 @@ use crcbl_hal::{
     ShaderStages, check_portable_storage_buffers,
 };
 use crcbl_shaders::probe::ProbeVolume;
-use crcbl_shaders::probe_gather::{GATHER_PARAMS_SIZE, GATHER_WORKGROUP_SIZE, GatherParams};
+use crcbl_shaders::probe_gather::{
+    GATHER_PARAMS_SIZE, GATHER_WORKGROUP_SIZE, GatherParams, PRODUCER_STRIDE, PunctualProducer,
+};
 
 use crate::draw_gen::{bound, compute_pipeline, storage, uniform};
 use crate::graph::{BufferId, ImageId, RenderGraph};
@@ -47,6 +59,15 @@ use crate::ssao::cached_group;
 /// Bytes one probe's position occupies in the table the shader reads: a
 /// `float4`, because that is what a `StructuredBuffer<float4>` element is.
 const POSITION_STRIDE: u64 = 16;
+
+/// Rows the producer table holds: one per light tile of the shadow atlas, which
+/// is the most punctual faces a frame can draw.
+///
+/// **Sized for the atlas rather than for the frame**, because a buffer is
+/// created once and a frame's producer count moves with the lights the selection
+/// happened to admit — see [`GatherParams::producers`], which is what bounds the
+/// shader's loop.
+const PRODUCER_ROWS: usize = crate::shadow::LIGHT_TILES;
 
 /// How large a [`ProbeGather`] is and what it writes into.
 #[derive(Clone, Copy, Debug)]
@@ -76,6 +97,9 @@ pub(crate) struct ProbeGather {
     probes: Vec<BufferHandle>,
     /// Where each probe stands, evaluated once from the volume.
     positions: BufferHandle,
+    /// One producer table per frame in flight, host-uploaded and rewritten every
+    /// frame: the lights move, and so does which of them holds an atlas tile.
+    producers: Vec<BufferHandle>,
     /// One cached bind group per frame — see [`cached_group`] for why a group
     /// naming a graph transient cannot be built where the others are.
     groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
@@ -83,15 +107,26 @@ pub(crate) struct ProbeGather {
     rows: u32,
 }
 
-/// The three targets [`crate::rsm`]'s pass wrote, as the graph knows them.
+/// The three targets one of [`crate::rsm`]'s passes wrote, as the graph knows
+/// them.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RsmImages {
+pub(crate) struct RsmTargets {
     /// `RsmOutput::albedo`.
     pub(crate) albedo: ImageId,
     /// `RsmOutput::normal`.
     pub(crate) normal: ImageId,
     /// `RsmOutput::world`.
     pub(crate) world: ImageId,
+}
+
+/// Both maps [`crate::rsm`] describes, as the graph knows them.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RsmImages {
+    /// The sun's near cascade, drawn once at [`crate::rsm::extent`].
+    pub(crate) sun: RsmTargets,
+    /// Every shadowed punctual face, drawn one tile each at
+    /// [`crate::rsm::punctual_extent`] — see [`crate::rsm::punctual_tile`].
+    pub(crate) punctual: RsmTargets,
 }
 
 impl ProbeGather {
@@ -159,6 +194,10 @@ impl ProbeGather {
             sampled(4, ImageViewType::D2),
             sampled(5, ImageViewType::D2),
             storage(6, false),
+            sampled(7, ImageViewType::D2),
+            sampled(8, ImageViewType::D2),
+            sampled(9, ImageViewType::D2),
+            storage(10, true),
         ];
         let layout_desc = BindGroupLayoutDesc {
             label: Some(label),
@@ -192,6 +231,7 @@ impl ProbeGather {
         device.write_buffer(positions, 0, &position_table(&desc.volume))?;
 
         let mut params = Vec::with_capacity(desc.probes.len());
+        let mut producers = Vec::with_capacity(desc.probes.len());
         for frame in 0..desc.probes.len() {
             let block = device.create_buffer(&BufferDesc {
                 label: Some(&format!("{label} params {frame}")),
@@ -201,6 +241,14 @@ impl ProbeGather {
             })?;
             rollback.buffers.push(block);
             params.push(block);
+            let table = device.create_buffer(&BufferDesc {
+                label: Some(&format!("{label} producers {frame}")),
+                size: (PRODUCER_ROWS * PRODUCER_STRIDE) as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })?;
+            rollback.buffers.push(table);
+            producers.push(table);
         }
 
         Ok(Self {
@@ -210,19 +258,27 @@ impl ProbeGather {
             params,
             probes: desc.probes.to_vec(),
             positions,
+            producers,
             groups: vec![None; desc.probes.len()],
             rows,
         })
     }
 
-    /// Writes `frame`'s parameter block.
+    /// Writes `frame`'s parameter block and its producer table.
     ///
     /// Called once per frame, before [`ProbeGather::add_pass`], against the same
     /// frame slot the probe table is bound from.
     ///
+    /// `producers` is every punctual face the frame's punctual pass is about to
+    /// draw, **in the order it draws them** — the shader reads a row's own tile
+    /// rectangle rather than deriving one, so the two lists have to be the same
+    /// list. `crate::forward`'s `punctual_faces` is the one place it is built.
+    /// A `producers` longer than the table holds is truncated to it, which is
+    /// the atlas's own bound and so cannot happen from a legal selection.
+    ///
     /// # Errors
     ///
-    /// [`HalError`] if the write failed.
+    /// [`HalError`] if either write failed.
     ///
     /// # Panics
     ///
@@ -233,14 +289,30 @@ impl ProbeGather {
         frame: usize,
         sun_color: [f32; 3],
         texel_area: f32,
+        producers: &[PunctualProducer],
     ) -> Result<(), HalError> {
+        let producers = &producers[..producers.len().min(PRODUCER_ROWS)];
         let params = GatherParams {
             sun_color,
             texel_area,
             rsm_side: crcbl_shaders::probe_gather::RSM_SIDE,
             probes: self.rows,
+            producers: u32::try_from(producers.len())
+                .unwrap_or_else(|_| unreachable!("bounded by the atlas's light tiles")),
         };
-        device.write_buffer(self.params[frame], 0, &params.to_bytes())
+        device.write_buffer(self.params[frame], 0, &params.to_bytes())?;
+        // **Only the rows the block claims.** The rest of the table is whatever
+        // an earlier frame left there, and the shader's loop stops at
+        // `params.producers` — so a shorter frame reads none of it rather than
+        // paying to zero a buffer nothing will look at.
+        let mut bytes = Vec::with_capacity(producers.len() * PRODUCER_STRIDE);
+        for producer in producers {
+            bytes.extend_from_slice(&producer.to_bytes());
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        device.write_buffer(self.producers[frame], 0, &bytes)
     }
 
     /// Adds the gather to `graph`: one workgroup per probe, reading `images` and
@@ -269,20 +341,27 @@ impl ProbeGather {
         let positions = self.positions;
         let rows = self.rows;
         let probes = self.probes[frame];
+        let producers = self.producers[frame];
         // Split off before the closure, so it borrows this slot of the cache
         // rather than the whole of `self` — `crate::ssao`'s add_passes does the
         // same and for the same reason.
         let cached = &mut self.groups[frame];
         graph
             .add_compute_pass("probe-gather")
-            .read_image(images.albedo)
-            .read_image(images.normal)
-            .read_image(images.world)
+            .read_image(images.sun.albedo)
+            .read_image(images.sun.normal)
+            .read_image(images.sun.world)
+            .read_image(images.punctual.albedo)
+            .read_image(images.punctual.normal)
+            .read_image(images.punctual.world)
             .use_buffer(table, ResourceState::ShaderReadWrite)
             .execute(move |ctx| {
-                let albedo = ctx.image_view(images.albedo);
-                let normal = ctx.image_view(images.normal);
-                let world = ctx.image_view(images.world);
+                let albedo = ctx.image_view(images.sun.albedo);
+                let normal = ctx.image_view(images.sun.normal);
+                let world = ctx.image_view(images.sun.world);
+                let punctual_albedo = ctx.image_view(images.punctual.albedo);
+                let punctual_normal = ctx.image_view(images.punctual.normal);
+                let punctual_world = ctx.image_view(images.punctual.world);
                 let device = ctx.device();
                 let entries = vec![
                     bound(0, params),
@@ -311,6 +390,22 @@ impl ProbeGather {
                         resource: BindingResource::ImageView(world),
                     },
                     bound(6, probes),
+                    BindGroupEntry {
+                        binding: 7,
+                        array_index: 0,
+                        resource: BindingResource::ImageView(punctual_albedo),
+                    },
+                    BindGroupEntry {
+                        binding: 8,
+                        array_index: 0,
+                        resource: BindingResource::ImageView(punctual_normal),
+                    },
+                    BindGroupEntry {
+                        binding: 9,
+                        array_index: 0,
+                        resource: BindingResource::ImageView(punctual_world),
+                    },
+                    bound(10, producers),
                 ];
                 // **The visibility view is part of the key too.** It is the
                 // placeholder until `capture_probe_visibility` has run and the
@@ -320,7 +415,15 @@ impl ProbeGather {
                 let Some(group) = cached_group(
                     cached,
                     device,
-                    &[(2, visibility), (3, albedo), (4, normal), (5, world)],
+                    &[
+                        (2, visibility),
+                        (3, albedo),
+                        (4, normal),
+                        (5, world),
+                        (7, punctual_albedo),
+                        (8, punctual_normal),
+                        (9, punctual_world),
+                    ],
                     "probe gather",
                     layout,
                     entries,
@@ -346,7 +449,7 @@ impl ProbeGather {
         }
         device.destroy_bind_group_layout(self.layout);
         device.destroy_buffer(self.positions);
-        for buffer in self.params {
+        for buffer in self.params.into_iter().chain(self.producers) {
             device.destroy_buffer(buffer);
         }
     }
@@ -419,6 +522,22 @@ mod tests {
             inv_spacing: [0.5, 0.25, 1.0],
             counts: [2, 3, 4],
             levels: 2,
+        }
+    }
+
+    /// One producer row, with every field distinct so a table written in the
+    /// wrong order is a different set of bytes.
+    fn producer() -> PunctualProducer {
+        PunctualProducer {
+            position: [1.0, 2.0, 3.0],
+            radius: 4.0,
+            color: [0.5, 0.25, 0.125],
+            cos_outer: 0.5,
+            axis: [0.0, -1.0, 0.0],
+            cos_inner: 0.9,
+            origin: [16, 32],
+            side: 16,
+            kind: crcbl_shaders::light::KIND_SPOT,
         }
     }
 
@@ -553,11 +672,58 @@ mod tests {
         .expect("the null backend accepts every descriptor");
         assert!(recorder.total_live_objects() > before);
         gather
-            .begin_frame(device.as_ref(), 0, [1.0, 1.0, 1.0], 0.25)
+            .begin_frame(device.as_ref(), 0, [1.0, 1.0, 1.0], 0.25, &[producer()])
             .expect("a host-upload write always lands");
         gather.destroy(device.as_ref());
         assert_eq!(recorder.total_live_objects(), before);
 
+        table.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **A frame with more punctual faces than the atlas has light tiles writes
+    /// only the tiles**, rather than running off the end of a buffer sized for
+    /// them.
+    ///
+    /// The selection cannot hand out such a list — [`PRODUCER_ROWS`] is that
+    /// atlas's own bound — so what this guards is the one place the two counts
+    /// could drift apart. Shown red by removing the truncation, which makes the
+    /// write overrun the buffer and the backend refuse it.
+    #[test]
+    fn a_producer_table_is_bounded_by_the_atlas_s_light_tiles() {
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(adapter.id))
+            .expect("the null backend always opens");
+        let queue = device.queue(QueueKind::Graphics).expect("always present");
+        let volume = volume();
+        let table = crate::probe::ProbeTable::new(
+            device.as_ref(),
+            queue,
+            &crate::probe::ProbeTableDesc {
+                label: Some("test"),
+                capacity: volume.total(),
+                frames: 1,
+            },
+        )
+        .expect("the null backend accepts every descriptor");
+        let gather = ProbeGather::new(
+            device.as_ref(),
+            &ProbeGatherDesc {
+                label: Some("test"),
+                volume,
+                probes: &[table.buffer(0)],
+            },
+        )
+        .expect("the null backend accepts every descriptor");
+        let too_many = vec![producer(); PRODUCER_ROWS + 3];
+        gather
+            .begin_frame(device.as_ref(), 0, [1.0; 3], 0.25, &too_many)
+            .expect("the table takes the rows it has room for and no more");
+
+        gather.destroy(device.as_ref());
         table.destroy(device.as_ref());
         recorder.assert_valid();
     }

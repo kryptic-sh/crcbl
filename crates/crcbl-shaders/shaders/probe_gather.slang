@@ -6,9 +6,10 @@
 // visibility map.
 //
 // ```text
-//  rsm albedo ─┐
-//  rsm normal ─┼─▶ one workgroup per probe, every thread striding every texel
-//  rsm world ──┘        │
+//  the sun's map ────────┐
+//  the punctual atlas ───┼─▶ one workgroup per probe, every thread striding
+//  PunctualProducer rows ┘        every texel of every producer
+//                       │
 //                       ├─ probe_chebyshev ─▶ a texel the probe cannot see is
 //                       │                     dropped outright
 //                       ▼
@@ -25,6 +26,16 @@
 // history. `docs/backlog.md`'s survey constraint C2 holds by construction and a
 // frame is a function of its own inputs.
 //
+// # One dispatch walks every producer, and the store stays a store
+//
+// The sun's map and every punctual face are read by the same invocation of this
+// shader. A second dispatch over the same rows would have to `+=` into a row
+// some other dispatch had already written, which is a row that is a function of
+// how many passes preceded it rather than of this frame's inputs — the same
+// property the header above rests on. Walking both here also pays the
+// `groupshared` tree once instead of once per producer, and leaves the write at
+// the bottom the plain store it has always been.
+//
 // # `probe_chebyshev` and not `probe_weight`
 //
 // `PROBE_OCCLUDED_WEIGHT` is a property of the trilinear blend's *divisor* — it
@@ -36,6 +47,37 @@
 // `crcbl_shaders::probe_visibility`'s
 // `the_shaders_weigh_a_probe_the_way_this_module_does` holds this file's copy of
 // the bound to that file's and to `ssr.slang`'s, character for character.
+//
+// # What a punctual producer's texel contributes
+//
+// The same derivation as the sun's below, with one difference: a punctual light
+// is not a beam of fixed cross-section, so a texel's own area is not a constant.
+// Take a texel's distance to the light `d` and the solid angle `ω` it subtends
+// *from the light*. The engine shades this light's direct term as
+// `color · punctual_falloff(d, radius) · spot_cone · (n·l)`, so the patch behind
+// the texel has area `A = ω · d² / (n·l)` and reflects
+//
+// ```text
+//   Φ = albedo · color · spot_cone · punctual_falloff(d, radius) · (n·l) · A
+//     = albedo · color · spot_cone · punctual_falloff(d, radius) · ω · d²
+// ```
+//
+// — `n·l` cancels for the sun's own reason, and is left out rather than written
+// and divided away. So the radiance handed to `gather_patch` is
+// `albedo · color · spot_cone / π` and the area is `ω · d² · punctual_falloff`.
+//
+// **The falloff is the engine's, not a physical inverse square.** It is
+// `mesh.slang`'s own `range_window` and its `1 / (d² + 1)`, copied below because
+// Slang has no `#include`, so a light whose direct contribution the engine has
+// already bent keeps that bend in its bounce and no scene needs a second
+// intensity to make the two agree.
+//
+// **`ω` is analytic.** A shadow face is a perspective of half-angle `θ` — a
+// right angle for a cube face, the cone's own outer half-angle for a spot — so a
+// texel at `(u, v)` in `-1..1` covers `(2 tan θ / side)²` of the plane at unit
+// depth and subtends `(2 tan θ / side)² / (u² tan²θ + v² tan²θ + 1)^{3/2}`. That
+// is a closed form of the fragment's own coordinates and wants no host number
+// beside it.
 //
 // # The albedo target carries no sun, and this is where the sun is applied
 //
@@ -117,12 +159,20 @@ static const float PROBE_INV_PI = 0.3183098861837907;
 /// The most one texel's `texel_area · facing / r²` may be credited with.
 ///
 /// That quantity is the texel's solid angle at the probe scaled by the cosine
-/// between its surface and the sun — see the header's derivation — so it is
-/// bounded above by the hemisphere a patch can subtend, and this is that bound.
+/// between its surface and the light that lit it — see the header's derivation —
+/// so it is bounded above by the hemisphere a patch can subtend, and this is
+/// that bound.
 /// A bound rather than a fudge: the quotient grows without limit as `r` goes to
 /// zero, and a probe standing on a surface would otherwise take the whole room's
 /// colour from the one texel it is touching.
 static const float PROBE_MAX_SOLID_ANGLE = 6.283185307179586;
+
+/// `PunctualProducer::kind` for a light with a cone over it —
+/// `crcbl_shaders::light::KIND_SPOT`, which is the light row's own field rather
+/// than a second numbering. Every other kind this pass can be handed is a point
+/// light, and `crcbl_render::shadow::can_be_shadowed` is what keeps the sun and
+/// a rectangle out of the producer table entirely.
+static const uint PROBE_LIGHT_KIND_SPOT = 2;
 
 /// Invocations per workgroup, one workgroup per probe.
 /// `crcbl_shaders::probe_gather::GATHER_WORKGROUP_SIZE`.
@@ -146,8 +196,29 @@ struct GatherParams
     /// Rows the dispatch covers, which is the volume's total probe count. A
     /// group past it writes nothing.
     uint probes;
-    /// Padding to a `float4` boundary; unread.
-    uint reserved;
+    /// How many `producers` rows follow the sun's map — the punctual faces this
+    /// frame drew. Zero is an ordinary frame with no shadowed punctual light in
+    /// it, not a disabled one.
+    uint producers;
+};
+
+/// One punctual shadow face drawn into the punctual reflective shadow map,
+/// matching `crcbl_shaders::probe_gather::PunctualProducer`.
+struct PunctualProducer
+{
+    /// Where the light is in `xyz`; `w` is the radius its falloff reaches zero
+    /// at.
+    float4 position;
+    /// Its colour premultiplied by intensity in `rgb`; `w` is the cosine of the
+    /// cone's outer half-angle, unread unless `tile.w` is
+    /// `PROBE_LIGHT_KIND_SPOT`.
+    float4 color;
+    /// The cone's axis in `xyz`, pointing away from the light; `w` is the cosine
+    /// of its inner half-angle. Both unread for a point light.
+    float4 axis;
+    /// Where this face's tile starts in the punctual map in `xy`, its side in
+    /// `z`, and the light's kind in `w`.
+    uint4 tile;
 };
 
 [[vk::binding(0, 0)]]
@@ -192,6 +263,26 @@ Texture2D<float4> rsm_world;
 /// between four compilers and one Rust serialiser.
 [[vk::binding(6, 0)]]
 RWStructuredBuffer<float4> probes;
+
+/// The punctual map's diffuse albedo — the same `RsmOutput::albedo` the sun's
+/// map carries, drawn one tile per shadowed light face.
+[[vk::binding(7, 0)]]
+Texture2D<float4> punctual_albedo;
+
+/// Its world normals, encoded `n * 0.5 + 0.5` — `RsmOutput::normal`.
+[[vk::binding(8, 0)]]
+Texture2D<float4> punctual_normal;
+
+/// Its world positions in `xyz`, with the coverage flag in `w` —
+/// `RsmOutput::world`.
+[[vk::binding(9, 0)]]
+Texture2D<float4> punctual_world;
+
+/// Which light each tile of that map was drawn for, `params.producers` rows of
+/// it — `crcbl_render::probe_gather` writes it from the same list
+/// `crcbl_render::forward`'s punctual pass draws.
+[[vk::binding(10, 0)]]
+StructuredBuffer<PunctualProducer> producers;
 
 /// `+1` for a positive or zero value and `-1` for a negative one — the
 /// octahedral mapping's `signNotZero`.
@@ -265,6 +356,59 @@ float probe_chebyshev(uint index, float3 probe_position, float3 world_position, 
     return to_surface <= moments.x ? 1.0 : bound * bound * bound;
 }
 
+/// Karis' quartic window on a light's reach: `1` at the light, **exactly zero**
+/// at `radius`, and smooth between.
+///
+/// `mesh.slang`'s own, character for character — Slang has no `#include`, and
+/// `the_gather_falls_off_the_way_the_shading_does` is what holds the two copies
+/// together. It is what makes a light's bounce agree with the direct term the
+/// same light already contributed, rather than a physical inverse square that
+/// would disagree with everything the engine shades.
+float range_window(float distance, float radius)
+{
+    float ratio = distance / max(radius, 1e-6);
+    float window = saturate(1.0 - ratio * ratio * ratio * ratio);
+    return window * window;
+}
+
+/// How bright a punctual light is at `distance`, reaching **exactly zero** at
+/// `radius` — `mesh.slang`'s, on [`range_window`]'s terms.
+float punctual_falloff(float distance, float radius)
+{
+    return range_window(distance, radius) / (distance * distance + 1.0);
+}
+
+/// How much of a spot light this direction is inside its cone for —
+/// `mesh.slang`'s, on `range_window`'s terms.
+float spot_cone(float3 to_light, float3 axis, float cos_outer, float cos_inner)
+{
+    float cosine = dot(-to_light, normalize(axis));
+    return saturate((cosine - cos_outer) / max(cos_inner - cos_outer, 1e-4));
+}
+
+/// The tangent of the half-angle of the perspective one producer's face was
+/// drawn through, which is what scales a texel's own solid angle.
+///
+/// **Derived from the cosine the row already carries** rather than handed in
+/// beside it: `crcbl_render::shadow::spot_matrix` builds a cone's projection
+/// with the light's outer half-angle as its own half field of view, and
+/// `crcbl_render::rsm`'s `a_spot_s_map_is_a_perspective_of_its_own_outer_angle`
+/// is what holds that statement to this one. A second number here would be a
+/// second thing that can disagree with the matrix the tile was rendered
+/// through. `crcbl_render::shadow::MAX_SPOT_HALF_ANGLE` keeps the cosine well
+/// clear of zero.
+float producer_tangent(PunctualProducer light)
+{
+    // A cube face is a right angle, whose half-angle's tangent is one — the same
+    // fact `mesh.slang`'s `point_visibility` reads a face's axial depth off.
+    if (light.tile.w != PROBE_LIGHT_KIND_SPOT)
+    {
+        return 1.0;
+    }
+    float cosine = max(light.color.w, 1e-3);
+    return sqrt(max(1.0 - cosine * cosine, 0.0)) / cosine;
+}
+
 /// One thread's running sum of the three channels' four coefficients, in
 /// `GpuProbe`'s own `(L1x, L1y, L1z, L0)` packing.
 struct Bands
@@ -287,6 +431,51 @@ void accumulate(inout Bands bands, float3 direction, float3 radiance, float soli
     bands.r += basis * radiance.r;
     bands.g += basis * radiance.g;
     bands.b += basis * radiance.b;
+}
+
+/// Adds one texel's patch to `bands`, gated by the probe's own visibility map.
+///
+/// **What every producer's loop shares**, once it has worked out what its texel
+/// reflects and how much area that texel stands for. `patch_area` is that area
+/// measured *across the beam that lit it* — a constant for the sun's
+/// orthographic cascade, and `ω · d² · punctual_falloff` for a punctual light,
+/// which is the header's derivation. `radiance` is what the patch sends back,
+/// the light's own cosine already cancelled against the area.
+void gather_patch(inout Bands bands, uint probe, float3 probe_position,
+                  float3 sample_position, float3 sample_normal, float3 radiance,
+                  float patch_area)
+{
+    float3 offset = sample_position - probe_position;
+    float distance_squared = dot(offset, offset);
+    // A probe standing exactly on a patch has no direction to that patch.
+    // `PROBE_MAX_SOLID_ANGLE` bounds what a merely *close* one may take; this is
+    // the degenerate case that has no direction at all.
+    if (distance_squared <= 1e-12)
+    {
+        return;
+    }
+    float distance = sqrt(distance_squared);
+    float3 direction = offset / distance;
+
+    // How much of itself the patch shows the probe. A patch turned away
+    // reflects nothing towards it, and its solid angle there is zero rather
+    // than negative.
+    float facing = dot(sample_normal, -direction);
+    if (facing <= 0.0)
+    {
+        return;
+    }
+
+    // The whole point of the pass: a patch the probe's own visibility map
+    // reports as behind a wall contributes nothing at all.
+    float visibility = probe_chebyshev(probe, probe_position, sample_position, sample_normal);
+    if (visibility <= 0.0)
+    {
+        return;
+    }
+
+    float weight = min(patch_area * facing / distance_squared, PROBE_MAX_SOLID_ANGLE);
+    accumulate(bands, direction, radiance * visibility, weight);
 }
 
 /// One slot per thread of the reduction below, three `float4`s each.
@@ -315,6 +504,8 @@ void computeMain(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     if (probe < params.probes)
     {
         float3 probe_position = probe_positions[probe].xyz;
+
+        // --- the sun's cascade ---
         uint side = max(params.rsm_side, 1u);
         uint texels = side * side;
         for (uint index = lane; index < texels; index += PROBE_GATHER_THREADS)
@@ -331,49 +522,78 @@ void computeMain(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             {
                 continue;
             }
-            float3 sample_position = world.xyz;
             // Normalised rather than trusted: the encode is `n * 0.5 + 0.5` into
             // an eight-bit target, so what comes back is the direction to within
             // a quantisation step and not a unit vector.
             float3 sample_normal = normalize(rsm_normal.Load(at).xyz * 2.0 - 1.0);
 
-            float3 offset = sample_position - probe_position;
-            float distance_squared = dot(offset, offset);
-            // A probe standing exactly on a patch has no direction to that
-            // patch. `PROBE_MAX_SOLID_ANGLE` bounds what a merely *close* one
-            // may take; this is the degenerate case that has no direction at all.
-            if (distance_squared <= 1e-12)
-            {
-                continue;
-            }
-            float distance = sqrt(distance_squared);
-            float3 direction = offset / distance;
-
-            // How much of itself the patch shows the probe. A patch turned away
-            // reflects nothing towards it, and its solid angle there is zero
-            // rather than negative.
-            float facing = dot(sample_normal, -direction);
-            if (facing <= 0.0)
-            {
-                continue;
-            }
-
-            // The whole point of the pass: a patch the probe's own visibility
-            // map reports as behind a wall contributes nothing at all.
-            float visibility = probe_chebyshev(probe, probe_position, sample_position,
-                                               sample_normal);
-            if (visibility <= 0.0)
-            {
-                continue;
-            }
-
             // **The sun's own cosine is deliberately absent** — the header's
             // derivation is why, and it is the one thing here a reader will
             // expect to see and must not.
             float3 radiance = rsm_albedo.Load(at).rgb * params.sun_color.rgb * PROBE_INV_PI;
-            float weight =
-                min(params.texel_area * facing / distance_squared, PROBE_MAX_SOLID_ANGLE);
-            accumulate(bands, direction, radiance * visibility, weight);
+            gather_patch(bands, probe, probe_position, world.xyz, sample_normal, radiance,
+                         params.texel_area);
+        }
+
+        // --- every punctual face this frame drew ---
+        //
+        // `params.producers` is uniform across the group, so every lane walks
+        // the same producers in the same order and the reduction below is over
+        // the same lanes it always was.
+        for (uint producer = 0u; producer < params.producers; ++producer)
+        {
+            PunctualProducer light = producers[producer];
+            uint tile_side = max(light.tile.z, 1u);
+            uint tile_texels = tile_side * tile_side;
+            // The face's half-angle, and the width of one texel on the plane at
+            // unit depth — both constant across the tile, so they are hoisted
+            // out of the loop rather than recomputed per texel.
+            float tangent = producer_tangent(light);
+            float footprint = 2.0 * tangent / float(tile_side);
+            for (uint index = lane; index < tile_texels; index += PROBE_GATHER_THREADS)
+            {
+                uint row = index / tile_side;
+                uint column = index - row * tile_side;
+                int3 at = int3(int(light.tile.x + column), int(light.tile.y + row), 0);
+
+                float4 world = punctual_world.Load(at);
+                if (world.w <= 0.0)
+                {
+                    continue;
+                }
+                float3 sample_normal = normalize(punctual_normal.Load(at).xyz * 2.0 - 1.0);
+
+                float3 to_light = light.position.xyz - world.xyz;
+                float to_light_distance = length(to_light);
+                // A patch the light stands exactly on has no direction to the
+                // light, so it has no cone to be inside and no beam to reflect.
+                if (to_light_distance <= 1e-6)
+                {
+                    continue;
+                }
+                to_light /= to_light_distance;
+
+                float cone = light.tile.w == PROBE_LIGHT_KIND_SPOT
+                                 ? spot_cone(to_light, light.axis.xyz, light.color.w,
+                                             light.axis.w)
+                                 : 1.0;
+
+                // The texel's own solid angle from the light, off its position in
+                // the tile and nothing else — the header's closed form.
+                float u = (2.0 * (float(column) + 0.5) / float(tile_side) - 1.0) * tangent;
+                float v = (2.0 * (float(row) + 0.5) / float(tile_side) - 1.0) * tangent;
+                float axial = u * u + v * v + 1.0;
+                float omega = footprint * footprint / (axial * sqrt(axial));
+
+                // **The light's own cosine is absent for the sun's reason**, and
+                // the area below is what it cancelled against.
+                float3 radiance =
+                    punctual_albedo.Load(at).rgb * light.color.rgb * cone * PROBE_INV_PI;
+                float area = omega * to_light_distance * to_light_distance
+                           * punctual_falloff(to_light_distance, light.position.w);
+                gather_patch(bands, probe, probe_position, world.xyz, sample_normal, radiance,
+                             area);
+            }
         }
     }
 

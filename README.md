@@ -48,11 +48,11 @@ What is real today:
   SSR, clustered lights — point, spot and rectangular area lights shaded by
   linearly transformed cosines — an irradiance probe clipmap whose probes each
   carry a visibility map, captured on the GPU, so a probe a fragment cannot see
-  past a wall lends it no light, and a reflective shadow map that refills those
-  probes from the sun every frame for a scene that asks for it; volumetric fog,
-  bloom, auto-exposure, SMAA and FXAA, render-scale upscaling, GPU skinning,
-  tonemapping and a screen-space grid, with mesh shaders and bindless where the
-  device has them.
+  past a wall lends it no light, and reflective shadow maps that refill those
+  probes from the sun and from every shadowed point and spot light, every frame,
+  for a scene that asks for it; volumetric fog, bloom, auto-exposure, SMAA and
+  FXAA, render-scale upscaling, GPU skinning, tonemapping and a screen-space
+  grid, with mesh shaders and bindless where the device has them.
 - **glTF import** with meshlet building, a cluster DAG and QEM simplification.
 - **A server-authoritative game stack** — fixed-tick simulation, snapshots,
   interpolation, an ECS, physics, input mapping, audio, persistence and a job

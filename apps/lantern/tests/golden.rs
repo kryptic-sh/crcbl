@@ -186,11 +186,19 @@ const MIRROR_FRACTION_OF_PLASTER: f32 = 0.05;
 /// rather than changing the hit. So 15%, on the old constant's terms: margin
 /// over a measured difference the two adapters agree on.
 ///
+/// **The punctual producer widened the remainder again**, and for the plainest
+/// of the three reasons: the probe rows now carry the lamp's first bounce as
+/// well as the sun's, so there is more environment behind this hit to remove.
+/// Measured 2026-09-04: the point reads 61.2 -> 47.7 on the discrete adapter and
+/// 61.4 -> 47.9 on llvmpipe, 22.1% either way. So 28%, on the terms every
+/// widening before it took: margin over a measured difference the two adapters
+/// agree on to a tenth of a level.
+///
 /// The teeth are unchanged. A fallback substituted for the hit is not a few per
 /// cent: with the probe rows zeroed the fallback reads at most 1.0, which the
-/// miss point in the same test pins at 20.3 -> 0.0, so that failure lands an
+/// miss point in the same test pins at 27.2 -> 0.0, so that failure lands an
 /// order of magnitude below this threshold whichever of the two it is.
-const SSR_HIT_TOLERANCE: f32 = 0.15;
+const SSR_HIT_TOLERANCE: f32 = 0.28;
 
 /// How much brighter the foot of the mirror panel is than its face further up.
 ///
@@ -248,8 +256,36 @@ const MIRROR_AT: Vec3 = room::MIRROR_MISSES;
 /// A point on the plaster back wall, clear of the panel and of the plinth.
 ///
 /// [`room::UNTINTED_PLASTER`] — the comparand the SSR-miss control above is
-/// measured against, and directly lit, which is what makes it one.
+/// measured against, and the far half of the bounce claim below; the module that
+/// owns it is where the proof that nothing but the bounce separates it from
+/// [`TINTED_AT`] lives.
 const PLASTER_AT: Vec3 = room::UNTINTED_PLASTER;
+
+/// The same plaster **beside the coloured wall**, mirrored across the room's
+/// axis — [`room::TINTED_PLASTER`].
+const TINTED_AT: Vec3 = room::TINTED_PLASTER;
+
+/// How much redder, in red-to-blue, the plaster beside the coloured wall has to
+/// read than the same plaster across the room.
+///
+/// **The rendered symptom of the punctual producer.** The coloured wall is lit
+/// by the room's orbiting lamp and by nothing else — the sun cannot reach it and
+/// the downlight's cone is in the far corner — so this ratio is zero for an
+/// updater that gathers the sun alone, which is what it measured while one did:
+/// 0.999, no tint at all. A ratio of ratios, so it survives the tonemap and the
+/// exposure the way every other claim here does.
+///
+/// **Fifteen per cent, against a measured thirty-one on both tiers at both
+/// extents**: 1.3097 at [`EXTENT`] and 1.3130 at [`REVIEW_EXTENT`] on radv,
+/// 1.3071 and 1.3124 on llvmpipe. Under half the measured excess, which is the
+/// margin the deleted 1.10-against-1.17 form of this constant kept — and the
+/// failure it guards is not near the threshold: an updater that gathers the sun
+/// alone reads 0.999, which is the whole way down.
+///
+/// Not higher: the two blocks differ in one term of the shading added to a flat
+/// ambient, and the tonemap and the sRGB encode both compress that difference
+/// rather than preserving it.
+const BOUNCE_TINT: f32 = 1.15;
 
 /// Floor in the plinth's contact corner, where ambient occlusion is strongest.
 ///
@@ -304,7 +340,22 @@ const SPOT_SHADOW_LIFT: f32 = 1.5;
 /// placeholder that is not white — but it is caught with less room than before.
 /// `docs/backlog.md` carries what that costs and how an AO intensity control
 /// would return it.
-const AO_LIFT: f32 = 1.02;
+///
+/// **And smaller a third time since the punctual producer**, which put the
+/// lamp's first bounce into this corner and left the *ratio* between the two
+/// readings narrower than it left the readings: 66.7 against 67.6 on radv and
+/// 66.8 against 67.6 on llvmpipe, ratios of 1.0135 and 1.0120, where the same
+/// pair read 57.5 against 59.7 before. So 1.008 — two thirds of the smaller
+/// measurement's excess, on this constant's own terms.
+///
+/// **The margin is thin and the repeatability is what makes it a check at all.**
+/// Both readings above repeat to a tenth of a level across runs and across the
+/// two adapters, so the 1.2% this has to resolve is more than ten times the
+/// spread of the measurement it is taken from; and the state it exists to catch
+/// is still exactly 1.00, which is the whole 0.8% below the threshold rather
+/// than beside it. It has run out of room to narrow again, and what would return
+/// it is the AO intensity control `docs/backlog.md` already names.
+const AO_LIFT: f32 = 1.008;
 
 /// A point on the front wall, dead ahead of [`room::monitor_camera`].
 ///
@@ -877,7 +928,54 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
          base-colour factor did not reach the fragment stage"
     );
 
-    // ---- 6. the downlight lights a corner and the post stands in it ---------
+    // ---- 6. and the coloured wall tints the plaster beside it ---------------
+    //
+    // Two blocks of the back wall's inner face at one height, mirrored across
+    // the room's axis: same material row, same normal, same depth, neither in
+    // the sun and neither in the lamp's reach —
+    // `room::the_two_back_wall_samples_differ_in_the_bounce_and_in_nothing_else`
+    // is what proves each has matching direct-light terms with no GPU. What is
+    // left between them is the coloured wall's bounce, and the only light on
+    // that wall is the lamp — so this claim is red for any updater that gathers
+    // the sun alone, which is what `docs/plan/50-irradiance-probes.md`'s
+    // punctual producer exists to fix.
+    let tinted = project(&camera, extent, TINTED_AT);
+    // The block has to stay off the coloured wall itself, or this measures the
+    // material row rather than its bounce — and how many pixels that is depends
+    // on the extent, so it is asked of the projection rather than written down.
+    let corner = project(
+        &camera,
+        extent,
+        Vec3::new(room::HALF_WIDTH, TINTED_AT.y, TINTED_AT.z),
+    );
+    assert!(
+        tinted.0 + block.0 < corner.0,
+        "the block beside the coloured wall reaches to {} and the wall's own corner is at \
+         {} — this block has the wall in it",
+        tinted.0 + block.0,
+        corner.0
+    );
+    let tinted_brightness = brightness(image, tinted, block);
+    assert!(
+        tinted_brightness > LIT_FLOOR,
+        "the plaster beside the coloured wall is at {tinted_brightness:.1}/255, so there is \
+         nothing to take a ratio of"
+    );
+    let tinted_redness = channel(image, tinted, block, 0) / channel(image, tinted, block, 2);
+    let plain_redness = channel(image, at_plaster, block, 0) / channel(image, at_plaster, block, 2);
+    eprintln!(
+        "lantern bounce: tinted red-to-blue {tinted_redness:.4}, plain {plain_redness:.4}, \
+         ratio {:.4}",
+        tinted_redness / plain_redness
+    );
+    assert!(
+        tinted_redness > plain_redness * BOUNCE_TINT,
+        "the plaster beside the coloured wall reads a red-to-blue of {tinted_redness:.3} and \
+         the same plaster across the room {plain_redness:.3} — the lamp's bounce off the \
+         coloured wall is missing from the probe rows"
+    );
+
+    // ---- 7. the downlight lights a corner and the post stands in it ---------
     //
     // Two blocks of the `-x` wall's inner face, both inside the cone, one with
     // the corner post between it and the fitting. Neither is in the sun — that

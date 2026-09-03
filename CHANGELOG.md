@@ -35,16 +35,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **The sun's first bounce fills a probe volume, every frame.**
-  `ProbeGrid::update` is new and defaults to `ProbeUpdate::Authored`, which is
-  the behaviour every existing scene had: the rows a scene hands over are the
-  rows the frame reads. Set it to `ProbeUpdate::EveryFrame` and the renderer
-  records two more passes — `rsm`, a reflective shadow map drawn through cascade
-  zero's own matrix and its already-generated draws, and `probe-gather`, one
-  compute workgroup per probe striding the whole map — and the volume's rows
-  become the sun's first bounce off the scene, recomputed from scratch each
-  frame with no temporal history. Each sample is weighed by the probe's own
-  visibility map, so a surface a probe cannot see lends it nothing.
+- **The first bounce of the sun and of every shadowed punctual light fills a
+  probe volume, every frame.** `ProbeGrid::update` is new and defaults to
+  `ProbeUpdate::Authored`, which is the behaviour every existing scene had: the
+  rows a scene hands over are the rows the frame reads. Set it to
+  `ProbeUpdate::EveryFrame` and the renderer records three more passes — `rsm`,
+  a reflective shadow map drawn through cascade zero's own matrix and its
+  already-generated draws; `rsm-punctual`, the same map for every shadowed point
+  and spot light, one tile per shadow face through that face's own matrix and
+  its slot's own draws; and `probe-gather`, one compute workgroup per probe
+  striding every texel of both — and the volume's rows become the scene's first
+  bounce, recomputed from scratch each frame with no temporal history. Each
+  sample is weighed by the probe's own visibility map, so a surface a probe
+  cannot see lends it nothing, and a punctual light's bounce is weighed by the
+  very falloff and cone its direct term is, so the two agree without a second
+  intensity.
+
+  So a coloured wall lit only by a lamp tints the plaster beside it, and a
+  brazier throws warm light onto what stands around it — neither of which a
+  sun-only gather can produce. The price is
+  `crcbl_shaders::probe_gather::PUNCTUAL_RSM_SIDE` texels a face, a number swept
+  before it was fixed; that constant's own docs carry the sweep.
 
   What a consumer has to do to get it: build the volume as before (origin,
   spacing, counts, one level), leave the rows at `GpuProbe::ZERO`, and set

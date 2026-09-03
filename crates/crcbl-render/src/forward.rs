@@ -150,6 +150,7 @@ use crcbl_hal::{
     ShaderModuleHandle, ShaderStages, StoreOp, Viewport, check_portable_storage_buffers,
 };
 use crcbl_shaders::meshlet::MeshClusters;
+use crcbl_shaders::probe_gather::PunctualProducer;
 use crcbl_shaders::{
     MESH, MESH_CLUSTER, Stage, TONEMAP, contact_shadows, dfg, level_select, ltc, mesh, ssao, ssr,
     tonemap,
@@ -184,7 +185,7 @@ use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDe
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshUpload};
 use crate::probe::{ProbeTable, ProbeTableDesc};
-use crate::probe_gather::{ProbeGather, ProbeGatherDesc, RsmImages};
+use crate::probe_gather::{ProbeGather, ProbeGatherDesc, RsmImages, RsmTargets};
 use crate::rsm;
 use crate::scene::{self, Geometry, InstanceDesc, ProbeUpdate, SceneDesc};
 use crate::shadow::{self, Cascades};
@@ -805,6 +806,55 @@ const fn shadow_cull(slot: usize) -> usize {
     shadow::CASCADES + slot
 }
 
+/// One punctual shadow face this frame draws into the punctual reflective
+/// shadow map, and everything both halves of the updater need of it.
+///
+/// `docs/plan/50-irradiance-probes.md`'s punctual producer. It carries no
+/// matrix and no visible set: a face's transform is already in the uniform block
+/// [`ForwardRenderer::shadow_groups`] binds, and its draws are the ones its
+/// slot's cull generated for the atlas — which is what makes this rung cost no
+/// second cull and no second matrix.
+#[derive(Clone, Copy, Debug)]
+struct PunctualFace {
+    /// Which shadow view this face is — [`shadow_view`]'s answer, and the index
+    /// of the bind group whose block holds that face's own `view_proj`.
+    view: usize,
+    /// Which of the frame's shadow culls generated its draws — [`shadow_cull`]'s
+    /// answer for the slot this face belongs to.
+    cull: usize,
+    /// Where it lands in the punctual map — [`rsm::punctual_tile`], which is the
+    /// rectangle the pass sets its viewport to *and* the one the gather reads
+    /// this face's texels out of.
+    tile: shadow::TileRect,
+    /// The light this is a face of, as the gather weighs its texels.
+    producer: PunctualProducer,
+}
+
+/// One light's row in the gather's producer table, for the face standing at
+/// `tile`.
+///
+/// **Built out of the light's own row**, which is the one place a light becomes
+/// numbers — so the falloff, the cone and the colour the bounce is weighed by
+/// are the very ones `mesh.slang` weighs the same light's direct term by, rather
+/// than a second reading of the same fields that could round or widen
+/// differently. [`Light::row`](crate::light::Light::row) is handed [`None`]
+/// because a producer occludes through nothing: the gather gates a texel with
+/// the probe's own visibility map, not with the light's.
+fn producer_row(light: &Light, tile: shadow::TileRect) -> PunctualProducer {
+    let row = light.row(None);
+    PunctualProducer {
+        position: [row.position[0], row.position[1], row.position[2]],
+        radius: row.position[3],
+        color: [row.color[0], row.color[1], row.color[2]],
+        cos_outer: row.direction[3],
+        axis: [row.direction[0], row.direction[1], row.direction[2]],
+        cos_inner: row.cos_inner,
+        origin: [tile.x, tile.y],
+        side: tile.side,
+        kind: row.kind,
+    }
+}
+
 const _: () = assert!(
     SHADOW_CULLS == shadow::GROUPS,
     "a cull is a cadence group: `shadow::Cadence` schedules what this file \
@@ -875,16 +925,19 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 }
 
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
-/// atlas's, the reflective shadow map, the depth prepass, the forward pass, the
-/// debug draw layer, the tonemap, the ground grid and the culling-statistics
-/// copy — plus [`Ssao::MAX_PASSES`], [`Ssr::PASSES`], [`ProbeGather::PASSES`],
-/// [`Bloom::MAX_PASSES`], [`Exposure::PASSES`] and [`Upscale::PASSES`] beside
-/// them.
+/// atlas's, the two reflective shadow maps, the depth prepass, the forward pass,
+/// the debug draw layer, the tonemap, the ground grid and the
+/// culling-statistics copy — plus [`Ssao::MAX_PASSES`], [`Ssr::PASSES`],
+/// [`ProbeGather::PASSES`], [`Bloom::MAX_PASSES`], [`Exposure::PASSES`] and
+/// [`Upscale::PASSES`] beside them.
 ///
-/// The reflective shadow map and [`ProbeGather::PASSES`] are counted on the
-/// ground grid's terms: both are off unless a scene's
+/// The reflective shadow maps and [`ProbeGather::PASSES`] are counted on the
+/// ground grid's terms: all three are off unless a scene's
 /// [`ProbeUpdate`] asks for them, and a bound short
-/// of the frame that does ask would silently stop timing its last pass.
+/// of the frame that does ask would silently stop timing its last pass. The
+/// punctual map is a pass whether or not the frame has a punctual light to draw
+/// into it — see `ForwardRenderer::add_shadow_pass`, where the clear is what the
+/// gather reads on a frame that lights none.
 ///
 /// Every other pass in the frame belongs to a [`DrawGen`] or to the
 /// [`LightGrid`], which is why this is the only count written here rather than
@@ -910,7 +963,7 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// either an extent or a console is known. The frame that lands on
 /// it is a large one with bloom switched on; every smaller frame records fewer,
 /// exactly as a frame with a free shadow slot does.
-const RENDER_PASSES: u32 = 7
+const RENDER_PASSES: u32 = 8
     + DebugDraw::MAX_PASSES
     + ProbeGather::PASSES
     + Ssao::MAX_PASSES
@@ -6474,6 +6527,30 @@ impl ForwardRenderer {
         let mut views: Vec<(usize, usize, mesh::FrameUniforms)> = Vec::with_capacity(SHADOW_VIEWS);
         let mut culls: Vec<(usize, Frustum)> = Vec::with_capacity(SHADOW_CULLS);
         let mut regions: [Option<(usize, Vec3, f32)>; SHADOW_CULLS] = [None; SHADOW_CULLS];
+        // One shadowed light slot's per-face matrices and the frustum its one
+        // cull runs against, read out of the selection made above.
+        //
+        // **The one derivation both paths below read.** The atlas's fitting
+        // loop takes it, and so does the shadows-off branch that keeps
+        // `docs/plan/50-irradiance-probes.md`'s punctual producer fed — so a
+        // face drawn into the atlas and the same face drawn into the reflective
+        // shadow map cannot be through different matrices.
+        let slot_matrices = |held: shadow::Assignment, light: &Light| -> (Vec<Mat4>, Frustum) {
+            let faces = (0..shadow::tile_span(light))
+                .map(|face| Mat4::from_cols_array(&light_view_proj[held.base + face]))
+                .collect();
+            let frustum = match light {
+                Light::Point(point) => shadow::point_frustum(point),
+                // A rectangle holds no slot, for the reason the
+                // `light_view_proj` fill above gives, so it cannot reach either
+                // caller; its tile's identity matrix is what this would cull
+                // against if it did.
+                Light::Spot(_) | Light::Rect(_) => Frustum::from_view_projection(
+                    Mat4::from_cols_array(&light_view_proj[held.base]),
+                ),
+            };
+            (faces, frustum)
+        };
         if shadows {
             for (cascade, region) in regions.iter_mut().take(shadow::CASCADES).enumerate() {
                 let view_proj = cascades.view_proj[cascade];
@@ -6501,26 +6578,14 @@ impl ForwardRenderer {
                     continue;
                 };
                 let group = shadow_cull(slot);
-                for face in 0..shadow::tile_span(light) {
+                let (faces, frustum) = slot_matrices(*held, light);
+                for (face, view_proj) in faces.into_iter().enumerate() {
                     views.push((
                         group,
                         shadow_view(slot, face),
-                        view_block(
-                            Mat4::from_cols_array(&light_view_proj[held.base + face]),
-                            light.sphere().0,
-                        ),
+                        view_block(view_proj, light.sphere().0),
                     ));
                 }
-                let frustum = match light {
-                    Light::Point(point) => shadow::point_frustum(point),
-                    // A rectangle holds no slot, for the reason the
-                    // `light_view_proj` fill above gives, so it cannot reach
-                    // this loop; its tile's identity matrix is what this would
-                    // cull against if it did.
-                    Light::Spot(_) | Light::Rect(_) => Frustum::from_view_projection(
-                        Mat4::from_cols_array(&light_view_proj[held.base]),
-                    ),
-                };
                 culls.push((group, frustum));
                 // **The tile's own level is the tier**, so `shadow::coverage`
                 // decides how often a light's map is redrawn exactly as it
@@ -6592,17 +6657,20 @@ impl ForwardRenderer {
             // pool, so nothing on the host can tell this group's maps from the
             // last frame's — see [`ForwardRenderer::frame_skins`].
             //
-            // **Cascade 0 is never held while the probe updater is on**, and
-            // that is a correctness rule rather than a cost: the reflective
-            // shadow map is drawn from that cascade's own draws, and the probe
-            // table is a ring of `FRAMES_IN_FLIGHT` buffers. A frame that
-            // skipped the gather would leave *this frame's* slot holding
-            // whatever was in it a turn of the ring ago — the authored rows on
-            // the second frame of all — so the room would light and unlight on
-            // alternate frames. Redrawing a held cascade costs its tile and
-            // draws exactly the texels it already held, so the atlas is
-            // unchanged; what it buys is a map for the gather to read.
-            let updater_needs_it = group == 0 && self.probe_update_runs();
+            // **No group is held while the probe updater is on**, and that is a
+            // correctness rule rather than a cost: the reflective shadow maps
+            // are drawn from these groups' own draws, and the probe table is a
+            // ring of `FRAMES_IN_FLIGHT` buffers. A frame that skipped one
+            // producer would write *this frame's* slot without it, and the next
+            // frame's would have it again — so the room would light and unlight
+            // on alternate frames. It is cascade 0's rule extended to the light
+            // slots by the punctual producer, which draws through their views
+            // exactly as the sun's half draws through cascade 0's.
+            //
+            // Redrawing a held group costs its tiles and draws exactly the
+            // texels they already held, so the atlas is unchanged; what it buys
+            // is a map for the gather to read.
+            let updater_needs_it = self.probe_update_runs();
             if !relaid
                 && !self.frame_skins
                 && !updater_needs_it
@@ -6710,11 +6778,12 @@ impl ForwardRenderer {
                 self.shadow_lod_params,
             )?;
         }
-        // Cascade 0's block and cull on a frame with shadows off, which the two
-        // loops above skipped because it is in neither list — see
-        // `updater_drives_cascade_zero`. Written straight rather than pushed
-        // into `views`/`culls`, because those are what the *atlas* is drawn from
-        // and this cascade is not being drawn into it.
+        // Cascade 0's block and cull on a frame with shadows off, and every
+        // shadowed light's beside it, which the two loops above skipped because
+        // they are in neither list — see `updater_drives_cascade_zero`. Written
+        // straight rather than pushed into `views`/`culls`, because those are
+        // what the *atlas* is drawn from and none of this is being drawn into
+        // it.
         if updater_drives_cascade_zero {
             let view_proj = cascades.view_proj[0];
             let centre = camera.eye + direction * cascades.far[0];
@@ -6734,6 +6803,36 @@ impl ForwardRenderer {
                 eye,
                 self.shadow_lod_params,
             )?;
+            // And the punctual producer's views, on exactly the terms above:
+            // the lamp's bounce is drawn through the very faces the atlas would
+            // have used, so a frame that fitted neither would switch the
+            // *bounce* off with the shadows — which is the one thing the block
+            // above exists to prevent, and `apps/lantern`'s frame claim 6 is
+            // what would say so.
+            for (slot, held) in self.shadow_lights.slots().iter().enumerate() {
+                let Some(held) = *held else {
+                    continue;
+                };
+                let Some(light) = self.extra_lights.get(held.light) else {
+                    continue;
+                };
+                let (faces, frustum) = slot_matrices(held, light);
+                for (face, view_proj) in faces.into_iter().enumerate() {
+                    device.write_buffer(
+                        self.shadow_uniforms[self.frame][shadow_view(slot, face)],
+                        0,
+                        &view_block(view_proj, light.sphere().0).to_bytes(),
+                    )?;
+                }
+                self.shadow_draws[shadow_cull(slot)].begin_frame(
+                    device,
+                    self.frame,
+                    &frustum,
+                    instance_count,
+                    eye,
+                    self.shadow_lod_params,
+                )?;
+            }
         }
         // Whether the map has a cascade to be drawn from at all: the updater is
         // on, and cascade 0's block and cull were written this frame — by the
@@ -6751,12 +6850,23 @@ impl ForwardRenderer {
         // **Written whether or not the pass is recorded.** Which slot the gather
         // reads is decided by the frame, and a block left holding an older
         // frame's sun would be read the moment the pass came back.
+        //
+        // **The producer table is written here too**, off the selection this
+        // call has just made: `add_shadow_pass` draws exactly this list and the
+        // gather walks exactly this list, and `punctual_faces` is what makes
+        // those the same sentence.
+        let producers: Vec<PunctualProducer> = self
+            .punctual_faces()
+            .iter()
+            .map(|face| face.producer)
+            .collect();
         if let Some(gather) = self.probe_gather.as_ref() {
             gather.begin_frame(
                 device,
                 self.frame,
                 self.sun_color.to_array(),
                 rsm::texel_area(self.cascade_reach),
+                &producers,
             )?;
         }
         Ok(())
@@ -6776,6 +6886,86 @@ impl ForwardRenderer {
     /// `add_shadow_pass`, which is where the rest of it is.
     fn probe_update_runs(&self) -> bool {
         self.probe_update == ProbeUpdate::EveryFrame && rsm::enabled()
+    }
+
+    /// Every punctual shadow face this frame draws into the punctual reflective
+    /// shadow map, in the order the pass draws them and the producer table lists
+    /// them.
+    ///
+    /// **One list for both halves of the updater**, and that is the point:
+    /// `add_shadow_pass` sets a viewport from a face's
+    /// [`tile`](PunctualFace::tile) and the gather reads that same rectangle out
+    /// of the matching producer row, so a face the pass drew and a row the
+    /// gather walked have to be the same face. Building the two from separate
+    /// filters is two things that can drift, and the drift would be a light
+    /// bouncing another light's map.
+    ///
+    /// **The occupied slots this frame redraws**, which is the same set
+    /// `add_shadow_pass` gives the atlas: a face's transform is a shadow view's
+    /// block and its draws are a shadow cull's, and
+    /// [`Self::begin_frame_body`](Self::begin_frame) writes neither for a slot
+    /// it is holding.
+    ///
+    /// # Every occupied tile, and no budget of its own
+    ///
+    /// The producers are exactly the atlas's occupied faces — up to
+    /// [`shadow::LIGHT_SLOTS`] lights and [`shadow::LIGHT_TILES`] tiles between
+    /// them — rather than the highest-ranked light or some smaller count.
+    ///
+    /// **Because the budget already exists and is spent.**
+    /// [`shadow::Selection`] has ranked these lights by projected screen
+    /// influence and handed out every tile there is; a second budget on top
+    /// would rank the same lights again, differently, and produce a light that
+    /// casts a shadow and lends no bounce. That is a difference no picture shows
+    /// — the same argument [`Self::shadow_lights`] makes about a map's size —
+    /// and it is the kind of quiet inconsistency the two halves of one light are
+    /// worst placed to have.
+    ///
+    /// It is affordable at the extent that was chosen for it:
+    /// `apps/lantern` lights seven faces, and
+    /// [`PUNCTUAL_RSM_SIDE`](crcbl_shaders::probe_gather::PUNCTUAL_RSM_SIDE)
+    /// carries the sweep that priced them.
+    ///
+    /// **Empty where shadows are off**, for that same reason — a punctual face
+    /// *is* a shadow view. The sun's half is not, which is what
+    /// `updater_drives_cascade_zero` exists for: switching shadows off keeps the
+    /// sun's bounce and loses every punctual one, rather than switching the
+    /// whole updater off with them.
+    fn punctual_faces(&self) -> Vec<PunctualFace> {
+        if !self.probe_update_runs() {
+            return Vec::new();
+        }
+        // A frame with the shadows switched off draws no atlas, so no group of
+        // it is *redrawn* — and `begin_frame_body`'s `updater_drives_cascade_zero`
+        // branch has still written every one of these views and dispatched every
+        // one of these culls, for this pass to draw through.
+        let updater_drives = !self.frame_effects.contains(RenderEffects::SHADOWS);
+        let mut faces = Vec::new();
+        for (slot, held) in self.shadow_lights.slots().iter().enumerate() {
+            let Some(held) = *held else {
+                continue;
+            };
+            if !updater_drives && !self.shadow_group_redrawn[shadow_cull(slot)] {
+                continue;
+            }
+            let Some(light) = self.extra_lights.get(held.light) else {
+                continue;
+            };
+            // A spot draws face 0 alone and a point light all six, each through
+            // its own matrix into its own tile — `shadow::tile_span` is the same
+            // function `Selection` allocated the run with, so a face here and a
+            // tile there cannot disagree about how many there are.
+            for face in 0..shadow::tile_span(light) {
+                let tile = rsm::punctual_tile(held.base + face);
+                faces.push(PunctualFace {
+                    view: shadow_view(slot, face),
+                    cull: shadow_cull(slot),
+                    tile,
+                    producer: producer_row(light, tile),
+                });
+            }
+        }
+        faces
     }
 
     /// Everything one group of the shadow atlas is a function of, as bytes to
@@ -8946,11 +9136,30 @@ impl ForwardRenderer {
         // lines below and an insertion before them would hand a light's draws to
         // the wrong viewport.
         let rsm_only_cull = self.rsm_cull_ready && !cascades.contains(&0);
+        // The punctual producer's faces, which are also the light slots'
+        // atlas views — see `punctual_faces`, the one list both halves of the
+        // updater walk.
+        let punctual = self.punctual_faces();
+        // And their culls on a frame that is not drawing the atlas, which
+        // `occupied` is empty on for the same reason `cascades` is. Deduplicated
+        // because a point light's six faces draw one visible set, and chained
+        // **after** the entries `views` indexes positionally below.
+        let punctual_only_culls: Vec<usize> = if shadows {
+            Vec::new()
+        } else {
+            punctual
+                .iter()
+                .map(|face| face.cull)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
         let generated: Vec<(usize, GeneratedDraws)> = cascades
             .iter()
             .copied()
             .chain(occupied.iter().map(|(slot, _, _)| shadow_cull(*slot)))
             .chain(rsm_only_cull.then_some(0))
+            .chain(punctual_only_culls)
             .map(|cull| {
                 (
                     cull,
@@ -9087,6 +9296,35 @@ impl ForwardRenderer {
                     .map(|(_, draws)| (groups[CASCADE_ZERO_VIEW], *draws))
             })
             .flatten();
+        // **What the punctual reflective shadow map is drawn from**, resolved
+        // here for `cascade_zero`'s reason and on its terms: each face's own
+        // bind group — whose uniform block already holds that face's
+        // `view_proj` — and the `GeneratedDraws` its slot's cull produced a
+        // moment ago. Both are `Copy`, so the second pass costs no second cull
+        // and no second matrix.
+        //
+        // Found by cull id rather than by position, so this list and the atlas's
+        // cannot be knocked out of step by a slot the other one skipped.
+        let punctual_views: Vec<(BindGroupHandle, shadow::TileRect, GeneratedDraws)> = punctual
+            .iter()
+            .filter_map(|face| {
+                let (_, draws) = generated.iter().find(|(cull, _)| *cull == face.cull)?;
+                Some((groups[face.view], face.tile, *draws))
+            })
+            .collect();
+        // The culls those faces draw from, **once each**: a point light's six
+        // faces draw one visible set, so declaring a face's sources would
+        // declare the same buffers six times in one pass.
+        let punctual_sources: Vec<GeneratedDraws> = punctual
+            .iter()
+            .map(|face| face.cull)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|cull| {
+                let (_, draws) = generated.iter().find(|(candidate, _)| *candidate == cull)?;
+                Some(*draws)
+            })
+            .collect();
         let bucket_draws = BucketDraws {
             pipeline: self.shadow_pipeline,
             layout: self.mesh_pipeline_layout,
@@ -9172,14 +9410,15 @@ impl ForwardRenderer {
         let Some((cascade_group, cascade_draws)) = cascade_zero else {
             return (atlas, recorded, clears, None);
         };
-        let images = RsmImages {
-            albedo: graph.create_image("rsm-albedo", rsm::albedo_target()),
-            normal: graph.create_image("rsm-normal", rsm::normal_target()),
-            world: graph.create_image("rsm-world", rsm::world_target()),
+        let extent = rsm::extent();
+        let sun = RsmTargets {
+            albedo: graph.create_image("rsm-albedo", rsm::albedo_target(extent)),
+            normal: graph.create_image("rsm-normal", rsm::normal_target(extent)),
+            world: graph.create_image("rsm-world", rsm::world_target(extent)),
         };
         // Its own depth, cleared and discarded: it resolves which surface a
         // texel of the map holds and nothing reads it afterwards.
-        let rsm_depth = graph.create_image("rsm-depth", rsm::depth_target());
+        let rsm_depth = graph.create_image("rsm-depth", rsm::depth_target(extent));
         let mut rsm = graph
             .add_render_pass("rsm")
             // **Cleared, and the world target's clear is load-bearing**: `w` is
@@ -9187,9 +9426,9 @@ impl ForwardRenderer {
             // draws nothing into reads back zero there and the gather skips it.
             // Without the clear the world origin would stand in for every part
             // of the cascade the geometry does not cover.
-            .clear_color(images.albedo, [0.0; 4])
-            .clear_color(images.normal, [0.0; 4])
-            .clear_color(images.world, [0.0; 4])
+            .clear_color(sun.albedo, [0.0; 4])
+            .clear_color(sun.normal, [0.0; 4])
+            .clear_color(sun.world, [0.0; 4])
             .clear_depth(rsm_depth)
             // The same declarations the cascade above makes, for the same
             // reason: every group of the mesh layout names these, and this pass
@@ -9220,7 +9459,84 @@ impl ForwardRenderer {
             rsm_draws.open(encoder);
             rsm_draws.record(encoder, cascade_group, &cascade_draws);
         });
-        (atlas, recorded + rsm_recorded, clears, Some(images))
+
+        // --- the punctual reflective shadow map ---
+        //
+        // `docs/plan/50-irradiance-probes.md`'s punctual producer: the same
+        // pipeline and the same per-bucket call list as the pass above, under
+        // one viewport per shadowed light face instead of one whole map. A spot
+        // is a tile and a point light is six, which is `shadow::tile_span` — so
+        // this is the atlas pass's own view loop drawn into a second, much
+        // smaller set of targets.
+        //
+        // **Recorded whether or not the frame lights a punctual face**, unlike
+        // the map above. The clear is a legitimate answer — a frame with no
+        // shadowed punctual light has no punctual bounce, and the coverage flag
+        // in `w` says so at every texel — and a pass that came and went with the
+        // lights would be a pass list that changes shape with the scene, which
+        // is what `RENDER_PASSES` and every timing reader are written against.
+        let punctual_extent = rsm::punctual_extent();
+        let punctual_targets = RsmTargets {
+            albedo: graph.create_image("rsm-punctual-albedo", rsm::albedo_target(punctual_extent)),
+            normal: graph.create_image("rsm-punctual-normal", rsm::normal_target(punctual_extent)),
+            world: graph.create_image("rsm-punctual-world", rsm::world_target(punctual_extent)),
+        };
+        let punctual_depth =
+            graph.create_image("rsm-punctual-depth", rsm::depth_target(punctual_extent));
+        let mut punctual_pass = graph
+            .add_render_pass("rsm-punctual")
+            // Cleared on the map above's terms, and the world target's clear is
+            // load-bearing for its reason as well as for one of this map's own:
+            // the tiles the cascades would hold are drawn into by nothing at
+            // all, and a coverage flag of zero is what keeps the gather out of
+            // them.
+            .clear_color(punctual_targets.albedo, [0.0; 4])
+            .clear_color(punctual_targets.normal, [0.0; 4])
+            .clear_color(punctual_targets.world, [0.0; 4])
+            .clear_depth(punctual_depth)
+            .read_image(placeholder)
+            .read_image(reads.occlusion_placeholder)
+            .read_image(reads.pages.base_color)
+            .read_image(reads.pages.normal)
+            .read_buffer(reads.probes);
+        if let Some(vertices) = reads.skinned {
+            punctual_pass = punctual_pass.read_buffer(vertices);
+        }
+        // Each face's own cluster-selection buffer, which the mesh path's stages
+        // write — declared on the atlas pass's terms, and only for the views
+        // this pass draws.
+        for face in &punctual {
+            if let Some(&buffer) = selection.get(face.view) {
+                punctual_pass = punctual_pass.use_buffer(buffer, ResourceState::ShaderReadWrite);
+            }
+        }
+        for draws in &punctual_sources {
+            punctual_pass = read_draw_sources(punctual_pass, draws, self.emit);
+        }
+        let punctual_draws = BucketDraws {
+            pipeline: self.rsm_pipeline,
+            ..bucket_calls
+        };
+        let punctual_recorded = (punctual_views.len() * punctual_draws.calls.len()) as u64;
+        punctual_pass.execute(move |ctx| {
+            let encoder = ctx.encoder();
+            punctual_draws.open(encoder);
+            for (group, tile, draws) in &punctual_views {
+                set_shadow_tile(encoder, *tile);
+                punctual_draws.record(encoder, *group, draws);
+            }
+        });
+
+        let images = RsmImages {
+            sun,
+            punctual: punctual_targets,
+        };
+        (
+            atlas,
+            recorded + rsm_recorded + punctual_recorded,
+            clears,
+            Some(images),
+        )
     }
 
     /// Which lights hold the atlas's light tiles this frame, and where each
