@@ -251,10 +251,17 @@ doc comment to the integer. The anti-baseline is that doc comment's too. The
 difference matters to the decision this entry exists for: the rung takes
 thirty-seven sharp edges to none, not one to none.
 
-- **The second blur on its own makes it worse** — 1 to 2 on radv, 1 to 5 on
-  lavapipe. Widening the footprint over a field that still carries the same tile
-  spreads the step rather than removing it. It is only worth having with the
-  extra slices.
+- **The second blur on its own is the cheap win, and this bullet said the
+  opposite** off the stale table. Measured on radv 2026-09-03 it takes 37 sharp
+  edges to **8** for one extra 38 us pass — the whole AO chain goes 317 us to
+  357 us, +13% — where the full rung buys the last 8 by doubling the gather to
+  628 us. Widening the footprint over the same tile does spread each phase, and
+  at this footprint that is what removes most of the step rather than what
+  causes it.
+- **The extra slices on their own make it worse**, which is the finding that
+  survived in the opposite place: 37 sharp edges to **100**, at double the
+  gather. Four orientations arrive with no wider blur to average the tile
+  phases, so the knobs are not separable in the direction that looked obvious.
 - **The extra slices add four plane orientations, not sixteen.** Reduced modulo
   a half turn, the sixteen entries of `SLICE_DIRECTIONS` point along eight
   orientations, and the quarter turn permutes that set onto itself. The eighth
@@ -264,12 +271,13 @@ thirty-seven sharp edges to none, not one to none.
 **What the user still has to decide.** Only the two defaults, and they are
 separable:
 
-- `r_ssao_slices 4` buys the orientations, at roughly double the `ssao` pass. On
-  its own it is already no worse than the shipping count on radv and better on
-  lavapipe.
-- `r_ssao_blur_passes 2` costs a tenth of the pair on radv and nearly a third on
-  lavapipe, and on its own it is a regression. With four slices it is what takes
-  the line to zero on both tiers.
+- `r_ssao_blur_passes 2` alone: 37 sharp edges to 8, one extra 38 us pass, +13%
+  on the AO chain. The cheapest real improvement on the table.
+- `r_ssao_slices 4` alone: 37 to 100, at double the gather. A regression, so
+  this knob is not worth moving without the other.
+- Both: 37 to 0, worst step 5 to 1, 317 us to 628 us. Still under the 645 us the
+  shipping pair cost before the halving, so it is better than pre-halving
+  quality at less than pre-halving cost.
 
 Whether a tier should spend anything on these two knobs is not this entry's
 question. `docs/plan/43-render-standards.md`'s preset row is built — the seam
