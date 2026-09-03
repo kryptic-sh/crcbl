@@ -73,15 +73,19 @@ Rust ecosystem's two equivalents were read on 2026-08-30 and **both declined**:
 So a variable is declared where it lives and listed once, by the crate:
 
 ```rust
-// crates/crcbl-render/src/forward.rs — beside the thing it controls
+// crates/crcbl-render/src/ssao.rs — beside the thing it controls
 crcbl_console::convar! {
-    /// Draw the ambient-occlusion channel as grey instead of the shaded frame.
-    pub static r_ao_view: bool = false;
+    /// Steer the ambient term by the occlusion pass's bent direction.
+    pub static r_ssao_bent_normals: bool = true;
 }
 
 // crates/crcbl-render/src/lib.rs — once per crate
 pub fn console_table() -> crcbl_console::Table {
-    crcbl_console::table![r_ao_view, r_normals_view, r_motion_view, /* … */]
+    crcbl_console::table![
+        debug_draw::r_debug_draw,
+        ssao::r_ssao_bent_normals,
+        /* … */
+    ]
 }
 ```
 
@@ -279,6 +283,8 @@ the field and draw as the not-def glyph.
 | `pause`, `quit`         | the pause toggle the loop already has; a clean `ExitReason`                                                                                             |
 | `fps`                   | the frame-timing row's numbers as a line                                                                                                                |
 | `config <name>`         | runs `<name>.cfg` from the settings directory — Source's `exec`. A bare name, never a path; a failed line is reported and the file runs on              |
+| `bind`, `unbind`        | what drives an action, and driving it with one key instead — `bind jump Space`, `unbind jump`; bare `bind` lists                                        |
+| `quality [tier]`        | the quality tier the video keys hold — `quality medium` writes one, bare prints it                                                                      |
 
 A command with a `Fault` prints the fault and leaves state alone. Unknown names
 print "unknown command or variable, try `find`". **An enum value may hold a
