@@ -185,3 +185,92 @@ fn a_failed_recording_finishes_with_an_error_rather_than_hanging() {
     headless.device.destroy();
     headless.instance.validation_report().assert_clean();
 }
+
+/// A command buffer must be submitted to a queue of the family its pool was
+/// created on, and `submit` must say so rather than hand the mismatch to the
+/// driver.
+///
+/// Vulkan requires the two to match and defines nothing about what happens when
+/// they do not, so this was the one handle misuse in this backend that was
+/// undefined behaviour instead of an error: `CommandBufferEntry` recorded the
+/// pool but not the family it came from, and `submit` looked at neither. Every
+/// other foreign or stale handle here answers with a `HalError`.
+///
+/// **A second queue being `Some` is what makes the mismatch real.**
+/// `adapter::Families` fills the compute slot only from a family carrying
+/// `COMPUTE` and not `GRAPHICS`, and the transfer slot only from one carrying
+/// `TRANSFER` and neither of the others — so a device that offers either has a
+/// family genuinely distinct from its graphics family, and the test never has
+/// to ask which index any of them landed on.
+///
+/// **The features have to be asked for.** `Headless::open`'s device requests
+/// neither `ASYNC_COMPUTE_QUEUE` nor `TRANSFER_QUEUE`, so both slots are empty
+/// there whatever the hardware offers, and a test built on it would skip on
+/// every driver in the world while looking like it had run. This opens its own
+/// device asking for both.
+///
+/// A device that really has neither cannot commit this misuse at all, and says
+/// so rather than passing quietly — lavapipe is such a device, and a green run
+/// there would be reporting on a submission that was always legal.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_command_buffer_is_refused_by_a_queue_of_another_family() {
+    let mut headless = Headless::open_pinning_format(
+        "vk e2e cross-family submit",
+        Features::ASYNC_COMPUTE_QUEUE | Features::TRANSFER_QUEUE,
+        (64, 64),
+    );
+    let device = &headless.device;
+
+    let graphics = device
+        .queue(crcbl_hal::QueueKind::Graphics)
+        .expect("every device has a graphics queue");
+    let transfer = device
+        .queue(crcbl_hal::QueueKind::Compute)
+        .or_else(|| device.queue(crcbl_hal::QueueKind::Transfer));
+
+    let encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("recorded on graphics"),
+        queue: graphics,
+    });
+    let commands = encoder.finish().expect("an empty recording finishes");
+
+    if let Some(transfer) = transfer {
+        let error = device
+            .submit(
+                transfer,
+                &SubmitInfo {
+                    command_buffers: &[commands],
+                    waits: &[],
+                    signals: &[],
+                },
+            )
+            .expect_err("a command buffer from the graphics family must not submit to transfer");
+        assert!(
+            error.to_string().contains("family"),
+            "the refusal names the family mismatch: {error}"
+        );
+    } else {
+        eprintln!(
+            "crcbl vk e2e: this device has neither an async-compute nor a dedicated transfer \
+             family, so there is no cross-family submission to refuse — that is every device \
+             whose every queue also carries graphics, lavapipe included"
+        );
+        device
+            .submit(
+                graphics,
+                &SubmitInfo {
+                    command_buffers: &[commands],
+                    waits: &[],
+                    signals: &[],
+                },
+            )
+            .expect("the same family it was recorded on is always legal");
+    }
+
+    device.wait_idle().expect("idle");
+    device.destroy_swapchain(headless.swapchain);
+    headless.instance.destroy_surface(headless.surface);
+    headless.device.destroy();
+    headless.instance.validation_report().assert_clean();
+}

@@ -210,6 +210,15 @@ pub(crate) struct CommandBufferEntry {
     pub(crate) owner: u64,
     pub(crate) raw: vk::CommandBuffer,
     pub(crate) pool: vk::CommandPool,
+    /// The queue family [`pool`](Self::pool) was created on.
+    ///
+    /// `submit` checks it against the family of the queue it was handed, which
+    /// Vulkan requires to match and does not define the behaviour of
+    /// otherwise. Every other handle misuse in this backend answers with a
+    /// [`HalError`]; without this one, that one is undefined behaviour on a
+    /// device whose `queue_of` really does hand out distinct graphics,
+    /// async-compute and transfer families.
+    pub(crate) family: u32,
     /// Raw device objects (buffers, images, views, semaphores, pools, pipelines,
     /// layouts, samplers) the recorded commands use, collected at record time. A
     /// submission extends the deletion-queue retirement of any of these that are
@@ -2656,6 +2665,19 @@ impl Device for VkDevice {
                 *handle,
                 &self.inner,
             )?;
+            // **The pool's family must be the queue's.** Vulkan requires it
+            // and does not define what a driver does otherwise, so this is the
+            // one handle misuse here that would be undefined behaviour rather
+            // than an error — and it is reachable, because `queue_of` really
+            // does hand out distinct graphics, async-compute and transfer
+            // families on a device that has them.
+            if entry.family != slot.family {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "command buffer {handle:?} was recorded on queue family {} and submitted to a \
+                     queue of family {}; Vulkan requires the pool's family to match the queue's",
+                    entry.family, slot.family
+                )));
+            }
             commands.push(
                 vk::CommandBufferSubmitInfo::default()
                     .command_buffer(entry.raw)

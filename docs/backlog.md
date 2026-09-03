@@ -21,25 +21,6 @@ The rule going forward is in the global agent instructions: no attribution
 trailer on any new commit. Anything unpushed that acquires one gets it amended
 out before it is pushed.
 
-## `crcbl-vk`'s device suite cannot run on this machine (2026-09-02)
-
-**A coverage gap, stated as one.** Every test in `crcbl-vk`'s `vk_e2e` suite
-ends in `Debug::assert_clean`, which refuses to pass unless
-`VK_LAYER_KHRONOS_validation` actually loaded — a test that goes green because
-the layer was missing proves nothing, and that is deliberate. The layer is not
-installed here (Arch: `vulkan-validation-layers`), so all 61 of them fail at
-that assertion whatever their subject did.
-
-They still carry evidence: a test that fails at its _own_ assertion line rather
-than at `debug.rs`'s got that far, which is how
-`an_amplification_stage_delivers_its_payload_to_the_mesh_stage` was found to be
-the minimal reproduction of the task-payload defect. Reading which line a
-failure names is the difference between "this suite cannot run" and "this suite
-is telling you something".
-
-Installing the layer would also give synchronisation validation, which is the
-tool this session wanted twice and did without.
-
 ## In flight on 2026-09-02, and what a lost session would lose
 
 Written down deliberately: this entry exists so the state below survives a
@@ -18130,10 +18111,11 @@ say so in place (vk's `untag`, the QOA saturation, render's "documented"
 allocations), several the tree has since answered were deleted, and four are
 **defects rather than fragility** — `write_buffer`'s memory rule differing
 across backends, view-format compatibility being three rules across four
-backends, vk's `submit` not checking the command buffer's queue family, and the
-missing re-handshake after a forged `Accept`. Those four are the ones to fix
-first; the rest of the list is unchanged in kind, sharpened where the triage
-found the original wording named the lesser half of a problem.
+backends, and the missing re-handshake after a forged `Accept`. (The fourth,
+vk's `submit` not checking the command buffer's queue family, shipped on
+2026-09-03.) Those three are the ones to fix first; the rest of the list is
+unchanged in kind, sharpened where the triage found the original wording named
+the lesser half of a problem.
 
 - **net**: `baseline_tick = 0` is wire-ambiguous (delta.rs:824/866-869;
   unreachable — the server never encodes against tick 0); a forged `Accept`
@@ -18152,13 +18134,10 @@ found the original wording named the lesser half of a problem.
   semaphore-reuse safety depends on the `slots = image_count + 1` throttle — and
   the in-code comment claiming the acquire fence is what makes reuse provably
   safe overstates it: the fence proves the signal completed, not that the
-  caller's submit-side wait retired; `submit` never checks the CB's pool family
-  matches the queue, which `queue_of` makes reachable — it really does build
-  distinct graphics, async-compute and transfer families, and this is the one
-  handle misuse in that backend that is silent UB rather than a `HalError`. The
-  `untag` claim was **never true**: `Handle` stores a `NonZeroU32` generation
-  behind a private constructor, so no handle can carry generation 0 and
-  `from_bits` cannot fail — the index is masked, not checked.
+  caller's submit-side wait retired. The `untag` claim was **never true**:
+  `Handle` stores a `NonZeroU32` generation behind a private constructor, so no
+  handle can carry generation 0 and `from_bits` cannot fail — the index is
+  masked, not checked.
 - **win32**: `ScreenToClient` return ignored in the wheel arm (proc.rs:679);
   `GlobalLock` failure reads as `ClipboardContent::Empty` (documented);
   registered-format payloads lose a trailing NUL; 0×0 descriptor creates a

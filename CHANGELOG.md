@@ -14,6 +14,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **`crcbl-vk` refuses a command buffer submitted to a queue of another family**
+  instead of handing the mismatch to the driver. Vulkan requires a pool's queue
+  family to match the queue it is submitted to and defines nothing about what
+  happens otherwise, so this was the one handle misuse in that backend that was
+  undefined behaviour rather than a `HalError` — and it is reachable, because a
+  device asked for `ASYNC_COMPUTE_QUEUE` or `TRANSFER_QUEUE` really does hand
+  out queues on families distinct from graphics.
+
 ### Changed
 
 - **`crcbl_shaders::probe::ProbeVolume` is a clipmap.** It gained a `levels`

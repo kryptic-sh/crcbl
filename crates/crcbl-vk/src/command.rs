@@ -57,6 +57,14 @@ pub(crate) struct VkCommandEncoder {
     device: Arc<DeviceInner>,
     pool: vk::CommandPool,
     raw: vk::CommandBuffer,
+    /// The queue family [`begin`](Self::begin) created [`pool`](Self::pool) on.
+    ///
+    /// Kept so `submit` can refuse a command buffer handed to a queue of
+    /// another family. Vulkan requires the pool's family to match the queue's
+    /// and says nothing about what happens otherwise, so without this the one
+    /// misuse in this backend that is undefined behaviour rather than a
+    /// [`HalError`] would reach the driver unremarked.
+    family: u32,
     /// Set when something went wrong during recording. `finish` reports it
     /// rather than handing back a command buffer that is missing commands —
     /// a half-recorded frame that submits is far worse than one that does not.
@@ -106,6 +114,9 @@ impl VkCommandEncoder {
             device,
             pool: vk::CommandPool::null(),
             raw: vk::CommandBuffer::null(),
+            // Replaced by `begin` before any recording; an encoder whose
+            // `begin` failed has no pool and never reaches `finish`.
+            family: u32::MAX,
             failed: None,
             in_render_pass: false,
             in_compute_pass: false,
@@ -123,6 +134,7 @@ impl VkCommandEncoder {
 
     fn begin(&mut self, desc: &CommandEncoderDesc<'_>) -> Result<(), HalError> {
         let family = self.device.queue_family(desc.queue)?;
+        self.family = family;
         let info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(family)
             // Every buffer from this pool is recorded once and thrown away, so
@@ -1425,6 +1437,7 @@ impl CommandEncoder for VkCommandEncoder {
                         owner: self.device.id,
                         raw,
                         pool,
+                        family: self.family,
                         references,
                         // Recorded, not submitted: until `submit` says
                         // otherwise, this recording holds everything it
