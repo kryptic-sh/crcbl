@@ -110,88 +110,31 @@ under a running waiter is the suspected trigger. Read and Write still work.
 **This is why the five commits are unverified**, not a judgement that they are
 fine. Resume by re-running the gate set above from scratch.
 
-### The docs and the demo site describe an older engine (audited, not yet fixed)
+### The docs audit's leftovers (2026-09-03)
 
-The user asked on 2026-09-02 for the README, the other docs and the site's text
-to be brought up to date. **The audit is done, against `origin/main`; none of it
-is applied.** Ground truth from the tree: 31 crates, 18 apps, 15 browser demos,
-and the demo lists in `web/build.sh`, `build-pages.mjs`, `web/pages/`,
-`web/demos/`, `browser-e2e.mjs` and `pages.yml` all agree (enforced by
-`tools/check-browser-gate-demos.sh`) — no drift there.
+The sixteen false claims it found are fixed and the entry that listed them is
+gone — `git log`'s
+`docs: the README and the site describe the engine that exists` is the record.
+What that pass did **not** settle:
 
-**Outright false, in descending order of how badly it misleads a reader.** Each
-was spot-checked against `origin/main` where marked _(confirmed)_:
-
-- `README.md` — a whole bullet says "**`crcbl-wgpu` is still in the tree and is
-  slated for deletion**". It was deleted 2026-08-21 _(confirmed)_. Delete the
-  bullet; the thing that replaced it is the `run-render-harness-e2e.sh` /
-  `run-cross-backend-e2e.sh` pair, worth naming.
-- `README.md` — "**six of them** ship as browser demos". Fifteen do
-  _(confirmed)_.
-- `README.md` — the samples table marks `viewer` as having no browser build (it
-  is a published demo) and omits `bracket`, `breach`, `options`, `orbit`,
-  `puppet`, `quarry`, `shard`, `sparks` entirely.
-- `README.md` — the Layout block names 25 of 31 crates. Missing:
-  `crcbl-shaders`, `crcbl-wl-scanner`, `crcbl-golden`, `crcbl-greybox`,
-  `crcbl-rand`, `crcbl-vfx`.
-- `README.md` — the renderer bullet predates the probe work and omits
-  `probe_capture`, `probe_visibility`, `volumetric`, `bloom`, `smaa`, `fxaa`,
-  `exposure`, `upscale`, `contact_shadows`, `sky_pass` and `skinning`.
-- `web/README.md` — "`crcbl-wgpu` is a `cfg(not(target_arch = "wasm32"))`
-  dependency of the umbrella". `crates/crcbl/Cargo.toml` has no such line.
-- `web/README.md` — "**No pointer lock**, no clipboard, no IME". The web shell
-  sets `POINTER_LOCK` **and** `RAW_POINTER_MOTION` _(confirmed:
-  `crcbl-shell/src/web/mod.rs`, which asks for `unadjustedMovement: true`)_.
-  Clipboard and IME are still genuinely clear.
-- `web/pages/breach.html` — "There is no mouselook on this page, and that is
-  deliberate". Same disproof. **Two more copies of this claim live in
-  `apps/breach/src/web.rs` and `web/demos/breach/main.js`**; fixing only the
-  page leaves the tree contradicting itself.
-- `web/pages/index.html` — lantern and quarry described as "driven in a browser
-  by hand". Both are in `pages.yml`'s matrix and have `browser-e2e.mjs`
-  `EXPECTATIONS` rows.
-- `web/pages/index.html` and `web/pages/viewer.html` — "the drop target is not
-  built yet". `web/demos/viewer/main.js`'s `installDropTarget` is wired to the
-  canvas against `apps/viewer/src/web.rs`'s `__crcbl_viewer_drop_buffer` ABI.
-- `web/pages/index.html` and `web/pages/puppet.html` — "**Nothing is animated
-  yet**". `apps/puppet/src/anim.rs` is a 1D blend on measured speed, and the
-  puppet browser gate asserts `blend`/`mid`/`dev` off a `[POSE]` line.
-- `web/pages/options.html` — "the seven effect switches". `VIDEO_KEYS` is six
-  _(confirmed)_. The same page lists the quality tiers as not yet built, while
-  `apps/options/src/menu.rs` has `QUALITY_ID`, and its row inventory omits
-  `ANTIALIASING_ID` and `QUALITY_ID`.
-- `web/pages/horde.html` — "there is no job system to spread them over yet".
-  `apps/horde/src/game.rs` calls `pool.par_for`, and
-  `web/run-horde-threads-e2e.sh` asserts a chunk really ran on a worker. The
-  honest caveat is that **Pages cannot send COOP/COEP**, so the published build
-  has no workers and runs every chunk inline.
-- `web/templates/demo-window.html` — names `build-pages.py`. The renderer is
-  `build-pages.mjs`; no `.py` exists in the tree.
-- `crcbl-hal/src/lib.rs` — "the **deferred** `crcbl-mtl` / `crcbl-dx12`"
-  _(confirmed)_. Both implement the seam and have e2e jobs in CI.
-- `crcbl-webgpu/src/lib.rs` — "What is **not built yet** is the browser wiring".
-  Fifteen demos draw through it in a real browser on every push.
-
-**Stale but not false:** `crcbl-ui/src/lib.rs`'s diagram ends
-`Render backend (future)` when `crcbl-render/src/ui_pass.rs` is that backend;
-`crcbl-anim/src/lib.rs` frames GPU skinning as a later slice when
-`crcbl-render/src/skinning.rs` shipped with `apps/puppet` as its consumer;
-`quarry.html` and `lantern.html` both claim the heaviest frame while `pages.yml`
-measured shard slowest at 87.0x against breach's 51.1x.
-
-**`crcbl-cli/templates/README.md.tmpl` was audited and is correct** — every
-claim in it holds, including that the `.scn` format has not landed.
-
-**Coverage gaps in the audit itself, stated as gaps.** `README.md`'s "4,139
-passing tests across 126 test binaries, fourteen ignored" (dated 2026-08-19) was
-**not** re-measured — a clean number needs a fresh checkout of `origin/main`,
-not this working tree. Two of its sub-claims are false on reading alone:
-`crates/crcbl/tests/` holds **nine** `run-*-e2e.sh` harnesses, not the two the
-sentence names, and `gltf_e2e.rs` is feature-gated out of a default
-`cargo test --workspace` entirely. Only the first 16–22 lines of each of the 31
-`crates/*/src/lib.rs` headers were read, so a project-level claim buried deeper
-could have escaped. Not audited at all: `docs/plan/*`, `CHANGELOG.md`,
-`apps/*/src/**` module docs, `web/style.css`, `web/templates/layout.html`.
+- **Only the first 16–22 lines of each of the 31 `crates/*/src/lib.rs` headers
+  were read.** Several run for hundreds of lines, so a project-level claim
+  buried deeper than that has never been checked. Four were corrected
+  (`crcbl-hal`, `crcbl-webgpu`, `crcbl-ui`, `crcbl-anim`); the rest are unread
+  rather than clean.
+- **Not audited at all:** `docs/plan/*`, `CHANGELOG.md`, `apps/*/src/**` module
+  docs beyond `apps/breach/src/web.rs`, `web/style.css` and
+  `web/templates/layout.html`.
+- **Two site pages still disagree about which frame is heaviest.** `quarry.html`
+  says "the heaviest frame the site ships" and `lantern.html` "one of the two
+  heaviest", while `.github/workflows/pages.yml` measured shard slowest at 87.0x
+  against breach's 51.1x. `index.html` was corrected to say shard; those two
+  were left, because the right fix is a measured number per page rather than
+  another adjective.
+- **`README.md` documents `--backend vk|mtl|dx12|null`** while
+  `crates/crcbl/src/backend.rs` also parses `webgpu`. Whether that omission is
+  deliberate — a native `webgpu` backend being unusable rather than unnamed —
+  was not established, so nothing was changed.
 
 ## HIGH PRIORITY — the user's calls of 2026-08-30
 
