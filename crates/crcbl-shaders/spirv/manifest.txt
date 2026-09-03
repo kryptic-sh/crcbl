@@ -223,14 +223,14 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = ec883e54fdbaa3b017b3070c6f4dcc0a64de85d785f1aaa1a57bef36530873a3
+source-sha256 = 886d25230a85b4a71cef00cc39d579ae8dad80be3844fb84862eca71dcb29990
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = 8520f00567b81a9de6dee8b01b076cba3b5b63b03c0f9cfd591bc831f813ed19
+spirv-sha256 = 130a9051d7af29a919c8754d5c36c5fe255e7cc5709983bf0c4018ab2be15669
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 0dffc4de17860247ecbe3bb299e9ab4bb846e112f513355aa5a3b40a0c4ec610
+wgsl-sha256 = 5f46dc263e4de64fad029021584d35264bc0bf56a9a80074c0c4719610e522a9
 msl = msl/mesh.metal
-msl-sha256 = 283931fad7ed57f386197174a99eca656ba90b7b420dfbcc73d6a80513247872
+msl-sha256 = 03e78ac0ee1e636f11e5b0970a4e4f7925b70cf7da827afea7fcdef92ee383e7
 dxil = vertexMain:dxil/mesh.vertex.dxil:33808e9c9ea5a13876375d12deec3c858103335a0546d05d840c3b7ffc0ce458
 dxil = depthVertexMain:dxil/mesh.depth_vertex.dxil:d5bfc1868ad94ff42b7d1b013553b24a1ed89e992cad0eb9ef44bc98d4a0988a
 dxil = depthClearVertexMain:dxil/mesh.depth_clear_vertex.dxil:e2007f43be9438f2c6d5022cb8fb44f825ab39426569a45117fd8c1494ab53a4
@@ -447,14 +447,14 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr]
 source = shaders/ssr.slang
-source-sha256 = 948385f6e918b5a240d81ab90bec136ce929a0f66cf1d52d6c731bbee2f01f92
+source-sha256 = e143028183c77eeee79ba371be3f3c3b020cd81cf92843c37d6338c9c2e0f61d
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssr.spv
-spirv-sha256 = d501031089926b6dc0eb6e75503c8c64656fe504bb65677e512c595ae5043b4e
+spirv-sha256 = 5e82e1be5267dbf939a3180a71d22a94fffa8b068fa35e50af8f84570d93e2f7
 wgsl = wgsl/ssr.wgsl
-wgsl-sha256 = 2565d4ebe885999c917eb93866b7d3ad156756505eeb1fe0ed6d026ff2bcc51d
+wgsl-sha256 = 119bd18543fab03bc34ffe282370d00407a5bbe3fd3035c27f60e020d285d807
 msl = msl/ssr.metal
-msl-sha256 = deaf8d3043e75ff1a036a4f8bd246bdcede5100150ffb93d844742f2a3292682
+msl-sha256 = 60836f42a7322ceeafbf8456eb719a44457c80dfbd7653643ea93f927786c665
 dxil = vertexMain:dxil/ssr.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
 dxil = fragmentMain:dxil/ssr.fragment.dxil:5c74104d3a25b7ce8b0cc6ae144603d6072a348d96f6962cd208f0bb1eb64dff
 entry-points = vertexMain:vertex, fragmentMain:fragment

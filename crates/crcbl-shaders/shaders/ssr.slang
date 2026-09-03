@@ -864,22 +864,19 @@ float2 probe_moments(uint index, float3 direction)
     return lerp(lerp(c00, c10, weight.x), lerp(c01, c11, weight.x), weight.y);
 }
 
-/// The share of its trilinear weight the probe at `probe_position` keeps for a
-/// surface at `world_position` facing `normal` —
-/// `crcbl_shaders::probe_visibility::ProbeVisibility::weight`, and
-/// `mesh.slang`'s body character for character.
+/// The Chebyshev bound on the probe at `probe_position`'s visibility of a
+/// surface at `world_position` facing `normal` — [`probe_weight`] without its
+/// floor, and `mesh.slang`'s body character for character.
 ///
 /// **The Chebyshev bound**, cubed: Donnelly & Lauritzen 2006 is where it entered
 /// graphics and Majercik et al. 2019 §3 is where it is applied to a probe.
-/// `mesh.slang` is where the arithmetic and the two constants it reads are
-/// argued in full.
-///
-/// **A reflection asks it about the surface, not about the ray.** What this
-/// weighs out is a probe the shaded point cannot see — one behind the wall the
-/// point stands against — and that probe holds no light this surface may
-/// reflect, whichever way the ray leaves. The direction the ray takes is the
-/// evaluation in [`probe_level_environment`], and it is a separate question.
-float probe_weight(uint index, float3 probe_position, float3 world_position, float3 normal)
+/// `mesh.slang` is where the arithmetic and the constants it reads are argued in
+/// full, this split included: [`PROBE_OCCLUDED_WEIGHT`] is a property of the
+/// weighted mean's divisor, so a gather that has no divisor — the
+/// reflective-shadow-map updater `docs/plan/50-irradiance-probes.md` describes,
+/// summing thousands of texels into one probe — calls this instead and pays no
+/// per-texel leak through the wall it stands behind.
+float probe_chebyshev(uint index, float3 probe_position, float3 world_position, float3 normal)
 {
     float3 to_probe = probe_position - (world_position + normal * PROBE_SURFACE_BIAS);
     float to_surface = length(to_probe);
@@ -891,8 +888,26 @@ float probe_weight(uint index, float3 probe_position, float3 world_position, flo
     float variance = max(moments.y - moments.x * moments.x, 0.0);
     float behind = to_surface - moments.x;
     float bound = variance / (variance + behind * behind);
-    float visible = to_surface <= moments.x ? 1.0 : bound * bound * bound;
-    return max(visible, PROBE_OCCLUDED_WEIGHT);
+    return to_surface <= moments.x ? 1.0 : bound * bound * bound;
+}
+
+/// The share of its trilinear weight the probe at `probe_position` keeps for a
+/// surface at `world_position` facing `normal` —
+/// `crcbl_shaders::probe_visibility::ProbeVisibility::weight`, and
+/// `mesh.slang`'s body character for character.
+///
+/// [`probe_chebyshev`] floored at [`PROBE_OCCLUDED_WEIGHT`], which is what keeps
+/// the trilinear blend's divisor off zero.
+///
+/// **A reflection asks it about the surface, not about the ray.** What this
+/// weighs out is a probe the shaded point cannot see — one behind the wall the
+/// point stands against — and that probe holds no light this surface may
+/// reflect, whichever way the ray leaves. The direction the ray takes is the
+/// evaluation in [`probe_level_environment`], and it is a separate question.
+float probe_weight(uint index, float3 probe_position, float3 world_position, float3 normal)
+{
+    return max(probe_chebyshev(index, probe_position, world_position, normal),
+               PROBE_OCCLUDED_WEIGHT);
 }
 
 /// Which row of the probe table a grid cell of clipmap level `level` is, clamped

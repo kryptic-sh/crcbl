@@ -694,10 +694,16 @@ mod tests {
     /// behind the wall the surface stands against while the diffuse term at the
     /// same point does not.
     ///
-    /// **`oct_encode` and `sign_not_zero` are held too**, not only the two the
+    /// **`oct_encode` and `sign_not_zero` are held too**, not only the ones the
     /// bound is named after: `probe_moments` reads a texel through them, so a
     /// drift in either moves the answer while the pinned bodies stay identical —
     /// which is the silent half of the same failure.
+    ///
+    /// **`probe_chebyshev` is held separately from `probe_weight`** because the
+    /// two are separately callable: the bound is the arithmetic, and
+    /// `probe_weight` is that bound under [`OCCLUDED_WEIGHT`]'s floor. A pass
+    /// that gathers without a divisor wants the first without the second, so
+    /// each has to be pinned across the two files on its own.
     ///
     /// The bodies compare rather than the whole declarations, so each file's doc
     /// comment can say what that file uses them for; they do.
@@ -707,6 +713,8 @@ mod tests {
             "float sign_not_zero(float value)",
             "float2 oct_encode(float3 direction)",
             "float2 probe_moments(uint index, float3 direction)",
+            "float probe_chebyshev(uint index, float3 probe_position, float3 world_position, \
+             float3 normal)",
             "float probe_weight(uint index, float3 probe_position, float3 world_position, \
              float3 normal)",
         ] {

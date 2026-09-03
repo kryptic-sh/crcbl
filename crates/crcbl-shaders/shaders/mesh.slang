@@ -3811,8 +3811,8 @@ float2 oct_encode(float3 direction)
 /// bilinearly — `crcbl_shaders::probe_visibility::ProbeVisibility::moments`.
 ///
 /// This body is character for character the one `ssr.slang` carries, along with
-/// `probe_weight`, `oct_encode` and `sign_not_zero`: that pass weighs the
-/// reflection's probe fallback by the same bound, and
+/// `probe_chebyshev`, `probe_weight`, `oct_encode` and `sign_not_zero`: that
+/// pass weighs the reflection's probe fallback by the same bound, and
 /// `crcbl_shaders::probe_visibility`'s
 /// `the_shaders_weigh_a_probe_the_way_this_module_does` is what holds the two
 /// copies together.
@@ -3845,9 +3845,10 @@ float2 probe_moments(uint index, float3 direction)
     return lerp(lerp(c00, c10, weight.x), lerp(c01, c11, weight.x), weight.y);
 }
 
-/// The share of its trilinear weight the probe at `probe_position` keeps for a
-/// surface at `world_position` facing `normal` —
-/// `crcbl_shaders::probe_visibility::ProbeVisibility::weight`.
+/// The Chebyshev bound on the probe at `probe_position`'s visibility of a
+/// surface at `world_position` facing `normal` — `probe_weight` without its
+/// floor, and `crcbl_shaders::probe_visibility::chebyshev` applied to the
+/// moments this probe's map holds along that direction.
 ///
 /// **The Chebyshev bound**, cubed: for a depth distribution of mean `μ` and
 /// variance `σ²`, the share of it at least `d - μ` beyond the mean is at most
@@ -3858,9 +3859,18 @@ float2 probe_moments(uint index, float3 direction)
 /// and all.
 ///
 /// The query point is moved off the surface by `PROBE_SURFACE_BIAS` first; that
-/// constant is where the reason is. The floor is `PROBE_OCCLUDED_WEIGHT`, and
-/// `probe_irradiance` is where what it buys is argued.
-float probe_weight(uint index, float3 probe_position, float3 world_position, float3 normal)
+/// constant is where the reason is.
+///
+/// **The floor lives in `probe_weight`, not here, and the split is what makes
+/// the bound callable without it.** `PROBE_OCCLUDED_WEIGHT` is a property of the
+/// weighted mean's divisor — it is what keeps the sum of eight corner weights
+/// off zero — so a gather that has no divisor must not pay it:
+/// `docs/plan/50-irradiance-probes.md`'s reflective-shadow-map updater sums
+/// thousands of texels into one probe, where a floor under every wall-hidden
+/// texel is not a rounding error but that many ten-thousandths of flux leaking
+/// through the wall. Such a pass calls this; the trilinear gather calls
+/// `probe_weight`.
+float probe_chebyshev(uint index, float3 probe_position, float3 world_position, float3 normal)
 {
     float3 to_probe = probe_position - (world_position + normal * PROBE_SURFACE_BIAS);
     float to_surface = length(to_probe);
@@ -3872,8 +3882,20 @@ float probe_weight(uint index, float3 probe_position, float3 world_position, flo
     float variance = max(moments.y - moments.x * moments.x, 0.0);
     float behind = to_surface - moments.x;
     float bound = variance / (variance + behind * behind);
-    float visible = to_surface <= moments.x ? 1.0 : bound * bound * bound;
-    return max(visible, PROBE_OCCLUDED_WEIGHT);
+    return to_surface <= moments.x ? 1.0 : bound * bound * bound;
+}
+
+/// The share of its trilinear weight the probe at `probe_position` keeps for a
+/// surface at `world_position` facing `normal` —
+/// `crcbl_shaders::probe_visibility::ProbeVisibility::weight`.
+///
+/// `probe_chebyshev` floored at `PROBE_OCCLUDED_WEIGHT`, which is what keeps the
+/// gather's divisor off zero; `probe_irradiance` is where what that buys is
+/// argued, and `probe_chebyshev` is where the bound itself is.
+float probe_weight(uint index, float3 probe_position, float3 world_position, float3 normal)
+{
+    return max(probe_chebyshev(index, probe_position, world_position, normal),
+               PROBE_OCCLUDED_WEIGHT);
 }
 
 /// Which row of the probe table a grid cell is, clamped into the buffer.
