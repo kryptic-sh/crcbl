@@ -12,68 +12,17 @@ delivery table and the risks.
 performance, and above all no light leaking", after the no-bake rule of the same
 day.** The grid below stays, and everything that _fills_ it changes:
 
-- **The static bakes go.** `apps/lantern`'s `bounce` module and `apps/shard`'s
-  `light::probes` compute a lighting result once, at load, from a sun and
-  torches that then move — a bake in the sense the rule forbids (the result
-  outlives its inputs), whatever thread computed it. Both are replaced by the
-  updater below in the slice that lands it; until then they stand, documented
-  here as the thing being removed.
-- **Each probe gains a visibility map — this half has landed.** A 16×16
-  octahedral depth + depth² map per probe (Majercik et al. 2019's contribution,
-  and the one thing that makes a probe grid stop leaking), with a one-texel
-  replicated border so a bilinear read across the seam is continuous.
-  `mesh.slang`'s `probe_irradiance` and `ssr.slang`'s `probe_level_environment`
-  weight each of a fragment's eight probes by a Chebyshev visibility test
-  against it, so a probe on the far side of a wall gets no weight on either path
-  — `probe_weight` and `probe_moments` are the same body in both files,
-  character for character, checked by
-  `the_shaders_weigh_a_probe_the_way_this_module_does`.
-  `crcbl_shaders::probe_visibility` owns the layout, the octahedral mapping and
-  the bound, and is the Rust mirror the render tests compare the shader against;
-  `crcbl_render::probe_visibility` keeps the static triangles a map is about,
-  and `crcbl_render::probe_capture` fills it **on the device**, as the producer
-  table below always said it would — a depth cube per probe.
-
-  **The capture is six 90° views per probe into one tile atlas**, drawn from the
-  scene's own triangles by `probe_capture.slang` — `crcbl_render::shadow`'s
-  `+X, -X, +Y, -Y, +Z, -Z` face order and its 90° reversed-Z matrix, but not its
-  pass: that atlas is a per-frame tile budget handed out to a light list by the
-  render graph, and a capture wants six tiles a probe at load with no light in
-  the room. What the tiles hold is **distance**, in `R32Float`, rather than a
-  depth, because the resolve wants a distance and the fragment stage already has
-  one. `probe_octahedral.slang` then reads one tile texel per octahedral texel
-  and writes the two moments. Neither shader transcribes any of the mapping: the
-  direction table and the face each direction falls in are evaluated on the host
-  — by `crcbl_shaders::probe_visibility::texel_direction` and
-  `crcbl_render::probe_capture::face_of` — and arrive as data, so there is one
-  place each rule is written. Probes past what one 2048² atlas holds are
-  captured in chunks that share an encoder and take turns in it, which is what
-  keeps the memory flat as the count grows.
-
-  Where it departs from what the paragraphs below describe as intended: the
-  storage is a `Rg32Float` 2D **array**, one layer per probe, not a cube array —
-  no sampler, four `Load`s and a written-out bilinear. That does not keep it off
-  WebGPU's filterability rule, which is the one thing this slice got wrong and
-  had to fix: the check is on the layout entry against the view's format, not on
-  how the shader reads it, so Chromium refused the whole mesh bind group and
-  every 3D demo drew black. `crcbl_hal::SampleType` grew a third variant,
-  `UnfilterableFloat`, mapped through `crcbl-webgpu`'s wire codes and
-  `web/engine/`'s tables; the other three backends take the interpretation off
-  the view's format and ignore it, as they already ignored `Float`. The capture
-  is `ForwardRenderer::capture_probe_visibility(device, queue)`, an explicit
-  call after the static geometry is placed, **not** part of `with_scene`: a
-  `SceneDesc` carries meshes, materials and probes and no instances, so a
-  capture inside `with_scene` would see an empty world. And recapture — on
-  scroll, or when static geometry changes — is not written; the maps are
-  captured once. Dynamic objects are not in them and do not occlude the bounce,
-  which is the accepted limit (Enlighten's too).
-
-  Reachability is `r_probe_visibility`, a console variable declared beside the
-  pass, defaulting on; off rebinds the 1×1 placeholder every scene without
-  probes already reads. A scene with no probes is byte-identical to the frame
-  before this landed, which the probes golden was used to prove: with the
-  capture disabled it compares at zero differing pixels.
-
+- **No static bakes.** `apps/lantern`'s `bounce` module and `apps/shard`'s
+  `light::probes` computed a lighting result once, at load, from a sun and
+  torches that then moved — a bake in the sense the rule forbids, whatever
+  thread computed it. Both went with the updater that replaced them.
+- **Each probe carries a visibility map**: an octahedral depth + depth² map per
+  probe, Majercik et al. 2019's contribution and the one thing that makes a
+  probe grid stop leaking. Every reader weighs each of a fragment's eight probes
+  by a Chebyshev test against it, so a probe on the far side of a wall gets no
+  weight on any path. `crcbl_shaders::probe_visibility` owns the layout, the
+  mapping and the bound and is the Rust mirror the render tests compare the
+  shader against; `crcbl_render::probe_capture` fills it on the device.
 - **The raster updater, every frame, on all four backends**: the sun's near
   cascade is drawn a second time as a **reflective shadow map**, and one compute
   pass gathers the RSM into every probe, **each sample gated by that probe's
@@ -82,28 +31,13 @@ day.** The grid below stays, and everything that _fills_ it changes:
   `docs/backlog.md`'s survey constraint C2 holds and a golden is a function of
   its own inputs. One bounce, dynamic sun and lamps.
 
-  **Three things this bullet said until 2026-09-04 that the tree refuses**,
-  found by reading the passes rather than by building against them:
-  - **It is not the shadow pass's targets.** `crcbl_render::forward`'s `shadow`
-    pass has one attachment, a depth, and every pipeline it runs is
-    fragment-free — `depthVertexMain` and the tile-reset triangle alike. Colour
-    attachments there cover the whole 3072² atlas for data only cascade 0's 768²
-    corner would be read from, and they give all fourteen light tiles a fragment
-    stage. The RSM is its own render pass at its own extent, reusing cascade 0's
-    matrix and its already-generated draws.
-  - **It is three targets, not two.** Flux and world normal, and a world
-    position beside them, because the gather needs the sample's position and the
-    seam has no plain-float read of a depth image — `SampleType::Depth` is a
-    comparison-sampler slot. `probe_capture.slang` set that precedent when it
-    chose to write distance to a colour target rather than invert a projection
-    in the resolve.
-  - **The sky through the same visibility is not free.** `mesh.slang`'s
-    `sky_irradiance` is three dot products against `frame.sky_sh_*` with no
-    direction set to gate, so there is nothing at the fragment to weigh. The
-    implementable form is that the gather folds the sky into the rows along the
-    directions a probe's own map reports as open, and the host zeroes `sky_sh_*`
-    for a volume the updater owns. That is a real change to the sky term rather
-    than a binding, and it is its own decision.
+  **The sky through the same visibility is not free, and is undecided.**
+  `mesh.slang`'s `sky_irradiance` is three dot products against `frame.sky_sh_*`
+  with no direction set to gate, so there is nothing at the fragment to weigh.
+  The implementable form is that the gather folds the sky into the rows along
+  the directions a probe's own map reports as open, and the host zeroes
+  `sky_sh_*` for a volume the updater owns. That is a real change to how a scene
+  is lit rather than a binding, and it is its own decision.
 
 - **The traced updater, on `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl`**: the same
   rows, filled by inline ray queries once foundation (c) exists, which buys
@@ -123,43 +57,7 @@ is the trilinear gather and the Chebyshev weighting above. Rows are per level,
 so `docs/backlog.md`'s survey constraint C1 (no ninth storage buffer) holds with
 an offset per level.
 
-What the levels slice built, and where each rule lives:
-
-- `crcbl_shaders::probe::ProbeVolume` gained `levels`, and the header it writes
-  is now the counts, the level row, and **an origin and a reciprocal spacing per
-  level**. Where a level stands and how far apart its probes are is one rule —
-  `ProbeVolume::level_origin` and `level_inv_spacing` — and the shaders read the
-  rows rather than deriving them, which is what `probe_capture` already does
-  with the octahedral direction table. Level 0's rows are the fields the volume
-  was given _bit for bit_, because the offset a coarser level is placed by is a
-  multiplication by zero there.
-- **Which level a fragment reads is arithmetic a fragment must do**, so it is
-  written twice and held together rather than derived twice: `probe_level_reach`
-  and `probe_level_of` are the same body in `mesh.slang` and `ssr.slang`,
-  character for character, checked by
-  `the_shaders_pick_a_level_the_way_this_module_does`, and mirrored on the host
-  by `ProbeVolume::level_reach` and `level_of`. The reach is the Chebyshev norm
-  of the point in level 0's normalised coordinates, and every coarser level's
-  reach is that one halved — so the pick touches only level 0's rows.
-- **The band is `LEVEL_BAND` of a half-extent, and half is its ceiling.** The
-  levels are concentric and each is twice the last, so a point on level `k`'s
-  boundary stands at exactly half of level `k+1`'s half-extent; a band wider
-  than that would still be fading level `k` where the fragment beside it has
-  gone wholly to `k+1`, which is the step the blend exists to remove. The
-  composite is `coarse · (1 − share) + fine · share` rather than a `lerp`, for
-  the reason the reflection design gives: it returns either end exactly, so the
-  two sides of a level switch compute the same value.
-- **A one-level volume is one gather and nothing else.** The coarsest level
-  takes the whole share, so the arithmetic is what it was before the clipmap, in
-  the same order — no golden moved, and a scene that wants one grid pays nothing
-  for the levels it did not ask for.
-- **One capture still covers the whole volume.** A level's rows are a range of
-  the one table and the visibility image keeps one layer per row across every
-  level, so `capture_probe_visibility` is the call it always was;
-  `a_capture_walks_every_level_in_the_order_the_table_is_in` is what holds the
-  layer order to `ProbeVolume::position`.
-
-What it did **not** build, and what each would take:
+What the levels do **not** include, and what each would take:
 
 - **Scrolling.** There is no toroidal addressing, no camera-follow and no
   per-frame re-centring: the volume is centred once, where the scene places it,
@@ -208,8 +106,7 @@ clipmap exists. The raster producer is whole as of 2026-09-04 — the capture's
 distance half, and the RSM gather that fills the radiance half beside it,
 `crcbl_render::rsm` and `crcbl_render::probe_gather` — with the standing limit
 that it gathers the sun's near cascade and no punctual light. The RT producer is
-unbuilt and waits on foundation (c). Audited 2026-09-03, and this is the one the
-diagram used to state as shipped:
+unbuilt and waits on foundation (c). One more box is unbuilt:
 
 - **Relocation does not exist**, and nothing it needs does either. No code
   counts backfaces per probe and none moves or disables one, because the capture
@@ -236,7 +133,7 @@ justify them") is withdrawn — leaking is the defect the decision is about. Thi
 section supersedes the August account of the authored irradiance, which was
 removed from this file on 2026-08-30 rather than left standing beside it.
 
-**What the visibility half costs, measured.**
+**What the capture costs, and it is what the clipmap is priced against.**
 `apps/lantern --headless --frames 400 --size 1920x1080` on radv (RX 7900 XTX,
 Mesa 26.2.1), median of three runs, reported by the app's own
 `lantern: probe visibility captured …` line. The capture is a one-off at load
@@ -244,51 +141,21 @@ and costs **0.93 ms for 60 probes against 12 occluder meshes** (the room's
 second view, 10 occluders, takes 0.84 ms), end to end — the pipelines, the
 atlas, the six views a probe, the resolve, the copy and the `wait_idle`. That is
 **16 µs a probe against the 0.28 ms the host ray cast took**, a factor of
-eighteen, and it is the number the clipmap is priced against. The per-frame
-price of the weighting does not resolve: the `forward` pass reports **0.293 ms
-p50 with `r_probe_visibility` on against 0.302 ms with it off**, which is inside
-the 0.02 ms spread the same three runs show, so the eight extra octahedral
-fetches per fragment cost less than this instrument can see.
+eighteen. The per-frame price of the weighting does not resolve on the diffuse
+path: `forward` reports **0.293 ms p50 with `r_probe_visibility` on against
+0.302 ms off**, inside the 0.02 ms spread of the same three runs. On the
+specular path it does resolve, and the tiers disagree about it sharply — the
+software rasteriser pays 118% of the `ssr` pass where both GPU tiers pay 47%.
+`docs/backlog.md` carries that measurement, the browser reading and the
+candidate that would pay for it.
 
-**The specular half of the same weighting is not free, and the tiers disagree
-about it sharply.** `ssr.slang` gained the bound on 2026-09-04; measured the
-same way, against a worktree at the commit it sits on so the binaries differ by
-that change alone:
-
-```text
-                    ssr p50          the whole frame's p50
-              before    after        before    after
-radv           0.115    0.169         1.141    1.109
-lavapipe       7.072   15.421        72.042   80.152
-```
-
-On radv it is 54 µs the frame total cannot see — the two totals bracket each
-other inside the run-to-run spread. On lavapipe the pass **more than doubles**,
-+8.35 ms, and the frame follows it: +11.3%, with `ssr` going from 9.9% of the
-frame to 19.1%. The difference is where the two tiers spend a pixel: sixteen
-extra `Load`s per fragment are nothing beside a discrete GPU's bandwidth and are
-most of a software rasteriser's inner loop.
-
-**The browser tier, on hardware, sides with radv**: quarry through Chrome on an
-RDNA-3 adapter at the gate's 959x463, three runs each side, reads `ssr` **0.036
-ms p50 before against 0.053 after** — identical to the printed digit in every
-run — with the frame at **0.720 against 0.737 ms**. That is +47% on the pass and
-+2.4% of the frame, the same multiplier radv pays. So it is the _software_
-rasteriser that is the outlier, and the browser's software tier is the one
-reading nobody here can take: pinning the gate to SwiftShader grants the adapter
-and then reads back no pixels at all, so it logs no pass table.
-`docs/backlog.md` carries that limit and the candidate that would pay for the
-software cost, which is evaluating the fallback only where the march actually
-missed rather than for every non-far pixel.
-
-**Pricing for the halves not built.** Per frame: the RSM's two extra targets on
-the near cascade and one gather pass — the DDGI-class budget of roughly half a
-millisecond to a millisecond at 1080p on desktop; the browser tier takes a
-smaller grid. A clipmap of a few thousand probes is now a capture of tens of
-milliseconds rather than seconds, which is a load path rather than a redesign;
-what it still needs is the slab recapture, so that a scroll pays for the probes
-it exposed and not for the level. Each figure is measured on the three tiers
-before the rung counts, per the standing rule.
+**Pricing for the halves not built.** A punctual producer is a second RSM and a
+second gather, so it is priced against the sun's own, which `docs/backlog.md`
+records. A clipmap of a few thousand probes is a capture of tens of milliseconds
+rather than seconds, which is a load path rather than a redesign; what it still
+needs is the slab recapture, so that a scroll pays for the probes it exposed and
+not for the level. Each figure is measured on the three tiers before the rung
+counts, per the standing rule.
 
 **Order.** Among the raster lighting items this rebuild comes after LTC area
 lights, the shadow atlas and the AO tint, and **ahead of the atmosphere** — the
