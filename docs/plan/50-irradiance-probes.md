@@ -224,6 +224,28 @@ p50 with `r_probe_visibility` on against 0.302 ms with it off**, which is inside
 the 0.02 ms spread the same three runs show, so the eight extra octahedral
 fetches per fragment cost less than this instrument can see.
 
+**The specular half of the same weighting is not free, and the tiers disagree
+about it sharply.** `ssr.slang` gained the bound on 2026-09-04; measured the
+same way, against a worktree at the commit it sits on so the binaries differ by
+that change alone:
+
+```text
+                    ssr p50          the whole frame's p50
+              before    after        before    after
+radv           0.115    0.169         1.141    1.109
+lavapipe       7.072   15.421        72.042   80.152
+```
+
+On radv it is 54 µs the frame total cannot see — the two totals bracket each
+other inside the run-to-run spread. On lavapipe the pass **more than doubles**,
++8.35 ms, and the frame follows it: +11.3%, with `ssr` going from 9.9% of the
+frame to 19.1%. The difference is where the two tiers spend a pixel: sixteen
+extra `Load`s per fragment are nothing beside a discrete GPU's bandwidth and are
+most of a software rasteriser's inner loop. The browser tier is unmeasured and
+is the one this bears on; `docs/backlog.md` carries that and the candidate that
+would pay for it, which is evaluating the fallback only where the march actually
+missed rather than for every non-far pixel.
+
 **Pricing for the halves not built.** Per frame: the RSM's two extra targets on
 the near cascade and one gather pass — the DDGI-class budget of roughly half a
 millisecond to a millisecond at 1080p on desktop; the browser tier takes a

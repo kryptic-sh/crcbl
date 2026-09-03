@@ -83,30 +83,51 @@ in both this file and `docs/plan/46-ambient-occlusion.md`.
   margin they happen to have; the two drivers that were swept read 0 and 2
   against a bound of 8.
 
-## The SSR visibility weight is unpriced (2026-09-03)
+## The SSR visibility weight costs the software tier 11% of a frame (2026-09-04)
 
 `b83ae75` gave `ssr.slang`'s probe fallback the Chebyshev visibility weight
-`mesh.slang` already had, closing a specular leak through walls. What it did not
-do is price it on any tier.
+`mesh.slang` already had, closing a specular leak through walls. It was landed
+unpriced; the two native tiers have now been measured and the answer is not
+free.
 
-- **What grew.** `crates/crcbl-shaders/spirv/ssr.spv` went 43 KB to 94 KB. Each
-  of the fallback's eight corners now costs four `Load`s of the visibility array
-  plus the Chebyshev arithmetic, and a clipmap blend evaluates two levels, so
-  the worst case is sixteen corners a pixel. `probe_environment` is still
-  evaluated for every non-far pixel including fully rough ones, exactly as it
-  was before the weight landed — that is not a regression this change
-  introduced, but it is what makes the multiplier apply to the whole screen.
-- **What to run.** The same instrument the probe-visibility capture was priced
-  with: `apps/lantern --headless --frames 400 --size 1920x1080`, median of three
-  runs, reading the `ssr` row of the pass table the app logs on exit. The
-  comparison wants the pre-change shader compiled against today's tree —
-  `git show b83ae75^:crates/crcbl-shaders/shaders/ssr.slang`, regenerate,
-  measure, restore — which is the method `docs/plan/46-ambient-occlusion.md`
-  used to clear the AO rung of a suspected regression. Three tiers: radv,
-  lavapipe, and the browser through the quarry gate.
-- **Why it was skipped.** The agent that built it was told not to open a window,
-  and read the browser gate as out of brief. Neither reason survives; this is
-  simply owed.
+`apps/lantern --headless --frames 400 --size 1920x1080`, p50 of the `ssr` row of
+the app's own pass table, three runs each, before and after. "Before" is a
+worktree at `55d0eba` — the commit `b83ae75` sits on — so the two binaries
+differ by this change and nothing else:
+
+```text
+                    ssr p50          the whole frame's p50
+              before    after        before    after
+radv           0.115    0.169         1.141    1.109
+lavapipe       7.072   15.421        72.042   80.152
+```
+
+- **On radv it is invisible at frame level.** The pass grows 47%, 54 us, and the
+  frame total moves by less than the spread between runs — the two totals above
+  bracket each other, which is the honest reading of a 3% instrument.
+- **On lavapipe it more than doubles: +118%, +8.35 ms**, and the frame follows
+  it almost exactly, +8.11 ms or **+11.3%**. The `ssr` pass goes from 9.9% of
+  the frame to 19.1%. A software rasteriser pays for the sixteen extra `Load`s
+  per pixel in a way a discrete GPU does not.
+
+**The browser tier is still owed**, and it is the tier this matters to — the
+figure above is its closest proxy and it is the worst of the three. The method
+is cheap now that the comparison worktree exists: build the browser bundle from
+a worktree at `55d0eba` and from `HEAD`, and read `ssr` out of quarry's pass
+table at the gate's window size, which is how
+`docs/plan/50-irradiance-probes.md`'s other browser figures were taken.
+
+**The candidate that would pay for it, not yet costed.** `ssr.slang`'s
+`probe_environment` is evaluated for every non-far pixel including fully rough
+ones, exactly as it was before the weight landed — so the weight's sixteen loads
+apply to the whole screen rather than to the pixels whose ray actually missed
+and actually reflects. Restricting the fallback to those pixels is a change to
+the pass's shape rather than to the weight, it was already true before this
+commit, and it is where the software tier's eight milliseconds are. Whether that
+is worth building, or whether the leak fix should carry a console variable so a
+tier can decline it, is the user's call — the same shape of decision as the AO
+knobs, and the same missing route: neither `r_probe_visibility` nor anything
+else has an `[engine.video]` key or a tier row.
 
 **And one threshold got tighter.** `BRASS_PROBE_RATIO` in
 `apps/lantern/tests/golden.rs` moved 1.05 to 1.03 because the correct fallback
@@ -114,9 +135,8 @@ is now smaller — the brass reads 98.5 against 94.5 zeroed, a ratio of 1.042,
 where it read 1.086 before. That is 1.2% of margin where there was 3.6%. It was
 verified on radv and on lavapipe locally, both to the printed digit, and CI's 26
 jobs passed on `3430ba7` — but WARP and SwiftShader now clear it by less than
-they did, and a driver that shades the brass a level differently is closer to
-red than it was. If that row ever flakes, the fix is a re-sweep on the driver
-that flaked, not a nudge.
+they did. If that row ever flakes, the fix is a re-sweep on the driver that
+flaked, not a nudge.
 
 ## What the plan audit of 2026-09-03 did not reach
 
