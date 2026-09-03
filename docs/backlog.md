@@ -114,12 +114,25 @@ frame, and it predates the updater — lantern's browser job passed with it at
 `ae1a020`. So the new thing on that timeline is the per-frame `rsm` render pass
 and the `probe-gather` compute pass.
 
-**Not yet diagnosed.** A reproduction is running in a worktree at `aab984c`
-against the local `auto` (hardware) adapter, which will at least say whether
-this is SwiftShader-specific or true of every browser adapter. Whether `shard` —
-the other demo with an updated volume — fails the same way was still running
-when this was written and is the next thing to read: if it does, the fault is
-the probe path; if it does not, it is something lantern does with it.
+**Confirmed on hardware, and it is the probe path.** Three things settle it:
+
+- **`shard` fails too, and only shard.** The Pages run on `aab984c` finished
+  with `render lantern` and `render shard` red and the other **sixteen** demo
+  jobs green. Those two are the only demos with an `EveryFrame` volume, and
+  `deploy to GitHub Pages` was **skipped**, so the site did not publish.
+- **It is not SwiftShader.** Reproduced in a worktree at `aab984c` on the local
+  `auto` adapter, which picked an RDNA-3 card in Chrome: identical failure —
+  black canvas, no HUD line in 90 s, no device errors. Run a second time on an
+  idle machine, with the worktree confirmed at zero modified files, in case the
+  first had been starved by a concurrent GPU job. Same result.
+- **It is the updater's two passes, not the commit.** With `r_probe_bounce`
+  defaulted to `false` in that same worktree, lantern passes **46/46**.
+
+**A bisect that looked informative and is not.** Skipping only the gather's
+`add_pass` leaves the graph mis-declared and the run reports
+`No bind group set at group index 0` — an artefact of the hack rather than the
+bug, since the base run reports no device error at all. Any further split has to
+keep both passes and their bindings and remove only the _work_.
 
 **This blocks the site.** Pages does not deploy while a demo job is red, so the
 published site stays at whatever last deployed, and the punctual producer of
