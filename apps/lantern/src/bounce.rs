@@ -24,8 +24,8 @@
 //! gather could see.
 //!
 //! So [`probes`] ships [`GpuProbe::ZERO`] rows and
-//! [`ProbeUpdate::EveryFrame`](crcbl::render::ProbeUpdate::EveryFrame), and the
-//! rows are the volume's *size* rather than its contents: the table is sized
+//! [`ProbeUpdate::EveryFrame`], and the rows are the volume's *size* rather
+//! than its contents: the table is sized
 //! from them and `ProbeGrid::check` holds the two to each other, but what a
 //! frame reads is what the gather wrote. A frame drawn with the room's shadows
 //! switched off records no updater pass and reads the zeroes, which is the

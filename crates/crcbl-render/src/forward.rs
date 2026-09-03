@@ -883,7 +883,7 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 ///
 /// The reflective shadow map and [`ProbeGather::PASSES`] are counted on the
 /// ground grid's terms: both are off unless a scene's
-/// [`ProbeUpdate`](crate::scene::ProbeUpdate) asks for them, and a bound short
+/// [`ProbeUpdate`] asks for them, and a bound short
 /// of the frame that does ask would silently stop timing its last pass.
 ///
 /// Every other pass in the frame belongs to a [`DrawGen`] or to the

@@ -44,9 +44,9 @@
 //! # The spot has something standing in it
 //!
 //! [`spot`] stands in the shrine, above and behind the doorway at
-//! [`zone::LAYOUT`]'s row 4, aimed down the corridor —
-//! so the doorway's own posts are **inside the cone** and their shadows run down
-//! the corridor floor. `apps/lantern/src/room.rs` records why that is not
+//! [`crate::zone::LAYOUT`]'s row 4, aimed down the corridor — so the doorway's
+//! own posts are **inside the cone** and their shadows run down the corridor
+//! floor. `apps/lantern/src/room.rs` records why that is not
 //! decoration: with nothing in the cone, "a frame drawn with the spot holding a
 //! tile and one drawn with it holding none came back as the same bytes", which
 //! is a shadow map written and never read.
@@ -133,7 +133,7 @@ const FLICKER_WEIGHTS: [f64; 2] = [0.62, 0.38];
 /// Every tile with a brazier on it, in [`tiles`] order.
 ///
 /// Read off the layout rather than listed, so a brazier added to
-/// [`zone::LAYOUT`] is a torch without a second edit.
+/// [`crate::zone::LAYOUT`] is a torch without a second edit.
 #[must_use]
 pub fn brazier_tiles() -> Vec<(usize, usize)> {
     tiles()
@@ -255,9 +255,9 @@ pub fn spot() -> Light {
 /// simulation: the light list is the renderer's, the shrine's spot is a fixture
 /// that does not go out, and a torch nobody has lit is a torch that is not in
 /// this list at all. What that leaves lighting the zone is the irradiance volume
-/// and [`zone::house_light`]'s ambient floor, which is
-/// far darker and — because the updater gathers the sun alone, which this
-/// interior has none of — completely still.
+/// and [`crate::zone::house_light`]'s ambient floor, which is far darker and —
+/// because the updater gathers the sun alone, which this interior has none of
+/// — completely still.
 ///
 /// **That pair is what the browser gate's lighting check is made of**: a lit
 /// zone whose picture changes with nothing held, and a doused one whose picture
@@ -294,9 +294,8 @@ pub fn torches(seconds: f64, lit: bool) -> Vec<Light> {
 /// bounce fade upward rather than fill the room evenly.
 pub const PROBE_COUNTS: [u32; 3] = [7, 2, 8];
 
-/// How many probes that is — what
-/// [`zone`]'s capacities reserve and what `ProbeGrid::check` holds
-/// the table against.
+/// How many probes that is — what [`crate::zone`]'s capacities reserve and what
+/// `ProbeGrid::check` holds the table against.
 pub const PROBE_TOTAL: u32 = PROBE_COUNTS[0] * PROBE_COUNTS[1] * PROBE_COUNTS[2];
 
 /// How far apart the probes stand on each axis: the zone's interior divided by
@@ -349,11 +348,10 @@ fn probe_position(cell: [u32; 3]) -> DVec3 {
 /// # The rows ship zeroed, and what that costs this zone
 ///
 /// Until 2026-09-04 this gathered the torches' first bounce by casting rays into
-/// [`zone::world`] at `t = 0` — a bake in the sense
+/// [`crate::zone::world`] at `t = 0` — a bake in the sense
 /// `docs/plan/50-irradiance-probes.md`'s no-bake rule forbids, since the flames
 /// flicker and the result outlived them. The rows are the engine's updater's
-/// now, through
-/// [`ProbeUpdate::EveryFrame`](crcbl::render::ProbeUpdate::EveryFrame).
+/// now, through [`ProbeUpdate::EveryFrame`].
 ///
 /// **That updater is a reflective shadow map of the *sun's* near cascade**, and
 /// this zone's sun is [`zone::house_light`](crate::zone::house_light) — a token
