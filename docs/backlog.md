@@ -72,11 +72,24 @@ formally present and stale.
   wasm clippy leg, `tools/check-doc-citations.sh`,
   `tools/check-wrapped-strings.sh`, every `crates/crcbl/tests/run-*-e2e.sh` on
   radv and render-e2e on lavapipe, and the web gates.
-- **A different-axis sabotage of the clipmap.** The implementing agent named the
-  hole in its own tests: `ProbeVolume::level_origin`'s `1 − 2^k` offset sign,
-  which nothing in the CPU suite would catch on a symmetric fixture, and the
-  agreement between `probe_positions`' level-major order and `probe_row`'s
-  `probe_levels.y · level` on a scene with asymmetric per-level geometry.
+- ~~A different-axis sabotage of the clipmap.~~ **Done, and it inverted the
+  agent's own prediction.** Flipping `ProbeVolume::level_origin`'s offset sign
+  to `2^k − 1` was caught by the CPU test
+  `a_coarser_level_is_twice_as_wide_about_the_same_centre` (which the agent
+  expected to be blind to it on a symmetric fixture) and **not** by the GPU test
+  `a_fragment_crossing_a_clipmap_level_fades_into_it` (which it expected to
+  catch it): the frame still passed, with the mirror missing by 0.66 levels,
+  exactly its unsabotaged figure.
+
+  **Why, and it generalises: a shader-against-host mirror cannot catch an error
+  in the data the host uploads.** `level_origin` is evaluated once on the CPU
+  and written into the frame block, so a wrong origin reaches both sides of that
+  comparison and they agree about it perfectly. The mirror tests interpretation,
+  never input. Anything host-computed and uploaded — the per-level origins and
+  reciprocal spacings, `probe_capture`'s direction and face tables — needs a CPU
+  test asserting the value itself, and the mirror is not a substitute. Worth
+  checking that the other uploaded tables have one.
+
 - **The `Claude-Session:` trailers must come off all five commits** before the
   push, per this file's own entry above — the user confirmed that on 2026-09-03
   when a session-level instruction said otherwise. They are unpushed, so this is
