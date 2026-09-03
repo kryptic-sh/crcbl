@@ -18090,25 +18090,22 @@ Per-crate review passes explicitly disproved these before publishing anything:
 **Re-triaged against the tree on 2026-09-02**, every claim in this list. The
 heading no longer holds for all of it: three claims were **never accurate** and
 say so in place (vk's `untag`, the QOA saturation, render's "documented"
-allocations), several the tree has since answered were deleted, and four are
-**defects rather than fragility** — view-format compatibility being three rules
-across four backends, and the missing re-handshake after a forged `Accept`. (The
-other two, vk's `submit` not checking the command buffer's queue family and
-`write_buffer`'s memory rule differing across backends, shipped on 2026-09-03.)
-Those two are the ones to fix first; the rest of the list is unchanged in kind,
-sharpened where the triage found the original wording named the lesser half of a
-problem.
+allocations), several the tree has since answered were deleted, and four were
+**defects rather than fragility** — all four shipped on 2026-09-03 (vk's
+`submit` not checking the command buffer's queue family, `write_buffer`'s memory
+rule differing across backends, view-format compatibility being three rules
+across four backends, and the missing re-handshake after a forged `Accept`). The
+rest of the list is unchanged in kind, sharpened where the triage found the
+original wording named the lesser half of a problem.
 
 - **net**: `baseline_tick = 0` is wire-ambiguous (delta.rs:824/866-869;
-  unreachable — the server never encodes against tick 0); a forged `Accept`
-  permanently wedges the client (unauthenticated handshake by design) — the
-  missing half is **recovery**: `Client::handle_handshake_result` accepts any
-  generation-matching `Accept` and nothing ever re-handshakes, while
-  `auth_failure_count` is incremented in two places and read only by tests, and
-  the `Reject` path already has the two-strike logic to mirror; `Reject`
-  `msg_len` is u16 with a silent cast on encode (codec.rs:399); key rotation on
-  reconnect trusts a cleartext token (documented); reject messages disclose
-  server identifiers pre-auth.
+  unreachable — the server never encodes against tick 0); a forged `Accept` is
+  still accepted, because the handshake reply is unauthenticated by design —
+  what shipped is the **recovery**, `Client::expire_unproven_session`, so the
+  wedge is bounded rather than permanent; `Reject` `msg_len` is u16 with a
+  silent cast on encode (codec.rs:399); key rotation on reconnect trusts a
+  cleartext token (documented); reject messages disclose server identifiers
+  pre-auth.
 - **vk**: the acquire path waits with `u64::MAX` _while holding the device lock_
   — a compositor that never returns an image hangs every device call, and
   **both** waits are under it, the armed fence and `acquire_next_image` itself;

@@ -29,6 +29,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A forged `Accept` no longer wedges the client permanently.** The handshake
+  reply is unauthenticated by design, so a peer that names the outstanding
+  generation can complete the handshake with a resume token of its choosing; the
+  key derived from it opens nothing the real server sends, and
+  `handshake_complete` stopped every further hello, so the client sat
+  authenticated to nobody with `auth_failure_count` climbing. An accepted
+  session now has five seconds to open one message, and is discarded and
+  re-handshaked if it does not — with the resume token dropped on the second
+  such session in a row, the same two-strike rule the `INVALID_SESSION_TOKEN`
+  rejection already used.
 - **`write_buffer` requires `HostUpload` on every backend.** `crcbl-vk`,
   `crcbl-dx12` and `crcbl-mtl` gated on "is this memory mappable", which also
   admits `MemoryLocation::HostReadback`, while the trait doc and the `null`

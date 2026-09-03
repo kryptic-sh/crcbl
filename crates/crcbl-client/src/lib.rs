@@ -30,6 +30,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const HANDSHAKE_RETRY_BASE: Duration = Duration::from_millis(250);
 /// Ceiling on the retry delay.
 const HANDSHAKE_RETRY_MAX: Duration = Duration::from_secs(8);
+/// How long an accepted session has to open one message before the client
+/// concludes the key it derived is not the one the server holds.
+const SESSION_PROOF_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // InterpolatedState
@@ -120,6 +123,14 @@ pub struct Client<T: Transport> {
     /// to a fresh join.
     handshake_token_rejections: u32,
     handshake_complete: bool,
+    /// When an accepted session stops being given the benefit of the doubt,
+    /// because nothing it received has opened. Cleared by the first message
+    /// that does.
+    session_proof_deadline: Option<Duration>,
+    /// Consecutive accepted sessions whose key opened nothing; reaching two
+    /// drops the resume token, on the same reasoning as
+    /// `handshake_token_rejections`.
+    unproven_sessions: u32,
     /// Set only by a rejection this build can never satisfy.
     handshake_blocked: bool,
     reliable_rate_limiter: InboundRateLimiter,
@@ -176,6 +187,8 @@ impl<T: Transport> Client<T> {
             handshake_attempts: 0,
             handshake_token_rejections: 0,
             handshake_complete: false,
+            session_proof_deadline: None,
+            unproven_sessions: 0,
             handshake_blocked: false,
             reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
@@ -400,6 +413,8 @@ impl<T: Transport> Client<T> {
         self.handshake_complete = false;
         self.handshake_blocked = false;
         self.session_crypto = None;
+        self.session_proof_deadline = None;
+        self.unproven_sessions = 0;
     }
 
     /// Number of unrecoverable transport, encoding, or decoding errors.
@@ -455,6 +470,7 @@ impl<T: Transport> Client<T> {
     /// blocking every future attempt, and a retryable rejection backs off
     /// rather than latching.
     fn drive_handshake(&mut self) {
+        self.expire_unproven_session();
         if self.handshake_complete || self.handshake_blocked {
             return;
         }
@@ -478,6 +494,42 @@ impl<T: Transport> Client<T> {
             return;
         }
         self.send_hello();
+    }
+
+    /// Give up on a session whose key has never opened a message.
+    ///
+    /// An `Accept` is unauthenticated by design, so anyone who can reach this
+    /// client and name the outstanding generation completes the handshake with
+    /// a resume token of their choosing. Nothing distinguishes that from the
+    /// real thing at the time it arrives — but the key derived from a forged
+    /// token opens nothing, so every genuine snapshot afterwards fails its MAC
+    /// and the client sits authenticated to nobody. That state used to be
+    /// permanent: `handshake_complete` stops the hellos, and the failures land
+    /// in `auth_failure_count`, which nothing but a test reads.
+    ///
+    /// So an accepted session gets [`SESSION_PROOF_TIMEOUT`] to open one
+    /// message. If none does, the session is discarded and the handshake runs
+    /// again — and on the second such session in a row the resume token goes
+    /// with it, which is the `INVALID_SESSION_TOKEN` path's rule and is two
+    /// rather than one for its reason: a server that merely fell quiet must
+    /// not cost a still-valid credential.
+    fn expire_unproven_session(&mut self) {
+        let Some(deadline) = self.session_proof_deadline else {
+            return;
+        };
+        if self.now < deadline {
+            return;
+        }
+        self.session_proof_deadline = None;
+        self.session_crypto = None;
+        self.handshake_complete = false;
+        self.unproven_sessions = self.unproven_sessions.saturating_add(1);
+        if self.unproven_sessions >= 2 {
+            self.resume_token = None;
+            self.session_id = None;
+            self.unproven_sessions = 0;
+        }
+        self.schedule_handshake_retry();
     }
 
     fn schedule_handshake_retry(&mut self) {
@@ -633,6 +685,9 @@ impl<T: Transport> Client<T> {
                 self.handshake_attempts = 0;
                 self.handshake_token_rejections = 0;
                 self.handshake_retry_at = None;
+                // The `Accept` proves nothing on its own — it is unauthenticated
+                // — so the session is on the clock until a message opens.
+                self.session_proof_deadline = Some(self.now.saturating_add(SESSION_PROOF_TIMEOUT));
                 // Start playback at the server's clock rather than zero, so
                 // the first snapshot pair does not have to drag it forwards.
                 self.playback_tick = server_tick.get() as f64;
@@ -680,7 +735,11 @@ impl<T: Transport> Client<T> {
             }
         };
         // The MAC verified, so the sender holds this session's key: the
-        // hostile-input system cap no longer buys anything here.
+        // handshake that produced it was the real server's, and the session has
+        // proved itself for good.
+        self.session_proof_deadline = None;
+        self.unproven_sessions = 0;
+        // The same fact retires the hostile-input system cap here.
         let delta = match crcbl_net::decode_delta(&payload, Trust::Authenticated) {
             Ok(delta) => delta,
             Err(_) => {
@@ -1165,6 +1224,87 @@ mod tests {
         assert_eq!(client.session_id(), Some(SessionId(1)));
         assert_eq!(client.resume_token, Some(initial_token));
         assert_eq!(client.processing_error_count(), 1);
+    }
+
+    /// A forged `Accept` used to wedge the client for good.
+    ///
+    /// The handshake reply is unauthenticated by design, so a peer that names
+    /// the outstanding generation completes it with a token of its choosing.
+    /// The key derived from that token opens nothing the real server sends, and
+    /// `handshake_complete` stopped every further hello — so the client sat
+    /// authenticated to nobody, counting `auth_failure_count` upwards, forever.
+    #[test]
+    fn a_session_that_never_opens_a_message_is_handshaked_again() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(transport);
+
+        // The forgery: a well-formed `Accept` for the outstanding generation,
+        // carrying a token the server does not hold.
+        let forged = ResumeToken::from_bytes([0x11; 32]);
+        accept_hello(&mut client, &mut peer, Duration::ZERO, forged);
+        assert!(client.handshake_complete, "the client took the accept");
+
+        // The real server's snapshots now fail their MAC, which is all the
+        // client can see: it cannot tell a forged accept from a corrupt packet.
+        let mut real = SessionCrypto::from_token(&ResumeToken::from_bytes([0xA5; 32]));
+        send_sealed(&mut peer, &mut real, &keyframe_snapshot(1, &[(1, vec![7])]));
+        client.update(TICK);
+        assert_eq!(client.auth_failure_count(), 1, "the snapshot did not open");
+        assert!(peer.recv().unwrap().is_none(), "and nothing is sent back");
+
+        // Past the proof timeout the session is abandoned, and the hello that
+        // replaces it waits out the ordinary retry backoff.
+        client.update(SESSION_PROOF_TIMEOUT);
+        assert!(!client.handshake_complete, "an unproven session is dropped");
+        client.update(SESSION_PROOF_TIMEOUT + HANDSHAKE_RETRY_BASE);
+        let hello = peer.recv().unwrap().expect("the client handshakes again");
+        crcbl_net::decode_hello(&hello.payload).expect("it is a hello");
+    }
+
+    /// One quiet session costs the resume token nothing; two cost it the token.
+    ///
+    /// The same two-strike rule the `INVALID_SESSION_TOKEN` rejection uses, and
+    /// for the same reason — a server that merely fell silent must not force a
+    /// fresh join, but a token that has now failed twice is not worth resending.
+    #[test]
+    fn two_unproven_sessions_drop_the_resume_token() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(transport);
+
+        let token = ResumeToken::from_bytes([0x11; 32]);
+        accept_hello(&mut client, &mut peer, Duration::ZERO, token);
+
+        // One quiet session: expire it, then let the backoff run out.
+        client.update(SESSION_PROOF_TIMEOUT);
+        let second_at = SESSION_PROOF_TIMEOUT + HANDSHAKE_RETRY_BASE;
+        client.update(second_at);
+        let hello = peer.recv().unwrap().expect("a second hello");
+        let hello = crcbl_net::decode_hello(&hello.payload).expect("it is a hello");
+        assert_eq!(
+            hello.session_token,
+            Some(token),
+            "one quiet session keeps the credential, so the hello resumes"
+        );
+
+        // Answer it the same way and let that session go quiet too.
+        peer.send_reliable(Message::reliable(crcbl_net::encode_handshake_result(
+            &HandshakeResult::Accept {
+                generation: hello.generation,
+                session_id: SessionId(1),
+                resume_token: token,
+                server_tick: TickId::ZERO,
+            },
+        )))
+        .unwrap();
+        client.update(second_at);
+        client.update(second_at + SESSION_PROOF_TIMEOUT);
+        client.update(second_at + SESSION_PROOF_TIMEOUT + 2 * HANDSHAKE_RETRY_BASE);
+        let hello = peer.recv().unwrap().expect("a third hello");
+        let hello = crcbl_net::decode_hello(&hello.payload).expect("it is a hello");
+        assert_eq!(
+            hello.session_token, None,
+            "the second unproven session drops the token, so this is a fresh join"
+        );
     }
 
     #[test]
