@@ -148,6 +148,38 @@ jobs passed on `3430ba7` — but WARP and SwiftShader now clear it by less than
 they did. If that row ever flakes, the fix is a re-sweep on the driver that
 flaked, not a nudge.
 
+## The probe table's upload barriers are guarded by unit tests alone (2026-09-04)
+
+S2 made `crcbl_render::probe`'s table device-local and a ring of
+`FRAMES_IN_FLIGHT`, filled through a staging copy. Two of its checks were
+measured rather than assumed:
+
+- **The copy itself is well guarded.** Skipping `fill`'s upload leaves the
+  cleared zeroes, and that reddens `run-render-e2e.sh` (exit 100,
+  `the_probes_scene_lights_its_room_and_matches_its_golden`) and six of
+  lantern's eight goldens.
+- **The barriers around it are not, by anything on a GPU.** Emptying the closing
+  barrier list — so the rows are left in `TransferDst` while the graph's import
+  claims `ShaderRead` — leaves `run-render-e2e.sh` and `run-vk-e2e.sh` **both at
+  exit 0**, with Vulkan validation enabled and fatal. Only
+  `cargo test -p crcbl-render probe` goes red (exit 101). A buffer has no layout
+  to transition, and this upload's own `wait_idle` retires the copy before
+  anything reads the rows, so at load time there is no hazard for validation to
+  see.
+
+That makes `probe.rs`'s schedule-asserting unit tests the only guard on this
+path — which is what they were written to be, and worth knowing before someone
+reads them as redundant with the GPU suites and deletes them. It also means the
+barrier arguments will not be checked by anything until the gather makes them
+matter per frame, at S4.
+
+**And the ring is not exercised at all.** Every frame's buffer gets
+byte-identical contents and nothing writes them afterwards, so a wrong
+`buffer(frame)` or a copy loop that filled one slot would be invisible to every
+rendering test. The unit tests assert one copy per frame into that frame's own
+buffer and distinct handles; no GPU gate does. That changes at S4 and not
+before.
+
 ## `PROBE_OCCLUDED_WEIGHT` is correct and unguarded (2026-09-04)
 
 `crcbl_shaders::probe_visibility`'s `OCCLUDED_WEIGHT` (1e-4) is the floor

@@ -2201,12 +2201,14 @@ struct SharedBindings<'a> {
     /// dispatches for one camera.
     lights: BufferHandle,
     light_grid: BufferHandle,
-    /// Binding [`PROBE_TABLE_BINDING`], the irradiance grid's rows.
+    /// Binding [`PROBE_TABLE_BINDING`], **this frame's slot** of the irradiance
+    /// grid's ring.
     ///
-    /// Shared rather than per-group for the light list's reason and one more of
-    /// its own: the grid is written once at build and never varies by frame or
-    /// by view. A cascade reads it too and never looks — the depth-only pipeline
-    /// has no fragment stage of its own.
+    /// Shared across the *groups of one frame* rather than across frames, which
+    /// is the light list's arrangement exactly: a cascade shades nothing, so it
+    /// reads the same rows the colour pass does and the depth-only pipeline
+    /// simply never looks. What it is not is shared across the ring — see
+    /// [`crate::probe`] for why the table is per-frame at all.
     probes: BufferHandle,
     /// Binding [`LEVEL_GROUP_TABLE_BINDING`], `DrawGen`'s packed table buffer.
     ///
@@ -2556,6 +2558,28 @@ struct MaterialPages {
     base_color: ImageId,
     /// §2's normal page — [`ForwardRenderer::normal_page_import`].
     normal: ImageId,
+}
+
+/// Everything [`ForwardRenderer::add_shadow_pass`] declares and does not write,
+/// as the graph knows it.
+///
+/// One value rather than an argument apiece for [`MaterialPages`]' reason, and
+/// the list grew past what an argument list should be the moment the probe rows
+/// joined it: each of these is in every cascade's bind group and read by no
+/// cascade, so what the pass does with them is one thing — declare them, so the
+/// graph can order whoever writes them against these draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShadowReads {
+    /// The occlusion placeholder every cascade's group stands the real channel
+    /// in for — [`ForwardRenderer::ambient_occlusion_placeholder`].
+    occlusion_placeholder: ImageId,
+    /// §3.2's and §2's pages, which the cascades name and never sample.
+    pages: MaterialPages,
+    /// The skinned vertex region, where a frame has one — the cascades pull the
+    /// same geometry the colour pass does.
+    skinned: Option<BufferId>,
+    /// This frame's slot of the probe ring — see [`crate::probe`].
+    probes: BufferId,
 }
 
 /// What the mesh pass's bind-group layout is called.
@@ -3280,17 +3304,24 @@ impl ForwardRenderer {
         // shader's clamp lands on.
         let probe_table = ProbeTable::new(
             device,
+            queue,
             &ProbeTableDesc {
                 label: Some("forward"),
                 capacity: scene.capacities.probes,
+                frames: FRAMES_IN_FLIGHT,
             },
         )?;
-        // Into the rollback before it is filled, so a write that fails releases
-        // the buffer rather than leaking it.
+        // Into the rollback before it is filled, so a copy that fails releases
+        // the buffers rather than leaking them.
         rollback.probes = Some(probe_table);
         let probe_table = rollback.probes.as_ref().expect("just stored");
-        let probe_buffer = probe_table.buffer();
-        probe_table.fill(device, &scene.probes.probes)?;
+        probe_table.fill(device, queue, &scene.probes.probes)?;
+        // Read out here, like the instance ring's below and for the same
+        // reason: the handles are `Copy`, and the loop that builds the bind
+        // groups mutates the rollback the table now lives in.
+        let probe_buffers: Vec<BufferHandle> = (0..FRAMES_IN_FLIGHT)
+            .map(|frame| probe_table.buffer(frame))
+            .collect();
 
         // **Empty.** Every object in the scene arrives through
         // [`ForwardRenderer::add_instance`], including the demo scene's cube: a
@@ -3970,10 +4001,18 @@ impl ForwardRenderer {
             binding: PROBE_TABLE_BINDING,
             visibility: geometry.union(ShaderStages::FRAGMENT),
             kind: BindingKind::StorageBuffer {
-                // **Read-only, which is what lets the table be host-visible at
-                // all**: the seam refuses a *writable* storage binding of a
-                // host-visible buffer, and nothing writes a probe on the GPU —
-                // the whole grid is authored and uploaded once.
+                // **Read-only, and it stays read-only when the updater lands.**
+                // The rows are device-local now — see [`crate::probe`], which is
+                // where that is argued — so the seam no longer forces this;
+                // what forces it is that the shading path does not write a
+                // probe and this layout has no headroom to pretend otherwise.
+                // The raster path is at the WebGPU per-stage storage-buffer
+                // ceiling already, which the check at the end of the layout
+                // holds it to, so `read_only: false` here would buy a write
+                // nothing performs at the price of a binding budget there is
+                // none of. `docs/plan/50-irradiance-probes.md`'s gather is a
+                // compute pass with a layout of its own, and that is where the
+                // writable binding of these rows belongs.
                 read_only: true,
                 dynamic: false,
             },
@@ -4489,7 +4528,7 @@ impl ForwardRenderer {
                 shadow_sampler,
                 lights: lights.lights(frame),
                 light_grid: lights.grid(frame),
-                probes: probe_buffer,
+                probes: probe_buffers[frame],
                 tables: draws.tables(),
                 specular_dfg: specular_dfg.view,
                 ltc_table: ltc_table.view,
@@ -7489,7 +7528,12 @@ impl ForwardRenderer {
             self.lights
                 .add_pass(graph, self.frame, generated.visible_count_id, self.grid);
 
-        let probe_buffer = self.probes.buffer();
+        // **This frame's slot of the probe ring**, which is the buffer every
+        // one of this frame's bind groups names — see [`crate::probe`] for why
+        // there is more than one. Imported in `ShaderRead` and handed back in
+        // it: the build's staging copy left it there and no pass in the frame
+        // writes it yet.
+        let probe_buffer = self.probes.buffer(self.frame);
         let probe_table = graph.import_buffer(
             "probes",
             ImportedBuffer {
@@ -7572,9 +7616,12 @@ impl ForwardRenderer {
             graph,
             pool,
             &tile_selection,
-            occlusion_placeholder,
-            pages,
-            skinned,
+            ShadowReads {
+                occlusion_placeholder,
+                pages,
+                skinned,
+                probes: probe_table,
+            },
         );
 
         let scene_color =
@@ -7928,7 +7975,13 @@ impl ForwardRenderer {
             .read_image(base_color_page)
             // And §2's normal page, which is in the same groups for the same
             // reason and is sampled here just as little.
-            .read_image(normal_page);
+            .read_image(normal_page)
+            // And the probe rows, which `mesh_layout` names in this group too
+            // and which the depth-only pipeline reads not at all — declared for
+            // the colour pass's reason exactly: they are device-local and
+            // writable-by-copy so a gather can fill them, and the graph orders a
+            // write against a pass only if that pass declared the read.
+            .read_buffer(probe_table);
         // `read_draw_sources` declares the *camera's* statistics buffer, because
         // that is the one the arguments came out of; the prepass writes its own
         // instead, so both are declared and the graph barriers both.
@@ -8095,7 +8148,16 @@ impl ForwardRenderer {
             // stage has it bound, so declaring the read is what moves it — and
             // without the declaration the fragment stage reads a buffer the
             // compute pass may still be writing.
-            .read_buffer(light_grid);
+            .read_buffer(light_grid)
+            // The probe rows, on the froxel grid's terms and for a hazard that
+            // does not exist yet: nothing writes a probe on the GPU today, so
+            // this frame's slot is already in `ShaderRead` and the graph has
+            // nothing to transition. It is declared anyway, because the rows are
+            // device-local and `TRANSFER_DST` precisely so
+            // `docs/plan/50-irradiance-probes.md`'s gather can write them — and
+            // a pass that binds a buffer without declaring it is a pass the
+            // graph cannot barrier the day something does.
+            .read_buffer(probe_table);
         // And the skinned vertices, which is the declaration this whole entry
         // point exists for: without it the vertex stage pulls a region the
         // compute dispatch may still be writing, and the graph — which is told
@@ -8549,9 +8611,7 @@ impl ForwardRenderer {
         graph: &mut RenderGraph<'_>,
         pool: &TransientPool,
         selection: &[BufferId],
-        occlusion_placeholder: ImageId,
-        pages: MaterialPages,
-        skinned: Option<BufferId>,
+        reads: ShadowReads,
     ) -> (ImageId, u64, u64) {
         let shadows = self.frame_effects.contains(RenderEffects::SHADOWS);
         let (atlas_width, atlas_height) = shadow::atlas_extent();
@@ -8709,14 +8769,21 @@ impl ForwardRenderer {
             // Likewise, and it is in every one of those groups too — see
             // `ForwardRenderer::ambient_occlusion_placeholder`. Nothing samples
             // it here either: the depth-only pipeline has no fragment stage.
-            .read_image(occlusion_placeholder)
+            .read_image(reads.occlusion_placeholder)
             // And §3.2's page, which `mesh_layout` names in every group — a
             // cascade's included. See `ForwardRenderer::base_color_page_import`
             // for what the declaration buys a caller that writes the page.
-            .read_image(pages.base_color)
+            .read_image(reads.pages.base_color)
             // And §2's normal page beside it, in those same groups and sampled
             // by no cascade — see `ForwardRenderer::normal_page_import`.
-            .read_image(pages.normal);
+            .read_image(reads.pages.normal)
+            // And the probe rows, which are in those groups too and which no
+            // cascade reads — declared on the placeholder's and the pages'
+            // terms, plus one of their own: the rows are device-local and a copy
+            // destination so `docs/plan/50-irradiance-probes.md`'s gather can
+            // write them, and a pass that binds a buffer it has not declared is
+            // one the graph cannot order that write against.
+            .read_buffer(reads.probes);
         // Each tile's mesh pass records the cut it descended to, into a buffer
         // of its own — see `ForwardRenderer::shadow_selection`. Empty where
         // there is no amplification stage to descend anything.
@@ -8734,7 +8801,7 @@ impl ForwardRenderer {
         // dispatch was visible would be cast by the previous pose — a shadow
         // that does not match its caster, on a frame whose picture is otherwise
         // right.
-        if let Some(vertices) = skinned {
+        if let Some(vertices) = reads.skinned {
             pass = pass.read_buffer(vertices);
         }
         for (_, draws) in &generated {
