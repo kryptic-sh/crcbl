@@ -244,289 +244,19 @@ within tolerance and was left alone.
   which is why it was the largest geometry saving short of occlusion culling.
   Static caching — the map's geometry rendered once per cascade and only dynamic
   instances re-drawn — is still the rung above this one, and still unbuilt: what
-  item 5 caches is the whole map, not its static half.
-- **The atlas proper, pulled forward from post-MVP on 2026-08-30** because the
-  user wants shadows that hold up on a scene with many lights sooner than the
-  ladder had it. What the atlas holds is `SHADOW_ATLAS_COLUMNS` by
-  `SHADOW_ATLAS_ROWS` cells of `SHADOW_TILE` texels and `LIGHT_SLOTS` cull
-  slots, and so two shadowed point lights and two spots beside the sun; a fifth
-  light lights and does not occlude. That capacity is unchanged by the items
-  below that have landed — they made the atlas divisible, not larger. The rung
-  makes the atlas an **allocator rather than a grid**, in the shape Doom 2016
-  and Unity HDRP ship. **All five landed 2026-08-31.** Item 2 is what first
-  spends the allocator's levels, and 3 and 5 spend the frame.
-  1. **Variable tile sizes — the allocator landed 2026-08-31.**
-     `crcbl_render::shadow::AtlasAllocator` is a quadtree over each of the
-     atlas's root cells: `allocate(level)` hands out a whole cell or a halving
-     of it down to `MIN_TILE`, `release` merges four free children back into
-     their parent so the space comes back at the size it was, and the order is
-     deterministic — lowest free node of the level asked for, subdividing the
-     lowest free node of the finest coarser level. A forest of per-cell
-     quadtrees rather than one tree over the image, because the atlas is neither
-     square by construction nor a power of two in cells; ask every root for its
-     whole self and the layout is the old grid, texel for texel, which is what
-     shipped. **`MIN_TILE` is a floor nothing has measured** — the halvings are
-     a starting point to sweep, not a finding. The reason first given for that
-     is spent: item 2 landed the same day and lights do take sub-cell maps,
-     `shadow::tile_level` demoting on `coverage` and `mesh_e2e/shadow_tiles.rs`
-     rendering one light at a whole cell beside one at a quarter of its side.
-     What is still unmeasured is whether the floor is in the right place.
-  2. **A priority per light per frame — landed 2026-08-31.**
-     `crcbl_render::shadow::coverage` is how much of the frame's **height** a
-     light's shadow map covers on screen: the map's own footprint over the
-     distance to the eye, through the projection's own scale with no viewport
-     height in it. **A fraction of the frame rather than a count of pixels**, so
-     a scene allocates the same tiles at every extent and a golden at 256x192 is
-     evidence about the 1080p frame. **The map's footprint rather than the
-     light's sphere**, so a narrow cone is not demoted for being narrow: two
-     lights of one radius spread their texels over world regions that differ by
-     the cone's tangent, and the narrow one already has the finer texels.
-
-     One scorer decides both questions: the ranking that hands out runs of tiles
-     and the size of the tiles in that run. `WHOLE_CELL_COVERAGE` is the anchor
-     — a quarter of the frame's height earns a whole root cell — and every
-     threshold below it is that halved, because a level of the quadtree is a
-     halving of the tile's side. `LEVEL_HOLD_RATIO` is the band:
-     [25-lod.md](25-lod.md)'s "switch-up and switch-down differ" at this
-     module's other boundary, deliberately the same fifth
-     `ForwardRenderer::lod_hold_ratio` opens, so a light on a threshold does not
-     halve and double its map every frame. A light with no history starts at the
-     coarsest level and climbs, which is the ladder with no band at all — so a
-     frame's first answer is reproducible.
-
-     **The anchor is the conservative end of a sweep bounded by the fixtures
-     that must not move**, and that is written down rather than hidden. Measured
-     on the tree's own fixtures, which the metric makes independent of the
-     extent they render at: `Scene::PointShadow` 3.06, `Scene::SpotShadow` 1.41,
-     `apps/lantern`'s lamp 1.06 at the worst phase of its orbit, its corner
-     downlight 0.37 — and the downlight is what binds, clearing the anchor by
-     half as much again. The parameter-free rule of one shadow texel per screen
-     pixel would demote every one of them at the 256x192 the goldens are blessed
-     at; `docs/backlog.md` carries what that costs and what it buys.
-
-     **The bias had to move with it**, and that is the half a golden could not
-     have caught: `mesh.slang`'s `SHADOW_TILE` was the whole cell's side and
-     every bias in that file was denominated in it, so a demoted light would
-     have been biased by a footprint four times too small per two levels.
-     `tile_texels(rect)` — the reciprocal of `atlas_step` — is the map's own
-     side, read out of the rectangle item 4 already hands over, and the constant
-     is gone from the shader.
-
-     Checked by `crates/crcbl/tests/mesh_e2e/shadow_tiles.rs`: two lights of one
-     shape over one floor, one at a whole cell and one at a quarter of its side,
-     with the demoted light's pool measured for self-shadowing dots — 22 in 2941
-     pixels correctly biased against 195 in 2828 with the bias taken from the
-     cell, on radv at 1280x960; 23 in 2940 against 200 in 2823 on lavapipe.
-
-     **Priced 2026-08-31**: four spot lights over a six-by-six field of dunes
-     patches, the same rig drawn from a camera at 22 and at 88 world units, so
-     the far camera is that rig two ladder rungs down. `PassStats` over 48
-     recorded frames after the warm-up, the `shadow` pass alone — on an RX 7900
-     XTX 0.032 ms p50 whole against 0.030 demoted, and on llvmpipe 3.254 against
-     2.695. A sixth off on the software tier and a few per cent on the hardware
-     one, and the saving is the tile's _and_ the cut's together, since the far
-     camera also selects a coarser cut. The sun's two cascades are whole cells
-     in both columns and are most of what is left, which is why four demoted
-     lights do not halve the pass — on radv a repeat put the two 2 µs apart on a
-     pass of thirty, which is why the test reports the pair and asserts no
-     ordering between them. The browser tier is unmeasured.
-
-  3. **A budget in tiles and in rendered faces per frame — landed 2026-08-31.**
-     `crcbl_render::shadow::Cadence::schedule` is the whole of it: which of the
-     atlas's **groups** a frame redraws, out of the ones whose maps the image no
-     longer holds. A group is a cascade or a light slot's whole run of tiles —
-     what one cull covers, since a point light's `POINT_FACES` faces draw one
-     visible set through six matrices, so redrawing three of them and holding
-     three is the same cull and the same six visible sets at half the draws.
-
-     **Keyed to the frame index and to nothing else.** No clock, no iteration
-     order and no address is in the schedule, so a golden at a stated frame is
-     the same golden on every run, every driver and every backend — the property
-     the rung above asks for by name and the one this would be worthless
-     without.
-
-     **The tier is the ladder item 2 already built.** A light's tier is the
-     quadtree level `tile_level` gave it, so `coverage` decides how often a map
-     is redrawn exactly as it decides how large that map is — one scorer, read
-     twice, and no second notion of how much a light matters. A cascade's tier
-     is its own index, which is the cadence rung's own words: the near cascade
-     every frame, each one out at twice the period. `r_shadow_cadence` caps the
-     ladder.
-
-     **Cadence is the outer gate and staleness the inner one**, and the code
-     says so: a group whose inputs moved but whose turn has not come holds the
-     texels it has and is redrawn on its turn. The alternative — staleness
-     overriding the cadence — is a schedule that binds only while nothing moves,
-     which is the case that never needed bounding.
-
-     **`r_shadow_faces` bounds the tiles a frame redraws**, and the due groups
-     are admitted in the group index **rotated by the frame** rather than in
-     tier order. Tier order would starve every coarse map outright: a tier-0
-     group is due on every frame, so the budget would be spent before a tier-1
-     group was ever reached, for ever. Rotating serves them round-robin and the
-     ladder still comes out of it — a group due twice as often asks twice as
-     often and is served twice as often. A group that does not fit is skipped
-     and the walk continues, which is `Selection::update`'s rule at this
-     boundary; a frame that admitted nothing takes the first candidate anyway,
-     so a budget smaller than the largest map is a bounded overshoot rather than
-     a tile nothing ever draws.
-
-     **The reset is derived, not thresholded.** A map whose own centre has moved
-     further than its own reach — a light past its radius, a cascade's eye past
-     the sphere `Cascades::far` fitted it to — covers ground it was never drawn
-     for, which is worse than a shadow that lags. Such a group bypasses the
-     period and is offered the budget first;
-     `ForwardRenderer::shadow_cadence_reset` is the readback. A frame whose
-     atlas was **relaid** — a light gained, lost or resized a tile, or
-     `RenderEffects::SHADOWS` moved — resets wholesale and spends no budget,
-     because the only clear this seam has covers the whole image and there is
-     nothing left to hold.
-
-     **What made holding a tile possible is the clear item 5 could not make.**
-     `mesh.slang`'s `depthClearVertexMain` and
-     `MeshModules::depth_clear_pipeline` reset one tile with a primitive over
-     its own viewport — `CompareOp::Always` and depth writes on, at
-     `SHADOW_ATLAS_CLEAR_DEPTH`, which a const assertion holds to
-     `crcbl_hal::depth::CLEAR`. A frame that keeps a tile therefore **loads**
-     the attachment and resets what it redraws; a frame that keeps nothing
-     clears it, which is byte for byte the recording that shipped. That is also
-     the second half of the DECIDED rule below: the atlas's unit is now the
-     group, so a lamp that swings costs its own tiles and not every tile.
-     Per-_face_ inside a point light's cube is still not the unit and does not
-     need to be.
-
-     **Both limits default to what shipped**, so every golden in the tree is the
-     frame it was blessed from: `r_shadow_cadence` is one frame and
-     `r_shadow_faces` is the whole atlas. `ForwardRenderer::set_shadow_cadence`
-     pins the pair per renderer — the two variables are process-global and the
-     shadow pass is in every frame's pass list, so a test that moved them while
-     drawing would change the frame every other test draws.
-
-     Checked without a device by `crcbl_render::shadow::cadence`'s own tests —
-     the ladder halving, the hold capping it, the budget binding, nothing
-     starving, a forced group bypassing the period — and by
-     `crcbl_render::forward`'s
-     `the_far_cascade_is_held_on_the_frames_between_its_turns`,
-     `a_frame_that_keeps_a_tile_loads_the_attachment_and_resets_the_rest`,
-     `the_face_budget_bounds_a_frame_and_starves_no_map`,
-     `a_light_that_jumps_past_its_own_radius_resets_the_cadence` and
-     `a_point_light_costs_the_budget_every_face_it_draws` against the null
-     backend's recorded stream — the last of those because every other check
-     here is built on the sun and a spot, which own one map each, so a face
-     count that answered one for every group satisfied all of them and a point
-     light's cube is what binds on the difference. On a device by
-     `crates/crcbl/tests/mesh_e2e/shadow_cache.rs`'s
-     `a_frame_that_kept_a_tile_draws_the_map_it_redrew`, which is the half no
-     host test can reach: a frame drawn under a budget of one tile has to be the
-     frame a renderer meeting the scene for the first time draws. On radv at
-     256×192 the caster's move changes 1432 pixels, the frame after the run
-     differs from the reference in 0, and the frame that held the lamp's map
-     lags it by 1023 — against 755 differing when the tile clear is removed and
-     268 when the load is replaced by a whole-attachment clear.
-
-     **Priced 2026-08-31**: the same six-by-six field of dunes patches and four
-     spot lights the rung above is priced on, one camera, with a patch nudged
-     each frame so every map is out of date on every frame — the case a budget
-     exists to bound. `PassStats` over 48 recorded frames after the warm-up, the
-     `shadow` pass alone:
-
-     | Tier                | Every map every frame (6 tiles) | Budget of 2 tiles          |
-     | ------------------- | ------------------------------- | -------------------------- |
-     | RX 7900 XTX (radv)  | p50 0.016 ms, p95 0.018 ms      | p50 0.007 ms, p95 0.008 ms |
-     | llvmpipe (lavapipe) | p50 3.833 ms, p95 5.025 ms      | p50 1.727 ms, p95 2.414 ms |
-
-     A little over half the pass on both, which is what two tiles out of six
-     buys once the clear and the pass's own fixed cost are paid. The absolute
-     figures move with what else is on the machine — a repeat of the hardware
-     column on a quieter run read 0.030 ms against 0.013 ms — which is why the
-     two arms are drawn on alternating frames of one run and why no ordering is
-     asserted.
-
-     The browser tier is unmeasured. `docs/backlog.md` carries what a default
-     other than "every map every frame" would cost and what it would need.
-
-  4. **The shader reads a rect per light — landed 2026-08-31.**
-     `FrameUniforms::shadow_atlas_rect` is one `float4` per atlas slot (a scale
-     into the image in `xy`, an offset in `zw`), and `mesh.slang`'s `atlas_uv`
-     is `rect.zw + tile_uv * rect.xy` where it used to derive a cell from a
-     grid; `atlas_step` divides the atlas's texel size by the rectangle's, which
-     is what a smaller tile stepping further per texel means and the whole of
-     why one sampling path covers every size. `volumetric.slang` carries the
-     same row and the same three functions, held to `mesh.slang`'s by
-     `both_shaders_spell_the_same_atlas_walk`, and `SHADOW_ATLAS_COLUMNS` and
-     `SHADOW_ATLAS_ROWS` are gone from both — the grid is a host fact only now.
-
-     **The rectangle rides beside the per-slot matrix, not in the light's row**,
-     and the reason is the point light: it owns `SHADOW_POINT_FACES` maps and
-     one row cannot carry six rectangles. `GpuLight::shadow_tile` is therefore
-     still the index — but into a _pool the allocator hands out from_ rather
-     than into a fixed grid, which is what this item was for.
-
-  5. **Static caching — landed 2026-08-31, at whole-atlas granularity.**
-     `crcbl_render::shadow::Selection` holds its tiles across frames: a slot
-     that wants the size it already has keeps the same texels, and only a slot
-     whose map is gone or whose level changed hands its tile back to
-     `AtlasAllocator::release`, which is what gives that function its first
-     caller in the renderer. `ForwardRenderer::begin_frame` then compares
-     everything the atlas is drawn from — every view's block and every cull's
-     frustum, the selection eye, the instance count and `InstancePool::revision`
-     — against the reading the image was last _drawn_ from, and a frame that
-     matches records no cull and no pass. `ForwardRenderer::shadow_atlas_cached`
-     is the readback.
-
-     **The record is committed by the pass's own body, not by the call that
-     records it**, and that is the subtle half: a frame whose graph is refused,
-     or built and dropped, has left the image exactly as it was, and a renderer
-     that had already moved its record on would then hold a map nothing drew.
-     `a_refused_frame_leaves_the_shadow_atlas_where_it_was` is the case.
-
-     **The unit is the group, and the tile is still not it.** This paragraph
-     used to say one changed input redraws every tile, and the cadence rung
-     below made that false: `begin_frame` builds a `shadow_group_record` per
-     group — that group's views, culls, selection eye and instance count — and
-     leaves a group whose record has not moved out of the frame's work entirely.
-     `shadow_slot_redrawn` and `shadow_cascade_redrawn` read back per group;
-     `shadow_atlas_cached` is the whole-atlas case alone. So a lamp that swings
-     costs its own group rather than the atlas, which is most of what the
-     DECIDED rule below asks for.
-
-     What a _tile_ as the unit still needs is the clear. This seam can only
-     clear a depth attachment pass-wide, and the region-bounded forms are not
-     portable — Metal's load action and WebGPU's `loadOp` have no render area,
-     so a partial clear would keep a tile on Vulkan and erase it on Metal. Of
-     the two routes out, the scissored depth-writing quad is **built** —
-     `mesh.slang`'s `depthClearVertexMain` through
-     `MeshModules::depth_clear_pipeline`, which is how the cadence path resets a
-     redrawn tile — and a `clear_attachment`-with-rects call at the HAL seam is
-     the one still owed. The second half of the same entry stands: the camera is
-     an input to every tile — cascades are fitted to it and every shadow cull
-     selects detail at the camera's pixels — so the cache only hits on a frame
-     the eye did not move in.
-
-  **DECIDED 2026-08-30, the user's rule for this rung:** the atlas is **dynamic
-  and cached** — every light re-renders its tiles whenever it or an instance it
-  covers moves, and a light whose tiles would come out the same is not
-  re-rendered at all, so a scene full of still fixtures costs the frame nothing
-  and a lamp that swings costs exactly its own tiles. That makes items 3 and 5
-  the rule rather than an option: the cadence tiers exist to bound the worst
-  case when everything moves, and the cache is what makes the common case cheap.
-  Both halves are built as of 2026-08-31: item 5 landed the cache at whole-atlas
-  granularity, and item 3's per-tile clear — `mesh.slang`'s
-  `depthClearVertexMain` — moved its unit to the group, so a lamp that swings
-  now costs its own tiles and not every tile. Per-_face_ inside a point light's
-  cube is deliberately not the unit; the cadence's unit is the cull, and
-  `docs/backlog.md` says why. A cached tile is not a bake — it is re-rendered
-  the frame its inputs change, and nothing about it survives a load. The budget
-  row — how many shadowed local lights a frame renders and the atlas's size on
-  each of the three quality tiers — is drafted in
-  [39-capabilities.md](39-capabilities.md)'s tier table as starting values to
-  sweep on each tier's hardware.
-
-  Checked by the goldens that stand — the sun's cascades and the four lights
-  lantern shadows must not move — plus a scene with more lights than tiles that
-  reads every tile allocated, the priority order observed, and the cost row
-  `40-profiling.md`'s baseline supplies.
-
+  the cache holds is a group's whole map, not its static half, so one moved
+  caster redraws every caster that group covers.
+- **The atlas is an allocator rather than a grid**, in the shape Doom 2016 and
+  Unity HDRP ship — pulled forward from post-MVP on 2026-08-30 because the user
+  wants shadows that hold up on a scene with many lights sooner than the ladder
+  had it. What it holds is `SHADOW_ATLAS_COLUMNS` by `SHADOW_ATLAS_ROWS` cells
+  of `SHADOW_TILE` texels and `LIGHT_SLOTS` cull slots, and so two shadowed
+  point lights and two spots beside the sun; a fifth light lights and does not
+  occlude. `crcbl_render::shadow::AtlasAllocator` is a forest of per-cell
+  quadtrees rather than one tree over the image, because the atlas is neither
+  square by construction nor a power of two in cells — ask every root for its
+  whole self and the layout is the old grid, texel for texel. What a light is
+  given, when it is redrawn and what that costs are the three decisions below.
 - **Under `LightingPath::RayTraced` this whole section is bypassed**, not
   augmented: shadows come from ray queries against the TLAS, for every light
   type, with no cascades and no shadow atlas. The two are alternatives, which is
@@ -1027,6 +757,84 @@ What is still true is that **nothing runs this on its own**: the numbers above
 came from a hand-run binary, there is no harness that records a pass's cost and
 fails on a regression, and the browser gate still reports wall clock per demo
 rather than per pass. `docs/backlog.md` carries that as what is left.
+
+### A twelfth, taken 2026-08-31: the coverage anchor is the conservative end of a measured sweep
+
+`crcbl_render::shadow::coverage` is how much of the frame's **height** a light's
+shadow map covers on screen — the map's own footprint over the distance to the
+eye, through the projection's own scale with no viewport height in it. A
+fraction of the frame rather than a count of pixels, so a scene allocates the
+same tiles at every extent and a golden at 256x192 is evidence about the 1080p
+frame; and the map's footprint rather than the light's sphere, so a narrow cone
+is not demoted for being narrow.
+
+One scorer decides both questions — the ranking that hands out runs of tiles and
+the size of the tiles in that run. `WHOLE_CELL_COVERAGE` is the anchor, a
+quarter of the frame's height earning a whole root cell, and every threshold
+below it is that halved, because a level of the quadtree is a halving of the
+tile's side.
+
+**The anchor is the conservative end of a sweep bounded by the fixtures that
+must not move**, and those bounds are written here rather than left in a commit
+message, because anyone moving `WHOLE_CELL_COVERAGE` is moving it against them.
+Measured 2026-08-31 on the tree's own fixtures — the metric is a fraction of the
+frame, so each is independent of the extent it renders at: `Scene::PointShadow`
+3.06, `Scene::SpotShadow` 1.41, `apps/lantern`'s lamp 1.06 at the worst phase of
+its orbit, and its corner downlight 0.37. **The downlight is what binds**,
+clearing the anchor by half as much again. The parameter-free alternative — one
+shadow texel per screen pixel — would demote every one of the four at the
+256x192 the goldens are blessed at; `docs/backlog.md` carries what that costs
+and what it buys.
+
+**The bias had to move with the tile**, and that is the half a golden could not
+have caught: `mesh.slang`'s `SHADOW_TILE` was the whole cell's side and every
+bias in that file was denominated in it, so a demoted light would have been
+biased by a footprint four times too small per two levels. `tile_texels(rect)` —
+the reciprocal of `atlas_step` — is the map's own side, read out of the
+rectangle the shader is handed, and the constant is gone from the shader.
+`crates/crcbl/tests/mesh_e2e/shadow_tiles.rs` is where that is held: two lights
+of one shape over one floor, one at a whole cell and one at a quarter of its
+side, with the demoted light's pool measured for self-shadowing dots.
+
+### A thirteenth, taken 2026-08-31: the hold band is the fifth `lod_hold_ratio` opens
+
+`LEVEL_HOLD_RATIO` is what stops a light sitting on a threshold halving and
+doubling its map every frame, and it is **deliberately the same fifth
+`ForwardRenderer::lod_hold_ratio` opens** — [25-lod.md](25-lod.md)'s "switch-up
+and switch-down differ", at this module's other boundary. That is a cross-module
+constraint rather than a note about the atlas: the two bands are one number by
+intent, and moving either without the other makes a light and its mesh disagree
+about when a rung is worth taking.
+
+A light with no history starts at the coarsest level and climbs, which is the
+ladder with no band at all — so a frame's first answer is reproducible.
+
+### A fourteenth, taken 2026-08-30 by the user: the atlas is dynamic and cached
+
+Every light re-renders its tiles whenever it or an instance it covers moves, and
+a light whose tiles would come out the same is not re-rendered at all — so a
+scene full of still fixtures costs the frame nothing and a lamp that swings
+costs exactly its own tiles. That makes the cadence and the cache the rule
+rather than an option: the cadence tiers bound the worst case when everything
+moves, and the cache is what makes the common case cheap.
+
+**A cached tile is not a bake.** It is re-rendered the frame its inputs change,
+and nothing about it survives a load.
+
+**The unit is the cull, not the face.** `crcbl_render::shadow::cadence`'s
+`schedule` decides which of the atlas's _groups_ a frame redraws — a cascade, or
+a light slot's whole run of tiles — because a point light's `POINT_FACES` faces
+draw one visible set through six matrices, so redrawing three and holding three
+is the same cull and the same six visible sets at half the draws. Per-face
+granularity inside a point light's cube was considered and declined;
+`docs/backlog.md` says why. `mesh.slang`'s `depthClearVertexMain` is what lets a
+group be cleared without clearing the atlas, since a pass-wide `LoadOp::Clear`
+is the only depth clear the seam offers.
+
+The budget row — how many shadowed local lights a frame renders, and the atlas's
+size on each of the three quality tiers — is drafted in
+[39-capabilities.md](39-capabilities.md)'s tier table as starting values to
+sweep on each tier's hardware.
 
 ### The quality ladder, taken 2026-08-27
 

@@ -710,48 +710,6 @@ conditionally later.** It is priced on half-resolution AO being "already owed
 and unmeasured" (that document, the row itself), and half-resolution AO landed
 and was swept on 2026-09-02. That row wants re-checking today.
 
-## The browser log cuts a line at 1024 bytes, and the pass table is longer (2026-09-02)
-
-`crcbl::web`'s `MAX_LOG_LINE` is 1024 bytes and the sink truncates there. Since
-2026-09-02 it says so — a cut line ends in a marker naming the bytes it lost,
-matching what the same queue already did for a page that stops draining — but
-the cap itself has not moved, so **the message that hits it most is the one
-worth reading**: `crcbl::engine`'s per-pass timing table.
-
-Measured on `ba91af3`'s Pages artifact, `web-e2e-lantern`: the table announces
-`23 label(s)` and the log carries fifteen, ending mid-number inside `hiz-2`. The
-eight it loses are the tail of the frame — `ssr`, `ssr-blur`, the remaining
-`hiz` levels, tonemap, ui, upscale. So **the browser tier's SSR price cannot be
-read out of a gate log at all**, which is what `47-reflections.md`'s "no
-half-resolution SSR" row wants before it can have a reason of its own, and what
-`44-lighting.md`'s area-light row means by the browser figure still being an ALU
-count.
-
-The cap is not arbitrary: 512 queued lines at 1024 bytes bounds the shim's share
-of wasm memory at half a megabyte, and a page that never drains must not grow it
-without bound. Raising it would buy headroom rather than a rule — the label
-count only grows, so whatever number replaced 1024 would be the next date this
-entry got rewritten.
-
-**Taken instead: `Loop::finish` logs one record per line.** `PassStats::report`
-is unchanged; only how many records carry it is, so the cap is never met and no
-number had to be guessed. This entry first priced that route as moving the gate
-with the format, on the belief that `web/tools/browser-e2e.mjs` parses the
-`gpu passes` line for its label count. It does not — the only mention of that
-line in the file is a comment on why the report is the wrong reading for the
-check it sits beside. **But the entry then said "nothing anywhere parses the
-table", and that was false, and it reddened CI on `5a1c1ef`.**
-`tools/run-samples-windowed.sh` matches an individual **row** —
-`^[[:space:]]+ssao-blur-2[[:space:]]` — to prove an `autoexec.cfg` variable
-reached the renderer before the frames were timed, and the rows stopped
-beginning with whitespace the moment each got its own record. The searches
-behind the absence claim were for `gpu passes` and `label(s)`, so a consumer
-that greps a row was never in their reach: an absence claim is only as wide as
-the search under it. The patterns are anchored on the `crcbl::engine]` target
-now, which is both correct and stricter. Note the direction of the near miss —
-one of the three is an `autoexec_refuses`, and a refusal whose pattern has
-stopped matching anything passes.
-
 ## SSAO reads no depth pyramid and the banding is bought (2026-09-01)
 
 The user asked whether the AO pass is implemented the industry-standard way and
@@ -1324,33 +1282,6 @@ limits rather than fixed:
   not written back. A `bind aim mouse` spelling needs a parser for the other
   variants and a decision about what `Wasd` looks like on one line.
 
-## `45-shadows.md`'s atlas section is a record of shipped work (2026-08-31)
-
-All five items of the atlas rung landed, and `43-render-standards.md`'s delivery
-table no longer carries the row — but the five items themselves are still
-written in `docs/plan/45-shadows.md` as a delivery list, at length. The standing
-rule is that shipped work leaves the plans, and this has not left.
-
-**It is not a delete, which is why it was not done in passing.** Parts of that
-prose still bind future work and would be lost with it:
-
-- **`MIN_TILE` is a floor nothing has measured.** The text says so explicitly —
-  no light asks for a sub-cell map until the priority rung spends one — so the
-  halvings are a starting point for a sweep, not a finding. That is a live
-  instruction to whoever builds the next rung.
-- **The coverage anchors are a sweep bounded by fixtures that must not move**:
-  `Scene::PointShadow` 3.06, `Scene::SpotShadow` 1.41, `apps/lantern`'s lamp
-  1.06 at the worst phase of its orbit, its corner downlight 0.37, with the
-  downlight binding. Anyone moving `WHOLE_CELL_COVERAGE` needs those numbers.
-- **`LEVEL_HOLD_RATIO` is deliberately the same fifth `lod_hold_ratio` opens**,
-  which is a cross-module constraint rather than a note about this rung.
-
-What it would take: lift those three into decisions of their own — the file
-already has eleven numbered decisions and they belong beside them — and then cut
-the five-item narrative, which `git log` and the changelog already hold. Doing
-it as one edit risks mangling a long file, so it wants to be its own change with
-its own diff review.
-
 ## Screen-space contact shadows: what the rung left (2026-08-31)
 
 The pass is built and **parked outside `RenderEffects::DEFAULT_STACK`**, so
@@ -1425,27 +1356,40 @@ nothing draws it by default and no golden has moved. What that leaves:
   factual claim that is false. Either the table is completed and a test holds it
   to the set, or the comment stops claiming completeness.
 
-## The shadow atlas: what items 1, 2, 4 and 5 left (2026-08-31)
+## The shadow atlas: what the rung left (2026-08-31)
 
-`docs/plan/45-shadows.md`'s atlas rung is five items; item 3 (a budget in tiles
-and rendered faces per frame, with the cadence tiers spending it) is the one
-that has not been built. What the four that landed left behind:
+All five items of `docs/plan/45-shadows.md`'s atlas rung have landed. This
+entry's first two paragraphs said otherwise until 2026-09-04 — that item 3, the
+budget in tiles and rendered faces, "has not been built", and that the cache is
+whole-atlas because the seam has no way to clear one tile. Both were checked and
+both are false: `crcbl_render::shadow::cadence`'s `schedule` is item 3,
+`mesh.slang`'s `depthClearVertexMain` is the depth-only clear quad this entry
+listed as an unbuilt candidate, and `ForwardRenderer::shadow_group_redrawn`
+answers per **group** — a cascade, or a light slot's whole run of tiles — so a
+lamp that swings costs its own tiles and not every tile. The group rather than
+the tile is the deliberate unit, because the cadence's unit is the cull;
+per-face inside a point light's cube is declined below.
 
-- **The atlas caches whole, not per tile — and the obstacle is the clear.**
-  `ForwardRenderer::shadow_atlas_record` is one reading over every map, so a
-  single moved light redraws all of them. Making it per-tile needs a way to
-  clear one tile of a depth attachment, and this seam has none: a pass-wide
-  `LoadOp::Clear` is the only clear `crcbl_hal::CommandEncoder` offers for a
-  depth attachment, and the region-bounded forms are not portable — Vulkan's
-  `renderArea` bounds a clear, Metal's `MTLRenderPassDescriptor` load action and
-  WebGPU's `loadOp` do not, so a partial clear would keep a cached tile on one
-  backend and erase it on another. The two candidates are a
-  `clear_attachment`-with-rects call at the HAL seam (four backends to
-  implement, and WebGPU has no such call at all) or a depth-only clear quad — a
-  new `.slang` entry point with `depth_write` and `CompareOp::Always`, scissored
-  to the tile, which `Self::build_depth_fullscreen` already has the pipeline
-  shape for. Neither was in this slice's scope. Until then the plan's "a lamp
-  that swings costs exactly its own tiles" is not what ships.
+What the rung did leave behind:
+
+- **Static caching within a group is the rung above, and is unbuilt.** The cache
+  holds a group's whole map, so one moved caster redraws every caster that group
+  covers. Rendering a map's static geometry once and re-drawing only the dynamic
+  instances over it is what `docs/plan/45-shadows.md` still names as the next
+  rung.
+- **Demotion's price is measured on two tiers and not the third.** Four spot
+  lights over a six-by-six field of dunes patches, the same rig drawn from a
+  camera at 22 and at 88 world units so the far camera is that rig two ladder
+  rungs down; `PassStats` over 48 recorded frames after the warm-up, the
+  `shadow` pass alone. On an RX 7900 XTX **0.032 ms p50 whole against 0.030
+  demoted**, and on llvmpipe **3.254 against 2.695** — a sixth off the software
+  tier and a few per cent off the hardware one, and the saving is the tile's and
+  the cut's together, since the far camera also selects a coarser cut. The sun's
+  two cascades are whole cells in both columns and are most of what is left,
+  which is why four demoted lights do not halve the pass. On radv a repeat put
+  the two 2 us apart on a pass of thirty, which is why the test reports the pair
+  and asserts no ordering between them. **The browser tier is unmeasured**, and
+  the local gate cannot take it — see the SwiftShader limit recorded above.
 
 - **The camera invalidates every tile, so the cache only hits on a still eye.**
   Cascades are fitted to the camera, and every shadow cull — a spot's and a
