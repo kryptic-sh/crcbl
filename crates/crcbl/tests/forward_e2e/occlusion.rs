@@ -523,7 +523,14 @@ const DIAGONAL_LENGTH: u32 = 240;
 /// crosses a boundary. A step of two is not the quantiser.
 const SHARP_EDGE: u8 = 2;
 
-/// Sharp edges the tangential line may hold at the counts that ship.
+/// Sharp edges the tangential line may hold at the **sparse** counts — one
+/// blur pass over the lower slice count.
+///
+/// Named for the configuration and not for what ships, because since 2026-09-03
+/// they are no longer the same thing: [`MAX_SHIPPED_SHARP_EDGES`] is the bound
+/// on what ships. This one is kept because it is the reading the anti-baseline
+/// below was placed against, and because it is what the shipping counts have to
+/// improve *on* for the rung to mean anything.
 ///
 /// **Swept before it was fixed**, at [`OCCLUSION_EXTENT`] over
 /// [`DIAGONAL_LENGTH`] samples on 2026-09-02, on the two drivers this machine
@@ -534,21 +541,54 @@ const SHARP_EDGE: u8 = 2;
 /// ```text
 ///                                          radv   lavapipe
 /// every SLICE_DIRECTIONS entry the same     118        113
-/// SLICE_DIRECTIONS as `ssao.slang` ships     37         38
+/// the sparse counts                          37         38
 /// ```
 ///
-/// So this sits between them on a log scale, with room on both sides: the
-/// shipping table has to step two thirds more often to go red, and a table down
-/// to one orientation has to lose two fifths of its edges to pass.
+/// So this sits between them on a log scale, with room on both sides: the sparse
+/// pair has to step two thirds more often to go red, and a table down to one
+/// orientation has to lose two fifths of its edges to pass.
 ///
-/// **The shipping count is thirty-seven and not the one it was** before the pair
+/// **The sparse count is thirty-seven and not the one it was** before the pair
 /// was halved, and the reason is the scene rather than the slices: the blur's
 /// footprint spans twice as much of the frame now, so each of the sixteen tile
 /// phases is paired with a wider spread of distances from the edge and the sum
 /// moves further between neighbours. The gap to the anti-baseline is what this
 /// bound is placed inside, and that gap survived — three times rather than a
 /// hundred, and still on a log scale.
-const MAX_SHARP_EDGES: usize = 64;
+const MAX_SPARSE_SHARP_EDGES: usize = 64;
+
+/// Sharp edges the tangential line may hold at the counts that **ship**.
+///
+/// The defaults moved on 2026-09-03 — `r_ssao_slices` to four and
+/// `r_ssao_blur_passes` to two — so the configuration this bounds is the one
+/// [`MAX_SPARSE_SHARP_EDGES`]' gap was opened against, and it needs a bound of
+/// its own or the suite would carry no absolute claim about what a player
+/// actually gets.
+///
+/// **Swept on both local drivers on 2026-09-03**, same extent and sample count:
+///
+/// ```text
+///                          radv   lavapipe
+/// the shipping counts         0          2
+/// the sparse counts          37         38
+/// two blurs, low slices       8          9
+/// ```
+///
+/// Eight, which is four times the worse of the two readings. The headroom is
+/// deliberate and it is not slack: **CI also runs WARP and SwiftShader, and
+/// neither has ever drawn this configuration** — nor have D3D12 and Metal, for
+/// which there is no hardware here at all. The two software adapters are the
+/// risk, and lavapipe is the evidence about their kind: it steps twice where
+/// radv does not step at all, so a bound pinned to radv's zero would be a bound
+/// pinned to the machine that happens to be under it.
+///
+/// It still catches what it is for. A return to the sparse counts reads 37, a
+/// table collapsed to one orientation reads about 118, and a shader change that
+/// undid the second blur's averaging reads 8 or 9 — all of them red. What it
+/// deliberately does *not* do is separate the shipping pair from that last one;
+/// the assertion comparing the rung against the low slice count at the same two
+/// blurs is what does that, and it is driver-relative rather than absolute.
+const MAX_SHIPPED_SHARP_EDGES: usize = 8;
 
 /// Samples of the tangential line a failure message prints.
 ///
@@ -2003,8 +2043,13 @@ fn the_tangential_occlusion_line_does_not_step() {
             .find(|measured| measured.slices == slices && measured.blurs == blurs)
             .unwrap_or_else(|| panic!("{slices} slices and {blurs} blur(s) was measured"))
     };
-    let shipped = at(low, 1);
-    let rung = at(high, 2);
+    // Named for their counts rather than for what ships: the defaults moved to
+    // the high slice count and two blurs on 2026-09-03, so `sparse` is a
+    // configuration a player no longer gets and `shipped` is the one they do.
+    let sparse = at(low, 1);
+    // The rung and what ships are the same configuration since 2026-09-03,
+    // so there is one name for it rather than two.
+    let shipped = at(high, 2);
     // The rung's own blur count with the shipping slice count, which is what
     // isolates the eighth turn: comparing the rung against what ships would let
     // the second blur alone answer for it.
@@ -2013,7 +2058,7 @@ fn the_tangential_occlusion_line_does_not_step() {
     // Anti-vacuity, on `MIN_SWING`'s terms: a line lying outside the falloff, or
     // on a scene whose plate occludes nothing, is flat for a reason that has
     // nothing to do with the pass and would pass every assertion below.
-    let level = shipped.line[0];
+    let level = sparse.line[0];
     assert!(
         level < UNOCCLUDED && level > 0,
         "the tangential line reads {level} at its first sample, which is neither occluded nor \
@@ -2022,24 +2067,35 @@ fn the_tangential_occlusion_line_does_not_step() {
     );
 
     assert!(
-        shipped.sharp <= MAX_SHARP_EDGES,
+        sparse.sharp <= MAX_SPARSE_SHARP_EDGES,
+        "the tangential line has {} sharp edges in {DIAGONAL_LENGTH} samples at the sparse \
+         counts, where {MAX_SPARSE_SHARP_EDGES} is the bound and its worst step is {} levels. \
+         The line is a straight run at a fixed distance from a straight edge, so what is \
+         stepping is `ssao.slang`'s tile coming through `ssao_blur.slang` rather than anything \
+         in the scene. Its first samples are {first:?}.",
+        sparse.sharp,
+        sparse.worst,
+        first = &sparse.line[..MESSAGE_SAMPLES.min(sparse.line.len())],
+    );
+    assert!(
+        shipped.sharp <= MAX_SHIPPED_SHARP_EDGES,
         "the tangential line has {} sharp edges in {DIAGONAL_LENGTH} samples at the counts that \
-         ship, where {MAX_SHARP_EDGES} is the bound and its worst step is {} levels. The line is \
-         a straight run at a fixed distance from a straight edge, so what is stepping is \
-         `ssao.slang`'s tile coming through `ssao_blur.slang` rather than anything in the scene. \
-         Its first samples are {first:?}.",
+         ship, where {MAX_SHIPPED_SHARP_EDGES} is the bound and its worst step is {} levels. \
+         This is the absolute claim about what a player gets, and the two drivers here read 0 \
+         and 2 — so a reading near the bound on some other adapter is worth understanding \
+         rather than raising the bound for. Its first samples are {first:?}.",
         shipped.sharp,
         shipped.worst,
         first = &shipped.line[..MESSAGE_SAMPLES.min(shipped.line.len())],
     );
     assert!(
-        rung.sharp < blurred_twice.sharp,
+        shipped.sharp < blurred_twice.sharp,
         "the eighth turn bought nothing: {high} slices left {} sharp edges against {low} slices' \
          {}, at the same two blur passes. Either `ssao.slang`'s eighth turn landed back on a \
          direction the quarter turn already gave, or the count never reached the shader — and \
          every other check here is green either way. This is the one assertion about the rung \
          itself.",
-        rung.sharp,
+        shipped.sharp,
         blurred_twice.sharp,
     );
 

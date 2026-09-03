@@ -51,10 +51,15 @@ pub const RESOLUTION_DIVISOR: u32 = 2;
 /// Planes through the eye each pixel sweeps by default, matching
 /// `static const uint SLICE_COUNT_DEFAULT` in `shaders/ssao.slang`.
 ///
-/// Two: the tile's own direction and its quarter turn. Every golden in this
-/// workspace was blessed at this count, and it is the floor `slice_count`
-/// clamps to — so a producer that leaves [`SsaoParams::slices`] at zero gets
-/// this frame rather than an unoccluded one.
+/// Two: the tile's own direction and its quarter turn. It is the floor
+/// `slice_count` clamps to — so a producer that leaves [`SsaoParams::slices`]
+/// at zero gets this frame rather than an unoccluded one — and that is the
+/// whole of what "default" means here.
+///
+/// **It is not what the engine ships.** `crcbl_render::ssao`'s `r_ssao_slices`
+/// has defaulted to [`SLICE_COUNT_MAX`] since 2026-09-03, and the goldens were
+/// re-blessed at that count; a frame reaching this one is a frame whose
+/// producer wrote nothing.
 pub const SLICE_COUNT_DEFAULT: u8 = 2;
 
 /// The most planes a pixel may sweep, matching `static const uint
@@ -245,10 +250,11 @@ pub struct SsaoParams {
     pub radius: f32,
     /// Planes through the eye each pixel sweeps for a horizon.
     ///
-    /// [`SLICE_COUNT_DEFAULT`] is what ships and [`SLICE_COUNT_MAX`] is the
+    /// [`SLICE_COUNT_DEFAULT`] is the floor and [`SLICE_COUNT_MAX`] the
     /// ceiling; `ssao.slang`'s `slice_count` clamps whatever arrives into that
-    /// range, so a producer that writes nothing here gets the default rather
-    /// than a frame with no slices in it.
+    /// range, so a producer that writes nothing here gets the floor rather than
+    /// a frame with no slices in it. What the engine *ships* is the ceiling —
+    /// `r_ssao_slices` has defaulted to it since 2026-09-03.
     ///
     /// A `u8` because the range is that small and because the block carries it
     /// as a float: every value it can hold converts without rounding, which is

@@ -259,6 +259,10 @@ fn per_pass_gpu_timers_report_real_numbers() {
         "depth-prepass",
         "ssao",
         "ssao-blur",
+        // The second occlusion blur, which is a pass rather than a loop inside
+        // one — so this row is what goes red if
+        // `crcbl_render::ssao::r_ssao_blur_passes` stops defaulting to two.
+        "ssao-blur-2",
         "ssao-upsample",
         "forward",
     ]);

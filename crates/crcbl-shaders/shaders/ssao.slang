@@ -102,8 +102,9 @@
 // slice. [`SLICE_COUNT_MAX`] carries that bound as an angle, a texel and a
 // channel level.
 //
-// **How many of the four a frame sweeps is `camera.params.y`**, and two is what
-// ships. See [`SLICE_COUNT_MAX`] for what the other two buy and cost.
+// **How many of the four a frame sweeps is `camera.params.y`**, and four is what
+// ships since 2026-09-03 — two is the floor a frame that writes nothing falls
+// to. See [`SLICE_COUNT_MAX`] for what the other two buy and cost.
 //
 // `STEP_OFFSETS` is the same rule applied to the other axis of the march — how
 // far along a slice a pixel starts rather than which way it faces — and is an
@@ -297,10 +298,13 @@ static const float DEPTH_FAR = 0.0;
 /// measures it as a picture rather than as a count.
 static const uint SLICE_COUNT_MAX = 4;
 
-/// The default, and the count every golden in this workspace was blessed at.
+/// The floor a frame that asks for nothing falls to — not what ships.
 ///
 /// Two slices sweep the tile's own direction and its quarter turn, which is what
-/// this file did before it could be asked for more.
+/// this file did before it could be asked for more. The engine has asked for
+/// [`SLICE_COUNT_MAX`] since 2026-09-03 and the goldens were re-blessed there,
+/// so this count is what a producer writing a zero gets rather than what a
+/// player sees.
 static const uint SLICE_COUNT_DEFAULT = 2;
 
 /// Samples marched out along **each side** of each slice.

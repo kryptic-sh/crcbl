@@ -125,187 +125,56 @@ What that pass did **not** settle:
   name. So the flag's list is the list of backends a native run can select,
   which is what it claims to be.
 
-## HIGH PRIORITY — the user's calls of 2026-08-30
+## What the AO default change of 2026-09-03 did not cover (2026-09-03)
 
-The items the user ranked above the lighting order. They stay at the top of this
-file until they ship.
+`r_ssao_slices` and `r_ssao_blur_passes` in `crates/crcbl-render/src/ssao.rs`
+default to 4 and 2 — the tangential rung is what ships, and every golden in the
+workspace was re-blessed at it. The decision this file carried, and the three
+tiers of timings that informed it, are gone with it; what follows is what the
+change left owed.
 
-### The ambient occlusion tangential rung is built and is not the default
-
-**Both halves exist and all three tiers are measured. What is left is one
-decision, and it is the user's: whether either default moves.**
-
-The radial half shipped 2026-08-30 (`STEP_OFFSETS` in `ssao.slang`). The
-tangential half shipped 2026-08-31 as two console variables in
-`crates/crcbl-render/src/ssao.rs` — `r_ssao_slices` in `2..=4` and
-`r_ssao_blur_passes` in `1..=2` — both defaulting to what shipped.
-
-Every figure below was re-taken after half-resolution AO landed on 2026-09-02,
-which changed the shape of the pass; anything measured against the
-full-resolution chain has been dropped rather than carried forward, because it
-describes a pass that no longer exists.
-
-**Native, p50 over seven runs each**, read off
-`forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`:
-
-```text
-                    radv (RX 7900 XTX)                     lavapipe
-slices blurs  edges worst   ssao  blur blur2  |  edges worst    ssao    blur  blur2
-     2     1     37     5  275us  19us     —  |     38     5  3.53ms  1.61ms      —  ships
-     4     1    100     3  543us  19us     —  |     89     3  5.90ms  1.56ms      —
-     2     2      8     3  275us  19us  19us  |      9     3  3.49ms  1.55ms 1.25ms
-     4     2      0     1  544us  19us  19us  |      2     2  5.90ms  1.51ms 1.25ms  rung
-```
-
-**Re-taken 2026-09-02 after `38b2688`, which changed this pass**, splitting the
-inverse-projection so no caller computes a component it discards — `ssao.slang`
-and `ssao_blur.slang` are both in that commit. **Every quality figure is
-unchanged**: all eight edge counts and all eight worst-steps came back as the
-same integers on both drivers, seven runs each, so the rung still buys 37 sharp
-edges down to 0. The timings moved only where that commit touched: the blur
-falls 23 us to 19 us on radv, and lavapipe's whole column drifts a few per cent
-low, inside the 15.5 % spread this entry already records for it. The numbers
-above are the new medians.
-
-This is also the **first table in this file whose figures have ever been
-re-taken** rather than carried forward — see the coverage note near the end,
-which is what prompted it.
-
-**The edge counts are the same integer in all seven runs of every row, on both
-drivers**, so the 37-against-0 the rung buys is exact rather than a draw from a
-spread. Only the timings move, and by very different amounts — the `ssao` pass
-holds inside **1.1%** of its p50 on radv and **15.5%** on lavapipe, which is the
-software rasteriser's scheduling.
-
-Gather plus blurs, summing the medians above: **294 us** shipping and **582 us**
-for the rung on radv; **5.14 ms** and **8.66 ms** on lavapipe. Before the
-halving the shipping pair was 645 us and 17.0 ms, so **the rung still costs less
-than the pair it would replace used to** on both native tiers — by a wider
-margin than when this was written, since `38b2688` took a few per cent off both.
-
-**Halving made the shipping configuration markedly less smooth on this axis: 1
-sharp edge became 37 on radv and 38 on lavapipe.** The blur's footprint spans
-twice as much of the frame, so each tile phase pairs with a wider spread of
-distances from the edge. That is the quality cost to weigh the rung's price
-against, and the two drivers agree to within one edge on every row.
-
-**Browser, quarry under SwiftShader at the gate's window size**, two runs of
-each configuration, p50 per pass in ms:
-
-```text
-                  baseline (2 slices, 1 blur)    rung (4 slices, 2 blurs)
-ssao                     4.07 / 4.18                  6.53 / 6.19
-ssao-blur                3.01 / 3.09                  3.30 / 3.33
-ssao-blur-2                  —                        3.30 / 3.35
-ssao-upsample            5.96 / 6.16                  5.91 / 6.18
-------------------------------------------------------------------------
-the AO chain            13.12 / 13.35                19.04 / 19.05
-forward                137.3  / 142.1               144.5  / 139.3
-the frame              206.0  / 208.6               215.8  / 211.3
-```
-
-Read the passes, not the frame: the pass timings are far steadier than the
-totals, where `forward` alone moves 137.3 to 144.5 across runs and swamps the
-difference under test. The label count is what makes the rung runs checkable — a
-second blur is a _pass_, so `ssao-blur-2` appears only when one really ran.
-
-**The browser does not veto the rung, and this entry had that backwards for
-weeks.** Gather plus blurs goes 7.17 to 12.99 ms, **+81%**, between radv's +98%
-and lavapipe's +68% — so the rung's relative cost is much the same on all three
-tiers. What differs is what it is a share _of_: the whole AO chain is **6.4% of
-a browser frame before and 8.9% after**, because a software rasteriser spends
-two thirds of its frame in `forward`. The tier called "most able to veto it" is
-the tier where AO matters least.
-
-**A browser on real hardware, 2026-08-31**: quarry through Chrome on an RX 7900
-XTX, `--adapter hardware`, canvas 959x463 — `ssao` **0.054 ms** p50 and one
-`ssao-blur` **0.017 ms**, 8.0% and 2.6% of a 0.678 ms frame. Not comparable in
-absolute terms to the 1920x1080 native figures, but it is the tier a visitor to
-the Pages URL actually gets.
-
-**What the rung buys.** The scene is a half-plane occluder whose edge runs along
-`(3, 2)` — deliberately not the frame's diagonal, which is the orientation an
-eighth-turned slice runs parallel to — and a 480-sample line parallel to that
-edge, so every sample sits at the same perpendicular distance and the true
-answer is smooth. The measure is how many neighbouring pairs differ by two
-levels or more. Identical in all seven runs on each tier:
+**The sweep the test's thresholds are chosen off**, read from
+`forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step`, sharp
+edges over `DIAGONAL_LENGTH` samples, identical in all seven runs of each row:
 
 ```text
 slices  blurs     radv   lavapipe
-     2      1       37         38     what ships
+     2      1       37         38   the clamp floor
      4      1      100         89
      2      2        8          9
-     4      2        0          0     the rung
+     4      2        0          2   what ships
 anti-baseline: one plane orientation across the whole tile
      2      1      118        113
 ```
 
-**This table read `1 / 1 / 2 / 0` on radv until 2026-09-03 and was wrong** — it
-had been carried across the half-resolution change rather than re-taken, which
-is exactly what the paragraph above it promises was not done. Re-measured on
-radv by running
-`forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step` on that
-date: `37 / 100 / 8 / 0` sharp edges over `DIAGONAL_LENGTH` samples, worst step
-`5 / 3 / 3 / 1`, which is the first table's column and `MAX_SHARP_EDGES`' own
-doc comment to the integer. The anti-baseline is that doc comment's too. The
-difference matters to the decision this entry exists for: the rung takes
-thirty-seven sharp edges to none, not one to none.
+Kept because `MAX_SPARSE_SHARP_EDGES` and `MAX_SHIPPED_SHARP_EDGES` are picked
+off it, and because it is re-taken whenever the pass changes rather than carried
+forward. It was carried once — across the half-resolution change — read
+`1 / 1 / 2 / 0` on radv for weeks, and produced a conclusion that was backwards
+in both this file and `docs/plan/46-ambient-occlusion.md`.
 
-- **The second blur on its own is the cheap win, and this bullet said the
-  opposite** off the stale table. Measured on radv 2026-09-03 it takes 37 sharp
-  edges to **8** for one extra 38 us pass — the whole AO chain goes 317 us to
-  357 us, +13% — where the full rung buys the last 8 by doubling the gather to
-  628 us. Widening the footprint over the same tile does spread each phase, and
-  at this footprint that is what removes most of the step rather than what
-  causes it.
-- **The extra slices on their own make it worse**, which is the finding that
-  survived in the opposite place: 37 sharp edges to **100**, at double the
-  gather. Four orientations arrive with no wider blur to average the tile
-  phases, so the knobs are not separable in the direction that looked obvious.
-- **The extra slices add four plane orientations, not sixteen.** Reduced modulo
-  a half turn, the sixteen entries of `SLICE_DIRECTIONS` point along eight
-  orientations, and the quarter turn permutes that set onto itself. The eighth
-  turn is the only turn that leaves the set; it takes the neighbourhood to
-  twelve.
-
-**What the user still has to decide.** Only the two defaults, and they are
-separable:
-
-- `r_ssao_blur_passes 2` alone: 37 sharp edges to 8, one extra 38 us pass, +13%
-  on the AO chain. The cheapest real improvement on the table.
-- `r_ssao_slices 4` alone: 37 to 100, at double the gather. A regression, so
-  this knob is not worth moving without the other.
-- Both: 37 to 0, worst step 5 to 1, 317 us to 628 us. Still under the 645 us the
-  shipping pair cost before the halving, so it is better than pre-halving
-  quality at less than pre-halving cost.
-
-Whether a tier should spend anything on these two knobs is not this entry's
-question. `docs/plan/43-render-standards.md`'s preset row is built — the seam
-landed 2026-08-31 — but its tier table has no cell for either knob, which is
-what "The tier table is silent about six knobs a preset could write" below is
-about.
-
-**Giving the AO knobs `[engine.video]` keys is a separate, still-wanted route**,
-and the only one for anything that is not a console variable — an autoexec
-reaches a `convar!`, but not a `RenderEffects` bit with no catalogue key, which
-is why the contact-shadow entry below is still blocked. It is a design decision
-rather than a chore, because a catalogue key generates a console variable named
-after itself and would sit beside the existing `r_ssao_slices`. The entry "The
-tier table is silent about six knobs a preset could write" carries the three
-routes and what each trades.
-
-**Coverage gaps.**
-
-- D3D12 and Metal are unmeasured, for the reason every row of theirs is — no
-  Windows or Apple hardware here. CI's software adapters run the assertions but
+- **Nothing guards the slice default.**
+  `the_tangential_occlusion_line_does_not_step` names every configuration it
+  measures explicitly, from `crcbl::shaders::ssao`'s `SLICE_COUNT_DEFAULT` and
+  `SLICE_COUNT_MAX`, and builds its own passes — so it never reads a console
+  variable and would pass unchanged if either default were reverted.
+  `r_ssao_blur_passes` is caught in three places, because a second blur is a
+  _pass_: the expected pass lists in `crcbl::screenshot` and `crcbl-vk`'s
+  `queries` suite both name `ssao-blur-2`, and `draw_gen_e2e`'s
+  `fullscreen_instances` counts the triangle it draws. Slices change no pass
+  list and draw no extra triangle, so none of the three sees them. Closing it
+  wants a test that reads the renderer's `r_ssao_slices` rather than naming a
+  count.
+- **D3D12 and Metal are unmeasured**, for the reason every row of theirs is — no
+  Windows or Apple hardware here. CI's software adapters run the assertions and
   time nothing.
-- `MAX_SHARP_EDGES` is swept on radv and lavapipe only. The rung assertion
-  `rung.sharp < blurred_twice.sharp` measured `0 < 2` on radv and `0 < 5` on
-  lavapipe; the radv margin is one step, so WARP and SwiftShader see that
-  headroom for the first time in CI.
-- The tangential measure counts steps of two levels or more. A regression that
-  moved the whole line by a constant, or that kept every step at one level while
+- **The measure counts steps of two levels or more.** A regression that moved
+  the whole line by a constant, or that kept every step at one level while
   wandering, would not be caught by it.
+- **WARP and SwiftShader have never been swept on this axis**, at either the old
+  defaults or the new. They meet `MAX_SHIPPED_SHARP_EDGES` in CI with whatever
+  margin they happen to have; the two drivers that were swept read 0 and 2
+  against a bound of 8.
 
 ## The `forward` timing bundles two clears, and a baseline row would split them (2026-09-02)
 
@@ -395,10 +264,10 @@ that reason.** The default is 1.0 and is exactly identity, so every figure above
 still describes the frame that ships: `AO_RATIO` still guards 5.8% where it once
 guarded 20%, and `AO_LIFT` 3.8% against more than 8%. The knob makes the
 contrast _recoverable_ — it does not recover it. **Whether the shipped default
-moves off 1.0 is the user's call**, and it is the same shape of decision as the
-`r_ssao_slices` and `r_ssao_blur_passes` defaults in this file's HIGH PRIORITY
-entry: three occlusion console variables now exist, none has an `[engine.video]`
-key, and no tier row spends any of them.
+moves off 1.0 is the user's call**, and it is the same shape of decision the
+`r_ssao_slices` and `r_ssao_blur_passes` defaults were until they moved on
+2026-09-03: three occlusion console variables now exist, none has an
+`[engine.video]` key, and no tier row spends any of them.
 
 **This is also the honest answer to "the AO looks weak"** if that comes up: the
 tint makes it weaker on purpose, and the fix is turning the intensity up rather
@@ -944,7 +813,7 @@ caller.
 
 What follows is what those slices left as limits rather than fixed — each stated
 in the code as well as here. It is no longer a tracking entry for unshipped
-work, which is why it is no longer under HIGH PRIORITY.
+work.
 
 What slice 1 left as limits rather than fixed, each stated in the code:
 
@@ -1603,21 +1472,22 @@ when the columns separate. Not a defect; recorded so the resemblance is not read
 as a copy-paste slip.
 
 **A concrete candidate to separate them arrived on 2026-09-02: the AO tangential
-rung.** The HIGH PRIORITY entry at the top of this file now has the rung
-measured on both native tiers, and it is affordable — four slices with two blurs
+rung.** It shipped as the default on 2026-09-03 — four slices with two blurs
 costs less than the un-runged pair did before AO was halved, and it undoes the
-smoothness that halving cost. `r_ssao_slices` and `r_ssao_blur_passes` are
-console variables with no `[engine.video]` key and no tier row, which is exactly
-the two-step road the entry above this one describes: a catalogue key whose
-reader drives the variable, then a tier-table row saying what each column
-spends. Give them that and `high` would differ from `medium` by something
-measured rather than by a knob nobody has priced.
+smoothness that halving cost — so what a lower tier would spend here is the
+_saving_ of stepping back down to the clamp floor, which "What the AO default
+change of 2026-09-03 did not cover" prices. `r_ssao_slices` and
+`r_ssao_blur_passes` are console variables with no `[engine.video]` key and no
+tier row, which is exactly the two-step road the entry above this one describes:
+a catalogue key whose reader drives the variable, then a tier-table row saying
+what each column spends. Give them that and `high` would differ from `medium` by
+something measured rather than by a knob nobody has priced.
 
 One thing still gates it, and it is not work: **which tier gets which value is
 the user's call** — see "Whether any tier should be the default is still the
 user's call" below. The browser tier is no longer the second gate; it was
-measured 2026-09-02 and did not refuse the extra slices. The HIGH PRIORITY entry
-at the top of this file carries that table.
+measured 2026-09-02 and did not refuse the extra slices, and both defaults moved
+to the higher counts on 2026-09-03.
 
 ## The tier table's CMAA2 cells are read as SMAA (2026-08-31)
 
@@ -2746,11 +2616,11 @@ the evidence. What the slice deferred or turned up:
   the hemisphere took, not fitted.** Reference implementations run more slices
   with a temporal filter to hide the noise; this one has no temporal filter and
   leans on `ssao_blur.slang` instead. **What more slices buy has since been
-  rendered**, on the tangential axis rather than as a picture: the table in this
-  file's HIGH PRIORITY entry measures two slices against four, on both native
-  drivers, with and without the second blur. `r_ssao_slices` is the console
-  variable that selects it, and whether the default moves is the decision that
-  entry is waiting on.
+  rendered**, on the tangential axis rather than as a picture: the table in
+  "What the AO default change of 2026-09-03 did not cover" measures two slices
+  against four, on both native drivers, with and without the second blur.
+  `r_ssao_slices` is the console variable that selects it, and it has defaulted
+  to four since 2026-09-03.
 - **The `probes` flatness assertion is the only guard that would have caught the
   tilt-sign bug**, and it is in the probe test rather than the AO one, by
   accident. `Scene::Ao` looks into a closed trough with no open flat surface

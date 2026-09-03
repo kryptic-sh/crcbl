@@ -63,6 +63,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Ambient occlusion ships the tangential rung.** `r_ssao_slices` now defaults
+  to 4 and `r_ssao_blur_passes` to 2, so a default frame runs a second occlusion
+  blur — the pass `ssao-blur-2` — and gathers four horizon planes instead of
+  two. Measured on the tangential test line, sharp steps go from 37 to 0 on radv
+  and 38 to 2 on lavapipe; the gather roughly doubles and the chain costs 317 us
+  to 628 us there, still under what the pass pair cost before occlusion moved to
+  half resolution. Every golden in the workspace was re-blessed at the new
+  defaults. A caller that wants the old frame sets both console variables back
+  to their floors.
+
 - **`crcbl_shaders::probe::ProbeVolume` is a clipmap.** It gained a `levels`
   field: `origin` and `inv_spacing` now describe level 0 alone, `counts` is the
   probe count _every_ level holds, and level `k` is spaced `2^k` times level 0

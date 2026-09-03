@@ -405,14 +405,14 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao]
 source = shaders/ssao.slang
-source-sha256 = 0237738a4121fff64be4e4a7cecf844b1ffa5d5f631f380117c6fb4e170704bc
+source-sha256 = aba038cffa8f8886840f2e2c371bc6851aa77ddd8013b7dfe68d2f91919cf220
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssao.spv
 spirv-sha256 = 200240e51aa8762616d515291d5560a987db87081f254cc1c89291fd9c887c4f
 wgsl = wgsl/ssao.wgsl
 wgsl-sha256 = 361c69b9de41e33ad49ac7568b75810e4e9e1c65a1e7223d24997ff74a471e58
 msl = msl/ssao.metal
-msl-sha256 = 4b24aaba6be0ec715c668e42982a33d2c7a7be0bcb0529fab62d8e0e7ff78e3d
+msl-sha256 = 6654a4af528278f8e1253f15d8aaa0f58b204168c288c1e19b2e036b6b7af4ef
 dxil = vertexMain:dxil/ssao.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
 dxil = fragmentMain:dxil/ssao.fragment.dxil:d1a45e8665907d72098788f847f8feeb5bc8fa493773fde0ae07c27190d24210
 entry-points = vertexMain:vertex, fragmentMain:fragment

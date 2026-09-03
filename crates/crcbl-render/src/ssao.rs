@@ -120,13 +120,29 @@ use crate::graph::{ImageId, RenderGraph};
 const FULLSCREEN_VERTICES: u32 = 3;
 
 crcbl_console::convar! {
-    /// Planes each pixel sweeps for a horizon: 2 ships, 4 adds an eighth turn.
-    pub static r_ssao_slices: i64 in 2 ..= 4 = 2;
+    /// Planes each pixel sweeps for a horizon: 4 ships, 2 drops the eighth turn.
+    ///
+    /// **Four since 2026-09-03, and only worth having with two blur passes.**
+    /// The sixteen `SLICE_DIRECTIONS` entries reduce, modulo a half turn, to
+    /// eight orientations that the quarter turn permutes onto themselves; the
+    /// eighth turn is the one turn that leaves the set, taking the
+    /// neighbourhood to twelve. On its own that is a *regression* — measured on
+    /// radv it takes the tangential line from 37 sharp edges to 100, because
+    /// four orientations arrive with no wider blur to average the tile phases
+    /// against. Paired with [`r_ssao_blur_passes`] at two it reaches none.
+    pub static r_ssao_slices: i64 in 2 ..= 4 = 4;
 }
 
 crcbl_console::convar! {
-    /// Times the occlusion blur runs over the raw channel: 1 ships.
-    pub static r_ssao_blur_passes: i64 in 1 ..= 2 = 1;
+    /// Times the occlusion blur runs over the raw channel: 2 ships.
+    ///
+    /// **Two since 2026-09-03.** The second pass is the cheap half of that
+    /// change — one more pass of the same footprint, where the extra slices
+    /// double the gather — and on its own it already takes the tangential line
+    /// from 37 sharp edges to 8. It widens the footprint over the same tile,
+    /// which at this footprint is what averages the phases rather than what
+    /// spreads them.
+    pub static r_ssao_blur_passes: i64 in 1 ..= 2 = 2;
 }
 
 crcbl_console::convar! {

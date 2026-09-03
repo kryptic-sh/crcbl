@@ -4827,6 +4827,14 @@ mod tests {
                 ("render", "depth-prepass"),
                 ("render", "ssao"),
                 ("render", "ssao-blur"),
+                // **A second blur is a pass, so it is a row here.**
+                // `r_ssao_blur_passes` defaults to two since 2026-09-03 and a
+                // pass runs per count, which is also what makes a run at the
+                // higher count checkable rather than asserted: this row appears
+                // only when a second blur really ran. If that default moves
+                // back, this test is what goes red — which is the job of a
+                // fixture expectation.
+                ("render", "ssao-blur-2"),
                 ("render", "ssao-upsample"),
                 ("render", "forward"),
                 // **The pyramid the march climbs, and it is part of the march

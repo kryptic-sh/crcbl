@@ -53,8 +53,16 @@ const REPORT_FLOOR: u64 = 2;
 const REPORT_BOUND: u64 = 32;
 
 /// The full-screen triangles a forward frame draws: `ssao`'s, `ssao-blur`'s,
-/// `ssao-upsample`'s, `ssr`'s, `ssr-blur`'s, the tonemap's, the antialiasing
-/// resolve's, and one per level of the Hi-Z pyramid the march climbs.
+/// `ssao-blur-2`'s, `ssao-upsample`'s, `ssr`'s, `ssr-blur`'s, the tonemap's, the
+/// antialiasing resolve's, and one per level of the Hi-Z pyramid the march
+/// climbs.
+///
+/// **The second occlusion blur is in that list because
+/// `crcbl_render::ssao`'s `r_ssao_blur_passes` defaults to two**, and it is a
+/// pass rather than a loop inside one. A frame at the console variable's floor
+/// draws one fewer triangle than this, so this constant is one of the three
+/// places a moved default goes red — the other two being the expected pass lists
+/// in `crcbl::screenshot` and `crcbl-vk`'s `queries` suite.
 ///
 /// One instance each, submitted and drawn, and the only draws in a forward frame
 /// the CPU knows the count of. They are on both sides of the submitted/drawn
@@ -66,7 +74,7 @@ const REPORT_BOUND: u64 = 32;
 /// written down here: a pyramid that stopped being built would otherwise leave
 /// this constant right and the frame short.
 fn fullscreen_instances() -> u64 {
-    7 + u64::from(crcbl::render::hiz::levels_for(
+    8 + u64::from(crcbl::render::hiz::levels_for(
         crate::mesh_scene::MESH_EXTENT,
     ))
 }

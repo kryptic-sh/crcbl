@@ -80,13 +80,22 @@ first.
   tile, so it removes the _radial_ banding, and where all sixteen of its taps
   count it divides an isolated flipped sample by sixteen — which the
   depth-weighted kernel below is precise about, because it is no longer sixteen
-  everywhere. **It does not remove the tangential banding**, and measurement
-  2026-08-31 is why that sentence now says "radial": the tile carries only eight
-  plane orientations at the shipping slice count, and averaging a footprint over
-  a field that still carries the same eight spreads the step rather than
-  removing it — a second blur pass on its own measurably makes it worse. What
-  buys orientations is `crcbl_render::ssao`'s `r_ssao_slices`; `docs/backlog.md`
-  carries the numbers on both local tiers and the two defaults still to decide.
+  everywhere. **It does not remove the tangential banding on its own**, and
+  measurement 2026-08-31 is why that sentence says "radial": the tile carries
+  only eight plane orientations at the low slice count, and one blur over a
+  field carrying the same eight leaves a step between tile phases. What buys
+  orientations is `crcbl_render::ssao`'s `r_ssao_slices`.
+
+  **The second blur is not the regression this bullet used to call it.** It said
+  "a second blur pass on its own measurably makes it worse", off a table in
+  `docs/backlog.md` that had been carried across the half-resolution change
+  rather than re-taken. Re-measured on both local drivers 2026-09-03: the second
+  blur alone takes the tangential line from 37 sharp edges to 8 on radv and 38
+  to 9 on lavapipe. The extra slices alone are the regression — 37 to 100 and 38
+  to 89 — because four orientations arrive with no wider footprint to average
+  the phases against. **Both defaults moved on 2026-09-03**, to four slices and
+  two blurs, which reads 0 on radv and 2 on lavapipe.
+
 - **The golden is not the instrument.** An AO pass writing a constant 1.0 draws
   a perfectly plausible frame. The check is a **structural ratio**, in the shape
   `SPOT_SHADOW_RATIO` already uses: a band inside a concave corner must be
@@ -433,11 +442,12 @@ dividing zero by zero.
 
 **What it cost is quality on the tangential axis**, not correctness: the blur's
 footprint now spans twice as much of the frame, so each tile phase pairs with a
-wider spread of distances from an edge, and the shipping slice/blur pair became
-markedly less smooth there. `docs/backlog.md`'s HIGH PRIORITY entry carries the
-measurements on all three tiers and the decision they inform — whether the
-tangential rung's defaults move — and is where those numbers belong, since they
-move whenever the pass does.
+wider spread of distances from an edge, and the pair that shipped until
+2026-09-03 became markedly less smooth there — 1 sharp edge on the tangential
+line became 37. That is what moving both defaults to the rung on that date
+bought back. `docs/backlog.md`'s "What the AO default change of 2026-09-03 did
+not cover" carries the sweep the test's thresholds come off, and is where those
+numbers belong, since they move whenever the pass does.
 
 `crates/crcbl/tests/forward_e2e/occlusion.rs` is the harness: the silhouette is
 measured on both axes, the reconstruction is held to the nearest gathered sample
