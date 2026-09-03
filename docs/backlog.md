@@ -104,13 +104,18 @@ What that pass did **not** settle:
   (`crcbl-hal`, `crcbl-webgpu`, `crcbl-ui`, `crcbl-anim`); the rest are unread
   rather than clean.
 - **Not audited at all:** `CHANGELOG.md` and `apps/*/src/**` module docs beyond
-  `apps/breach/src/web.rs`. Of `docs/plan/*`, only `50-irradiance-probes.md` and
-  `18-render-features.md` have been checked against the tree (2026-09-03) — and
-  the first held two false "shipped" claims, so the other fifty are unread
-  rather than clean. `web/style.css` and `web/templates/layout.html` **are**
-  audited now and carry nothing checkable: the template is markup with one
-  factual claim, "MIT", which matches `LICENSE` and the workspace manifest, and
-  the stylesheet's two prose comments describe its own policy.
+  `apps/breach/src/web.rs`. Of `docs/plan/*`, `18-render-features.md` and `44`
+  through `50` have been checked against the tree (2026-09-03); every one of
+  `44`–`47` held at least one false claim and `50`'s pipeline diagram stated two
+  unbuilt stages as shipped, so the remaining forty-five are unread rather than
+  clean. **The measurements in the audited ones were deliberately not checked**
+  — every millisecond figure, pass-share percentage, golden pixel count, SSIM
+  and sweep table in `44`–`49` is a run's output that no assertion pins, and
+  re-deriving one means re-running the harness it came from. `web/style.css` and
+  `web/templates/layout.html` **are** audited now and carry nothing checkable:
+  the template is markup with one factual claim, "MIT", which matches `LICENSE`
+  and the workspace manifest, and the stylesheet's two prose comments describe
+  its own policy.
 - ~~`README.md` documents `--backend vk|mtl|dx12|null` while `backend.rs` also
   parses `webgpu`~~ — **settled 2026-09-03, and the README is right.**
   `crates/crcbl/src/backend.rs` registers the name so `CRCBL_GPU=webgpu` does
@@ -13563,6 +13568,23 @@ Related and smaller: the probe uses `anisotropy: 1.0`, so the pass-through above
 is exercised only against the stub. Nothing verifies what a real Dawn does with
 `maxAnisotropy: 16`. Deliberate — the probe exists for the `lod_max` sentinel,
 and an anisotropy probe would be measuring the machine rather than the seam.
+
+### Two `crcbl-render` modules are private and cited by crate path
+
+`crcbl-render/src/lib.rs` declares `mod ssao;` and `mod contact_shadows;`
+without `pub`, while `docs/plan/46-ambient-occlusion.md` and `45-shadows.md`
+name items by paths like `crcbl_render::ssao::bent_normals` and
+`crcbl_render::contact_shadows`. Every item exists at those paths inside the
+crate and the console variables are reachable by their console names, so nothing
+is broken and `tools/check-doc-citations.sh` passes — but a reader following one
+of those paths from outside the crate finds nothing, and a rustdoc link to one
+would not resolve.
+
+Two ways out and no decision yet: make the modules `pub` — they are peers of
+`hiz`, which already is, so the asymmetry looks accidental — or reword the
+citations to name the console variable and the shader instead. Raised by the
+2026-09-03 plan audit and not fixed, because which one is right depends on
+whether those modules are meant to be part of the crate's surface.
 
 ### The specular probe fallback is not gated by probe visibility
 
