@@ -67,6 +67,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A browser threw away every frame of any demo whose probe volume updates.**
+  The shadow pass resets the tiles it is about to redraw with one over-sized
+  triangle, and that draw bound a pipeline and no bind group.
+  `MeshModules::depth_clear_pipeline` builds it from `mesh_pipeline_layout`, so
+  the layout declares group 0 even though the triangle's shader reads none of it
+  — and WebGPU refuses a draw with any group the layout declares left unset,
+  where Vulkan and the others only check what the shader dereferences.
+
+  The refusal arrives when the command encoder is _finished_, so the whole
+  frame's command buffer was discarded and every pass recorded in it went with
+  it: `apps/lantern` and `apps/shard` opened a device, built a swapchain,
+  reached their running state and then showed a black canvas that never changed,
+  with no frame completing and no readback ever answering. Native runs were
+  unaffected throughout, which is why nothing caught it.
+
+  The reset only runs on a frame that _loads_ the shadow atlas rather than
+  clearing it, so the fault was latent until `ProbeUpdate::EveryFrame` began
+  forcing groups to be redrawn. `apps/lantern` now passes the browser gate on a
+  hardware adapter, 46 of 46. `apps/shard` gets its frames back and runs 57
+  checks, of which one still fails on what the stall was hiding — a doused zone
+  that is flatter than the check was written for, which `docs/backlog.md`
+  carries.
+
 - **A reflection no longer takes probe light through a wall.** `ssr.slang`'s
   probe fallback — what a screen-space ray that finds nothing falls back to —
   read the same eight rows of the probe table `mesh.slang`'s diffuse gather does

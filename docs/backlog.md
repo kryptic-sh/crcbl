@@ -83,61 +83,47 @@ in both this file and `docs/plan/46-ambient-occlusion.md`.
   margin they happen to have; the two drivers that were swept read 0 and 2
   against a bound of 8.
 
-## lantern is dead in the browser since the RSM updater (2026-09-04)
+## shard's doused zone is 95% one colour since the bake went (2026-09-04)
 
-**`render lantern in a real browser` passes at `ae1a020` and fails at
-`aab984c`.** `85e4f7a`, the sun's reflective-shadow-map updater, is between
-them. Nothing surfaced it for eight commits because every Pages run in that
-range was cancelled by the next push — see the entry below on what that costs.
-
-What the Pages job reports, on the `swiftshader` adapter it uses because CI's
-hardware adapter is `none`:
+The shadow-tile-reset fix gave `apps/shard` its frames back, and the browser
+gate now runs 57 checks on it and fails one:
 
 ```text
-  ok   the webgpu backend opened a device — google swiftshader
-  ok   a swapchain was created — 959x463 Rgba8UnormSrgb Fifo (2 images)
-  ok   the demo reached STATUS_RUNNING — status 3
-  FAIL the demo ticks … — no second HUD line in 90000 ms
-  FAIL the canvas is not one flat colour — 1 distinct colour(s): rgb(0,0,0) 100.0%
-  FAIL the canvas changes between frames … — 1 distinct frame(s) across 16 samples
-  FAIL the culling statistics come back off the GPU — the cull-stats readback never answered
+and dousing them leaves a still frame that is darker but not blank —
+mean luma 6.68 swinging 0.000, flattest colour 95.0%; asked for a swing
+under 0.01, a mean under 14.97 and no colour over 85%
 ```
 
-**Neither a validation failure nor a panic.** "the browser reported no WebGPU
-device errors" passes, and the page-error channel is proven live in the same run
-by the deliberate-exception check. The device opens, the swapchain is made, the
-demo reaches its running state — and then the frame never completes.
+Still: yes. Darker: yes. **Blank: also yes**, by the check's own definition.
 
-**What is ruled out by reading.** `capture_probe_visibility` is not the cause:
-`apps/lantern/src/room.rs` calls it once where the room is placed, not per
-frame, and it predates the updater — lantern's browser job passed with it at
-`ae1a020`. So the new thing on that timeline is the per-frame `rsm` render pass
-and the `probe-gather` compute pass.
+**The check's premise is the thing that changed, and it is written down in the
+check.** `web/tools/browser-e2e.mjs`'s `TORCH_FLAT_SHARE` doc says the doused
+frame stays a picture because "the zone keeps its shrine spot and its **baked
+irradiance volume** when the torches go out". That bake was removed in `85e4f7a`
+under the no-bake rule. Measured when the doc was written: doused mean luma 9.18
+and flat share 0.53. Measured now: 6.68 and 0.95.
 
-**Confirmed on hardware, and it is the probe path.** Three things settle it:
+**Do not widen the threshold.** The check exists to refuse the cheap wrong
+explanation for stillness — that the frame went black — and 0.95 is that
+explanation arriving.
 
-- **`shard` fails too, and only shard.** The Pages run on `aab984c` finished
-  with `render lantern` and `render shard` red and the other **sixteen** demo
-  jobs green. Those two are the only demos with an `EveryFrame` volume, and
-  `deploy to GitHub Pages` was **skipped**, so the site did not publish.
-- **It is not SwiftShader.** Reproduced in a worktree at `aab984c` on the local
-  `auto` adapter, which picked an RDNA-3 card in Chrome: identical failure —
-  black canvas, no HUD line in 90 s, no device errors. Run a second time on an
-  idle machine, with the worktree confirmed at zero modified files, in case the
-  first had been starved by a concurrent GPU job. Same result.
-- **It is the updater's two passes, not the commit.** With `r_probe_bounce`
-  defaulted to `false` in that same worktree, lantern passes **46/46**.
+**What is probably happening, unverified.** `zone::house_light`'s ambient is
+`(0.012, 0.011, 0.014)`, and at that luminance many distinct surfaces quantise
+to the _same_ 8-bit value, so "one flat colour over 95% of the canvas" is likely
+quantisation collapse near black rather than an absent picture. If so, a small
+ambient lift spreads the surfaces back across several quantised values without
+making the zone bright. `the_house_light_is_an_ambient_floor_and_not_a_sun` pins
+that ambient under 0.05, which is the room a fix has.
 
-**A bisect that looked informative and is not.** Skipping only the gather's
-`add_pass` leaves the graph mis-declared and the run reports
-`No bind group set at group index 0` — an artefact of the hack rather than the
-bug, since the base run reports no device error at all. Any further split has to
-keep both passes and their bindings and remove only the _work_.
-
-**This blocks the site.** Pages does not deploy while a demo job is red, so the
-published site stays at whatever last deployed, and the punctual producer of
-`docs/plan/50-irradiance-probes.md` extends exactly the pass that is failing.
-Fix this before that rung, not after.
+**The decision underneath it, which is the user's.** With the bake, a doused
+zone kept light from torches that were out — physically wrong, and exactly what
+the no-bake rule forbids. So the new picture is the more correct one and the
+check was calibrated against the less correct one. Either the scene gains
+something that legitimately survives dousing (the shrine spot's reach, or the
+ambient floor), or the check is re-derived against what a torch-lit zone with
+its torches out should actually look like. **Sweep before choosing**: each
+browser run is minutes, the lit windows read 15.75 mean where the check wants
+the doused one under 14.97, and an ambient lift moves both.
 
 ## The SSR visibility weight costs the software tier 11% of a frame (2026-09-04)
 

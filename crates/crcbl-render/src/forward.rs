@@ -9378,13 +9378,33 @@ impl ForwardRenderer {
         // that cleared has already had every tile reset by the attachment, so
         // this is `None` and the recording is the one that shipped.
         let clear = (!self.shadow_atlas_clears).then_some(self.shadow_clear_pipeline);
+        // **The reset draw has to bind a group, and only a browser says so.**
+        // `MeshModules::depth_clear_pipeline` builds this pipeline from
+        // `mesh_pipeline_layout`, so its layout declares group 0 whether or not
+        // the one triangle's vertex shader reads a byte of it — and WebGPU
+        // refuses a draw with any group the *layout* declares left unset, where
+        // Vulkan and the others only care about what the shader dereferences. An
+        // unbound reset therefore fails no native run and rejects the whole
+        // browser frame: `No bind group set at group index 0` arrives when the
+        // encoder is finished, so every pass recorded after it is thrown away
+        // with it and the canvas stays at the clear colour.
+        //
+        // Any bucket's offset does: the block is what the mesh draws index and
+        // this draw reads none of it, so what matters is that the offset is one
+        // the layout accepts rather than which bucket it names.
+        let clear_layout = bucket_draws.layout;
+        let clear_offset = bucket_draws
+            .calls
+            .first()
+            .map_or(0, |(constant_offset, ..)| *constant_offset);
         pass.execute(move |ctx| {
             ran.store(pass_id, Ordering::Relaxed);
             let encoder = ctx.encoder();
             if let Some(clear) = clear {
                 encoder.bind_graphics_pipeline(clear);
-                for (_, tile, _) in &views {
+                for (view, tile, _) in &views {
                     set_shadow_tile(encoder, *tile);
+                    encoder.bind_group(0, groups[*view], &[clear_offset], clear_layout);
                     encoder.draw(0..TILE_CLEAR_VERTICES, 0..1);
                 }
             }
