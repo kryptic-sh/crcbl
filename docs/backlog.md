@@ -205,6 +205,19 @@ the shaded result is finite and equals the plain trilinear read. `Scene::Probes`
 cannot be it; that scene is the anti-vacuity floor for the whole probe path and
 must stay byte-identical. It wants a scene of its own, and it is small.
 
+## `crcbl_render::ssao`'s header still says `R8Unorm` (2026-09-04)
+
+`crates/crcbl-render/src/ssao.rs`'s module doc lists what every backend needs
+for this pass as "a full-screen draw, a sampled `D32Float` and an `R8Unorm`
+target". The target widened to `Rgba8Unorm` when bent normals landed 2026-09-02
+— the same file's own diagram three dozen lines above already says `Rgba8Unorm`,
+and its pipeline builds `ColorTargetState::opaque(Format::Rgba8Unorm)`.
+
+A one-line comment fix, deliberately not taken in the moment it was found: a
+write agent was mid-verification on `crcbl-render`, and touching that crate
+would have invalidated a gate run in flight for a comment. Fix it in the next
+change that touches the crate for another reason.
+
 ## The RSM probe updater: the plan, and the three things it is bigger than (2026-09-04)
 
 The last item in `docs/plan/43-render-standards.md`'s lighting order before the
@@ -697,18 +710,20 @@ does not cite it at all — checked whole-file for "upsample", "bilateral" and
 "depth-aware".
 
 What actually exists is `crates/crcbl-shaders/shaders/ssao_upsample.slang`, and
-it is **AO-specific, not a shared pass**: it reads a single-channel `R8Unorm`
-occlusion image, hard-codes `RESOLUTION_DIVISOR` as its own scale factor, and
-returns `1.0` where nothing was drawn because unoccluded is the identity for the
-value it carries. A reflection colour and a froxel lookup share neither the
-channel count nor that far-plane fallback, so making it serve three readers is a
-generalisation with real design in it — a rung, not a binding somebody forgot to
-add.
+it is **AO-specific, not a shared pass**: it reads an `Rgba8Unorm` occlusion
+image carrying one visibility channel and a bent direction, hard-codes
+`RESOLUTION_DIVISOR` as its own scale factor, and returns `1.0` where nothing
+was drawn because unoccluded is the identity for the value it carries. A
+reflection colour and a froxel lookup share neither that channel layout nor the
+far-plane fallback, so making it serve three readers is a generalisation with
+real design in it — a rung, not a binding somebody forgot to add.
 
-**`47-reflections.md`'s "no half-resolution SSR" row is stale now, not
-conditionally later.** It is priced on half-resolution AO being "already owed
-and unmeasured" (that document, the row itself), and half-resolution AO landed
-and was swept on 2026-09-02. That row wants re-checking today.
+(This entry said `R8Unorm` until 2026-09-04, and so did `crcbl_render::ssao`'s
+own module header. The target widened to four channels when bent normals landed
+2026-09-02 — `ssao.rs`'s pipeline builds
+`ColorTargetState::opaque(Format::Rgba8Unorm)` and the shader's `fragmentMain`
+returns a `float4`. The argument survives the correction and is stronger for it:
+a reflection colour is four channels too, and still not these four.)
 
 ## SSAO reads no depth pyramid and the banding is bought (2026-09-01)
 
@@ -898,15 +913,22 @@ summary line `run_text` prints carries the name. What is **not** covered:
 - **The engine call site is gated only on Linux/X11.** It has a home now:
   `tools/run-samples-windowed.sh` runs `lantern` twice under a scratch
   `XDG_CONFIG_HOME`, seeded and not, and asserts the seeded run logs
-  `autoexec.cfg: 1 line`, sets the variable, and **draws an `ssao-blur-2` pass**
-  — the pass is the part that says the value reached the renderer before the
-  frames were timed, rather than only reaching the console. Removing
-  `console.run_autoexec();` from `Loop::new` takes that gate to exit 1, which is
-  the check that had never existed.
+  `autoexec.cfg: 1 line`, sets the variable, and **is one pass shorter than the
+  control** — the pass count is the part that says the value reached the
+  renderer before the frames were timed, rather than only reaching the console.
+  Removing `console.run_autoexec();` from `Loop::new` takes that gate to exit 1,
+  which is the check that had never existed.
 
-  The control run asserts `ssao-blur` is present _before_ asserting
-  `ssao-blur-2` is absent, so a run that reported no passes at all cannot pass
-  for a run that reported no second blur.
+  **The direction inverted on 2026-09-03**, when `r_ssao_blur_passes` started
+  defaulting to two. The seed used to ask for two and the pass `ssao-blur-2`
+  appeared only where the autoexec had run; once two was the default the control
+  drew it as well and the pair graded nothing. The gate caught that itself — its
+  control assertion is what failed the job rather than passing quietly — and the
+  repair was the direction alone: the seed is now the variable's floor, so the
+  seeded run lacks `ssao-blur-2` and the control has it. The seeded run asserts
+  `ssao-blur` is present _before_ asserting `ssao-blur-2` is absent, so a run
+  that reported no passes at all cannot pass for a run that reported no second
+  blur.
 
   What it does not cover: that gate is the X11 windowed suite, so the autoexec's
   call site is unexercised on Wayland, Win32 and AppKit, and the local runs went
