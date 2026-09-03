@@ -353,10 +353,20 @@ self_test_validation() {
 # back. `AUTOEXEC_BASE_PASS` is the blur that is in the frame either way, which
 # is what lets the absence of the second one be read as a missing pass rather
 # than as a missing report.
+#
+# **The seeded run is the one that takes the pass away, and it is that way round
+# because the default moved.** `r_ssao_blur_passes` defaulted to one until
+# 2026-09-03 and the seed asked for two, so the pass appeared only where the
+# autoexec had run. Since the default is two the pass is in every frame, and
+# that arrangement graded nothing — the control run drew `ssao-blur-2` with
+# nothing having asked for it, which this check's own control assertion caught
+# and failed on rather than passing quietly. Seeding the **floor** restores the
+# difference: the seeded frame is a pass shorter than the control's, and the
+# direction is the only thing that changed.
 AUTOEXEC_SAMPLE="lantern"
 AUTOEXEC_FILE="autoexec.cfg"
 AUTOEXEC_VAR="r_ssao_blur_passes"
-AUTOEXEC_VALUE="2"
+AUTOEXEC_VALUE="1"
 AUTOEXEC_BASE_PASS="ssao-blur"
 AUTOEXEC_PASS="ssao-blur-2"
 # The two config roots, set by `check_autoexec` and read by `autoexec_run`.
@@ -431,17 +441,17 @@ autoexec_refuses() {
 #
 # It is asked twice, and **the control run is not optional**: `r_ssao_blur_passes`
 # has a default, so a seeded run on its own cannot tell "the autoexec set it to
-# two" from "it was two anyway". The two runs differ in exactly one thing —
+# one" from "it was one anyway". The two runs differ in exactly one thing —
 # whether an `autoexec.cfg` exists in the config directory each was given.
 #
 # And each is graded on two kinds of evidence, because they answer different
 # questions. `autoexec.cfg: 1 line` says the file was found, parsed and run to
 # the end with nothing failing: `run_text` appends ", N of them failed" to that
 # same line when anything did, so matching it exactly is the zero-failure
-# assertion too. The `ssao-blur-2` **pass** says the value reached the renderer
-# before the frames were timed, which is what the call site actually claims — a
-# variable applied after the first frame would print the same console line and
-# change no pass at all.
+# assertion too. The missing `ssao-blur-2` **pass** says the value reached the
+# renderer before the frames were timed, which is what the call site actually
+# claims — a variable applied after the first frame would print the same console
+# line and leave the frame the control's length.
 #
 # **The pass rows are matched by their log target, not by leading whitespace.**
 # They used to be continuation lines of one multi-line record, so they began
@@ -491,37 +501,40 @@ check_autoexec() {
     autoexec_run control "${fields[@]}"
 
     # The seeded run: the file ran, the variable took the value, and the
-    # renderer built the pass that value asks for.
+    # renderer left out the pass that value declines to ask for. Its own pass
+    # report is read first: with no ${AUTOEXEC_BASE_PASS} row there is no report
+    # for ${AUTOEXEC_PASS} to be missing from, and the assertion under it would
+    # pass on a log that had lost the table entirely.
     autoexec_wants seeded "console\] ${AUTOEXEC_FILE}: 1 line$" \
         "it ran no ${AUTOEXEC_FILE} at boot. Either Loop::new no longer calls
            run_autoexec, or the file it reads is not the one seeded here, or a
            line in it failed and the count says so."
     autoexec_wants seeded "console\] ${AUTOEXEC_VAR} = ${AUTOEXEC_VALUE}$" \
         "the file ran and ${AUTOEXEC_VAR} did not take the value it set."
-    autoexec_wants seeded "crcbl::engine\][[:space:]]+${AUTOEXEC_PASS}[[:space:]]" \
+    autoexec_wants seeded "crcbl::engine\][[:space:]]+${AUTOEXEC_BASE_PASS}[[:space:]]" \
+        "it reported no ${AUTOEXEC_BASE_PASS} pass at all, so the absence of
+           ${AUTOEXEC_PASS} below would be a missing report rather than a
+           missing pass."
+    autoexec_refuses seeded "crcbl::engine\][[:space:]]+${AUTOEXEC_PASS}[[:space:]]" \
         "the value never reached the renderer before the frames were timed. The
            console said it was set and the frame disagrees, which is the failure
            running the autoexec before the first frame exists to prevent."
 
-    # The control run, which is what makes the three above mean anything. Its
-    # own pass report is read first: with no ${AUTOEXEC_BASE_PASS} row there is
-    # no report for ${AUTOEXEC_PASS} to be missing from, and every check under
-    # it would pass on a log that had lost the table entirely.
-    autoexec_wants control "crcbl::engine\][[:space:]]+${AUTOEXEC_BASE_PASS}[[:space:]]" \
-        "it reported no ${AUTOEXEC_BASE_PASS} pass at all, so the absence of
-           ${AUTOEXEC_PASS} below would be a missing report rather than a
-           missing pass."
+    # The control run, which is what makes the four above mean anything: it is
+    # the run that shows ${AUTOEXEC_PASS} is a pass the default draws, so the
+    # seeded run's not drawing it is the seed's doing.
+    autoexec_wants control "crcbl::engine\][[:space:]]+${AUTOEXEC_PASS}[[:space:]]" \
+        "${AUTOEXEC_PASS} is absent with nothing having asked for its absence, so
+           the seeded run proves nothing about what read the file — the default
+           ${AUTOEXEC_VAR} draws has moved to the value this gate seeds."
     autoexec_refuses control "console\] ${AUTOEXEC_FILE}:" \
         "it ran an ${AUTOEXEC_FILE} out of a directory this gate left empty —
            XDG_CONFIG_HOME did not move the config root, and these two runs have
            been reading the machine's own."
     autoexec_refuses control "console\] ${AUTOEXEC_VAR} = " \
         "something other than the autoexec sets ${AUTOEXEC_VAR}."
-    autoexec_refuses control "crcbl::engine\][[:space:]]+${AUTOEXEC_PASS}[[:space:]]" \
-        "${AUTOEXEC_PASS} is in the frame with nothing having asked for it, so the
-           seeded run proves nothing about what read the file."
 
-    echo "crcbl e2e: ${AUTOEXEC_SAMPLE} ran ${AUTOEXEC_FILE} at boot and drew ${AUTOEXEC_PASS};"
+    echo "crcbl e2e: ${AUTOEXEC_SAMPLE} ran ${AUTOEXEC_FILE} at boot and left ${AUTOEXEC_PASS} out;"
     echo "           the same run against an empty config directory did neither"
 }
 
