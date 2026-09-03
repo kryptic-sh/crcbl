@@ -171,7 +171,7 @@ That makes `probe.rs`'s schedule-asserting unit tests the only guard on this
 path — which is what they were written to be, and worth knowing before someone
 reads them as redundant with the GPU suites and deletes them. It also means the
 barrier arguments will not be checked by anything until the gather makes them
-matter per frame, at S4.
+matter per frame, at S3.
 
 **And the ring is not exercised at all.** Every frame's buffer gets
 byte-identical contents and nothing writes them afterwards, so a wrong
@@ -256,20 +256,22 @@ the lines above already use for exactly this reason.
   a staging buffer and a copy; `forward`, `depth-prepass` and `shadow` each
   declare `read_buffer` on it so the graph emits the barriers. Again no golden
   moves.
-- **S3 — the `rsm` pass**, with `rsmFragmentMain` and the `named_entry` fix.
-  **Do not record the pass in this slice**: a pass whose targets nothing reads
-  is per-frame cost for no picture, and "the half that will be read next slice"
-  is the shape this project forbids. Land the module and the pipeline only.
-- **S4 — the gather, and both passes recorded.** One workgroup per probe
-  striding the whole RSM, `groupshared` reduction,
-  `ProbeUpdate { Authored, EveryFrame }` on `ProbeGrid` defaulting to
-  `Authored`. lantern's `bounce` and shard's `light::probes` lose their gather
-  bodies here and not later — the moment the updater runs, their rows are
+- **S3 — the `rsm` pass and the gather, as one slice.** This was two in the
+  first plan: the pass, then the gather that reads it. Both halves fail the same
+  rule from opposite sides — recording a pass whose targets nothing reads is
+  per-frame cost for no picture, and landing a module nothing constructs is dead
+  code that reads as live. `ProbeUpdate { Authored, EveryFrame }` on `ProbeGrid`
+  resolves it: the default `Authored` records neither pass, so no existing scene
+  pays anything and no golden moves, and `EveryFrame` records both and is
+  reachable the day it lands. One workgroup per probe striding the whole RSM, a
+  `groupshared` reduction, and the `named_entry` fix for `rsmFragmentMain`.
+  lantern's `bounce` and shard's `light::probes` lose their gather bodies in
+  this slice and not later — the moment the updater runs, their rows are
   overwritten and the code reads as live while being dead. Their _volume
   construction_ stays: that is placement, not lighting.
-- **S5 — the sky through the visibility**, only after S4 measures. Its own
-  commit and its own goldens.
-- **S6 — pricing on three tiers, and the doc deletions.**
+- **S4 — the sky through the visibility**, only after S3 measures. Its own
+  commit, its own goldens, and the user's decision first.
+- **S5 — pricing on three tiers, and the doc deletions.**
 
 **What must not move: `crates/crcbl/tests/golden/probes.png`.** `Scene::Probes`
 is the anti-vacuity floor for the whole probe read path — the Rust-mirror
@@ -285,7 +287,7 @@ is a host-evaluated stratum-centre table uploaded as data, the way
 `probe_visibility::texel_direction` already is — not a hash, and not built
 speculatively.
 
-**Two things the user has to decide before S5, and one before S4:**
+**Two things the user has to decide before S4, and one before S3:**
 
 - **The sky term.** Folding it into the gather and zeroing `frame.sky_sh_*` for
   an updater-owned volume is a real change to how a scene is lit, not a binding.
