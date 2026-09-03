@@ -58,13 +58,15 @@ meta-->
     <!--include demo-loop-keys-->
   </ul>
   <div class="note">
-    <strong>The mouse works here, and it took an options dictionary to say
-    so.</strong>
+    <strong
+      >The mouse works here, and it took an options dictionary to say
+      so.</strong
+    >
     A browser reports pointer movement only under Pointer Lock, and those deltas
     used to arrive accelerated and smoothed by the same operating-system layer
-    that raw input exists to bypass — so the engine declined the lock rather than
-    tell a first-person camera it had aim input it could trust. That argument was
-    answered by the platform: <code>requestPointerLock</code> takes
+    that raw input exists to bypass — so the engine declined the lock rather
+    than tell a first-person camera it had aim input it could trust. That
+    argument was answered by the platform: <code>requestPointerLock</code> takes
     <code>unadjustedMovement: true</code>, which asks for device motion instead
     of the pointer's, and the shim asks for it. Where a browser refuses the
     option the shim retries without it, and the aim is the adjusted stream. The
