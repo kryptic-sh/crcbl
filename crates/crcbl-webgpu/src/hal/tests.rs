@@ -726,12 +726,33 @@ fn a_view_of_mips_or_layers_the_image_lacks_is_refused_without_encoding_anything
     let frame = device
         .acquire_next_frame(swapchain)
         .expect("WebGPU's acquire answers in the call");
-    view(frame.image, 0, all, 0, all)
+    // The swapchain's own format, not this test's image format: a view may not
+    // reinterpret, so a view of the acquired texture asks for what the canvas
+    // was configured with. Asking for `Rgba8Unorm` here is refused, which is
+    // the rule and not an accident of this fixture.
+    let frame_view = |base_mip, mip_count, base_layer, layer_count| {
+        device.create_image_view(&ImageViewDesc {
+            label: Some("frame subrange"),
+            image: frame.image,
+            view_type: ImageViewType::D2Array,
+            format: Format::Rgba8UnormSrgb,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip,
+                mip_count,
+                base_layer,
+                layer_count,
+            },
+        })
+    };
+    frame_view(0, all, 0, all)
         .expect("the whole of an acquired frame is a view a caller may ask for");
-    view(frame.image, 1, all, 0, all)
+    frame_view(1, all, 0, all)
         .expect_err("a canvas texture has one mip, so there is no second one to view");
-    view(frame.image, 0, all, 1, all)
+    frame_view(0, all, 1, all)
         .expect_err("a canvas texture has one array layer, so there is no second one to view");
+    view(frame.image, 0, all, 0, all)
+        .expect_err("a view may not reinterpret the canvas's format as another");
 }
 
 /// The seam's checks that this backend used to run nowhere at all.

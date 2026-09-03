@@ -370,6 +370,10 @@ struct BufferState {
 /// decide asks about them, and the replayer holds the whole descriptor anyway.
 #[derive(Clone, Copy, Debug)]
 struct ImageState {
+    /// The image's own format, which [`ImageViewDesc::check`] holds a view's
+    /// against — this seam offers no reinterpretation, and the reason is on
+    /// [`ImageViewDesc::format`](crcbl_hal::ImageViewDesc::format).
+    format: crcbl_hal::Format,
     /// [`ImageDesc::mip_levels`](crcbl_hal::ImageDesc::mip_levels), as asked
     /// for.
     mip_levels: u32,
@@ -387,6 +391,9 @@ struct ImageState {
 /// back an object the replayer files under an id **this** side minted.
 #[derive(Clone, Copy, Debug)]
 struct SwapchainState {
+    /// The format this device last configured the swapchain at, so a view of
+    /// the acquired texture can be held to it.
+    format: crcbl_hal::Format,
     /// The extent this device last configured the swapchain at.
     extent: (u32, u32),
     /// The pair the last [`acquire_next_frame`](Device::acquire_next_frame)
@@ -1056,6 +1063,7 @@ impl Device for WebGpuDevice {
             .insert(
                 handle.to_bits(),
                 ImageState {
+                    format: desc.format,
                     mip_levels: desc.mip_levels,
                     // `depth_or_layers` is the *depth* of a 3D image and the
                     // array-layer count of every other type, so a volume has
@@ -1094,7 +1102,7 @@ impl Device for WebGpuDevice {
             .get(&desc.image.to_bits())
             .copied()
             .ok_or_else(|| HalError::invalid_handle("image", desc.image))?;
-        desc.check(state.mip_levels, state.layers)?;
+        desc.check(state.format, state.mip_levels, state.layers)?;
         let handle: ImageViewHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_image_view(handle, desc)));
@@ -1628,6 +1636,7 @@ impl Device for WebGpuDevice {
             .insert(
                 handle.to_bits(),
                 SwapchainState {
+                    format: desc.format,
                     extent: desc.extent,
                     acquired: None,
                     presented: false,
@@ -1651,10 +1660,12 @@ impl Device for WebGpuDevice {
         let state = swapchains
             .entry(swapchain.to_bits())
             .or_insert(SwapchainState {
+                format: desc.format,
                 extent: desc.extent,
                 acquired: None,
                 presented: false,
             });
+        state.format = desc.format;
         state.extent = desc.extent;
         // The pair a reconfigure leaves behind is the same one an acquire
         // would: last frame's, already presented and already expired. Retiring
@@ -1764,7 +1775,7 @@ impl Device for WebGpuDevice {
         // implicit, so there is nothing for a caller to wait on or signal.
         let image: ImageHandle = self.pool.alloc();
         let view: ImageViewHandle = self.pool.alloc();
-        let (extent, stale) = {
+        let (swapchain_format, extent, stale) = {
             let mut swapchains = self
                 .swapchains
                 .lock()
@@ -1774,13 +1785,19 @@ impl Device for WebGpuDevice {
                     // A fresh frame, so it has not been presented — the flag
                     // travels with the pair it describes.
                     state.presented = false;
-                    (state.extent, state.acquired.replace((image, view)))
+                    (
+                        state.format,
+                        state.extent,
+                        state.acquired.replace((image, view)),
+                    )
                 }
                 // A handle this device never created, or one already destroyed.
                 // The acquire still goes on the stream — the replayer is the
                 // one that decides what an unknown swapchain is — and there is
                 // no remembered pair to retire.
-                None => ((0, 0), None),
+                // The format is unused on this path: an unknown swapchain
+                // files no `ImageState`, so nothing later reads it back.
+                None => (crcbl_hal::Format::Rgba8Unorm, (0, 0), None),
             }
         };
         {
@@ -1798,6 +1815,9 @@ impl Device for WebGpuDevice {
             images.insert(
                 image.to_bits(),
                 ImageState {
+                    // The swapchain's own format, which is what a view of the
+                    // acquired texture must ask for.
+                    format: swapchain_format,
                     mip_levels: 1,
                     layers: 1,
                 },

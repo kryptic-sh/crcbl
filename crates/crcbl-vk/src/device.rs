@@ -2180,16 +2180,16 @@ impl Device for VkDevice {
     fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
         let mut state = self.inner.state();
         // Copied out before the pool is borrowed mutably below.
-        let (image_raw, mip_levels, layers) = {
+        let (image_raw, image_format, mip_levels, layers) = {
             let entry = lookup(&state.images, "image", desc.image, &self.inner)?;
-            (entry.raw, entry.mip_levels, entry.layers)
+            (entry.raw, entry.format, entry.mip_levels, entry.layers)
         };
         // The seam's subresource rule, which nothing ran here: the range went
         // into `vkCreateImageView` as it stood, and a base or count past the
         // image's own shape is `VUID-VkImageViewCreateInfo-subresourceRange-01478`
         // — a VU the driver does not report, so the caller got a live-looking
         // view onto mips that do not exist.
-        desc.check(mip_levels, layers)?;
+        desc.check(image_format, mip_levels, layers)?;
         let info = vk::ImageViewCreateInfo::default()
             .image(image_raw)
             .view_type(conv::image_view_type(desc.view_type))

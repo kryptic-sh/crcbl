@@ -1142,6 +1142,7 @@ impl Device for NullDevice {
             ObjectKind::Image,
             desc.label,
             Detail::Image {
+                format: desc.format,
                 mip_levels: desc.mip_levels,
                 layers,
             },
@@ -1158,17 +1159,22 @@ impl Device for NullDevice {
         // before: `create_image` filed `Detail::None`, so neither count was
         // anywhere to be read and a view of mips the image never had was
         // served here while `crcbl-mtl` and `crcbl-dx12` refused it.
-        let (mip_levels, layers) = {
+        let (image_format, mip_levels, layers) = {
             let state = self.recorder.lock();
             let Some(object) = state.get(ObjectKind::Image, desc.image.to_bits()) else {
                 return Err(HalError::invalid_handle("image", desc.image));
             };
-            let Detail::Image { mip_levels, layers } = &object.detail else {
+            let Detail::Image {
+                format,
+                mip_levels,
+                layers,
+            } = &object.detail
+            else {
                 unreachable!("an image handle always carries image detail");
             };
-            (*mip_levels, *layers)
+            (*format, *mip_levels, *layers)
         };
-        desc.check(mip_levels, layers)?;
+        desc.check(image_format, mip_levels, layers)?;
         Ok(self.insert(ObjectKind::ImageView, desc.label, Detail::None))
     }
 

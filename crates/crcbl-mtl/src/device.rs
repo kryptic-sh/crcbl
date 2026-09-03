@@ -2220,17 +2220,19 @@ impl Device for MetalDevice {
     fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
         let mut state = self.state();
         let entry = lookup(&state.images, "image", desc.image, &*self.inner)?;
-        // A depth or stencil format has no compatible reinterpretation in
-        // Metal — the depth formats are their own class — so the texture was
-        // not created with `MTLTextureUsagePixelFormatView` and asking for a
-        // different format here would raise. Refuse it while it is still an
-        // error a caller can catch.
-        if desc.format != entry.format
-            && (desc.format.is_depth_stencil() || entry.format.is_depth_stencil())
-        {
+        // **No reinterpretation at all, not merely none involving depth.** This
+        // guard used to fire only when a depth or stencil format was on one
+        // side, while its own reasoning — that the texture was not created with
+        // `MTLTextureUsagePixelFormatView`, so asking for another format raises
+        // rather than returning an error — applies to every format equally. A
+        // colour reinterpretation therefore reached Metal and raised, which is
+        // not an error a caller can catch. `ImageViewDesc::format` is where the
+        // seam's rule and the cost of offering the capability are written.
+        if desc.format != entry.format {
             return Err(HalError::InvalidDescriptor(format!(
-                "a view of a {:?} image cannot reinterpret it as {:?}: Metal permits no \
-                 reinterpretation involving a depth or stencil format",
+                "a view of a {:?} image cannot reinterpret it as {:?}: this backend creates \
+                 textures without MTLTextureUsagePixelFormatView, so Metal would raise rather \
+                 than fail",
                 entry.format, desc.format
             )));
         }

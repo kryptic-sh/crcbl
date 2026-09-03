@@ -574,8 +574,23 @@ pub struct ImageViewDesc<'a> {
     pub image: ImageHandle,
     /// Dimensionality of the view.
     pub view_type: ImageViewType,
-    /// Format seen through the view — may differ from the image's format for
-    /// sRGB reinterpretation, and must be compatible with it.
+    /// Format seen through the view, which **must equal the image's own**.
+    ///
+    /// This field once promised sRGB reinterpretation. No backend here can
+    /// deliver it as they create images today, and one of them structurally
+    /// cannot: D3D12 permits a differing view format only on a *typeless*
+    /// resource, and `crcbl-dx12` stores colour images with their concrete
+    /// format precisely so the driver may compress them. Metal is the same
+    /// shape — `crcbl-mtl` does not pass `MTLTextureUsagePixelFormatView`, and
+    /// asking for another format on a texture without it raises rather than
+    /// returning an error. So the promise was one only Vulkan kept, and a
+    /// caller taking it up got a working view on two backends and a failure on
+    /// the others.
+    ///
+    /// Reinterpretation is therefore a **capability this seam does not offer**,
+    /// not a thing that quietly works in some places. Offering it means
+    /// creating images typeless on D3D12 and with the view-format usage on
+    /// Metal, and paying for both — `docs/backlog.md` carries what that costs.
     pub format: Format,
     /// Subrange covered.
     ///
@@ -614,7 +629,26 @@ impl ImageViewDesc<'_> {
     ///
     /// [`HalError::InvalidDescriptor`], naming the range and the shape it ran
     /// past.
-    pub fn check(&self, image_mip_levels: u32, image_layers: u32) -> Result<(), HalError> {
+    pub fn check(
+        &self,
+        image_format: Format,
+        image_mip_levels: u32,
+        image_layers: u32,
+    ) -> Result<(), HalError> {
+        // **One rule, in one place.** `crcbl-dx12` enforced this and `crcbl-mtl`
+        // enforced half of it — only where a depth or stencil format was
+        // involved, though its own comment says a colour reinterpretation would
+        // raise too — while `crcbl-vk` and the reference backend enforced
+        // nothing. So the same descriptor was an error, a raise, or a working
+        // view depending on the backend. See [`ImageViewDesc::format`].
+        if self.format != image_format {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a view of a {image_format:?} image cannot be created as {:?}: this seam offers \
+                 no format reinterpretation, because D3D12 needs a typeless resource for it and \
+                 Metal a usage flag neither backend asks for",
+                self.format
+            )));
+        }
         let range = self.range;
         if range.base_mip >= image_mip_levels || range.base_layer >= image_layers {
             return Err(HalError::InvalidDescriptor(format!(
@@ -943,6 +977,10 @@ mod tests {
         // compared mips against layers would not pass by coincidence.
         const MIPS: u32 = 4;
         const LAYERS: u32 = 3;
+        /// The image's format, which every view below asks for unchanged —
+        /// these cases are about the subresource range, and a differing format
+        /// is its own refusal tested separately.
+        const VIEW_FORMAT: Format = Format::Rgba8Unorm;
         let view = |base_mip, mip_count, base_layer, layer_count| ImageViewDesc {
             label: None,
             image: Handle::from_bits(1 << 32).expect("a non-zero generation"),
@@ -959,16 +997,16 @@ mod tests {
         let all = ImageSubresourceRange::ALL;
 
         view(0, all, 0, all)
-            .check(MIPS, LAYERS)
+            .check(VIEW_FORMAT, MIPS, LAYERS)
             .expect("both sentinels resolve to the whole image, which is a view of all of it");
         view(3, all, 2, all)
-            .check(MIPS, LAYERS)
+            .check(VIEW_FORMAT, MIPS, LAYERS)
             .expect("the sentinel from the last mip and last layer is one of each, not none");
         view(0, MIPS, 0, LAYERS)
-            .check(MIPS, LAYERS)
+            .check(VIEW_FORMAT, MIPS, LAYERS)
             .expect("the whole image named explicitly is the same view");
         view(1, 2, 1, 2)
-            .check(MIPS, LAYERS)
+            .check(VIEW_FORMAT, MIPS, LAYERS)
             .expect("a subrange ending exactly at the end is inside the image");
 
         // A base past the end is asserted on its *message*, because the two
@@ -987,7 +1025,7 @@ mod tests {
             ),
         ] {
             let error = desc
-                .check(MIPS, LAYERS)
+                .check(VIEW_FORMAT, MIPS, LAYERS)
                 .expect_err(&format!("{what} must be refused"));
             let HalError::InvalidDescriptor(message) = &error else {
                 panic!("{what} is a bad descriptor, not {error:?}");
@@ -1017,13 +1055,47 @@ mod tests {
             ),
         ] {
             let error = desc
-                .check(MIPS, LAYERS)
+                .check(VIEW_FORMAT, MIPS, LAYERS)
                 .expect_err(&format!("{what} must be refused"));
             assert!(
                 matches!(error, HalError::InvalidDescriptor(_)),
                 "{what}: {error:?}"
             );
         }
+    }
+
+    /// A view's format must equal its image's, and the seam is where that is
+    /// said — [`ImageViewDesc::format`] carries why the capability is not on
+    /// offer.
+    ///
+    /// This is the rule three backends disagreed about: `crcbl-dx12` refused
+    /// every mismatch, `crcbl-mtl` refused only those involving a depth or
+    /// stencil format while its own comment argued for refusing all of them,
+    /// and `crcbl-vk` and this crate's reference backend checked nothing. The
+    /// same descriptor was therefore an error, a raise, or a working view.
+    #[test]
+    fn a_view_may_not_reinterpret_its_image_s_format() {
+        let view = |format| ImageViewDesc {
+            label: None,
+            image: Handle::from_bits(1 << 32).expect("a non-zero generation"),
+            view_type: ImageViewType::D2,
+            format,
+            range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+        };
+        view(Format::Rgba8Unorm)
+            .check(Format::Rgba8Unorm, 1, 1)
+            .expect("the image's own format is what a view asks for");
+
+        let error = view(Format::Rgba8UnormSrgb)
+            .check(Format::Rgba8Unorm, 1, 1)
+            .expect_err("sRGB reinterpretation is the case this seam does not offer");
+        let HalError::InvalidDescriptor(text) = error else {
+            panic!("a caller bug is named in the descriptor");
+        };
+        assert!(
+            text.contains("Rgba8Unorm") && text.contains("Rgba8UnormSrgb"),
+            "the refusal names both formats: {text}"
+        );
     }
 
     #[test]

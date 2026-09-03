@@ -633,7 +633,16 @@ pub(super) enum Detail {
     /// `layers` is the **array-layer** count, which is `1` for an
     /// [`ImageType::D3`](crate::ImageType) image however deep it is — see
     /// `create_image`, which resolves it.
-    Image { mip_levels: u32, layers: u32 },
+    ///
+    /// `format` is here for the same reason the counts are: without it the
+    /// reference backend could not state the seam's rule that a view's format
+    /// equals its image's, and three backends disagreed about that rule
+    /// unchecked until 2026-09-03.
+    Image {
+        format: crate::Format,
+        mip_levels: u32,
+        layers: u32,
+    },
     /// An in-flight readback: what it covers and how many more polls report
     /// `Pending` before it completes.
     Readback {

@@ -14,6 +14,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **An image view keeps its image's format.** `ImageViewDesc::format` documented
+  itself as free to differ from the image's "for sRGB reinterpretation" and no
+  two backends agreed: `crcbl-dx12` refused every differing format, `crcbl-mtl`
+  refused only across depth or stencil, `crcbl-vk` and `null` did not check, and
+  `crcbl-webgpu` could not have honoured it — WebGPU fixes a texture's
+  reinterpretation list at creation and `ImageDesc` has no field to carry one.
+  `ImageViewDesc::check` now refuses any format but the image's own, and every
+  backend routes its `create_image_view` through it, so the seam keeps a promise
+  all five can. A caller that passed a differing format got backend-dependent
+  behaviour before and gets `HalError::InvalidDescriptor` everywhere now.
+
 ### Fixed
 
 - **`write_buffer` requires `HostUpload` on every backend.** `crcbl-vk`,

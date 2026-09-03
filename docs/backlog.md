@@ -13561,60 +13561,42 @@ is exercised only against the stub. Nothing verifies what a real Dawn does with
 `maxAnisotropy: 16`. Deliberate — the probe exists for the `lod_max` sentinel,
 and an anisotropy probe would be measuring the machine rather than the seam.
 
-### `ImageDesc` has no `view_formats`, so sRGB reinterpretation cannot work on WebGPU
+### Cross-format image views were declined, and the seam now says a view keeps its image's format
 
-`ImageViewDesc::format` documents itself as free to differ from the image's "for
-sRGB reinterpretation". **On WebGPU that documented capability does not work.**
-`GPUTextureDescriptor.viewFormats` is the list a texture may be reinterpreted
-as, it is fixed at creation, and WebGPU refuses a view whose format is neither
-the texture's own nor in that list. `ImageDesc` has no field to carry one, so
-the replayer creates every texture with the default empty list and any
-reinterpreting view is refused by the browser.
+`ImageViewDesc::format` used to document itself as free to differ from the
+image's "for sRGB reinterpretation", and no two backends agreed: `crcbl-dx12`
+refused every differing format, `crcbl-mtl` refused only across depth or
+stencil, `crcbl-vk` and `null` did not check, and `crcbl-webgpu` could not have
+honoured it at all. `ImageViewDesc::check` now refuses any format but the
+image's own, on every backend, so the seam keeps a promise all five can.
 
-The replayer deliberately does **not** invent a list — granting a permission the
-caller never asked for is worse than the refusal, and on a real driver it costs
-optimisations the texture would otherwise get.
+The two routes to the opposite decision were considered and declined, so that
+they are not re-proposed:
 
-The fix is a `view_formats` field on `crcbl_hal::ImageDesc`. It is not
-WebGPU-specific: Vulkan wants the same list through
-`VkImageFormatListCreateInfo`, and D3D12 has the equivalent. So this is a seam
-gap the WebGPU work surfaced rather than a WebGPU workaround, and it wants doing
-where every backend can use it. Recorded in `web/engine/gpu-replay.js` above
-`GPU_TEXTURE_USAGE` and on the probe's view descriptor.
+- **A `view_formats` list on `ImageDesc`**, mirroring
+  `GPUTextureDescriptor.viewFormats`, `VkImageFormatListCreateInfo` and D3D12's
+  equivalent. It is the honest cross-backend shape, and it is a new field on the
+  most-used descriptor in the seam plus a plumbing change in five backends, for
+  a capability nothing in the workspace asks for — every render target and
+  sampled image here is created in the format it is read in.
+- **Typeless D3D12 resources**, or gating on `CastingFullyTypedFormatSupported`.
+  The first costs compression on every render target; the second makes a seam
+  promise depend on the machine. Both arguments are in `crcbl-dx12`'s
+  `create_image_view`.
 
-### `ImageDesc` and `ImageViewDesc` state contracts nothing enforces
+If a caller ever needs sRGB reinterpretation, the `view_formats` route is the
+one to take — not a per-backend relaxation of the check.
 
-One of them, found while putting both descriptors on the wire (the
-`mip_levels`/`samples` floor that stood beside it is enforced now —
-`ImageDesc::check` refuses a zero by name). It is prose in
-`crates/crcbl-hal/src/resource.rs` with no check anywhere and no named owner:
-
-- **`ImageViewDesc::format` "must be compatible with" the image's format**, and
-  nothing defines compatibility or says who checks it.
-
-It lands on the WebGPU replayer in the slice that executes these commands, and
-it has nothing to enforce them against: it sees the descriptor and not the
-seam's intent. What is needed is a decision about where it belongs — the
-descriptor's constructor, a debug assertion in the HAL, or explicitly the
-backend's — not more prose.
-
-**There is now a worked precedent for that decision, and it was found by
-checking this entry's own example.** `BufferDesc::size` is the rule this entry
-cites as the one that _is_ stated, and on 2026-08-24 it turned out to be stated
-and not kept: null, Vulkan, Metal and D3D12 each refused a zero with
-`HalError::InvalidDescriptor` and `crcbl-webgpu` served it, allocating a handle
-and encoding a `CreateBuffer`. So a documented seam rule with no named answer
-and no test had already diverged on a live backend, which is the concrete
-version of what this entry warns about.
-
-The shape that closed it, and the one the rule above should copy: **the check
-lives in each backend**, the seam's doc **names the error** rather than only the
-rule, and **two tests** hold everyone to it — the agnostic seam suite for the
-four native backends, and `crcbl-webgpu`'s own `hal::tests` for the browser one,
-because the seam suite is a native binary and `CRCBL_GPU` names no browser. That
-last split is the part worth carrying forward: an agnostic suite that reaches
-four of five backends cannot be the only guard for a rule the fifth is the most
-likely to break.
+**The shape that closes a seam-rule divergence, worth copying for the next
+one:** the check lives in the shared descriptor's `check`, the seam's doc
+**names the error** rather than only the rule, and **two tests** hold everyone
+to it — the agnostic seam suite for the four native backends, and
+`crcbl-webgpu`'s own `hal::tests` for the browser one, because the seam suite is
+a native binary and `CRCBL_GPU` names no browser. That last split is the part
+that keeps being needed: an agnostic suite reaching four of five backends cannot
+be the only guard for a rule the fifth is the most likely to break. Both
+`BufferDesc::size` (2026-08-24, where `crcbl-webgpu` alone served a zero) and
+this view-format rule diverged exactly there.
 
 ### The sweep for test-restated isolation defaults is finished, and three candidates were declined
 
@@ -18157,16 +18139,10 @@ problem.
   TIMESTAMP_QUERY" is unreachable (create_query_set errors first); `present`'s
   queue must be present-capable but the seam never says so; `AcquiredFrame`
   carries no swapchain identity.
-- **null**: `create_image_view` never validates format or subresource — and the
-  finding behind it is that **view-format compatibility is three different rules
-  across four backends**. `ImageViewDesc::format` documents that a view "may
-  differ from the image's format for sRGB reinterpretation"; `crcbl-dx12`
-  refuses any differing format outright, `crcbl-mtl` refuses only when either
-  side is depth or stencil, and `crcbl-vk` and `null` do not check at all. The
-  field's documented purpose is therefore broken on D3D12, and
-  `ImageViewDesc::check` covers mips and layers only. `crcbl-dx12` and
-  `crcbl-mtl` also keep hand-rolled copies of the subresource rule that
-  `ImageViewDesc::check` already owns.
+- **null**: `crcbl-dx12` and `crcbl-mtl` keep hand-rolled copies of the
+  subresource rule that `ImageViewDesc::check` already owns. (The view-format
+  disagreement that stood beside this is settled — see the cross-format entry
+  above.)
 
   The rest of this bullet was about **`crcbl-wgpu`, which was deleted on
   2026-08-21** — unclosed passes no-opping, `checked()` routing, abandoned
@@ -18787,18 +18763,6 @@ compiles consecutive frames against one pool and needs no layer.
 ## What DX2 left open
 
 The device-and-resources slice. Everything below is in `crates/crcbl-dx12`.
-
-- **An image view's format must equal its image's on DX12, and the seam says it
-  need not.** `create_image_view` refuses a differing `ImageViewDesc::format`
-  outright, so the sRGB reinterpretation `crcbl-hal` documents — and `crcbl-mtl`
-  delivers — is unavailable on this backend. D3D12 permits the cast only from a
-  typeless resource, which costs compression on every render target, or where
-  `CastingFullyTypedFormatSupported` is reported, which would make the seam's
-  promise depend on the machine. Both were declined for those reasons and the
-  argument is in the code. **This wants a decision before the bind-group
-  slice**: either the seam narrows its promise, or DX12 pays one of the two
-  costs. A sampled _depth_ image is not affected — it is stored typeless with
-  the depth-stencil view and the shader view each naming a concrete format.
 
 - **`create_image` does not check `mip_levels` against the extent.** More mips
   than the extent admits reaches D3D12 as `E_INVALIDARG` and surfaces as
@@ -24714,9 +24678,6 @@ silently accepts or substitutes. All unverified by me.
   cost today is that `a_sampler_below_the_anisotropy_floor_is_refused`
   deliberately omits the NaN arm and says so, or it would fail on Windows and
   macOS. The sub-1.0 half of this row has shipped: every backend now refuses it.
-- `ImageViewDesc::format` differing from the image's: the seam permits it and
-  mtl honours it except across depth, but **dx12 refuses every cross-format view
-  uniformly, by design**. A documented seam promise one backend does not keep.
 
 ### What the survey did not look at, stated as a gap
 
