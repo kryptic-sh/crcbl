@@ -248,10 +248,18 @@ to **specular occlusion**, which the SSR section refuses outright and refuses
 direction exists now; the cone angle does not, and that refusal stands until it
 does.
 
-**SSAO stays as the cheap tier** rather than being deleted, on the antialiasing
-ladder's own FXAA-under-SMAA pattern: eight taps and a comparison is a real
-budget on a software rasteriser and on a small device, and the two techniques
-share the pass, the resource, the blur and the test.
+**SSAO was to stay as the cheap tier** rather than being deleted, on the
+antialiasing ladder's own FXAA-under-SMAA pattern: eight taps and a comparison
+is a real budget on a software rasteriser and on a small device, and the two
+techniques would share the pass, the resource, the blur and the test.
+
+**That half did not happen, and the tree is what says so.** `ssao.slang` was
+rewritten in place — its header reads "Not a hemisphere of depth comparisons" —
+and no selector was built: `crcbl_render::ssao` declares slice, blur, intensity,
+radius and bent-normal variables and nothing that names a technique. So the
+chain ships one technique, not two. What that costs is
+[sample/19-alcove.md](sample/19-alcove.md)'s milestone 2, which is a comparison
+between two of them; `docs/backlog.md` carries the entry.
 
 Refused, with the reasons:
 

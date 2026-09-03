@@ -255,13 +255,22 @@ pub fn spot() -> Light {
 /// simulation: the light list is the renderer's, the shrine's spot is a fixture
 /// that does not go out, and a torch nobody has lit is a torch that is not in
 /// this list at all. What that leaves lighting the zone is the irradiance volume
-/// and [`crate::zone::house_light`]'s ambient floor, which is far darker and —
-/// because the updater gathers the sun alone, which this interior has none of
-/// — completely still.
+/// and [`crate::zone::house_light`]'s ambient floor, both far darker than the
+/// braziers and both still: the spot does not flicker, so neither does its
+/// bounce.
 ///
 /// **That pair is what the browser gate's lighting check is made of**: a lit
 /// zone whose picture changes with nothing held, and a doused one whose picture
 /// does not.
+///
+/// **The doused zone's bounce is measurably nothing**, which is a fact about
+/// this scene rather than about the updater. Measured 2026-09-04 by running the
+/// browser gate twice, once with `crcbl_render::rsm`'s `r_probe_bounce` off:
+/// the doused window read a mean luma of 6.68 with the bounce and 6.67 without,
+/// where the lit window read 16.01 against 15.73. So the braziers light the
+/// volume and [`spot`] does not — it is the coldest and least of the zone's
+/// lights and it stands in one corner of it. `docs/backlog.md` carries what
+/// that costs the gate.
 #[must_use]
 pub fn torches(seconds: f64, lit: bool) -> Vec<Light> {
     let mut lights = vec![spot()];

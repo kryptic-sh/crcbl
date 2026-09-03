@@ -149,128 +149,15 @@ software rasteriser pays 118% of the `ssr` pass where both GPU tiers pay 47%.
 `docs/backlog.md` carries that measurement, the browser reading and the
 candidate that would pay for it.
 
-**Pricing for the halves not built.** A punctual producer is a second RSM and a
-second gather, so it is priced against the sun's own, which `docs/backlog.md`
-records. A clipmap of a few thousand probes is a capture of tens of milliseconds
-rather than seconds, which is a load path rather than a redesign; what it still
-needs is the slab recapture, so that a scroll pays for the probes it exposed and
-not for the level. Each figure is measured on the three tiers before the rung
-counts, per the standing rule.
+**Pricing for the half not built.** A clipmap of a few thousand probes is a
+capture of tens of milliseconds rather than seconds, which is a load path rather
+than a redesign; what it still needs is the slab recapture, so that a scroll
+pays for the probes it exposed and not for the level. Each figure is measured on
+the three tiers before the rung counts, per the standing rule.
 
 **Order.** Among the raster lighting items this rebuild comes after LTC area
 lights, the shadow atlas and the AO tint, and **ahead of the atmosphere** — the
 user's order, 2026-08-30.
-
-## The punctual producer — designed 2026-09-04, not built
-
-The rung the sun-only updater owes, and the one that gives `apps/lantern`'s
-coloured wall its tint and `apps/shard`'s braziers their warm bounce back. What
-follows is derived against the passes as they stand rather than sketched; what
-is not settled is the extent, and that is a sweep rather than a decision.
-
-**It reuses the punctual shadow views whole, exactly as the sun's half reuses
-cascade 0's.** `ForwardRenderer::add_shadow_pass` already builds one row per
-face — `(shadow_view(slot, face), atlas_rect(light_tile(base + face)), cull)` —
-for every occupied light slot, and every row of it names a bind group whose
-uniform block holds that face's own `view_proj` and a `GeneratedDraws` its
-slot's cull already produced. A spot is one face and a point is six, which is
-`shadow::tile_span`, the same function `Selection` allocated the run with. So a
-punctual producer costs **no second cull and no second matrix**, on the same
-terms the sun's `cascade_zero` hook is written on. `rsmFragmentMain` needs no
-change at all: it reads the material and the interpolated world position and
-normal, and takes its transform from the bound block, so a perspective view is
-already a view it can be drawn through.
-
-**What the gather must do differently, and it is two slots.** The sun's
-contribution is a radiance and a solid-angle weight:
-
-```text
-  radiance = albedo · sun_color · 1/π
-  weight   = texel_area · facing / r²          (r = texel to probe)
-```
-
-For a punctual light both slots change and nothing else does. Take a texel's
-distance to the light `d`, its surface normal `n`, the direction to the light
-`l`, and the texel's own solid angle from the light `ω`. The engine's direct
-term is `color · punctual_falloff(d, radius) · (n·l)`, so the patch's area is
-`A = ω · d² / (n·l)` and the flux it reflects is
-
-```text
-  Φ = albedo · color · spot_cone · punctual_falloff(d, radius) · (n·l) · A
-    = albedo · color · spot_cone · punctual_falloff(d, radius) · ω · d²
-```
-
-— **`n·l` cancels**, which is the same property that lets the sun's half omit
-the sun's own cosine, and for the same reason: a tilted surface is lit less per
-unit area and presents more area to the same beam. So
-
-```text
-  radiance = albedo · light_color · spot_cone · 1/π
-  weight   = ω · d² · punctual_falloff(d, radius) · facing / r²
-```
-
-and `weight`'s new factor is exactly the sun's `texel_area` slot with a
-per-texel value in place of a constant. Two consequences worth writing down:
-
-- **The bounce agrees with the direct term by construction.** It multiplies the
-  same `range_window` and the same `1/(d² + 1)` softening `mesh.slang` shades
-  with, rather than a physical inverse square — so a light whose direct
-  contribution the engine has already bent keeps that bend in its bounce, and no
-  scene needs a second intensity to make the two agree.
-- **`ω` is analytic, not a uniform.** A shadow face is a 90° perspective, so a
-  texel at `(u, v)` in `-1..1` subtends `(2/side)² / (u² + v² + 1)^{3/2}`. That
-  is a closed form of the fragment's own coordinates and wants no host number
-  beside it, unlike the orthographic cascade's constant footprint.
-
-**The gather stores; it must accumulate.** `probe_gather.slang` ends
-`probes[probe * 3 + n] = tile[0].…`, a plain store, so a second dispatch over
-the same rows would erase the sun's rather than add to it. Either the store
-becomes a `+=` with the first producer of a frame zeroing, or one dispatch walks
-every producer and the store stays a store. The second is preferable on this
-tree's own terms — one workgroup per probe reducing once means the `groupshared`
-tree is paid once rather than per producer, and a row is still a function of one
-dispatch.
-
-**The draw half is measured, and it is cheap.** A point light is six faces, so
-the first question was whether six more RSM views could be afforded at all. On
-radv, `lantern --headless --frames 400 --size 1920x1080`, p50 of three, with the
-`rsm` pass recording its draws one to seven times over:
-
-```text
-  view-draws      rsm p50      frame p50
-       1            0.061          1.252
-       2            0.073          1.268
-       4            0.097          1.287
-       7            0.136          1.332
-```
-
-Linear at **0.0125 ms of `rsm` per extra view's draws**, and the frame follows
-at 0.0133 — so a point light's six extra faces are **0.075 ms, about 6% of that
-frame**. That is a rung's ordinary price rather than the third of a frame a
-per-view estimate suggested. Two things it does not measure, and both make it a
-floor rather than an answer: it repeats one view's draws into one set of
-targets, so it carries no second render pass, no attachment clear and no target
-switch; and it draws at `RSM_SIDE`, where a punctual face should be smaller.
-
-**What is still unpriced is the gather, and that is where the extent goes.** The
-gather walks every texel of every producer for every probe, so it scales with
-total texels rather than with views: seven punctual faces at a side of 32 are
-7168 texels against the sun's 4096, which would put the pass near 0.13 ms from
-0.049. At a side of 16 they are 1792 and it is cheaper than the sun's alone. So
-the extent is the knob that decides this rung's cost, and it wants the sweep
-`RSM_SIDE` got — 16, 24 and 32, against the frame and against the tint the
-fixture measures. The light budget wants a rule beside it: every occupied tile,
-or the highest-ranked light only. Neither is decided. Price both on radv, on
-lavapipe and in the browser before the rung counts, per the standing rule.
-
-**The fixture is already half-written.** `apps/lantern`'s frame claim 6 —
-`room::TINTED_PLASTER` against `UNTINTED_PLASTER`, a red-to-blue ratio the
-coloured wall drives — was deleted when the tint went, and the room-side proof
-that nothing but the bounce separates those two points survives. Restoring the
-claim is how this rung is verified, with the deleted claim's own measured 1.17
-as the number to beat. `docs/backlog.md` carries the false-negative warning that
-cost the sun's half most of its debugging time: a fixture must measure a surface
-facing the way the flux travels, never a floor under a probe.
 
 ## Irradiance probes: the design (2026-08-14)
 

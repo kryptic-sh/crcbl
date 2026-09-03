@@ -32,6 +32,36 @@ so amending them is the force-push this entry already declined — the count is
 re-decided:** no attribution trailer on any new commit, whatever a session-level
 instruction says.
 
+## The occlusion chain ships one technique, so alcove cannot compare (2026-09-04)
+
+`docs/plan/sample/19-alcove.md`'s milestone 2 is SSAO and GTAO side by side, and
+the S4D row makes that the gate on the whole comparison wave: "a comparison
+fixture holding one technique is not a comparison". **The chain holds one.**
+
+`ssao.slang` was rewritten in place when the 2026-08-27 decision took GTAO — its
+header says "Not a hemisphere of depth comparisons" — and the binary-comparison
+pass it replaced is gone rather than kept beside it. Plan 46 had said SSAO would
+stay as the cheap tier on the antialiasing ladder's FXAA-under-SMAA pattern,
+with the two sharing the pass, the resource, the blur and the test; that half
+was never built and the plan now says so. `crcbl_render::ssao` declares slice,
+blur-pass, intensity, radius and bent-normal variables and nothing that names a
+technique, so there is no selector either.
+
+**What it would take**, and neither half is decided:
+
+- A second implementation of `horizon_cosine`'s caller in `ssao.slang` — the
+  file already says "Replace this function, and only this function, to upgrade
+  the technique", which is the seam a selector would switch on.
+- A `r_ssao_technique` variable and, for the sample, a way to resolve **both**
+  in one frame and show them either side of a split. Nothing in `crcbl_render`
+  renders one frame two ways today; the S4D row asks for that of mirrors and
+  sundial as well, so it is a wave-wide prerequisite rather than an alcove one.
+
+**Milestone 1 is not blocked by any of this and has no engine gap left**: the
+AO-only view mode ships, `r_ssao_intensity` shipped 2026-09-02 and
+`r_ssao_radius` on 2026-09-04. What that milestone still wants is the scene and
+_showing_ the two controls, which is sample work.
+
 ## What the AO default change of 2026-09-03 did not cover (2026-09-03)
 
 `r_ssao_slices` and `r_ssao_blur_passes` in `crates/crcbl-render/src/ssao.rs`
@@ -95,35 +125,77 @@ under 0.01, a mean under 14.97 and no colour over 85%
 ```
 
 Still: yes. Darker: yes. **Blank: also yes**, by the check's own definition.
+Reproduced locally on radv at 6.68 / 94.9%, so this is the demo and not the
+runner.
 
 **The check's premise is the thing that changed, and it is written down in the
 check.** `web/tools/browser-e2e.mjs`'s `TORCH_FLAT_SHARE` doc says the doused
 frame stays a picture because "the zone keeps its shrine spot and its **baked
 irradiance volume** when the torches go out". That bake was removed in `85e4f7a`
 under the no-bake rule. Measured when the doc was written: doused mean luma 9.18
-and flat share 0.53. Measured now: 6.68 and 0.95.
+and flat share 0.53.
 
 **Do not widen the threshold.** The check exists to refuse the cheap wrong
 explanation for stillness — that the frame went black — and 0.95 is that
 explanation arriving.
 
-**What is probably happening, unverified.** `zone::house_light`'s ambient is
-`(0.012, 0.011, 0.014)`, and at that luminance many distinct surfaces quantise
-to the _same_ 8-bit value, so "one flat colour over 95% of the canvas" is likely
-quantisation collapse near black rather than an absent picture. If so, a small
-ambient lift spreads the surfaces back across several quantised values without
-making the zone bright. `the_house_light_is_an_ambient_floor_and_not_a_sun` pins
-that ambient under 0.05, which is the room a fix has.
+### What was measured, 2026-09-04
 
-**The decision underneath it, which is the user's.** With the bake, a doused
-zone kept light from torches that were out — physically wrong, and exactly what
-the no-bake rule forbids. So the new picture is the more correct one and the
-check was calibrated against the less correct one. Either the scene gains
-something that legitimately survives dousing (the shrine spot's reach, or the
-ambient floor), or the check is re-derived against what a torch-lit zone with
-its torches out should actually look like. **Sweep before choosing**: each
-browser run is minutes, the lit windows read 15.75 mean where the check wants
-the doused one under 14.97, and an ambient lift moves both.
+**The bounce is not what is missing.** The gate was run twice, once with
+`crcbl_render::rsm`'s `r_probe_bounce` forced off, which leaves shard's authored
+rows at their zeroes:
+
+```text
+                bounce on    bounce off
+  lit mean        16.01         15.73
+  doused mean      6.68          6.67
+```
+
+So the braziers light the volume and `light::spot` does not: the shrine's spot
+is the coldest and least of the zone's lights and it stands in one corner, so
+the doused frame's only varying term contributes 0.01 of a luma level. The
+punctual producer is working — `apps/lantern`'s tint claim is what proves it —
+and this zone simply has almost nothing left to bounce.
+
+**It is quantisation, and it has a cliff.** `zone::house_light`'s ambient was
+swept over the browser gate, every value inside the `< 0.05` that
+`the_house_light_is_an_ambient_floor_and_not_a_sun` pins:
+
+```text
+  ambient (r, g, b)         lit mean   doused mean   doused flat
+  0.012, 0.011, 0.014  ×1     16.01         6.68        94.9%
+  0.024, 0.022, 0.028  ×2     17.25         8.23        94.0%
+  0.036, 0.033, 0.042  ×3     18.42         9.62        50.1%
+  0.048, 0.044, 0.049  ×4     19.37        11.20        58.4%
+```
+
+The share does not fall gradually — it holds at 94% and then collapses. Below
+the cliff the zone's surfaces all round to the same 8-bit value and the frame is
+one colour by arithmetic rather than by absence; above it they separate. The
+non-monotone ×4 reading is the same effect from the other side and is why this
+wants a value chosen off the table rather than off a trend.
+
+**Either of the two lifted values passes the whole check**, with the mean clause
+having margin: at ×3 the doused window reads 9.62 against the 17.50 the lit one
+allows, and the flat share is 50.1% against 85%.
+
+### The decision, which is the user's
+
+`house_light`'s own doc argues against the lift: "a flat term bright enough to
+see by would be a room that looks lit whether or not anything lit it". At ×3 the
+doused room reads 0.52 of the lit one where it reads 0.42 today, so this is a
+visible change to how a doused zone looks, not a tuning detail. The options:
+
+- **Lift the ambient to ×3.** One line in `zone::house_light`, passes the gate,
+  measured above. Costs the look the doc argues for.
+- **Give the shrine spot something to bounce** — more reach or intensity, so the
+  doused zone has a varying term rather than a floor. Unmeasured, and it changes
+  the lit frame too.
+- **Re-derive the check** against what a torch-lit zone with its torches out
+  should actually look like. The flat-share clause is the one that no longer
+  matches the scene; the swing and mean clauses still do.
+
+Until it is decided the Pages run has one red check and does not deploy.
 
 ## The SSR visibility weight costs the software tier 11% of a frame (2026-09-04)
 
