@@ -83,6 +83,49 @@ in both this file and `docs/plan/46-ambient-occlusion.md`.
   margin they happen to have; the two drivers that were swept read 0 and 2
   against a bound of 8.
 
+## lantern is dead in the browser since the RSM updater (2026-09-04)
+
+**`render lantern in a real browser` passes at `ae1a020` and fails at
+`aab984c`.** `85e4f7a`, the sun's reflective-shadow-map updater, is between
+them. Nothing surfaced it for eight commits because every Pages run in that
+range was cancelled by the next push — see the entry below on what that costs.
+
+What the Pages job reports, on the `swiftshader` adapter it uses because CI's
+hardware adapter is `none`:
+
+```text
+  ok   the webgpu backend opened a device — google swiftshader
+  ok   a swapchain was created — 959x463 Rgba8UnormSrgb Fifo (2 images)
+  ok   the demo reached STATUS_RUNNING — status 3
+  FAIL the demo ticks … — no second HUD line in 90000 ms
+  FAIL the canvas is not one flat colour — 1 distinct colour(s): rgb(0,0,0) 100.0%
+  FAIL the canvas changes between frames … — 1 distinct frame(s) across 16 samples
+  FAIL the culling statistics come back off the GPU — the cull-stats readback never answered
+```
+
+**Neither a validation failure nor a panic.** "the browser reported no WebGPU
+device errors" passes, and the page-error channel is proven live in the same run
+by the deliberate-exception check. The device opens, the swapchain is made, the
+demo reaches its running state — and then the frame never completes.
+
+**What is ruled out by reading.** `capture_probe_visibility` is not the cause:
+`apps/lantern/src/room.rs` calls it once where the room is placed, not per
+frame, and it predates the updater — lantern's browser job passed with it at
+`ae1a020`. So the new thing on that timeline is the per-frame `rsm` render pass
+and the `probe-gather` compute pass.
+
+**Not yet diagnosed.** A reproduction is running in a worktree at `aab984c`
+against the local `auto` (hardware) adapter, which will at least say whether
+this is SwiftShader-specific or true of every browser adapter. Whether `shard` —
+the other demo with an updated volume — fails the same way was still running
+when this was written and is the next thing to read: if it does, the fault is
+the probe path; if it does not, it is something lantern does with it.
+
+**This blocks the site.** Pages does not deploy while a demo job is red, so the
+published site stays at whatever last deployed, and the punctual producer of
+`docs/plan/50-irradiance-probes.md` extends exactly the pass that is failing.
+Fix this before that rung, not after.
+
 ## The SSR visibility weight costs the software tier 11% of a frame (2026-09-04)
 
 `b83ae75` gave `ssr.slang`'s probe fallback the Chebyshev visibility weight
