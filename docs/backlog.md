@@ -2709,12 +2709,6 @@ What it did not cover:
   is covered; no golden and no browser gate looks at what it draws. The row is
   no longer the only place a reviewer reaches this view — the console's
   `debug_view ambient occlusion` reaches it in every sample with a renderer.
-- **Nothing sets the AO radius from outside.** `SSAO_RADIUS` is a `forward.rs`
-  constant, so one of the two live controls `docs/plan/sample/19-alcove.md` puts
-  in milestone 1 beside this view still has nothing to drive. The other does:
-  intensity shipped 2026-09-02 as `crcbl_render::ssao::r_ssao_intensity`, read
-  by `ao_intensity()` in `ssao_upsample.slang`. The radius wants the same
-  graphics-quality seam the entry above wants for `SHADOW_TAPS`.
 
 ### The normal offset scallops one silhouette's foot (2026-08-28)
 

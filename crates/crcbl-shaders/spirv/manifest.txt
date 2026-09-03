@@ -419,44 +419,44 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao]
 source = shaders/ssao.slang
-source-sha256 = aba038cffa8f8886840f2e2c371bc6851aa77ddd8013b7dfe68d2f91919cf220
+source-sha256 = 9dba065b1993b6feb2702884c1a7bcdd1fdbeb09a0c46aa4ef4b303256677014
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssao.spv
-spirv-sha256 = 200240e51aa8762616d515291d5560a987db87081f254cc1c89291fd9c887c4f
+spirv-sha256 = 17db5e7351ca2628ae0da05f3d8b288a64aac317d2262771c131684d369b8772
 wgsl = wgsl/ssao.wgsl
-wgsl-sha256 = 361c69b9de41e33ad49ac7568b75810e4e9e1c65a1e7223d24997ff74a471e58
+wgsl-sha256 = cc9f54ab7bcc5c72c65e80b310c19a1176376a49cd3b10cebbc381a8b70e6c0b
 msl = msl/ssao.metal
-msl-sha256 = 6654a4af528278f8e1253f15d8aaa0f58b204168c288c1e19b2e036b6b7af4ef
+msl-sha256 = eb1138f13bfaf4aaa9e6e7b0809153a4675a2768b0285b5ec87f5059726b787f
 dxil = vertexMain:dxil/ssao.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/ssao.fragment.dxil:d1a45e8665907d72098788f847f8feeb5bc8fa493773fde0ae07c27190d24210
+dxil = fragmentMain:dxil/ssao.fragment.dxil:d3b5dc5cf6437d99426a1263f1737efa3a66b7c6be58dc9ea62aafd700aa8bf9
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao_blur]
 source = shaders/ssao_blur.slang
-source-sha256 = d3c8627a8378bfb30da9e747982b3c26818e377635e41eab97e149c13ce8cb57
+source-sha256 = 427fa3a62eaf66e11971795a19055b24ce92a95a626113db74bb702807aa2a83
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssao_blur.spv
-spirv-sha256 = b360ccf06fd8e1946dc416f054c52332f1e953a1a5be4ac9e8579ba0b0841581
+spirv-sha256 = 3da5f336f035f6d7d8b5f6a8e9fade6df3efdba2f71ca914c8632e459b1c5dec
 wgsl = wgsl/ssao_blur.wgsl
-wgsl-sha256 = 0304421679b825914693eb3a5671f4fa67af9c2e3b02686545c9da52fa42e43a
+wgsl-sha256 = 43ac4557e485fd5777e4b1ebbb8594f42ea74f7bf2adac30f5e428cd44c47080
 msl = msl/ssao_blur.metal
-msl-sha256 = 2aa0c7eafbc576a01bd5476c7682e200e7aad7561102f1dfb312b8ce4d86f740
+msl-sha256 = bd5e134fe902bf29d989d5d27b1067deec3ab3130c76f5b3fa380b7540a19f0d
 dxil = vertexMain:dxil/ssao_blur.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/ssao_blur.fragment.dxil:97262e4a764062f03549caeff34e8c9f5055e6d4eee5dbca6181f4b5554b083f
+dxil = fragmentMain:dxil/ssao_blur.fragment.dxil:6005e340b6dc36ff30f4beaa105044370b972dfa19c8912d50c86eeee2a2005f
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao_upsample]
 source = shaders/ssao_upsample.slang
-source-sha256 = 517543675c8dabc0a789540f48b983c236cef23936b26c97cfda48459f802c7b
+source-sha256 = 1051fdb3e1d3adfbb8bb18ad7d6abb8a0e9e9c16bc66219ed20c95b68a9ed910
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssao_upsample.spv
-spirv-sha256 = 5681fb79d83c3419ef8d99bfd6c3edb987a300b0086342cebd38e76d985b5a95
+spirv-sha256 = 9a4ab2b74149b66401630bbf66037d4f6d5bfb9dd5fb8e95eb6f2b6573d52ab9
 wgsl = wgsl/ssao_upsample.wgsl
-wgsl-sha256 = fa16fdbe47fb84519acdf3cd689cbc198634b1d004f42a199502f800872e7c6b
+wgsl-sha256 = 0f3938ae782e2bee413a0799445037fe8bba9ad934ddb1b79d0c4c56e5f54ad0
 msl = msl/ssao_upsample.metal
-msl-sha256 = 83339b1703c1e75386bc5f091a1a705a58366d5e0987ed5b8a78d92cf75bf539
+msl-sha256 = f68669f9cfe1f067274c05c9a3748d5a40d77b5c2659d19cbb2d4b6f72e504e1
 dxil = vertexMain:dxil/ssao_upsample.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/ssao_upsample.fragment.dxil:779f3edb973990d30585578db01fbd830279c5e78b5b46cfb102a0c803caf270
+dxil = fragmentMain:dxil/ssao_upsample.fragment.dxil:9ab95d04cf36da6904ba3594d92d3b115e3f52cc14a425d43b67cc3f43b5f33e
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr]

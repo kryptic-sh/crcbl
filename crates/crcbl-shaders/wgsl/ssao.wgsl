@@ -98,6 +98,16 @@ fn normal_at_0( pixel_3 : vec2<i32>,  centre_0 : vec3<f32>,  extent_2 : vec2<i32
     return normalize(cross(vertical_0, horizontal_0));
 }
 
+fn sampling_radius_0() -> f32
+{
+    var asked_0 : f32 = camera_0.params_0.x;
+    if(asked_0 <= 0.0f)
+    {
+        return 0.5f;
+    }
+    return clamp(asked_0, 0.0625f, 4.0f);
+}
+
 fn slice_count_0() -> u32
 {
     return clamp(u32(camera_0.params_0.y), u32(2), u32(4));
@@ -226,7 +236,7 @@ fn slice_visibility_0( h1_0 : f32,  cos_h1_0 : f32,  sin_h1_0 : f32,  h2_0 : f32
 fn occlusion_at_0( pixel_5 : vec2<i32>,  tile_0 : u32,  centre_2 : vec3<f32>,  normal_0 : vec3<f32>,  extent_4 : vec2<i32>,  size_2 : vec2<f32>) -> vec4<f32>
 {
     const unoccluded_0 : vec4<f32> = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
-    var radius_1 : f32 = camera_0.params_0.x;
+    var radius_1 : f32 = sampling_radius_0();
     var near_clip_0 : vec4<f32> = (((vec4<f32>(centre_2, 1.0f)) * (mat4x4<f32>(camera_0.proj_0.data_0[i32(0)][i32(0)], camera_0.proj_0.data_0[i32(1)][i32(0)], camera_0.proj_0.data_0[i32(2)][i32(0)], camera_0.proj_0.data_0[i32(3)][i32(0)], camera_0.proj_0.data_0[i32(0)][i32(1)], camera_0.proj_0.data_0[i32(1)][i32(1)], camera_0.proj_0.data_0[i32(2)][i32(1)], camera_0.proj_0.data_0[i32(3)][i32(1)], camera_0.proj_0.data_0[i32(0)][i32(2)], camera_0.proj_0.data_0[i32(1)][i32(2)], camera_0.proj_0.data_0[i32(2)][i32(2)], camera_0.proj_0.data_0[i32(3)][i32(2)], camera_0.proj_0.data_0[i32(0)][i32(3)], camera_0.proj_0.data_0[i32(1)][i32(3)], camera_0.proj_0.data_0[i32(2)][i32(3)], camera_0.proj_0.data_0[i32(3)][i32(3)]))));
     var far_clip_0 : vec4<f32> = (((vec4<f32>(centre_2 + vec3<f32>(radius_1, 0.0f, 0.0f), 1.0f)) * (mat4x4<f32>(camera_0.proj_0.data_0[i32(0)][i32(0)], camera_0.proj_0.data_0[i32(1)][i32(0)], camera_0.proj_0.data_0[i32(2)][i32(0)], camera_0.proj_0.data_0[i32(3)][i32(0)], camera_0.proj_0.data_0[i32(0)][i32(1)], camera_0.proj_0.data_0[i32(1)][i32(1)], camera_0.proj_0.data_0[i32(2)][i32(1)], camera_0.proj_0.data_0[i32(3)][i32(1)], camera_0.proj_0.data_0[i32(0)][i32(2)], camera_0.proj_0.data_0[i32(1)][i32(2)], camera_0.proj_0.data_0[i32(2)][i32(2)], camera_0.proj_0.data_0[i32(3)][i32(2)], camera_0.proj_0.data_0[i32(0)][i32(3)], camera_0.proj_0.data_0[i32(1)][i32(3)], camera_0.proj_0.data_0[i32(2)][i32(3)], camera_0.proj_0.data_0[i32(3)][i32(3)]))));
     var _S18 : f32 = near_clip_0.w;

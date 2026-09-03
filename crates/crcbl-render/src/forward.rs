@@ -564,19 +564,6 @@ const DFG_SIZE_U32: u32 = dfg::DFG_SIZE as u32;
 /// rather than a stretched image.
 const LTC_SIZE_U32: u32 = ltc::LTC_SIZE as u32;
 
-/// The radius `ssao.slang` gathers occlusion within, in **world units**.
-///
-/// A world-space radius rather than a screen-space one, because occlusion is a
-/// fact about a room and not about a zoom level: a corner that darkens when the
-/// camera walks towards it is the artefact a screen-space radius produces.
-///
-/// Half the width of the engine's unit cube — about half a metre at the scale
-/// every mesh in the tree is modelled at, which is the reach conventional
-/// screen-space occlusion is tuned for. A surface meeting a wall then darkens
-/// over a band a reader can see at the golden suite's 256×192, while two separate
-/// objects a unit apart still do not shade each other at all.
-const SSAO_RADIUS: f32 = 0.5;
-
 /// The `Rgba8Unorm` texel that occludes nothing and steers nothing.
 ///
 /// What [`ForwardRenderer::ambient_occlusion_placeholder`] holds, and therefore
@@ -6289,7 +6276,7 @@ impl ForwardRenderer {
                 // world-space ambient term. The same expression the reflection
                 // pass's block carries, a few lines below.
                 inv_view: camera.view().inverse().to_cols_array(),
-                radius: SSAO_RADIUS,
+                radius: crate::ssao::radius(),
                 slices: crate::ssao::slice_count(),
                 intensity: crate::ssao::intensity(),
                 bent_normals: crate::ssao::bent_normals(),

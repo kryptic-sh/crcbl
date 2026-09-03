@@ -83,14 +83,15 @@ in isolation, which is the only way a matchmaker can be evaluated without a real
 playerbase.
 
 **Where the ladder stands.** Every sample on it except towers (07), arena (08)
-and the 17–20 wave has an `apps/` crate that builds for `wasm32` and ships on
-the demo site; `web/build.sh`'s `DEMOS` array is the list, and it is the
-authority — a sample missing from it is a sample nobody visits. What each of
-those crates has and has not built is in its own doc's status section and,
+and the comparison wave (17–19) has an `apps/` crate that builds for `wasm32`
+and ships on the demo site; `web/build.sh`'s `DEMOS` array is the list, and it
+is the authority — a sample missing from it is a sample nobody visits. What each
+of those crates has and has not built is in its own doc's status section and,
 fresher than either, in the module header of its `src/lib.rs`. **towers, arena
-and the whole 17–20 wave have no `apps/` directory at all**, and each doc says
-what it is waiting on — for 17 through 19 that is the ladder itself, since a
-comparison fixture holding one technique is not a comparison.
+and mirrors, sundial and alcove have no `apps/` directory at all**, and each doc
+says what it is waiting on — for 17 through 19 that is the ladder itself, since
+a comparison fixture holding one technique is not a comparison. options (20) is
+not among them: `apps/options` was built and published on 2026-08-28.
 
 **Where multiplayer lives — and where it does not.** Native sessions are LAN:
 direct connect by IP, or a lobby browser over local-network host discovery.

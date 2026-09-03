@@ -78,6 +78,16 @@ fn view_z_0( pixel_2 : vec2<i32>,  depth_1 : f32,  extent_1 : vec2<f32>) -> f32
     return view_0.x / view_0.y;
 }
 
+fn sampling_radius_0() -> f32
+{
+    var asked_0 : f32 = camera_0.params_0.x;
+    if(asked_0 <= 0.0f)
+    {
+        return 0.5f;
+    }
+    return clamp(asked_0, 0.0625f, 4.0f);
+}
+
 fn decode_bent_0( texel_0 : vec4<f32>) -> vec3<f32>
 {
     var decoded_0 : vec3<f32> = texel_0.yzw * vec3<f32>(2.0f) - vec3<f32>(1.0f);
@@ -124,7 +134,7 @@ fn fragmentMain( _S5 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
         return _S8;
     }
     var _S9 : f32 = view_z_0(centre_texel_0, centre_depth_0, depth_size_0);
-    var _S10 : f32 = camera_0.params_0.x * 2.0f;
+    var _S10 : f32 = sampling_radius_0() * 2.0f;
     const _S11 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
     var y_0 : i32 = i32(-1);
     var total_0 : f32 = 0.0f;

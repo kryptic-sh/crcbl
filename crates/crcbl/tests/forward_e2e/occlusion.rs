@@ -293,11 +293,12 @@ const LINE_Y: u32 = OCCLUSION_EXTENT.1 / 2;
 
 /// The sampling radius, in world units.
 ///
-/// `crcbl_render`'s `SSAO_RADIUS`, which is private to that crate. The value is
-/// mirrored rather than reached for because this test is about the *shape* of
-/// the falloff and would measure the same shape at any radius; what it must not
-/// do is measure a radius nobody ships.
-const RADIUS: f32 = 0.5;
+/// The shipped disc, reached for rather than mirrored: it stopped being a
+/// `crcbl_render` constant when `r_ssao_radius` gave it a knob, and
+/// `crcbl::shaders::ssao` is where the shader's own copy is asserted equal.
+/// This test is about the *shape* of the falloff and would measure the same
+/// shape at any radius; what it must not do is measure a radius nobody ships.
+const RADIUS: f32 = crcbl::shaders::ssao::RADIUS_DEFAULT;
 
 /// `ssao.slang`'s `SLICE_STEPS`, for the failure message's arithmetic.
 ///
@@ -1221,6 +1222,8 @@ struct Knobs {
     intensity: f32,
     /// `crcbl_render::ssao::r_ssao_bent_normals`.
     bent_normals: bool,
+    /// `crcbl_render::ssao::r_ssao_radius`, in world units.
+    radius: f32,
 }
 
 impl Knobs {
@@ -1231,6 +1234,7 @@ impl Knobs {
         blurs: 1,
         intensity: crcbl::shaders::ssao::INTENSITY_DEFAULT,
         bent_normals: true,
+        radius: RADIUS,
     };
 }
 
@@ -1278,6 +1282,7 @@ fn run_passes(
         blurs,
         intensity,
         bent_normals,
+        radius,
     } = knobs;
     let device = headless.device.as_ref();
     let (width, height) = EXTENT;
@@ -1365,7 +1370,7 @@ fn run_passes(
         // frame the depths were written in. A rotation would be one more thing
         // between the horizons and the assertion.
         inv_view: Mat4::IDENTITY.to_cols_array(),
-        radius: RADIUS,
+        radius,
         slices,
         intensity,
         bent_normals,
@@ -2550,6 +2555,134 @@ fn the_ao_intensity_scales_the_reconstructed_occlusion() {
         column = worst_at.1,
         level = worst_at.2,
         predicted = worst_at.3,
+    );
+
+    headless.finish();
+}
+
+/// **The disc the horizons are swept over is the console's, and the shader
+/// holds it to the range it publishes.**
+///
+/// `ssao.slang`'s `sampling_radius` is what this measures:
+/// `crcbl_render::ssao::r_ssao_radius` reaches `camera.params.x`, and that
+/// function is the clamp between the two. Three of the four assertions below
+/// are exact frame equalities and none of them needs a threshold, because each
+/// asks whether two *inputs* resolve to the same radius rather than what the
+/// picture at a radius looks like.
+///
+/// # What each one would catch
+///
+/// The zero is the sentinel. `SsaoParams::radius` sits in a word a producer may
+/// leave unwritten, and a zero disc projects under `MIN_RADIUS_PIXELS` at every
+/// distance — so a shader that clamped the zero up to `RADIUS_MIN` instead of
+/// answering it with `RADIUS_DEFAULT` would hand such a producer a frame with
+/// almost no occlusion in it, and this is where that shows.
+///
+/// The two clamps are the range: a radius past either end must resolve to that
+/// end, or `r_ssao_radius`' own bounds are the only thing standing between a
+/// caller and a disc the march was never measured at.
+///
+/// **The inequality is what makes the other three worth asserting.** A shader
+/// that ignored `params.x` outright would satisfy every equality here — every
+/// frame would be the same frame — so the run at each end of the range has to
+/// differ from the shipped one before any of them means anything.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_ao_radius_is_the_consoles_and_the_shader_clamps_it() {
+    let headless = Headless::open_at_format(EXTENT, None, Features::TIMESTAMP_QUERY);
+    let (width, height) = EXTENT;
+    let size = (width as f32, height as f32);
+    let projection = Projection::Perspective {
+        fov_y: FOV_Y,
+        near: NEAR,
+    }
+    .matrix(size.0 / size.1);
+
+    // [`the_ao_intensity_scales_the_reconstructed_occlusion`]'s scene, for its
+    // reason: a plate in front of a wall holds a range of visibilities rather
+    // than one, so a change of radius has somewhere to show.
+    let wall = depth_of(projection, -WALL_Z);
+    let plate = lifted_depth(projection, PLATE_LIFT);
+    let texels = depth_image(|x, _| {
+        if PLATE_COLUMNS.contains(&x) {
+            plate
+        } else {
+            wall
+        }
+    });
+    let at_radius = |radius: f32| {
+        run_passes(
+            &headless,
+            projection,
+            &texels,
+            Knobs {
+                radius,
+                ..Knobs::SHIPPING
+            },
+            Chain::Reconstructed,
+        )
+    };
+    let mean = |run: &Run| -> f64 {
+        let line: Vec<u8> = INTENSITY_COLUMNS
+            .map(|column| run.at(column, HALO_LINE_Y))
+            .collect();
+        line.iter().map(|level| f64::from(*level)).sum::<f64>() / line.len() as f64
+    };
+
+    let min = crcbl::shaders::ssao::RADIUS_MIN;
+    let max = crcbl::shaders::ssao::RADIUS_MAX;
+    let shipping = at_radius(crcbl::shaders::ssao::RADIUS_DEFAULT);
+    let unwritten = at_radius(0.0);
+    let floor = at_radius(min);
+    let under_floor = at_radius(min / 2.0);
+    let ceiling = at_radius(max);
+    let over_ceiling = at_radius(max * 2.0);
+
+    eprintln!(
+        "{suite}: the occlusion window {INTENSITY_COLUMNS:?} means {base:.1} at the shipped \
+         radius {default}, {floor_mean:.1} at {min} and {ceiling_mean:.1} at {max}",
+        suite = crate::SUITE,
+        default = crcbl::shaders::ssao::RADIUS_DEFAULT,
+        base = mean(&shipping),
+        floor_mean = mean(&floor),
+        ceiling_mean = mean(&ceiling),
+    );
+
+    assert_ne!(
+        floor.image,
+        shipping.image,
+        "the frame at radius {min} is the frame at the shipped {default}, so nothing below reads \
+         `camera.params.x` at all and every equality in this test passes on a shader that \
+         ignores the field. `sampling_radius` in `ssao.slang` is what must return it.",
+        default = crcbl::shaders::ssao::RADIUS_DEFAULT,
+    );
+    assert_ne!(
+        ceiling.image,
+        shipping.image,
+        "the frame at radius {max} is the frame at the shipped {default}, for the reason above.",
+        default = crcbl::shaders::ssao::RADIUS_DEFAULT,
+    );
+    assert_eq!(
+        unwritten.image, shipping.image,
+        "a block whose `params.x` was never written did not produce the frame the default \
+         produces. Zero is what an unwritten word reads as, and a zero disc projects under \
+         `MIN_RADIUS_PIXELS` at every distance — so the frame this run wrote has no occlusion in \
+         it. `sampling_radius` in `ssao.slang` is what must answer a zero with `RADIUS_DEFAULT` \
+         rather than clamp it up to `RADIUS_MIN`."
+    );
+    assert_eq!(
+        under_floor.image,
+        floor.image,
+        "a radius of {half} did not resolve to the floor {min}: `sampling_radius` is not \
+         clamping, so `r_ssao_radius`' own range is the only thing keeping a caller off a disc \
+         the march was never measured at.",
+        half = min / 2.0,
+    );
+    assert_eq!(
+        over_ceiling.image,
+        ceiling.image,
+        "a radius of {double} did not resolve to the ceiling {max}, for the reason above.",
+        double = max * 2.0,
     );
 
     headless.finish();

@@ -48,6 +48,67 @@ pub const DEPTH_FAR: f32 = 0.0;
 /// else is an image the passes would render a fraction of.
 pub const RESOLUTION_DIVISOR: u32 = 2;
 
+/// The sampling radius a producer that writes nothing gets, in world units,
+/// matching `static const float RADIUS_DEFAULT` in `shaders/ssao.slang` and in
+/// the two shaders beside it.
+///
+/// Half a metre, tuned at room scale against `Scene::Ao` and blessed into every
+/// golden in this workspace. It is what `ssao.slang`'s `sampling_radius`
+/// answers a zero [`SsaoParams::radius`] with rather than [`RADIUS_MIN`]: world
+/// units have no zero that means anything, so an unwritten block is a producer
+/// that chose nothing rather than a frame asking for the narrowest disc.
+///
+/// **It is also what the engine ships**, unlike [`SLICE_COUNT_DEFAULT`]:
+/// `crcbl_render::ssao`'s `r_ssao_radius` defaults here.
+///
+/// **World units and not screen ones**, because occlusion is a fact about a
+/// room and not about a zoom level: a corner that darkens as the camera walks
+/// towards it is the artefact a screen-space radius produces. Half is the width
+/// of the engine's unit cube halved — about half a metre at the scale every
+/// mesh in the tree is modelled at, and the reach conventional screen-space
+/// occlusion is tuned for. A surface meeting a wall darkens over a band a
+/// reader can see at the golden suite's 256×192, while two separate objects a
+/// unit apart still do not shade each other at all.
+pub const RADIUS_DEFAULT: f32 = 0.5;
+
+/// The shortest sampling radius the march will honour, in world units, matching
+/// `static const float RADIUS_MIN` in `shaders/ssao.slang` and in the two
+/// shaders beside it.
+///
+/// An eighth of [`RADIUS_DEFAULT`]. The shader's constant carries the argument:
+/// under it the disc projects below `MIN_RADIUS_PIXELS` across most of a room
+/// rather than at the far end of one, and a control whose lower half draws
+/// nothing is one nobody can read the effect of.
+pub const RADIUS_MIN: f32 = 0.0625;
+
+/// The longest sampling radius the march will honour, in world units, matching
+/// `static const float RADIUS_MAX` in `shaders/ssao.slang` and in the two
+/// shaders beside it.
+///
+/// Eight times [`RADIUS_DEFAULT`], the same span the other way, and a bound on
+/// the picture rather than on the cost: the march takes the same number of
+/// samples whatever its reach, so widening the disc only walks the steps
+/// apart until a step lands on the far side of the room.
+pub const RADIUS_MAX: f32 = 4.0;
+
+/// The three above are a radius *control*, checked where they are written.
+///
+/// A compile-time block for [`INTENSITY_MAX`]'s reason: every term is a
+/// constant. What it holds is that the control brackets what ships, so the
+/// variable can ask for a tighter disc and a wider one, and that the floor is
+/// over zero — a zero radius is the sentinel [`RADIUS_DEFAULT`] answers, so a
+/// floor that reached it would make the two indistinguishable.
+const _: () = {
+    assert!(
+        RADIUS_MIN > 0.0,
+        "a zero floor is the unwritten-block sentinel, and a control may not ask for it"
+    );
+    assert!(
+        RADIUS_MIN < RADIUS_DEFAULT && RADIUS_DEFAULT < RADIUS_MAX,
+        "a radius control that does not bracket what ships can only move the frame one way"
+    );
+};
+
 /// Planes through the eye each pixel sweeps by default, matching
 /// `static const uint SLICE_COUNT_DEFAULT` in `shaders/ssao.slang`.
 ///
@@ -240,6 +301,18 @@ pub struct SsaoParams {
     /// [`inv_proj`]: Self::inv_proj
     pub inv_view: [f32; 16],
     /// The sampling radius, in world units.
+    ///
+    /// [`RADIUS_MIN`] is the floor and [`RADIUS_MAX`] the ceiling;
+    /// `ssao.slang`'s `sampling_radius` clamps whatever arrives into that range
+    /// and answers a zero with [`RADIUS_DEFAULT`], which is also what the engine
+    /// ships — `crcbl_render::ssao`'s `r_ssao_radius` is what writes it.
+    ///
+    /// **Every pass in the chain reads it**, not only the gather: the two
+    /// filters take their depth tolerance as a share of the disc that was
+    /// swept, so each resolves this field through its own copy of that
+    /// function. A pass that read the raw lane instead would take its tolerance
+    /// from a radius no march ever used, which on an unwritten block is zero —
+    /// every tap rejected as off-surface.
     ///
     /// A depth bias sat beside it until GTAO replaced the hemisphere of depth
     /// comparisons that needed one; `ssao.slang` says on `SsaoParams::params`
@@ -492,6 +565,77 @@ mod tests {
             "ssao_blur.slang rejects a tap at {blur} radii and ssao_upsample.slang at \
              {upsample}; the two filters have drifted"
         );
+    }
+
+    /// The chain's three shaders must resolve one radius, not three.
+    ///
+    /// The gather sweeps the disc `camera.params.x` names and the two filters
+    /// reject a tap at a share of it, so the three have to agree about what a
+    /// given lane *means* — bounds, sentinel and all. They cannot share a
+    /// declaration (Slang has no include here, which is why
+    /// `BENT_NORMAL_MIN_LENGTH` is spelled four times), so this compares the
+    /// declarations against each other and against this module.
+    ///
+    /// **Being a source check, it cannot see a resolver that is never called.**
+    /// `crcbl`'s `forward_e2e::occlusion::the_ao_radius_is_the_consoles_and_the_shader_clamps_it`
+    /// is the half that renders: it was written against a chain where only the
+    /// gather resolved the lane, and the two filters took a zero tolerance from
+    /// an unwritten block — a frame, not a drifted constant.
+    #[test]
+    fn the_occlusion_chain_resolves_one_radius() {
+        let sources = [
+            ("ssao.slang", include_str!("../shaders/ssao.slang")),
+            (
+                "ssao_blur.slang",
+                include_str!("../shaders/ssao_blur.slang"),
+            ),
+            (
+                "ssao_upsample.slang",
+                include_str!("../shaders/ssao_upsample.slang"),
+            ),
+        ];
+        let value_of = |source: &str, name: &str| {
+            let declaration = format!("static const float {name} = ");
+            let at = source
+                .find(&declaration)
+                .map(|at| at + declaration.len())
+                .unwrap_or_else(|| panic!("every shader in the chain declares `{name}`"));
+            source[at..]
+                .split(';')
+                .next()
+                .expect("the declaration ends in a semicolon")
+                .to_string()
+        };
+        for (name, ours) in [
+            ("RADIUS_DEFAULT", RADIUS_DEFAULT),
+            ("RADIUS_MIN", RADIUS_MIN),
+            ("RADIUS_MAX", RADIUS_MAX),
+        ] {
+            for (file, source) in sources {
+                let declared = value_of(source, name);
+                assert_eq!(
+                    declared.parse::<f32>().ok(),
+                    Some(ours),
+                    "{file} declares `{name}` as {declared} where this module holds {ours}; a \
+                     pass that clamps to a different range than the pass beside it filters a \
+                     frame the gather did not draw"
+                );
+            }
+        }
+        for (file, source) in sources {
+            // Two occurrences and not one: the declaration is the first, and a
+            // resolver nothing calls is exactly the shape this is here to
+            // catch — the file would still declare the constants above and
+            // still read the raw lane.
+            let uses = source.matches("sampling_radius()").count();
+            assert!(
+                uses >= 2,
+                "{file} names `sampling_radius()` {uses} time(s), so it declares the resolver \
+                 without calling it and reads `camera.params.x` raw — which is zero on a block a \
+                 producer never wrote, while the rest of the chain answers that zero with \
+                 `RADIUS_DEFAULT`"
+            );
+        }
     }
 
     /// The block the shader declares, member for member and in this order.

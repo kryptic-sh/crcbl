@@ -65,6 +65,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `apps/shard` now light their rooms this way and their hand-written CPU bounce
   bakes are gone.
 
+- **The ambient occlusion radius is a console variable.** `r_ssao_radius` in
+  `crcbl_render::ssao` sets the world-space disc the horizon sweep is taken
+  over, in `0.0625..=4`, defaulting to the 0.5 every golden was blessed at. It
+  was a private `forward.rs` constant, so the second of the two live controls
+  `docs/plan/sample/19-alcove.md` asks for had nothing to drive it; the first,
+  `r_ssao_intensity`, shipped on 2026-09-02. `ssao.slang` grew `sampling_radius`
+  to read and clamp it, and `crcbl_shaders::ssao` now publishes
+  `RADIUS_DEFAULT`, `RADIUS_MIN` and `RADIUS_MAX` — the bounds a producer
+  writing `SsaoParams::radius` has to stay inside. Widening the disc costs no
+  samples: the march takes the same count whatever its reach.
+
 ### Fixed
 
 - **A browser threw away every frame of any demo whose probe volume updates.**

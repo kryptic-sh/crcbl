@@ -506,13 +506,14 @@ frame that asked for no bent direction at all. `decode_bent` in both filters
 resolves a tap to a unit vector or to exactly nothing, and that is why.
 
 **Reachability is a console variable and nothing else.**
-`crcbl_render::ssao::r_ssao_bent_normals` sits beside the chain's other three,
-is **on by default** — the other three default to what shipped before them,
-because they buy quality on top of a rung, and this one is the rung — and rides
-in `SsaoParams`' last word, which was the row's padding. A producer that never
-writes it gets the frame the chain drew before the channel was widened. There is
-no `RenderEffects` bit and no `VIDEO_KEYS` row; the settings row is
-`docs/backlog.md`'s open question, unchanged.
+`crcbl_render::ssao::r_ssao_bent_normals` sits beside the chain's other
+variables, is **on by default** — the rest default to what shipped before them,
+because they buy quality on top of a rung or move a picture that is already
+right, and this one is the rung — and rides in `SsaoParams`' last word, which
+was the row's padding. A producer that never writes it gets the frame the chain
+drew before the channel was widened. There is no `RenderEffects` bit and no
+`VIDEO_KEYS` row; the settings row is `docs/backlog.md`'s open question,
+unchanged.
 
 `debug_view bent normal` draws the channel's three direction bytes as the
 colour, on the occlusion view's terms: the channel and not the shading's use of
@@ -585,8 +586,8 @@ occluded texels out of 32425 drawn. A population that thin cannot tell a working
 pass from a rounding step.
 
 This is milestone 1 of [sample/19-alcove.md](sample/19-alcove.md)'s three parts,
-and the one that document says to build first. **The intensity control exists**
-— `crcbl_render::ssao::r_ssao_intensity`, a console variable the pass reads
-every frame — so what is left of that milestone is the scene and a live _radius_
-control, which has no knob of any kind. A console variable is live but it is not
-_shown_, which is half of what that sample asks a control to be.
+and the one that document says to build first. **Both controls exist** —
+`crcbl_render::ssao::r_ssao_intensity` and `r_ssao_radius`, console variables
+the pass reads every frame, the second reaching `ssao.slang`'s `sampling_radius`
+— so what is left of that milestone is the scene. A console variable is live but
+it is not _shown_, which is half of what that sample asks a control to be.

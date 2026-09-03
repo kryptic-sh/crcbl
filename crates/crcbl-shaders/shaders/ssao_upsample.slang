@@ -87,8 +87,9 @@ struct SsaoParams
     /// with it before it is ever written; nothing here does, and it is declared
     /// for `proj`'s reason exactly.
     float4x4 inv_view;
-    /// `x` is the sampling radius in **world units**, which is what
-    /// [`DEPTH_TOLERANCE_RADII`] is a share of. `y` is the count of planes
+    /// `x` is the sampling radius in **world units**, read through
+    /// [`sampling_radius`] because that is the disc the gather swept, and it is
+    /// what [`DEPTH_TOLERANCE_RADII`] is a share of. `y` is the count of planes
     /// `ssao.slang` swept, which nothing here reads, and `z` is the exponent
     /// this pass raises its answer to — see [`ao_intensity`], the only reader
     /// of it in the chain. `w` is that file's bent-direction switch, which
@@ -154,6 +155,44 @@ static const int RESOLUTION_DIVISOR = 2;
 /// `the_two_occlusion_filters_share_one_depth_tolerance` is what holds the two
 /// declarations together.
 static const float DEPTH_TOLERANCE_RADII = 2.0;
+
+/// The sampling radius, in world units, a frame that asks for nothing falls to.
+///
+/// **`ssao.slang`'s constant, and it has to be that one.** That file's
+/// `sampling_radius` is what the gather resolved `camera.params.x` through, and
+/// [`DEPTH_TOLERANCE_RADII`] is a share of the disc the gather actually swept —
+/// so a filter reading the raw lane would take its tolerance from a number no
+/// pass ever used. `crcbl_shaders::ssao`'s `RADIUS_DEFAULT` is the Rust mirror
+/// and `the_occlusion_chain_resolves_one_radius` is what holds the copies
+/// together.
+static const float RADIUS_DEFAULT = 0.5;
+
+/// The shortest sampling radius the gather will honour, in world units.
+///
+/// `ssao.slang`'s constant of the same name — see [`RADIUS_DEFAULT`].
+static const float RADIUS_MIN = 0.0625;
+
+/// The longest sampling radius the gather will honour, in world units.
+///
+/// `ssao.slang`'s constant of the same name — see [`RADIUS_DEFAULT`].
+static const float RADIUS_MAX = 4.0;
+
+/// The disc the gather swept, in view-space units, as this filter must read it.
+///
+/// `ssao.slang`'s `sampling_radius`, restated for the reason its constants are:
+/// an unwritten block leaves a zero in `camera.params.x`, the gather answers
+/// that with [`RADIUS_DEFAULT`], and a tolerance taken from the zero instead
+/// would be zero — every tap rejected as off-surface, on a frame the gather
+/// filled normally.
+float sampling_radius()
+{
+    float asked = camera.params.x;
+    if (asked <= 0.0)
+    {
+        return RADIUS_DEFAULT;
+    }
+    return clamp(asked, RADIUS_MIN, RADIUS_MAX);
+}
 
 /// How long a decoded bent direction has to be to be a direction at all.
 ///
@@ -375,7 +414,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
         return float4(1.0, encode_bent(float3(0.0, 0.0, 0.0), 0.0));
     }
     float centre_z = view_z(pixel, centre_depth, depth_size);
-    float tolerance = camera.params.x * DEPTH_TOLERANCE_RADII;
+    float tolerance = sampling_radius() * DEPTH_TOLERANCE_RADII;
 
     // The sample this pixel sits **on or after**, and how far past it the pixel
     // is. `nearest` is the block's own sample, `offset` is zero on an axis where

@@ -65,7 +65,7 @@
 //! that bundled them could not say so. Both default to what ships, so a frame
 //! nobody has touched the console on is the frame every golden was blessed at.
 //!
-//! # The bent direction is the fourth switch, and it is the one that is on
+//! # The bent direction is the switch that is on
 //!
 //! [`r_ssao_bent_normals`] is what `docs/plan/46-ambient-occlusion.md` calls
 //! the second half of the rung: the same horizon sweep that measures how much
@@ -75,13 +75,14 @@
 //! encoding and the sweep's by-product are argued.
 //!
 //! **It defaults on, which is the one switch here that does not default to what
-//! shipped before it.** The other three exist to buy quality a tier may not
-//! want to pay for; this one is the rung. What it costs is the three channels
-//! the target widened by — `R8Unorm` to `Rgba8Unorm` — and the arithmetic in
-//! the pass that already runs, and what turning it off restores is the zero
-//! sentinel every consumer answers with the shading normal.
+//! shipped before it.** The others exist to buy quality a tier may not want to
+//! pay for, or to move a picture that is already right; this one is the rung.
+//! What it costs is the three channels the target widened by — `R8Unorm` to
+//! `Rgba8Unorm` — and the arithmetic in the pass that already runs, and what
+//! turning it off restores is the zero sentinel every consumer answers with the
+//! shading normal.
 //!
-//! # The intensity is a third switch, and it buys nothing
+//! # The intensity is a switch that buys nothing
 //!
 //! [`r_ssao_intensity`] is not on that ladder: it costs one comparison in the
 //! pass that already runs, and what it changes is how much of the occlusion the
@@ -96,10 +97,30 @@
 //! blend could only weaken it further. The default is the exponent that changes
 //! nothing, so this switch too leaves the frame every golden was blessed at.
 //!
-//! None of the four is a quality preset, and none is set by one.
+//! # The radius is the other control, and it is the one with a picture
+//!
+//! [`r_ssao_radius`] is the world-space disc the horizons are swept over, and
+//! it is the second of the two live controls
+//! `docs/plan/sample/19-alcove.md`'s first milestone asks for beside the AO
+//! view — [`r_ssao_intensity`] above is the first. `shaders/ssao.slang`'s
+//! `sampling_radius` is the whole of it: read once per gathered pixel and
+//! projected to a reach in pixels the march steps out along.
+//!
+//! **It moves the picture without moving the budget.** The march takes the same
+//! `slice_count() * 2 * SLICE_STEPS` samples whatever the disc's size, so
+//! nothing here is a purchase either; what widening it spends is fidelity,
+//! because the steps are spaced evenly in *pixels* out to the projected radius
+//! and a wider disc walks them apart until one lands on the far side of the
+//! room. That is what [`ssao::RADIUS_MAX`] bounds, and [`ssao::RADIUS_MIN`] is
+//! the other end: under it the projected disc falls below the march's own
+//! `MIN_RADIUS_PIXELS` across most of a room, and the knob draws nothing. The
+//! default is what every golden was blessed at, so this switch too leaves that
+//! frame alone.
+//!
+//! None of these is a quality preset, and none is set by one.
 //! `crcbl::settings::presets` writes the `[engine.video]` keys of a tier, and
 //! `docs/plan/39-capabilities.md`'s tier table has no row for the occlusion
-//! chain — so all four stay what they are: variables declared beside the pass
+//! chain — so they all stay what they are: variables declared beside the pass
 //! that reads them, the way `crate::debug_draw`'s switch is. What a tier should
 //! spend on them is `docs/backlog.md`'s, and so is the open question a
 //! `VIDEO_KEYS` row would answer: a preset clears an effect by writing that
@@ -156,6 +177,11 @@ crcbl_console::convar! {
     pub static r_ssao_bent_normals: bool = true;
 }
 
+crcbl_console::convar! {
+    /// The disc the horizons are swept over, in world units: 0.5 ships.
+    pub static r_ssao_radius: f32 in 0.0625 ..= 4.0 = 0.5;
+}
+
 /// [`r_ssao_slices`] as the shader's uniform wants it.
 ///
 /// Clamped on the way through rather than trusted: the variable's own range is
@@ -196,6 +222,20 @@ pub(crate) fn intensity() -> f32 {
 /// normal it already had — see `shaders/ssao.slang`'s `bent_normals`.
 pub(crate) fn bent_normals() -> bool {
     r_ssao_bent_normals.get_bool()
+}
+
+/// [`r_ssao_radius`] as the shader's uniform wants it.
+///
+/// Clamped on the way through for [`slice_count`]'s reason exactly.
+/// `sampling_radius` clamps again on its side, which is where a value that
+/// never reached this function at all is caught — and where a zero is answered
+/// with [`ssao::RADIUS_DEFAULT`] rather than with the floor, because world
+/// units have no zero that means anything and an unwritten block is a producer
+/// that chose nothing.
+pub(crate) fn radius() -> f32 {
+    r_ssao_radius
+        .get_f32()
+        .clamp(ssao::RADIUS_MIN, ssao::RADIUS_MAX)
 }
 
 /// The extent the march and the blur run at: `extent` divided by
@@ -952,6 +992,29 @@ mod tests {
             intensity(),
             ssao::INTENSITY_DEFAULT,
             "a frame nobody has touched the console on must reach the shader at the exponent \
+             every golden in this workspace was blessed under"
+        );
+    }
+
+    /// The same holding, for the disc the march sweeps.
+    ///
+    /// Separate from the test above because it is a separate copy: the bounds
+    /// on `r_ssao_radius` are literals repeating `crcbl_shaders::ssao`'s, and
+    /// the two pairs can drift apart one at a time.
+    #[test]
+    fn the_console_radius_range_is_the_range_the_march_honours() {
+        assert_eq!(
+            r_ssao_radius.kind(),
+            crcbl_console::Kind::Float {
+                min: ssao::RADIUS_MIN,
+                max: ssao::RADIUS_MAX,
+            },
+            "`r_ssao_radius` accepts a range `shaders/ssao.slang` does not honour"
+        );
+        assert_eq!(
+            radius(),
+            ssao::RADIUS_DEFAULT,
+            "a frame nobody has touched the console on must reach the shader at the radius \
              every golden in this workspace was blessed under"
         );
     }

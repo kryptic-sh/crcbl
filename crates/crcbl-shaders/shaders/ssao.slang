@@ -169,13 +169,14 @@ struct SsaoParams
     /// the same way, for the same reason: a view-space ray that has to address
     /// the world-space probe grid.
     float4x4 inv_view;
-    /// `x` is the sampling radius in **world units** and `y` is how many planes
-    /// each pixel sweeps — see [`slice_count`], which is what reads it. `z` is
-    /// the intensity exponent `ssao_upsample.slang` raises its reconstruction
-    /// to, written by the host into the block all three of these passes share
-    /// and read by that one alone. `w` is the bent-direction switch — see
-    /// [`bent_normals`], which is what reads it, and which is the one lane of
-    /// this row *this* file reads besides `y`.
+    /// `x` is the sampling radius in **world units**, read through
+    /// [`sampling_radius`], and `y` is how many planes each pixel sweeps — see
+    /// [`slice_count`], which is what reads it. `z` is the intensity exponent
+    /// `ssao_upsample.slang` raises its reconstruction to, written by the host
+    /// into the block all three of these passes share and read by that one
+    /// alone. `w` is the bent-direction switch — see [`bent_normals`], which is
+    /// what reads it, and which is the one lane of this row *this* file reads
+    /// besides `x` and `y`.
     ///
     /// **`y` is a count and not a quality enumeration**, so the shader has one
     /// number to clamp rather than a table to agree with a host about. It is
@@ -326,6 +327,44 @@ static const uint SLICE_STEPS = 4;
 /// is what skips them. A surface this far away is also one whose ambient term is
 /// a handful of pixels wide.
 static const float MIN_RADIUS_PIXELS = 2.0;
+
+/// The sampling radius, in world units, a frame that asks for nothing falls to.
+///
+/// Half a metre: what every golden in this workspace was blessed at, and what
+/// `crcbl_render::ssao::r_ssao_radius` defaults to. A producer that never writes
+/// `camera.params.x` leaves a zero there, and a zero disc projects to a reach
+/// under [`MIN_RADIUS_PIXELS`] at every distance — a frame with no occlusion in
+/// it. So [`sampling_radius`] answers the zero with this rather than with
+/// [`RADIUS_MIN`], which is `ao_intensity`'s reasoning in the shader beside
+/// this one: the floor is a radius somebody chose, and an unwritten block is
+/// nobody choosing.
+///
+/// **All three of the chain's shaders resolve the lane, not just this one.**
+/// `ssao_blur.slang` and `ssao_upsample.slang` take their depth tolerance as a
+/// share of the disc the gather swept, so each carries this constant and its
+/// own copy of [`sampling_radius`]; `crcbl_shaders::ssao`'s
+/// `the_occlusion_chain_resolves_one_radius` is what holds the three together.
+static const float RADIUS_DEFAULT = 0.5;
+
+/// The shortest sampling radius the march will honour, in world units.
+///
+/// An eighth of [`RADIUS_DEFAULT`]. Below it the disc is narrow enough that
+/// [`MIN_RADIUS_PIXELS`] turns the march away across most of a room rather than
+/// at the far end of one, and the lower half of a control that draws nothing on
+/// screen is a control nobody can read.
+static const float RADIUS_MIN = 0.0625;
+
+/// The longest sampling radius the march will honour, in world units.
+///
+/// Eight times [`RADIUS_DEFAULT`], the same span the other way.
+///
+/// **The ceiling is a picture and not a budget.** The march takes
+/// `slice_count() * 2 * SLICE_STEPS` samples whatever its reach, so a wider disc
+/// costs nothing but cache locality; what it spends is fidelity. The steps are
+/// spaced evenly in pixels out to the projected radius, so widening it walks
+/// them apart, and past a few metres a step lands on the far side of the room
+/// rather than on the neighbourhood the horizon is meant to be over.
+static const float RADIUS_MAX = 4.0;
 
 /// The factor the occlusion chain's gather extent is divided by, on each axis.
 ///
@@ -730,6 +769,28 @@ uint slice_count()
     return clamp(uint(camera.params.y), SLICE_COUNT_DEFAULT, SLICE_COUNT_MAX);
 }
 
+/// The disc this frame asked its horizons for, in view-space units.
+///
+/// `camera.params.x`, which the host writes from a console variable — see
+/// `crcbl_render::ssao::r_ssao_radius`. That variable's own range is the
+/// console's guard and this clamp is the one that holds if the two ever
+/// disagree; the host clamps as well, so a value that never reached this
+/// function is caught there.
+///
+/// **The unwritten block is turned away upwards, like `slice_count`'s lane and
+/// unlike [`RADIUS_MIN`].** World units have no zero that means anything, so a
+/// zero here is a producer that wrote no block rather than a frame asking for
+/// the narrowest disc.
+float sampling_radius()
+{
+    float asked = camera.params.x;
+    if (asked <= 0.0)
+    {
+        return RADIUS_DEFAULT;
+    }
+    return clamp(asked, RADIUS_MIN, RADIUS_MAX);
+}
+
 /// Whether this frame asked for the bent direction beside the scalar.
 ///
 /// `camera.params.w`, which the host writes from a console variable — see
@@ -842,7 +903,7 @@ float4 occlusion_at(int2 pixel, uint tile, float3 centre, float3 normal, int2 ex
     // early return below hands this back, and each of them is a pixel with
     // nothing to say — see [`BENT_NORMAL_MIN_LENGTH`].
     const float4 unoccluded = float4(0.0, 0.0, 0.0, 0.0);
-    float radius = camera.params.x;
+    float radius = sampling_radius();
 
     // The radius in pixels, measured rather than derived from a projection
     // element: `proj` may be perspective or orthographic, and projecting the two
