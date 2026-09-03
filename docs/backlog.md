@@ -207,19 +207,6 @@ the shaded result is finite and equals the plain trilinear read. `Scene::Probes`
 cannot be it; that scene is the anti-vacuity floor for the whole probe path and
 must stay byte-identical. It wants a scene of its own, and it is small.
 
-## `crcbl_render::ssao`'s header still says `R8Unorm` (2026-09-04)
-
-`crates/crcbl-render/src/ssao.rs`'s module doc lists what every backend needs
-for this pass as "a full-screen draw, a sampled `D32Float` and an `R8Unorm`
-target". The target widened to `Rgba8Unorm` when bent normals landed 2026-09-02
-— the same file's own diagram three dozen lines above already says `Rgba8Unorm`,
-and its pipeline builds `ColorTargetState::opaque(Format::Rgba8Unorm)`.
-
-A one-line comment fix, deliberately not taken in the moment it was found: a
-write agent was mid-verification on `crcbl-render`, and touching that crate
-would have invalidated a gate run in flight for a comment. Fix it in the next
-change that touches the crate for another reason.
-
 ## What the RSM probe updater shipped without (2026-09-04)
 
 `docs/plan/50-irradiance-probes.md`'s raster updater is built:

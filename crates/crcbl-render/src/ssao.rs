@@ -45,7 +45,8 @@
 //! The off-switch is data rather than a branch: a frame that does not add these
 //! passes leaves `ForwardRenderer`'s white placeholder bound, and `mesh.slang`
 //! multiplies its ambient by 1.0. There is no device fact to gate on — every
-//! backend has a full-screen draw, a sampled `D32Float` and an `R8Unorm` target.
+//! backend has a full-screen draw, a sampled `D32Float` and an `Rgba8Unorm`
+//! target.
 //!
 //! # The higher rung, and why it is two switches
 //!
