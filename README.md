@@ -26,7 +26,7 @@ or the browser.
 > sections before moving.
 
 **Pre-1.0 and moving.** Frames draw on every backend, several samples are
-playable, and six of them ship as browser demos that double as the engine's
+playable, and fifteen of them ship as browser demos that double as the engine's
 continuous cross-backend regression test. The API breaks when a caller needs it
 to.
 
@@ -46,8 +46,11 @@ What is real today:
 - **A GPU-driven forward renderer.** Culling and draw generation on the GPU, a
   shadow pass, depth prepass, ground-truth ambient occlusion with bent normals,
   SSR, clustered lights — point, spot and rectangular area lights shaded by
-  linearly transformed cosines — tonemapping and a screen-space grid, with mesh
-  shaders and bindless where the device has them.
+  linearly transformed cosines — an irradiance probe clipmap whose probes each
+  carry a visibility map, captured on the GPU, so a probe a fragment cannot see
+  past a wall lends it no light; volumetric fog, bloom, auto-exposure, SMAA and
+  FXAA, render-scale upscaling, GPU skinning, tonemapping and a screen-space
+  grid, with mesh shaders and bindless where the device has them.
 - **glTF import** with meshlet building, a cluster DAG and QEM simplification.
 - **A server-authoritative game stack** — fixed-tick simulation, snapshots,
   interpolation, an ECS, physics, input mapping, audio, persistence and a job
@@ -55,9 +58,6 @@ What is real today:
 
 What is not:
 
-- **`crcbl-wgpu` is still in the tree and is slated for deletion.** It was the
-  Tier-B backend that got the browser working before `crcbl-webgpu` existed. It
-  goes once the parity list closes; nothing new should be built on it.
 - **No editor.** `apps/editor` is deliberately absent until there is something
   to put in it.
 - The viewer opens a file from the command line, from a drop on its window
@@ -191,8 +191,16 @@ built it.
 | `asteroids`      | churn: entities spawn and die every tick                               | ✓              |
 | `horde`          | scale: thousands of agents, one broadphase, a job pool                 | ✓              |
 | `hud`            | the UI system's living fixture — draw-list primitives and nothing else | ✓              |
+| `orbit`          | the physics pillar's acceptance test, wearing a rocket costume         | ✓              |
+| `bracket`        | matchmaking, rating and ranked flow, with no game attached             | ✓              |
+| `options`        | the settings acceptance test: move a fader, and it is still there      | ✓              |
+| `puppet`         | a character, a controller and a camera on a small shadowed map         | ✓              |
+| `breach`         | a first-person firing range, on the controller `puppet` walks          | ✓              |
+| `shard`          | a torch-lit interior zone, walked in an isometric-ish third person     | ✓              |
+| `sparks`         | the VFX fixture: stock effects, a hostile one, and the budget for them | ✓              |
 | `lantern`        | the lighting acceptance fixture: one room, every effect                | ✓              |
-| `viewer`         | a glTF model viewer, and the asset pipeline's acceptance test          |                |
+| `quarry`         | the geometry acceptance fixture: one dense scene on every path         | ✓              |
+| `viewer`         | a glTF model viewer, and the asset pipeline's acceptance test          | ✓              |
 | `bare`           | the engine as a plain library, with a hand-written loop                |                |
 | `render-harness` | drives the golden scenes through a browser GPU for the parity gate     |                |
 
@@ -205,12 +213,17 @@ cargo test --workspace
 ```
 
 All three, every time — a green clippy with a skipped `fmt` is a red CI run over
-whitespace. As of 2026-08-19 the workspace suite is **4,139 passing tests**
-across 126 test binaries and doctest runs. Fourteen are ignored: two end-to-end
-scenes that need a real device pinned with `CRCBL_GPU` and have their own
-scripts (`crates/crcbl/tests/run-gltf-e2e.sh` and `run-tiling-e2e.sh`), and
-twelve doctests marked `ignore` because they are illustrative fragments rather
-than runnable programs.
+whitespace. As of 2026-09-03 `cargo test --workspace` reports **6,006 passing
+tests** across 178 test binaries and doctest runs, with 21 ignored: six that
+need a real device pinned with `CRCBL_GPU`, or a generator rerun, and are driven
+by their own scripts, and fifteen doctests marked `ignore` because they are
+illustrative fragments rather than runnable programs.
+
+That command is the floor rather than the suite. The device-bound work lives in
+the nine `crates/crcbl/tests/run-*-e2e.sh` harnesses, each of which pins a
+backend and turns its own feature on — a bare `cargo test` compiles several of
+them out entirely — alongside each sample's own golden script and the browser
+gates under `web/`.
 
 CI runs those on Linux, macOS and Windows and then goes further: a nested-sway
 Wayland session, Xvfb with and without a window manager, a real Windows desktop,
@@ -234,6 +247,12 @@ crates/crcbl-ui         crates/crcbl-sprite   crates/crcbl-audio
 crates/crcbl-assets     crates/crcbl-store    crates/crcbl-jobs
 crates/crcbl-console    the debug console's registry: variables, commands, the line
 crates/crcbl-core       ids, handles, arenas, time, logging
+crates/crcbl-shaders    Slang sources, and the SPIR-V, WGSL, MSL and DXIL built from them
+crates/crcbl-wl-scanner the Wayland protocol code generator, run at build time
+crates/crcbl-vfx        particle simulation: pooled effects, a fixed modifier menu
+crates/crcbl-greybox    greybox prototyping primitives, sized in real-world metres
+crates/crcbl-golden     golden-image comparison for the render tests
+crates/crcbl-rand       the one randomness seam
 crates/crcbl-cli        the `crcbl` binary
 apps/                   the samples
 web/                    the demo site and its hand-written ES modules

@@ -3,8 +3,7 @@
 //!
 //! Everything above this crate (`crcbl-render`, the samples, the editor) talks
 //! to the GPU exclusively through the traits here. Everything below it
-//! (`crcbl-vk`, `crcbl-webgpu`, and the deferred `crcbl-mtl` / `crcbl-dx12`)
-//! implements them.
+//! (`crcbl-vk`, `crcbl-mtl`, `crcbl-dx12` and `crcbl-webgpu`) implements them.
 //! No backend type ever appears in a signature on this side of the seam, and no
 //! `#[cfg(target_os = "…")]` ever appears above it.
 //!

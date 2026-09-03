@@ -1,7 +1,7 @@
 <!--
   The demo window. Every demo renders this and nothing else: a page in
   `web/pages/` pulls it in with an `include demo-window` directive, and
-  `build-pages.py` fails the build for a demo page that does not, so a change
+  `build-pages.mjs` fails the build for a demo page that does not, so a change
   here lands on all of them at once.
 
   `{{slug}}` and `{{name}}` come from the page's metadata block. The ids are the

@@ -58,16 +58,20 @@ meta-->
     <!--include demo-loop-keys-->
   </ul>
   <div class="note">
-    <strong>There is no mouselook on this page, and that is deliberate.</strong>
-    A browser reports pointer movement only through Pointer Lock, and the
-    numbers it gives are accelerated and smoothed by the same operating-system
-    layer that raw input exists to bypass — so the engine declines the lock here
-    rather than telling a first-person camera it has aim input it can trust. The
-    native build takes the mouse. Firing is a key on both, because a click means
-    a trigger pull under a lock and a click on a page without one, and the same
-    build should not have its central verb mean two things. This is the first of
-    the reasons the competitive version of this sample will not ship to a
-    browser at all.
+    <strong>The mouse works here, and it took an options dictionary to say
+    so.</strong>
+    A browser reports pointer movement only under Pointer Lock, and those deltas
+    used to arrive accelerated and smoothed by the same operating-system layer
+    that raw input exists to bypass — so the engine declined the lock rather than
+    tell a first-person camera it had aim input it could trust. That argument was
+    answered by the platform: <code>requestPointerLock</code> takes
+    <code>unadjustedMovement: true</code>, which asks for device motion instead
+    of the pointer's, and the shim asks for it. Where a browser refuses the
+    option the shim retries without it, and the aim is the adjusted stream. The
+    arrows stay a real second binding rather than an accessibility afterthought,
+    and firing stays a key on both builds, because a click means a trigger pull
+    under a lock and a request for the lock without one — the same build should
+    not have its central verb mean two things.
   </div>
 </section>
 

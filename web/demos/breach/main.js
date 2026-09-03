@@ -45,7 +45,7 @@ const MAPS = ['range', 'practice'];
 
 bootDemo({
   init,
-  hint: 'W/A/S/D walk, relative to where you are looking · the arrows look — a browser reports no raw mouse motion, so there is no mouselook here · SPACE fires · ESC opens the panel · F3 shows the stats · F11 fullscreen',
+  hint: 'W/A/S/D walk, relative to where you are looking · click to take the pointer, then the mouse looks · the arrows look too · SPACE fires · ESC opens the panel · F3 shows the stats · F11 fullscreen',
   savedLabel: 'Nothing',
   bind: (ex) => {
     // Before `bootDemo` calls `prepare` or `boot`, which is the window this

@@ -37,12 +37,13 @@
 //!
 //! That doc's milestone 1 onward is a competitive shooter, and it says in as
 //! many words that a browser build of it would be a claim the platform cannot
-//! back: no anti-cheat, no unreliable channel, no measurable latency, and **no
-//! raw mouse input**. The last of those is visible right here — the web shell
-//! reports no `RAW_POINTER_MOTION` because `movementX`/`movementY` under
-//! Pointer Lock are accelerated by the same OS layer the capability exists to
-//! bypass — so this page is looked around with the arrow keys, and
-//! [`crate::app`] says so where the binding is made.
+//! back: no anti-cheat, no unreliable channel and no measurable latency. Raw
+//! mouse input was on that list and is not any more: the web shell grants
+//! `POINTER_LOCK` and `RAW_POINTER_MOTION`, because `requestPointerLock` takes
+//! `unadjustedMovement: true` and that is the bypass the capability exists to
+//! promise. So this page looks around with the mouse, on the same
+//! `ShellCaps::has_mouselook` binding the native build takes, and the arrows
+//! remain the second binding [`crate::app`] describes where it is made.
 //!
 //! What milestone 0 *is* about is the fallback paths, and a browser is where
 //! they are not hypothetical: there is no mesh stage and no ray query, so the

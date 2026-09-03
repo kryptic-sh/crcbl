@@ -91,9 +91,9 @@ server rather than one per caller.
 ## Which GPU backend the browser renders through
 
 `crcbl-webgpu`, our own wasm→JS→wasm command stream, and **there is nothing to
-configure**. `crcbl-wgpu` is a `cfg(not(target_arch = "wasm32"))` dependency of
-the umbrella (see `crates/crcbl/Cargo.toml`), so a browser build links exactly
-one GPU backend and `crcbl::backend` auto-selects it because the target says so.
+configure**. It is the only GPU backend a `wasm32` build links — the crate that
+once sat beside it, `crcbl-wgpu`, was deleted on 2026-08-21 — so
+`crcbl::backend` auto-selects it because the target says so.
 
 ```sh
 ./web/build.sh --serve
@@ -365,6 +365,12 @@ all runs here. What it cannot see, a black canvas included, is what
   unchanged in behaviour**: its artifacts import nothing, so `engine/jobs.js`
   refuses them, `Spawn::threaded()` answers `false`, and every demo runs exactly
   as it did — which that gate's third red check asserts rather than assumes.
-- **No pointer lock, no clipboard, no IME.** The Web shell backend clears those
-  capability bits; there is nothing for a shim to wire.
+- **No clipboard, no IME.** The Web shell backend clears those capability bits;
+  there is nothing for a shim to wire. **Pointer lock is wired**, and
+  `RAW_POINTER_MOTION` with it: the shim takes the lock from a gesture and asks
+  for `unadjustedMovement: true`, which is the OS-level bypass that bit exists
+  to promise, so a first-person camera in a browser gets what it gets natively.
+  `crates/crcbl-shell/src/web/mod.rs` carries the caveat — a browser that
+  declines the option is retried without it, and the deltas are then the
+  adjusted stream.
 - **No service worker, no offline cache.** The site is static files.

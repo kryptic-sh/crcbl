@@ -19,7 +19,7 @@
 //! DrawList + FontAtlas         ←  first slice (P4-a)
 //!      │
 //!      ▼
-//! Render backend (future)
+//! Render backend            ← crcbl-render's ui_pass
 //! ```
 //!
 //! [`debug`] is the one panel every sample switches on: frame timing and FPS

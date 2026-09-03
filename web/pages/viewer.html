@@ -74,11 +74,13 @@ meta-->
   </p>
   <p>
     A browser tab has no path and no filesystem to resolve one against, so this
-    build opens a document generated in Rust and compiled into the module. That
-    is the honest limit of it today:
-    <strong>there is no drop target yet</strong>. Everything past the loading is
-    the same code — the orbit camera, the frame-on-load, the grid scaled to the
-    document's own size, the listing, the debug views, the exposure.
+    build opens with a document generated in Rust and compiled into the module —
+    and then takes whatever you drag onto the canvas. A dropped
+    <code>.glb</code> or <code>.gltf</code> goes through a staging buffer into
+    exactly the loader a path reaches natively, and the next frame that draws is
+    the new document. Everything past the loading is the same code — the orbit
+    camera, the frame-on-load, the grid scaled to the document's own size, the
+    listing, the debug views, the exposure.
   </p>
   <p>
     The other differences are the ones every demo here has. Start-up is polled

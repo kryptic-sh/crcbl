@@ -98,11 +98,14 @@ meta-->
     that does nothing is worse than one that admits it.
   </p>
   <p>
-    FRAME CAP, ANISOTROPY, RENDER SCALE and the seven effect switches are the
-    <code>[engine.video]</code> keys on the screen and the only rows here that
-    do not apply as you change them: the loop takes its frame ceiling once, when
-    it is built, and a renderer takes its anisotropy, its scale and its effect
-    set when it opens over a scene — and this screen draws none. So each row
+    QUALITY, FRAME CAP, ANISOTROPY, ANTIALIASING, RENDER SCALE and the six
+    effect switches are the <code>[engine.video]</code> keys on the screen and
+    the only rows here that do not apply as you change them: the loop takes its
+    frame ceiling once, when it is built, and a renderer takes its anisotropy,
+    its antialiasing, its scale and its effect set when it opens over a scene —
+    and this screen draws none. QUALITY sits above the rest and writes a whole
+    tier at once, so the rows below it move together and then say
+    <code>custom</code> the moment you disagree with one of them. So each row
     says <code>(next start)</code> until a reload has come up on the value you
     chose — which is the same honesty the silent buses get, applied to time
     instead of to sound. FRAME CAP goes one further: a ceiling above the rate
@@ -133,10 +136,10 @@ meta-->
   </p>
   <p>
     What is not here yet is the rest of the video half — display mode,
-    resolution, present mode, the graphics quality tiers — and the
-    requested-versus-resolved display that makes a device's downward-only clamp
-    visible instead of confusing. Those are written down in the repository's
-    backlog rather than implied by an empty row.
+    resolution, present mode — and the requested-versus-resolved display that
+    makes a device's downward-only clamp visible instead of confusing. Those are
+    written down in the repository's backlog rather than implied by an empty
+    row.
   </p>
   <!--include demo-console-note-->
 </section>

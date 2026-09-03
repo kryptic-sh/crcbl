@@ -81,8 +81,13 @@ meta-->
     Radeon RX 7900 XTX: the <em>render</em> side carries ten thousand with room
     to spare — a frame costs about a tenth of a millisecond of CPU whether the
     field holds one enemy or ten thousand — and the <em>simulation</em> is what
-    breaks, because separation is one broadphase query per body per tick and
-    there is no job system to spread them over yet.
+    breaks, because separation is one broadphase query per body per tick. It is
+    spread over a job pool now — steering goes through <code>par_for</code>, and
+    <code>web/run-horde-threads-e2e.sh</code> asserts a chunk really ran on a
+    Web Worker — but not on this page: GitHub Pages cannot send the COOP/COEP
+    headers a shared memory needs, so the published build has no workers to
+    announce and every chunk runs inline. That degradation is itself one of the
+    gate's red checks.
   </p>
 </section>
 

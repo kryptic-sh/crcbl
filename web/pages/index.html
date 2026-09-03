@@ -58,9 +58,10 @@ meta-->
     broken wasm build is a broken CI, and a broken CI blocks the merge. Each
     build is loaded in a real headless browser that opens a WebGPU device,
     presses a key where there is one to press, and reads the canvas back before
-    it ships — all of them but lantern and quarry, the two heaviest frames here,
-    which are built and export-checked on every commit and driven in a browser
-    by hand. Their pages say what they cost.
+    it ships — all of them, on a software rasteriser, with every wall-clock
+    budget scaled by the beat that machine actually manages, so a slower frame
+    stretches the run rather than failing it. Shard is the heaviest scene here
+    by a long way, and its page says what it costs.
   </p>
   <ul class="grid">
     <li>
@@ -158,8 +159,8 @@ meta-->
           The asset pipeline as a usable tool: it opens a glTF document, frames
           the camera on whatever it turns out to contain, and lists what the
           file holds and what the conversion could not bring in. Natively you
-          point it at your own file. A tab has no filesystem, so this page shows
-          the document it ships with — the drop target is not built yet.
+          point it at your own file; here you drag one onto the canvas, and the
+          same loader opens it.
         </p>
       </a>
     </li>
@@ -198,8 +199,10 @@ meta-->
           A capsule the size of a person, swept through a blockout and sliding
           along what it hits. One mound is gentle enough to walk up and the
           other is not; one step is inside the height it will climb and the
-          other is not. Nothing is animated yet — this is the ground that has to
-          hold before anything is.
+          other is not. It walks, too: the pose is a blend keyed on the speed
+          the controller actually achieved rather than on the key you are
+          holding, so walking into a wall stands the character still instead of
+          skating it.
         </p>
       </a>
     </li>

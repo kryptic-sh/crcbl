@@ -2,10 +2,11 @@
 //!
 //! The third and fourth slices of `docs/plan/17-animation.md` — its "Clip
 //! sampling" step, the palette the evaluation stack ends at, and the blending
-//! above them, and **nothing above that**. There is no state machine, no root
-//! motion and no GPU skinning here; each is a later slice with its own
-//! consumer, and building them now against no caller is the failure this
-//! project guards against. What is here is what
+//! above them, and **nothing above that**. There is no GPU skinning here — the
+//! skinning dispatch is `crcbl-render`'s (`skinning.rs`), and it takes a
+//! [`Palette`] this crate produced. A state machine and root motion are later
+//! slices with their own consumers, and building them now against no caller is
+//! the failure this project guards against. What is here is what
 //! `docs/plan/sample/09-puppet.md` needs through its milestone 2: a character
 //! posed from a clip, and a locomotion set mixed by speed.
 //!

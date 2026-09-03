@@ -15,11 +15,14 @@
 //! [`PendingDevice`](crcbl_hal::PendingDevice), [`Device`](crcbl_hal::Device)
 //! and [`CommandEncoder`](crcbl_hal::CommandEncoder) implementations now exist,
 //! in [`hal`]: each wraps a probe from [`instance`]/[`device`] and encodes
-//! through [`StreamWriter`], so `poll` is `drain` + `absorb` + a match. What is
-//! not built yet is the browser wiring — the JS shim and the registry entry
-//! that drive them in a page — which is a later slice; [`hal`] says which of a
-//! device's methods are wired, which WebGPU legitimately refuses, and which are
-//! loud stubs a later slice fills.
+//! through [`StreamWriter`], so `poll` is `drain` + `absorb` + a match. The
+//! browser wiring exists: `web/engine/gpu-stream.js` decodes the buffer against
+//! a real `GPUDevice`, `gpu-transport.js` carries it and `gpu-reply.js` brings
+//! the answers home, and every demo on the site draws through them.
+//! `web/run-probe-e2e.sh` drives this seam one command at a time and
+//! `web/run-render-harness-e2e.sh` holds its frames against the native
+//! goldens. [`hal`] still says which of a device's methods are wired, which
+//! WebGPU legitimately refuses, and which are loud stubs a later slice fills.
 //!
 //! Nothing but integers and buffers wasm owns crosses the boundary, which is
 //! the convention `crcbl-store`'s fetch ABI and the OPFS entry points already
