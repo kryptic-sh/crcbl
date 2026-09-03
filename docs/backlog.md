@@ -1776,75 +1776,6 @@ Verified by reading `create_window` and `window_state` in
 harness's own Xvfb: an assertion that the field reads `false` before the first
 pump fails, and the failure names `true`.
 
-## One whole-workspace-only test flake is left, in the logger (2026-09-02)
-
-The three sample flakes this entry used to carry were **one bug and it is
-fixed** — see `git log`. `ForwardRenderer::resolved_effects` removes _both_
-antialiasing bits for any debug view that is a readout rather than a picture,
-and `crcbl::debug_view` is one process-global value, so a test reading effects
-back while a sibling in the same binary held a readout view lost exactly
-`ANTIALIASING`. quarry's was the same mechanism with the roles swapped: its app
-writes that global on **every boot**, so an unguarded `run(..)` test stomped the
-guarded heatmap test back to `Shaded` and it read `HEATMAP: OFF`. The lock
-`crcbl::debug_view::for_test` takes only serialises against other takers, which
-is why holding it in `scripted` was not enough.
-
-What is left is a different one, seen twice in six whole-workspace runs on
-2026-09-02:
-
-```text
-crcbl-core: log::tests::logger_respects_the_filter_without_being_installed
-crates/crcbl-core/src/log.rs:1294
-assertion failed: !logger.enabled(
-    &Metadata::builder().level(Level::Info).target("any").build())
-```
-
-**It is the same family — a process global read by a test that does not own it —
-but the writer has not been found.** Established by reading, all of it negative:
-
-- `with_filter` **does** serialise: it takes `FILTER_ORDER` for the whole body,
-  and no test in `log.rs` writes `FILTER` outside it.
-- `StderrLogger::enabled` is `self.permits(metadata) || capturing()`, and
-  `capturing()` is `CAPTURED.with(..)` — a genuine `thread_local`, so another
-  thread's capture cannot be what turns this on. That comment is accurate.
-- `store_filter` is the one writer that takes no order lock, but its only
-  non-test caller is the console `log` command, and the tests that drive that
-  live in `tests/console_log.rs` — a separate binary, so a separate process.
-
-So something moves `FILTER`, or the facade's max level, between `with_filter`
-writing it and the assertion reading it.
-
-**Instrumented and reproduced, 2026-09-02, and `capturing()` is now ruled out by
-observation rather than by reading.** A hunt ran the workspace repeatedly with
-the filter, `max_level()`, `permits`, `capturing()`, the installed flag and the
-thread printed at the failing assertions. It tripped twice, and the second trip
-is the informative one: **`the_ring_holds_records_the_filter_refused`
-(`log.rs:1241`) also fails**, and that test asserts `!logger.permits(..)`
-_directly_ — it never calls `enabled`, so it has no `capturing()` disjunct to
-blame. Both failures are therefore about the filter the logger is holding, not
-about capture state. The third bullet above is confirmed rather than merely
-argued.
-
-**The writer is still unnamed.** The hunt was stopped at four hours, mid-way
-through instrumenting to identify it, so this is a narrowed question rather than
-an answer: what writes `FILTER` (or the facade's max level) while `with_filter`
-holds `FILTER_ORDER`, given that `store_filter`'s only non-test caller lives in
-a different binary. Two tests are known to observe it, which is a second
-foothold the earlier work did not have.
-
-**The diagnostics are committed**, so the next trip on any machine prints its
-own filter, permits, capturing, installed flag and thread instead of a bare
-`assertion failed`. That is the one thing that made this cheap to pick up again;
-it was verified by inverting the assertion and reading the rendered message, not
-by assuming it formats.
-
-**Rate: not established, and the older figure is contaminated.** The two-in-six
-sample was taken while a `debug_view` test panicked in the same runs. It then
-did not reproduce in ten workspace runs that had nothing to do with logging, and
-reproduced twice in this hunt's runs — whose count was not recovered before the
-agent was stopped, so no rate can be quoted from it either. Anyone resuming
-should count runs explicitly rather than inherit a number.
-
 ## The render-quality programme (opened 2026-08-27)
 
 Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
@@ -3824,6 +3755,31 @@ duplicated shape.
   different signature. Extracting it would need a callback per difference.
 
 ## Surprises worth keeping — not bugs
+
+### `--document-private-items` does not license a link to a private item (2026-09-04)
+
+rustdoc's own note on `private_intra_doc_links` reads "this link will resolve
+properly if you pass `--document-private-items`", which is not true of a
+**public** item's documentation. CI's wasm32 doc gate passes that flag and still
+refuses
+`public documentation for `probe_bounce_grid`links to private item`leak_volume``.
+The fix is to unlink the name, never to widen the flag.
+
+Worth keeping because the note reads as an instruction and sends you to change
+the command rather than the comment.
+
+### A local `cargo doc` cannot fail without `RUSTDOCFLAGS` (2026-09-04)
+
+Every doc gate in `ci.yml` sets `RUSTDOCFLAGS: -D warnings` in the job's `env:`
+block rather than on the `run:` line. A doc gate run without it reports a broken
+intra-doc link as a warning and exits **0** — so the local chain is green over
+exactly what reddens CI. `85e4f7a` went out that way and left `main` red across
+two jobs until `d06edef`.
+
+The corollary that cost the round trip: `[`Name`](path::to::Name)` is
+`redundant_explicit_links` whenever the label alone already resolves. A link
+that needs a path puts the path _inside_ the brackets —
+`[`crate::zone::LAYOUT`]`.
 
 ### rustc suppresses its own lints inside an external macro's expansion (2026-08-27)
 

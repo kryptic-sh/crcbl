@@ -1196,11 +1196,17 @@ mod tests {
     /// Runs `body` with `directives` in force, and puts back what was there.
     ///
     /// **The facade's global maximum is deliberately left alone**, which is the
-    /// one thing this does not share with [`set_filter`]: nothing in this binary
-    /// installs a logger — `installing_the_logger_is_idempotent` asserts the slot
-    /// is still empty — so the maximum decides nothing here, while lowering it
-    /// would silence a [`capture`] running on another thread. The filter tests
-    /// that need both halves are `tests/console_log.rs`, in a binary of their own.
+    /// one thing this does not share with [`set_filter`]: the maximum decides
+    /// nothing for the assertions here, which read [`FILTER`] through `permits`,
+    /// while lowering it would silence a [`capture`] running on another thread.
+    /// The filter tests that need both halves are `tests/console_log.rs`, in a
+    /// binary of their own.
+    ///
+    /// **`installing_the_logger_is_idempotent` takes this lock too, and must.**
+    /// `try_init_logging` calls `store_filter` without it, so under `cargo test`
+    /// — one process, threaded, unlike nextest's process per test — an install
+    /// landing inside one of these bodies replaces the directives it just wrote
+    /// with the installed filter, and the body then asserts on that instead.
     fn with_filter<R>(directives: &str, body: impl FnOnce() -> R) -> R {
         let _order = FILTER_ORDER.lock().unwrap_or_else(PoisonError::into_inner);
         let previous = std::mem::replace(
@@ -1402,10 +1408,20 @@ mod tests {
         );
     }
 
-    /// Installs the process logger. Each nextest test runs in its own process,
-    /// so this does not fight the other tests over the global slot.
+    /// Installs the process logger.
+    ///
+    /// **Takes [`FILTER_ORDER`], because `try_init_logging` writes [`FILTER`]
+    /// and takes no lock of its own.** Under nextest each test owns a process
+    /// and this fights nobody, but `cargo test` runs the whole binary's tests as
+    /// threads of one process — so without the order lock this install lands
+    /// inside a sibling's [`with_filter`] body and leaves it asserting on
+    /// `trace` instead of the directives it wrote. That is the whole of the
+    /// whole-workspace-only flake: the failures printed
+    /// `filter Filter { default: Trace, targets: [] }, max level TRACE,
+    /// installed true`, which is this call's argument and nothing else's.
     #[test]
     fn installing_the_logger_is_idempotent() {
+        let _order = FILTER_ORDER.lock().unwrap_or_else(PoisonError::into_inner);
         assert!(!is_installed());
         assert!(try_init_logging(Filter::parse("trace")).is_ok());
         assert!(is_installed());
