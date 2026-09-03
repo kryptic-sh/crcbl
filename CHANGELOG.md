@@ -107,6 +107,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The debug console draws command output and trouble, not the engine's
+  commentary.** The panel used to draw every record the ring held, which at info
+  level is the engine narrating its own boot and frame loop — so the answer to a
+  typed command scrolled off the screen before it could be read. The view now
+  starts at `LevelFilter::Warn` for engine records and draws the console's own
+  output whatever level it carries, which is what a line remembering it came
+  from `CONSOLE_TARGET` buys: command output is logged at info, so a level test
+  alone would have hidden the reply along with the noise.
+
+  Nothing is lost. The ring still holds every record, `LogView::lines` still
+  yields them, and widening the view with `LogView::set_filter` brings the
+  commentary back — the lines were there the whole time. Nor is stderr touched:
+  the terminal still prints whatever `CRCBL_LOG` admits.
+
 - **Ambient occlusion ships the tangential rung.** `r_ssao_slices` now defaults
   to 4 and `r_ssao_blur_passes` to 2, so a default frame runs a second occlusion
   blur — the pass `ssao-blur-2` — and gathers four horizon planes instead of

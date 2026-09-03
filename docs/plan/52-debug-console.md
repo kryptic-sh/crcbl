@@ -642,7 +642,10 @@ entry; the browser gate runs on every slice that touches a demo.
 - …and a **tap on the CONSOLE button** opens it in every demo on a device that
   has been touched, with no per-app code at all: the button and the keyboard are
   both the loop's.
-- The panel shows the same lines as stderr, in order, coloured by level.
+- The panel shows command output and warnings, in order, coloured by level. Not
+  the same set as stderr: the engine's info-level commentary is held in the ring
+  and not drawn, so the panel reads as a prompt with its answers rather than as
+  a second terminal. `LogView::set_filter` widens it.
 - `help` prints every variable in `crcbl::settings::catalogue()` and every
   `convar!` in the workspace; a `convar!` missing from its crate's table is a
   red test in that crate.

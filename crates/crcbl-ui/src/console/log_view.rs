@@ -4,6 +4,15 @@
 //! `docs/plan/52-debug-console.md` decision 6. The view is fed [`Record`]s and
 //! nothing else — it does not read the ring, which is why a test here can hold
 //! a log with no logger installed.
+//!
+//! # What it draws is narrower than what it holds
+//!
+//! The view takes every record the ring gives it and **draws two kinds**: the
+//! console's own output, whatever level it carries, and engine records at
+//! [`LevelFilter::Warn`] or worse. The engine's info-level commentary is held
+//! and not drawn, so the panel reads as a command prompt with its answers
+//! rather than as a second terminal. [`LogView::set_filter`] widens it, and
+//! nothing is lost in the meantime because the lines are already here.
 
 use std::collections::VecDeque;
 
@@ -29,6 +38,16 @@ pub struct LogLine {
     pub level: Level,
     /// The text, as [`LogView::push_records`] rendered it.
     pub text: String,
+    /// Whether the console itself produced this line ([`CONSOLE_TARGET`]) — an
+    /// echoed command, the answer to it, `help`.
+    ///
+    /// **Kept because the level cannot say it.** Command output is logged at
+    /// [`Level::Info`], the same level as the engine's own running commentary,
+    /// so a view that hid info to be quiet would hide the answer to what
+    /// somebody just typed. This is what [`LogView::render`] tests instead, and
+    /// it is why a filter of [`LevelFilter::Warn`] still shows a typed
+    /// command's reply.
+    pub from_console: bool,
 }
 
 /// The lines the console shows, newest at the bottom.
@@ -46,7 +65,8 @@ pub struct LogView {
     /// How many lines are hidden **below** the bottom of the view. Zero is the
     /// newest line at the bottom, which is where a console sits.
     scroll: usize,
-    /// The most verbose level the view draws.
+    /// The most verbose level the view draws for lines the **engine** logged.
+    /// The console's own output ignores it — see [`LogLine::from_console`].
     filter: LevelFilter,
 }
 
@@ -63,7 +83,7 @@ impl LogView {
             lines: VecDeque::new(),
             cursor: 0,
             scroll: 0,
-            filter: LevelFilter::Trace,
+            filter: LevelFilter::Warn,
         }
     }
 
@@ -83,6 +103,7 @@ impl LogView {
             self.push(LogLine {
                 level: record.level,
                 text: line_text(record),
+                from_console: record.target == CONSOLE_TARGET,
             });
         }
     }
@@ -114,7 +135,8 @@ impl LogView {
         self.cursor
     }
 
-    /// The lines the view holds, oldest first and before the level filter.
+    /// The lines the view holds, oldest first and before the level filter — so
+    /// this yields the engine's info lines that [`render`](Self::render) hides.
     pub fn lines(&self) -> impl Iterator<Item = &LogLine> {
         self.lines.iter()
     }
@@ -163,14 +185,25 @@ impl LogView {
         self.scroll = 0;
     }
 
-    /// The most verbose level the view draws.
+    /// The most verbose level the view draws for engine lines.
+    ///
+    /// The console's own output is drawn whatever this says — see
+    /// [`LogLine::from_console`] for why the level alone cannot decide it.
     #[must_use]
     pub const fn filter(&self) -> LevelFilter {
         self.filter
     }
 
-    /// Sets the most verbose level the view draws, and returns to the newest
-    /// line.
+    /// Sets the most verbose level the view draws for engine lines, and returns
+    /// to the newest line.
+    ///
+    /// **[`LevelFilter::Warn`] is what a view starts at**: the panel is where
+    /// somebody types a command and reads its answer, and an engine that logs
+    /// its running commentary at info scrolls that answer off the screen before
+    /// it can be read. So the default shows what a person asked for and what
+    /// went wrong, and nothing else. Widening this to
+    /// [`Info`](LevelFilter::Info) brings the commentary back — the lines were
+    /// held the whole time, as the paragraph below says.
     ///
     /// The panel's own filter, and **not** the logger's: this hides lines that
     /// were logged, where `log <filter>` decides what is logged at all. Turning
@@ -230,7 +263,7 @@ impl LogView {
         let visible: Vec<&LogLine> = self
             .lines
             .iter()
-            .filter(|line| line.level.to_level_filter() <= self.filter)
+            .filter(|line| line.from_console || line.level.to_level_filter() <= self.filter)
             .collect();
         let scroll = self.scroll.min(visible.len().saturating_sub(1));
         let end = visible.len() - scroll;
@@ -426,6 +459,9 @@ mod tests {
         let style = style();
         let rect = rect_of(4, 40, &atlas, &style);
         let mut view = LogView::new();
+        // Layout, not filtering: these are engine info lines, which the
+        // quiet default hides — see `set_filter`.
+        view.set_filter(LevelFilter::Trace);
         let mut bottoms = Vec::new();
         for step in 0..6 {
             view.push_records(&records(step, 1));
@@ -461,6 +497,9 @@ mod tests {
         let atlas = atlas();
         let style = style();
         let mut view = LogView::new();
+        // Layout, not filtering: these are engine info lines, which the
+        // quiet default hides — see `set_filter`.
+        view.set_filter(LevelFilter::Trace);
         view.push_records(&records(0, 10));
 
         let three = rect_of(3, 40, &atlas, &style);
@@ -557,6 +596,9 @@ mod tests {
         let style = style();
         let rect = rect_of(3, 40, &atlas, &style);
         let mut view = LogView::new();
+        // Layout, not filtering: these are engine info lines, which the
+        // quiet default hides — see `set_filter`.
+        view.set_filter(LevelFilter::Trace);
         view.push_records(&records(0, 10));
 
         view.scroll_by(4);
@@ -598,28 +640,71 @@ mod tests {
     /// **The panel's own filter hides lines without losing them**, which is the
     /// whole difference between it and `log <filter>`.
     #[test]
-    fn the_level_filter_hides_lines_and_gives_them_back() {
+    fn the_level_filter_hides_engine_lines_and_gives_them_back() {
         let atlas = atlas();
         let style = style();
         let rect = rect_of(6, 40, &atlas, &style);
         let mut view = LogView::new();
         view.push_records(&[
-            record(0, Level::Error, CONSOLE_TARGET, "boom"),
-            record(1, Level::Info, CONSOLE_TARGET, "started"),
-            record(2, Level::Debug, CONSOLE_TARGET, "detail"),
+            record(0, Level::Error, "crcbl_vk::device", "boom"),
+            record(1, Level::Info, "crcbl::demo", "started"),
+            record(2, Level::Debug, "crcbl::demo", "detail"),
         ]);
-        assert_eq!(view.filter(), LevelFilter::Trace);
-        assert_eq!(drawn(&view, rect, &style), ["boom", "started", "detail"]);
+        let all = [
+            "[crcbl_vk::device] boom",
+            "[crcbl::demo] started",
+            "[crcbl::demo] detail",
+        ];
 
-        view.set_filter(LevelFilter::Warn);
-        assert_eq!(drawn(&view, rect, &style), ["boom"]);
+        // The default is quiet: the failure is drawn and the commentary is not.
+        assert_eq!(view.filter(), LevelFilter::Warn);
+        assert_eq!(drawn(&view, rect, &style), ["[crcbl_vk::device] boom"]);
         assert_eq!(view.len(), 3, "the filter dropped lines instead of hiding");
+
+        view.set_filter(LevelFilter::Trace);
+        assert_eq!(drawn(&view, rect, &style), all);
 
         view.set_filter(LevelFilter::Off);
         assert!(drawn(&view, rect, &style).is_empty());
 
         view.set_filter(LevelFilter::Trace);
-        assert_eq!(drawn(&view, rect, &style), ["boom", "started", "detail"]);
+        assert_eq!(drawn(&view, rect, &style), all);
+    }
+
+    /// **The answer to a typed command survives the quiet default**, which is
+    /// the whole reason a line remembers who produced it.
+    ///
+    /// `crcbl_core::log::console::print` logs at [`Level::Info`] — the same
+    /// level as the engine's running commentary — so a view that decided on the
+    /// level alone would hide what somebody just asked for. The engine's info
+    /// line beside it is the control: same level, same view, not drawn.
+    #[test]
+    fn a_typed_commands_answer_is_drawn_where_the_engines_chatter_is_not() {
+        let atlas = atlas();
+        let style = style();
+        let rect = rect_of(6, 40, &atlas, &style);
+        let mut view = LogView::new();
+        view.push_records(&[
+            record(0, Level::Info, CONSOLE_TARGET, "] r_ssao_intensity"),
+            record(1, Level::Info, CONSOLE_TARGET, "r_ssao_intensity 1"),
+            record(2, Level::Info, "crcbl::engine", "shell: first configure"),
+        ]);
+
+        assert_eq!(view.filter(), LevelFilter::Warn);
+        assert_eq!(
+            drawn(&view, rect, &style),
+            ["] r_ssao_intensity", "r_ssao_intensity 1"],
+            "the console's own output is drawn whatever the filter says, and the \
+             engine's info line at the same level is not"
+        );
+
+        // Off is off for the engine's lines and still not for the console's:
+        // a prompt that answered nothing would be a broken prompt.
+        view.set_filter(LevelFilter::Off);
+        assert_eq!(
+            drawn(&view, rect, &style),
+            ["] r_ssao_intensity", "r_ssao_intensity 1"]
+        );
     }
 
     /// Every line is drawn in its own level's colour, so the level is readable
