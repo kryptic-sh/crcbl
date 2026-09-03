@@ -142,24 +142,23 @@ const SHAFT_RATIO: f32 = 2.0;
 /// must retain.
 ///
 /// This is a non-black fallback control, not a claim that the mirror is brighter
-/// than plaster or that it rejects whole-frame brightening. The fixed Vulkan run
-/// measures a 0.17 ratio, so this leaves margin for rasterisation variation.
+/// than plaster or that it rejects whole-frame brightening. [`MIRROR_AT`] has no
+/// direct light on it at all — see `crcbl_lantern::room::MIRROR_MISSES` — so what
+/// it reads is the probe environment the SSR march falls back to, while the
+/// plaster it is measured against is directly lit.
 ///
-/// **The comparand is what moved it, not the mirror.** It was 0.20 against a
-/// measured 0.24 until the shadow atlas was re-tiled to
-/// [`SHADOW_ATLAS_COLUMNS`](crcbl::shaders::mesh::SHADOW_ATLAS_COLUMNS) columns
-/// of [`SHADOW_TILE`](crcbl::shaders::mesh::SHADOW_TILE)-sided tiles on
-/// 2026-08-26. [`MIRROR_AT`] has no direct light on it at all — see
-/// `crcbl_lantern::room::MIRROR_MISSES` — so it read 20.3 before that change and
-/// 20.3 after it; the *plaster* it is measured against is directly lit and went
-/// from 83.3 to 119.9 as the coarser maps' larger world-space bias let more of
-/// the lamp reach it. The teeth are unchanged: with the probe rows zeroed this
-/// point reads at most 1.0, which
+/// **The probe updater is what moved it, not the mirror.** Lantern's rows were an
+/// authored CPU bake until the reflective shadow map began filling them every
+/// frame, and one sun-only bounce through the visibility gate is dimmer than that
+/// bake was, which had neither a gate nor an occluder in it: the ratio went from a
+/// measured 0.17 to 0.099 at [`EXTENT`] and 0.098 at [`REVIEW_EXTENT`] on radv,
+/// and to 0.096 and 0.095 on lavapipe. Half of the smallest of those. The teeth
+/// are unchanged: with the probe rows zeroed this point reads 0.0, which
 /// [`zero_probes_only_remove_the_ssr_and_rough_fallbacks`] pins, so the failure
-/// this guards lands an order of magnitude below the threshold either way.
+/// this guards lands the whole way to the floor rather than near the threshold.
 ///
 /// [`zero_probes_only_remove_the_ssr_and_rough_fallbacks`]: fn@zero_probes_only_remove_the_ssr_and_rough_fallbacks
-const MIRROR_FRACTION_OF_PLASTER: f32 = 0.14;
+const MIRROR_FRACTION_OF_PLASTER: f32 = 0.05;
 
 /// How much a fully screen-space hit may vary when the probe rows are zeroed.
 ///
@@ -248,32 +247,9 @@ const MIRROR_AT: Vec3 = room::MIRROR_MISSES;
 
 /// A point on the plaster back wall, clear of the panel and of the plinth.
 ///
-/// [`room::UNTINTED_PLASTER`] — the far half of the bounce claim below, and the
-/// module that owns it is where the proof that nothing but the bounce separates
-/// it from [`TINTED_AT`] lives.
+/// [`room::UNTINTED_PLASTER`] — the comparand the SSR-miss control above is
+/// measured against, and directly lit, which is what makes it one.
 const PLASTER_AT: Vec3 = room::UNTINTED_PLASTER;
-
-/// The same plaster **beside the coloured wall**, mirrored across the room's
-/// axis — [`room::TINTED_PLASTER`].
-const TINTED_AT: Vec3 = room::TINTED_PLASTER;
-
-/// How much redder, in red-to-blue, the plaster beside the coloured wall has to
-/// read than the same plaster across the room.
-///
-/// **The rendered symptom of the coloured wall's isolated CPU contribution.** A
-/// ratio of ratios, so it survives the tonemap and exposure the way every other
-/// claim here does. `bounce::the_environment_beside_the_coloured_wall_is_the_red_one`
-/// suppresses only `Face::Bounce` while preserving every neutral-surface bounce;
-/// that control establishes this ratio's coloured source. This assertion verifies
-/// the resulting rendered tint, not isolation by pixels alone.
-///
-/// Ten per cent, against a measured seventeen at [`EXTENT`] and nineteen at
-/// [`REVIEW_EXTENT`]. Not higher: the two blocks differ in one term of the
-/// shading added to a flat ambient, and the tonemap and the sRGB encode both
-/// compress that difference rather than preserving it — the same tint is half as
-/// large again in the linear irradiance the shader read, which is what
-/// `crcbl_lantern::bounce`'s own CPU claim measures.
-const BOUNCE_TINT: f32 = 1.10;
 
 /// Floor in the plinth's contact corner, where ambient occlusion is strongest.
 ///
@@ -669,7 +645,15 @@ fn build(
 ) -> Result<ForwardRenderer, crcbl::screenshot::OffscreenError> {
     let mut scene = room::room();
     if zero_probes {
+        // **The updater off and the rows zeroed**, which is what "zero probes"
+        // has meant since `crcbl_lantern::bounce` stopped baking them: the rows
+        // it ships are already zero, so filling them again is a control that
+        // controls nothing — the gather would overwrite both arms with the same
+        // light. `ProbeUpdate::Authored` is what leaves the table holding those
+        // zeroes, which is the same binding and the same lookup shape with only
+        // the radiance removed.
         scene.probes.probes.fill(GpuProbe::ZERO);
+        scene.probes.update = crcbl::render::ProbeUpdate::Authored;
     }
     let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
     // The **programmatic** layer of topic 39's resolution order, which is the
@@ -893,48 +877,7 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
          base-colour factor did not reach the fragment stage"
     );
 
-    // ---- 6. and the coloured wall tints the plaster beside it ---------------
-    //
-    // Two blocks of the back wall's inner face at one height, mirrored across
-    // the room's axis: same material row, same normal, same depth, neither in
-    // the sun and neither in the lamp's reach —
-    // `room::the_two_back_wall_samples_differ_in_the_bounce_and_in_nothing_else`
-    // is what proves each has matching direct-light terms with no GPU. The CPU
-    // bounce control suppresses only Face::Bounce while retaining neutral rows;
-    // this assertion observes that isolated source's rendered tint rather than
-    // claiming the two pixel blocks isolate it on their own.
-    let tinted = project(&camera, extent, TINTED_AT);
-    // The block has to stay off the coloured wall itself, or this measures the
-    // material row rather than its bounce — and how many pixels that is depends
-    // on the extent, so it is asked of the projection rather than written down.
-    let corner = project(
-        &camera,
-        extent,
-        Vec3::new(room::HALF_WIDTH, TINTED_AT.y, TINTED_AT.z),
-    );
-    assert!(
-        tinted.0 + block.0 < corner.0,
-        "the block beside the coloured wall reaches to {} and the wall's own corner is at \
-         {} — this block has the wall in it",
-        tinted.0 + block.0,
-        corner.0
-    );
-    let tinted_brightness = brightness(image, tinted, block);
-    assert!(
-        tinted_brightness > LIT_FLOOR,
-        "the plaster beside the coloured wall is at {tinted_brightness:.1}/255, so there is \
-         nothing to take a ratio of"
-    );
-    let tinted_redness = channel(image, tinted, block, 0) / channel(image, tinted, block, 2);
-    let plain_redness = channel(image, at_plaster, block, 0) / channel(image, at_plaster, block, 2);
-    assert!(
-        tinted_redness > plain_redness * BOUNCE_TINT,
-        "the plaster beside the coloured wall reads a red-to-blue of {tinted_redness:.3} and \
-         the same plaster across the room {plain_redness:.3} — the CPU control isolates the \
-         coloured wall's contribution, and its rendered tint is missing"
-    );
-
-    // ---- 7. the downlight lights a corner and the post stands in it ---------
+    // ---- 6. the downlight lights a corner and the post stands in it ---------
     //
     // Two blocks of the `-x` wall's inner face, both inside the cone, one with
     // the corner post between it and the fitting. Neither is in the sun — that

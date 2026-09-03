@@ -184,7 +184,9 @@ use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDe
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshUpload};
 use crate::probe::{ProbeTable, ProbeTableDesc};
-use crate::scene::{self, Geometry, InstanceDesc, SceneDesc};
+use crate::probe_gather::{ProbeGather, ProbeGatherDesc, RsmImages};
+use crate::rsm;
+use crate::scene::{self, Geometry, InstanceDesc, ProbeUpdate, SceneDesc};
 use crate::shadow::{self, Cascades};
 use crate::skinning::{SkinRange, SkinnedMesh, Skinning, SkinningError};
 use crate::sky_pass::SkyPass;
@@ -780,6 +782,19 @@ const SHADOW_CULLS: usize = shadow::CASCADES + shadow::LIGHT_SLOTS;
 /// would cost.
 const SHADOW_VIEWS: usize = shadow::CASCADES + shadow::LIGHT_SLOTS * shadow::POINT_FACES;
 
+/// Cascade 0's view, which is the one `docs/plan/50-irradiance-probes.md`'s
+/// reflective shadow map is drawn through.
+///
+/// **A cascade is its own view index**, which is what `add_shadow_pass`'s view
+/// list pushes; [`shadow_view`] numbers a *light slot's* faces and starts past
+/// [`shadow::CASCADES`], so it is not the function to reach for here.
+const CASCADE_ZERO_VIEW: usize = 0;
+
+const _: () = assert!(
+    CASCADE_ZERO_VIEW < shadow::CASCADES,
+    "cascade 0's view has to be one of the cascades' own, not a light slot's"
+);
+
 /// Which view is face `face` of light slot `slot`.
 const fn shadow_view(slot: usize, face: usize) -> usize {
     shadow::CASCADES + slot * shadow::POINT_FACES + face
@@ -860,11 +875,16 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 }
 
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
-/// atlas's, the depth prepass, the forward pass, the debug draw layer, the
-/// tonemap, the ground grid and the culling-statistics copy — plus
-/// [`Ssao::MAX_PASSES`], [`Ssr::PASSES`],
+/// atlas's, the reflective shadow map, the depth prepass, the forward pass, the
+/// debug draw layer, the tonemap, the ground grid and the culling-statistics
+/// copy — plus [`Ssao::MAX_PASSES`], [`Ssr::PASSES`], [`ProbeGather::PASSES`],
 /// [`Bloom::MAX_PASSES`], [`Exposure::PASSES`] and [`Upscale::PASSES`] beside
 /// them.
+///
+/// The reflective shadow map and [`ProbeGather::PASSES`] are counted on the
+/// ground grid's terms: both are off unless a scene's
+/// [`ProbeUpdate`](crate::scene::ProbeUpdate) asks for them, and a bound short
+/// of the frame that does ask would silently stop timing its last pass.
 ///
 /// Every other pass in the frame belongs to a [`DrawGen`] or to the
 /// [`LightGrid`], which is why this is the only count written here rather than
@@ -890,8 +910,9 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// either an extent or a console is known. The frame that lands on
 /// it is a large one with bloom switched on; every smaller frame records fewer,
 /// exactly as a frame with a free shadow slot does.
-const RENDER_PASSES: u32 = 6
+const RENDER_PASSES: u32 = 7
     + DebugDraw::MAX_PASSES
+    + ProbeGather::PASSES
     + Ssao::MAX_PASSES
     + ContactShadows::PASSES
     + Hiz::PASSES
@@ -1488,6 +1509,49 @@ pub struct ForwardRenderer {
     /// [`MeshModules::depth_clear_pipeline`], which is where the whole argument
     /// for it lives.
     shadow_clear_pipeline: GraphicsPipelineHandle,
+    /// `docs/plan/50-irradiance-probes.md`'s reflective shadow map — see
+    /// [`MeshModules::rsm_pipeline`]. Built on every scene and bound only by a
+    /// frame whose volume asked for [`ProbeUpdate::EveryFrame`].
+    rsm_pipeline: GraphicsPipelineHandle,
+    /// The compute pass that reads that map into the probe rows, and [`None`]
+    /// for every scene whose volume is [`ProbeUpdate::Authored`] — which is the
+    /// whole of what the default costs such a scene: no pipeline, no buffers, no
+    /// pass and no frame time.
+    probe_gather: Option<ProbeGather>,
+    /// Whether cascade 0's view block and cull parameters were written for the
+    /// frame being recorded, so the reflective shadow map can be drawn from
+    /// them.
+    ///
+    /// Not [`ForwardRenderer::shadow_group_redrawn`], which is a claim about the
+    /// *atlas*: a frame drawing without
+    /// [`RenderEffects::SHADOWS`](crate::effects::RenderEffects::SHADOWS) fits
+    /// cascade 0 for the map and writes no tile, and overloading that flag would
+    /// report a cascade as redrawn when nothing drew it.
+    rsm_cull_ready: bool,
+    /// What the scene said fills the probe rows.
+    ///
+    /// Read by [`ForwardRenderer::begin_frame`] — which keeps cascade 0 off the
+    /// shadow atlas's static-cache hold when the updater is on, because the map
+    /// is that cascade's own draws — and by the pass recording below.
+    probe_update: ProbeUpdate,
+    /// How far cascade 0 reached on the frame being recorded, which is the
+    /// radius of the sphere it was fitted to — `crate::rsm::texel_area` is what
+    /// reads it.
+    ///
+    /// Written by [`ForwardRenderer::begin_frame`] beside the cascade matrices
+    /// themselves, rather than recomputed at pass-record time: a frame that
+    /// scaled its gather by one cascade's footprint while drawing the map
+    /// through another's would be a bounce that is uniformly wrong, and nothing
+    /// in the frame could see it.
+    cascade_reach: f32,
+    /// The sun's colour premultiplied by its intensity, this frame.
+    ///
+    /// The reflective shadow map holds albedo rather than flux — `RsmOutput` in
+    /// `mesh.slang` argues why — so this is what the gather multiplies by, and it
+    /// is read off the same [`DirectionalLight`] the cascades were fitted to.
+    /// The sun's *direction* is not carried beside it: the gather needs none, on
+    /// `probe_gather.slang`'s own derivation.
+    sun_color: Vec3,
     /// One cull and draw-argument pass **per cascade and per shadowed light**,
     /// which is topic 18's "one cull dispatch per cascade against the same
     /// instance/geometry pools" with a shadowed light counting as a cascade does.
@@ -2031,6 +2095,10 @@ struct Rollback {
     materials: Option<MaterialTable>,
     /// The irradiance probe table, which owns one buffer.
     probes: Option<ProbeTable>,
+    /// `docs/plan/50-irradiance-probes.md`'s updater, which owns one pipeline,
+    /// one layout and a ring of blocks — and only exists for a scene whose
+    /// volume asked to be updated.
+    probe_gather: Option<ProbeGather>,
     /// The cull and draw-argument passes, which own two pipelines and a ring of
     /// buffers each — and which clean themselves up on their own failure path,
     /// so this only carries one that was built.
@@ -2155,6 +2223,10 @@ impl Rollback {
         }
         if let Some(draws) = self.draws {
             draws.destroy(device);
+        }
+        // Before the table, because its bind groups name that table's rows.
+        if let Some(gather) = self.probe_gather {
+            gather.destroy(device);
         }
         if let Some(table) = self.probes {
             table.destroy(device);
@@ -3322,6 +3394,23 @@ impl ForwardRenderer {
         let probe_buffers: Vec<BufferHandle> = (0..FRAMES_IN_FLIGHT)
             .map(|frame| probe_table.buffer(frame))
             .collect();
+        // `docs/plan/50-irradiance-probes.md`'s updater, built **only** for a
+        // description that asked for it. A volume left at
+        // [`ProbeUpdate::Authored`] gets no pipeline, no buffers and no pass, so
+        // the default really is the frame every scene drew before this landed.
+        let probe_gather = match scene.probes.update {
+            ProbeUpdate::Authored => None,
+            ProbeUpdate::EveryFrame => Some(ProbeGather::new(
+                device,
+                &ProbeGatherDesc {
+                    label: Some("forward probes"),
+                    volume: scene.probes.volume,
+                    probes: &probe_buffers,
+                },
+            )?),
+        };
+        rollback.probe_gather = probe_gather;
+        let probe_gather = rollback.probe_gather.take();
 
         // **Empty.** Every object in the scene arrives through
         // [`ForwardRenderer::add_instance`], including the demo scene's cube: a
@@ -4722,6 +4811,13 @@ impl ForwardRenderer {
         // attachment's load operation cannot express — see
         // [`MeshModules::depth_clear_pipeline`].
         let shadow_clear_result = modules.depth_clear_pipeline(device, mesh_pipeline_layout);
+        // And `docs/plan/50-irradiance-probes.md`'s reflective shadow map, built
+        // from the same modules and the same layout — see
+        // [`MeshModules::rsm_pipeline`]. Built on every scene rather than only
+        // on one whose probes ask to be updated: the modules are released a line
+        // below and a pipeline built later would need them back, which is a
+        // second shader compilation for a field a `ProbeGrid` decides.
+        let rsm_result = modules.rsm_pipeline(device, mesh_pipeline_layout);
         modules.destroy(device);
         let mesh_pipeline = mesh_pipeline?;
         rollback.pipelines.push(mesh_pipeline);
@@ -4729,6 +4825,8 @@ impl ForwardRenderer {
         rollback.pipelines.push(shadow_pipeline);
         let shadow_clear_pipeline = shadow_clear_result?;
         rollback.pipelines.push(shadow_clear_pipeline);
+        let rsm_pipeline = rsm_result?;
+        rollback.pipelines.push(rsm_pipeline);
 
         // --- the tonemap pass ---
         let tonemap_entries = [
@@ -5127,6 +5225,17 @@ impl ForwardRenderer {
             shadow_sampler,
             shadow_pipeline,
             shadow_clear_pipeline,
+            rsm_pipeline,
+            probe_gather,
+            probe_update: scene.probes.update,
+            // Overwritten by the first `begin_frame`, which is the only reader's
+            // only source. Zero is the honest placeholder: no cascade has been
+            // fitted yet, and a gather recorded against it would scale by zero
+            // rather than by a number nobody chose.
+            cascade_reach: 0.0,
+            // Nothing has been fitted before the first `begin_frame`.
+            rsm_cull_ready: false,
+            sun_color: Vec3::ZERO,
             shadow_draws: std::mem::take(&mut rollback.shadow_draws),
             shadow_uniforms,
             shadow_groups,
@@ -5858,6 +5967,18 @@ impl ForwardRenderer {
         // frame that culls against them and a fragment that samples through them
         // cannot disagree about where they are.
         let cascades = Cascades::new(camera, direction);
+        // **Cascade 0's own reach, kept for the reflective shadow map.** The map
+        // is that cascade's box, so how much world one of its texels covers is a
+        // function of this number — see `crate::rsm::texel_area`. Read here
+        // rather than at pass-record time for the reason the matrices are: a
+        // frame that scaled its gather against one fitting while it drew the map
+        // through another would be a bounce nothing in the frame could see was
+        // wrong.
+        self.cascade_reach = cascades.far[0];
+        // And the sun the map is drawn through, as the light table carries it.
+        // The map holds albedo rather than flux — `RsmOutput` in `mesh.slang`
+        // argues why — so this is what the gather multiplies by.
+        self.sun_color = light.color;
         let mut shadow_view_proj = [[0.0f32; 16]; shadow::CASCADES];
         for (matrix, cascade) in shadow_view_proj.iter_mut().zip(&cascades.view_proj) {
             *matrix = cascade.to_cols_array();
@@ -6470,7 +6591,23 @@ impl ForwardRenderer {
             // A skinned frame's vertices are written by a compute pass into the
             // pool, so nothing on the host can tell this group's maps from the
             // last frame's — see [`ForwardRenderer::frame_skins`].
-            if !relaid && !self.frame_skins && held_id == self.shadow_group_id[group] {
+            //
+            // **Cascade 0 is never held while the probe updater is on**, and
+            // that is a correctness rule rather than a cost: the reflective
+            // shadow map is drawn from that cascade's own draws, and the probe
+            // table is a ring of `FRAMES_IN_FLIGHT` buffers. A frame that
+            // skipped the gather would leave *this frame's* slot holding
+            // whatever was in it a turn of the ring ago — the authored rows on
+            // the second frame of all — so the room would light and unlight on
+            // alternate frames. Redrawing a held cascade costs its tile and
+            // draws exactly the texels it already held, so the atlas is
+            // unchanged; what it buys is a map for the gather to read.
+            let updater_needs_it = group == 0 && self.probe_update_runs();
+            if !relaid
+                && !self.frame_skins
+                && !updater_needs_it
+                && held_id == self.shadow_group_id[group]
+            {
                 continue;
             }
             wanted[group] = Some(shadow::Group {
@@ -6516,8 +6653,23 @@ impl ForwardRenderer {
         // A relaid atlas records its pass even with nothing to draw into it: the
         // clear *is* the frame's answer, and it is what a frame that switched
         // shadows off leaves behind for anything that samples the maps.
-        self.shadow_atlas_cached = !relaid && !redraw.iter().any(|drawn| *drawn);
+        // **A frame drawing without `RenderEffects::SHADOWS` still fits cascade
+        // 0 while the probe updater is on.** The reflective shadow map is that
+        // cascade's box and its draws, and it is not the atlas: nothing here
+        // puts cascade 0 into `views` or `regions`, so no tile is written and
+        // the switch goes on removing every shadow in the frame. What it buys is
+        // that switching shadows off does not also switch the *bounce* off,
+        // which would make the sun's direct term and its indirect one one
+        // toggle — and `apps/lantern`'s `every_effect_toggles_and_the_frame_says_so`
+        // is what says a floor already in full sun must not move when the
+        // shadows go.
+        let updater_drives_cascade_zero = !shadows && self.probe_update_runs();
+        self.shadow_atlas_cached =
+            !relaid && !redraw.iter().any(|drawn| *drawn) && !updater_drives_cascade_zero;
         if self.shadow_atlas_cached {
+            // Nothing was fitted, so there is nothing for the map to be drawn
+            // from — see [`ForwardRenderer::rsm_cull_ready`].
+            self.rsm_cull_ready = false;
             return Ok(());
         }
 
@@ -6558,7 +6710,72 @@ impl ForwardRenderer {
                 self.shadow_lod_params,
             )?;
         }
+        // Cascade 0's block and cull on a frame with shadows off, which the two
+        // loops above skipped because it is in neither list — see
+        // `updater_drives_cascade_zero`. Written straight rather than pushed
+        // into `views`/`culls`, because those are what the *atlas* is drawn from
+        // and this cascade is not being drawn into it.
+        if updater_drives_cascade_zero {
+            let view_proj = cascades.view_proj[0];
+            let centre = camera.eye + direction * cascades.far[0];
+            device.write_buffer(
+                // **Cascade 0's view is view 0.** `shadow_view` numbers a light
+                // slot's faces, which start past `shadow::CASCADES` — a cascade
+                // is its own index, which is what the loop above pushes.
+                self.shadow_uniforms[self.frame][CASCADE_ZERO_VIEW],
+                0,
+                &view_block(view_proj, centre).to_bytes(),
+            )?;
+            self.shadow_draws[0].begin_frame(
+                device,
+                self.frame,
+                &Frustum::from_view_projection(view_proj),
+                instance_count,
+                eye,
+                self.shadow_lod_params,
+            )?;
+        }
+        // Whether the map has a cascade to be drawn from at all: the updater is
+        // on, and cascade 0's block and cull were written this frame — by the
+        // loops above where shadows are on, or by the branch above where they
+        // are off.
+        self.rsm_cull_ready = self.probe_update_runs()
+            && (updater_drives_cascade_zero || (redraw[0] && regions[0].is_some()));
+        // `docs/plan/50-irradiance-probes.md`'s gather, parameterised from the
+        // cascade this frame just fitted and the sun it was fitted to. Written
+        // here rather than in the pass body: a pass body runs while the frame's
+        // commands are being recorded, and a host write to a buffer an earlier
+        // submission may still be reading is the hazard the whole ring exists to
+        // avoid.
+        //
+        // **Written whether or not the pass is recorded.** Which slot the gather
+        // reads is decided by the frame, and a block left holding an older
+        // frame's sun would be read the moment the pass came back.
+        if let Some(gather) = self.probe_gather.as_ref() {
+            gather.begin_frame(
+                device,
+                self.frame,
+                self.sun_color.to_array(),
+                rsm::texel_area(self.cascade_reach),
+            )?;
+        }
         Ok(())
+    }
+
+    /// Whether this frame records `docs/plan/50-irradiance-probes.md`'s two
+    /// updater passes.
+    ///
+    /// The scene's own answer and the console's together: the volume decides
+    /// whether the feature applies at all — see [`ProbeUpdate`], which is where
+    /// the reason it is not an effect bit lives — and `r_probe_bounce` is the
+    /// on/off pair a pricing run reads the two passes' cost off with everything
+    /// else held still.
+    ///
+    /// **It is not the whole condition.** The map is cascade 0's own draws, so
+    /// the pass is recorded only where that cascade is being drawn too — see
+    /// `add_shadow_pass`, which is where the rest of it is.
+    fn probe_update_runs(&self) -> bool {
+        self.probe_update == ProbeUpdate::EveryFrame && rsm::enabled()
     }
 
     /// Everything one group of the shadow atlas is a function of, as bytes to
@@ -7612,7 +7829,7 @@ impl ForwardRenderer {
             base_color: base_color_page,
             normal: normal_page,
         };
-        let (shadow_atlas, shadow_draws, shadow_tile_clears) = self.add_shadow_pass(
+        let (shadow_atlas, shadow_draws, shadow_tile_clears, rsm_images) = self.add_shadow_pass(
             graph,
             pool,
             &tile_selection,
@@ -7904,6 +8121,34 @@ impl ForwardRenderer {
         self.recorded_tile_clears = shadow_tile_clears;
         self.recorded_draws =
             shadow_draws + 2 * bucket_draws.calls.len() as u64 + self.direct_draws();
+
+        // --- the probe gather ---
+        //
+        // `docs/plan/50-irradiance-probes.md`'s updater, second half: the map
+        // the pass above drew, read into every row of the table. **Here rather
+        // than beside that pass** because the write is `&mut` — the group naming
+        // the map's transient views is cached across frames, and a group naming a
+        // transient cannot be built where the others are; see
+        // [`crate::ssao::cached_group`].
+        //
+        // It is before the depth prepass and the forward pass, which is the
+        // ordering that matters: both declare a read of these rows, so the graph
+        // barriers this write against them.
+        //
+        // Which map layer a row is weighed against is the row's own index, so
+        // the view is resolved exactly as the drawing passes resolve it — the
+        // placeholder until `capture_probe_visibility` has run, and off entirely
+        // where `r_probe_visibility` is off. A gather against the placeholder
+        // occludes nothing, which is the honest answer for a scene that never
+        // captured.
+        let probe_visibility_view = match &self.probe_visibility {
+            Some(captured) if crate::probe_visibility::enabled() => captured.view,
+            _ => self.probe_visibility_placeholder.view,
+        };
+        let frame = self.frame;
+        if let Some((gather, images)) = self.probe_gather.as_mut().zip(rsm_images) {
+            gather.add_pass(graph, frame, images, probe_visibility_view, probe_table);
+        }
 
         // --- the depth prepass ---
         //
@@ -8612,7 +8857,7 @@ impl ForwardRenderer {
         pool: &TransientPool,
         selection: &[BufferId],
         reads: ShadowReads,
-    ) -> (ImageId, u64, u64) {
+    ) -> (ImageId, u64, u64, Option<RsmImages>) {
         let shadows = self.frame_effects.contains(RenderEffects::SHADOWS);
         let (atlas_width, atlas_height) = shadow::atlas_extent();
         let atlas = graph.import_image(
@@ -8638,7 +8883,11 @@ impl ForwardRenderer {
         // handed it back that way — so the graph has no transition to make, and
         // the passes that sample it read the maps an earlier frame left there.
         if self.shadow_atlas_cached {
-            return (atlas, 0, 0);
+            // **And no reflective shadow map either**, which cannot happen while
+            // the updater is on: `begin_frame` keeps cascade 0 off the hold in
+            // exactly that case, so a frame reaching here has nothing to draw
+            // the map from. See `probe_update_runs`.
+            return (atlas, 0, 0, None);
         }
         let placeholder = graph.import_image(
             "shadow-placeholder",
@@ -8689,10 +8938,19 @@ impl ForwardRenderer {
         } else {
             Vec::new()
         };
+        // **Cascade 0's cull, on a frame that is not drawing it into the
+        // atlas.** `begin_frame` fits it whenever the updater is on, shadows or
+        // no shadows — see `rsm_cull_ready` — so this is the case where the map
+        // is drawn and the atlas keeps its clear. Chained **last**, because the
+        // occupied slots' entries are indexed by `cascades.len() + index` a few
+        // lines below and an insertion before them would hand a light's draws to
+        // the wrong viewport.
+        let rsm_only_cull = self.rsm_cull_ready && !cascades.contains(&0);
         let generated: Vec<(usize, GeneratedDraws)> = cascades
             .iter()
             .copied()
             .chain(occupied.iter().map(|(slot, _, _)| shadow_cull(*slot)))
+            .chain(rsm_only_cull.then_some(0))
             .map(|cull| {
                 (
                     cull,
@@ -8809,6 +9067,26 @@ impl ForwardRenderer {
         }
 
         let groups = self.shadow_groups[self.frame].clone();
+        // **What the reflective shadow map is drawn from**, read out here rather
+        // than reconstructed by the caller: cascade 0's bind group — whose
+        // uniform block already holds that cascade's `view_proj`, which is what
+        // "reusing cascade 0's matrix" means — and the `GeneratedDraws` its cull
+        // produced a moment ago. Both are `Copy`, so recording a second pass
+        // from them costs no second cull and no second matrix.
+        //
+        // [`None`] on a frame that is not drawing cascade 0 at all: shadows off,
+        // or a `r_shadow_cadence` past one that held the group anyway. The rows
+        // then keep what the last gather wrote — see [`ProbeUpdate::EveryFrame`],
+        // which says so.
+        let cascade_zero: Option<(BindGroupHandle, GeneratedDraws)> = self
+            .rsm_cull_ready
+            .then(|| {
+                generated
+                    .iter()
+                    .find(|(cull, _)| *cull == 0)
+                    .map(|(_, draws)| (groups[CASCADE_ZERO_VIEW], *draws))
+            })
+            .flatten();
         let bucket_draws = BucketDraws {
             pipeline: self.shadow_pipeline,
             layout: self.mesh_pipeline_layout,
@@ -8830,6 +9108,11 @@ impl ForwardRenderer {
                 })
                 .collect(),
         };
+        // Kept back for the reflective shadow map below, which is the same
+        // per-bucket call list under a different pipeline — the depth prepass
+        // plays exactly this trick with the camera's. Cloned before the pass
+        // body takes the original.
+        let bucket_calls = bucket_draws.clone();
 
         // Counted off the two loops the body below runs, before it takes them:
         // one call per bucket per occupied view. `ForwardRenderer::counters` is
@@ -8873,7 +9156,71 @@ impl ForwardRenderer {
                 bucket_draws.record(encoder, groups[*view], &generated[*cull].1);
             }
         });
-        (atlas, recorded, clears)
+
+        // --- the reflective shadow map ---
+        //
+        // `docs/plan/50-irradiance-probes.md`'s updater, first half, recorded
+        // here because this is where cascade 0's bind group and its
+        // already-generated draws are. **A pass of its own at its own extent**,
+        // and [`crate::rsm`]'s header argues why it cannot ride the atlas above:
+        // one colour attachment there spans the whole 3072² image for data only
+        // one 768² tile is read from, and it would give all fourteen light tiles
+        // a fragment stage.
+        //
+        // No viewport is set: the graph opens a pass with a full-target viewport
+        // and scissor already, and every attachment here is the map's own square.
+        let Some((cascade_group, cascade_draws)) = cascade_zero else {
+            return (atlas, recorded, clears, None);
+        };
+        let images = RsmImages {
+            albedo: graph.create_image("rsm-albedo", rsm::albedo_target()),
+            normal: graph.create_image("rsm-normal", rsm::normal_target()),
+            world: graph.create_image("rsm-world", rsm::world_target()),
+        };
+        // Its own depth, cleared and discarded: it resolves which surface a
+        // texel of the map holds and nothing reads it afterwards.
+        let rsm_depth = graph.create_image("rsm-depth", rsm::depth_target());
+        let mut rsm = graph
+            .add_render_pass("rsm")
+            // **Cleared, and the world target's clear is load-bearing**: `w` is
+            // the coverage flag `RsmOutput::world` writes, so a texel the pass
+            // draws nothing into reads back zero there and the gather skips it.
+            // Without the clear the world origin would stand in for every part
+            // of the cascade the geometry does not cover.
+            .clear_color(images.albedo, [0.0; 4])
+            .clear_color(images.normal, [0.0; 4])
+            .clear_color(images.world, [0.0; 4])
+            .clear_depth(rsm_depth)
+            // The same declarations the cascade above makes, for the same
+            // reason: every group of the mesh layout names these, and this pass
+            // binds one of those groups. Unlike the cascade, this one has a
+            // fragment stage — so the pages really are sampled here.
+            .read_image(placeholder)
+            .read_image(reads.occlusion_placeholder)
+            .read_image(reads.pages.base_color)
+            .read_image(reads.pages.normal)
+            .read_buffer(reads.probes);
+        if let Some(vertices) = reads.skinned {
+            rsm = rsm.read_buffer(vertices);
+        }
+        // Cascade 0's cluster-selection buffer, which the mesh path's stages
+        // write — declared on the atlas pass's terms, and only for the one view
+        // this pass draws.
+        if let Some(&buffer) = selection.get(CASCADE_ZERO_VIEW) {
+            rsm = rsm.use_buffer(buffer, ResourceState::ShaderReadWrite);
+        }
+        rsm = read_draw_sources(rsm, &cascade_draws, self.emit);
+        let rsm_draws = BucketDraws {
+            pipeline: self.rsm_pipeline,
+            ..bucket_calls.clone()
+        };
+        let rsm_recorded = rsm_draws.calls.len() as u64;
+        rsm.execute(move |ctx| {
+            let encoder = ctx.encoder();
+            rsm_draws.open(encoder);
+            rsm_draws.record(encoder, cascade_group, &cascade_draws);
+        });
+        (atlas, recorded + rsm_recorded, clears, Some(images))
     }
 
     /// Which lights hold the atlas's light tiles this frame, and where each
@@ -10503,6 +10850,7 @@ impl ForwardRenderer {
         device.destroy_bind_group_layout(self.tonemap_layout);
 
         device.destroy_graphics_pipeline(self.shadow_pipeline);
+        device.destroy_graphics_pipeline(self.rsm_pipeline);
         device.destroy_graphics_pipeline(self.shadow_clear_pipeline);
         for groups in self.shadow_groups {
             for group in groups {
@@ -10600,6 +10948,11 @@ impl ForwardRenderer {
         // them.
         self.lights.destroy(device);
         self.draws.destroy(device);
+        // Before the probe table, because its bind groups name that table's
+        // rows — the same ordering the light grid is under above.
+        if let Some(gather) = self.probe_gather {
+            gather.destroy(device);
+        }
         self.probes.destroy(device);
         self.materials.destroy(device);
         self.instances.destroy(device);
@@ -10660,6 +11013,14 @@ struct MeshModules {
     /// geometry is a primitive, not a cluster.
     depth_clear_vertex: &'static str,
     fragment: &'static str,
+    /// `rsmFragmentMain`, which [`MeshModules::rsm_pipeline`] takes in
+    /// [`MeshModules::fragment`]'s place: the same geometry stage, three targets
+    /// describing the surface rather than shading it.
+    ///
+    /// **The reason the shaded stage above is looked up by name.** A module with
+    /// two fragment entry points has no unambiguous one, which is what `entry`
+    /// answers `None` for.
+    rsm_fragment: &'static str,
     /// `mesh_cluster.slang`'s, on the mesh-shader path alone.
     cluster: Option<ClusterStages>,
 }
@@ -10712,6 +11073,23 @@ impl MeshModules {
         ColorTargetState::opaque(MOTION_FORMAT),
     ];
 
+    /// **Three targets again, and a different three.** `mesh.slang`'s
+    /// `RsmOutput` writes the surface's diffuse albedo, its world normal encoded
+    /// `n * 0.5 + 0.5`, and its world position with a coverage flag in `w` —
+    /// which is what `docs/plan/50-irradiance-probes.md`'s gather needs of a
+    /// texel and nothing more.
+    ///
+    /// Element order is `SV_Target` order and each format is the one the
+    /// matching description in [`crate::rsm`] creates: a pipeline built for a
+    /// format the attachment is not in is a validation error on WebGPU and a
+    /// silent reinterpretation elsewhere. `the_targets_carry_the_formats_the_shader_writes`
+    /// in that module is the other half of the pair.
+    const RSM_TARGETS: [ColorTargetState; 3] = [
+        ColorTargetState::opaque(Format::Rgba16Float),
+        ColorTargetState::opaque(Format::Rgba8Unorm),
+        ColorTargetState::opaque(Format::Rgba32Float),
+    ];
+
     /// Invocations per mesh workgroup, which is `mesh_cluster.slang`'s
     /// `[numthreads(THREADS, 1, 1)]` — and `THREADS` is
     /// `MAX_CLUSTER_VERTICES`, one lane per vertex a cluster can hold.
@@ -10750,7 +11128,14 @@ impl MeshModules {
         let vertex = named_entry(&MESH, "vertexMain", Stage::Vertex)?;
         let depth_vertex = named_entry(&MESH, "depthVertexMain", Stage::Vertex)?;
         let depth_clear_vertex = named_entry(&MESH, "depthClearVertexMain", Stage::Vertex)?;
-        let fragment = entry(&MESH, Stage::Fragment)?;
+        // **Named rather than looked up by stage, on the vertex entry points'
+        // terms exactly.** Since `docs/plan/50-irradiance-probes.md`'s updater
+        // landed, this module has *two* fragment entry points — the shaded one
+        // and `rsmFragmentMain` — and `entry` answers `None` for two matches, so
+        // a stage lookup here refuses the build outright with "exposes no
+        // unambiguous Fragment entry point".
+        let fragment = named_entry(&MESH, "fragmentMain", Stage::Fragment)?;
+        let rsm_fragment = named_entry(&MESH, "rsmFragmentMain", Stage::Fragment)?;
         // **Named rather than looked up by stage**, because the module has two
         // mesh entry points and a stage lookup would refuse an ambiguous one —
         // see `named_entry`. Which of the two this names is the whole of the
@@ -10846,6 +11231,7 @@ impl MeshModules {
             depth_vertex,
             depth_clear_vertex,
             fragment,
+            rsm_fragment,
             cluster,
         })
     }
@@ -11024,6 +11410,74 @@ impl MeshModules {
                 depth_stencil: Self::depth_stencil(),
                 multisample: MultisampleState::default(),
                 color_targets: &[],
+            }),
+        }
+    }
+
+    /// The reflective shadow map's pipeline: the colour pipeline's geometry
+    /// stage, `rsmFragmentMain` in the shaded stage's place, and
+    /// [`MeshModules::RSM_TARGETS`] in [`MeshModules::COLOR_TARGETS`]'s.
+    ///
+    /// `docs/plan/50-irradiance-probes.md`'s updater draws the sun's near
+    /// cascade a second time through this — see [`crate::rsm`], which owns the
+    /// attachments, and `ForwardRenderer::add_shadow_pass`, which records the
+    /// pass out of that cascade's own bind group and its own already-generated
+    /// draws.
+    ///
+    /// **[`MeshModules::vertex`] and not [`MeshModules::depth_vertex`]**, unlike
+    /// the cascade this rides beside: a fragment stage that writes a world
+    /// position, a normal and an albedo needs the varyings `depthVertexMain`
+    /// exists to leave unread. On the mesh path it is the very same geometry
+    /// stage the colour pass runs, for the reason `depth_pipeline` gives.
+    ///
+    /// **Its own depth, written**, rather than the colour pass's read-only
+    /// equality test: nothing has drawn this view's depth before it, and the
+    /// pass is what decides which surface a texel of the map holds.
+    fn rsm_pipeline(
+        &self,
+        device: &dyn Device,
+        layout: PipelineLayoutHandle,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        let primitive = Self::primitive(PolygonMode::Fill);
+        let fragment = Some(ShaderEntry {
+            module: self.mesh,
+            entry_point: self.rsm_fragment,
+        });
+        match self.cluster.as_ref() {
+            Some(cluster) => device.create_mesh_pipeline(&MeshPipelineDesc {
+                label: Some("rsm mesh cluster"),
+                layout,
+                task: cluster
+                    .task
+                    .zip(cluster.task_module)
+                    .map(|(entry_point, module)| ShaderEntry {
+                        module,
+                        entry_point,
+                    }),
+                task_workgroup_size: Self::TASK_WORKGROUP_SIZE,
+                mesh: ShaderEntry {
+                    module: cluster.mesh_module,
+                    entry_point: cluster.mesh,
+                },
+                mesh_workgroup_size: Self::MESH_WORKGROUP_SIZE,
+                fragment,
+                primitive,
+                depth_stencil: Self::depth_stencil(),
+                multisample: MultisampleState::default(),
+                color_targets: &Self::RSM_TARGETS,
+            }),
+            None => device.create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("rsm"),
+                layout,
+                vertex: ShaderEntry {
+                    module: self.mesh,
+                    entry_point: self.vertex,
+                },
+                fragment,
+                primitive,
+                depth_stencil: Self::depth_stencil(),
+                multisample: MultisampleState::default(),
+                color_targets: &Self::RSM_TARGETS,
             }),
         }
     }
@@ -15957,8 +16411,27 @@ mod tests {
 
         let (recorder, device, queue) = open();
         let device = device.as_ref();
+        // **A scene whose probes ask to be updated**, because the widest frame
+        // is the one with every pass in it and
+        // `docs/plan/50-irradiance-probes.md`'s two are recorded by a volume
+        // rather than by an effect bit — the ground grid's argument exactly. A
+        // renderer built on the demo's empty grid records neither, and the bound
+        // would then be checked against a frame that could not reach it.
+        let mut scene = scene::demo();
+        scene.capacities.probes = 1;
+        scene.probes = scene::ProbeGrid {
+            volume: crcbl_shaders::probe::ProbeVolume {
+                origin: [0.0; 3],
+                inv_spacing: [1.0; 3],
+                counts: [1, 1, 1],
+                levels: 1,
+            },
+            probes: vec![crcbl_shaders::probe::GpuProbe::ZERO],
+            update: ProbeUpdate::EveryFrame,
+        };
         let mut renderer =
-            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+            ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, &scene)
+                .expect("built");
         renderer
             .set_ground_grid(device, Some(GridStyle::default()))
             .expect("the null backend builds every pipeline");

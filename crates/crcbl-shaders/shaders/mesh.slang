@@ -5207,3 +5207,104 @@ FragmentOutput fragmentMain(VertexOutput input)
     output.motion = motion;
     return output;
 }
+
+/// What the reflective shadow map's three targets hold, one member per
+/// `SV_Target` — `crcbl_render::forward::MeshModules::RSM_TARGETS` is the
+/// matching `ColorTargetState` array and
+/// `docs/plan/50-irradiance-probes.md` is the design.
+///
+/// # Three targets, and the third is a position rather than a depth
+///
+/// `probe_gather.slang` needs each texel's world position to measure the
+/// direction and the distance from a probe to it. The seam has no plain-float
+/// read of a depth image — `crcbl_hal::SampleType::Depth` is a
+/// comparison-sampler slot — so reconstructing the position from the pass's own
+/// depth attachment is not something the gather can do. `probe_capture.slang`
+/// set the precedent and its header argues it at length: the fragment stage
+/// already holds the value, and writing it costs one target where recovering it
+/// costs an inverted projection and a second place the near and far planes have
+/// to agree.
+///
+/// # It is albedo here, and the sun is applied in the gather
+///
+/// Target 0 holds the surface's **diffuse albedo**, not its outgoing flux. The
+/// pass is drawn through one directional light's cascade, so the sun's colour is
+/// the same number at every texel and its cosine wants the surface normal —
+/// which target 1 already carries into the gather. Multiplying there costs one
+/// `mad` per sample and keeps this stage free of the light list and the froxel
+/// grid, neither of which is addressed for the sun's own view. The target is
+/// still `Rgba16Float` and not narrower, because an albedo is
+/// `input.color * material.base_color * texel` and the first two of those are
+/// unclamped floats.
+struct RsmOutput
+{
+    /// The diffuse albedo, into an `Rgba16Float` target. `a` is unread.
+    float4 albedo : SV_Target0;
+    /// The surface's world normal encoded `n * 0.5 + 0.5`, into an
+    /// `Rgba8Unorm` target — the normals view's mapping, and the one an eight-bit
+    /// target can carry a signed direction in.
+    ///
+    /// **The geometric normal and not the shading one.** A normal map perturbs
+    /// how a surface *scatters* at the receiver; what the gather wants of a
+    /// patch is which way the patch itself faces, because that is what its solid
+    /// angle at the probe and its own cosine against the sun are measured from.
+    float4 normal : SV_Target1;
+    /// The world position in `xyz`, into an `Rgba32Float` target, and `1.0` in
+    /// `w`.
+    ///
+    /// **`w` is the coverage flag.** The attachment is cleared to zero, so a
+    /// texel the pass drew nothing into reads back `w == 0` and the gather skips
+    /// it — otherwise the world origin would stand in for every part of the
+    /// cascade the geometry does not cover, and a probe there would gather a
+    /// patch nobody drew.
+    float4 world : SV_Target2;
+};
+
+/// The reflective shadow map's fragment stage: what a texel of the sun's near
+/// cascade reflects, where it is and which way it faces.
+///
+/// `docs/plan/50-irradiance-probes.md`'s raster updater, first half.
+/// `probe_gather.slang` is the second, and `RsmOutput` is the contract between
+/// them.
+///
+/// **A second fragment entry point in this file**, which is why
+/// `crcbl_render::forward::MeshModules` resolves the shaded one as
+/// `named_entry(&MESH, "fragmentMain", Stage::Fragment)`: a lookup by stage
+/// answers `None` for two matches, exactly as it already did for this file's
+/// three vertex entry points and `mesh_cluster.slang`'s two mesh ones.
+///
+/// **It shares `vertexMain` and `mesh_cluster.slang`'s mesh stage**, so the
+/// geometry it draws is the geometry the cascade above it drew, out of the same
+/// pool through the same transform. Nothing here reads a light, a shadow map,
+/// an occlusion channel or a probe row: the pass is a description of the
+/// surface, and every term that varies with the sun is applied by the gather.
+[shader("fragment")]
+RsmOutput rsmFragmentMain(VertexOutput input)
+{
+    // Renormalised for `fragmentMain`'s reason: interpolation denormalises, and
+    // a shortened normal here is a patch whose cosine and whose solid angle are
+    // both scaled by the same wrong factor.
+    float3 vertex_normal = normalize(input.world_normal);
+
+    // The material row and the sampling UV, resolved exactly as `fragmentMain`
+    // resolves them — including the physical-tiling branch, so a surface whose
+    // texture repeats by world extent reflects the texels it actually wears.
+    GpuMaterial material = materials[input.material];
+    float2 uv = input.uv;
+    if (material.tiling == TILING_PHYSICAL)
+    {
+        uv = physical_tile_uv(input.world_position, vertex_normal, material.tile_metres);
+    }
+    float4 texel = base_color_textures.Sample(
+        base_color_sampler, float3(uv, float(base_color_layer(material))));
+    float4 albedo = input.color * material.base_color * texel;
+
+    RsmOutput written;
+    // **A conductor bounces no diffuse light**, which is `fragmentMain`'s
+    // `diffuse_albedo` and the same one interpolation: what a metal does with
+    // light is reflect it into a lobe no probe row can represent.
+    written.albedo = float4(albedo.rgb * (1.0 - saturate(material.metallic)), 1.0);
+    written.normal = float4(vertex_normal * 0.5 + 0.5, 1.0);
+    written.world = float4(input.world_position, 1.0);
+    return written;
+}

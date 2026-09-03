@@ -169,9 +169,10 @@ What it did **not** build, and what each would take:
 - **Recapture.** `capture_probe_visibility` is still the load-time call; the
   slab a scroll would expose is not captured, and a probe whose static geometry
   changed is not re-captured on demand. Neither can exist before scrolling does.
-- **The updater.** `apps/lantern`'s `bounce` and `apps/shard`'s `light::probes`
-  still bake their rows at load, both now declaring `levels: 1`, and the RSM
-  gather that replaces them is a later slice.
+- **A punctual producer.** The updater that landed 2026-09-04 gathers the sun's
+  near cascade and nothing else, so a lamp's bounce is not in the rows — which
+  is what `apps/lantern`'s coloured wall and `apps/shard`'s torches lost when
+  their bakes went. `docs/backlog.md` carries what that cost, measured.
 
 **Captured on load, then on scroll — never baked.** The visibility maps for the
 whole volume are captured when a scene loads — that much runs, and since the
@@ -203,9 +204,12 @@ the same on every tier, and the two tiers differ in exactly one stage:
 ```
 
 **The diagram is the design, not the tree.** Of the placement box only the
-clipmap exists, and of the producers only the raster capture's distance half.
-Audited 2026-09-03 — what is built and what is not is the list above, and this
-is the one the diagram used to state as shipped:
+clipmap exists. The raster producer is whole as of 2026-09-04 — the capture's
+distance half, and the RSM gather that fills the radiance half beside it,
+`crcbl_render::rsm` and `crcbl_render::probe_gather` — with the standing limit
+that it gathers the sun's near cascade and no punctual light. The RT producer is
+unbuilt and waits on foundation (c). Audited 2026-09-03, and this is the one the
+diagram used to state as shipped:
 
 - **Relocation does not exist**, and nothing it needs does either. No code
   counts backfaces per probe and none moves or disables one, because the capture

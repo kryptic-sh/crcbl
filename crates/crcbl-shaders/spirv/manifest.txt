@@ -223,19 +223,20 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 886d25230a85b4a71cef00cc39d579ae8dad80be3844fb84862eca71dcb29990
+source-sha256 = 22384fbc098aefe0db62fe1f30bba68779377f4677a2a57940756b956d1ea2ad
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = 130a9051d7af29a919c8754d5c36c5fe255e7cc5709983bf0c4018ab2be15669
+spirv-sha256 = 4a776927a97dc724d5b9775c5dad59a4e8e7749d626afe3c219997d971355d57
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 5f46dc263e4de64fad029021584d35264bc0bf56a9a80074c0c4719610e522a9
+wgsl-sha256 = 0f2097a38dfa2d4baa39b271fdfa6b72d877fad8617919f7deaa82c6c20b8b32
 msl = msl/mesh.metal
-msl-sha256 = 03e78ac0ee1e636f11e5b0970a4e4f7925b70cf7da827afea7fcdef92ee383e7
+msl-sha256 = f85096181f35f3f54367ff3b21589a4481119fc24b2a94ef40c422c4065007e0
 dxil = vertexMain:dxil/mesh.vertex.dxil:33808e9c9ea5a13876375d12deec3c858103335a0546d05d840c3b7ffc0ce458
 dxil = depthVertexMain:dxil/mesh.depth_vertex.dxil:d5bfc1868ad94ff42b7d1b013553b24a1ed89e992cad0eb9ef44bc98d4a0988a
 dxil = depthClearVertexMain:dxil/mesh.depth_clear_vertex.dxil:e2007f43be9438f2c6d5022cb8fb44f825ab39426569a45117fd8c1494ab53a4
 dxil = fragmentMain:dxil/mesh.fragment.dxil:705bd20ce2c09748c5248263c1a37ce755f1a996a25465d7679ec02c8fbbf110
-entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:vertex, fragmentMain:fragment
+dxil = rsmFragmentMain:dxil/mesh.rsm_fragment.dxil:f89ccef154f78f3b1020618c2d39114c4025bb0e7850be27343704dfb58ceb30
+entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:vertex, fragmentMain:fragment, rsmFragmentMain:fragment
 
 [mesh_cluster]
 source = shaders/mesh_cluster.slang
@@ -283,6 +284,19 @@ msl-sha256 = 6886fd40c9ff1694bfd0504d21da2d6925e98298075baa53be2f6dc414978829
 dxil = vertexMain:dxil/probe_capture.vertex.dxil:882b5609d3a403b8a5b9d51c08dc7f917a3fec2aaf74fca9897f73df501a9a3d
 dxil = fragmentMain:dxil/probe_capture.fragment.dxil:786eb8331b2eea0c306936d7d3de88cc51c2e6cf9fa650626dc02a20c8bb2083
 entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[probe_gather]
+source = shaders/probe_gather.slang
+source-sha256 = 2212abbe5455ea627e89c1a7e1a88bc06dcb9968984937b21aad98ca864f172e
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/probe_gather.spv
+spirv-sha256 = 8015b47e193c1b5b86d55cbe5fa3cb332dcc59da13a901d754f37157bd440c18
+wgsl = wgsl/probe_gather.wgsl
+wgsl-sha256 = c017a9c2d11f2a60fbb6ceefca4cbad7b52afdf6dc6f336b81b7d72bd3c4cb43
+msl = msl/probe_gather.metal
+msl-sha256 = 72522a67a2c7ce93c73adb55b26b45ff04465893951b5c1e34c4e5a29f308878
+dxil = computeMain:dxil/probe_gather.compute.dxil:4de757a73c5a8db9cbf4f8d94da1efd2cac9155ea11f50ebf34517c64c5d7a48
+entry-points = computeMain:glcompute
 
 [probe_octahedral]
 source = shaders/probe_octahedral.slang

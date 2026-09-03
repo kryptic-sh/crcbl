@@ -90,8 +90,8 @@ use crate::render::scene::{
 };
 use crate::render::{
     Camera, DirectionalLight, EffectOverride, EffectRequest, FontAtlas, ForwardRenderer,
-    FrameCounters, GraphError, InstanceDesc, Projection, RenderEffects, RenderGraph, SampleMode,
-    SheetDesc, SheetId, Sprite, SpriteRenderer, TransientPool, UiRenderer,
+    FrameCounters, GraphError, InstanceDesc, ProbeUpdate, Projection, RenderEffects, RenderGraph,
+    SampleMode, SheetDesc, SheetId, Sprite, SpriteRenderer, TransientPool, UiRenderer,
 };
 use crate::ui::draw_list::DrawList;
 
@@ -1559,6 +1559,7 @@ pub fn probe_grid() -> crate::render::scene::ProbeGrid {
     let red = [PROBE_RADIANCE, 0.0, 0.0];
     let blue = [0.0, 0.0, PROBE_RADIANCE];
     crate::render::scene::ProbeGrid {
+        update: ProbeUpdate::Authored,
         volume: crate::shaders::probe::ProbeVolume {
             // The probes are close together at the room's centre. Everything
             // beyond their interval clamps to an endpoint, producing broad flat
@@ -1692,16 +1693,29 @@ pub fn probe_leak_grid() -> crate::render::scene::ProbeGrid {
         lit.accumulate(direction, [LEAK_RADIANCE; 3], solid_angle);
     }
     crate::render::scene::ProbeGrid {
-        volume: crate::shaders::probe::ProbeVolume {
-            origin: [-LEAK_PROBE_REACH, 0.5 * LEAK_ROOM_HEIGHT, 0.0],
-            inv_spacing: [1.0 / (2.0 * LEAK_PROBE_REACH), 0.0, 0.0],
-            counts: [2, 1, 1],
-            // One level, on `probe_grid`'s terms: the claim this fixture makes
-            // is about a wall, and a second level would put a second read
-            // between the wall and the band.
-            levels: 1,
-        },
+        update: ProbeUpdate::Authored,
+        volume: leak_volume(),
         probes: vec![crate::shaders::probe::GpuProbe::ZERO, lit],
+    }
+}
+
+/// The volume both divider fixtures place their two probes in: one either side
+/// of the wall, at half the room's height.
+///
+/// One function because the two fixtures are the same room and the same wall —
+/// [`probe_leak_grid`] authors its rows and [`probe_bounce_grid`] has the
+/// updater fill them — so a probe that moved in one and not the other would put
+/// the wall in a different place in each.
+///
+/// One level, on `probe_grid`'s terms: the claim both fixtures make is about a
+/// wall, and a second level would put a second read between the wall and the
+/// band.
+fn leak_volume() -> crate::shaders::probe::ProbeVolume {
+    crate::shaders::probe::ProbeVolume {
+        origin: [-LEAK_PROBE_REACH, 0.5 * LEAK_ROOM_HEIGHT, 0.0],
+        inv_spacing: [1.0 / (2.0 * LEAK_PROBE_REACH), 0.0, 0.0],
+        counts: [2, 1, 1],
+        levels: 1,
     }
 }
 
@@ -1853,6 +1867,218 @@ pub fn probe_leak_reflection_forward(
 }
 
 // ---------------------------------------------------------------------------
+// The updater fixture
+// ---------------------------------------------------------------------------
+
+/// How thick the panel [`probe_bounce_forward`] stands against its `+X` wall
+/// is.
+///
+/// [`BLOOM_EMITTER_THICKNESS`]'s reasoning stood on end: thin enough that its
+/// own ambient occlusion darkens no pixel a band is measured in, thick enough
+/// that the depth buffer resolves it against the wall behind it rather than
+/// z-fighting with it.
+const BOUNCE_PANEL_THICKNESS: f32 = 0.02;
+
+/// How far out from the room's centre the panel stands, in world units.
+///
+/// Against the `+X` wall — half of [`LEAK_ROOM_WIDTH`], less half the panel's
+/// own thickness, so the two surfaces touch and neither pokes through the other.
+const BOUNCE_PANEL_AT: f32 = 0.5 * LEAK_ROOM_WIDTH - 0.5 * BOUNCE_PANEL_THICKNESS;
+
+/// The base-colour factor the panel reflects the sun with.
+///
+/// **Red and above one**, on [`BLOOM_EMITTER_GAIN`]'s terms: `base_color` is a
+/// linear multiplier into the vertex albedo, so this is how the fixture gets one
+/// surface whose bounce is unmistakably its own without inventing an emissive
+/// term. Red because the measurement is a channel difference — the sun is white
+/// and its direct term lands in all three channels together, so a red channel
+/// that moved and a blue one that did not is the panel's flux and nothing else.
+const BOUNCE_PANEL_GAIN: f32 = 40.0;
+
+/// The base colour the divider is drawn with in this fixture.
+///
+/// **Nearly black, and that is what makes the measurement a difference of
+/// one thing.** The sun comes from `-X`, so the divider's own `-X` face is lit
+/// by it — and a white face there is a second thing the arms differ by, since
+/// taking the divider away takes that bounce with it. At this albedo the divider
+/// occludes and reflects almost nothing, so what the `-X` probe loses to it is
+/// the panel across the room and little else.
+const BOUNCE_DIVIDER_ALBEDO: f32 = 0.02;
+
+/// The panel: the demo cube flattened into a slab and stood against the `+X`
+/// wall, the room's full height and depth.
+///
+/// **Vertical, and that is the whole fixture.** The surface a probe gathers
+/// lights the surfaces its own flux travels *towards*, so a red patch on the
+/// floor would light the ceiling and leave the floor — where the bands are
+/// measured, and where the camera looks — exactly as it found it. A wall lit by
+/// a low sun throws its bounce sideways and down, onto the floor either side of
+/// the divider.
+fn bounce_panel() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(
+        BOUNCE_PANEL_AT,
+        0.5 * LEAK_ROOM_HEIGHT,
+        0.0,
+    )) * glam::Mat4::from_scale(glam::Vec3::new(
+        BOUNCE_PANEL_THICKNESS,
+        LEAK_ROOM_HEIGHT,
+        LEAK_ROOM_DEPTH,
+    ))
+}
+
+/// The sun [`probe_bounce_forward`] runs under: **low, from `-X`, and the only
+/// light in the room**.
+///
+/// * **From `-X` at forty-five degrees** — it has to reach the panel's inner
+///   face, which a sun straight overhead never does, and it has to leave the
+///   `-X` band where the measurement is taken lit identically in both arms. Both
+///   follow from the direction: the divider's shadow falls on its `+X` side,
+///   away from that band, and the panel stands in the light rather than in that
+///   shadow.
+/// * **No ambient at all** — the flat term is the same in both arms, so it
+///   cannot fake the difference, but it is white and it dilutes the channel
+///   difference the measurement reads. Zero leaves the direct sun and the
+///   updater's bounce as the only two things in a pixel.
+fn bounce_sun() -> crcbl_render::DirectionalLight {
+    crcbl_render::DirectionalLight {
+        direction: glam::Vec3::new(-1.0, 1.0, 0.0).normalize(),
+        ..dimmed_sun(0.30, 0.0)
+    }
+}
+
+/// How far out from the `-X` wall [`probe_bounce_forward`]'s camera stands, in
+/// world units.
+///
+/// Close enough that the wall's inner face fills the frame's middle — the
+/// measurement is a block at the centre and nothing else, so there is no
+/// projection to invert — and far enough out that the near plane is nowhere near
+/// it and the `-X` probe stands between the two rather than behind the eye.
+const BOUNCE_CAMERA_OUT: f32 = 2.2;
+
+/// The camera it is drawn with: level, from inside the `-X` half, looking
+/// straight at that wall's inner face.
+///
+/// **Not the top-down camera every other probe fixture uses**, and the reason is
+/// the measurement. A surface is lit by the flux arriving *at* its own normal,
+/// so the floor — which is what a top-down camera sees — reads the hemisphere
+/// above it, where a room's bounce has already been counted into the probe's
+/// downward lobe and cancels. The `-X` wall's inner face looks the way the
+/// panel's flux travels, and the sun never touches it: with the light at `-X`
+/// and above, that face is turned away from it. So every level in the block this
+/// fixture measures is the probe term.
+fn bounce_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(
+            BOUNCE_CAMERA_OUT - 0.5 * LEAK_ROOM_WIDTH,
+            0.5 * LEAK_ROOM_HEIGHT,
+            0.0,
+        ),
+        target: glam::Vec3::new(-0.5 * LEAK_ROOM_WIDTH, 0.5 * LEAK_ROOM_HEIGHT, 0.0),
+        up: glam::Vec3::Y,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// **The updater fixture's volume**: [`leak_volume`] with every row at zero and
+/// [`ProbeUpdate::EveryFrame`] on it.
+///
+/// The rows are zero because they are the updater's to fill — an authored row
+/// here would be a value the frame could show whether the reflective shadow map
+/// ran or not. Public so `tests/render_e2e.rs` can reserve the volume's own
+/// capacity and read its count rather than writing a second copy of either.
+#[must_use]
+pub fn probe_bounce_grid() -> crate::render::scene::ProbeGrid {
+    let volume = leak_volume();
+    let probes = vec![crate::shaders::probe::GpuProbe::ZERO; volume.total() as usize];
+    crate::render::scene::ProbeGrid {
+        update: ProbeUpdate::EveryFrame,
+        volume,
+        probes,
+    }
+}
+
+/// **The updater fixture**: a sunlit red slab on one side of a divider, two
+/// probes the reflective shadow map fills every frame, and a wall between them
+/// that is there or is not.
+///
+/// `docs/plan/50-irradiance-probes.md`'s raster updater, measured the way
+/// [`probe_leak_forward`] measures the authored rows: one scene against itself
+/// with the divider taken away, because nothing in a single frame says whether a
+/// probe gathered flux it should not have.
+///
+/// **What separates the two arms is one channel.** The sun is white, points
+/// straight down and casts no shadow from a vertical wall, so the direct term at
+/// a band on the `-X` floor is the same in both arms. The only red in the room
+/// is the slab's, it is on the `+X` floor, and the `-X` probe can gather it only
+/// when nothing stands between them. So the `-X` band's red channel rises when
+/// the wall goes and its blue channel does not — which is the shape no uniform
+/// change can fake, and the shape a gather that ignored
+/// `probe_chebyshev` would destroy by lighting both arms alike.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built or the capture cannot
+/// be uploaded.
+pub fn probe_bounce_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    wall: bool,
+) -> Result<ForwardScene, OffscreenError> {
+    let probes = probe_bounce_grid();
+    let mut scene = crate::render::scene::demo();
+    scene.capacities.probes = probes.volume.total();
+    scene.probes = probes;
+    // Appended rather than edited in place, on `probe_leak_reflection_forward`'s
+    // terms: every other row keeps the value every other fixture draws with.
+    let panel = scene.materials.len();
+    scene.materials.push(crate::shaders::mesh::GpuMaterial {
+        base_color: [BOUNCE_PANEL_GAIN, 0.0, 0.0, 1.0],
+        ..crate::shaders::mesh::GpuMaterial::UNTINTED
+    });
+    let divider = scene.materials.len();
+    scene.materials.push(crate::shaders::mesh::GpuMaterial {
+        base_color: [
+            BOUNCE_DIVIDER_ALBEDO,
+            BOUNCE_DIVIDER_ALBEDO,
+            BOUNCE_DIVIDER_ALBEDO,
+            1.0,
+        ],
+        ..crate::shaders::mesh::GpuMaterial::UNTINTED
+    });
+    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
+    // On `probe_leak_forward`'s terms: the measured pixels are the direct sun
+    // and the diffuse probe term, and a rough surface's reflection would put
+    // specular into them.
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(crcbl_render::RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    // No sky, for the same reason `bounce_sun` carries no ambient: the sky is a
+    // second environment in the pixel, and this fixture is about the first one.
+    renderer.set_sky(crcbl_render::Sky::NONE);
+    place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, leak_room());
+    place(&mut renderer, DEMO_CUBE, panel, bounce_panel());
+    if wall {
+        place(&mut renderer, DEMO_CUBE, divider, leak_wall());
+    }
+    // **After the geometry and before the frame**, which is the whole shape of
+    // the capture — and here it is also what the gather reads: the two arms
+    // differ in the visibility this call records, and the updater weighs every
+    // map texel by it.
+    renderer.capture_probe_visibility(device, queue)?;
+    Ok(ForwardScene {
+        camera: bounce_camera(),
+        sun: bounce_sun(),
+        renderer: Box::new(renderer),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // The clipmap fixture
 // ---------------------------------------------------------------------------
 
@@ -1939,7 +2165,11 @@ pub fn probe_clipmap_grid() -> crate::render::scene::ProbeGrid {
             probes.push(constant(radiance));
         }
     }
-    crate::render::scene::ProbeGrid { volume, probes }
+    crate::render::scene::ProbeGrid {
+        volume,
+        probes,
+        update: ProbeUpdate::Authored,
+    }
 }
 
 /// **The clipmap fixture**: [`Scene::Probes`]' room and camera over a volume of

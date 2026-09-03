@@ -171,12 +171,22 @@ pub const TRANSFER_L1: f32 = 2.0 * std::f32::consts::PI / 3.0;
 /// `Â₀ · Y₀₀²`, and `Y₀₀ = ½√(1/π)` is constant over the sphere: projecting
 /// onto the band and evaluating the band both carry a factor of `Y₀₀`, so what
 /// survives into a stored *irradiance* coefficient is their product.
-const PROJECT_L0: f32 = TRANSFER_L0 / (4.0 * std::f32::consts::PI);
+///
+/// **Public because a shader has to declare it.**
+/// `docs/plan/50-irradiance-probes.md`'s updater does the projection on the
+/// device, so `shaders/probe_gather.slang` carries a copy of this number and
+/// [`crate::probe_gather`]'s
+/// `the_gather_projects_a_sample_the_way_this_module_does` is what holds the two
+/// together. Nothing else in the tree knows what the right answer was.
+pub const PROJECT_L0: f32 = TRANSFER_L0 / (4.0 * std::f32::consts::PI);
 
 /// The same for the linear band: `Â₁ · (Y₁₁/x)²`, with
 /// `Y₁₁ = ½√(3/π) · x` and its two siblings carrying the same normalisation on
 /// `y` and `z`.
-const PROJECT_L1: f32 = 3.0 * TRANSFER_L1 / (4.0 * std::f32::consts::PI);
+///
+/// Public on [`PROJECT_L0`]'s terms exactly, and pinned to the shader by the
+/// same test.
+pub const PROJECT_L1: f32 = 3.0 * TRANSFER_L1 / (4.0 * std::f32::consts::PI);
 
 /// One probe's irradiance, matching `struct GpuProbe` in `shaders/mesh.slang`.
 ///

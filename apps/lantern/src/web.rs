@@ -23,7 +23,7 @@
 //! **The browser draws the room through [`crcbl::hal::LightingPath::Rasterised`]
 //! by construction.** WebGPU exposes no ray query, so the selector cannot
 //! resolve to anything else here — shadow maps, screen-space reflections and the
-//! probe volume [`crate::bounce`] bakes are the whole of the lighting, and the
+//! probe volume [`crate::bounce`] places are the whole of the lighting, and the
 //! debug panel's `unbuilt` section says so on screen. That is why this sample is
 //! worth publishing: it is the one place the rasterised path can be looked at
 //! without building anything.

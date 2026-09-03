@@ -612,16 +612,23 @@ mod tests {
         );
     }
 
-    /// The two shaders that weigh a probe against this map, and the file each
+    /// The three shaders that weigh a probe against this map, and the file each
     /// one is.
     ///
-    /// `mesh.slang` is the diffuse gather and `ssr.slang` the reflection's probe
-    /// fallback; both read the same eight rows of the same table, so both have
-    /// to weigh them by the same bound or the specular term leaks through a wall
-    /// the diffuse term does not.
-    const SOURCES: [(&str, &str); 2] = [
+    /// `mesh.slang` is the diffuse gather, `ssr.slang` the reflection's probe
+    /// fallback and `probe_gather.slang` the reflective-shadow-map updater that
+    /// fills the rows both of them read. The first two read the same eight rows
+    /// of the same table, so both have to weigh them by the same bound or the
+    /// specular term leaks through a wall the diffuse term does not; the third
+    /// weighs the *samples it writes into* those rows by that same bound, so a
+    /// drift there leaks light into the table before either reader sees it.
+    const SOURCES: [(&str, &str); 3] = [
         ("mesh.slang", include_str!("../shaders/mesh.slang")),
         ("ssr.slang", include_str!("../shaders/ssr.slang")),
+        (
+            "probe_gather.slang",
+            include_str!("../shaders/probe_gather.slang"),
+        ),
     ];
 
     /// The body of the function named `signature` in `source`, brace to brace.
@@ -709,30 +716,68 @@ mod tests {
     /// comment can say what that file uses them for; they do.
     #[test]
     fn the_shaders_weigh_a_probe_the_way_this_module_does() {
-        for signature in [
-            "float sign_not_zero(float value)",
-            "float2 oct_encode(float3 direction)",
-            "float2 probe_moments(uint index, float3 direction)",
-            "float probe_chebyshev(uint index, float3 probe_position, float3 world_position, \
-             float3 normal)",
-            "float probe_weight(uint index, float3 probe_position, float3 world_position, \
-             float3 normal)",
+        // **Which files carry which body.** `probe_weight` is the bound under
+        // `OCCLUDED_WEIGHT`'s floor and belongs to the two *readers*: the
+        // updater gathers without a divisor and must not pay the floor — see
+        // `probe_chebyshev`'s own doc comment in `mesh.slang` — so a copy of it
+        // in `probe_gather.slang` would be the leak this split exists to
+        // prevent. Everything else is held across all three.
+        let readers = |name: &str| name != "probe_gather.slang";
+        for (signature, carried_by) in [
+            (
+                "float sign_not_zero(float value)",
+                &(|_: &str| true) as &dyn Fn(&str) -> bool,
+            ),
+            ("float2 oct_encode(float3 direction)", &|_| true),
+            (
+                "float2 probe_moments(uint index, float3 direction)",
+                &|_| true,
+            ),
+            (
+                "float probe_chebyshev(uint index, float3 probe_position, float3 world_position, \
+                 float3 normal)",
+                &|_| true,
+            ),
+            (
+                "float probe_weight(uint index, float3 probe_position, float3 world_position, \
+                 float3 normal)",
+                &readers,
+            ),
         ] {
             let copies: Vec<(&str, String)> = SOURCES
                 .into_iter()
+                .filter(|(name, _)| carried_by(name))
                 .map(|(name, source)| {
                     let body = body_of(source, signature)
                         .unwrap_or_else(|| panic!("{name} does not declare `{signature}`"));
                     (name, body)
                 })
                 .collect();
-            assert_eq!(
-                copies[0].1, copies[1].1,
-                "`{signature}` differs between {} and {}; the visibility weight is copied \
-                 verbatim and one copy has drifted",
-                copies[0].0, copies[1].0
+            assert!(
+                copies.len() >= 2,
+                "`{signature}` is carried by fewer than two files, so nothing holds it to \
+                 anything"
             );
+            for copy in &copies[1..] {
+                assert_eq!(
+                    copies[0].1, copy.1,
+                    "`{signature}` differs between {} and {}; the visibility weight is copied \
+                     verbatim and one copy has drifted",
+                    copies[0].0, copy.0
+                );
+            }
         }
+        // And the file that must *not* carry the floor really does not, which is
+        // the half a comparison between the copies that exist cannot see.
+        assert!(
+            body_of(
+                include_str!("../shaders/probe_gather.slang"),
+                "float probe_weight(uint index",
+            )
+            .is_none(),
+            "probe_gather.slang declares `probe_weight`; a gather with no divisor must not \
+             floor a wall-hidden sample at OCCLUDED_WEIGHT"
+        );
     }
 
     /// The bound's two ends and its shape between them, against the arithmetic

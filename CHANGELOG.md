@@ -33,6 +33,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   With nothing able to reach the permission it grants, `conv::texture_usage`
   stops asking for it.
 
+### Added
+
+- **The sun's first bounce fills a probe volume, every frame.**
+  `ProbeGrid::update` is new and defaults to `ProbeUpdate::Authored`, which is
+  the behaviour every existing scene had: the rows a scene hands over are the
+  rows the frame reads. Set it to `ProbeUpdate::EveryFrame` and the renderer
+  records two more passes — `rsm`, a reflective shadow map drawn through cascade
+  zero's own matrix and its already-generated draws, and `probe-gather`, one
+  compute workgroup per probe striding the whole map — and the volume's rows
+  become the sun's first bounce off the scene, recomputed from scratch each
+  frame with no temporal history. Each sample is weighed by the probe's own
+  visibility map, so a surface a probe cannot see lends it nothing.
+
+  What a consumer has to do to get it: build the volume as before (origin,
+  spacing, counts, one level), leave the rows at `GpuProbe::ZERO`, and set
+  `update: ProbeUpdate::EveryFrame`. `r_probe_bounce` is the console pair that
+  turns the two passes off for a measurement; the volume, not the console, is
+  what decides whether the feature applies at all. `apps/lantern` and
+  `apps/shard` now light their rooms this way and their hand-written CPU bounce
+  bakes are gone.
+
 ### Fixed
 
 - **A reflection no longer takes probe light through a wall.** `ssr.slang`'s

@@ -253,6 +253,11 @@ pub mod probe;
 /// Rust mirror of the Chebyshev test it does it with.
 pub mod probe_visibility;
 
+/// The reflective-shadow-map updater's constants and parameter block, in the
+/// layout `probe_gather.slang` declares — `docs/plan/50-irradiance-probes.md`'s
+/// every-frame producer for [`probe`]'s rows.
+pub mod probe_gather;
+
 /// The cluster record `mesh_cluster.slang` indexes, in the layout that shader
 /// declares. `crcbl_scene::meshlet` is what builds them.
 pub mod meshlet;

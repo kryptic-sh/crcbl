@@ -463,6 +463,62 @@ impl<'a> PageDesc<'a> {
     }
 }
 
+/// Who writes an irradiance volume's rows: the description that authored them,
+/// or `docs/plan/50-irradiance-probes.md`'s every-frame updater.
+///
+/// # Why this is a field of the volume and not an effect bit or a console
+/// variable
+///
+/// **Not a [`RenderEffects`](crate::effects::RenderEffects) bit**: those are a
+/// frame-wide toggle with a settings key each — `every_effect_has_a_key_and_no_two_share_one`
+/// is what holds that pairing — and a new key shifts the options demo's fader
+/// indices in `web/tools/browser-e2e.mjs`. What decides whether a *volume* is
+/// updated is a property of that volume, not of the frame.
+///
+/// **Not a console variable**: a convar is process-global, and the pass-list
+/// tests run every scene of a fixture in one process. A scene's answer would
+/// then depend on what ran before it.
+///
+/// So it is a field, and [`Authored`](Self::Authored) is [`Default`]: a scene
+/// that says nothing records neither of the updater's two passes and pays
+/// nothing for them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProbeUpdate {
+    /// The rows are the ones [`ProbeGrid::probes`] carries, uploaded once and
+    /// never written again.
+    ///
+    /// Every scene that existed before the updater, and every scene whose
+    /// lighting a golden pins: `crates/crcbl/tests/golden/probes.png` is the
+    /// anti-vacuity floor for the whole probe read path and stands on rows a
+    /// Rust mirror can predict.
+    #[default]
+    Authored,
+    /// The rows are overwritten every frame by the reflective-shadow-map
+    /// gather — `crcbl_render::rsm` draws the map and
+    /// `crcbl_render::probe_gather` reads it into the table.
+    ///
+    /// [`ProbeGrid::probes`] is then the volume's *size* rather than its
+    /// contents: the rows still have to be there, because the table is sized
+    /// from them and `check` holds the two to each other, but what a frame reads
+    /// is what the gather wrote.
+    ///
+    /// **It needs the sun's near cascade.** The map is the cascade's own draws
+    /// through the cascade's own matrix, so a frame drawing without
+    /// [`RenderEffects::SHADOWS`](crate::effects::RenderEffects::SHADOWS) — or
+    /// one whose shadow cadence held cascade 0 — records neither pass and leaves
+    /// the rows as the last gather wrote them. The renderer keeps cascade 0 off
+    /// the static-cache hold for exactly this reason, so the ordinary frame does
+    /// run it; a caller that has raised `r_shadow_cadence` past one has asked
+    /// for the cascade to be redrawn less often and gets a bounce that follows
+    /// it.
+    ///
+    /// **Probes outside the near cascade gather nothing.** The map covers
+    /// cascade 0's camera-following sphere and the volume is authored where the
+    /// scene put it, so a volume larger than that sphere has rows the updater
+    /// never reaches. Scrolling is what would close it and does not exist.
+    EveryFrame,
+}
+
 /// `docs/plan/18-render-features.md`'s irradiance volume: where the probes are,
 /// and what each of them holds.
 ///
@@ -493,6 +549,11 @@ pub struct ProbeGrid {
     /// Where the grid is, how far apart its probes are, and how many there are
     /// on each axis.
     pub volume: probe::ProbeVolume,
+    /// What fills [`probes`](Self::probes) once the scene is running.
+    ///
+    /// [`ProbeUpdate::Authored`] by default, which is the frame every scene drew
+    /// before the updater landed.
+    pub update: ProbeUpdate,
     /// One row per probe, the clipmap's levels one after another finest first
     /// and **`x`-fastest** within each: index
     /// `level_row(level) + (z · counts.y + y) · counts.x + x`.
@@ -1228,6 +1289,7 @@ mod tests {
     fn a_grid_that_would_read_rows_it_does_not_carry_is_refused() {
         let two = vec![probe::GpuProbe::ZERO; 2];
         let claims_more = ProbeGrid {
+            update: ProbeUpdate::Authored,
             volume: probe::ProbeVolume {
                 counts: [2, 2, 1],
                 ..probe::ProbeVolume::default()
@@ -1239,6 +1301,7 @@ mod tests {
             .expect_err("a 2×2×1 grid carrying two probes would read rows it never wrote");
 
         let claims_fewer = ProbeGrid {
+            update: ProbeUpdate::Authored,
             volume: probe::ProbeVolume {
                 counts: [1, 1, 1],
                 ..probe::ProbeVolume::default()
@@ -1252,6 +1315,7 @@ mod tests {
         // And the shape that agrees is accepted, or the two refusals above
         // would pass on a check that refused everything.
         ProbeGrid {
+            update: ProbeUpdate::Authored,
             volume: probe::ProbeVolume {
                 counts: [2, 1, 1],
                 inv_spacing: [1.0; 3],
@@ -1273,12 +1337,14 @@ mod tests {
             levels: 2,
         };
         ProbeGrid {
+            update: ProbeUpdate::Authored,
             volume: clipmap,
             probes: two.clone(),
         }
         .check()
         .expect_err("a two-level clipmap of two probes a level needs four rows");
         ProbeGrid {
+            update: ProbeUpdate::Authored,
             volume: clipmap,
             probes: vec![probe::GpuProbe::ZERO; 4],
         }

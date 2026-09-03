@@ -1954,3 +1954,47 @@ fn fragmentMain( _S173 : pixelInput_0, @builtin(position) position_5 : vec4<f32>
     return output_3;
 }
 
+struct RsmOutput_0
+{
+    @location(0) albedo_2 : vec4<f32>,
+    @location(1) normal_13 : vec4<f32>,
+    @location(2) world_1 : vec4<f32>,
+};
+
+struct pixelInput_1
+{
+    @location(0) world_position_16 : vec3<f32>,
+    @location(6) world_normal_2 : vec3<f32>,
+    @location(7) color_4 : vec4<f32>,
+    @interpolate(flat) @location(8) material_6 : u32,
+    @location(1) uv_4 : vec2<f32>,
+    @location(2) clip_position_2 : vec4<f32>,
+    @location(3) previous_clip_position_2 : vec4<f32>,
+    @location(4) world_tangent_2 : vec3<f32>,
+    @interpolate(flat) @location(5) frame_3 : u32,
+};
+
+@fragment
+fn rsmFragmentMain( _S203 : pixelInput_1, @builtin(position) position_6 : vec4<f32>) -> RsmOutput_0
+{
+    var vertex_normal_1 : vec3<f32> = normalize(_S203.world_normal_2);
+    var _S204 : GpuMaterial_std430_0 = materials_0[_S203.material_6];
+    var uv_5 : vec2<f32>;
+    if((_S204.tiling_0) == u32(1))
+    {
+        uv_5 = physical_tile_uv_0(_S203.world_position_16, vertex_normal_1, _S204.tile_metres_0);
+    }
+    else
+    {
+        uv_5 = _S203.uv_4;
+    }
+    var _S205 : u32 = base_color_layer_0(&(_S204));
+    var _S206 : vec3<f32> = vec3<f32>(uv_5, f32(_S205));
+    var written_0 : RsmOutput_0;
+    written_0.albedo_2 = vec4<f32>((_S203.color_4 * _S204.base_color_0 * (textureSample((base_color_textures_0), (base_color_sampler_0), ((_S206)).xy, i32(((_S206)).z)))).xyz * vec3<f32>((1.0f - saturate(_S204.metallic_0))), 1.0f);
+    var _S207 : vec3<f32> = vec3<f32>(0.5f);
+    written_0.normal_13 = vec4<f32>(vertex_normal_1 * _S207 + _S207, 1.0f);
+    written_0.world_1 = vec4<f32>(_S203.world_position_16, 1.0f);
+    return written_0;
+}
+

@@ -157,9 +157,17 @@ mod probe;
 /// resolved into the octahedral layer `mesh.slang` reads.
 mod probe_capture;
 
+/// The compute pass that reads `docs/plan/50-irradiance-probes.md`'s reflective
+/// shadow map into every probe row of a volume the scene asked to be updated.
+mod probe_gather;
+
 /// The static geometry a probe's visibility map is captured from, and the
 /// console variable that decides whether the frame reads one.
 mod probe_visibility;
+
+/// The reflective shadow map: the sun's near cascade drawn a second time as
+/// what it reflects, where it is and which way it faces.
+pub mod rsm;
 pub mod scene;
 pub mod shadow;
 pub mod skinning;
@@ -230,7 +238,9 @@ pub use mesh_pool::{
 pub use nine_slice::{NineQuads, NineSliceSource, SliceQuad};
 pub use orbit::OrbitCamera;
 pub use pass_stats::PassStats;
-pub use scene::{Capacities, Geometry, InstanceDesc, MeshDesc, PageDesc, ProbeGrid, SceneDesc};
+pub use scene::{
+    Capacities, Geometry, InstanceDesc, MeshDesc, PageDesc, ProbeGrid, ProbeUpdate, SceneDesc,
+};
 pub use shadow::Cascades;
 pub use skinning::{
     SkinRange, SkinnedMesh, SkinnedRegion, Skinning, SkinningDesc, SkinningError, blend,
@@ -273,6 +283,7 @@ pub fn console_table() -> crcbl_console::Table {
         ssao::r_ssao_intensity,
         ssao::r_ssao_bent_normals,
         probe_visibility::r_probe_visibility,
+        rsm::r_probe_bounce,
         shadow::r_shadow_cadence,
         shadow::r_shadow_faces
     ]

@@ -275,11 +275,12 @@ impl crcbl::ui::DebugModule for Paths {
 /// albedo and a conductor has none — see [`crate::room`] — so a reflection is
 /// the whole of what lights either metal surface, and both now get one: the
 /// mirror panel takes a screen-space hit at its foot and the irradiance volume
-/// [`crate::bounce`] bakes everywhere else on that face, and the brass block,
+/// [`crate::bounce`] places everywhere else on that face, and the brass block,
 /// whose roughness is above [`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`], takes
 /// that volume directly without marching at all. What is left to say on the
-/// screen is what that environment *is*: baked and blurry, and the only answer
-/// there is for anything the frame cannot see. Ray tracing is what replaces it,
+/// screen is what that environment *is*: one bounce of the sun off whatever the
+/// map saw, blurred into a probe grid, and the only answer there is for anything
+/// the frame cannot see. Ray tracing is what replaces it,
 /// and the `paths` section's `ray tracing` row is where that is named.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Unbuilt;
@@ -287,8 +288,8 @@ pub struct Unbuilt;
 impl crcbl::ui::DebugModule for Unbuilt {
     fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
         section.set_title("unbuilt");
-        section.row_str("metal", "reflection only: SSR hit or baked probe");
-        section.row_str("bounce wall", "one analytic bounce, no GI solve");
+        section.row_str("metal", "reflection only: SSR hit or probe volume");
+        section.row_str("bounce wall", "the sun's first bounce, no GI solve");
         // The per-effect toggles used to be a row here, and so did both unwired
         // request layers. Both have sources now — the monitor's view asks for
         // its own stack, which the `paths` section's `monitor` row reports, and

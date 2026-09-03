@@ -173,12 +173,14 @@ reads them as redundant with the GPU suites and deletes them. It also means the
 barrier arguments will not be checked by anything until the gather makes them
 matter per frame, at S3.
 
-**And the ring is not exercised at all.** Every frame's buffer gets
-byte-identical contents and nothing writes them afterwards, so a wrong
-`buffer(frame)` or a copy loop that filled one slot would be invisible to every
-rendering test. The unit tests assert one copy per frame into that frame's own
-buffer and distinct handles; no GPU gate does. That changes at S4 and not
-before.
+**The ring is exercised now, and was not when it landed.** Until the gather
+shipped, every frame's buffer got byte-identical contents and nothing wrote them
+afterwards, so a wrong `buffer(frame)` or a copy loop that filled one slot would
+have been invisible to every rendering test — the unit tests asserting one copy
+per frame into that frame's own buffer were the only guard. A scene at
+`ProbeUpdate::EveryFrame` writes each slot separately, so the GPU suites reach
+it. A scene at `Authored` still does not, and that is every scene but lantern
+and shard.
 
 ## `PROBE_OCCLUDED_WEIGHT` is correct and unguarded (2026-09-04)
 
@@ -218,114 +220,90 @@ write agent was mid-verification on `crcbl-render`, and touching that crate
 would have invalidated a gate run in flight for a comment. Fix it in the next
 change that touches the crate for another reason.
 
-## The RSM probe updater: the plan, and the three things it is bigger than (2026-09-04)
+## What the RSM probe updater shipped without (2026-09-04)
 
-The last item in `docs/plan/43-render-standards.md`'s lighting order before the
-atmosphere, and the half of `docs/plan/50-irradiance-probes.md`'s decision that
-has not been built. The design below was read out of the tree on 2026-09-04 and
-the structural claims were re-verified against the code before being written
-here; nothing was built or run, so every line is a reading rather than a result.
+`docs/plan/50-irradiance-probes.md`'s raster updater is built:
+`crcbl_render::rsm` draws the sun's near cascade as a reflective shadow map,
+`crcbl_render::probe_gather` sums every one of its texels into every probe row
+through `probe_chebyshev`, and `ProbeGrid::update` selects it — `Authored` by
+default, so no existing scene records either pass. lantern and shard's CPU bakes
+are gone with it. The plan that described the work is deleted; what follows is
+what it left.
 
-**Three places it is bigger than the plan's one sentence, all corrected in the
-plan itself now:**
+**It gathers the sun and nothing else, and that is a visible loss.** The design
+says "the sun's near cascade (and any lamp the application asks for)"; only the
+first half is built. Two things went with the bakes:
 
-1. **The probe buffer cannot be written by a compute pass as it stands.**
-   `crcbl_render::probe`'s table is `BufferUsage::STORAGE` +
-   `MemoryLocation::HostUpload` and its mesh layout entry is
-   `StorageBuffer { read_only: true }` — the seam refuses a writable storage
-   binding of a host-visible buffer. Making it device-local also forces it to
-   become a ring of `FRAMES_IN_FLIGHT`, because `SharedBindings` names one
-   buffer in every frame's group and frame N+1's gather would overwrite rows
-   frame N's forward pass is still reading. `crcbl_render::light_grid`'s
-   per-frame `grid[frame]` is the pattern.
-2. **The RSM cannot ride the shadow pass.** That pass has one attachment, a
-   depth, and every pipeline in it is fragment-free. Colour targets there span
-   the whole 3072² atlas for data only cascade 0's 768² corner is read from, and
-   they give all fourteen light tiles a fragment stage. It wants its own render
-   pass at its own extent, reusing cascade 0's matrix and its already-generated
-   draws.
-3. **It is three targets, not two.** Flux (`Rgba16Float` — the sun's colour may
-   exceed one), world normal (`Rgba8Unorm`), and world position (`Rgba32Float`),
-   because the gather needs the sample's position and the seam has no
-   plain-float read of a depth image.
+- **lantern's coloured wall no longer tints the plaster beside it.** That was
+  frame claim 6 in `apps/lantern/tests/golden.rs`, asserting a red-to-blue ratio
+  of at least 1.10 against a measured 1.17. Measured after the change it is
+  **0.999 on radv and 0.992–0.997 on lavapipe — no tint at all**, because the
+  coloured wall is lamp-lit rather than sun-lit and the updater does not gather
+  lamps. The claim was deleted rather than weakened, which is the right call for
+  an effect that is genuinely gone; `room::TINTED_PLASTER` and
+  `UNTINTED_PLASTER` and the room-side proof that nothing but the bounce
+  separates them survive, so the claim can be restored the day a punctual
+  producer exists.
+- **shard's zone lost its warm torch bounce**, for the same reason. The ambient
+  floor in `zone::house_light` is what holds that term up now, and `light.rs`'s
+  header says so.
 
-**The trap that will bite whoever writes it.** `crcbl_render::forward` looks its
-fragment stage up as `entry(&MESH, Stage::Fragment)`, and `entry` returns `None`
-on two matches. A second fragment entry point in `mesh.slang` therefore breaks
-every renderer build with "exposes no unambiguous fragment entry point". The fix
-is `named_entry(&MESH, "fragmentMain", …)`, which the two vertex entry points on
-the lines above already use for exactly this reason.
+**Whether that trade is worth keeping is the user's call**: a dynamic sun bounce
+that follows the light, against a static bake that carried every light's colour
+and could not move. The bake is not coming back — the no-bake rule of 2026-08-30
+forbids it — so the question is whether the lamp producer is the next rung or
+whether something else is.
 
-**The slicing, each with what goes red if it is wrong:**
+**What it costs.** p50 of three,
+`lantern --headless --frames 400 --size 1920x1080`, updater on against off:
 
-- **S1 — split `probe_weight` into `probe_chebyshev` plus the floor**, in
-  `mesh.slang` and `ssr.slang` together, held by
-  `the_shaders_weigh_a_probe_the_way_this_module_does`. `PROBE_OCCLUDED_WEIGHT`
-  exists to stop the trilinear blend's divisor reaching zero; the gather has no
-  divisor, and a floor there would let every wall-hidden RSM texel contribute
-  1e-4 of its flux — thousands of samples of that is a leak by another name. No
-  golden may move; that is the check.
-- **S2 — the table goes device-local and per-frame.** `ProbeTable::fill` becomes
-  a staging buffer and a copy; `forward`, `depth-prepass` and `shadow` each
-  declare `read_buffer` on it so the graph emits the barriers. Again no golden
-  moves.
-- **S3 — the `rsm` pass and the gather, as one slice.** This was two in the
-  first plan: the pass, then the gather that reads it. Both halves fail the same
-  rule from opposite sides — recording a pass whose targets nothing reads is
-  per-frame cost for no picture, and landing a module nothing constructs is dead
-  code that reads as live. `ProbeUpdate { Authored, EveryFrame }` on `ProbeGrid`
-  resolves it: the default `Authored` records neither pass, so no existing scene
-  pays anything and no golden moves, and `EveryFrame` records both and is
-  reachable the day it lands. One workgroup per probe striding the whole RSM, a
-  `groupshared` reduction, and the `named_entry` fix for `rsmFragmentMain`.
-  lantern's `bounce` and shard's `light::probes` lose their gather bodies in
-  this slice and not later — the moment the updater runs, their rows are
-  overwritten and the code reads as live while being dead. Their _volume
-  construction_ stays: that is placement, not lighting.
-- **S4 — the sky through the visibility**, only after S3 measures. Its own
-  commit, its own goldens, and the user's decision first.
-- **S5 — pricing on three tiers, and the doc deletions.**
+```text
+                radv on   radv off   lavapipe on   lavapipe off
+rsm               0.060          —         1.136              —
+probe-gather      0.047          —         0.052              —
+frame total       1.281      1.161        81.964         80.092
+```
 
-**What must not move: `crates/crcbl/tests/golden/probes.png`.** `Scene::Probes`
-is the anti-vacuity floor for the whole probe read path — the Rust-mirror
-comparison, the ratio-between-blocks assertion, the clipmap band test and both
-leak tests all stand on it. lantern's `room.png` and `live.png` _must_ move,
-because their bounce becomes the RSM's.
+**+0.120 ms on radv, which is 10% of that frame**, and +1.87 ms on lavapipe,
+which is 2.3% of that one. The discrete tier pays the larger share because its
+frame is small; the software tier's `rsm` is nineteen times its radv cost and
+still disappears into an 80 ms frame. `docs/backlog.md`'s survey constraint C3
+budgets the whole frame at 0.990 ms on this adapter and it was already at 1.161
+before the updater, so this is a rung spent over budget rather than into it.
 
-**Determinism has a clean answer here**: make the RSM small — 64 a side, 4096
-texels — and have every probe gather every texel every frame. Then the sample
-pattern _is_ the image and neither shader transcribes a mapping, which is the
-strongest form of the rule. If a large clipmap ever forces a subset, the escape
-is a host-evaluated stratum-centre table uploaded as data, the way
-`probe_visibility::texel_direction` already is — not a hash, and not built
-speculatively.
+**`RSM_SIDE` is 64, swept rather than guessed.** At 32 the gather is 0.020 ms on
+radv against 0.047 at 64, while the map's own pass does not move at all — it is
+draw-bound at both extents. The frames differ by 0.15% RMSE with a peak channel
+of 17/255, and lantern's mirror fallback reads 26.0 at 32 against 25.6 at 64.
+Both are affordable, so the sample count decided it.
 
-**Two things the user has to decide before S4, and one before S3:**
+**What is not verified.** The browser tier and any windowed run — neither was
+measured. Metal and D3D12 are type-checked on the cross-target clippy legs and
+have run nowhere: no Apple or Windows hardware here, so CI's software adapters
+are the only verdict on `rsmFragmentMain`'s three targets and on the gather's
+`groupshared` reduction, which is the construct `crcbl_shaders::exposure`
+records Slang's Metal backend as sensitive to.
 
-- **The sky term.** Folding it into the gather and zeroing `frame.sky_sh_*` for
-  an updater-owned volume is a real change to how a scene is lit, not a binding.
-- **`RSM_SIDE` is a tier knob or it is not.** Constraint C4 says the software
-  and browser tiers pay about 40x per pass, so a gather costing 0.5 ms on radv
-  is 20 ms on lavapipe. Sweep 32 and 64 before fixing the constant rather than
-  guessing it — and note that the same tier problem has now been measured once
-  for real, in "The SSR visibility weight costs the software tier 11% of a
-  frame" above.
+**A finding worth keeping, because it cost most of the debugging time.** A probe
+standing above a floor gathers nearly all its flux from below, so its L1 lobe
+cancels at the floor's own `+Y` normal and a floor pixel shows the bounce barely
+at all. The first fixture written for this measured a floor and read exactly
+zero difference between the walled and open arms — a perfect false negative.
+**Any future updater fixture must measure a surface facing the way the flux
+travels**, which is why the one that shipped measures a wall face the sun never
+touches.
 
-**A limit worth writing down before someone measures it as a bug:** the RSM
-covers cascade 0's camera-following sphere, radius 24, while the probe volume is
-authored and does not scroll. Probes outside the near cascade gather nothing.
-lantern's room is too small to notice; a larger scene is not.
+**Still owed from the plan, in order:**
 
-**Coverage gaps in the plan itself.** Nothing was compiled or run to produce it.
-`crcbl-mtl`, `crcbl-dx12` and `crcbl-webgpu` were not opened — the
-`UnfilterableFloat` requirement, the Metal `groupshared` caveat and the DXIL
-entry-point rule are taken from the seam's and the shaders' own doc comments.
-The render graph's barrier synthesis was not read: that a compute
-`ShaderReadWrite` followed by a render `read_buffer` on one imported id produces
-the right barrier is inferred from `light-cluster` to `forward` working today.
-`Cascades::splits` was not evaluated, so the RSM's world footprint and per-texel
-area are unverified. `mesh_cluster.slang` was not opened, so the claim that the
-cluster path needs no mirror for a new fragment entry point is unconfirmed.
+- **The sky through the visibility.** `mesh.slang`'s `sky_irradiance` is three
+  dot products with no direction to gate, so it has to become a term of the
+  gather plus a host-side zeroing of `frame.sky_sh_*` for an updater-owned
+  volume. That is a change to how a scene is lit rather than a binding, and it
+  is the user's decision before it is anyone's work.
+- **A punctual producer**, which is what the two losses above want.
+- **Scrolling, and recapture on scroll.** Probes outside cascade 0's
+  camera-following sphere gather nothing, and the volume does not move.
+  `ProbeUpdate::EveryFrame`'s own doc comment says so.
 
 ## What the plan audit of 2026-09-03 did not reach
 
@@ -435,13 +413,20 @@ where they sat before the gather was halved, so the reconstruction is carrying
 the contrast the full-resolution pass had. The margin is unchanged, and so is
 the case for an intensity control below.
 
-**Not yet re-checked after the AO defaults moved on 2026-09-03**, and it is the
-obvious next candidate to have eaten the headroom — four horizon planes and a
-second blur changed the occlusion channel enough to re-bless fourteen goldens,
-which is a larger change to it than the halving this entry did re-check. Read
-both again on radv the way that re-check was done: the AO scene's wall bands
-against its open floor, and lantern's contact corner with occlusion on against
-off. Until that is done the two figures below describe the pre-2026-09-03 frame.
+**Re-checked after the AO defaults moved, 2026-09-04, and both margins gave a
+little back.** On radv the AO scene now measures its walls at 71.2 and 70.6
+against an open floor of 74.7 — a ratio of **1.049** where the halving left it
+at 1.055 — and lantern's contact corner goes 54.3 to 56.2 with occlusion off, a
+lift of **1.035** against 1.038. So four horizon planes and a second blur cost
+about half a point of separation on each, against thresholds of `AO_RATIO` 1.03
+and `AO_LIFT` 1.02. Both still clear, and both clear by less: the AO scene now
+guards 4.9% where this entry recorded 5.8%, and the corner 3.5% where it
+recorded 3.8%.
+
+The lift is measured on a frame whose bounce is the RSM updater's rather than
+lantern's old CPU bake, since both landed before this reading. The ratio is not:
+`Scene::Ao` is `ProbeUpdate::Authored`, so nothing about the updater reaches it
+and its half-point is the AO defaults alone.
 
 **The industry answer is an AO intensity control, and it was built on
 2026-09-02** — `r_ssao_intensity`, a console variable in `crcbl_render::ssao`

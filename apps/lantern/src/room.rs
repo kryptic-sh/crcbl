@@ -37,7 +37,7 @@
 //! ray leaving it goes back past the eye and only the lowest part of the face
 //! sends one that reaches the floor while still on screen — see [`MIRROR_FOOT`].
 //! Everywhere else on that face the march finds nothing and returns the
-//! irradiance volume [`crate::bounce`] bakes as its environment, so the face is
+//! irradiance volume [`crate::bounce`] places as its environment, so the face is
 //! dim rather than black — see [`MIRROR_MISSES`]. The rough metal block receives
 //! that same environment directly because its roughness is above the cutoff a
 //! single ray is honest at ([`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`]); it never
@@ -46,15 +46,16 @@
 //! `zero_probes_only_remove_the_ssr_and_rough_fallbacks` is what measures each
 //! share, by zeroing the probe rows and reading the difference at
 //! [`MIRROR_MISSES`], [`MIRROR_FOOT`] and [`BRASS_AT`]. That the environment is
-//! baked rather than traced is what the debug panel says on a row of its own,
-//! and `docs/backlog.md` carries the remaining work.
+//! a probe volume rather than a trace is what the debug panel says on a row of
+//! its own, and `docs/backlog.md` carries the remaining work.
 //!
-//! **The coloured wall bounces**, and [`crate::bounce`] is the whole of how: a
-//! single analytic gather of the sun's first bounce off this room's interior,
-//! baked from these constants into the irradiance volume [`room`] hands over. It
-//! is one bounce off one box rather than a global-illumination solve, and what
-//! it leaves out — every occluder standing in the room, and every bounce after
-//! the first — is named in that module's docs.
+//! **The room bounces the sun**, and the renderer is the whole of how:
+//! [`crate::bounce`] places the irradiance volume [`room`] hands over and leaves
+//! every row at zero, and `ProbeUpdate::EveryFrame` on it has the reflective
+//! shadow map refill those rows each frame from the sun's first bounce off
+//! whatever is actually standing in the room. It is one bounce and the sun's
+//! alone — a torch or a lamp lends the volume nothing — which is what
+//! `docs/backlog.md` carries the remaining work on.
 //!
 //! Neither is faked. A fixture whose job is showing what the renderer does must
 //! not flatter it.
@@ -991,7 +992,7 @@ fn shell_slab(label: &'static str, min: Vec3, max: Vec3) -> MeshDesc<'static> {
 // ---------------------------------------------------------------------------
 
 /// Everything the room makes resident: every mesh, every material row, the page
-/// and the irradiance volume [`crate::bounce`] bakes from the constants above.
+/// and the irradiance volume [`crate::bounce`] places among the constants above.
 ///
 /// The mesh order is [`FLOOR_MESH`] through [`POST_MESH`] and the row order is
 /// [`PLASTER`] through [`MONITOR`]; both are load-bearing, and the constants
@@ -1139,7 +1140,7 @@ pub const CAPACITIES: Capacities = Capacities {
     instances: 64,
     materials: 8,
     lights: 8,
-    // The irradiance volume [`crate::bounce`] bakes, whose size is that module's
+    // The irradiance volume [`crate::bounce`] places, whose size is that module's
     // `PROBE_COUNTS` rather than a number written twice — `ProbeGrid::check`
     // refuses a table that disagrees with its own volume, and this pool is the
     // only other place the count appears.
@@ -1518,9 +1519,10 @@ const SPOT_COLOR: Vec3 = Vec3::new(0.72, 0.82, 1.0);
 /// picture until something stands in the cone to be one. [`SPOT_LIT`] and
 /// [`SPOT_SHADOWED`] are where the difference is read.
 ///
-/// It is also not in [`crate::bounce`]'s gather, which bakes the sun's first
-/// bounce and nothing else — so the pool below is direct light with no indirect
-/// term of its own, exactly as the lamp's pool is.
+/// It is also not in the probe volume [`crate::bounce`] places: the updater that
+/// fills those rows gathers the sun's first bounce and nothing else — so the
+/// pool below is direct light with no indirect term of its own, exactly as the
+/// lamp's pool is.
 ///
 /// A static light rather than a second moving one: a golden is worth comparing
 /// only at a time both runs agree on, and a cone that stood still is one whose

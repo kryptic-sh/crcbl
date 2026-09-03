@@ -1,12 +1,12 @@
 //! The zone's light: the braziers' torches, the shrine's spot, and the
-//! irradiance volume baked from both.
+//! irradiance volume the renderer refills from the sun.
 //!
 //! ```text
-//!   zone::LAYOUT ──▶ torches(seconds, lit)  ──▶ ForwardRenderer::set_lights   (every frame)
-//!         │                    │
-//!         │                    └──▶ probes() ──▶ SceneDesc::probes            (once, at build)
+//!   zone::LAYOUT ──▶ torches(seconds, lit) ──▶ ForwardRenderer::set_lights   (every frame)
 //!         │
-//!         └──▶ zone::world() ──▶ cast_ray ──▶ what a probe can actually see
+//!         └──────────▶ probes() ──▶ SceneDesc::probes                        (placed once)
+//!                          │
+//!                          └──▶ ProbeUpdate::EveryFrame ──▶ the rsm updater  (every frame)
 //! ```
 //!
 //! # This is the load, not the feature
@@ -60,32 +60,27 @@
 //! is touching anything, which is what `web/tools/browser-e2e.mjs` reads to tell
 //! a running page from a stalled one, and what its lighting check douses.
 //!
-//! # The volume is a one-bounce gather, and it says so
+//! # The volume is placed here and filled by the renderer
 //!
-//! [`probes`] casts rays out of each probe into
-//! [`zone::world`], computes the light **arriving** at what
-//! each ray hit — through the same [`punctual`] falloff the shader applies, with
-//! a visibility ray per torch — and projects the surface's outgoing radiance
-//! into the L1 basis [`GpuProbe`] holds. So a sealed alcove with no torch in it
-//! is genuinely dark in the ambient term, and the great hall picks up the warm
-//! bounce off its own floor.
+//! [`probes`] decides where the probes stand and hands the rows over at zero
+//! with `ProbeUpdate::EveryFrame` on them; the renderer's reflective shadow map
+//! is what puts light in them, one bounce of the **sun** off whatever the zone
+//! has standing in it, recomputed every frame.
 //!
-//! **It is one bounce and it is not a solve.** `apps/lantern/src/bounce.rs` is
-//! the sample that bakes a room properly, over a 6 × 32² cube-face quadrature
-//! and an analytic model of every face; this is a
-//! Fibonacci sphere of `GATHER_DIRECTIONS` rays against the collision world,
-//! which is what a zone this size can afford to bake at start-up.
-//! The volume is baked **once**, into [`SceneDesc::probes`](crcbl::render::scene::SceneDesc);
-//! there is no per-frame probe call, and `crates/crcbl-render/src/probe.rs` says
-//! why the table is write-once.
+//! **So this zone's indirect light is thin, and that is honest rather than
+//! broken.** The zone is an interior lit by torches, and the updater gathers no
+//! punctual light at all — `docs/backlog.md` carries what a producer that did
+//! would take. What is left holding the ambient term up is
+//! [`zone::house_light`](crate::zone::house_light)'s floor. The rows this module
+//! hands over are zero, so a frame drawn before the updater has run is that
+//! floor and nothing else.
 
 use crcbl::math::{DVec3, Vec3};
-use crcbl::phys::{PhysicsWorld, Ray};
 use crcbl::render::scene::ProbeGrid;
-use crcbl::render::{Light, PointLight, SpotLight};
+use crcbl::render::{Light, PointLight, ProbeUpdate, SpotLight};
 use crcbl::shaders::probe::{GpuProbe, ProbeVolume};
 
-use crate::zone::{self, BRAZIER_HEIGHT, COLS, Cell, ROWS, TILE_M, WALL_TOP_Y, tile_centre, tiles};
+use crate::zone::{BRAZIER_HEIGHT, COLS, Cell, ROWS, TILE_M, WALL_TOP_Y, tile_centre, tiles};
 
 // ---------------------------------------------------------------------------
 // The torches
@@ -110,10 +105,10 @@ pub const TORCH_COLOR: Vec3 = Vec3::new(1.0, 0.58, 0.24);
 ///
 /// Well above 1.0, like every other light in this engine: the scene target is
 /// `Rgba16Float` and the tonemap pass is what brings it back. Chosen against
-/// the picture rather than against a photometric unit — [`punctual`] divides by
-/// the square of the distance, so a torch three metres away delivers a tenth of
-/// this and one six metres away a fortieth, and a zone whose far wall is black
-/// is one whose shadows and reflections have nothing to show.
+/// the picture rather than against a photometric unit — `mesh.slang` divides a
+/// point light by the square of the distance, so a torch three metres away
+/// delivers a tenth of this and one six metres away a fortieth, and a zone whose
+/// far wall is black is one whose shadows and reflections have nothing to show.
 pub const TORCH_INTENSITY: f32 = 26.0;
 
 /// How far [`flame`] swings either side of 1.0.
@@ -261,7 +256,8 @@ pub fn spot() -> Light {
 /// that does not go out, and a torch nobody has lit is a torch that is not in
 /// this list at all. What that leaves lighting the zone is the irradiance volume
 /// and [`zone::house_light`]'s ambient floor, which is
-/// far darker and — because [`probes`] is baked once — completely still.
+/// far darker and — because the updater gathers the sun alone, which this
+/// interior has none of — completely still.
 ///
 /// **That pair is what the browser gate's lighting check is made of**: a lit
 /// zone whose picture changes with nothing held, and a doused one whose picture
@@ -286,7 +282,7 @@ pub fn torches(seconds: f64, lit: bool) -> Vec<Light> {
 }
 
 // ---------------------------------------------------------------------------
-// The bake
+// The volume
 // ---------------------------------------------------------------------------
 
 /// How many probes the volume holds on each axis.
@@ -302,168 +298,6 @@ pub const PROBE_COUNTS: [u32; 3] = [7, 2, 8];
 /// [`zone`]'s capacities reserve and what `ProbeGrid::check` holds
 /// the table against.
 pub const PROBE_TOTAL: u32 = PROBE_COUNTS[0] * PROBE_COUNTS[1] * PROBE_COUNTS[2];
-
-/// How many directions each probe gathers over.
-///
-/// A Fibonacci sphere, so every direction stands for the **same** solid angle
-/// and the quadrature weight is one number rather than a table. Thirty-two is
-/// what a zone of this size can afford at start-up: the whole bake is
-/// `PROBE_TOTAL × GATHER_DIRECTIONS` rays into the collision world plus a
-/// visibility ray per torch behind each hit.
-const GATHER_DIRECTIONS: usize = 32;
-
-/// How far a gather ray looks, in metres. Past the diagonal of the zone, so a
-/// ray that finds nothing has genuinely left the building.
-const GATHER_M: f64 = 64.0;
-
-/// How far off a surface the visibility ray starts, in metres — enough that it
-/// does not immediately strike the surface it left.
-const BOUNCE_EPSILON: f64 = 0.02;
-
-/// How much light a stone surface sends back, per channel.
-///
-/// One number for the whole zone rather than the material table's six rows: the
-/// bake is an approximation and reading the rows would make it look like a
-/// solve. Stone at a little under a third is the usual figure and is what
-/// `crcbl::greybox`'s own `GREYBOX_ALBEDO` sits near.
-const BOUNCE_ALBEDO: f32 = 0.28;
-
-/// How bright a punctual light is at `distance`, reaching **exactly zero** at
-/// `radius`.
-///
-/// The Rust mirror of `punctual_falloff` in
-/// `crates/crcbl-shaders/shaders/mesh.slang` — inverse square with Karis'
-/// quartic window over it — so the light this bake gathers is the light the
-/// shader will draw. A second falloff of this module's own invention would make
-/// the ambient disagree with the direct term everywhere, which is the class of
-/// error that reads as a shading bug and is nobody's fault in particular.
-#[must_use]
-pub fn punctual(distance: f32, radius: f32) -> f32 {
-    let ratio = distance / radius.max(1e-6);
-    let window = (1.0 - ratio * ratio * ratio * ratio).clamp(0.0, 1.0);
-    window * window / distance.mul_add(distance, 1.0)
-}
-
-/// `GATHER_DIRECTIONS` unit vectors spread evenly over the sphere.
-///
-/// The Fibonacci (golden-angle) spiral, which is the standard construction for
-/// an equal-area point set on a sphere: the `y` coordinates are spaced evenly
-/// over `-1..1` — which is what makes the areas equal, by Archimedes' theorem —
-/// and each is turned by the golden angle from the last.
-/// `the_gather_directions_are_unit_and_spread` is what holds it to that rather
-/// than to this paragraph.
-fn gather_directions() -> Vec<DVec3> {
-    // π(3 − √5), the golden angle in radians.
-    let golden = core::f64::consts::PI * (3.0 - 5.0f64.sqrt());
-    (0..GATHER_DIRECTIONS)
-        .map(|index| {
-            #[allow(clippy::cast_precision_loss)]
-            let step = index as f64;
-            #[allow(clippy::cast_precision_loss)]
-            let y = 1.0 - 2.0 * (step + 0.5) / GATHER_DIRECTIONS as f64;
-            let radius = (1.0 - y * y).max(0.0).sqrt();
-            let theta = golden * step;
-            DVec3::new(radius * theta.cos(), y, radius * theta.sin())
-        })
-        .collect()
-}
-
-/// The light arriving at `point`, whose surface faces `normal`, from every torch
-/// that can see it.
-///
-/// The direct term and nothing else, in linear RGB: what the surface then sends
-/// back is this times [`BOUNCE_ALBEDO`] over π, which is a Lambertian
-/// reflector's outgoing radiance.
-///
-/// **The visibility ray is what makes the volume a map of the zone** rather than
-/// of the torches. Without it every probe in the sealed alcoves would gather the
-/// hall's braziers straight through the stone, and the ambient would say the
-/// zone is one room.
-fn arriving(world: &mut PhysicsWorld, point: DVec3, normal: DVec3, seconds: f64) -> Vec3 {
-    let from = point + normal * BOUNCE_EPSILON;
-    let mut sum = Vec3::ZERO;
-    for index in 0..brazier_tiles().len() {
-        let at = flame_at(index);
-        let to = at - from;
-        let distance = to.length();
-        if distance <= f64::EPSILON || distance >= f64::from(TORCH_REACH) {
-            continue;
-        }
-        let direction = to / distance;
-        let facing = normal.dot(direction);
-        if facing <= 0.0 {
-            continue;
-        }
-        // Bounded just short of the flame, so the ray asks "is there stone in
-        // the way" rather than "is there anything at all out there".
-        let ray = Ray::new(from, direction).with_bounds(0.0, distance - BOUNCE_EPSILON);
-        if world.cast_ray(&ray).is_some() {
-            continue;
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        let reach = punctual(distance as f32, TORCH_REACH) * facing as f32;
-        sum += TORCH_COLOR * TORCH_INTENSITY * (flame(index, seconds) as f32) * reach;
-    }
-    sum
-}
-
-/// One probe: the whole sphere gathered from `position`.
-///
-/// A probe standing inside stone gathers nothing and stays at
-/// [`GpuProbe::ZERO`]. That is the honest row for it — a point inside a wall has
-/// no irradiance — and it matters because the shader interpolates over the eight
-/// probes around a fragment: a probe inside a wall that had gathered the far
-/// side's light would bleed a lit room's ambient through into a dark one.
-fn bake(world: &mut PhysicsWorld, position: DVec3, directions: &[DVec3], seconds: f64) -> GpuProbe {
-    let mut probe = GpuProbe::ZERO;
-    if !inside_open_air(position) {
-        return probe;
-    }
-    #[allow(clippy::cast_precision_loss)]
-    let solid_angle = 4.0 * core::f32::consts::PI / GATHER_DIRECTIONS as f32;
-    for &direction in directions {
-        let ray = Ray::new(position, direction).with_bounds(0.0, GATHER_M);
-        // A direction that leaves the zone through no surface carries no light.
-        // Unreachable inside a sealed room, and skipped rather than asserted
-        // because a probe half inside a doorway's lintel is a legitimate way to
-        // reach it.
-        let Some((_, hit)) = world.cast_ray(&ray) else {
-            continue;
-        };
-        let outgoing =
-            arriving(world, hit.point, hit.normal, seconds) * BOUNCE_ALBEDO / core::f32::consts::PI;
-        #[allow(clippy::cast_possible_truncation)]
-        let unit = [direction.x as f32, direction.y as f32, direction.z as f32];
-        probe.accumulate(unit, outgoing.to_array(), solid_angle);
-    }
-    probe
-}
-
-/// Whether `position` is in air a character could stand in rather than inside a
-/// piece of the zone.
-///
-/// Read off [`zone::LAYOUT`] rather than out of the physics
-/// world, because "is this point inside a collider" is not a question
-/// [`PhysicsWorld`] answers and the layout knows it exactly.
-fn inside_open_air(position: DVec3) -> bool {
-    let index = |value: f64, count: usize, span: f64| -> Option<usize> {
-        #[allow(clippy::cast_precision_loss)]
-        let grid = (value / span + count as f64 * 0.5).floor();
-        if grid < 0.0 || grid >= count as f64 {
-            return None;
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Some(grid as usize)
-    };
-    let (Some(col), Some(row)) = (
-        index(position.x, COLS, TILE_M),
-        index(position.z, ROWS, TILE_M),
-    ) else {
-        return false;
-    };
-    let cell = zone::cell(col, row);
-    cell.is_open() && position.y > cell.floor_y() && position.y < WALL_TOP_Y
-}
 
 /// How far apart the probes stand on each axis: the zone's interior divided by
 /// the counts.
@@ -493,39 +327,46 @@ fn grid_origin() -> DVec3 {
 }
 
 /// Where probe `(x, y, z)` stands, in world space.
+///
+/// The host-side twin of what the engine derives from the volume header —
+/// `crcbl::shaders::probe::ProbeVolume::position` — and
+/// `every_probe_stands_where_the_header_says` is what holds the two to one
+/// another. Kept as its own function because reading the claim through the
+/// header would be reading it through the thing it is checking.
+#[cfg(test)]
 fn probe_position(cell: [u32; 3]) -> DVec3 {
     let steps = DVec3::new(f64::from(cell[0]), f64::from(cell[1]), f64::from(cell[2]));
     grid_origin() + spacing() * steps
 }
 
-/// The zone's irradiance volume, gathered from the zone's own colliders.
+/// The zone's irradiance volume: where the probes stand, and rows for the
+/// engine's updater to fill.
 ///
 /// Rows in the `x`-fastest order
 /// [`ProbeGrid::probes`](crcbl::render::scene::ProbeGrid) declares, so the table
-/// and the volume's counts address the same probe —
-/// `every_probe_reads_back_at_its_own_position` is what checks that against
-/// [`crcbl::shaders::probe::irradiance_at`] rather than against a second copy of
-/// the index arithmetic.
+/// and the volume's counts address the same probe.
 ///
-/// Gathered at `t = 0`, which is the flames' own rest phase and the only instant
-/// a volume baked once can be gathered at.
+/// # The rows ship zeroed, and what that costs this zone
+///
+/// Until 2026-09-04 this gathered the torches' first bounce by casting rays into
+/// [`zone::world`] at `t = 0` — a bake in the sense
+/// `docs/plan/50-irradiance-probes.md`'s no-bake rule forbids, since the flames
+/// flicker and the result outlived them. The rows are the engine's updater's
+/// now, through
+/// [`ProbeUpdate::EveryFrame`](crcbl::render::ProbeUpdate::EveryFrame).
+///
+/// **That updater is a reflective shadow map of the *sun's* near cascade**, and
+/// this zone's sun is [`zone::house_light`](crate::zone::house_light) — a token
+/// whose colour is `0.01`,
+/// because a torch-lit interior has no sun. So the volume the updater fills here
+/// is very nearly black, and the warm bounce off the great hall's floor that the
+/// old gather produced is gone until a producer that gathers punctual lights
+/// exists. That is the honest state and it is written here rather than papered
+/// over with a bake: the ambient floor in
+/// [`zone::house_light`](crate::zone::house_light) is what lights
+/// the zone's shadowed surfaces meanwhile.
 #[must_use]
 pub fn probes() -> ProbeGrid {
-    let directions = gather_directions();
-    let mut world = zone::world();
-    let mut rows = Vec::with_capacity(PROBE_TOTAL as usize);
-    for z in 0..PROBE_COUNTS[2] {
-        for y in 0..PROBE_COUNTS[1] {
-            for x in 0..PROBE_COUNTS[0] {
-                rows.push(bake(
-                    &mut world,
-                    probe_position([x, y, z]),
-                    &directions,
-                    0.0,
-                ));
-            }
-        }
-    }
     #[allow(clippy::cast_possible_truncation)]
     let f32s = |v: DVec3| [v.x as f32, v.y as f32, v.z as f32];
     ProbeGrid {
@@ -537,31 +378,22 @@ pub fn probes() -> ProbeGrid {
             // light the zone from the wrong place.
             inv_spacing: f32s(DVec3::ONE / spacing()),
             counts: PROBE_COUNTS,
-            // One level, on `apps/lantern`'s `bounce::probes` terms: the zone
-            // is the extent this gather covers, and the updater that fills a
-            // clipmap's coarser levels is what replaces this bake.
+            // One level, on `apps/lantern`'s `bounce::probes` terms: the zone is
+            // the extent the updater's near cascade covers, and a clipmap's
+            // coarser levels are for a world larger than this one.
             levels: 1,
         },
-        probes: rows,
+        // **Zeroes.** The rows are the volume's size here, not its contents —
+        // see above.
+        probes: vec![GpuProbe::ZERO; PROBE_TOTAL as usize],
+        update: ProbeUpdate::EveryFrame,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl::shaders::probe::irradiance_at;
-    use crcbl::shaders::probe_visibility::ProbeVisibility;
-
-    /// How many times brighter the ambient beside a brazier has to be than the
-    /// ambient out in the corridor.
-    ///
-    /// **Measured, not guessed.** Sweeping every row of the volume when this was
-    /// written put the brightest non-zero probe at 0.120 and the darkest at
-    /// 0.0007, and the two points below at 0.066 and 0.0015 — a factor of
-    /// forty-three. The threshold sits well under that, so re-tuning a torch does
-    /// not red the test, and well over one, so a volume that gathered the same
-    /// light everywhere could not pass it.
-    const VOLUME_CONTRAST: f32 = 8.0;
+    use crate::zone;
 
     /// **Every brazier on the layout is a torch, and every torch stands over its
     /// own brazier.** The two lists are read off one table, and this is what
@@ -732,91 +564,45 @@ mod tests {
         assert!(spot.inner_angle <= spot.outer_angle);
     }
 
-    /// **The gather directions are unit vectors spread over the whole sphere.**
-    /// A quadrature that pointed all one way would bake a volume lit from one
-    /// side, and every probe would still be a plausible-looking row.
+    /// **The volume's header puts every probe where [`probe_position`] says**,
+    /// which is what the updater places its samples against.
+    ///
+    /// This used to read a row back through [`irradiance_at`] and assert it was
+    /// that probe's own row; it cannot, now that the rows ship zeroed and the
+    /// updater fills them. What that test was really about survives here: an
+    /// origin at the zone's corner rather than at the first cell's centre, an
+    /// `inv_spacing` carrying the spacing instead of its reciprocal, or a
+    /// `z`-fastest walk each leave a zone lit from the wrong place, and each is
+    /// a claim about the header.
+    ///
+    /// **A tolerance rather than an equality**, and it is arithmetic rather than
+    /// slack: this module places its probes in `f64` and the header carries an
+    /// `f32` *reciprocal* spacing, so the two multiply different numbers and
+    /// differ in the last bit of a metre-scale coordinate. A micrometre is four
+    /// orders under the spacing, so every mistake this test is about — a corner
+    /// origin, an uninverted spacing, a transposed walk — is metres out and
+    /// still fails.
     #[test]
-    fn the_gather_directions_are_unit_and_spread() {
-        let directions = gather_directions();
-        assert_eq!(directions.len(), GATHER_DIRECTIONS);
-        let mut sum = DVec3::ZERO;
-        for direction in &directions {
-            assert!(
-                (direction.length() - 1.0).abs() < 1e-9,
-                "{direction} is not a unit vector",
-            );
-            sum += *direction;
-        }
-        // An equal-area set over the sphere sums to nearly nothing.
-        assert!(sum.length() < 0.2, "the set is biased toward {sum}");
-        // And it reaches every octant, which a bias no sum could see would not.
-        for signs in 0..8u8 {
-            let wanted = |bit: u8, value: f64| {
-                if signs & (1 << bit) == 0 {
-                    value > 0.0
-                } else {
-                    value < 0.0
-                }
-            };
-            assert!(
-                directions
-                    .iter()
-                    .any(|d| wanted(0, d.x) && wanted(1, d.y) && wanted(2, d.z)),
-                "no direction in octant {signs}",
-            );
-        }
-    }
+    fn every_probe_stands_where_the_header_says() {
+        /// How far apart the two placements may be, in metres.
+        const TOLERANCE_M: f32 = 1.0e-6;
 
-    /// **The falloff is the shader's**, checked at the two ends the mirror has to
-    /// get right: zero exactly at the radius, and finite at zero distance.
-    #[test]
-    fn the_falloff_reaches_zero_at_the_radius() {
-        assert_eq!(punctual(TORCH_REACH, TORCH_REACH), 0.0);
-        assert_eq!(punctual(TORCH_REACH * 2.0, TORCH_REACH), 0.0);
-        assert!(punctual(0.0, TORCH_REACH).is_finite());
-        // Monotone on the way out, which is what makes "further is darker" true.
-        let mut last = f32::INFINITY;
-        for step in 0..=100 {
-            #[allow(clippy::cast_precision_loss)]
-            let distance = TORCH_REACH * step as f32 / 100.0;
-            let value = punctual(distance, TORCH_REACH);
-            assert!(value <= last + 1e-9, "it rose at {distance} m");
-            last = value;
-        }
-    }
-
-    /// **The volume's header addresses the table it is shipped with**, checked
-    /// through [`irradiance_at`] — the engine's own reader — rather than through
-    /// a second copy of the index arithmetic.
-    #[test]
-    fn every_probe_reads_back_at_its_own_position() {
         let grid = probes();
         assert_eq!(grid.volume.counts, PROBE_COUNTS);
         assert_eq!(grid.volume.total(), PROBE_TOTAL);
         assert_eq!(grid.probes.len() as u32, PROBE_TOTAL);
-
-        // One row read at its own probe's position is that row, because the
-        // trilinear weights collapse onto it.
         for z in 0..PROBE_COUNTS[2] {
             for y in 0..PROBE_COUNTS[1] {
                 for x in 0..PROBE_COUNTS[0] {
-                    let index = ((z * PROBE_COUNTS[1] + y) * PROBE_COUNTS[0] + x) as usize;
                     let at = probe_position([x, y, z]);
                     #[allow(clippy::cast_possible_truncation)]
-                    let point = [at.x as f32, at.y as f32, at.z as f32];
-                    let normal = [0.0, 1.0, 0.0];
-                    let read = irradiance_at(
-                        &grid.volume,
-                        &grid.probes,
-                        &ProbeVisibility::NONE,
-                        point,
-                        normal,
-                    );
-                    let want = grid.probes[index].irradiance(normal);
-                    for channel in 0..3 {
+                    let want = [at.x as f32, at.y as f32, at.z as f32];
+                    let got = grid.volume.position(0, [x, y, z]);
+                    for axis in 0..3 {
                         assert!(
-                            (read[channel] - want[channel]).abs() < 1e-5,
-                            "probe {x},{y},{z} reads back {read:?} rather than {want:?}",
+                            (got[axis] - want[axis]).abs() <= TOLERANCE_M,
+                            "the header puts probe ({x}, {y}, {z}) at {got:?} and this \
+                             module puts it at {want:?}"
                         );
                     }
                 }
@@ -824,119 +610,14 @@ mod tests {
         }
     }
 
-    /// **A torch behind a pillar does not reach the surface behind it**, which
-    /// is what the visibility ray in [`arriving`] buys and the only thing that
-    /// makes the baked volume a map of the zone rather than of the torches.
-    ///
-    /// The control is a second point at the **same distance** from the same
-    /// flame with nothing in the way: without it, "the shaded point is dark"
-    /// passes for a falloff that had simply run out, and this test would say
-    /// nothing about the ray at all.
+    /// **The rows ship zeroed and the volume asks to be updated.** A grid of
+    /// zeroes left at `ProbeUpdate::Authored` is a zone with no bounce at all
+    /// and a perfectly plausible picture — see [`probes`] for what the updater
+    /// can and cannot give this zone.
     #[test]
-    fn a_torch_behind_a_pillar_does_not_reach_the_probe() {
-        /// What the shaded point may still collect, as a fraction of what the
-        /// clear one does. Measured at 0.0003 against 1.18, which is three
-        /// parts in ten thousand; this is thirty times that.
-        const PILLAR_LEAK: f32 = 0.01;
-
-        let mut world = zone::world();
-        // The hall's left-hand brazier, with a pillar one tile north of it.
-        let brazier = brazier_tiles()
-            .iter()
-            .position(|(col, row)| *col == 2 && *row == 11)
-            .expect("the hall carries a brazier at column 2, row 11");
-        assert_eq!(zone::cell(2, 10), Cell::Pillar, "the pillar moved");
-        let flame = flame_at(brazier);
-
-        // Two metres above the floor on either side, both two tiles from the
-        // flame: one with the pillar on the line and one without.
-        let shaded = tile_centre(2, 9) + DVec3::Y * 1.0;
-        let open = tile_centre(4, 11) + DVec3::Y * 1.0;
-        let mut reach = |at: DVec3| {
-            let normal = (flame - at).normalize();
-            arriving(&mut world, at, normal, 0.0)
-        };
-        assert!(
-            ((flame - shaded).length() - (flame - open).length()).abs() < 0.05,
-            "the two points are {:.2} m and {:.2} m from the flame, so this is a \
-             test of the falloff",
-            (flame - shaded).length(),
-            (flame - open).length(),
-        );
-
-        let lit = reach(open).length();
-        let dark = reach(shaded).length();
-        assert!(lit > 0.0, "the clear point got no light at all");
-        // Not zero, and it is worth saying why: [`arriving`] sums *every* light
-        // in the zone, so the shaded point still collects a trace from the
-        // braziers that flank the spawn two tiles further on. What it does not
-        // collect is the flame the pillar stands between it and — and the
-        // equal-distance control above is what makes that a statement about the
-        // ray rather than about the falloff.
-        assert!(
-            dark < lit * PILLAR_LEAK,
-            "the pillar let {dark} through, against {lit} on the clear side",
-        );
-    }
-
-    /// **The volume varies across the zone**: the ambient beside a brazier is far
-    /// above the ambient in the corridor, which every torch is out of reach of.
-    ///
-    /// Read through [`irradiance_at`] — the engine's own reader, and the same
-    /// arithmetic `mesh.slang` runs — rather than off the rows, so what is
-    /// asserted is what a fragment would be handed.
-    #[test]
-    fn the_volume_is_brighter_beside_a_brazier_than_out_in_the_corridor() {
+    fn the_rows_are_the_updater_s_to_fill() {
         let grid = probes();
-        let luminance = |at: DVec3| {
-            #[allow(clippy::cast_possible_truncation)]
-            let point = [at.x as f32, at.y as f32, at.z as f32];
-            let value = irradiance_at(
-                &grid.volume,
-                &grid.probes,
-                &ProbeVisibility::NONE,
-                point,
-                [0.0, 1.0, 0.0],
-            );
-            0.2126f32.mul_add(value[0], 0.7152f32.mul_add(value[1], 0.0722 * value[2]))
-        };
-
-        assert_eq!(zone::cell(2, 11), Cell::Brazier, "the hall's brazier moved");
-        assert_eq!(zone::cell(6, 6), Cell::Floor, "the corridor moved");
-        let beside = luminance(tile_centre(2, 11) + DVec3::Y * 1.0);
-        let corridor = luminance(tile_centre(6, 6) + DVec3::Y * 1.0);
-        assert!(beside > 0.0, "the brazier's probes gathered nothing at all");
-        assert!(
-            beside > corridor * VOLUME_CONTRAST,
-            "beside a brazier reads {beside:.5} and the corridor {corridor:.5}, which is \
-             a volume that does not know where the light is",
-        );
-    }
-
-    /// **A probe inside stone stays at zero.** The row a wall's probe carries is
-    /// what would bleed a lit room's ambient into a dark one, and nothing else
-    /// here would see it.
-    #[test]
-    fn a_probe_inside_the_stone_gathers_nothing() {
-        // The corner of the grid, which is always a wall block — see
-        // `zone::the_border_of_the_zone_is_solid`.
-        let corner = tile_centre(0, 0) + DVec3::Y * 2.0;
-        assert!(!inside_open_air(corner));
-        let mut world = zone::world();
-        let baked = bake(&mut world, corner, &gather_directions(), 0.0);
-        assert_eq!(baked, GpuProbe::ZERO);
-
-        // The control: a point in the middle of the hall is open air, and a
-        // probe there gathers something.
-        let open = tile_centre(6, 13) + DVec3::Y * 1.5;
-        assert!(inside_open_air(open));
-        let gathered = bake(&mut world, open, &gather_directions(), 0.0);
-        assert_ne!(gathered, GpuProbe::ZERO);
-
-        // …and so is a point outside the grid altogether, which the index
-        // arithmetic has to refuse rather than wrap.
-        assert!(!inside_open_air(DVec3::new(1e6, 1.0, 0.0)));
-        assert!(!inside_open_air(DVec3::new(0.0, -1.0, 0.0)));
-        assert!(!inside_open_air(DVec3::new(0.0, WALL_TOP_Y + 1.0, 0.0)));
+        assert_eq!(grid.update, ProbeUpdate::EveryFrame);
+        assert!(grid.probes.iter().all(|probe| *probe == GpuProbe::ZERO));
     }
 }

@@ -2901,6 +2901,115 @@ fn a_probe_behind_a_wall_reflects_nothing_through_it() {
     );
 }
 
+/// The least the wall face must measure in red once the divider is gone, in
+/// levels of 255.
+///
+/// **The anti-vacuity half, and here it is a strong one**: nothing but the
+/// updater lights this face — the sun is turned away from it, the fixture's sun
+/// carries no ambient and its sky is off — so a gather that never ran leaves it
+/// black rather than merely dimmer. Measured at **101.59 levels on radv and
+/// 101.00 on lavapipe**, and at **0.00 on both with the dispatch removed**, so
+/// this is set at well under half of what the fixture reaches and an order of
+/// magnitude above what the failure it guards leaves behind.
+const BOUNCE_MIN_LEVELS: f32 = 40.0;
+
+/// How much redder, in red-to-blue, the wall face must read with the divider
+/// gone than with it in place.
+///
+/// **A ratio of ratios, so nothing that changes the room's brightness can
+/// satisfy it** — the same shape [`LEAK_RATIO`] carries, and for the same
+/// reason. The walled arm is not neutral and is not meant to be: the `-X` probe
+/// still gathers its own half of a room lit by a warm sun, which is what the
+/// 1.97 below is. What the divider takes from it is the red panel across the
+/// room.
+///
+/// Measured at **3.078 open against 1.966 walled on radv** and **3.061 against
+/// 1.966 on lavapipe**, which is a little over 1.56× either way. With
+/// `probe_chebyshev` forced to one the walled arm reads **3.465** — it gathers
+/// the panel through the divider — against 3.206 open, so the sabotage lands at
+/// 0.93× and misses this by the whole of the distance rather than by a margin.
+const BOUNCE_REDDER: f32 = 1.25;
+
+/// **The updater's claim on the device: a probe gathers the sunlit surfaces it
+/// can see, and nothing through a wall.**
+///
+/// `crcbl::screenshot::probe_bounce_forward` is the fixture — the divider room
+/// with a red panel against its `+X` wall, a low white sun from `-X`, and two
+/// probes whose rows the reflective shadow map fills every frame. Drawn twice,
+/// with the divider and without it, exactly as
+/// [`a_probe_behind_a_wall_lights_nothing_through_it`] draws its authored rows.
+///
+/// **What is measured is the probe term alone.** The camera looks straight at
+/// the `-X` wall's inner face, which is turned away from the sun and reaches no
+/// ambient — the fixture's sun carries none and its sky is off — so every level
+/// in the block is irradiance the updater put in a row.
+///
+/// **The two channels move in opposite directions**, which is what nothing
+/// uniform can fake. Taking the divider away hands the `-X` probe the red panel
+/// across the room and takes away the divider's own sunlit `-X` face, which was
+/// white: so red rises, blue falls, and the face's red-to-blue opens up. A
+/// gather that ignored `probe_chebyshev` reads the red panel in **both** arms
+/// and flattens that ratio; a dispatch that never ran leaves both arms' rows at
+/// zero, and this face — which has no other light on it — goes black and misses
+/// the floor below.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_updater_gathers_what_a_probe_can_see_and_nothing_through_a_wall() {
+    crcbl_core::log::init_logging();
+
+    let frame = |wall: bool| {
+        let setup =
+            OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, move |device, queue, format| {
+                crcbl::screenshot::probe_bounce_forward(device, queue, format, wall)
+            })
+            .unwrap_or_else(|why| panic!("a GPU backend opens for the probe updater scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        // **The second frame, not the first.** The rows this reads are written
+        // by the frame that reads them, but the visibility capture and the
+        // instance uploads land on the first one, and a fixture that measured
+        // the frame those share would be measuring the build as much as the
+        // updater.
+        let _build = setup.draw_and_readback().expect("the frame renders");
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format))
+            .expect("the readback is exactly one image")
+    };
+
+    let walled = frame(true);
+    let open = frame(false);
+    // The frame's middle, which is the `-X` wall's inner face and nothing else:
+    // `crcbl::screenshot::probe_bounce_forward` aims the camera straight at it,
+    // so this measurement inverts no projection.
+    let middle = (EXTENT.0 / 2, EXTENT.1 / 2);
+    let band = |image: &Image, channel| block_channel(image, middle, PROBE_BAND, channel);
+    let (red_walled, red_open) = (band(&walled, 0), band(&open, 0));
+    let (blue_walled, blue_open) = (band(&walled, 2), band(&open, 2));
+    let walled_redness = red_walled / blue_walled;
+    let open_redness = red_open / blue_open;
+    eprintln!(
+        "crcbl render e2e: probe updater — wall face red {red_walled:.2} walled against \
+         {red_open:.2} open, blue {blue_walled:.2} against {blue_open:.2}, red-to-blue \
+         {walled_redness:.3} against {open_redness:.3}"
+    );
+
+    assert!(
+        red_open >= BOUNCE_MIN_LEVELS,
+        "with the divider gone the wall face must carry the red panel's bounce, and it \
+         measures {red_open:.2} of the {BOUNCE_MIN_LEVELS} this fixture is built to reach — \
+         nothing but the updater lights this face, so a face this dark is a row the gather \
+         never wrote"
+    );
+    assert!(
+        open_redness > walled_redness * BOUNCE_REDDER,
+        "and the face must read {BOUNCE_REDDER}× redder with the divider gone: a red-to-blue \
+         of {open_redness:.3} against {walled_redness:.3} walled ({red_walled:.2}/\
+         {blue_walled:.2} against {red_open:.2}/{blue_open:.2}) — the probe beside this face \
+         is gathering the red panel through the wall"
+    );
+}
+
 /// How far along `x` the clipmap profile is read, in world units.
 ///
 /// Level 0's boundary is one [`crcbl::screenshot::probe_clipmap_grid`] spacing
