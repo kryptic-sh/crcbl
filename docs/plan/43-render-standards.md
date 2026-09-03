@@ -582,10 +582,15 @@ What is left of §4 is [51-volumetrics.md](51-volumetrics.md)'s rungs 3 and 4: a
 runtime updates (Unity's APV, Godot's SDFGI, Unreal's Lumen), plus screen-space
 GI to catch what the probes are too coarse for.
 
-**Where this one is:** L1 spherical-harmonic irradiance probes —
-`shaders/probe.slang`, `compute_probe.slang` — decoded per pixel, and a flat
-`frame.ambient` term underneath them. That is a real irradiance volume and it is
-the right first rung.
+**Where this one is:** L1 spherical-harmonic irradiance probes — the row layout
+in `crcbl_shaders::probe`, the read in `mesh.slang`'s `probe_irradiance` and
+`ssr.slang`'s `probe_level_environment`, and the visibility maps captured by
+`probe_capture.slang` and `probe_octahedral.slang` — decoded per pixel, and a
+flat `frame.ambient` term underneath them. (This named `shaders/probe.slang` and
+`compute_probe.slang` until 2026-09-04. The first has never existed; the second
+is the HAL's compute-capability probe, which draws nothing and has no bearing on
+irradiance at all.) That is a real irradiance volume and it is the right first
+rung.
 
 **The gaps, in order of how much they cost:**
 

@@ -148,6 +148,113 @@ jobs passed on `3430ba7` — but WARP and SwiftShader now clear it by less than
 they did. If that row ever flakes, the fix is a re-sweep on the driver that
 flaked, not a nudge.
 
+## The RSM probe updater: the plan, and the three things it is bigger than (2026-09-04)
+
+The last item in `docs/plan/43-render-standards.md`'s lighting order before the
+atmosphere, and the half of `docs/plan/50-irradiance-probes.md`'s decision that
+has not been built. The design below was read out of the tree on 2026-09-04 and
+the structural claims were re-verified against the code before being written
+here; nothing was built or run, so every line is a reading rather than a result.
+
+**Three places it is bigger than the plan's one sentence, all corrected in the
+plan itself now:**
+
+1. **The probe buffer cannot be written by a compute pass as it stands.**
+   `crcbl_render::probe`'s table is `BufferUsage::STORAGE` +
+   `MemoryLocation::HostUpload` and its mesh layout entry is
+   `StorageBuffer { read_only: true }` — the seam refuses a writable storage
+   binding of a host-visible buffer. Making it device-local also forces it to
+   become a ring of `FRAMES_IN_FLIGHT`, because `SharedBindings` names one
+   buffer in every frame's group and frame N+1's gather would overwrite rows
+   frame N's forward pass is still reading. `crcbl_render::light_grid`'s
+   per-frame `grid[frame]` is the pattern.
+2. **The RSM cannot ride the shadow pass.** That pass has one attachment, a
+   depth, and every pipeline in it is fragment-free. Colour targets there span
+   the whole 3072² atlas for data only cascade 0's 768² corner is read from, and
+   they give all fourteen light tiles a fragment stage. It wants its own render
+   pass at its own extent, reusing cascade 0's matrix and its already-generated
+   draws.
+3. **It is three targets, not two.** Flux (`Rgba16Float` — the sun's colour may
+   exceed one), world normal (`Rgba8Unorm`), and world position (`Rgba32Float`),
+   because the gather needs the sample's position and the seam has no
+   plain-float read of a depth image.
+
+**The trap that will bite whoever writes it.** `crcbl_render::forward` looks its
+fragment stage up as `entry(&MESH, Stage::Fragment)`, and `entry` returns `None`
+on two matches. A second fragment entry point in `mesh.slang` therefore breaks
+every renderer build with "exposes no unambiguous fragment entry point". The fix
+is `named_entry(&MESH, "fragmentMain", …)`, which the two vertex entry points on
+the lines above already use for exactly this reason.
+
+**The slicing, each with what goes red if it is wrong:**
+
+- **S1 — split `probe_weight` into `probe_chebyshev` plus the floor**, in
+  `mesh.slang` and `ssr.slang` together, held by
+  `the_shaders_weigh_a_probe_the_way_this_module_does`. `PROBE_OCCLUDED_WEIGHT`
+  exists to stop the trilinear blend's divisor reaching zero; the gather has no
+  divisor, and a floor there would let every wall-hidden RSM texel contribute
+  1e-4 of its flux — thousands of samples of that is a leak by another name. No
+  golden may move; that is the check.
+- **S2 — the table goes device-local and per-frame.** `ProbeTable::fill` becomes
+  a staging buffer and a copy; `forward`, `depth-prepass` and `shadow` each
+  declare `read_buffer` on it so the graph emits the barriers. Again no golden
+  moves.
+- **S3 — the `rsm` pass**, with `rsmFragmentMain` and the `named_entry` fix.
+  **Do not record the pass in this slice**: a pass whose targets nothing reads
+  is per-frame cost for no picture, and "the half that will be read next slice"
+  is the shape this project forbids. Land the module and the pipeline only.
+- **S4 — the gather, and both passes recorded.** One workgroup per probe
+  striding the whole RSM, `groupshared` reduction,
+  `ProbeUpdate { Authored, EveryFrame }` on `ProbeGrid` defaulting to
+  `Authored`. lantern's `bounce` and shard's `light::probes` lose their gather
+  bodies here and not later — the moment the updater runs, their rows are
+  overwritten and the code reads as live while being dead. Their _volume
+  construction_ stays: that is placement, not lighting.
+- **S5 — the sky through the visibility**, only after S4 measures. Its own
+  commit and its own goldens.
+- **S6 — pricing on three tiers, and the doc deletions.**
+
+**What must not move: `crates/crcbl/tests/golden/probes.png`.** `Scene::Probes`
+is the anti-vacuity floor for the whole probe read path — the Rust-mirror
+comparison, the ratio-between-blocks assertion, the clipmap band test and both
+leak tests all stand on it. lantern's `room.png` and `live.png` _must_ move,
+because their bounce becomes the RSM's.
+
+**Determinism has a clean answer here**: make the RSM small — 64 a side, 4096
+texels — and have every probe gather every texel every frame. Then the sample
+pattern _is_ the image and neither shader transcribes a mapping, which is the
+strongest form of the rule. If a large clipmap ever forces a subset, the escape
+is a host-evaluated stratum-centre table uploaded as data, the way
+`probe_visibility::texel_direction` already is — not a hash, and not built
+speculatively.
+
+**Two things the user has to decide before S5, and one before S4:**
+
+- **The sky term.** Folding it into the gather and zeroing `frame.sky_sh_*` for
+  an updater-owned volume is a real change to how a scene is lit, not a binding.
+- **`RSM_SIDE` is a tier knob or it is not.** Constraint C4 says the software
+  and browser tiers pay about 40x per pass, so a gather costing 0.5 ms on radv
+  is 20 ms on lavapipe. Sweep 32 and 64 before fixing the constant rather than
+  guessing it — and note that the same tier problem has now been measured once
+  for real, in "The SSR visibility weight costs the software tier 11% of a
+  frame" above.
+
+**A limit worth writing down before someone measures it as a bug:** the RSM
+covers cascade 0's camera-following sphere, radius 24, while the probe volume is
+authored and does not scroll. Probes outside the near cascade gather nothing.
+lantern's room is too small to notice; a larger scene is not.
+
+**Coverage gaps in the plan itself.** Nothing was compiled or run to produce it.
+`crcbl-mtl`, `crcbl-dx12` and `crcbl-webgpu` were not opened — the
+`UnfilterableFloat` requirement, the Metal `groupshared` caveat and the DXIL
+entry-point rule are taken from the seam's and the shaders' own doc comments.
+The render graph's barrier synthesis was not read: that a compute
+`ShaderReadWrite` followed by a render `read_buffer` on one imported id produces
+the right barrier is inferred from `light-cluster` to `forward` working today.
+`Cascades::splits` was not evaluated, so the RSM's world footprint and per-texel
+area are unverified. `mesh_cluster.slang` was not opened, so the claim that the
+cluster path needs no mirror for a new fragment entry point is unconfirmed.
+
 ## What the plan audit of 2026-09-03 did not reach
 
 Plans 43, 51 and 52 were audited against the tree and eleven false claims were

@@ -75,14 +75,36 @@ day.** The grid below stays, and everything that _fills_ it changes:
   capture disabled it compares at zero differing pixels.
 
 - **The raster updater, every frame, on all four backends**: the sun's near
-  cascade (and any lamp the application asks for) also writes flux and normal —
-  a reflective shadow map — and one compute pass gathers the RSM into every
-  probe, **each sample gated by that probe's visibility map**, so an RSM texel
-  the probe cannot see contributes nothing. Sky irradiance goes through the same
-  visibility, which is what stops a closed room receiving the sky. A fixed
-  sample pattern, every probe every frame, no history —
-  [43-render-standards.md](43-render-standards.md) §5's C2 holds and a golden is
-  a function of its own inputs. One bounce, dynamic sun and lamps.
+  cascade is drawn a second time as a **reflective shadow map**, and one compute
+  pass gathers the RSM into every probe, **each sample gated by that probe's
+  visibility map**, so an RSM texel the probe cannot see contributes nothing. A
+  fixed sample pattern, every probe every frame, no history —
+  `docs/backlog.md`'s survey constraint C2 holds and a golden is a function of
+  its own inputs. One bounce, dynamic sun and lamps.
+
+  **Three things this bullet said until 2026-09-04 that the tree refuses**,
+  found by reading the passes rather than by building against them:
+  - **It is not the shadow pass's targets.** `crcbl_render::forward`'s `shadow`
+    pass has one attachment, a depth, and every pipeline it runs is
+    fragment-free — `depthVertexMain` and the tile-reset triangle alike. Colour
+    attachments there cover the whole 3072² atlas for data only cascade 0's 768²
+    corner would be read from, and they give all fourteen light tiles a fragment
+    stage. The RSM is its own render pass at its own extent, reusing cascade 0's
+    matrix and its already-generated draws.
+  - **It is three targets, not two.** Flux and world normal, and a world
+    position beside them, because the gather needs the sample's position and the
+    seam has no plain-float read of a depth image — `SampleType::Depth` is a
+    comparison-sampler slot. `probe_capture.slang` set that precedent when it
+    chose to write distance to a colour target rather than invert a projection
+    in the resolve.
+  - **The sky through the same visibility is not free.** `mesh.slang`'s
+    `sky_irradiance` is three dot products against `frame.sky_sh_*` with no
+    direction set to gate, so there is nothing at the fragment to weigh. The
+    implementable form is that the gather folds the sky into the rows along the
+    directions a probe's own map reports as open, and the host zeroes `sky_sh_*`
+    for a volume the updater owns. That is a real change to the sky term rather
+    than a binding, and it is its own decision.
+
 - **The traced updater, on `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl`**: the same
   rows, filled by inline ray queries once foundation (c) exists, which buys
   multi-bounce and dynamic occluders. The volume, the visibility test and the
@@ -98,8 +120,8 @@ middle, sparse ones out at the edge, and a world that can be any size because
 the levels are relative to that point. A fragment reads the finest level that
 contains it, blended over a band at each level's edge; within a level the read
 is the trilinear gather and the Chebyshev weighting above. Rows are per level,
-so [43-render-standards.md](43-render-standards.md) §5's C1 (one storage buffer)
-holds with an offset per level.
+so `docs/backlog.md`'s survey constraint C1 (no ninth storage buffer) holds with
+an offset per level.
 
 What the levels slice built, and where each rule lives:
 
@@ -202,13 +224,13 @@ single bounce is the rule on both until then.
 
 **What this amends.** The GI decision of 2026-08-30 said the tier below ray
 tracing has no bounce term; it now has this one, because it is leak-free and its
-cost is one compute pass and two extra shadow-pass targets — the first thing on
-the ladder below that the user judged worth having on every tier. The DDGI
-rejection below stands on its temporal half and falls on its ray-tracing half;
-the light-field-probe rejection ("no leaking defect yet to justify them") is
-withdrawn — leaking is the defect the decision is about. This section supersedes
-the August account of the authored irradiance, which was removed from this file
-on 2026-08-30 rather than left standing beside it.
+cost is one compute pass and one extra render pass of three small targets — the
+first thing on the ladder below that the user judged worth having on every tier.
+The DDGI rejection below stands on its temporal half and falls on its
+ray-tracing half; the light-field-probe rejection ("no leaking defect yet to
+justify them") is withdrawn — leaking is the defect the decision is about. This
+section supersedes the August account of the authored irradiance, which was
+removed from this file on 2026-08-30 rather than left standing beside it.
 
 **What the visibility half costs, measured.**
 `apps/lantern --headless --frames 400 --size 1920x1080` on radv (RX 7900 XTX,
