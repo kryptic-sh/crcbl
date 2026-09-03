@@ -435,6 +435,14 @@ where they sat before the gather was halved, so the reconstruction is carrying
 the contrast the full-resolution pass had. The margin is unchanged, and so is
 the case for an intensity control below.
 
+**Not yet re-checked after the AO defaults moved on 2026-09-03**, and it is the
+obvious next candidate to have eaten the headroom — four horizon planes and a
+second blur changed the occlusion channel enough to re-bless fourteen goldens,
+which is a larger change to it than the halving this entry did re-check. Read
+both again on radv the way that re-check was done: the AO scene's wall bands
+against its open floor, and lantern's contact corner with occlusion on against
+off. Until that is done the two figures below describe the pre-2026-09-03 frame.
+
 **The industry answer is an AO intensity control, and it was built on
 2026-09-02** — `r_ssao_intensity`, a console variable in `crcbl_render::ssao`
 that `ssao_upsample.slang` raises its reconstructed visibility to, applied to
