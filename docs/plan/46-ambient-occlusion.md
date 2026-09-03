@@ -96,11 +96,19 @@ first.
   inverted normal, and a result that never reaches the shading line.
 - **AO is always on, and the off-switch is data rather than a branch.** There is
   no device fact to gate on — every backend has a fullscreen draw, a sampled
-  `D32Float` and an `R8Unorm` target — and inventing a capability that is really
-  a performance opinion is what topic 39 exists to prevent. A renderer-owned 1×1
-  `R8Unorm` cleared to 1.0, bound when the AO passes are not added, is the
-  `shadow_placeholder` pattern already in the tree, and it makes a later quality
-  knob a two-line change rather than a shader permutation.
+  `D32Float` and a colour target — and inventing a capability that is really a
+  performance opinion is what topic 39 exists to prevent. A renderer-owned 1×1
+  image, bound when the AO passes are not added, is the `shadow_placeholder`
+  pattern already in the tree, and it makes a later quality knob a two-line
+  change rather than a shader permutation.
+
+  **The format in this bullet was `R8Unorm` until the bent-normal rung widened
+  it**, and the placeholder is not a clear:
+  `TransientImageDesc::ambient_occlusion` is `Rgba8Unorm` — visibility in `r`,
+  the bent direction in the other three — and
+  `ForwardRenderer::ambient_occlusion_placeholder` is an _uploaded_ 1×1 whose
+  four bytes are `AMBIENT_OCCLUSION_NONE`, because a cleared image cannot carry
+  the direction sentinel a byte of it has to hold.
 
   **Qualified when the switch was built (2026-08-14): the 1×1 form is not free,
   and what it costs is a line in the shader rather than a pass.** `mesh.slang`
@@ -348,10 +356,11 @@ what occludes it, which is the point, and on a bright surface the lift is large:
 `1.198` and now separates them by `1.058`, and `apps/lantern`'s contact corner
 moved from a comfortable margin to `1.038`. Both match the published curve at
 those albedos, so this is the fit working rather than the occlusion weakening.
-`AO_RATIO` and `AO_LIFT` carry the new measurements and still land at exactly
-`1.00` for a pass that never reached the shading line. What they have lost is
-margin — `docs/backlog.md` carries that, and the AO intensity control that would
-buy it back.
+`AO_RATIO` and `AO_LIFT` are the thresholds those measurements were used to set
+— each below the reading it guards, not equal to it — and both still land at
+exactly `1.00` for a pass that never reached the shading line. What they have
+lost is margin — `docs/backlog.md` carries that, and the AO intensity control
+that would buy it back.
 
 The presets of foundation (g) select between the two. **They exist now** —
 `crcbl::settings::presets` landed 2026-08-31 — so this rung wires into them

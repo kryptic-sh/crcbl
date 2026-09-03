@@ -22,35 +22,43 @@ four targets, and a new `VertexOutput` consumer". **Every clause of that is a
 fact about the depth prepass**, which is built from the shadow pipeline with no
 fragment stage and no colour targets. On the **forward** pass none of it holds:
 both forward pipelines already take one `ColorTargetState` array and both name
-the same fragment entry, so a second target is one array element and no new
-pipeline, no new entry point and no new interpolant. Recorded here so the
-refusal is not applied by analogy to a pass it was never about.
+the same fragment entry, so a further target is one array element and no new
+pipeline, no new entry point and no new interpolant. (The fragment stage returns
+three today: `lit`, `reflectivity` and the `motion` target the temporal rung
+added.) Recorded here so the refusal is not applied by analogy to a pass it was
+never about.
 
 ### The decision
 
-- **One new colour attachment on the forward pass: `Rgba8Unorm`, `rgb = F0`,
-  `a = sharpness`.** Sharpness is the clamped screen-march ramp
-  `1 - roughness / ROUGHNESS_CUTOFF`: zero means the surface keeps its probe
-  environment but cannot honestly launch one screen-space ray. Encoding the
-  endpoint rather than reconstructing it from quantised roughness is
-  load-bearing — `0.5` may round to either neighbouring byte, while zero
-  survives every `Rgba8Unorm` backend exactly. `max_color_attachments` is 4 on
-  the minimum capability profile.
+- **One new colour attachment on the forward pass: `Rgba8Unorm`, `rgb = F0`, `a`
+  the lobe.** The alpha held the clamped screen-march ramp
+  `1 - roughness / ROUGHNESS_CUTOFF` when this was decided, on the argument that
+  `0.5` may round to either neighbouring byte while zero survives every
+  `Rgba8Unorm` backend exactly. **Since 2026-08-29 it holds the roughness
+  itself**, quantised to `REFLECTIVITY_LEVELS`, because the split-sum fallback
+  needs a roughness and the ramp is one division away from it — `ssr.slang`'s
+  `sharpness_of` derives it where it is used, and the zero endpoint is preserved
+  by the quantisation levels rather than by the encoding.
+  `max_color_attachments` is 4 on the minimum capability profile.
 - **It carries the two values the downstream reflection pair consumes.** `F0`
   colours Fresnel for every surface. Sharpness gates the march and controls how
   strongly the blur moves from the direct centre fallback to filtered SSR. The
   original roughness remains in the material row for the forward GGX lobe; the
   attachment does not pretend a single screen-space ray can evaluate a broad
   lobe.
-- **The normal stays reconstructed from depth**, sharing the AO pass's four-tap
-  function — but see the escalation clause below, because the cost of a wrong
-  normal is not the same for the two features.
-- **The pass is the composite.** It reads scene colour, depth and reflectivity
-  and writes their sum into a second `Rgba16Float` transient, which `add_passes`
-  returns in place of the scene colour. One pass, no blend state, no feedback
-  loop. A frame that does not add it returns the old id and the picture is
-  bit-identical — the same data-not-a-branch off-switch AO has, needing no
-  placeholder because nothing in `mesh.slang` reads the result.
+- **The normal stays reconstructed from depth**, by the AO pass's four-tap
+  technique — `normal_at`, declared independently in each shader rather than
+  shared through an import — but see the escalation clause below, because the
+  cost of a wrong normal is not the same for the two features.
+- **The composite is a pass of the pair, not of the march.** This decision put
+  it in the ray pass; what shipped puts it in the blur, for the reason the
+  roughness section below gives. `ssr.slang` returns the reflection alone and
+  `ssr_blur.slang` adds `scene_color` to the filtered result, writing the sum
+  into a second `Rgba16Float` transient which `add_passes` returns in place of
+  the scene colour. No blend state, no feedback loop. A frame that does not add
+  it returns the old id and the picture is bit-identical — the same
+  data-not-a-branch off-switch AO has, needing no placeholder because nothing in
+  `mesh.slang` reads the result.
 
 ### What is refused
 
@@ -109,9 +117,12 @@ whole cell of whatever level it is on in one iteration, dropping a level only
 where the cell in front of it is not empty. Everything else in this section is
 unchanged and still describes the march: the reach, the clip, the border ramp,
 the thickness bound and the probe fallback are all what they were. A frame too
-small to halve once has no pyramid and the walk stays on level 0, which is the
-fixed stride the paragraphs below describe, so that path is still live rather
-than replaced.
+small to halve once has no pyramid and the walk stays on level 0 — one-texel
+cells, resolved between cell entry and exit exactly as every coarser level is.
+That is **not** the fixed-stride walk the paragraphs below describe: nothing in
+the tree steps by `reach / MAX_STEPS` any more, and `MAX_STEPS`' own doc says
+so. Read those paragraphs for the reach, the clip, the ramps and the thickness
+rule, not for the stride.
 
 - **Screen space, not view space.** A world-unit step is tens of pixels near the
   eye and a fraction of one far away, so the same constants would be a different
@@ -128,20 +139,25 @@ than replaced.
   between a surface and what it reflects, so the reflection got _shorter_ as the
   window got bigger. `lantern`'s panel is where it showed — the reflection its
   golden asserts at 256×192 was simply absent from the 1280×960 review frame of
-  the same room. `ssr.slang` therefore derives its stride from
-  `REACH_FRACTION * min(width, height) / MAX_STEPS`: the stride is still a fixed
-  number of pixels along one ray, the loop bound is still a constant, the cost
-  is still the same at every resolution, and a reflection is now the same share
-  of the frame at every resolution rather than the same number of pixels.
+  the same room. `ssr.slang` therefore takes its **reach** from
+  `REACH_FRACTION * min(width, height)`: the loop bound is still a constant, the
+  cost is still the same at every resolution, and a reflection is now the same
+  share of the frame at every resolution rather than the same number of pixels.
+  The stride that once divided that reach by `MAX_STEPS` is gone with the
+  fixed-stride walk — the Hi-Z march advances by whole cells of the level it is
+  on — but the reach it sized is exactly what the pyramid march still uses.
 - **The segment is clipped to the viewport before the walk**, so every tap is
   in-bounds by construction and a ray leaving the screen stops being a branch.
   It ends at the clipped endpoint with a **border ramp** on its weight; a hard
   stop draws a visible line where reflections end.
-- **A ray that hits nothing returns the probe environment.** The same L1 table
-  used for diffuse irradiance is decoded back to approximate directional
-  radiance, multiplied by Fresnel, and blended against a hit by confidence. A
-  zero probe volume returns exact zero and preserves the old hit multiplication
-  order. This is why the table's Reflections cell says "screen-space
+- **A ray that hits nothing returns the probe environment, plus a prefiltered
+  sky.** The same L1 table used for diffuse irradiance is decoded back to
+  approximate directional radiance and added to `sky_prefiltered` at the lobe's
+  own roughness; the sum is multiplied by the split-sum `env_brdf` from `dfg_at`
+  — not by Fresnel alone, which is what this bullet said before the prefiltered
+  rung landed — and blended against a hit by confidence. Exact zero therefore
+  needs a zeroed probe volume **and** a black sky; either one alone leaves the
+  other standing. This is why the table's Reflections cell says "screen-space
   reflections, probe fallback" rather than claiming screen space is complete.
 - **Behind an object, the depth buffer has no information, and this is where the
   plausible wrong answer lives.** A tap says the ray is behind the _front_

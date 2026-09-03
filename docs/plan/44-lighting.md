@@ -36,12 +36,12 @@ deferred, and whether that is worth building next is a scheduling question for
 the roadmap rather than a design question for this document. `docs/backlog.md`
 is where that decision belongs.
 
-| Effect              | `RayTraced`                         | `Rasterised`                                     |
-| ------------------- | ----------------------------------- | ------------------------------------------------ |
-| Global illumination | ray-traced GI                       | irradiance probes + baked/ambient                |
-| Reflections         | ray-traced reflections              | screen-space reflections, probe fallback         |
-| Shadows             | ray-traced shadows, all light types | CSM for sun, single map for spot, cube for point |
-| Ambient occlusion   | ray-traced AO                       | screen-space AO                                  |
+| Effect              | `RayTraced`                         | `Rasterised`                                        |
+| ------------------- | ----------------------------------- | --------------------------------------------------- |
+| Global illumination | ray-traced GI                       | irradiance probes + baked/ambient                   |
+| Reflections         | ray-traced reflections              | screen-space reflections, probe fallback            |
+| Shadows             | ray-traced shadows, all light types | CSM for sun, one atlas tile for spot, six for point |
+| Ambient occlusion   | ray-traced AO                       | screen-space AO                                     |
 
 Rules that keep the two from diverging into two renderers:
 
@@ -131,11 +131,13 @@ tier is the whole cost of the frame.
   number surfaces, and a scene that overflows should be visible in the debug
   panel rather than mysteriously dark.
 - **Shadowed lights are a subset, and a small one.** Shadow atlas space is the
-  scarce resource: the sun's cascades, then a stated number of spot maps and
-  point cube maps, chosen by a rule the frame can state (nearest, brightest,
-  largest screen influence — the rule is the next slice's decision and belongs
-  in this file when taken). An unshadowed light still lights; it just does not
-  occlude.
+  scarce resource: the sun's cascades, then a stated number of spot tiles and
+  six-tile point runs, chosen by a rule the frame can state. **That rule was
+  taken** — `crcbl_render::shadow::coverage` ranks by screen influence, with
+  `HOLD_RATIO` as the hysteresis that stops a tie swapping every frame and
+  `tile_level` demoting a light that covers little to a smaller tile — and it is
+  written up in [45-shadows.md](45-shadows.md) rather than here. An unshadowed
+  light still lights; it just does not occlude.
 
 ## The BRDF the "one material model" rule names (decided 2026-08-13)
 
@@ -196,9 +198,12 @@ Two consequences worth stating before somebody meets them:
   surface out of every light's reach is **black** until it has something to
   reflect, and the two rows that give it one are exactly SSR
   ([47-reflections.md](47-reflections.md)) and irradiance probes
-  ([50-irradiance-probes.md](50-irradiance-probes.md)). Nothing regresses today:
-  `GpuMaterial::UNTINTED` is `metallic 0.0` and no scene in the tree sets one
-  higher.
+  ([50-irradiance-probes.md](50-irradiance-probes.md)). The default is clear of
+  it — `GpuMaterial::UNTINTED` is `metallic 0.0` — but **scenes are not**:
+  `apps/lantern`'s mirror slab and its brass block are both fully metallic, and
+  `crcbl_scene`'s two glTF paths default a row to metallic as glTF specifies. So
+  the reassurance this bullet used to carry is spent, and the surfaces standing
+  black without those two rows are the ones lantern ships to show them off.
 - **The engine's Lambert term carries no `1 / pi`, so neither does the specular
   one.** Trowbridge-Reitz normalises to `alpha2 / (pi * shape * shape)` and
   Lambert to `albedo / pi`; this engine's diffuse is a bare `albedo * N·L`, the

@@ -70,19 +70,23 @@ space.
 Its fixture is `Scene::Aa` — one slab turned about the view axis, so its
 silhouette runs diagonally between two flat levels — and the claim its golden
 cannot make is in `the_resolve_is_what_puts_the_soft_pixels_there`, which draws
-that same scene twice through `crcbl::screenshot::aa_forward` and compares. The
-measured pair: **532 pixels between the two levels with the resolve, zero
-without it, and a mean level that moves by 0.24 out of 255.**
+that same scene twice through `crcbl::screenshot::aa_forward` and compares. What
+the fixture pins is a band rather than a reading: at least `AA_MIN_SOFT_PIXELS`
+soft pixels with the resolve, at least four times fewer without it, and a mean
+level moved by no more than `AA_MEAN_TOLERANCE`. A run's own numbers were
+written here once and are not what goes red when the filter changes.
 
 **Its template is `crates/crcbl-shaders/shaders/bloom_composite.slang` and not
 `crates/crcbl-shaders/shaders/tonemap.slang`**, which is worth saying because
-the obvious answer is the wrong one. The tonemap is a 1:1 `Load` at an integer
-pixel and deliberately samples no neighbour — that is the whole of its
-determinism argument. The bloom composite already carries both halves FXAA
-needs: the same fullscreen triangle out of `SV_VertexID`, and a neighbourhood
-gathered around a UV through an `inv_source` texel-size uniform its Rust mirror
-writes once per frame. An `fxaa.slang` is that file with the tent replaced by
-the edge detect.
+the obvious answer is the wrong one. The tonemap is a 1:1 blit — it samples at
+the pixel's own centre through a nearest sampler, so it reads one texel and no
+neighbour, which is the whole of its determinism argument. (It is `Sample`
+through a declared `SamplerState` rather than a `Load`; the sampler the renderer
+creates for it is what makes the two the same read.) The bloom composite already
+carries both halves FXAA needs: the same fullscreen triangle out of
+`SV_VertexID`, and a neighbourhood gathered around a UV through an `inv_source`
+texel-size uniform its Rust mirror writes once per frame. An `fxaa.slang` is
+that file with the tent replaced by the edge detect.
 
 What it cost, item by item, because none of it was hypothetical:
 
@@ -117,11 +121,15 @@ What it cost, item by item, because none of it was hypothetical:
 
 ### SMAA 1x second, and it is the real industry standard step
 
-**When FXAA's over-blur of text and thin geometry starts showing, the engine
-reaches for SMAA 1x** — not for TAA, and not for a wider FXAA preset. Three
-passes: an edge detection, a blend-weight calculation that looks the detected
-pattern up in a precomputed **area** table and a **search** table, and a
-neighbourhood blend that applies the weights. Each is the fullscreen shape the
+**SMAA 1x is what the engine reaches for where FXAA over-blurs text and thin
+geometry** — not TAA, and not a wider FXAA preset. It is **built**:
+`crcbl_render::Smaa`, its three shaders, the cooked tables,
+`RenderEffects::SMAA` and `Antialiasing::Smaa`, with
+`smaa_changes_a_band_along_the_edges_and_nothing_else` as its observer. What
+follows is the design it was built to, kept because the refusals in it still
+bind. Three passes: an edge detection, a blend-weight calculation that looks the
+detected pattern up in a precomputed **area** table and a **search** table, and
+a neighbourhood blend that applies the weights. Each is the fullscreen shape the
 tier below establishes, so the pass machinery is the same machinery a third
 time.
 
@@ -221,10 +229,11 @@ grounds this section's determinism arguments refuse it for goldens. Its
 filtering row is bilinear, trilinear and anisotropic 2× to 16×, which
 `apps/options`' `ANISOTROPIES` row already matches rung for rung.
 
-What this tree has instead is **two independent bits**,
-`RenderEffects::ANTIALIASING` and `RenderEffects::SMAA`, each a `VIDEO_KEYS`
-row, so the panel can switch both on and the resolve slot picks between them out
-of sight. The next two rungs of this ladder are the CS2 shape:
+What this tree had instead, until the cycler below landed, was **two independent
+bits** — `RenderEffects::ANTIALIASING` and `RenderEffects::SMAA` — each its own
+settings row, so the panel could switch both on and the resolve slot picked
+between them out of sight. Neither is a `VIDEO_KEYS` row today; that table's own
+comment says why. The next two rungs of this ladder are the CS2 shape:
 
 1. **One `antialiasing` cycler row — built 2026-08-30.**
    `crcbl_render::Antialiasing` is the ladder (`None`, `Fxaa`, `Smaa`; CMAA2 and

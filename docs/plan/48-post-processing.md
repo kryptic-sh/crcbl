@@ -20,8 +20,9 @@ contract for a pass that does not exist. `ForwardRenderer::set_render_scale`
 sizes an internal target at a fraction of the caller's extent — the cluster
 grid, the level-of-detail pixel budget, the Hi-Z pyramid, bloom and FXAA all
 follow it there — and `shaders/upscale.slang` reconstructs that target into the
-caller's own as the last pass of the frame. Every stage of this chain now
-genuinely costs what the internal extent says, which is the whole reason the
+caller's own as the last pass of the _render_ chain; the UI composites after it,
+which is the order the pipeline further down states. Every stage of this chain
+now genuinely costs what the internal extent says, which is the whole reason the
 order is written this way.
 
 **At full scale there is no pass and no second image**: the stage before it
@@ -135,10 +136,11 @@ request.
   tonemap, `RenderEffects::ANTIALIASING` is the bit, and it is in
   `DEFAULT_STACK` — so every frame this engine draws is resolved.
 
-- **Bloom (P10)**: physically-plausible threshold-free downsample chain (Karis
-  average), 5–6 mips, tent upsample, additive with scalar. Cheap, huge
-  perceived-quality win — timed with the UI/debug polish phase so the profiler
-  HUD can show its cost honestly. `docs/backlog.md` carries what the slice left.
+- **Bloom (P10) — built.** Physically-plausible threshold-free downsample chain
+  (Karis average), tent upsample, additive with scalar: `crcbl_render::bloom`,
+  `bloom_down.slang` / `bloom_up.slang` / `bloom_composite.slang`,
+  `crcbl_shaders::bloom::BloomParams`, `RenderEffects::BLOOM` and the
+  `Scene::Bloom` fixture. `docs/backlog.md` carries what the slice left.
 - Stack is data-driven per camera (RON: which passes, parameters) —
   games/samples tune without engine edits; settings UI (topic 14 P10) exposes
   quality toggles.
@@ -195,13 +197,14 @@ half that dispatches them cannot disagree.
   but the `Scene::Bloom` fixture — is not drawing it to begin with. The reason
   is on that constant: the other three approximate light transport present in
   the scene, and a camera given no stack has been given no lens.
-- **Device** is wired to `DeviceCaps` and **removes nothing**, which is a fact
-  about these three effects rather than an unfinished clamp —
-  [46-ambient-occlusion.md](46-ambient-occlusion.md) says it of the occlusion
-  pair in as many words, the reflection pair's module says it of itself, and a
-  device too small for the shadow atlas fails to build the renderer rather than
-  degrading past it. The first real rule arrives with the ray-traced variants,
-  which `LightingPath` selects.
+- **Device removes nothing**, and it is not wired to anything: `device_effects`
+  is initialised to `RenderEffects::all()` and never assigned, so no
+  `DeviceCaps` value reaches it. That is a fact about these three effects rather
+  than an unfinished clamp — [46-ambient-occlusion.md](46-ambient-occlusion.md)
+  says it of the occlusion pair in as many words, the reflection pair's module
+  says it of itself, and a device too small for the shadow atlas fails to build
+  the renderer rather than degrading past it. The first real rule arrives with
+  the ray-traced variants, which `LightingPath` selects.
 - **Camera stack** is a field nothing writes: there is no render-stack RON, and
   nothing in the workspace reads or writes RON at all. **It is a foundation rung
   (2026-08-30)**, scheduled by `43-render-standards.md`'s foundations block
@@ -216,5 +219,8 @@ half that dispatches them cannot disagree.
   while it opens — `SettingsSource::Platform` by default, so every sample and
   the `crcbl new` scaffold get it without asking — and
   `GpuContext::effect_request` hands the layer to a renderer built on that
-  context. `crcbl::settings`' `VIDEO_KEYS` is the one place a key is spelled,
-  and a key that is absent clamps nothing, because this layer may only remove.
+  context. `crcbl::settings`' `VIDEO_KEYS` is the one place an **effect** key is
+  spelled, and a key that is absent clamps nothing, because this layer may only
+  remove. The `[engine.video]` keys that are not effect bits — `render_scale`,
+  `frame_limit`, `antialiasing` — are spelled beside it, each with its own
+  constant and its own reason.

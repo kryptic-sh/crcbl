@@ -54,7 +54,7 @@
 //! | [`EffectRequest::video`] | `[engine.video]` | yes — `crcbl`'s start-up reads it: `GpuContextDesc::settings`, `GpuContext::effect_request` |
 //! | [`EffectRequest::antialiasing`] | `[engine.video] antialiasing` | yes — the same read: `crcbl::settings::antialiasing`, `GpuContext::effect_request` |
 //! | [`EffectRequest::programmatic`] | game code | yes — [`ForwardRenderer::set_effect_request`] |
-//! | the device clamp | [`crcbl_hal::DeviceCaps`] | yes, and it removes nothing — see [`ForwardRenderer::device_effects`] |
+//! | the device clamp | nothing yet — no [`crcbl_hal::DeviceCaps`] value reaches it | the clamp runs and its rule set is empty, which is a fact about these effects — see [`ForwardRenderer::device_effects`] |
 //!
 //! The camera row's source is **not** the render-stack RON topic 18 describes —
 //! nothing in this workspace reads or writes RON — it is a

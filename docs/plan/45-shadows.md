@@ -265,9 +265,12 @@ within tolerance and was left alone.
      quadtrees rather than one tree over the image, because the atlas is neither
      square by construction nor a power of two in cells; ask every root for its
      whole self and the layout is the old grid, texel for texel, which is what
-     shipped. **`MIN_TILE` is a floor nothing has measured** — no light asks for
-     a sub-cell map until item 2 exists — so the halvings are a starting point
-     for that rung to sweep, not a finding.
+     shipped. **`MIN_TILE` is a floor nothing has measured** — the halvings are
+     a starting point to sweep, not a finding. The reason first given for that
+     is spent: item 2 landed the same day and lights do take sub-cell maps,
+     `shadow::tile_level` demoting on `coverage` and `mesh_e2e/shadow_tiles.rs`
+     rendering one light at a whole cell beside one at a quarter of its side.
+     What is still unmeasured is whether the floor is in the right place.
   2. **A priority per light per frame — landed 2026-08-31.**
      `crcbl_render::shadow::coverage` is how much of the frame's **height** a
      light's shadow map covers on screen: the map's own footprint over the
@@ -477,18 +480,28 @@ within tolerance and was left alone.
      that had already moved its record on would then hold a map nothing drew.
      `a_refused_frame_leaves_the_shadow_atlas_where_it_was` is the case.
 
-     **What did not land is the tile as the unit.** The DECIDED rule below says
-     "a lamp that swings costs exactly its own tiles"; what shipped is that one
-     changed input redraws every tile. The obstacle is the clear: this seam can
-     only clear a depth attachment pass-wide, and the region-bounded forms are
-     not portable — Metal's load action and WebGPU's `loadOp` have no render
-     area, so a partial clear would keep a tile on Vulkan and erase it on Metal.
-     Per-tile needs either a `clear_attachment`-with-rects call at the HAL seam
-     or a depth-writing clear quad scissored to the tile. `docs/backlog.md`
-     carries both, and the second half of the same entry: the camera is an input
-     to every tile — cascades are fitted to it and every shadow cull selects
-     detail at the camera's pixels — so the cache only hits on a frame the eye
-     did not move in.
+     **The unit is the group, and the tile is still not it.** This paragraph
+     used to say one changed input redraws every tile, and the cadence rung
+     below made that false: `begin_frame` builds a `shadow_group_record` per
+     group — that group's views, culls, selection eye and instance count — and
+     leaves a group whose record has not moved out of the frame's work entirely.
+     `shadow_slot_redrawn` and `shadow_cascade_redrawn` read back per group;
+     `shadow_atlas_cached` is the whole-atlas case alone. So a lamp that swings
+     costs its own group rather than the atlas, which is most of what the
+     DECIDED rule below asks for.
+
+     What a _tile_ as the unit still needs is the clear. This seam can only
+     clear a depth attachment pass-wide, and the region-bounded forms are not
+     portable — Metal's load action and WebGPU's `loadOp` have no render area,
+     so a partial clear would keep a tile on Vulkan and erase it on Metal. Of
+     the two routes out, the scissored depth-writing quad is **built** —
+     `mesh.slang`'s `depthClearVertexMain` through
+     `MeshModules::depth_clear_pipeline`, which is how the cadence path resets a
+     redrawn tile — and a `clear_attachment`-with-rects call at the HAL seam is
+     the one still owed. The second half of the same entry stands: the camera is
+     an input to every tile — cascades are fitted to it and every shadow cull
+     selects detail at the camera's pixels — so the cache only hits on a frame
+     the eye did not move in.
 
   **DECIDED 2026-08-30, the user's rule for this rung:** the atlas is **dynamic
   and cached** — every light re-renders its tiles whenever it or an instance it
@@ -579,8 +592,10 @@ through it. No leak was seen at two; the bound is why three is not shipped.
 period of the shadow texel, where the offset walks a receiver near a silhouette
 across the edge of its own caster. That is the standard cost of this direction,
 it is bounded by the offset itself, and it is a tenth the size of the strip it
-replaced. The rungs above — a rotated Poisson kernel, then PCSS — are what
-soften it.
+replaced. The rungs above — a rotated disc, then PCSS — are what soften it. (It
+is a **Vogel spiral**, not a Poisson set; the ninth decision below argues why,
+and `the_shadow_discs_are_the_vogel_spirals_they_claim_to_be` holds the source
+to it.)
 
 Goldens re-blessed: `cube`, `cube_97x61`, `dunes`, `spot_shadow` and
 `point_shadow` in `crates/crcbl/tests/golden/`, and `room.png` and `live.png` in
