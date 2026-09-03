@@ -13569,6 +13569,20 @@ is exercised only against the stub. Nothing verifies what a real Dawn does with
 `maxAnisotropy: 16`. Deliberate — the probe exists for the `lod_max` sentinel,
 and an anisotropy probe would be measuring the machine rather than the seam.
 
+### `CHANGELOG.md`'s `[Unreleased]` is 12,090 lines, because no tag has been cut
+
+Measured 2026-09-03. The file's own header says why — "There are no tags yet, so
+everything so far is unreleased" — so this is the design working, not a defect.
+It is recorded because of what it costs: the section is past the point where a
+reader can find anything in it, and **BCTP step 2 assumes `[Unreleased]` is
+small enough to audit by eye** before moving it under a version heading. Cutting
+`v0.1.0` would move all of it under one heading and leave the next release's
+entries readable again.
+
+That is the user's call, not one to make unasked: a first tag starts the release
+pipeline, and the link block at the bottom of the file has never been exercised.
+Not a blocker for anything.
+
 ### Two `crcbl-render` modules are private and cited by crate path
 
 `crcbl-render/src/lib.rs` declares `mod ssao;` and `mod contact_shadows;`
