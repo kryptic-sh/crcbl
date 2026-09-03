@@ -287,10 +287,6 @@ than as a reason:
 - **`51-volumetrics.md`'s rungs were checked by symbol and test _name_, not by
   behaviour.** The host-side arithmetic was read; that each pass does what the
   prose says it does was not.
-- **"No RSM updater exists" is scoped to a grep over `crates/*/src`** for
-  `reflective shadow` and `RSM`, not to an exhaustive read. It is the premise
-  under which `43-render-standards.md`'s delivery row now keeps the updater as
-  owed, so it is worth a second look before that row is deleted.
 - **The comparand claims cannot be checked from this tree at all** — "Unity HDRP
   does not do this", Lumen's hybrid, what a KTX2 importer supports. They stand
   or fall on the reading that produced them.
