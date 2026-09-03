@@ -268,7 +268,13 @@ fn a_command_buffer_is_refused_by_a_queue_of_another_family() {
             .expect("the same family it was recorded on is always legal");
     }
 
+    // **A refused submission still owns its recording.** `submit` returning an
+    // error means the driver never took the command buffer, so nothing retires
+    // it and the suite's teardown reporter counts it as an object outliving the
+    // device — which is how this test first failed CI while every assertion in
+    // it passed.
     device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
     device.destroy_swapchain(headless.swapchain);
     headless.instance.destroy_surface(headless.surface);
     headless.device.destroy();
