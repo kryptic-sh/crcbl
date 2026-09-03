@@ -2790,6 +2790,117 @@ fn a_probe_behind_a_wall_lights_nothing_through_it() {
     );
 }
 
+/// How many times more the unobstructed `-X` reflection must carry than the
+/// walled one.
+///
+/// [`LEAK_RATIO`]'s shape and its reason — a ratio, so nothing uniform can
+/// satisfy it. The run that landed this reads **0.00 levels walled against 71.10
+/// open on radv and 0.00 against 71.20 on lavapipe**: the wall takes the whole
+/// of the reflected probe, so the divisor is what it is set against rather than
+/// what it measures. Four leaves every backend room and is still far above the
+/// two levels `crcbl_golden::Tolerance::RASTERISER` allows.
+const LEAK_MIRROR_RATIO: f32 = 4.0;
+
+/// The least the `+X` reflection must **gain** when the wall is added, in levels.
+///
+/// The opposite-directions half. Measured at **17.5 levels on both radv and
+/// lavapipe** — 138.00 walled against 120.50 open on each — and set at well
+/// under a third of that, which is the same headroom [`LEAK_MIN_GAIN`] carries
+/// over the band it guards.
+const LEAK_MIRROR_MIN_GAIN: f32 = 5.0;
+
+/// The least the unobstructed `-X` reflection must measure, in levels of 255.
+///
+/// [`LEAK_MIN_LEVELS`]'s anti-vacuity claim on the specular path: without it a
+/// fixture whose reflection pass wrote nothing would satisfy the ratio by
+/// dividing nothing by nothing. Measured at **71.10 levels on radv and 71.20 on
+/// lavapipe**; set at a third of that.
+const LEAK_MIRROR_MIN_LEVELS: f32 = 25.0;
+
+/// **The rung's claim on the specular path: a probe on the far side of a wall
+/// reflects nothing through it.**
+///
+/// [`a_probe_behind_a_wall_lights_nothing_through_it`]'s fixture through a
+/// mirror — `crcbl::screenshot::probe_leak_reflection_forward` is the same room,
+/// the same two probes and the same divider, with the room shaded as a metal at
+/// roughness zero so `ssr.slang` marches it. Every ray the bands reflect leaves
+/// the floor upward and outward, finds nothing in the depth buffer, and falls
+/// back to the probe grid — which until this rung read those eight rows with no
+/// visibility term at all, so the reflection leaked where the diffuse term had
+/// stopped.
+///
+/// **What is measured is the reflection pass and nothing else**: each arm is
+/// drawn twice, with the pair and without it, and the difference is what
+/// `ssr_blur.slang` added. So the divider's own shadow, its occlusion and the
+/// diffuse probe term all cancel before a single assertion runs.
+///
+/// **The two bands move in opposite directions**, which is what nothing uniform
+/// can fake — [`a_probe_behind_a_wall_lights_nothing_through_it`] argues it in
+/// full, and the argument is the same one with a mirror ray in place of a
+/// hemisphere: the `-X` band loses the only lit probe to the wall, and the `+X`
+/// band gains because the same wall hides the *black* probe that was dragging
+/// its blend down.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_probe_behind_a_wall_reflects_nothing_through_it() {
+    crcbl_core::log::init_logging();
+
+    let frame = |wall: bool, effects| {
+        let setup =
+            OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, move |device, queue, format| {
+                crcbl::screenshot::probe_leak_reflection_forward(
+                    device, queue, format, wall, effects,
+                )
+            })
+            .unwrap_or_else(|why| panic!("a GPU backend opens for the probe leak mirror: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format))
+            .expect("the readback is exactly one image")
+    };
+
+    let with_reflections = RenderEffects::DEFAULT_STACK;
+    let without = RenderEffects::DEFAULT_STACK.difference(RenderEffects::REFLECTIONS);
+    let at = crcbl::screenshot::LEAK_BAND_AT;
+    // The green channel, on the diffuse test's terms: the lit probe holds a
+    // neutral environment, so one channel carries the whole measurement.
+    let contribution = |wall: bool, x: f32| {
+        let band =
+            |effects| block_channel(&frame(wall, effects), probe_pixel(x, 0.0), PROBE_BAND, 1);
+        band(with_reflections) - band(without)
+    };
+    let near_walled = contribution(true, -at);
+    let near_open = contribution(false, -at);
+    let far_walled = contribution(true, at);
+    let far_open = contribution(false, at);
+    eprintln!(
+        "crcbl render e2e: probe leak mirror — -X band {near_walled:.2} walled against \
+         {near_open:.2} open; +X band {far_walled:.2} against {far_open:.2}"
+    );
+
+    assert!(
+        near_open >= LEAK_MIRROR_MIN_LEVELS,
+        "with nothing in the way the -X band's reflection must carry the lit probe's quarter \
+         of the blend, and it measures {near_open:.2} of the {LEAK_MIRROR_MIN_LEVELS} this \
+         fixture is built to reach — the probe fallback is not in this reflection at all"
+    );
+    assert!(
+        near_walled * LEAK_MIRROR_RATIO < near_open,
+        "the -X band's reflection must lose the probe the wall now hides: {near_walled:.2} \
+         walled against {near_open:.2} open, which is not the {LEAK_MIRROR_RATIO}× drop a \
+         probe on the far side of a wall costs — light is leaking through it into the mirror"
+    );
+    assert!(
+        far_open + LEAK_MIRROR_MIN_GAIN < far_walled,
+        "and the +X band's reflection must *gain* by at least {LEAK_MIRROR_MIN_GAIN} level(s), \
+         because the same wall hides the black probe that was a quarter of its blend: \
+         {far_walled:.2} walled against {far_open:.2} open — two bands moving the same way is \
+         one thing dimming the room, not a visibility test"
+    );
+}
+
 /// How far along `x` the clipmap profile is read, in world units.
 ///
 /// Level 0's boundary is one [`crcbl::screenshot::probe_clipmap_grid`] spacing

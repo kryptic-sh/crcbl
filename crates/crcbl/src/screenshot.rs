@@ -1771,6 +1771,87 @@ pub fn probe_leak_forward(
     })
 }
 
+/// The roughness [`probe_leak_reflection_forward`]'s room is shaded at.
+///
+/// Zero, so `ssr.slang`'s `sharpness_of` gives the march its whole weight:
+/// `GpuMaterial::UNTINTED` sits at that shader's `ROUGHNESS_CUTOFF` exactly and
+/// derives no reflection at all, which is why this fixture appends a row rather
+/// than reusing the one [`probe_leak_forward`] draws with.
+const LEAK_MIRROR_ROUGHNESS: f32 = 0.0;
+
+/// The metalness it is shaded at.
+///
+/// One, and it does two things this fixture needs. A metal has no diffuse lobe,
+/// so the probe grid's *diffuse* term — which [`probe_leak_forward`] measures —
+/// is gone from these pixels and cannot be mistaken for the specular one; and
+/// its `F0` is its base colour rather than a dielectric's 4%, so what the
+/// reflection carries is most of the environment it gathered rather than a
+/// twenty-fifth of it.
+const LEAK_MIRROR_METALLIC: f32 = 1.0;
+
+/// **The leak fixture through a mirror**: [`probe_leak_forward`]'s room, probes
+/// and wall, with the room shaded as a mirror and the reflection pair allowed.
+///
+/// `docs/plan/50-irradiance-probes.md`'s rung reaches the specular path here.
+/// `ssr.slang` marches the depth buffer, finds nothing along a ray that leaves
+/// this floor upward and outward, and falls back to the same eight probe rows
+/// `mesh.slang`'s diffuse gather reads — so a probe on the far side of the
+/// divider must contribute nothing to the reflection either.
+///
+/// `effects` is the caller's rather than forced, because the claim is a
+/// comparison: `tests/render_e2e.rs` draws each arm with the reflection pair and
+/// again without it, and the difference is the pass's own output and nothing
+/// else. [`ssr_forward`] takes its effect set for the same reason.
+///
+/// **The sky is refused outright.** The fallback is the probe grid *plus* the
+/// prefiltered sky, and a sky would add the same term to every arm — which a
+/// ratio between two arms is not free to ignore.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built or the capture cannot
+/// be uploaded.
+pub fn probe_leak_reflection_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    wall: bool,
+    effects: crcbl_render::RenderEffects,
+) -> Result<ForwardScene, OffscreenError> {
+    let probes = probe_leak_grid();
+    let mut scene = crate::render::scene::demo();
+    scene.capacities.probes = probes.volume.total();
+    scene.probes = probes;
+    // Appended rather than edited in place, on `ssr_rough_floor_forward`'s
+    // terms: every other row keeps the value every other fixture draws with.
+    let mirror = scene.materials.len();
+    scene.materials.push(crate::shaders::mesh::GpuMaterial {
+        metallic: LEAK_MIRROR_METALLIC,
+        roughness: LEAK_MIRROR_ROUGHNESS,
+        ..scene.materials[DEMO_UNTINTED]
+    });
+    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
+    renderer.set_effect_request(EffectRequest {
+        camera: effects,
+        ..EffectRequest::default()
+    });
+    renderer.set_sky(crcbl_render::Sky::NONE);
+    place(&mut renderer, DEMO_OPEN_BOX, mirror, leak_room());
+    if wall {
+        // The divider through the ordinary row: it is what stands between a
+        // probe and a band, and a mirror one would put the room's own walls into
+        // the pixels either side of it.
+        place(&mut renderer, DEMO_CUBE, DEMO_UNTINTED, leak_wall());
+    }
+    // [`probe_leak_forward`]'s call, in the same place and for the same reason.
+    renderer.capture_probe_visibility(device, queue)?;
+    Ok(ForwardScene {
+        camera: leak_camera(),
+        sun: probe_sun(),
+        renderer: Box::new(renderer),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The clipmap fixture
 // ---------------------------------------------------------------------------

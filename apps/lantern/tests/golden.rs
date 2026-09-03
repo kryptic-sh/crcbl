@@ -200,8 +200,23 @@ const SSR_HIT_TOLERANCE: f32 = 0.15;
 const MIRROR_GRADIENT: f32 = 1.05;
 
 /// The minimum authored-to-zeroed brightness ratio the brass probe fallback
-/// control must retain. Vulkan measured 97.4/89.7, so this leaves margin.
-const BRASS_PROBE_RATIO: f32 = 1.05;
+/// control must retain.
+///
+/// **Re-measured 2026-09-03, when `ssr.slang`'s probe fallback gained the
+/// Chebyshev visibility weight `mesh.slang` already had.** That weight takes
+/// each of the eight corners' share down by what the room's own geometry hides
+/// from this point, so the *correct* fallback here is smaller than the
+/// unweighted one this constant was set against: the brass reads **98.5 against
+/// 94.5 zeroed on both the discrete adapter and llvmpipe**, a ratio of 1.042,
+/// where forcing that weight back to one reads 100.9 and 1.068. The two arms
+/// agree to the printed digit on both adapters, so what this needs is margin
+/// over a measurement rather than over a spread.
+///
+/// **The teeth are what they were.** A fallback removed outright — the failure
+/// this control exists to catch — makes the two arms the same frame and the
+/// ratio exactly 1.000, which is 2.8 levels below the threshold this value sets
+/// at the measured pair. Raising it back to 1.05 would fail the correct frame.
+const BRASS_PROBE_RATIO: f32 = 1.03;
 
 /// The floor a lit block's mean brightness has to clear, out of 255.
 ///

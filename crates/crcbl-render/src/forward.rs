@@ -8256,6 +8256,12 @@ impl ForwardRenderer {
                     },
                     probe_buffer,
                     probe_table,
+                    // The same view the forward pass's own group named, so the
+                    // reflection's probe fallback is weighed by the maps the
+                    // diffuse gather was weighed by — or by the placeholder,
+                    // when there are none and every probe keeps all of its
+                    // weight.
+                    probe_visibility_view,
                 );
                 composited
             }

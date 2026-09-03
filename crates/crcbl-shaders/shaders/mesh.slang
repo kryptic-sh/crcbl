@@ -3739,8 +3739,8 @@ uint froxel_of(float2 pixel, float depth)
 
 /// Texels along one side of a visibility map's interior — the part that holds
 /// directions. `crcbl_shaders::probe_visibility::SIDE`, and
-/// `the_visibility_map_constants_match_the_ones_mesh_slang_declares` is what
-/// holds the two to each other.
+/// `the_visibility_map_constants_match_the_ones_the_shaders_declare` is what
+/// holds this file, `ssr.slang` and that module to one another.
 static const float PROBE_VISIBILITY_SIDE = 16.0;
 
 /// Texels of wrapped border on each side of that interior, which is what lets
@@ -3809,6 +3809,13 @@ float2 oct_encode(float3 direction)
 
 /// The two depth moments probe `index`'s map holds along `direction`, blended
 /// bilinearly — `crcbl_shaders::probe_visibility::ProbeVisibility::moments`.
+///
+/// This body is character for character the one `ssr.slang` carries, along with
+/// `probe_weight`, `oct_encode` and `sign_not_zero`: that pass weighs the
+/// reflection's probe fallback by the same bound, and
+/// `crcbl_shaders::probe_visibility`'s
+/// `the_shaders_weigh_a_probe_the_way_this_module_does` is what holds the two
+/// copies together.
 ///
 /// `table_tap`'s addressing and `table_tap`'s reason: a texel holds the value at
 /// its own centre, so a direction's place in the interior is

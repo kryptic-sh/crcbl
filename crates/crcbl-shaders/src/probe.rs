@@ -1715,13 +1715,18 @@ mod tests {
     /// character** — and it is the arithmetic
     /// [`ProbeVolume::level_reach`] and [`ProbeVolume::level_of`] mirror.
     ///
-    /// `mesh.slang` weights its gather by visibility and `ssr.slang` does not,
-    /// so the two evaluators are genuinely different code; the *selection* in
-    /// front of them is one rule, and a copy of it that drifted would fade the
-    /// diffuse and the specular reads between different levels at the same
-    /// point. This is `crate::ssr`'s screen-space-helper guard applied to the
-    /// clipmap, and it holds the bodies rather than the declarations so each
-    /// file's doc comment can say what that file uses them for.
+    /// `mesh.slang` evaluates its gather against a normal and `ssr.slang`
+    /// against a reflected direction, so the two evaluators are genuinely
+    /// different code; the *selection* in front of them is one rule, and a copy
+    /// of it that drifted would fade the diffuse and the specular reads between
+    /// different levels at the same point. This is `crate::ssr`'s
+    /// screen-space-helper guard applied to the clipmap, and it holds the bodies
+    /// rather than the declarations so each file's doc comment can say what that
+    /// file uses them for.
+    ///
+    /// The weighting *within* a level is shared outright rather than merely
+    /// selected the same way — see `crate::probe_visibility`'s
+    /// `the_shaders_weigh_a_probe_the_way_this_module_does`.
     #[test]
     fn the_shaders_pick_a_level_the_way_this_module_does() {
         let mesh = include_str!("../shaders/mesh.slang");

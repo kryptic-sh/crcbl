@@ -256,6 +256,50 @@ Texture2D<float4> sky_prefilter;
 [[vk::binding(11, 0)]]
 Texture2D<float4> dfg;
 
+/// `docs/plan/50-irradiance-probes.md`'s per-probe **visibility map**, the very
+/// image the forward pass binds to `mesh.slang`: one layer per row of
+/// [`probes`], `r` the mean distance from that probe to the nearest static
+/// surface in a direction and `g` the mean of its square.
+/// `crcbl_shaders::probe_visibility` owns the layout and the octahedral mapping,
+/// and `crcbl_render::probe_visibility` is what captures it.
+///
+/// # A reflection leaks through a wall without it
+///
+/// [`probe_level_environment`] reads the same eight rows `mesh.slang`'s diffuse
+/// gather does, so a probe grid whose diffuse term is weighed by this map and
+/// whose specular fallback is not still lights the room next door — through the
+/// mirror rather than through the wall. [`probe_weight`] is the Chebyshev bound
+/// that closes it, and it is `mesh.slang`'s body character for character;
+/// `crcbl_shaders::probe_visibility`'s
+/// `the_shaders_weigh_a_probe_the_way_this_module_does` is what holds the two
+/// copies to each other.
+///
+/// # Read by four `Load`s and a blend written out
+///
+/// No sampler, like every other read in this pass: a hardware filter is
+/// fixed-function arithmetic four rasterisers compute independently, and it also
+/// means the image's format need not be filterable — `rg32float` is not, without
+/// WebGPU's `float32-filterable`.
+///
+/// **A `float4` element on a two-channel image**, read as `.xy`, which is the
+/// declaration `mesh.slang` makes of the same image.
+///
+/// # Bound on every path, and a one-texel image is the off switch
+///
+/// `crcbl_render::ssr` binds `crcbl_render::forward`'s 1×1×1 image holding
+/// `crcbl_shaders::probe_visibility::FAR` when nothing has been captured or when
+/// `r_probe_visibility` is off. No surface is further away than that, so every
+/// probe keeps all of its weight and this file has no branch for the feature
+/// being absent. The fetch is clamped against `GetDimensions`, which is what
+/// lets the one-texel image be read by the same code as a captured one.
+///
+/// **Appended past [`dfg`], never inserted**: `crcbl-mtl` numbers a resource by
+/// counting the same-table entries of the layout list, and Slang numbers a
+/// stage's arguments by declaration order, so the two agree only while both
+/// ascend.
+[[vk::binding(12, 0)]]
+Texture2DArray<float4> probe_visibility;
+
 /// The reversed-Z far plane: `crcbl_hal::depth::CLEAR`, and the value
 /// `ssao.slang` declares under this name.
 ///
@@ -668,6 +712,27 @@ static const float PROBE_TRANSFER_L1 = 2.0943951023931954923;
 /// copy. That module is where the reason is argued.
 static const float PROBE_LEVEL_BAND = 0.25;
 
+/// Texels along one side of a visibility map's interior — the part that holds
+/// directions. `crcbl_shaders::probe_visibility::SIDE`, and
+/// `the_visibility_map_constants_match_the_ones_the_shaders_declare` is what
+/// holds this file, `mesh.slang` and that module to one another.
+static const float PROBE_VISIBILITY_SIDE = 16.0;
+
+/// Texels of wrapped border on each side of that interior, which is what lets
+/// [`probe_moments`] read four ordinary neighbours everywhere.
+/// `crcbl_shaders::probe_visibility::BORDER`.
+static const float PROBE_VISIBILITY_BORDER = 1.0;
+
+/// How far along its own normal a shaded point is moved before its distance to a
+/// probe is measured, in world units.
+/// `crcbl_shaders::probe_visibility::SURFACE_BIAS`, where the reason is argued.
+static const float PROBE_SURFACE_BIAS = 0.05;
+
+/// The share of its trilinear weight a fully occluded corner keeps.
+/// `crcbl_shaders::probe_visibility::OCCLUDED_WEIGHT`, where the reason is
+/// argued: it is what stops the weighted sum's divisor reaching zero.
+static const float PROBE_OCCLUDED_WEIGHT = 0.0001;
+
 /// One texel of `sky_prefilter` or of `dfg` as the two shares it encodes.
 ///
 /// Each channel pair arrives as the stored bytes over 255, a conversion every
@@ -747,6 +812,148 @@ float3 sky_prefiltered(float3 direction, float roughness)
     return camera.sky[1].rgb * horizon + far * weights.x + opposite * weights.y;
 }
 
+/// `+1` for a positive or zero value and `-1` for a negative one — the
+/// octahedral mapping's `signNotZero`, and `mesh.slang`'s body character for
+/// character.
+float sign_not_zero(float value)
+{
+    return value >= 0.0 ? 1.0 : -1.0;
+}
+
+/// A unit direction as a point of the octahedral square, each component in
+/// `-1..1` — `crcbl_shaders::probe_visibility::oct_encode`, and `mesh.slang`'s
+/// body character for character. Cigolle et al. 2014, *A Survey of Efficient
+/// Representations for Independent Unit Vectors*; that file is where the fold
+/// onto `+Y`/`-Y` is argued.
+float2 oct_encode(float3 direction)
+{
+    float norm = abs(direction.x) + abs(direction.y) + abs(direction.z);
+    float2 p = direction.xz / max(norm, 1e-20);
+    if (direction.y < 0.0)
+    {
+        p = float2((1.0 - abs(p.y)) * sign_not_zero(p.x),
+                   (1.0 - abs(p.x)) * sign_not_zero(p.y));
+    }
+    return p;
+}
+
+/// The two depth moments probe `index`'s map holds along `direction`, blended
+/// bilinearly — `crcbl_shaders::probe_visibility::ProbeVisibility::moments`, and
+/// `mesh.slang`'s body character for character.
+///
+/// The clamp is against `GetDimensions` rather than against the constants above,
+/// which is what lets the one-texel off-switch be read by this same code.
+float2 probe_moments(uint index, float3 direction)
+{
+    uint width;
+    uint height;
+    uint layers;
+    probe_visibility.GetDimensions(width, height, layers);
+    float2 extent = float2(float(width), float(height));
+    float2 scaled = (oct_encode(direction) * 0.5 + 0.5) * PROBE_VISIBILITY_SIDE
+                  + PROBE_VISIBILITY_BORDER - 0.5;
+    float2 low = clamp(floor(scaled), float2(0.0, 0.0), extent - 1.0);
+    float2 high = min(low + 1.0, extent - 1.0);
+    float2 weight = clamp(scaled - low, 0.0, 1.0);
+    int layer = int(min(index, max(layers, 1u) - 1u));
+
+    float2 c00 = probe_visibility.Load(int4(int(low.x), int(low.y), layer, 0)).xy;
+    float2 c10 = probe_visibility.Load(int4(int(high.x), int(low.y), layer, 0)).xy;
+    float2 c01 = probe_visibility.Load(int4(int(low.x), int(high.y), layer, 0)).xy;
+    float2 c11 = probe_visibility.Load(int4(int(high.x), int(high.y), layer, 0)).xy;
+    return lerp(lerp(c00, c10, weight.x), lerp(c01, c11, weight.x), weight.y);
+}
+
+/// The share of its trilinear weight the probe at `probe_position` keeps for a
+/// surface at `world_position` facing `normal` —
+/// `crcbl_shaders::probe_visibility::ProbeVisibility::weight`, and
+/// `mesh.slang`'s body character for character.
+///
+/// **The Chebyshev bound**, cubed: Donnelly & Lauritzen 2006 is where it entered
+/// graphics and Majercik et al. 2019 §3 is where it is applied to a probe.
+/// `mesh.slang` is where the arithmetic and the two constants it reads are
+/// argued in full.
+///
+/// **A reflection asks it about the surface, not about the ray.** What this
+/// weighs out is a probe the shaded point cannot see — one behind the wall the
+/// point stands against — and that probe holds no light this surface may
+/// reflect, whichever way the ray leaves. The direction the ray takes is the
+/// evaluation in [`probe_level_environment`], and it is a separate question.
+float probe_weight(uint index, float3 probe_position, float3 world_position, float3 normal)
+{
+    float3 to_probe = probe_position - (world_position + normal * PROBE_SURFACE_BIAS);
+    float to_surface = length(to_probe);
+    // The map is indexed by the direction the probe looks *out* along.
+    float2 moments = probe_moments(index, -to_probe);
+    // Clamped because the two moments are blended independently and a texel
+    // between two disagreeing neighbours can land a hair under `mean²`, which
+    // is a negative variance and a visibility above one.
+    float variance = max(moments.y - moments.x * moments.x, 0.0);
+    float behind = to_surface - moments.x;
+    float bound = variance / (variance + behind * behind);
+    float visible = to_surface <= moments.x ? 1.0 : bound * bound * bound;
+    return max(visible, PROBE_OCCLUDED_WEIGHT);
+}
+
+/// Which row of the probe table a grid cell of clipmap level `level` is, clamped
+/// into the buffer — `mesh.slang`'s `probe_row` against this pass's own block.
+///
+/// **It is also the layer of [`probe_visibility`]**, which is what makes the row
+/// and the map one probe: `crcbl_render::probe_capture` writes its layers in the
+/// order the table's rows are in.
+uint probe_row(uint level, uint3 cell)
+{
+    uint index = camera.probe_levels.y * level
+               + (cell.z * camera.probe_counts.y + cell.y) * camera.probe_counts.x + cell.x;
+    return min(index, max(camera.probe_counts.w, 1u) - 1u);
+}
+
+/// One corner of the trilinear gather: its coefficients already scaled by the
+/// weight it keeps, and that weight beside them. `crcbl_shaders::probe`'s
+/// `WeightedProbe` is the host mirror and `mesh.slang` carries the same struct.
+struct WeightedProbe
+{
+    /// The row, every coefficient already multiplied by `weight`.
+    GpuProbe sh;
+    /// What this corner counts for: its visibility, never below
+    /// [`PROBE_OCCLUDED_WEIGHT`].
+    float weight;
+};
+
+/// Two corners blended coefficient by coefficient and weight by weight — one
+/// axis of the trilinear interpolation below.
+WeightedProbe lerp_probe(WeightedProbe a, WeightedProbe b, float t)
+{
+    WeightedProbe blended;
+    blended.sh.sh_r = lerp(a.sh.sh_r, b.sh.sh_r, t);
+    blended.sh.sh_g = lerp(a.sh.sh_g, b.sh.sh_g, t);
+    blended.sh.sh_b = lerp(a.sh.sh_b, b.sh.sh_b, t);
+    blended.weight = lerp(a.weight, b.weight, t);
+    return blended;
+}
+
+/// The corner at cell `cell` of clipmap level `level`: its row, scaled by what
+/// that probe's visibility map says a surface at `world_position` facing
+/// `normal` keeps of it.
+///
+/// `origin` and `spacing` are the level's own, which the caller reads and
+/// inverts once rather than eight times here.
+WeightedProbe probe_corner(uint level, uint3 cell, float3 origin, float3 spacing,
+                           float3 world_position, float3 normal)
+{
+    uint row = probe_row(level, cell);
+    GpuProbe stored = probes[row];
+    float3 at = origin + float3(cell) * spacing;
+    float weight = probe_weight(row, at, world_position, normal);
+
+    WeightedProbe corner;
+    corner.sh.sh_r = stored.sh_r * weight;
+    corner.sh.sh_g = stored.sh_g * weight;
+    corner.sh.sh_b = stored.sh_b * weight;
+    corner.weight = weight;
+    return corner;
+}
+
 /// How far out of the **finest** clipmap level `world_position` stands, in that
 /// level's own half-extents: zero at its centre and one on its boundary.
 ///
@@ -796,14 +1003,40 @@ float2 probe_level_of(float reach, uint levels)
 }
 
 /// One clipmap level's manually trilinear L1 radiance evaluation in the
-/// reflection direction. The stored coefficients are irradiance: undo the
-/// clamped-cosine transfer per band before evaluating them. A zero volume
-/// addresses row zero of the zeroed table and returns exactly zero.
+/// reflection direction, each corner weighed by whether that probe can see the
+/// surface the ray leaves. The stored coefficients are irradiance: undo the
+/// clamped-cosine transfer per band before evaluating them.
 ///
-/// **No visibility weighting**, which is where this and `mesh.slang`'s gather
-/// deliberately differ: a reflection asks what a direction sees, and the
-/// Chebyshev bound is about what a *surface* can see of a probe.
-float3 probe_level_environment(uint level, float3 world_position, float3 direction)
+/// `mesh.slang`'s `probe_level_irradiance` with a reflection where its normal
+/// basis is: the cell, the eight corners, the weights and the seven blends are
+/// that function's, and what differs is the last three lines — a surface asks
+/// what a hemisphere gives it and a reflection asks what one direction holds.
+///
+/// # Each corner is weighed by whether it can see the surface
+///
+/// `docs/plan/50-irradiance-probes.md`'s rung, on the specular path: a corner's
+/// weight is its trilinear share times [`probe_weight`], the Chebyshev bound of
+/// that probe's visibility map in the direction of this surface. A probe on the
+/// far side of a wall is further away than the wall it recorded, so it keeps
+/// nothing and its light does not come through the reflection either. The
+/// coefficients ride through the same seven blends already scaled by that weight
+/// and the weights ride beside them, so the sum is a weighted mean and the
+/// divide at the end is what makes it one.
+///
+/// **Every corner occluded is the plain trilinear result, not black**, on
+/// `mesh.slang`'s terms: the weight never falls below [`PROBE_OCCLUDED_WEIGHT`],
+/// so the divisor cannot reach zero, and when every corner sits at that floor it
+/// divides straight back out.
+///
+/// # A zero volume is still exactly zero
+///
+/// A scene with no probes addresses row zero of the zeroed table at every
+/// corner, and reads the one-texel placeholder — [`probe_visibility`]'s off
+/// switch — for every weight, which no surface is further away than. So every
+/// weight is exactly one, scaling a coefficient by it is exact, the divisor is
+/// exactly one, and what comes out is the zero this returned before the
+/// weighting landed.
+float3 probe_level_environment(uint level, float3 world_position, float3 normal, float3 direction)
 {
     float3 last = max(float3(camera.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
     // Where this level stands and how far apart its probes are, read rather than
@@ -816,43 +1049,36 @@ float3 probe_level_environment(uint level, float3 world_position, float3 directi
     float3 f = grid - base;
     uint3 lo = uint3(base);
     uint3 hi = uint3(min(base + 1.0, last));
-    uint total = max(camera.probe_counts.w, 1u) - 1u;
-    // The level's own rows, which begin `probe_levels.y` apart — the order
-    // `crcbl_render::probe_capture` writes and `mesh.slang`'s `probe_row` reads.
-    uint first = camera.probe_levels.y * level;
-    uint index000 = min(first + (lo.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + lo.x, total);
-    uint index100 = min(first + (lo.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + hi.x, total);
-    uint index010 = min(first + (lo.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + lo.x, total);
-    uint index110 = min(first + (lo.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + hi.x, total);
-    uint index001 = min(first + (hi.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + lo.x, total);
-    uint index101 = min(first + (hi.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + hi.x, total);
-    uint index011 = min(first + (hi.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + lo.x, total);
-    uint index111 = min(first + (hi.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + hi.x, total);
-    GpuProbe x00 = probes[index000];
-    GpuProbe x10 = probes[index010];
-    GpuProbe x01 = probes[index001];
-    GpuProbe x11 = probes[index011];
-    GpuProbe y00 = probes[index100];
-    GpuProbe y10 = probes[index110];
-    GpuProbe y01 = probes[index101];
-    GpuProbe y11 = probes[index111];
-    GpuProbe z0;
-    z0.sh_r = lerp(lerp(x00.sh_r, y00.sh_r, f.x), lerp(x10.sh_r, y10.sh_r, f.x), f.y);
-    z0.sh_g = lerp(lerp(x00.sh_g, y00.sh_g, f.x), lerp(x10.sh_g, y10.sh_g, f.x), f.y);
-    z0.sh_b = lerp(lerp(x00.sh_b, y00.sh_b, f.x), lerp(x10.sh_b, y10.sh_b, f.x), f.y);
-    GpuProbe z1;
-    z1.sh_r = lerp(lerp(x01.sh_r, y01.sh_r, f.x), lerp(x11.sh_r, y11.sh_r, f.x), f.y);
-    z1.sh_g = lerp(lerp(x01.sh_g, y01.sh_g, f.x), lerp(x11.sh_g, y11.sh_g, f.x), f.y);
-    z1.sh_b = lerp(lerp(x01.sh_b, y01.sh_b, f.x), lerp(x11.sh_b, y11.sh_b, f.x), f.y);
-    GpuProbe cell;
-    cell.sh_r = lerp(z0.sh_r, z1.sh_r, f.z);
-    cell.sh_g = lerp(z0.sh_g, z1.sh_g, f.z);
-    cell.sh_b = lerp(z0.sh_b, z1.sh_b, f.z);
-    return max(float3(
-                   dot(cell.sh_r.xyz / PROBE_TRANSFER_L1, direction) + cell.sh_r.w / PROBE_TRANSFER_L0,
-                   dot(cell.sh_g.xyz / PROBE_TRANSFER_L1, direction) + cell.sh_g.w / PROBE_TRANSFER_L0,
-                   dot(cell.sh_b.xyz / PROBE_TRANSFER_L1, direction) + cell.sh_b.w / PROBE_TRANSFER_L0),
-               float3(0.0, 0.0, 0.0));
+    // The spacing the block carries the reciprocal of, so a corner's world
+    // position can be named — `mesh.slang`'s spelling and its reason: an axis
+    // with no reciprocal has no step to take, and every probe on it stands at
+    // the origin's coordinate.
+    float3 spacing = float3(inv.x != 0.0 ? 1.0 / inv.x : 0.0,
+                            inv.y != 0.0 ? 1.0 / inv.y : 0.0,
+                            inv.z != 0.0 ? 1.0 / inv.z : 0.0);
+
+    // Seven blends over the coefficients and their weights, in the order
+    // `mesh.slang` makes them: the far corner's weight reaches exactly zero at
+    // the boundary where the cell index changes, so a fragment landing in cell
+    // `i` at `f≈1` and one landing in cell `i+1` at `f≈0` compute the same
+    // value.
+    WeightedProbe x00 = lerp_probe(probe_corner(level, uint3(lo.x, lo.y, lo.z), origin, spacing, world_position, normal),
+                                   probe_corner(level, uint3(hi.x, lo.y, lo.z), origin, spacing, world_position, normal), f.x);
+    WeightedProbe x10 = lerp_probe(probe_corner(level, uint3(lo.x, hi.y, lo.z), origin, spacing, world_position, normal),
+                                   probe_corner(level, uint3(hi.x, hi.y, lo.z), origin, spacing, world_position, normal), f.x);
+    WeightedProbe x01 = lerp_probe(probe_corner(level, uint3(lo.x, lo.y, hi.z), origin, spacing, world_position, normal),
+                                   probe_corner(level, uint3(hi.x, lo.y, hi.z), origin, spacing, world_position, normal), f.x);
+    WeightedProbe x11 = lerp_probe(probe_corner(level, uint3(lo.x, hi.y, hi.z), origin, spacing, world_position, normal),
+                                   probe_corner(level, uint3(hi.x, hi.y, hi.z), origin, spacing, world_position, normal), f.x);
+    WeightedProbe y0 = lerp_probe(x00, x10, f.y);
+    WeightedProbe y1 = lerp_probe(x01, x11, f.y);
+    WeightedProbe cell = lerp_probe(y0, y1, f.z);
+
+    float3 radiance = float3(
+        dot(cell.sh.sh_r.xyz / PROBE_TRANSFER_L1, direction) + cell.sh.sh_r.w / PROBE_TRANSFER_L0,
+        dot(cell.sh.sh_g.xyz / PROBE_TRANSFER_L1, direction) + cell.sh.sh_g.w / PROBE_TRANSFER_L0,
+        dot(cell.sh.sh_b.xyz / PROBE_TRANSFER_L1, direction) + cell.sh.sh_b.w / PROBE_TRANSFER_L0);
+    return max(radiance / cell.weight, float3(0.0, 0.0, 0.0));
 }
 
 /// The whole clipmap's L1 radiance in the reflection direction: the finest level
@@ -864,7 +1090,12 @@ float3 probe_level_environment(uint level, float3 world_position, float3 directi
 /// blends a screen hit with, for the same reason: it returns either end exactly.
 /// A volume of one level evaluates one gather and nothing else, which is what
 /// keeps a scene that asks for a single grid bit-identical.
-float3 probe_environment(float3 world_position, float3 direction)
+///
+/// `normal` is the reflecting surface's and `direction` the ray leaving it, and
+/// the two answer different halves of the lookup: the normal is what
+/// [`probe_weight`] measures a probe's visibility of this point along, and the
+/// direction is what the coefficients are evaluated in.
+float3 probe_environment(float3 world_position, float3 normal, float3 direction)
 {
     float3 last = max(float3(camera.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
     uint levels = clamp(camera.probe_levels.x, 1u, PROBE_LEVELS);
@@ -876,10 +1107,10 @@ float3 probe_environment(float3 world_position, float3 direction)
     uint level = uint(pick.x);
     float share = pick.y;
 
-    float3 fine = probe_level_environment(level, world_position, direction);
+    float3 fine = probe_level_environment(level, world_position, normal, direction);
     if (share >= 1.0)
         return fine;
-    float3 coarse = probe_level_environment(level + 1, world_position, direction);
+    float3 coarse = probe_level_environment(level + 1, world_position, normal, direction);
     return coarse * (1.0 - share) + fine * share;
 }
 
@@ -931,6 +1162,12 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
 
     float3 world_position = mul(camera.inv_view, float4(origin, 1.0)).xyz;
     float3 reflection_direction = normalize(mul(camera.inv_view, float4(ray, 0.0)).xyz);
+    // The reconstructed normal in the same space as the point it belongs to,
+    // which is what `probe_weight` biases the query off the surface along. A
+    // direction, so `w` is zero and the translation column does not reach it;
+    // normalised because the inverse view is a rigid transform of a normal this
+    // pass derived from three depth taps.
+    float3 world_normal = normalize(mul(camera.inv_view, float4(normal, 0.0)).xyz);
     // The probe grid and the sky, **added**: both are what a ray leaving this
     // surface would find, and a scene may have bounce light around it and a sky
     // above it. A zeroed probe volume leaves the sky alone and a black sky
@@ -943,7 +1180,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // `docs/plan/44-lighting.md`'s rung 3 cooked that gather into
     // `sky_prefilter`. This is the split-sum's prefiltered half; `env_brdf`
     // below is the other.
-    float3 environment = probe_environment(world_position, reflection_direction)
+    float3 environment = probe_environment(world_position, world_normal, reflection_direction)
                        + sky_prefiltered(reflection_direction, surface.a);
 
     // The split-sum's second half: the `DFG` pair at `(N·V, roughness)`, and

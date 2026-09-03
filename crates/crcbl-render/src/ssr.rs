@@ -58,6 +58,19 @@ const DFG_BINDING: u32 = SKY_PREFILTER_BINDING + 1;
 /// [`dfg::DFG_SIZE`] as an image extent.
 const DFG_SIZE: u32 = dfg::DFG_SIZE as u32;
 
+/// The binding `ssr.slang` reads `docs/plan/50-irradiance-probes.md`'s per-probe
+/// visibility maps through — the image [`crate::forward`] binds to `mesh.slang`,
+/// so that the reflection's probe fallback is weighed by the same Chebyshev
+/// bound the diffuse gather is and stops reading a probe through a wall.
+///
+/// **Appended past [`DFG_BINDING`], never inserted**, for the reason
+/// [`crate::forward`]'s own binding constants give: `crcbl-mtl` numbers a
+/// resource by counting the same-table entries of the layout list and Slang
+/// numbers a stage's arguments by declaration order, so the two agree only while
+/// both ascend. `msl/ssr.metal` puts it at `texture(10)`, the next free index of
+/// that table.
+const PROBE_VISIBILITY_BINDING: u32 = DFG_BINDING + 1;
+
 /// Vertices in the over-sized full-screen triangle `ssr.slang` and
 /// `ssr_blur.slang` generate from `SV_VertexID`. No geometry is bound anywhere.
 const FULLSCREEN_VERTICES: u32 = 3;
@@ -287,6 +300,27 @@ impl Ssr {
             count: 1,
             flags: BindingFlags::empty(),
         });
+        // The per-probe visibility maps, at the highest binding of the set — see
+        // [`PROBE_VISIBILITY_BINDING`] on why the number rather than the list
+        // position is what has to ascend.
+        //
+        // `D2Array` and `UnfilterableFloat` are both *declared* rather than
+        // merely bound, which is [`crate::forward`]'s note on the same image:
+        // WebGPU compares the dimension and the sample type a layout entry
+        // claims against the view handed to it, the image is `Rg32Float`, and
+        // `Rg32Float` is unfilterable without the `float32-filterable` feature.
+        // Reading it only with `Load` does not lift that — the check is on the
+        // layout against the view's format, not on how the shader gets at it.
+        entries.push(BindGroupLayoutEntry {
+            binding: PROBE_VISIBILITY_BINDING,
+            visibility: ShaderStages::FRAGMENT,
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2Array,
+                sample_type: SampleType::UnfilterableFloat,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
         entries.extend(
             (0..crate::hiz::MAX_LEVELS).map(|level| BindGroupLayoutEntry {
                 binding: 5 + level,
@@ -446,6 +480,12 @@ impl Ssr {
     /// hand back: the reflection is *in* it, and the scene colour it was added
     /// to is not the finished picture any more.
     ///
+    /// `probe_visibility` is the caller's own — the captured maps when it has
+    /// them and the console switch is on, and its one-texel placeholder
+    /// otherwise, which every probe keeps all of its weight through. It is not a
+    /// graph transient, so it is not realised here; it does change between
+    /// frames when the switch moves, which is why it joins the cache key below.
+    ///
     /// # Panics
     ///
     /// If `frame` is not a slot this was built with.
@@ -456,6 +496,7 @@ impl Ssr {
         images: SsrImages,
         probes: BufferHandle,
         probe_id: crate::graph::BufferId,
+        probe_visibility: ImageViewHandle,
     ) {
         let SsrImages {
             depth,
@@ -563,6 +604,15 @@ impl Ssr {
                     array_index: 0,
                     resource: BindingResource::ImageView(dfg_view),
                 },
+                // Overwritten by `cached_group` with the same view, which is
+                // what puts it in the key: the two tables above never move and
+                // this one does, whenever a capture lands or the console switch
+                // is toggled.
+                BindGroupEntry {
+                    binding: PROBE_VISIBILITY_BINDING,
+                    array_index: 0,
+                    resource: BindingResource::ImageView(probe_visibility),
+                },
             ];
             let pyramid_views = pyramid.map(|level| ctx.image_view(level));
             entries.extend(pyramid_views.iter().enumerate().map(|(level, view)| {
@@ -573,7 +623,12 @@ impl Ssr {
                     resource: BindingResource::ImageView(*view),
                 }
             }));
-            let mut key = vec![(1, depth_view), (2, color_view), (3, material_view)];
+            let mut key = vec![
+                (1, depth_view),
+                (2, color_view),
+                (3, material_view),
+                (PROBE_VISIBILITY_BINDING, probe_visibility),
+            ];
             key.extend(pyramid_views.iter().enumerate().map(|(level, view)| {
                 (
                     5 + u32::try_from(level)

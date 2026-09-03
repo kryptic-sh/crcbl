@@ -1,6 +1,6 @@
 //! The per-probe **visibility map**: the octahedral depth and depth² image
-//! `mesh.slang` weighs each of a fragment's eight probes against, in the layout
-//! that shader reads.
+//! `mesh.slang` and `ssr.slang` weigh each of a fragment's eight probes against,
+//! in the layout those shaders read.
 //!
 //! ```text
 //!   direction ──oct_encode──▶ uv ──▶ texel of layer `probe` ──▶ (mean, mean²)
@@ -612,10 +612,45 @@ mod tests {
         );
     }
 
-    /// **The shader must name the same four numbers this module does.**
+    /// The two shaders that weigh a probe against this map, and the file each
+    /// one is.
     ///
-    /// Nothing else can catch a drift: `mesh.slang` compiles with any of them,
-    /// and a mismatch shows up only as a frame lit a little wrong on whatever
+    /// `mesh.slang` is the diffuse gather and `ssr.slang` the reflection's probe
+    /// fallback; both read the same eight rows of the same table, so both have
+    /// to weigh them by the same bound or the specular term leaks through a wall
+    /// the diffuse term does not.
+    const SOURCES: [(&str, &str); 2] = [
+        ("mesh.slang", include_str!("../shaders/mesh.slang")),
+        ("ssr.slang", include_str!("../shaders/ssr.slang")),
+    ];
+
+    /// The body of the function named `signature` in `source`, brace to brace.
+    ///
+    /// [`None`] when that file has no such function, which is how a missing copy
+    /// is reported as an absence rather than as a difference.
+    fn body_of(source: &str, signature: &str) -> Option<String> {
+        let at = source.find(signature)?;
+        let open = source[at..].find('{')? + at;
+        let mut depth = 0usize;
+        for (offset, byte) in source[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(source[open..open + offset + 1].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// **Both shaders must name the same four numbers this module does.**
+    ///
+    /// Nothing else can catch a drift: each file compiles with any of them, and
+    /// a mismatch shows up only as a frame lit a little wrong on whatever
     /// machine happens to look — a border offset out by one reads the wrong
     /// texels, a surface bias out by a factor lets a floor shadow itself, and an
     /// occluded weight out by orders of magnitude turns the fully occluded case
@@ -623,8 +658,7 @@ mod tests {
     /// the source is hash-pinned by the manifest, so it is the same file the
     /// committed artifact was built from.
     #[test]
-    fn the_visibility_map_constants_match_the_ones_mesh_slang_declares() {
-        let source = include_str!("../shaders/mesh.slang");
+    fn the_visibility_map_constants_match_the_ones_the_shaders_declare() {
         for declaration in [
             format!(
                 "static const float PROBE_VISIBILITY_SIDE = {:.1};",
@@ -637,10 +671,58 @@ mod tests {
             format!("static const float PROBE_SURFACE_BIAS = {SURFACE_BIAS};"),
             format!("static const float PROBE_OCCLUDED_WEIGHT = {OCCLUDED_WEIGHT};"),
         ] {
-            assert!(
-                source.contains(&declaration),
-                "mesh.slang does not declare `{declaration}`; the visibility map's constants \
-                 have drifted from the shader that reads it"
+            for (name, source) in SOURCES {
+                assert!(
+                    source.contains(&declaration),
+                    "{name} does not declare `{declaration}`; the visibility map's constants \
+                     have drifted from the shader that reads it"
+                );
+            }
+        }
+    }
+
+    /// **The two shaders weigh a probe with the same arithmetic, character for
+    /// character** — and it is the arithmetic [`ProbeVisibility::moments`] and
+    /// [`ProbeVisibility::weight`] mirror.
+    ///
+    /// `crate::probe`'s `the_shaders_pick_a_level_the_way_this_module_does`
+    /// applied to the read within a level: the manifest hashes one source per
+    /// artifact, so an `#include` would be a file whose edits nothing downstream
+    /// notices, and the two copies are written out instead. Nothing else in the
+    /// tree would notice one being fixed and the other left — both files compile
+    /// either way, and the failure is a reflection that takes light from a probe
+    /// behind the wall the surface stands against while the diffuse term at the
+    /// same point does not.
+    ///
+    /// **`oct_encode` and `sign_not_zero` are held too**, not only the two the
+    /// bound is named after: `probe_moments` reads a texel through them, so a
+    /// drift in either moves the answer while the pinned bodies stay identical —
+    /// which is the silent half of the same failure.
+    ///
+    /// The bodies compare rather than the whole declarations, so each file's doc
+    /// comment can say what that file uses them for; they do.
+    #[test]
+    fn the_shaders_weigh_a_probe_the_way_this_module_does() {
+        for signature in [
+            "float sign_not_zero(float value)",
+            "float2 oct_encode(float3 direction)",
+            "float2 probe_moments(uint index, float3 direction)",
+            "float probe_weight(uint index, float3 probe_position, float3 world_position, \
+             float3 normal)",
+        ] {
+            let copies: Vec<(&str, String)> = SOURCES
+                .into_iter()
+                .map(|(name, source)| {
+                    let body = body_of(source, signature)
+                        .unwrap_or_else(|| panic!("{name} does not declare `{signature}`"));
+                    (name, body)
+                })
+                .collect();
+            assert_eq!(
+                copies[0].1, copies[1].1,
+                "`{signature}` differs between {} and {}; the visibility weight is copied \
+                 verbatim and one copy has drifted",
+                copies[0].0, copies[1].0
             );
         }
     }

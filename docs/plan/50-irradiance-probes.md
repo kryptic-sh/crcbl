@@ -22,13 +22,17 @@ day.** The grid below stays, and everything that _fills_ it changes:
   octahedral depth + depth² map per probe (Majercik et al. 2019's contribution,
   and the one thing that makes a probe grid stop leaking), with a one-texel
   replicated border so a bilinear read across the seam is continuous.
-  `probe_irradiance` weights each of a fragment's eight probes by a Chebyshev
-  visibility test against it, so a probe on the far side of a wall gets no
-  weight. `crcbl_shaders::probe_visibility` owns the layout, the octahedral
-  mapping and the bound, and is the Rust mirror the render tests compare the
-  shader against; `crcbl_render::probe_visibility` keeps the static triangles a
-  map is about, and `crcbl_render::probe_capture` fills it **on the device**, as
-  the producer table below always said it would — a depth cube per probe.
+  `mesh.slang`'s `probe_irradiance` and `ssr.slang`'s `probe_level_environment`
+  weight each of a fragment's eight probes by a Chebyshev visibility test
+  against it, so a probe on the far side of a wall gets no weight on either path
+  — `probe_weight` and `probe_moments` are the same body in both files,
+  character for character, checked by
+  `the_shaders_weigh_a_probe_the_way_this_module_does`.
+  `crcbl_shaders::probe_visibility` owns the layout, the octahedral mapping and
+  the bound, and is the Rust mirror the render tests compare the shader against;
+  `crcbl_render::probe_visibility` keeps the static triangles a map is about,
+  and `crcbl_render::probe_capture` fills it **on the device**, as the producer
+  table below always said it would — a depth cube per probe.
 
   **The capture is six 90° views per probe into one tile atlas**, drawn from the
   scene's own triangles by `probe_capture.slang` — `crcbl_render::shadow`'s
@@ -173,27 +177,19 @@ the same on every tier, and the two tiers differ in exactly one stage:
   integrate ── shared: samples → L1 irradiance rows + octahedral depth/depth²
         │
   shading read ── shared: level pick, trilinear, SSR fallback
-                  diffuse only: Chebyshev weight
+                  both paths: Chebyshev weight
 ```
 
 **The diagram is the design, not the tree.** Of the placement box only the
-clipmap exists; of the producers only the raster capture's distance half; and
-the shading read's Chebyshev weight is on the diffuse path alone. Audited
-2026-09-03 — what is built and what is not is the list above, and these are the
-two the diagram used to state as shipped:
+clipmap exists, and of the producers only the raster capture's distance half.
+Audited 2026-09-03 — what is built and what is not is the list above, and this
+is the one the diagram used to state as shipped:
 
 - **Relocation does not exist**, and nothing it needs does either. No code
   counts backfaces per probe and none moves or disables one, because the capture
   writes distance and distance² and no backface channel, so the "both producers
   report backfaces" premise has nothing behind it on the raster tier. It lands
   with the producer that first reports one.
-- **The Chebyshev weight is on `mesh.slang` only.** `probe_weight` and
-  `probe_moments` there gate every one of a fragment's eight probes by its
-  visibility map; `ssr.slang`'s `probe_level_environment` reads the same eight
-  rows with no visibility term at all. So the specular fallback still leaks
-  through a wall where the diffuse term does not. Closing it is `probe_weight`'s
-  body and the `probe_visibility` binding in the SSR shader — the same two
-  functions, held together the way `probe_level_of` already is.
 
 The producer's contract is a sample buffer of a fixed layout; the integrate
 pass, the storage, the relocation rule (a probe whose samples are mostly
@@ -416,3 +412,14 @@ So a probe golden goes under `Tolerance::RASTERISER` like every other 3D golden.
   that simply darkened the room fails it too. Shown red by forcing the Chebyshev
   weight to a constant `1.0`, which reports both bands identical across the
   pair.
+- **The specular leak test**,
+  `a_probe_behind_a_wall_reflects_nothing_through_it`: the same room and the
+  same wall through a mirror —
+  `crcbl::screenshot::probe_leak_reflection_forward` shades it as a metal at
+  roughness zero, so every band pixel's ray leaves the floor, misses in screen
+  space and falls back to the probe grid. Each arm is drawn with the reflection
+  pair and again without it and the difference taken, so what is compared is the
+  SSR pass's own output and the divider's shadow, occlusion and diffuse term all
+  cancel. Same two-directions claim, same shape of thresholds. Shown red by
+  forcing `probe_weight` in `ssr.slang` alone to `1.0`, which leaves the diffuse
+  test green and this one failing on both bands.

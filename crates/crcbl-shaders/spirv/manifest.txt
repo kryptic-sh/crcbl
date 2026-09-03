@@ -223,14 +223,14 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = ff4ba9467da018b05ed09a1aac6be44dd7eebbaaf30dfd005a68c6f14dc5f360
+source-sha256 = ec883e54fdbaa3b017b3070c6f4dcc0a64de85d785f1aaa1a57bef36530873a3
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = 8520f00567b81a9de6dee8b01b076cba3b5b63b03c0f9cfd591bc831f813ed19
 wgsl = wgsl/mesh.wgsl
 wgsl-sha256 = 0dffc4de17860247ecbe3bb299e9ab4bb846e112f513355aa5a3b40a0c4ec610
 msl = msl/mesh.metal
-msl-sha256 = 50ece446a3904bc812ae53440634720c190b8517ba2469a884e32af15987d1fe
+msl-sha256 = 283931fad7ed57f386197174a99eca656ba90b7b420dfbcc73d6a80513247872
 dxil = vertexMain:dxil/mesh.vertex.dxil:33808e9c9ea5a13876375d12deec3c858103335a0546d05d840c3b7ffc0ce458
 dxil = depthVertexMain:dxil/mesh.depth_vertex.dxil:d5bfc1868ad94ff42b7d1b013553b24a1ed89e992cad0eb9ef44bc98d4a0988a
 dxil = depthClearVertexMain:dxil/mesh.depth_clear_vertex.dxil:e2007f43be9438f2c6d5022cb8fb44f825ab39426569a45117fd8c1494ab53a4
@@ -447,16 +447,16 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr]
 source = shaders/ssr.slang
-source-sha256 = 3c6f605ef1bad1ad2a1d372ea37104a53ec8b5d93bd87a01828116d608016b41
+source-sha256 = 948385f6e918b5a240d81ab90bec136ce929a0f66cf1d52d6c731bbee2f01f92
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssr.spv
-spirv-sha256 = e0eb81148750ce44d4a675d38ee4a2cfde86f3e0cc7722fcf04e1386d1237e68
+spirv-sha256 = d501031089926b6dc0eb6e75503c8c64656fe504bb65677e512c595ae5043b4e
 wgsl = wgsl/ssr.wgsl
-wgsl-sha256 = 86d686b5762cb401def5fecbeb683d8bacd7a25fd6504c61223beb4f45d292fe
+wgsl-sha256 = 2565d4ebe885999c917eb93866b7d3ad156756505eeb1fe0ed6d026ff2bcc51d
 msl = msl/ssr.metal
-msl-sha256 = 5bc9760450f4a9f007e31b360c582474d164070a4d3b8c56bf8e04f52daf2acd
+msl-sha256 = deaf8d3043e75ff1a036a4f8bd246bdcede5100150ffb93d844742f2a3292682
 dxil = vertexMain:dxil/ssr.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/ssr.fragment.dxil:75acf837bde18d1f4c884fdeb70d2b015725e4975def33ff403587a5f1a32ddb
+dxil = fragmentMain:dxil/ssr.fragment.dxil:5c74104d3a25b7ce8b0cc6ae144603d6072a348d96f6962cd208f0bb1eb64dff
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr_blur]

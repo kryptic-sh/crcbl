@@ -35,6 +35,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A reflection no longer takes probe light through a wall.** `ssr.slang`'s
+  probe fallback — what a screen-space ray that finds nothing falls back to —
+  read the same eight rows of the probe table `mesh.slang`'s diffuse gather does
+  but with no visibility term, so a mirror showed the room next door where the
+  diffuse term did not. It now weighs each of its eight corners by the same
+  Chebyshev bound against the per-probe visibility map, sharing `probe_weight`
+  and `probe_moments` with `mesh.slang` character for character. The SSR bind
+  group gains the `probe_visibility` image at binding 12; a scene with no
+  probes, or one run with `r_probe_visibility` off, reads the one-texel
+  placeholder, keeps every probe's whole weight and draws a byte-identical
+  frame.
+
 - **A forged `Accept` no longer wedges the client permanently.** The handshake
   reply is unauthenticated by design, so a peer that names the outstanding
   generation can complete the handshake with a resume token of its choosing; the
