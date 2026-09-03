@@ -182,31 +182,6 @@ per frame into that frame's own buffer were the only guard. A scene at
 it. A scene at `Authored` still does not, and that is every scene but lantern
 and shard.
 
-## `PROBE_OCCLUDED_WEIGHT` is correct and unguarded (2026-09-04)
-
-`crcbl_shaders::probe_visibility`'s `OCCLUDED_WEIGHT` (1e-4) is the floor
-`probe_weight` puts under the Chebyshev bound so the trilinear blend's divisor
-cannot reach zero when all eight of a fragment's corners are occluded. Deleting
-it outright from **both** `mesh.slang` and `ssr.slang` — the wrapper returning
-`probe_chebyshev` bare — regenerates cleanly and leaves `run-render-e2e.sh` and
-`run-lantern-golden.sh` both at exit 0 with no golden moving. So no fixture in
-the tree puts a shaded point where every corner is hidden, and nothing would
-notice the floor being removed.
-
-That is not an argument for removing it: a divisor reaching zero is a NaN across
-a whole surface, and the arithmetic is right. It is a note that the guard is
-absent, and that the mechanism is otherwise live — the same edit made _upward_,
-forcing the weight to 1.0, does redden
-`a_probe_behind_a_wall_reflects_nothing_through_it`, so the
-edit-regenerate-rebuild-test path is real and it is the magnitude that is
-invisible.
-
-**What would close it**: a fixture with a probe cell entirely inside a sealed
-volume — every corner's map reporting the surface as behind a wall — asserting
-the shaded result is finite and equals the plain trilinear read. `Scene::Probes`
-cannot be it; that scene is the anti-vacuity floor for the whole probe path and
-must stay byte-identical. It wants a scene of its own, and it is small.
-
 ## What the RSM probe updater shipped without (2026-09-04)
 
 `docs/plan/50-irradiance-probes.md`'s raster updater is built:

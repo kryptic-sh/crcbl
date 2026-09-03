@@ -1982,7 +1982,7 @@ fn bounce_camera() -> Camera {
     }
 }
 
-/// **The updater fixture's volume**: [`leak_volume`] with every row at zero and
+/// **The updater fixture's volume**: `leak_volume`'s, with every row at zero and
 /// [`ProbeUpdate::EveryFrame`] on it.
 ///
 /// The rows are zero because they are the updater's to fill — an authored row
@@ -2211,6 +2211,221 @@ pub fn probe_clipmap_forward(
         ..EffectRequest::default()
     });
     place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, probe_room());
+    renderer.capture_probe_visibility(device, queue)?;
+    Ok(ForwardScene {
+        camera: probe_camera(),
+        sun: probe_sun(),
+        renderer: Box::new(renderer),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The sealed-cell fixture
+// ---------------------------------------------------------------------------
+
+/// How wide [`probe_sealed_forward`]'s room is, in world units.
+///
+/// [`LEAK_ROOM_WIDTH`]'s reason over a wider grid: the `±X` walls stay well
+/// outside the frame, so the only vertical surfaces in the picture are the two
+/// vaults and nothing else can stand between a probe and the band.
+const SEALED_ROOM_WIDTH: f32 = 6.0;
+
+/// How deep it is.
+///
+/// **Twice [`PROBE_ROOM_DEPTH`], and the band is what buys the difference.** The
+/// measurement has to sit *beside* the vaults rather than under them — the
+/// camera looks straight down and a vault hides the floor it stands over — and
+/// it has to clear every wall by more than
+/// `crcbl_render::ForwardRenderer`'s occlusion radius, on the terms
+/// `tests/render_e2e.rs`'s `PROBE_BAND_AT` is chosen under — that constant lives
+/// in the test crate, so this is its name rather than a link. Those two put it a
+/// unit past where a two-deep room's `±Z` walls are.
+/// The walls then leave the frame, which is the bargain [`PROBE_ROOM_WIDTH`]
+/// already makes on the other axis.
+const SEALED_ROOM_DEPTH: f32 = 4.0;
+
+/// How tall it is. [`PROBE_ROOM_HEIGHT`], which is the height every probe room
+/// in this file stands at and the one both vaults are sized under.
+const SEALED_ROOM_HEIGHT: f32 = PROBE_ROOM_HEIGHT;
+
+/// How far either side of the room's centre [`probe_sealed_grid`]'s two probes
+/// stand, and therefore half the grid's spacing.
+///
+/// **Wide, because the two corners have to disagree.** The band reads both
+/// probes, and what this fixture is about is the *divisor* that combines them:
+/// a band near the middle of a narrow cell stands almost equally far from the
+/// two probes, which gives their visibility maps almost equal readings and
+/// leaves the divisor with nothing to say. At this reach the band stands three
+/// times as far along the grid's own axis from one probe as from the other.
+const SEALED_PROBE_REACH: f32 = 1.2;
+
+/// Half the width of the vault sealing the `-X` probe, in world units.
+///
+/// **Deliberately not [`SEALED_LIT_VAULT_HALF`], and the difference is the
+/// fixture's own red check.** The bound a sealed corner reports is the variance
+/// of what its map can see over the square of how far past that the surface is,
+/// cubed — so it scales steeply with the size of the room the probe is shut in,
+/// and two probes sealed in *identically* sized vaults report bounds close
+/// enough to each other that the weighted mean and the plain trilinear one are
+/// the same picture. Nothing in the frame would then notice
+/// `PROBE_OCCLUDED_WEIGHT` being deleted from `mesh.slang`. A tight vault
+/// against a roomy one puts orders of magnitude between the two bounds while
+/// leaving both far under the floor, which is the case this scene exists to put
+/// on a device.
+///
+/// Wide enough all the same that the probe stands clear of every face by far
+/// more than `crcbl_render::probe_capture`'s near plane, so no face of it is
+/// clipped away and read as open space.
+const SEALED_DARK_VAULT_HALF: f32 = 0.15;
+
+/// Half the width of the vault sealing the `+X` probe.
+///
+/// [`SEALED_DARK_VAULT_HALF`]'s reason, from the other end of the ratio. It is
+/// also the vault that has to stay inside the room: at this half-width its top
+/// is [`SEALED_ROOM_HEIGHT`]'s upper quarter and its floor is clear of the
+/// room's.
+const SEALED_LIT_VAULT_HALF: f32 = 0.6;
+
+/// Where the band is read along `x`, in world units.
+///
+/// Half of `SEALED_PROBE_REACH` towards the `-X` probe, so the trilinear blend
+/// gives that probe three quarters and the `+X` one a quarter. **Not the cell's
+/// centre**, which is where the two corners are mirror images of one another and
+/// their visibility maps read the same by symmetry — see
+/// `SEALED_DARK_VAULT_HALF`, which is the other half of the same argument.
+///
+/// Public so `tests/render_e2e.rs` names the band once rather than twice.
+pub const SEALED_BAND_X: f32 = -0.5 * SEALED_PROBE_REACH;
+
+/// Where it is read along `z`.
+///
+/// Out past both vaults, so the camera sees floor here rather than a lid, and
+/// still more than `crcbl_render::ForwardRenderer`'s occlusion radius from every
+/// vault and from the `+Z` wall — the condition `PROBE_BAND_AT` is chosen under,
+/// which is what makes the occlusion over this block exactly one.
+pub const SEALED_BAND_Z: f32 = 0.9;
+
+/// [`probe_sealed_forward`]'s room: the open box at [`SEALED_ROOM_WIDTH`] ×
+/// [`SEALED_ROOM_HEIGHT`] × [`SEALED_ROOM_DEPTH`], floor on the plane `y = 0`.
+///
+/// `probe_room`'s transform for `probe_room`'s reason, the floor at exactly
+/// `y = 0` included: it is what lets `tests/render_e2e.rs` name the band's world
+/// position without reconstructing anything.
+fn sealed_room() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5 * SEALED_ROOM_HEIGHT, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::new(
+            SEALED_ROOM_WIDTH,
+            SEALED_ROOM_HEIGHT,
+            SEALED_ROOM_DEPTH,
+        ))
+}
+
+/// A vault: the demo cube as a closed box of half-width `half`, centred on the
+/// probe standing at `x` and at the probes' own height.
+///
+/// A cube because it is closed, which is the whole of the seal:
+/// `crcbl_render::probe_capture` draws the scene's triangles with no culling, so
+/// a probe standing inside one records its inner faces and every direction it
+/// can look along is a wall.
+fn sealed_vault(x: f32, half: f32) -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(x, 0.5 * SEALED_ROOM_HEIGHT, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::splat(2.0 * half))
+}
+
+/// [`probe_sealed_forward`]'s volume: two probes on the `x` axis
+/// `SEALED_PROBE_REACH` either side of the room's centre, at half its height.
+///
+/// **The rows are [`probe_leak_grid`]'s** — the `-X` probe black and the `+X`
+/// probe a constant environment — because this fixture wants what that one
+/// wants of them: with one row at zero the band's value is the share of the
+/// *other* row the blend gave it, and a share is exactly the quantity a divisor
+/// decides. Taken from that function rather than rebuilt so the two fixtures
+/// cannot drift into holding different light.
+///
+/// Public so `tests/render_e2e.rs` predicts the frame from the rows the device
+/// was actually given, on [`probe_grid`]'s terms.
+#[must_use]
+pub fn probe_sealed_grid() -> crate::render::scene::ProbeGrid {
+    crate::render::scene::ProbeGrid {
+        volume: crate::shaders::probe::ProbeVolume {
+            origin: [-SEALED_PROBE_REACH, 0.5 * SEALED_ROOM_HEIGHT, 0.0],
+            inv_spacing: [1.0 / (2.0 * SEALED_PROBE_REACH), 0.0, 0.0],
+            counts: [2, 1, 1],
+            // One level, on `leak_volume`'s terms: the claim is about a cell's
+            // eight corners, and a second level would put a second read between
+            // them and the band.
+            levels: 1,
+        },
+        ..probe_leak_grid()
+    }
+}
+
+/// **The sealed-cell fixture**: one room, two probes, and a vault around each
+/// of them that is there or is not.
+///
+/// `mesh.slang`'s `probe_irradiance` divides its weighted sum of eight corners
+/// by the sum of their weights, and `PROBE_OCCLUDED_WEIGHT` is the floor that
+/// keeps that divisor off zero — so a fragment whose every corner is hidden
+/// falls back to the plain trilinear blend rather than to a division by nothing.
+/// No other probe fixture in this file reaches that case — [`Scene::Probes`]
+/// hides none of a band's corners and the divider fixtures hide some — and it is
+/// the only arrangement in which the floor is what decides the pixel.
+///
+/// **`both` is the seal, and it is a parameter for [`probe_leak_forward`]'s
+/// reason.** A frame in which every corner is occluded is a frame that looks
+/// exactly like one in which none of them are — that is what the fallback
+/// *means* — so a single picture cannot say whether the vaults occluded
+/// anything at all. Drawn with `both`, the cell is sealed and the band must be
+/// the plain blend. Drawn without it, only the black `-X` probe is sealed, its
+/// three quarters of the blend are weighed out, and the band must jump to
+/// nearly the whole of the lit probe. The second arm is what makes the first
+/// one a measurement rather than a tautology.
+///
+/// Every band either arm reads is the probe term and nothing else, on
+/// [`probe_leak_forward`]'s terms exactly: `probe_sun` leaves the direct and
+/// flat ambient contributions at zero, the floor is one quad of one albedo, and
+/// the reflection pair is refused. The camera is `probe_camera`'s rather than
+/// one of its own, because `tests/render_e2e.rs` turns the band's pixels back
+/// into world positions through that camera's mapping and a second copy of it
+/// would agree only until somebody moved one of them.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built or the capture cannot
+/// be uploaded.
+pub fn probe_sealed_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    both: bool,
+) -> Result<ForwardScene, OffscreenError> {
+    let probes = probe_sealed_grid();
+    let mut scene = crate::render::scene::demo();
+    scene.capacities.probes = probes.volume.total();
+    scene.probes = probes;
+    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(crcbl_render::RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, sealed_room());
+    place(
+        &mut renderer,
+        DEMO_CUBE,
+        DEMO_UNTINTED,
+        sealed_vault(-SEALED_PROBE_REACH, SEALED_DARK_VAULT_HALF),
+    );
+    if both {
+        place(
+            &mut renderer,
+            DEMO_CUBE,
+            DEMO_UNTINTED,
+            sealed_vault(SEALED_PROBE_REACH, SEALED_LIT_VAULT_HALF),
+        );
+    }
+    // After the geometry and before the frame, on `probe_leak_forward`'s terms:
+    // the two arms differ in exactly what this call records.
     renderer.capture_probe_visibility(device, queue)?;
     Ok(ForwardScene {
         camera: probe_camera(),

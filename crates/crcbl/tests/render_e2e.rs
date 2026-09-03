@@ -2651,7 +2651,7 @@ fn probe_floor_albedo() -> [f32; 3] {
         .color
 }
 
-/// What the Rust mirror says one channel of one block of [`Scene::Probes`]
+/// What the Rust mirror says one channel of one block of a probe-lit floor
 /// should measure, in the frame's own levels.
 ///
 /// The forward model [`PROBE_MIRROR_LEVELS`] justifies: the irradiance the mirror
@@ -2660,8 +2660,19 @@ fn probe_floor_albedo() -> [f32; 3] {
 /// order and over the same pixels [`block_channel`] reads, because the field has
 /// a gradient across the block and the encode is not linear — evaluating the
 /// centre and encoding once is a different number.
-fn predicted_block_channel(centre: (u32, u32), half: (u32, u32), index: usize) -> f32 {
-    let grid = crcbl::screenshot::probe_grid();
+///
+/// **The mirror is evaluated against
+/// `crcbl_shaders::probe_visibility::ProbeVisibility::NONE`, the map that
+/// occludes nothing**, so what comes back is the *plain trilinear blend* of the
+/// rows the grid holds. Each caller says why that is the right prediction for
+/// its own fixture — for one of them because no corner is occluded, and for the
+/// other because every corner is.
+fn predicted_block_channel(
+    grid: &crcbl::render::scene::ProbeGrid,
+    centre: (u32, u32),
+    half: (u32, u32),
+    index: usize,
+) -> f32 {
     let albedo = probe_floor_albedo();
     let mut total = 0.0f32;
     let mut count = 0u32;
@@ -2669,14 +2680,6 @@ fn predicted_block_channel(centre: (u32, u32), half: (u32, u32), index: usize) -
         let irradiance = crcbl::shaders::probe::irradiance_at(
             &grid.volume,
             &grid.probes,
-            // **Every probe fully visible, and that is a claim rather than a
-            // convenience.** The fixture's two probes stand in open air over a
-            // flat floor with nothing between them and it, so the visibility
-            // capture `SceneState` runs for this scene must give every corner
-            // its whole weight — and if it does not, the device's frame and this
-            // prediction part company and this comparison is what says so. See
-            // `crcbl_shaders::probe_visibility`, where `NONE` is the map that
-            // occludes nothing.
             &crcbl::shaders::probe_visibility::ProbeVisibility::NONE,
             probe_world(x, y),
             [0.0, 1.0, 0.0],
@@ -3246,6 +3249,161 @@ fn a_fragment_crossing_a_clipmap_level_fades_into_it() {
     );
 }
 
+/// How far the sealed band may sit from the plain trilinear read, in levels of
+/// 255.
+///
+/// [`PROBE_MIRROR_LEVELS`]' forward model exactly — the same floor, the same
+/// camera, the same sun with its direct and ambient terms at zero, the same
+/// reflection refusal, and a band chosen under the same clearance from every
+/// surface — so the same list of exactly-zero and exactly-one steps applies and
+/// what is left to cover is 8-bit rounding, the sRGB encode's precision and half
+/// a pixel of disagreement about where a fragment centre is.
+///
+/// Measured over all three channels at **0.20 levels at worst on radv and 0.20
+/// on lavapipe**, and set at [`PROBE_MIRROR_LEVELS`]' own budget — a band this
+/// far from every surface, read as a block average, is the same measurement that
+/// constant was set under.
+const SEALED_MIRROR_LEVELS: f32 = 1.0;
+
+/// The least the half-sealed band must carry over the plain trilinear read, in
+/// levels of 255.
+///
+/// **The claim that the vaults occlude anything at all**, which is the one thing
+/// the sealed arm cannot say on its own: a cell whose every corner is weighed out
+/// draws the same picture as a cell whose every corner is whole, so without this
+/// a fixture whose vaults leaked would satisfy the comparison below by agreeing
+/// with the mirror for the wrong reason. With only the black `-X` probe sealed
+/// its three quarters of the blend are weighed out and the band jumps to nearly
+/// the whole of the lit probe.
+///
+/// The run that landed this reads **103.90 levels of gain at worst over the
+/// three channels on radv and 103.90 on lavapipe** — 224.00 against a plain
+/// blend of 120.10 on blue, the narrowest of them. Set at well under half of
+/// that, and far over the two levels `crcbl_golden::Tolerance::RASTERISER`
+/// allows two frames of one scene to differ by.
+const SEALED_UNSEALED_GAIN: f32 = 40.0;
+
+/// The least the sealed band must measure, in levels of 255.
+///
+/// The anti-vacuity half, and here it is also the finiteness claim: the case
+/// this fixture puts on a device is the one where the gather's divisor would be
+/// a sum of zeroes without `PROBE_OCCLUDED_WEIGHT`, and a fragment that divided
+/// by nothing reaches the swapchain as a hole rather than as a floor.
+///
+/// Measured at **119.90 levels at worst over the three channels on radv and
+/// 119.90 on lavapipe**; set at half of that.
+const SEALED_MIN_LEVELS: f32 = 60.0;
+
+/// **The floor under the gather's divisor, on the device: a cell hidden on every
+/// side keeps the light it had rather than becoming a hole.**
+///
+/// `mesh.slang`'s `probe_irradiance` divides its weighted sum of eight corners
+/// by the sum of their weights, and `crcbl_shaders::probe_visibility`'s
+/// `OCCLUDED_WEIGHT` is the floor under each of those weights. No other probe
+/// test here reaches the case it exists for — [`Scene::Probes`] hides none of a
+/// band's corners and the divider fixtures hide some — and it is the only
+/// arrangement in which that floor is what decides the pixel: until this test
+/// existed nothing in the tree put a shaded point where every corner was
+/// occluded, so the constant could be deleted with every golden and every
+/// assertion still green.
+///
+/// `crcbl::screenshot::probe_sealed_forward` is the fixture: two probes, the
+/// `-X` one black and the `+X` one a constant environment, with a closed vault
+/// of its own around each. One arm seals both probes and one seals only the
+/// black one, and the pair is what makes this a measurement:
+///
+/// * **Seal only the black probe** and its three quarters of the blend are
+///   weighed out, so the band must carry nearly the whole of the lit probe —
+///   [`SEALED_UNSEALED_GAIN`] over the quarter the plain blend would give it.
+///   That is the proof the vaults occlude anything at all.
+/// * **Seal both** and every corner is at the floor, which divides straight back
+///   out: the band must be the plain trilinear read to within
+///   [`SEALED_MIRROR_LEVELS`], evaluated by
+///   `crcbl_shaders::probe::irradiance_at` over the rows the device was given.
+///
+/// **The mirror comparison is the one the floor holds up.** Delete the floor
+/// from `probe_weight` in `mesh.slang` and the sealed arm's two corners keep raw
+/// Chebyshev bounds instead — bounds that differ between a probe in a tight vault
+/// and one in a roomy vault by orders of magnitude, which is what
+/// `crcbl::screenshot`'s two vault half-widths are sized for — so the weighted
+/// mean stops being the plain one and this band moves by tens of levels.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_probe_cell_sealed_on_every_side_keeps_the_plain_blend() {
+    crcbl_core::log::init_logging();
+
+    let frame = |both: bool| {
+        let setup =
+            OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, move |device, queue, format| {
+                crcbl::screenshot::probe_sealed_forward(device, queue, format, both)
+            })
+            .unwrap_or_else(|why| panic!("a GPU backend opens for the sealed probe scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format))
+            .expect("the readback is exactly one image")
+    };
+
+    let sealed = frame(true);
+    let half = frame(false);
+    // **Every corner occluded, which is why the plain blend is the prediction
+    // here.** `ProbeVisibility::NONE` gives every corner its whole weight and
+    // `OCCLUDED_WEIGHT` gives every corner the same share of one; both are a
+    // weighted mean whose weights are equal, so both are the unweighted
+    // trilinear blend. That equality is the property this test is about, and it
+    // is what makes a mirror that knows nothing about the vaults the right
+    // thing to compare the sealed arm against.
+    let grid = crcbl::screenshot::probe_sealed_grid();
+    let at = probe_pixel(
+        crcbl::screenshot::SEALED_BAND_X,
+        crcbl::screenshot::SEALED_BAND_Z,
+    );
+    let mut worst = 0.0f32;
+    for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
+        let predicted = predicted_block_channel(&grid, at, PROBE_BAND, channel);
+        let measured = block_channel(&sealed, at, PROBE_BAND, channel);
+        let unsealed = block_channel(&half, at, PROBE_BAND, channel);
+        let miss = (measured - predicted).abs();
+        worst = worst.max(miss);
+        eprintln!(
+            "crcbl render e2e: sealed cell — {name} band {measured:.2} sealed against \
+             {unsealed:.2} with only the black probe sealed, and a plain blend of \
+             {predicted:.2}"
+        );
+
+        assert!(
+            measured >= SEALED_MIN_LEVELS,
+            "the sealed band's {name} channel measures {measured:.2} of the \
+             {SEALED_MIN_LEVELS} this fixture is built to reach — a cell hidden on every \
+             side has become a hole in the floor rather than keeping the light it had"
+        );
+        assert!(
+            unsealed >= predicted + SEALED_UNSEALED_GAIN,
+            "with only the black probe sealed the {name} band must lose that probe's three \
+             quarters of the blend and carry nearly the whole of the lit one: it measures \
+             {unsealed:.2} against a plain blend of {predicted:.2}, which is not the \
+             {SEALED_UNSEALED_GAIN} level(s) of gain a weighed-out corner costs — these \
+             vaults are not occluding anything, and the comparison below would then agree \
+             with the mirror for the wrong reason"
+        );
+        assert!(
+            miss <= SEALED_MIRROR_LEVELS,
+            "the sealed band's {name} channel measures {measured:.2} and the plain trilinear \
+             blend of the same rows is {predicted:.2}, a miss of {miss:.2} level(s) against a \
+             budget of {SEALED_MIRROR_LEVELS} — a cell whose every corner is at \
+             `crcbl_shaders::probe_visibility::OCCLUDED_WEIGHT` must divide that constant \
+             straight back out, so a band that moved is a gather weighing its corners by \
+             something the floor no longer holds equal"
+        );
+    }
+    eprintln!(
+        "crcbl render e2e: sealed cell — the sealed band and the plain blend agree to \
+         {worst:.2} level(s) at worst over all three channels"
+    );
+}
+
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
 fn the_probes_scene_lights_its_room_and_matches_its_golden() {
@@ -3378,6 +3536,13 @@ fn the_probe_grid_lights_each_end_of_the_room_in_its_own_colour(image: &Image) {
 /// number is measured rather than chosen; the printed line is what a later run
 /// checks it against.
 fn the_shader_and_the_rust_mirror_agree_about_the_irradiance(image: &Image) {
+    // **Every probe fully visible, and that is a claim rather than a
+    // convenience.** The fixture's two probes stand in open air over a flat
+    // floor with nothing between them and it, so the visibility capture
+    // `SceneState` runs for this scene must give every corner its whole weight —
+    // and if it does not, the device's frame and the plain trilinear prediction
+    // part company and this comparison is what says so.
+    let grid = crcbl::screenshot::probe_grid();
     let mut worst = 0.0f32;
     for (side, x) in [
         ("-X", -PROBE_BAND_AT),
@@ -3387,7 +3552,7 @@ fn the_shader_and_the_rust_mirror_agree_about_the_irradiance(image: &Image) {
         let at = probe_pixel(x, 0.0);
         for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
             let measured = block_channel(image, at, PROBE_BAND, channel);
-            let predicted = predicted_block_channel(at, PROBE_BAND, channel);
+            let predicted = predicted_block_channel(&grid, at, PROBE_BAND, channel);
             let miss = (measured - predicted).abs();
             worst = worst.max(miss);
             assert!(
