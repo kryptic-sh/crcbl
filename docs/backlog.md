@@ -232,13 +232,24 @@ levels or more. Identical in all seven runs on each tier:
 
 ```text
 slices  blurs     radv   lavapipe
-     2      1        1          1     what ships
-     4      1        1          0
-     2      2        2          5
+     2      1       37         38     what ships
+     4      1      100         89
+     2      2        8          9
      4      2        0          0     the rung
 anti-baseline: one plane orientation across the whole tile
-     2      1      148        172
+     2      1      118        113
 ```
+
+**This table read `1 / 1 / 2 / 0` on radv until 2026-09-03 and was wrong** — it
+had been carried across the half-resolution change rather than re-taken, which
+is exactly what the paragraph above it promises was not done. Re-measured on
+radv by running
+`forward_e2e::occlusion::the_tangential_occlusion_line_does_not_step` on that
+date: `37 / 100 / 8 / 0` sharp edges over `DIAGONAL_LENGTH` samples, worst step
+`5 / 3 / 3 / 1`, which is the first table's column and `MAX_SHARP_EDGES`' own
+doc comment to the integer. The anti-baseline is that doc comment's too. The
+difference matters to the decision this entry exists for: the rung takes
+thirty-seven sharp edges to none, not one to none.
 
 - **The second blur on its own makes it worse** — 1 to 2 on radv, 1 to 5 on
   lavapipe. Widening the footprint over a field that still carries the same tile
