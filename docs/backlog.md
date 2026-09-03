@@ -298,40 +298,18 @@ and shard.
 
 ## What the RSM probe updater shipped without (2026-09-04)
 
-`docs/plan/50-irradiance-probes.md`'s raster updater is built:
-`crcbl_render::rsm` draws the sun's near cascade as a reflective shadow map,
-`crcbl_render::probe_gather` sums every one of its texels into every probe row
+`docs/plan/50-irradiance-probes.md`'s raster updater is built and so is its
+punctual half: `crcbl_render::rsm` draws the sun's near cascade as a reflective
+shadow map and every shadowed point and spot light's faces as a second one,
+`crcbl_render::probe_gather` sums every texel of both into every probe row
 through `probe_chebyshev`, and `ProbeGrid::update` selects it — `Authored` by
 default, so no existing scene records either pass. lantern and shard's CPU bakes
-are gone with it. The plan that described the work is deleted; what follows is
-what it left.
-
-**It gathers the sun and nothing else, and that is a visible loss.** The design
-says "the sun's near cascade (and any lamp the application asks for)"; only the
-first half is built. Two things went with the bakes:
-
-- **lantern's coloured wall no longer tints the plaster beside it.** That was
-  frame claim 6 in `apps/lantern/tests/golden.rs`, asserting a red-to-blue ratio
-  of at least 1.10 against a measured 1.17. Measured after the change it is
-  **0.999 on radv and 0.992–0.997 on lavapipe — no tint at all**, because the
-  coloured wall is lamp-lit rather than sun-lit and the updater does not gather
-  lamps. The claim was deleted rather than weakened, which is the right call for
-  an effect that is genuinely gone; `room::TINTED_PLASTER` and
-  `UNTINTED_PLASTER` and the room-side proof that nothing but the bounce
-  separates them survive, so the claim can be restored the day a punctual
-  producer exists.
-- **shard's zone lost its warm torch bounce**, for the same reason. The ambient
-  floor in `zone::house_light` is what holds that term up now, and `light.rs`'s
-  header says so.
-
-**Whether that trade is worth keeping is the user's call**: a dynamic sun bounce
-that follows the light, against a static bake that carried every light's colour
-and could not move. The bake is not coming back — the no-bake rule of 2026-08-30
-forbids it — so the question is whether the lamp producer is the next rung or
-whether something else is.
+are gone with it, `apps/lantern`'s frame claim 6 is restored, and the plan
+sections that described both halves are deleted. What follows is what they left.
 
 **What it costs.** p50 of three,
-`lantern --headless --frames 400 --size 1920x1080`, updater on against off:
+`lantern --headless --frames 400 --size 1920x1080`, the sun-only updater on
+against off:
 
 ```text
                 radv on   radv off   lavapipe on   lavapipe off
@@ -345,13 +323,9 @@ which is 2.3% of that one. The discrete tier pays the larger share because its
 frame is small; the software tier's `rsm` is nineteen times its radv cost and
 still disappears into an 80 ms frame. `docs/backlog.md`'s survey constraint C3
 budgets the whole frame at 0.990 ms on this adapter and it was already at 1.161
-before the updater, so this is a rung spent over budget rather than into it.
-
-**`RSM_SIDE` is 64, swept rather than guessed.** At 32 the gather is 0.020 ms on
-radv against 0.047 at 64, while the map's own pass does not move at all — it is
-draw-bound at both extents. The frames differ by 0.15% RMSE with a peak channel
-of 17/255, and lantern's mirror fallback reads 26.0 at 32 against 25.6 at 64.
-Both are affordable, so the sample count decided it.
+before the updater, so this is a rung spent over budget rather than into it. The
+punctual half's own price is in `crcbl_shaders::probe_gather`'s
+`PUNCTUAL_RSM_SIDE`, which carries its extent sweep.
 
 **What is not verified.** The browser tier and any windowed run — neither was
 measured. Metal and D3D12 are type-checked on the cross-target clippy legs and
@@ -369,6 +343,13 @@ zero difference between the walled and open arms — a perfect false negative.
 travels**, which is why the one that shipped measures a wall face the sun never
 touches.
 
+**A producer is only as good as the light it is given.** `apps/shard`'s doused
+zone was measured on 2026-09-04 with `r_probe_bounce` off and on and moved by
+0.01 of a luma level, because the one light left burning there is faint and
+stands in a corner — see "shard's doused zone is 95% one colour". The gather is
+not at fault and no engine change addresses it; it is what a scene with nothing
+to bounce looks like.
+
 **Still owed from the plan, in order:**
 
 - **The sky through the visibility.** `mesh.slang`'s `sky_irradiance` is three
@@ -376,7 +357,6 @@ touches.
   gather plus a host-side zeroing of `frame.sky_sh_*` for an updater-owned
   volume. That is a change to how a scene is lit rather than a binding, and it
   is the user's decision before it is anyone's work.
-- **A punctual producer**, which is what the two losses above want.
 - **Scrolling, and recapture on scroll.** Probes outside cascade 0's
   camera-following sphere gather nothing, and the volume does not move.
   `ProbeUpdate::EveryFrame`'s own doc comment says so.
