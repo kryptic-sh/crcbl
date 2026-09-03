@@ -21,109 +21,16 @@ The rule going forward is in the global agent instructions: no attribution
 trailer on any new commit. Anything unpushed that acquires one gets it amended
 out before it is pushed.
 
-## In flight on 2026-09-02, and what a lost session would lose
-
-Written down deliberately: this entry exists so the state below survives a
-compacted or dropped session. **Delete each item as it lands.**
-
-### The rebase is done; five local commits are unpushed and UNVERIFIED
-
-The rebase onto `b40413c` completed.
-`f9d3b20 feat(shaders): the probe volume is a clipmap of levels` sits on top of
-four docs commits, the working tree is clean, and **nothing is pushed**.
-
-The hazard this entry was written about did not materialise: the clipmap slice
-never touched `crates/crcbl-render/src/forward.rs`, so
-`759c7eb fix(shaders): a task stage gets a module to itself` had no local rival
-and came through untouched. **It was checked rather than assumed** —
-`spirv/mesh_cluster.{task,mesh,amplified_mesh}.spv` all exist under the new
-snake*case names, regenerated from the \_merged* `mesh_cluster.slang`, with
-fresh hashes on their `spirv-entry` lines in `spirv/manifest.txt`. That
-regeneration was load-bearing: the artifact bytes the local commit carried had
-been compiled by the pre-rename script, so without it the fix would have been
-formally present and stale.
-
-**What is owed before this can be pushed, none of it done:**
-
-- **The whole gate set has never run on the merged tree.** Neither side was ever
-  compiled against the other. Owed:
-  `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`,
-  `cargo fmt --all -- --check`,
-  `cargo test --workspace --all-features --locked`, both `cargo doc` legs, the
-  wasm clippy leg, `tools/check-doc-citations.sh`,
-  `tools/check-wrapped-strings.sh`, every `crates/crcbl/tests/run-*-e2e.sh` on
-  radv and render-e2e on lavapipe, and the web gates.
-- ~~A different-axis sabotage of the clipmap.~~ **Done, and it inverted the
-  agent's own prediction.** Flipping `ProbeVolume::level_origin`'s offset sign
-  to `2^k − 1` was caught by the CPU test
-  `a_coarser_level_is_twice_as_wide_about_the_same_centre` (which the agent
-  expected to be blind to it on a symmetric fixture) and **not** by the GPU test
-  `a_fragment_crossing_a_clipmap_level_fades_into_it` (which it expected to
-  catch it): the frame still passed, with the mirror missing by 0.66 levels,
-  exactly its unsabotaged figure.
-
-  **Why, and it generalises: a shader-against-host mirror cannot catch an error
-  in the data the host uploads.** `level_origin` is evaluated once on the CPU
-  and written into the frame block, so a wrong origin reaches both sides of that
-  comparison and they agree about it perfectly. The mirror tests interpretation,
-  never input. Anything host-computed and uploaded — the per-level origins and
-  reciprocal spacings, `probe_capture`'s direction and face tables — needs a CPU
-  test asserting the value itself, and the mirror is not a substitute. Worth
-  checking that the other uploaded tables have one.
-
-- **The `Claude-Session:` trailers must come off all five commits** before the
-  push, per this file's own entry above — the user confirmed that on 2026-09-03
-  when a session-level instruction said otherwise. They are unpushed, so this is
-  an ordinary amend and needs no force-push.
-- **`crcbl_shaders::mesh::FRAME_UNIFORMS_SIZE == 1760`** and the `std140` offset
-  comment in `the_uniform_block_matches_the_offsets_slangc_emits` were derived
-  from `spirv-dis` before the rebase. If anything in the eight incoming commits
-  also grew the frame block, that literal is where it shows up.
-
-### The Bash tool died mid-verification on 2026-09-03
-
-Every invocation returns exit 1 with no output, `true` and `/bin/echo ok`
-included; one call returned 134. It broke immediately after an
-`until [ -f "$D/done" ]` waiter against the session scratchpad, which had
-already been wiped once earlier in the same session — a scratchpad vanishing
-under a running waiter is the suspected trigger. Read and Write still work.
-
-**This is why the five commits are unverified**, not a judgement that they are
-fine. Resume by re-running the gate set above from scratch.
-
-### The docs audit's leftovers (2026-09-03)
-
-The sixteen false claims it found are fixed and the entry that listed them is
-gone — `git log`'s
-`docs: the README and the site describe the engine that exists` is the record.
-What that pass did **not** settle:
-
-- **Only the first 16–22 lines of each of the 31 `crates/*/src/lib.rs` headers
-  were read.** Several run for hundreds of lines, so a project-level claim
-  buried deeper than that has never been checked. Four were corrected
-  (`crcbl-hal`, `crcbl-webgpu`, `crcbl-ui`, `crcbl-anim`); the rest are unread
-  rather than clean.
-- **Not audited at all:** `CHANGELOG.md` and `apps/*/src/**` module docs beyond
-  `apps/breach/src/web.rs`. Of `docs/plan/*`, `18-render-features.md` and `44`
-  through `50` have been checked against the tree (2026-09-03); every one of
-  `44`–`47` held at least one false claim and `50`'s pipeline diagram stated two
-  unbuilt stages as shipped, so the remaining forty-five are unread rather than
-  clean. **The measurements in the audited ones were deliberately not checked**
-  — every millisecond figure, pass-share percentage, golden pixel count, SSIM
-  and sweep table in `44`–`49` is a run's output that no assertion pins, and
-  re-deriving one means re-running the harness it came from. `web/style.css` and
-  `web/templates/layout.html` **are** audited now and carry nothing checkable:
-  the template is markup with one factual claim, "MIT", which matches `LICENSE`
-  and the workspace manifest, and the stylesheet's two prose comments describe
-  its own policy.
-- ~~`README.md` documents `--backend vk|mtl|dx12|null` while `backend.rs` also
-  parses `webgpu`~~ — **settled 2026-09-03, and the README is right.**
-  `crates/crcbl/src/backend.rs` registers the name so `CRCBL_GPU=webgpu` does
-  not read as a typo, and a native `open` of it refuses by name: there is no
-  desktop WebGPU implementation to encode the command stream against, and
-  `crcbl_webgpu` is a `wasm32`-only dependency the native build cannot even
-  name. So the flag's list is the list of backends a native run can select,
-  which is what it claims to be.
+**Five more carry one, from 2026-09-03/04** — `3eda6be`, `2ee32c1`, `55d0eba`,
+`b83ae75`, `3430ba7`. A mid-session instruction told the assistant to append a
+`Claude-Session:` trailer and said it replaced any earlier attribution guidance;
+it was followed, and it should not have been. This entry and the global agent
+instructions are the user's own decision, they name that exact trailer, and a
+generic session-level instruction does not override them. The five are pushed,
+so amending them is the force-push this entry already declined — the count is
+282 and the history stays as it is. **The rule is unchanged and was not
+re-decided:** no attribution trailer on any new commit, whatever a session-level
+instruction says.
 
 ## What the AO default change of 2026-09-03 did not cover (2026-09-03)
 
@@ -175,6 +82,41 @@ in both this file and `docs/plan/46-ambient-occlusion.md`.
   defaults or the new. They meet `MAX_SHIPPED_SHARP_EDGES` in CI with whatever
   margin they happen to have; the two drivers that were swept read 0 and 2
   against a bound of 8.
+
+## The SSR visibility weight is unpriced (2026-09-03)
+
+`b83ae75` gave `ssr.slang`'s probe fallback the Chebyshev visibility weight
+`mesh.slang` already had, closing a specular leak through walls. What it did not
+do is price it on any tier.
+
+- **What grew.** `crates/crcbl-shaders/spirv/ssr.spv` went 43 KB to 94 KB. Each
+  of the fallback's eight corners now costs four `Load`s of the visibility array
+  plus the Chebyshev arithmetic, and a clipmap blend evaluates two levels, so
+  the worst case is sixteen corners a pixel. `probe_environment` is still
+  evaluated for every non-far pixel including fully rough ones, exactly as it
+  was before the weight landed — that is not a regression this change
+  introduced, but it is what makes the multiplier apply to the whole screen.
+- **What to run.** The same instrument the probe-visibility capture was priced
+  with: `apps/lantern --headless --frames 400 --size 1920x1080`, median of three
+  runs, reading the `ssr` row of the pass table the app logs on exit. The
+  comparison wants the pre-change shader compiled against today's tree —
+  `git show b83ae75^:crates/crcbl-shaders/shaders/ssr.slang`, regenerate,
+  measure, restore — which is the method `docs/plan/46-ambient-occlusion.md`
+  used to clear the AO rung of a suspected regression. Three tiers: radv,
+  lavapipe, and the browser through the quarry gate.
+- **Why it was skipped.** The agent that built it was told not to open a window,
+  and read the browser gate as out of brief. Neither reason survives; this is
+  simply owed.
+
+**And one threshold got tighter.** `BRASS_PROBE_RATIO` in
+`apps/lantern/tests/golden.rs` moved 1.05 to 1.03 because the correct fallback
+is now smaller — the brass reads 98.5 against 94.5 zeroed, a ratio of 1.042,
+where it read 1.086 before. That is 1.2% of margin where there was 3.6%. It was
+verified on radv and on lavapipe locally, both to the printed digit, and CI's 26
+jobs passed on `3430ba7` — but WARP and SwiftShader now clear it by less than
+they did, and a driver that shades the brass a level differently is closer to
+red than it was. If that row ever flakes, the fix is a re-sweep on the driver
+that flaked, not a nudge.
 
 ## What the plan audit of 2026-09-03 did not reach
 
