@@ -36,12 +36,12 @@ deferred, and whether that is worth building next is a scheduling question for
 the roadmap rather than a design question for this document. `docs/backlog.md`
 is where that decision belongs.
 
-| Effect              | `RayTraced`                         | `Rasterised`                                        |
-| ------------------- | ----------------------------------- | --------------------------------------------------- |
-| Global illumination | ray-traced GI                       | irradiance probes + baked/ambient                   |
-| Reflections         | ray-traced reflections              | screen-space reflections, probe fallback            |
-| Shadows             | ray-traced shadows, all light types | CSM for sun, one atlas tile for spot, six for point |
-| Ambient occlusion   | ray-traced AO                       | screen-space AO                                     |
+| Effect              | `RayTraced`                         | `Rasterised`                                                                  |
+| ------------------- | ----------------------------------- | ----------------------------------------------------------------------------- |
+| Global illumination | ray-traced GI                       | irradiance probes filled every frame by a reflective shadow map, plus ambient |
+| Reflections         | ray-traced reflections              | screen-space reflections, probe fallback                                      |
+| Shadows             | ray-traced shadows, all light types | CSM for sun, one atlas tile for spot, six for point                           |
+| Ambient occlusion   | ray-traced AO                       | screen-space AO                                                               |
 
 Rules that keep the two from diverging into two renderers:
 

@@ -114,9 +114,10 @@ the **load** on the fallback paths rather than a fixture for them —
 `apps/lantern` and `apps/quarry` are the acceptance fixtures, and this is a zone
 of modular tiles with a torch over every brazier and a spot over the shrine,
 more lights than there are shadow slots to give them, screen-space occlusion and
-reflections, and a baked irradiance volume, all in a dark interior where a
-mistake in any of them shows. It also gives the Pages site the 3D flagship this
-doc asks for; every browser figure recorded before it came from a 2D sample.
+reflections, and an irradiance volume the engine's updater fills every frame,
+all in a dark interior where a mistake in any of them shows. It also gives the
+Pages site the 3D flagship this doc asks for; every browser figure recorded
+before it came from a 2D sample.
 
 **Every renderer feature it leans on already existed** — shadows, effects and
 probes in `crates/crcbl-render/` — but saying none of them gained a line on

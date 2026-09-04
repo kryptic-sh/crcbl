@@ -63,17 +63,19 @@
 //! # The volume is placed here and filled by the renderer
 //!
 //! [`probes`] decides where the probes stand and hands the rows over at zero
-//! with `ProbeUpdate::EveryFrame` on them; the renderer's reflective shadow map
-//! is what puts light in them, one bounce of the **sun** off whatever the zone
-//! has standing in it, recomputed every frame.
+//! with `ProbeUpdate::EveryFrame` on them; the renderer's reflective shadow
+//! maps are what put light in them — one bounce of the sun and of every
+//! punctual light that won a shadow slot, off whatever the zone has standing in
+//! it, recomputed every frame.
 //!
-//! **So this zone's indirect light is thin, and that is honest rather than
-//! broken.** The zone is an interior lit by torches, and the updater gathers no
-//! punctual light at all — `docs/backlog.md` carries what a producer that did
-//! would take. What is left holding the ambient term up is
-//! [`zone::house_light`](crate::zone::house_light)'s floor. The rows this module
-//! hands over are zero, so a frame drawn before the updater has run is that
-//! floor and nothing else.
+//! **So this zone's indirect light is the braziers' and thin, and that is
+//! honest rather than broken.** The zone is an interior whose sun is a token,
+//! so the sun's map gathers almost nothing; what the rows hold is the torches'
+//! bounce, and only from the torches the shadow ranking gave a slot to —
+//! [`torches`] measures what that comes to. What holds the ambient term up
+//! under it is [`zone::house_light`](crate::zone::house_light)'s floor. The
+//! rows this module hands over are zero, so a frame drawn before the updater
+//! has run is that floor and nothing else.
 
 use crcbl::math::{DVec3, Vec3};
 use crcbl::render::scene::ProbeGrid;
@@ -362,16 +364,15 @@ fn probe_position(cell: [u32; 3]) -> DVec3 {
 /// flicker and the result outlived them. The rows are the engine's updater's
 /// now, through [`ProbeUpdate::EveryFrame`].
 ///
-/// **That updater is a reflective shadow map of the *sun's* near cascade**, and
-/// this zone's sun is [`zone::house_light`](crate::zone::house_light) — a token
-/// whose colour is `0.01`,
-/// because a torch-lit interior has no sun. So the volume the updater fills here
-/// is very nearly black, and the warm bounce off the great hall's floor that the
-/// old gather produced is gone until a producer that gathers punctual lights
-/// exists. That is the honest state and it is written here rather than papered
-/// over with a bake: the ambient floor in
-/// [`zone::house_light`](crate::zone::house_light) is what lights
-/// the zone's shadowed surfaces meanwhile.
+/// **That updater gathers the sun's near cascade and every shadowed punctual
+/// light's faces.** This zone's sun is
+/// [`zone::house_light`](crate::zone::house_light) — a token whose colour is
+/// `0.01`, because a torch-lit interior has no sun — so the sun's half fills
+/// next to nothing, and the warm bounce off the great hall's floor comes from
+/// the punctual half: the braziers that won a shadow slot, and no others. What
+/// that comes to, measured, is in [`torches`]'s doc. The ambient floor in
+/// [`zone::house_light`](crate::zone::house_light) is what lights the zone's
+/// shadowed surfaces beneath it.
 #[must_use]
 pub fn probes() -> ProbeGrid {
     #[allow(clippy::cast_possible_truncation)]
