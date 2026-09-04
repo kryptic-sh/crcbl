@@ -325,7 +325,7 @@ touches.
 **A producer is only as good as the light it is given.** `apps/shard`'s doused
 zone was measured on 2026-09-04 with `r_probe_bounce` off and on and moved by
 0.01 of a luma level, because the one light left burning there is faint and
-stands in a corner — see "shard's doused zone is 95% one colour". The gather is
+stands in a corner — see "shard's doused zone was never lifted". The gather is
 not at fault and no engine change addresses it; it is what a scene with nothing
 to bounce looks like.
 
@@ -363,9 +363,11 @@ than as a reason:
 - **The comparand claims cannot be checked from this tree at all** — "Unity HDRP
   does not do this", Lumen's hybrid, what a KTX2 importer supports. They stand
   or fall on the reading that produced them.
-- **The sibling ladders 45, 46, 47, 49 and 50 were not opened.**
-  `43-render-standards.md` §1 summarises each in one word and those cells are
-  unassessed, except where the AO and probe work of the same day bears on them.
+- **The sibling ladders were opened on 2026-09-04 and read against the tree, not
+  measured.** 45, 47 and 49 held; 46 was rewritten by the technique slice; 50
+  carried three sun-only claims a day after the punctual producer landed and was
+  corrected. `43-render-standards.md` §1's one-word cells for each are still
+  unassessed against those files.
 - **`52-debug-console.md`'s browser assertions were spot-checked, not
   enumerated**: `web/tools/browser-e2e.mjs` was read only around the console,
   autoexec and touch groups.

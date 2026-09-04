@@ -44,9 +44,10 @@
 //! **The room bounces the sun**, which it did not before [`bounce`]: that
 //! module places the probe volume the scene carries and leaves its rows at zero,
 //! and the renderer's reflective shadow map refills them every frame from the
-//! sun's first bounce off whatever is standing in the room. It is one bounce and
-//! the sun's alone — nothing bounces twice, and a lamp or a torch lends the
-//! volume nothing — and that module's docs name each limit. [`room`]'s
+//! sun's first bounce off whatever is standing in the room, and from the lamp's
+//! shadow faces since the punctual half landed the same day. It is one bounce —
+//! nothing bounces twice, and a light that won no shadow slot lends the volume
+//! nothing — and that module's docs name each limit. [`room`]'s
 //! module docs say the rest, the debug panel's `unbuilt` section says it on
 //! screen, and none of it is faked: a fixture whose job is showing what the
 //! renderer does must not flatter it.
