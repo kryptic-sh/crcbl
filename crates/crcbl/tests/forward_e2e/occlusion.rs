@@ -1255,7 +1255,7 @@ const TEXEL_BYTES: usize = 4;
 /// A type rather than four positional arguments to [`run_passes`], which
 /// `crcbl::hal`'s own `too_many_arguments` floor is what forced and which the
 /// call sites wanted anyway: `2, 1, 1.0, true` says nothing at a call site and
-/// `..Knobs::SHIPPING` says exactly what a test is varying.
+/// `..Knobs::SPARSE` says exactly what a test is varying.
 #[derive(Clone, Copy)]
 struct Knobs {
     /// `crcbl_render::ssao::r_ssao_technique`.
@@ -1273,9 +1273,19 @@ struct Knobs {
 }
 
 impl Knobs {
-    /// What a frame nobody has touched the console on runs at, and what every
-    /// golden in this workspace was blessed under.
-    const SHIPPING: Self = Self {
+    /// The **sparse** counts — the shader's floor slice count and a single blur
+    /// — with every other knob at the value its shader constant declares.
+    ///
+    /// Named for the configuration rather than for what a player gets, on
+    /// [`MAX_SPARSE_SHARP_EDGES`]' terms: `r_ssao_slices` and
+    /// `r_ssao_blur_passes` moved away from these counts on 2026-09-03 and the
+    /// baseline here did not, so this is the cheap end of the ladder and
+    /// [`shipped_counts`] is what ships.
+    ///
+    /// Every test in this file that is not about the counts runs here, because
+    /// it is the configuration their thresholds were swept at — moving it moves
+    /// every one of those bounds and is a sweep of its own.
+    const SPARSE: Self = Self {
         technique: Technique::Gtao,
         slices: crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
         blurs: 1,
@@ -1283,6 +1293,39 @@ impl Knobs {
         bent_normals: true,
         radius: RADIUS,
     };
+}
+
+/// The slice and blur counts a frame nobody has touched the console on runs at.
+///
+/// **Read off the console's own cells rather than restated here.** A second copy
+/// of "what ships" goes stale the day a default moves — which is what happened
+/// to `r_ssao_slices` and `r_ssao_blur_passes` on 2026-09-03, and this file went
+/// on calling the counts it had been written against the shipping ones. Reading
+/// them is also what makes a *revert* of either default red in this suite rather
+/// than silent.
+///
+/// The route is `crcbl_render`'s console table because `crcbl_render::ssao` is
+/// private to that crate — the same reason this file rebuilds the passes rather
+/// than reaching for `Ssao`. It is the list a player types against, so a default
+/// read here is the value they would see with no config file loaded, and
+/// `crcbl_render`'s own `console_table` test is what keeps the names in it.
+fn shipped_counts() -> (u8, u32) {
+    let table = crcbl::render::console_table();
+    let default_of = |name: &str| {
+        let var = table
+            .vars()
+            .iter()
+            .find(|var| var.name() == name)
+            .unwrap_or_else(|| panic!("`crcbl_render::console_table` lists `{name}`"));
+        match var.default() {
+            crcbl::console::Value::Int(count) => *count,
+            other => panic!("`{name}` defaults to {other:?}, which is not a count"),
+        }
+    };
+    (
+        u8::try_from(default_of("r_ssao_slices")).expect("a slice count of a few"),
+        u32::try_from(default_of("r_ssao_blur_passes")).expect("a blur count of a few"),
+    )
 }
 
 /// Which of the two gathers a run drives.
@@ -1914,7 +1957,7 @@ fn the_blurred_occlusion_falloff_does_not_terrace() {
         &headless,
         projection,
         &texels,
-        Knobs::SHIPPING,
+        Knobs::SPARSE,
         Chain::Gathered,
     );
 
@@ -2065,7 +2108,7 @@ fn the_cheap_tier_occludes_the_band_and_reports_no_direction() {
         &texels,
         Knobs {
             technique: Technique::Hemisphere,
-            ..Knobs::SHIPPING
+            ..Knobs::SPARSE
         },
         Chain::Gathered,
     );
@@ -2076,7 +2119,7 @@ fn the_cheap_tier_occludes_the_band_and_reports_no_direction() {
         &headless,
         projection,
         &texels,
-        Knobs::SHIPPING,
+        Knobs::SPARSE,
         Chain::Gathered,
     );
 
@@ -2194,10 +2237,16 @@ fn the_cheap_tier_occludes_the_band_and_reports_no_direction() {
 /// tier's decision and lives in `docs/backlog.md` — so the four configurations
 /// are timed and printed rather than compared for speed.
 ///
-/// The third assertion is the one the rung rests on: **four slices and two
-/// blurs must measure flatter than two and one.** A change that made the extra
-/// planes stop contributing — an eighth turn that landed back on the quarter
-/// turn, a count the shader clamped away — leaves every other check here green.
+/// The third assertion is the one the rung rests on: **the counts that ship must
+/// measure flatter than the shader's floor slice count at the same blur count.**
+/// A change that made the extra planes stop contributing — an eighth turn that
+/// landed back on the quarter turn, a count the shader clamped away — leaves
+/// every other check here green.
+///
+/// Which counts those are is read from `crcbl_render`'s console table by
+/// [`shipped_counts`] and not named here, so a default reverted in
+/// `crcbl_render::ssao` is a red run in this suite: the row it would then select
+/// is the one the third assertion compares against.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn the_tangential_occlusion_line_does_not_step() {
@@ -2249,7 +2298,7 @@ fn the_tangential_occlusion_line_does_not_step() {
         &headless,
         projection,
         &texels,
-        Knobs::SHIPPING,
+        Knobs::SPARSE,
         Chain::Gathered,
     );
 
@@ -2268,7 +2317,7 @@ fn the_tangential_occlusion_line_does_not_step() {
             Knobs {
                 slices,
                 blurs,
-                ..Knobs::SHIPPING
+                ..Knobs::SPARSE
             },
             Chain::Gathered,
         );
@@ -2306,17 +2355,35 @@ fn the_tangential_occlusion_line_does_not_step() {
             .find(|measured| measured.slices == slices && measured.blurs == blurs)
             .unwrap_or_else(|| panic!("{slices} slices and {blurs} blur(s) was measured"))
     };
-    // Named for their counts rather than for what ships: the defaults moved to
-    // the high slice count and two blurs on 2026-09-03, so `sparse` is a
-    // configuration a player no longer gets and `shipped` is the one they do.
+    // Named for their counts rather than for what ships: the defaults moved off
+    // the sparse pair on 2026-09-03, so `sparse` is a configuration a player no
+    // longer gets and `shipped` is the one they do.
     let sparse = at(low, 1);
-    // The rung and what ships are the same configuration since 2026-09-03,
-    // so there is one name for it rather than two.
-    let shipped = at(high, 2);
-    // The rung's own blur count with the shipping slice count, which is what
-    // isolates the eighth turn: comparing the rung against what ships would let
-    // the second blur alone answer for it.
-    let blurred_twice = at(low, 2);
+    // **What ships is asked of the console rather than written here**, so a
+    // default reverted in `crcbl_render::ssao` lands in this test as a row that
+    // is not the one the rung's claim is about, rather than as nothing at all.
+    let (ships_slices, ships_blurs) = shipped_counts();
+    assert_ne!(
+        ships_slices, low,
+        "`r_ssao_slices` defaults to the shader's floor slice count, so the row this test \
+         calls what ships is the row it calls `blurred_twice`, and the rung's own assertion \
+         below would compare a measurement with itself. Either the default was reverted, or \
+         the rung the sweep in `docs/backlog.md` was taken for no longer describes what a \
+         player gets."
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|measured| (measured.slices, measured.blurs) == (ships_slices, ships_blurs)),
+        "the console ships {ships_slices} slices and {ships_blurs} blur pass(es), which is \
+         not one of the configurations swept here — so nothing measured above is what a \
+         player gets and `MAX_SHIPPED_SHARP_EDGES` bounds a configuration nobody runs"
+    );
+    let shipped = at(ships_slices, ships_blurs);
+    // The shipping blur count over the floor slice count, which is what isolates
+    // the eighth turn: comparing the rung against the sparse pair would let the
+    // second blur alone answer for it.
+    let blurred_twice = at(low, ships_blurs);
 
     // Anti-vacuity, on `MIN_SWING`'s terms: a line lying outside the falloff, or
     // on a scene whose plate occludes nothing, is flat for a reason that has
@@ -2503,7 +2570,7 @@ fn the_reconstruction_does_not_halo_a_silhouette() {
         &headless,
         projection,
         &texels,
-        Knobs::SHIPPING,
+        Knobs::SPARSE,
         Chain::Reconstructed,
     );
 
@@ -2610,7 +2677,7 @@ fn the_reconstruction_does_not_halo_a_silhouette_down_a_column() {
         &headless,
         projection,
         &texels,
-        Knobs::SHIPPING,
+        Knobs::SPARSE,
         Chain::Reconstructed,
     );
 
@@ -2691,7 +2758,7 @@ fn the_ao_intensity_scales_the_reconstructed_occlusion() {
             &texels,
             Knobs {
                 intensity,
-                ..Knobs::SHIPPING
+                ..Knobs::SPARSE
             },
             Chain::Reconstructed,
         )
@@ -2875,7 +2942,7 @@ fn the_ao_radius_is_the_consoles_and_the_shader_clamps_it() {
             &texels,
             Knobs {
                 radius,
-                ..Knobs::SHIPPING
+                ..Knobs::SPARSE
             },
             Chain::Reconstructed,
         )
@@ -3081,14 +3148,14 @@ fn the_reconstruction_answers_a_sliver_with_its_nearest_sample() {
         &headless,
         projection,
         &texels,
-        Knobs::SHIPPING,
+        Knobs::SPARSE,
         Chain::Reconstructed,
     );
     let gathered = run_passes(
         &headless,
         projection,
         &texels,
-        Knobs::SHIPPING,
+        Knobs::SPARSE,
         Chain::Gathered,
     );
 
@@ -3206,7 +3273,7 @@ fn the_bent_direction_leans_out_of_the_occluded_band() {
         &headless,
         projection,
         &texels,
-        Knobs::SHIPPING,
+        Knobs::SPARSE,
         Chain::Reconstructed,
     );
 
@@ -3293,7 +3360,7 @@ fn the_filters_leave_the_bent_direction_a_unit_vector() {
         ("ssao_blur.slang", Chain::Gathered),
         ("ssao_upsample.slang", Chain::Reconstructed),
     ] {
-        let run = run_passes(&headless, projection, &texels, Knobs::SHIPPING, chain);
+        let run = run_passes(&headless, projection, &texels, Knobs::SPARSE, chain);
         let (run_width, run_height) = run.extent;
         let mut directed = 0u64;
         let mut worst = 0.0f32;
@@ -3385,7 +3452,7 @@ fn the_bent_direction_switch_writes_the_sentinel_and_leaves_the_scalar_alone() {
         &headless,
         projection,
         &texels,
-        Knobs::SHIPPING,
+        Knobs::SPARSE,
         Chain::Reconstructed,
     );
     let off = run_passes(
@@ -3394,7 +3461,7 @@ fn the_bent_direction_switch_writes_the_sentinel_and_leaves_the_scalar_alone() {
         &texels,
         Knobs {
             bent_normals: false,
-            ..Knobs::SHIPPING
+            ..Knobs::SPARSE
         },
         Chain::Reconstructed,
     );

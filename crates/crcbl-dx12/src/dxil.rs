@@ -842,31 +842,42 @@ mod tests {
         assert_eq!(parsed.numthreads(), None);
     }
 
-    /// **The register each binding lands on is what the committed container
-    /// declares**, checked against every shipped artifact's own resource table.
+    /// One row of [`transcribed_cases`]: the source's name, the shader it names,
+    /// the entry points whose containers are read, and the register classes the
+    /// source's bindings take in ascending `(set, binding)` order.
+    type TranscribedCase = (
+        &'static str,
+        &'static crcbl_shaders::Shader,
+        &'static [&'static str],
+        &'static [RegisterClass],
+    );
+
+    /// The sources whose resource declarations are transcribed here, each with
+    /// the entry points that together reach all of them.
     ///
-    /// The rule under test is the module docs': per class, in ascending
-    /// `(set, binding)` order, across the whole source. It matters because a
-    /// root signature whose ranges name registers the shader does not use is
-    /// rejected by pipeline creation — on a Windows runner, one CI round trip
-    /// away from here.
+    /// Every entry point of a row is named because `dxc` numbers across the
+    /// whole source while a container records only what its own entry point
+    /// reached — so the union over a row's containers is what that source
+    /// declares, and only then can a hand-written class list be compared with
+    /// it as a whole.
     ///
-    /// Every shader is listed, not only the compute ones, because the mistake
-    /// this replaced was invisible for exactly the shaders whose sets hold one
-    /// resource class. `sprite` earns its place twice over: its bindings are
-    /// spread across **two** sets, and the container numbers them end to end in
-    /// space 0 — which is what the running counter reproduces and a per-set one
-    /// could not.
-    #[test]
-    fn registers_are_assigned_per_class_in_declaration_order() {
+    /// **That is also what decides which sources can be here at all**, and it is
+    /// a narrower set than "every shader that commits a container": a source may
+    /// declare a resource that *no* compiled entry point reaches, and `dxc`
+    /// reserves its register while leaving it out of every container's table.
+    /// `mesh_cluster` is the shipped counterexample — its containers' `t`
+    /// registers have interior gaps, which
+    /// [`registers_are_dense_from_zero_in_every_committed_container`] names and
+    /// asserts. A transcription of that source's declarations could not match
+    /// any union of its containers, so the rule is held over it by the density
+    /// test rather than by a row here.
+    fn transcribed_cases() -> &'static [TranscribedCase] {
         use RegisterClass::{Cbv, Sampler, Srv, Uav};
 
-        // `(shader, its entry points, the classes its bindings take in
-        // ascending (set, binding) order)`, transcribed from the `.slang`
-        // sources' declarations. Every entry point is named because `dxc`
-        // numbers across the whole source while a container records only what
-        // its own entry point reached, so the union is what the source declares.
-        let cases: &[(&str, &crcbl_shaders::Shader, &[&str], &[RegisterClass])] = &[
+        // A `static` rather than a temporary, because a row borrows the shader
+        // `crcbl-shaders` publishes and a temporary array of those does not
+        // outlive this call.
+        static CASES: &[TranscribedCase] = &[
             (
                 "bindless_probe",
                 &crcbl_shaders::BINDLESS_PROBE,
@@ -1047,6 +1058,42 @@ mod tests {
                 &[Srv, Sampler, Srv, Cbv],
             ),
         ];
+
+        CASES
+    }
+
+    /// **The register each binding lands on is what the committed container
+    /// declares**, checked against the resource tables of every container
+    /// [`transcribed_cases`] names.
+    ///
+    /// The rule under test is the module docs': per class, in ascending
+    /// `(set, binding)` order, across the whole source. It matters because a
+    /// root signature whose ranges name registers the shader does not use is
+    /// rejected by pipeline creation — on a Windows runner, one CI round trip
+    /// away from here.
+    ///
+    /// **What the table covers is the rule's shapes, not the shader set.** A row
+    /// is a hand transcription of one source's declarations, so rows are added
+    /// for what they can get wrong rather than for coverage: a set holding a
+    /// single resource class, where the mistake this replaced was invisible
+    /// (`hiz`, `triangle`); classes interleaved along one set, where a counter
+    /// that did not restart per class diverges (`exposure`, `tonemap`, `ui`);
+    /// bindings spread across **two** sets and numbered end to end in space 0,
+    /// which is what the running counter reproduces and a per-set one could not
+    /// (`sprite`); an array of descriptors, whose `t0` opens a range rather than
+    /// covering one register (`bindless_probe`); and the widest tables shipped,
+    /// where a binding-number gap the source leaves is one D3D12 does not see
+    /// (`mesh`, `draw_gen`).
+    ///
+    /// The shaders with no row are not unchecked. Every committed container is
+    /// read by [`registers_are_dense_from_zero_in_every_committed_container`],
+    /// which holds the same rule in the form that needs no transcription — and
+    /// which is where a source whose declarations a transcription could not
+    /// match has to be held. [`transcribed_cases`] says why that set is narrower
+    /// than the set of shaders that commit a container.
+    #[test]
+    fn registers_are_assigned_per_class_in_declaration_order() {
+        let cases = transcribed_cases();
         assert!(!cases.is_empty(), "nothing to check");
         for (name, shader, entry_points, classes) in cases {
             assert!(!entry_points.is_empty(), "{name}: no entry point to read");
@@ -1055,7 +1102,8 @@ mod tests {
                 let bytes = shader.dxil(entry_point).unwrap_or_else(|| {
                     panic!("{name} commits a DXIL container for `{entry_point}`")
                 });
-                for binding in resource_table(bytes) {
+                for (class, first, _) in resource_table(bytes) {
+                    let binding = (class, first);
                     if !declared.contains(&binding) {
                         declared.push(binding);
                     }
@@ -1081,7 +1129,13 @@ mod tests {
         }
     }
 
-    /// A container's `PSV0` resource table: what each binding is, and where.
+    /// A container's `PSV0` resource table: what each binding is, and the run of
+    /// registers it covers as `(class, first, last)`.
+    ///
+    /// The two bounds are both returned because a range is one record whatever
+    /// its length — `bindless_probe`'s descriptor array is the shipped example
+    /// — so the register after it is the *last* bound plus one, and a test
+    /// walking a class's registers in order needs to know where each range ends.
     ///
     /// Test-only, because the runtime path never needs it: the root signature is
     /// built from the caller's declared layout, and this is how that layout is
@@ -1091,7 +1145,7 @@ mod tests {
     /// that many records, each opening `ResType`, `Space`, `LowerBound`,
     /// `UpperBound`. `PSVResourceType` numbers sampler 1, CBV 2, the three SRV
     /// kinds 3–5 and the UAV kinds from 6.
-    fn resource_table(bytes: &[u8]) -> Vec<(RegisterClass, u32)> {
+    fn resource_table(bytes: &[u8]) -> Vec<(RegisterClass, u32, u32)> {
         let part = parts(bytes)
             .expect("a well-formed part table")
             .into_iter()
@@ -1126,9 +1180,113 @@ mod tests {
                     space, 0,
                     "Slang's HLSL output puts every resource in space 0; this one is in {space}"
                 );
-                (class, word(bytes, record + 8).expect("a lower bound"))
+                (
+                    class,
+                    word(bytes, record + 8).expect("a lower bound"),
+                    word(bytes, record + 12).expect("an upper bound"),
+                )
             })
             .collect()
+    }
+
+    /// **Every committed container's registers open at zero and count up within
+    /// their class**, over every shader that commits one — the module docs'
+    /// rule in the form that needs no transcription, and so the only check that
+    /// reaches the sources [`transcribed_cases`] has no row for.
+    ///
+    /// What a container alone can be asked: each class the shader uses opens at
+    /// register zero, its ranges ascend and never overlap, and — through
+    /// [`resource_table`]'s own assertion — every record is in space 0. A `dxc`
+    /// that numbered by binding, or per set, or from one counter shared across
+    /// classes would break the first or the second wherever a set holds more
+    /// than one class.
+    ///
+    /// What it cannot be asked is whether anything is *missing*: an interior gap
+    /// is a register `dxc` reserved for a declaration no compiled entry point
+    /// reached, and the container has nothing to compare it with. The one
+    /// shipped source where that happens is named below and **asserted** rather
+    /// than excused — a run where it comes back dense is a run where its
+    /// declarations could be transcribed like every other row's.
+    #[test]
+    fn registers_are_dense_from_zero_in_every_committed_container() {
+        // The one shipped source that declares resources no compiled entry
+        // point reaches. See this test's docs for why that is a gap and not a
+        // broken rule.
+        const GAPPED: &str = "mesh_cluster";
+
+        let compiled: Vec<&crcbl_shaders::Shader> = crcbl_shaders::ALL
+            .iter()
+            .copied()
+            .filter(|shader| !shader.dxil_containers().is_empty())
+            .collect();
+        assert!(!compiled.is_empty(), "no shader commits a DXIL container");
+
+        // The transcribed table is a share of that set, and each row's label is
+        // the shader it names — a row labelled one shader while reading
+        // another's containers would compare a transcription with the wrong
+        // artifact and still pass.
+        for (name, shader, ..) in transcribed_cases() {
+            assert_eq!(*name, shader.name(), "a row's label is not its shader");
+            assert!(
+                compiled.iter().any(|it| it.name() == *name),
+                "{name} is in the register table but commits no DXIL container"
+            );
+        }
+
+        let mut gapped: Vec<&str> = Vec::new();
+        for shader in compiled {
+            let mut declared: Vec<(RegisterClass, u32, u32)> = Vec::new();
+            for (_, bytes) in shader.dxil_containers() {
+                for record in resource_table(bytes) {
+                    if !declared.contains(&record) {
+                        declared.push(record);
+                    }
+                }
+            }
+            for class in [
+                RegisterClass::Cbv,
+                RegisterClass::Srv,
+                RegisterClass::Uav,
+                RegisterClass::Sampler,
+            ] {
+                let mut ranges: Vec<(u32, u32)> = declared
+                    .iter()
+                    .filter(|(it, ..)| *it == class)
+                    .map(|(_, first, last)| (*first, *last))
+                    .collect();
+                if ranges.is_empty() {
+                    continue;
+                }
+                ranges.sort_unstable();
+                let mut next = 0;
+                for (first, last) in ranges {
+                    assert!(
+                        first >= next,
+                        "{}: {class:?} register {first} is claimed twice",
+                        shader.name()
+                    );
+                    assert!(
+                        last >= first,
+                        "{}: a {class:?} range ends before it starts",
+                        shader.name()
+                    );
+                    // A class opening above zero counts here too: `next` starts
+                    // at zero, so the first range leaving it behind is a gap.
+                    if first > next {
+                        gapped.push(shader.name());
+                    }
+                    next = last.saturating_add(1);
+                }
+            }
+        }
+        gapped.sort_unstable();
+        gapped.dedup();
+        assert_eq!(
+            gapped,
+            [GAPPED],
+            "the sources whose containers leave a register unaccounted for are not the one this \
+             test names"
+        );
     }
 
     /// Each class counts on its own, and an unbounded range takes the rest of

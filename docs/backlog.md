@@ -397,18 +397,19 @@ forward. It was carried once — across the half-resolution change — read
 `1 / 1 / 2 / 0` on radv for weeks, and produced a conclusion that was backwards
 in both this file and `docs/plan/46-ambient-occlusion.md`.
 
-- **Nothing guards the slice default.**
-  `the_tangential_occlusion_line_does_not_step` names every configuration it
-  measures explicitly, from `crcbl::shaders::ssao`'s `SLICE_COUNT_DEFAULT` and
-  `SLICE_COUNT_MAX`, and builds its own passes — so it never reads a console
-  variable and would pass unchanged if either default were reverted.
-  `r_ssao_blur_passes` is caught in three places, because a second blur is a
-  _pass_: the expected pass lists in `crcbl::screenshot` and `crcbl-vk`'s
-  `queries` suite both name `ssao-blur-2`, and `draw_gen_e2e`'s
-  `fullscreen_instances` counts the triangle it draws. Slices change no pass
-  list and draw no extra triangle, so none of the three sees them. Closing it
-  wants a test that reads the renderer's `r_ssao_slices` rather than naming a
-  count.
+- **Every occlusion threshold but the shipping one is swept at a configuration
+  nobody runs.** `forward_e2e::occlusion`'s baseline knobs were called
+  `Knobs::SHIPPING` while holding the shader's floor slice count and a single
+  blur, with a doc claiming they were what every golden was blessed under. They
+  are now `Knobs::SPARSE`, which is what they are, and
+  `the_tangential_occlusion_line_does_not_step` reads what actually ships from
+  `crcbl_render`'s console table through `shipped_counts` — so reverting either
+  default reddens `crates/crcbl/tests/run-forward-e2e.sh`. Every _other_ test in
+  that file still runs at `Knobs::SPARSE`, so `MAX_HALO`, `MIN_SWING`,
+  `MIN_TECHNIQUE_GAP` and the terracing, intensity and radius bounds all
+  describe a picture a player does not get. Closing that is a re-sweep of each
+  bound at the shipping counts, not a rename, and it is the reason the rename
+  stopped there.
 - **D3D12 and Metal are unmeasured**, for the reason every row of theirs is — no
   Windows or Apple hardware here. CI's software adapters run the assertions and
   time nothing.
@@ -1676,12 +1677,6 @@ nothing draws it by default and no golden has moved. What that leaves:
   pixels of 2,073,600 — because past about a quarter-metre the 15-pixel
   `MAX_REACH` is the limit, not the world length. It stays a world length
   because it does bind at lower resolutions and greater distances.
-
-- **`crcbl-dx12`'s `dxil.rs` case table claims "Every shader is listed" and
-  already does not list `ssao`, `ssr`, `bloom`, `smaa`, `volumetric` or `sky`.**
-  Nothing cross-checks it against the shader set, so the doc comment is a
-  factual claim that is false. Either the table is completed and a test holds it
-  to the set, or the comment stops claiming completeness.
 
 ## The shadow atlas: what the rung left (2026-08-31)
 
@@ -3737,37 +3732,36 @@ temporal SSR, temporal upscaling, per-object motion blur and SSGI's
 accumulation, it gets more expensive as more shaders index past the instance
 stride, and it needs the user's call on when to spend the re-bless.
 
-### `registers_are_assigned_per_class_in_declaration_order` covers a third of the shaders (2026-08-27)
+### The DXIL register rule is held two ways, and the table cannot be completed (2026-09-05)
 
-That test in `crates/crcbl-dx12/src/dxil.rs` says "Every shader is listed, not
-only the compute ones" and it is not true. **Re-counted 2026-09-02, and the
-entry's own figures were wrong as well as stale**: its `cases` table names
-thirteen shaders — `BINDLESS_PROBE`, `COMPUTE_PROBE`, `CULL`, `DRAW_GEN`,
-`EXPOSURE`, `FXAA`, `HIZ`, `LIGHT_CLUSTER`, `MESH`, `SPRITE`, `TONEMAP`,
-`TRIANGLE`, `UI` — against the thirty-nine shader sources with DXIL in
-`crates/crcbl-shaders/dxil/`. So a third, not a half, and the gap is wider than
-when this was written rather than narrower.
+`crates/crcbl-dx12/src/dxil.rs` holds the per-class register rule in two places.
+`transcribed_cases` is the hand-written table — a row per source, its resource
+declarations transcribed from the `.slang` — and
+`registers_are_assigned_per_class_in_declaration_order` compares each row
+against the union of that shader's containers.
+`registers_are_dense_from_zero_in_every_committed_container` reads **every**
+shader in `crcbl_shaders::ALL` that commits a container and asserts what the
+rule implies with no transcription: each register class opens at zero, its
+ranges ascend and never overlap, and every record is in space 0. The "Every
+shader is listed" claim is gone from the doc comment, which is what this entry
+was about.
 
-The post stack is most of what is missing, along with `grid`, `skinning`, the
-mesh-shader pair, `contact_shadows`, `debug_draw`, `volumetric`,
-`volumetric_composite`, `ssao_upsample` and `upscale`. The probe fixtures this
-entry used to name are only partly missing: `bindless_probe` and `compute_probe`
-are covered, while `push_constant_probe`, `task_write_probe` and
-`zero_dispatch_probe` are not. `hiz` and `exposure` were added when they were
-built, which is what keeps turning the gap up.
+**The table cannot be completed, and `mesh_cluster` is the proof.** All three of
+its entry points compile containers, yet the union of their `t` registers has
+interior gaps: `dxc` reserves a register for a declaration no compiled entry
+point reaches and then leaves it out of every container's resource table. A
+transcription of that source's declarations therefore cannot equal any union of
+its containers, which is the comparison the transcribed test _is_. So "a case
+per shader in the artifact directory" — what this entry used to propose — is not
+something that can be written.
 
-**What it costs:** the failure the test exists to catch — a root signature
-naming registers the shader does not use, rejected at pipeline creation on a
-Windows runner — is unguarded for every unlisted shader. Nothing has gone wrong
-yet; this is a coverage gap, not a symptom.
-
-**What it would take:** transcribing each source's bindings in ascending
-`(set, binding)` order into the case table, by hand, from the `.slang`
-declarations. It is mechanical but not automatic — the register class per
-binding is a reading of the declaration, and getting one wrong writes a false
-assertion rather than a failing one. Worth doing with the completeness check the
-doc already implies: a case per shader in the artifact directory, so a new
-shader cannot be missed the way these were.
+**What the density test cannot say** is that a register is _missing_: a gap and
+a declaration nobody reached look identical from the container. `mesh_cluster`
+is named in the test as the one source that gaps and the expectation is an
+equality on that list, so a second source starting to gap is red and a
+`mesh_cluster` that goes dense is red too. But a root signature naming a
+register its shader does not use is still caught only by a row in the
+transcribed table, or by pipeline creation on a Windows runner.
 
 ### The Hi-Z march trusts a genuine crossing less than the strided one did (2026-08-27)
 
