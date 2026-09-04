@@ -278,8 +278,9 @@ pub fn split_at() -> Option<f32> {
 /// two are read into one row of one block: a test that moved the filter while
 /// another moved the seam would be reading a lane neither of them wrote.
 ///
-/// **Last in the lock order**, after `crate::ssao::TECHNIQUE_SWITCH`. Every
-/// test that takes it takes it alone, so there is no cycle to have.
+/// **Last in the lock order**, after `crate::ssao::TECHNIQUE_SWITCH`. A test
+/// that takes it with the others takes it after all of them, so there is no
+/// cycle to have.
 #[cfg(test)]
 pub(crate) static FILTER_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

@@ -18801,9 +18801,21 @@ mod tests {
     ///   one of them; a setting that perturbed a matrix, an instance or a shadow
     ///   view would be drawing a different frame for a reason nobody asked for,
     ///   and the "at least one differs" half alone would pass on it happily.
+    ///
+    /// **Holds every switch whose row is in a block it compares**, in the lock
+    /// order: the two batches are compared byte for byte over every host
+    /// buffer the frame writes, so any console row another test moves between
+    /// them — the blur count, the seam, the technique, the shadow filter, or
+    /// `crate::ssao`'s own mover of the params block — reads here as "some
+    /// other write moving". [`ssao_technique_switch`] is the one that
+    /// serialises against that mover.
     #[test]
     fn four_slices_reach_the_frame_the_shader_reads() {
+        let _blurs = ssao_blur_switch();
+        let _seam = ssao_split_switch();
         let switch = ssao_slice_switch();
+        let _technique = ssao_technique_switch();
+        let _filter = shadow_filter_switch();
 
         let (recorder, device, queue) = open();
         let device = device.as_ref();

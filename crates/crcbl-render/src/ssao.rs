@@ -1385,10 +1385,19 @@ mod tests {
     /// **The moved values are each on the far side of the default from the
     /// other**, so a `shipped` that returned the *live* value would differ from
     /// the expected one in every field rather than in a lucky one.
+    ///
+    /// Holds [`TECHNIQUE_SWITCH`] for the whole of it, and alone. The four
+    /// variables it moves are rows of the occlusion params block, and
+    /// `crate::forward`'s `four_slices_reach_the_frame_the_shader_reads`
+    /// compares that block across two rings byte for byte; a move here landing
+    /// between its batches is a row that test never asked to change.
     #[test]
     fn the_seams_other_side_is_what_the_chain_ships() {
         use crcbl_console::Value;
 
+        let _technique = TECHNIQUE_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = (
             r_ssao_radius.get_f32(),
             r_ssao_slices.get_i64(),
