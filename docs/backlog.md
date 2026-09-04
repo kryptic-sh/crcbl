@@ -99,12 +99,20 @@ out of `FrameUniforms::shadow_filter`. What that change did **not** do:
   says so where a reader of the seam will meet it. If it is ever wanted, the
   drift guard is the piece to design first — it is the only thing keeping the
   two atlas walks one body.
-- **Nothing prices the three filters against each other.** The instrument is the
-  `forward` row of `crcbl_render::PassTimers` across two runs at two settings of
-  `r_shadow_filter`, which is what the eleventh decision used for the probe's
-  0.221 ms against 0.303 ms. It has not been run for `box` or `disc`, so the
-  ladder has a picture and no cost. Worth doing on an adapter with a real GPU
-  before any tier ever selects a rung.
+- **Decision needed: which rung each tier's shadow filter is.** The three are
+  priced now — measured 2026-09-04 and written into `docs/plan/45-shadows.md`'s
+  fifteenth decision, off five `apps/sundial` runs per filter per adapter at the
+  goldens' own pose with the seam off. Median `forward` p50: 0.228 / 0.199 /
+  0.180 ms for `pcss` / `disc` / `box` on an RX 7900 XTX (radv, Mesa 26.2.2) at
+  1920x1080, and 8.586 / 7.349 / 6.914 ms on that machine's llvmpipe (LLVM
+  22.1.8) at 960x720. The ladder's own order on both adapters, no two ranges
+  overlapping, and the ladder end to end is 0.068 ms of a 0.649 ms radv frame;
+  the `shadow` row is flat across all three, as the selector claims. What is
+  left is the assignment, and it is the user's: `r_shadow_filter` has no tier
+  row, so every tier runs the shipped `pcss`, and
+  `docs/plan/39-capabilities.md`'s tier table is where a row would go. Same
+  shape of question as the SSR visibility weight and the AO knobs below, and the
+  same missing route.
 - **Considered and declined: drawing the scene twice to compare.** The occlusion
   chain's seam records its gather twice under a scissor, and that shape is
   available to a full-screen pass because each recording pays for half a target
@@ -112,7 +120,7 @@ out of `FrameUniforms::shadow_filter`. What that change did **not** do:
   triangle, every cull and every vertex fetch again, so a comparison would cost
   two frames rather than one. The per-side `PassTimers` row it would have bought
   measures the scene rather than the filter and would be dominated by whatever
-  each half contains, so it buys nothing the two-run measurement above does not.
+  each half contains, so it buys nothing the per-filter runs above do not.
   `crcbl_render::split`'s header carries both shapes and which client takes
   which.
 

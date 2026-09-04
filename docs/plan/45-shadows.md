@@ -931,6 +931,77 @@ between two halves is dominated by what each half contains. What prices a filter
 is the `forward` row across two runs at two settings of `r_shadow_filter`, which
 needs no seam at all.
 
+#### What the three cost, measured 2026-09-04
+
+**Run, not built.** `apps/sundial` already holds every filter behind a flag, and
+`crcbl::engine`'s `finish` already logs `crcbl_render::PassStats` — a p50 and a
+p95 per pass over the last frames of the run — so pricing the ladder was a
+handful of invocations and no code:
+
+```
+sundial --headless --frames 400 --size 1920x1080 --backend vk \
+        --sun-paused --filter {pcss,disc,box}
+```
+
+under `RUST_LOG=info`, five runs each, reading the `forward` p50 off the report.
+`--sun-paused` holds the clock at `apps/sundial/src/sun.rs`'s `FIXTURE_TICK` —
+by its own doc, the tick the fixed camera's goldens are taken at — on the
+`--camera fixed` default those goldens are drawn from, and there is no
+`--split`, so the seam is off and the whole frame is one filter. On llvmpipe the
+extent and the frame count are the eleventh decision's,
+`--size 960x720 --frames 120`, and the ICD is pinned through `VK_DRIVER_FILES`.
+
+Both adapters are Mesa 26.2.2-arch1.1, as `vulkaninfo --summary` and the
+engine's own `crcbl-vk: opened` line each name them:
+`AMD Radeon RX 7900 XTX (RADV NAVI31)` on driver `radv`, and
+`llvmpipe (LLVM 22.1.8, 256 bits)` on driver `llvmpipe`.
+
+`forward` p50, median of five runs, range in brackets:
+
+| Filter | radv, 1920×1080        | llvmpipe, 960×720      |
+| ------ | ---------------------- | ---------------------- |
+| `pcss` | 0.228 ms (0.222–0.231) | 8.586 ms (8.548–8.602) |
+| `disc` | 0.199 ms (0.198–0.202) | 7.349 ms (7.299–7.483) |
+| `box`  | 0.180 ms (0.179–0.183) | 6.914 ms (6.869–6.938) |
+
+**The order is the ladder's on both, and no two ranges overlap.** `disc` takes
+12.7% off `pcss` on radv and 14.4% on llvmpipe; `box` takes another 9.5% and
+5.9% off `disc`; `pcss` to `box` is 21.1% and 19.5%. A SIMD GPU and a scalar
+software rasteriser agreeing within a few points is the eleventh decision's own
+finding again — what a rung on this ladder costs is taps, not divergence.
+
+**The atlas render does not move, because the filter is on the sampling side.**
+At the golden pose it does not run at all: the cadence caches every tile of a
+still scene, so `shadow` records one sample and the report says `filling`
+instead of a p50. Reading it needs a moving atlas, so a second set of five runs
+each dropped `--sun-paused` — same binary, same extent, same deterministic
+sweep, every frame redrawing the tiles. Medians of five, range in brackets:
+
+| Filter | `shadow`, radv         | `shadow`, llvmpipe     | `forward`, radv        | `forward`, llvmpipe    |
+| ------ | ---------------------- | ---------------------- | ---------------------- | ---------------------- |
+| `pcss` | 0.070 ms (0.053–0.070) | 4.790 ms (4.770–4.804) | 0.204 ms (0.194–0.207) | 8.228 ms (8.127–8.554) |
+| `disc` | 0.070 ms (0.068–0.070) | 4.906 ms (4.780–4.936) | 0.180 ms (0.172–0.182) | 7.032 ms (6.965–7.179) |
+| `box`  | 0.070 ms (0.069–0.070) | 4.767 ms (4.732–4.803) | 0.178 ms (0.176–0.178) | 6.914 ms (6.805–7.015) |
+
+The `shadow` column is flat across all three on both adapters — every one of the
+six ranges overlaps the other two on its own adapter — which is what the
+selector claims and now has a number behind it. What the sweep does **not**
+separate is `disc` from `box` on radv: 0.172–0.182 against 0.176–0.178 is one
+overlapping band, where the fixed pose above puts 0.198–0.202 against
+0.179–0.183 with daylight between them. A sweep averages over sun angles whose
+shadow coverage differs frame to frame, so the fixed pose is the comparison to
+quote and the sweep is only how the `shadow` row is read.
+
+**What it means for a tier, which is not this page's call.** One run at each
+setting puts the whole frame's p50 at 0.649 / 0.604 / 0.581 ms on radv and
+19.189 / 18.039 / 17.596 ms on llvmpipe, for `pcss` / `disc` / `box` — so the
+whole ladder end to end is 0.068 ms of a 0.649 ms frame at 1080p on a card of
+this class, and 1.593 ms of 19.189 ms on the software rasteriser. Worth
+selecting, and not where a frame that misses a budget is losing it. **No tier
+and no preset is changed here**: which rung a tier selects is the user's
+decision, and this note exists so that decision has a price rather than a
+picture.
+
 **What the default preserves is every byte.** `r_shadow_filter` defaults to
 `pcss` and `r_shadow_split` to zero, which is one mode in both lanes and a zero
 column — so every fragment takes the far lane, the arm it takes is the one that
