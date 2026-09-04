@@ -62,6 +62,45 @@ AO-only view mode ships, `r_ssao_intensity` shipped 2026-09-02 and
 `r_ssao_radius` on 2026-09-04. What that milestone still wants is the scene and
 _showing_ the two controls, which is sample work.
 
+## The comparison seam's blocks are unverified end to end (2026-09-04)
+
+`crcbl_render::split` and `r_ssao_split` landed: a frame can record its
+occlusion gather twice, each march scissored to the columns the other was kept
+off, the near side reading the console's block and the far side the shipped one.
+Two halves of it are covered and one is not.
+
+**Covered.** `split::halves` is swept over every width to 64 and every seam to a
+hundredth, so the two rectangles tile the target and neither is empty.
+`forward`'s
+`the_comparison_seam_marches_twice_over_columns_that_tile_the_gather` reads the
+encoder back and holds the two marches to those rectangles, with a frame
+comparing nothing as the control. `ssao`'s
+`the_seams_other_side_is_what_the_chain_ships` moves all four knobs and checks
+that `shipped` follows none of them.
+
+**Not covered: that the second march binds the second block.** The reference
+backend records a bind group as a handle and a layout, not as the resources
+behind it, so the encoder cannot be asked which buffer a march read. Measured
+rather than assumed — pointing both marches at one buffer leaves the whole suite
+green, which is why that test's doc says so in its own words.
+
+What would close it, in the order they get harder:
+
+- **A pixel test.** Render one frame through `ForwardRenderer` with a knob moved
+  and a seam at 0.5, read the reconstructed occlusion channel back, and assert
+  the two halves differ. `crates/crcbl/tests/forward_e2e/occlusion.rs` is the
+  suite with the readback machinery, but every test in it drives the three
+  shaders directly rather than through the renderer, so this wants a fixture
+  that does not exist there yet.
+- **Recording the resources behind a bind group** in `crcbl-hal`'s null backend,
+  which would make this and every other "bound the wrong buffer" fault visible
+  to the reference backend rather than to a picture. Wider than this entry and
+  worth its own decision.
+
+**Also owed, and it is what the seam exists for:** a second _technique_ to
+compare, rather than two settings of one. See "The occlusion chain ships one
+technique, so alcove cannot compare".
+
 ## What the AO default change of 2026-09-03 did not cover (2026-09-03)
 
 `r_ssao_slices` and `r_ssao_blur_passes` in `crates/crcbl-render/src/ssao.rs`

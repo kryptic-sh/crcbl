@@ -131,7 +131,8 @@ use crcbl_hal::{
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ClearValue, ColorTargetState, Device, Format, GraphicsPipelineHandle, HalError,
     ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc,
-    PipelineLayoutHandle, SampleType, ShaderStages, StoreOp, check_portable_storage_buffers,
+    PipelineLayoutHandle, Rect2d, SampleType, ShaderStages, StoreOp,
+    check_portable_storage_buffers,
 };
 use crcbl_shaders::{SSAO, SSAO_BLUR, SSAO_UPSAMPLE, ssao};
 
@@ -180,6 +181,11 @@ crcbl_console::convar! {
 crcbl_console::convar! {
     /// The disc the horizons are swept over, in world units: 0.5 ships.
     pub static r_ssao_radius: f32 in 0.0625 ..= 4.0 = 0.5;
+}
+
+crcbl_console::convar! {
+    /// Compare the console's occlusion against the shipped one: seam at 0..1.
+    pub static r_ssao_split: f32 in 0.0 ..= 1.0 = 0.0;
 }
 
 /// [`r_ssao_slices`] as the shader's uniform wants it.
@@ -236,6 +242,49 @@ pub(crate) fn radius() -> f32 {
     r_ssao_radius
         .get_f32()
         .clamp(ssao::RADIUS_MIN, ssao::RADIUS_MAX)
+}
+
+/// [`r_ssao_split`] as [`crate::split::halves`] wants it, or `None` for a frame
+/// comparing nothing.
+///
+/// **Zero is off and is the default**, so a frame nobody has touched the console
+/// on records the chain once — a comparison is something a person asks for, and
+/// every golden in this workspace was blessed without one. `halves` refuses a
+/// seam at either edge anyway, so this is the readable spelling of a rule that
+/// holds whatever reaches it.
+pub(crate) fn split_at() -> Option<f32> {
+    let at = r_ssao_split.get_f32();
+    (at > 0.0 && at < 1.0).then_some(at)
+}
+
+/// The four scalars the chain ships with, for the other side of the seam.
+///
+/// **Read off the variables' own declared defaults rather than restated.** A
+/// second copy of "what ships" is a copy that goes stale the day a default
+/// moves — which is exactly what happened to `r_ssao_slices` and
+/// `r_ssao_blur_passes` on 2026-09-03 — and the comparison would then be
+/// against a configuration nothing has shipped since.
+///
+/// A wrong-typed default is unreachable by construction: `convar!` builds the
+/// cell and the default together, so each of these matches the getter beside
+/// it. The fallbacks are what a `match` needs and nothing reaches them.
+fn shipped() -> (f32, u8, f32, bool) {
+    use crcbl_console::Value;
+    let float = |value: &Value| match value {
+        Value::Float(at) => *at,
+        _ => 0.0,
+    };
+    let slices = match r_ssao_slices.default() {
+        Value::Int(count) => u8::try_from(*count).unwrap_or(ssao::SLICE_COUNT_DEFAULT),
+        _ => ssao::SLICE_COUNT_DEFAULT,
+    };
+    let bent = matches!(r_ssao_bent_normals.default(), Value::Bool(true));
+    (
+        float(r_ssao_radius.default()).clamp(ssao::RADIUS_MIN, ssao::RADIUS_MAX),
+        slices,
+        float(r_ssao_intensity.default()).clamp(ssao::INTENSITY_MIN, ssao::INTENSITY_MAX),
+        bent,
+    )
 }
 
 /// The extent the march and the blur run at: `extent` divided by
@@ -303,6 +352,16 @@ pub(crate) struct Ssao {
     /// frame uniforms' reason exactly — the previous frame may still be reading
     /// last frame's while this one is written.
     uniforms: Vec<BufferHandle>,
+    /// `[frame]`: the same block holding [`shipped`]'s scalars, for the far side
+    /// of [`r_ssao_split`]'s seam.
+    ///
+    /// **Its own ring and not a second offset into [`Ssao::uniforms`]**: the
+    /// gather binds its block as a whole buffer rather than through a dynamic
+    /// offset, so two blocks in one buffer would want a binding change to reach
+    /// the second. Written every frame whether or not a seam was asked for, for
+    /// the ring's own reason — a buffer written only on the frames that compare
+    /// holds an older frame's matrices on the first frame that does.
+    split_uniforms: Vec<BufferHandle>,
     layout: BindGroupLayoutHandle,
     pipeline_layout: PipelineLayoutHandle,
     pipeline: GraphicsPipelineHandle,
@@ -312,6 +371,12 @@ pub(crate) struct Ssao {
     /// as well as the depth transient — and that is a ring. A single cache keyed
     /// on the view alone would hand the even frames' block to the odd frames.
     groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
+    /// `[frame]`: the same group against [`Ssao::split_uniforms`].
+    ///
+    /// **Its own ring for [`Ssao::blur_again_groups`]' reason**: it names a
+    /// different buffer, so one cache shared with [`Ssao::groups`] would be
+    /// rebuilt twice on every frame that compares.
+    split_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
     blur_layout: BindGroupLayoutHandle,
     blur_pipeline_layout: PipelineLayoutHandle,
     blur_pipeline: GraphicsPipelineHandle,
@@ -366,13 +431,15 @@ impl Ssao {
     /// in the frame.
     pub(crate) const MAX_BLUR_PASSES: u32 = 2;
 
-    /// The most passes [`Ssao::add_passes`] can add to a frame: the march, every
-    /// blur behind it, and the reconstruction that ends the chain.
+    /// The most passes [`Ssao::add_passes`] can add to a frame: both marches,
+    /// every blur behind them, and the reconstruction that ends the chain.
     ///
     /// A **ceiling**, which is what `crate::forward`'s `RENDER_PASSES` needs
     /// from every term it adds up — see [`Ssao::passes`] for what a given frame
-    /// actually records.
-    pub(crate) const MAX_PASSES: u32 = Self::passes(Self::MAX_BLUR_PASSES);
+    /// actually records. It counts the comparison seam's second march, because
+    /// a person may type `r_ssao_split` at any point in a run and the frame
+    /// after that types one more pass than the frame before it.
+    pub(crate) const MAX_PASSES: u32 = Self::passes(Self::MAX_BLUR_PASSES) + 1;
 
     /// Passes [`Ssao::add_passes`] adds to a frame that asked for `blurs` of
     /// them: the occlusion march, one per blur, and the reconstruction.
@@ -380,6 +447,12 @@ impl Ssao {
     /// **The reconstruction is not conditional on anything.** It is what makes
     /// the half-resolution chain a full-resolution channel — see this module's
     /// header — so a frame that records the march records this as well.
+    ///
+    /// **The comparison seam's second march is not counted here.** This is what
+    /// a frame's own counters are checked against, and a frame comparing
+    /// nothing — which is every frame nobody has typed `r_ssao_split` in —
+    /// records exactly this many. [`Ssao::MAX_PASSES`] is the term that carries
+    /// the other one.
     pub(crate) const fn passes(blurs: u32) -> u32 {
         1 + blurs + 1
     }
@@ -522,21 +595,29 @@ impl Ssao {
         )?;
 
         let mut uniforms = Vec::with_capacity(frames);
-        for _ in 0..frames {
-            uniforms.push(device.create_buffer(&BufferDesc {
-                label: Some("ssao params"),
-                size: ssao::PARAMS_SIZE as u64,
-                usage: BufferUsage::UNIFORM,
-                memory: MemoryLocation::HostUpload,
-            })?);
+        let mut split_uniforms = Vec::with_capacity(frames);
+        for (ring, label) in [
+            (&mut uniforms, "ssao params"),
+            (&mut split_uniforms, "ssao params (shipped)"),
+        ] {
+            for _ in 0..frames {
+                ring.push(device.create_buffer(&BufferDesc {
+                    label: Some(label),
+                    size: ssao::PARAMS_SIZE as u64,
+                    usage: BufferUsage::UNIFORM,
+                    memory: MemoryLocation::HostUpload,
+                })?);
+            }
         }
 
         Ok(Self {
             uniforms,
+            split_uniforms,
             layout,
             pipeline_layout,
             pipeline,
             groups: vec![None; frames],
+            split_groups: vec![None; frames],
             blur_layout,
             blur_pipeline_layout,
             blur_pipeline,
@@ -562,7 +643,21 @@ impl Ssao {
         frame: usize,
         params: ssao::SsaoParams,
     ) -> Result<(), HalError> {
-        device.write_buffer(self.uniforms[frame], 0, &params.to_bytes())
+        device.write_buffer(self.uniforms[frame], 0, &params.to_bytes())?;
+        // The comparison's other side: this frame's own matrices with
+        // [`shipped`]'s scalars, so the seam separates the four knobs and
+        // nothing else. Building it from `params` rather than beside it is what
+        // makes that true — a second block assembled from a second camera would
+        // compare two frames.
+        let (radius, slices, intensity, bent_normals) = shipped();
+        let baseline = ssao::SsaoParams {
+            radius,
+            slices,
+            intensity,
+            bent_normals,
+            ..params
+        };
+        device.write_buffer(self.split_uniforms[frame], 0, &baseline.to_bytes())
     }
 
     /// Adds the `ssao` pass, its blurs and the reconstruction, in that order,
@@ -594,9 +689,14 @@ impl Ssao {
         &'a mut self,
         graph: &mut RenderGraph<'a>,
         frame: usize,
+        extent: (u32, u32),
         depth: ImageId,
         images: OcclusionImages,
     ) -> ImageId {
+        // The gather's own extent, derived here rather than taken: `half_extent`
+        // is what sized `images` and a second spelling of the halving is a
+        // scissor over an image of another size — see this module's header.
+        let half = half_extent(extent);
         let OcclusionImages {
             raw,
             blurred,
@@ -622,43 +722,59 @@ impl Ssao {
         let again_cached = &mut again_groups[frame];
         let upsample_cached = &mut upsample_groups[frame];
 
-        graph
-            .add_render_pass("ssao")
-            // `DontCare`, not `Clear`: the full-screen triangle writes every
-            // pixel of the target, so loading or clearing it is pure bandwidth.
-            .color(raw, LoadOp::DontCare, StoreOp::Store, ClearValue::default())
-            // The prepass left this in `DepthStencilWrite`. Declaring the read is
-            // what moves it to a shader-readable layout, and without it every
-            // backend reads whatever the depth writes left behind.
-            .read_image(depth)
-            .execute(move |ctx| {
-                let view = ctx.image_view(depth);
-                let device = ctx.device();
-                let entries = vec![
-                    BindGroupEntry {
-                        binding: 0,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(uniforms),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        array_index: 0,
-                        // Overwritten by `cached_group` with the realised view;
-                        // written here so the list is a complete description of
-                        // the layout rather than a list with a hole in it.
-                        resource: BindingResource::ImageView(view),
-                    },
-                ];
-                let Some(group) =
-                    cached_group(cached, device, &[(1, view)], "ssao depth", layout, entries)
-                else {
-                    return;
-                };
-                let encoder = ctx.encoder();
-                encoder.bind_graphics_pipeline(pipeline);
-                encoder.bind_group(0, group, &[], pipeline_layout);
-                encoder.draw(0..FULLSCREEN_VERTICES, 0..1);
-            });
+        // The gather, once for a frame drawing one picture and twice for one
+        // comparing two — see [`crate::split`]. The second reads the same depth
+        // and writes the same image, so what separates the two sides is the
+        // block each binds and the columns each may write.
+        let seam = split_at().and_then(|at| crate::split::halves(half, at));
+        let (split_uniforms, split_groups) = (self.split_uniforms[frame], &mut self.split_groups);
+        let split_cached = &mut split_groups[frame];
+        match seam {
+            None => add_gather(
+                graph,
+                "ssao",
+                cached,
+                uniforms,
+                layout,
+                pipeline_layout,
+                pipeline,
+                raw,
+                depth,
+                LoadOp::DontCare,
+                None,
+            ),
+            Some((left, right)) => {
+                add_gather(
+                    graph,
+                    "ssao",
+                    cached,
+                    uniforms,
+                    layout,
+                    pipeline_layout,
+                    pipeline,
+                    raw,
+                    depth,
+                    LoadOp::DontCare,
+                    Some(left),
+                );
+                // `Load`, where the first is `DontCare`: this pass writes the
+                // columns the first one's scissor kept it out of, and a second
+                // `DontCare` would licence a backend to discard them.
+                add_gather(
+                    graph,
+                    "ssao-shipped",
+                    split_cached,
+                    split_uniforms,
+                    layout,
+                    pipeline_layout,
+                    pipeline,
+                    raw,
+                    depth,
+                    LoadOp::Load,
+                    Some(right),
+                );
+            }
+        }
 
         let blur = Filter {
             uniforms,
@@ -705,6 +821,7 @@ impl Ssao {
         for cached in self
             .groups
             .into_iter()
+            .chain(self.split_groups)
             .chain(self.blur_groups)
             .chain(self.blur_again_groups)
             .chain(self.upsample_groups)
@@ -721,10 +838,81 @@ impl Ssao {
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.layout);
-        for buffer in self.uniforms {
+        for buffer in self.uniforms.into_iter().chain(self.split_uniforms) {
             device.destroy_buffer(buffer);
         }
     }
+}
+
+/// Records one occlusion gather, over the whole target or over `scissor`.
+///
+/// The pass body [`Ssao::add_passes`] used to hold inline, lifted out when the
+/// comparison seam gave it a second caller — see [`crate::split`]. `load` is
+/// `DontCare` for a gather that writes every pixel and `Load` for one that
+/// writes the columns another gather left, and `scissor` is `None` for the
+/// former: a full-screen triangle covers the target, so a frame drawing one
+/// picture sets no rectangle at all and records what it recorded before this
+/// function existed.
+///
+/// **The viewport is not touched.** `ssao.slang` reads `SV_Position`, so a
+/// viewport narrowed to the half would squash the whole image into it; the
+/// scissor is the one of the pair that crops. [`crate::split`]'s header is where
+/// that is argued, because it is where a second effect will look.
+#[allow(clippy::too_many_arguments)]
+fn add_gather<'a>(
+    graph: &mut RenderGraph<'a>,
+    label: &'static str,
+    cached: &'a mut Option<(Vec<ImageViewHandle>, BindGroupHandle)>,
+    uniforms: BufferHandle,
+    layout: BindGroupLayoutHandle,
+    pipeline_layout: PipelineLayoutHandle,
+    pipeline: GraphicsPipelineHandle,
+    raw: ImageId,
+    depth: ImageId,
+    load: LoadOp,
+    scissor: Option<Rect2d>,
+) {
+    graph
+        .add_render_pass(label)
+        // `DontCare` where the triangle writes every pixel of the target, so
+        // loading or clearing it is pure bandwidth; `Load` where a scissor keeps
+        // this pass off columns another one wrote.
+        .color(raw, load, StoreOp::Store, ClearValue::default())
+        // The prepass left this in `DepthStencilWrite`. Declaring the read is
+        // what moves it to a shader-readable layout, and without it every
+        // backend reads whatever the depth writes left behind.
+        .read_image(depth)
+        .execute(move |ctx| {
+            let view = ctx.image_view(depth);
+            let device = ctx.device();
+            let entries = vec![
+                BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(uniforms),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    array_index: 0,
+                    // Overwritten by `cached_group` with the realised view;
+                    // written here so the list is a complete description of the
+                    // layout rather than a list with a hole in it.
+                    resource: BindingResource::ImageView(view),
+                },
+            ];
+            let Some(group) =
+                cached_group(cached, device, &[(1, view)], "ssao depth", layout, entries)
+            else {
+                return;
+            };
+            let encoder = ctx.encoder();
+            if let Some(rect) = scissor {
+                encoder.set_scissor(&rect);
+            }
+            encoder.bind_graphics_pipeline(pipeline);
+            encoder.bind_group(0, group, &[], pipeline_layout);
+            encoder.draw(0..FULLSCREEN_VERTICES, 0..1);
+        });
 }
 
 /// The pipeline, layout and uniform block every pass behind the march shares.
@@ -1000,6 +1188,99 @@ mod tests {
     ///
     /// Separate from the test above because it is a separate copy: the bounds
     /// on `r_ssao_radius` are literals repeating `crcbl_shaders::ssao`'s, and
+    /// The seam's other side is what the chain ships, whatever the console holds.
+    ///
+    /// [`shipped`] reads each variable's own declared default, so this moves
+    /// every one of them and checks that none of the four followed. A copy of
+    /// "what ships" written out beside the variables would pass the first half
+    /// of this and fail the second the day a default moved — which is what
+    /// happened to `r_ssao_slices` and `r_ssao_blur_passes` on 2026-09-03.
+    ///
+    /// **The moved values are each on the far side of the default from the
+    /// other**, so a `shipped` that returned the *live* value would differ from
+    /// the expected one in every field rather than in a lucky one.
+    #[test]
+    fn the_seams_other_side_is_what_the_chain_ships() {
+        use crcbl_console::Value;
+
+        let before = (
+            r_ssao_radius.get_f32(),
+            r_ssao_slices.get_i64(),
+            r_ssao_intensity.get_f32(),
+            r_ssao_bent_normals.get_bool(),
+        );
+        let shipped_before = shipped();
+        for (name, value) in [
+            ("r_ssao_radius", Value::Float(ssao::RADIUS_MAX)),
+            (
+                "r_ssao_slices",
+                Value::Int(i64::from(ssao::SLICE_COUNT_DEFAULT)),
+            ),
+            ("r_ssao_intensity", Value::Float(ssao::INTENSITY_MAX)),
+            ("r_ssao_bent_normals", Value::Bool(false)),
+        ] {
+            let var = match name {
+                "r_ssao_radius" => &r_ssao_radius,
+                "r_ssao_slices" => &r_ssao_slices,
+                "r_ssao_intensity" => &r_ssao_intensity,
+                _ => &r_ssao_bent_normals,
+            };
+            var.set(&value).expect("a writable variable in range");
+        }
+
+        // Anti-vacuity: every knob has to have actually moved, or the equality
+        // below holds of a console nobody changed.
+        let moved = (
+            r_ssao_radius.get_f32(),
+            r_ssao_slices.get_i64(),
+            r_ssao_intensity.get_f32(),
+            r_ssao_bent_normals.get_bool(),
+        );
+        let live = (
+            radius(),
+            i64::from(slice_count()),
+            intensity(),
+            bent_normals(),
+        );
+        assert_eq!(live, moved, "the getters did not follow the console");
+
+        let after = shipped();
+        assert_eq!(
+            after, shipped_before,
+            "the shipped block moved when the console did, so the seam compares a configuration \
+             against itself"
+        );
+        assert_ne!(
+            (after.0, i64::from(after.1), after.2, after.3),
+            live,
+            "the shipped block is what the console holds, so both sides of the seam are the same \
+             picture"
+        );
+        assert_eq!(
+            after,
+            (
+                ssao::RADIUS_DEFAULT,
+                ssao::SLICE_COUNT_MAX,
+                ssao::INTENSITY_DEFAULT,
+                true
+            ),
+            "the shipped block is not the four defaults the variables above declare"
+        );
+
+        for (var, value) in [
+            (&r_ssao_radius, Value::Float(before.0)),
+            (&r_ssao_intensity, Value::Float(before.2)),
+        ] {
+            var.set(&value).expect("putting a float back");
+        }
+        r_ssao_slices
+            .set(&Value::Int(before.1))
+            .expect("putting the count back");
+        r_ssao_bent_normals
+            .set(&Value::Bool(before.3))
+            .expect("putting the switch back");
+    }
+
     /// the two pairs can drift apart one at a time.
     #[test]
     fn the_console_radius_range_is_the_range_the_march_honours() {

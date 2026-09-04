@@ -92,7 +92,11 @@ Nothing else exists.
    the two: this sample asks for them to be legible on screen, and a console
    variable is live without being shown.
 2. **GTAO**, side by side with SSAO, with the silhouette-rim comparison the
-   escalation clause cares about.
+   escalation clause cares about. **The split screen this wants is built** —
+   `crcbl_render::split` and `r_ssao_split` resolve one frame's depth two ways
+   either side of a seam, which is the harness sample 17 was to prove — so what
+   is left of this milestone is a second technique to put on the far side of it.
+   `docs/backlog.md` carries why there is only one.
 3. **Bent-normal visualisation**, once GTAO produces one.
 4. **Ray-traced AO**, gated on P7C, and the device clamp — and this is the rung
    that gives the screen-space rungs a reference to be judged against, which

@@ -8461,7 +8461,9 @@ impl ForwardRenderer {
         // two depth-only passes, neither of which has a fragment stage and so
         // neither of which ever samples it.
         let occlusion = match occlusion_chain {
-            Some(images) => self.ssao.add_passes(graph, frame, scene_depth, images),
+            Some(images) => self
+                .ssao
+                .add_passes(graph, frame, extent, scene_depth, images),
             None => occlusion_placeholder,
         };
         // `docs/plan/45-shadows.md`'s contact march, or the one texel that
@@ -14041,6 +14043,47 @@ mod tests {
     /// [`ssao_blur_switch`]'s lock.
     static SSAO_BLUR_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Takes `r_ssao_split` for this thread and puts it back when the guard
+    /// drops.
+    ///
+    /// [`ssao_blur_switch`]'s shape exactly, for its reason. The seam is what
+    /// makes the occlusion chain record its second march, so a test about the
+    /// widest frame a renderer can produce has to hold this as well as the blur
+    /// count — see `crate::ssao`'s `r_ssao_split`.
+    fn ssao_split_switch() -> SsaoSplitSwitch {
+        let guard = SSAO_SPLIT_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let switch = SsaoSplitSwitch { _guard: guard };
+        switch.set(0.0);
+        switch
+    }
+
+    /// What [`ssao_split_switch`] hands back.
+    struct SsaoSplitSwitch {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl SsaoSplitSwitch {
+        /// Asks for a seam at `at`, or for none at zero.
+        fn set(&self, at: f32) {
+            crate::ssao::r_ssao_split
+                .set(&crcbl_console::Value::Float(at))
+                .expect("`r_ssao_split` is a writable float in range");
+        }
+    }
+
+    impl Drop for SsaoSplitSwitch {
+        fn drop(&mut self) {
+            // Back to the default at both ends, so a check that panicked
+            // mid-way does not hand the next holder a comparing frame.
+            self.set(0.0);
+        }
+    }
+
+    /// [`ssao_split_switch`]'s lock.
+    static SSAO_SPLIT_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Takes `r_ssao_slices` for this thread and puts it back at its default
     /// when the guard drops.
     ///
@@ -16790,6 +16833,12 @@ mod tests {
         // would be asserting the bound against a frame that could not reach it.
         let blurs = ssao_blur_switch();
         blurs.set(i64::from(Ssao::MAX_BLUR_PASSES));
+        // And the comparison seam, which is the occlusion chain's other
+        // conditional pass — see `crate::ssao`'s `r_ssao_split`. Held for the
+        // same reason the blur count is: the bound counts a frame that compares,
+        // so a frame that does not could never reach it.
+        let split = ssao_split_switch();
+        split.set(0.5);
         renderer
             .debug_draw()
             .line(Vec3::ZERO, Vec3::X, [1.0, 1.0, 1.0, 1.0]);
@@ -17325,6 +17374,7 @@ mod tests {
             let got = ssao.add_passes(
                 &mut graph,
                 0,
+                TEST_EXTENT,
                 depth,
                 crate::ssao::OcclusionImages {
                     raw,
@@ -17361,6 +17411,7 @@ mod tests {
             let got = ssao.add_passes(
                 &mut graph,
                 0,
+                TEST_EXTENT,
                 depth,
                 crate::ssao::OcclusionImages {
                     raw,
@@ -17464,6 +17515,159 @@ mod tests {
         pool.destroy(device);
         device.destroy_image_view(imported.view);
         device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **The comparison seam records a second march, scissored to the columns
+    /// the first one was kept off.**
+    ///
+    /// `crate::split`'s geometry, read off the encoder rather than off the code
+    /// that drove it: two passes, and two `SetScissor` rectangles that tile the
+    /// gather extent between them.
+    ///
+    /// **What this cannot see is which block each march bound.** The reference
+    /// backend records a bind group as a handle and a layout, not as the
+    /// resources behind it, so pointing both marches at one buffer leaves this
+    /// test green — measured, by doing exactly that. The group inequality below
+    /// is kept because it is free and would catch the two marches sharing a
+    /// cache, which is a different fault; what covers the blocks is
+    /// `crate::ssao`'s `the_seams_other_side_is_what_the_chain_ships`, and what
+    /// is not covered at all is the wiring between them. `docs/backlog.md`
+    /// carries that gap.
+    ///
+    /// **The control is the same frame without a seam**, and it is what makes
+    /// the assertions mean anything: a chain that scissored unconditionally
+    /// would satisfy every claim below and change every golden in the workspace,
+    /// so the frame nobody asked to compare has to record one march and set no
+    /// rectangle at all.
+    ///
+    /// Holds [`ssao_split_switch`] for [`ssao_blur_switch`]'s reason: the seam
+    /// is process-wide state and a frame that picked one up from another
+    /// thread's test is a frame with a pass this one did not ask for.
+    #[test]
+    fn the_comparison_seam_marches_twice_over_columns_that_tile_the_gather() {
+        use crcbl_hal::null::Command;
+
+        let _blurs = ssao_blur_switch();
+        let split = ssao_split_switch();
+
+        let gathered = crate::ssao::half_extent(TEST_EXTENT);
+        // One entry per march the frame recorded: the last rectangle that pass
+        // left the scissor at, and the group it bound.
+        //
+        // **The last and not the only one.** The graph opens every pass with a
+        // scissor over the whole render area, so a march that sets none of its
+        // own still records one — which is why "did it scissor at all" is not
+        // the question and "what did it end up cropped to" is.
+        let marches = |recorder: &Recorder, from: usize| {
+            let mut inside = false;
+            let mut found: Vec<(crcbl_hal::Rect2d, crcbl_hal::BindGroupHandle)> = Vec::new();
+            let mut rect = None;
+            let mut group = None;
+            for command in &recorder.commands()[from..] {
+                if let Some((_, label)) = command.opens_pass() {
+                    inside = matches!(label, Some("ssao" | "ssao-shipped"));
+                    (rect, group) = (None, None);
+                    continue;
+                }
+                if matches!(command, Command::EndRenderPass | Command::EndComputePass) {
+                    if let (true, Some(rect), Some(group)) = (inside, rect, group) {
+                        found.push((rect, group));
+                    }
+                    inside = false;
+                    continue;
+                }
+                if !inside {
+                    continue;
+                }
+                match command {
+                    Command::SetScissor(at) => rect = Some(*at),
+                    Command::BindGroup { group: bound, .. } => group = Some(*bound),
+                    _ => {}
+                }
+            }
+            found
+        };
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+
+        split.set(0.0);
+        let alone = frame_seen_from(
+            device,
+            &mut renderer,
+            queue,
+            &Camera::default(),
+            &DirectionalLight::default(),
+        );
+        let plain = marches(&recorder, 0);
+        let after = recorder.commands().len();
+        alone.release(device);
+
+        split.set(0.5);
+        let frame = frame_seen_from(
+            device,
+            &mut renderer,
+            queue,
+            &Camera::default(),
+            &DirectionalLight::default(),
+        );
+        let compared = marches(&recorder, after);
+        frame.finish(device, renderer);
+
+        assert_eq!(
+            plain.len(),
+            1,
+            "a frame comparing nothing recorded {} march(es); the seam is off, so there is one",
+            plain.len()
+        );
+        assert_eq!(
+            (
+                plain[0].0.x,
+                plain[0].0.y,
+                plain[0].0.width,
+                plain[0].0.height
+            ),
+            (0, 0, gathered.0, gathered.1),
+            "a frame comparing nothing left its march cropped to something other than the whole \
+             gather extent {gathered:?} — so the chain crops whether or not anybody asked it to, \
+             and every golden in this workspace was blessed on a frame that does not"
+        );
+
+        assert_eq!(
+            compared.len(),
+            2,
+            "a frame comparing two configurations recorded {} march(es)",
+            compared.len()
+        );
+        let (left, right) = (compared[0].0, compared[1].0);
+        assert_eq!(
+            (left.x, left.y, right.y),
+            (0, 0, 0),
+            "both halves start at the top and the left one at the edge"
+        );
+        assert_eq!(
+            i64::from(right.x),
+            i64::from(left.width),
+            "the second march starts where the first one ended, or a column is drawn twice"
+        );
+        assert_eq!(
+            (left.width + right.width, left.height, right.height),
+            (gathered.0, gathered.1, gathered.1),
+            "the two rectangles have to cover the gather extent {gathered:?} exactly"
+        );
+        assert!(
+            left.width < gathered.0 && right.width < gathered.0,
+            "one half covers the whole extent, so the other draws over it and the seam is a \
+             rectangle that crops nothing"
+        );
+        assert_ne!(
+            compared[0].1, compared[1].1,
+            "the two marches bound one group, so they cannot be reading two blocks"
+        );
+
         recorder.assert_valid();
     }
 

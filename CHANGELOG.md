@@ -65,6 +65,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `apps/shard` now light their rooms this way and their hand-written CPU bounce
   bakes are gone.
 
+- **The renderer can resolve one frame's data two ways, either side of a seam.**
+  `r_ssao_split` in `crcbl_render::ssao` puts a vertical seam at a fraction of
+  the width and runs the occlusion gather twice — the near side with the
+  console's own settings, the far side with the four the chain ships — so a
+  person tuning a knob sees what they changed beside what they changed it from.
+  Zero is off and is the default, so a frame nobody has asked to compare records
+  exactly the passes it recorded before.
+
+  The two marches read the same depth and write the same image, each scissored
+  to the columns the other was kept off, so a comparison allocates nothing and
+  costs together what one gather cost. `crcbl_render`'s new `split` module owns
+  the geometry, and it owns it rather than the occlusion chain because
+  `docs/plan/sample/17-mirrors.md`, `18-sundial.md` and `19-alcove.md` each ask
+  for the same harness of a different effect; which effect is being compared
+  stays that effect's own console variable.
+
 - **The ambient occlusion radius is a console variable.** `r_ssao_radius` in
   `crcbl_render::ssao` sets the world-space disc the horizon sweep is taken
   over, in `0.0625..=4`, defaulting to the 0.5 every golden was blessed at. It

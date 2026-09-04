@@ -173,6 +173,7 @@ pub mod shadow;
 pub mod skinning;
 mod sky_pass;
 mod smaa;
+mod split;
 pub mod sprite_pass;
 mod ssao;
 mod ssr;
@@ -269,7 +270,9 @@ pub use volumetric::FroxelBuffers;
 /// `ssao::r_ssao_radius`, which that header argues are not on their ladder at
 /// all because neither moves the budget, and `ssao::r_ssao_bent_normals`, which
 /// is the one of them that is on by default because it is the rung rather than
-/// a purchase on top of it — and the shadow cadence's two,
+/// a purchase on top of it, and `ssao::r_ssao_split`, which is not a knob on the
+/// effect at all but the comparison seam `crate::split` describes — and the
+/// shadow cadence's two,
 /// `shadow::r_shadow_cadence` and `shadow::r_shadow_faces`, which
 /// `crate::shadow`'s cadence module argues are two for the same kind of reason:
 /// how long a map may be held and how many may be redrawn at once are different
@@ -284,6 +287,7 @@ pub fn console_table() -> crcbl_console::Table {
         ssao::r_ssao_intensity,
         ssao::r_ssao_bent_normals,
         ssao::r_ssao_radius,
+        ssao::r_ssao_split,
         probe_visibility::r_probe_visibility,
         rsm::r_probe_bounce,
         shadow::r_shadow_cadence,

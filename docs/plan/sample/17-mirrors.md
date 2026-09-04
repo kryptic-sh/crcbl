@@ -81,6 +81,13 @@ exactly two techniques. That is deliberate: a two-way comparison is where the
 harness — the selector, the split screen, the per-technique timer — gets built
 and proven, and every later rung is then a row added to a thing that works.
 
+**The split screen was built ahead of this sample**, on the occlusion chain
+rather than the reflection one: `crcbl_render::split` owns the seam's geometry
+and `r_ssao_split` is its first caller, so what this sample inherits is a
+mechanism with a client rather than a design. The per-technique timer comes with
+it — each side is a pass of its own and the debug panel lists passes by name.
+What is still this sample's own is the selector and the second rung.
+
 ## Milestones
 
 1. **Two rungs and the harness.** The shipped march against whichever rung lands
