@@ -177,7 +177,11 @@ hold in their head, and the only honest way to set them is to look.
    golden moved. `Cascades::params` reads the cells rather than the constants,
    which is the whole of the engine half. This sample binds them to `[` `]` and
    `;` `'`, to the pause panel's `BIAS` and `NORMAL OFFSET` rows and to the
-   debug overlay's `shadow filter` section.
+   debug overlay's `shadow filter` section. They are **on the page** as well —
+   two sliders on `/demos/sundial/` over `__crcbl_sundial_bias` and
+   `__crcbl_sundial_normal_offset`, each track spanning the ceiling the engine
+   declares, and both counts on the `[HUD]` line, so the browser gate reads a
+   drag off the console's cell rather than off the canvas.
 
    `tests/golden.rs`'s
    `the_two_bias_counts_trade_acne_against_the_plinths_own_contact` is the

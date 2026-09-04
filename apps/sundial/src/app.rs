@@ -183,13 +183,21 @@ impl Sundial {
     /// `crate::web::__crcbl_sundial_atlas_view`'s effect a reading rather
     /// than an inference. `apps/quarry`'s heartbeat carries the same field for
     /// the same reason.
+    ///
+    /// **The two bias counts are here for that reason too.** What either of them
+    /// moves is acne on the open pavement or a gap under the plinth — a few
+    /// pixels of a lit surface, which no whole-canvas statistic separates from
+    /// the sun having moved. Both are printed off [`Knobs`], which reads the
+    /// console's own cells, so `crate::web::__crcbl_sundial_bias`'s effect is a
+    /// reading here rather than an inference from the picture.
     fn log_heartbeat(&self) {
         if !self.ticks.is_multiple_of(HEARTBEAT_TICKS) {
             return;
         }
         crcbl::log::info!(
             "[HUD] tick: {}  lighting: {:?}  geometry: {:?}  binding: {:?}  camera: {}  \
-             effects: {}  filter: {}  seam: {}  view: {}  sun: {}",
+             effects: {}  filter: {}  seam: {}  bias: {}  normal offset: {}  view: {}  \
+             sun: {}",
             self.ticks,
             self.paths.lighting,
             self.paths.geometry,
@@ -198,6 +206,8 @@ impl Sundial {
             self.paths.effects_row(),
             self.knobs.filter.label(),
             self.knobs.seam_row(),
+            Knobs::bias_row(self.knobs.bias()),
+            Knobs::bias_row(self.knobs.offset()),
             crcbl::debug_view::current().label(),
             self.sky().row(),
         );

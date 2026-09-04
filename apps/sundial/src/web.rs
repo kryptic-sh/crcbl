@@ -23,7 +23,8 @@
 //!
 //! `apps/alcove/src/web.rs`' argument, and this fixture has one more control to
 //! carry than that one does. Natively every knob here is a key or a pause-panel
-//! row: `F` cycles the filter, `X` raises the seam, `,` and `.` walk it, `T`
+//! row: `F` cycles the filter, `X` raises the seam, `,` and `.` walk it, `[`,
+//! `]`, `;` and `'` walk the sun's two bias counts, `T`
 //! puts the shadow atlas up, `C` tints the frame by cascade, `P` stops the sun
 //! and `-` and `=` scrub it. **A
 //! phone has none of them**, and a shadow fixture with a sun nobody can stop is
@@ -34,7 +35,7 @@
 //!
 //! | Knob | Where the state lives | How this module reaches it |
 //! | --- | --- | --- |
-//! | the filter, the seam | a `r_shadow_*` console cell | [`crate::filter`], the same cell a key and a typed line write |
+//! | the filter, the seam, the two bias counts | a `r_shadow_*` console cell | [`crate::filter`], the same cell a key and a typed line write |
 //! | the atlas viewer, the cascade overlay | the engine's `r_debug_view` cell | `crate::app::toggle_atlas_view` and `crate::app::toggle_cascade_view`, the same cell `T`, `C` and the pause panel's `ATLAS` and `CASCADES` rows write |
 //! | the sun's tick, and whether it runs | `crate::app::Sundial` | [`crate::sun::page_clock`] and its `ask_*` pair, adopted by the next fixed step |
 //!
@@ -91,10 +92,10 @@
 //! ## Exports: the knobs
 //!
 //! Each one **reads** rather than writing when it is passed an argument that
-//! could not be a value — a negative number for the two that take a position,
-//! and a zero for the two that cycle or toggle — so a page places its controls
-//! and drives them through one symbol each. The answer is always the state that
-//! is in force after the call.
+//! could not be a value — a negative number for the ones that take a position or
+//! a count, and a zero for the two that cycle or toggle — so a page places its
+//! controls and drives them through one symbol each. The answer is always the
+//! state that is in force after the call.
 //!
 //! | Symbol | Signature (wasm) | Meaning |
 //! | --- | --- | --- |
@@ -102,6 +103,10 @@
 //! | [`__crcbl_sundial_filter_ptr`] | `() -> i32` | Address of that name (UTF-8, not NUL-terminated). Read it **after** the call above: the two together are one read. |
 //! | [`__crcbl_sundial_seam`] | `(i32) -> f32` | A non-zero argument raises the comparison seam at the centre or drops it, as the `X` key does. Returns where it stands, and `0` for a frame comparing nothing. |
 //! | [`__crcbl_sundial_seam_at`] | `(f32) -> f32` | Where the seam stands, as a fraction of the frame's width — what `,` and `.` walk. Either edge takes it down. |
+//! | [`__crcbl_sundial_bias`] | `(f32) -> f32` | The sun's constant shadow bias, in texels of the cascade a fragment landed in — what `[` and `]` walk. A negative argument reads, and anything past either end of the variable's own range is clamped into it. |
+//! | [`__crcbl_sundial_bias_ceiling`] | `() -> f32` | The top of that range, so a page's slider spans the count the engine accepts rather than one written into the markup. |
+//! | [`__crcbl_sundial_normal_offset`] | `(f32) -> f32` | How far along its own normal a receiver moves before the sun's shadow lookup, in the same texels — what `;` and `'` walk. It reads and clamps as the count above does. |
+//! | [`__crcbl_sundial_normal_offset_ceiling`] | `() -> f32` | The top of *that* range, which is not the same number: the two counts are declared with ceilings of their own. |
 //! | [`__crcbl_sundial_atlas_view`] | `(i32) -> i32` | A non-zero argument draws the shadow atlas over the frame or takes it away, as the `T` key does. `1`/`0` for whether it is the picture in force. |
 //! | [`__crcbl_sundial_cascades`] | `(i32) -> i32` | A non-zero argument tints the picture by the cascade each fragment's sun shadow came from, or takes the tint away, as the `C` key does. `1`/`0` for whether it is the picture in force. |
 //! | [`__crcbl_sundial_sun_tick`] | `(f64) -> f64` | Which tick of the clock the sun is drawn at. Writing one **stops** the clock, as a scrub does. |
@@ -247,6 +252,72 @@ pub extern "C" fn __crcbl_sundial_seam_at(at: f32) -> f32 {
         return filter::set_seam(at).unwrap_or(0.0);
     }
     filter::seam().unwrap_or(0.0)
+}
+
+// ---------------------------------------------------------------------------
+// Exports: the sun's two bias counts, which are console cells as well
+// ---------------------------------------------------------------------------
+
+/// Put the sun's constant shadow bias at `texels` of the cascade a fragment
+/// landed in, and answer with the count in force.
+///
+/// A negative `texels` reads. This is `[` and `]` as something a finger can
+/// reach, through the same [`crate::filter::BIAS`] cell those keys, the pause
+/// panel's row and a typed `r_shadow_bias 3` all write — and the half of
+/// `docs/plan/45-shadows.md`'s seventh decision that moves the compared depth
+/// **towards the light**: too little draws acne on the open pavement, too much
+/// lifts the plinth's shadow off the plinth.
+///
+/// The floor of the range is not exported beside
+/// [`__crcbl_sundial_bias_ceiling`], because a slider that asks for less than
+/// the engine accepts is clamped here and shown where it landed; a slider whose
+/// *track* ended somewhere other than the range's top would be a control that
+/// could not reach what the console can.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_sundial_bias(texels: f32) -> f32 {
+    if texels >= 0.0 {
+        return filter::set_bias(filter::BIAS, texels);
+    }
+    filter::var(filter::BIAS).get_f32()
+}
+
+/// The top of the constant bias's range, in the same texels.
+///
+/// [`crate::filter::BIAS`]' own declared `Kind::Float`, so a page's slider
+/// spans the count the engine accepts rather than a number written into the
+/// markup — the argument [`__crcbl_sundial_sun_sweep`] makes about the sun's
+/// arc, and [`__crcbl_sundial_filter_ptr`] about the set of filters.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_sundial_bias_ceiling() -> f32 {
+    filter::ceiling(filter::BIAS)
+}
+
+/// Move a receiver `texels` along its own normal before the sun's shadow lookup,
+/// and answer with the count in force.
+///
+/// A negative `texels` reads. `;` and `'` as something a finger can reach,
+/// through [`crate::filter::OFFSET`] — the seventh decision's other half, and the
+/// one that moves the receiver **sideways** rather than light-ward. Two controls
+/// and not one quality knob for that decision's reason: the pair is pulled in
+/// different directions by the same two artefacts, and a single count could not
+/// show them moving against each other.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_sundial_normal_offset(texels: f32) -> f32 {
+    if texels >= 0.0 {
+        return filter::set_bias(filter::OFFSET, texels);
+    }
+    filter::var(filter::OFFSET).get_f32()
+}
+
+/// The top of the normal offset's range, in the same texels.
+///
+/// **Not the same number as [`__crcbl_sundial_bias_ceiling`]'s**, which is why
+/// there are two of these rather than one: the engine declares a ceiling per
+/// count, and a page that spanned one slider's track with the other's would put
+/// its thumb somewhere the engine never goes.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_sundial_normal_offset_ceiling() -> f32 {
+    filter::ceiling(filter::OFFSET)
 }
 
 // ---------------------------------------------------------------------------

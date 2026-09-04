@@ -184,14 +184,31 @@ pub fn nudge_seam(right: bool) {
 /// terms: a press at either end leaves the count there rather than being refused
 /// by the console.
 pub fn nudge_bias(name: &str, up: bool) {
-    let Some((min, max)) = float_range(name) else {
-        return;
-    };
     let step = if up { BIAS_STEP } else { -BIAS_STEP };
-    set(
-        name,
-        &Value::Float((var(name).get_f32() + step).clamp(min, max)),
-    );
+    set_bias(name, var(name).get_f32() + step);
+}
+
+/// Puts one bias count at `texels`, clamped into the variable's own range, and
+/// answers with where it stands afterwards.
+///
+/// **[`BIAS`] and [`OFFSET`] through one function**, on [`nudge_bias`]'s terms,
+/// and **clamped rather than refused** on [`set_seam`]'s: the console rejects a
+/// value outside the declared range outright, so a caller that asked for one
+/// would otherwise leave the count where it was and read as a control wired to
+/// nothing. The keys and the page both come through here.
+pub fn set_bias(name: &str, texels: f32) -> f32 {
+    if let Some((min, max)) = float_range(name) {
+        set(name, &Value::Float(texels.clamp(min, max)));
+    }
+    var(name).get_f32()
+}
+
+/// The top of one bias count's declared range, which is what a page's slider
+/// spans — and `0` for a variable that is not a count at all, which
+/// `every_knob_this_sample_drives_is_declared_by_the_engine` rules out.
+#[must_use]
+pub fn ceiling(name: &str) -> f32 {
+    float_range(name).map_or(0.0, |(_, max)| max)
 }
 
 /// Puts the seam at `at`, the same fraction of the frame's width the variable

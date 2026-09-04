@@ -7,10 +7,10 @@
 // business in a file every demo runs.
 //
 // The knobs reach three different kinds of state and `apps/sundial/src/web.rs`
-// is where that table is: the filter and the seam are `r_shadow_*` console
-// cells, the sun is the fixture's own clock, and the atlas viewer and the
-// cascade tint are the engine's `r_debug_view` — one cell for both of them, so
-// each of those two buttons takes the other's picture down.
+// is where that table is: the filter, the seam and the two bias counts are
+// `r_shadow_*` console cells, the sun is the fixture's own clock, and the atlas
+// viewer and the cascade tint are the engine's `r_debug_view` — one cell for
+// both of them, so each of those two buttons takes the other's picture down.
 //
 // The symbols are written out literally rather than built from the sample's
 // name. `web/tools/check-exports.mjs` scans the shim for `.__crcbl_…` to learn
@@ -69,11 +69,26 @@ function installKnobs(ex) {
   const sun = button('knob-sun');
   const reset = button('knob-reset');
   const seamAt = slider('knob-seam-at');
+  const bias = slider('knob-bias');
+  const offset = slider('knob-normal-offset');
   const sunTick = slider('knob-sun-tick');
   const seamValue = el('knob-seam-value');
+  const biasValue = el('knob-bias-value');
+  const offsetValue = el('knob-normal-offset-value');
   const sunValue = el('knob-sun-value');
 
-  const controls = [filter, seam, atlas, cascades, sun, reset, seamAt, sunTick];
+  const controls = [
+    filter,
+    seam,
+    atlas,
+    cascades,
+    sun,
+    reset,
+    seamAt,
+    bias,
+    offset,
+    sunTick,
+  ];
 
   // The arc the tick slider spans, off the engine's own `sun::SWEEP_TICKS`
   // rather than a number written into the markup — `web/pages/sundial.html`
@@ -81,6 +96,15 @@ function installKnobs(ex) {
   // once: it is a constant of the fixture, not a knob.
   const sweep = ex.__crcbl_sundial_sun_sweep();
   sunTick.max = String(sweep - 1);
+
+  // The same argument for the two bias counts, and here it is one track per
+  // count: `r_shadow_bias` and `r_shadow_normal_offset` are declared with
+  // ceilings of their own, so one number read for both would give one of the two
+  // sliders a track the engine never reaches the end of. The floor is `min="0"`
+  // in the markup and stays there — a drag below what the engine accepts is
+  // clamped by the call itself and `refresh` puts the thumb where it landed.
+  bias.max = String(ex.__crcbl_sundial_bias_ceiling());
+  offset.max = String(ex.__crcbl_sundial_normal_offset_ceiling());
 
   /**
    * The filter's own name, out of the engine's variable.
@@ -117,6 +141,17 @@ function installKnobs(ex) {
     cascades.textContent = ex.__crcbl_sundial_cascades(0)
       ? 'hide it'
       : 'show it';
+
+    // Both counts are in texels of whichever cascade the fragment landed in,
+    // and the unit is printed for `Knobs::bias_row`'s reason: a bare `1.50`
+    // beside a seam printed as a fraction of the width is two numbers a reader
+    // has no reason to read differently.
+    const biasNow = ex.__crcbl_sundial_bias(-1);
+    bias.value = String(biasNow);
+    biasValue.textContent = `${biasNow.toFixed(2)} texels`;
+    const offsetNow = ex.__crcbl_sundial_normal_offset(-1);
+    offset.value = String(offsetNow);
+    offsetValue.textContent = `${offsetNow.toFixed(2)} texels`;
 
     const running = ex.__crcbl_sundial_sun_running(-1);
     sun.textContent = running ? 'stop it' : 'start it';
@@ -176,6 +211,12 @@ function installKnobs(ex) {
   seamAt.addEventListener('input', () =>
     drive(() => ex.__crcbl_sundial_seam_at(Number(seamAt.value)))
   );
+  bias.addEventListener('input', () =>
+    drive(() => ex.__crcbl_sundial_bias(Number(bias.value)))
+  );
+  offset.addEventListener('input', () =>
+    drive(() => ex.__crcbl_sundial_normal_offset(Number(offset.value)))
+  );
   sunTick.addEventListener('input', () =>
     drive(() => ex.__crcbl_sundial_sun_tick(Number(sunTick.value)))
   );
@@ -205,7 +246,7 @@ function installKnobs(ex) {
 
 bootDemo({
   init,
-  hint: 'the knobs under the canvas drive the filter, the seam, the shadow atlas, the cascade tint and the sun · ESC opens the panel — CAMERA swaps to the free one · then WASD, Space/Shift and the arrows fly it · F3 shows the panel · F11 fullscreen',
+  hint: 'the knobs under the canvas drive the filter, the seam, the two bias counts, the shadow atlas, the cascade tint and the sun · ESC opens the panel — CAMERA swaps to the free one · then WASD, Space/Shift and the arrows fly it · F3 shows the panel · F11 fullscreen',
   savedLabel: 'Nothing',
   bind: (ex) => {
     installKnobs(ex);

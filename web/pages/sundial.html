@@ -44,15 +44,16 @@ meta-->
     Natively these are keys and rows on the pause panel. A seam that can only be
     nudged by <kbd>,</kbd> and <kbd>.</kbd> and a sun that can only be stopped
     by <kbd>P</kbd> are controls a phone cannot reach at all. The filter and the
-    seam below drive the same <code>r_shadow_*</code> console variable the key
-    writes — one cell, three writers, no copy of the state on this page. The
-    sun's two are the fixture's own clock rather than a setting, so they are
-    taken up on its next fixed step; the label is the request either way, and
-    everything else here shows what the engine holds <em>after</em> it wrote.
-    The shadow atlas and the cascade tint are a third kind again: they are the
-    engine's own debug view, one cell shared with every other sample and with
-    the <code>debug_view</code> console command — so putting one of the two up
-    takes the other down.
+    seam and the two bias counts below drive the same
+    <code>r_shadow_*</code> console variable the key writes — one cell, three
+    writers, no copy of the state on this page. The sun's two are the fixture's
+    own clock rather than a setting, so they are taken up on its next fixed
+    step; the label is the request either way, and everything else here shows
+    what the engine holds <em>after</em> it wrote. The shadow atlas and the
+    cascade tint are a third kind again: they are the engine's own debug view,
+    one cell shared with every other sample and with the
+    <code>debug_view</code> console command — so putting one of the two up takes
+    the other down.
   </p>
   <ul class="keys" id="shadow-knobs">
     <li class="key-row">
@@ -84,6 +85,42 @@ meta-->
           disabled
         />
         <span id="knob-seam-value">…</span>
+      </span>
+    </li>
+    <li class="key-row">
+      <span
+        ><label for="knob-bias"
+          >How far the depth is biased towards the light</label
+        ></span
+      >
+      <span>
+        <input
+          type="range"
+          id="knob-bias"
+          min="0"
+          step="0.25"
+          value="0"
+          disabled
+        />
+        <span id="knob-bias-value">…</span>
+      </span>
+    </li>
+    <li class="key-row">
+      <span
+        ><label for="knob-normal-offset"
+          >How far a receiver moves along its own normal</label
+        ></span
+      >
+      <span>
+        <input
+          type="range"
+          id="knob-normal-offset"
+          min="0"
+          step="0.25"
+          value="0"
+          disabled
+        />
+        <span id="knob-normal-offset-value">…</span>
       </span>
     </li>
     <li class="key-row">
@@ -170,6 +207,18 @@ meta-->
     shadow, which is exactly what the band exists to remove.
   </div>
   <div class="note">
+    <strong>The two bias counts are one comparison, not two knobs.</strong> Both
+    are counted in texels of whichever cascade the fragment landed in: the first
+    moves the depth a shadow is compared against towards the light, and the
+    second moves the receiver sideways along its own normal before the lookup
+    happens at all. Take either to zero, stop the sun at a grazing pose and the
+    open pavement stipples — that is acne; take the first one well up and the
+    plinth's shadow slides out from under the plinth, which is peter-panning.
+    They are two sliders because they are pulled in opposite directions by the
+    same pair of artefacts, and a single quality knob could not put one at zero
+    while the other stands where the engine ships it.
+  </div>
+  <div class="note">
     <strong>The sun is the one to reach for.</strong> Shadow quality is a set of
     failure modes with names — acne, peter-panning, a cascade seam, edges that
     swim — and every one of them is either invisible in a still or invisible
@@ -246,6 +295,10 @@ meta-->
     <li class="key-row">
       <span>The seam: raise it, then walk it</span>
       <span><kbd>X</kbd>, then <kbd>,</kbd> and <kbd>.</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Walk the constant bias, and the normal offset</span>
+      <span><kbd>[</kbd> <kbd>]</kbd>, then <kbd>;</kbd> and <kbd>'</kbd></span>
     </li>
     <li class="key-row">
       <span>Show the shadow atlas, or the cascade the frame sampled</span>

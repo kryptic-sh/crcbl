@@ -178,16 +178,6 @@ golden of their own and a button on the page. What is still **not** done:
   — whose filter widths differ, so the count that covers a grazing receiver
   under one of them need not cover it under another. Each is one more set of
   arms of the same walk.
-- **`r_shadow_bias` and `r_shadow_normal_offset` are not on the page.**
-  Deliberately out of the 2026-09-05 slice. `/demos/sundial/` would want two
-  more exports on `apps/sundial/src/web.rs`' shape — a setter answering with
-  what the engine holds after the write, on `__crcbl_sundial_seam`'s pattern,
-  since a float knob is a slider rather than a cycle button — two sliders in
-  `web/pages/sundial.html` and `web/demos/sundial/main.js`, the counts added to
-  the `[HUD]` heartbeat so a reading is a reading rather than an inference, and
-  two more entries in `web/tools/browser-e2e.mjs`'s `sundial` row, each watched
-  to fail with the export behind it made a no-op. The native half — `[` `]`, `;`
-  `'`, the panel's `BIAS` and `NORMAL OFFSET` rows — is done.
 - **The keys walk the counts' neighbourhood and cannot reach the far end of
   either range.** `filter::BIAS_STEP` is half a texel and the ranges run to 128
   and 64, so the count at which `apps/sundial`'s plinth loses its shadow is 189
@@ -275,23 +265,27 @@ nor `crate::app` offers a hook to empty it from inside `apps/sundial`.
 `/demos/alcove/` is the first page on the site whose controls are HTML rather
 than keys — `apps/alcove/src/web.rs` exports one call per knob and
 `web/demos/alcove/main.js` binds them. `web/tools/browser-e2e.mjs`'s `alcove`
-row presses **four** of them and reads the effect off the demo's own heartbeat:
-the seam button, the seam slider, the technique button and the bent-direction
-button — that last one twice, because no sample's `reset` reaches the engine's
-debug view — then `reset`. The **AO-only view, the bent-normals switch, the
-radius slider and the intensity slider are driven by nothing but a person**.
+row presses **five** of them and reads the effect off the demo's own heartbeat:
+the seam button, the seam slider, the technique button, the bent-direction
+button and the AO-only view button — the last two twice each, because no
+sample's `reset` reaches the engine's debug view — then `reset`. The
+**bent-normals switch, the radius slider and the intensity slider are driven by
+nothing but a person**.
 
-The bent-direction slice of 2026-09-05 put a `view:` field on
-`Alcove::log_heartbeat`, so the **AO-only view button is now cheap to check**:
-it is the same `crcbl::debug_view` cell the bent one writes, and the block in
-`browser-e2e.mjs` now takes a **list** — `knobs.views` of
-`{control, label, noun}` against one shared `viewField`, which sundial's row
-uses for its atlas viewer and its cascade overlay. So the AO-only button is one
-more entry in `alcove`'s `views` with a `label` of `ambient occlusion`, and
-nothing stands in the way of it any more. The **bent-normals switch and the
-intensity slider are still not on the heartbeat at all**, and checking either
-wants another field on that line or a reading taken off the canvas, and the
-second is what `still` in that row says this demo cannot give.
+The AO-only button joined that list on 2026-09-05, once `Alcove::log_heartbeat`
+carried a `view:` field and `browser-e2e.mjs`'s debug-view block took a **list**
+of `{control, label, noun}` entries against one shared `viewField`: it writes
+the same `crcbl::debug_view` cell the bent one does, its label is
+`ambient occlusion`, and `web/demos/alcove/main.js` presses it by reading the
+view back and asking for the other one — so the second press takes it away,
+which is the half that block asserts. Of the three left, **the radius is the
+cheap one**: it is on the heartbeat already, as `radius:` in world units, so it
+wants an entry of the shape sundial's `knobs.counts` took and a comparison that
+accounts for its control being a 0-to-1 dial rather than metres. The
+**bent-normals switch and the intensity slider are not on the heartbeat at
+all**, and checking either wants another field on that line or a reading taken
+off the canvas, and the second is what `still` in that row says this demo cannot
+give.
 
 **Reaching those controls at all costs the pointer, and that surprised us.** The
 fixture asks for Pointer Lock while it is running, `web/engine/shell.js` takes

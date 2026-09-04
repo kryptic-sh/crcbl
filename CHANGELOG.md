@@ -55,6 +55,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   moving the filter does: the bias row is kept out of the shadow views' blocks,
   which are the cache's record of what a map was drawn from.
 
+  **They are on `/demos/sundial/` as well**, which is where a visitor with no
+  keyboard meets them. `__crcbl_sundial_bias` and
+  `__crcbl_sundial_normal_offset` write the same console cells the keys do and
+  answer with what the console holds afterwards, clamping a count into the
+  variable's own range rather than letting it be refused; two sliders drive
+  them, and each track spans the ceiling the engine declares, read through
+  `__crcbl_sundial_bias_ceiling` and `__crcbl_sundial_normal_offset_ceiling`
+  because the two ranges are not the same and a page carrying a number of its
+  own goes stale. `Sundial::log_heartbeat` prints both counts, so the browser
+  gate reads a drag off the console's cell rather than off a canvas where acne
+  is a few pixels of one lit surface.
+
 - **`apps/sundial`'s milestone 2: acne and peter-panning, measured against each
   other.** `docs/plan/45-shadows.md`'s seventh decision argued that a move along
   the receiver's own normal keeps a contact shadow where a move towards the
@@ -142,6 +154,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and at the slot's crease, the alcove's back corner and the box's contact band
   it leans out towards the opening, which the `+z` channel measures at 7.7, 57.5
   and 37.2 codes. Every figure was swept on lavapipe and on radv.
+
+  The **AO-only view** — the older of the two pictures, on `V`, the panel's
+  `AO VIEW` row and `__crcbl_alcove_view` — is checked by that gate now too, as
+  a second entry in `alcove`'s `knobs.views`: it was the one control on that
+  page nothing but a person had ever pressed.
 
 - **The shadow-atlas viewer**, which `docs/plan/sample/18-sundial.md`'s
   milestone 1 has owed since the sample was written and which closes

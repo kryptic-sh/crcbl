@@ -886,6 +886,17 @@ const EXPECTATIONS = {
           label: 'bent normal',
           noun: 'the bent direction instead of the shaded court',
         },
+        // **The AO-only view, which is the same cell again.** `V` natively, and
+        // `web/demos/alcove/main.js` presses it through
+        // `__crcbl_alcove_view` — which is set-to-value rather than a toggle,
+        // so the page reads the view back and asks for the other one. That is
+        // what makes the second press below take it away, and it is why this
+        // entry needs nothing on the page that was not already there.
+        {
+          control: 'knob-view',
+          label: 'ambient occlusion',
+          noun: 'the occlusion channel instead of the shaded court',
+        },
       ],
       // And everything back, which is also what leaves the demo in the state
       // the groups after this one were written against.
@@ -1024,6 +1035,27 @@ const EXPECTATIONS = {
           control: 'knob-cascades',
           label: 'cascades',
           noun: 'the frame tinted by the cascade its shadow came from',
+        },
+      ],
+      // **The sun's two bias counts, which are console cells like the filter
+      // and the seam and unlike either in what they move.** What a count
+      // changes is acne on the open pavement or the gap under the plinth — a
+      // few pixels of one lit surface — so the heartbeat is where the effect is
+      // legible at all. `field` is the count as `Knobs::bias_row` prints it,
+      // and the block below holds it against the slider's own value rather than
+      // against a number written here: the ceiling each track spans is the
+      // engine's, read through `__crcbl_sundial_bias_ceiling` and its pair, and
+      // the two ceilings are not the same number.
+      counts: [
+        {
+          control: 'knob-bias',
+          field: /\bbias: ([\d.]+) texels/,
+          noun: "the sun's constant bias",
+        },
+        {
+          control: 'knob-normal-offset',
+          field: /\bnormal offset: ([\d.]+) texels/,
+          noun: 'the normal offset the receiver moves along',
         },
       ],
       sun: 'knob-sun',
@@ -4221,6 +4253,63 @@ try {
             : scrubbed
               ? `the sun reads ${sunNow || '(nothing)'}, the slider asked for ` +
                 `${asked || '(nothing)'}, and it was stopped at ${heldAt}`
+              : `no heartbeat in ${pollCeiling()} ms after the drag`
+      );
+    }
+
+    // **AND THE TWO BIAS COUNTS, WHICH ARE THE ONES A PICTURE CANNOT ANSWER
+    // FOR.** Only sundial has them: they are `r_shadow_*` console cells like
+    // the filter and the seam, but what either of them moves is acne on the
+    // open pavement or the gap under the plinth — a few pixels of one lit
+    // surface, on a canvas whose statistics also carry the HUD and a sun that
+    // is moving anyway. `Sundial::log_heartbeat` prints both off the console's
+    // own cells, which is what makes this a reading.
+    //
+    // **Held against the slider's own value, not against "it changed"**, for
+    // the sun slider's reason: the page writes that value back out of the
+    // engine's answer, so an export that read instead of writing would leave
+    // the two agreeing on the count that was already in force. Both halves are
+    // asked — the heartbeat matches the control, *and* the count is no longer
+    // where the page opened it. A quarter of the way along either track is
+    // well clear of what the engine ships — both counts default to a couple of
+    // texels and both ranges run to dozens of them, which is
+    // `DEPTH_BIAS_TEXELS` and `NORMAL_OFFSET_TEXELS` read against their own
+    // `convar!` ranges — and the second clause below is what asserts that
+    // rather than this sentence.
+    //
+    // The `reset` below is what puts them back: both are in
+    // `crate::filter::KNOBS`, which is the list that press walks.
+    for (const count of knobs.counts ?? []) {
+      const before = stands(hud()[hud().length - 1] ?? '', count.field);
+      const dragged = await dragSlider(count.control);
+      const asked = dragged
+        ? String(
+            await evaluate(
+              page,
+              `document.getElementById('${count.control}')?.value ?? ''`
+            )
+          )
+        : '';
+      const moved = dragged && (await resume());
+      const countMark = hud().length;
+      const countLine = moved ? await beatAfter(countMark) : null;
+      const countNow = stands(countLine ?? '', count.field);
+      check(
+        'C',
+        `a drag on the page moves ${count.noun}`,
+        Boolean(countLine) &&
+          countNow !== '' &&
+          countNow !== before &&
+          countNow === Number(asked).toFixed(2),
+        !dragged
+          ? `the page has no #${count.control} control`
+          : !moved
+            ? 'the demo did not go back into play after the drag — status ' +
+              `${await evaluate(page, `crcbl.status()`)}`
+            : countLine
+              ? `the count reads ${countNow || '(nothing)'}, the slider asked ` +
+                `for ${asked || '(nothing)'}, and it opened at ` +
+                `${before || '(nothing)'}`
               : `no heartbeat in ${pollCeiling()} ms after the drag`
       );
     }
