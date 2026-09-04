@@ -139,6 +139,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   device asked for `ASYNC_COMPUTE_QUEUE` or `TRANSFER_QUEUE` really does hand
   out queues on families distinct from graphics.
 
+- **The browser gate's blank-frame control could not see a dark scene.**
+  `apps/shard`'s doused zone failed the check that its still frame is "darker
+  but not blank", and the check was right that the frame is nearly one colour
+  and wrong that this means nothing was drawn: the premise in its own doc was a
+  baked irradiance volume that the no-bake rule removed. Every whole-canvas
+  reading the harness produces was measured against a build whose doused zone is
+  lit by nothing at all, and none of them separates the two — mean luma 0.42
+  against 0.35 of the lit window, flattest colour 94.9% against 95.1%, distinct
+  colours 8 against 7 — because `crcbl-ui` draws the HUD onto the same canvas
+  and the overlay dominates all six numbers.
+
+  `SAMPLE_CANVAS` now accumulates a second set of statistics over an inset
+  window in the same pixel walk, and the control asks that window for more than
+  one colour. That is a difference in kind rather than a threshold: the blank
+  arm reads exactly one colour, which is what a uniform region is. The
+  stillness, flicker and darker clauses keep the whole canvas they were
+  calibrated on. shard's 57 checks pass locally on a hardware adapter, and that
+  was the one job holding the demo site's deploy.
+
 ### Changed
 
 - **The debug console draws command output and trouble, not the engine's

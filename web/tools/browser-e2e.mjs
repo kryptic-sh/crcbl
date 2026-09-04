@@ -1902,6 +1902,40 @@ const BLEND_IDLE_MAX = 0.05;
  * that rasteriser, so four samples span roughly two thirds of a cycle. That is
  * what the swing below was measured over.
  */
+/**
+ * How much of each edge the torch block's **inner** window leaves out, as a
+ * fraction of the canvas's width and height.
+ *
+ * A quarter each side, so the window is the middle half of each axis: enough to
+ * miss `crcbl-ui`'s HUD, which is drawn onto this same canvas and which is what
+ * makes every whole-canvas reading a mixture of a room and an overlay that does
+ * not go out when the torches do — see [`TORCH_DARKER_RATIO`] for the six
+ * numbers that mixture flattened.
+ *
+ * **What the inner window buys is a difference in kind, not in degree.**
+ * Measured 2026-09-04 on radv, doused, against the same build with the zone lit
+ * by nothing at all:
+ *
+ * ```text
+ *                       drawn    lit by nothing
+ *   mean luma            3.17          1.51
+ *   flattest colour     99.2%        100.0%
+ *   distinct colours        2             1
+ * ```
+ *
+ * One colour is what a uniform region *is*, so the blank arm is not near the
+ * boundary — it is the boundary. That is why the check below asks for more than
+ * one colour rather than for a share or a luminance: those two readings differ
+ * here by 0.8% and 1.7 of a byte, and both were measured on this machine's
+ * hardware adapter while the gate runs on SwiftShader in CI.
+ *
+ * **Only the blank-frame control reads this window.** The stillness, flicker and
+ * darker clauses keep the whole canvas they were calibrated on: cropping halved
+ * the lit window's swing here (0.78 to 0.40), and [`TORCH_FLICKER_LUMA`] is a
+ * SwiftShader measurement with less margin than that to give away.
+ */
+const TORCH_INSET = 0.25;
+
 const TORCH_SAMPLES = 4;
 const TORCH_SAMPLE_GAP_MS = 80;
 
@@ -1930,27 +1964,42 @@ const TORCH_FLICKER_LUMA = 0.04;
 const TORCH_STILL_LUMA = 0.01;
 
 /**
- * How much of the doused canvas the frame must be *left* with, as a fraction of
- * the lit canvas's mean luminance — and how much of it one flat colour may
- * cover.
+ * How much of the lit canvas's mean luminance the doused one must be under.
  *
- * **The first is the control for the control.** A build whose torch key merely
- * *froze* the flicker would hand this block a still frame with the heartbeat
- * still running and the picture still a picture, and pass everything else here;
- * what it cannot do is get darker. Measured: the lit windows read 14.18 and
- * 14.01 of mean luminance and the doused one read 9.18, which is 0.65 of them —
- * the zone keeps its shrine spot and its baked irradiance volume when the
- * torches go out, so the drop is the torches' share of the frame rather than a
- * fade to nothing.
+ * **The control for the control.** A build whose torch key merely *froze* the
+ * flicker would hand this block a still frame with the heartbeat still running
+ * and the picture still a picture, and pass everything else here; what it cannot
+ * do is get darker. Measured 2026-09-04 on radv: the lit window read 16.01 of
+ * mean luminance and the doused one 6.68, which is 0.42 of it, so the drop is
+ * the torches' share of the frame.
  *
- * **The second is the control for the stillness claim.** "The picture stopped
- * changing when the lights went out" has a cheap wrong explanation — the frame
- * went black, and a black frame is trivially still — so the doused canvas has
- * to still be a *picture*: no single quantised colour covering more of it than
- * this. Measured at 0.53 with the torches out, against 0.39 with them lit.
+ * # The blank-frame control is no longer a share of one colour
+ *
+ * It was until 2026-09-04: the doused canvas had to be a *picture*, no single
+ * quantised colour covering more than 0.85 of it, measured at 0.53 with the
+ * torches out. **That reading was of a zone lit by a baked irradiance volume**,
+ * and the bake went in `85e4f7a` under the no-bake rule. What lights the zone
+ * now when its torches are out is `apps/shard`'s shrine spot, which stands in
+ * one corner of it, and an ambient floor — so the room quantises to one byte
+ * over 95% of the canvas on a frame that is drawn correctly.
+ *
+ * **It was not widened, because no threshold on this canvas can do the job.**
+ * Measured against a build whose doused zone is lit by *nothing at all* — the
+ * ambient zeroed and the light list emptied — the whole canvas reads:
+ *
+ * ```text
+ *                        drawn    lit by nothing
+ *   mean luma / lit      0.42          0.35
+ *   flattest colour     94.9%         95.1%
+ *   distinct colours        8             7
+ * ```
+ *
+ * Every one of those is a gap a threshold cannot sit in, and the reason is that
+ * `crcbl-ui` draws the HUD onto this same canvas: the overlay is the brighter
+ * half of all six numbers and it does not go out when the torches do. See
+ * [`TORCH_INSET`], which is what the surviving control measures instead.
  */
 const TORCH_DARKER_RATIO = 0.95;
-const TORCH_FLAT_SHARE = 0.85;
 
 /**
  * How many particles sparks' switchable emitter must hold before its count
@@ -2656,7 +2705,7 @@ const launch = (binary, mode) =>
  * that block: a five-bit shift throws away exactly the small, smooth brightness
  * swings a flickering torch produces on a wall.
  */
-const SAMPLE_CANVAS = (selector) => `(async () => {
+const SAMPLE_CANVAS = (selector, inset = 0) => `(async () => {
   const canvas = document.querySelector(${JSON.stringify(selector)});
   if (!canvas || !canvas.width || !canvas.height) return null;
   const image = new Image();
@@ -2668,20 +2717,46 @@ const SAMPLE_CANVAS = (selector) => `(async () => {
   const context = scratch.getContext('2d', { willReadFrequently: true });
   context.drawImage(image, 0, 0);
   const pixels = context.getImageData(0, 0, scratch.width, scratch.height).data;
+  // The inset window, accumulated in the same walk rather than sampled again:
+  // \`toDataURL\` is what costs, so a second statistic over a sub-rectangle is
+  // free and a second sample is not. Zero leaves it equal to the whole canvas.
+  const inset = ${JSON.stringify(inset)};
+  const left = Math.floor(scratch.width * inset);
+  const top = Math.floor(scratch.height * inset);
+  const right = scratch.width - left;
+  const bottom = scratch.height - top;
   const histogram = new Map();
+  const inner = new Map();
   let hash = 2166136261;
   let light = 0;
+  let innerLight = 0;
+  let innerCount = 0;
   for (let i = 0; i < pixels.length; i += 4) {
     const key = ((pixels[i] >> 3) << 10) | ((pixels[i + 1] >> 3) << 5) | (pixels[i + 2] >> 3);
     histogram.set(key, (histogram.get(key) ?? 0) + 1);
     hash = Math.imul(hash ^ pixels[i], 16777619);
     hash = Math.imul(hash ^ pixels[i + 1], 16777619);
     hash = Math.imul(hash ^ pixels[i + 2], 16777619);
-    light += 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
+    const luma = 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
+    light += luma;
+    const pixel = i / 4;
+    const px = pixel % scratch.width;
+    const py = (pixel - px) / scratch.width;
+    if (px >= left && px < right && py >= top && py < bottom) {
+      inner.set(key, (inner.get(key) ?? 0) + 1);
+      innerLight += luma;
+      innerCount += 1;
+    }
   }
   const ranked = [...histogram.entries()].sort((a, b) => b[1] - a[1]);
+  const innerRanked = [...inner.entries()].sort((a, b) => b[1] - a[1]);
   const total = pixels.length / 4;
   return {
+    inner: {
+      distinct: inner.size,
+      luma: innerCount ? innerLight / innerCount : 0,
+      share: innerCount ? (innerRanked[0]?.[1] ?? innerCount) / innerCount : 1,
+    },
     width: scratch.width,
     height: scratch.height,
     distinct: histogram.size,
@@ -4837,14 +4912,21 @@ try {
      * a canvas that stopped changing because the demo stopped running is the
      * other explanation for every still frame, and a rising heartbeat is what
      * rules it out. `flattest` is the largest share any one quantised colour
-     * took of any frame in the window — the black-rectangle control.
+     * took of any frame in the window; it is **reported and not asserted on**
+     * since 2026-09-04. `innerDistinct` is the same count over
+     * [`TORCH_INSET`]'s window, and it is what took the question over — see
+     * that constant for why a share of the whole canvas can no longer answer
+     * it.
      */
     const sampleWindow = async () => {
       const from = hud().length;
       const taken = [];
       for (let at = 0; at < TORCH_SAMPLES; at += 1) {
         if (at > 0) await pause(TORCH_SAMPLE_GAP_MS);
-        const sample = await evaluate(page, SAMPLE_CANVAS('#canvas'));
+        const sample = await evaluate(
+          page,
+          SAMPLE_CANVAS('#canvas', TORCH_INSET)
+        );
         if (sample) taken.push(sample);
       }
       const lumas = taken.map((sample) => sample.luma);
@@ -4860,6 +4942,22 @@ try {
         flattest: taken.length
           ? Math.max(...taken.map((sample) => sample.top[0]?.share ?? 1))
           : 1,
+        // The fewest distinct quantised colours any frame in the window held.
+        // Reported beside the flat share because the two answer different
+        // questions: a share says how much of the canvas one colour covers, and
+        // this says how many others there are at all.
+        distinct: taken.length
+          ? Math.min(...taken.map((sample) => sample.distinct))
+          : 0,
+        // The same count over [`TORCH_INSET`]'s window, which is the one the
+        // blank-frame control below reads. Zero for an empty window, so a run
+        // that sampled nothing fails that control rather than passing it.
+        innerDistinct: taken.length
+          ? Math.min(...taken.map((sample) => sample.inner?.distinct ?? 0))
+          : 0,
+        innerLuma: taken.length
+          ? Math.min(...taken.map((sample) => sample.inner?.luma ?? 0))
+          : 0,
       };
     };
     /**
@@ -4875,7 +4973,9 @@ try {
       `${window.frames} distinct frame(s) in ${window.samples} sample(s) over ` +
       `${window.beats} beat(s), mean luma ${window.mean.toFixed(2)} swinging ` +
       `${window.spread.toFixed(3)} over ${window.lumas.join(', ')}, flattest ` +
-      `colour ${(window.flattest * 100).toFixed(1)}%`;
+      `colour ${(window.flattest * 100).toFixed(1)}% over ${window.distinct} ` +
+      `distinct colour(s), and ${window.innerDistinct} colour(s) at ` +
+      `${window.innerLuma.toFixed(2)} luma inside`;
 
     const lit = await sampleWindow();
     check(
@@ -4912,14 +5012,14 @@ try {
         out.beats > 0 &&
         out.spread <= TORCH_STILL_LUMA &&
         out.mean <= lit.mean * TORCH_DARKER_RATIO &&
-        out.flattest < TORCH_FLAT_SHARE,
+        out.innerDistinct > 1,
       doused === null
         ? `no heartbeat in ${pollCeiling()} ms said the torches were out — the key ` +
             `never reached the game, so nothing below is about the lighting`
         : `${readWindow(out)}; asked for a swing under ${TORCH_STILL_LUMA}, a ` +
             `mean under ${(lit.mean * TORCH_DARKER_RATIO).toFixed(2)} (the lit ` +
-            `window read ${lit.mean.toFixed(2)}) and no colour over ` +
-            `${(TORCH_FLAT_SHARE * 100).toFixed(0)}%`
+            `window read ${lit.mean.toFixed(2)}) and more than one colour in ` +
+            `the middle ${((1 - 2 * TORCH_INSET) * 100).toFixed(0)}% of the canvas`
     );
 
     // And back, which is what says the stillness was a light going out rather

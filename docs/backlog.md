@@ -113,52 +113,17 @@ in both this file and `docs/plan/46-ambient-occlusion.md`.
   margin they happen to have; the two drivers that were swept read 0 and 2
   against a bound of 8.
 
-## shard's doused zone is 95% one colour since the bake went (2026-09-04)
+## shard's doused zone was never lifted, and the numbers if it should be (2026-09-04)
 
-The shadow-tile-reset fix gave `apps/shard` its frames back, and the browser
-gate now runs 57 checks on it and fails one:
+**Considered and declined, so it is not re-proposed.** When the no-bake rule
+removed `apps/shard`'s baked irradiance volume, its doused zone stopped being a
+picture: one quantised colour covers 95% of the canvas where the browser gate's
+blank-frame control asked for under 85%. The control was re-derived instead —
+see `web/tools/browser-e2e.mjs`'s `TORCH_INSET` for what it now measures and why
+a share of the whole canvas cannot answer the question any more.
 
-```text
-and dousing them leaves a still frame that is darker but not blank —
-mean luma 6.68 swinging 0.000, flattest colour 95.0%; asked for a swing
-under 0.01, a mean under 14.97 and no colour over 85%
-```
-
-Still: yes. Darker: yes. **Blank: also yes**, by the check's own definition.
-Reproduced locally on radv at 6.68 / 94.9%, so this is the demo and not the
-runner.
-
-**The check's premise is the thing that changed, and it is written down in the
-check.** `web/tools/browser-e2e.mjs`'s `TORCH_FLAT_SHARE` doc says the doused
-frame stays a picture because "the zone keeps its shrine spot and its **baked
-irradiance volume** when the torches go out". That bake was removed in `85e4f7a`
-under the no-bake rule. Measured when the doc was written: doused mean luma 9.18
-and flat share 0.53.
-
-**Do not widen the threshold.** The check exists to refuse the cheap wrong
-explanation for stillness — that the frame went black — and 0.95 is that
-explanation arriving.
-
-### What was measured, 2026-09-04
-
-**The bounce is not what is missing.** The gate was run twice, once with
-`crcbl_render::rsm`'s `r_probe_bounce` forced off, which leaves shard's authored
-rows at their zeroes:
-
-```text
-                bounce on    bounce off
-  lit mean        16.01         15.73
-  doused mean      6.68          6.67
-```
-
-So the braziers light the volume and `light::spot` does not: the shrine's spot
-is the coldest and least of the zone's lights and it stands in one corner, so
-the doused frame's only varying term contributes 0.01 of a luma level. The
-punctual producer is working — `apps/lantern`'s tint claim is what proves it —
-and this zone simply has almost nothing left to bounce.
-
-**It is quantisation, and it has a cliff.** `zone::house_light`'s ambient was
-swept over the browser gate, every value inside the `< 0.05` that
+Lifting `zone::house_light`'s ambient was the other candidate and it works. The
+sweep, over the browser gate on radv, every value inside the `< 0.05` that
 `the_house_light_is_an_ambient_floor_and_not_a_sun` pins:
 
 ```text
@@ -169,33 +134,21 @@ swept over the browser gate, every value inside the `< 0.05` that
   0.048, 0.044, 0.049  ×4     19.37        11.20        58.4%
 ```
 
-The share does not fall gradually — it holds at 94% and then collapses. Below
-the cliff the zone's surfaces all round to the same 8-bit value and the frame is
-one colour by arithmetic rather than by absence; above it they separate. The
-non-monotone ×4 reading is the same effect from the other side and is why this
-wants a value chosen off the table rather than off a trend.
+The share holds at 94% and then collapses, which is a quantisation cliff rather
+than a trend — below it the room's surfaces all round to one 8-bit value. So ×3
+would have restored the original control with margin.
 
-**Either of the two lifted values passes the whole check**, with the mean clause
-having margin: at ×3 the doused window reads 9.62 against the 17.50 the lit one
-allows, and the flat share is 50.1% against 85%.
+**It was not taken because `house_light`'s own doc argues against it**: "a flat
+term bright enough to see by would be a room that looks lit whether or not
+anything lit it". At ×3 the doused room reads 0.52 of the lit one where it reads
+0.42 today, which is a visible change to how a doused zone looks. The table is
+kept here so that a later decision to make the zone legible when its torches are
+out does not have to re-run the sweep.
 
-### The decision, which is the user's
-
-`house_light`'s own doc argues against the lift: "a flat term bright enough to
-see by would be a room that looks lit whether or not anything lit it". At ×3 the
-doused room reads 0.52 of the lit one where it reads 0.42 today, so this is a
-visible change to how a doused zone looks, not a tuning detail. The options:
-
-- **Lift the ambient to ×3.** One line in `zone::house_light`, passes the gate,
-  measured above. Costs the look the doc argues for.
-- **Give the shrine spot something to bounce** — more reach or intensity, so the
-  doused zone has a varying term rather than a floor. Unmeasured, and it changes
-  the lit frame too.
-- **Re-derive the check** against what a torch-lit zone with its torches out
-  should actually look like. The flat-share clause is the one that no longer
-  matches the scene; the swing and mean clauses still do.
-
-Until it is decided the Pages run has one red check and does not deploy.
+**What is still true and is nobody's bug**: the zone's only surviving light is
+the shrine spot, which is faint and stands in one corner, so the doused frame
+carries almost nothing that varies. `light::torches` records the measurement
+that says so.
 
 ## The SSR visibility weight costs the software tier 11% of a frame (2026-09-04)
 
