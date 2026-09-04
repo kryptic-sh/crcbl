@@ -360,19 +360,27 @@ put `crcbl_render::DebugView::BentNormal` up, and
 in `apps/alcove/tests/golden.rs` holds a golden and four readings. What the
 slice did not do:
 
-- **One pose and one arm.** Every reading and the golden are the fixed camera at
-  `Arm::shipped()` — the shipped gather, the shipped radius, no seam. The
-  `hemisphere` gather writes the zero sentinel on every pixel and therefore
-  draws mid grey everywhere under this view; that is the honest picture, and
-  nothing asserts it **on that gather** —
-  `the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gathered`
-  holds the same grey with `r_ssao_bent_normals` off and with the occlusion pass
-  out, and neither of those arms is `hemisphere` running. So a cheap tier that
-  started reporting a direction would go unnoticed. `court::rim_camera` is not
-  drawn under the view either, and it is the pose where a depth-reconstructed
-  normal is wrong — a bent direction at a silhouette is exactly where topic 18's
-  escalation clause would show, and no claim is made about it.
-
+- **The rim pose says the escalation clause does not show, and neither new frame
+  is blessed.** `the_bent_direction_beside_a_silhouette_is_the_walls_own_normal`
+  draws `court::rim_camera` under the view on the shipped gather and holds the
+  wall — every pixel from `court::rim_outside`'s column in to the column the
+  sphere's limb projects into, on the sphere's widest row — at the wall's own
+  normal, half a code on both adapters, with the first pixel of sphere past that
+  column as the anti-vacuity. So the claim that pose supports is that the
+  direction does **not** lean: the far wall is four occlusion radii behind the
+  sphere, nothing on it is inside the wall's gather, and a depth-reconstructed
+  normal's error at the silhouette never reaches the picture — the same reason
+  the scalar's halo is zero there. `docs/plan/18-render-features.md`'s
+  escalation clause is therefore still unwitnessed by any bent-direction
+  reading, and a pose that would witness it needs an occluder within one
+  occlusion radius of the surface behind it, which this court does not have
+  anywhere the fixed or the rim camera can see. Separately, `bent-normal.png` is
+  still the only checked-in bent picture: the rim's bent frame is held by its
+  two readings and by nothing else, and the sentinel arms —
+  `r_ssao_bent_normals` off, the occlusion pass out, and the `hemisphere` gather
+  — are held by the whole-frame scan. Blessing the rim's is a fifth entry in
+  `the_court_matches_its_goldens` and was left because the readings, not a
+  picture, are what say it is right.
 - **No run opens on either view flag; only the parse and the write are held.**
   `the_two_view_flags_name_one_picture_and_the_last_one_wins` and
   `apply_puts_the_flags_picture_up_and_leaves_the_cell_alone_without_one` in

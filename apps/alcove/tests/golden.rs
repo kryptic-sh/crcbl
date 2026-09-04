@@ -1391,13 +1391,24 @@ const SHIPPED_OFF_SENTINEL: f32 = 28.0;
 /// those is the frame the sentinel makes, and until this test nothing in this
 /// crate drew it.
 ///
-/// **Two arms, because there are two ways to have no direction and they must
+/// **Three arms, because there are three ways to have no direction and they must
 /// draw the same picture.** `r_ssao_bent_normals` off leaves the gather running
 /// and writing its scalar with the direction taken out of the arithmetic;
 /// `RenderEffects::AMBIENT_OCCLUSION` out takes the whole pass away and leaves
 /// `crcbl_render::forward`'s 1×1 placeholder, whose `gba` are the same sentinel
-/// bytes. `mesh.slang` says both are the mid grey and `web/pages/alcove.html`
-/// tells a visitor to expect it; this is what holds them to it.
+/// bytes; and the `hemisphere` gather never had a direction to report —
+/// `shaders/ssao_hemisphere.slang` sums depth comparisons instead of sweeping a
+/// horizon, so there is no bisector to accumulate and it writes the sentinel
+/// beside every scalar it produces, with `r_ssao_bent_normals` left nothing to
+/// switch. `mesh.slang` says all three are the mid grey and
+/// `web/pages/alcove.html` tells a visitor to expect it; this is what holds them
+/// to it.
+///
+/// **The cheap tier is the arm this test exists for.** The other two are states a
+/// fixture arranges and nobody runs; `hemisphere` is a tier a person selects from
+/// the pause panel or from `r_ssao_technique`, so it is the one where a gather
+/// that had started reporting a direction would ship — and the flat grey is the
+/// honest picture of a tier that has none.
 ///
 /// **The claim is every pixel, not a block average.** The sentinel picture has no
 /// features in it to place a reading on, so a block mean would be four samples of
@@ -1408,11 +1419,11 @@ const SHIPPED_OFF_SENTINEL: f32 = 28.0;
 ///
 /// # What was measured
 ///
-/// Every pixel of both arms at [`EXTENT`], on radv (AMD Radeon RX 7900 XTX, RADV
-/// NAVI31) and on lavapipe (llvmpipe, LLVM 22.1.8). Both drivers, both arms:
+/// Every pixel of all three arms at [`EXTENT`], on radv (AMD Radeon RX 7900 XTX,
+/// RADV NAVI31) and on lavapipe (llvmpipe, LLVM 22.1.8). Both drivers, every arm:
 /// **0.16** codes off the encoded grey of 187.84 at the worst pixel, which is the
 /// distance from that grey to the byte 188 it rounds to — so the picture is that
-/// one byte at every pixel of both frames.
+/// one byte at every pixel of all three frames.
 ///
 /// The shipped bent arm at the same four blocks, in codes off the same grey on
 /// its furthest channel:
@@ -1443,6 +1454,11 @@ const SHIPPED_OFF_SENTINEL: f32 = 28.0;
 ///   wired to a constant would put up on every arm. The scan above passed on both
 ///   arms and the blocks are what caught it:
 ///   `open floor draws [188.0, 188.0, 188.0] on the shipped bent arm, 0.16 codes off the sentinel grey 187.84 and short of 28`.
+/// * **The hemisphere arm made the shipped one**, by drawing it `on("gtao")` —
+///   which is what a cheap tier wired to the shipped gather's pipeline would
+///   draw, and what a hemisphere gather that had grown a bent direction would
+///   look like from here. The scan read the shipped picture:
+///   `the sentinel picture with the hemisphere gather draws [0, 186, 194] at (237, 0), 187.84 codes off the grey 187.84, past 1`.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-alcove-golden.sh"]
 fn the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gathered() {
@@ -1463,6 +1479,10 @@ fn the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gather
         (
             "the occlusion pass out",
             Arm::shipped().without_occlusion().as_bent_direction(),
+        ),
+        (
+            "the hemisphere gather",
+            Arm::shipped().on("hemisphere").as_bent_direction(),
         ),
     ] {
         let (frame, _, _) = draw(EXTENT, arm);
@@ -1522,6 +1542,204 @@ fn the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gather
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The bent direction at a silhouette
+// ---------------------------------------------------------------------------
+
+/// How far the far wall's bent direction may sit from the wall's own normal, in
+/// 0-255 codes, at [`court::rim_camera`]'s framing.
+///
+/// **A ceiling on quantisation, on [`OPEN_FLOOR_BENT_TOLERANCE`]'s terms and for
+/// its reason** — the wall is four occlusion radii behind the sphere, so nothing
+/// is inside its gather and the average unblocked direction on it is the wall's
+/// own `+z`. A constant of its own rather than that one shared, because it
+/// admits a different surface in a different pose: the two would not move
+/// together, and the day one of them has to move is the day sharing it would
+/// have hidden which.
+///
+/// **Swept before it was fixed**, three runs on each adapter and identical in
+/// all three of each. Both readings the test takes, as the worst of the three
+/// channels against the encoded normal `(187.52, 187.52, 255.00)`:
+///
+/// ```text
+/// reading                              radv   lavapipe
+/// the strip in to the limb, worst      0.52       0.52
+/// the first pixel inside the limb    101.52     100.52
+/// ```
+///
+/// So it is set two orders under the silhouette's own step, which is what makes
+/// it a bound that separates "the wall keeps its normal" from "the silhouette
+/// bent it" rather than one that admits both. The second row is
+/// [`RIM_BENT_STRADDLE`]'s.
+const RIM_BENT_TOLERANCE: f32 = 2.5;
+
+/// How far the pixel **inside** the limb must stand off that same normal, in
+/// 0-255 codes.
+///
+/// **Measured and floored at about half of it**, which is [`CORNER_BENT_LEAN`]'s
+/// rule; the sweep is the second row of [`RIM_BENT_TOLERANCE`]'s table.
+///
+/// It carries the whole of this claim's anti-vacuity and it is two claims in
+/// one. A bound on how far the wall beside a silhouette may bend says nothing
+/// unless there is a silhouette there — a frame of flat wall satisfies it
+/// perfectly — and the scan below is a claim about the wall *up to* the limb,
+/// which is worth nothing if the column it stops at is still wall a long way
+/// short of one.
+const RIM_BENT_STRADDLE: f32 = 50.0;
+
+/// **A silhouette does not bend the direction on the wall behind it either.**
+///
+/// [`the_silhouette_does_not_print_on_the_wall_behind_it`] makes the charter's
+/// rim claim about the occlusion channel's scalar. This is the same claim about
+/// the direction beside it, and `docs/plan/18-render-features.md`'s escalation
+/// clause is why both are worth making: the gather is handed no normal buffer
+/// and reconstructs a normal from depth, which is exact on a plane and wrong on
+/// the pixel of wall next to a silhouette. The scalar puts that error through a
+/// `saturate` and a blur; the bent direction is the channel where a wrong normal
+/// is visible as itself, and at this framing the wall either side of the limb is
+/// a region a person can look at.
+///
+/// **What the measurement says is that the error does not reach the picture
+/// here**, and for the reason the scalar's halo does not either: the far wall is
+/// two metres behind the sphere, four times the shipped occlusion radius, so
+/// nothing on the sphere is inside the wall's own gather and the direction the
+/// wall reports is its own normal. That is the claim held below — not a lean
+/// away from the occluder, which this pose does not produce.
+///
+/// **A strip and not only a block.** [`court::rim_outside`] stands a few pixels
+/// clear of the limb, and a reconstructed-normal error is a pixel or two wide —
+/// so a block average there can pass over exactly the pixels the clause is
+/// about. The scan runs along that block's own row, which is the sphere's
+/// widest, from it to the column the limb projects into. The column past that
+/// one is read as well, and it is the reading that says the scan reached the
+/// silhouette instead of stopping short of it in flat wall.
+///
+/// The `hemisphere` gather is not drawn here:
+/// [`the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gathered`]
+/// is where that tier's picture is held, and it is the sentinel everywhere
+/// rather than a direction this pose could ask anything of.
+///
+/// # What was measured
+///
+/// Three runs on radv (AMD Radeon RX 7900 XTX, RADV NAVI31) and three on
+/// lavapipe (llvmpipe, LLVM 22.1.8), identical within each adapter. The wall
+/// beside the limb draws `(188.00, 187.00, 255.00)` against an encoded normal of
+/// `(187.52, 187.52, 255.00)` on both, and the strip in to the limb never leaves
+/// that byte triple. The first pixel of sphere past it draws `(86, 184, 230)` on
+/// radv and `(87, 184, 230)` on lavapipe. The figures are on the two constants
+/// above; the run prints them again on whatever adapter it opened.
+///
+/// # How it was shown to fail
+///
+/// Three runs, one per thing this check says.
+///
+/// * **The strip read off the sphere**, by scanning outwards from the limb
+///   rather than in to it — which is what the reading would do if
+///   [`court::frame_right`] pointed the other way, and it is the sign this whole
+///   claim turns on:
+///   `the wall beside the silhouette draws [86.0, 184.0, 230.0] at column 84 of row 96, 101.52 codes off the wall's own normal [187.51602, 187.51602, 254.99998], past 2.5`.
+/// * **The view never ran**, by dropping `Arm::as_bent_direction` — the shaded
+///   court, which is what a switch wired to nothing leaves:
+///   `the wall beside the silhouette draws [118.0, 121.0, 127.0] at column 77 of row 96, 128.00 codes off the wall's own normal [187.51602, 187.51602, 254.99998], past 2.5`.
+/// * **The straddle taken on the wall**, at the column before the limb rather
+///   than the one after it — which is what a scan that never reached the
+///   silhouette would have to work with:
+///   `the first pixel inside the limb draws [188.0, 187.0, 255.0] at column 82 of row 96, 0.52 codes off the wall's own normal [187.51602, 187.51602, 254.99998] and short of 50`.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-alcove-golden.sh"]
+fn the_bent_direction_beside_a_silhouette_is_the_walls_own_normal() {
+    let camera = court::rim_camera();
+    let (bent, paths, _) = draw(
+        EXTENT,
+        Arm::shipped().framed_on_the_rim().as_bent_direction(),
+    );
+
+    // The far wall's inner face looks down `+z`, encoded `n * 0.5 + 0.5` and put
+    // through the swapchain's encode — the open-floor claim's derived colour, for
+    // the one surface this pose is about.
+    let normal = [srgb_encode(0.5), srgb_encode(0.5), srgb_encode(1.0)];
+    let off = |here: [f32; 3]| {
+        (0..3)
+            .map(|at| (here[at] - normal[at]).abs())
+            .fold(0.0f32, f32::max)
+    };
+
+    let beside = project(&camera, EXTENT, court::rim_outside());
+    // The sphere's limb on that same side, placed from the court's own geometry:
+    // the centre pushed exactly its own radius along `court::frame_right`, which
+    // is the offset `court::rim_outside` adds its clearance to.
+    let limb = project(
+        &camera,
+        EXTENT,
+        court::SPHERE_CENTRE - court::frame_right() * court::SPHERE_RADIUS,
+    )
+    .0;
+    let row = beside.1;
+    assert!(
+        beside.0 < limb,
+        "the block outside the limb is at column {} and the limb projects into column {limb} of \
+         the same row, so the scan between them is empty and asserts nothing",
+        beside.0,
+    );
+
+    // One pixel of that row, as the three floats every reading below is in.
+    let read = |x: u32| {
+        let pixel = bent.pixel(x, row).expect("inside the frame");
+        [
+            f32::from(pixel[0]),
+            f32::from(pixel[1]),
+            f32::from(pixel[2]),
+        ]
+    };
+
+    // **Anti-vacuity first**, because everything below is a bound on wall: the
+    // column past the limb is the sphere, and a run in which it is not is a run
+    // in which the scan stopped somewhere out in flat wall.
+    let silhouette = limb + 1;
+    let inside = read(silhouette);
+    eprintln!(
+        "alcove golden: the bent direction at the rim on {paths} — the first pixel inside the \
+         limb {inside:?} at column {silhouette}, {:.2} codes off the wall's own normal \
+         {normal:?}",
+        off(inside),
+    );
+    assert!(
+        off(inside) > RIM_BENT_STRADDLE,
+        "the first pixel inside the limb draws {inside:?} at column {silhouette} of row {row}, \
+         {:.2} codes off the wall's own normal {normal:?} and short of {RIM_BENT_STRADDLE} — so \
+         the scan below runs out in flat wall rather than up against a silhouette",
+        off(inside),
+    );
+
+    // Every pixel of wall from the block the scalar claim reads to the limb
+    // itself, and the worst one is what the message carries: a reconstructed
+    // normal is wrong on the pixels nearest the discontinuity and right
+    // everywhere else, so an average over the strip would dilute exactly the
+    // reading this is about.
+    let mut worst = (0.0f32, beside.0, [0.0f32; 3]);
+    for x in beside.0..=limb {
+        let here = read(x);
+        if off(here) > worst.0 {
+            worst = (off(here), x, here);
+        }
+    }
+    let (drift, column, drawn) = worst;
+    eprintln!(
+        "alcove golden: the bent direction at the rim on {paths} — columns {}..={limb} of row \
+         {row} are the wall's own normal {normal:?} to {drift:.2} codes, worst {drawn:?} at \
+         column {column}",
+        beside.0,
+    );
+    assert!(
+        drift < RIM_BENT_TOLERANCE,
+        "the wall beside the silhouette draws {drawn:?} at column {column} of row {row}, \
+         {drift:.2} codes off the wall's own normal {normal:?}, past {RIM_BENT_TOLERANCE}. \
+         Nothing on the sphere is within the occlusion radius of that wall, so the average \
+         unblocked direction there is the wall's normal and the silhouette in front of it is \
+         not something the gather may report"
+    );
 }
 
 // ---------------------------------------------------------------------------

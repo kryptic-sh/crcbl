@@ -97,7 +97,8 @@ cannot. `bent-normal.png` is behind those readings rather than in front of them.
 Its anti-vacuity is
 `the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gathered`,
 which draws the picture there is no direction in: with `r_ssao_bent_normals`
-off, and again with the occlusion pass out of the stack, every pixel of the
+off, again with the occlusion pass out of the stack, and again on the
+`hemisphere` gather, which has no direction to report at all, every pixel of the
 frame is the grey `crcbl_shaders::ssao::BENT_NORMAL_NONE` encodes to — and the
 four blocks above are not that grey on the arm that ships.
 
