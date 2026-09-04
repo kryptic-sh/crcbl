@@ -184,26 +184,21 @@ exactly what `disc` draws. `apps/sundial/src/plaza.rs`'s `NEAR` is half a metre
 for that reason and says so, and the split is read back out of `Cascades` by
 `the_colonnade_straddles_the_cascade_split` rather than assumed.
 
-## sundial's page knobs: what is checked, and what is not (2026-09-04)
+## sundial's page knobs: what the browser gate presses (2026-09-04)
 
 `/demos/sundial/` is the second page on the site whose controls are HTML rather
 than keys — `apps/sundial/src/web.rs` exports one call per knob and
 `web/demos/sundial/main.js` binds them. `web/tools/browser-e2e.mjs`'s `sundial`
 row presses **every one of them** and reads the effect off the demo's own
 heartbeat: the seam button, the seam slider, the filter button, the sun's
-stop/start button, the tick slider, the atlas-viewer button and `reset`. Each
-was watched to fail with the export behind it made a no-op, and the `reset`
-sabotage additionally reddened group D's changed-frame check — which is the
-evidence that this row is right to carry no `still`. That is where it differs
-from alcove's row below, where four controls are driven by nothing but a person.
-
-What is **not** checked is `__crcbl_sundial_sun_sweep`. The gate never reads the
-tick slider's `max`, so a sweep export answering a wrong number would give the
-page a slider spanning the wrong range and every check would still pass, because
-they compare the slider's value against the heartbeat rather than against the
-sweep. Closing it wants either the `max` read out of the DOM and held against a
-number this gate spells — a copy of `sun::SWEEP_TICKS` that goes stale — or a
-second field on `Sundial::log_heartbeat`'s line.
+stop/start button, the tick slider, the atlas-viewer button and `reset`. It also
+holds the tick slider's `max` against the sweep the heartbeat names —
+`sun::Sky::row` prints `tick N of SWEEP_TICKS`, so the arc is the engine's own
+answer rather than a copy of the constant kept here. Each was watched to fail
+with the export behind it made a no-op, and the `reset` sabotage additionally
+reddened group D's changed-frame check — which is the evidence that this row is
+right to carry no `still`. That is where it differs from alcove's row below,
+where four controls are driven by nothing but a person.
 
 ## sundial's page: a filter cycle button rather than a select (2026-09-04)
 

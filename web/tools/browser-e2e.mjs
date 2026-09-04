@@ -986,6 +986,11 @@ const EXPECTATIONS = {
       // the canvas and the engine pauses on blur, so a sun that stopped because
       // nothing was ticking would pass a check that only watched the sun.
       sunField: /\bsun: tick (\d+)/,
+      // **The sweep the tick slider has to span**, off the same heartbeat
+      // field: `crate::sun::Sky::row` prints `tick N of SWEEP_TICKS`, so the
+      // engine names its own arc on every line and this gate keeps no copy of
+      // the constant to go stale.
+      sweepField: /\bsun: tick \d+ of (\d+)/,
       loopField: /\[HUD\] tick: (\d+)/,
     },
   },
@@ -4098,6 +4103,34 @@ try {
             ? `the sun held at ${[...suns].join(', ') || '(nothing)'} across ` +
               `${loops.size} loop tick(s): ${[...loops].join(', ')}`
             : `no ${HELD_BEATS} heartbeats in ${pollCeiling()} ms after the press`
+      );
+
+      // **And the track it scrubs along is the engine's own arc.**
+      // `web/pages/sundial.html` gives the slider no `max` at all;
+      // `web/demos/sundial/main.js` sets it from
+      // `__crcbl_sundial_sun_sweep`, and nothing else here reads it — an
+      // export answering a wrong number would leave the page a slider spanning
+      // the wrong sweep while the drag below still landed somewhere and every
+      // check passed. The heartbeat already carries the answer, so the two are
+      // held against each other rather than against a number written down
+      // here. The far end is the sweep's *last* tick: tick `SWEEP_TICKS` is
+      // tick 0 again, which is why this is one off rather than equal.
+      const swept = stands(hud()[hud().length - 1] ?? '', knobs.sweepField);
+      const spans = String(
+        await evaluate(
+          page,
+          `document.getElementById('${knobs.sunAt}')?.max ?? ''`
+        )
+      );
+      check(
+        'C',
+        "the tick slider spans the engine's own sweep",
+        swept !== '' && spans === String(Number(swept) - 1),
+        swept === ''
+          ? 'no sweep on the heartbeat to hold the slider against: ' +
+              `${hud()[hud().length - 1] ?? '(no heartbeat at all)'}`
+          : `the slider's max is ${spans || '(unset)'} and the heartbeat's ` +
+              `sweep is ${swept} ticks, whose last is ${Number(swept) - 1}`
       );
 
       // **And the slider scrubs it.** Compared against the slider's own value
