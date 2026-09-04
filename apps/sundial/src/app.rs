@@ -180,7 +180,7 @@ impl Sundial {
     /// a grey one and a stat over the canvas mixes the scene with the HUD drawn
     /// over it. `crcbl::debug_view::current` is the cell every route to it
     /// writes, and printing it here is what makes
-    /// [`crate::web::__crcbl_sundial_atlas_view`]'s effect a reading rather
+    /// `crate::web::__crcbl_sundial_atlas_view`'s effect a reading rather
     /// than an inference. `apps/quarry`'s heartbeat carries the same field for
     /// the same reason.
     fn log_heartbeat(&self) {
