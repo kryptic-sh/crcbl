@@ -6539,6 +6539,16 @@ impl ForwardRenderer {
                 // name. Carrying the camera's matrix would still be a block that
                 // says a cascade moved the way the viewer did.
                 previous_view_proj: view_proj.to_cols_array(),
+                // **Not the console's filter row.** `depth_pipeline` names no
+                // fragment stage, so nothing drawing these views reads it — and
+                // the block's bytes are the atlas cache's record of what a map
+                // was drawn from. Carried, the row made `r_shadow_filter` and
+                // `r_shadow_split` redraw every map in the atlas, and made the
+                // tests that move them redraw it under the cache tests in this
+                // crate's own process. Zeroed, a sampling knob is a sampling
+                // knob. `a_moved_shadow_filter_leaves_a_still_atlas_alone` holds
+                // it there.
+                shadow_filter: [0; 4],
                 ..uniforms
             }
         };
@@ -16047,6 +16057,71 @@ mod tests {
         assert!(
             renderer.shadow_slot_redrawn(0),
             "and the reset is only a reset if the map is actually redrawn"
+        );
+
+        renderer.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **A console knob about *sampling* the atlas does not redraw it.**
+    ///
+    /// `r_shadow_filter` and `r_shadow_split` decide how the colour pass reads
+    /// a map, and not one byte of what the depth pass writes into it. Yet the
+    /// shadow views' blocks are the frame's block spread, and the cache record
+    /// is those blocks' bytes — so until the views zeroed the row, a person
+    /// typing `r_shadow_filter box` redrew every map in the atlas for nothing,
+    /// and in this crate's own test process the filter tests moving that cell
+    /// redrew the atlas under `each_thing_the_atlas_is_drawn_from_redraws_it`
+    /// once in every five or six workspace runs on 2026-09-04. Holding the lock
+    /// here is what makes the move below the only one in flight.
+    #[test]
+    fn a_moved_shadow_filter_leaves_a_still_atlas_alone() {
+        let switch = shadow_filter_switch();
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let (mut renderer, _) = shadow_cache_scene(device, queue);
+        let camera = Camera::default();
+        let sun = DirectionalLight::default();
+        let mut seen = 0usize;
+        assert!(
+            drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ),
+            "the first frame of all draws the atlas"
+        );
+        assert!(
+            !drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ),
+            "a still second frame has to hold it, or the move below proves nothing"
+        );
+
+        switch.filter(shadow::Filter::Box);
+        switch.seam(0.5);
+        assert!(
+            !drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ),
+            "`r_shadow_filter` and `r_shadow_split` moved and the atlas was drawn again: a \
+             sampling knob reached the record of what the maps were drawn from"
         );
 
         renderer.destroy(device);

@@ -228,6 +228,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Changing the shadow filter redrew the whole shadow atlas.** The shadow
+  views' uniform blocks were the frame's block spread, so the `r_shadow_filter`
+  / `r_shadow_split` row the frame carries since this release reached the atlas
+  cache's record of what each map was drawn from, and a typed
+  `r_shadow_filter box` redrew every map for a knob the depth pass never reads.
+  The views now zero that row; a sampling knob leaves a still atlas alone.
+
 - **`alcove`'s slot walls were inside out.** The two walls either side of the
   slot are the court's one turned box, and its builder spelled the six faces a
   second time with four of them wound clockwise — so the walls' tops, undersides
