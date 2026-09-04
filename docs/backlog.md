@@ -196,13 +196,25 @@ golden of their own and a button on the page. What is still **not** done:
   which case the test refuses the run rather than passing it, which is the
   failure mode to expect. Widening it wants either a pose that sees more of that
   pavement or a caster placed for it.
-- **The viewer is only exercised over whole root cells.** The e2e reads cascade
-  0 and one free slot of the light region, and both are whole cells of
-  `crcbl_render::shadow`'s grid. `atlas_view.slang`'s border loop reads each
-  slot's `FrameUniforms::shadow_atlas_rect`, so a map the allocator put in a
-  _subdivided_ cell is bordered at its real size — that path is written and
-  nothing observes it. A scene with more shadowed lights than the atlas has root
-  cells would reach it.
+- **The viewer is exercised over one subdivided cell, at one level.**
+  `the_atlas_view_borders_a_subdivided_slot_at_its_own_size` (2026-09-05) draws
+  a spot demoted by `SUBDIVIDED_CAMERA_UP` and reads the border on the
+  quarter-cell's far edges — which are interior to its root cell, where a grid
+  drawn on whole cells leaves grey — and the absence of one on the root cell's
+  own far edges, so the two viewers are told apart. What is still nobody's claim
+  is the rest of `atlas::TILE_LEVELS`' ladder: only a quarter of a cell is ever
+  drawn, so a sixteenth or a `MIN_TILE` tile — a handful of frame pixels a side
+  at the fixture's extent, against a `BORDER_PIXELS` border on each edge — is
+  bordered by nothing anybody has looked at. The check's own width guard is what
+  would refuse such a frame rather than pass it.
+- **Subdivision is the coverage ladder's doing, not the allocator running out.**
+  Recorded because the entry this replaces said the opposite: a scene with more
+  shadowed lights than the atlas has root cells subdivides nothing.
+  `Selection::lay_out` spends the coarsest requests first and its allocation
+  cannot run out — which is why the failure there is `unreachable!` rather than
+  a fallback. What hands out a halving is `shadow::tile_level` on a light's
+  `coverage`, so the way to reach a subdivided cell from a test is one light
+  whose map covers little of the frame, not a crowd of them.
 - **A frame at a render scale below one draws the readout through the upscale.**
   The pass writes the internal target, which the upscale then filters to the
   caller's extent — so at `set_render_scale(0.5)` the atlas is a Catmull-Rom
