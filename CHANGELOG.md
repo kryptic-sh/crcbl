@@ -35,6 +35,44 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The cascade overlay reaches `apps/sundial`'s golden suite and its page.**
+  `crcbl_render::DebugView::Cascades` has been on the `C` key and the pause
+  panel's `CASCADES` row since it landed, and nothing else reached it: no golden
+  drew it, so it could change unnoticed, and a visitor with no keyboard could
+  not put it up at all. `__crcbl_sundial_cascades` is the export — the same
+  `crcbl::debug_view` cell `C` and a typed `debug_view cascades` write, so
+  putting it up takes the atlas viewer down — a button beside the atlas one on
+  `/demos/sundial/` is the control, and `apps/sundial/tests/golden.rs` blesses
+  `plaza-cascades.png` with two readings placed from `crcbl::render::Cascades`'
+  own split in front of it: one inside cascade 0 and clear of the cross-fade
+  band, one past the split, which have to come out on opposite sides of the
+  red-over-blue axis `crcbl_shaders::mesh::CASCADE_TINTS` is chosen on — while
+  the same two places with the overlay off must not.
+
+  `web/tools/browser-e2e.mjs`'s debug-view block now takes a **list** of views
+  per demo rather than a single control. `knobs.views` is
+  `{control, label, noun}` entries against one shared `viewField`, so `sundial`
+  declares the atlas viewer and the cascade overlay and `alcove` declares its
+  bent direction, and the gate presses each of them twice — the second press
+  being what says the export toggles rather than only ever setting the view, and
+  what leaves the groups after it the shaded frame they were written against.
+
+- **`apps/sundial`'s milestone 3: the colonnade's shadow crosses the cascade
+  split without a step in it.** `docs/plan/45-shadows.md`'s eighth decision made
+  the cascade switch a band rather than an edge, and the claim had no observer
+  on a scene anyone looks at — `crates/crcbl/tests/forward_e2e/shadow.rs` holds
+  the cascade _overlay_ to the band, which is a picture of the switch rather
+  than the shadow it is about.
+  `the_colonnades_shadow_crosses_the_cascade_split_without_a_step` walks every
+  column of the colonnade's shadow at offsets either side of its own edge, bins
+  the **shadow term** — the frame with the shadow passes off, less the frame
+  with them on — into shells of distance from the eye, and holds each walk's
+  step across the split to the steepest step the same walk shows clear of the
+  band. `plaza::hidden_from` and `plaza::lamplit` are new and are what keep the
+  reading on pavement the camera can see and no lamp reaches; the colonnade
+  hides a good deal of its own floor from the fixture pose, and a walk that did
+  not ask would be reading a column's face.
+
 - **The bent-direction view in `apps/alcove`**, which closes
   `docs/plan/sample/19-alcove.md`'s milestone 3. The engine has drawn
   `crcbl_render::DebugView::BentNormal` since bent normals landed — the

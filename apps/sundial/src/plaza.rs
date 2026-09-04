@@ -611,11 +611,8 @@ fn mesh_of(label: &'static str, fill: impl FnOnce(&mut MeshBuilder)) -> MeshDesc
 /// The colonnade: [`COLONNADE_COUNT`] columns marching away from the camera.
 fn colonnade(builder: &mut MeshBuilder) {
     for index in 0..COLONNADE_COUNT {
-        let foot = column_foot(index);
-        builder.box_outward(
-            Vec3::new(foot.x - COLUMN_HALF, 0.0, foot.z - COLUMN_HALF),
-            Vec3::new(foot.x + COLUMN_HALF, COLUMN_HEIGHT, foot.z + COLUMN_HALF),
-        );
+        let (min, max) = column_box(index);
+        builder.box_outward(min, max);
     }
 }
 
@@ -647,10 +644,8 @@ pub fn plaza() -> SceneDesc<'static> {
                 );
             }),
             mesh_of("parapet", |builder| {
-                builder.box_outward(
-                    Vec3::new(-PARAPET_HALF_WIDTH, 0.0, PARAPET_Z.0),
-                    Vec3::new(PARAPET_HALF_WIDTH, PARAPET_HEIGHT, PARAPET_Z.1),
-                );
+                let (min, max) = parapet_box();
+                builder.box_outward(min, max);
             }),
             mesh_of("colonnade", colonnade),
             mesh_of("plinth", |builder| {
@@ -736,6 +731,105 @@ pub fn place(renderer: &mut ForwardRenderer) -> Result<usize, InstancePoolError>
         placed += 1;
     }
     Ok(placed)
+}
+
+// ---------------------------------------------------------------------------
+// What a reading can see
+// ---------------------------------------------------------------------------
+
+/// Column `index`'s box, as `(min, max)` corners.
+fn column_box(index: usize) -> (Vec3, Vec3) {
+    let foot = column_foot(index);
+    (
+        Vec3::new(foot.x - COLUMN_HALF, 0.0, foot.z - COLUMN_HALF),
+        Vec3::new(foot.x + COLUMN_HALF, COLUMN_HEIGHT, foot.z + COLUMN_HALF),
+    )
+}
+
+/// Counter `index`'s box, on the same terms.
+fn counter_box(index: usize) -> (Vec3, Vec3) {
+    let centre = counter_centre(index);
+    (
+        centre - Vec3::splat(COUNTER_HALF),
+        centre + Vec3::splat(COUNTER_HALF),
+    )
+}
+
+/// The parapet's box, on the same terms.
+fn parapet_box() -> (Vec3, Vec3) {
+    (
+        Vec3::new(-PARAPET_HALF_WIDTH, 0.0, PARAPET_Z.0),
+        Vec3::new(PARAPET_HALF_WIDTH, PARAPET_HEIGHT, PARAPET_Z.1),
+    )
+}
+
+/// Whether the segment from `eye` to `at` passes through the box `min .. max`.
+///
+/// The slab test, with the far end of the segment left open: a reading *on* a
+/// solid's own surface is not a reading hidden by it, and every point this is
+/// asked about is a point on the pavement.
+fn crosses(eye: Vec3, at: Vec3, min: Vec3, max: Vec3) -> bool {
+    /// How much of the segment's far end is left out of the test, as a fraction.
+    ///
+    /// A sight line that ends on the pavement runs into the pavement, and the
+    /// solids stand on it — so without this every reading beside a column's foot
+    /// would answer "hidden by that column".
+    const OPEN_END: f32 = 0.999;
+
+    let along = at - eye;
+    let (mut enter, mut leave) = (0.0f32, OPEN_END);
+    for axis in 0..3 {
+        let (from, span) = (eye[axis], along[axis]);
+        if span.abs() < f32::EPSILON {
+            if from < min[axis] || from > max[axis] {
+                return false;
+            }
+            continue;
+        }
+        let (near, far) = ((min[axis] - from) / span, (max[axis] - from) / span);
+        enter = enter.max(near.min(far));
+        leave = leave.min(near.max(far));
+        if enter > leave {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether any of the plaza's own geometry stands between `eye` and `at`.
+///
+/// **This plaza hides a good deal of its own floor**, and a reading that did not
+/// ask would be a reading of whatever stands in front of the pavement it meant
+/// to measure. The colonnade is the reason: it is a row of [`COLUMN_HEIGHT`]
+/// columns across the middle of the frame, and the shadows it throws land
+/// *behind* it from
+/// [`fixed_camera`] over much of their length — so a walk along one of those
+/// shadows crosses stretches where what the camera sees is a column's own face.
+///
+/// The boxes are the ones [`plaza`] builds its meshes from, through the same
+/// corner helpers, rather than a second copy of them.
+#[must_use]
+pub fn hidden_from(eye: Vec3, at: Vec3) -> bool {
+    (0..COLONNADE_COUNT)
+        .map(column_box)
+        .chain((0..COUNTERS.len()).map(counter_box))
+        .chain([parapet_box(), (PLINTH_MIN, PLINTH_MAX)])
+        .any(|(min, max)| crosses(eye, at, min, max))
+}
+
+/// Whether any of the plaza's punctual lights reaches `at`.
+///
+/// [`lights`]' own radii, which are hard bounds: `PointLight::radius` is where
+/// the shading window reaches zero. A reading inside one of them carries that
+/// lamp's own shadow as well as the sun's, and the two are not the same claim —
+/// a punctual light's map is one tile of the atlas with no cascades in it at
+/// all.
+#[must_use]
+pub fn lamplit(at: Vec3) -> bool {
+    lights().iter().any(|light| {
+        let (position, radius) = light.sphere();
+        position.distance(at) < radius
+    })
 }
 
 // ---------------------------------------------------------------------------

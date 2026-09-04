@@ -114,6 +114,9 @@ struct Arm {
     /// Whether the shadow atlas is drawn over the picture rather than the
     /// picture itself — [`crcbl::render::DebugView::ShadowAtlas`].
     atlas: bool,
+    /// Whether the picture is tinted by the cascade each fragment's sun shadow
+    /// came from — [`crcbl::render::DebugView::Cascades`].
+    cascades: bool,
 }
 
 impl Arm {
@@ -134,6 +137,7 @@ impl Arm {
             tick: sun::FIXTURE_TICK,
             counters: false,
             atlas: false,
+            cascades: false,
         }
     }
 
@@ -185,6 +189,15 @@ impl Arm {
     const fn showing_the_atlas(self) -> Self {
         Self {
             atlas: true,
+            ..self
+        }
+    }
+
+    /// The same arm with the picture tinted by cascade — what `C`, the pause
+    /// panel's `CASCADES` row and the page's own button put up.
+    const fn showing_the_cascades(self) -> Self {
+        Self {
+            cascades: true,
             ..self
         }
     }
@@ -327,6 +340,10 @@ fn build(
     // block — so an arm that does not ask for it records no pass at all and the
     // four goldens blessed before it existed are untouched by its being here.
     renderer.set_atlas_view(arm.atlas);
+    // The cascade overlay, which *is* a lane of the frame block — `mesh.slang`
+    // multiplies the shaded picture by `cascade_tint` — so an arm that does not
+    // ask for it draws the frame it always drew, byte for byte.
+    renderer.set_cascade_view(arm.cascades);
     Ok(renderer)
 }
 
@@ -334,31 +351,38 @@ fn build(
 // Reading the frame
 // ---------------------------------------------------------------------------
 
-/// Where a world point lands in the frame, in pixels.
+/// Where a world point lands in the frame, in pixels, or `None` when it is
+/// behind the camera or off the frame.
 ///
 /// Through the very same [`Camera::view_projection`] the frame was drawn with,
 /// so a claim about a surface is a claim about the pixels that surface actually
 /// covers.
-fn project(camera: &Camera, extent: (u32, u32), point: Vec3) -> (u32, u32) {
+fn on_screen(camera: &Camera, extent: (u32, u32), point: Vec3) -> Option<(u32, u32)> {
     #[allow(clippy::cast_precision_loss)]
     let aspect = extent.0 as f32 / extent.1 as f32;
     let clip = camera.view_projection(aspect) * point.extend(1.0);
-    assert!(
-        clip.w > 0.0,
-        "{point:?} is behind the camera, so nothing in the frame is about it"
-    );
+    if clip.w <= 0.0 {
+        return None;
+    }
     let ndc = clip.truncate() / clip.w;
     #[allow(clippy::cast_precision_loss)]
     let (width, height) = (extent.0 as f32, extent.1 as f32);
     let x = (ndc.x + 1.0) * 0.5 * width;
     let y = (1.0 - ndc.y) * 0.5 * height;
-    assert!(
-        x >= 0.0 && x < width && y >= 0.0 && y < height,
-        "{point:?} projects to ({x:.1}, {y:.1}), outside a {width}x{height} frame — \
-         the claim about it would be about a pixel that is not there"
-    );
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    (x as u32, y as u32)
+    (x >= 0.0 && x < width && y >= 0.0 && y < height).then_some((x as u32, y as u32))
+}
+
+/// Where a world point lands in the frame, for a reading that has no answer if
+/// it lands nowhere.
+fn project(camera: &Camera, extent: (u32, u32), point: Vec3) -> (u32, u32) {
+    on_screen(camera, extent, point).unwrap_or_else(|| {
+        panic!(
+            "{point:?} is behind a {}x{} frame or outside it, so the claim about it would be \
+             about a pixel that is not there",
+            extent.0, extent.1,
+        )
+    })
 }
 
 /// Mean luminance of a block of pixels around `centre`, out of 255.
@@ -1000,14 +1024,39 @@ fn level_at(image: &Image, at: (u32, u32)) -> f32 {
     f32::from(image.pixel(at.0, at.1).expect("inside the frame")[0])
 }
 
-/// How far red leads blue at `at`, in 0-255 codes.
+/// How far red leads blue over a block around `centre`, in 0-255 codes.
 ///
-/// The reading that separates the tile borders from every grey in the picture:
-/// `crcbl::shaders::atlas_view::BORDER_TINT` is amber and everything else the
-/// viewer draws is a grey, so the two are not on one axis at all.
+/// A difference of channels rather than of brightness, which is what survives
+/// the tonemap and a surface that is not white — and what both readings taken on
+/// this axis are about: `crcbl::shaders::atlas_view::BORDER_TINT` is amber where
+/// everything else the atlas viewer draws is a grey, and
+/// `crcbl::shaders::mesh::CASCADE_TINTS` is red-dominant for the near cascade
+/// and blue-dominant for the far one.
+fn tint_over(image: &Image, centre: (u32, u32), half: (u32, u32)) -> f32 {
+    let (mut total, mut count) = (0.0f32, 0u32);
+    let x0 = centre.0.saturating_sub(half.0);
+    let y0 = centre.1.saturating_sub(half.1);
+    let x1 = (centre.0 + half.0).min(image.width().saturating_sub(1));
+    let y1 = (centre.1 + half.1).min(image.height().saturating_sub(1));
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let pixel = image
+                .pixel(x, y)
+                .unwrap_or_else(|| panic!("({x}, {y}) is inside the frame"));
+            total += f32::from(pixel[0]) - f32::from(pixel[2]);
+            count += 1;
+        }
+    }
+    assert!(count > 0, "an empty block at {centre:?} measures nothing");
+    #[allow(clippy::cast_precision_loss)]
+    {
+        total / count as f32
+    }
+}
+
+/// How far red leads blue at `at`, in 0-255 codes.
 fn tint_at(image: &Image, at: (u32, u32)) -> f32 {
-    let pixel = image.pixel(at.0, at.1).expect("inside the frame");
-    f32::from(pixel[0]) - f32::from(pixel[2])
+    tint_over(image, at, (0, 0))
 }
 
 /// Which root cell of the atlas the sun's near cascade is rendered into.
@@ -1156,6 +1205,188 @@ fn the_atlas_viewer_draws_the_atlas_and_borders_the_cascade_it_rendered() {
 
     // And last, the picture itself, on the four goldens' terms.
     match check_golden(&image, "plaza-atlas", &paths) {
+        Ok(line) => eprintln!("sundial golden: {line}"),
+        Err(fault) => panic!("{fault}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The cascade overlay
+// ---------------------------------------------------------------------------
+
+/// Where the overlay's near reading is taken, on the pavement.
+///
+/// **Open pavement in front of the plinth and to its `+x` side.** Three things
+/// are wanted of it and the test reads all three off the plaza rather than
+/// trusting this paragraph: it is inside cascade 0 and clear of the cross-fade
+/// band, where the tint is one cascade's own rather than a mixture; the fixed
+/// camera can see it, on [`plaza::hidden_from`]'s terms; and no lamp reaches it,
+/// so the surface under the tint is lit by the sun alone.
+///
+/// [`plaza::OPEN_PAVEMENT`] is the other end of the reading and is the plaza's
+/// own control point — in full sun at every tick and outside every lamp — which
+/// happens to stand well past the split.
+const CASCADE_NEAR_READING: Vec3 = Vec3::new(1.2, 0.0, 3.6);
+
+/// How far apart the two readings have to stand on the red-over-blue axis, in
+/// 0-255 codes.
+///
+/// **Swept, not guessed**, at [`EXTENT`] over [`block_for`]'s block, on both
+/// Vulkan adapters this workspace runs locally, with the overlay on and off:
+///
+/// | reading | radv | radv, overlay off | lavapipe | lavapipe, overlay off |
+/// | --- | --- | --- | --- | --- |
+/// | the cascade 0 reading | `+79.9` | `+6.9` | `+79.6` | `+7.0` |
+/// | the reading past the split | `-74.1` | `+7.7` | `-74.2` | `+7.7` |
+/// | the gap between the two | `154.0` | `0.8` | `153.8` | `0.7` |
+///
+/// The two adapters agree to a tenth of a code on every one of them. Floored at
+/// about half the gap the overlay opens, which is still two orders above what
+/// the plaza's own colour puts between the two places —
+/// [`CASCADE_PLAZA_FLATNESS`] is that.
+const CASCADE_OVERLAY_LEVELS: f32 = 64.0;
+
+/// How flat the same two readings have to be with the overlay **off**, in the
+/// same codes.
+///
+/// The anti-vacuity constant, and a different measurement rather than the same
+/// one loosened: what it bounds is the plaza's *own* spread across the two
+/// places, which is what a test measuring the scene instead of the overlay would
+/// be reporting. The figures are on [`CASCADE_OVERLAY_LEVELS`].
+const CASCADE_PLAZA_FLATNESS: f32 = 4.0;
+
+/// **The cascade overlay tints the plaza by the cascade each fragment's sun
+/// shadow came from**, and it reaches this fixture's own frame.
+///
+/// `docs/plan/sample/18-sundial.md`'s milestone 1 diagnostic, the other half of
+/// the pair the atlas viewer is one of. `crates/crcbl/tests/forward_e2e/
+/// shadow.rs` holds the overlay to the *band* on the engine's own pavement —
+/// three readings across one cross-fade, and the middle one strictly between its
+/// neighbours. What is added here is that the picture reaches **this** frame —
+/// the plaza, at the pose the goldens are blessed from, through the sample's own
+/// effect stack — and a golden of it, so the picture `C`, the pause panel's
+/// `CASCADES` row and the page's own button all put up is one that cannot change
+/// unnoticed.
+///
+/// Two readings, placed from [`crcbl::render::Cascades`]' own split rather than
+/// written down: one inside cascade 0 and clear of the band, one past the split.
+/// `crcbl::shaders::mesh::CASCADE_TINTS` is red-dominant for the near cascade
+/// and blue-dominant for the far one, so the two have to come out on opposite
+/// sides of the red-over-blue axis.
+///
+/// **Anti-vacuity.** The two tints have to differ, or no arrangement of readings
+/// could tell the cascades apart — they are compared. The same two places with
+/// the overlay *off* must not order themselves the same way, or this is a
+/// picture of the plaza's own colour and would hold with the overlay deleted —
+/// [`CASCADE_PLAZA_FLATNESS`] is that half. And both places have to be lit, or a
+/// tint multiplied into a dark pixel is a reading of the dark pixel —
+/// [`LIT_PAVEMENT`] is read off the frame with the overlay off.
+///
+/// # How it was shown to fail
+///
+/// Three runs, one per thing this check says, all on radv.
+///
+/// * **The overlay never ran**, by drawing the tinted arm as
+///   [`Arm::shipped`]: *"the cascade 0 reading (6.9) is not 64 codes redder
+///   than the one past the split (7.7), so the overlay is not reaching this
+///   frame."* Those two numbers are the plaza's own colour at the two places,
+///   which is what the second assertion is a bound on.
+/// * **The flatness half read the tinted frame** rather than the plain one,
+///   which is what a control taken off the wrong picture would look like:
+///   *"the plaza already separates these two places by 154.0 codes with the
+///   overlay off — 79.9 against -74.1."*
+/// * **The golden compared against another tick of the sun**, which moves the
+///   cascade the far reading falls in and nothing else here: both readings
+///   still passed and the comparison failed at `51.6256%` grossly wrong against
+///   a `0.1%` budget. That is the half that says the picture is held to *this*
+///   frame rather than to any frame with two tints in it.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
+fn the_cascade_overlay_tints_the_plaza_by_the_cascade_its_shadow_came_from() {
+    let extent = EXTENT;
+    let camera = plaza::fixed_camera();
+    let sky = sun::Sky::at(sun::FIXTURE_TICK);
+    let reach = plaza::cascade_split(&camera, sky);
+    let band = reach * crcbl::shaders::mesh::CASCADE_FADE_FRACTION;
+    let tints = crcbl::shaders::mesh::CASCADE_TINTS;
+    assert_ne!(
+        tints[0], tints[1],
+        "the two cascades wear one colour, so no arrangement of the readings below could tell \
+         them apart"
+    );
+
+    let places = [
+        ("cascade 0", CASCADE_NEAR_READING),
+        ("past the split", plaza::OPEN_PAVEMENT),
+    ];
+    for (name, at) in places {
+        let apart = at.distance(camera.eye);
+        assert!(
+            if name == "cascade 0" {
+                apart < reach - band
+            } else {
+                apart > reach
+            },
+            "the {name} reading stands {apart:.3} m from the eye, and cascade 0 reaches \
+             {reach:.3} m and fades out from {:.3} — so it is not where this reading says it is",
+            reach - band,
+        );
+        assert!(
+            !plaza::hidden_from(camera.eye, at),
+            "the {name} reading at {at:?} is behind something the plaza stands in front of it, so \
+             the pixel it names is not the pavement"
+        );
+        assert!(
+            !plaza::lamplit(at),
+            "a lamp reaches the {name} reading at {at:?}, so the colour there is the lamp's as \
+             well as the tint's"
+        );
+    }
+
+    let (tinted, paths, _) = draw(extent, Arm::shipped().showing_the_cascades());
+    let (plain, _, _) = draw(extent, Arm::shipped());
+    let block = block_for(extent);
+    let mut readings = Vec::new();
+    for (name, at) in places {
+        let pixel = project(&camera, extent, at);
+        let (on, off) = (
+            tint_over(&tinted, pixel, block),
+            tint_over(&plain, pixel, block),
+        );
+        let lit = brightness(&plain, pixel, block);
+        eprintln!(
+            "sundial golden: the cascade overlay on {paths} — the {name} reading at {at:?} is \
+             pixel {pixel:?}, {apart:.3} m from the eye: red over blue {on:.1} with the overlay \
+             on and {off:.1} with it off, and the surface under it reads {lit:.2}/255",
+            apart = at.distance(camera.eye),
+        );
+        assert!(
+            lit > LIT_PAVEMENT,
+            "the {name} reading reads {lit:.2}/255 with no overlay on it, under the \
+             {LIT_PAVEMENT} lit pavement stands at — a tint multiplied into a dark pixel is a \
+             reading of the dark pixel"
+        );
+        readings.push((name, on, off));
+    }
+
+    let [(_, near_on, near_off), (_, far_on, far_off)] =
+        <[(&str, f32, f32); 2]>::try_from(readings.as_slice()).expect("two readings");
+    assert!(
+        near_on - far_on > CASCADE_OVERLAY_LEVELS,
+        "the cascade 0 reading ({near_on:.1}) is not {CASCADE_OVERLAY_LEVELS} codes redder than \
+         the one past the split ({far_on:.1}), so the overlay is not reaching this frame — or \
+         both places wear one cascade's colour"
+    );
+    assert!(
+        (near_off - far_off).abs() < CASCADE_PLAZA_FLATNESS,
+        "the plaza already separates these two places by {:.1} codes with the overlay off — \
+         {near_off:.1} against {far_off:.1} — so the ordering above is a picture of the scene's \
+         own colour and would hold with the overlay deleted",
+        (near_off - far_off).abs(),
+    );
+
+    // And last, the picture itself, on the other goldens' terms.
+    match check_golden(&tinted, "plaza-cascades", &paths) {
         Ok(line) => eprintln!("sundial golden: {line}"),
         Err(fault) => panic!("{fault}"),
     }
@@ -1602,5 +1833,484 @@ fn the_grazing_sun_leaves_the_open_pavement_as_smooth_as_the_steep_one_does() {
          covers a steep receiver and not a grazing one",
         grazing_sky.elevation.to_degrees(),
         steep_sky.elevation.to_degrees(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The cascade cross-fade
+// ---------------------------------------------------------------------------
+
+/// How far apart the samples along a column's shadow stand, in metres of
+/// pavement.
+///
+/// Under a pixel at [`CLAIM_EXTENT`] from [`plaza::fixed_camera`], for
+/// [`SCAN_STEP`]'s reason: the walk is sampled at least as finely as the frame
+/// resolves it, so a shell's mean is an average over the pixels it covers rather
+/// than over a handful of them picked by rounding.
+const CASCADE_WALK_STEP: f32 = 0.004;
+
+/// How far from a column's own foot its walk starts, in metres along the shadow.
+///
+/// The shadow's axis begins *inside* the caster — a column is `COLUMN_HALF` on a
+/// side in `plaza` and the axis runs out of its centre — so the first stretch
+/// would read the column's own face rather than the pavement its shadow falls
+/// on. [`plaza::hidden_from`] would refuse those samples anyway; starting past
+/// them is what keeps the walk's own length honest.
+const CASCADE_WALK_CLEARANCE: f32 = 0.45;
+
+/// How far inside cascade 0 the walk reaches, in cross-fade bands.
+const CASCADE_INNER_BANDS: f32 = 2.0;
+
+/// How far past the split it reaches, in the same bands.
+const CASCADE_OUTER_BANDS: f32 = 0.5;
+
+/// How many shells the walk cuts one band into.
+///
+/// **The whole of what separates a band from an edge is here.** A switch with no
+/// band puts its whole change into the *one* pair of neighbouring shells that
+/// straddles the split, whatever this number is; a band spreads the same change
+/// over all of them. So the finer the cut, the further apart the two cases
+/// stand — and the fewer samples each shell holds, which is the other end of it.
+///
+/// **Swept** on radv, as the ratio the test bounds — the steepest step across
+/// the split against the steepest the same walk shows clear of the band — and as
+/// how many walks are left with both:
+///
+/// | shells per band | walks reading across the split | steepest ratio |
+/// | --- | --- | --- |
+/// | 8 | 2 | `3.77` over `2.07` |
+/// | 12 | 3 | `2.83` over `1.55` |
+/// | 16 | 3 | `2.24` over `1.43` |
+/// | 24 | 0 | refused |
+/// | 32 | 0 | refused |
+///
+/// Sixteen. Finer than that the shells stop holding [`CASCADE_SHELL_SAMPLES`],
+/// every walk loses one end of its pair, and the run is refused rather than
+/// passed.
+const CASCADE_SHELLS_PER_BAND: f32 = 16.0;
+
+/// How far off a shadow's own axis each sample stands, in metres.
+///
+/// **The offsets are what make this a reading of a shadow's edge rather than of
+/// its middle.** A cascade switch is a switch of shadow map, and what differs
+/// between the two maps at a vertical caster's shadow is the *width* of the
+/// filter over it: `sun_penumbra_texels` in `shaders/mesh.slang` clamps its
+/// estimate into two to eight texels **of the cascade the fragment landed in**,
+/// and the outer cascade's texel is several times the near one's here. Deep in
+/// the umbra both cascades answer the same nothing and out on the open pavement
+/// both answer the same everything; the difference is at the edge, and these
+/// straddle it — `plaza`'s `COLUMN_HALF` is where the geometric edge stands, and
+/// there are offsets either side of it on both sides of the shadow.
+///
+/// The outermost is inside **half the lateral spacing of the colonnade's
+/// shadows**, which the test asserts rather than assumes: the columns stand
+/// [`plaza::COLONNADE_SPACING`] apart and their shadows are parallel strips, so
+/// an offset past that would be a reading of the next column's shadow.
+const CASCADE_LATERALS: [f32; 12] = [
+    -0.26, -0.22, -0.18, -0.14, -0.10, -0.06, 0.06, 0.10, 0.14, 0.18, 0.22, 0.26,
+];
+
+/// The fewest samples a shell may hold before its mean is used.
+///
+/// A shell that collected fewer is one the colonnade or a lamp's reach hid most
+/// of, and a mean over what is left is a mean over whichever end of the shell
+/// happened to survive. Such a shell is dropped rather than averaged, and the
+/// pairs either side of it with it.
+///
+/// **Swept, and it caught one.** At eight, column 3's walk at `-0.06` m read a
+/// step of `13.88`/255 across the split against `2.05` clear of the band — and
+/// the *same* `13.88` with the band collapsed to an edge, which is what says it
+/// was not the switch at all but a shell the lamp's own reach had left a dozen
+/// samples of. At sixteen that shell is dropped and the walks that remain are
+/// the ones with a shell's worth of pavement behind every reading. At
+/// twenty-four and thirty-two no walk has a pair either side of the split left, and
+/// the test refuses the run rather than passing it.
+const CASCADE_SHELL_SAMPLES: u32 = 16;
+
+/// One walk: one column's shadow, read at one offset from its axis.
+///
+/// Every step below is taken **inside** one of these and never between two, so a
+/// walk the colonnade hid half of contributes the pairs it has and nothing else.
+/// That is what makes it sound to pool the readings of several columns: what is
+/// pooled is the steps, not the levels, and two columns at different distances
+/// from their own shadows legitimately darken the pavement by different amounts.
+#[derive(Clone, Debug)]
+struct Walk {
+    /// Which column of the colonnade it follows.
+    column: usize,
+    /// How far off that column's shadow axis it stands, in metres.
+    lateral: f32,
+    /// The total darkening and the sample count in each shell, in order.
+    shells: Vec<(f32, u32)>,
+}
+
+/// A shadow direction on the pavement, and the perpendicular the offsets step
+/// along.
+///
+/// Both are the *colonnade's*: a vertical column's shadow is its own footprint
+/// swept along the sun, so every column's strip runs along the first of these
+/// and the strips stand apart along the second.
+fn shadow_axes(sky: sun::Sky) -> (Vec3, Vec3) {
+    let towards = sky.towards();
+    let axis = Vec3::new(-towards.x, 0.0, -towards.z).normalize();
+    (axis, Vec3::new(axis.z, 0.0, -axis.x))
+}
+
+/// Where each shell's middle stands, in metres from the eye.
+fn cascade_shells(reach: f32, band: f32) -> Vec<f32> {
+    let near_end = band.mul_add(-CASCADE_INNER_BANDS, reach);
+    let width = band / CASCADE_SHELLS_PER_BAND;
+    let spread = (CASCADE_INNER_BANDS + CASCADE_OUTER_BANDS) * CASCADE_SHELLS_PER_BAND;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a window of a few bands, a few shells to each"
+    )]
+    let count = spread.round() as usize;
+    (0..count)
+        .map(|index| {
+            #[expect(clippy::cast_precision_loss, reason = "a shell index under a hundred")]
+            let middle = index as f32 + 0.5;
+            middle.mul_add(width, near_end)
+        })
+        .collect()
+}
+
+/// Walks every column of the colonnade's shadow across the cascade split and
+/// bins what it reads into shells of distance from the eye.
+///
+/// `shadowed` and `flat` are one frame with the shadow passes on and off, and
+/// what is binned is the **difference**: the pavement's own falloff is in both
+/// and cancels, so what is left is the shadow term alone. A profile of raw luma
+/// would carry the Lambert gradient [`SPECKLE_LUMA`]'s doc measures across this
+/// stretch of plaza, which is larger than every step this reading is about.
+///
+/// A sample is taken only where the camera can **see** the pavement and no lamp
+/// reaches it — [`plaza::hidden_from`] and [`plaza::lamplit`], which are the
+/// plaza's own geometry rather than a copy of it here. Both refusals matter: a
+/// column standing in front of its own neighbour's shadow puts that column's lit
+/// face where the reading expects pavement, and a lamp puts a second shadow with
+/// no cascades in it at all on top of the sun's.
+fn cascade_walks(
+    shadowed: &Image,
+    flat: &Image,
+    camera: &Camera,
+    extent: (u32, u32),
+    sky: sun::Sky,
+    reach: f32,
+    band: f32,
+) -> Vec<Walk> {
+    let (axis, perp) = shadow_axes(sky);
+    let length = plaza::COLUMN_HEIGHT * sky.shadow_reach();
+    let middles = cascade_shells(reach, band);
+    let width = band / CASCADE_SHELLS_PER_BAND;
+    let near_end = middles[0] - width / 2.0;
+    let far_end = middles[middles.len() - 1] + width / 2.0;
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a shadow a few metres long walked in millimetres"
+    )]
+    let steps = ((length - CASCADE_WALK_CLEARANCE) / CASCADE_WALK_STEP) as u32;
+    let mut walks = Vec::new();
+    for column in 0..plaza::COLONNADE_COUNT {
+        let foot = plaza::column_foot(column);
+        for lateral in CASCADE_LATERALS {
+            let mut shells = vec![(0.0f32, 0u32); middles.len()];
+            for step in 0..=steps {
+                let walked =
+                    f32::from(u16::try_from(step).expect("the walk is a few thousand steps"));
+                let along = walked.mul_add(CASCADE_WALK_STEP, CASCADE_WALK_CLEARANCE);
+                let at = foot + axis * along + perp * lateral;
+                let distance = at.distance(camera.eye);
+                if distance < near_end || distance >= far_end {
+                    continue;
+                }
+                if plaza::hidden_from(camera.eye, at) || plaza::lamplit(at) {
+                    continue;
+                }
+                let Some(pixel) = on_screen(camera, extent, at) else {
+                    continue;
+                };
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "guarded into the window on the lines above"
+                )]
+                let shell = (((distance - near_end) / width) as usize).min(shells.len() - 1);
+                shells[shell].0 +=
+                    brightness(flat, pixel, (0, 0)) - brightness(shadowed, pixel, (0, 0));
+                shells[shell].1 += 1;
+            }
+            walks.push(Walk {
+                column,
+                lateral,
+                shells,
+            });
+        }
+    }
+    walks
+}
+
+/// How much darker than the frame with no shadow term the walks have to read on
+/// each side of the split, in luma out of 255.
+///
+/// The anti-vacuity floor, and what says the profiles are readings of the
+/// colonnade's shadow rather than of the open plaza beside it. Walks that had
+/// drifted off the strips would find nothing to darken them, every shell would
+/// read about zero, every step between them would be about zero, and the bound
+/// below would hold on a frame with no shadow in it at all.
+///
+/// **Swept**, at [`CLAIM_EXTENT`] over the window these walks cover, on both
+/// Vulkan adapters this workspace runs locally:
+///
+/// | reading | radv | lavapipe |
+/// | --- | --- | --- |
+/// | mean darkening over the cascade 0 shells | `83.70` | `83.56` |
+/// | mean darkening over the cascade 1 shells | `27.54` | `27.53` |
+///
+/// The two sides differ because the outer cascade's filter is several times
+/// wider — the same shadow, spread — which is the switch this reading is about
+/// and not a fault. Floored at half the thinner of them, because what it bounds
+/// is a shadow being present at all rather than how dark it is.
+const CASCADE_SHADOWED_LEVELS: f32 = 14.0;
+
+/// How much steeper than the steepest step the same walk shows clear of the band
+/// its step across the split may be.
+///
+/// **A ratio and not a level**, because the walks are at different offsets from
+/// their own shadow's edge and darken the pavement by very different amounts:
+/// the question is whether the split is a discontinuity *in the profile it sits
+/// in*, and a level would answer it differently for every offset.
+///
+/// **Swept, not guessed**, at [`CLAIM_EXTENT`] on both Vulkan adapters this
+/// workspace runs locally, against the same frames drawn with
+/// `CASCADE_FADE_FRACTION` in `shaders/mesh.slang` set to zero — the band
+/// collapsed to an edge:
+///
+/// | walk | radv | radv, no band | lavapipe | lavapipe, no band |
+/// | --- | --- | --- | --- | --- |
+/// | column 4 at `-0.26` m | `1.03` | `2.61` | `1.09` | `2.49` |
+/// | column 4 at `-0.22` m | `1.57` | `8.48` | `2.01` | `7.51` |
+/// | column 4 at `-0.18` m | `0.95` | `14.10` | `0.97` | `12.45` |
+///
+/// Five, which is the midpoint of the two worst readings — `2.01` with the band
+/// and `12.45` without it — on a log scale, and so is two and a half times clear
+/// of each. The outermost walk moves least because it stands furthest into the
+/// lit gap between two shadows, where even the outer cascade's filter reaches
+/// only part way.
+const CASCADE_STEP_OVER_NEIGHBOURS: f32 = 5.0;
+
+/// **The colonnade's shadow crosses the cascade split without a step in it.**
+///
+/// `docs/plan/sample/18-sundial.md`'s milestone 3, and
+/// `docs/plan/45-shadows.md`'s eighth decision from this sample's side: where two
+/// cascades meet, both are sampled and the answers are mixed by distance, so the
+/// switch is a **band** and not an edge. `crates/crcbl/tests/forward_e2e/
+/// shadow.rs` holds the cascade *overlay* to that band — the two tints blend
+/// across it — and what is added here is the thing the overlay is a picture of:
+/// the shadow itself, on the fixture the colonnade was laid out for.
+///
+/// # What is read
+///
+/// Every column of the colonnade's shadow, walked from inside cascade 0 out past
+/// the split, at [`CASCADE_LATERALS`]' offsets either side of its own edge, and
+/// binned into shells of **distance from the eye** — the quantity a cascade is
+/// selected by, so a shell is a set of pavement the switch treats alike. What
+/// each shell holds is the **shadow term**: the pixel with the shadow passes
+/// off, less the same pixel with them on, so the pavement's own falloff cancels
+/// and what is left is what the sun's shadow map did there.
+///
+/// A cascade switch changes everything about that answer — the map, the texel
+/// footprint both biases and the filter are denominated in, and the filter's
+/// width with it — so the profile *does* change across the split, and is meant
+/// to. The claim is about **how**: the steepest step between two neighbouring
+/// shells that touches the band is held to the steepest step between two
+/// neighbouring shells that does not, which is what the same walks show with no
+/// switch anywhere near them.
+///
+/// # Anti-vacuity
+///
+/// Four ways this could pass while measuring nothing. The walks could be off the
+/// shadow, where every shell reads zero and every step with it —
+/// [`CASCADE_SHADOWED_LEVELS`] is read off both sides. The two frames could be
+/// one frame, where every darkening is zero by construction — they are compared
+/// as bytes. The control could be zero, where the bound is a bound against
+/// nothing — it is asserted positive. And no pair could straddle the split at
+/// all, where the reading is about two stretches of one cascade — the pair that
+/// does is asserted to exist.
+///
+/// # How it was shown to fail
+///
+/// **By collapsing the band to an edge** — `CASCADE_FADE_FRACTION` in
+/// `shaders/mesh.slang` set to zero and every artifact regenerated — which is
+/// the artefact this exists for and the thing
+/// `docs/plan/45-shadows.md`'s eighth decision removed. On radv:
+///
+/// > column 4's shadow at -0.18 m off its axis steps 17.49/255 between the two
+/// > shells either side of the split at 6.100 m, against 1.24 for the steepest
+/// > pair of shells the same walk has clear of the band — past the 5x this holds
+/// > it to. The cascade switch is an edge in the picture rather than the band
+/// > `CASCADE_FADE_FRACTION` makes of it
+///
+/// and on lavapipe the same walk read `17.55` against `1.41`. Every other
+/// assertion here still passed on those frames — the walks darkened
+/// `83.70`/255 and `28.42` either side of the split, against `83.70` and `27.54`
+/// with the band — so it was this bound that fired and not the floor.
+///
+/// [`CASCADE_SHELL_SAMPLES`]' own doc carries the second run: at eight samples
+/// a shell the near lamp's reach had all but emptied read a `13.88`/255 step
+/// across the split, *and the same `13.88` with the band collapsed*, which is
+/// how a step that was never the cascade's was told from one that is.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
+fn the_colonnades_shadow_crosses_the_cascade_split_without_a_step() {
+    let extent = CLAIM_EXTENT;
+    let camera = plaza::fixed_camera();
+    let sky = sun::Sky::at(sun::FIXTURE_TICK);
+    let reach = plaza::cascade_split(&camera, sky);
+    let band = reach * crcbl::shaders::mesh::CASCADE_FADE_FRACTION;
+
+    // The colonnade's shadows are parallel strips, so an offset past half their
+    // lateral spacing is a reading of the next column's shadow and not of this
+    // one's edge.
+    let (_, perp) = shadow_axes(sky);
+    let spacing = (plaza::column_foot(0) - plaza::column_foot(1))
+        .dot(perp)
+        .abs();
+    let outermost = CASCADE_LATERALS
+        .iter()
+        .fold(0.0f32, |widest, lateral| widest.max(lateral.abs()));
+    assert!(
+        outermost < spacing / 2.0,
+        "the walks read {outermost:.3} m off a shadow's axis and the colonnade's shadows stand \
+         {spacing:.3} m apart across it, so the outermost offset is inside the next column's \
+         shadow rather than beside this one's"
+    );
+
+    let (shadowed, paths, _) = draw(extent, Arm::shipped());
+    let (flat, _, _) = draw(extent, Arm::shipped().without_shadows());
+    assert!(
+        shadowed.pixels() != flat.pixels(),
+        "the shadow passes drew the same frame off as on, so every darkening below is zero by \
+         construction"
+    );
+
+    let middles = cascade_shells(reach, band);
+    let walks = cascade_walks(&shadowed, &flat, &camera, extent, sky, reach, band);
+    eprintln!(
+        "sundial golden: the cascade walk on {paths} — split {reach:.3} m, band {band:.3} m, \
+         {columns} columns at {laterals} offsets, {shells} shells from {near:.3} to {far:.3} m",
+        columns = plaza::COLONNADE_COUNT,
+        laterals = CASCADE_LATERALS.len(),
+        shells = middles.len(),
+        near = middles[0],
+        far = middles[middles.len() - 1],
+    );
+
+    // Every neighbouring pair of shells one walk has both of. A pair whose two
+    // shells sit either side of the split is the one a switch with no band puts
+    // its whole change into; a pair clear of the band altogether is what the
+    // same walk shows where no switch is anywhere near it.
+    let mean_of = |shell: &(f32, u32)| {
+        (shell.1 >= CASCADE_SHELL_SAMPLES).then(|| {
+            #[expect(clippy::cast_precision_loss, reason = "a shell holds a few hundred")]
+            {
+                shell.0 / shell.1 as f32
+            }
+        })
+    };
+    let (mut inside, mut outside, mut compared) = (Vec::new(), Vec::new(), Vec::new());
+    for walk in &walks {
+        for (index, middle) in middles.iter().enumerate() {
+            if let Some(level) = mean_of(&walk.shells[index]) {
+                if *middle < reach - band {
+                    inside.push(level);
+                } else if *middle > reach {
+                    outside.push(level);
+                }
+            }
+        }
+        let (mut straddling, mut clear) = (f32::MIN, f32::MIN);
+        for index in 0..middles.len() - 1 {
+            let (Some(low), Some(high)) = (
+                mean_of(&walk.shells[index]),
+                mean_of(&walk.shells[index + 1]),
+            ) else {
+                continue;
+            };
+            let (near, far) = (middles[index], middles[index + 1]);
+            let step = (high - low).abs();
+            if near < reach && far >= reach {
+                straddling = straddling.max(step);
+            } else if far <= reach - band || near >= reach {
+                clear = clear.max(step);
+            }
+        }
+        if straddling > f32::MIN && clear > f32::MIN {
+            compared.push((walk.column, walk.lateral, straddling, clear));
+        }
+    }
+    assert!(
+        !compared.is_empty(),
+        "no walk has both a pair of shells either side of the split and a pair clear of the band \
+         — so nothing here reads across the switch against what the same stretch of shadow shows \
+         without one"
+    );
+
+    for (column, lateral, straddling, clear) in &compared {
+        eprintln!(
+            "sundial golden:   column {column} at {lateral:+.2} m steps {straddling:.2}/255 \
+             across the split and at most {clear:.2} clear of the band"
+        );
+    }
+    let worst = compared
+        .iter()
+        .copied()
+        .fold((0, 0.0, f32::MIN, 1.0), |worst, walk| {
+            if walk.2 * worst.3 > worst.2 * walk.3 {
+                walk
+            } else {
+                worst
+            }
+        });
+    let (column, lateral, straddling, clear) = worst;
+    eprintln!(
+        "sundial golden: the cascade split on {paths} — {n} walks read across it; the steepest \
+         against its own is column {column} at {lateral:+.2} m, {straddling:.2}/255 across the \
+         split against {clear:.2} clear of the band",
+        n = compared.len(),
+    );
+
+    // Both sides of the split read a shadow, which is what stops the bound below
+    // holding on a frame that has none.
+    for (name, read) in [("cascade 0", &inside), ("cascade 1", &outside)] {
+        assert!(!read.is_empty(), "no shell of any walk landed in {name}");
+        #[expect(clippy::cast_precision_loss, reason = "a few hundred shells")]
+        let darkening = read.iter().sum::<f32>() / read.len() as f32;
+        eprintln!(
+            "sundial golden: the walks darken {name} by {darkening:.2}/255 over {} shells",
+            read.len(),
+        );
+        assert!(
+            darkening > CASCADE_SHADOWED_LEVELS,
+            "the walks darken {name} by {darkening:.2}/255, under the \
+             {CASCADE_SHADOWED_LEVELS} shadowed pavement stands at. This is a reading of the open \
+             plaza, and open plaza has no step in it however the cascades are switched"
+        );
+    }
+    assert!(
+        clear > 0.0,
+        "the walk this is worst on shows no step at all clear of the band, so the bound below is \
+         a bound against nothing"
+    );
+    assert!(
+        straddling < CASCADE_STEP_OVER_NEIGHBOURS * clear,
+        "column {column}'s shadow at {lateral:+.2} m off its axis steps {straddling:.2}/255 \
+         between the two shells either side of the split at {reach:.3} m, against {clear:.2} for \
+         the steepest pair of shells the same walk has clear of the band — past the \
+         {CASCADE_STEP_OVER_NEIGHBOURS}x this holds it to. The cascade switch is an edge in the \
+         picture rather than the band `CASCADE_FADE_FRACTION` makes of it"
     );
 }

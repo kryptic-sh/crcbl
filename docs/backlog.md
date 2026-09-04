@@ -128,20 +128,28 @@ out of `FrameUniforms::shadow_filter`. What that change did **not** do:
 
 `apps/sundial` was built natively — the plaza, the scripted sun, the filter and
 seam bindings, and the golden suite that measures the penumbra ladder, the seam,
-the contact and the clock's determinism — and the atlas viewer now reaches a
-golden of its own and a button on the page. What is still **not** done:
+the contact and the clock's determinism — and both diagnostics now reach a
+golden of their own and a button on the page. What is still **not** done:
 
-- **The cascade overlay reaches neither.** `DebugView::Cascades` is bound to `C`
-  and to the panel's `CASCADES` row and nothing else: this sample's
-  `tests/golden.rs` blesses no frame with the tint on, and
-  `apps/sundial/src/web.rs` exports no control for it, so a phone cannot reach
-  it and CI never draws it. What `crates/crcbl/tests/forward_e2e/shadow.rs`
-  holds is the engine's own fixture — that the tint follows the cascade the
-  lighting sampled — not this sample's frame. The atlas viewer's pair is the
-  shape it would take: `Arm::showing_the_atlas`'s sibling and one more
-  `__crcbl_sundial_*` export. Left because the overlay multiplies the shaded
-  picture, so a golden of it moves whenever the plaza's shading does, where the
-  atlas viewer's replaces the frame and moves only with the atlas.
+- **The cross-fade claim is read at one pose, one sun and one filter.**
+  `the_colonnades_shadow_crosses_the_cascade_split_without_a_step` draws
+  `Arm::shipped()` alone: `plaza::fixed_camera`, `sun::FIXTURE_TICK` and the
+  shipped `pcss`. Nothing reads the band under `disc` or `box`, whose filter
+  widths differ from PCSS's and therefore whose step across the switch does too;
+  nothing reads it at `sun::GRAZING_TICK`, where the shadows are two and a half
+  times longer and cross the split somewhere else entirely; and nothing reads it
+  from `plaza::counter_camera`, whose split stands at the same distance but in a
+  different part of the plaza. Each is one more arm of the same walk, and each
+  costs two more frames.
+- **Only three walks read across the split, and all three are one column's.**
+  The run prints them: column 4 at `-0.26`, `-0.22` and `-0.18` m off its shadow
+  axis. That is not a choice — `plaza::hidden_from` refuses the rest, because
+  the colonnade stands between the fixed camera and most of the pavement its own
+  shadows fall on at that distance. The reading is therefore thinner than it
+  looks, and a change to `COLONNADE_NEAR_Z`, `COLONNADE_SPACING` or the fixture
+  sun could leave it with none — in which case the test refuses the run rather
+  than passing it, which is the failure mode to expect. Widening it wants either
+  a pose that sees more of that pavement or a caster placed for it.
 - **The viewer is only exercised over whole root cells.** The e2e reads cascade
   0 and one free slot of the light region, and both are whole cells of
   `crcbl_render::shadow`'s grid. `atlas_view.slang`'s border loop reads each
@@ -240,13 +248,15 @@ radius slider and the intensity slider are driven by nothing but a person**.
 
 The bent-direction slice of 2026-09-05 put a `view:` field on
 `Alcove::log_heartbeat`, so the **AO-only view button is now cheap to check**:
-it is the same `crcbl::debug_view` cell the bent one writes and the same block
-in `browser-e2e.mjs` would drive it, given a `viewLabel` of `ambient occlusion`.
-That block takes one control per demo, so a second one wants the block to take a
-list — which is why it was left rather than done in passing. The **bent-normals
-switch and the intensity slider are still not on the heartbeat at all**, and
-checking either wants another field on that line or a reading taken off the
-canvas, and the second is what `still` in that row says this demo cannot give.
+it is the same `crcbl::debug_view` cell the bent one writes, and the block in
+`browser-e2e.mjs` now takes a **list** — `knobs.views` of
+`{control, label, noun}` against one shared `viewField`, which sundial's row
+uses for its atlas viewer and its cascade overlay. So the AO-only button is one
+more entry in `alcove`'s `views` with a `label` of `ambient occlusion`, and
+nothing stands in the way of it any more. The **bent-normals switch and the
+intensity slider are still not on the heartbeat at all**, and checking either
+wants another field on that line or a reading taken off the canvas, and the
+second is what `still` in that row says this demo cannot give.
 
 **Reaching those controls at all costs the pointer, and that surprised us.** The
 fixture asks for Pointer Lock while it is running, `web/engine/shell.js` takes
@@ -1636,11 +1646,53 @@ per-face inside a point light's cube is declined below.
 
 What the rung did leave behind:
 
-- **Static caching within a group is the rung above, and is unbuilt.** The cache
-  holds a group's whole map, so one moved caster redraws every caster that group
-  covers. Rendering a map's static geometry once and re-drawing only the dynamic
-  instances over it is what `docs/plan/45-shadows.md` still names as the next
-  rung.
+- **Static caching within a group is the rung above, and is unbuilt — priced
+  2026-09-05, and it needs a decision.** The cache holds a group's whole map, so
+  one moved caster redraws every caster that group covers. What the tree has and
+  lacks, read that day:
+  - **Invalidation is whole-pool.** `ForwardRenderer::shadow_group_record` folds
+    `InstancePool::revision` in, and that counter moves on any instance write;
+    `GpuInstance::flags` defines `LIVE` and `BASE_VERTEX_OVERRIDE` and calls the
+    rest reserved, `InstanceDesc` has no mobility field, and `crcbl-scene`'s
+    glTF path reads none. A `STATIC` bit costs no record width.
+  - **The cull has no filter.** `crcbl_shaders::cull::Params` is planes, count
+    and capacity; survivors go to one `visible_instances` list through one
+    atomic. A second `DrawGen` per group is what the per-face declination below
+    refused on memory grounds, so the cheap shape is one list partitioned from
+    both ends by two counters.
+  - **A depth copy exists on every backend and is used nowhere.**
+    `CommandEncoder::copy_image_to_image` is implemented on vk, mtl, dx12 and
+    crcbl-webgpu, `Capability::ImageToImageCopy` is `Yes` on all four, and
+    `RenderGraph::add_copy_pass` emits the transitions. The atlas is created
+    without `TRANSFER_DST`. `PassKind::Copy` is filtered out of `PassTimers`, so
+    a copy pass is invisible to `PassStats` until `timing.rs` changes.
+  - **The open question is WebGPU.** `Capability::DepthImageCopy` records that
+    `D32Float` copies _out_ to a buffer and only `D16Unorm` copies back _in_;
+    that is the buffer table, and whether a texture-to-texture copy into a
+    `D32Float` destination is allowed there is untested in this tree. Probe it
+    on `crcbl-webgpu` before writing any Rust.
+
+  Two designs. **Depth copy** (recommended): a second `D32Float` static atlas of
+  the atlas's extent, redrawn per group from a `STATIC`-filtered cull when that
+  group's static record changes; a frame that redraws the group for a dynamic
+  reason copies its tile rects static → live and draws only the dynamic
+  instances with `LoadOp::Load` under the ordinary reversed-Z test. Zero shader
+  changes, `both_shaders_spell_the_same_atlas_walk` untouched, no golden
+  re-blessed from the sampling side; costs one more atlas of memory and a copy
+  per held group. **Two atlases and `min()`**: no copy, but a second depth
+  binding on every layout that samples the atlas, `tile_tap` doubled in
+  `mesh.slang` and `volumetric.slang`, `atlas_view.slang` choosing which to
+  show, and `min` of two PCF results is not PCF of the min depth at a silhouette
+  where a dynamic caster overlaps a static one.
+
+  **The ceiling is the camera.** "The camera invalidates every tile" below means
+  a panning eye redraws every group regardless, so this rung buys a still-eye
+  saving until a punctual light's shadow LOD is denominated in its own texels.
+  And no sample is the fixture: lantern moves a lamp, shard moves many foes, the
+  rest are all-still or all-moving; the price wants
+  `crates/crcbl/tests/mesh_e2e/shadow_tiles.rs`'s dunes field with one instance
+  translated per frame against the same field held still.
+
 - **Demotion's price is measured on two tiers and not the third.** Four spot
   lights over a six-by-six field of dunes patches, the same rig drawn from a
   camera at 22 and at 88 world units so the far camera is that rig two ladder

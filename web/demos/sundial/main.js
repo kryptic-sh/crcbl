@@ -8,8 +8,9 @@
 //
 // The knobs reach three different kinds of state and `apps/sundial/src/web.rs`
 // is where that table is: the filter and the seam are `r_shadow_*` console
-// cells, the sun is the fixture's own clock, and the atlas viewer is the
-// engine's `r_debug_view`.
+// cells, the sun is the fixture's own clock, and the atlas viewer and the
+// cascade tint are the engine's `r_debug_view` — one cell for both of them, so
+// each of those two buttons takes the other's picture down.
 //
 // The symbols are written out literally rather than built from the sample's
 // name. `web/tools/check-exports.mjs` scans the shim for `.__crcbl_…` to learn
@@ -64,6 +65,7 @@ function installKnobs(ex) {
   const filter = button('knob-filter');
   const seam = button('knob-seam');
   const atlas = button('knob-atlas');
+  const cascades = button('knob-cascades');
   const sun = button('knob-sun');
   const reset = button('knob-reset');
   const seamAt = slider('knob-seam-at');
@@ -71,7 +73,7 @@ function installKnobs(ex) {
   const seamValue = el('knob-seam-value');
   const sunValue = el('knob-sun-value');
 
-  const controls = [filter, seam, atlas, sun, reset, seamAt, sunTick];
+  const controls = [filter, seam, atlas, cascades, sun, reset, seamAt, sunTick];
 
   // The arc the tick slider spans, off the engine's own `sun::SWEEP_TICKS`
   // rather than a number written into the markup — `web/pages/sundial.html`
@@ -105,10 +107,14 @@ function installKnobs(ex) {
     seamValue.textContent =
       at > 0 ? `${at.toFixed(2)} of the width` : 'no seam';
 
-    // The engine holds one debug view, so this is "is the atlas the picture"
-    // rather than a flag of this control's own — a view some other route put up
-    // leaves this reading off, which is the truth about the frame.
+    // The engine holds one debug view, so each of these is "is *this* the
+    // picture" rather than a flag of its own control — a view some other route
+    // put up leaves both readings off, and putting one of the two up takes the
+    // other down. That is the truth about the frame rather than about the page.
     atlas.textContent = ex.__crcbl_sundial_atlas_view(0)
+      ? 'hide it'
+      : 'show it';
+    cascades.textContent = ex.__crcbl_sundial_cascades(0)
       ? 'hide it'
       : 'show it';
 
@@ -161,6 +167,7 @@ function installKnobs(ex) {
   press(filter, () => ex.__crcbl_sundial_filter(1));
   press(seam, () => ex.__crcbl_sundial_seam(1));
   press(atlas, () => ex.__crcbl_sundial_atlas_view(1));
+  press(cascades, () => ex.__crcbl_sundial_cascades(1));
   press(sun, () =>
     ex.__crcbl_sundial_sun_running(ex.__crcbl_sundial_sun_running(-1) ? 0 : 1)
   );
@@ -198,7 +205,7 @@ function installKnobs(ex) {
 
 bootDemo({
   init,
-  hint: 'the knobs under the canvas drive the filter, the seam, the shadow atlas and the sun · ESC opens the panel — CAMERA swaps to the free one · then WASD, Space/Shift and the arrows fly it · F3 shows the panel · F11 fullscreen',
+  hint: 'the knobs under the canvas drive the filter, the seam, the shadow atlas, the cascade tint and the sun · ESC opens the panel — CAMERA swaps to the free one · then WASD, Space/Shift and the arrows fly it · F3 shows the panel · F11 fullscreen',
   savedLabel: 'Nothing',
   bind: (ex) => {
     installKnobs(ex);

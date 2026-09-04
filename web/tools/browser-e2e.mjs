@@ -871,14 +871,22 @@ const EXPECTATIONS = {
       // that stopped drawing, because the HUD is drawn over the same canvas.
       // `Alcove::log_heartbeat` prints `crcbl::debug_view::current` straight off
       // the cell the button writes.
-      view: 'knob-bent-view',
+      //
+      // **A list, because sundial declares two of them**: the block below walks
+      // whatever a demo names here, and this fixture has one picture to put up
+      // where that one has the atlas and the cascade tint. `label` is what
+      // `DebugView::BentNormal::label` spells; the *off* value is not written
+      // down, because the check reads it off the heartbeat before it presses
+      // anything, so a fixture that opened on some other view is compared
+      // against where it actually started.
       viewField: /\bview: (.+?) {2}/,
-      // What `DebugView::BentNormal::label` spells. The *off* value is not
-      // written down here — the check reads it off the heartbeat before it
-      // presses anything, so a fixture that opened on some other view is
-      // compared against where it actually started.
-      viewLabel: 'bent normal',
-      viewNoun: 'the bent direction instead of the shaded court',
+      views: [
+        {
+          control: 'knob-bent-view',
+          label: 'bent normal',
+          noun: 'the bent direction instead of the shaded court',
+        },
+      ],
       // And everything back, which is also what leaves the demo in the state
       // the groups after this one were written against.
       reset: 'knob-reset',
@@ -993,18 +1001,31 @@ const EXPECTATIONS = {
       // `Sundial::log_heartbeat` prints `crcbl::debug_view::current` straight
       // off the cell the button writes.
       // **The keys are the shared ones**, not `atlas*`: alcove's row carries the
-      // same four for its own bent-direction button, and one block below drives
-      // whichever of them a demo declares. A copy per demo is a copy that drifts.
-      view: 'knob-atlas',
+      // same pair for its own bent-direction button, and one block below drives
+      // whichever views a demo declares. A copy per demo is a copy that drifts.
+      //
+      // **Two of them here**, which is why this is a list: the atlas viewer and
+      // the cascade overlay are two pictures behind one `crcbl::debug_view`
+      // cell, so the second is not covered by having driven the first — and the
+      // block presses each of them twice, which is also what leaves the groups
+      // after it the shaded frame they were written against. `label` is what
+      // `DebugView::ShadowAtlas::label` and `DebugView::Cascades::label` spell;
+      // `noun` is what a red line calls the picture, so it names the control
+      // rather than a demo-agnostic "the view". The *off* value is not written
+      // down — the check reads it off the heartbeat before it presses anything.
       viewField: /\bview: (.+?) {2}/,
-      // What `DebugView::ShadowAtlas::label` spells. The *off* value is not
-      // written down here — the check reads it off the heartbeat before it
-      // presses anything, so a fixture that opened on some other view is
-      // compared against where it actually started.
-      viewLabel: 'shadow atlas',
-      // What the check calls the picture in its own line, so a red one names the
-      // control rather than a demo-agnostic "the view".
-      viewNoun: 'the shadow atlas over the frame',
+      views: [
+        {
+          control: 'knob-atlas',
+          label: 'shadow atlas',
+          noun: 'the shadow atlas over the frame',
+        },
+        {
+          control: 'knob-cascades',
+          label: 'cascades',
+          noun: 'the frame tinted by the cascade its shadow came from',
+        },
+      ],
       sun: 'knob-sun',
       sunAt: 'knob-sun-tick',
       // The sun's own tick, and the loop's. `moving` above reads the first of
@@ -4204,38 +4225,44 @@ try {
       );
     }
 
-    // **AND THE DEBUG VIEW, WHICH THE RESET BELOW DOES NOT PUT BACK.** `R`
+    // **AND THE DEBUG VIEWS, WHICH THE RESET BELOW DOES NOT PUT BACK.** `R`
     // resets a sample's own knobs and its clock; the debug view is the *engine's*
-    // cell and no sample's reset reaches it, so this block presses its control
+    // cell and no sample's reset reaches it, so this block presses each control
     // **twice** and the second press is what leaves the groups after this one
     // the shaded frame they were written against.
     //
-    // **One block over both demos that have such a control** — sundial's shadow
-    // atlas and alcove's bent direction — because it is one fact about one cell:
-    // `crcbl::debug_view` holds exactly one view, every route to it writes that
-    // cell, and each sample's heartbeat prints `DebugView::label` off it. What
-    // differs between the two is the control's id and the name of the picture,
-    // which is what `knobs.view*` carries.
+    // **One block over every demo that has such a control** — sundial's shadow
+    // atlas and its cascade overlay, alcove's bent direction — because it is one
+    // fact about one cell: `crcbl::debug_view` holds exactly one view, every
+    // route to it writes that cell, and each sample's heartbeat prints
+    // `DebugView::label` off it. What differs is the control's id and the name
+    // of the picture, which is what each entry of `knobs.views` carries; the
+    // heartbeat field is shared, because there is one field.
+    //
+    // **A list rather than one control per demo**, and sundial is why: two
+    // pictures behind one cell is two buttons, and driving the first says
+    // nothing about the second. Each is pressed twice in turn, so the cell is
+    // back at the shaded frame before the next one is tried.
     //
     // The second press is also the half that makes the first one a check.
     // A button wired to a call that only ever *set* the view — or a heartbeat
     // field stuck on whatever it first printed — passes "it turned on" and
     // fails "it turned off again".
-    if (knobs.view) {
+    for (const view of knobs.views ?? []) {
       const startingView = stands(
         hud()[hud().length - 1] ?? '',
         knobs.viewField
       );
-      const shown = (await clickControl(knobs.view)) && (await resume());
+      const shown = (await clickControl(view.control)) && (await resume());
       const shownMark = hud().length;
       const shownLine = shown ? await beatAfter(shownMark) : null;
       const viewNow = stands(shownLine ?? '', knobs.viewField);
       check(
         'C',
-        `a press on the page draws ${knobs.viewNoun}`,
-        Boolean(shownLine) && viewNow === knobs.viewLabel,
+        `a press on the page draws ${view.noun}`,
+        Boolean(shownLine) && viewNow === view.label,
         !shown
-          ? `the page has no #${knobs.view} control, or the demo did not go ` +
+          ? `the page has no #${view.control} control, or the demo did not go ` +
               'back into play after the press — status ' +
               `${await evaluate(page, `crcbl.status()`)}`
           : shownLine
@@ -4244,16 +4271,16 @@ try {
             : `no heartbeat in ${pollCeiling()} ms after the press`
       );
 
-      const hidden = (await clickControl(knobs.view)) && (await resume());
+      const hidden = (await clickControl(view.control)) && (await resume());
       const hiddenMark = hud().length;
       const hiddenLine = hidden ? await beatAfter(hiddenMark) : null;
       const viewBack = stands(hiddenLine ?? '', knobs.viewField);
       check(
         'C',
-        'and a second press takes it away again',
+        `and a second press on #${view.control} takes it away again`,
         Boolean(hiddenLine) &&
           viewBack === startingView &&
-          viewBack !== knobs.viewLabel,
+          viewBack !== view.label,
         !hidden
           ? 'the demo did not go back into play after the second press — ' +
               `status ${await evaluate(page, `crcbl.status()`)}`

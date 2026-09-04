@@ -48,7 +48,11 @@ a shadow implementation whose artefacts ship.
 - A sun on a scripted clock, pausable, scrubbable.
 - A cascade debug overlay — tinting each cascade — which
   [18-render-features.md](../18-render-features.md) has owed since P7 and which
-  nothing else in the tree is going to build.
+  nothing else in the tree was going to build. **Built 2026-09-04** as
+  `crcbl_render::DebugView::Cascades`, and bound here to `C`, to the pause
+  panel's `CASCADES` row and — **2026-09-05** — to `__crcbl_sundial_cascades`, a
+  button on the page beside the atlas viewer's, and `tests/golden.rs`'s
+  `plaza-cascades` frame, which is what draws it in CI.
 - An atlas viewer: the shadow atlas drawn to screen, so tile assignment is a
   thing you can look at. **Built 2026-09-04** as
   `crcbl_render::DebugView::ShadowAtlas` — an engine slice, because drawing the
@@ -98,7 +102,8 @@ same day**: `apps/sundial/src/web.rs`, `web/pages/sundial.html` and
 sun's clock on the page as HTML controls, and `web/tools/browser-e2e.mjs`'s
 `sundial` row presses each of them and reads what the `[HUD]` line says they
 did. **Milestone 1's two diagnostics landed the same day**: the cascade overlay
-on `C`, and the atlas viewer on `T`.
+on `C`, and the atlas viewer on `T`; **2026-09-05** gave the overlay the golden
+and the page button the viewer already had, and closed milestone 3.
 
 What also exists is evidence that the shadow implementation is at the edge of
 its current budget: since the 2026-08-26 re-tiling that bought a second shadowed
@@ -129,7 +134,15 @@ hold in their head, and the only honest way to set them is to look.
    `crcbl_render::DebugView::Cascades`: the shaded picture multiplied by a tint
    per cascade, blended across [45-shadows.md](../45-shadows.md)'s eighth
    decision's band. This sample binds it to `C` and to the pause panel's
-   `CASCADES` row.
+   `CASCADES` row, and **2026-09-05** gave it the other two routes the atlas
+   viewer has: `__crcbl_sundial_cascades` and a button on the page, so a visitor
+   with no keyboard can put it up, and `tests/golden.rs`'s `plaza-cascades`
+   frame, so CI draws it. Two readings stand beside that golden — one inside
+   cascade 0 and clear of the cross-fade band, one past the split, placed from
+   `crcbl::render::Cascades`' own split — because a golden alone cannot say
+   which of the tints it is looking at, and the same two places with the overlay
+   off are the control that says the ordering is the overlay's and not the
+   plaza's own colour.
 
    The **atlas viewer** landed the same day as
    `crcbl_render::DebugView::ShadowAtlas`: the `D32Float` atlas letterboxed over
@@ -155,7 +168,35 @@ hold in their head, and the only honest way to set them is to look.
    than four luma under the median of its own 5x5 neighbourhood, at the bottom
    of the sun's arc and again at the top of it, and holds the grazing share to
    the steep one's.
-3. **Cascade cross-fade**, against the seam the colonnade crosses.
+3. **Cascade cross-fade**, against the seam the colonnade crosses. **Complete
+   2026-09-05.**
+
+   [45-shadows.md](../45-shadows.md)'s eighth decision made the cascade switch a
+   band rather than an edge and measured it on `apps/lantern`'s floor; what was
+   missing was a claim on the fixture the colonnade was laid out for.
+   `tests/golden.rs`'s
+   `the_colonnades_shadow_crosses_the_cascade_split_without_a_step` is it.
+
+   What it measures is the **shadow term** — the frame with the shadow passes
+   off, less the frame with them on, so the pavement's own Lambert falloff
+   cancels and what is left is what the sun's shadow map did there. Every column
+   of the colonnade's shadow is walked at offsets either side of its own edge,
+   where the two cascades disagree because their filters are denominated in
+   texels of very different sizes, and each walk's readings are binned into
+   shells of **distance from the eye**, which is the quantity `sun_visibility`
+   selects a cascade by. The claim is then local and scale-free: each walk's
+   step between the two shells either side of the split is held to the steepest
+   step the same walk shows clear of the band. With the band it reads at worst
+   `2.24` against `1.43` on radv and `2.33` against `1.16` on lavapipe; with
+   `CASCADE_FADE_FRACTION` set to zero and every artifact regenerated — the band
+   collapsed to an edge — the same walks read `17.49` against `1.24` and `17.55`
+   against `1.41`, which is the sabotage that says the reading has teeth.
+
+   The walk reads only pavement the fixed camera can see and no lamp reaches,
+   which `plaza::hidden_from` and `plaza::lamplit` answer off the plaza's own
+   geometry: the colonnade hides much of the floor its shadows fall on from this
+   pose, and a walk that did not ask would be reading a column's lit face.
+
 4. **The filter ladder side by side**, with the penumbra-versus-distance claim.
    The filters themselves **shipped 2026-08-28 and 2026-09-04** — the ninth
    decision's rotated disc took the place of the Poisson set this line asked

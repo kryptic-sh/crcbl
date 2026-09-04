@@ -49,9 +49,10 @@ meta-->
     sun's two are the fixture's own clock rather than a setting, so they are
     taken up on its next fixed step; the label is the request either way, and
     everything else here shows what the engine holds <em>after</em> it wrote.
-    The shadow atlas is a third kind again: it is the engine's own debug view,
-    one cell shared with every other sample and with the
-    <code>debug_view</code> console command.
+    The shadow atlas and the cascade tint are a third kind again: they are the
+    engine's own debug view, one cell shared with every other sample and with
+    the <code>debug_view</code> console command — so putting one of the two up
+    takes the other down.
   </p>
   <ul class="keys" id="shadow-knobs">
     <li class="key-row">
@@ -116,6 +117,14 @@ meta-->
       >
     </li>
     <li class="key-row">
+      <span>Tint the picture by the cascade its shadow came from</span>
+      <span
+        ><button class="btn" type="button" id="knob-cascades" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
       <span>Every knob and the clock back to where a run opens</span>
       <span
         ><button class="btn" type="button" id="knob-reset" disabled>
@@ -148,6 +157,17 @@ meta-->
     worth looking at because a lamp that was refused a tile still lights the
     plaza: the frame is entirely plausible either way, and this is the only
     place the answer is written down.
+  </div>
+  <div class="note">
+    <strong>The cascade tint is the one that shows where the split is.</strong>
+    The sun's shadow is drawn from two maps, not one: a near map fitted to a
+    sphere a few metres around the camera, and a far one covering the rest. That
+    split is invisible in the shaded picture on purpose, and this is the picture
+    it is visible in — everything inside the near cascade tinted red, everything
+    beyond it blue, and a band between the two where both are sampled and the
+    answers mixed. Watch the colonnade: the boundary crosses its shadows, and it
+    is a gradient rather than a line. A hard edge there would be a seam in the
+    shadow, which is exactly what the band exists to remove.
   </div>
   <div class="note">
     <strong>The sun is the one to reach for.</strong> Shadow quality is a set of

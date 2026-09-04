@@ -24,7 +24,8 @@
 //! `apps/alcove/src/web.rs`' argument, and this fixture has one more control to
 //! carry than that one does. Natively every knob here is a key or a pause-panel
 //! row: `F` cycles the filter, `X` raises the seam, `,` and `.` walk it, `T`
-//! puts the shadow atlas up, `P` stops the sun and `-` and `=` scrub it. **A
+//! puts the shadow atlas up, `C` tints the frame by cascade, `P` stops the sun
+//! and `-` and `=` scrub it. **A
 //! phone has none of them**, and a shadow fixture with a sun nobody can stop is
 //! one whose artefacts cannot be looked at — acne, peter-panning and a swimming
 //! cascade edge each want the sun held at a pose.
@@ -34,7 +35,7 @@
 //! | Knob | Where the state lives | How this module reaches it |
 //! | --- | --- | --- |
 //! | the filter, the seam | a `r_shadow_*` console cell | [`crate::filter`], the same cell a key and a typed line write |
-//! | the atlas viewer | the engine's `r_debug_view` cell | `crate::app::toggle_atlas_view`, the same cell `T` and the pause panel's `ATLAS` row write |
+//! | the atlas viewer, the cascade overlay | the engine's `r_debug_view` cell | `crate::app::toggle_atlas_view` and `crate::app::toggle_cascade_view`, the same cell `T`, `C` and the pause panel's `ATLAS` and `CASCADES` rows write |
 //! | the sun's tick, and whether it runs | `crate::app::Sundial` | [`crate::sun::page_clock`] and its `ask_*` pair, adopted by the next fixed step |
 //!
 //! **There is no second copy of either on the page.** Every call below answers
@@ -102,6 +103,7 @@
 //! | [`__crcbl_sundial_seam`] | `(i32) -> f32` | A non-zero argument raises the comparison seam at the centre or drops it, as the `X` key does. Returns where it stands, and `0` for a frame comparing nothing. |
 //! | [`__crcbl_sundial_seam_at`] | `(f32) -> f32` | Where the seam stands, as a fraction of the frame's width — what `,` and `.` walk. Either edge takes it down. |
 //! | [`__crcbl_sundial_atlas_view`] | `(i32) -> i32` | A non-zero argument draws the shadow atlas over the frame or takes it away, as the `T` key does. `1`/`0` for whether it is the picture in force. |
+//! | [`__crcbl_sundial_cascades`] | `(i32) -> i32` | A non-zero argument tints the picture by the cascade each fragment's sun shadow came from, or takes the tint away, as the `C` key does. `1`/`0` for whether it is the picture in force. |
 //! | [`__crcbl_sundial_sun_tick`] | `(f64) -> f64` | Which tick of the clock the sun is drawn at. Writing one **stops** the clock, as a scrub does. |
 //! | [`__crcbl_sundial_sun_sweep`] | `() -> f64` | How many ticks one sweep of the sun takes, so a page's slider spans the engine's own arc rather than a number written on the page. |
 //! | [`__crcbl_sundial_sun_running`] | `(i32) -> i32` | Whether the clock is moving — the `P` key. `1`/`0`. |
@@ -248,7 +250,7 @@ pub extern "C" fn __crcbl_sundial_seam_at(at: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Exports: the atlas viewer, which is the engine's own debug-view cell
+// Exports: the two debug views, which are the engine's own cell
 // ---------------------------------------------------------------------------
 
 /// Draw the shadow atlas over the frame or take it away, and answer with
@@ -279,6 +281,33 @@ pub extern "C" fn __crcbl_sundial_atlas_view(toggle: i32) -> i32 {
         crate::app::toggle_atlas_view();
     }
     i32::from(crcbl::debug_view::current() == crcbl::render::DebugView::ShadowAtlas)
+}
+
+/// Tint the picture by the cascade each fragment's sun shadow came from, or take
+/// the tint away, and answer with whether it is the picture in force.
+///
+/// `toggle` of `0` reads. The `C` key and the pause panel's `CASCADES` row as
+/// something a finger can reach, through `crate::app::toggle_cascade_view` — the
+/// same [`crcbl::debug_view`] cell all three write, and the same one
+/// [`__crcbl_sundial_atlas_view`] answers about. The engine holds exactly **one**
+/// view, so putting either of these up takes the other down, and each answers
+/// with whether its own picture is *the* one.
+///
+/// # What it is for
+///
+/// `docs/plan/sample/18-sundial.md`'s milestone 1 diagnostic, and the one
+/// `docs/plan/18-render-features.md` had been owed since P7. The sun's cascades
+/// are spheres about the eye and the switch between two of them is a band rather
+/// than an edge — `docs/plan/45-shadows.md`'s eighth decision — and neither the
+/// spheres nor the band is visible in a shaded frame at all. This is the picture
+/// they are visible in: the shaded frame multiplied by a tint per cascade,
+/// blended across the band exactly as the shadow answer is.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_sundial_cascades(toggle: i32) -> i32 {
+    if toggle != 0 {
+        crate::app::toggle_cascade_view();
+    }
+    i32::from(crcbl::debug_view::current() == crcbl::render::DebugView::Cascades)
 }
 
 // ---------------------------------------------------------------------------
