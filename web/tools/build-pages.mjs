@@ -72,6 +72,7 @@ const DEMOS = [
   ['horde', 'horde', '/demos/horde/'],
   ['hud', 'hud', '/demos/hud/'],
   ['lantern', 'lantern', '/demos/lantern/'],
+  ['alcove', 'alcove', '/demos/alcove/'],
   ['quarry', 'quarry', '/demos/quarry/'],
   ['viewer', 'viewer', '/demos/viewer/'],
   ['orbit', 'orbit', '/demos/orbit/'],

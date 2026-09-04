@@ -190,6 +190,66 @@ pub fn nudge_seam(right: bool) {
     set(SPLIT, &Value::Float((at + step).clamp(min, max)));
 }
 
+/// Puts the seam at `at`, the same fraction of the frame's width the variable
+/// itself is in, and answers with where it stands afterwards.
+///
+/// **Zero and one take it down**, which is [`seam`]'s rule rather than a second
+/// one: a slider driven to either end leaves one side of the frame empty and the
+/// chain records once. `at` is clamped into the variable's own range, so a page
+/// that sends a number from outside it moves the seam to the nearest edge rather
+/// than being refused by the console.
+///
+/// The absolute placement [`nudge_seam`] has no way to express, and the reason it
+/// exists: `,` and `.` walk the seam a step at a time, and a page — a phone
+/// especially — has no key to hold.
+pub fn set_seam(at: f32) -> Option<f32> {
+    let Some((min, max)) = float_range(SPLIT) else {
+        return seam();
+    };
+    set(SPLIT, &Value::Float(at.clamp(min, max)));
+    seam()
+}
+
+/// The range `name` accepts, if a dial can run the length of it.
+///
+/// `None` for anything but a float variable whose lower bound is above zero:
+/// the mapping below is a ratio, and a range reaching zero has no logarithm.
+/// [`RADIUS`] and [`INTENSITY`] are the two knobs that qualify, and they are the
+/// two the dial is for — [`SPLIT`] is already a fraction and has [`set_seam`].
+fn dial_range(name: &str) -> Option<(f32, f32)> {
+    float_range(name).filter(|(min, _)| *min > 0.0)
+}
+
+/// Where `name` stands between its own bounds, as a fraction from 0 to 1.
+///
+/// **Geometric, on the scale a key press already steps.** The radius spans six
+/// doublings between its bounds, so a dial that ran linearly would spend most of
+/// its travel above the values a reviewer works at and have nothing left for the
+/// bottom of the range — which is the same argument `RADIUS_STEP` makes about a
+/// press being a ratio rather than an addition. This is that scale drawn out to
+/// a slider's whole length. Zero for a knob with no such range.
+#[must_use]
+pub fn dial(name: &str) -> f32 {
+    let Some((min, max)) = dial_range(name) else {
+        return 0.0;
+    };
+    (var(name).get_f32().clamp(min, max) / min).ln() / (max / min).ln()
+}
+
+/// Puts `name` at `at` of that scale, and answers with the value it now holds.
+///
+/// The value rather than the fraction, because a page showing a slider has to
+/// print what the slider means — a radius in metres, not how far along its own
+/// range the handle sits.
+pub fn set_dial(name: &str, at: f32) -> f32 {
+    let Some((min, max)) = dial_range(name) else {
+        return var(name).get_f32();
+    };
+    let moved = (min * (max / min).powf(at.clamp(0.0, 1.0))).clamp(min, max);
+    set(name, &Value::Float(moved));
+    var(name).get_f32()
+}
+
 /// Flips the bent-direction switch.
 pub fn toggle_bent_normals() {
     set(BENT_NORMALS, &Value::Bool(!var(BENT_NORMALS).get_bool()));
@@ -534,6 +594,51 @@ mod tests {
             "the seam row does not say where it stands: {}",
             compared.seam_row()
         );
+    }
+
+    /// **The dial runs the length of a knob's own range, on the scale the keys
+    /// step it along.**
+    ///
+    /// The midpoint is the geometric mean rather than the arithmetic one, which
+    /// is the half a linear dial would fail: the arithmetic mean of the radius's
+    /// own bounds sits several times above the value that ships, so a linear
+    /// slider leaves every setting a reviewer works at bunched at one end of its
+    /// travel.
+    #[test]
+    fn the_dial_runs_a_knob_from_one_bound_to_the_other() {
+        let _held = held();
+        for name in [RADIUS, INTENSITY] {
+            let (min, max) = float_range(name).expect("a float variable");
+            assert!((set_dial(name, 0.0) - min).abs() < 1e-4, "{name} at 0");
+            assert!((dial(name) - 0.0).abs() < 1e-4, "{name} reads back at 0");
+            assert!((set_dial(name, 1.0) - max).abs() < 1e-4, "{name} at 1");
+            assert!((dial(name) - 1.0).abs() < 1e-4, "{name} reads back at 1");
+
+            let middle = set_dial(name, 0.5);
+            assert!(
+                (middle - (min * max).sqrt()).abs() < 1e-3,
+                "{name}'s middle is {middle}, not the geometric mean of {min} and {max}",
+            );
+            assert!((dial(name) - 0.5).abs() < 1e-4, "{name} reads back at 0.5");
+        }
+    }
+
+    /// **A page can place the seam outright**, and either edge takes it down.
+    ///
+    /// The clamp is the clause worth having: a slider that sent a number from
+    /// outside the variable's range would otherwise be refused by the console
+    /// and leave the seam wherever it last stood, which reads on the page as a
+    /// control that does nothing.
+    #[test]
+    fn the_seam_can_be_placed_outright_and_either_edge_takes_it_down() {
+        let _held = held();
+        assert_eq!(set_seam(0.25), Some(0.25));
+        assert_eq!(seam(), Some(0.25));
+        assert_eq!(set_seam(0.0), None, "the left edge is no comparison");
+        assert_eq!(set_seam(0.75), Some(0.75));
+        assert_eq!(set_seam(1.0), None, "the right edge is no comparison");
+        assert_eq!(set_seam(7.0), None, "past the range is the range's own end");
+        assert_eq!(var(SPLIT).get_f32(), 1.0, "and it stopped at that end");
     }
 
     /// **`reset` puts every knob back**, which is what a run that has been

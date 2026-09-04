@@ -158,12 +158,11 @@ impl Alcove {
 
     /// The `[HUD]` line, on the cadence every other sample's heartbeat uses.
     ///
-    /// The one thing this fixture logs from inside the tick, and it is there for
-    /// the browser gate this sample does not have yet — `docs/backlog.md`'s
-    /// "alcove's web demo is owed" — and for a person watching a headless run.
-    /// It names the lighting path, so a page that opened some other device is
-    /// legible, and the occlusion state, which is the whole of what this sample
-    /// is for.
+    /// The one thing this fixture logs from inside the tick, and it is what the
+    /// browser gate reads — `web/tools/browser-e2e.mjs`'s `alcove` row — as well
+    /// as what a person watching a headless run has. It names the lighting path,
+    /// so a page that opened some other device is legible, and the occlusion
+    /// state, which is the whole of what this sample is for.
     fn log_heartbeat(&self) {
         if !self.ticks.is_multiple_of(HEARTBEAT_TICKS) {
             return;
@@ -295,8 +294,8 @@ pub fn start(options: &Options) -> Result<Loop, AlcoveError> {
 /// Builds the loop on an already-open shell, blocking on both waits.
 ///
 /// The browser cannot use this — a main thread may not sit in a blocking
-/// `wait_for_configure` — and would take a pending loop instead. That is the web
-/// front end this sample owes; `docs/backlog.md` says what it needs.
+/// [`wait_for_configure`] — and takes [`PendingLoop`] instead. What the two
+/// share is everything after the waiting, which is `assemble`.
 ///
 /// # Errors
 ///
@@ -606,5 +605,62 @@ impl crcbl::ui::DebugModule for Alcove {
                 "golden"
             },
         );
+    }
+}
+
+// ---- polled start-up ---------------------------------------------------------
+
+/// A [`Loop`] being started one poll at a time, for a caller that may not
+/// block — which on a browser main thread is every caller.
+///
+/// The state machine, the pump and the resize-during-start-up race are
+/// [`crcbl::engine::PolledBoot`]'s; all that is left here is this sample's
+/// `Options` and the `assemble` call the engine deliberately stops short of.
+#[derive(Debug)]
+pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
+    boot: crcbl::engine::PolledBoot<S, Gpu>,
+    options: Options,
+}
+
+impl<S: Shell + ?Sized> PendingLoop<S> {
+    /// Creates the window and starts the wait, without blocking on either half.
+    ///
+    /// `clock_source` is the caller's because the browser's cannot be
+    /// [`Clock::new`]'s: `std::time::Instant::now` panics on
+    /// `wasm32-unknown-unknown`, so a page drives the loop from
+    /// `performance.now()` instead.
+    ///
+    /// # Errors
+    ///
+    /// [`AlcoveError`] if the shell refused the window.
+    pub fn request(
+        mut shell: Box<S>,
+        options: &Options,
+        clock_source: Clock,
+    ) -> Result<Self, AlcoveError> {
+        let window = open_the_window(shell.as_mut(), &clock_source, options)?;
+        Ok(Self {
+            boot: crcbl::engine::PolledBoot::request(
+                shell,
+                window,
+                clock_source,
+                options.common.gpu(),
+                (),
+            ),
+            options: options.clone(),
+        })
+    }
+
+    /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`AlcoveError`] if the window went away before it had a size, or if the
+    /// device request failed.
+    pub fn poll(&mut self) -> Result<Option<Loop<S>>, AlcoveError> {
+        let Some(booted) = self.boot.poll::<AlcoveError>()? else {
+            return Ok(None);
+        };
+        Ok(Some(assemble(booted, &self.options)))
     }
 }

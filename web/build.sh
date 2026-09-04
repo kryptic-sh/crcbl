@@ -160,6 +160,7 @@ DEMOS=(
   "horde:crcbl_horde:demos/horde"
   "hud:crcbl_hud:demos/hud"
   "lantern:crcbl_lantern:demos/lantern"
+  "alcove:crcbl_alcove:demos/alcove"
   "quarry:crcbl_quarry:demos/quarry"
   "viewer:crcbl_viewer:demos/viewer"
   "orbit:crcbl_orbit:demos/orbit"

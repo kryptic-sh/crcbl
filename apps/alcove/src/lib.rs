@@ -52,14 +52,15 @@
 //! * **Milestone 4's ray-traced occlusion**, gated on P7C. The panel's
 //!   `ray tracing` row says `raster only` rather than implying a choice was
 //!   made.
-//! * **The Pages web demo.** `docs/backlog.md`'s "alcove's web demo is owed"
-//!   lists the eight places a browser demo has to be registered; this crate is
-//!   already a `cdylib` and has no web front end behind it yet.
 //!
-//! # One library, one front end so far
+//! # One library, three front ends
 //!
 //! `src/main.rs` is argv and an exit code; everything else is here, so
-//! `tests/golden.rs` can render the same court the binary does.
+//! `tests/golden.rs` can render the same court the binary does. `src/web.rs` is
+//! the browser's — compiled only on `wasm32`, which is why it is not linked on a
+//! host build — and it carries what a page needs on top of the shared boot
+//! protocol: the occlusion knobs as exports of their own, because natively they
+//! are keys and a phone has none.
 
 mod app;
 mod args;
@@ -68,7 +69,10 @@ mod gpu;
 pub mod menu;
 pub mod occlusion;
 
-pub use app::{Alcove, AlcoveError, Loop, Summary, run, start, with_shell};
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
+pub use app::{Alcove, AlcoveError, Loop, PendingLoop, Summary, run, start, with_shell};
 pub use args::{
     DEFAULT_TICK_HZ, Invocation, Options, USAGE, binding_from_name, geometry_from_name, parse,
     seam_from_name, technique_from_name,

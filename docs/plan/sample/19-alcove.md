@@ -60,7 +60,7 @@ for it, and this sample must not quietly imply otherwise.
 flat untextured surfaces are the point. **Exempt from rules 2 and 10**, on the
 viewer's: no game state, no `World`, no `GameModule`.
 
-## Status: built natively, and not on the site
+## Status: built and published
 
 **`apps/alcove` exists and milestones 1 and 2 are done, 2026-09-04.** The court
 is one interior of nothing but occlusion geometry — an alcove with a recess, a
@@ -91,12 +91,20 @@ band; that a wider radius deepens the occlusion; and that a silhouette does not
 print onto the wall two metres behind it. Four goldens sit behind them. Every
 one was measured on lavapipe and on radv, and every one was watched to fail.
 
+**The browser demo landed the same day**, at `/demos/alcove/`. It is the first
+page on the site whose controls are HTML rather than keys, and that is this
+sample's own reason rather than a flourish: the seam is the interesting knob to
+drive and natively it is walked with `,` and `.`, which a phone does not have.
+Each control drives the same `r_ssao_*` variable the key writes, through the
+exports `apps/alcove/src/web.rs` adds on top of the shared boot protocol, and
+reads back what the console holds afterwards — so there is no second copy of the
+state on the page. What a browser cannot carry is the ray-traced rung, and it
+cannot for the same reason it is owed everywhere else: WebGPU exposes no ray
+query, so the page draws through `LightingPath::Rasterised` by construction and
+compares two screen-space gathers.
+
 ## What is owed
 
-- **The Pages web demo.** Nothing of alcove is on the site: no `src/web.rs`, no
-  `cdylib` in `web/build.sh`, no page, no browser-gate expectation. The eight
-  registration points a browser demo needs are listed in `docs/backlog.md` under
-  "alcove's web demo is owed".
 - **Milestone 3, bent-normal visualisation.** `r_ssao_bent_normals` is a knob
   the sample toggles and reports, and nothing draws the direction: a term that
   steers where ambient is sampled from cannot be reviewed as a grey image, which

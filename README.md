@@ -202,7 +202,7 @@ built it.
 | `shard`          | a torch-lit interior zone, walked in an isometric-ish third person     | ✓              |
 | `sparks`         | the VFX fixture: stock effects, a hostile one, and the budget for them | ✓              |
 | `lantern`        | the lighting acceptance fixture: one room, every effect                | ✓              |
-| `alcove`         | the ambient-occlusion acceptance fixture — native only, so far         |                |
+| `alcove`         | the ambient-occlusion acceptance fixture: one court, every technique   | ✓              |
 | `quarry`         | the geometry acceptance fixture: one dense scene on every path         | ✓              |
 | `viewer`         | a glTF model viewer, and the asset pipeline's acceptance test          | ✓              |
 | `bare`           | the engine as a plain library, with a hand-written loop                |                |

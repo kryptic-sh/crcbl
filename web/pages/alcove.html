@@ -1,0 +1,282 @@
+<!--meta
+{
+  "out": "demos/alcove/index.html",
+  "slug": "alcove",
+  "name": "Alcove",
+  "title": "Alcove — Crucible",
+  "description": "alcove, the ambient-occlusion acceptance fixture, compiled to wasm32 and drawing screen-space occlusion through WebGPU — with every knob on the page.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#knobs", "label": "the knobs" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/alcove", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/alcove\">apps/alcove</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/alcove/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S4D</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Alcove</span></h1>
+  <p class="tagline">
+    One walled court of nothing but occlusion geometry: a recess, a cantilevered
+    stair, boxes and a post resting on a floor, a slot the sun runs straight
+    down, and a sphere on a pedestal against the far wall. Flat and untextured
+    on purpose — texture detail is exactly what hides an occlusion artefact. Not
+    a game: the occlusion is the content.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="knobs">
+  <h2>the occlusion, from the page</h2>
+  <h3>
+    Every knob the sample binds to a key, as something a finger can reach.
+  </h3>
+  <p>
+    Natively these are keys and rows on the pause panel. A seam that can only be
+    nudged by <kbd>,</kbd> and <kbd>.</kbd> is a control a phone cannot reach at
+    all, so each one below drives the same <code>r_ssao_*</code> console
+    variable the key writes — one cell, three writers, no copy of the state on
+    this page. Each control shows what the console holds <em>after</em> it
+    wrote, so a value the engine clamped reads back where it actually landed.
+  </p>
+  <ul class="keys" id="occlusion-knobs">
+    <li class="key-row">
+      <span>Draw the occlusion channel instead of the shaded court</span>
+      <span
+        ><button class="btn" type="button" id="knob-view" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span>Which gather runs</span>
+      <span
+        ><button class="btn" type="button" id="knob-technique" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span>Gather a bent direction beside the scalar</span>
+      <span
+        ><button class="btn" type="button" id="knob-bent" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span>The comparison seam</span>
+      <span
+        ><button class="btn" type="button" id="knob-seam" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span><label for="knob-seam-at">Where the seam stands</label></span>
+      <span>
+        <input
+          type="range"
+          id="knob-seam-at"
+          min="0"
+          max="1"
+          step="0.01"
+          value="0"
+          disabled
+        />
+        <span id="knob-seam-value">…</span>
+      </span>
+    </li>
+    <li class="key-row">
+      <span
+        ><label for="knob-radius">The radius the horizons sweep</label></span
+      >
+      <span>
+        <input
+          type="range"
+          id="knob-radius"
+          min="0"
+          max="1"
+          step="0.01"
+          value="0"
+          disabled
+        />
+        <span id="knob-radius-value">…</span>
+      </span>
+    </li>
+    <li class="key-row">
+      <span><label for="knob-intensity">How hard it is applied</label></span>
+      <span>
+        <input
+          type="range"
+          id="knob-intensity"
+          min="0"
+          max="1"
+          step="0.01"
+          value="0"
+          disabled
+        />
+        <span id="knob-intensity-value">…</span>
+      </span>
+    </li>
+    <li class="key-row">
+      <span>Every knob back to what the engine ships</span>
+      <span
+        ><button class="btn" type="button" id="knob-reset" disabled>
+          reset
+        </button></span
+      >
+    </li>
+  </ul>
+  <div class="note">
+    <strong>Clicked the canvas? Press <kbd>Esc</kbd> first.</strong> The fixture
+    takes the pointer while it is running, the way any mouse-look camera does,
+    and a captured pointer sends every click to the canvas — so nothing above
+    can be reached until the browser hands it back, and <kbd>Esc</kbd> is how it
+    does that. Letting the pointer go also pauses the fixture, as taking the
+    keyboard off the canvas does: the status line says <em>Paused</em> until you
+    click the canvas and press <kbd>Esc</kbd> again. Nothing here is waiting on
+    that — a court with nothing in it that moves draws the same picture paused,
+    and every knob above goes on changing that picture. And a finger never
+    triggers the capture at all, which is the case these controls exist for.
+  </div>
+  <div class="note">
+    <strong>The seam is the one to reach for.</strong> Raise it and the frame is
+    drawn twice: the technique you picked on the left of the line, the one the
+    engine ships on the right, over the same geometry in the same frame. Press
+    <kbd>F3</kbd> and the panel names which is which and prices them separately
+    — a raised seam times two gathers, so the cheap tier's saving is a number
+    rather than an impression.
+  </div>
+</section>
+
+<section id="what-you-are-looking-at">
+  <h2>what you are looking at</h2>
+  <h3>Four things, and each one is an occlusion claim you can check.</h3>
+  <p>
+    <strong>The alcove's back corner.</strong> Two walls and a ceiling meeting
+    is the deepest occlusion in the court, and it is where widening the radius
+    shows first: take the slider up and the darkening reaches further out of the
+    corner rather than getting darker in it.
+  </p>
+  <p>
+    <strong>The contact bands.</strong> Boxes and a post rest on the floor, and
+    the thin dark line where they meet it is the whole of what a screen-space
+    gather can say about contact. Open floor away from them must not move at all
+    — if the picture darkens everywhere, what you are looking at is the
+    intensity rather than the occlusion.
+  </p>
+  <p>
+    <strong>The slot the sun runs down.</strong> The sun's azimuth, the camera's
+    eye ray and the slot's axis are deliberately one line, so the floor at the
+    bottom of it is in full sun at any depth. Occlusion takes the same share off
+    that crease with the sun on as with it off, because it scales the ambient
+    term and leaves direct light alone — which is what the golden suite measures
+    as a difference of differences rather than as a ratio.
+  </p>
+  <p>
+    <strong>The sphere against the far wall.</strong> A silhouette must not
+    print onto the wall two metres behind it. That halo is the classic
+    screen-space artefact — a depth buffer knows how far away the sphere is and
+    nothing about what is behind it — and this court exists to make it visible
+    if it comes back.
+  </p>
+</section>
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>Nothing to play. There is a camera, and there are the knobs above.</h3>
+  <p>
+    The page opens on the fixed pose the golden frames are taken from, held
+    still. Swapping to the free camera is a row on the pause menu rather than a
+    key, because the two cameras share one lens — a free camera with a lens of
+    its own would give you a frame nobody could hold against the reference.
+  </p>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Swap between the fixed pose and the free camera</span>
+      <span><kbd>ESC</kbd>, then <kbd>ENTER</kbd> on <code>CAMERA</code></span>
+    </li>
+    <li class="key-row">
+      <span>Fly the free camera</span>
+      <span
+        ><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>,
+        <kbd>Space</kbd> and <kbd>Shift</kbd> for up and down, the arrows to
+        look</span
+      >
+    </li>
+    <li class="key-row">
+      <span>The AO-only view, the technique, bent normals</span>
+      <span><kbd>V</kbd>, <kbd>T</kbd>, <kbd>B</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>The seam: raise it, then walk it</span>
+      <span><kbd>X</kbd>, then <kbd>,</kbd> and <kbd>.</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Radius, intensity, and everything back</span>
+      <span
+        ><kbd>[</kbd> <kbd>]</kbd>, <kbd>-</kbd> <kbd>=</kbd>,
+        <kbd>R</kbd></span
+      >
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="why-this-one">
+  <h2>why this one is worth publishing</h2>
+  <h3>Because the comparison is the sample, and a browser can carry it.</h3>
+  <p>
+    The engine picks its lighting path from what the device offers. WebGPU
+    exposes no ray query, so this page draws the court through
+    <code>LightingPath::Rasterised</code> by construction — which is the honest
+    answer for a fixture whose ray-traced rung is not built yet, and it leaves
+    screen-space occlusion carrying the whole picture. That is the tier being
+    compared here: two gathers, either side of one seam, in one frame, with the
+    debug panel pricing each.
+  </p>
+  <p>
+    Press <kbd>F3</kbd> for the receipts. The panel names which geometry path,
+    which binding model and which lighting path this frame was drawn through,
+    which effects survived the four layers that resolve them, and what the
+    occlusion chain's passes cost — so a picture you think looks wrong comes
+    with the arm that drew it.
+  </p>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The native sample, with three differences the browser forces.</h3>
+  <p>
+    Start-up is polled across several frames, because
+    <code>requestDevice</code> is a promise and the main thread cannot block on
+    it. The frame loop is driven by <code>requestAnimationFrame</code> out here
+    rather than by a <code>loop</code> inside the engine. And the clock is the
+    browser's, because <code>wasm32-unknown-unknown</code> has no
+    <code>Instant</code>.
+  </p>
+  <p>
+    There is no fourth difference about saved data: this demo keeps nothing,
+    because there is no score to keep. It loads nothing either — the court's
+    geometry is built from literals in <code>apps/alcove</code> rather than read
+    off a disk, and the shaders and the font atlas are compiled into the module.
+  </p>
+  <div class="note">
+    <strong>Expect it to be slow on a machine with no GPU.</strong> A software
+    WebGPU adapter runs the whole occlusion chain per frame, and with the seam
+    up it runs two gathers instead of one. The court is small and flat-shaded,
+    which is why it is nearer the light end of this site's 3D demos than the
+    heavy one — but the frame is a full lighting stack either way.
+  </div>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

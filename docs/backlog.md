@@ -49,23 +49,30 @@ reference backend cannot:
   bind group only as a handle and a layout, so pointing both marches at one
   buffer leaves its suite green.
 
-**What is left is a question rather than a gap.** The two sides are not
-symmetric. With the radius moved, the near side is exact and the **far** side
-sits up to 0.4479/255 (lavapipe; 0.4167 on radv) away from the whole-frame run
-at the shipped radius, on columns as far as a hundred pixels from the seam — too
-far to be the blur's footprint, which the technique test measures at nine pixels
-left of the seam and four right of it. Every one of those columns is still
-closer to the block it was meant to read than to the other one, by a margin of
-at least 0.6406/255, so the claim holds; what is unexplained is why moving a
-number in the block perturbs the far side at all when moving the pipeline does
-not.
+**What is left is explained, and it is a small inconsistency rather than a
+gap.** The two sides are not symmetric. With the radius moved, the near side is
+exact and the **far** side sits up to 0.4479/255 (lavapipe; 0.4167 on radv) away
+from the whole-frame run at the shipped radius, on columns as far as a hundred
+pixels from the seam — too far to be the blur's footprint. Every one of those
+columns is still closer to the block it was meant to read than to the other one,
+by a margin of at least 0.6406/255, so the claim holds.
 
-Not chased down: it costs a `RenderDoc`-class look at the blur and upsample
-passes, and it changes no assertion. `SEAM_BLOCK_RESIDUE` in that file is the
-bound, and its doc says the same thing. Worth an hour when somebody is next
-inside `crcbl_render::ssao`'s chain — the likely answers are the depth-aware
-blur's weights or the upsample's neighbourhood reaching further than the seam
-split assumes.
+**The cause is in `Ssao::add_passes`, read on 2026-09-04**: only the _gather_ is
+split. Both blurs and the reconstruction are whole-frame passes and every one of
+them binds `uniforms` — the console's block — so their depth tolerance, which
+`ssao_blur.slang` and `ssao_upsample.slang` take as
+`sampling_radius() * DEPTH_TOLERANCE_RADII`, follows the console's radius on
+both sides of the seam. The far side therefore has the shipped gather under the
+console's filtering, which is not the whole-frame run at the shipped radius
+wherever depth varies. Moving the pipeline changes no block, so it leaves no
+residue. `crcbl_render::split`'s header already says the filters carry the seam
+sideways; this is the same fact on a different axis.
+
+Not fixed, because the honest fix is a decision: the filters could be split too
+(two more marches, each scissored, at the cost the seam was built to avoid), or
+the far side could accept the console's filter tolerance as the comparison's one
+shared knob — which is what it does today, and what `SEAM_BLOCK_RESIDUE`'s bound
+in `apps/alcove/tests/golden.rs` measures.
 
 Still open from the original entry, and independent of the above: **recording
 the resources behind a bind group** in `crcbl-hal`'s null backend, which would
@@ -73,36 +80,39 @@ make this and every other "bound the wrong buffer" fault visible to the
 reference backend rather than to a picture. Wider than this entry and worth its
 own decision.
 
-## alcove's web demo is owed (2026-09-04)
+## alcove's page knobs: what is checked, and what is not (2026-09-04)
 
-`apps/alcove` was built natively on 2026-09-04 — milestones 1 and 2 of
-`docs/plan/sample/19-alcove.md` — and deliberately stopped at the native half.
-Nothing of it is on the site, and `docs/plan/sample/00-samples-overview.md`'s
-ladder says so.
+`/demos/alcove/` is the first page on the site whose controls are HTML rather
+than keys — `apps/alcove/src/web.rs` exports one call per knob and
+`web/demos/alcove/main.js` binds them. `web/tools/browser-e2e.mjs`'s `alcove`
+row presses **three** of them and reads the effect off the demo's own heartbeat:
+the seam button, the seam slider and the technique button, then `reset`. The
+**AO-only view, bent normals, the radius slider and the intensity slider are
+driven by nothing but a person**. Two of the four are not on the heartbeat at
+all (`view` and `bent normals` are panel rows, and `intensity` is not printed),
+which is why they were left out rather than skipped quietly: checking them wants
+either another field on `Alcove::log_heartbeat`'s line or a reading taken off
+the canvas, and the second is what `still` in that row says this demo cannot
+give.
 
-The crate already declares a `cdylib` alongside its `rlib`, so the wasm side has
-somewhere to land, and `apps/alcove/src/lib.rs` names what is missing. What a
-browser demo has to be registered in, all of which exist for `lantern` and can
-be copied from it:
+**Reaching those controls at all costs the pointer, and that surprised us.** The
+fixture asks for Pointer Lock while it is running, `web/engine/shell.js` takes
+it on the first mouse press inside the canvas, and under a lock every mouse
+event goes to the canvas — so a click on a page control never arrives. `Esc` is
+the way out and the page says so; letting the pointer go also pauses the
+fixture, and focus coming back does not resume it. None of that is a bug — each
+half is behaviour a check in this tree asserts on purpose — but together they
+make a desktop visitor press `Esc` before the knobs answer, where a finger never
+does. If the seam ever wants to be reachable while the court is being flown, the
+decision to revisit is `Alcove::pointer_mode`, which locks whenever the run is
+not paused even though the page opens on the fixed camera.
 
-1. `web/build.sh`'s `DEMOS` list, which is what builds the `cdylib` for
-   `wasm32-unknown-unknown`.
-2. `web/tools/build-pages.mjs`'s `DEMOS` list, which is what emits the page.
-3. A page of its own under `web/pages/`, named for the demo.
-4. A directory of its own under `web/demos/`, holding the demo's `main.js` and
-   an asset manifest under `assets/`.
-5. `web/tools/browser-e2e.mjs`'s `EXPECTATIONS`, without which the demo is built
-   and never opened — `docs/backlog.md` has watched that happen before.
-6. Two steps in `.github/workflows/pages.yml`.
-7. The card in `web/pages/index.html`.
-8. A web front end in the crate itself — the module every other sample calls
-   `web.rs` — against the `crate-type` entry that already exists in
-   `apps/alcove/Cargo.toml`.
-
-**One thing to decide before building it:** the sample's controls are keys and a
-pause panel, and the seam is the interesting one to drive from a page. Every
-other demo's page offers its controls as HTML; a seam that can only be nudged by
-`,` and `.` is a control a phone cannot reach at all.
+**`web/run-browser-e2e.sh` accepts `--expect-fail ssr,ui` and ignores it.** That
+flag is `web/run-render-harness-e2e.sh`'s; the browser gate passes unknown
+`--flags` through to `browser-e2e.mjs`, whose argument parser records anything
+beginning with `--` and never complains. Nothing here depends on it, but a
+person copying a command line from one gate to the other gets no warning that
+half of it did nothing.
 
 ## What the AO default change of 2026-09-03 did not cover (2026-09-03)
 

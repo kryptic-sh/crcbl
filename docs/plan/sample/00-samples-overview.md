@@ -82,21 +82,20 @@ a **tech demo with no game in it at all** — matchmaking, rating and ranked aut
 in isolation, which is the only way a matchmaker can be evaluated without a real
 playerbase.
 
-**Where the ladder stands.** Every sample on it except towers (07), arena (08)
-and the comparison wave (17–19) has an `apps/` crate that builds for `wasm32`
-and ships on the demo site — alcove (19) has the crate and not the demo;
-`web/build.sh`'s `DEMOS` array is the list, and it is the authority — a sample
-missing from it is a sample nobody visits. What each of those crates has and has
-not built is in its own doc's status section and, fresher than either, in the
-module header of its `src/lib.rs`. **towers, arena and mirrors and sundial have
-no `apps/` directory at all**, and each doc says what it is waiting on — for 17
-and 18 that is the ladder itself, since a comparison fixture holding one
-technique is not a comparison. **alcove (19) is the first of the comparison wave
-to have a crate**: `apps/alcove` was built natively on 2026-09-04, once the
-occlusion chain had a second technique to compare, and it is **not on the site**
-— `web/build.sh`'s `DEMOS` array does not name it, and `docs/backlog.md` lists
-the eight places a browser demo has to be registered. options (20) is not among
-them either: `apps/options` was built and published on 2026-08-28.
+**Where the ladder stands.** Every sample on it except towers (07), arena (08),
+mirrors (17) and sundial (18) has an `apps/` crate that builds for `wasm32` and
+ships on the demo site; `web/build.sh`'s `DEMOS` array is the list, and it is
+the authority — a sample missing from it is a sample nobody visits. What each of
+those crates has and has not built is in its own doc's status section and,
+fresher than either, in the module header of its `src/lib.rs`. **towers, arena
+and mirrors and sundial have no `apps/` directory at all**, and each doc says
+what it is waiting on — for 17 and 18 that is the ladder itself, since a
+comparison fixture holding one technique is not a comparison. **alcove (19) is
+the first of the comparison wave to ship**: `apps/alcove` was built natively on
+2026-09-04, once the occlusion chain had a second technique to compare, and its
+browser demo landed the same day at `/demos/alcove/` — the one page on the site
+whose controls are HTML rather than keys, because a seam walked with `,` and `.`
+is a comparison a phone cannot reach. options (20) shipped on 2026-08-28.
 
 **Where multiplayer lives — and where it does not.** Native sessions are LAN:
 direct connect by IP, or a lobby browser over local-network host discovery.

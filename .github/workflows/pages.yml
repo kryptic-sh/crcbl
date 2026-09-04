@@ -412,6 +412,19 @@ jobs:
           # number: the cap says "out of wall clock", never "too slow".
           - quarry
           - lantern
+          # alcove is the third 3D fixture and it sits with lantern rather than
+          # with shard: one small flat-shaded court, no animation and a fixed
+          # camera, so what it costs is the occlusion chain rather than the
+          # scene. Measured on a desktop's software adapter on 2026-09-04 — the
+          # same box, the same afternoon — it reported "every later budget
+          # scaled" 5.2x and 5.5x across two runs against lantern's 5.6x, where
+          # shard's own note here records 87x on a runner. Its `EXPECTATIONS`
+          # row also carries `still`: nothing in the court moves, so group D
+          # reads the loop's frame counter instead of a changed picture,
+          # exactly as options does. And it is the one demo whose *page*
+          # controls are gated — `knobs` in that row presses them and reads what
+          # the engine's own heartbeat says they did.
+          - alcove
           # viewer and orbit are the two samples whose subject does not move on
           # its own, and both answer group C off something the sample itself
           # advances — viewer's idle turntable, orbit's scripted ascent.
@@ -621,6 +634,13 @@ jobs:
       - name: Render lantern in a real browser
         timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=lantern ./web/run-browser-e2e.sh --headless
+
+      # Twenty, the same as lantern's: the two measure within half a factor of
+      # each other on a software adapter, and this fixture runs the occlusion
+      # chain twice over whenever the gate raises its seam.
+      - name: Render alcove in a real browser
+        timeout-minutes: 20
+        run: CRCBL_WEB_E2E_DEMO=alcove ./web/run-browser-e2e.sh --headless
 
       - name: Render viewer in a real browser
         timeout-minutes: 12

@@ -790,6 +790,83 @@ const EXPECTATIONS = {
     // compiles.
     effectsRow: 'effects: shadows ao ssr aa vfog',
   },
+  // **The demo whose subject is a comparison**, and the only one on the site
+  // whose controls are HTML rather than keys. `apps/alcove` is the
+  // ambient-occlusion acceptance fixture: one flat, untextured court, a fixed
+  // camera, and every `r_ssao_*` knob reachable from the page through
+  // `apps/alcove/src/web.rs`'s own exports — because natively the seam is walked
+  // with `,` and `.`, and a phone has neither.
+  //
+  // **No start key and nothing that moves.** There is no run to begin, so there
+  // is nothing for a `Space` to leave; and the court has no simulation in it at
+  // all — `HostedGame::tick` integrates a camera nobody is flying — so the
+  // picture is identical from one frame to the next by construction. That is
+  // options' situation in a 3D scene, and it takes options' answer: `still`
+  // swaps group D's frame hash for the loop's own frame counter, and `moving`
+  // reads the tick the heartbeats are logged on, which is all this demo has to
+  // give. A *changed* frame here would be the finding.
+  //
+  // `waiting` is this sample's own claim, and it is three. `lighting:
+  // Rasterised` is the arm a browser resolves to by construction — no ray query
+  // — which is also the honest answer to this sample's ray-traced rung not being
+  // built: the seam compares two screen-space gathers and nothing else.
+  // `technique: gtao` and `seam: OFF` are the knobs before anything has touched
+  // them, and they are the control for the page's own controls: a boot that had
+  // already moved a knob would report it here.
+  alcove: {
+    // The seventh demo that draws mesh instances, so the seventh whose cull pass
+    // has something to count. See lantern's row and group D.
+    culls: true,
+    // The second demo whose canvas is meant to hold still — see the note above
+    // and options' row, which is the other.
+    still: true,
+    key: null,
+    waiting: (line) =>
+      line.includes('[HUD] tick: 60') &&
+      line.includes('lighting: Rasterised') &&
+      line.includes('technique: gtao') &&
+      line.includes('seam: OFF'),
+    moving: /tick: (\d+)/,
+    movingLabel: 'the loop keeps ticking with nothing to simulate',
+    // **The one thing this whole page is downstream of**: that occlusion
+    // survived the four layers that resolve an effect and reached the frame the
+    // browser drew. Every control on this demo's page moves an `r_ssao_*`
+    // variable, and on a device that clamped ambient occlusion away all of them
+    // would move a term nothing samples — while every other check here passed,
+    // because the court still draws and the loop still ticks.
+    //
+    // A prefix rather than the whole row, which is where this differs from
+    // lantern's: that row names `vfog` because lantern is the only view that
+    // dispatches it, and this one is not making a claim about which of `ssr` and
+    // `aa` a given adapter kept. Measured identical on this machine's RDNA-3
+    // adapter and on SwiftShader — `effects: shadows ao ssr aa` on both — and it
+    // is the `ao` that is being asserted.
+    effectsRow: 'effects: shadows ao',
+    // **The page's own controls**, and the block above the `range` and `zone`
+    // blocks reads them. Every id here is one `web/pages/alcove.html` gives a
+    // control and `web/demos/alcove/main.js` binds; every pattern is a field of
+    // the `[HUD]` line `apps/alcove/src/app.rs` logs, which is the console's own
+    // cell rather than anything the page remembers.
+    knobs: {
+      // The seam, raised and lowered by a button and placed by a slider — the
+      // pair the whole decision to give this page HTML controls was about.
+      seam: 'knob-seam',
+      seamAt: 'knob-seam-at',
+      // The gather, cycled through the set `crcbl_render::ssao` declares. What
+      // it cycles *to* is not spelled here for `crate::occlusion`'s reason: the
+      // set is the engine's, and the check asks only that the name changed.
+      technique: 'knob-technique',
+      // And everything back, which is also what leaves the demo in the state
+      // the groups after this one were written against.
+      reset: 'knob-reset',
+      seamField: /\bseam: (OFF|[\d.]+)/,
+      techniqueField: /\btechnique: (\w+)/,
+      // Where `occlusion::SEAM_CENTRE` puts the seam when the button raises it,
+      // as the heartbeat prints it. The slider has to move it off this, or a
+      // slider wired to nothing would pass on the button's own work.
+      centre: '0.50',
+    },
+  },
   // **The third demo with no start key**, and the second that draws mesh
   // geometry. `apps/quarry` is the geometry acceptance fixture: there is no run
   // to begin and no state to leave, so there is nothing for a `Space` to do. It
@@ -3616,6 +3693,247 @@ try {
           `${values().size} value(s): ${[...values()].join(', ') || 'none'}` +
           heldNote()
   );
+
+  // **AND THE PAGE'S OWN CONTROLS, WHICH NOTHING ELSE HERE PRESSES.** Only
+  // alcove has a `knobs` block, because it is the only demo on the site whose
+  // controls are HTML rather than keys — the seam it exists to drive is walked
+  // natively with `,` and `.`, and a phone has neither.
+  //
+  // Nothing else in this file would notice them going wrong.
+  // `web/tools/check-exports.mjs` proves the symbols behind them are in the
+  // artifact and that the shim names ones that exist; it cannot know whether a
+  // listener was ever attached. The page loads and every other check in this
+  // run passes for a demo whose knobs do nothing at all.
+  //
+  // **The observable is the engine's own heartbeat, not the control's label.**
+  // `main.js` writes both, so a page that had lost the engine and kept its own
+  // idea of the state would print a moved value beside a picture nothing had
+  // moved. `Alcove::log_heartbeat` prints the console's cells, which is where
+  // these exports write and where the occlusion pass reads.
+  //
+  // **Every press pauses the demo, and that is not a fault.** Clicking any
+  // control takes the keyboard off the canvas, the engine pauses on blur, and
+  // focus coming back does not resume it — group E asserts all three. So each
+  // reading below is taken after putting the run back in play the way a visitor
+  // does: a click on the canvas, then Escape.
+  if (EXPECTED.knobs) {
+    const knobs = EXPECTED.knobs;
+
+    /**
+     * Gives the pointer back, so a click on a page control is seen at all.
+     *
+     * **alcove asks for Pointer Lock while it is being flown** — every 3D
+     * sample here does — and `web/engine/shell.js` takes it on the first mouse
+     * press inside the canvas, which is the focusing click this group has
+     * already made. Under a lock the browser routes every mouse event to the
+     * locked element, so a click on a button elsewhere on the page never
+     * arrives: it reads exactly like a control that was never wired to
+     * anything, which is what it read as here until this existed. `Esc` is how
+     * a visitor gets out of it, and `web/pages/alcove.html` says so; this is
+     * that same release, asked for directly so the key does not also reach the
+     * demo's pause.
+     *
+     * The two frames afterwards are not decoration. The release is a round trip
+     * through the browser process, and a click dispatched in the same breath is
+     * still delivered to the canvas — measured, and it cost the first press of
+     * this block every run before the wait was here.
+     */
+    const releasePointer = async () => {
+      await evaluate(page, `(document.exitPointerLock?.(), true)`);
+      const freed = await until(async () =>
+        (await evaluate(page, `document.pointerLockElement === null`)) === true
+          ? true
+          : null
+      );
+      await loopFrames(page);
+      return freed === true;
+    };
+
+    /**
+     * One real click on the middle of a page control, scrolled into view first.
+     *
+     * Through the browser's input pipeline rather than `element.click()`,
+     * because what this block is about is a control a visitor can actually
+     * reach: a synthetic `click()` fires the listener on an element that is off
+     * screen, behind something else, or — as here — behind a pointer lock.
+     */
+    const clickControl = async (/** @type {string} */ id) => {
+      await releasePointer();
+      const at = await evaluate(
+        page,
+        `(() => { const e = document.getElementById('${id}');
+                  if (!e) return null;
+                  e.scrollIntoView({ block: 'center', behavior: 'instant' });
+                  const r = e.getBoundingClientRect();
+                  return { x: Math.round(r.x + r.width / 2),
+                           y: Math.round(r.y + r.height / 2) }; })()`
+      );
+      if (at) await clickAt(at);
+      return Boolean(at);
+    };
+
+    /**
+     * A real click a quarter of the way along a slider's track.
+     *
+     * Not the middle, which is where the seam's own button has just put it: a
+     * click that landed on the value already in force would pass this block
+     * whether or not the slider is wired to anything. Where exactly the thumb
+     * lands is the browser's range geometry rather than this gate's business,
+     * so the check below asks that it moved rather than where to.
+     */
+    const dragSlider = async (/** @type {string} */ id) => {
+      await releasePointer();
+      const at = await evaluate(
+        page,
+        `(() => { const e = document.getElementById('${id}');
+                  if (!e) return null;
+                  e.scrollIntoView({ block: 'center', behavior: 'instant' });
+                  const r = e.getBoundingClientRect();
+                  return { x: Math.round(r.x + r.width / 4),
+                           y: Math.round(r.y + r.height / 2) }; })()`
+      );
+      if (at) await clickAt(at);
+      return Boolean(at);
+    };
+
+    /**
+     * Puts the run back in play, and the canvas back where group E expects it.
+     *
+     * A slider takes the keyboard when it is dragged, the engine pauses on the
+     * blur, and focus coming back does not resume it — group E asserts all
+     * three. So this is what a visitor does: a click on the canvas, then
+     * Escape. `focusPoint` scrolls the canvas to the middle of the viewport,
+     * which is exactly where it was when `rect` was read — so the corner group E
+     * clicks is the corner it computed, rather than wherever scrolling down to
+     * the knobs left it.
+     */
+    const resume = async () => {
+      // **The engine has to have seen the blur before this asks whether it is
+      // paused.** Losing the keyboard — or the pointer lock — is an event the
+      // loop applies on its next frame, so a status read taken in the same
+      // breath as the release still says RUNNING: this block first "resumed" a
+      // demo that had not paused yet, sent no key, and then waited out its
+      // deadline for a heartbeat the pause was about to stop. Two frames of the
+      // demo's own loop is the engine having had its chance, which is the wait
+      // group E makes before reading the same flag.
+      await loopFrames(page);
+      await clickAt(await focusPoint());
+      await loopFrames(page);
+      if ((await evaluate(page, `crcbl.status()`)) === 6) {
+        for (const type of ['keyDown', 'keyUp']) {
+          await page.send('Input.dispatchKeyEvent', {
+            type,
+            code: 'Escape',
+            key: 'Escape',
+            windowsVirtualKeyCode: 27,
+            nativeVirtualKeyCode: 27,
+          });
+        }
+      }
+      return until(async () =>
+        (await evaluate(page, `crcbl.status()`)) === 3 ? true : null
+      );
+    };
+
+    /** The first HUD line logged after `mark`, or `null` if none arrives. */
+    const beatAfter = async (/** @type {number} */ mark) =>
+      until(async () => hud()[mark] ?? null);
+
+    /** What the heartbeat `line` says a knob stands at. */
+    const stands = (/** @type {string} */ line, /** @type {RegExp} */ field) =>
+      line.match(field)?.[1] ?? '';
+
+    const startingTechnique = stands(
+      hud()[hud().length - 1] ?? '',
+      knobs.techniqueField
+    );
+
+    // **The controls open only once there is a loop behind them.** They are
+    // `disabled` in the markup and `main.js` polls the sample's own status
+    // export before enabling them, so a block that clicked one before that
+    // would be reporting start-up rather than a control. Polled rather than
+    // read once, because "not yet" and "never" are the same answer at a single
+    // instant.
+    const opened = await until(async () =>
+      (await evaluate(
+        page,
+        `document.getElementById('${knobs.seam}')?.disabled === false`
+      )) === true
+        ? true
+        : null
+    );
+    check(
+      'C',
+      'the page opens its own controls once the demo is running',
+      opened === true,
+      opened === true
+        ? `#${knobs.seam} is enabled`
+        : `#${knobs.seam} is still disabled after ${pollCeiling()} ms, or the ` +
+            'page has no such control at all'
+    );
+
+    // The seam up, the gather cycled, and the seam then moved off the centre
+    // the button chose — three presses, read off one heartbeat afterwards.
+    const pressed =
+      (await clickControl(knobs.seam)) &&
+      (await clickControl(knobs.technique)) &&
+      (await dragSlider(knobs.seamAt));
+    const running = pressed && (await resume());
+    const mark = hud().length;
+    const line = running ? await beatAfter(mark) : null;
+    const seamNow = stands(line ?? '', knobs.seamField);
+    check(
+      'C',
+      'a press and a drag on the page raise the seam and move it',
+      Boolean(line) && seamNow !== 'OFF' && seamNow !== knobs.centre,
+      !pressed
+        ? 'one of the controls named in EXPECTATIONS is not on the page'
+        : !running
+          ? 'the demo did not go back into play after the presses — status ' +
+            `${await evaluate(page, `crcbl.status()`)}`
+          : line
+            ? `the seam reads ${seamNow || '(nothing)'} — raised from OFF and ` +
+              `moved off the ${knobs.centre} the button puts it at`
+            : `no heartbeat in ${pollCeiling()} ms after the presses`
+    );
+    check(
+      'C',
+      'a press on the page cycles the gather the frame runs',
+      Boolean(line) &&
+        stands(line ?? '', knobs.techniqueField) !== '' &&
+        stands(line ?? '', knobs.techniqueField) !== startingTechnique,
+      line
+        ? `technique: ${stands(line, knobs.techniqueField) || '(nothing)'}, ` +
+            `and it opened on ${startingTechnique || '(nothing)'}`
+        : 'no heartbeat to read it off'
+    );
+
+    // **And back, so the frame every group after this one reads is the frame
+    // they were written against.** It is also the check that `reset` reaches
+    // the engine's own defaults rather than values the page wrote down: both
+    // fields have to return, and one of them was moved by a slider that never
+    // named a number.
+    const wasReset = await clickControl(knobs.reset);
+    const backInPlay = wasReset && (await resume());
+    const afterMark = hud().length;
+    const restored = backInPlay ? await beatAfter(afterMark) : null;
+    check(
+      'C',
+      'the page puts every knob back where the engine declares it',
+      Boolean(restored) &&
+        stands(restored ?? '', knobs.seamField) === 'OFF' &&
+        stands(restored ?? '', knobs.techniqueField) === startingTechnique,
+      restored
+        ? `seam: ${stands(restored, knobs.seamField)}, technique: ` +
+            `${stands(restored, knobs.techniqueField)}`
+        : !wasReset
+          ? `the page has no #${knobs.reset} control`
+          : !backInPlay
+            ? 'the demo did not go back into play after the reset — status ' +
+              `${await evaluate(page, `crcbl.status()`)}`
+            : `no heartbeat in ${pollCeiling()} ms after the reset`
+    );
+  }
 
   // **AND THE CONTROLLER BEING DRIVEN, WHICH THE CHECK ABOVE CANNOT SEE.**
   // Only puppet has one. `moving` above says the simulation is advancing, and

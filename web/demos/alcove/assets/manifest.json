@@ -1,0 +1,4 @@
+{
+  "comment": "Asset keys the shim pre-loads through __crcbl_web_fetch_* before the demo boots. alcove has none: the court is described in Rust rather than loaded, it draws no sprite art at all — sample rule 11 exempts it by name, and flat untextured surfaces are the point — and its shaders and font atlas are compiled into the wasm module. The list is the seam, not the content.",
+  "keys": []
+}

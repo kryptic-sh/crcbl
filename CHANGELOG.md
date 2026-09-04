@@ -35,22 +35,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`alcove`, the ambient-occlusion acceptance fixture, runs natively.**
-  `cargo run -p alcove` opens one interior of nothing but occlusion geometry —
-  an alcove with a recess, a cantilevered stair, boxes and a post on a floor, a
-  slot the sun runs straight down, and a sphere on a pedestal against the far
-  wall, all flat and near-untextured, because texture detail is what hides an
-  occlusion artefact. Every knob the occlusion chain ships is live and on the
-  pause panel: the AO-only view (`V`), the technique (`T`, cycling `gtao` and
-  `hemisphere`), the radius (`[` / `]`), the intensity (`-` / `=`), bent normals
-  (`B`), and the comparison seam (`X` to raise it, `,` / `.` to nudge it) — with
-  a row naming which technique each side of the seam is running. The panel and
-  the headless summary both carry the per-pass GPU time for `ssao` and
+- **`alcove`, the ambient-occlusion acceptance fixture, natively and in a
+  browser.** `cargo run -p alcove` opens one interior of nothing but occlusion
+  geometry — an alcove with a recess, a cantilevered stair, boxes and a post on
+  a floor, a slot the sun runs straight down, and a sphere on a pedestal against
+  the far wall, all flat and near-untextured, because texture detail is what
+  hides an occlusion artefact. Every knob the occlusion chain ships is live and
+  on the pause panel: the AO-only view (`V`), the technique (`T`, cycling `gtao`
+  and `hemisphere`), the radius (`[` / `]`), the intensity (`-` / `=`), bent
+  normals (`B`), and the comparison seam (`X` to raise it, `,` / `.` to nudge
+  it) — with a row naming which technique each side of the seam is running. The
+  panel and the headless summary both carry the per-pass GPU time for `ssao` and
   `ssao-shipped`, so a raised seam prices two techniques against each other in
   one frame. `--camera fixed|free`, `--technique`, `--split`, `--no-ao`,
   `--ao-view`, `--force-geometry` and `--force-binding` are the flags on top of
-  the common set. Native only for now: the browser demo is owed, and
-  `docs/backlog.md` lists what it needs.
+  the common set. **It is on the demo site too**, at `/demos/alcove/`, and it is
+  the first page there whose controls are HTML rather than keys: the AO-only
+  view, the technique, bent normals, the seam and sliders for where the seam
+  stands and for the radius and intensity, each driving the same `r_ssao_*`
+  console variable the key writes and reading back what the console holds
+  afterwards. That is the seam's own reason — natively it is walked with `,` and
+  `.`, which a phone does not have. A browser has no ray query, so the page
+  draws through `LightingPath::Rasterised` and compares two screen-space
+  gathers.
 
 - **The occlusion chain ships two techniques, and a console variable picks which
   one a frame gathers with.** `r_ssao_technique` in `crcbl_render::ssao` takes
