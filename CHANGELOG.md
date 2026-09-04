@@ -35,6 +35,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The occlusion chain ships two techniques, and a console variable picks which
+  one a frame gathers with.** `r_ssao_technique` in `crcbl_render::ssao` takes
+  `gtao` or `hemisphere` and defaults to `gtao`, which is the horizon integral
+  `shaders/ssao.slang` has drawn since 2026-08-27 and the one every golden in
+  this workspace was blessed on — so a frame nobody has touched the console on
+  records exactly what it recorded before. `hemisphere` selects the new
+  `shaders/ssao_hemisphere.slang`: classic normal-oriented SSAO, eight depth
+  comparisons in the hemisphere around the reconstructed normal, which is the
+  cheap tier `docs/plan/46-ambient-occlusion.md` had planned to keep beside GTAO
+  and did not.
+
+  **The two share everything but the module.** One uniform block, both bindings,
+  one bind-group layout, one uniform ring, one group cache, the same blur and
+  the same reconstruction; `Ssao` simply builds a second gather pipeline and
+  binds it instead. So the selector reaches a **pipeline** where every other
+  occlusion knob reaches a lane of the block — which is what lets it work across
+  the comparison seam: with `r_ssao_split` set, the near side gathers through
+  the technique the console holds and the far side through the one that ships,
+  so one frame's depth is resolved by two different algorithms either side of a
+  vertical line. That is `docs/plan/sample/19-alcove.md`'s second milestone, and
+  its engine half is now done.
+
+  **What the cheap tier does not produce is a bent direction.** A hemisphere of
+  binary comparisons has no visible arc to bisect, so it writes the sentinel for
+  a zero direction in every pixel's `gba` and `mesh.slang` answers that with the
+  shading normal it already had — the lighting a frame got before the occlusion
+  target was widened. `r_ssao_bent_normals` therefore has nothing to switch
+  while `hemisphere` is selected. Its self-occlusion bias comes back with it as
+  `DEPTH_BIAS_RADII`, taken as a share of the sampling radius rather than as the
+  fixed view-space distance it was when this technique last shipped, because the
+  radius is `r_ssao_radius` now.
+
 - **The first bounce of the sun and of every shadowed punctual light fills a
   probe volume, every frame.** `ProbeGrid::update` is new and defaults to
   `ProbeUpdate::Authored`, which is the behaviour every existing scene had: the

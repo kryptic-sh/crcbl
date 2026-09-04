@@ -75,10 +75,12 @@ It ships in the engine rather than here: `ForwardRenderer::set_occlusion_view`,
 pause panel. So the view mode this sample owes is **reachable today in a demo
 that exists**, and what is left for this one is the scene and the comparison.
 
-The technique rung it displays is now GTAO, not SSAO: the eight-tap hemisphere
-was replaced rather than kept as a cheap tier, because a tier needs a selector
-to choose it and there is none. That makes the technique selector below a
-prerequisite for milestone 2 rather than a convenience.
+**Both technique rungs are reachable since 2026-09-04.** GTAO replaced the
+eight-tap hemisphere in place when it landed; `shaders/ssao_hemisphere.slang`
+brought that body back beside it and `crcbl_render::ssao::r_ssao_technique`
+selects between them, either side of `r_ssao_split`'s seam. So milestone 2's
+engine half is done and what is left of it is this sample's: the scene, and
+showing which technique each side of the seam is running.
 
 Nothing else exists.
 
@@ -92,11 +94,12 @@ Nothing else exists.
    the two: this sample asks for them to be legible on screen, and a console
    variable is live without being shown.
 2. **GTAO**, side by side with SSAO, with the silhouette-rim comparison the
-   escalation clause cares about. **The split screen this wants is built** —
+   escalation clause cares about. **The engine half is built** —
    `crcbl_render::split` and `r_ssao_split` resolve one frame's depth two ways
-   either side of a seam, which is the harness sample 17 was to prove — so what
-   is left of this milestone is a second technique to put on the far side of it.
-   `docs/backlog.md` carries why there is only one.
+   either side of a seam, and `r_ssao_technique` puts a different _technique_ on
+   each side of it: the near side runs what the console holds and the far side
+   what ships. What is left of this milestone is the sample's own half — the
+   scene, and saying on screen which technique each side is running.
 3. **Bent-normal visualisation**, once GTAO produces one.
 4. **Ray-traced AO**, gated on P7C, and the device clamp — and this is the rung
    that gives the screen-space rungs a reference to be judged against, which

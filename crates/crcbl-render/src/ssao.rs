@@ -97,6 +97,26 @@
 //! blend could only weaken it further. The default is the exponent that changes
 //! nothing, so this switch too leaves the frame every golden was blessed at.
 //!
+//! # The technique is the switch that changes the shader
+//!
+//! [`r_ssao_technique`] is the one knob here that reaches a **pipeline** rather
+//! than a lane of the uniform block: `shaders/ssao.slang` integrates a horizon
+//! and `shaders/ssao_hemisphere.slang` sums eight depth comparisons, and they
+//! are two modules because a stage with two entry points is one
+//! [`crcbl_shaders::Shader::entry_point`] refuses to choose between. So
+//! [`Ssao`] carries a second gather pipeline on the same layout, and
+//! [`Ssao::add_passes`] picks which of them each side of the seam records.
+//!
+//! **`gtao` is the default and is what every golden was blessed at.**
+//! `docs/plan/46-ambient-occlusion.md` kept the hemisphere as the cheap tier on
+//! the antialiasing ladder's FXAA-under-SMAA pattern — eight taps and a
+//! comparison is a real budget on a software rasteriser — and
+//! `docs/plan/sample/19-alcove.md`'s second milestone is the two of them either
+//! side of [`r_ssao_split`]. What the cheap tier does not produce is a bent
+//! direction: it writes the zero sentinel on every pixel, and `mesh.slang`
+//! answers that with the shading normal, so [`r_ssao_bent_normals`] has nothing
+//! to switch while it is selected.
+//!
 //! # The radius is the other control, and it is the one with a picture
 //!
 //! [`r_ssao_radius`] is the world-space disc the horizons are swept over, and
@@ -134,7 +154,7 @@ use crcbl_hal::{
     PipelineLayoutHandle, Rect2d, SampleType, ShaderStages, StoreOp,
     check_portable_storage_buffers,
 };
-use crcbl_shaders::{SSAO, SSAO_BLUR, SSAO_UPSAMPLE, ssao};
+use crcbl_shaders::{SSAO, SSAO_BLUR, SSAO_HEMISPHERE, SSAO_UPSAMPLE, ssao};
 
 use crate::graph::{ImageId, RenderGraph};
 
@@ -181,6 +201,11 @@ crcbl_console::convar! {
 crcbl_console::convar! {
     /// The disc the horizons are swept over, in world units: 0.5 ships.
     pub static r_ssao_radius: f32 in 0.0625 ..= 4.0 = 0.5;
+}
+
+crcbl_console::convar! {
+    /// Which gather runs: `gtao` ships, `hemisphere` is the cheap tier.
+    pub static r_ssao_technique: &'static str one_of ["gtao", "hemisphere"] = "gtao";
 }
 
 crcbl_console::convar! {
@@ -244,6 +269,80 @@ pub(crate) fn radius() -> f32 {
         .clamp(ssao::RADIUS_MIN, ssao::RADIUS_MAX)
 }
 
+/// The gather a frame runs: one of the two shaders that write the raw channel.
+///
+/// **A technique is a pipeline and not a uniform**, which is what separates
+/// this from every other switch in this module: the two are separate modules
+/// (see this module's header) and therefore separate pipelines, so
+/// [`Ssao::add_passes`] selects rather than [`Ssao::begin_frame`] writing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Technique {
+    /// `shaders/ssao.slang`'s horizon integral. What ships.
+    Gtao,
+    /// `shaders/ssao_hemisphere.slang`'s eight depth comparisons. The cheap
+    /// tier, and it writes no bent direction.
+    Hemisphere,
+}
+
+impl Technique {
+    /// The name [`r_ssao_technique`] holds for this one.
+    ///
+    /// The `convar!` needs literals, so the names are written twice; the test
+    /// below is what holds this copy to the variable's own set.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Gtao => "gtao",
+            Self::Hemisphere => "hemisphere",
+        }
+    }
+
+    /// The technique `name` names.
+    ///
+    /// **[`Technique::Gtao`] for a name outside the set**, which the console
+    /// cannot deliver — an enum variable refuses a value it does not declare —
+    /// so this is what a caller reaching past the console would get, and it is
+    /// what ships rather than an arbitrary arm.
+    fn of(name: &str) -> Self {
+        TECHNIQUES
+            .into_iter()
+            .find(|technique| technique.label() == name)
+            .unwrap_or(Self::Gtao)
+    }
+}
+
+/// The order [`r_ssao_technique`] declares its names in.
+///
+/// `crate::debug_view`'s `VIEWS` has the same shape for the same reason: the
+/// macro takes literals, so this is the list [`Technique::of`] searches and
+/// `the_variable_names_are_the_techniques_labels` in this module's tests is what
+/// holds the two spellings together.
+const TECHNIQUES: [Technique; 2] = [Technique::Gtao, Technique::Hemisphere];
+
+/// [`r_ssao_technique`] as the pipeline picker wants it.
+pub(crate) fn technique() -> Technique {
+    Technique::of(r_ssao_technique.get_enum())
+}
+
+/// The technique the chain ships, for the other side of the seam.
+///
+/// [`shipped`]'s rule on its own scalars, applied to the one switch that is not
+/// one of them: read off the variable's declared default rather than written
+/// down, so the far side follows a default that moves and the comparison is
+/// never a configuration against itself.
+///
+/// **Beside [`shipped`] rather than inside it**, because the two are read at
+/// different points: those four scalars are written into a uniform block by
+/// [`Ssao::begin_frame`] and this selects a pipeline in [`Ssao::add_passes`].
+/// Returning it from that tuple would be a value one caller always discards.
+fn shipped_technique() -> Technique {
+    match r_ssao_technique.default() {
+        crcbl_console::Value::Enum(name) => Technique::of(name),
+        // Unreachable by construction: `convar!` builds an enum cell and its
+        // default together. This is what a `match` needs.
+        _ => Technique::Gtao,
+    }
+}
+
 /// [`r_ssao_split`] as [`crate::split::halves`] wants it, or `None` for a frame
 /// comparing nothing.
 ///
@@ -286,6 +385,23 @@ fn shipped() -> (f32, u8, f32, bool) {
         bent,
     )
 }
+
+/// The lock [`r_ssao_technique`] is moved under.
+///
+/// **In this module rather than beside the test that takes it**, because two
+/// files move this one variable: [`tests::the_seams_other_side_is_the_technique_that_ships`]
+/// and `crate::forward`'s `ssao_technique_switch`. A `cargo test` run shares one
+/// process between them, so a variable one left moved is a frame the other did
+/// not ask for — `ssao_blur_switch` is where that paragraph is written out in
+/// full, off an experiment rather than a guess.
+///
+/// **Last in the lock order**, after `crate::forward`'s three. It is the only
+/// one of them reached from two modules, and a test here takes this one alone,
+/// so there is no cycle to have.
+///
+/// [`tests::the_seams_other_side_is_the_technique_that_ships`]: fn@tests::the_seams_other_side_is_the_technique_that_ships
+#[cfg(test)]
+pub(crate) static TECHNIQUE_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The extent the march and the blur run at: `extent` divided by
 /// `shaders/ssao.slang`'s `RESOLUTION_DIVISOR` on each axis, **rounded up**.
@@ -365,6 +481,20 @@ pub(crate) struct Ssao {
     layout: BindGroupLayoutHandle,
     pipeline_layout: PipelineLayoutHandle,
     pipeline: GraphicsPipelineHandle,
+    /// The cheap tier's gather, on [`Ssao::pipeline_layout`] exactly as the
+    /// pipeline above is.
+    ///
+    /// **A second pipeline and nothing else**, which is what makes a technique
+    /// switchable at all: `shaders/ssao_hemisphere.slang` declares the same two
+    /// bindings in the same order and reads the same block, so one layout, one
+    /// uniform ring and one group cache answer for both — see this module's
+    /// header. What differs is the module a draw runs.
+    ///
+    /// Built by [`Ssao::new`] whether or not anything ever selects it, for
+    /// [`Ssao::split_uniforms`]' reason: a pipeline created the first time a
+    /// person types `r_ssao_technique` is a compile in the frame that typed it,
+    /// and what carrying it costs instead is one pipeline object.
+    hemisphere_pipeline: GraphicsPipelineHandle,
     /// `[frame]`: the occlusion group, cached against the depth view.
     ///
     /// **One per frame in flight**, because this group names [`Ssao::uniforms`]
@@ -574,6 +704,15 @@ impl Ssao {
 
         let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
         let pipeline = build_fullscreen(device, "ssao", &SSAO, pipeline_layout, &targets)?;
+        // The other technique, on the same layout and the same target — see
+        // [`Ssao::hemisphere_pipeline`].
+        let hemisphere_pipeline = build_fullscreen(
+            device,
+            "ssao hemisphere",
+            &SSAO_HEMISPHERE,
+            pipeline_layout,
+            &targets,
+        )?;
         let blur_pipeline = build_fullscreen(
             device,
             "ssao blur",
@@ -616,6 +755,7 @@ impl Ssao {
             layout,
             pipeline_layout,
             pipeline,
+            hemisphere_pipeline,
             groups: vec![None; frames],
             split_groups: vec![None; frames],
             blur_layout,
@@ -673,6 +813,31 @@ impl Ssao {
         (self.uniforms[frame], self.split_uniforms[frame])
     }
 
+    /// The two gather pipelines [`Ssao::new`] built: the technique that ships,
+    /// and the cheap tier.
+    ///
+    /// Test-only, and [`Ssao::blocks`]' counterpart for the switch that reaches
+    /// a pipeline rather than a block — a **stronger** one, because the
+    /// reference backend does record which pipeline a pass bound where it does
+    /// not record which buffer a group named. See `crate::forward`'s
+    /// `the_occlusion_technique_picks_the_gathers_pipeline`.
+    #[cfg(test)]
+    pub(crate) const fn gathers(&self) -> (GraphicsPipelineHandle, GraphicsPipelineHandle) {
+        (self.pipeline, self.hemisphere_pipeline)
+    }
+
+    /// The gather pipeline `technique` runs.
+    ///
+    /// The whole of what the selector reaches — see this module's header on why
+    /// a technique is a pipeline and every other switch here is a lane of the
+    /// uniform block.
+    fn pipeline_for(&self, technique: Technique) -> GraphicsPipelineHandle {
+        match technique {
+            Technique::Gtao => self.pipeline,
+            Technique::Hemisphere => self.hemisphere_pipeline,
+        }
+    }
+
     /// Adds the `ssao` pass, its blurs and the reconstruction, in that order,
     /// and returns the image the forward pass should read.
     ///
@@ -716,7 +881,12 @@ impl Ssao {
             again,
             upsampled,
         } = images;
-        let pipeline = self.pipeline;
+        // The near side's technique and the far side's, both read before the
+        // borrows below split `self`. The console's on the near side and the
+        // shipped one on the far, which is [`shipped`]'s rule for the four
+        // scalars applied to the switch that is not one of them.
+        let pipeline = self.pipeline_for(technique());
+        let shipped_pipeline = self.pipeline_for(shipped_technique());
         let pipeline_layout = self.pipeline_layout;
         let layout = self.layout;
         let uniforms = self.uniforms[frame];
@@ -738,7 +908,8 @@ impl Ssao {
         // The gather, once for a frame drawing one picture and twice for one
         // comparing two — see [`crate::split`]. The second reads the same depth
         // and writes the same image, so what separates the two sides is the
-        // block each binds and the columns each may write.
+        // block each binds, the pipeline each runs and the columns each may
+        // write.
         let seam = split_at().and_then(|at| crate::split::halves(half, at));
         let (split_uniforms, split_groups) = (self.split_uniforms[frame], &mut self.split_groups);
         let split_cached = &mut split_groups[frame];
@@ -780,7 +951,7 @@ impl Ssao {
                     split_uniforms,
                     layout,
                     pipeline_layout,
-                    pipeline,
+                    shipped_pipeline,
                     raw,
                     depth,
                     LoadOp::Load,
@@ -848,6 +1019,7 @@ impl Ssao {
         device.destroy_graphics_pipeline(self.blur_pipeline);
         device.destroy_pipeline_layout(self.blur_pipeline_layout);
         device.destroy_bind_group_layout(self.blur_layout);
+        device.destroy_graphics_pipeline(self.hemisphere_pipeline);
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.layout);
@@ -866,6 +1038,11 @@ impl Ssao {
 /// former: a full-screen triangle covers the target, so a frame drawing one
 /// picture sets no rectangle at all and records what it recorded before this
 /// function existed.
+///
+/// `pipeline` is the technique this gather runs — see [`Technique`]. It is an
+/// argument rather than a field read here because the two sides of a comparison
+/// may run different ones, which is the whole of what
+/// `docs/plan/sample/19-alcove.md`'s second milestone asks for.
 ///
 /// **The viewport is not touched.** `ssao.slang` reads `SV_Position`, so a
 /// viewport narrowed to the half would squash the whole image into it; the
@@ -1197,10 +1374,6 @@ mod tests {
         );
     }
 
-    /// The same holding, for the disc the march sweeps.
-    ///
-    /// Separate from the test above because it is a separate copy: the bounds
-    /// on `r_ssao_radius` are literals repeating `crcbl_shaders::ssao`'s, and
     /// The seam's other side is what the chain ships, whatever the console holds.
     ///
     /// [`shipped`] reads each variable's own declared default, so this moves
@@ -1294,6 +1467,88 @@ mod tests {
             .expect("putting the switch back");
     }
 
+    /// [`TECHNIQUES`] and [`r_ssao_technique`] must name the same set, in the
+    /// same order.
+    ///
+    /// `crate::debug_view`'s `the_variable_names_are_the_renderers_labels` is
+    /// this test on the other enum variable, for its reason: the `convar!` takes
+    /// literals, so the names exist twice, and [`Technique::of`] searches the
+    /// copy. A name that drifted would be a value a person can set and
+    /// [`technique`] answers with [`Technique::Gtao`] — the selector silently
+    /// doing nothing.
+    ///
+    /// **It holds the names and not the enum's completeness**, which is worth
+    /// saying because the two look alike: a variant added to [`Technique`] and
+    /// left out of [`TECHNIQUES`] passes here. What it costs is nothing a frame
+    /// can reach — the console cannot name it, so nothing can select it — and
+    /// what would catch it is a derive this workspace does not have.
+    #[test]
+    fn the_variable_names_are_the_techniques_labels() {
+        let crcbl_console::Kind::Enum(names) = r_ssao_technique.kind() else {
+            panic!("`r_ssao_technique` is an enum variable");
+        };
+        let labels: Vec<&str> = TECHNIQUES.into_iter().map(Technique::label).collect();
+        assert_eq!(names, labels.as_slice());
+    }
+
+    /// A frame nobody has touched the console on runs what ships, and so does
+    /// the far side of the seam whatever the console holds.
+    ///
+    /// [`the_seams_other_side_is_what_the_chain_ships`]'s claim for the switch
+    /// that is not one of the four scalars, and it is the same failure: a
+    /// [`shipped_technique`] that followed the console would be a comparison of
+    /// one technique against itself, which is a seam that draws one picture and
+    /// says nothing.
+    ///
+    /// [`the_seams_other_side_is_what_the_chain_ships`]: fn@the_seams_other_side_is_what_the_chain_ships
+    #[test]
+    fn the_seams_other_side_is_the_technique_that_ships() {
+        use crcbl_console::Value;
+
+        let _guard = TECHNIQUE_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = r_ssao_technique.get_enum();
+        assert_eq!(
+            technique(),
+            Technique::Gtao,
+            "a frame nobody has touched the console on must gather through the technique every \
+             golden in this workspace was blessed under"
+        );
+        let shipped_before = shipped_technique();
+
+        r_ssao_technique
+            .set(&Value::Enum(Technique::Hemisphere.label()))
+            .expect("a writable enum in the set");
+        // Anti-vacuity: the knob has to have actually moved, or the equality
+        // below holds of a console nobody changed.
+        assert_eq!(
+            technique(),
+            Technique::Hemisphere,
+            "the getter did not follow the console"
+        );
+        assert_eq!(
+            shipped_technique(),
+            shipped_before,
+            "the shipped technique moved when the console did, so the seam compares a technique \
+             against itself"
+        );
+        assert_ne!(
+            shipped_technique(),
+            technique(),
+            "the shipped technique is what the console holds, so both sides of the seam run one \
+             shader"
+        );
+
+        r_ssao_technique
+            .set(&Value::Enum(before))
+            .expect("putting the technique back");
+    }
+
+    /// The same holding, for the disc the march sweeps.
+    ///
+    /// Separate from the test above because it is a separate copy: the bounds
+    /// on `r_ssao_radius` are literals repeating `crcbl_shaders::ssao`'s, and
     /// the two pairs can drift apart one at a time.
     #[test]
     fn the_console_radius_range_is_the_range_the_march_honours() {

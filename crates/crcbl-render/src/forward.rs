@@ -14125,6 +14125,88 @@ mod tests {
     /// [`ssao_slice_switch`]'s lock.
     static SSAO_SLICE_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Takes `r_ssao_technique` for this thread and puts it back at its default
+    /// when the guard drops.
+    ///
+    /// [`ssao_blur_switch`]'s shape exactly, for its reason — and this one moves
+    /// a **pipeline** rather than a lane of a uniform block, so a frame that
+    /// picked it up from another thread's test gathers through a shader that
+    /// test never selected.
+    ///
+    /// **Its lock lives in `crate::ssao`** rather than beside this function, and
+    /// it is the one switch here whose does: `ssao`'s own
+    /// `the_seams_other_side_is_the_technique_that_ships` moves the same
+    /// variable, and a second mutex would serialise neither against the other.
+    /// See `crate::ssao::TECHNIQUE_SWITCH` for where it sits in the order.
+    fn ssao_technique_switch() -> SsaoTechniqueSwitch {
+        let guard = crate::ssao::TECHNIQUE_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let switch = SsaoTechniqueSwitch { _guard: guard };
+        switch.set(shipped_technique_name());
+        switch
+    }
+
+    /// The technique name the chain ships, and the one
+    /// [`ssao_technique_switch`] restores.
+    ///
+    /// **Read off the variable rather than written down**, which is
+    /// [`the_comparison_seam_marches_twice_over_columns_that_tile_the_gather`]'s
+    /// rule about the slice count and for its reason: which value ships is a
+    /// thing that moves, and a test naming the wrong one would be comparing the
+    /// shipped configuration against itself.
+    ///
+    /// [`the_comparison_seam_marches_twice_over_columns_that_tile_the_gather`]: fn@the_comparison_seam_marches_twice_over_columns_that_tile_the_gather
+    fn shipped_technique_name() -> &'static str {
+        match crate::ssao::r_ssao_technique.default() {
+            crcbl_console::Value::Enum(name) => name,
+            other => panic!("`r_ssao_technique` defaults to {other:?}, not to a technique name"),
+        }
+    }
+
+    /// A name from the variable's own set that is **not** the one it ships.
+    ///
+    /// [`shipped_technique_name`]'s clause from the other side: the tests below
+    /// need a technique to move the console to, and picking it out of the
+    /// declared set is what keeps them from naming one the variable does not
+    /// offer — or, if a third arrived, from silently going on comparing the
+    /// same two.
+    fn other_technique_name() -> &'static str {
+        let crcbl_console::Kind::Enum(names) = crate::ssao::r_ssao_technique.kind() else {
+            panic!("`r_ssao_technique` is an enum variable");
+        };
+        let ships = shipped_technique_name();
+        names
+            .iter()
+            .copied()
+            .find(|name| *name != ships)
+            .expect("`r_ssao_technique` offers a technique other than the one it ships")
+    }
+
+    /// What [`ssao_technique_switch`] hands back.
+    struct SsaoTechniqueSwitch {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl SsaoTechniqueSwitch {
+        /// Asks for the gather `name` selects.
+        fn set(&self, name: &'static str) {
+            crate::ssao::r_ssao_technique
+                .set(&crcbl_console::Value::Enum(name))
+                .expect("`r_ssao_technique` is a writable enum in the set");
+        }
+    }
+
+    impl Drop for SsaoTechniqueSwitch {
+        fn drop(&mut self) {
+            // Back to what ships at both ends, so a check that panicked mid-way
+            // does not hand the next holder a frame gathered through the cheap
+            // tier — which is a frame no golden in this workspace was blessed
+            // on.
+            self.set(shipped_technique_name());
+        }
+    }
+
     /// Every draw the recorded stream holds, whichever call recorded it.
     ///
     /// Not scoped to a pass, unlike [`commands_in_pass`]: what
@@ -17720,6 +17802,180 @@ mod tests {
              bytes, so a comparison shows the same picture twice"
         );
 
+        recorder.assert_valid();
+    }
+
+    /// Every gather pipeline the frame bound, in the order the marches ran.
+    ///
+    /// [`the_comparison_seam_marches_twice_over_columns_that_tile_the_gather`]'s
+    /// `marches` closure asking the other question of the same stream: that one
+    /// reads the scissor and the group, and this one reads the pipeline. Only
+    /// the `ssao` and `ssao-shipped` passes are looked at, because every other
+    /// pass in the chain binds a pipeline too and a filter over the whole stream
+    /// would be counting blurs.
+    ///
+    /// [`the_comparison_seam_marches_twice_over_columns_that_tile_the_gather`]: fn@the_comparison_seam_marches_twice_over_columns_that_tile_the_gather
+    fn gathers_bound(recorder: &Recorder, from: usize) -> Vec<crcbl_hal::GraphicsPipelineHandle> {
+        use crcbl_hal::null::Command;
+
+        let mut inside = false;
+        let mut found = Vec::new();
+        for command in &recorder.commands()[from..] {
+            if let Some((_, label)) = command.opens_pass() {
+                inside = matches!(label, Some("ssao" | "ssao-shipped"));
+                continue;
+            }
+            if matches!(command, Command::EndRenderPass | Command::EndComputePass) {
+                inside = false;
+                continue;
+            }
+            if let (true, Command::BindGraphicsPipeline(pipeline)) = (inside, command) {
+                found.push(*pipeline);
+            }
+        }
+        found
+    }
+
+    /// **`r_ssao_technique` decides which shader the gather runs**, read off the
+    /// pipeline the `ssao` pass bound.
+    ///
+    /// The observable `docs/backlog.md` says the uniform block cannot have. The
+    /// reference backend records a bind group as a handle and a layout rather
+    /// than as the resources behind it, so nothing can ask which *block* a march
+    /// read — but a pipeline is recorded as itself, so which *technique* a march
+    /// ran is a question this backend answers. `Ssao::gathers` is what names the
+    /// two, so this is an equality against the pipeline built from each shader
+    /// rather than an inequality that any two handles would satisfy.
+    ///
+    /// **The default arm is the load-bearing half.** A selector that read the
+    /// wrong variable, or a `pipeline_for` whose arms were swapped, would still
+    /// change the frame when the console moved; what would go with it is every
+    /// golden in this workspace, which is blessed on the technique that ships.
+    ///
+    /// Holds [`ssao_blur_switch`] for its own reason and
+    /// [`ssao_technique_switch`] third, after it and [`ssao_split_switch`] —
+    /// see `crate::ssao::TECHNIQUE_SWITCH` on the order.
+    #[test]
+    fn the_occlusion_technique_picks_the_gathers_pipeline() {
+        let _blurs = ssao_blur_switch();
+        let _seam = ssao_split_switch();
+        let technique = ssao_technique_switch();
+        // The name to move to, taken out of the variable's own set — see
+        // `other_technique_name`.
+        let other = other_technique_name();
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let (ships, cheap) = renderer.ssao.gathers();
+        assert_ne!(
+            ships, cheap,
+            "the renderer built one gather pipeline for both techniques, so nothing below can \
+             tell them apart"
+        );
+
+        let shipped = frame_seen_from(
+            device,
+            &mut renderer,
+            queue,
+            &Camera::default(),
+            &DirectionalLight::default(),
+        );
+        let by_default = gathers_bound(&recorder, 0);
+        let after = recorder.commands().len();
+        shipped.release(device);
+
+        technique.set(other);
+        let moved_frame = frame_seen_from(
+            device,
+            &mut renderer,
+            queue,
+            &Camera::default(),
+            &DirectionalLight::default(),
+        );
+        let moved = gathers_bound(&recorder, after);
+        moved_frame.finish(device, renderer);
+
+        assert_eq!(
+            by_default,
+            vec![ships],
+            "a frame nobody has touched the console on gathered through something other than \
+             `ssao.slang`'s pipeline, which is what every golden in this workspace was blessed on"
+        );
+        assert_eq!(
+            moved,
+            vec![cheap],
+            "`r_ssao_technique {other}` left the frame gathering through the pipeline \
+             it gathered through before, so the selector reaches nothing"
+        );
+        recorder.assert_valid();
+    }
+
+    /// **The comparison seam's two marches run two techniques**, which is what
+    /// the seam was built for.
+    ///
+    /// `docs/plan/sample/19-alcove.md`'s second milestone is SSAO and GTAO in
+    /// one frame, and this is that claim as a pair of pipeline handles: with the
+    /// technique moved the near side runs the cheap tier and the far side the
+    /// one that ships, and with it at its default both marches run the same
+    /// shader and the seam separates nothing.
+    ///
+    /// **The control is the frame at the default**, and it is what makes the
+    /// first half mean anything: a far side that always ran `ssao.slang` would
+    /// satisfy the inequality below whatever `shipped_technique` did, and a
+    /// chain that had simply forgotten to pass the far side a pipeline of its
+    /// own would too.
+    #[test]
+    fn the_comparison_seam_marches_through_two_techniques() {
+        let _blurs = ssao_blur_switch();
+        let seam = ssao_split_switch();
+        let technique = ssao_technique_switch();
+        let other = other_technique_name();
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let (ships, cheap) = renderer.ssao.gathers();
+
+        seam.set(0.5);
+        let compared = frame_seen_from(
+            device,
+            &mut renderer,
+            queue,
+            &Camera::default(),
+            &DirectionalLight::default(),
+        );
+        let one_technique = gathers_bound(&recorder, 0);
+        let after = recorder.commands().len();
+        compared.release(device);
+
+        technique.set(other);
+        let frame = frame_seen_from(
+            device,
+            &mut renderer,
+            queue,
+            &Camera::default(),
+            &DirectionalLight::default(),
+        );
+        let two_techniques = gathers_bound(&recorder, after);
+        frame.finish(device, renderer);
+
+        assert_eq!(
+            one_technique,
+            vec![ships, ships],
+            "a seam with the technique at its default has to march the shipped gather twice — \
+             both sides read `shipped`'s configuration, and the picture is one technique either \
+             side of a line"
+        );
+        assert_eq!(
+            two_techniques,
+            vec![cheap, ships],
+            "with `r_ssao_technique {other}` the near side has to run the cheap tier \
+             and the far side what ships; the far side follows the variable's *default*, exactly \
+             as the four scalars do"
+        );
         recorder.assert_valid();
     }
 

@@ -419,7 +419,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao]
 source = shaders/ssao.slang
-source-sha256 = 9dba065b1993b6feb2702884c1a7bcdd1fdbeb09a0c46aa4ef4b303256677014
+source-sha256 = a0e888bda8bad67057e737785ab5cb08e05d8a28578a3d001c8419acb9f5237b
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssao.spv
 spirv-sha256 = 17db5e7351ca2628ae0da05f3d8b288a64aac317d2262771c131684d369b8772
@@ -443,6 +443,20 @@ msl = msl/ssao_blur.metal
 msl-sha256 = bd5e134fe902bf29d989d5d27b1067deec3ab3130c76f5b3fa380b7540a19f0d
 dxil = vertexMain:dxil/ssao_blur.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
 dxil = fragmentMain:dxil/ssao_blur.fragment.dxil:6005e340b6dc36ff30f4beaa105044370b972dfa19c8912d50c86eeee2a2005f
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[ssao_hemisphere]
+source = shaders/ssao_hemisphere.slang
+source-sha256 = 38df9c2ad678f89dc9fffb62323695fc0104920040a48ff83dd06cbae596cd2a
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/ssao_hemisphere.spv
+spirv-sha256 = c0cedc4d8c21204dab35a92c81b243a6716ca1f39ce81b2c62b61bb146697bad
+wgsl = wgsl/ssao_hemisphere.wgsl
+wgsl-sha256 = 633af873e7b2a012a34effdecb073b4182bb4429e574555e3548baeb93cea883
+msl = msl/ssao_hemisphere.metal
+msl-sha256 = 11c8df80c3d01a434409bddeed5a93adf3ee88668b4e316974098582c910c34a
+dxil = vertexMain:dxil/ssao_hemisphere.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/ssao_hemisphere.fragment.dxil:8266d84a3c6ee58297daace1e76be2a456be3c5b05a3abc373fa4d0c3830f89f
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao_upsample]

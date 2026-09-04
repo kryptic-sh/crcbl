@@ -11,9 +11,10 @@
 //! [`tests::the_shared_screen_space_helpers_have_not_drifted`]. `ssr.slang`
 //! copies `depth_at`, `unproject`, `view_position` and `normal_at` out of
 //! `ssao.slang` verbatim and `ssr_blur.slang` copies `depth_at`, `unproject`
-//! and `view_z`, because this repo has no include mechanism by design; two
-//! copies is already the bug, and four without a guard is a drift with a
-//! schedule.
+//! and `view_z`, and the occlusion chain's cheap tier copies the four that
+//! reconstruct a position, because this repo has no include mechanism by
+//! design; two copies is already the bug, and every one after that without a
+//! guard is a drift with a schedule.
 //!
 //! [`tests::the_shared_screen_space_helpers_have_not_drifted`]: self
 
@@ -187,8 +188,17 @@ mod tests {
     /// Adding another screen-space pass means adding it here; a pass that
     /// copied a helper and was not listed is a copy this guard does not hold,
     /// which is the state the guard exists to end.
-    const SOURCES: [(&str, &str); 5] = [
+    const SOURCES: [(&str, &str); 6] = [
         ("ssao.slang", include_str!("../shaders/ssao.slang")),
+        // The occlusion gather's second technique, which copies the four depth
+        // helpers, the half-resolution mapping and the bent-direction encoding
+        // out of the file above — see `crcbl_render::ssao::r_ssao_technique`.
+        // Two gathers that unprojected differently would compare two
+        // reconstructions rather than two techniques.
+        (
+            "ssao_hemisphere.slang",
+            include_str!("../shaders/ssao_hemisphere.slang"),
+        ),
         (
             "ssao_blur.slang",
             include_str!("../shaders/ssao_blur.slang"),
@@ -229,9 +239,11 @@ mod tests {
     ///
     /// `ssr.slang` re-declares `depth_at`, `unproject`, `view_position` and
     /// `normal_at`, `ssr_blur.slang` re-declares `depth_at`, `unproject` and
-    /// `view_z`, and
+    /// `view_z`,
     /// `contact_shadows.slang` re-declares those three and the march's own five
-    /// beside them, because the manifest hashes one source per artifact and an
+    /// beside them, and `ssao_hemisphere.slang` re-declares the reconstruction's
+    /// four, the half-resolution mapping and the bent-direction encoding,
+    /// because the manifest hashes one source per artifact and an
     /// `#include` would be a file whose edits nothing downstream notices. Nothing else in the tree would
     /// notice one copy being fixed and the others left: the shaders compile
     /// either way, and the failure is a reflection sampling a pixel the
@@ -253,6 +265,14 @@ mod tests {
             "float view_z(int2 pixel, float depth, float2 extent)",
             "float3 view_position(int2 pixel, float depth, float2 extent)",
             "float3 normal_at(int2 pixel, float3 centre, int2 extent, float2 size)",
+            // The occlusion chain's own two, carried by every shader that maps
+            // between the gather's half-resolution grid and the prepass, or
+            // that writes the bent-direction channel from a direction. A second
+            // gather mapping its pixel differently would gather somewhere else
+            // while the blur behind it went on weighting taps by the depth the
+            // first one gathered at.
+            "int2 full_res_pixel(int2 pixel)",
+            "float3 encode_bent(float3 direction)",
             // The march's own five, shared by `ssr.slang` and
             // `contact_shadows.slang` since the contact rung landed. They were
             // one file's alone until then, which is exactly the state this

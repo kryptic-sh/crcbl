@@ -492,10 +492,10 @@ struct FullscreenOutput
 /// alternative is a filtered value four rasterisers would each round their own
 /// way, which is the objection this file makes to everything else it refuses.
 ///
-/// All three passes of the chain map the same way, which is what lets
+/// Every pass of the chain maps the same way, which is what lets
 /// `ssao_blur.slang` weight a tap by the depth this file actually gathered it
 /// at, and `ssao_upsample.slang` know where each half-resolution sample sits.
-/// `crcbl_shaders::ssr`'s drift guard holds the three copies together.
+/// `crcbl_shaders::ssr`'s drift guard holds those copies together.
 int2 full_res_pixel(int2 pixel)
 {
     return pixel * RESOLUTION_DIVISOR;

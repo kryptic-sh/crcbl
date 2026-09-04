@@ -287,6 +287,7 @@ pub fn console_table() -> crcbl_console::Table {
         ssao::r_ssao_intensity,
         ssao::r_ssao_bent_normals,
         ssao::r_ssao_radius,
+        ssao::r_ssao_technique,
         ssao::r_ssao_split,
         probe_visibility::r_probe_visibility,
         rsm::r_probe_bounce,

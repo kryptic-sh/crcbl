@@ -408,14 +408,49 @@ impl SsaoParams {
 mod tests {
     use super::*;
 
-    /// The three shaders the occlusion channel passes through, in the order it
+    /// Every shader the occlusion channel may pass through, in the order it
     /// passes through them.
     ///
     /// The constants below are declared in more than one of them — they are one
-    /// channel's worth of agreement rather than three shaders' opinions — and
+    /// channel's worth of agreement rather than one opinion per shader — and
     /// this is the list the checks sweep. A pass added to the chain and left off
     /// this list is a copy nothing holds.
-    const OCCLUSION_SOURCES: [(&str, &str); 3] = [
+    ///
+    /// **Two gathers and not one**, since `crcbl_render::ssao::r_ssao_technique`
+    /// landed: `ssao_hemisphere.slang` is the cheap tier and writes the same
+    /// channel from the same block, so every constant that describes the channel
+    /// binds it exactly as it binds `ssao.slang`. What it does *not* declare is
+    /// the bent-direction threshold, because it measures no direction — see
+    /// [`BENT_NORMAL_SOURCES`], which is the list that check sweeps instead.
+    const OCCLUSION_SOURCES: [(&str, &str); 4] = [
+        ("ssao.slang", include_str!("../shaders/ssao.slang")),
+        (
+            "ssao_hemisphere.slang",
+            include_str!("../shaders/ssao_hemisphere.slang"),
+        ),
+        (
+            "ssao_blur.slang",
+            include_str!("../shaders/ssao_blur.slang"),
+        ),
+        (
+            "ssao_upsample.slang",
+            include_str!("../shaders/ssao_upsample.slang"),
+        ),
+    ];
+
+    /// Every shader that carries the bent direction: the gather that measures
+    /// one, both filters that average it, and `mesh.slang`, which decodes what
+    /// arrives.
+    ///
+    /// **`ssao_hemisphere.slang` is deliberately not among them.** The cheap
+    /// tier measures no direction at all, so it declares no threshold to drift —
+    /// it writes the zero sentinel unconditionally, which
+    /// [`the_cheap_tier_writes_only_the_bent_normal_sentinel`] is what holds. A
+    /// filter or a consumer left off this list is a copy nothing holds, which is
+    /// [`OCCLUSION_SOURCES`]' clause.
+    ///
+    /// [`the_cheap_tier_writes_only_the_bent_normal_sentinel`]: fn@the_cheap_tier_writes_only_the_bent_normal_sentinel
+    const BENT_NORMAL_SOURCES: [(&str, &str); 4] = [
         ("ssao.slang", include_str!("../shaders/ssao.slang")),
         (
             "ssao_blur.slang",
@@ -425,6 +460,7 @@ mod tests {
             "ssao_upsample.slang",
             include_str!("../shaders/ssao_upsample.slang"),
         ),
+        ("mesh.slang", include_str!("../shaders/mesh.slang")),
     ];
 
     /// The constant and the shaders must name the same far plane.
@@ -583,17 +619,7 @@ mod tests {
     /// an unwritten block — a frame, not a drifted constant.
     #[test]
     fn the_occlusion_chain_resolves_one_radius() {
-        let sources = [
-            ("ssao.slang", include_str!("../shaders/ssao.slang")),
-            (
-                "ssao_blur.slang",
-                include_str!("../shaders/ssao_blur.slang"),
-            ),
-            (
-                "ssao_upsample.slang",
-                include_str!("../shaders/ssao_upsample.slang"),
-            ),
-        ];
+        let sources = OCCLUSION_SOURCES;
         let value_of = |source: &str, name: &str| {
             let declaration = format!("static const float {name} = ");
             let at = source
@@ -665,6 +691,87 @@ mod tests {
         assert!(
             inv_proj < proj && proj < inv_view && inv_view < params,
             "ssao.slang declares the block in a different order than `to_bytes` writes it"
+        );
+    }
+
+    /// The two gathers must declare **one** uniform block.
+    ///
+    /// `crcbl_render::ssao::Ssao` binds one uniform ring and one bind-group
+    /// layout to whichever gather `r_ssao_technique` selected, so a member the
+    /// cheap tier declared in another order would read the sampling radius out
+    /// of a matrix column. Nothing else would notice: both shaders compile, both
+    /// draw, and the frame is occluded everywhere or nowhere.
+    ///
+    /// The *declarations* are compared and not the whole struct, because each
+    /// file's doc comments are allowed to say what that file uses a member for —
+    /// and they do: `ssao_hemisphere.slang` reads only `params.x`.
+    #[test]
+    fn the_two_gathers_declare_one_block() {
+        let members = |source: &str| -> Vec<String> {
+            let at = source
+                .find("struct SsaoParams")
+                .expect("every gather declares the block");
+            let open = source[at..].find('{').expect("the struct opens") + at;
+            let close = source[open..].find('}').expect("the struct closes") + open;
+            source[open..close]
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.ends_with(';'))
+                .map(str::to_owned)
+                .collect()
+        };
+        let gtao = members(include_str!("../shaders/ssao.slang"));
+        assert_eq!(
+            gtao.len(),
+            4,
+            "ssao.slang's block is not the three matrices and a row this module writes, so the \
+             comparison below is over the wrong lines: {gtao:?}"
+        );
+        assert_eq!(
+            members(include_str!("../shaders/ssao_hemisphere.slang")),
+            gtao,
+            "ssao_hemisphere.slang declares a different block than ssao.slang, and one uniform \
+             ring is bound to both"
+        );
+    }
+
+    /// The cheap tier writes the **sentinel** in every bent-direction channel it
+    /// writes, and thresholds no direction anywhere.
+    ///
+    /// `ssao_hemisphere.slang` sums binary depth comparisons: there is no arc to
+    /// bisect and therefore no direction to report, so `mesh.slang` has to get
+    /// the byte that means "steer by the shading normal" — see
+    /// [`BENT_NORMAL_NONE`]. A gather that wrote anything else there would light
+    /// every surface by a direction nothing measured, which is a picture and not
+    /// an error.
+    ///
+    /// **Every call site and not merely one**, which is what the arithmetic
+    /// below is for: the file has an early return for the far plane as well as
+    /// its ordinary path, and a check that found the sentinel once would pass on
+    /// a file that wrote a direction on the other.
+    #[test]
+    fn the_cheap_tier_writes_only_the_bent_normal_sentinel() {
+        let source = include_str!("../shaders/ssao_hemisphere.slang");
+        // The declaration is the one occurrence that is not a call.
+        let calls = source.matches("encode_bent(").count() - 1;
+        let sentinels = source.matches("encode_bent(float3(0.0, 0.0, 0.0))").count();
+        assert!(
+            calls > 0,
+            "ssao_hemisphere.slang calls `encode_bent` nowhere, so it writes no bent-direction \
+             channel at all and `mesh.slang` reads whatever the target held"
+        );
+        assert_eq!(
+            calls,
+            sentinels,
+            "ssao_hemisphere.slang encodes a bent direction at {} of its {calls} `encode_bent` \
+             call(s) that is not the zero sentinel; the cheap tier measures no direction",
+            calls - sentinels
+        );
+        assert!(
+            !source.contains("BENT_NORMAL_MIN_LENGTH"),
+            "ssao_hemisphere.slang thresholds a bent-direction length, so it has a copy of that \
+             constant that `the_bent_normal_length_matches_the_constant_the_shaders_declare` \
+             does not hold — see `BENT_NORMAL_SOURCES`"
         );
     }
 
@@ -879,10 +986,7 @@ mod tests {
     fn the_bent_normal_length_matches_the_constant_the_shaders_declare() {
         let declaration =
             format!("static const float BENT_NORMAL_MIN_LENGTH = {BENT_NORMAL_MIN_LENGTH};");
-        for (name, source) in OCCLUSION_SOURCES
-            .into_iter()
-            .chain([("mesh.slang", include_str!("../shaders/mesh.slang"))])
-        {
+        for (name, source) in BENT_NORMAL_SOURCES {
             assert!(
                 source.contains(&declaration),
                 "{name} does not declare `{declaration}`; the bent-direction threshold has \

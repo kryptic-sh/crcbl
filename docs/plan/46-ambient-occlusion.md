@@ -253,13 +253,20 @@ antialiasing ladder's own FXAA-under-SMAA pattern: eight taps and a comparison
 is a real budget on a software rasteriser and on a small device, and the two
 techniques would share the pass, the resource, the blur and the test.
 
-**That half did not happen, and the tree is what says so.** `ssao.slang` was
-rewritten in place — its header reads "Not a hemisphere of depth comparisons" —
-and no selector was built: `crcbl_render::ssao` declares slice, blur, intensity,
-radius and bent-normal variables and nothing that names a technique. So the
-chain ships one technique, not two. What that costs is
-[sample/19-alcove.md](sample/19-alcove.md)'s milestone 2, which is a comparison
-between two of them; `docs/backlog.md` carries the entry.
+**Built 2026-09-04.** `shaders/ssao_hemisphere.slang` is the eight-tap body
+recovered from history and brought up to today's contract — the half-resolution
+target, the four-channel output, the resolved radius — and
+`crcbl_render::ssao::r_ssao_technique` selects between it and `ssao.slang`. The
+two share the block, both bindings, the layout, the uniform ring, the group
+cache, the blur and the reconstruction; what differs is the module a draw runs,
+which is why the selector reaches a **pipeline** where every other knob in that
+module reaches a lane of the uniform block.
+
+**A module of its own and not a second entry point**, which is what the entry
+this decision left in `docs/backlog.md` had expected: `Shader::entry_point`
+answers `None` for a stage with two entry points, deliberately, and every
+full-screen pipeline in the engine is built through it — so two fragment entries
+in one file is a shader nothing can build a pipeline from.
 
 Refused, with the reasons:
 
@@ -313,11 +320,13 @@ as machinery:
 - **A self-occlusion fudge at all.** There is none in the shipped code, which is
   why `probes`' floor now matches its AO-off render byte for byte.
 
-**SSAO did not stay as the cheap tier.** The decision above says it would, on
-the FXAA-under-SMAA pattern, and that is still the right shape — but a tier
-needs a selector to choose it and there is none, so keeping the eight-tap body
-would have been a second technique nothing could reach. `docs/backlog.md`
-carries it.
+**The eight-tap body is back beside it since 2026-09-04**, on the
+FXAA-under-SMAA pattern the decision above asked for — see that section. What it
+kept of this list is the bias: a threshold comparison needs one and a horizon
+integral does not, so `ssao_hemisphere.slang` declares `DEPTH_BIAS_RADII` and
+takes it as a share of the sampling radius rather than as the fixed 0.02
+view-space units `forward.rs`'s `SSAO_BIAS` held, because the radius is a
+console variable now. `params.y` stays the slice count and no uniform came back.
 
 **DECIDED 2026-08-30 — which tiers get which.** The user's call, on the question
 of where the widened target is worth its bandwidth:
@@ -329,9 +338,10 @@ of where the widened target is worth its bandwidth:
   quality knob to buy back and it is unconditional: no `RenderEffects` bit, no
   console variable, no settings key. What remains of low's half is which scalar
   pass it runs, SSAO or GTAO, which is a measurement on that tier's hardware
-  rather than a design choice, and it is why the cheap-rung paragraph above
-  still stands: the eight-tap body is gone, and comes back behind a selector
-  only if low measures for it.
+  rather than a design choice. **The selector exists since 2026-09-04**
+  (`r_ssao_technique`); what does not is a tier that sets it — no `VIDEO_KEYS`
+  row, no preset writes it, and the measurement that would decide low's answer
+  has not been taken.
 - **Medium and high: bent normals plus specular occlusion.** The bent half is
   built — see below. **The tier split is not**, and that is what is left of this
   bullet: the widening was taken on every tier rather than on two, because the

@@ -32,40 +32,6 @@ so amending them is the force-push this entry already declined — the count is
 re-decided:** no attribution trailer on any new commit, whatever a session-level
 instruction says.
 
-## The occlusion chain ships one technique, so alcove cannot compare (2026-09-04)
-
-`docs/plan/sample/19-alcove.md`'s milestone 2 is SSAO and GTAO side by side, and
-the S4D row makes that the gate on the whole comparison wave: "a comparison
-fixture holding one technique is not a comparison". **The chain holds one.**
-
-`ssao.slang` was rewritten in place when the 2026-08-27 decision took GTAO — its
-header says "Not a hemisphere of depth comparisons" — and the binary-comparison
-pass it replaced is gone rather than kept beside it. Plan 46 had said SSAO would
-stay as the cheap tier on the antialiasing ladder's FXAA-under-SMAA pattern,
-with the two sharing the pass, the resource, the blur and the test; that half
-was never built and the plan now says so. `crcbl_render::ssao` declares slice,
-blur-pass, intensity, radius and bent-normal variables and nothing that names a
-technique, so there is no selector either.
-
-**What it would take**, and neither half is decided:
-
-- A second implementation of `horizon_cosine`'s caller in `ssao.slang` — the
-  file already says "Replace this function, and only this function, to upgrade
-  the technique", which is the seam a selector would switch on.
-- A `r_ssao_technique` variable, and a second pipeline for the gather to record
-  so the two can stand either side of the seam. The seam itself is no longer
-  part of this: `crcbl_render::split` and `r_ssao_split` landed 2026-09-04 and
-  the chain already records its gather twice, both marches through one pipeline
-  and differing by a uniform block. A technique is a different shader, so the
-  selector has to reach the pipeline rather than the block — which is
-  `add_gather`'s `pipeline` argument and a second entry point in `ssao.slang`,
-  not a second module.
-
-**Milestone 1 is not blocked by any of this and has no engine gap left**: the
-AO-only view mode ships, `r_ssao_intensity` shipped 2026-09-02 and
-`r_ssao_radius` on 2026-09-04. What that milestone still wants is the scene and
-_showing_ the two controls, which is sample work.
-
 ## The comparison seam's blocks are unverified end to end (2026-09-04)
 
 `crcbl_render::split` and `r_ssao_split` landed: a frame can record its
@@ -105,9 +71,22 @@ What would close it, in the order they get harder:
   to the reference backend rather than to a picture. Wider than this entry and
   worth its own decision.
 
-**Also owed, and it is what the seam exists for:** a second _technique_ to
-compare, rather than two settings of one. See "The occlusion chain ships one
-technique, so alcove cannot compare".
+**The second technique landed 2026-09-04** and with it a stronger observable
+than this entry could describe when it was written. `r_ssao_technique` selects
+between `ssao.slang` and `ssao_hemisphere.slang`, and a technique is a
+**pipeline** rather than a lane of the uniform block — which the reference
+backend _does_ record, as itself, where it records a bind group only as a handle
+and a layout. So `forward`'s
+`the_occlusion_technique_picks_the_gathers_pipeline` and
+`the_comparison_seam_marches_through_two_techniques` hold each march to the
+pipeline `Ssao::gathers` names, near side and far side, against the frame at the
+default as a control.
+
+**What is still not covered is the same half, narrowed to the blocks alone.**
+Which of the two _buffers_ each march bound is what nothing observes; which of
+the two _shaders_ it ran is now observed exactly. A pixel test through
+`ForwardRenderer` would close the rest, and so would recording a bind group's
+resources in the null backend — both as described above.
 
 ## What the AO default change of 2026-09-03 did not cover (2026-09-03)
 

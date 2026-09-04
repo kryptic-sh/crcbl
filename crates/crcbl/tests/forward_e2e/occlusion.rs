@@ -94,7 +94,9 @@ use crcbl::hal::{
 };
 use crcbl::math::{Mat4, Vec4};
 use crcbl::render::Projection;
-use crcbl::shaders::{SSAO, SSAO_BLUR, SSAO_UPSAMPLE, Shader, Stage, ssao::SsaoParams};
+use crcbl::shaders::{
+    SSAO, SSAO_BLUR, SSAO_HEMISPHERE, SSAO_UPSAMPLE, Shader, Stage, ssao::SsaoParams,
+};
 
 /// The frame this measures at.
 ///
@@ -309,6 +311,25 @@ const SLICE_STEPS_HINT: u32 = 4;
 
 /// The `Rgba8Unorm` texel a fully unoccluded pixel carries in `r`.
 const UNOCCLUDED: u8 = 0xFF;
+
+/// The levels the cheap tier must darken the plate's band by, at least.
+///
+/// **Swept before it was fixed** — see
+/// [`the_cheap_tier_occludes_the_band_and_reports_no_direction`], whose header
+/// carries the 2026-09-04 readings. Its darkest column sits 28 levels under
+/// [`UNOCCLUDED`], and this is half of that.
+///
+/// [`the_cheap_tier_occludes_the_band_and_reports_no_direction`]: fn@the_cheap_tier_occludes_the_band_and_reports_no_direction
+const MIN_CHEAP_OCCLUSION: u8 = 14;
+
+/// The levels the two techniques' bands must differ by somewhere.
+///
+/// Anti-vacuity for the technique selector, and swept on the same day for the
+/// same reason: the two disagree by 52 levels at their furthest apart, and this
+/// is half of that. It bounds a *difference* and never says which of them is
+/// darker, because which one is right at a given column is the question the
+/// comparison exists to put to a person rather than to an assertion.
+const MIN_TECHNIQUE_GAP: u8 = 25;
 
 /// The column [`the_bent_direction_leans_out_of_the_occluded_band`] reads the
 /// leaning direction at, in [`EXTENT`]'s pixels.
@@ -924,6 +945,12 @@ struct Passes {
     layout: crcbl::hal::BindGroupLayoutHandle,
     pipeline_layout: PipelineLayoutHandle,
     pipeline: GraphicsPipelineHandle,
+    /// The cheap tier's gather, on the same layout as the one above — which is
+    /// `crcbl_render::ssao::Ssao`'s shape: `ssao_hemisphere.slang` declares the
+    /// same two bindings and reads the same block, so one layout, one group and
+    /// one uniform buffer answer for both and only the module differs. See
+    /// [`Technique`].
+    hemisphere_pipeline: GraphicsPipelineHandle,
     blur_layout: crcbl::hal::BindGroupLayoutHandle,
     blur_pipeline_layout: PipelineLayoutHandle,
     blur_pipeline: GraphicsPipelineHandle,
@@ -1040,6 +1067,12 @@ impl Passes {
 
         Self {
             pipeline: fullscreen_pipeline(device, "ssao", &SSAO, pipeline_layout),
+            hemisphere_pipeline: fullscreen_pipeline(
+                device,
+                "ssao hemisphere",
+                &SSAO_HEMISPHERE,
+                pipeline_layout,
+            ),
             blur_pipeline: fullscreen_pipeline(
                 device,
                 "ssao blur",
@@ -1064,9 +1097,20 @@ impl Passes {
         device.destroy_graphics_pipeline(self.blur_pipeline);
         device.destroy_pipeline_layout(self.blur_pipeline_layout);
         device.destroy_bind_group_layout(self.blur_layout);
+        device.destroy_graphics_pipeline(self.hemisphere_pipeline);
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.layout);
+    }
+
+    /// The gather pipeline `technique` runs — `crcbl_render::ssao::Ssao`'s
+    /// `pipeline_for`, copied here for the reason [`run_passes`] gives about the
+    /// rest of that module.
+    fn gather(&self, technique: Technique) -> GraphicsPipelineHandle {
+        match technique {
+            Technique::Gtao => self.pipeline,
+            Technique::Hemisphere => self.hemisphere_pipeline,
+        }
     }
 }
 
@@ -1214,6 +1258,8 @@ const TEXEL_BYTES: usize = 4;
 /// `..Knobs::SHIPPING` says exactly what a test is varying.
 #[derive(Clone, Copy)]
 struct Knobs {
+    /// `crcbl_render::ssao::r_ssao_technique`.
+    technique: Technique,
     /// `crcbl_render::ssao::r_ssao_slices`.
     slices: u8,
     /// `crcbl_render::ssao::r_ssao_blur_passes`.
@@ -1230,12 +1276,30 @@ impl Knobs {
     /// What a frame nobody has touched the console on runs at, and what every
     /// golden in this workspace was blessed under.
     const SHIPPING: Self = Self {
+        technique: Technique::Gtao,
         slices: crcbl::shaders::ssao::SLICE_COUNT_DEFAULT,
         blurs: 1,
         intensity: crcbl::shaders::ssao::INTENSITY_DEFAULT,
         bent_normals: true,
         radius: RADIUS,
     };
+}
+
+/// Which of the two gathers a run drives.
+///
+/// **`crcbl_render::ssao::Technique` mirrored**, because that type is private to
+/// its own crate — the same reason this file rebuilds the pipelines rather than
+/// reaching for `Ssao`. The names are `r_ssao_technique`'s, and that variable's
+/// own set is held to them by `crcbl_render::ssao`'s
+/// `the_variable_names_are_the_techniques_labels`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Technique {
+    /// `ssao.slang`'s horizon integral. What ships, and what every golden in
+    /// this workspace was blessed on.
+    Gtao,
+    /// `ssao_hemisphere.slang`'s eight depth comparisons. The cheap tier, and
+    /// it writes no bent direction at all.
+    Hemisphere,
 }
 
 /// Where a run's chain ends, and therefore what extent its readback is in.
@@ -1278,6 +1342,7 @@ fn run_passes(
     chain: Chain,
 ) -> Run {
     let Knobs {
+        technique,
         slices,
         blurs,
         intensity,
@@ -1585,7 +1650,7 @@ fn run_passes(
     });
     encoder.set_viewport(&viewport);
     encoder.set_scissor(&area);
-    encoder.bind_graphics_pipeline(passes.pipeline);
+    encoder.bind_graphics_pipeline(passes.gather(technique));
     encoder.bind_group(0, occlusion_group, &[], passes.pipeline_layout);
     encoder.draw(0..3, 0..1);
     encoder.end_render_pass();
@@ -1913,6 +1978,199 @@ fn the_blurred_occlusion_falloff_does_not_terrace() {
          dithering them across the blur's footprint.",
         step = reach / SLICE_STEPS_HINT as f32,
         covered_step = covered / SLICE_STEPS_HINT as f32,
+    );
+
+    headless.finish();
+}
+
+/// **The cheap tier occludes the plate's band, leaves the open wall alone, and
+/// reports no bent direction anywhere.**
+///
+/// `ssao_hemisphere.slang` driven through this file's own fixture with the
+/// second pipeline `Passes` now builds — the same analytic prepass, the same
+/// blur behind it and the same readback as
+/// [`the_blurred_occlusion_falloff_does_not_terrace`], which is what makes this
+/// a claim about the technique rather than about a scene written for it.
+///
+/// # What it asserts, and why each is not the others
+///
+/// * **The band past the plate's edge darkens.** A gather that compiled and
+///   drew nothing — a kernel rotated into the surface, a bias that swallowed
+///   every comparison, a `saturate` the wrong way round — writes
+///   [`UNOCCLUDED`] everywhere and is a picture nobody would question, because
+///   an unoccluded frame is what the whole chain produces when it is switched
+///   off.
+/// * **The open wall is exactly [`UNOCCLUDED`].** The other half of that: a
+///   technique that darkens *everything* also darkens the band, and the
+///   self-occlusion haze this file's [`DEPTH_BIAS_RADII`] paragraph is about is
+///   precisely the failure that looks like more occlusion.
+/// * **The two techniques disagree.** Anti-vacuity for the selector as a whole:
+///   a `Passes::gather` whose arms were swapped, or a second pipeline built
+///   from the same module, satisfies both assertions above and compares one
+///   technique against itself — which is the thing
+///   `docs/plan/sample/19-alcove.md`'s second milestone exists to stop.
+/// * **Every bent channel is [`BENT_NORMAL_NONE`], on every pixel.** This
+///   technique measures no direction, and `mesh.slang` answers that byte with
+///   the shading normal; anything else steers a frame's ambient light by a
+///   direction nothing measured.
+///
+/// # Measured before the bounds were fixed
+///
+/// Swept on 2026-09-04 at [`EXTENT`] on this machine's RDNA-3 adapter (RX 7900
+/// XTX, radv) and on lavapipe. Over the [`WINDOW`] columns past
+/// [`SILHOUETTE_SKIP`] the cheap tier's darkest column reads 227 against
+/// [`UNOCCLUDED`]'s 255 — 28 levels — and rises to 247 by the end of the
+/// window, where the shipped gather runs 175 to 250 over the same columns. The
+/// largest disagreement between the two anywhere in the band is 52 levels. The
+/// open wall reads 255 exactly and every one of the 960×540 gathered pixels
+/// carries [`BENT_NORMAL_NONE`] in all three of its direction channels, exactly.
+/// The bounds below sit at half of each measured margin, and the two exact
+/// readings are asserted exactly because they are exact facts rather than
+/// measurements: an unoccluded pixel writes `1.0` and the sentinel is a byte the
+/// blur passes through unchanged.
+///
+/// **The falloff is flatter than the shipped gather's, and that is the
+/// technique rather than a fault.** Eight binary comparisons at fixed kernel
+/// elevations resolve a shadow band in a handful of steps where a horizon
+/// integral resolves it continuously — which is the trade
+/// `docs/plan/46-ambient-occlusion.md` describes when it keeps this one as the
+/// cheap tier. Nothing here asserts a shape, for that reason: the terracing
+/// tests above are about `ssao.slang`'s dither ladder and this one is about the
+/// gather being reachable, correct at both ends and different.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_cheap_tier_occludes_the_band_and_reports_no_direction() {
+    let headless = Headless::open_at_format(EXTENT, None, Features::TIMESTAMP_QUERY);
+    let (width, height) = EXTENT;
+    let size = (width as f32, height as f32);
+    let projection = Projection::Perspective {
+        fov_y: FOV_Y,
+        near: NEAR,
+    }
+    .matrix(size.0 / size.1);
+
+    let wall = depth_of(projection, -WALL_Z);
+    let plate = lifted_depth(projection, PLATE_LIFT);
+    let texels = depth_image(|x, _| {
+        if PLATE_COLUMNS.contains(&x) {
+            plate
+        } else {
+            wall
+        }
+    });
+
+    let cheap = run_passes(
+        &headless,
+        projection,
+        &texels,
+        Knobs {
+            technique: Technique::Hemisphere,
+            ..Knobs::SHIPPING
+        },
+        Chain::Gathered,
+    );
+    // The same scene through the gather that ships, for the disagreement below.
+    // Two runs of one fixture rather than two fixtures: every input but the
+    // pipeline is identical, so a difference between them is the technique.
+    let shipped = run_passes(
+        &headless,
+        projection,
+        &texels,
+        Knobs::SHIPPING,
+        Chain::Gathered,
+    );
+
+    let divisor = crcbl::shaders::ssao::RESOLUTION_DIVISOR;
+    // The plate's edge in the gather's own pixels, as the falloff test finds it.
+    let edge = PLATE_COLUMNS.end.div_ceil(divisor);
+    let start = edge + SILHOUETTE_SKIP;
+    let band = |run: &Run| -> Vec<u8> {
+        (0..WINDOW)
+            .map(|column| run.at(start + column, LINE_Y))
+            .collect()
+    };
+    let cheap_band = band(&cheap);
+    let shipped_band = band(&shipped);
+    let darkest = *cheap_band.iter().min().expect("a non-empty band");
+    let open = cheap.at(BENT_OPEN_COLUMN / divisor, LINE_Y);
+    let apart = cheap_band
+        .iter()
+        .zip(&shipped_band)
+        .map(|(here, there)| here.abs_diff(*there))
+        .max()
+        .expect("a non-empty band");
+
+    // The whole channel and not a sample of it: a technique that reported a
+    // direction on the silhouette alone would pass a spot check anywhere else,
+    // and `mesh.slang` reads every pixel.
+    let mut off_sentinel = 0u8;
+    let mut off_at = (0u32, 0u32);
+    for y in 0..OCCLUSION_EXTENT.1 {
+        for x in 0..OCCLUSION_EXTENT.0 {
+            let at = cheap.texel(x, y);
+            for channel in 1..4 {
+                let away =
+                    cheap.image[at + channel].abs_diff(crcbl::shaders::ssao::BENT_NORMAL_NONE);
+                if away > off_sentinel {
+                    off_sentinel = away;
+                    off_at = (x, y);
+                }
+            }
+        }
+    }
+
+    match cheap.pass("ssao") {
+        Some(ns) => eprintln!(
+            "{suite}: the cheap tier's gather took {ns} ns over a {width}×{height} scene \
+             gathered at {gather}×{rows}; its band past the plate runs {darkest}..={last} where \
+             the shipped gather runs {shipped_darkest}..={shipped_last}",
+            suite = crate::SUITE,
+            gather = OCCLUSION_EXTENT.0,
+            rows = OCCLUSION_EXTENT.1,
+            last = cheap_band.last().expect("a non-empty band"),
+            shipped_darkest = shipped_band.iter().min().expect("a non-empty band"),
+            shipped_last = shipped_band.last().expect("a non-empty band"),
+        ),
+        None => eprintln!(
+            "{suite}: this device has no timestamp query, so the cheap tier's gather is untimed \
+             here; its band past the plate runs {darkest}..={last}",
+            suite = crate::SUITE,
+            last = cheap_band.last().expect("a non-empty band"),
+        ),
+    }
+
+    assert!(
+        UNOCCLUDED - darkest >= MIN_CHEAP_OCCLUSION,
+        "the cheap tier's darkest column past the plate's edge is {darkest} against \
+         {UNOCCLUDED:#04x} unoccluded, a darkening of {} levels where {MIN_CHEAP_OCCLUSION} is \
+         the bound — so `ssao_hemisphere.slang` measured no occlusion where a plate stands in \
+         front of a wall, which is the frame the whole chain draws when it is switched off. The \
+         window is {}.",
+        UNOCCLUDED - darkest,
+        plateaus(&cheap_band)
+    );
+    assert_eq!(
+        open, UNOCCLUDED,
+        "the cheap tier darkened open wall at column {BENT_OPEN_COLUMN} to {open}, where nothing \
+         within {RADIUS} of that pixel occludes it. That is the self-occlusion haze a threshold \
+         comparison draws over every flat wall, and `ssao_hemisphere.slang`'s DEPTH_BIAS_RADII \
+         is the whole of what stands between the frame and it."
+    );
+    assert!(
+        apart >= MIN_TECHNIQUE_GAP,
+        "the two techniques' bands are never more than {apart} levels apart, where \
+         {MIN_TECHNIQUE_GAP} is the bound — so the second pipeline draws what the first one \
+         does, and a comparison between them shows one picture twice.\n\
+         \x20 cheap: {cheap_band:?}\n\
+         \x20 shipped: {shipped_band:?}"
+    );
+    assert_eq!(
+        off_sentinel,
+        0,
+        "the cheap tier wrote a bent-direction channel at {off_at:?} that is {off_sentinel} \
+         level(s) off {sentinel:#04x}, so it reported a direction it cannot have measured and \
+         `mesh.slang` will steer that pixel's ambient light by it",
+        sentinel = crcbl::shaders::ssao::BENT_NORMAL_NONE,
     );
 
     headless.finish();
