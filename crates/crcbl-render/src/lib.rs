@@ -276,7 +276,11 @@ pub use volumetric::FroxelBuffers;
 /// `shadow::r_shadow_cadence` and `shadow::r_shadow_faces`, which
 /// `crate::shadow`'s cadence module argues are two for the same kind of reason:
 /// how long a map may be held and how many may be redrawn at once are different
-/// purchases. `tests/console_table.rs` is
+/// purchases — and the shadow filter's two, `shadow::r_shadow_filter` and
+/// `shadow::r_shadow_split`, which are that module's answer to the occlusion
+/// chain's technique pair: which rung of `docs/plan/45-shadows.md`'s filter
+/// ladder runs, and the seam that puts it beside the one that ships.
+/// `tests/console_table.rs` is
 /// what keeps this list in step with what the source actually declares.
 #[must_use]
 pub fn console_table() -> crcbl_console::Table {
@@ -292,6 +296,8 @@ pub fn console_table() -> crcbl_console::Table {
         probe_visibility::r_probe_visibility,
         rsm::r_probe_bounce,
         shadow::r_shadow_cadence,
-        shadow::r_shadow_faces
+        shadow::r_shadow_faces,
+        shadow::r_shadow_filter,
+        shadow::r_shadow_split
     ]
 }

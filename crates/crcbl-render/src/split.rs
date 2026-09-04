@@ -20,18 +20,36 @@
 //! One variable per effect is also what a person comparing wants: two effects
 //! split at once is two questions asked of one picture, and neither answered.
 //!
-//! # Why a scissor and not two targets
+//! # Two shapes, and which client takes which
 //!
-//! The effect records its pass twice, each time with [`Rect2d`] restricting
-//! which pixels the draw may write, and both write the **same** image. Nothing
-//! is allocated, nothing is copied, and the two sides cost together what one
-//! full pass costs — a half-width scissor halves the fragments, so a comparison
-//! is not a frame at half the frame rate.
+//! **A full-screen pass records itself twice under a scissor.**
+//! `crate::ssao::r_ssao_split` is that client: the effect records its pass
+//! twice, each time with [`Rect2d`] restricting which pixels the draw may
+//! write, and both write the **same** image. Nothing is allocated, nothing is
+//! copied, and the two sides cost together what one full pass costs — a
+//! half-width scissor halves the fragments, so a comparison is not a frame at
+//! half the frame rate.
 //!
 //! The viewport stays the whole target. A full-screen pass derives its own
 //! coordinates from `SV_Position`, so shrinking the viewport would squash the
 //! image into the half rather than showing that half of it; the scissor is the
 //! one of the two that crops.
+//!
+//! **A scene pass selects per pixel out of its uniform block.**
+//! `crate::shadow::r_shadow_split` is that client: the two filter modes and
+//! [`halves`]' left rectangle's `width` ride in
+//! [`crcbl_shaders::mesh::FrameUniforms::shadow_filter`], and `mesh.slang`'s
+//! `shadow_filter_mode` compares that column against the fragment's own
+//! `SV_Position.x`. The scissor shape is not available to it: the pass draws
+//! *geometry*, so a second recording is every triangle, every vertex fetch and
+//! every cull again — and the frame would cost two scenes to compare one
+//! filter.
+//!
+//! Nor would the second recording buy the timer row that might justify it. A
+//! per-side `PassTimers` entry on a scene pass measures the *scene*, and the
+//! difference between two half-scenes is dominated by what each half happens to
+//! contain. What prices a filter is the `forward` row across two runs at two
+//! settings of `r_shadow_filter`, which needs no seam at all.
 //!
 //! **What this cannot split is a pass whose output is not where it was
 //! written.** A gather that reduces, a blur that reads its neighbours, a chain
@@ -39,6 +57,11 @@
 //! footprint. That is why the occlusion chain splits its *gather* and leaves the
 //! filters whole: a few texels of blend at the seam is a better picture than a
 //! tear, and the filters are not what the comparison is about.
+//!
+//! The per-pixel shape has the same limit from the other end: it splits only
+//! what the *fragment* decides. A froxel has no `SV_Position` and reads no seam
+//! column, so `volumetric.slang`'s shafts are filtered one way either side of a
+//! shadow seam — `shaders/mesh.slang`'s header says which way and why.
 
 use crcbl_hal::Rect2d;
 

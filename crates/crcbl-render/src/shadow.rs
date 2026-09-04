@@ -81,6 +81,28 @@
 //! [`LIGHT_SLOTS`]: a slot is a [`DrawGen`](crate::draw_gen::DrawGen), so the
 //! culls this budget added are device-local memory the atlas did not ask for.
 //!
+//! # Which filter samples them, and the seam that shows two at once
+//!
+//! [`r_shadow_filter`] is the one knob here that reaches into `mesh.slang`'s
+//! sampling rather than into this module's arithmetic: `docs/plan/45-shadows.md`
+//! has three filter rungs and, until it existed, only the top one was in the
+//! tree. [`Filter`] is the set, [`filter`] is the near side of the comparison
+//! and [`shipped_filter`] is the far one.
+//!
+//! **The seam is per pixel and not per pass**, which is what [`r_shadow_split`]
+//! buys and what makes it unlike `crate::ssao::r_ssao_split`: the occlusion
+//! gather is a full-screen pass, so its two sides are two recordings under two
+//! scissors and cost one target's worth of fragments between them. The filter
+//! lives in a scene draw, where a second recording is every triangle again — so
+//! the two modes and the seam's column ride in
+//! [`crcbl_shaders::mesh::FrameUniforms::shadow_filter`] and the fragment picks
+//! its own side. `crate::split`'s header carries both shapes.
+//!
+//! **`pcss` is the default and is what every golden was blessed at**, and a
+//! frame nobody has touched either variable on writes a row of zeroes — one
+//! mode in both lanes and no column — which is the picture this engine drew
+//! before the row existed.
+//!
 //! # Stability: a sphere around the eye, snapped to texels
 //!
 //! The classic cascade shimmer is a shadow edge crawling along a static surface
@@ -115,6 +137,151 @@ pub use cadence::{Cadence, GROUPS, Group, r_shadow_cadence, r_shadow_faces};
 use crate::camera::Camera;
 use crate::cull::Frustum;
 use crate::light::{Light, PointLight, SpotLight};
+
+crcbl_console::convar! {
+    /// Which shadow filter runs: `pcss` ships, `disc` drops the blocker search,
+    /// `box` is the 3×3.
+    pub static r_shadow_filter: &'static str one_of ["pcss", "disc", "box"] = "pcss";
+}
+
+crcbl_console::convar! {
+    /// Compare the console's shadow filter against the shipped one: seam at 0..1.
+    pub static r_shadow_split: f32 in 0.0 ..= 1.0 = 0.0;
+}
+
+/// The shadow filter a fragment runs — `docs/plan/45-shadows.md`'s ladder, with
+/// every rung of it still in the tree.
+///
+/// **A uniform lane and not a pipeline**, which is what separates this from
+/// `crate::ssao`'s `Technique`: the occlusion gather is a full-screen pass and
+/// two of them are two shaders, where this is a branch inside a *scene* draw.
+/// `crate::split`'s header is where the consequence is argued — a scene pass
+/// cannot record itself twice under a scissor without drawing every triangle
+/// twice, so the seam rides in the frame block and `mesh.slang`'s
+/// `shadow_filter_mode` picks a side per fragment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Filter {
+    /// The blocker search sizes the sun's disc per fragment and the punctual
+    /// maps take it at its fixed reach: the ninth, tenth and eleventh decisions
+    /// together. **What ships**, and what every golden was blessed under.
+    Pcss,
+    /// The same rotated disc at the fixed reach for the sun as well, so no
+    /// blocker search runs and no penumbra widens with its caster's height: the
+    /// ninth and eleventh decisions without the tenth.
+    Disc,
+    /// The 3×3 hardware-PCF box the ninth decision replaced.
+    Box,
+}
+
+impl Filter {
+    /// The name [`r_shadow_filter`] holds for this one.
+    ///
+    /// The `convar!` needs literals, so the names are written twice — three
+    /// times counting `mesh.slang`'s constants — and this module's
+    /// `the_variable_names_are_the_filters_labels` is what holds this copy to
+    /// the other two.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Pcss => "pcss",
+            Self::Disc => "disc",
+            Self::Box => "box",
+        }
+    }
+
+    /// The value `mesh.slang` compares against, which is this filter's place in
+    /// [`crcbl_shaders::mesh::SHADOW_FILTERS`].
+    ///
+    /// Derived from the list rather than written down, so a filter inserted in
+    /// the middle of it renumbers here rather than silently selecting its
+    /// neighbour.
+    #[must_use]
+    pub fn mode(self) -> u32 {
+        let at = crcbl_shaders::mesh::SHADOW_FILTERS
+            .iter()
+            .position(|label| *label == self.label())
+            // Unreachable while `the_variable_names_are_the_filters_labels`
+            // passes: that test is what holds the two lists to one set of
+            // names. Zero is what ships, which is the answer a caller would
+            // rather have than a panic in a frame.
+            .unwrap_or(0);
+        u32::try_from(at).unwrap_or(0)
+    }
+
+    /// The filter `name` names.
+    ///
+    /// **[`Filter::Pcss`] for a name outside the set**, which the console cannot
+    /// deliver — an enum variable refuses a value it does not declare — so this
+    /// is what a caller reaching past the console would get, and it is what
+    /// ships rather than an arbitrary arm. `crate::ssao`'s `Technique::of` is
+    /// the same rule on the same shape.
+    fn of(name: &str) -> Self {
+        FILTERS
+            .into_iter()
+            .find(|filter| filter.label() == name)
+            .unwrap_or(Self::Pcss)
+    }
+}
+
+/// The order [`r_shadow_filter`] declares its names in.
+///
+/// `crate::ssao`'s `TECHNIQUES` has the same shape for the same reason: the
+/// macro takes literals, so the names exist twice, and [`Filter::of`] searches
+/// this copy.
+const FILTERS: [Filter; 3] = [Filter::Pcss, Filter::Disc, Filter::Box];
+
+/// [`r_shadow_filter`] as the near side of the seam wants it.
+#[must_use]
+pub fn filter() -> Filter {
+    Filter::of(r_shadow_filter.get_enum())
+}
+
+/// The filter the engine ships, for the other side of the seam.
+///
+/// `crate::ssao`'s `shipped_technique` exactly: read off the variable's own
+/// declared default rather than written down, so the far side follows a default
+/// that moves and the comparison is never a configuration against itself.
+#[must_use]
+pub fn shipped_filter() -> Filter {
+    match r_shadow_filter.default() {
+        crcbl_console::Value::Enum(name) => Filter::of(name),
+        // Unreachable by construction: `convar!` builds an enum cell and its
+        // default together. This is what a `match` needs.
+        _ => Filter::Pcss,
+    }
+}
+
+/// [`r_shadow_split`] as `crate::split::halves` wants it, or `None` for a
+/// frame comparing nothing.
+///
+/// `crate::ssao`'s `split_at` rule: **zero is off and is the default**, so a
+/// frame nobody has touched the console on draws one filter everywhere — a
+/// comparison is something a person asks for, and every golden in this
+/// workspace was blessed without one. `halves` refuses a seam at either edge
+/// anyway, so this is the readable spelling of a rule that holds whatever
+/// reaches it.
+#[must_use]
+pub fn split_at() -> Option<f32> {
+    let at = r_shadow_split.get_f32();
+    (at > 0.0 && at < 1.0).then_some(at)
+}
+
+/// The lock [`r_shadow_filter`] and [`r_shadow_split`] are moved under.
+///
+/// **In this module rather than beside the test that takes it**, on
+/// `crate::ssao::TECHNIQUE_SWITCH`'s terms exactly: two files move these
+/// variables — this module's own tests and `crate::forward`'s
+/// `shadow_filter_switch` — and a `cargo test` run shares one process between
+/// them, so a variable one left moved is a frame the other did not ask for.
+///
+/// **One lock for both variables**, unlike the occlusion chain's, because the
+/// two are read into one row of one block: a test that moved the filter while
+/// another moved the seam would be reading a lane neither of them wrote.
+///
+/// **Last in the lock order**, after `crate::ssao::TECHNIQUE_SWITCH`. Every
+/// test that takes it takes it alone, so there is no cycle to have.
+#[cfg(test)]
+pub(crate) static FILTER_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// How many cascades the sun's shadow map is split into.
 ///
@@ -2822,5 +2989,137 @@ mod tests {
 
         selection.update(&[], &camera_at(Vec3::ZERO));
         assert_eq!(selection.slots(), &[None; LIGHT_SLOTS]);
+    }
+
+    /// [`FILTERS`], [`r_shadow_filter`] and
+    /// [`crcbl_shaders::mesh::SHADOW_FILTERS`] must name the same set, in the
+    /// same order.
+    ///
+    /// `crate::ssao`'s `the_variable_names_are_the_techniques_labels` is this
+    /// test on the other enum variable, with a third list to hold: the console's
+    /// literals, this module's labels and the shader's constants are three
+    /// copies of one set of names, and `mesh.slang` numbers its constants by
+    /// position in the shader's list. A name that drifted would be a value a
+    /// person can set and [`filter`] answers with [`Filter::Pcss`] — the
+    /// selector silently doing nothing; an *order* that drifted would be a mode
+    /// the shader reads as its neighbour, which is a filter nobody asked for.
+    ///
+    /// **It holds the names and not the enum's completeness**, on the occlusion
+    /// chain's terms: a variant added to [`Filter`] and left out of [`FILTERS`]
+    /// passes here, and costs nothing a frame can reach because the console
+    /// cannot name it.
+    #[test]
+    fn the_variable_names_are_the_filters_labels() {
+        let crcbl_console::Kind::Enum(names) = r_shadow_filter.kind() else {
+            panic!("`r_shadow_filter` is an enum variable");
+        };
+        let labels: Vec<&str> = FILTERS.into_iter().map(Filter::label).collect();
+        assert_eq!(names, labels.as_slice());
+        assert_eq!(
+            labels.as_slice(),
+            crcbl_shaders::mesh::SHADOW_FILTERS.as_slice(),
+            "the shader numbers its `SHADOW_FILTER_*` constants by position in its own list, \
+             so a set that differs here is a mode the fragment reads as another filter"
+        );
+        // And the numbering itself, which is the half a set comparison cannot
+        // see: `Filter::mode` searches by label, so a list in the right order
+        // with the wrong lookup would still pass above.
+        for (mode, filter) in FILTERS.into_iter().enumerate() {
+            assert_eq!(
+                filter.mode() as usize,
+                mode,
+                "`{}` is the shader's mode {}, not {mode}",
+                filter.label(),
+                filter.mode()
+            );
+        }
+    }
+
+    /// A frame nobody has touched the console on runs what ships, and so does
+    /// the far side of the seam whatever the console holds.
+    ///
+    /// `crate::ssao`'s `the_seams_other_side_is_the_technique_that_ships`, and
+    /// the same failure: a [`shipped_filter`] that followed the console would be
+    /// a comparison of one filter against itself, which is a seam that draws one
+    /// picture and says nothing.
+    #[test]
+    fn the_seams_other_side_is_the_filter_that_ships() {
+        use crcbl_console::Value;
+
+        let _guard = FILTER_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = r_shadow_filter.get_enum();
+        assert_eq!(
+            filter(),
+            Filter::Pcss,
+            "a frame nobody has touched the console on must sample through the filter every \
+             golden in this workspace was blessed under"
+        );
+        let shipped_before = shipped_filter();
+
+        r_shadow_filter
+            .set(&Value::Enum(Filter::Box.label()))
+            .expect("a writable enum in the set");
+        // Anti-vacuity: the knob has to have actually moved, or the equality
+        // below holds of a console nobody changed.
+        assert_eq!(
+            filter(),
+            Filter::Box,
+            "the getter did not follow the console"
+        );
+        assert_eq!(
+            shipped_filter(),
+            shipped_before,
+            "the shipped filter moved when the console did, so the seam compares a filter \
+             against itself"
+        );
+        assert_ne!(
+            shipped_filter(),
+            filter(),
+            "the shipped filter is what the console holds, so both sides of the seam run one \
+             kernel"
+        );
+
+        r_shadow_filter
+            .set(&Value::Enum(before))
+            .expect("putting the filter back");
+    }
+
+    /// A seam at either end of [`r_shadow_split`]'s range is no comparison, and
+    /// the default is one of them.
+    ///
+    /// `crate::ssao::split_at`'s rule, asserted here because this is a second
+    /// copy of it: a default that compared would put a seam through every
+    /// golden in the workspace, and an end of the range that compared would ask
+    /// `crate::split::halves` for a rectangle with no columns in it.
+    #[test]
+    fn a_seam_at_either_edge_is_no_comparison() {
+        use crcbl_console::Value;
+
+        let _guard = FILTER_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = r_shadow_split.get_f32();
+        assert_eq!(
+            split_at(),
+            None,
+            "a frame nobody has touched the console on must draw one filter over the whole \
+             target, which is what every golden in this workspace was blessed as"
+        );
+        for (at, wanted) in [
+            (0.0, None),
+            (1.0, None),
+            (0.5, Some(0.5)),
+            (0.25, Some(0.25)),
+        ] {
+            r_shadow_split
+                .set(&Value::Float(at))
+                .expect("a writable float in range");
+            assert_eq!(split_at(), wanted, "a seam asked for at {at}");
+        }
+        r_shadow_split
+            .set(&Value::Float(before))
+            .expect("putting the seam back");
     }
 }

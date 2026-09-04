@@ -80,6 +80,42 @@ make this and every other "bound the wrong buffer" fault visible to the
 reference backend rather than to a picture. Wider than this entry and worth its
 own decision.
 
+## The shadow filter selector leaves three things owed (2026-09-04)
+
+`crcbl_render::shadow::r_shadow_filter` and `r_shadow_split` landed with topic
+45's fifteenth decision — three filters in `mesh.slang`, selected per fragment
+out of `FrameUniforms::shadow_filter`. What that change did **not** do:
+
+- **`volumetric.slang` does not honour the selector.** Its copy of `tile_pcf` is
+  held letter-for-letter against `mesh.slang`'s by `crcbl_shaders::volumetric`'s
+  `both_shaders_spell_the_same_atlas_walk`, and it has always taken the disc at
+  the fixed `SHADOW_FILTER_TEXELS` — the tenth decision's per-fragment width
+  never reached it either. A froxel has no `SV_Position`, so the seam's column
+  means nothing there, and honouring the _filter_ alone would mean giving
+  `VolumetricParams` a mode lane, giving that shader a `tile_box_pcf`, and
+  reworking the drift guard so the two `tile_pcf` bodies may differ in the one
+  branch. Not done, and deliberately: a shaft's filter is not what
+  `docs/plan/sample/18-sundial.md` compares, and `shaders/mesh.slang`'s header
+  says so where a reader of the seam will meet it. If it is ever wanted, the
+  drift guard is the piece to design first — it is the only thing keeping the
+  two atlas walks one body.
+- **Nothing prices the three filters against each other.** The instrument is the
+  `forward` row of `crcbl_render::PassTimers` across two runs at two settings of
+  `r_shadow_filter`, which is what the eleventh decision used for the probe's
+  0.221 ms against 0.303 ms. It has not been run for `box` or `disc`, so the
+  ladder has a picture and no cost. Worth doing on an adapter with a real GPU
+  before any tier ever selects a rung.
+- **Considered and declined: drawing the scene twice to compare.** The occlusion
+  chain's seam records its gather twice under a scissor, and that shape is
+  available to a full-screen pass because each recording pays for half a target
+  of fragments. The forward pass is a _scene_ draw: a second recording is every
+  triangle, every cull and every vertex fetch again, so a comparison would cost
+  two frames rather than one. The per-side `PassTimers` row it would have bought
+  measures the scene rather than the filter and would be dominated by whatever
+  each half contains, so it buys nothing the two-run measurement above does not.
+  `crcbl_render::split`'s header carries both shapes and which client takes
+  which.
+
 ## alcove's page knobs: what is checked, and what is not (2026-09-04)
 
 `/demos/alcove/` is the first page on the site whose controls are HTML rather

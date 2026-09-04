@@ -176,6 +176,24 @@ pub const SHADOW_ATLAS_ROWS: u32 = 4;
 /// `crcbl_render::shadow::AtlasAllocator` is what decides it.
 pub const SHADOW_ATLAS_TILES: usize = SHADOW_CASCADES + SHADOW_LIGHT_TILES;
 
+/// The shadow filters [`FrameUniforms::shadow_filter`] selects between, in the
+/// order the block's lanes number them: a mode is this array's index.
+///
+/// * `pcss` — `docs/plan/45-shadows.md`'s ninth, tenth and eleventh decisions
+///   together: a blocker search sizes the sun's rotated disc per fragment, and
+///   a punctual map takes that disc at its fixed reach. **What ships**, and
+///   what every golden in this workspace was blessed under.
+/// * `disc` — the same rotated disc at the fixed reach for the sun as well, so
+///   no blocker search runs and no penumbra widens with its caster's height.
+/// * `box` — the 3×3 hardware-PCF box the ninth decision replaced.
+///
+/// `mesh.slang` spells each name as a `SHADOW_FILTER_<NAME>` constant whose
+/// value is that index, and `crcbl_render::shadow::Filter` spells them again
+/// for the console. Two tests hold the three spellings together: this module's
+/// `the_shader_names_a_constant_for_every_filter_this_module_lists` and that
+/// module's `the_variable_names_are_the_filters_labels`.
+pub const SHADOW_FILTERS: [&str; 3] = ["pcss", "disc", "box"];
+
 /// How far in front of a cascade's near plane still writes depth, in world
 /// units.
 ///
@@ -256,9 +274,10 @@ const _: () = assert!(
 /// `float4x4`, two closing `float4`, a `uint4`, [`SHADOW_LIGHT_TILES`] more
 /// `float4x4`, the irradiance clipmap's [`PROBE_VOLUME_SIZE`] header, the LOD and
 /// fog rows, the sky's three spherical-harmonic rows, the previous frame's
-/// `float4x4`, the vertex pool's `uint4` and [`SHADOW_ATLAS_TILES`] `float4` of
-/// atlas rectangles. Checked against the `Offset` decorations `slangc` emits by
-/// this module's `the_uniform_block_matches_the_offsets_slangc_emits`.
+/// `float4x4`, the vertex pool's `uint4`, [`SHADOW_ATLAS_TILES`] `float4` of
+/// atlas rectangles and the shadow filter's closing `uint4`. Checked against the
+/// `Offset` decorations `slangc` emits by this module's
+/// `the_uniform_block_matches_the_offsets_slangc_emits`.
 pub const FRAME_UNIFORMS_SIZE: usize = 96
     + 64 * SHADOW_CASCADES
     + 48
@@ -269,7 +288,8 @@ pub const FRAME_UNIFORMS_SIZE: usize = 96
     + 48
     + 64
     + 16
-    + 16 * SHADOW_ATLAS_TILES;
+    + 16 * SHADOW_ATLAS_TILES
+    + 16;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -814,6 +834,24 @@ pub struct FrameUniforms {
     ///
     /// **Last in the block**, on [`lod_params`](Self::lod_params)' terms.
     pub shadow_atlas_rect: [[f32; 4]; SHADOW_ATLAS_TILES],
+    /// Which shadow filter each side of the comparison seam runs: `x` the near
+    /// side's mode, `y` the far side's, `z` the seam's column in pixels and `w`
+    /// unread padding.
+    ///
+    /// A mode is an index into [`SHADOW_FILTERS`] and `mesh.slang`'s
+    /// `shadow_filter_mode` is the only reader — a fragment left of `z` takes
+    /// `x` and one at or past it takes `y`.
+    /// `crcbl_render::shadow::Filter` is the host's spelling of the set and
+    /// `crcbl_render::split::halves` is what counts the column.
+    ///
+    /// **All zeroes is the frame that ships**: one mode in both lanes and a
+    /// zero column is a frame comparing nothing, and mode zero is the filter
+    /// every golden in this workspace was blessed under. So a writer that has
+    /// never heard of this row draws the picture it drew before the row
+    /// existed.
+    ///
+    /// **Last in the block**, on [`lod_params`](Self::lod_params)' terms.
+    pub shadow_filter: [u32; 4],
 }
 
 impl FrameUniforms {
@@ -1004,6 +1042,10 @@ impl FrameUniforms {
         }
         for rect in &self.shadow_atlas_rect {
             put(&mut bytes, &mut at, rect);
+        }
+        for value in self.shadow_filter {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
         }
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
@@ -3219,13 +3261,13 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 1760,
+            FRAME_UNIFORMS_SIZE, 1776,
             "at two cascades, fourteen light tiles, four probe levels and \
              sixteen atlas rectangles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
         // 224, 240, 256, 272, 1168, 1184, 1200, 1264, 1328, 1344, 1360, 1376,
-        // 1392, 1408, 1424, 1488, 1504 — and
+        // 1392, 1408, 1424, 1488, 1504, 1760 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64` beside
         // `%_arr_mat4v4float_int_14`, which is the light array's own length,
         // `%_arr_v4float_int_4 ArrayStride 16`, which is a probe level array's,
@@ -3257,6 +3299,7 @@ mod tests {
             240 + cascades + lights + PROBE_VOLUME_SIZE,
             304 + cascades + lights + PROBE_VOLUME_SIZE,
             320 + cascades + lights + PROBE_VOLUME_SIZE,
+            320 + cascades + lights + PROBE_VOLUME_SIZE + rects,
         ];
         let sizes = [
             64usize,
@@ -3277,6 +3320,7 @@ mod tests {
             64,
             16,
             rects,
+            16,
         ];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
@@ -3339,6 +3383,12 @@ mod tests {
             shadow_atlas_rect: core::array::from_fn(|slot| {
                 core::array::from_fn(|lane| 200.0 + 4.0 * slot as f32 + lane as f32)
             }),
+            // A distinct value per lane, in a range nothing above uses and one
+            // no real frame carries: the two modes and the column are three
+            // `uint`s of one width, and a writer that put the far side's mode
+            // in the near side's lane would draw a seam with its halves the
+            // wrong way round — a picture, and one only this ordering catches.
+            shadow_filter: [300, 301, 302, 303],
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -3496,10 +3546,22 @@ mod tests {
                 "the atlas rectangle of slot {slot}"
             );
         }
+        // And the filter selector past them, which is where the block now ends.
+        // Every lane, on the rectangles' terms: three `uint`s of one width
+        // permute silently, and a near side drawn with the far side's filter is
+        // a comparison with its halves swapped.
+        let filter = atlas + 16 * SHADOW_ATLAS_TILES;
+        for (lane, expected) in [300u32, 301, 302, 303].into_iter().enumerate() {
+            assert_eq!(
+                word_at(filter + lane * 4),
+                expected,
+                "shadow_filter lane {lane}"
+            );
+        }
         assert_eq!(
-            atlas + 16 * SHADOW_ATLAS_TILES,
+            filter + 16,
             FRAME_UNIFORMS_SIZE,
-            "the rectangles are not what ends the block"
+            "the filter selector is not what ends the block"
         );
     }
 
@@ -5071,6 +5133,10 @@ mod tests {
                 "float tile_pcf(uint tile, float2 tile_uv, float reference",
                 "atlas_step(rect)",
             ),
+            (
+                "float tile_box_pcf(uint tile, float2 tile_uv, float reference)",
+                "atlas_step(rect)",
+            ),
         ] {
             let body = one_body(source, signature);
             let guard = body.find("atlas_rect_is_empty(rect)").unwrap_or_else(|| {
@@ -5085,6 +5151,67 @@ mod tests {
                  whether the rectangle names a map at {guard}. A slot with no map carries \
                  zeros, so the divide is a NaN — and a NaN is false against every comparison \
                  below it, including the one that would have returned lit"
+            );
+        }
+    }
+
+    /// **Every filter [`SHADOW_FILTERS`] lists is a constant `mesh.slang`
+    /// spells, at the value this crate numbers it**, and both shaders that
+    /// declare the block declare the row that carries the selection.
+    ///
+    /// `crcbl_render::shadow`'s `the_variable_names_are_the_filters_labels` is
+    /// the same claim on the console's side: three copies of one set of names —
+    /// the console's literals, the `Filter` enum's labels and the shader's
+    /// constants — and only a pair of tests holds them together. A name that
+    /// drifted here would be a mode the host selects and the fragment reads as
+    /// the arm it fell through to, which is a picture rather than an error.
+    ///
+    /// The *values* matter as much as the names, and that is the half a
+    /// presence check would miss: the mode is an index into [`SHADOW_FILTERS`],
+    /// so a shader that numbered `box` 1 and `disc` 2 would answer every
+    /// selection with the other filter and every golden at the default would
+    /// still pass — the default is index 0 either way.
+    #[test]
+    fn the_shader_names_a_constant_for_every_filter_this_module_lists() {
+        let mesh = include_str!("../shaders/mesh.slang");
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        for (mode, label) in SHADOW_FILTERS.into_iter().enumerate() {
+            let spelling = format!(
+                "static const uint SHADOW_FILTER_{} = {mode}u;",
+                label.to_uppercase()
+            );
+            assert!(
+                mesh.contains(&spelling),
+                "mesh.slang does not declare `{spelling}`, so `{label}` is a mode the host \
+                 writes and the shader answers with whichever arm the value falls through to"
+            );
+        }
+        // And the row they are selected through, in both files: `mesh.slang`
+        // reads it and `mesh_cluster.slang` declares it because the two blocks
+        // are one buffer — see that file's `FrameUniforms`.
+        for (name, source) in [("mesh.slang", mesh), ("mesh_cluster.slang", cluster)] {
+            assert!(
+                source.contains("uint4 shadow_filter;"),
+                "{name} does not declare `shadow_filter`, so the two stages disagree about \
+                 the size of the block they share"
+            );
+        }
+        assert!(
+            mesh.contains("uint shadow_filter_mode(float2 pixel)"),
+            "mesh.slang declares the selector's row and no longer reads it, so \
+             `r_shadow_filter` writes into a lane nothing looks at"
+        );
+        // And both shadow lookups ask it. A selector only the sun honoured
+        // would draw a seam that moves across a cascade and not across a cone,
+        // which is a picture nobody would question.
+        for signature in [
+            "float cascade_visibility(uint cascade, float3 world_position",
+            "float punctual_visibility(uint tile, float3 world_position",
+        ] {
+            assert!(
+                one_body(mesh, signature).contains("shadow_filter_mode(pixel)"),
+                "`{signature}` does not select a filter, so `r_shadow_filter` reaches only \
+                 some of the maps in the atlas"
             );
         }
     }

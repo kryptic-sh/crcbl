@@ -7468,6 +7468,12 @@ pub(crate) mod tests {
             // shadowed light, so no slot names a map. A zero rectangle is what
             // `crcbl_render::shadow` writes for a slot nothing rendered into.
             shadow_atlas_rect: [[0.0; 4]; crcbl_shaders::mesh::SHADOW_ATLAS_TILES],
+            // And no comparison seam: one mode in both lanes and a zero column
+            // is a frame drawing one filter everywhere, which is what
+            // `crcbl_shaders::mesh::FrameUniforms::shadow_filter` calls the
+            // frame that ships. Nothing here shades in any case — this probe
+            // names no fragment stage.
+            shadow_filter: [0; 4],
         };
 
         // One triangle over the centre of the target and neither corner, in

@@ -836,6 +836,73 @@ size on each of the three quality tiers — is drafted in
 [39-capabilities.md](39-capabilities.md)'s tier table as starting values to
 sweep on each tier's hardware.
 
+### A fifteenth, taken 2026-09-04: the filter is selected at runtime, and the seam is per fragment
+
+The ninth, tenth and eleventh decisions each **replaced** what came before them,
+so the ladder's lower rungs stopped being compiled: the 3x3 hardware-PCF box the
+ninth replaced lived only in git history from 2026-08-28, and there was no way
+to put two filters in one picture at all. `docs/plan/sample/18-sundial.md` is a
+comparison fixture that cannot be built without one, and the engine held exactly
+one filter.
+
+**`crcbl_render::shadow::r_shadow_filter` now selects between three**, and
+`mesh.slang` compiles all three:
+
+- **`pcss`** — the ninth, tenth and eleventh together: the blocker search sizes
+  the sun's rotated disc per fragment and a punctual map takes that disc at
+  `SHADOW_FILTER_TEXELS`. **The default**, and what every golden in this
+  workspace was blessed under.
+- **`disc`** — the ninth and eleventh without the tenth: the same rotated disc
+  at the fixed reach for the sun as well, so no blocker search runs and no
+  penumbra widens with its caster's height. It is also what a punctual map takes
+  under every mode, because the tenth decision was the sun's alone.
+- **`box`** — the 3x3 hardware-PCF kernel the ninth replaced, recovered from the
+  tree before 713da9d rather than re-derived, and re-expressed in the atlas
+  rectangle the allocator rung introduced. Its taps go through the same
+  `tile_tap` as the disc's, with the identity rotation, so the half-texel clamp
+  and the atlas walk are one body.
+
+Only the **kernel** is a rung. Every bias decision after the ninth still applies
+to all three: the receiver is offset along its facet normal and towards the
+light by the same two counts whichever filter samples it.
+
+**A uniform branch and not three pipelines.** The occlusion chain's
+`r_ssao_technique` selects a pipeline, and could: a full-screen gather is one
+draw, so two of them are two draws over half a target each. This filter lives in
+a _scene_ pass, where a per-pipeline switch would mean drawing every triangle,
+running every cull and fetching every vertex twice to put two filters in one
+frame.
+
+**And the seam is resolved per fragment, for the same reason.**
+`crcbl_render::split` had one shape — record the pass twice under a scissor —
+and that shape is unavailable here on the same arithmetic. So
+`FrameUniforms::shadow_filter` carries the near side's mode, the far side's and
+the seam's column in pixels, `crcbl_render::split::halves` still owns where the
+column falls, and `mesh.slang`'s `shadow_filter_mode` compares it against
+`SV_Position.x`. That module's header now carries both shapes and which client
+takes which.
+
+The per-side timer row a second recording would have bought is not a loss: a
+`PassTimers` entry on half a scene measures the _scene_, and the difference
+between two halves is dominated by what each half contains. What prices a filter
+is the `forward` row across two runs at two settings of `r_shadow_filter`, which
+needs no seam at all.
+
+**What the default preserves is every byte.** `r_shadow_filter` defaults to
+`pcss` and `r_shadow_split` to zero, which is one mode in both lanes and a zero
+column — so every fragment takes the far lane, the arm it takes is the one that
+shipped, and the row a writer that has never heard of it leaves is all zeroes.
+The render, forward, `lantern` and `alcove` golden suites were run against the
+change and none moved.
+
+**What this does not reach is the froxel volume.** `volumetric.slang` carries a
+letter-for-letter copy of `tile_pcf`, held there by
+`crcbl_shaders::volumetric`'s `both_shaders_spell_the_same_atlas_walk`, and that
+copy has always taken the disc at the fixed reach — a froxel has no
+`SV_Position` and the scatter pass reads no seam column. So a frame comparing
+two filters compares the surfaces, and the shafts in the air are filtered on
+`disc` either side of the line. `docs/backlog.md` carries it.
+
 ### The quality ladder, taken 2026-08-27
 
 What ships, first, because the ladder is only readable against it: **stable
@@ -847,9 +914,10 @@ origin to whole texels — **hardware PCF through a comparison sampler**, which 
 disc and averaging them, the texel-denominated bias of the fifth decision, the
 geometric normal of the sixth, the **normal-offset** direction of the seventh,
 the **cascade cross-fade** of the eighth, the **rotated disc** of the ninth —
-which is what the box in the sentence above became — and the **2026-08-26
-re-tiling** that bought a second point light by shrinking `SHADOW_TILE` rather
-than growing the image.
+which is what the box in the sentence above became, though since the fifteenth
+decision that box is still in the tree as `r_shadow_filter box` rather than only
+in history — and the **2026-08-26 re-tiling** that bought a second point light
+by shrinking `SHADOW_TILE` rather than growing the image.
 
 **The tile is now the binding constraint on shadow quality**: the 2026-08-26
 re-tiling bought a second point light by shrinking `SHADOW_TILE` rather than

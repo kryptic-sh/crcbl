@@ -51,10 +51,15 @@ a shadow implementation whose artefacts ship.
   nothing else in the tree is going to build.
 - An atlas viewer: the shadow atlas drawn to screen, so tile assignment is a
   thing you can look at.
-- Technique selector and split screen, on sample 17's harness pattern. The split
-  screen itself is built — `crcbl_render::split` owns the seam's geometry and
-  `r_ssao_split` is its first caller — so what this sample owes is the selector
-  and a shadow variable to put either side of it.
+- Technique selector and split screen, on sample 17's harness pattern. **Both
+  are built as of 2026-09-04** — topic 45's fifteenth decision:
+  `r_shadow_filter` selects between `pcss`, `disc` and `box`, and
+  `r_shadow_split` puts the console's choice either side of a seam
+  `crcbl_render::split::halves` counts, resolved per fragment out of
+  `FrameUniforms::shadow_filter` because a scene pass cannot be recorded twice
+  under a scissor. So what this sample owes here is the **binding and the
+  panel**: keys that drive the two variables and an on-screen label saying which
+  filter each side of the line is.
 - Pages web demo.
 
 ## Non-goals (hard cap)
@@ -68,9 +73,19 @@ place to reopen it. No authoring tools.
 
 ## Status: unbuilt, and there is a measured reason to want it
 
-Nothing exists. What does exist is evidence that the shadow implementation is at
-the edge of its current budget: since the 2026-08-26 re-tiling that bought a
-second shadowed point light by shrinking every tile, the `cube` browser-path
+**One of its dependencies is no longer owed.** The engine held exactly one
+shadow filter until 2026-09-04; it now holds three, selectable at runtime, with
+a per-fragment seam that puts any of them beside the one that ships — topic 45's
+fifteenth decision. That was the piece this sample could not have been built
+without and could not have built for itself, because it is a `mesh.slang`
+change. What remains owed is everything else on the Scope list and none of it
+has moved: **the scene**, the sun on its scripted clock, the cascade overlay,
+the atlas viewer, the key bindings and panel that drive the two variables, the
+goldens, and the Pages web demo.
+
+Nothing else exists. What does exist is evidence that the shadow implementation
+is at the edge of its current budget: since the 2026-08-26 re-tiling that bought
+a second shadowed point light by shrinking every tile, the `cube` browser-path
 golden fails on linux and windows — 64 grossly-wrong pixels against a 49-pixel
 budget, a maximum channel delta of 216, an ssim of 0.998945 — and the diff is
 scattered noise along shadow edges. macOS passes. The trade was taken knowingly
@@ -92,7 +107,13 @@ hold in their head, and the only honest way to set them is to look.
    against each other as the two counts change, where that decision could only
    measure one fixture's strip and one patch's dots.
 3. **Cascade cross-fade**, against the seam the colonnade crosses.
-4. **The Poisson kernel and PCSS**, with the penumbra-versus-distance claim.
+4. **The filter ladder side by side**, with the penumbra-versus-distance claim.
+   The filters themselves **shipped 2026-08-28 and 2026-09-04** — the ninth
+   decision's rotated disc took the place of the Poisson set this line asked
+   for, with the reason in that decision, and the fifteenth made all three rungs
+   selectable — so what is left here is the same as milestone 2's: the
+   comparison, not the rung. `r_shadow_filter` and `r_shadow_split` are what it
+   drives.
 5. **Ray-traced shadows**, gated on P7C, and the device clamp.
 
 ## Exit criteria

@@ -6214,6 +6214,25 @@ impl ForwardRenderer {
             // sampling side knows about the atlas's shape, so a map is read
             // from the rectangle it was rendered into whatever size that was.
             shadow_atlas_rect: atlas_rects,
+            // Which filter each side of the comparison seam samples through,
+            // and where the seam falls — see `crate::split`, whose header
+            // carries why a scene pass selects per pixel where a full-screen
+            // effect records itself twice.
+            //
+            // **The column comes from `split::halves`' left rectangle** rather
+            // than from a second multiplication here, so the seam module stays
+            // the one place a fraction becomes a column: a frame comparing
+            // nothing carries the console's own filter in both lanes and a zero
+            // column, which is a row of zeroes at the default and therefore the
+            // frame every golden was blessed as.
+            shadow_filter: {
+                let near = shadow::filter().mode();
+                let seam = shadow::split_at().and_then(|at| crate::split::halves(extent, at));
+                let (far, column) = seam.map_or((near, 0), |(left, _)| {
+                    (shadow::shipped_filter().mode(), left.width)
+                });
+                [near, far, column, 0]
+            },
         };
         // Advanced here, between writing the block that reads it and anything
         // else that could look at it: this function runs exactly once per
@@ -14084,6 +14103,57 @@ mod tests {
     /// [`ssao_split_switch`]'s lock.
     static SSAO_SPLIT_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Takes `r_shadow_filter` and `r_shadow_split` for this thread and puts
+    /// them both back at their defaults when the guard drops.
+    ///
+    /// [`ssao_split_switch`]'s shape, with two variables under one lock because
+    /// they are read into one row of one block — `crate::shadow::FILTER_SWITCH`
+    /// is where that is argued, and why the lock lives there rather than beside
+    /// this function: `crate::shadow`'s own tests move the same two.
+    fn shadow_filter_switch() -> ShadowFilterSwitch {
+        let guard = crate::shadow::FILTER_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let switch = ShadowFilterSwitch { _guard: guard };
+        switch.reset();
+        switch
+    }
+
+    /// What [`shadow_filter_switch`] hands back.
+    struct ShadowFilterSwitch {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ShadowFilterSwitch {
+        /// Asks for `filter` on the near side of the seam.
+        fn filter(&self, filter: shadow::Filter) {
+            crate::shadow::r_shadow_filter
+                .set(&crcbl_console::Value::Enum(filter.label()))
+                .expect("`r_shadow_filter` is a writable enum in the set");
+        }
+
+        /// Asks for a seam at `at`, or for none at zero.
+        fn seam(&self, at: f32) {
+            crate::shadow::r_shadow_split
+                .set(&crcbl_console::Value::Float(at))
+                .expect("`r_shadow_split` is a writable float in range");
+        }
+
+        /// Back to the frame every golden was blessed as.
+        fn reset(&self) {
+            self.filter(shadow::shipped_filter());
+            self.seam(0.0);
+        }
+    }
+
+    impl Drop for ShadowFilterSwitch {
+        fn drop(&mut self) {
+            // Back to the defaults at both ends, so a check that panicked
+            // mid-way does not hand the next holder a comparing frame.
+            self.reset();
+        }
+    }
+
     /// Takes `r_ssao_slices` for this thread and puts it back at its default
     /// when the guard drops.
     ///
@@ -17976,6 +18046,111 @@ mod tests {
              and the far side what ships; the far side follows the variable's *default*, exactly \
              as the four scalars do"
         );
+        recorder.assert_valid();
+    }
+
+    /// **The frame block carries the console's shadow filter on the near side
+    /// of the seam, the shipped one on the far side, and the column
+    /// [`crate::split::halves`] counted.**
+    ///
+    /// [`the_comparison_seam_marches_through_two_techniques`]'s claim for the
+    /// other seam, and it has to be a claim about *bytes* rather than about
+    /// pass handles: the occlusion chain compares two pipelines and this
+    /// compares two arms of one, so there is nothing in the pass list to look
+    /// at. What a person sees is decided entirely by the row this asserts.
+    ///
+    /// **The frame at the default is the control**, and it is what makes the
+    /// rest mean anything: a block that always wrote the shipped filter into
+    /// both lanes would satisfy the third case's far side whatever
+    /// `shipped_filter` did, and one that copied the near lane into the far one
+    /// would satisfy the first two.
+    ///
+    /// The column is compared against `halves`' own answer rather than against
+    /// a number written here, which is the seam module's whole point: a test
+    /// that multiplied the fraction by the width itself would be a second
+    /// opinion about the rounding, and the floor is exactly what that module's
+    /// `the_seam_takes_the_floor_of_the_column_it_asks_for` exists to pin.
+    ///
+    /// [`the_comparison_seam_marches_through_two_techniques`]: fn@the_comparison_seam_marches_through_two_techniques
+    #[test]
+    fn the_frame_block_carries_a_shadow_filter_for_each_side_of_the_seam() {
+        let switch = shadow_filter_switch();
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+
+        // The seam is counted over the extent the scene is *drawn* at, which is
+        // what `SV_Position.x` is denominated in — not the caller's window.
+        let internal = renderer.internal_extent(TEST_EXTENT);
+        let (left, _) = crate::split::halves(internal, 0.5).expect("a seam down the middle");
+        assert!(
+            left.width > 0,
+            "a seam with no columns on one side would make every assertion below hold of a \
+             frame that compares nothing"
+        );
+
+        let ships = shadow::shipped_filter();
+        let other = shadow::Filter::Box;
+        assert_ne!(
+            other.mode(),
+            ships.mode(),
+            "the filter this test moves the console to is the one that ships, so the seam it \
+             asks for compares one kernel against itself"
+        );
+
+        let draw = |renderer: &mut ForwardRenderer| {
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    TEST_EXTENT,
+                )
+                .expect("write");
+            let bytes = recorder
+                .buffer_bytes(renderer.uniforms[renderer.frame])
+                .expect("this frame's uniform block is live");
+            let at = mesh::FRAME_UNIFORMS_SIZE - 16;
+            core::array::from_fn(|lane| {
+                u32::from_le_bytes(
+                    bytes[at + lane * 4..at + lane * 4 + 4]
+                        .try_into()
+                        .expect("four bytes"),
+                )
+            })
+        };
+
+        let shipped: [u32; 4] = draw(&mut renderer);
+        assert_eq!(
+            shipped,
+            [ships.mode(), ships.mode(), 0, 0],
+            "a frame nobody has touched the console on must carry the shipped filter in both \
+             lanes and no column, which is the row every golden in this workspace was blessed \
+             under"
+        );
+
+        switch.filter(other);
+        let unsplit: [u32; 4] = draw(&mut renderer);
+        assert_eq!(
+            unsplit,
+            [other.mode(), other.mode(), 0, 0],
+            "`r_shadow_filter {}` with no seam has to reach every pixel, so both lanes carry it",
+            other.label()
+        );
+
+        switch.seam(0.5);
+        let compared: [u32; 4] = draw(&mut renderer);
+        assert_eq!(
+            compared,
+            [other.mode(), ships.mode(), left.width, 0],
+            "a seam at 0.5 has to put the console's filter left of `halves`' column and the \
+             shipped one right of it; the far side follows the variable's *default*, exactly \
+             as the occlusion chain's does"
+        );
+
+        renderer.destroy(device);
         recorder.assert_valid();
     }
 

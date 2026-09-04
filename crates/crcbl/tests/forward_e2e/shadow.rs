@@ -460,6 +460,280 @@ fn sun(sign: f32) -> crcbl::math::Vec3 {
     crcbl::math::Vec3::new(sign, SUN_ELEVATION, SUN_TOWARDS_Z).normalize()
 }
 
+/// Takes `r_shadow_filter` and `r_shadow_split` for the run and puts both back
+/// at their defaults when it drops.
+///
+/// A guard rather than two `set` calls per test, because the variables are
+/// process-wide and this suite's runner may share a process between tests: a
+/// filter one test left moved is a frame the next one did not ask for, and
+/// every golden in this workspace was blessed at the defaults.
+struct FilterSwitch;
+
+impl FilterSwitch {
+    /// Takes the two and puts them at what ships.
+    fn take() -> Self {
+        let switch = Self;
+        switch.reset();
+        switch
+    }
+
+    /// Asks for `filter` on the near side of the seam.
+    fn filter(&self, filter: crcbl::render::shadow::Filter) {
+        crcbl::render::shadow::r_shadow_filter
+            .set(&crcbl::console::Value::Enum(filter.label()))
+            .expect("`r_shadow_filter` is a writable enum in the set");
+    }
+
+    /// Asks for a seam at `at`, or for none at zero.
+    fn seam(&self, at: f32) {
+        crcbl::render::shadow::r_shadow_split
+            .set(&crcbl::console::Value::Float(at))
+            .expect("`r_shadow_split` is a writable float in range");
+    }
+
+    /// Back to the frame every golden was blessed as.
+    fn reset(&self) {
+        self.filter(crcbl::render::shadow::shipped_filter());
+        self.seam(0.0);
+    }
+}
+
+impl Drop for FilterSwitch {
+    fn drop(&mut self) {
+        self.reset();
+    }
+}
+
+/// How many pixels a filter change has to move before the difference is the
+/// filter rather than the driver, and by how much.
+///
+/// **Swept before they were fixed**, on both Vulkan adapters this workspace can
+/// run locally — radv on an RX 7900 XTX and lavapipe — over the `sun(1.0)` frame
+/// [`a_penumbra_resolves_differently_under_every_rung_of_the_filter_ladder`]
+/// draws:
+///
+/// | Against the shipped `pcss` | radv        | lavapipe    |
+/// | -------------------------- | ----------- | ----------- |
+/// | `disc`                     | 326 px / 75 | 323 px / 75 |
+/// | `box`                      | 690 px / 74 | 693 px / 74 |
+///
+/// The two adapters agree to within three pixels and to the level on the worst
+/// channel, and the *narrow* rung is `disc` — the middle of the ladder, which
+/// differs from `pcss` only where a blocker stands high enough for the search to
+/// widen the disc. So the counts are floored under that column rather than under
+/// the box's, at roughly two thirds of it, and the level under half of what
+/// either rung moves: enough margin for a driver that rounds a penumbra
+/// differently, and nowhere near enough for an arm that fell through to the
+/// filter that ships, which moves exactly zero pixels.
+const PENUMBRA_PIXELS: usize = 200;
+
+/// How far the worst-moved channel has to travel. See [`PENUMBRA_PIXELS`].
+const PENUMBRA_LEVELS: u8 = 32;
+
+/// How many pixels of `a` and `b` differ at all, and by how much the worst
+/// channel of any of them does.
+///
+/// The pair rather than one number, because they fail differently: a filter
+/// that reached nothing moves *no* pixels, and one that reached the frame
+/// through a lane that is almost always zero moves many pixels by one level —
+/// which is the shape of a rounding difference between two drivers rather than
+/// of a kernel change.
+fn difference(a: &crcbl_golden::Image, b: &crcbl_golden::Image) -> (usize, u8) {
+    difference_over(a, b, 0..MESH_EXTENT.0)
+}
+
+/// [`difference`] over `columns` alone, which is how the seam's two sides are
+/// asked about separately.
+///
+/// A count and a worst case rather than the two pixel vectors compared whole:
+/// an `assert_eq!` on a quarter of a frame prints a quarter of a frame, and a
+/// failure nobody can read is one nobody diagnoses.
+fn difference_over(
+    a: &crcbl_golden::Image,
+    b: &crcbl_golden::Image,
+    columns: std::ops::Range<u32>,
+) -> (usize, u8) {
+    let mut moved = 0usize;
+    let mut worst = 0u8;
+    assert!(!columns.is_empty(), "an empty range compares nothing");
+    for y in 0..MESH_EXTENT.1 {
+        for x in columns.clone() {
+            let (one, two) = (
+                a.pixel(x, y).expect("inside the frame"),
+                b.pixel(x, y).expect("inside the frame"),
+            );
+            let apart = one
+                .iter()
+                .zip(&two)
+                .map(|(l, r)| l.abs_diff(*r))
+                .max()
+                .unwrap_or(0);
+            if apart > 0 {
+                moved += 1;
+                worst = worst.max(apart);
+            }
+        }
+    }
+    (moved, worst)
+}
+
+/// **The filter the console selects reaches the picture**, measured across the
+/// one part of the frame where two filters can disagree.
+///
+/// `docs/plan/45-shadows.md`'s ladder has three rungs and until
+/// `r_shadow_filter` existed only the top one was compiled. A selector that
+/// wrote its mode into a lane nothing read, or a shader arm that fell through
+/// to the filter that ships, would leave every frame identical — and no golden
+/// could see it, because the frame it draws is the one that was blessed.
+///
+/// **The penumbra is where the claim lives.** A 3×3 box reaches one texel and
+/// the shipping filter reaches two to eight, so a fully lit or fully shadowed
+/// fragment answers the same under both and only the gradient between them
+/// carries the difference. That is why this counts *pixels that moved* rather
+/// than averaging a band: the penumbra is a few dozen pixels of a frame the
+/// tonemap has taken to near white almost everywhere, and a mean over any band
+/// wide enough to be robust dilutes it to under a level — measured at 0.03 of
+/// 255 over the two central eighths, which is why the first spelling of this
+/// test was thrown away. Both thresholds are swept rather than guessed; see
+/// [`PENUMBRA_PIXELS`].
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn a_penumbra_resolves_differently_under_every_rung_of_the_filter_ladder() {
+    let switch = FilterSwitch::take();
+    let ships = crcbl::render::shadow::shipped_filter();
+    let shipped = render_shadowed(sun(1.0));
+
+    // Every rung but the one that ships, so the middle of the ladder is held to
+    // the same claim as its ends: a `disc` arm that fell through to `pcss` is
+    // exactly as invisible as a `box` one that did, and a test naming only the
+    // box would pass over it.
+    for filter in [
+        crcbl::render::shadow::Filter::Disc,
+        crcbl::render::shadow::Filter::Box,
+    ] {
+        assert_ne!(filter, ships, "this rung is the one that ships");
+        switch.filter(filter);
+        let frame = render_shadowed(sun(1.0));
+        let (moved, worst) = difference(&shipped.image, &frame.image);
+        eprintln!(
+            "{suite}: shadow — `{rung}` against the shipped `{shipped_rung}`: {moved} pixels \
+             moved, worst channel {worst}",
+            rung = filter.label(),
+            shipped_rung = ships.label(),
+            suite = crate::SUITE
+        );
+        assert!(
+            moved >= PENUMBRA_PIXELS && worst >= PENUMBRA_LEVELS,
+            "`r_shadow_filter {rung}` moved {moved} pixels by at most {worst} levels, which is \
+             under the {PENUMBRA_PIXELS} and {PENUMBRA_LEVELS} both adapters clear — so that \
+             rung is not reaching the shader",
+            rung = filter.label()
+        );
+    }
+}
+
+/// How far the seam's own column bleeds sideways, in pixels, and therefore how
+/// many columns either side of it
+/// [`the_seam_puts_the_console_s_filter_on_one_side_and_the_shipped_one_on_the_other`]
+/// leaves out of its comparison.
+///
+/// **The antialiasing filter's own horizontal reach**, which is what carries a
+/// per-pixel seam sideways. `crcbl_render::split`'s header is where the shape is
+/// argued: the fragment stage decides its own filter per pixel, and the passes
+/// *after* it read their neighbours, so the picture either side of the column is
+/// only the unsplit frame's outside that footprint.
+///
+/// `shaders/smaa_weights.slang`'s `MAX_SEARCH_STEPS` bounds the edge walk and
+/// each of its steps covers two texels, so this is twice that count. The number
+/// is taken from the pass rather than from the measurement, because what the
+/// measurement finds is what *this frame's* edges happened to need: probed
+/// column by column on radv over the `sun(1.0)` frame at a seam of 0.5 — the
+/// seam falls on column 128 of 256 — the near side differed from the unsplit
+/// `box` frame only at column 127, in one pixel by one level, and the far side
+/// differed from the unsplit `pcss` frame at six columns between 128 and 140, in
+/// one pixel each. Widening a constant until a test passes is how a threshold
+/// ends up describing one frame; the walk's own bound describes the pass.
+///
+/// What it costs is the columns nearest the seam, and the assertion either side
+/// of it is then exact rather than tolerant — the anti-vacuity check above is
+/// what says the columns that are left still carry a difference to see.
+const SEAM_BLEED: u32 = 32;
+
+/// **The seam runs down the column `crcbl_render::split` counted**: the
+/// console's filter left of it, the shipped one right of it, and the whole
+/// frame the console's when there is no seam.
+///
+/// Both halves are asserted against *unsplit* frames rather than against each
+/// other, which is what makes this a claim about the seam rather than about the
+/// two filters: a shader that ignored the column and ran the near mode
+/// everywhere would satisfy the left half and fail the right, and one that ran
+/// the far mode everywhere the other way round.
+///
+/// **Compared pixel for pixel and not by a mean.** Everything but the filter is
+/// the same frame — the same scene, the same camera, the same block except for
+/// the row that selects — so a side of the seam is bit-identical to the unsplit
+/// frame it belongs to. A mean would pass on two frames that differed
+/// everywhere and averaged the same.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_seam_puts_the_console_s_filter_on_one_side_and_the_shipped_one_on_the_other() {
+    let switch = FilterSwitch::take();
+    let internal = MESH_EXTENT;
+    let column = internal.0 / 2;
+    assert!(
+        column > 0 && column < internal.0,
+        "a seam at 0.5 has to leave columns on both sides of a {internal:?} frame"
+    );
+
+    let shipped = render_shadowed(sun(1.0));
+    switch.filter(crcbl::render::shadow::Filter::Box);
+    let boxed = render_shadowed(sun(1.0));
+
+    // Anti-vacuity: the two unsplit frames have to actually differ on **both**
+    // sides of the column, or an equality below holds of a half where the two
+    // filters agree anyway.
+    for (side, range) in [
+        ("left", 0..column - SEAM_BLEED),
+        ("right", column + SEAM_BLEED..internal.0),
+    ] {
+        let (moved, _) = difference_over(&boxed.image, &shipped.image, range);
+        assert!(
+            moved > 0,
+            "the two filters drew the same {side} half, so the assertion about that side of \
+             the seam separates nothing"
+        );
+    }
+
+    // A seam at zero is no seam: the console's filter over the whole target.
+    switch.seam(0.0);
+    let unsplit = render_shadowed(sun(1.0));
+    assert_eq!(
+        difference(&unsplit.image, &boxed.image),
+        (0, 0),
+        "`r_shadow_split 0` has to draw `r_shadow_filter`'s own filter everywhere, which is \
+         what makes the default a frame with no comparison in it"
+    );
+
+    switch.seam(0.5);
+    let compared = render_shadowed(sun(1.0));
+    assert_eq!(
+        difference_over(&compared.image, &boxed.image, 0..column - SEAM_BLEED),
+        (0, 0),
+        "left of the seam's column the frame has to be the one `r_shadow_filter box` draws \
+         on its own"
+    );
+    assert_eq!(
+        difference_over(
+            &compared.image,
+            &shipped.image,
+            column + SEAM_BLEED..internal.0
+        ),
+        (0, 0),
+        "and right of it the one the shipped filter draws, which is the far side following \
+         the variable's *default* rather than the console"
+    );
+}
+
 /// **The cascades were rendered into, not merely allocated.**
 ///
 /// The single assertion this whole slice can otherwise hide behind. Under

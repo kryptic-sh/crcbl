@@ -140,6 +140,24 @@
 // pass — is a multiply of two values in the same space. The tonemap pass and
 // the swapchain's sRGB encode are what turn the product into pixels.
 
+// # The shadow filter is selected per fragment, and `volumetric.slang` is not
+//
+// `FrameUniforms::shadow_filter` names one of `SHADOW_FILTER_PCSS`,
+// `SHADOW_FILTER_DISC` and `SHADOW_FILTER_BOX` for each side of
+// `crcbl_render::split`'s seam, and `shadow_filter_mode` is where a fragment
+// picks its side. A uniform branch and not three pipelines: this is a *scene*
+// draw, so a per-pipeline switch would have to draw every triangle twice to put
+// two filters in one picture, where a full-screen effect records itself twice
+// under a scissor for one target's worth of fragments.
+//
+// **`volumetric.slang` does not honour the selector.** Its copy of `tile_pcf` is
+// held letter-for-letter against this file's by `crcbl_shaders::volumetric`'s
+// `both_shaders_spell_the_same_atlas_walk`, and that copy has always taken the
+// disc at the fixed `SHADOW_FILTER_TEXELS` — the tenth decision never reached
+// it, because a froxel has no `SV_Position` and the scatter pass reads no seam
+// column. So a frame comparing two filters compares the *surfaces*: the shafts
+// in the air are filtered on `SHADOW_FILTER_DISC` either side of the line.
+
 // The vertex pool's two streams, and the arithmetic that reads one back.
 //
 // `docs/plan/43-render-standards.md` §2's 2026-08-30 layout: the pool is one
@@ -575,6 +593,26 @@ struct FrameUniforms
     /// **Last in the block**, on `lod_params`' terms: no existing member's
     /// offset moves.
     float4 shadow_atlas_rect[SHADOW_ATLAS_TILES];
+    /// Which shadow filter each side of the comparison seam runs: `x` the near
+    /// side's mode, `y` the far side's, `z` the seam's column in pixels and `w`
+    /// unread padding.
+    ///
+    /// The modes are `SHADOW_FILTER_PCSS`, `SHADOW_FILTER_DISC` and
+    /// `SHADOW_FILTER_BOX` below, and `shadow_filter_mode` is the only reader:
+    /// a fragment left of `z` takes `x` and one at or past it takes `y`.
+    /// `crcbl_render::split` owns where that column falls and
+    /// `crcbl_render::shadow`'s `r_shadow_filter` owns which mode is on the near
+    /// side.
+    ///
+    /// **A frame comparing nothing carries one mode in both lanes and a zero
+    /// column**, so every fragment reads `y` and there is no seam anywhere. All
+    /// zeroes is that frame at `SHADOW_FILTER_PCSS`, which is what ships and
+    /// what every golden in this workspace was blessed under — so a writer that
+    /// leaves this row alone draws the picture it drew before the row existed.
+    ///
+    /// **Last in the block**, on `lod_params`' terms: no existing member's
+    /// offset moves.
+    uint4 shadow_filter;
 };
 
 /// What `FrameUniforms::ambient`'s `w` must reach for `fragmentMain` to draw the
@@ -2977,6 +3015,48 @@ float2 shadow_rotation(float2 pixel)
     return SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
 }
 
+/// `FrameUniforms::shadow_filter`'s value for the filter that **ships**: the
+/// blocker search sizes the sun's disc and the punctual maps take it at
+/// [`SHADOW_FILTER_TEXELS`].
+///
+/// `docs/plan/45-shadows.md`'s ninth, tenth and eleventh decisions together, and
+/// the default every golden in this workspace was blessed under. Zero, which is
+/// what makes an unwritten row this filter.
+static const uint SHADOW_FILTER_PCSS = 0u;
+
+/// `FrameUniforms::shadow_filter`'s value for the rotated disc at a **fixed**
+/// reach: the ninth and eleventh decisions without the tenth.
+///
+/// [`tile_pcf`] at [`SHADOW_FILTER_TEXELS`] for the sun as well as for the
+/// punctual lights, so no blocker search runs and no penumbra widens with its
+/// caster's height. It is what the punctual maps take under every mode.
+static const uint SHADOW_FILTER_DISC = 1u;
+
+/// `FrameUniforms::shadow_filter`'s value for the 3×3 hardware-PCF box —
+/// [`tile_box_pcf`], and the rung the ninth decision replaced.
+static const uint SHADOW_FILTER_BOX = 2u;
+
+/// Which of the three filters this fragment runs, out of the frame block.
+///
+/// **Per pixel rather than per pass**, and `crcbl_render::split`'s header is
+/// where that is argued: a full-screen effect can record itself twice under a
+/// scissor and pay for one target's worth of fragments, and a scene draw cannot
+/// — the second recording would be every triangle again. So the seam's column
+/// rides in the block and the fragment picks its own side of it.
+///
+/// `pixel` is the fragment's `SV_Position.xy`, whose `x` is a pixel *centre*;
+/// truncating it is what turns that into the column index
+/// `crcbl_render::split::halves` counted, so the column the host calls the
+/// right rectangle's first is the first one to read the far side's mode.
+///
+/// A frame comparing nothing carries a zero column and one mode in both lanes,
+/// so this returns that mode everywhere — see `FrameUniforms::shadow_filter`.
+uint shadow_filter_mode(float2 pixel)
+{
+    return uint(pixel.x) < frame.shadow_filter.z ? frame.shadow_filter.x
+                                                 : frame.shadow_filter.y;
+}
+
 /// Where atlas slot `tile`'s map is in the image, out of the frame block:
 /// `FrameUniforms::shadow_atlas_rect`, and that member is where the layout is
 /// argued.
@@ -3132,6 +3212,47 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
                                reference);
     }
     return visibility / float(SHADOW_TAPS);
+}
+
+/// The 3×3 hardware-PCF box over tile `tile`, at `tile_uv` in that tile's own
+/// `0..1` space: nine taps one texel apart, unrotated, averaged.
+///
+/// `SHADOW_FILTER_BOX`'s kernel, and the rung `docs/plan/45-shadows.md`'s ninth
+/// decision replaced. It is in the tree rather than in history because
+/// `docs/plan/sample/18-sundial.md` is a comparison fixture: a ladder with only
+/// its top rung compiled compares nothing, and the box is the rung a reader
+/// recognises.
+///
+/// **Recovered rather than re-invented** — the body before the rotated disc,
+/// re-expressed in the atlas rectangle the allocator rung introduced. The taps
+/// go through [`tile_tap`] with the identity rotation, `(1, 0)`, which turns a
+/// spoke onto itself exactly: so the half-texel clamp and the atlas walk are the
+/// same code the disc takes, and this is not a second transcription of either.
+///
+/// Everything around it is unchanged: the receiver is offset along its facet
+/// normal and towards the light by the same two counts, because only the kernel
+/// is a rung and the bias decisions after the ninth still hold. What the box
+/// does not have is a radius — its reach is one texel by construction — so it
+/// takes no `radius` and no `pixel`.
+float tile_box_pcf(uint tile, float2 tile_uv, float reference)
+{
+    float4 rect = atlas_rect(tile);
+    if (atlas_rect_is_empty(rect))
+    {
+        return 1.0;
+    }
+    float2 texel_step = atlas_step(rect);
+
+    float visibility = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            visibility += tile_tap(rect, texel_step, tile_uv, float2(float(x), float(y)),
+                                   float2(1.0, 0.0), reference);
+        }
+    }
+    return visibility / 9.0;
 }
 
 /// How wide the sun's penumbra is at this fragment, in texels of cascade
@@ -3341,6 +3462,17 @@ float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
     // is what reads the difference out of the map. The rotation is taken once
     // and handed to both so the disc the search walks is the disc the filter
     // draws.
+    uint mode = shadow_filter_mode(pixel);
+    if (mode == SHADOW_FILTER_BOX)
+    {
+        return tile_box_pcf(cascade, tile_uv, ndc.z);
+    }
+    if (mode == SHADOW_FILTER_DISC)
+    {
+        // The disc at its fixed reach: the ninth decision without the tenth, so
+        // the penumbra is the same width wherever its caster stands.
+        return tile_pcf(cascade, tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
+    }
     float2 rotation = shadow_rotation(pixel);
     float radius = sun_penumbra_texels(cascade, tile_uv, ndc.z, rotation);
     return tile_pcf(cascade, tile_uv, ndc.z, pixel, radius);
@@ -3570,6 +3702,14 @@ float punctual_visibility(uint tile, float3 world_position, float3 to_light, flo
     // perspective projection, so a difference of two of its depths is not a
     // distance until it is un-projected, and its light has no angular radius to
     // scale one by. Contact hardening for these is its own rung.
+    //
+    // **`pcss` and `disc` are the same filter here**, which is why only the box
+    // is a branch: the tenth decision is the sun's alone, so the two modes above
+    // it differ on a cascade and not on a cone or a cube face.
+    if (shadow_filter_mode(pixel) == SHADOW_FILTER_BOX)
+    {
+        return tile_box_pcf(atlas, tile_uv, ndc.z);
+    }
     return tile_pcf(atlas, tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
 }
 

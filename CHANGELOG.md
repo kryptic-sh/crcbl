@@ -35,6 +35,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Two console variables that put `docs/plan/45-shadows.md`'s filter ladder
+  back in the tree and compare two rungs of it in one frame.** `r_shadow_filter`
+  selects between `pcss` — the shipping filter, where a blocker search sizes the
+  sun's rotated disc per fragment — `disc`, the same rotated disc at its fixed
+  reach for the sun as well, and `box`, the 3x3 hardware-PCF kernel the rotated
+  disc replaced and which had lived only in git history since. `r_shadow_split`
+  puts a vertical seam through the frame at a fraction of its width with
+  `r_shadow_filter`'s choice on the near side and the shipped filter on the far
+  one.
+
+  The selection is a uniform lane rather than three pipelines, and the seam is
+  resolved per fragment rather than by recording the pass twice under a scissor
+  the way `r_ssao_split` does: this filter lives in a scene draw, so a second
+  recording would be every triangle again. Both default to what shipped, so a
+  frame nobody has touched them on is unchanged to the byte.
+
 - **`alcove`, the ambient-occlusion acceptance fixture, natively and in a
   browser.** `cargo run -p alcove` opens one interior of nothing but occlusion
   geometry — an alcove with a recess, a cantilevered stair, boxes and a post on

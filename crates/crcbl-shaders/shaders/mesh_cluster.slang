@@ -316,6 +316,13 @@ struct FrameUniforms
     /// exactly: this file does not shade, and `mesh.slang` — whose fragment
     /// stage is this pipeline's — is where the rectangle is sampled through.
     float4 shadow_atlas_rect[SHADOW_ATLAS_TILES];
+    /// Which shadow filter each side of the comparison seam runs, and where the
+    /// seam falls. **Read by nothing here**, on the cascades' terms exactly:
+    /// this file does not shade, and `mesh.slang`'s `shadow_filter_mode` — whose
+    /// fragment stage is this pipeline's — is the only reader. Declared all the
+    /// same, because a block short of a row here is one whose size the two
+    /// stages disagree about.
+    uint4 shadow_filter;
 };
 
 /// Matching `struct GpuLight` in `mesh.slang`.

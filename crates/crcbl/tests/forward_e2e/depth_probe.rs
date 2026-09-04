@@ -1402,6 +1402,12 @@ fn render_probe(
         // up. A zero rectangle is what `crcbl::render::shadow` writes for a
         // slot no map was rendered into, and this whole frame is that.
         shadow_atlas_rect: [[0.0; 4]; crcbl::shaders::mesh::SHADOW_ATLAS_TILES],
+        // And no comparison seam: one mode in both lanes and a zero column is a
+        // frame that draws one filter over the whole target, which is what
+        // `crcbl::shaders::mesh::FrameUniforms::shadow_filter` calls the frame
+        // that ships. Nothing here samples a shadow map in any case — the rows
+        // above name no tile.
+        shadow_filter: [0; 4],
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())
