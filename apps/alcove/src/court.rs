@@ -552,20 +552,6 @@ pub const PEDESTAL_MESH: usize = 11;
 /// The sphere.
 pub const SPHERE_MESH: usize = 12;
 
-/// Which way a quad faces along the axis its plane is perpendicular to.
-///
-/// The engine culls back faces and calls counter-clockwise front, so a quad's
-/// corner order decides whether it is a wall or a hole. Naming the direction
-/// rather than writing four coordinates per quad keeps that decision in one
-/// place.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Facing {
-    /// The face's normal points along `+axis`.
-    Positive,
-    /// The face's normal points along `-axis`.
-    Negative,
-}
-
 /// A triangle list under construction, and the positions `build_meshlets` needs
 /// beside it.
 #[derive(Debug, Default)]
@@ -596,9 +582,36 @@ impl MeshBuilder {
     /// normal repeated four times would draw a polyhedron rather than the ball
     /// `docs/plan/sample/19-alcove.md` asks for.
     fn quad_shaded(&mut self, corners: [Vec3; 4], normals: [Vec3; 4]) {
+        Self::facing_its_normals(&[corners[0], corners[1], corners[2]], &normals);
         let base = self.push_corners(&corners, &normals);
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// Refuses a face whose winding disagrees with the normals it claims.
+    ///
+    /// **The contract every builder above states, enforced rather than
+    /// trusted**: a face is counter-clockwise seen from its normals' side, which
+    /// is what `CullMode::Back` culls the other side of. A face wound the wrong
+    /// way carries a plausible normal, lights plausibly, and is simply not
+    /// there from outside — the slot's walls drew that way for a day before a
+    /// person looked at them from above. So the geometric normal of the first
+    /// triangle is held to the same hemisphere as every authored normal, and a
+    /// court that disagrees does not build.
+    ///
+    /// # Panics
+    ///
+    /// If any of `normals` points away from the side `corners` wind
+    /// counter-clockwise from.
+    fn facing_its_normals(corners: &[Vec3; 3], normals: &[Vec3]) {
+        let geometric = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
+        for normal in normals {
+            assert!(
+                geometric.dot(*normal) > 0.0,
+                "a face at {corners:?} winds clockwise seen from its normal {normal:?}, so it \
+                 would be culled from the side it claims to face"
+            );
+        }
     }
 
     /// Appends one triangle, counter-clockwise seen from its normals' side.
@@ -606,6 +619,7 @@ impl MeshBuilder {
     /// The sphere's two pole rings and nothing else: a quad there would have two
     /// coincident corners and a zero-area triangle in it.
     fn tri(&mut self, corners: [Vec3; 3], normals: [Vec3; 3]) {
+        Self::facing_its_normals(&corners, &normals);
         let base = self.push_corners(&corners, &normals);
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
@@ -624,60 +638,13 @@ impl MeshBuilder {
         base
     }
 
-    /// A quad in the plane `x`, spanning `y` and `z`.
-    fn quad_x(&mut self, x: f32, facing: Facing, y: (f32, f32), z: (f32, f32)) {
-        let at = |y: f32, z: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(y.0, z.1), at(y.0, z.0), at(y.1, z.0), at(y.1, z.1)],
-                Vec3::X,
-            ),
-            Facing::Negative => self.quad(
-                [at(y.0, z.0), at(y.0, z.1), at(y.1, z.1), at(y.1, z.0)],
-                Vec3::NEG_X,
-            ),
-        }
-    }
-
-    /// A quad in the plane `y`, spanning `x` and `z`.
-    fn quad_y(&mut self, y: f32, facing: Facing, x: (f32, f32), z: (f32, f32)) {
-        let at = |x: f32, z: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(x.0, z.1), at(x.1, z.1), at(x.1, z.0), at(x.0, z.0)],
-                Vec3::Y,
-            ),
-            Facing::Negative => self.quad(
-                [at(x.0, z.0), at(x.1, z.0), at(x.1, z.1), at(x.0, z.1)],
-                Vec3::NEG_Y,
-            ),
-        }
-    }
-
-    /// A quad in the plane `z`, spanning `x` and `y`.
-    fn quad_z(&mut self, z: f32, facing: Facing, x: (f32, f32), y: (f32, f32)) {
-        let at = |x: f32, y: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(x.0, y.0), at(x.1, y.0), at(x.1, y.1), at(x.0, y.1)],
-                Vec3::Z,
-            ),
-            Facing::Negative => self.quad(
-                [at(x.1, y.0), at(x.0, y.0), at(x.0, y.1), at(x.1, y.1)],
-                Vec3::NEG_Z,
-            ),
-        }
-    }
-
     /// A closed box between `min` and `max`, every face pointing **out**.
     fn box_outward(&mut self, min: Vec3, max: Vec3) {
-        let (x, y, z) = ((min.x, max.x), (min.y, max.y), (min.z, max.z));
-        self.quad_x(max.x, Facing::Positive, y, z);
-        self.quad_x(min.x, Facing::Negative, y, z);
-        self.quad_y(max.y, Facing::Positive, x, z);
-        self.quad_y(min.y, Facing::Negative, x, z);
-        self.quad_z(max.z, Facing::Positive, x, y);
-        self.quad_z(min.z, Facing::Negative, x, y);
+        self.box_frame(
+            (min + max) * 0.5,
+            [Vec3::X, Vec3::Y, Vec3::Z],
+            (max - min) * 0.5,
+        );
     }
 
     /// A box of `half` extents about `centre`, turned so its local `+x` runs
@@ -690,64 +657,81 @@ impl MeshBuilder {
         let forward = along.normalize();
         let up = Vec3::Y;
         let side = forward.cross(up).normalize();
-        let corner = |sx: f32, sy: f32, sz: f32| {
-            centre + forward * (half.x * sx) + up * (half.y * sy) + side * (half.z * sz)
+        self.box_frame(centre, [forward, up, side], half);
+    }
+
+    /// A closed box about `centre` in the right-handed frame `axes`, `half`
+    /// along each axis, every face pointing **out**.
+    ///
+    /// **One corner order for both boxes.** [`box_outward`](Self::box_outward)
+    /// and [`box_along`](Self::box_along) used to spell their six faces
+    /// separately, and the turned copy had four of them wound the other way —
+    /// the slot's walls were there from inside and culled from outside, which
+    /// is what a person looking down into the slot reported on 2026-09-04.
+    /// Each face below is the axis-aligned one's order with `x`, `y` and `z`
+    /// read as the frame's three axes, and
+    /// [`facing_its_normals`](Self::facing_its_normals) is what now refuses a
+    /// transcription that disagrees with itself.
+    fn box_frame(&mut self, centre: Vec3, axes: [Vec3; 3], half: Vec3) {
+        let [x, y, z] = axes;
+        let at = |sx: f32, sy: f32, sz: f32| {
+            centre + x * (half.x * sx) + y * (half.y * sy) + z * (half.z * sz)
         };
-        // Each face counter-clockwise seen from outside, in the same order
-        // `box_outward` emits them.
+        // Each face counter-clockwise seen from outside: `+x`, `-x`, `+y`,
+        // `-y`, `+z`, `-z`.
         self.quad(
             [
-                corner(1.0, -1.0, -1.0),
-                corner(1.0, -1.0, 1.0),
-                corner(1.0, 1.0, 1.0),
-                corner(1.0, 1.0, -1.0),
+                at(1.0, -1.0, 1.0),
+                at(1.0, -1.0, -1.0),
+                at(1.0, 1.0, -1.0),
+                at(1.0, 1.0, 1.0),
             ],
-            forward,
+            x,
         );
         self.quad(
             [
-                corner(-1.0, -1.0, 1.0),
-                corner(-1.0, -1.0, -1.0),
-                corner(-1.0, 1.0, -1.0),
-                corner(-1.0, 1.0, 1.0),
+                at(-1.0, -1.0, -1.0),
+                at(-1.0, -1.0, 1.0),
+                at(-1.0, 1.0, 1.0),
+                at(-1.0, 1.0, -1.0),
             ],
-            -forward,
+            -x,
         );
         self.quad(
             [
-                corner(-1.0, 1.0, 1.0),
-                corner(-1.0, 1.0, -1.0),
-                corner(1.0, 1.0, -1.0),
-                corner(1.0, 1.0, 1.0),
+                at(-1.0, 1.0, 1.0),
+                at(1.0, 1.0, 1.0),
+                at(1.0, 1.0, -1.0),
+                at(-1.0, 1.0, -1.0),
             ],
-            up,
+            y,
         );
         self.quad(
             [
-                corner(-1.0, -1.0, -1.0),
-                corner(-1.0, -1.0, 1.0),
-                corner(1.0, -1.0, 1.0),
-                corner(1.0, -1.0, -1.0),
+                at(-1.0, -1.0, -1.0),
+                at(1.0, -1.0, -1.0),
+                at(1.0, -1.0, 1.0),
+                at(-1.0, -1.0, 1.0),
             ],
-            -up,
+            -y,
         );
         self.quad(
             [
-                corner(-1.0, -1.0, 1.0),
-                corner(1.0, -1.0, 1.0),
-                corner(1.0, 1.0, 1.0),
-                corner(-1.0, 1.0, 1.0),
+                at(-1.0, -1.0, 1.0),
+                at(1.0, -1.0, 1.0),
+                at(1.0, 1.0, 1.0),
+                at(-1.0, 1.0, 1.0),
             ],
-            side,
+            z,
         );
         self.quad(
             [
-                corner(1.0, -1.0, -1.0),
-                corner(-1.0, -1.0, -1.0),
-                corner(-1.0, 1.0, -1.0),
-                corner(1.0, 1.0, -1.0),
+                at(1.0, -1.0, -1.0),
+                at(-1.0, -1.0, -1.0),
+                at(-1.0, 1.0, -1.0),
+                at(1.0, 1.0, -1.0),
             ],
-            -side,
+            -z,
         );
     }
 

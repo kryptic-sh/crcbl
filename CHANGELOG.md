@@ -228,6 +228,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`alcove`'s slot walls were inside out.** The two walls either side of the
+  slot are the court's one turned box, and its builder spelled the six faces a
+  second time with four of them wound clockwise — so the walls' tops, undersides
+  and ends were culled from outside and drawn from inside, which is what a
+  visitor looking down into the slot saw. Both boxes now share one corner order
+  through `MeshBuilder::box_frame`, and the builder refuses any face whose
+  winding disagrees with the normal it claims, so the court cannot build with a
+  face like that again. The alcove goldens were re-blessed for the walls that
+  are now there.
+
 - **A browser threw away every frame of any demo whose probe volume updates.**
   The shadow pass resets the tiles it is about to redraw with one over-sized
   triangle, and that draw bound a pipeline and no bind group.
