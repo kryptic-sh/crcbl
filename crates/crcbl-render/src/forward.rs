@@ -12808,6 +12808,14 @@ mod tests {
     fn the_heatmap_moves_the_ambients_last_lane_and_no_other_byte() {
         const AMBIENT_W: usize = 64 + 16 + 12;
 
+        // Held for the whole comparison, and it is not this check's own knob:
+        // `r_shadow_filter` and `r_shadow_split` land in the block's
+        // `shadow_filter` row on every `begin_frame`, and the filter checks in
+        // this module move them under this lock while `cargo test` runs the
+        // module's checks as threads of one process. Two frames read either side
+        // of such a move differ at that row, which is outside every lane below —
+        // one run in twelve, measured 2026-09-04.
+        let _filter = shadow_filter_switch();
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
@@ -12890,6 +12898,14 @@ mod tests {
         // about `FrameUniforms`' own layout and not a silent read of a matrix.
         const AMBIENT_W: usize = 64 + 16 + 12;
 
+        // Held for the whole comparison, and it is not this check's own knob:
+        // `r_shadow_filter` and `r_shadow_split` land in the block's
+        // `shadow_filter` row on every `begin_frame`, and the filter checks in
+        // this module move them under this lock while `cargo test` runs the
+        // module's checks as threads of one process. Two frames read either side
+        // of such a move differ at that row, which is outside every lane below —
+        // one run in twelve, measured 2026-09-04.
+        let _filter = shadow_filter_switch();
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
