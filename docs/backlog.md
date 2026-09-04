@@ -159,19 +159,17 @@ golden of its own and a button on the page. What is still **not** done:
   slice did not supply it: `ShadowCost` prints the `shadow` and `forward` rows
   live, but nothing in the golden suite records a number, because a timing read
   off one run of one adapter is not a figure worth writing into a doc.
-- **The acne half of the charter has no claim.** The peter-panning half does —
-  the contact reading — and the fixture sun is deliberately a grazing one at
-  23.9°, which is where acne appears if the bias is wrong. But acne is a
-  high-frequency pattern over a large surface and the suite has no reading that
-  names it; the goldens would catch it appearing, and would not say what it was.
-  A claim would want something like the variance of a block of pavement under a
-  grazing sun against the same block under a steep one. Not built, and stated
-  here rather than left implied.
 - **Only the `pcss` rung is tested on a second camera.** The penumbra ladder is
   read from `plaza::counter_camera`, which is the only pose where PCSS's
   estimate is unclamped; every other claim is from the fixture pose. A filter
   that was wrong only in the outer cascade would pass everything here except a
-  golden.
+  golden. The acne claim closed on 2026-09-04 is in that half: it counts
+  self-shadowing dots over one 3 m by 2 m block of open pavement from the fixed
+  pose, so acne on a surface that block does not cover is still nobody's claim.
+  It is also a claim about the normal offset alone: with `DEPTH_BIAS_TEXELS` at
+  zero and the offset kept, the block counts 3.3% dots grazing against 2.9%
+  steep and the claim holds, where the offset at zero counts 41.5% against 0.0%
+  and fails it.
 
 **What surprised us, and is not a bug.** The first cascade's extent is a
 function of the camera's **near plane** — `Cascades::splits` blends a

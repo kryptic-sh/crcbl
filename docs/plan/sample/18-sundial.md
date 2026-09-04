@@ -149,7 +149,12 @@ hold in their head, and the only honest way to set them is to look.
    2026-08-28** — `docs/plan/45-shadows.md`'s seventh decision — so what is left
    here is the comparison, not the rung: a scene that shows the pair moving
    against each other as the two counts change, where that decision could only
-   measure one fixture's strip and one patch's dots.
+   measure one fixture's strip and one patch's dots. **2026-09-04:** the acne
+   half now has a reading of its own, where before only peter-panning did —
+   `tests/golden.rs` counts what share of one block of open pavement sits more
+   than four luma under the median of its own 5x5 neighbourhood, at the bottom
+   of the sun's arc and again at the top of it, and holds the grazing share to
+   the steep one's.
 3. **Cascade cross-fade**, against the seam the colonnade crosses.
 4. **The filter ladder side by side**, with the penumbra-versus-distance claim.
    The filters themselves **shipped 2026-08-28 and 2026-09-04** — the ninth

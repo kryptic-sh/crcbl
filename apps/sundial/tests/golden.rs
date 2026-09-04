@@ -1283,3 +1283,324 @@ fn the_plaza_reads_the_same_at_presentation_size() {
         CLAIM_EXTENT.1,
     );
 }
+
+// ---------------------------------------------------------------------------
+// The acne
+// ---------------------------------------------------------------------------
+
+/// Where the block both acne readings are taken over sits on the pavement.
+///
+/// **Open pavement to the `+x` side of the plaza, and every caster in the scene
+/// throws away from it at both of the ticks read below.** The sun swings from
+/// `+22°` to `0°` between them, so its shadows run towards `-x` and `+z`: the
+/// colonnade stands at [`plaza::COLONNADE_X`] and throws further into `-x`, the
+/// plinth's shadow lands at `z` past its own near face, the parapet's reaches
+/// `z = -6.3` at the bottom of the arc and the three counters' land between
+/// `z = -1.9` and `z = 1.4`. This block is clear of all of them, at both ticks,
+/// which is not taken on trust: [`LIT_PAVEMENT`] is read off each frame before
+/// anything else here is believed.
+const ACNE_CENTRE: Vec3 = Vec3::new(3.0, 0.0, -3.5);
+
+/// Half the block's side, in metres of pavement, in `x` and in `z`.
+///
+/// The largest clear rectangle found on that pavement — 3 m by 2 m, which
+/// [`acne_block`] inscribes 167 by 25 pixels of at [`CLAIM_EXTENT`] from
+/// [`plaza::fixed_camera`]. Wide rather than square because the block lies most
+/// of a plaza away and the plane is seen nearly edge-on, so a metre of `z` is a
+/// handful of rows where a metre of `x` is dozens of columns. Growing it in `z`
+/// walks into the parapet's shadow at the grazing tick; growing it in `x` walks
+/// into the counters' at the steep one.
+const ACNE_HALF: (f32, f32) = (1.5, 1.0);
+
+/// How far below the median of its own 5x5 neighbourhood a pixel has to sit to
+/// count as a self-shadowing dot, in luma out of 255.
+///
+/// **The statistic `crcbl_render::shadow`'s `DEPTH_BIAS_TEXELS` and
+/// `NORMAL_OFFSET_TEXELS` were both swept with**, and the same threshold
+/// `crates/crcbl/tests/mesh_e2e/shadow_tiles.rs` counts a punctual light's
+/// speckle at — that file carries the sweep that set it. What it separates is a
+/// *dot* from a *gradient*: a shading gradient's own pixels sit on their
+/// neighbourhood's median, and a pixel whose shadow map quantised the receiver's
+/// own depth away sits below it. A block average or a standard deviation cannot
+/// tell the two apart, and this block is a gradient — it spans 3 m of pavement
+/// under a sun 10° up, which is 25 luma of legitimate falloff across it.
+const SPECKLE_LUMA: f32 = 4.0;
+
+/// How dark the block's mean may be before it is not lit pavement, out of 255.
+///
+/// The anti-vacuity floor, and the reason the two readings below are readings of
+/// acne rather than of a shadow that wandered over the block. Shadowed pavement
+/// in this plaza is lit by `crate::sun`'s `AMBIENT` and nothing else, so a block
+/// that had drifted into one would measure a smooth dark rectangle, count no
+/// dots at either tick, and pass on both counts.
+///
+/// That is not a hypothetical. Moved onto the plinth's own shadow the block
+/// reads `78.28` and `78.56` out of 255 and counts no dot at either tick — the
+/// second of the runs the test below records.
+///
+/// **Swept:** the block reads 185.29 at the grazing tick and 252.46 at the steep
+/// one on radv (AMD Radeon RX 7900 XTX, RADV NAVI31), and 185.15 and 252.46 on
+/// lavapipe (llvmpipe). Set between those and the 78 the shadowed block reads,
+/// and **under what the zero-bias frames in this constant's neighbours
+/// measure** — 144.78 and 194.13 — so that a run with acne on it fails on the
+/// acne and not here.
+const LIT_PAVEMENT: f32 = 120.0;
+
+/// What share of the block may be self-shadowing dots under the **steep** sun,
+/// as a percentage.
+///
+/// The control on the reading itself: a statistic that counted this block's own
+/// texture, its dither, or the driver's rounding would count it at every sun
+/// angle. Under a sun 55° up the receiver's depth barely moves across a shadow
+/// texel and there is nothing for a bias to fail to cover, so the honest answer
+/// here is zero.
+///
+/// **Swept**, at [`CLAIM_EXTENT`] over [`ACNE_HALF`]'s block, against the same
+/// frames drawn with both of `crcbl_render::shadow`'s sun bias constants set to
+/// zero:
+///
+/// | reading | radv | radv, zero bias | lavapipe | lavapipe, zero bias |
+/// | --- | --- | --- | --- | --- |
+/// | dots at the grazing tick, 10.0° up | `0.0000%` | `42.2275%` | `0.0000%` | `42.1078%` |
+/// | dots at the steep tick, 55.0° up | `0.0000%` | `23.0180%` | `0.0000%` | `23.0180%` |
+/// | grazing over steep, in points | `0.0000` | `19.2096` | `0.0000` | `19.0898` |
+/// | the block's mean at the grazing tick | `185.29` | `144.78` | `185.15` | `144.68` |
+/// | the block's mean at the steep tick | `252.46` | `194.13` | `252.46` | `193.89` |
+///
+/// Both adapters count **no** dot at either tick with the shipped bias, so this
+/// is floored at about half of what the zero-bias steep frame draws rather than
+/// at a multiple of a healthy reading there is none of.
+const STEEP_SPECKLE_PERCENT: f32 = 10.0;
+
+/// How many points rougher than the steep frame the grazing frame's block may
+/// be.
+///
+/// [`STEEP_SPECKLE_PERCENT`]'s own table is the sweep: the difference is
+/// `0.0000` points on both adapters with the shipped bias and `19.2096` and
+/// `19.0898` with it at zero, so this is floored at about the midpoint.
+///
+/// **This half and the one above catch different failures**, which is why both
+/// are here. A bias too small for *any* incidence acnes both frames and the
+/// ceiling above is what refuses it; a bias that covers a steep receiver and not
+/// a grazing one — the shape acne actually takes, because what has to be covered
+/// grows with how fast the receiver climbs across one shadow texel — leaves the
+/// steep frame clean and only this difference sees it.
+const GRAZING_OVER_STEEP: f32 = 9.0;
+
+/// Where the acne block lands in the frame: a centre and half-extents in pixels,
+/// in [`brightness`]' own shape.
+///
+/// The block's four corners are put through the very [`project`] the rest of
+/// this file uses and the largest rectangle **inside** the trapezoid they make
+/// is taken — inside rather than around it, because the plane is seen at an
+/// angle and a bounding box of the four would reach past the pavement the
+/// corners were chosen to keep clear.
+fn acne_block(camera: &Camera, extent: (u32, u32)) -> ((u32, u32), (u32, u32)) {
+    let corner = |dx: f32, dz: f32| {
+        project(
+            camera,
+            extent,
+            ACNE_CENTRE + Vec3::new(dx * ACNE_HALF.0, 0.0, dz * ACNE_HALF.1),
+        )
+    };
+    let (near_left, far_left) = (corner(-1.0, 1.0), corner(-1.0, -1.0));
+    let (near_right, far_right) = (corner(1.0, 1.0), corner(1.0, -1.0));
+    // The far edge is the higher one in the frame, so the inscribed rectangle
+    // starts below whichever of its two corners sits lower.
+    let (left, right) = (near_left.0.max(far_left.0), near_right.0.min(far_right.0));
+    let (top, bottom) = (far_left.1.max(far_right.1), near_left.1.min(near_right.1));
+    assert!(
+        left < right && top < bottom,
+        "the acne block projects to nothing: {left}..{right} by {top}..{bottom}"
+    );
+    let half = ((right - left) / 2, (bottom - top) / 2);
+    assert!(
+        half.0 > 0 && half.1 > 0,
+        "the acne block is under two pixels across at {extent:?}, so a 5x5 \
+         neighbourhood is bigger than the thing it is a neighbourhood in"
+    );
+    ((left + half.0, top + half.1), half)
+}
+
+/// What share of the block sits more than [`SPECKLE_LUMA`] below the median of
+/// its own 5x5 neighbourhood, as a percentage.
+///
+/// The neighbourhood is read from the whole frame rather than from the block, so
+/// a pixel on the block's own edge is compared against its real neighbours; the
+/// block decides which pixels are *counted*, not which are looked at.
+fn speckle_percent(image: &Image, centre: (u32, u32), half: (u32, u32)) -> f32 {
+    /// How far a neighbourhood reaches from the pixel it is about, in pixels.
+    ///
+    /// Two, which makes it the 5x5 that
+    /// `crates/crcbl/tests/mesh_e2e/shadow_tiles.rs` swept [`SPECKLE_LUMA`] over.
+    const REACH: i32 = 2;
+
+    let luma = |p: [u8; 4]| (f32::from(p[0]) + f32::from(p[1]) + f32::from(p[2])) / 3.0;
+    let (mut dots, mut count) = (0u32, 0u32);
+    let mut neighbourhood = Vec::new();
+    for y in centre.1 - half.1..=centre.1 + half.1 {
+        for x in centre.0 - half.0..=centre.0 + half.0 {
+            let value = luma(image.pixel(x, y).expect("the block is inside the frame"));
+            neighbourhood.clear();
+            for dy in -REACH..=REACH {
+                for dx in -REACH..=REACH {
+                    let (nx, ny) = (i64::from(x) + i64::from(dx), i64::from(y) + i64::from(dy));
+                    if let Some(pixel) = u32::try_from(nx)
+                        .ok()
+                        .zip(u32::try_from(ny).ok())
+                        .and_then(|(nx, ny)| image.pixel(nx, ny))
+                    {
+                        neighbourhood.push(luma(pixel));
+                    }
+                }
+            }
+            neighbourhood.sort_by(f32::total_cmp);
+            if neighbourhood[neighbourhood.len() / 2] - value > SPECKLE_LUMA {
+                dots += 1;
+            }
+            count += 1;
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    {
+        100.0 * dots as f32 / count as f32
+    }
+}
+
+/// **The pavement under a grazing sun is as smooth as the same pavement under a
+/// steep one.**
+///
+/// `docs/plan/sample/18-sundial.md`'s charter pairs acne with peter-panning, and
+/// the contact reading above is only the second of the two. Acne is what a bias
+/// too *small* draws: the shadow map quantises a receiver's own depth away
+/// across one texel, the receiver compares against a copy of itself and loses,
+/// and a large flat surface fills with dots on the period of the shadow texel.
+/// It is worst where the receiver climbs fastest across one of those texels,
+/// which is where the sun grazes — [`sun::GRAZING_TICK`] is [`sun::MIN_ELEVATION`]
+/// exactly, the most grazing sun this clock reaches.
+///
+/// A golden would catch the dots arriving and could not say what they were, and
+/// no average over the block can either: the block is 3 m of pavement seen
+/// nearly edge-on, so it carries 25 luma of legitimate falloff across it and its
+/// mean and its variance are both mostly that. [`SPECKLE_LUMA`] is the statistic
+/// that separates a dot from a gradient, and it is the same one both of
+/// `crcbl_render::shadow`'s sun bias constants were swept with.
+///
+/// **The block is [`ACNE_CENTRE`]'s**, open pavement on the `+x` side that every
+/// caster in the plaza throws away from at both ticks — and the block is read
+/// **at both ticks**, so the sun's own elevation is the only thing that differs
+/// between the two counts.
+///
+/// # Anti-vacuity
+///
+/// Three ways this could pass while measuring nothing, and one assertion each.
+/// The block could be **in shadow**, where a smooth dark rectangle counts no
+/// dots at either tick — [`LIT_PAVEMENT`] is read off both frames. The two ticks
+/// could be the **same sun**, where any two readings agree — the elevations are
+/// held apart, off [`sun::Sky::at`] rather than off the tick numbers. And the
+/// two frames could be **one frame**, where the difference is zero by
+/// construction — they are compared as bytes.
+///
+/// # How it was shown to fail
+///
+/// Three runs.
+///
+/// * **Both of `crcbl_render::shadow`'s sun bias constants set to zero**, which
+///   is the artefact this exists for. The grazing block went to `42.2275%` dots
+///   against a steep `23.0180%` on radv, and the steep half failed first:
+///   *"23.0180% of the block is a self-shadowing dot with the sun 55.0° up, past
+///   the 10% this reading has any business finding at all."* With
+///   [`STEEP_SPECKLE_PERCENT`] lifted out of the way to reach the other half,
+///   *"the block is 42.2275% dots with the sun 10.0° up and 23.0180% with it
+///   55.0° up — 19.2096 points over, past 9."* The block's mean fell to `144.78`
+///   and `194.13` and stayed clear of [`LIT_PAVEMENT`], so it was the acne that
+///   fired and not the floor.
+/// * **[`ACNE_CENTRE`] moved to `(-0.2, 0, 3.0)` and [`ACNE_HALF`] to
+///   `(0.5, 0.2)`**, which is pavement inside the plinth's own shadow at both
+///   ticks and is what this reading would look like if it had drifted off the
+///   open plaza. Both counts came back `0.0000%` — the claim satisfied — and the
+///   block read `78.28` and `78.56` out of 255, which [`LIT_PAVEMENT`] refused.
+/// * **Both ticks set to [`sun::GRAZING_TICK`]**: the difference is `0.0000`
+///   points whatever the frames contain, and the elevation assertion failed
+///   first — *"the two ticks put the sun 10.0° and 10.0° up."*
+///
+/// And one constant at a time, on radv, which says what this reading is a claim
+/// *about*. `NORMAL_OFFSET_TEXELS` alone at zero: `41.5329%` grazing against
+/// `0.0000%` steep, the second assertion — the shape acne takes, a bias that
+/// covers the steep receiver and not the grazing one. `DEPTH_BIAS_TEXELS` alone
+/// at zero: `3.2575%` against `2.9222%`, `0.3353` points over, and the claim
+/// **holds** — over this block the normal offset covers a lost depth bias on
+/// its own, so a depth bias regression is not something this reading sees.
+/// `crates/crcbl/tests/mesh_e2e/shadow_tiles.rs`'s sweep is where that constant
+/// is held.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
+fn the_grazing_sun_leaves_the_open_pavement_as_smooth_as_the_steep_one_does() {
+    let extent = CLAIM_EXTENT;
+    let camera = plaza::fixed_camera();
+    let (centre, half) = acne_block(&camera, extent);
+
+    let (grazing_sky, steep_sky) = (
+        sun::Sky::at(sun::GRAZING_TICK),
+        sun::Sky::at(sun::NOON_TICK),
+    );
+    assert!(
+        steep_sky.elevation > grazing_sky.elevation * 2.0,
+        "the two ticks put the sun {:.1}° and {:.1}° up. A comparison of a grazing sun with a \
+         steep one needs the two to be different suns",
+        grazing_sky.elevation.to_degrees(),
+        steep_sky.elevation.to_degrees(),
+    );
+
+    let (grazing, paths, _) = draw(extent, Arm::shipped().at_tick(sun::GRAZING_TICK));
+    let (steep, _, _) = draw(extent, Arm::shipped().at_tick(sun::NOON_TICK));
+    assert!(
+        grazing.pixels() != steep.pixels(),
+        "the two ticks drew one frame, so every reading below is the same reading twice"
+    );
+
+    let readings = [
+        ("grazing", &grazing, grazing_sky),
+        ("steep", &steep, steep_sky),
+    ];
+    let mut dots = [0.0f32; 2];
+    for (index, (name, image, sky)) in readings.into_iter().enumerate() {
+        let mean = brightness(image, centre, half);
+        dots[index] = speckle_percent(image, centre, half);
+        eprintln!(
+            "sundial golden: the {name} pavement on {paths} — block at {centre:?} +-{half:?}, \
+             {} — mean {mean:.2}/255, {:.4}% of it more than {SPECKLE_LUMA} luma under its own \
+             neighbourhood",
+            sky.row(),
+            dots[index],
+        );
+        assert!(
+            mean > LIT_PAVEMENT,
+            "the block reads {mean:.2}/255 at the {name} tick, under the {LIT_PAVEMENT} lit \
+             pavement stands at. This is a reading of a shadow, and a shadow counts no dots \
+             however the bias is set"
+        );
+    }
+
+    let [grazing_dots, steep_dots] = dots;
+    let over = grazing_dots - steep_dots;
+    eprintln!(
+        "sundial golden: the acne pair on {paths} — {grazing_dots:.4}% grazing against \
+         {steep_dots:.4}% steep, {over:.4} points over"
+    );
+    assert!(
+        steep_dots < STEEP_SPECKLE_PERCENT,
+        "{steep_dots:.4}% of the block is a self-shadowing dot with the sun {:.1}° up, past the \
+         {STEEP_SPECKLE_PERCENT}% this reading has any business finding at all. The sun's shadow \
+         bias is too small for every incidence, not merely for a grazing one",
+        steep_sky.elevation.to_degrees(),
+    );
+    assert!(
+        over < GRAZING_OVER_STEEP,
+        "the block is {grazing_dots:.4}% dots with the sun {:.1}° up and {steep_dots:.4}% with it \
+         {:.1}° up — {over:.4} points over, past {GRAZING_OVER_STEEP}. That is acne: the bias \
+         covers a steep receiver and not a grazing one",
+        grazing_sky.elevation.to_degrees(),
+        steep_sky.elevation.to_degrees(),
+    );
+}
