@@ -29,8 +29,8 @@ Sample numbering **is build order** for 01–11 (see
 sample allocated after the ladder was written keeps the next free number rather
 than renumbering the rest. `12-flappy` is the first of those — allocated last,
 built second. Every sample starts only when all its engine dependencies exist,
-ships with spatial audio, and (except viewer) publishes as a wasm demo on the
-GitHub Pages site.
+ships with spatial audio, and publishes as a wasm demo on the GitHub Pages site
+— viewer included, since 2026-08-24.
 
 | #   | Sample                       | Roadmap gate                 | Proves                                                                                                             |
 | --- | ---------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------ |
