@@ -768,14 +768,17 @@ records what is now true. What is owed:
   figure includes them — but the clipmap's recapture-on-scroll runs this per
   frame, and hoisting `probe_capture`'s `Transients` into the renderer is the
   first thing that slice will want.
-- **The chunk loop has no permanent test.**
-  `crcbl_render::probe_capture::PROBES_PER_CHUNK` is one atlas's worth of tiles,
-  so every scene in the tree captures in one chunk and the multi-chunk path is
-  dead code in CI. It was exercised once, by hand, by forcing the constant to 7:
-  `run-render-e2e.sh` stayed 37/37 with identical leak and mirror numbers and
-  `run-lantern-golden.sh` stayed 8/8. A scene with more probes than one chunk
-  holds, or a test-only override of that constant, would make it a standing
-  check.
+- **The multi-chunk path is recorded, not run.** `crcbl_render::probe_capture`'s
+  `a_capture_of_more_probes_than_one_chunk_records_every_chunk` captures a
+  180-probe volume — ten past the 170 one atlas holds — on `crcbl_hal::null` and
+  asserts the recorded stream: one cube pass and one resolve dispatch per chunk,
+  a draw per tile across the whole volume, and a last dispatch smaller than the
+  first. It goes red with `encode`'s loop stopped after chunk 0. What no test
+  does is _read back_ a probe captured in a chunk past the first: every scene in
+  the tree still fits one atlas, so the second chunk's moments have never been
+  compared against anything on a real device. That wants a render-e2e scene with
+  more than `PROBES_PER_CHUNK` probes and a reading off its far ones, which is a
+  new scene and a new golden rather than a filter on an existing run.
 - **The host tests of what a map _contains_ went with the ray caster.**
   `the_intersector_reports_the_distance_along_the_ray`,
   `a_probe_in_a_box_records_the_walls_it_is_inside`,
@@ -15664,22 +15667,25 @@ they left:
   running in CI on WARP and the macOS paravirtual device, and by nothing else.
   The test's bound is one eight-bit page level, which a wrong frame misses by
   the whole tilt rather than by rounding, so a disagreement would be loud.
-- **Coverage gap: the normal page's mip chain is unobserved on a device.**
-  `ForwardRenderer::with_scene` builds the page's levels through
-  `crcbl_render::mip::normal_chain`, and swapping that call for the colour
-  `chain` passes every device test in the tree: `tests/mesh_e2e/normal_map.rs`
-  draws its quad at one texel per page texel, so only level 0 is ever sampled,
-  and level 0 is uploaded as authored whichever chain built the rest.
-  `the_colour_filter_and_the_normal_filter_disagree` guards the function, not
-  the call site. Closing it means a frame that minifies: the same quad drawn
-  small enough that the sampler reaches level 1 or below, over a page whose
-  texels lean two ways so the two filters' level 1 differ by more than the
-  target's step, and a read of the shaded value against the normal filter's
-  arithmetic. Verified by sabotage on 2026-08-30, not by argument. The companion
-  gap — the pool dropping `GpuMesh::flags` on the way to the table — was found
-  the same way and is closed:
-  `the_table_matches_the_pool_through_allocations_and_frees` uploads distinct
-  flags and decodes the row.
+- **The normal chain is observed at its bottom level only.**
+  `tests/mesh_e2e/normal_map.rs`'s
+  `a_minified_normal_page_lights_by_the_renormalised_average` tiles a quad's UVs
+  256 times so the LOD lands past the last level of a `PAGE_EXTENT`-wide page
+  and the sampler clamps there — so what a device now checks is one
+  `normal_resample` of four texels into one, against a page whose texels lean
+  +0.9 and −0.6 in `u`. What it does not reach is the _recursive_ half of
+  `normal_chain`: level `n` resampled from level `n − 1` rather than from level
+  0, which still has only the host test
+  `a_normal_chain_keeps_a_flat_map_flat_and_every_level_unit` behind it. A page
+  built at a larger extent in that file, read at two tilings, would reach an
+  intermediate level; nothing in the tree needs one today.
+- **The importer's own normal resample has no device reading.**
+  `crcbl_scene::gltf_render` resizes a `normalTexture` onto the page extent
+  through `crcbl_render::mip::normal_resample` — a second call site the
+  minifying frame above does not cover, because it hands `PageDesc` a layer that
+  is already the page's size. `crates/crcbl/tests/gltf_e2e.rs` builds no glTF
+  with a `normalTexture` at all (grep of that file, 2026-09-05), so no e2e reads
+  a normal map through the importer.
 - **Surprise, not a bug: only the browser gate sees a uniformity break.**
   `shading_normal_of` was first written with its `layer == 0` early return above
   the derivatives and an implicit-LOD `Sample` below them. SPIR-V, MSL and DXIL

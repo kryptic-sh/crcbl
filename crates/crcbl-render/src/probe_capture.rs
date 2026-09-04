@@ -1437,4 +1437,127 @@ mod tests {
         // times over.
         assert_ne!(positions[0], positions[volume.per_level() as usize]);
     }
+
+    /// **A volume of more probes than one chunk holds records every chunk**,
+    /// which is the only thing in the tree that takes [`encode`]'s loop round
+    /// more than once.
+    ///
+    /// [`PROBES_PER_CHUNK`] tiles is one atlas full, and every scene the engine
+    /// ships captures inside one — so the second turn is dead code that no
+    /// golden, no e2e run and no other test here can reach. A capture that
+    /// stopped after the first chunk would leave every probe past it holding
+    /// whatever the moments buffer was created with, and the frames it lit would
+    /// be plausible: the layers exist, the image binds, and only the far corner
+    /// of a big enough volume is wrong.
+    ///
+    /// The counts are read off the recorded stream rather than off the layout,
+    /// because the layout is what the loop is *supposed* to walk and the stream
+    /// is what it walked. One cube pass and one resolve dispatch per chunk, a
+    /// draw per tile across the **whole** volume, and a last dispatch smaller
+    /// than the first — the partial chunk, which is the case an off-by-one in
+    /// the count hands the shader as a full one.
+    #[test]
+    fn a_capture_of_more_probes_than_one_chunk_records_every_chunk() {
+        use crcbl_hal::null::{Command, NullInstance, Recorder};
+        use crcbl_hal::{DeviceDesc, Features, Instance, QueueKind};
+
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: Some("probe capture chunks"),
+                adapter: adapter.id,
+                required_features: Features::GPU_DRIVEN,
+                optional_features: Features::empty(),
+                compatible_surface: None,
+            })
+            .expect("the null backend always opens");
+        let queue = device.queue(QueueKind::Graphics).expect("always present");
+
+        // The demo scene's own geometry under one instance: a capture needs a
+        // triangle soup to draw, and this is the cheapest real one rather than
+        // a second hand-written cube.
+        let mut scene = crate::scene::demo();
+        scene.capacities.probes = 1;
+        let ids: Vec<u32> = (0..scene.meshes.len() as u32).collect();
+        let geometry = Occluders::from_scene(&scene, &ids);
+        let placed = [Occluder {
+            mesh: ids[0],
+            transform: glam::Mat4::IDENTITY,
+        }];
+        assert!(
+            !world_triangles(&geometry, &placed).is_empty(),
+            "the fixture must place triangles, or `capture` returns None and every count \
+             below is zero"
+        );
+
+        // Ten probes past one atlas full, so the last chunk is a partial one.
+        let volume = ProbeVolume {
+            origin: [-2.0, -1.0, -2.0],
+            inv_spacing: [1.0; 3],
+            counts: [6, 6, 5],
+            levels: 1,
+        };
+        let probes = volume.total();
+        let layout = Layout::new(device.as_ref(), probes);
+        assert!(
+            layout.chunks > 1,
+            "a fixture of {probes} probes fits in {} chunk(s), so it takes the loop round \
+             once and this test would hold with the loop deleted",
+            layout.chunks
+        );
+
+        let captured = capture(device.as_ref(), queue, &volume, &geometry, &placed)
+            .expect("the null backend accepts every descriptor")
+            .expect("a volume with probes and a scene with triangles has a map to capture");
+        captured.destroy(device.as_ref());
+
+        let commands = recorder.commands();
+        let passes = commands
+            .iter()
+            .filter(|command| {
+                matches!(command, Command::BeginRenderPass { label: Some(label), .. }
+                    if label == "probe capture cube")
+            })
+            .count();
+        assert_eq!(
+            passes as u32, layout.chunks,
+            "the capture recorded {passes} cube passes for {} chunks",
+            layout.chunks
+        );
+
+        let draws = commands
+            .iter()
+            .filter(|command| matches!(command, Command::Draw { .. }))
+            .count();
+        assert_eq!(
+            draws as u32,
+            probes * FACES,
+            "a draw per face of every probe, not of the first chunk's"
+        );
+
+        let dispatches: Vec<u32> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Dispatch { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<u32> = (0..layout.chunks)
+            .map(|chunk| {
+                let (_, count) = layout.chunk(chunk);
+                (count * EXTENT * EXTENT).div_ceil(WORKGROUP)
+            })
+            .collect();
+        assert_eq!(
+            dispatches, expected,
+            "one resolve per chunk, each over its own chunk's probes"
+        );
+        assert!(
+            expected.last() < expected.first(),
+            "the fixture's last chunk must be a partial one, or nothing here reads the \
+             count the loop passes"
+        );
+    }
 }

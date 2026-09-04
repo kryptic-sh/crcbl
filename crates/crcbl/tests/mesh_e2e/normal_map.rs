@@ -25,6 +25,10 @@
 //! * an **unmarked** mesh, whose frame the fragment stage rebuilds out of
 //!   `ddx`/`ddy` — which must agree with the marked one to a tolerance this file
 //!   measures and states rather than guesses;
+//! * a **minified** page whose four texels lean two ways, drawn small enough
+//!   that the sampler can only reach the bottom of the page's mip chain — the
+//!   one test here about the chain the renderer *builds* rather than about the
+//!   frame it applies;
 //! * the `Normals` debug view, which is the one reading that is about the vector
 //!   itself instead of about what a light did with it.
 //!
@@ -42,7 +46,7 @@
 use crate::hdr::HdrTarget;
 use crate::mesh_scene::{MESH_EXTENT, render_mesh_lit};
 use crate::vertex_v2::{
-    QUAD_CORNERS, QUAD_INDICES, flat_frame, pixel_at, quad_camera, quad_clusters,
+    QUAD_CORNERS, QUAD_HALF, QUAD_INDICES, flat_frame, pixel_at, quad_camera, quad_clusters,
 };
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::scene::{
@@ -50,7 +54,7 @@ use crcbl::render::scene::{
 };
 use crcbl::render::{
     Camera, DirectionalLight, EffectOverride, EffectRequest, ForwardRenderer, InstanceDesc,
-    Projection, RenderEffects, TransientPool,
+    Projection, RenderEffects, TransientPool, mip,
 };
 use crcbl_shaders::mesh::{GpuMaterial, GpuMesh, MeshVertex, vertex_bytes};
 use crcbl_shaders::vertex::{TangentFrame, UvRange};
@@ -96,6 +100,48 @@ fn tilted_normal_texels() -> Vec<u8> {
     encoded.repeat(PAGE_EXTENT as usize * PAGE_EXTENT as usize)
 }
 
+/// How far half of [`leaning_normal_texels`]' texels lean towards `+u`, and how
+/// far the other half lean towards `-u`.
+///
+/// **Hard, and unequal, and both halves are load-bearing.** Hard, because the
+/// two filters differ by a transfer curve and the gap that opens between them
+/// grows with how far the texels sit from the neutral. Unequal, because a page
+/// whose leans cancelled would average to the neutral and read black — and a
+/// black reading is what a renderer that drew nothing at all also produces, so
+/// the expectation this test asserts against would be one it could pass without
+/// drawing the quad.
+///
+/// What they are not is a plausible authored map: no real normal map swings
+/// from one hard lean to the opposite one between neighbouring texels. That is
+/// the point — this is the input that separates the two filters, and
+/// [`the_two_filters_disagree_at_the_bottom_of_the_chain`] measures by how
+/// much.
+const LEAN_X: f32 = 0.9;
+
+/// [`LEAN_X`]'s other half.
+const COUNTER_LEAN_X: f32 = -0.6;
+
+/// A normal page layer whose texels lean **two ways**: a checker of [`LEAN_X`]
+/// towards `+u` and [`COUNTER_LEAN_X`] towards `-u`.
+///
+/// Four texels, because [`PAGE_EXTENT`] is two — so the chain below this layer
+/// is one level, and that level is the single texel every cell of the layer
+/// averages into. A checker rather than two stripes so the pattern is symmetric
+/// under a flipped `u` and a flipped `v` alike: whichever way the fragment
+/// stage runs the coordinates, the average is the same average.
+fn leaning_normal_texels() -> Vec<u8> {
+    let lean = |x: f32| {
+        let normal = [x, 0.0, (1.0 - x * x).sqrt()];
+        let mut texel = [0xFFu8; 4];
+        for (lane, axis) in texel[..3].iter_mut().zip(&normal) {
+            *lane = (axis * 0.5 + 0.5).clamp(0.0, 1.0).mul_add(255.0, 0.5) as u8;
+        }
+        texel
+    };
+    let (towards, away) = (lean(LEAN_X), lean(COUNTER_LEAN_X));
+    [towards, away, away, towards].concat()
+}
+
 /// The layer [`normal_scene`] pushes [`tilted_normal_texels`] into.
 ///
 /// One past the neutral texel `PageDesc` owns, which is the whole of the layer
@@ -123,6 +169,12 @@ const NEUTRAL_ROW: usize = 2;
 /// The row that samples [`TILTED_LAYER`] at half scale — glTF's
 /// `normalTexture.scale`, which multiplies the decoded `x` and `y`.
 const HALF_SCALE_ROW: usize = 3;
+
+/// The layer [`leaning_normal_texels`] is pushed into.
+const LEANING_LAYER: u32 = 3;
+
+/// The row that samples [`LEANING_LAYER`].
+const LEANING_ROW: usize = 4;
 
 /// [`HALF_SCALE_ROW`]'s scale.
 const HALF_SCALE: f32 = 0.5;
@@ -259,6 +311,30 @@ fn unmarked_quad() -> MeshDesc<'static> {
     quad("unmarked quad", vertices, range, 0)
 }
 
+/// How many times [`tiled_quad`] repeats the page across its own width.
+///
+/// The page's sampler repeats rather than clamping, so UVs running past one are
+/// tiles of the page rather than its edge texel — and tiling is how a frame this
+/// size *minifies* a page only [`PAGE_EXTENT`] texels a side. One tile over a
+/// quad this wide magnifies it many times over, which reads level 0 and never
+/// fetches the chain at all.
+///
+/// This many puts several texels under every pixel, so the level the sampler
+/// picks is past the bottom of a two-level chain and it clamps to the last one.
+/// [`the_tiled_quad_minifies_past_the_bottom_of_its_chain`] is that arithmetic
+/// written out, so the premise is asserted rather than described.
+const MINIFYING_TILES: f32 = 256.0;
+
+/// [`marked_quad`] with its UVs repeated [`MINIFYING_TILES`] times over.
+///
+/// The frame, the winding and the flags are the marked quad's exactly — the one
+/// difference is the coordinate, so a comparison between the two is a
+/// comparison of the mip level the sampler reached.
+fn tiled_quad() -> MeshDesc<'static> {
+    let uvs = UVS.map(|uv| [uv[0] * MINIFYING_TILES, uv[1] * MINIFYING_TILES]);
+    corner_quad("tiled quad", flat_frame(), uvs)
+}
+
 /// **`orthonormal_basis` hands a `+Z` normal back its own `+X` tangent**, which
 /// is why `unmarked_quad` above cannot use the stand-in an unmarked mesh
 /// actually ships.
@@ -290,6 +366,8 @@ fn normal_scene(meshes: Vec<MeshDesc<'static>>) -> SceneDesc<'static> {
         PageDesc::NEUTRAL_NORMAL.repeat(PAGE_EXTENT as usize * PAGE_EXTENT as usize),
     );
     assert_eq!(neutral, NEUTRAL_LAYER);
+    let leaning = page.push_normal_layer(leaning_normal_texels());
+    assert_eq!(leaning, LEANING_LAYER);
     let rows = vec![
         GpuMaterial::UNTINTED,
         GpuMaterial {
@@ -303,6 +381,10 @@ fn normal_scene(meshes: Vec<MeshDesc<'static>>) -> SceneDesc<'static> {
         GpuMaterial {
             normal_texture: TILTED_LAYER,
             normal_scale: HALF_SCALE,
+            ..GpuMaterial::UNTINTED
+        },
+        GpuMaterial {
+            normal_texture: LEANING_LAYER,
             ..GpuMaterial::UNTINTED
         },
     ];
@@ -778,4 +860,157 @@ fn the_frames_are_drawn_through_the_orthographic_camera() {
     assert_eq!(camera().eye.z, crate::vertex_v2::CAMERA_Z);
     // And the quad the tests read the middle of really does cover that texel.
     let _ = centre_texel();
+}
+
+/// The tangent-space `u` a page texel decodes to, normalised the way
+/// `shading_normal_of` normalises it.
+///
+/// On a quad whose tangent is world `+X` and under [`sun`], that number **is**
+/// `N·L` — so it is what [`centre`] reads out of the frame, and the two can be
+/// compared directly.
+fn tilt_of(texel: &[u8]) -> f32 {
+    let decoded: Vec<f32> = texel[..3]
+        .iter()
+        .map(|lane| f32::from(*lane) / 255.0 * 2.0 - 1.0)
+        .collect();
+    let length = decoded.iter().map(|axis| axis * axis).sum::<f32>().sqrt();
+    decoded[0] / length
+}
+
+/// The tilt at the **bottom** of [`leaning_normal_texels`]' chain, built through
+/// `filter` — [`mip::normal_chain`] for the one the renderer is meant to use
+/// and [`mip::chain`] for the colour one.
+///
+/// The bottom level is the whole of what a minified frame can read, and on a
+/// [`PAGE_EXTENT`]-wide page it is one texel: the average of all four, which is
+/// where the two filters part company.
+fn bottom_tilt(filter: fn(&[u8], u32) -> Vec<Vec<u8>>) -> f32 {
+    let levels = filter(&leaning_normal_texels(), PAGE_EXTENT);
+    let bottom = levels.last().expect("a 2² layer has one level below it");
+    assert_eq!(bottom.len(), 4, "the bottom of the chain is a single texel");
+    tilt_of(bottom)
+}
+
+/// **A minified normal page lights by the renormalised average and not by the
+/// colour one.**
+///
+/// **No other frame here reaches [`mip::normal_chain`]'s output at all.** Every
+/// one of them draws a page whose every texel is the same, and a constant layer
+/// survives *any* box filter unchanged — so swapping the normal page's chain for
+/// the base-colour page's at the call site in `crcbl_render::forward` moved no
+/// golden, no e2e value and no assertion in this suite. The layer this one
+/// draws leans two ways, which is exactly the input the two filters answer
+/// differently for: one averages the decoded vectors and renormalises, the
+/// other decodes an sRGB curve, averages, and re-encodes with no length to put
+/// back.
+///
+/// **What the tiling is for.** The chain is only reachable by a fragment whose
+/// footprint covers more than a texel, and one tile of a two-texel page over a
+/// quad this size is a heavy magnification. [`MINIFYING_TILES`] tiles put the
+/// LOD past the bottom of the chain, so the sampler clamps there and the whole
+/// quad reads that one texel — which is why the centre reading is the whole
+/// frame's value rather than a point on a ramp.
+///
+/// **Sabotaged before it was believed.** With the call site in
+/// `crcbl_render::forward::ForwardRenderer::with_scene` swapped to build the
+/// normal layers through `crate::mip::chain`, this reads:
+///
+/// ```text
+/// the minified quad read 0.63134766 where the bottom of the normal page's chain
+/// tilts by 0.23232852, a gap of 0.39901912 against a bound of 0.007843138; the
+/// colour chain's bottom tilts by 0.5534985
+/// ```
+///
+/// The reading sits above the colour chain's own tilt for the reason
+/// [`MINIFIED_TOLERANCE`] gives: what rides on top of the Lambert term is
+/// `mesh.slang`'s GGX lobe, and a normal leaning that much further towards the
+/// sun is a normal that much closer to the half vector between the sun and the
+/// camera.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_minified_normal_page_lights_by_the_renormalised_average() {
+    let scene = normal_scene(vec![marked_quad(), tiled_quad()]);
+    let read = centre(&lit_frame(&scene, false, |renderer| {
+        place_quad(renderer, 1, LEANING_ROW);
+    }));
+    let expected = bottom_tilt(mip::normal_chain);
+    assert!(
+        (read - expected).abs() <= MINIFIED_TOLERANCE,
+        "the minified quad read {read} where the bottom of the normal page's chain tilts \
+         by {expected}, a gap of {} against a bound of {MINIFIED_TOLERANCE}; the colour \
+         chain's bottom tilts by {}",
+        (read - expected).abs(),
+        bottom_tilt(mip::chain)
+    );
+}
+
+/// How far the minified reading may sit from the texel at the bottom of the
+/// chain.
+///
+/// **Swept before it was fixed.** With this at zero the tiled quad reads
+/// `0.2376709` on radv and on lavapipe alike — identical to the bit, as the
+/// other readings in this file are — against a bottom level that tilts by
+/// `0.23232852`. The `0.0053` between them is neither the chain nor the
+/// sampler: it is `mesh.slang`'s specular lobe, which rides on top of the
+/// clamped Lambert term in every reading in this file —
+/// [`a_normal_map_tilted_towards_the_sun_lights_a_quad_the_sun_is_edge_on_to`]
+/// carries it too, reading `0.20495605` against a `0.2` tilt. It grows as the
+/// shading normal turns towards the half vector between the sun and the camera,
+/// so a bound written here does not transfer to a page that leans further.
+///
+/// So the bound is [`PAGE_TILT_TOLERANCE`]'s — one eight-bit page step on the
+/// decoded normal — which has room over the measured gap and is still far under
+/// the distance to the colour filter's answer that
+/// [`the_two_filters_disagree_at_the_bottom_of_the_chain`] holds this test to.
+const MINIFIED_TOLERANCE: f32 = PAGE_TILT_TOLERANCE;
+
+/// **The two filters disagree at the bottom of the chain**, by far more than
+/// the frame above can absorb.
+///
+/// Without this the device test is a comparison whose two sides might be the
+/// same number, and it would pass just as well on a renderer that mipped the
+/// normal page through the colour filter. Host-side, so the disagreement is a
+/// property of the two functions rather than of a frame.
+#[test]
+fn the_two_filters_disagree_at_the_bottom_of_the_chain() {
+    let renormalised = bottom_tilt(mip::normal_chain);
+    let colour = bottom_tilt(mip::chain);
+    assert!(
+        renormalised > LIT_FLOOR * 10.0,
+        "the renormalised average must light the quad at all, or the device test asserts \
+         against a black frame: it tilts by {renormalised}"
+    );
+    assert!(
+        (renormalised - colour).abs() > MINIFIED_TOLERANCE * 10.0,
+        "the renormalised bottom level tilts by {renormalised} and the colour one by \
+         {colour}, a gap of {} — and the device test can only tell them apart if that gap \
+         is well past its {MINIFIED_TOLERANCE} bound",
+        (renormalised - colour).abs()
+    );
+}
+
+/// **The tiled quad really is minified past the bottom of its chain.**
+///
+/// The premise of the device test above, and the one part of it that is not
+/// visible in the value it reads: a quad that magnified the page would sample
+/// level 0 — one authored lean or the other, or a blend across their boundary —
+/// and would fail with a number that looks like a filtering bug rather than
+/// like a coordinate one. Stated as the LOD arithmetic the sampler does, at
+/// least one level past the last the chain has, so nothing of level 0 is
+/// blended in.
+#[test]
+fn the_tiled_quad_minifies_past_the_bottom_of_its_chain() {
+    let (left, _) = pixel_at(-QUAD_HALF, 0.0);
+    let (right, _) = pixel_at(QUAD_HALF, 0.0);
+    let across = (right - left) as f32;
+    assert!(across > 1.0, "the quad covers {across} pixels");
+    let texels_per_pixel = MINIFYING_TILES * PAGE_EXTENT as f32 / across;
+    let lod = texels_per_pixel.log2();
+    let bottom = mip::normal_chain(&leaning_normal_texels(), PAGE_EXTENT).len() as f32;
+    assert!(
+        lod >= bottom + 1.0,
+        "the tiled quad puts {texels_per_pixel} texels under a pixel, which is a LOD of \
+         {lod}; the chain's bottom level is {bottom} and the sampler must land a whole \
+         level past it for level 0 to be out of the blend"
+    );
 }
