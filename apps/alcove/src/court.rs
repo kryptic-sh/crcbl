@@ -80,9 +80,10 @@ pub const HALF_DEPTH: f32 = 3.4;
 /// How tall the walls stand, in metres.
 ///
 /// Taller than a room, because the court has no roof and the walls are what the
-/// frame's upper half is made of: at [`fixed_camera`]'s field of view the top of
-/// the frame reaches 4.6 metres up the far wall, and a shorter wall would put
-/// the clear colour across the top of every golden.
+/// frame's upper half is made of: at [`fixed_camera`]'s field of view the top
+/// of the frame lands just under the top of the far wall, and a shorter wall
+/// would put the clear colour across the top of every golden — which is a
+/// claim the goldens' own top rows check, since every one of them is wall.
 pub const WALL_HEIGHT: f32 = 2.9;
 
 /// How thick every slab in the shell is.
