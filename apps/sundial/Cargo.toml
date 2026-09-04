@@ -1,0 +1,54 @@
+[package]
+name = "sundial"
+description = "Sundial — the shadow acceptance fixture: one plaza, a sun on a clock, every filter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with two front ends, like every other sample**, and here with a
+# third caller: `tests/golden.rs` is an integration test, and an integration
+# test can only reach the plaza it renders through a lib target — a bin crate
+# has no linkable artifact. `src/main.rs` owns argv and the exit code.
+#
+# `cdylib` is what `wasm32-unknown-unknown` links into a `.wasm`; `rlib` is what
+# `main.rs` and the golden suite link against. Both are declared now even though
+# the browser front end is not built yet — `docs/backlog.md`'s "sundial's web
+# demo is owed" lists what a page needs, and the crate type is the one item of
+# it that costs nothing to have already.
+#
+# The lib is not called `sundial`: a lib and a bin of the same name in one
+# package write the same file, which cargo calls an output filename collision.
+[lib]
+name = "crcbl_sundial"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "sundial"
+path = "src/main.rs"
+
+# One engine dependency, like every other sample — with the `scene` feature on,
+# for `apps/lantern`'s reason: `crcbl::render::scene`'s `Geometry::Flat` carries
+# a `MeshClusters` and nothing above the seam can build one, so an application
+# that describes its own resident meshes needs `crcbl::scene::build_meshlets`.
+[dependencies]
+crcbl = { workspace = true, features = ["scene"] }
+
+# The golden suite's image I/O — comparison, diffs and PNG encoding. A
+# dev-dependency, which is the whole of `crcbl-golden`'s own manifest rule: it
+# reaches no shipped binary.
+[dev-dependencies]
+crcbl-golden = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+# `tests/golden.rs` — the fixed camera's frames off a real device, against
+# checked-in goldens. Feature-gated *and* `#[ignore]`d, the same pair
+# `crcbl`'s `render-e2e` uses: a plain `cargo test --workspace --all-features`
+# on a machine with no GPU must stay green, and `tests/run-sundial-golden.sh` is
+# the only thing that turns it on — and it fails when the suite reports zero
+# tests run.
+golden-e2e = []

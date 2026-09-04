@@ -1738,6 +1738,25 @@ jobs:
           CRCBL_VK_SYNC_VALIDATION: '1'
           CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/alcove/tests/run-alcove-golden.sh
+      # The shadow acceptance fixture, and the only step that runs the shadow
+      # ladder against anything that can tell PCSS apart from a fixed-width
+      # filter. A blocker search that never ran draws the same picture the disc
+      # does, a `r_shadow_filter` wired to one branch draws two identical halves
+      # either side of the seam, and a bias that detached every shadow from its
+      # caster still fills the frame with shadows — each of those draws a
+      # plausible plaza and passes every other check in this workflow. The suite
+      # measures the penumbra under three casters at graded heights, asserts
+      # which columns came off which filter, that the pavement a block stands on
+      # is dark and that one tick of the scripted sun draws one frame, before it
+      # compares a golden at all.
+      - name: Draw sundial on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
+        run: apps/sundial/tests/run-sundial-golden.sh
       # The first playable sample, against a real driver. `run-vk-e2e.sh` drives
       # `--package sandbox` and every other harness script does too, so until
       # this step existed nothing outside breakout's own unit tests ever ran the

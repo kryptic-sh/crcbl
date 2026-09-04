@@ -116,6 +116,57 @@ out of `FrameUniforms::shadow_filter`. What that change did **not** do:
   `crcbl_render::split`'s header carries both shapes and which client takes
   which.
 
+## sundial leaves the diagnostics and the page owed (2026-09-04)
+
+`apps/sundial` was built natively — the plaza, the scripted sun, the filter and
+seam bindings, and the golden suite that measures the penumbra ladder, the seam,
+the contact and the clock's determinism. What that slice did **not** do:
+
+- **The cascade overlay and the atlas viewer.** `docs/plan/sample/18-sundial.md`
+  puts both in milestone 1, and neither is a sample-side change: tinting a
+  fragment by the cascade it landed in is a mode lane in `mesh.slang` beside
+  `shadow_filter_mode`, and drawing `crcbl_render::shadow`'s atlas to screen is
+  a pass in `crcbl-render`. So they are two engine slices this fixture will bind
+  keys and a panel row to once they exist, not work `apps/sundial` could have
+  finished. The cascade overlay is the one `docs/plan/18-render-features.md` has
+  been owed since P7.
+- **The web demo.** The crate builds for `wasm32-unknown-unknown` as a `cdylib`
+  already, and there is no `src/web.rs`: a page owes an export per knob (filter,
+  seam, seam position, sun tick, sun pause, reset), a demo directory of its own
+  beside `web/demos/alcove/`, a row in `web/build.sh`'s `DEMOS`, a row in
+  `web/tools/browser-e2e.mjs`, and the demo-list guards
+  `crcbl-a-new-demo-joins-eight-lists` names. `apps/alcove`'s page is the shape
+  to follow — HTML controls rather than keys, for the same reason: a seam walked
+  with `,` and `.` is a comparison a phone cannot reach.
+- **No cost figure per filter.** The entry above this one asks for it and this
+  slice did not supply it: `ShadowCost` prints the `shadow` and `forward` rows
+  live, but nothing in the golden suite records a number, because a timing read
+  off one run of one adapter is not a figure worth writing into a doc.
+- **The acne half of the charter has no claim.** The peter-panning half does —
+  the contact reading — and the fixture sun is deliberately a grazing one at
+  23.9°, which is where acne appears if the bias is wrong. But acne is a
+  high-frequency pattern over a large surface and the suite has no reading that
+  names it; the goldens would catch it appearing, and would not say what it was.
+  A claim would want something like the variance of a block of pavement under a
+  grazing sun against the same block under a steep one. Not built, and stated
+  here rather than left implied.
+- **Only the `pcss` rung is tested on a second camera.** The penumbra ladder is
+  read from `plaza::counter_camera`, which is the only pose where PCSS's
+  estimate is unclamped; every other claim is from the fixture pose. A filter
+  that was wrong only in the outer cascade would pass everything here except a
+  golden.
+
+**What surprised us, and is not a bug.** The first cascade's extent is a
+function of the camera's **near plane** — `Cascades::splits` blends a
+logarithmic division of `near .. DISTANCE`, and the logarithmic half is
+`near * (DISTANCE / near).powf(ratio)` — so the two-centimetre near plane every
+other sample opens with puts the first split about four metres from the eye and
+makes the whole penumbra ladder unmeasurable: at cascade 1's texel, every
+separation in a scene this size clamps to the same lower bound and `pcss` draws
+exactly what `disc` draws. `apps/sundial/src/plaza.rs`'s `NEAR` is half a metre
+for that reason and says so, and the split is read back out of `Cascades` by
+`the_colonnade_straddles_the_cascade_split` rather than assumed.
+
 ## alcove's page knobs: what is checked, and what is not (2026-09-04)
 
 `/demos/alcove/` is the first page on the site whose controls are HTML rather

@@ -57,9 +57,10 @@ a shadow implementation whose artefacts ship.
   `r_shadow_split` puts the console's choice either side of a seam
   `crcbl_render::split::halves` counts, resolved per fragment out of
   `FrameUniforms::shadow_filter` because a scene pass cannot be recorded twice
-  under a scissor. So what this sample owes here is the **binding and the
-  panel**: keys that drive the two variables and an on-screen label saying which
-  filter each side of the line is.
+  under a scissor. The **binding and the panel** landed with `apps/sundial` on
+  2026-09-04: `F` cycles the filter, `X` raises and drops the seam, `,` and `.`
+  walk it, and the pause panel and the debug overlay both name the filter on
+  each side of the line.
 - Pages web demo.
 
 ## Non-goals (hard cap)
@@ -71,25 +72,25 @@ place to reopen it. No authoring tools.
 **Exempt from sample rule 11**, on lantern's ground. **Exempt from rules 2 and
 10**, on the viewer's: no game state, no `World`, no `GameModule`.
 
-## Status: unbuilt, and there is a measured reason to want it
+## Status: built natively 2026-09-04; the diagnostics and the page are owed
 
-**One of its dependencies is no longer owed.** The engine held exactly one
-shadow filter until 2026-09-04; it now holds three, selectable at runtime, with
-a per-fragment seam that puts any of them beside the one that ships — topic 45's
-fifteenth decision. That was the piece this sample could not have been built
-without and could not have built for itself, because it is a `mesh.slang`
-change. What remains owed is everything else on the Scope list and none of it
-has moved: **the scene**, the sun on its scripted clock, the cascade overlay,
-the atlas viewer, the key bindings and panel that drive the two variables, the
-goldens, and the Pages web demo.
+**`apps/sundial` exists and CI draws it.** The engine held exactly one shadow
+filter until 2026-09-04; it now holds three, selectable at runtime, with a
+per-fragment seam that puts any of them beside the one that ships — topic 45's
+fifteenth decision — and the sample followed the same day: the plaza
+(`src/plaza.rs`), the sun on its scripted clock (`src/sun.rs`), the filter and
+seam bindings and panel rows (`src/filter.rs`, `src/menu.rs`), and the golden
+suite (`tests/golden.rs`) CI runs on lavapipe. What remains owed is the
+diagnostic half of milestone 1 — the cascade overlay and the atlas viewer, both
+engine slices — and the Pages web demo; `docs/backlog.md` carries all three.
 
-Nothing else exists. What does exist is evidence that the shadow implementation
-is at the edge of its current budget: since the 2026-08-26 re-tiling that bought
-a second shadowed point light by shrinking every tile, the `cube` browser-path
-golden fails on linux and windows — 64 grossly-wrong pixels against a 49-pixel
-budget, a maximum channel delta of 216, an ssim of 0.998945 — and the diff is
-scattered noise along shadow edges. macOS passes. The trade was taken knowingly
-and the cost landed where a demo would have shown it first.
+What also exists is evidence that the shadow implementation is at the edge of
+its current budget: since the 2026-08-26 re-tiling that bought a second shadowed
+point light by shrinking every tile, the `cube` browser-path golden fails on
+linux and windows — 64 grossly-wrong pixels against a 49-pixel budget, a maximum
+channel delta of 216, an ssim of 0.998945 — and the diff is scattered noise
+along shadow edges. macOS passes. The trade was taken knowingly and the cost
+landed where a demo would have shown it first.
 
 That is the argument for this sample rather than a footnote to it: the tile
 resolution, the filter and the bias are three knobs whose interaction nobody can
@@ -100,6 +101,19 @@ hold in their head, and the only honest way to set them is to look.
 1. **The scene, the moving sun and the shipped filter.** Cascade overlay and
    atlas viewer land here — they are the diagnostic half and they are worth more
    than a second filter.
+
+   **The scene, the clock and the filter selector were built on 2026-09-04**, as
+   `apps/sundial`: the plaza (`src/plaza.rs`), the scripted sun (`src/sun.rs`),
+   the filter and seam bindings (`src/filter.rs`) and the golden suite
+   (`tests/golden.rs`), which measures the penumbra under three casters at
+   graded heights, holds the seam exact to the column, reads the pavement the
+   plinth stands on and replays a tick of the clock byte for byte.
+
+   **The cascade overlay and the atlas viewer are still owed**, and neither is a
+   sample-side change: tinting per cascade and drawing the atlas to screen are
+   both `crcbl-render` work, so they are engine slices this fixture will bind
+   rather than build. `docs/backlog.md` carries them.
+
 2. **Normal-offset bias and the acne/peter-panning pair**, checkable at the
    contact points the scene was built for. The bias itself **shipped
    2026-08-28** — `docs/plan/45-shadows.md`'s seventh decision — so what is left

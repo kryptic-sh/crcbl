@@ -51,6 +51,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   recording would be every triangle again. Both default to what shipped, so a
   frame nobody has touched them on is unchanged to the byte.
 
+- **`sundial`, the shadow acceptance fixture, natively.** `cargo run -p sundial`
+  opens one exterior plaza of nothing but shadow geometry — a colonnade of five
+  columns whose shadows cross the cascade boundary in frame, a plinth resting on
+  the pavement so its contact can be read, three counters hanging at graded
+  heights over one plane for the penumbra claim, a low parapet, and three
+  punctual lights (one spot, two point) which is exactly the atlas budget. The
+  sun runs on a **scripted clock**, a pure function of a tick rather than of the
+  wall, pausable with `P` and scrubbable with `-` and `=`, so any frame of the
+  sweep can be named and drawn again. Every rung of the filter ladder is live
+  and on the pause panel: the filter (`F`, cycling `pcss`, `disc` and `box`),
+  the comparison seam (`X` to raise it, `,` / `.` to nudge it) with a row naming
+  which filter each side is running, the shadow passes themselves, the camera
+  (`ENTER`, cycling the fixture pose, a pose beside the counters and free fly)
+  and `R` to put everything back. The panel and the headless summary both carry
+  the per-pass GPU time for `shadow` and `forward`, and the summary names the
+  sun's tick, without which no frame of this sample could be reproduced.
+
+  `apps/sundial/tests/run-sundial-golden.sh` is the acceptance suite, and it
+  asserts what a picture cannot: that the penumbra widens with its caster's
+  height under `pcss` (0.0440, 0.0640 and 0.1080 m of pavement) and does not
+  under `disc` (0.0440, 0.0480, 0.0440), that every column outside the
+  antialiasing's bleed band came off the filter its side of the seam was given,
+  that the pavement the plinth stands on loses 56% of its light to the shadow
+  term while pavement nothing reaches does not move, and that one tick of the
+  clock drawn twice in one process is byte-identical while a different tick is
+  not. Four goldens follow those: one per filter at the fixture sun and one at
+  the bottom of the sun's arc. CI runs the suite on lavapipe.
+
+  The crate builds for `wasm32-unknown-unknown` already; the browser demo is not
+  built yet, and `docs/backlog.md` says what a page owes.
+
 - **`alcove`, the ambient-occlusion acceptance fixture, natively and in a
   browser.** `cargo run -p alcove` opens one interior of nothing but occlusion
   geometry — an alcove with a recess, a cantilevered stair, boxes and a post on
