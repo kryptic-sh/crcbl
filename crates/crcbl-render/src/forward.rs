@@ -15436,6 +15436,14 @@ mod tests {
     ) -> (ForwardRenderer, InstanceHandle) {
         let mut renderer =
             ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        // Pinned, on `set_shadow_cadence`'s own terms: the console's two limits
+        // are process-global and `the_console_moves_both_limits` holds them at
+        // a four-frame hold and three faces a frame for the length of its
+        // check. A cache test reading the console inside that window reports
+        // "did not settle" — seen in the wild on 2026-09-04, and reproduced by
+        // holding both limits at those values inside the arm's own process,
+        // which the pin makes harmless.
+        renderer.set_shadow_cadence(Some(shadow::Cadence::EVERY_FRAME));
         let cube = place_cube(&mut renderer, Mat4::IDENTITY);
         renderer.set_lights(&[shadowable_spot(-1.0)]);
         (renderer, cube)
