@@ -8,6 +8,20 @@ target = spirv_1_5
 dxc-version = 1.9(1-0d3ee6b5)(1.9.0.1)
 dxil-model = 6_6
 
+[atlas_view]
+source = shaders/atlas_view.slang
+source-sha256 = 6ab186f28ddf8baa4c4154eddf2140c1034c01e539c73d95d2a97217c74ee37f
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/atlas_view.spv
+spirv-sha256 = f99b2cdc9c4dd9af662876588172a97273008344319b2c2feae14b1d5eef440d
+wgsl = wgsl/atlas_view.wgsl
+wgsl-sha256 = abdf1273f048e385427b887bdcaa3c168f5884df76dd6be3f5239e6f792fccc7
+msl = msl/atlas_view.metal
+msl-sha256 = 65f73bb142b246381cdd3c6b448cabda6f26ca6822d81e15ce0cb0d356a3ecb6
+dxil = vertexMain:dxil/atlas_view.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/atlas_view.fragment.dxil:f49d512bd459a3e03c07311543347dbd7596aff1e77c6914dea69472f09f0014
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
 [bindless_probe]
 source = shaders/bindless_probe.slang
 source-sha256 = aae1af326068fa49f84a9f89f900d7d48cf190b0d6c262e6dd0ba0b381acb0a7

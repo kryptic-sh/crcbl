@@ -131,7 +131,7 @@ pub struct Sundial {
     shadow_cost: ShadowCost,
     /// The values the pause panel was last built for; `None` until the first
     /// pause, so the panel is always rebuilt once with the real ones.
-    shown: Option<(CameraMode, EffectRequest, Knobs, Clock, bool)>,
+    shown: Option<(CameraMode, EffectRequest, Knobs, Clock, DebugView)>,
     /// Whether the loop has the simulation stopped, recorded in
     /// [`HostedGame::menu_kind`].
     paused: bool,
@@ -253,10 +253,15 @@ type KeyBinding = (KeyCode, fn(), &'static str);
 /// The clock's keys are not here: they move [`Sundial::clock`], which is state on
 /// this type rather than in the console, so they cannot be a `fn()` with nothing
 /// to write to. [`CLOCK_KEYS`] is theirs.
-pub(crate) const KEYS: [KeyBinding; 4] = [
+pub(crate) const KEYS: [KeyBinding; 5] = [
     (KeyCode::KeyF, cycle_filter, "F"),
     (KeyCode::KeyX, filter::toggle_seam, "X"),
     (KeyCode::KeyC, toggle_cascade_view, "C"),
+    // **`T` for tiles**, which is what the picture is of: the letters this
+    // fixture would rather have are taken — `A` and `S` are the flyer's, and the
+    // flyer is offered every key before this table is walked, so a binding on
+    // one of them would be unreachable rather than merely confusing.
+    (KeyCode::KeyT, toggle_atlas_view, "T"),
     (KeyCode::KeyR, reset_all, "R"),
 ];
 
@@ -293,18 +298,6 @@ fn cycle_filter() {
     filter::cycle(filter::FILTER);
 }
 
-/// Whether the frame tints the picture by the cascade each sun-lit fragment's
-/// shadow was sampled from.
-///
-/// **Read, not kept**, on `apps/alcove`'s `occlusion_view` terms exactly: the
-/// `CASCADES` row and the console's `debug_view cascades` are one value —
-/// `docs/plan/52-debug-console.md` decision 8 — and [`crcbl::engine::Loop`] is
-/// what puts it into force on the renderer.
-#[must_use]
-pub fn cascade_view() -> bool {
-    crcbl::debug_view::current() == DebugView::Cascades
-}
-
 /// Swaps between the shaded picture and that picture tinted by cascade.
 ///
 /// What `C` and the panel's `CASCADES` row both do. `docs/plan/45-shadows.md`'s
@@ -313,6 +306,17 @@ pub fn cascade_view() -> bool {
 /// fixture could not show before the overlay existed.
 pub fn toggle_cascade_view() {
     crcbl::debug_view::toggle(DebugView::Cascades);
+}
+
+/// Swaps between the frame and the shadow atlas drawn over it.
+///
+/// What `T` and the panel's `ATLAS` row both do —
+/// `docs/plan/sample/18-sundial.md`'s milestone 1 atlas viewer. The plaza's sun
+/// and its two lamps compete for the tiles `crcbl::render::shadow` budgets, and
+/// which of them got one is the question this fixture had no way to ask: a light
+/// that was refused a tile still lights, so the frame looks the same either way.
+pub fn toggle_atlas_view() {
+    crcbl::debug_view::toggle(DebugView::ShadowAtlas);
 }
 
 /// Both halves of `R`: the console's knobs and this run's clock.
@@ -573,6 +577,7 @@ impl HostedGame for Sundial {
             }
             SundialAction::CycleFilter => filter::cycle(filter::FILTER),
             SundialAction::ToggleCascades => toggle_cascade_view(),
+            SundialAction::ToggleAtlas => toggle_atlas_view(),
             SundialAction::ToggleSeam => filter::toggle_seam(),
             SundialAction::ToggleSun => self.clock.toggle(),
             SundialAction::Reset => {
@@ -591,20 +596,16 @@ impl HostedGame for Sundial {
         // first panel is laid out and a knob a key moved while paused has to reach
         // the label on the same frame.
         let knobs = Knobs::read();
-        // The overlay is process-global console state like the knobs, so it is
-        // read here for the same reason and joins the rebuild key beside them:
-        // `C` pressed while paused has to move the `CASCADES` row on the frame
-        // it is pressed on.
-        let cascades = cascade_view();
-        if paused
-            && self.shown
-                != Some((
-                    self.camera,
-                    self.effect_request,
-                    knobs,
-                    self.clock,
-                    cascades,
-                ))
+        // The debug view is process-global console state like the knobs, so it
+        // is read here for the same reason and joins the rebuild key beside
+        // them: `C` or `T` pressed while paused has to move the `CASCADES` and
+        // `ATLAS` rows on the frame it is pressed on.
+        //
+        // **The view itself and not a flag per row.** The engine holds exactly
+        // one — `crcbl::debug_view::current` is the cell — so a pair of flags
+        // here would be a key that can spell a state the engine cannot be in.
+        let view = crcbl::debug_view::current();
+        if paused && self.shown != Some((self.camera, self.effect_request, knobs, self.clock, view))
         {
             // A row's label changed (or this is the first pause): rebuild the
             // panel with the values in force, restoring the selection so a press
@@ -621,7 +622,7 @@ impl HostedGame for Sundial {
                     self.device_effects,
                     knobs,
                     self.clock,
-                    cascades,
+                    view,
                 ),
             );
             if let Some(id) = selected {
@@ -630,13 +631,7 @@ impl HostedGame for Sundial {
                     .expect("the pause menu is in the set")
                     .select_id(id);
             }
-            self.shown = Some((
-                self.camera,
-                self.effect_request,
-                knobs,
-                self.clock,
-                cascades,
-            ));
+            self.shown = Some((self.camera, self.effect_request, knobs, self.clock, view));
         }
         self.knobs = knobs;
         paused
@@ -937,23 +932,29 @@ mod tests {
         assert_eq!(fixture.clock(), before, "a key release acted like a press");
     }
 
-    /// **`C` shows the cascade overlay, a second press takes it away, and the
-    /// pause panel's `CASCADES` row says which of the two the frame is
-    /// drawing.**
+    /// **Each debug-view key shows its picture, a second press takes it away,
+    /// the pause panel names which of the two the frame is drawing, and a
+    /// second key *replaces* the first.**
     ///
     /// The two halves live in different files — this one's key table writes the
     /// engine's `debug_view` cell and [`crate::menu::pause_menu`] reads it back
     /// — which is exactly the shape that drifts into a key toggling a picture no
-    /// panel names. So the row is built from the value the key moved rather than
-    /// from a literal, and the panel's own `CASCADES` press is driven beside the
-    /// key, because [`SundialAction::ToggleCascades`] is a second route to the
-    /// same cell.
+    /// panel names. So each row is built from the value its key moved rather
+    /// than from a literal, and the panel's own press is driven beside the key,
+    /// because a [`SundialAction`] is a second route to the same cell.
+    ///
+    /// **One table over both keys rather than a check each**, and the exclusivity
+    /// at the end is why it is worth being one: the engine holds exactly one
+    /// debug view, so `T` pressed while `C`'s overlay is up must leave the panel
+    /// reading `ON` once. Two separate checks, each starting from the shaded
+    /// frame, could not see that at all — and a panel that read `ON` twice about
+    /// one picture is a panel nobody can act on.
     ///
     /// [`crcbl::debug_view::for_test`] is held for the module docs' reason: the
     /// view is a process-global console variable and `cargo test` runs a crate's
     /// checks as threads of one process.
     #[test]
-    fn the_c_key_shows_the_cascade_overlay_and_the_panel_names_it() {
+    fn each_debug_view_key_shows_its_picture_and_the_panel_names_it() {
         let _view = crcbl::debug_view::for_test();
         let mut fixture = Sundial::new(
             CameraMode::Fixed,
@@ -968,52 +969,118 @@ mod tests {
             EffectRequest::default(),
             RenderEffects::all(),
         );
-        let row = || {
+        // The panel as it stands right now, row by row — built from the cell the
+        // key moved, exactly as `menu_kind` builds it.
+        let rows = || {
             menu::pause_menu(
                 CameraMode::Fixed,
                 EffectRequest::default(),
                 RenderEffects::all(),
                 Knobs::read(),
                 Clock::default(),
-                cascade_view(),
+                crcbl::debug_view::current(),
             )
             .items()
             .iter()
-            .find(|item| item.id == menu::CASCADES_ID)
-            .expect("the panel has a CASCADES row")
-            .label
-            .clone()
+            .map(|item| (item.id, item.label.clone()))
+            .collect::<Vec<_>>()
+        };
+        let row = |id| {
+            rows()
+                .into_iter()
+                .find(|(found, _)| *found == id)
+                .unwrap_or_else(|| panic!("the panel has no row {id:?}"))
+                .1
+        };
+        // Every debug-view row the panel carries, so the count below is about
+        // the panel rather than about the two this check drives.
+        let views: [(KeyCode, DebugView, crcbl::ui::WidgetId, &str, SundialAction); 2] = [
+            (
+                KeyCode::KeyC,
+                DebugView::Cascades,
+                menu::CASCADES_ID,
+                "CASCADES",
+                SundialAction::ToggleCascades,
+            ),
+            (
+                KeyCode::KeyT,
+                DebugView::ShadowAtlas,
+                menu::ATLAS_ID,
+                "ATLAS",
+                SundialAction::ToggleAtlas,
+            ),
+        ];
+        // How many rows read `ON` — the count that says the panel is describing
+        // one picture.
+        let showing = || {
+            views
+                .iter()
+                .filter(|(_, _, id, _, _)| row(*id).ends_with(": ON"))
+                .count()
         };
 
-        assert!(
-            !cascade_view(),
-            "a guard hands its holder the shaded frame, so this check starts with the overlay off"
-        );
-        assert_eq!(row(), "CASCADES: OFF");
+        for (key, view, id, name, action) in views {
+            assert_eq!(
+                crcbl::debug_view::current(),
+                DebugView::Shaded,
+                "{name} starts from a frame that is already showing something"
+            );
+            assert_eq!(row(id), format!("{name}: OFF"));
 
+            fixture.key_event(key, true);
+            assert_eq!(
+                crcbl::debug_view::current(),
+                view,
+                "{key:?} did not put {view:?} in force"
+            );
+            assert_eq!(
+                row(id),
+                format!("{name}: ON"),
+                "the panel does not follow {key:?}"
+            );
+
+            fixture.key_event(key, true);
+            assert_eq!(
+                crcbl::debug_view::current(),
+                DebugView::Shaded,
+                "a second press left {view:?} up, so {key:?} cannot take it back"
+            );
+            assert_eq!(row(id), format!("{name}: OFF"));
+
+            // The panel's own press, which is the other route to the same cell.
+            fixture.apply(action);
+            assert_eq!(
+                crcbl::debug_view::current(),
+                view,
+                "the {name} row did not show {view:?}"
+            );
+            assert_eq!(row(id), format!("{name}: ON"));
+
+            // And a key release is not a press, on the clock keys' terms.
+            fixture.key_event(key, false);
+            assert_eq!(
+                crcbl::debug_view::current(),
+                view,
+                "a key release acted like a press"
+            );
+
+            assert_eq!(showing(), 1, "{name} is up and the panel says otherwise");
+            fixture.apply(action);
+        }
+
+        // **A second view replaces the first**, which is what makes the panel's
+        // two rows one reading. Driven from the keys rather than from the cell,
+        // because the key is what a reviewer presses.
         fixture.key_event(KeyCode::KeyC, true);
+        fixture.key_event(KeyCode::KeyT, true);
+        assert_eq!(crcbl::debug_view::current(), DebugView::ShadowAtlas);
         assert_eq!(
-            crcbl::debug_view::current(),
-            DebugView::Cascades,
-            "C did not put the cascade overlay in force"
+            showing(),
+            1,
+            "the panel reads ON for two rows about one picture: {:?}",
+            rows()
         );
-        assert_eq!(row(), "CASCADES: ON", "the panel does not follow the key");
-
-        fixture.key_event(KeyCode::KeyC, true);
-        assert!(
-            !cascade_view(),
-            "a second press left the overlay up, so the key cannot take it back"
-        );
-        assert_eq!(row(), "CASCADES: OFF");
-
-        // The panel's own press, which is the other route to the same cell.
-        fixture.apply(SundialAction::ToggleCascades);
-        assert!(cascade_view(), "the CASCADES row did not show the overlay");
-        assert_eq!(row(), "CASCADES: ON");
-
-        // And a key release is not a press, on the clock keys' terms.
-        fixture.key_event(KeyCode::KeyC, false);
-        assert!(cascade_view(), "a key release acted like a press");
+        assert_eq!(row(menu::CASCADES_ID), "CASCADES: OFF");
     }
 
     /// **The camera row cycles all three poses and the sky follows the clock**,

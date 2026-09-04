@@ -1344,7 +1344,7 @@ pub fn apply_video_to(
 /// In
 /// [`ForwardRenderer::debug_view`](crcbl_render::ForwardRenderer::debug_view)'s
 /// own precedence order — bent normal, motion, occlusion, heatmap, LOD, normals,
-/// cascades — so `debug_view` of a renderer this was
+/// shadow atlas, cascades — so `debug_view` of a renderer this was
 /// applied to answers back the view it was handed, whichever it was. That
 /// round trip is what
 /// `every_debug_view_sets_exactly_the_switch_its_precedence_reads_back` asserts
@@ -1354,17 +1354,18 @@ pub fn apply_video_to(
 /// [`DebugView`](crcbl_render::DebugView) variant added later fails to compile
 /// here instead of silently drawing the shaded frame.
 #[must_use]
-pub const fn debug_view_switches(view: crcbl_render::DebugView) -> [bool; 7] {
+pub const fn debug_view_switches(view: crcbl_render::DebugView) -> [bool; 8] {
     use crcbl_render::DebugView as V;
     match view {
-        V::Shaded => [false, false, false, false, false, false, false],
-        V::BentNormal => [true, false, false, false, false, false, false],
-        V::Motion => [false, true, false, false, false, false, false],
-        V::AmbientOcclusion => [false, false, true, false, false, false, false],
-        V::Heatmap => [false, false, false, true, false, false, false],
-        V::LodTint => [false, false, false, false, true, false, false],
-        V::Normals => [false, false, false, false, false, true, false],
-        V::Cascades => [false, false, false, false, false, false, true],
+        V::Shaded => [false, false, false, false, false, false, false, false],
+        V::BentNormal => [true, false, false, false, false, false, false, false],
+        V::Motion => [false, true, false, false, false, false, false, false],
+        V::AmbientOcclusion => [false, false, true, false, false, false, false, false],
+        V::Heatmap => [false, false, false, true, false, false, false, false],
+        V::LodTint => [false, false, false, false, true, false, false, false],
+        V::Normals => [false, false, false, false, false, true, false, false],
+        V::ShadowAtlas => [false, false, false, false, false, false, true, false],
+        V::Cascades => [false, false, false, false, false, false, false, true],
     }
 }
 
@@ -1381,13 +1382,23 @@ pub const fn set_debug_view_on(
     renderer: &mut crcbl_render::ForwardRenderer,
     view: crcbl_render::DebugView,
 ) {
-    let [bent, motion, occlusion, heatmap, lod, normals, cascades] = debug_view_switches(view);
+    let [
+        bent,
+        motion,
+        occlusion,
+        heatmap,
+        lod,
+        normals,
+        atlas,
+        cascades,
+    ] = debug_view_switches(view);
     renderer.set_bent_normal_view(bent);
     renderer.set_motion_view(motion);
     renderer.set_occlusion_view(occlusion);
     renderer.set_heatmap(heatmap);
     renderer.set_lod_view(lod);
     renderer.set_normals_view(normals);
+    renderer.set_atlas_view(atlas);
     renderer.set_cascade_view(cascades);
 }
 
@@ -3167,9 +3178,10 @@ mod tests {
     ///
     /// The renderer needs a device and these do not, so this asserts the table
     /// against that function's precedence order directly: bent normal, motion,
-    /// occlusion, heatmap, LOD, normals, cascades. A view that set two switches
-    /// would be drawn as whichever is outermost, silently — and the cascade
-    /// view is the one that would go unnoticed, because it loses to all six.
+    /// occlusion, heatmap, LOD, normals, shadow atlas, cascades. A view that set
+    /// two switches would be drawn as whichever is outermost, silently — and the
+    /// two at the bottom are the ones that would go unnoticed, because each
+    /// loses to everything above it.
     #[test]
     fn every_debug_view_sets_exactly_the_switch_its_precedence_reads_back() {
         use crcbl_render::DebugView as V;
@@ -3180,11 +3192,12 @@ mod tests {
             V::Heatmap,
             V::LodTint,
             V::Normals,
+            V::ShadowAtlas,
             V::Cascades,
         ];
         assert_eq!(
             debug_view_switches(V::Shaded),
-            [false; 7],
+            [false; 8],
             "the shaded frame is every switch off",
         );
         for (index, view) in order.into_iter().enumerate() {
@@ -3204,5 +3217,59 @@ mod tests {
                 "{view:?} is not at its precedence position"
             );
         }
+    }
+
+    /// **Every view `set_debug_view_on` is handed reaches the renderer**, which
+    /// answers back with that same view.
+    ///
+    /// The check above is about [`debug_view_switches`] alone, and a table is
+    /// only half of this: the other half is the row of setter calls under it,
+    /// where a literal in place of a destructured flag, or two rows crossed,
+    /// leaves the table right and the frame wrong. Sabotaging
+    /// `renderer.set_atlas_view(atlas)` to `set_atlas_view(false)` left the
+    /// check above green, which is what this one exists for — it fails on that
+    /// edit, and on the same edit to any of the other seven.
+    ///
+    /// The null backend, so it runs on every CI leg: what is being observed is
+    /// a switch moving and
+    /// [`ForwardRenderer::debug_view`](crcbl_render::ForwardRenderer::debug_view)
+    /// resolving it, and neither reads a driver.
+    #[test]
+    fn every_debug_view_set_on_a_renderer_reads_back_as_itself() {
+        use crate::hal::null::NullInstance;
+        use crate::hal::{DeviceDesc, Format, Instance as _, QueueKind};
+        use crcbl_render::DebugView as V;
+
+        let instance = NullInstance::gpu_driven();
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(adapter.id))
+            .expect("the null backend always opens");
+        let queue = device.queue(QueueKind::Graphics).expect("always present");
+        let mut renderer =
+            crcbl_render::ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
+                .expect("the null backend accepts every descriptor");
+
+        for view in [
+            V::Shaded,
+            V::BentNormal,
+            V::Motion,
+            V::AmbientOcclusion,
+            V::Heatmap,
+            V::LodTint,
+            V::Normals,
+            V::ShadowAtlas,
+            V::Cascades,
+        ] {
+            set_debug_view_on(&mut renderer, view);
+            assert_eq!(
+                renderer.debug_view(),
+                view,
+                "{view:?} was applied to a renderer that then drew {:?}",
+                renderer.debug_view()
+            );
+        }
+
+        renderer.destroy(device.as_ref());
     }
 }

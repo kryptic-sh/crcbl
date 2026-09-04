@@ -193,6 +193,7 @@ KEYS:
     X                    Raise the comparison seam at the centre, or drop it
     , .                  Walk the seam a step left or right
     C                    Tint the picture by the cascade each shadow was read from
+    T                    Draw the shadow atlas over the frame, tile by tile
     P                    Stop and start the sun
     - =                  Scrub the sun back or forward, and stop it
     R                    Put every knob and the clock back where a run opens

@@ -37,6 +37,12 @@
 //! * **Cost per technique, per frame**: [`gpu::ShadowCost`] reads the atlas
 //!   render and the scene draw off `PassTimers`, on the panel and in the headless
 //!   summary line. There is no per-side row, and that module's header says why.
+//! * **Milestone 1's two diagnostics.** `C` and the panel's `CASCADES` row draw
+//!   [`crcbl::render::DebugView::Cascades`], which colours the frame by the
+//!   cascade each sun-lit fragment read; `T` and the `ATLAS` row draw
+//!   [`crcbl::render::DebugView::ShadowAtlas`], which is the atlas itself — so
+//!   which of the plaza's three punctual lights was given a tile is something to
+//!   look at rather than to infer from a scene that lights either way.
 //!
 //! Beside them: a free-fly camera, the fixed pose the goldens are taken from, a
 //! second fixed pose the penumbra ladder is read at, the debug panel rule 4 asks
@@ -47,11 +53,6 @@
 //!
 //! # What is not here, and where it is written down
 //!
-//! * **The atlas viewer.** Milestone 1's other diagnostic, and *engine* work —
-//!   a pass that draws the atlas to screen — so it cannot be built from an
-//!   application crate. `docs/backlog.md` carries it. The cascade overlay is
-//!   here: `C` and the panel's `CASCADES` row show
-//!   [`crcbl::render::DebugView::Cascades`].
 //! * **Milestone 5's ray-traced shadows**, gated on P7C. The panel's `ray
 //!   tracing` row says `raster only` rather than implying a choice was made.
 //!

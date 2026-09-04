@@ -1296,7 +1296,11 @@ fn pixels_unlike_the_corner(frame: &crcbl_golden::Image) -> usize {
 /// not the value that lands in the buffer — the other assertions in this file
 /// read either a linear attachment or a channel ordering, and needed no such
 /// thing.
-fn srgb_encode(value: f32) -> f32 {
+///
+/// `pub(crate)` since [`crate::shadow`]'s atlas-viewer check wanted the same
+/// conversion: two transcriptions of one transfer function in one test binary
+/// are two things to keep in step, and this is the one that was here first.
+pub(crate) fn srgb_encode(value: f32) -> f32 {
     if value <= 0.003_130_8 {
         value * 12.92
     } else {

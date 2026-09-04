@@ -174,6 +174,7 @@ use crate::graph::{
 // Renamed on the way in, because [`crate::light_grid::Grid`] already holds the
 // bare name here and means the froxel grid — the collision [`crate::grid`]'s
 // header predicted.
+use crate::atlas_view::AtlasView;
 use crate::bloom::Bloom;
 use crate::exposure::{Exposure, ExposureAdaptation, ExposureBuffers};
 use crate::fxaa::Fxaa;
@@ -352,6 +353,19 @@ pub enum DebugView {
     /// `n * 0.5 + 0.5` — [`ForwardRenderer::set_bent_normal_view`]. **Wins over
     /// every other view.**
     BentNormal,
+    /// The sun's cascades and the lit tiles beside them — the `D32Float` shadow
+    /// atlas itself, letterboxed over the finished frame with a border round
+    /// every occupied slot — [`ForwardRenderer::set_atlas_view`].
+    ///
+    /// **The one view that is a pass rather than a branch in `mesh.slang`**, and
+    /// therefore the one whose lane is the off sentinel: the colour pass draws
+    /// the shaded picture exactly as it always did and `crate::atlas_view`
+    /// replaces it afterwards. That module's header is where the placement is
+    /// argued.
+    ///
+    /// It resolves **below every view above and above [`Self::Cascades`]** — see
+    /// [`ForwardRenderer::debug_view`].
+    ShadowAtlas,
     /// The shaded picture tinted by the cascade each sun-lit fragment's shadow
     /// was sampled from, with the cross-fade band drawn as the blend of the two
     /// — [`ForwardRenderer::set_cascade_view`].
@@ -376,6 +390,7 @@ impl DebugView {
             Self::AmbientOcclusion => "ambient occlusion",
             Self::Motion => "motion",
             Self::BentNormal => "bent normal",
+            Self::ShadowAtlas => "shadow atlas",
             Self::Cascades => "cascades",
         }
     }
@@ -926,8 +941,12 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// atlas's, the two reflective shadow maps, the depth prepass, the forward pass,
 /// the debug draw layer, the tonemap, the ground grid and the
 /// culling-statistics copy — plus [`Ssao::MAX_PASSES`], [`Ssr::PASSES`],
-/// [`ProbeGather::PASSES`], [`Bloom::MAX_PASSES`], [`Exposure::PASSES`] and
-/// [`Upscale::PASSES`] beside them.
+/// [`ProbeGather::PASSES`], [`Bloom::MAX_PASSES`], [`Exposure::PASSES`],
+/// [`POST_TONEMAP_PASSES`] and [`Upscale::PASSES`] beside them.
+///
+/// [`AtlasView::PASSES`] has no term of its own and is inside
+/// [`POST_TONEMAP_PASSES`] instead, which is where that is argued: the atlas
+/// viewer and the resolve are never both recorded.
 ///
 /// The reflective shadow maps and [`ProbeGather::PASSES`] are counted on the
 /// ground grid's terms: all three are off unless a scene's
@@ -971,7 +990,7 @@ const RENDER_PASSES: u32 = 8
     + Volumetric::PASSES
     + Exposure::PASSES
     + Bloom::MAX_PASSES
-    + RESOLVE_PASSES
+    + POST_TONEMAP_PASSES
     + Upscale::PASSES;
 
 /// What the frame's one resolve slot costs at its widest: the larger of the two
@@ -986,6 +1005,24 @@ const RESOLVE_PASSES: u32 = if Fxaa::PASSES > Smaa::PASSES {
     Fxaa::PASSES
 } else {
     Smaa::PASSES
+};
+
+/// What the frame's one **post-tonemap** slot costs at its widest: the resolve
+/// above, or [`crate::atlas_view`]'s pass, which replaces the picture instead of
+/// filtering it.
+///
+/// **The larger and not the sum**, on [`RESOLVE_PASSES`]' terms and for a
+/// reason of the same shape: [`ForwardRenderer::resolved_effects`] takes *both*
+/// antialiasing tiers off for every debug view, and the atlas viewer records
+/// only on the frame [`ForwardRenderer::debug_view`] resolved to
+/// [`DebugView::ShadowAtlas`] — which is a debug view. So a frame that draws the
+/// atlas resolves nothing, a frame that resolves is not drawing the atlas, and
+/// neither can be short of this. `the_pass_bound_is_the_widest_frame_the_renderer_records`
+/// is what holds the arithmetic to a frame that was actually recorded.
+const POST_TONEMAP_PASSES: u32 = if RESOLVE_PASSES > AtlasView::PASSES {
+    RESOLVE_PASSES
+} else {
+    AtlasView::PASSES
 };
 
 /// Draws a full-screen pass records: the over-sized triangle, drawn once.
@@ -1509,6 +1546,17 @@ pub struct ForwardRenderer {
     /// `the_cascade_view_threshold_lies_below_every_replacing_view` is what
     /// holds the shader to the same order, from the other end of the lane.
     cascade_view: bool,
+
+    /// Whether the frame draws the shadow atlas over the finished picture — see
+    /// [`set_atlas_view`](ForwardRenderer::set_atlas_view).
+    ///
+    /// **Not a lane of the frame block**, unlike every field above: this view is
+    /// a pass rather than a branch in `mesh.slang`, so what reads this is
+    /// [`ForwardRenderer::add_passes`] deciding whether to record
+    /// [`crate::atlas_view`]'s. It resolves below every replacing view and above
+    /// [`cascade_view`](Self::cascade_view) — see
+    /// [`ForwardRenderer::debug_view`].
+    atlas_view: bool,
 
     /// Where [`begin_frame`](ForwardRenderer::begin_frame) projects
     /// `docs/plan/25-lod.md`'s selection from, when that is not the camera's own
@@ -2056,6 +2104,11 @@ pub struct ForwardRenderer {
     /// [`crate::sky_pass`]. It draws on no frame whose sky is [`Sky::NONE`],
     /// which is every frame until a caller calls [`set_sky`](Self::set_sky).
     sky_pass: SkyPass,
+    /// The shadow atlas viewer — see [`crate::atlas_view`]. It draws on no frame
+    /// but the one [`debug_view`](Self::debug_view) resolved to
+    /// [`DebugView::ShadowAtlas`], which is none until a caller calls
+    /// [`set_atlas_view`](Self::set_atlas_view).
+    atlas_viewer: AtlasView,
     /// How large the internal render target is as a fraction of the extent a
     /// caller hands `begin_frame` — see [`set_render_scale`](Self::set_render_scale).
     render_scale: f32,
@@ -2209,6 +2262,9 @@ struct Rollback {
     /// The background pass, which owns one pipeline, one layout and a ring of
     /// blocks and groups.
     sky_pass: Option<SkyPass>,
+    /// The shadow atlas viewer, which owns one pipeline, one layout and a ring
+    /// of blocks and groups.
+    atlas_viewer: Option<AtlasView>,
 }
 
 impl Rollback {
@@ -2250,6 +2306,9 @@ impl Rollback {
         }
         if let Some(lights) = self.lights {
             lights.destroy(device);
+        }
+        if let Some(atlas_viewer) = self.atlas_viewer {
+            atlas_viewer.destroy(device);
         }
         if let Some(sky_pass) = self.sky_pass {
             sky_pass.destroy(device);
@@ -5167,6 +5226,20 @@ impl ForwardRenderer {
             Self::build_tested_fullscreen,
         )?);
 
+        // --- the shadow atlas viewer ---
+        //
+        // Built last, so `Rollback::run` releases it first. It writes the
+        // caller's target rather than a transient — it replaces the picture the
+        // tonemap put there, which is [`crate::atlas_view`]'s argument — and it
+        // records on no frame but the one that resolved
+        // [`DebugView::ShadowAtlas`].
+        rollback.atlas_viewer = Some(AtlasView::new(
+            device,
+            instance_buffers.len(),
+            target_format,
+            Self::build_fullscreen,
+        )?);
+
         Ok(Self {
             pool: rollback
                 .pool
@@ -5277,6 +5350,7 @@ impl ForwardRenderer {
             motion_view: false,
             bent_normal_view: false,
             cascade_view: false,
+            atlas_view: false,
             // Following the camera, on the line above's terms: the selection eye
             // is the camera's until a caller pins it, so a renderer nobody calls
             // `set_frozen_selection_eye` on hands `begin_frame` exactly what it
@@ -5422,6 +5496,10 @@ impl ForwardRenderer {
                 .sky_pass
                 .take()
                 .unwrap_or_else(|| unreachable!("the sky was placed in the rollback above")),
+            atlas_viewer: rollback
+                .atlas_viewer
+                .take()
+                .unwrap_or_else(|| unreachable!("the viewer was placed in the rollback above")),
             // Full resolution, which is the frame every caller of this type drew
             // before there was a knob — see [`Self::set_render_scale`].
             render_scale: 1.0,
@@ -6412,6 +6490,23 @@ impl ForwardRenderer {
         // and pays for sixteen bytes nobody reads, and a block written only on
         // the frames that use it is stale on the frame a caller moves the knob.
         self.upscale.begin_frame(device, self.frame, extent)?;
+        // The atlas viewer's block: where the atlas is letterboxed into this
+        // frame, and where each slot's map is inside it. Written on the four
+        // above's terms — a frame not drawing the view pays for the write and
+        // reads none of it, and a block written only on the frames that draw it
+        // is stale on the frame a caller switches the view on.
+        //
+        // **`atlas_rects` and not a second derivation of it.** These are the
+        // rectangles the frame block above carries, so the grid the viewer draws
+        // is the one the sampling side reads through; a viewer that worked its
+        // own out would be a diagnostic supplying its own evidence.
+        self.atlas_viewer.begin_frame(
+            device,
+            self.frame,
+            extent,
+            shadow::atlas_extent(),
+            atlas_rects,
+        )?;
 
         // `docs/plan/07-ui-debug.md` item 5's immediate-mode buffer: whatever
         // any system appended since the last frame, uploaded and cleared here.
@@ -8054,6 +8149,11 @@ impl ForwardRenderer {
         // borrow `self` field by field, and a `&self` method called between
         // them would borrow the whole of it.
         let draws_sky = self.draws_sky();
+        // Whether this frame ends by drawing the shadow atlas over itself — the
+        // resolved view rather than the switch, so a caller who left the atlas
+        // up and then asked for normals gets normals. Read here for
+        // `draws_sky`'s reason exactly: `debug_view` takes `&self`.
+        let draws_atlas_view = self.debug_view() == DebugView::ShadowAtlas;
 
         let pages = MaterialPages {
             base_color: base_color_page,
@@ -8333,10 +8433,17 @@ impl ForwardRenderer {
         // resolved by the toggle order — it is a caller's opt-in, off by
         // default — so what decides it is the field and not this frame's
         // effects.
-        self.recorded_fullscreen =
-            fullscreen_passes(effects, extent, upscaling, self.frame_ssao_blurs)
+        self.recorded_fullscreen = fullscreen_passes(effects, extent, upscaling, self.frame_ssao_blurs)
                 + u64::from(self.ground_grid().is_some())
-                + if draws_sky { SkyPass::PASSES } else { 0 };
+                + if draws_sky { SkyPass::PASSES } else { 0 }
+                // The atlas viewer, on the ground grid's terms: not an effect
+                // bit and not resolved by the toggle order, so what decides it
+                // is the debug view and not this frame's effects.
+                + if draws_atlas_view {
+                    u64::from(AtlasView::PASSES)
+                } else {
+                    0
+                };
         // The debug draw layer's own call, on the ground grid's terms: not an
         // effect bit, and decided by whether this frame's slot has a segment in
         // it. One direct draw of one instance covering every segment appended,
@@ -8966,6 +9073,30 @@ impl ForwardRenderer {
                 // that is usually off.
                 view_proj.inverse(),
             );
+        }
+
+        // --- the shadow atlas viewer ---
+        //
+        // **After the grid and before the resolve, and it replaces what both of
+        // them were about.** `docs/plan/sample/18-sundial.md`'s atlas viewer:
+        // the `D32Float` image the shadow pass filled, drawn over the finished
+        // frame so that which slot holds which map is something a reviewer can
+        // look at. [`crate::atlas_view`] carries why it draws here — in display
+        // space, after the operator — rather than into the scene colour.
+        //
+        // After the grid because a grid over a readout is noise; before the
+        // resolve because there is nothing to resolve, and nothing to resolve
+        // *with*: [`Self::resolved_effects`] takes both antialiasing tiers off
+        // for every debug view, so `display` and `present` are one image on
+        // every frame this branch runs on.
+        //
+        // Nothing here is conditional on [`RenderEffects`], on the ground
+        // grid's terms: a frame that resolved any other view is the frame this
+        // renderer recorded before this module existed — no pass, no pipeline,
+        // no block read.
+        if draws_atlas_view {
+            self.atlas_viewer
+                .add_pass(graph, frame, shadow_atlas, display);
         }
 
         // --- the antialiasing resolve ---
@@ -10790,6 +10921,49 @@ impl ForwardRenderer {
         self.cascade_view
     }
 
+    /// Draws the **shadow atlas itself** over the finished frame: the
+    /// `D32Float` image `crate::shadow` budgets, letterboxed at its own aspect,
+    /// each texel's stored depth as a grey and a border round every occupied
+    /// slot.
+    ///
+    /// `docs/plan/sample/18-sundial.md`'s atlas viewer, and the answer to a
+    /// question no other view can be asked: which slot holds which map, and
+    /// which slots hold nothing. A tile that was never rendered into, or
+    /// rendered at the wrong viewport, lights a scene *fully* — so the frame it
+    /// produces is plausible and every golden blessed from it passes. Here it is
+    /// a rectangle that is visibly empty.
+    ///
+    /// # It is a pass, and it is the only debug view that is
+    ///
+    /// Every other view rides in one lane of the frame's uniform block and is a
+    /// branch in `mesh.slang`, because every other view is a function of the
+    /// fragment being shaded. The atlas is not: it is one image the whole frame
+    /// shares. So this switch adds `crate::atlas_view`'s full-screen pass to
+    /// the frame instead — after the tonemap, in display space, for that
+    /// module's reason — and the frame block is byte-identical either way.
+    ///
+    /// # Where it resolves, and what it costs when it is off
+    ///
+    /// Below every replacing view and above
+    /// [`set_cascade_view`](Self::set_cascade_view)'s tint — see
+    /// [`debug_view`](Self::debug_view), which is that order stated once. A
+    /// frame that resolved anything else records **no pass**, no pipeline bind
+    /// and no block read, which is what makes the off position bit-identical on
+    /// `crate::sky_pass`'s terms.
+    pub const fn set_atlas_view(&mut self, on: bool) {
+        self.atlas_view = on;
+    }
+
+    /// Whether the frame draws the shadow atlas over the picture.
+    ///
+    /// **What was asked for, not what is drawn**, on
+    /// [`lod_view`](Self::lod_view)'s terms: a renderer with a replacing view
+    /// also on answers `true` here and draws that one.
+    #[must_use]
+    pub const fn atlas_view(&self) -> bool {
+        self.atlas_view
+    }
+
     /// Pins the eye `docs/plan/25-lod.md`'s selection is projected from, so the
     /// cut stops following the camera.
     ///
@@ -10907,6 +11081,21 @@ impl ForwardRenderer {
             DebugView::LodTint
         } else if self.normals_view {
             DebugView::Normals
+        } else if self.atlas_view {
+            // **Below every view above it, and above the tint below.**
+            //
+            // Below, because every branch before this one is a question about
+            // the *picture* — a cluster's error, a surface's normal, the
+            // occlusion channel — and this one is not a picture of the scene at
+            // all. A caller who left the atlas up and then asked for normals has
+            // asked to look at the frame again, and the frame is what the branch
+            // above draws; the atlas is one keystroke away and is not lost by
+            // being deferred to.
+            //
+            // Above, because the cascade tint multiplies the shaded picture and
+            // this replaces it: a tint on a frame the atlas overwrote would be a
+            // tint on the atlas, which is a colour standing for nothing.
+            DebugView::ShadowAtlas
         } else if self.cascade_view {
             // **Innermost, and the only view that sits below the others rather
             // than above them.** Every branch before this one draws something
@@ -10936,7 +11125,12 @@ impl ForwardRenderer {
             DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
             DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
             DebugView::Cascades => mesh::FrameUniforms::CASCADE_VIEW_ON,
-            DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
+            // **The off sentinel, and it is not an omission.** This view is a
+            // pass rather than a branch in `mesh.slang` — see
+            // [`crate::atlas_view`] — so the colour pass draws exactly the
+            // shaded picture it always drew and the pass afterwards replaces it.
+            // A lane of its own would be a threshold no shader tests.
+            DebugView::ShadowAtlas | DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
         }
     }
 
@@ -11325,6 +11519,7 @@ impl ForwardRenderer {
         // Nothing to release on a renderer nobody drew a segment through — see
         // [`crate::debug_draw`], whose pipeline is built on first use.
         self.debug_draw.destroy(device);
+        self.atlas_viewer.destroy(device);
         self.sky_pass.destroy(device);
         self.upscale.destroy(device);
         self.smaa.destroy(device);
@@ -12342,12 +12537,14 @@ mod tests {
     /// order agrees with this one on every combination where at most one switch
     /// is set.
     ///
-    /// **[`DebugView::Cascades`] is the exception the walk is worth most for.**
-    /// It is the one view that keeps the shaded picture rather than replacing
+    /// **The two innermost views are the exception the walk is worth most for.**
+    /// [`DebugView::Cascades`] keeps the shaded picture rather than replacing
     /// it, so it resolves *last* and its sentinel runs the other way down the
-    /// lane; every combination where it is set beside a replacing view is a
-    /// combination an order written any other way answers differently, and there
-    /// is no single-switch case that could tell them apart.
+    /// lane; [`DebugView::ShadowAtlas`] resolves just above it and carries the
+    /// *off* sentinel, because it is a pass rather than a branch. Every
+    /// combination where either is set beside a replacing view is a combination
+    /// an order written any other way answers differently, and there is no
+    /// single-switch case that could tell them apart.
     ///
     /// [`ForwardRenderer::debug_view`] is asserted beside the lane, so the value
     /// a panel reads back and the value the shader branches on cannot drift —
@@ -12371,18 +12568,23 @@ mod tests {
                     for heatmap in [false, true] {
                         for lod in [false, true] {
                             for normals in [false, true] {
-                                for cascades in [false, true] {
+                                for (atlas, cascades) in
+                                    [false, true].into_iter().flat_map(|atlas| {
+                                        [false, true].map(|cascades| (atlas, cascades))
+                                    })
+                                {
                                     renderer.set_bent_normal_view(bent);
                                     renderer.set_motion_view(motion);
                                     renderer.set_occlusion_view(occlusion);
                                     renderer.set_heatmap(heatmap);
                                     renderer.set_lod_view(lod);
                                     renderer.set_normals_view(normals);
+                                    renderer.set_atlas_view(atlas);
                                     renderer.set_cascade_view(cascades);
                                     let set = format!(
                                         "bent={bent} motion={motion} occlusion={occlusion} \
                                  heatmap={heatmap} lod={lod} normals={normals} \
-                                 cascades={cascades}"
+                                 atlas={atlas} cascades={cascades}"
                                     );
                                     // Each switch reads back what it was set to, whatever
                                     // the others are: a caller's toggle is about the
@@ -12394,6 +12596,7 @@ mod tests {
                                     assert_eq!(renderer.heatmap(), heatmap);
                                     assert_eq!(renderer.lod_view(), lod);
                                     assert_eq!(renderer.normals_view(), normals);
+                                    assert_eq!(renderer.atlas_view(), atlas);
                                     assert_eq!(renderer.cascade_view(), cascades);
 
                                     let expected = if bent {
@@ -12408,6 +12611,15 @@ mod tests {
                                         DebugView::LodTint
                                     } else if normals {
                                         DebugView::Normals
+                                    } else if atlas {
+                                        // **Below every replacing view above and
+                                        // above the tint below**, which is the
+                                        // half of this order no single-switch
+                                        // case reaches: with a replacing view
+                                        // also set the frame is that view's, and
+                                        // with the tint also set the frame is the
+                                        // atlas.
+                                        DebugView::ShadowAtlas
                                     } else if cascades {
                                         // **Last, which is the half of this order a
                                         // chain in any other arrangement would get
@@ -12442,7 +12654,17 @@ mod tests {
                                         DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
                                         DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
                                         DebugView::Cascades => mesh::FrameUniforms::CASCADE_VIEW_ON,
-                                        DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
+                                        // **The atlas view carries the *off*
+                                        // sentinel**, which is what makes this
+                                        // assertion say something rather than
+                                        // restate `debug_view_lane`: the colour
+                                        // pass draws the shaded picture and
+                                        // `crate::atlas_view`'s pass replaces
+                                        // it, so a lane of its own here would be
+                                        // a threshold no shader tests.
+                                        DebugView::ShadowAtlas | DebugView::Shaded => {
+                                            mesh::FrameUniforms::NORMALS_VIEW_OFF
+                                        }
                                     };
                                     assert_eq!(
                                         &block[AMBIENT_W..AMBIENT_W + 4],
@@ -12467,6 +12689,109 @@ mod tests {
         }
 
         renderer.destroy(device.as_ref());
+    }
+
+    /// **The atlas viewer records one pass, and only on the frame it is the view
+    /// showing.**
+    ///
+    /// The mechanism no other check in this file can see. Every other debug view
+    /// is a lane of the frame block, so
+    /// [`the_debug_views_resolve_in_one_order_however_they_are_set`] observes it
+    /// by reading four bytes; this one is a *pass*, and "the pass was recorded"
+    /// is a claim about the command stream and about nothing else. A switch that
+    /// resolved correctly and recorded nothing would satisfy every other
+    /// assertion in this module and draw the frame unchanged.
+    ///
+    /// Three arms, and the third is the one that makes the first two mean
+    /// something:
+    ///
+    /// * off — no pass at all, which is what makes the off position
+    ///   bit-identical for every golden in this workspace;
+    /// * on — the pass, with the full-screen triangle in it;
+    /// * on **beside a replacing view** — no pass, because
+    ///   [`ForwardRenderer::debug_view`] resolved to that view and the atlas is
+    ///   not what this frame draws. That is the half a `self.atlas_view` read at
+    ///   the recording site would get wrong while passing both arms above.
+    ///
+    /// [`the_debug_views_resolve_in_one_order_however_they_are_set`]: fn@the_debug_views_resolve_in_one_order_however_they_are_set
+    #[test]
+    fn the_atlas_viewer_records_its_pass_only_when_it_is_the_view_showing() {
+        use crcbl_hal::null::Command;
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let (camera, sun) = (Camera::default(), DirectionalLight::default());
+
+        // How many times the viewer's pass was opened since `from`, which is
+        // where the previous arm's commands ended.
+        let opened = |from: usize| {
+            recorder.commands()[from..]
+                .iter()
+                .filter(|command| {
+                    matches!(
+                        command.opens_pass(),
+                        Some((_, Some(recorded))) if recorded == crate::atlas_view::LABEL
+                    )
+                })
+                .count()
+        };
+
+        let shaded = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
+        assert_eq!(
+            opened(0),
+            0,
+            "a frame drawing the shaded picture recorded the atlas viewer's pass"
+        );
+        let after_shaded = recorder.commands().len();
+        shaded.release(device);
+
+        renderer.set_atlas_view(true);
+        assert_eq!(renderer.debug_view(), DebugView::ShadowAtlas);
+        let viewing = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
+        assert_eq!(
+            opened(after_shaded),
+            1,
+            "the atlas viewer is on and its pass was not recorded exactly once"
+        );
+        // And what it recorded is the over-sized triangle and nothing else: a
+        // pass that bound a pipeline and drew no vertices would open above and
+        // leave the frame the tonemap wrote.
+        let drawn: Vec<(u32, u32)> = commands_in_pass(&recorder, crate::atlas_view::LABEL)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Draw {
+                    vertices,
+                    instances,
+                } => Some((
+                    vertices.end - vertices.start,
+                    instances.end - instances.start,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drawn, vec![(crate::atlas_view::FULLSCREEN_VERTICES, 1)]);
+        let after_viewing = recorder.commands().len();
+        viewing.release(device);
+
+        // The switch left on, and a replacing view asked for over the top of it.
+        renderer.set_normals_view(true);
+        assert_eq!(
+            renderer.debug_view(),
+            DebugView::Normals,
+            "the atlas view does not lose to a replacing view, so the arm below asks nothing"
+        );
+        let normals = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
+        assert_eq!(
+            opened(after_viewing),
+            0,
+            "the frame resolved to the normals view and still recorded the atlas viewer's \
+             pass over the top of it"
+        );
+        normals.release(device);
+
+        renderer.destroy(device);
     }
 
     /// **The heatmap moves the ambient's last lane and no other byte**, and

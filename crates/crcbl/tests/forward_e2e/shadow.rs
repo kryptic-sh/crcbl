@@ -82,6 +82,15 @@ const SUN_TOWARDS_Z: f32 = 1.0;
 /// A frame drawn under one sun, with its shadow atlas read back beside it.
 struct ShadowFrame {
     image: crcbl_golden::Image,
+    /// The swapchain format this frame was drawn into.
+    ///
+    /// Carried because the atlas viewer's check compares a **derived** grey
+    /// against a readback byte, and what a fragment wrote is not what lands in
+    /// the buffer where the surface preferred an sRGB format — see
+    /// [`crate::depth_probe::srgb_encode`]. The fixture takes whatever the
+    /// surface offers, so which of the two happened is a fact about the run
+    /// rather than a constant.
+    format: Format,
     /// The atlas as depth, row-major, `atlas_extent()` of them — or the reason
     /// this backend produced none, which is a declared answer rather than a
     /// failure. See [`ShadowFrame::atlas`].
@@ -329,13 +338,18 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
     let image = crcbl_golden::Image::from_readback(width, height, &color, order)
         .expect("the readback is exactly one image");
 
+    let format = headless.format;
     device.destroy_command_buffer(commands);
     device.destroy_buffer(color_staging);
     device.destroy_buffer(atlas_staging);
     renderer.destroy(device);
     pool.destroy(device);
     headless.finish();
-    ShadowFrame { image, atlas }
+    ShadowFrame {
+        image,
+        format,
+        atlas,
+    }
 }
 
 /// **Holds a backend to a declared missing depth-image copy**, and hands back
@@ -1170,6 +1184,443 @@ fn the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from() {
         (0, 0),
         "a renderer the cascade view was switched on and off again does not draw the frame it \
          drew before, so every golden blessed without the overlay is at risk of moving"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The atlas viewer
+// ---------------------------------------------------------------------------
+//
+// `docs/plan/sample/18-sundial.md`'s milestone 1 owed one diagnostic after the
+// cascade overlay: the atlas *itself* on screen. Everything above this line
+// reads the atlas back on the CPU, which no reviewer can do while looking at a
+// live frame — so a tile that was never rendered into, or one a light was
+// refused, has only ever been visible to a test.
+//
+// `DebugView::ShadowAtlas` is that picture, and it is the one debug view that is
+// a pass rather than a branch in `mesh.slang`. The checks below therefore have
+// to hold two things a lane-reading assertion cannot: that the pass reaches the
+// frame at all, and that the grey it draws is a function of the depth the CPU
+// readback finds at the very texel the shader sampled — not of itself.
+
+/// The sun's scene, with the atlas viewer on or off.
+///
+/// The same open box and hanging cube every check above draws, because what is
+/// being looked at is the atlas rather than the scene: the cascades are filled
+/// by a caster and the light region is empty, which is exactly the pair of
+/// states the picture has to tell apart.
+fn render_atlas_view(on: bool) -> ShadowFrame {
+    let prepare = move |renderer: &mut crcbl::render::ForwardRenderer| {
+        crate::mesh_scene::place(
+            renderer,
+            crcbl::render::scene::DEMO_OPEN_BOX,
+            crcbl::render::scene::DEMO_UNTINTED,
+            crcbl::math::Mat4::from_translation(BOX_AT),
+        );
+        renderer.set_atlas_view(on);
+    };
+    render_scene(&ShadowScene {
+        prepare: &prepare,
+        camera: overhead_camera(),
+        sun: crcbl::render::DirectionalLight {
+            direction: sun(1.0),
+            ..crcbl::render::DirectionalLight::default()
+        },
+        model: crcbl::math::Mat4::from_translation(CUBE_AT),
+    })
+}
+
+/// Where the atlas is drawn in this frame, in pixels: `xy` the corner and `zw`
+/// the size.
+///
+/// The renderer's own letterbox rather than a second one — `begin_frame` writes
+/// the block with this function — so a change to how the atlas is fitted moves
+/// the readings below with it instead of leaving them measuring whatever now
+/// falls there. The rectangles are irrelevant to it and are passed empty.
+fn atlas_on_screen() -> [f32; 4] {
+    crcbl::shaders::atlas_view::AtlasViewParams::letterboxed(
+        MESH_EXTENT,
+        crcbl::render::shadow::atlas_extent(),
+        [[0.0; 4]; crcbl::shaders::mesh::SHADOW_ATLAS_TILES],
+    )
+    .view
+}
+
+/// Where atlas root cell `cell` is drawn in the frame: `(x, y, width, height)`
+/// in pixels, right and bottom exclusive.
+///
+/// **A choice of where to look, not a claim about the allocator.** What every
+/// grey below is asserted against is the depth the readback holds at
+/// [`atlas_texel_under`] of the pixel actually read, so a cell the allocator
+/// subdivided changes which texel that is and not whether the reading means
+/// anything. The one place the arrangement *is* assumed is the border check,
+/// which asks whether the edge of this rectangle is drawn — and that is the
+/// assumption [`tile`] above already makes.
+fn cell_on_screen(cell: usize) -> (u32, u32, u32, u32) {
+    let view = atlas_on_screen();
+    let (origin_x, origin_y) = crcbl::render::shadow::tile_origin(cell);
+    let (atlas_width, atlas_height) = crcbl::render::shadow::atlas_extent();
+    let side = crcbl::render::shadow::TILE;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "an atlas extent is a few thousand texels, and a tile's origin \
+                  and side are inside it"
+    )]
+    let (across, down) = (atlas_width as f32, atlas_height as f32);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a tile origin and side are inside that extent"
+    )]
+    let (origin, span) = (
+        (origin_x as f32 / across, origin_y as f32 / down),
+        (side as f32 / across, side as f32 / down),
+    );
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the assertion below is what says the result is a rectangle of this frame"
+    )]
+    let rect = (
+        origin.0.mul_add(view[2], view[0]) as u32,
+        origin.1.mul_add(view[3], view[1]) as u32,
+        (span.0 * view[2]) as u32,
+        (span.1 * view[3]) as u32,
+    );
+    assert!(
+        rect.2 > 0
+            && rect.3 > 0
+            && rect.0 + rect.2 <= MESH_EXTENT.0
+            && rect.1 + rect.3 <= MESH_EXTENT.1,
+        "root cell {cell} lands at {rect:?}, which is not a rectangle of a {MESH_EXTENT:?} frame"
+    );
+    rect
+}
+
+/// The middle pixel of [`cell_on_screen`]'s rectangle.
+fn cell_centre(cell: usize) -> (u32, u32) {
+    let (x, y, width, height) = cell_on_screen(cell);
+    (x + width / 2, y + height / 2)
+}
+
+/// The pixels of `cell`'s rectangle whose texel the readback says something was
+/// drawn into, in scan order.
+///
+/// **A cascade is mostly empty and that is not a defect.** Its map covers the
+/// whole of the camera's near range, and the scene standing in it is one box and
+/// one cube — so the middle of the cell is the clear value, and a check that
+/// read there would be comparing two empty tiles and passing. This is what picks
+/// a pixel that is over a caster: the rule is stated, the readback decides, and
+/// the count is what says the cascade drew anything at all.
+fn drawn_pixels_of(atlas: &[f32], cell: usize) -> Vec<(u32, u32)> {
+    let (x, y, width, height) = cell_on_screen(cell);
+    let (atlas_width, _) = crcbl::render::shadow::atlas_extent();
+    let mut found = Vec::new();
+    for row in y..y + height {
+        for column in x..x + width {
+            let (tx, ty) = atlas_texel_under((column, row));
+            if atlas[(ty * atlas_width + tx) as usize] > crcbl::shaders::atlas_view::DEPTH_CLEAR {
+                found.push((column, row));
+            }
+        }
+    }
+    found
+}
+
+/// Which atlas texel `atlas_view.slang` reads for the pixel at `at`.
+///
+/// The shader's own arithmetic — a pixel *centre* mapped through the letterbox
+/// and floored — so the depth compared below is the depth the fragment that drew
+/// this pixel loaded, rather than the depth of a texel nearby.
+fn atlas_texel_under(at: (u32, u32)) -> (u32, u32) {
+    let view = atlas_on_screen();
+    let (width, height) = crcbl::render::shadow::atlas_extent();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a frame extent is a few hundred pixels and an atlas a few thousand texels"
+    )]
+    let inside = ((at.0 as f32 + 0.5) - view[0], (at.1 as f32 + 0.5) - view[1]);
+    assert!(
+        inside.0 >= 0.0 && inside.0 < view[2] && inside.1 >= 0.0 && inside.1 < view[3],
+        "pixel {at:?} is outside the atlas's rectangle {view:?}"
+    );
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "an atlas extent is a few thousand texels"
+    )]
+    let extent = (width as f32, height as f32);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the product is inside the extent by the bound asserted above"
+    )]
+    let texel = (
+        (inside.0 / view[2] * extent.0) as u32,
+        (inside.1 / view[3] * extent.1) as u32,
+    );
+    (texel.0.min(width - 1), texel.1.min(height - 1))
+}
+
+/// The grey the viewer draws for a texel holding `depth`, as a readback level.
+///
+/// `atlas_view.slang`'s mapping, then the swapchain's own encode — see
+/// [`crate::depth_probe::srgb_encode`], and the field on [`ShadowFrame`] that
+/// says which of the two happened.
+fn expected_level(depth: f32, format: Format) -> f32 {
+    use crcbl::shaders::atlas_view::{DEPTH_CLEAR, EMPTY_GREY, OCCUPIED_FLOOR};
+    let grey = if depth > DEPTH_CLEAR {
+        OCCUPIED_FLOOR + depth * (1.0 - OCCUPIED_FLOOR)
+    } else {
+        EMPTY_GREY
+    };
+    let encoded = match format {
+        Format::Rgba8UnormSrgb | Format::Bgra8UnormSrgb => crate::depth_probe::srgb_encode(grey),
+        _ => grey,
+    };
+    encoded * 255.0
+}
+
+/// The red channel at `at`, which is the grey where the viewer drew one.
+fn level_at(image: &crcbl_golden::Image, at: (u32, u32)) -> f32 {
+    f32::from(image.pixel(at.0, at.1).expect("inside the frame")[0])
+}
+
+/// How far red leads blue at `at`, in levels — the reading that separates the
+/// tile borders from every grey in the picture.
+fn tint_at(image: &crcbl_golden::Image, at: (u32, u32)) -> f32 {
+    let pixel = image.pixel(at.0, at.1).expect("inside the frame");
+    f32::from(pixel[0]) - f32::from(pixel[2])
+}
+
+/// Which root cell the sun's near cascade is drawn into, and which one nothing
+/// is.
+///
+/// The sun's scene lights no punctual light at all, so every slot of the atlas's
+/// light region is free — [`EMPTY_CELL`] is one of them, chosen away from the
+/// top row so a reading there cannot be a cascade the allocator moved.
+const CASCADE_CELL: usize = 0;
+
+/// See [`CASCADE_CELL`].
+const EMPTY_CELL: usize = 5;
+
+/// How many of the near cascade's pixels have to be over a texel a caster wrote.
+///
+/// **Swept before it was fixed**, with the rest of this check's constants; the
+/// table is beside [`ATLAS_GREY_LEVELS`]. It is the anti-vacuity floor under
+/// [`drawn_pixels_of`]'s pick: one such pixel would let a cascade that drew a
+/// single stray texel satisfy every reading below, and the box and the cube
+/// standing in this cascade cover far more of it than that. Floored at roughly
+/// half the measured count.
+const CASCADE_DRAWN_PIXELS: usize = 32;
+
+/// How far apart an occupied texel's grey and an empty one's have to be, in
+/// levels.
+///
+/// **Swept before it was fixed**, on both Vulkan adapters this workspace runs
+/// locally — radv on an RX 7900 XTX and lavapipe — over the frame this test
+/// draws, into an `Rgba8UnormSrgb` swapchain:
+///
+/// | reading                            | radv        | lavapipe    |
+/// | ---------------------------------- | ----------- | ----------- |
+/// | pixels of cell 0 over a caster     | `77`        | `77`        |
+/// | depth at the pixel picked          | `0.0413146` | `0.0413142` |
+/// | grey drawn there / depth predicts  | `155.0` / `155.2` | `155.0` / `155.2` |
+/// | grey over the empty slot / predicts | `69.0` / `69.3` | `69.0` / `69.3` |
+/// | border's red over blue             | `147.0`     | `147.0`     |
+/// | either grey's red over blue        | `0.0`       | `0.0`       |
+/// | the surround                       | `0.0`       | `0.0`       |
+///
+/// so the gap this constant floors is `86.0` on both, and the two adapters agree
+/// to the level everywhere. Floored at roughly half of it: margin for a driver
+/// that rounds an encode differently, and nowhere near enough for a viewer that
+/// drew every texel at one grey, which moves the gap to zero.
+const ATLAS_GREY_LEVELS: f32 = 40.0;
+
+/// How close the grey the picture drew has to be to the grey the readback's own
+/// depth predicts, in levels.
+///
+/// The tolerance on the *cross-check* rather than on the comparison above, and
+/// it is what holds the mapping to the real depth: a viewer whose grey ignored
+/// the depth entirely would still open a gap against an empty tile and would
+/// land nowhere near the value this predicts. The sweep above measured `0.2` and
+/// `0.3`; two levels is the rounding of one 8-bit quantisation and one transfer
+/// function, and a tenth of the gap the mapping actually spans.
+const ATLAS_LEVEL_TOLERANCE: f32 = 2.0;
+
+/// How far red must lead blue for a pixel to be one of the tile borders.
+///
+/// `BORDER_TINT` is amber and every other texel of the picture is a grey, so the
+/// two are not on one axis at all — the sweep above measured `147.0` on the
+/// border and `0.0` on both greys. Floored at roughly half the lead, which is
+/// still far above anything a grey can produce.
+const ATLAS_BORDER_LEVELS: f32 = 70.0;
+
+/// **The atlas viewer draws each atlas texel's stored depth, borders the slots
+/// that hold a map, and leaves the frame alone when it is off.**
+///
+/// The claim `docs/plan/sample/18-sundial.md`'s milestone 1 has had no observer
+/// for. Four readings, each placed from the atlas's own geometry rather than
+/// found by looking:
+///
+/// * the middle of the near cascade's cell, whose texel the readback says a
+///   caster wrote — a grey the mapping predicts from that very depth;
+/// * the middle of a cell in the light region, which this scene lights nothing
+///   into, so its texels are still the reversed-Z clear;
+/// * a pixel on the cascade cell's own edge, which has to be the border tint and
+///   therefore off the grey axis entirely;
+/// * a pixel outside the letterbox, which is the surround.
+///
+/// **Anti-vacuity.** The two greys are compared against each other *and* against
+/// what the readback's depth predicts, so a viewer that drew one flat grey fails
+/// the first and one that drew a plausible ramp of its own fails the second; the
+/// border is asserted on a channel difference no grey can produce; and the same
+/// frame with the view off must come back byte for byte, or the pass is reaching
+/// frames nobody asked it to.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_atlas_view_draws_the_stored_depth_and_borders_the_slots_that_hold_a_map() {
+    let viewed = render_atlas_view(true);
+    let Some(atlas) = viewed.atlas() else {
+        return;
+    };
+    let (atlas_width, _) = crcbl::render::shadow::atlas_extent();
+
+    let depth_under = |at: (u32, u32)| {
+        let (x, y) = atlas_texel_under(at);
+        atlas[(y * atlas_width + x) as usize]
+    };
+
+    let drawn = drawn_pixels_of(atlas, CASCADE_CELL);
+    let occupied_at = *drawn.first().unwrap_or_else(|| {
+        panic!(
+            "no pixel of root cell {CASCADE_CELL} is over a texel a caster wrote, so the near \
+             cascade drew nothing this frame and there is no occupied tile to look at"
+        )
+    });
+    assert!(
+        drawn.len() >= CASCADE_DRAWN_PIXELS,
+        "only {} of root cell {CASCADE_CELL}'s pixels are over a caster, which is fewer than \
+         the {CASCADE_DRAWN_PIXELS} this scene draws — the reading below would be a single \
+         texel's accident",
+        drawn.len()
+    );
+    let empty_at = cell_centre(EMPTY_CELL);
+    assert!(
+        drawn_pixels_of(atlas, EMPTY_CELL).is_empty(),
+        "root cell {EMPTY_CELL} holds a map, so this scene is not the two-state fixture this \
+         check needs"
+    );
+    let (occupied_depth, empty_depth) = (depth_under(occupied_at), depth_under(empty_at));
+    eprintln!(
+        "{suite}: shadow — the atlas is drawn at {view:?}; {drawn} of root cell {CASCADE_CELL}'s \
+         pixels are over a caster, the first at {occupied_at:?} over texel {occupied_texel:?} \
+         holding depth {occupied_depth}; cell {EMPTY_CELL} is pixel {empty_at:?} over texel \
+         {empty_texel:?} holding depth {empty_depth}",
+        suite = crate::SUITE,
+        view = atlas_on_screen(),
+        drawn = drawn.len(),
+        occupied_texel = atlas_texel_under(occupied_at),
+        empty_texel = atlas_texel_under(empty_at),
+    );
+    assert_eq!(
+        empty_depth,
+        crcbl::shaders::atlas_view::DEPTH_CLEAR,
+        "a slot in the light region holds a depth, so this scene is not the two-state fixture \
+         this check needs"
+    );
+
+    let (occupied, empty) = (
+        level_at(&viewed.image, occupied_at),
+        level_at(&viewed.image, empty_at),
+    );
+    let (cascade_x, cascade_y, cascade_width, _) = cell_on_screen(CASCADE_CELL);
+    let border_at = (cascade_x + cascade_width / 2, cascade_y);
+    let surround_at = (0, MESH_EXTENT.1 / 2);
+    eprintln!(
+        "{suite}: shadow — the viewer drew {occupied:.1} over the caster (the depth predicts \
+         {want_occupied:.1}) and {empty:.1} over the empty slot (predicting {want_empty:.1}); \
+         the border at {border_at:?} leads red over blue by {border:.1}, the two greys by \
+         {occupied_tint:.1} and {empty_tint:.1}, and the surround at {surround_at:?} is \
+         {surround:.1}",
+        suite = crate::SUITE,
+        want_occupied = expected_level(occupied_depth, viewed.format),
+        want_empty = expected_level(empty_depth, viewed.format),
+        border = tint_at(&viewed.image, border_at),
+        occupied_tint = tint_at(&viewed.image, occupied_at),
+        empty_tint = tint_at(&viewed.image, empty_at),
+        surround = level_at(&viewed.image, surround_at),
+    );
+
+    assert!(
+        occupied - empty > ATLAS_GREY_LEVELS,
+        "the caster's texel drew {occupied:.1} and the empty slot's {empty:.1}, which is not \
+         {ATLAS_GREY_LEVELS} levels apart — so the picture cannot tell a tile that holds a map \
+         from one that does not"
+    );
+    // And the grey is the one the depth in the atlas predicts, which is what
+    // holds the mapping to the evidence rather than to itself.
+    for (name, at, depth, drawn) in [
+        ("the caster's", occupied_at, occupied_depth, occupied),
+        ("the empty slot's", empty_at, empty_depth, empty),
+    ] {
+        let want = expected_level(depth, viewed.format);
+        assert!(
+            (drawn - want).abs() <= ATLAS_LEVEL_TOLERANCE,
+            "{name} texel at {at:?} holds depth {depth}, which the viewer's mapping draws as \
+             {want:.1}, and the picture has {drawn:.1}"
+        );
+    }
+
+    // The tile grid, on the edge of the cell the cascade was drawn into.
+    assert!(
+        tint_at(&viewed.image, border_at) > ATLAS_BORDER_LEVELS,
+        "the edge of the occupied cell is not the border tint, so the picture has no tile grid \
+         and slot assignment is as unreadable as it was"
+    );
+    for (name, at) in [
+        ("the caster's", occupied_at),
+        ("the empty slot's", empty_at),
+    ] {
+        assert!(
+            tint_at(&viewed.image, at).abs() < ATLAS_BORDER_LEVELS,
+            "{name} texel is on the border's own colour axis, so the reading above cannot say \
+             which of the two it found"
+        );
+    }
+    assert_eq!(
+        level_at(&viewed.image, surround_at),
+        0.0,
+        "the frame outside the atlas's rectangle is not the surround, so the letterbox is not \
+         where this check thinks it is"
+    );
+
+    // And switching the view off puts the frame back exactly, not nearly.
+    let shaded = render_atlas_view(false);
+    let toggled = {
+        let prepare = |renderer: &mut crcbl::render::ForwardRenderer| {
+            crate::mesh_scene::place(
+                renderer,
+                crcbl::render::scene::DEMO_OPEN_BOX,
+                crcbl::render::scene::DEMO_UNTINTED,
+                crcbl::math::Mat4::from_translation(BOX_AT),
+            );
+            renderer.set_atlas_view(true);
+            renderer.set_atlas_view(false);
+        };
+        render_scene(&ShadowScene {
+            prepare: &prepare,
+            camera: overhead_camera(),
+            sun: crcbl::render::DirectionalLight {
+                direction: sun(1.0),
+                ..crcbl::render::DirectionalLight::default()
+            },
+            model: crcbl::math::Mat4::from_translation(CUBE_AT),
+        })
+    };
+    assert_eq!(
+        difference(&shaded.image, &toggled.image),
+        (0, 0),
+        "a renderer the atlas view was switched on and off again does not draw the frame it \
+         drew before, so every golden blessed without the viewer is at risk of moving"
     );
 }
 

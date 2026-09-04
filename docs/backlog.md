@@ -122,21 +122,27 @@ out of `FrameUniforms::shadow_filter`. What that change did **not** do:
 seam bindings, and the golden suite that measures the penumbra ladder, the seam,
 the contact and the clock's determinism. What that slice did **not** do:
 
-- **The atlas viewer.** `docs/plan/sample/18-sundial.md` puts it in milestone 1
-  and it is not a sample-side change: drawing `crcbl_render::shadow`'s atlas to
-  screen is a pass in `crcbl-render`. So it is an engine slice this fixture will
-  bind a key and a panel row to once it exists, not work `apps/sundial` could
-  have finished — see the shadow-map inspector entry above. The **cascade
-  overlay**, which stood beside it here, landed 2026-09-04 as
-  `DebugView::Cascades`, and this fixture binds it to `C` and to the panel's
-  `CASCADES` row.
-- **`C` is bound but not in `--help`.** The cascade overlay's key landed
-  2026-09-04 in `app.rs`'s `KEYS` and on the pause panel, and `args.rs`'s
-  `USAGE` was not touched — it was outside that change's write set. `KEYS` is
-  what `every_key_is_bound_once_and_named_in_the_help` walks, and that check
-  passes for `C` only because the usage text contains the letter somewhere else,
-  which is the vacuous half of an otherwise real guard. What it wants is a line
-  under the other key descriptions saying `C` toggles the cascade overlay.
+- **The atlas viewer reaches no golden and no page.** It landed 2026-09-04 as
+  `DebugView::ShadowAtlas` and this fixture binds it to `T` and the panel's
+  `ATLAS` row, but nothing draws it in CI: `apps/sundial/tests/golden.rs` has no
+  frame with the view on, and `apps/sundial/src/web.rs` exports no control for
+  it — the browser demo's controls are the filter, the seam and the clock, and a
+  phone has no `T`. A golden would be the natural place to catch a viewer that
+  stopped drawing the border or the letterbox, which the e2e's four placed
+  readings do not cover: those assert values at points, not the layout.
+- **The viewer is only exercised over whole root cells.** The e2e reads cascade
+  0 and one free slot of the light region, and both are whole cells of
+  `crcbl_render::shadow`'s grid. `atlas_view.slang`'s border loop reads each
+  slot's `FrameUniforms::shadow_atlas_rect`, so a map the allocator put in a
+  _subdivided_ cell is bordered at its real size — that path is written and
+  nothing observes it. A scene with more shadowed lights than the atlas has root
+  cells would reach it.
+- **A frame at a render scale below one draws the readout through the upscale.**
+  The pass writes the internal target, which the upscale then filters to the
+  caller's extent — so at `set_render_scale(0.5)` the atlas is a Catmull-Rom
+  reconstruction of itself and its one-pixel borders are soft. Considered and
+  left: drawing after the upscale would want a second pipeline at the caller's
+  format for a case a reviewer can avoid by putting the scale back.
 - **No cost figure per filter.** The entry above this one asks for it and this
   slice did not supply it: `ShadowCost` prints the `shadow` and `forward` rows
   live, but nothing in the golden suite records a number, because a timing read
@@ -4156,23 +4162,6 @@ field; `the_tonemap_block_carries_the_curve_a_caller_selected` in
 `crates/crcbl-render/src/forward.rs` is what proves the lane reaches the GPU,
 and `the_aces_curve_keeps_the_shading_the_clamp_flattens` in
 `crates/crcbl/tests/mesh_e2e/hdr.rs` is what proves the branch runs on a device.
-
-### Shadow-map inspector (2026-08-27)
-
-**Not built.** `18-render-features.md`'s shadow section names it beside the
-cascade overlay, which landed 2026-09-04 as `ForwardRenderer::set_cascade_view`
-and `DebugView::Cascades`. The inspector is the other half: the `D32Float` atlas
-itself drawn to screen, so a tile that was never rendered into, or rendered at
-the wrong viewport, is visible rather than inferred from a frame.
-
-**What it would take.** A UI panel sampling the atlas, which needs a
-sampled-depth read the AO pass already does. `crates/crcbl/tests/forward_e2e/`'s
-`the_shadow_atlas_is_written_rather_than_left_at_its_clear_value` and
-`a_shadowed_spot_fills_the_tile_it_was_given_and_no_other` are what stand in for
-it today, and they read the atlas back on the CPU — which no reviewer can do
-while looking at a live frame.
-
-**Blocks.** Nothing shipping. It is a diagnosis cost the next shadow bug pays.
 
 ### Camera-relative rendering: the f64 sector offset table (2026-08-27)
 
@@ -22466,7 +22455,7 @@ is left of topic 25:
 
 - **Hand-authored LOD precedence and `MSFT_lod` import**, and QEM auto-gen for
   arbitrary meshes — the only DAG in the tree is the cooked dunes artifact.
-- The bake cache, the shadow-map inspector, HLOD, impostors, dithered crossfade.
+- The bake cache, HLOD, impostors, dithered crossfade.
 
 **The coverage hole worth knowing about:** `OffscreenSetup::OPTIONAL_FEATURES`
 never asked for `TASK_SHADER`, so every `render_e2e` run on a mesh-capable

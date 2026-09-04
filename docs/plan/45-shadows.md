@@ -224,10 +224,11 @@ within tolerance and was left alone.
   indirect draws into depth-only pipelines). No CPU re-traversal per cascade —
   the shadow cost scales like the main pass, by design.
 - Render graph: cascades = depth targets owned by the graph; barriers/layout
-  automatic like every pass. **The debug half of this row is unbuilt**: there is
-  no cascade-split overlay and no shadow-map inspector panel.
-  `ForwardRenderer::debug_view` offers a heatmap, a DAG-level tint, world-space
-  normals, ambient occlusion and motion — and none of them is about shadows.
+  automatic like every pass. **The debug half of this row landed 2026-09-04**:
+  `ForwardRenderer::debug_view` now offers `Cascades`, which tints the picture
+  by the cascade each sun-lit fragment read, and `ShadowAtlas`, which draws the
+  atlas itself — the cascade-split overlay and the shadow-map inspector this
+  line asked for. Both are dated notes below.
 - Skinned casters (topic 17) come free via the skinned-output pool region.
 - **Spot and point shadows are built, and not as this line first described
   them.** The 2026-08-13 decision above replaced the cube map with six atlas
@@ -428,6 +429,28 @@ existing branch had to grow a condition. `crates/crcbl/tests/forward_e2e/`'s
 `the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from` reads three
 placed pixels — inside the near cascade, half way through the band, past it —
 and holds them in that order, which is the assertion a step would fail.
+
+**2026-09-04: and the atlas is now something you can look at.**
+`crcbl_render::DebugView::ShadowAtlas` — `debug_view shadow atlas` from the
+console, `T` in `apps/sundial` — draws the `D32Float` atlas over the finished
+frame: each texel's stored depth as a grey, an amber border round every slot
+whose `FrameUniforms::shadow_atlas_rect` is non-zero, and the image letterboxed
+at its own aspect. That closes the "no shadow-map inspector panel" this topic's
+MVP row carried, and it is the diagnostic every rung above pays for: a tile that
+was never rendered into, one rendered at the wrong viewport, and one a light was
+refused all produce a scene that is _fully lit_ and entirely plausible, so until
+now the only observer was a CPU readback in
+`crates/crcbl/tests/forward_e2e/shadow.rs`.
+
+Two decisions inside it. It is a **pass** rather than a branch in `mesh.slang`,
+where every other debug view is a branch, because the atlas is one image the
+whole frame shares rather than a function of any fragment — drawn from the
+colour pass, what a reviewer saw of it would depend on where they were standing.
+And it draws **after the tonemap, in display space**, on the ground grid's
+terms: a readout whose greys move with the scene's exposure is one nobody can
+compare across two frames. The consequence a reader should expect is that the
+frame's uniform block does not change at all, so no golden moves and the view's
+off position is bit-identical.
 
 ### A ninth, taken 2026-08-28: a rotated disc, and the count that makes it quiet
 

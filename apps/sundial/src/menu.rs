@@ -24,7 +24,7 @@
 //! readings for a run nobody has paused.
 
 use crcbl::engine::FIRST_GAME_ID;
-use crcbl::render::{EffectRequest, RenderEffects};
+use crcbl::render::{DebugView, EffectRequest, RenderEffects};
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
 use crate::filter::Knobs;
@@ -110,6 +110,16 @@ pub enum SundialAction {
     /// is the only way the cross-fade band `docs/plan/45-shadows.md`'s eighth
     /// decision added is a thing a reviewer can look at.
     ToggleCascades,
+    /// Draw the shadow atlas over the frame, or take it away —
+    /// `crcbl::debug_view`'s `DebugView::ShadowAtlas`.
+    ///
+    /// **The one row that is about the atlas rather than about the picture.**
+    /// Every other control here — [`Self::ToggleCascades`] included — asks a
+    /// question about the frame; this one replaces the frame with the `D32Float`
+    /// image the shadow pass filled, which is the only way "which slot holds
+    /// which map, and which slots hold nothing" is a thing a reviewer can look
+    /// at rather than infer from a scene that looks lit either way.
+    ToggleAtlas,
     /// Put the comparison seam up at [`crate::filter::SEAM_CENTRE`], or take it
     /// away.
     ToggleSeam,
@@ -156,18 +166,24 @@ pub const SUN_TIME_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 8;
 /// that already exist.
 pub const CASCADES_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 9;
 
+/// The atlas viewer's row.
+///
+/// Appended past every id above, on [`CASCADES_ID`]'s terms and for its reason.
+pub const ATLAS_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 10;
+
 /// Every row `ENTER` fires, with the action it carries and the word it prints.
 ///
 /// One table rather than a row list beside an id match, because those are one
 /// fact about a row written twice — and the way the two drift is a row that fires
 /// its neighbour's action while printing its own name.
-pub(crate) const PRESSED_ROWS: [(crcbl::ui::WidgetId, SundialAction, &str); 6] = [
+pub(crate) const PRESSED_ROWS: [(crcbl::ui::WidgetId, SundialAction, &str); 7] = [
     (
         SHADOWS_ID,
         SundialAction::ToggleEffect(RenderEffects::SHADOWS),
         "SHADOWS",
     ),
     (CASCADES_ID, SundialAction::ToggleCascades, "CASCADES"),
+    (ATLAS_ID, SundialAction::ToggleAtlas, "ATLAS"),
     (FILTER_ID, SundialAction::CycleFilter, "FILTER"),
     (SEAM_ID, SundialAction::ToggleSeam, "SEAM"),
     (SUN_ID, SundialAction::ToggleSun, "SUN"),
@@ -232,6 +248,17 @@ fn effect_state(resolved: RenderEffects, device: RenderEffects) -> &'static str 
     }
 }
 
+/// What a debug-view row says: `ON` where the frame is drawing `named` and `OFF`
+/// otherwise.
+///
+/// A function rather than the conditional written out at each row, because the
+/// two rows are one fact about one cell — the engine draws exactly one view —
+/// and a row that spelled the comparison itself is a row that can disagree with
+/// its neighbour about what "on" means.
+fn on_off(view: DebugView, named: DebugView) -> &'static str {
+    if view == named { "ON" } else { "OFF" }
+}
+
 /// The pause panel: the camera, the shadow passes, the filter, the seam and the
 /// sun.
 #[must_use]
@@ -241,7 +268,7 @@ pub fn pause_menu(
     device: RenderEffects,
     knobs: Knobs,
     clock: Clock,
-    cascades: bool,
+    view: DebugView,
 ) -> Menu {
     use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
     let resolved = request.resolve(device);
@@ -258,12 +285,27 @@ pub fn pause_menu(
         // Under the shadow row rather than beside the filter's, because it is
         // about the *cascades* and not about the kernel: it says which map a
         // pixel read, which is the question the rows below cannot answer at all.
+        //
+        // **Both rows are read off one value**, and that is why `view` is a
+        // [`DebugView`] rather than a flag each: the engine holds exactly one
+        // debug view — `crcbl::debug_view::current` is the cell — so two
+        // independent flags here could spell a panel saying `ON` twice about a
+        // frame that draws one of them, and two adjacent `bool` arguments could
+        // be handed over the wrong way round and still compile.
         MenuItem::new(
             CASCADES_ID,
-            format!("CASCADES: {}", if cascades { "ON" } else { "OFF" }),
+            format!("CASCADES: {}", on_off(view, DebugView::Cascades)),
             // `ENTER`, not `C`, on `FILTER`'s terms: a row with an action behind
             // it says so, and the key beside it is a shortcut rather than the
             // row's control. This module's header is where that split is drawn.
+            "ENTER",
+        ),
+        // Beside the cascade row: the two are the diagnostics
+        // `docs/plan/sample/18-sundial.md`'s milestone 1 asks for, and they are
+        // the two rows here that leave the shadow alone and change what is drawn.
+        MenuItem::new(
+            ATLAS_ID,
+            format!("ATLAS: {}", on_off(view, DebugView::ShadowAtlas)),
             "ENTER",
         ),
         MenuItem::new(
@@ -323,7 +365,7 @@ pub fn menus() -> Menus {
                 RenderEffects::all(),
                 Knobs::read(),
                 Clock::default(),
-                crate::app::cascade_view(),
+                crcbl::debug_view::current(),
             ),
         )],
     )
@@ -350,7 +392,7 @@ mod tests {
             RenderEffects::all(),
             Knobs::read(),
             Clock::default(),
-            false,
+            DebugView::Shaded,
         ))
     }
 
@@ -442,7 +484,7 @@ mod tests {
             RenderEffects::all(),
             knobs,
             clock,
-            false,
+            DebugView::Shaded,
         ));
         let has = |prefix: &str| {
             rows.iter()
@@ -467,7 +509,7 @@ mod tests {
             RenderEffects::all(),
             knobs,
             scrubbed,
-            false,
+            DebugView::Shaded,
         ));
         let sun = moved
             .iter()
@@ -493,7 +535,7 @@ mod tests {
                 RenderEffects::all(),
                 Knobs::read(),
                 Clock::default(),
-                false,
+                DebugView::Shaded,
             ))
             .into_iter()
             .find(|label| label.starts_with("CAMERA: "))
@@ -567,7 +609,7 @@ mod tests {
             clamped,
             Knobs::read(),
             Clock::default(),
-            false,
+            DebugView::Shaded,
         ));
         assert!(
             rows.contains(&"SHADOWS: UNAVAILABLE".to_string()),

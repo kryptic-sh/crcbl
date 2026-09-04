@@ -50,7 +50,10 @@ a shadow implementation whose artefacts ship.
   [18-render-features.md](../18-render-features.md) has owed since P7 and which
   nothing else in the tree is going to build.
 - An atlas viewer: the shadow atlas drawn to screen, so tile assignment is a
-  thing you can look at.
+  thing you can look at. **Built 2026-09-04** as
+  `crcbl_render::DebugView::ShadowAtlas` — an engine slice, because drawing the
+  atlas is a pass in `crcbl-render` rather than anything a sample can do — and
+  bound here to `T` and to the pause panel's `ATLAS` row.
 - Technique selector and split screen, on sample 17's harness pattern. **Both
   are built as of 2026-09-04** — topic 45's fifteenth decision:
   `r_shadow_filter` selects between `pcss`, `disc` and `box`, and
@@ -80,7 +83,7 @@ place to reopen it. No authoring tools.
 **Exempt from sample rule 11**, on lantern's ground. **Exempt from rules 2 and
 10**, on the viewer's: no game state, no `World`, no `GameModule`.
 
-## Status: built and published 2026-09-04; the atlas viewer is owed
+## Status: built and published 2026-09-04, milestone 1 complete
 
 **`apps/sundial` exists and CI draws it.** The engine held exactly one shadow
 filter until 2026-09-04; it now holds three, selectable at runtime, with a
@@ -92,9 +95,9 @@ suite (`tests/golden.rs`) CI runs on lavapipe. **The browser demo followed the
 same day**: `apps/sundial/src/web.rs`, `web/pages/sundial.html` and
 `web/demos/sundial/main.js` put the filter, the seam and the sun's clock on the
 page as HTML controls, and `web/tools/browser-e2e.mjs`'s `sundial` row presses
-each of them and reads what the `[HUD]` line says they did. What remains owed is
-the atlas viewer, an engine slice; `docs/backlog.md` carries it. The cascade
-overlay landed the same day and `C` shows it.
+each of them and reads what the `[HUD]` line says they did. **Milestone 1's two
+diagnostics landed the same day**: the cascade overlay on `C`, and the atlas
+viewer on `T`.
 
 What also exists is evidence that the shadow implementation is at the edge of
 its current budget: since the 2026-08-26 re-tiling that bought a second shadowed
@@ -112,7 +115,7 @@ hold in their head, and the only honest way to set them is to look.
 
 1. **The scene, the moving sun and the shipped filter.** Cascade overlay and
    atlas viewer land here — they are the diagnostic half and they are worth more
-   than a second filter.
+   than a second filter. **Complete 2026-09-04.**
 
    **The scene, the clock and the filter selector were built on 2026-09-04**, as
    `apps/sundial`: the plaza (`src/plaza.rs`), the scripted sun (`src/sun.rs`),
@@ -125,8 +128,16 @@ hold in their head, and the only honest way to set them is to look.
    `crcbl_render::DebugView::Cascades`: the shaded picture multiplied by a tint
    per cascade, blended across [45-shadows.md](../45-shadows.md)'s eighth
    decision's band. This sample binds it to `C` and to the pause panel's
-   `CASCADES` row. The **atlas viewer** is still owed — see `docs/backlog.md`'s
-   shadow-map inspector entry.
+   `CASCADES` row.
+
+   The **atlas viewer** landed the same day as
+   `crcbl_render::DebugView::ShadowAtlas`: the `D32Float` atlas letterboxed over
+   the finished frame, each texel's stored depth as a grey and an amber border
+   round every slot holding a map. It is a full-screen pass in `crcbl-render`
+   rather than a branch in `mesh.slang`, because the atlas is one image the
+   whole frame shares rather than a function of any fragment, and it draws in
+   display space after the tonemap so its greys do not move with the exposure.
+   `T` and the panel's `ATLAS` row show it.
 
 2. **Normal-offset bias and the acne/peter-panning pair**, checkable at the
    contact points the scene was built for. The bias itself **shipped

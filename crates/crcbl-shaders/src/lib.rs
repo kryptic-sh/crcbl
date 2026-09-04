@@ -312,6 +312,10 @@ pub mod ssr;
 /// The uniform block `fxaa.slang` reads, in the layout that shader declares.
 pub mod fxaa;
 
+/// The uniform block and the constants `atlas_view.slang` reads, in the layouts
+/// that shader declares.
+pub mod atlas_view;
+
 // `fog` carries its own `//!` header, for the reason `upscale` and `dfg` do
 // below: both forms on one module makes rustdoc resolve its intra-doc links in
 // this file's scope rather than its own.

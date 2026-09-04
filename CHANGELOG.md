@@ -35,6 +35,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The shadow-atlas viewer**, which `docs/plan/sample/18-sundial.md`'s
+  milestone 1 has owed since the sample was written and which closes
+  `docs/plan/45-shadows.md`'s "no shadow-map inspector panel".
+  `crcbl_render::DebugView::ShadowAtlas` and `ForwardRenderer::set_atlas_view`
+  draw the `D32Float` atlas itself over the finished frame: each texel's stored
+  depth as a grey, an amber border round every slot that holds a map, and the
+  image letterboxed at its own aspect. A tile that was never rendered into, or
+  one a light was refused, lights a scene fully and produces a frame that looks
+  correct — so until now the only way to see one was to copy the atlas back on
+  the CPU, which no reviewer can do while looking at a live frame.
+
+  It is the one debug view that is a **pass** rather than a branch in
+  `mesh.slang`, because the atlas is one image the whole frame shares rather
+  than a function of any fragment; `crcbl-render`'s new `atlas_view` module and
+  `crcbl-shaders`' `atlas_view.slang` are it. The pass draws after the tonemap
+  in display space, on the ground grid's terms, so the grey standing for a given
+  depth does not move with the scene's exposure. It resolves below every
+  replacing view and above `DebugView::Cascades`, and a frame that resolved
+  anything else records no pass at all — the frame's uniform block is
+  byte-identical either way, so no golden moves.
+
+  Reachable as `debug_view shadow atlas` from the console in every sample, and
+  bound in `apps/sundial` to the `T` key and the pause panel's `ATLAS` row.
+
 - **The cascade debug overlay**, which `docs/plan/18-render-features.md` has
   owed since P7. `crcbl_render::DebugView::Cascades` and
   `ForwardRenderer::set_cascade_view` multiply the shaded picture by
