@@ -157,25 +157,49 @@ seam bindings, and the golden suite that measures the penumbra ladder, the seam,
 the contact and the clock's determinism — and both diagnostics now reach a
 golden of their own and a button on the page. What is still **not** done:
 
-- **The cross-fade claim is read at one pose, one sun and one filter.**
-  `the_colonnades_shadow_crosses_the_cascade_split_without_a_step` draws
-  `Arm::shipped()` alone: `plaza::fixed_camera`, `sun::FIXTURE_TICK` and the
-  shipped `pcss`. Nothing reads the band under `disc` or `box`, whose filter
-  widths differ from PCSS's and therefore whose step across the switch does too;
-  nothing reads it at `sun::GRAZING_TICK`, where the shadows are two and a half
-  times longer and cross the split somewhere else entirely; and nothing reads it
-  from `plaza::counter_camera`, whose split stands at the same distance but in a
-  different part of the plaza. Each is one more arm of the same walk, and each
-  costs two more frames.
-- **Only three walks read across the split, and all three are one column's.**
-  The run prints them: column 4 at `-0.26`, `-0.22` and `-0.18` m off its shadow
-  axis. That is not a choice — `plaza::hidden_from` refuses the rest, because
-  the colonnade stands between the fixed camera and most of the pavement its own
-  shadows fall on at that distance. The reading is therefore thinner than it
-  looks, and a change to `COLONNADE_NEAR_Z`, `COLONNADE_SPACING` or the fixture
-  sun could leave it with none — in which case the test refuses the run rather
-  than passing it, which is the failure mode to expect. Widening it wants either
-  a pose that sees more of that pavement or a caster placed for it.
+- **The cross-fade claim is read on three arms, and the two it is not read on
+  were measured rather than skipped (2026-09-05).**
+  `the_colonnades_shadow_crosses_the_cascade_split_without_a_step` now walks
+  `Arm::shipped()`, every other rung the engine declares less
+  `CASCADE_UNSEPARATED_RUNG` — today that is `disc` — and the same walk at
+  `sun::GRAZING_TICK`. Two arms were swept on both local Vulkan adapters and
+  held back, and neither is a bound that was loosened:
+  - **The `box` rung.** Its walk is flat clear of the band: the steepest step
+    column 4's walk at `-0.18` m shows there is `0.12`/255 on radv and `0.04` on
+    lavapipe, against `2.18` and `1.96` for the shipped rung on the same walk.
+    So the ratio the claim bounds is a reading of that denominator's noise, and
+    it comes out **higher with the band** (`13.17` radv, `38.50` lavapipe)
+    **than with `CASCADE_FADE_FRACTION` collapsed to an edge** (`10.20`, `9.13`)
+    — no bound on it separates the two. Its absolute step across the split is
+    smaller than the shipped rung's (`1.55`/255 against `2.24` on radv), so this
+    is a rung the reading cannot measure rather than a rung with a step in it.
+    Reading `box` wants a second quantity whose denominator cannot collapse on a
+    flat profile — the step against the walk's own spread over the whole window
+    rather than against its steepest neighbouring pair, say — and that is its
+    own sweep and its own sabotage.
+  - **`plaza::counter_camera`.** Measured with the plaza's own predicates and no
+    GPU: 48665 of the walk's 88020 candidate samples land inside the shell
+    window, and `on_screen` refuses **every one** of them. `plaza::hidden_from`
+    refuses none that the frame had not refused already. The colonnade stands
+    across the plaza from the counters and the window is a shell of distance
+    about the eye, so the two do not meet on screen at all — an arm there has no
+    pair of shells either side of the split and would red the suite rather than
+    widen the claim. Widening this wants a **third pose**, framing the colonnade
+    from somewhere its shadows are both visible and near the split; it is not
+    another arm of this walk.
+- **Nine readings cross the split now, at six offsets, and all six are one
+  column's.** The shipped and `disc` arms each read column 4 at `-0.26`, `-0.22`
+  and `-0.18` m off its shadow axis; the grazing arm reads column 4 at `+0.18`,
+  `+0.22` and `+0.26` — the other side of the same shadow, which is where a sun
+  several times lower puts the stretch that lands in the same window of
+  distance. So the arms multiplied and the column did not: `plaza::hidden_from`
+  still refuses the rest, because the colonnade stands between the fixed camera
+  and most of the pavement its own shadows fall on at that distance. The reading
+  is therefore thinner than it looks, and a change to `COLONNADE_NEAR_Z`,
+  `COLONNADE_SPACING` or either arm's sun could leave one of them with none — in
+  which case the test refuses the run rather than passing it, which is the
+  failure mode to expect. Widening it wants either a pose that sees more of that
+  pavement or a caster placed for it.
 - **The viewer is only exercised over whole root cells.** The e2e reads cascade
   0 and one free slot of the light region, and both are whole cells of
   `crcbl_render::shadow`'s grid. `atlas_view.slang`'s border loop reads each

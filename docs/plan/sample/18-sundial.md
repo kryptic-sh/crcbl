@@ -242,10 +242,29 @@ hold in their head, and the only honest way to set them is to look.
    collapsed to an edge — the same walks read `17.49` against `1.24` and `17.55`
    against `1.41`, which is the sabotage that says the reading has teeth.
 
-   The walk reads only pavement the fixed camera can see and no lamp reaches,
+   **2026-09-05 widened it from one arm to three**, each drawn against its own
+   split and its own shadow direction. The `disc` rung is read the same way,
+   because a filter's width is what differs between the two cascades at a
+   vertical caster's shadow and a band held under one filter is not a band held
+   under the ladder: `2.98` against `1.43` on radv with the band, `39.24`
+   against `4.02` with it collapsed. The grazing sun, `sun::GRAZING_TICK`, puts
+   a shadow several times longer through the same window of distance and comes
+   back on the other side of the shadow's axis: `0.63` against `1.30` with the
+   band, `3.32` against `0.09` without. The `box` rung was measured and is
+   **not** read — its walk clear of the band is flat enough (`0.12`/255 on radv,
+   `0.04` on lavapipe) that the ratio reads that denominator's noise and comes
+   out higher with the band than with it collapsed, so no bound separates the
+   two and the bound was left where the arms it does separate put it.
+   `plaza::counter_camera` was measured and is not read either: every sample of
+   every walk that lands in the shell window falls outside that pose's frame, so
+   an arm there has no pair of shells either side of the split and would red the
+   suite rather than widen the claim. Both refusals and what closing them would
+   take are in [backlog.md](../../backlog.md).
+
+   The walk reads only pavement the arm's camera can see and no lamp reaches,
    which `plaza::hidden_from` and `plaza::lamplit` answer off the plaza's own
-   geometry: the colonnade hides much of the floor its shadows fall on from this
-   pose, and a walk that did not ask would be reading a column's lit face.
+   geometry: the colonnade hides much of the floor its shadows fall on from the
+   fixed pose, and a walk that did not ask would be reading a column's lit face.
 
 4. **The filter ladder side by side**, with the penumbra-versus-distance claim.
    **Complete 2026-09-05.**

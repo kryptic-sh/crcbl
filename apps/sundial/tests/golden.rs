@@ -2534,17 +2534,22 @@ fn cascade_walks(
 /// below would hold on a frame with no shadow in it at all.
 ///
 /// **Swept**, at [`CLAIM_EXTENT`] over the window these walks cover, on both
-/// Vulkan adapters this workspace runs locally:
+/// Vulkan adapters this workspace runs locally, on every arm the claim below is
+/// read on:
 ///
-/// | reading | radv | lavapipe |
-/// | --- | --- | --- |
-/// | mean darkening over the cascade 0 shells | `83.70` | `83.56` |
-/// | mean darkening over the cascade 1 shells | `27.54` | `27.53` |
+/// | arm | cascade 0, radv | cascade 1, radv | cascade 0, lavapipe | cascade 1, lavapipe |
+/// | --- | --- | --- | --- | --- |
+/// | the shipped rung | `83.70` | `27.54` | `83.56` | `27.53` |
+/// | the `disc` rung | `88.55` | `27.55` | `88.37` | `27.54` |
+/// | the grazing sun | `43.60` | `47.73` | `43.46` | `47.64` |
 ///
-/// The two sides differ because the outer cascade's filter is several times
-/// wider — the same shadow, spread — which is the switch this reading is about
-/// and not a fault. Floored at half the thinner of them, because what it bounds
-/// is a shadow being present at all rather than how dark it is.
+/// The two sides differ on the first two because the outer cascade's filter is
+/// several times wider — the same shadow, spread — which is the switch this
+/// reading is about and not a fault. At the grazing sun they differ the other
+/// way: a shadow several times longer puts a different stretch of itself in the
+/// same window of distance from the eye, and the far shells land deeper in it.
+/// Floored at half the thinnest of them, because what it bounds is a shadow
+/// being present at all rather than how dark it is.
 const CASCADE_SHADOWED_LEVELS: f32 = 14.0;
 
 /// How much steeper than the steepest step the same walk shows clear of the band
@@ -2558,7 +2563,7 @@ const CASCADE_SHADOWED_LEVELS: f32 = 14.0;
 /// **Swept, not guessed**, at [`CLAIM_EXTENT`] on both Vulkan adapters this
 /// workspace runs locally, against the same frames drawn with
 /// `CASCADE_FADE_FRACTION` in `shaders/mesh.slang` set to zero — the band
-/// collapsed to an edge:
+/// collapsed to an edge. The shipped arm, per walk:
 ///
 /// | walk | radv | radv, no band | lavapipe | lavapipe, no band |
 /// | --- | --- | --- | --- | --- |
@@ -2571,81 +2576,82 @@ const CASCADE_SHADOWED_LEVELS: f32 = 14.0;
 /// of each. The outermost walk moves least because it stands furthest into the
 /// lit gap between two shadows, where even the outer cascade's filter reaches
 /// only part way.
+///
+/// **The same sweep on the other arms**, as the worst ratio each shows — the
+/// `ratio` the run prints, which is the steepest step across the split over the
+/// steepest the same walk has clear of the band:
+///
+/// | arm | radv | radv, no band | lavapipe | lavapipe, no band |
+/// | --- | --- | --- | --- | --- |
+/// | the `disc` rung | `2.08` | `9.76` | `2.68` | `9.24` |
+/// | the grazing sun | `0.49` | `35.46` | `0.63` | `31.06` |
+/// | the `box` rung | `13.17` | `10.20` | `38.50` | `9.13` |
+///
+/// The first two sit either side of five the way the shipped arm does, and are
+/// the arms the claim is read on. The third does not, which is what
+/// [`CASCADE_UNSEPARATED_RUNG`] is.
 const CASCADE_STEP_OVER_NEIGHBOURS: f32 = 5.0;
 
-/// **The colonnade's shadow crosses the cascade split without a step in it.**
+/// The rung of the filter ladder the claim below is **not** read on.
 ///
-/// `docs/plan/sample/18-sundial.md`'s milestone 3, and
-/// `docs/plan/45-shadows.md`'s eighth decision from this sample's side: where two
-/// cascades meet, both are sampled and the answers are mixed by distance, so the
-/// switch is a **band** and not an edge. `crates/crcbl/tests/forward_e2e/
-/// shadow.rs` holds the cascade *overlay* to that band — the two tints blend
-/// across it — and what is added here is the thing the overlay is a picture of:
-/// the shadow itself, on the fixture the colonnade was laid out for.
+/// `box`, and the reason is the denominator rather than the frame. Its walk is
+/// flatter clear of the band than any other arm's: the steepest step column 4's
+/// walk at `-0.18` m shows there is `0.12`/255 on radv and `0.04` on lavapipe,
+/// against `2.18` and `1.96` for the shipped rung on the same walk. A ratio
+/// taken against a denominator that small is a reading of the pavement's own
+/// noise, and it comes out **higher with the band than without it** — the `box`
+/// row of [`CASCADE_STEP_OVER_NEIGHBOURS`]' second table — so no bound on this
+/// ratio separates the band from the edge here, and the bound is left where the
+/// arms it does separate put it rather than loosened until this one fits.
 ///
-/// # What is read
+/// **This is a rung the reading cannot measure and not a rung with a step in
+/// it**: its step across the split is `1.55`/255 on radv against the shipped
+/// rung's `2.24` on the same frames, so what changed between the two arms is
+/// what the ratio is divided by. Reading `box` across the split wants a quantity
+/// whose denominator does not collapse on a flat profile —
+/// `docs/backlog.md` carries it.
 ///
-/// Every column of the colonnade's shadow, walked from inside cascade 0 out past
-/// the split, at [`CASCADE_LATERALS`]' offsets either side of its own edge, and
-/// binned into shells of **distance from the eye** — the quantity a cascade is
-/// selected by, so a shell is a set of pavement the switch treats alike. What
-/// each shell holds is the **shadow term**: the pixel with the shadow passes
-/// off, less the same pixel with them on, so the pavement's own falloff cancels
-/// and what is left is what the sun's shadow map did there.
+/// Held against the ladder the engine declares rather than trusted: a rung
+/// renamed out from under this fails the run, where an exclusion that silently
+/// excluded nothing would leave the ladder short by one and say so nowhere.
+const CASCADE_UNSEPARATED_RUNG: &str = "box";
+
+/// What one arm's walks read across the split.
 ///
-/// A cascade switch changes everything about that answer — the map, the texel
-/// footprint both biases and the filter are denominated in, and the filter's
-/// width with it — so the profile *does* change across the split, and is meant
-/// to. The claim is about **how**: the steepest step between two neighbouring
-/// shells that touches the band is held to the steepest step between two
-/// neighbouring shells that does not, which is what the same walks show with no
-/// switch anywhere near them.
+/// The pooled steps rather than the frames they came off: every step is taken
+/// **inside** one walk and never between two, so what this carries is per walk
+/// and is only ever pooled across walks as steps.
+struct Crossing {
+    /// Which paths drew this arm's two frames.
+    paths: String,
+    /// Every walk with a pair of shells either side of the split **and** a pair
+    /// clear of the band: its column, its offset off that column's shadow axis,
+    /// the steepest step across the split, and the steepest clear of the band.
+    compared: Vec<(usize, f32, f32, f32)>,
+    /// Every shell mean that landed inside cascade 0, and every one that landed
+    /// outside the band, in that order.
+    levels: [Vec<f32>; 2],
+    /// Where cascade 0 ends for this arm's pose and sun, in metres from the eye.
+    reach: f32,
+}
+
+/// Draws one arm with the shadow passes on and off and walks the colonnade's
+/// shadow across that arm's own cascade split.
 ///
-/// # Anti-vacuity
-///
-/// Four ways this could pass while measuring nothing. The walks could be off the
-/// shadow, where every shell reads zero and every step with it —
-/// [`CASCADE_SHADOWED_LEVELS`] is read off both sides. The two frames could be
-/// one frame, where every darkening is zero by construction — they are compared
-/// as bytes. The control could be zero, where the bound is a bound against
-/// nothing — it is asserted positive. And no pair could straddle the split at
-/// all, where the reading is about two stretches of one cascade — the pair that
-/// does is asserted to exist.
-///
-/// # How it was shown to fail
-///
-/// **By collapsing the band to an edge** — `CASCADE_FADE_FRACTION` in
-/// `shaders/mesh.slang` set to zero and every artifact regenerated — which is
-/// the artefact this exists for and the thing
-/// `docs/plan/45-shadows.md`'s eighth decision removed. On radv:
-///
-/// > column 4's shadow at -0.18 m off its axis steps 17.49/255 between the two
-/// > shells either side of the split at 6.100 m, against 1.24 for the steepest
-/// > pair of shells the same walk has clear of the band — past the 5x this holds
-/// > it to. The cascade switch is an edge in the picture rather than the band
-/// > `CASCADE_FADE_FRACTION` makes of it
-///
-/// and on lavapipe the same walk read `17.55` against `1.41`. Every other
-/// assertion here still passed on those frames — the walks darkened
-/// `83.70`/255 and `28.42` either side of the split, against `83.70` and `27.54`
-/// with the band — so it was this bound that fired and not the floor.
-///
-/// [`CASCADE_SHELL_SAMPLES`]' own doc carries the second run: at eight samples
-/// a shell the near lamp's reach had all but emptied read a `13.88`/255 step
-/// across the split, *and the same `13.88` with the band collapsed*, which is
-/// how a step that was never the cascade's was told from one that is.
-#[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
-fn the_colonnades_shadow_crosses_the_cascade_split_without_a_step() {
-    let extent = CLAIM_EXTENT;
-    let camera = plaza::fixed_camera();
-    let sky = sun::Sky::at(sun::FIXTURE_TICK);
+/// The pose and the sun come off the [`Arm`] rather than from the caller, so an
+/// arm at another tick or from the other pose is read against **its** split and
+/// **its** shadow direction — a cascade split is a function of the camera, and
+/// the colonnade's strips run along the sun.
+fn crossing(extent: (u32, u32), name: &str, arm: Arm) -> Crossing {
+    let camera = arm.camera();
+    let sky = arm.sky();
     let reach = plaza::cascade_split(&camera, sky);
     let band = reach * crcbl::shaders::mesh::CASCADE_FADE_FRACTION;
 
     // The colonnade's shadows are parallel strips, so an offset past half their
     // lateral spacing is a reading of the next column's shadow and not of this
-    // one's edge.
+    // one's edge. Read per arm, because the strips stand apart along the sun's
+    // own perpendicular and this sample's sun moves.
     let (_, perp) = shadow_axes(sky);
     let spacing = (plaza::column_foot(0) - plaza::column_foot(1))
         .dot(perp)
@@ -2655,24 +2661,25 @@ fn the_colonnades_shadow_crosses_the_cascade_split_without_a_step() {
         .fold(0.0f32, |widest, lateral| widest.max(lateral.abs()));
     assert!(
         outermost < spacing / 2.0,
-        "the walks read {outermost:.3} m off a shadow's axis and the colonnade's shadows stand \
-         {spacing:.3} m apart across it, so the outermost offset is inside the next column's \
-         shadow rather than beside this one's"
+        "on {name} the walks read {outermost:.3} m off a shadow's axis and the colonnade's \
+         shadows stand {spacing:.3} m apart across it, so the outermost offset is inside the next \
+         column's shadow rather than beside this one's"
     );
 
-    let (shadowed, paths, _) = draw(extent, Arm::shipped());
-    let (flat, _, _) = draw(extent, Arm::shipped().without_shadows());
+    let (shadowed, paths, _) = draw(extent, arm);
+    let (flat, _, _) = draw(extent, arm.without_shadows());
     assert!(
         shadowed.pixels() != flat.pixels(),
-        "the shadow passes drew the same frame off as on, so every darkening below is zero by \
-         construction"
+        "on {name} the shadow passes drew the same frame off as on, so every darkening read off \
+         it is zero by construction"
     );
 
     let middles = cascade_shells(reach, band);
     let walks = cascade_walks(&shadowed, &flat, &camera, extent, sky, reach, band);
     eprintln!(
-        "sundial golden: the cascade walk on {paths} — split {reach:.3} m, band {band:.3} m, \
-         {columns} columns at {laterals} offsets, {shells} shells from {near:.3} to {far:.3} m",
+        "sundial golden: the cascade walk on {name}, {paths} — split {reach:.3} m, band \
+         {band:.3} m, {columns} columns at {laterals} offsets, {shells} shells from {near:.3} to \
+         {far:.3} m",
         columns = plaza::COLONNADE_COUNT,
         laterals = CASCADE_LATERALS.len(),
         shells = middles.len(),
@@ -2723,65 +2730,236 @@ fn the_colonnades_shadow_crosses_the_cascade_split_without_a_step() {
             compared.push((walk.column, walk.lateral, straddling, clear));
         }
     }
-    assert!(
-        !compared.is_empty(),
-        "no walk has both a pair of shells either side of the split and a pair clear of the band \
-         — so nothing here reads across the switch against what the same stretch of shadow shows \
-         without one"
-    );
-
     for (column, lateral, straddling, clear) in &compared {
         eprintln!(
-            "sundial golden:   column {column} at {lateral:+.2} m steps {straddling:.2}/255 \
-             across the split and at most {clear:.2} clear of the band"
+            "sundial golden:   {name}: column {column} at {lateral:+.2} m steps {straddling:.2}\
+             /255 across the split and at most {clear:.2} clear of the band"
         );
     }
-    let worst = compared
-        .iter()
-        .copied()
-        .fold((0, 0.0, f32::MIN, 1.0), |worst, walk| {
-            if walk.2 * worst.3 > worst.2 * walk.3 {
-                walk
-            } else {
-                worst
-            }
-        });
-    let (column, lateral, straddling, clear) = worst;
-    eprintln!(
-        "sundial golden: the cascade split on {paths} — {n} walks read across it; the steepest \
-         against its own is column {column} at {lateral:+.2} m, {straddling:.2}/255 across the \
-         split against {clear:.2} clear of the band",
-        n = compared.len(),
-    );
+    Crossing {
+        paths,
+        compared,
+        levels: [inside, outside],
+        reach,
+    }
+}
 
-    // Both sides of the split read a shadow, which is what stops the bound below
-    // holding on a frame that has none.
-    for (name, read) in [("cascade 0", &inside), ("cascade 1", &outside)] {
-        assert!(!read.is_empty(), "no shell of any walk landed in {name}");
-        #[expect(clippy::cast_precision_loss, reason = "a few hundred shells")]
-        let darkening = read.iter().sum::<f32>() / read.len() as f32;
-        eprintln!(
-            "sundial golden: the walks darken {name} by {darkening:.2}/255 over {} shells",
-            read.len(),
-        );
-        assert!(
-            darkening > CASCADE_SHADOWED_LEVELS,
-            "the walks darken {name} by {darkening:.2}/255, under the \
-             {CASCADE_SHADOWED_LEVELS} shadowed pavement stands at. This is a reading of the open \
-             plaza, and open plaza has no step in it however the cascades are switched"
-        );
+/// **The colonnade's shadow crosses the cascade split without a step in it.**
+///
+/// `docs/plan/sample/18-sundial.md`'s milestone 3, and
+/// `docs/plan/45-shadows.md`'s eighth decision from this sample's side: where two
+/// cascades meet, both are sampled and the answers are mixed by distance, so the
+/// switch is a **band** and not an edge. `crates/crcbl/tests/forward_e2e/
+/// shadow.rs` holds the cascade *overlay* to that band — the two tints blend
+/// across it — and what is added here is the thing the overlay is a picture of:
+/// the shadow itself, on the fixture the colonnade was laid out for.
+///
+/// # What is read
+///
+/// Every column of the colonnade's shadow, walked from inside cascade 0 out past
+/// the split, at [`CASCADE_LATERALS`]' offsets either side of its own edge, and
+/// binned into shells of **distance from the eye** — the quantity a cascade is
+/// selected by, so a shell is a set of pavement the switch treats alike. What
+/// each shell holds is the **shadow term**: the pixel with the shadow passes
+/// off, less the same pixel with them on, so the pavement's own falloff cancels
+/// and what is left is what the sun's shadow map did there.
+///
+/// A cascade switch changes everything about that answer — the map, the texel
+/// footprint both biases and the filter are denominated in, and the filter's
+/// width with it — so the profile *does* change across the split, and is meant
+/// to. The claim is about **how**: the steepest step between two neighbouring
+/// shells that touches the band is held to the steepest step between two
+/// neighbouring shells that does not, which is what the same walks show with no
+/// switch anywhere near them.
+///
+/// # The arms
+///
+/// One reading each — the whole colonnade, walked at every offset — and each
+/// drawn twice, passes on and off, against **its own** split: the pose picks
+/// where cascade 0 ends and the sun picks the direction the strips run in, so an
+/// arm at another tick or from another pose is read against its own and not the
+/// fixture's.
+///
+/// * **The shipped rung**, at [`sun::FIXTURE_TICK`] from [`plaza::fixed_camera`],
+///   which is the arm the constants above were swept on.
+/// * **Every other rung the engine declares**, out of
+///   `filter::names(filter::FILTER)` rather than written down here, less
+///   [`CASCADE_UNSEPARATED_RUNG`] — today that is `disc`. A filter's width is
+///   what differs between the two cascades at a vertical caster's shadow, so a
+///   band held for one rung is not a band held for the ladder.
+/// * **The grazing sun**, [`sun::GRAZING_TICK`], where the shadows are several
+///   times longer and the stretch of shadow that lands in the same window of
+///   distance is a different one — the walks that come back are on the *other*
+///   side of the shadow's axis from the fixture arm's.
+///
+/// # What it is not read on
+///
+/// Two arms were measured and are not here, and neither is a bound that was
+/// loosened to fit them.
+///
+/// [`CASCADE_UNSEPARATED_RUNG`] carries the first: on `box` the ratio reads
+/// higher with the band than with it collapsed, so no bound on it separates the
+/// two.
+///
+/// The second is [`plaza::counter_camera`]. Every sample of every walk that
+/// lands in the shell window is **outside that pose's frame** — the colonnade
+/// stands across the plaza from the counters and the window is a shell of
+/// distance around the eye, so the two do not meet on screen. Not one sample is
+/// refused by [`plaza::hidden_from`] that the frame had not refused already, and
+/// no walk is left with a pair of shells either side of the split. That is a
+/// refusal rather than a pass: an arm with no such pair fails the run below, so
+/// putting the counter pose in the list would red the suite rather than widen
+/// the claim. Framing the colonnade from a second pose wants a pose, not another
+/// arm — `docs/backlog.md` carries it.
+///
+/// # Anti-vacuity
+///
+/// Five ways this could pass while measuring nothing. The walks could be off the
+/// shadow, where every shell reads zero and every step with it —
+/// [`CASCADE_SHADOWED_LEVELS`] is read off both sides of every arm. The two
+/// frames could be one frame, where every darkening is zero by construction —
+/// they are compared as bytes, per arm. The control could be zero, where the
+/// bound is a bound against nothing — it is asserted positive. No pair could
+/// straddle the split at all, where the reading is about two stretches of one
+/// cascade — the pair that does is asserted to exist on every arm, which is what
+/// refuses the counter pose above rather than passing it. And
+/// [`CASCADE_UNSEPARATED_RUNG`] could name a rung the engine no longer declares,
+/// where the exclusion silently excludes nothing — it is held against the
+/// ladder.
+///
+/// # How it was shown to fail
+///
+/// **By collapsing the band to an edge** — `CASCADE_FADE_FRACTION` in
+/// `shaders/mesh.slang` set to zero and every artifact regenerated — which is
+/// the artefact this exists for and the thing `docs/plan/45-shadows.md`'s eighth
+/// decision removed. **Every arm went red, on both adapters**, and the run
+/// reports all three together because the arms are read into one list of faults
+/// rather than one assertion each. On radv:
+///
+/// > on the shipped pcss column 4's shadow at -0.18 m off its axis steps
+/// > 17.49/255 between the two shells either side of the split at 6.100 m,
+/// > against 1.24 for the steepest pair of shells the same walk has clear of the
+/// > band — past the 5x this holds it to. The cascade switch is an edge in the
+/// > picture rather than the band `CASCADE_FADE_FRACTION` makes of it
+/// >
+/// > on the disc rung column 4's shadow at -0.18 m off its axis steps 39.24/255
+/// > … against 4.02 …
+/// >
+/// > on the grazing sun column 4's shadow at +0.26 m off its axis steps 3.32/255
+/// > … against 0.09 …
+///
+/// and on lavapipe the same three walks read `17.55` against `1.41`, `38.94`
+/// against `4.22`, and `3.33` against `0.11`.
+///
+/// [`CASCADE_SHELL_SAMPLES`]' own doc carries the second run: at eight samples
+/// a shell the near lamp's reach had all but emptied read a `13.88`/255 step
+/// across the split, *and the same `13.88` with the band collapsed*, which is
+/// how a step that was never the cascade's was told from one that is.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
+fn the_colonnades_shadow_crosses_the_cascade_split_without_a_step() {
+    let extent = CLAIM_EXTENT;
+    let shipped = crcbl::render::shadow::shipped_filter().label();
+    let ladder = filter::names(filter::FILTER);
+    assert!(
+        ladder.contains(&CASCADE_UNSEPARATED_RUNG),
+        "the engine declares {ladder:?} and none of them is `{CASCADE_UNSEPARATED_RUNG}`, so the \
+         rung this walk holds itself back from is a rung nothing runs and the exclusion excludes \
+         nothing"
+    );
+    let mut arms = vec![(format!("the shipped {shipped}"), Arm::shipped())];
+    for name in ladder {
+        if *name != shipped && *name != CASCADE_UNSEPARATED_RUNG {
+            arms.push((format!("the {name} rung"), Arm::shipped().on(name)));
+        }
     }
     assert!(
-        clear > 0.0,
-        "the walk this is worst on shows no step at all clear of the band, so the bound below is \
-         a bound against nothing"
+        arms.len() > 1,
+        "the engine declares {ladder:?}, so there is no second rung to read this band on and the \
+         claim is a claim about one filter"
     );
-    assert!(
-        straddling < CASCADE_STEP_OVER_NEIGHBOURS * clear,
-        "column {column}'s shadow at {lateral:+.2} m off its axis steps {straddling:.2}/255 \
-         between the two shells either side of the split at {reach:.3} m, against {clear:.2} for \
-         the steepest pair of shells the same walk has clear of the band — past the \
-         {CASCADE_STEP_OVER_NEIGHBOURS}x this holds it to. The cascade switch is an edge in the \
-         picture rather than the band `CASCADE_FADE_FRACTION` makes of it"
-    );
+    arms.push((
+        "the grazing sun".to_string(),
+        Arm::shipped().at_tick(sun::GRAZING_TICK),
+    ));
+
+    let mut faults = Vec::new();
+    for (name, arm) in arms {
+        let Crossing {
+            paths,
+            compared,
+            levels: [inside, outside],
+            reach,
+        } = crossing(extent, &name, arm);
+
+        // Both sides of the split read a shadow, which is what stops the bound
+        // below holding on a frame that has none.
+        for (side, read) in [("cascade 0", &inside), ("cascade 1", &outside)] {
+            if read.is_empty() {
+                faults.push(format!("on {name} no shell of any walk landed in {side}"));
+                continue;
+            }
+            #[expect(clippy::cast_precision_loss, reason = "a few hundred shells")]
+            let darkening = read.iter().sum::<f32>() / read.len() as f32;
+            eprintln!(
+                "sundial golden: {name}: the walks darken {side} by {darkening:.2}/255 over {} \
+                 shells",
+                read.len(),
+            );
+            if darkening <= CASCADE_SHADOWED_LEVELS {
+                faults.push(format!(
+                    "on {name} the walks darken {side} by {darkening:.2}/255, under the \
+                     {CASCADE_SHADOWED_LEVELS} shadowed pavement stands at. This is a reading of \
+                     the open plaza, and open plaza has no step in it however the cascades are \
+                     switched"
+                ));
+            }
+        }
+
+        if compared.is_empty() {
+            faults.push(format!(
+                "on {name} no walk has both a pair of shells either side of the split and a pair \
+                 clear of the band — so nothing here reads across the switch against what the \
+                 same stretch of shadow shows without one"
+            ));
+            continue;
+        }
+        let worst = compared
+            .iter()
+            .copied()
+            .fold((0, 0.0, f32::MIN, 1.0), |worst, walk| {
+                if walk.2 * worst.3 > worst.2 * walk.3 {
+                    walk
+                } else {
+                    worst
+                }
+            });
+        let (column, lateral, straddling, clear) = worst;
+        eprintln!(
+            "sundial golden: the cascade split on {name}, {paths} — {n} walks read across it; \
+             the steepest against its own is column {column} at {lateral:+.2} m, \
+             {straddling:.2}/255 across the split against {clear:.2} clear of the band, ratio \
+             {ratio:.2}",
+            n = compared.len(),
+            ratio = straddling / clear,
+        );
+        if clear <= 0.0 {
+            faults.push(format!(
+                "on {name} the walk this is worst on shows no step at all clear of the band, so \
+                 the bound below is a bound against nothing"
+            ));
+            continue;
+        }
+        if straddling >= CASCADE_STEP_OVER_NEIGHBOURS * clear {
+            faults.push(format!(
+                "on {name} column {column}'s shadow at {lateral:+.2} m off its axis steps \
+                 {straddling:.2}/255 between the two shells either side of the split at \
+                 {reach:.3} m, against {clear:.2} for the steepest pair of shells the same walk \
+                 has clear of the band — past the {CASCADE_STEP_OVER_NEIGHBOURS}x this holds it \
+                 to. The cascade switch is an edge in the picture rather than the band \
+                 `CASCADE_FADE_FRACTION` makes of it"
+            ));
+        }
+    }
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
