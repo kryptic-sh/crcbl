@@ -60,6 +60,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   global, and what actually fails is `postMessage`ing that memory to a `Worker`,
   which is the step the host performs.
 
+- **The demo browser gate runs one demo on the origin GitHub Pages serves.**
+  `web/run-browser-e2e.sh` drives `hud` a second time behind
+  `web/tools/serve.mjs --no-isolation`, where neither COOP nor COEP is sent and
+  `SharedArrayBuffer` does not exist — the document every visitor to
+  crcbl.kryptic.sh gets, and one no demo gate had ever loaded. The demo has to
+  boot, open a WebGPU device and draw there just as it does under the headers,
+  so a page that reached for a global only the isolated origin has is now caught
+  by a gate rather than by a visitor. `web/tools/browser-e2e.mjs` takes a
+  `--no-isolation` flag for it, and the flag says what is **expected** rather
+  than only what the server should send: group A asserts
+  `crossOriginIsolated === false` under it, so a run given the isolated origin
+  by mistake fails on its first check instead of reporting the rest as facts
+  about an origin nobody visits.
+
+  One demo rather than the whole list, because CI runs the script once per demo
+  and a second run for each would double the matrix to make a single claim about
+  the origin. `hud` is the cheapest that can make it: no start key, no per-demo
+  guard block of its own, and still a demo whose clear colour reaches the
+  canvas, so the run reads pixels back rather than a status line.
+
 - **The sun's two shadow bias counts are console variables.**
   `crcbl_render::shadow::r_shadow_bias` and
   `crcbl_render::shadow::r_shadow_normal_offset` are floats in **texels of the

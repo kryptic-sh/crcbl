@@ -3,6 +3,7 @@
 // the demo under test *renders*.
 //
 //   node web/tools/browser-e2e.mjs [--site target/site] [--demo demos/breakout/]
+//                                  [--no-isolation]
 //
 // `web/run-browser-e2e.sh` is the entry point a human or CI runs; this file is
 // the half that needs a JS engine. Everything here is plain Node with no
@@ -21,7 +22,10 @@
 //   A  the platform — `navigator.gpu`, an adapter, **that this browser can
 //      report canvas pixels at all** (see below; this one is not a formality),
 //      and that the origin is cross-origin isolated, which is what decides
-//      whether a threaded wasm build could run here at all
+//      whether a threaded wasm build could run here at all. Under
+//      `--no-isolation` that last one is asserted the other way round: the
+//      origin GitHub Pages serves sends neither header, and a run told to
+//      expect that fails here if it was handed the isolated origin instead
 //   B  the engine boots — canvas size, wgpu backend, swapchain, STATUS_RUNNING
 //   C  input drives the simulation — a real click focuses the canvas, a real
 //      Space key launches the ball, and the game's own HUD log line changes.
@@ -128,9 +132,23 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
  * option the same way.
  *
  * Every one of them takes a value, which is why the loop below can read the next
- * argument without asking which flag it is reading for.
+ * argument without asking which flag it is reading for. {@link KNOWN_FLAGS} is
+ * the list that does not.
  */
 const KNOWN_ARGS = ['adapter', 'demo', 'out', 'site', 'timeout'];
+
+/**
+ * The options that are switches rather than values.
+ *
+ * `--no-isolation` withholds the COOP/COEP pair from {@link serve}, which is
+ * what GitHub Pages does and therefore what every visitor to the published site
+ * gets. It **says what is expected of the document**, not merely what the
+ * server should send: group A asserts `crossOriginIsolated === false` under it,
+ * so pairing it with an isolated origin fails on the first check rather than
+ * passing quietly. `web/tools/jobs-e2e.mjs` spells its own flag the same way,
+ * for the same reason.
+ */
+const KNOWN_FLAGS = ['no-isolation'];
 
 /** @type {Record<string, string>} */
 const args = {};
@@ -138,14 +156,32 @@ for (let i = 2; i < process.argv.length; i += 1) {
   const arg = process.argv[i];
   if (!arg.startsWith('--')) fail(`unexpected argument ${arg}`);
   const [name, inline] = arg.slice(2).split('=', 2);
+  if (KNOWN_FLAGS.includes(name)) {
+    // A switch given a value is a mistake worth naming: `--no-isolation=false`
+    // reads as turning it off and would turn it on, which is the one way a
+    // caller could ask for the published origin and be handed the other one.
+    if (inline !== undefined) fail(`--${name} takes no value`);
+    args[name] = 'yes';
+    continue;
+  }
   if (!KNOWN_ARGS.includes(name)) {
     fail(
       `unknown option --${name}; this driver accepts ` +
-        `${KNOWN_ARGS.map((known) => `--${known} <value>`).join(', ')}`
+        `${KNOWN_ARGS.map((known) => `--${known} <value>`).join(', ')}` +
+        `${KNOWN_FLAGS.map((known) => `, --${known}`).join('')}`
     );
   }
   args[name] = inline ?? process.argv[++i] ?? '';
 }
+
+/**
+ * Whether the origin this run serves sends the COOP/COEP pair.
+ *
+ * The default is the isolated origin, which is what `build.sh --serve` gives a
+ * human and what makes a threaded artifact loadable at all. `--no-isolation`
+ * is the published one; see {@link KNOWN_FLAGS}.
+ */
+const ISOLATED = args['no-isolation'] === undefined;
 
 const SITE = resolve(REPO, args.site ?? process.env.SITE_DIR ?? 'target/site');
 const DEMO = args.demo ?? 'demos/breakout/';
@@ -3355,7 +3391,7 @@ function group(name) {
 
 mkdirSync(OUT, { recursive: true });
 
-const site = await serve(SITE, { routes: CONTROL_ROUTES });
+const site = await serve(SITE, { routes: CONTROL_ROUTES, isolated: ISOLATED });
 const binary = findBrowser(fail);
 
 /** Everything the page logged, in order, so a failure can print it. */
@@ -3393,7 +3429,10 @@ let exitCode = 1;
 
 try {
   say(`web e2e: browser ${binary}`);
-  say(`web e2e: serving ${SITE} at ${site.origin}`);
+  say(
+    `web e2e: serving ${SITE} at ${site.origin}` +
+      (site.isolated ? '' : ' (no COOP/COEP, as GitHub Pages serves it)')
+  );
   say(`web e2e: adapter mode "${ADAPTER}"`);
 
   group('A — the platform');
@@ -3426,25 +3465,56 @@ try {
   // `web/tools/serve.mjs` alone decides, and a browser that cannot report
   // canvas pixels can still answer it. Below the gate it would be skipped by
   // the `throw` on exactly the machines where nobody would notice.
-  check(
-    'A',
-    'the document is cross-origin isolated',
-    best?.isolated,
-    best?.isolated
-      ? Object.entries(ISOLATION_HEADERS)
-          .map(([name, value]) => `${name}: ${value}`)
-          .join('; ')
-      : 'crossOriginIsolated is false — no SharedArrayBuffer, so a wasm build ' +
-          'with +atomics cannot start a worker on this origin'
-  );
-  check(
-    'A',
-    'a shared WebAssembly.Memory can be constructed',
-    best?.sharedMemory === true,
-    best?.sharedMemory === true
-      ? 'its buffer is a SharedArrayBuffer'
-      : String(best?.sharedMemory)
-  );
+  //
+  // Both directions are asserted, because both origins are supported and the
+  // run was told which one it is on. Under `--no-isolation` the expectation is
+  // that the flag is *false* — so a run that asked for the published origin and
+  // got the isolated one fails here, on its first check, rather than reporting
+  // the rest as facts about an origin nobody visits.
+  if (ISOLATED) {
+    check(
+      'A',
+      'the document is cross-origin isolated',
+      best?.isolated,
+      best?.isolated
+        ? Object.entries(ISOLATION_HEADERS)
+            .map(([name, value]) => `${name}: ${value}`)
+            .join('; ')
+        : 'crossOriginIsolated is false — no SharedArrayBuffer, so a wasm build ' +
+            'with +atomics cannot start a worker on this origin'
+    );
+    check(
+      'A',
+      'a shared WebAssembly.Memory can be constructed',
+      best?.sharedMemory === true,
+      best?.sharedMemory === true
+        ? 'its buffer is a SharedArrayBuffer'
+        : String(best?.sharedMemory)
+    );
+  } else {
+    check(
+      'A',
+      'the document is not cross-origin isolated',
+      best?.isolated === false,
+      best?.isolated === false
+        ? 'neither COOP nor COEP is sent, which is the shape of the published origin'
+        : 'crossOriginIsolated is true — this run asked for the origin GitHub ' +
+            'Pages serves and was given the other one'
+    );
+    // The probe above reads a `SharedArrayBuffer` global, and that is the half
+    // that actually goes missing here: Chromium still *constructs* a shared
+    // `WebAssembly.Memory` on a non-isolated origin, which `web/jobs/main.js`
+    // measured and asserts apart from the global. Whichever of the two the
+    // probe tripped over, the detail line below is what it saw.
+    check(
+      'A',
+      'no shared memory is reachable on this origin',
+      best?.sharedMemory !== true,
+      best?.sharedMemory !== true
+        ? String(best?.sharedMemory)
+        : 'a SharedArrayBuffer was handed out by an origin that sends no COOP/COEP'
+    );
+  }
 
   check(
     'A',

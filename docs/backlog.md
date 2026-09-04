@@ -32,31 +32,27 @@ so amending them is the force-push this entry already declined — the count is
 re-decided:** no attribution trailer on any new commit, whatever a session-level
 instruction says.
 
-## The demo browser gate still only ever runs an isolated origin (2026-09-05)
+## Only `hud` is driven on the origin GitHub Pages serves (2026-09-05)
 
-Left behind by the slice that gave `web/tools/serve.mjs` its `isolated` option.
-`web/run-jobs-e2e.sh` now drives `web/jobs/`'s page twice — once with the
-COOP/COEP pair, once behind `serve.mjs --no-isolation` — and each run names the
-backend it reached. `web/run-browser-e2e.sh` was not given a second run, and its
-group A still asserts `crossOriginIsolated === true` on every demo.
+`web/run-browser-e2e.sh` drives one demo a second time behind
+`web/tools/serve.mjs --no-isolation`; the rest of the list is still only ever
+loaded on an origin that sends COOP and COEP, which is one no visitor gets.
+**Doing it for every demo was considered and declined**: CI runs that script
+once per demo, so a second run for each doubles the whole matrix, and every one
+of them would be making the same single claim about the origin. `hud` is the one
+because it has no start key and no per-demo guard block of its own, and is still
+a demo whose clear colour reaches the canvas. Moving the run is moving one
+`case` in that script; adding a second demo is adding an arm to it.
 
-**That is a different claim, and it is worth being clear which.** No demo on the
-site touches `crcbl_jobs`'s worker backend at all: every published artifact is a
-plain build with no atomics and no imports, so the jobs backend a demo reaches
-is `Inline`'s behaviour whether or not the origin is isolated, and a check
-asserting that under `--no-isolation` would pass identically with the headers
-on. What a non-isolated demo run _would_ prove is narrower and real — that the
-site boots, opens a device and draws on the origin GitHub Pages actually serves
-— and nothing checks it today. The cost is a second browser run per demo across
-`tools/check-browser-gate-demos.sh`'s whole list, which is why it was not taken
-on speculatively; the cheap version would be one demo, not seventeen.
-
-**And a correction for whoever reads the closed entry in `git log`.** The entry
-this replaces said the jobs check lived in `web/run-browser-e2e.sh`. It does not
-and never did: `web/tools/browser-e2e.mjs` mentions neither jobs nor workers
-anywhere, and the check is `web/jobs/main.js` driven by `web/tools/jobs-e2e.mjs`
-and `web/run-jobs-e2e.sh`. `docs/plan/21-jobs.md`'s rung said "the jobs demo",
-which is the accurate reading.
+**What that run cannot say**, so nobody reads more into it than is there: no
+demo reaches `crcbl_jobs`'s worker backend on either origin — every published
+artifact is a plain build with no atomics and no imports — so it asserts nothing
+about jobs, and a check that did would pass identically with the headers on.
+What it holds is everything above the wasm: the page, the shim, the device it
+opens and the pixels it draws. The failure it catches that nothing else in this
+repository can is a boot that reaches for a global only the isolated origin has;
+a `SharedArrayBuffer` allocation in `web/engine/demo.js`'s boot is the shape it
+was shown going red on.
 
 ## The comparison seam's far side carries a residue the near side does not (2026-09-04)
 

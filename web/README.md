@@ -166,8 +166,8 @@ site `build.sh` already produced, or pass `--build`:
 
 Anything past `--build`, `--headless` and `--hardware` goes to
 `tools/browser-e2e.mjs`, which takes `--site`, `--demo`, `--adapter`,
-`--timeout` and `--out` and **refuses anything else** by name — a flag borrowed
-from another gate used to be accepted and silently ignored.
+`--timeout`, `--out` and `--no-isolation` and **refuses anything else** by name
+— a flag borrowed from another gate used to be accepted and silently ignored.
 
 It starts its own Xvfb, serves the site through `web/tools/serve.mjs` — the same
 server `build.sh --serve` runs, so the origin the gate checks is the origin a
@@ -176,6 +176,21 @@ and a **real** Space key into the canvas, and reads the canvas back to assert
 the frame is neither one flat colour nor identical from frame to frame while the
 ball is in flight. It fails if zero checks ran, and separately if the
 cross-origin isolation check is not among the ones that did.
+
+**One demo is then driven a second time on the origin GitHub Pages actually
+serves.** `serve.mjs` sends COOP and COEP, and Pages sends neither, so every
+check above is made against an origin no visitor ever loads. The second run
+passes `--no-isolation` — the server withholds the pair, and the driver's group
+A asserts `crossOriginIsolated === false`, so a run handed the isolated origin
+by mistake fails on its first check — and the demo has to boot, open a device
+and draw there anyway. `hud` is the one, because it has no start key and no
+per-demo guard block of its own and is still a demo whose clear colour reaches
+the canvas; running every demo that way would double CI's matrix to make one
+claim about the origin. What that run can prove is narrower than
+`run-jobs-e2e.sh`'s second configuration: every published artifact is a plain
+build, so no demo reaches the worker backend on either origin, and what is only
+true here is the page, the shim, the device and the pixels under the published
+headers.
 
 **It needs no GPU**, which is what lets it run on a CI runner. Getting there
 took measuring something undocumented: three of the four obvious ways to read a
@@ -387,6 +402,10 @@ all runs here. What it cannot see, a black canvas included, is what
   unchanged in behaviour**: its artifacts import nothing, so `engine/jobs.js`
   refuses them, `Spawn::threaded()` answers `false`, and every demo runs exactly
   as it did — which that gate's third red check asserts rather than assumes.
+  **The demo gate runs on that origin too now**: `run-browser-e2e.sh` drives
+  `hud` a second time behind `serve.mjs --no-isolation`, so "a demo boots, opens
+  a device and draws" is a claim about the published origin and not only about
+  the isolated one.
 - **No clipboard, no IME.** The Web shell backend clears those capability bits;
   there is nothing for a shim to wire. **Pointer lock is wired**, and
   `RAW_POINTER_MOTION` with it: the shim takes the lock from a gesture and asks

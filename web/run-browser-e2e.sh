@@ -13,7 +13,7 @@
 #     --hardware   pin the adapter mode instead of letting it choose
 #
 #   Everything after those is passed to `web/tools/browser-e2e.mjs`, which reads
-#   five options and **refuses any other**:
+#   six options and **refuses any other**:
 #
 #     --site <dir>       the built site to serve. Set for you from $SITE_DIR
 #     --demo <path>      the demo directory inside it. Set for you from
@@ -21,6 +21,8 @@
 #     --adapter <mode>   `auto`, `hardware` or `swiftshader`
 #     --timeout <ms>     how long start-up is given
 #     --out <dir>        where the screenshot and the page log are written
+#     --no-isolation     serve without the COOP/COEP pair, and expect the
+#                        document to say so. Set by the second run below
 #
 #   The refusal is the point of writing them out here. This script recognises
 #   three flags and forwards the rest without looking at them, so a flag from a
@@ -73,6 +75,14 @@
 #   the precondition for `SharedArrayBuffer`, and therefore for any wasm build
 #   with `+atomics`. Nothing else in the repository would notice those headers
 #   going missing, so the named-check guard below insists that assertion ran.
+#
+#   And it is the only gate on **the origin a visitor actually gets**. Those two
+#   headers are exactly what GitHub Pages cannot send, so every check above is
+#   made against an origin nobody outside this repository ever loads. One demo is
+#   therefore driven a second time behind `serve.mjs --no-isolation`, where the
+#   driver expects `crossOriginIsolated === false` and the demo has to boot, open
+#   a device and draw anyway. See the block near the bottom for why it is one
+#   demo and why it is that one.
 #
 #   And it is the only gate on **its own reporting channels**. Three of the
 #   driver's checks assert that nothing was reported — no uncaught exception, no
@@ -1154,6 +1164,90 @@ if [ "$STATUS" -ne 0 ]; then
     exit "$STATUS"
 fi
 
+# ---------------------------------------------------------------------------
+# The second configuration: the origin GitHub Pages actually serves
+# ---------------------------------------------------------------------------
+#
+# Everything above this line ran against the COOP/COEP pair `web/tools/serve.mjs`
+# sends by default, which is the origin `web/build.sh --serve` gives a developer
+# and the origin no visitor ever gets: GitHub Pages sends neither header, so
+# crcbl.kryptic.sh is a document where `SharedArrayBuffer` does not exist.
+# `web/run-jobs-e2e.sh` drives its own page both ways for that reason. Nothing
+# drove a *demo* the second way, so "the site boots, opens a device and draws"
+# was a claim about an origin nobody loads.
+#
+# **The claim here is narrower than the jobs gate's, and worth being clear
+# which.** Every artifact the demo site publishes is a plain build with no
+# atomics and no imports, so no demo reaches `crcbl_jobs`'s worker backend on
+# either origin and asserting the backend here would pass identically with the
+# headers on. What only this run can see is everything above the wasm — the
+# page, the shim, the device it opens and the pixels it draws — under the
+# headers the published site has. A boot that reached for `SharedArrayBuffer`
+# is the shape of failure it catches: that global is present on every other
+# origin this repository serves and absent on this one.
+#
+# ONE DEMO, NOT THE WHOLE LIST. CI runs this script once per demo, so a second
+# run for every one of them would double the matrix to make a single claim about
+# the origin. `hud` makes that claim for the least work: `apps/hud` is a scripted
+# page rather than a game, so its `EXPECTATIONS` row has no start key and it has
+# no block of its own among the per-demo guards above — the shortest list of
+# checks the driver runs — while still being a demo whose clear colour reaches
+# the canvas, so the run reads pixels back rather than a status line. Moving the
+# second run to another demo is moving this `case`, and nothing else.
+#
+# `--out` is its own directory: the driver names the screenshot and the page log
+# after the demo and the adapter, and this run would otherwise write over the
+# evidence the run above just left. The upload step in
+# `.github/workflows/pages.yml` takes the whole of `target/web-e2e`, so both
+# arrive.
+case "$DEMO" in
+    hud)
+        PLAIN_OUTPUT="$RUNTIME_DIR/no-isolation.log"
+        echo "crcbl web e2e: driving $DEMO again on an origin with no COOP/COEP"
+        set +e
+        node "$REPO/web/tools/browser-e2e.mjs" --site "$SITE" --demo "demos/$DEMO/" \
+            --no-isolation --out target/web-e2e/no-isolation "$@" 2>&1 |
+            tee "$PLAIN_OUTPUT"
+        PLAIN_STATUS=${PIPESTATUS[0]}
+        set -e
+
+        # The same escape strip, for the same reason, as the run above.
+        sed -E $'s/\033\\[[0-9;]*[a-zA-Z]//g' "$PLAIN_OUTPUT" >"${PLAIN_OUTPUT}.plain"
+
+        if [ "$PLAIN_STATUS" -eq 2 ]; then
+            echo "crcbl web e2e: the non-isolated run could not run; its reason is above" >&2
+            exit 2
+        fi
+
+        PLAIN_RAN="$(grep -Eo '[0-9]+/[0-9]+ checks passed' "${PLAIN_OUTPUT}.plain" | tail -1 | grep -Eo '/[0-9]+' | tr -d '/' || true)"
+        if [ -z "$PLAIN_RAN" ] || [ "$PLAIN_RAN" -eq 0 ]; then
+            echo "crcbl web e2e: the non-isolated run reported no checks — that half is not gating" >&2
+            exit 1
+        fi
+
+        # One name, and it is the only one this run has to insist on. Every other
+        # check it makes is a check the run above already made and the guards
+        # above already name; what is new here is the origin, and this is the
+        # only line that says which origin it was. Without it the run is the
+        # isolated one over again and every green check in it means what it
+        # meant before. Renaming the check in the driver is meant to fail here
+        # and be renamed here too.
+        PLAIN_ISOLATION="$(grep -F 'the document is not cross-origin isolated' "${PLAIN_OUTPUT}.plain" || true)"
+        if [ -z "$PLAIN_ISOLATION" ]; then
+            echo "crcbl web e2e: the second run never said which origin it was on;" >&2
+            echo "               --no-isolation reached a driver that does not read it," >&2
+            echo "               so this was the isolated run a second time" >&2
+            exit 1
+        fi
+
+        if [ "$PLAIN_STATUS" -ne 0 ]; then
+            echo "crcbl web e2e: on the origin with no COOP/COEP, $PLAIN_RAN checks ran and at least one failed" >&2
+            echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/no-isolation/" >&2
+            exit "$PLAIN_STATUS"
+        fi
+        ;;
+esac
+
 # Which configuration actually served, from the driver rather than from what was
 # asked for. A run that fell back to the other adapter, or that never left the
 # boot checks, shows up here and nowhere else.
@@ -1172,3 +1266,9 @@ echo "crcbl web e2e: $RAN checks ran in a real browser, ${CONFIG#running against
 echo "crcbl web e2e: $DEMO booted, opened a WebGPU device, and drew moving frames"
 echo "crcbl web e2e: its command stream ended with nothing left alive"
 echo "crcbl web e2e:${ISOLATION#*ok  }"
+# Set only by the second run above, so this line is absent for every demo that
+# does not make the claim rather than being printed for all of them.
+if [ -n "${PLAIN_RAN:-}" ]; then
+    echo "crcbl web e2e: and $PLAIN_RAN checks again with neither header sent, where"
+    echo "crcbl web e2e: $DEMO booted and drew on the origin GitHub Pages serves"
+fi
