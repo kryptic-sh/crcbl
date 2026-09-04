@@ -71,8 +71,9 @@ scene is fixed, the camera is the viewer's, and this crate opens no `World`.
 
 Nothing exists. The gate is not scaffolding — it is that the ladder has one rung
 built. `crates/crcbl-render/src/ssr.rs` and
-`crates/crcbl-shaders/shaders/ssr.slang` ship the fixed-stride march; Hi-Z, cone
-tracing and planar reflection are all owed by
+`crates/crcbl-shaders/shaders/ssr.slang` ship one march — Hi-Z since 2026-08-27,
+which replaced the fixed stride rather than joining it as a second selectable
+technique; cone tracing and planar reflection are still owed by
 [18-render-features.md](../18-render-features.md), and a comparison demo with
 one technique in it is `apps/lantern` with extra steps.
 

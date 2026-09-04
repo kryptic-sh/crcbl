@@ -268,23 +268,23 @@ the field and draw as the not-def glyph.
 
 ### 7. The commands that ship
 
-| Command                 | Does                                                                                                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `help [name or prefix]` | every variable and command with its help, value, default and flags; with an argument, the matches only. The user's ask, verbatim                        |
-| `find <substring>`      | names and help lines containing the text — Source's `find`, and the way a variable is discovered without knowing its prefix                             |
-| `<var>`                 | prints `name = value (default: d) — help`                                                                                                               |
-| `<var> <value>`         | sets, coerced through `Kind`; `<var> = <value>` is accepted because the user wrote it that way; a value outside the domain is refused                   |
-| `toggle <bool var>`     | flips it                                                                                                                                                |
-| `reset <var>` / `reset` | back to the default; bare, every non-`ARCHIVE` variable                                                                                                 |
-| `save`                  | writes the settings file; `dump` prints `SettingsStack::dump()`                                                                                         |
-| `log <filter>`          | the live `CRCBL_LOG` filter                                                                                                                             |
-| `echo`, `clear`         | Source's                                                                                                                                                |
-| `debug_view <name>`     | `shaded`, `normals`, `ambient occlusion`, `bent normal`, `motion`, `heatmap`, `lod tint` — an `Enum` variable `r_debug_view` under the hood, everywhere |
-| `pause`, `quit`         | the pause toggle the loop already has; a clean `ExitReason`                                                                                             |
-| `fps`                   | the frame-timing row's numbers as a line                                                                                                                |
-| `config <name>`         | runs `<name>.cfg` from the settings directory — Source's `exec`. A bare name, never a path; a failed line is reported and the file runs on              |
-| `bind`, `unbind`        | what drives an action, and driving it with one key instead — `bind jump Space`, `unbind jump`; bare `bind` lists                                        |
-| `quality [tier]`        | the quality tier the video keys hold — `quality medium` writes one, bare prints it                                                                      |
+| Command                 | Does                                                                                                                                                                                |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `help [name or prefix]` | every variable and command with its help, value, default and flags; with an argument, the matches only. The user's ask, verbatim                                                    |
+| `find <substring>`      | names and help lines containing the text — Source's `find`, and the way a variable is discovered without knowing its prefix                                                         |
+| `<var>`                 | prints `name = value (default: d) — help`                                                                                                                                           |
+| `<var> <value>`         | sets, coerced through `Kind`; `<var> = <value>` is accepted because the user wrote it that way; a value outside the domain is refused                                               |
+| `toggle <bool var>`     | flips it                                                                                                                                                                            |
+| `reset <var>` / `reset` | back to the default; bare, every non-`ARCHIVE` variable                                                                                                                             |
+| `save`                  | writes the settings file; `dump` prints `SettingsStack::dump()`                                                                                                                     |
+| `log <filter>`          | the live `CRCBL_LOG` filter                                                                                                                                                         |
+| `echo`, `clear`         | Source's                                                                                                                                                                            |
+| `debug_view <name>`     | `shaded`, `normals`, `ambient occlusion`, `bent normal`, `motion`, `heatmap`, `lod tint`, `shadow atlas`, `cascades` — an `Enum` variable `r_debug_view` under the hood, everywhere |
+| `pause`, `quit`         | the pause toggle the loop already has; a clean `ExitReason`                                                                                                                         |
+| `fps`                   | the frame-timing row's numbers as a line                                                                                                                                            |
+| `config <name>`         | runs `<name>.cfg` from the settings directory — Source's `exec`. A bare name, never a path; a failed line is reported and the file runs on                                          |
+| `bind`, `unbind`        | what drives an action, and driving it with one key instead — `bind jump Space`, `unbind jump`; bare `bind` lists                                                                    |
+| `quality [tier]`        | the quality tier the video keys hold — `quality medium` writes one, bare prints it                                                                                                  |
 
 A command with a `Fault` prints the fault and leaves state alone. Unknown names
 print "unknown command or variable, try `find`". **An enum value may hold a
