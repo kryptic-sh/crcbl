@@ -228,14 +228,55 @@ golden of their own and a button on the page. What is still **not** done:
   golden. The acne claim closed on 2026-09-04 is in that half: it counts
   self-shadowing dots over one 3 m by 2 m block of open pavement from the fixed
   pose, so acne on a surface that block does not cover is still nobody's claim.
-  The 2026-09-05 pair claim,
-  `the_two_bias_counts_trade_acne_against_the_plinths_own_contact`, is in the
-  same half: five arms, all from the fixed pose, all at `sun::GRAZING_TICK` and
-  all under the shipped `pcss`. Nothing reads either bias count from
-  `plaza::counter_camera`, at the top of the sun's arc, or under `disc` or `box`
-  — whose filter widths differ, so the count that covers a grazing receiver
-  under one of them need not cover it under another. Each is one more set of
-  arms of the same walk.
+- **The bias pair reads two rungs now, and the three setups it does not read
+  were measured rather than skipped (2026-09-05).**
+  `the_two_bias_counts_trade_acne_against_the_plinths_own_contact` runs its five
+  arms once per setup: `Arm::shipped()` and every other rung the engine declares
+  less `BIAS_UNTRADED_RUNG` — today that is `disc` — both at `sun::GRAZING_TICK`
+  from `plaza::fixed_camera`, each read against its own control frame. `disc`
+  holds on every constant already in the file, so none of them moved. Three
+  setups were swept on both local Vulkan adapters and held back, and not one is
+  a bound that was loosened:
+  - **The `box` rung.** Two of the three claims fail on it. Zeroing
+    `r_shadow_bias` leaves its block at `0.0000%` dots on both adapters, against
+    `3.2575%` on radv and `3.2335%` on lavapipe for the shipped rung on the same
+    frames — under `box` the normal offset covers this block on its own, so
+    `ACNE_WITHOUT_BIAS` is a floor nothing there reaches. And `HELD_OFFSET`
+    leaves contact and beyond at exactly the shipped arm's numbers
+    (`70.73`/`68.33` on radv, `70.44`/`68.33` on lavapipe), which is the
+    anti-vacuity clause refusing a count it cannot see reach the frame; the next
+    station up, 44 texels, moves the contact itself to `31.29` and `31.13`, so
+    there is no station between the two. Its peter-panning half is fine — `0.00`
+    at the contact against `68.08` beyond it at `PETER_PAN_BIAS` — so this is a
+    rung the readings cannot carry rather than a rung with a defect. **Why the
+    narrowest kernel on the ladder is the one that leaves no acne behind at zero
+    constant bias was not established**; that is its own investigation. Closing
+    this wants an acne rise that does not depend on which kernel drew it, and an
+    offset station between 40 and 44 texels.
+  - **The top of the sun's arc, `sun::NOON_TICK`.** The same two claims fail,
+    and for one reason: a sun at `sun::MAX_ELEVATION` throws a plinth shadow a
+    fraction of the block's own height long. Zeroing `r_shadow_normal_offset`
+    draws `0.0000%` dots on both adapters — what that count covers is how fast
+    the receiver climbs across one shadow texel, and under a sun that steep it
+    barely climbs. And no count of constant bias peter-pans: contact and beyond
+    read `176.00`/`173.33` at 50 texels, `91.65`/`96.31` at 52, `0.21`/`0.39` at
+    54 and `0.00`/`0.00` at 56 on radv (`175.93`/`173.33`, `91.97`/`96.67`,
+    `0.23`/`0.37`, `0.00`/`0.00` on lavapipe), so the contact and the pavement
+    past it go together at every station and there is no gap to read. Along a
+    ray that steep the depth to cross is the block's _height_ — the ray leaves
+    the plinth through its top face rather than its far side — and that is the
+    same depth for the contact and for every station still inside so short a
+    shadow. Reading the pair at noon wants a **second, thin caster** whose noon
+    shadow outruns the gap a bias opens; it is not another arm of this walk.
+  - **`plaza::counter_camera`.** Measured with `on_screen` and no GPU at
+    `CLAIM_EXTENT`: `plaza::PLINTH_CONTACT` and every one of `BEYOND_CONTACT`'s
+    stations is **behind that pose's eye** — it stands past the plinth's near
+    face looking away down the plaza — so all of them are refused and `project`
+    would panic rather than report. The acne half _is_ framed from there: all
+    four corners of `acne_block` project and `plaza::hidden_from` refuses none
+    of them. So what that pose is short of is the contact, and reaching it wants
+    a **third pose**, one framing a contact and a stretch of the shadow past it,
+    rather than another arm.
 - **The keys walk the counts' neighbourhood and cannot reach the far end of
   either range.** `filter::BIAS_STEP` is half a texel and the ranges run to 128
   and 64, so the count at which `apps/sundial`'s plinth loses its shadow is 189

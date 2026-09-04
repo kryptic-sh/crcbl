@@ -1952,7 +1952,8 @@ const BEYOND_CONTACT: [f32; 5] = [0.2, 0.4, 0.6, 0.8, 1.0];
 /// [`sun::GRAZING_TICK`], with `r_shadow_normal_offset` left where it ships. The
 /// shadow term is the frame with the shadow passes off less the frame with them
 /// on, over a 5x5 block; `contact` is that term at [`plaza::PLINTH_CONTACT`] and
-/// `beyond` the deepest of it over [`BEYOND_CONTACT`]:
+/// `beyond` the deepest of it over [`BEYOND_CONTACT`]. The shipped rung, per
+/// count:
 ///
 /// | `r_shadow_bias` | contact, radv | beyond, radv | contact, lavapipe | beyond, lavapipe |
 /// | --- | --- | --- | --- | --- |
@@ -1972,6 +1973,37 @@ const BEYOND_CONTACT: [f32; 5] = [0.2, 0.4, 0.6, 0.8, 1.0];
 /// against, and a bias has to cross all of it. A thin caster loses its contact
 /// at a small count, which is `apps/lantern`'s wall and
 /// `docs/plan/45-shadows.md`'s seventh decision's own fixture.
+///
+/// **This count on the other arms**, as the pair of terms each shows at it:
+///
+/// | arm | contact, radv | beyond, radv | contact, lavapipe | beyond, lavapipe |
+/// | --- | --- | --- | --- | --- |
+/// | the `disc` rung | `0.45` | `67.01` | `0.37` | `67.00` |
+/// | the `box` rung | `0.00` | `68.08` | `0.00` | `68.08` |
+/// | the top of the arc | `0.00` | `0.00` | `0.00` | `0.00` |
+///
+/// The first two lift the contact and leave the pavement past it, which is the
+/// gap the claim below is about; `disc`'s own window runs from 92 to 100 texels
+/// on both adapters, so this count sits inside it as it sits inside the shipped
+/// rung's. The third does not — and **no** count does. The same sweep at
+/// [`sun::NOON_TICK`] takes the contact and the pavement past it away together:
+///
+/// | `r_shadow_bias` | contact, radv | beyond, radv | contact, lavapipe | beyond, lavapipe |
+/// | --- | --- | --- | --- | --- |
+/// | 50 | `176.00` | `173.33` | `175.93` | `173.33` |
+/// | 52 | `91.65` | `96.31` | `91.97` | `96.67` |
+/// | 54 | `0.21` | `0.39` | `0.23` | `0.37` |
+/// | 56 | `0.00` | `0.00` | `0.00` | `0.00` |
+///
+/// **A sun at the top of its arc is why**, and it is the paragraph above turned
+/// around: the ray from this contact to a sun that steep leaves the plinth
+/// through the block's *top* face rather than through its far side, so what a
+/// bias has to cross is the block's height, and that is the same depth for
+/// every station in a shadow this short — the whole shadow is a fraction of
+/// that height long. Contact and pavement lift as one,
+/// there is no gap between them to read, and so there is no count to read it
+/// at. `docs/backlog.md` carries what a peter-panning reading at the top of the
+/// arc would want.
 const PETER_PAN_BIAS: f32 = 96.0;
 
 /// What `r_shadow_normal_offset` is pushed to for the other half, in the same
@@ -1999,6 +2031,16 @@ const PETER_PAN_BIAS: f32 = 96.0;
 /// that has gone rather than one that has come off its caster — so the claim
 /// below is made at 40, where the contact reads what it reads with the offset at
 /// two and the frame is nonetheless a different picture.
+///
+/// **This count on the other arms.** The `disc` rung reads what the shipped rung
+/// reads to a hundredth: contact `70.73` and beyond `66.59` on radv, `70.44` and
+/// `66.53` on lavapipe. `box` reads the shipped arm's own numbers exactly —
+/// `70.73`/`68.33` and `70.44`/`68.33` — which is a count that reached that
+/// rung's frame nowhere these two readings can see, and half of what
+/// [`BIAS_UNTRADED_RUNG`] is. At the top of the arc the contact holds at
+/// `176.00` and `175.93` while beyond falls to `24.27` and `24.33`, so this half
+/// of the claim is one that arm could make; it is [`PETER_PAN_BIAS`]' half it
+/// cannot.
 const HELD_OFFSET: f32 = 40.0;
 
 /// How much shadow term a piece of pavement has to carry to count as shadowed,
@@ -2018,11 +2060,11 @@ const CONTACT_LIT: f32 = 20.0;
 
 /// How far the contact's term may move and still be *where it was*, out of 255.
 ///
-/// The tolerance on every "and the contact holds" clause. **Swept:** the four
-/// arms that are meant to leave it alone read `70.73` on radv and `70.44` on
-/// lavapipe — the same number to a hundredth, on both, not a number inside a
-/// tolerance — so this is a guard against readback noise rather than slack the
-/// claim needs.
+/// The tolerance on every "and the contact holds" clause. **Swept:** every arm
+/// that is meant to leave it alone reads `70.73` on radv and `70.44` on
+/// lavapipe, on both of the rungs the claim is read on — the same number to a
+/// hundredth, not a number inside a tolerance — so this is a guard against
+/// readback noise rather than slack the claim needs.
 const CONTACT_HELD: f32 = 2.0;
 
 /// What share of the acne block is a self-shadowing dot once the normal offset
@@ -2032,6 +2074,15 @@ const CONTACT_HELD: f32 = 2.0;
 /// `r_shadow_normal_offset` at zero, against `0.0000%` on both where it ships.
 /// A floor at about half of what was seen, because it is a floor on an artefact
 /// there is a great deal of rather than a second golden written in numbers.
+///
+/// The `disc` rung reads the same pair; `box` reads `42.6108%` on radv and
+/// `42.7305%` on lavapipe. At [`sun::NOON_TICK`] the block counts `0.0000%` on
+/// both adapters with this count at zero. What this count covers is how fast the
+/// receiver climbs across one shadow texel — [`GRAZING_OVER_STEEP`]'s own
+/// argument — and under a sun that steep it barely climbs, so there is nothing
+/// there for zeroing it to buy back. The quantisation the constant bias covers
+/// is still there, which is why the next constant's own noon reading is a rise
+/// and this one's is not.
 const ACNE_WITHOUT_OFFSET: f32 = 20.0;
 
 /// The same once the constant bias is gone instead.
@@ -2040,6 +2091,10 @@ const ACNE_WITHOUT_OFFSET: f32 = 20.0;
 /// at zero. Two orders smaller than the offset's, which is the whole shape of
 /// the seventh decision — over this block the offset covers a lost depth bias
 /// nearly on its own — so the floor is set under it rather than at half of it.
+///
+/// The `disc` rung reads the same pair. `box` reads `0.0000%` on both adapters,
+/// which is the other half of [`BIAS_UNTRADED_RUNG`]; at [`sun::NOON_TICK`] the
+/// shipped rung reads `2.9222%` on radv and `1.1737%` on lavapipe.
 const ACNE_WITHOUT_BIAS: f32 = 1.5;
 
 /// What share of the block may be dots on an arm that is meant to be smooth.
@@ -2049,6 +2104,39 @@ const ACNE_WITHOUT_BIAS: f32 = 1.5;
 /// an order over the largest reading a smooth arm produced and well under
 /// [`ACNE_WITHOUT_BIAS`], which is the smallest rise it has to separate from.
 const SMOOTH_PERCENT: f32 = 1.0;
+
+/// The rung of the filter ladder the claim below is **not** read on.
+///
+/// `box`, and it is two of the readings rather than the frame.
+///
+/// **Zeroing the constant bias leaves its block smooth**: `0.0000%` dots on both
+/// adapters, against the `3.2575%` and `3.2335%` the shipped rung reads on the
+/// same frames, which is [`ACNE_WITHOUT_BIAS`]' own sweep. Under this rung the
+/// normal offset covers this block on its own, so there is no rise for that half
+/// of the claim to be about. **Why** the narrowest kernel on the ladder is the
+/// one that leaves nothing behind was not established here; what was measured is
+/// that it leaves nothing.
+///
+/// And **[`HELD_OFFSET`] reaches this rung's frame nowhere these readings can
+/// see it**: pushed there, the contact reads `70.73` on radv and `70.44` on
+/// lavapipe and the pavement past it `68.33` on both, which is the shipped arm's
+/// own pair to a hundredth. That is the very reading the anti-vacuity clause
+/// below refuses — a contact that did not move is what a knob wired to nothing
+/// draws — and the next station up is no answer either: at 44 texels the contact
+/// itself falls to `31.29` and `31.13`, which is the clause the arm was meant to
+/// make going the wrong way rather than a station it can be pushed to.
+///
+/// **Its peter-panning half is fine**, which is what makes this a rung the
+/// readings cannot carry rather than a rung with a defect in it: at
+/// [`PETER_PAN_BIAS`] its contact reads `0.00` on both adapters and the pavement
+/// past it `68.08`. Reading `box` wants an acne rise that does not depend on
+/// which kernel drew it, and an offset station between the two this rung has —
+/// `docs/backlog.md` carries both.
+///
+/// Held against the ladder the engine declares rather than trusted: a rung
+/// renamed out from under this fails the run, where an exclusion that silently
+/// excluded nothing would leave the ladder short by one and say so nowhere.
+const BIAS_UNTRADED_RUNG: &str = "box";
 
 /// The **shadow term** at a world point: the frame drawn without the shadow
 /// passes, less the frame drawn with them.
@@ -2074,6 +2162,94 @@ fn shadow_term(
 ) -> f32 {
     let pixel = project(camera, extent, at);
     brightness(flat, pixel, BLOCK) - brightness(shadowed, pixel, BLOCK)
+}
+
+/// One arm's four readings, and whether it drew the shipped arm's own frame.
+struct Reading {
+    /// What the run's lines and the faults call this arm.
+    name: &'static str,
+    /// What share of [`acne_block`] is a self-shadowing dot.
+    dots: f32,
+    /// The block's mean, which [`LIT_PAVEMENT`] is read against.
+    mean: f32,
+    /// The shadow term at [`plaza::PLINTH_CONTACT`].
+    contact: f32,
+    /// The deepest shadow term over [`BEYOND_CONTACT`].
+    beyond: f32,
+    /// Whether this arm drew the shipped arm's frame byte for byte — the frame a
+    /// count that never reached the shader draws, and the one every "holds"
+    /// clause below is trivially true on. `false` on the shipped arm itself,
+    /// which is the frame the others are compared against.
+    unmoved: bool,
+}
+
+/// What one setup's arms read.
+///
+/// The readings rather than the frames they came off: every clause below holds
+/// two of these against each other, and all of them come from one setup's own
+/// pose, sun and filter.
+struct Trade {
+    /// Which paths drew this setup's frames.
+    paths: String,
+    /// The shipped arm, each count at **zero**, and each count **pushed**, in
+    /// that order.
+    arms: [Reading; 5],
+}
+
+/// Draws one setup's arms and reads the pair of artefacts off each.
+///
+/// The pose, the sun and the filter come off the [`Arm`] rather than from the
+/// caller, so a setup on another rung is read against **its own** control: the
+/// frame every shadow term here is a difference against is that setup drawn with
+/// the shadow passes out, and [`acne_block`] is projected through that setup's
+/// own camera.
+fn bias_trade(extent: (u32, u32), name: &str, base: Arm) -> Trade {
+    let camera = base.camera();
+    let (centre, half) = acne_block(&camera, extent);
+    let (flat, paths, _) = draw(extent, base.without_shadows());
+
+    let mut shipped_pixels = Vec::new();
+    let mut read = |arm_name: &'static str, arm: Arm| {
+        let (image, _, _) = draw(extent, arm);
+        let unmoved = if arm_name == "shipped" {
+            shipped_pixels = image.pixels().to_vec();
+            false
+        } else {
+            image.pixels() == shipped_pixels.as_slice()
+        };
+        let reading = Reading {
+            name: arm_name,
+            dots: speckle_percent(&image, centre, half),
+            mean: brightness(&image, centre, half),
+            contact: shadow_term(&flat, &image, &camera, extent, plaza::PLINTH_CONTACT),
+            beyond: BEYOND_CONTACT
+                .into_iter()
+                .map(|out| {
+                    let at = plaza::PLINTH_CONTACT + Vec3::new(0.0, 0.0, out);
+                    shadow_term(&flat, &image, &camera, extent, at)
+                })
+                .fold(f32::MIN, f32::max),
+            unmoved,
+        };
+        eprintln!(
+            "sundial golden: {name}: the {arm_name} arm on {paths} — {dots:.4}% of the block is a \
+             dot, mean {mean:.2}/255, shadow term {contact:.2} at the contact and {beyond:.2} \
+             deepest beyond it",
+            dots = reading.dots,
+            mean = reading.mean,
+            contact = reading.contact,
+            beyond = reading.beyond,
+        );
+        reading
+    };
+    let arms = [
+        read("shipped", base),
+        read("no offset", base.offset(0.0)),
+        read("no bias", base.biased(0.0)),
+        read("pushed bias", base.biased(PETER_PAN_BIAS)),
+        read("pushed offset", base.offset(HELD_OFFSET)),
+    ];
+    Trade { paths, arms }
 }
 
 /// **The sun's two bias counts trade acne against the plinth's own contact, and
@@ -2106,20 +2282,69 @@ fn shadow_term(
 ///   decision's claim — a sideways move keeps a contact — measured rather than
 ///   argued.
 ///
+/// # The setups
+///
+/// That set of arms, once per **setup**, and each setup read against its own
+/// control: [`bias_trade`] takes the pose, the sun and the filter off the
+/// [`Arm`] it is handed, so no arm is compared against a frame another rung
+/// drew.
+///
+/// * **The shipped rung**, which is the setup every constant above was swept on.
+/// * **Every other rung the engine declares**, out of
+///   `filter::names(filter::FILTER)` rather than written down here, less
+///   [`BIAS_UNTRADED_RUNG`] — today that is `disc`. A rung is a kernel over the
+///   same shadow map and both of the artefacts this pair is about are things a
+///   kernel averages over, so a count that covers a grazing receiver under one
+///   kernel need not cover it under another.
+///
+/// Every setup shares [`plaza::fixed_camera`] and [`sun::GRAZING_TICK`], which
+/// is what lets [`BEYOND_CONTACT`]'s stations run down `+z` for all of them.
+///
+/// # What it is not read on
+///
+/// Three more setups were measured and are not here, and not one of them is a
+/// bound that was loosened to fit it.
+///
+/// [`BIAS_UNTRADED_RUNG`] carries the first: on `box` there is no acne left to
+/// buy back by zeroing the constant bias, and [`HELD_OFFSET`] moves nothing
+/// these readings can see.
+///
+/// The second is **the top of the sun's arc**, [`sun::NOON_TICK`]. Two of the
+/// three claims fail there and both for one reason — a sun that steep throws a
+/// plinth shadow a fraction of the block's own height long. Zeroing the normal
+/// offset draws `0.0000%` dots on both adapters, so there is no rise for the
+/// first claim to be about; and no count of constant bias lifts the contact
+/// while the pavement past it is still shadowed, because along a ray that steep
+/// the depth to cross is the block's height for the contact and for every
+/// station beyond it alike, so the whole shadow goes at once. [`PETER_PAN_BIAS`]
+/// carries both sweeps. Reading the pair at the top of the arc wants a **second
+/// caster**, a thin one whose noon shadow outruns the gap a bias opens, and not
+/// another arm of this walk.
+///
+/// The third is [`plaza::counter_camera`]. [`plaza::PLINTH_CONTACT`] and every
+/// one of [`BEYOND_CONTACT`]'s stations is **behind that pose's eye**: it stands
+/// past the plinth's near face looking away down the plaza, so [`on_screen`]
+/// refuses all of them and [`project`] would panic rather than report. The acne
+/// half of the pair *is* framed from there — the block's four corners all
+/// project — so what that pose is short of is the contact, and reaching it wants
+/// a **third pose**. `docs/backlog.md` carries both.
+///
 /// # Anti-vacuity
 ///
-/// Four ways this could pass while measuring nothing, and an assertion each. The
-/// five arms could be **one picture**, where every "holds" clause is trivially
-/// true and every "moves" clause would have failed — they are compared as bytes
-/// against the shipped arm. The acne block could be **in shadow**, where it
-/// counts no dots however the counts are set — [`LIT_PAVEMENT`] is read off
-/// every arm. The contact could be **lit to begin with**, where "it opened"
-/// means nothing — the shipped arm's own term is held over
-/// [`CONTACT_SHADOWED`]. And the pushed-offset arm could be a knob that never
-/// reached the shader, where a contact that did not move is exactly what a
-/// no-op draws — that arm's shadow beyond the contact is held to have *fallen*
-/// against the shipped one's, so the count is shown to have done something
-/// before it is credited with not doing this.
+/// Five ways this could pass while measuring nothing, and a fault each. A
+/// setup's arms could be **one picture**, where every "holds" clause is
+/// trivially true and every "moves" clause would have failed — they are compared
+/// as bytes against that setup's own shipped arm. The acne block could be **in
+/// shadow**, where it counts no dots however the counts are set —
+/// [`LIT_PAVEMENT`] is read off every arm of every setup. The contact could be
+/// **lit to begin with**, where "it opened" means nothing — each setup's shipped
+/// arm is held over [`CONTACT_SHADOWED`]. The pushed-offset arm could be a knob
+/// that never reached the shader, where a contact that did not move is exactly
+/// what a no-op draws — that arm's shadow beyond the contact is held to have
+/// *fallen* against its own setup's shipped one, so the count is shown to have
+/// done something before it is credited with not doing this. And
+/// [`BIAS_UNTRADED_RUNG`] could name a rung the engine no longer declares, where
+/// the exclusion silently excludes nothing — it is held against the ladder.
 ///
 /// # How it was shown to fail
 ///
@@ -2128,183 +2353,196 @@ fn shadow_term(
 /// `r_shadow_bias` and `r_shadow_normal_offset` — a getter that ignores its own
 /// console cell, which is the failure this whole pair of variables can hide
 /// behind and the one every reading here would otherwise report as a clean
-/// frame. The four moved arms drew the shipped arm's picture and the byte
-/// comparison failed first:
+/// frame. **Every setup went red, on both adapters**, and the run reports them
+/// together because the arms are read into one list of faults rather than one
+/// assertion each. The rung that was added carries the same sentences under its
+/// own name; on radv three of its lines were
 ///
-/// ```text
-/// the no offset arm drew the shipped arm's frame byte for byte, so every reading
-/// taken off it below is the shipped reading under another name
-/// ```
+/// > on the disc rung the pushed bias arm drew the shipped arm's frame byte for
+/// > byte, so every reading taken off it is the shipped reading under another
+/// > name
+/// >
+/// > on the disc rung with the constant bias at zero the block is 0.0000% dots
+/// > against 0.0000% as the sample ships — short of the 1.5% this count is
+/// > worth. …
+/// >
+/// > on the disc rung at 96 texels of constant bias the contact still carries
+/// > 70.73 of shadow term, over the 20 this reading calls lit — the shadow has
+/// > not come off its caster …
+///
+/// and on lavapipe the last of those read `70.44`.
 ///
 /// # What was measured
 ///
-/// The tables are on [`PETER_PAN_BIAS`] and [`HELD_OFFSET`], and the run prints
-/// every arm's four readings again on whatever adapter it opened.
+/// The tables are on [`PETER_PAN_BIAS`], [`HELD_OFFSET`] and
+/// [`BIAS_UNTRADED_RUNG`], and the run prints every arm's four readings again on
+/// whatever adapter it opened.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
 fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
     let extent = CLAIM_EXTENT;
-    let camera = plaza::fixed_camera();
-    let (centre, half) = acne_block(&camera, extent);
-    let base = Arm::shipped().at_tick(sun::GRAZING_TICK);
-    let (flat, paths, _) = draw(extent, base.without_shadows());
-
-    /// One arm's four readings.
-    struct Reading {
-        /// What share of [`acne_block`] is a self-shadowing dot.
-        dots: f32,
-        /// The block's mean, which [`LIT_PAVEMENT`] is read against.
-        mean: f32,
-        /// The shadow term at the contact.
-        contact: f32,
-        /// The deepest shadow term over [`BEYOND_CONTACT`].
-        beyond: f32,
-    }
-
-    let arms = [
-        ("shipped", base),
-        ("no offset", base.offset(0.0)),
-        ("no bias", base.biased(0.0)),
-        ("pushed bias", base.biased(PETER_PAN_BIAS)),
-        ("pushed offset", base.offset(HELD_OFFSET)),
-    ];
-    let mut readings = Vec::with_capacity(arms.len());
-    let mut shipped_pixels = Vec::new();
-    for (name, arm) in arms {
-        let (image, _, _) = draw(extent, arm);
-        if name == "shipped" {
-            shipped_pixels = image.pixels().to_vec();
-        } else {
-            assert!(
-                image.pixels() != shipped_pixels.as_slice(),
-                "the {name} arm drew the shipped arm's frame byte for byte, so every reading \
-                 taken off it below is the shipped reading under another name"
-            );
+    let shipped = crcbl::render::shadow::shipped_filter().label();
+    let ladder = filter::names(filter::FILTER);
+    assert!(
+        ladder.contains(&BIAS_UNTRADED_RUNG),
+        "the engine declares {ladder:?} and none of them is `{BIAS_UNTRADED_RUNG}`, so the rung \
+         this pair holds itself back from is a rung nothing runs and the exclusion excludes \
+         nothing"
+    );
+    let mut setups = vec![(
+        format!("the shipped {shipped}"),
+        Arm::shipped().at_tick(sun::GRAZING_TICK),
+    )];
+    for name in ladder {
+        if *name != shipped && *name != BIAS_UNTRADED_RUNG {
+            setups.push((
+                format!("the {name} rung"),
+                Arm::shipped().at_tick(sun::GRAZING_TICK).on(name),
+            ));
         }
-        let reading = Reading {
-            dots: speckle_percent(&image, centre, half),
-            mean: brightness(&image, centre, half),
-            contact: shadow_term(&flat, &image, &camera, extent, plaza::PLINTH_CONTACT),
-            beyond: BEYOND_CONTACT
-                .into_iter()
-                .map(|out| {
-                    let at = plaza::PLINTH_CONTACT + Vec3::new(0.0, 0.0, out);
-                    shadow_term(&flat, &image, &camera, extent, at)
-                })
-                .fold(f32::MIN, f32::max),
-        };
+    }
+    assert!(
+        setups.len() > 1,
+        "the engine declares {ladder:?}, so there is no second rung to read this pair on and the \
+         claim is a claim about one filter"
+    );
+
+    let mut faults = Vec::new();
+    for (name, base) in setups {
+        let Trade { paths, arms } = bias_trade(extent, &name, base);
+        for arm in &arms {
+            if arm.unmoved {
+                faults.push(format!(
+                    "on {name} the {arm} arm drew the shipped arm's frame byte for byte, so \
+                     every reading taken off it is the shipped reading under another name",
+                    arm = arm.name,
+                ));
+            }
+            if arm.mean <= LIT_PAVEMENT {
+                faults.push(format!(
+                    "on {name} the block reads {mean:.2}/255 on the {arm} arm, under the \
+                     {LIT_PAVEMENT} lit pavement stands at. This is a reading of a shadow, and a \
+                     shadow counts no dots however the counts are set",
+                    mean = arm.mean,
+                    arm = arm.name,
+                ));
+            }
+        }
+        let [shipped_arm, no_offset, no_bias, pushed_bias, pushed_offset] = &arms;
         eprintln!(
-            "sundial golden: the {name} arm on {paths} — {dots:.4}% of the block is a dot, mean \
-             {mean:.2}/255, shadow term {contact:.2} at the contact and {beyond:.2} deepest \
-             beyond it",
-            dots = reading.dots,
-            mean = reading.mean,
-            contact = reading.contact,
-            beyond = reading.beyond,
+            "sundial golden: the bias pair on {name}, {paths} — the contact reads {ships:.2}/255 \
+             as the sample ships, {lifted:.2} at {PETER_PAN_BIAS} texels of constant bias and \
+             {held:.2} at {HELD_OFFSET} of normal offset",
+            ships = shipped_arm.contact,
+            lifted = pushed_bias.contact,
+            held = pushed_offset.contact,
         );
-        assert!(
-            reading.mean > LIT_PAVEMENT,
-            "the block reads {mean:.2}/255 on the {name} arm, under the {LIT_PAVEMENT} lit \
-             pavement stands at. This is a reading of a shadow, and a shadow counts no dots \
-             however the counts are set",
-            mean = reading.mean,
-        );
-        readings.push(reading);
+
+        // The contact has to be a shadow before "it opened" is a statement about
+        // anything.
+        if shipped_arm.contact <= CONTACT_SHADOWED {
+            faults.push(format!(
+                "on {name} the pavement at the plinth's contact carries {:.2} of shadow term as \
+                 the sample ships, under the {CONTACT_SHADOWED} this reading calls shadowed — so \
+                 there is no shadow here for a bias to take off",
+                shipped_arm.contact,
+            ));
+        }
+
+        // Zero either count: the pavement roughens, and the contact stays put.
+        for (count, arm, least) in [
+            ("normal offset", no_offset, ACNE_WITHOUT_OFFSET),
+            ("constant bias", no_bias, ACNE_WITHOUT_BIAS),
+        ] {
+            if arm.dots <= least || arm.dots <= shipped_arm.dots {
+                faults.push(format!(
+                    "on {name} with the {count} at zero the block is {:.4}% dots against {:.4}% \
+                     as the sample ships — short of the {least}% this count is worth. A count \
+                     that buys no acne back when it is taken away is not what is covering the \
+                     acne",
+                    arm.dots, shipped_arm.dots,
+                ));
+            }
+            if (arm.contact - shipped_arm.contact).abs() >= CONTACT_HELD {
+                faults.push(format!(
+                    "on {name} with the {count} at zero the contact's shadow term moved from \
+                     {:.2} to {:.2}. Acne is what a count too small draws; a contact that moved \
+                     as well says this reading is about the whole frame rather than about the \
+                     pavement under the plinth",
+                    shipped_arm.contact, arm.contact,
+                ));
+            }
+        }
+
+        // Push the constant bias: the shadow comes off the plinth and stays on
+        // the pavement past it.
+        if pushed_bias.contact >= CONTACT_LIT {
+            faults.push(format!(
+                "on {name} at {PETER_PAN_BIAS} texels of constant bias the contact still carries \
+                 {:.2} of shadow term, over the {CONTACT_LIT} this reading calls lit — the \
+                 shadow has not come off its caster and there is no peter-panning here to \
+                 measure",
+                pushed_bias.contact,
+            ));
+        }
+        if pushed_bias.beyond <= CONTACT_SHADOWED {
+            faults.push(format!(
+                "on {name} at {PETER_PAN_BIAS} texels the pavement past the contact carries \
+                 {:.2} of shadow term at its deepest, under the {CONTACT_SHADOWED} this reading \
+                 calls shadowed. The shadow has gone rather than come off its caster, and \
+                 peter-panning is the gap between the two",
+                pushed_bias.beyond,
+            ));
+        }
+        if pushed_bias.dots >= SMOOTH_PERCENT {
+            faults.push(format!(
+                "on {name} at {PETER_PAN_BIAS} texels the block is {:.4}% dots, past \
+                 {SMOOTH_PERCENT}% — a count raised past what acne needs must not draw acne of \
+                 its own",
+                pushed_bias.dots,
+            ));
+        }
+
+        // Push the normal offset the same way: the contact does not move.
+        if (pushed_offset.contact - shipped_arm.contact).abs() >= CONTACT_HELD {
+            faults.push(format!(
+                "on {name} at {HELD_OFFSET} texels of normal offset the contact's shadow term \
+                 moved from {:.2} to {:.2}. `docs/plan/45-shadows.md`'s seventh decision is that \
+                 a move along the receiver's own normal leaves the depth it compares alone and \
+                 therefore keeps a contact; this is the fixture that says so",
+                shipped_arm.contact, pushed_offset.contact,
+            ));
+        }
+        if pushed_offset.beyond >= shipped_arm.beyond {
+            faults.push(format!(
+                "on {name} at {HELD_OFFSET} texels of normal offset the pavement past the \
+                 contact carries {:.2} of shadow term at its deepest against the shipped arm's \
+                 {:.2} — the count reached the frame nowhere, so a contact that did not move is \
+                 what a knob wired to nothing draws",
+                pushed_offset.beyond, shipped_arm.beyond,
+            ));
+        }
+        if pushed_offset.dots >= SMOOTH_PERCENT {
+            faults.push(format!(
+                "on {name} at {HELD_OFFSET} texels the block is {:.4}% dots, past \
+                 {SMOOTH_PERCENT}%",
+                pushed_offset.dots,
+            ));
+        }
+
+        // And the two counts are not one knob: pushed the same way, one opens
+        // the contact and the other leaves it alone.
+        if pushed_bias.contact >= pushed_offset.contact {
+            faults.push(format!(
+                "on {name}, pushed past what acne needs, the constant bias leaves {:.2} of \
+                 shadow term at the contact and the normal offset {:.2}. Two counts that did the \
+                 same thing to a contact would be one quality knob, and this sample's pair of \
+                 variables would be a distinction with nothing behind it",
+                pushed_bias.contact, pushed_offset.contact,
+            ));
+        }
     }
-    let [shipped, no_offset, no_bias, pushed_bias, pushed_offset] =
-        <[Reading; 5]>::try_from(readings).unwrap_or_else(|_| panic!("one reading per arm"));
-
-    // The contact has to be a shadow before "it opened" is a statement about
-    // anything.
-    assert!(
-        shipped.contact > CONTACT_SHADOWED,
-        "the pavement at the plinth's contact carries {:.2} of shadow term as the sample ships, \
-         under the {CONTACT_SHADOWED} this reading calls shadowed — so there is no shadow here \
-         for a bias to take off",
-        shipped.contact,
-    );
-
-    // Zero either count: the pavement roughens, and the contact stays put.
-    for (name, reading, least) in [
-        ("normal offset", &no_offset, ACNE_WITHOUT_OFFSET),
-        ("constant bias", &no_bias, ACNE_WITHOUT_BIAS),
-    ] {
-        assert!(
-            reading.dots > least && reading.dots > shipped.dots,
-            "with the {name} at zero the block is {:.4}% dots against {:.4}% as the sample \
-             ships — short of the {least}% this count is worth. A count that buys no acne back \
-             when it is taken away is not what is covering the acne",
-            reading.dots,
-            shipped.dots,
-        );
-        assert!(
-            (reading.contact - shipped.contact).abs() < CONTACT_HELD,
-            "with the {name} at zero the contact's shadow term moved from {:.2} to {:.2}. Acne \
-             is what a count too small draws; a contact that moved as well says this reading is \
-             about the whole frame rather than about the pavement under the plinth",
-            shipped.contact,
-            reading.contact,
-        );
-    }
-
-    // Push the constant bias: the shadow comes off the plinth and stays on the
-    // pavement past it.
-    assert!(
-        pushed_bias.contact < CONTACT_LIT,
-        "at {PETER_PAN_BIAS} texels of constant bias the contact still carries {:.2} of shadow \
-         term, over the {CONTACT_LIT} this reading calls lit — the shadow has not come off its \
-         caster and there is no peter-panning here to measure",
-        pushed_bias.contact,
-    );
-    assert!(
-        pushed_bias.beyond > CONTACT_SHADOWED,
-        "at {PETER_PAN_BIAS} texels the pavement past the contact carries {:.2} of shadow term \
-         at its deepest, under the {CONTACT_SHADOWED} this reading calls shadowed. The shadow \
-         has gone rather than come off its caster, and peter-panning is the gap between the two",
-        pushed_bias.beyond,
-    );
-    assert!(
-        pushed_bias.dots < SMOOTH_PERCENT,
-        "at {PETER_PAN_BIAS} texels the block is {:.4}% dots, past {SMOOTH_PERCENT}% — a count \
-         raised past what acne needs must not draw acne of its own",
-        pushed_bias.dots,
-    );
-
-    // Push the normal offset the same way: the contact does not move.
-    assert!(
-        (pushed_offset.contact - shipped.contact).abs() < CONTACT_HELD,
-        "at {HELD_OFFSET} texels of normal offset the contact's shadow term moved from {:.2} to \
-         {:.2}. `docs/plan/45-shadows.md`'s seventh decision is that a move along the \
-         receiver's own normal leaves the depth it compares alone and therefore keeps a \
-         contact; this is the fixture that says so",
-        shipped.contact,
-        pushed_offset.contact,
-    );
-    assert!(
-        pushed_offset.beyond < shipped.beyond,
-        "at {HELD_OFFSET} texels of normal offset the pavement past the contact carries {:.2} \
-         of shadow term at its deepest against the shipped arm's {:.2} — the count reached the \
-         frame nowhere, so a contact that did not move is what a knob wired to nothing draws",
-        pushed_offset.beyond,
-        shipped.beyond,
-    );
-    assert!(
-        pushed_offset.dots < SMOOTH_PERCENT,
-        "at {HELD_OFFSET} texels the block is {:.4}% dots, past {SMOOTH_PERCENT}%",
-        pushed_offset.dots,
-    );
-
-    // And the two counts are not one knob: pushed the same way, one opens the
-    // contact and the other leaves it alone.
-    assert!(
-        pushed_bias.contact < pushed_offset.contact,
-        "pushed past what acne needs, the constant bias leaves {:.2} of shadow term at the \
-         contact and the normal offset {:.2}. Two counts that did the same thing to a contact \
-         would be one quality knob, and this sample's pair of variables would be a distinction \
-         with nothing behind it",
-        pushed_bias.contact,
-        pushed_offset.contact,
-    );
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 
 // ---------------------------------------------------------------------------
