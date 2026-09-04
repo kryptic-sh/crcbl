@@ -666,23 +666,46 @@ const PRICE_BOXES: usize = 1024;
 /// on its own is a property of the machine.
 const PRICED_PASSES: [&str; 2] = ["forward", "debug-draw"];
 
-/// Each of [`PRICED_PASSES`]' p50 and p95 in nanoseconds, or [`None`] where the
-/// device reports no way to time a pass, over frames that append `boxes` boxes.
+/// The configurations priced, as boxes each frame appends.
 ///
-/// A pass that was **never recorded** — which is what an empty buffer produces —
-/// has no percentiles, so its slot comes back [`None`] while the forward pass
-/// beside it is measured. That is the shape the empty-buffer claim is read out
-/// of, and it is why this returns one option per pass rather than refusing the
-/// whole run.
+/// The busy buffer first and the empty one second, because what is asked below
+/// is between them. The second row is the layer's off-switch — a buffer with
+/// nothing in it records no pass for the graph to time — and it is at the same
+/// time the zero-geometry row `forward`'s fused attachment clears are read off,
+/// at the same extent through the same effect stack with nothing appended over
+/// them.
+const PRICED_BUFFERS: [usize; 2] = [PRICE_BOXES, 0];
+
+/// One configuration's measurement.
+struct Priced {
+    /// How many frames reached [`crcbl::render::PassStats`], which is not how
+    /// many were drawn: the timer ring hands the same report back until a new
+    /// slot resolves, and a repeat is not a second sample.
+    recorded: u64,
+    /// Each of [`PRICED_PASSES`]' p50 and p95 in nanoseconds, in that order.
+    ///
+    /// A pass that was **never recorded** — which is what an empty buffer
+    /// produces — has no percentiles, so its slot is [`None`] while the forward
+    /// pass beside it is measured. That is the shape the empty-buffer claim is
+    /// read out of, and it is why this is an option per pass rather than a
+    /// refusal of the whole row.
+    passes: Vec<Option<(u64, u64)>>,
+}
+
+/// Each of [`PRICED_BUFFERS`]' measurement, in that order, or [`None`] where the
+/// device reports no way to time a pass.
 ///
-/// `depth_only.rs`'s helper is the shape this follows, down to the warm-up and
-/// the percentile floor, both of which are `area_light.rs`' constants rather
-/// than a second copy.
-fn debug_draw_prices(
-    extent: (u32, u32),
-    frames: usize,
-    boxes: usize,
-) -> Option<Vec<Option<(u64, u64)>>> {
+/// `depth_only.rs`'s helper is the shape this follows, down to the warm-up, the
+/// percentile floor and the interleaving — the first two are `area_light.rs`'s
+/// constants rather than a second copy. **The configurations are drawn
+/// interleaved on one device, a frame each per turn**, for that file's reason:
+/// the suite runs its tests at once and a software rasteriser's "GPU" time is
+/// CPU time, so a run measured configuration after configuration reads whatever
+/// else was on the machine during that configuration's turn. The comparison
+/// between the passes of one frame — the layer against the forward pass beside
+/// it — needs none of that, because contention that lands on one lands on both;
+/// anything read between the two rows is read between frames, and does.
+fn debug_draw_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; PRICED_BUFFERS.len()]> {
     use crcbl::hal::{CommandEncoderDesc, Features, PresentInfo, ResourceState, SubmitInfo};
 
     crcbl::render::debug_draw::r_debug_draw
@@ -699,95 +722,137 @@ fn debug_draw_prices(
     let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
     let camera = oblique_camera();
     let sun = crcbl::render::DirectionalLight::default();
-    let mut renderer = ForwardRenderer::new(device, headless.queue, headless.format)
-        .expect("the forward renderer builds");
-    let mut pool = TransientPool::new();
-    let mut timers = timed.then(|| {
-        crcbl::render::PassTimers::new(
-            device,
-            crcbl::render::forward::FRAMES_IN_FLIGHT,
-            crcbl::render::MAX_TIMED_PASSES,
+    let mut priced = PRICED_BUFFERS.map(|_| {
+        let renderer = ForwardRenderer::new(device, headless.queue, headless.format)
+            .expect("the forward renderer builds");
+        let timers = timed.then(|| {
+            crcbl::render::PassTimers::new(
+                device,
+                crcbl::render::forward::FRAMES_IN_FLIGHT,
+                crcbl::render::MAX_TIMED_PASSES,
+            )
+            .expect("a device reporting TIMESTAMP_QUERY gives out timer sets")
+        });
+        (
+            renderer,
+            TransientPool::new(),
+            timers,
+            crcbl::render::PassStats::new(),
+            Vec::new(),
         )
-        .expect("a device reporting TIMESTAMP_QUERY gives out timer sets")
     });
-    let mut stats = crcbl::render::PassStats::new();
-    let mut recorded = Vec::new();
 
     for index in 0..crate::area_light::PRICE_WARMUP + frames {
-        // Appended before the frame opens, because `begin_frame` is what
-        // uploads and clears the buffer — the whole of what "immediate mode"
-        // means here.
-        let draw = renderer.debug_draw();
-        for step in 0..boxes {
-            let at = Vec3::splat(step as f32 * 0.01);
-            draw.aabb(at - Vec3::ONE, at + Vec3::ONE, SEGMENT);
+        for (boxes, (renderer, pool, timers, stats, recorded)) in
+            PRICED_BUFFERS.iter().zip(&mut priced)
+        {
+            // Appended before the frame opens, because `begin_frame` is what
+            // uploads and clears the buffer — the whole of what "immediate
+            // mode" means here. The empty row appends nothing and is the same
+            // code with nothing to iterate.
+            let draw = renderer.debug_draw();
+            for step in 0..*boxes {
+                let at = Vec3::splat(step as f32 * 0.01);
+                draw.aabb(at - Vec3::ONE, at + Vec3::ONE, SEGMENT);
+            }
+            let acquired = device
+                .acquire_next_frame(headless.swapchain)
+                .expect("the ring always has an image");
+            renderer
+                .begin_frame(device, &camera, &sun, extent)
+                .expect("the uniform buffer is writable");
+            let compiled = {
+                let mut graph = crcbl::render::RenderGraph::new(headless.queue);
+                let target = graph.import_image(
+                    "swapchain",
+                    crcbl::render::ImportedImage {
+                        image: acquired.image,
+                        view: acquired.view,
+                        format: headless.format,
+                        extent,
+                        initial: ResourceState::Undefined,
+                        claim: crcbl::render::InitialClaim::Acquired,
+                        final_state: ResourceState::Present,
+                    },
+                );
+                renderer.add_passes(&mut graph, &*pool, target, extent);
+                graph.compile(&*pool).expect("a legal frame")
+            };
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("priced frame"),
+                queue: headless.queue,
+            });
+            compiled
+                .execute(device, pool, encoder.as_mut(), timers.as_mut())
+                .expect("the graph executed");
+            let commands = encoder.finish().expect("recording succeeded");
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device
+                .present(
+                    headless.queue,
+                    &PresentInfo {
+                        swapchain: headless.swapchain,
+                        waits: acquired.present_semaphore.as_slice(),
+                        present_id: None,
+                    },
+                )
+                .expect("present");
+            if let (true, Some(timers)) =
+                (index >= crate::area_light::PRICE_WARMUP, timers.as_ref())
+            {
+                stats.record(timers.latest());
+            }
+            recorded.push(commands);
         }
-        let acquired = device
-            .acquire_next_frame(headless.swapchain)
-            .expect("the ring always has an image");
-        renderer
-            .begin_frame(device, &camera, &sun, extent)
-            .expect("the uniform buffer is writable");
-        let compiled = {
-            let mut graph = crcbl::render::RenderGraph::new(headless.queue);
-            let target = graph.import_image(
-                "swapchain",
-                crcbl::render::ImportedImage {
-                    image: acquired.image,
-                    view: acquired.view,
-                    format: headless.format,
-                    extent,
-                    initial: ResourceState::Undefined,
-                    claim: crcbl::render::InitialClaim::Acquired,
-                    final_state: ResourceState::Present,
-                },
-            );
-            renderer.add_passes(&mut graph, &pool, target, extent);
-            graph.compile(&pool).expect("a legal frame")
-        };
-        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("priced frame"),
-            queue: headless.queue,
-        });
-        compiled
-            .execute(device, &mut pool, encoder.as_mut(), timers.as_mut())
-            .expect("the graph executed");
-        let commands = encoder.finish().expect("recording succeeded");
-        device
-            .submit(headless.queue, &SubmitInfo::new(&[commands]))
-            .expect("submit");
-        device
-            .present(
-                headless.queue,
-                &PresentInfo {
-                    swapchain: headless.swapchain,
-                    waits: acquired.present_semaphore.as_slice(),
-                    present_id: None,
-                },
-            )
-            .expect("present");
-        if let (true, Some(timers)) = (index >= crate::area_light::PRICE_WARMUP, timers.as_ref()) {
-            stats.record(timers.latest());
-        }
-        recorded.push(commands);
     }
 
     device.wait_idle().expect("idle");
-    let prices = timed.then(|| {
-        eprintln!("{}: {}", crate::SUITE, stats.report());
-        PRICED_PASSES
-            .iter()
-            .map(|pass| stats.percentiles(pass))
-            .collect()
+    // **What makes the second configuration a floor rather than a second copy of
+    // the first**, asked of the renderers and not of the clock — a duration read
+    // off a busy machine cannot tell the two apart, and this can.
+    // `FrameCounters::instances` is the live instances the cull dispatches were
+    // handed plus the frame's direct draws, and neither row places an instance,
+    // so what is left is the direct draws: the full-screen passes' triangles,
+    // which both configurations record alike through the same effect stack, and
+    // the layer's own line list, which only a frame with a segment in it
+    // records. So a busy row that appended nothing, or a floor row that appended
+    // anything, fails here instead of reporting a floor that is not one.
+    let submitted = std::array::from_fn::<_, { PRICED_BUFFERS.len() }, _>(|index| {
+        let (renderer, ..) = &priced[index];
+        renderer.counters().instances
     });
-    if let Some(mut timers) = timers.take() {
-        timers.destroy(device);
+    let [busy, empty] = submitted;
+    assert_eq!(
+        busy,
+        empty + 1,
+        "the busy buffer submitted {busy} instances and the empty one {empty}, which do not \
+         differ by the one line-list draw that is the only thing between them"
+    );
+    let prices = timed.then(|| {
+        std::array::from_fn(|index| {
+            let (_, _, _, stats, _) = &priced[index];
+            eprintln!("{}: {}", crate::SUITE, stats.report());
+            Priced {
+                recorded: stats.frames(),
+                passes: PRICED_PASSES
+                    .iter()
+                    .map(|pass| stats.percentiles(pass))
+                    .collect(),
+            }
+        })
+    });
+    for (renderer, mut pool, timers, _, recorded) in priced {
+        if let Some(mut timers) = timers {
+            timers.destroy(device);
+        }
+        for commands in recorded {
+            device.destroy_command_buffer(commands);
+        }
+        renderer.destroy(device);
+        pool.destroy(device);
     }
-    for commands in recorded {
-        device.destroy_command_buffer(commands);
-    }
-    renderer.destroy(device);
-    pool.destroy(device);
     headless.finish();
     prices
 }
@@ -806,6 +871,33 @@ fn debug_draw_prices(
 ///   [`None`] — while the forward pass in the very same frames is measured,
 ///   which is what says the run happened and the timers worked.
 ///
+/// # The empty row is the clears, and so is the row above it
+///
+/// `forward` opens by clearing the scene colour, the reflectivity target and the
+/// motion target over the whole extent. Each is a `LoadOp::Clear` fused into the
+/// pass's begin, so no timestamp can be put around them without giving them a
+/// pass and a second full-target write of their own, and every millisecond
+/// printed for `forward` has them in it. `depth_only.rs` separates them from a
+/// draw with a second **configuration** rather than a second timestamp, and
+/// [`PRICED_BUFFERS`]' empty row is that shape here: the same extent, the same
+/// effect stack, nothing appended.
+///
+/// **What it shows is that the row above it is already the same measurement**,
+/// which is the reason it is printed rather than folded into the busy row's
+/// sentence. Neither configuration places an instance — every frame this file
+/// draws is the layer over an empty scene — so `forward` records the clears and
+/// the pass's begin and no draw at all in both rows, and the layer, which
+/// records a pass of its own further down the frame, adds nothing to it.
+/// Measured at 640x480 over 48 recorded frames on 2026-09-05, the two rows'
+/// `forward` p50s landed within 80 ns of each other on an RX 7900 XTX and
+/// within a tenth of a millisecond on lavapipe, in *both* directions over three
+/// runs each. So the empty row is asked only for having been **measured** —
+/// frames reached the accumulator and the forward pass came back with a
+/// duration, where a row of zeroes would report a floor nothing observed — and
+/// an ordering between the two figures would be an assertion about which way a
+/// coin landed. What says the row is really empty is the instance counts the
+/// helper compares, which need no timestamps at all.
+///
 /// # A backend that cannot time a pass cannot price one
 ///
 /// CI's Apple Paravirtual device reports no `TIMESTAMP_QUERY`. The frames are
@@ -815,7 +907,7 @@ fn debug_draw_prices(
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh price"]
 fn the_price_of_the_debug_draw_layer() {
     let (extent, frames) = crate::area_light::price_frame();
-    let Some(busy) = debug_draw_prices(extent, frames, PRICE_BOXES) else {
+    let Some([busy, empty]) = debug_draw_prices(extent, frames) else {
         eprintln!(
             "{}: {PRICE_BOXES} boxes drew through the debug draw layer and this backend reports \
              no TIMESTAMP_QUERY, so the rung's price went unmeasured here",
@@ -823,36 +915,55 @@ fn the_price_of_the_debug_draw_layer() {
         );
         return;
     };
-    let empty = debug_draw_prices(extent, frames, 0).expect("the same device times the same way");
     let ms = |nanos: u64| nanos as f64 / 1.0e6;
 
-    let [busy_forward, busy_layer] = busy[..].try_into().expect("one price per priced pass");
-    let [empty_forward, empty_layer] = empty[..].try_into().expect("one price per priced pass");
+    let [busy_forward, busy_layer] = busy.passes[..]
+        .try_into()
+        .expect("one price per priced pass");
+    let [empty_forward, empty_layer] = empty.passes[..]
+        .try_into()
+        .expect("one price per priced pass");
     let busy_forward = busy_forward.expect("the forward pass is in every frame");
     let busy_layer =
         busy_layer.expect("a frame that appended boxes records the layer's pass and times it");
     let empty_forward = empty_forward.expect("the forward pass is in every frame");
     eprintln!(
-        "{}: {PRICE_BOXES} boxes ({} segments) at {}x{} over {frames} recorded frames — debug \
-         draw {:.3}/{:.3} ms against the forward pass's {:.3}/{:.3} ms; with an empty buffer the \
-         layer records no pass at all and the forward pass costs {:.3}/{:.3} ms (p50/p95)",
+        "{}: {PRICE_BOXES} boxes ({} segments) at {}x{} over {} recorded frames — debug draw \
+         {:.3}/{:.3} ms against the forward pass's {:.3}/{:.3} ms (p50/p95)",
         crate::SUITE,
         PRICE_BOXES * 12,
         extent.0,
         extent.1,
+        busy.recorded,
         ms(busy_layer.0),
         ms(busy_layer.1),
         ms(busy_forward.0),
         ms(busy_forward.1),
+    );
+    eprintln!(
+        "{}: an empty buffer at {}x{} over {} recorded frames — the layer records no pass at all \
+         and forward costs {:.3}/{:.3} ms (p50/p95), which is the clear-plus-pass-begin floor \
+         the row above is standing on and, with no instance placed in either row, is also all \
+         that row's forward figure was",
+        crate::SUITE,
+        extent.0,
+        extent.1,
+        empty.recorded,
         ms(empty_forward.0),
         ms(empty_forward.1),
     );
 
     // Anti-vacuity first: timestamps that came back as zeroes would satisfy
-    // everything below without having measured anything.
+    // everything below without having measured anything, and so would an empty
+    // row no frame ever reached.
     assert!(
         busy_layer.0 > 0 && busy_forward.0 > 0 && empty_forward.0 > 0,
         "a pass that took no time at all was not measured"
+    );
+    assert!(
+        empty.recorded > 0,
+        "the empty buffer reached {} recorded frames, so the figure it reports was not measured",
+        empty.recorded,
     );
     assert!(
         empty_layer.is_none(),

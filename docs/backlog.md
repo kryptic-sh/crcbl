@@ -678,34 +678,44 @@ than as a reason:
   enumerated**: `web/tools/browser-e2e.mjs` was read only around the console,
   autoexec and touch groups.
 
-## Three price fixtures still bundle `forward`'s two clears (2026-09-05)
+## Two price fixtures print a `forward` that bundles its fused clears (2026-09-05)
 
-`forward`'s two full-extent attachment clears are `LoadOp::Clear`s fused into
-the pass's begin, so giving them their own timestamp means giving them their own
-pass and a second full-target write — **not worth doing, and the reason is the
-measurement's, not the renderer's.** What attributes them honestly is a
-zero-geometry configuration timed beside the loaded one, and
-`mesh_e2e/depth_only.rs`'s `the_price_of_the_depth_only_passes` now has one:
-`PRICED_FIELDS`' second row draws an empty list at the same extent through the
-same effect stack, interleaved a frame at a time with the field, and the helper
-holds the two rows apart by their `FrameCounters` instance counts rather than by
-a duration. Measured 2026-09-05 at 640x480 over 48 recorded frames, the floor is
-a `forward` p50 of 0.009 ms on an RX 7900 XTX and 0.258 ms on lavapipe — medians
-of three runs each, spread 0.009–0.010 and 0.256–0.268 — and it is written into
-`docs/plan/43-render-standards.md`'s Delivery preamble.
+`forward`'s full-extent attachment clears — scene colour, reflectivity and
+motion — are `LoadOp::Clear`s fused into the pass's begin, so giving them their
+own timestamp means giving them their own pass and a second full-target write —
+**not worth doing, and the reason is the measurement's, not the renderer's.**
+What attributes them honestly is a zero-geometry configuration timed beside the
+loaded one, and `mesh_e2e/depth_only.rs`'s `the_price_of_the_depth_only_passes`
+now has one: `PRICED_FIELDS`' second row draws an empty list at the same extent
+through the same effect stack, interleaved a frame at a time with the field, and
+the helper holds the two rows apart by their `FrameCounters` instance counts
+rather than by a duration. Measured 2026-09-05 at 640x480 over 48 recorded
+frames, the floor is a `forward` p50 of 0.009 ms on an RX 7900 XTX and 0.258 ms
+on lavapipe — medians of three runs each, spread 0.009–0.010 and 0.256–0.268 —
+and it is written into `docs/plan/43-render-standards.md`'s Delivery preamble.
 
 What is left:
 
-- **The other three `the_price_of_*` fixtures have no floor row.**
-  `mesh_e2e/area_light.rs` and `mesh_e2e/rect_bound.rs` both subtract a sun-only
-  configuration, so the clears cancel in their per-light figures and only an
-  absolute millisecond quoted off them carries the floor.
-  `mesh_e2e/debug_draw.rs` is the one that does not cancel: its "empty"
-  configuration empties the debug buffer while still drawing the scene, so the
-  `forward` figure it prints beside the debug-draw pass has the clears in it.
-  Adding a row is `depth_only.rs`'s pattern — one more entry in the fixture's
-  set of priced configurations, with an empty draw list — and costs one extra
-  configuration per price run.
+- **`area_light.rs` and `rect_bound.rs` still have no floor row, and
+  `debug_draw.rs` turned out not to need one.** Both of the first two subtract a
+  sun-only configuration, so the clears cancel in every figure they assert on —
+  `area_cost`/`punctual_cost` in `the_price_of_a_froxel_full_of_area_lights`,
+  `useful`/`wasted` in `the_price_of_rectangles_that_light_nothing` — and
+  survive only in the absolute `forward` milliseconds both fixtures print, which
+  nothing asserts. `debug_draw.rs`'s `the_price_of_the_debug_draw_layer` draws
+  no scene at all: `debug_draw_prices` places no instance in either
+  configuration and the layer records a pass of its own, so `forward` there was
+  already the clear-plus-pass-begin floor and there was nothing bundled to split
+  out. What landed instead is `depth_only.rs`'s _structure_: the busy and empty
+  buffers are priced interleaved on one device rather than on two sequential
+  opens, `FrameCounters::instances` holds them apart by the layer's one
+  line-list draw, and the empty row is printed as its own line and asserted to
+  have been measured. The ordering `depth_only.rs` asserts — floor no dearer
+  than the loaded row — is deliberately absent: with no geometry in either row's
+  `forward` the two figures are one measurement, and at 640x480 over 48 recorded
+  frames on 2026-09-05 the empty row came out dearer in three of three radv runs
+  (by 40–80 ns) and in two of three lavapipe runs (−23 µs to +101 µs), so
+  asserting it would be asserting which way a coin landed.
 - **`docs/plan/47-reflections.md`'s shares are still unsplit**: `shadow` at
   27.1% and `forward` at 21.9% of a headless lantern frame, with the clears
   inside the `forward` number. Restating them needs a lantern-frame floor rather

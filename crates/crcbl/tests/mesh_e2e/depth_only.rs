@@ -25,12 +25,13 @@
 //! pass over the same field, timed by the GPU timestamps the render graph
 //! already takes around every pass.
 //!
-//! # Two clears ride inside `forward`, and a second row is what splits them
+//! # The clears ride inside `forward`, and a second row is what splits them
 //!
-//! `forward` begins by clearing the scene colour and the reflectivity target
-//! over the whole extent — `clear_color` is a `LoadOp::Clear` fused into the
-//! pass's begin, so no timestamp can be put around the two without giving them
-//! a pass and a second full-target write of their own. Every millisecond
+//! `forward` begins by clearing the scene colour, the reflectivity and the
+//! motion targets over the whole extent — each `clear_color` is a
+//! `LoadOp::Clear` fused into the pass's begin, so no timestamp can be put
+//! around them without giving them a pass and a second full-target write of
+//! their own. Every millisecond
 //! printed for `forward`, here and in the plans, therefore has them in it.
 //!
 //! What separates them from the draw is a second **configuration** rather than
@@ -342,7 +343,7 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; PRICE
 /// # The floor row, and what is asserted about it
 ///
 /// The second row is the header's empty draw list, and its `forward` is what
-/// the two attachment clears and the pass's begin cost before anything is
+/// the attachment clears and the pass's begin cost before anything is
 /// drawn. Two things are asked of it, and neither is a threshold. That it was
 /// **measured** — frames reached the accumulator and every pass came back with
 /// a duration — because a floor of zero would satisfy an ordering without
