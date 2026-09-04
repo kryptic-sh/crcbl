@@ -49,6 +49,9 @@ meta-->
     sun's two are the fixture's own clock rather than a setting, so they are
     taken up on its next fixed step; the label is the request either way, and
     everything else here shows what the engine holds <em>after</em> it wrote.
+    The shadow atlas is a third kind again: it is the engine's own debug view,
+    one cell shared with every other sample and with the
+    <code>debug_view</code> console command.
   </p>
   <ul class="keys" id="shadow-knobs">
     <li class="key-row">
@@ -105,6 +108,14 @@ meta-->
       </span>
     </li>
     <li class="key-row">
+      <span>Show the shadow atlas instead of the picture</span>
+      <span
+        ><button class="btn" type="button" id="knob-atlas" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
       <span>Every knob and the clock back to where a run opens</span>
       <span
         ><button class="btn" type="button" id="knob-reset" disabled>
@@ -125,6 +136,18 @@ meta-->
     controls are adopted on the next one, so a stopped page shows the request
     and the picture catches up when it ticks again. The filter and the seam
     change the frame whether it is ticking or not.
+  </div>
+  <div class="note">
+    <strong>The atlas is the one that shows what a frame cannot.</strong> Every
+    other control here changes the picture; that one replaces it with the shadow
+    atlas itself — the depth map the sun's cascades and the plaza's three
+    punctual lights were rendered into, laid out on the grid the allocator hands
+    tiles out on, with an amber border round every slot that holds a map.
+    Brighter is nearer the light, a flat dark rectangle is a slot nothing was
+    drawn into, and the black surround is the frame outside the atlas. It is
+    worth looking at because a lamp that was refused a tile still lights the
+    plaza: the frame is entirely plausible either way, and this is the only
+    place the answer is written down.
   </div>
   <div class="note">
     <strong>The sun is the one to reach for.</strong> Shadow quality is a set of
@@ -203,6 +226,10 @@ meta-->
     <li class="key-row">
       <span>The seam: raise it, then walk it</span>
       <span><kbd>X</kbd>, then <kbd>,</kbd> and <kbd>.</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Show the shadow atlas, or the cascade the frame sampled</span>
+      <span><kbd>T</kbd>, <kbd>C</kbd></span>
     </li>
     <li class="key-row">
       <span>Stop the sun, scrub it, and everything back</span>

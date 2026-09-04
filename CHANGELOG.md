@@ -59,6 +59,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Reachable as `debug_view shadow atlas` from the console in every sample, and
   bound in `apps/sundial` to the `T` key and the pause panel's `ATLAS` row.
 
+  **And drawn where CI can see it, on both tiers.**
+  `apps/sundial/tests/golden.rs` blesses `plaza-atlas.png` — the plaza's atlas
+  at the pose the other goldens are taken from — and asserts three readings
+  placed from `crcbl_render::shadow`'s own grid rather than found by looking:
+  the near cascade's cell edge is the amber border and therefore off the grey
+  axis, the middle of that cell is a grey and therefore on it, and the frame
+  outside the letterbox is exactly black. On the page, a new
+  `__crcbl_sundial_atlas_view` export and a button on `/demos/sundial/` put the
+  viewer where a visitor with no keyboard can reach it, and
+  `Sundial::log_heartbeat` gained a `view:` field so the browser gate reads what
+  the press did off the engine's own cell rather than off the control's label.
+
 - **The cascade debug overlay**, which `docs/plan/18-render-features.md` has
   owed since P7. `crcbl_render::DebugView::Cascades` and
   `ForwardRenderer::set_cascade_view` multiply the shaded picture by

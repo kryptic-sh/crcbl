@@ -6,6 +6,11 @@
 // bar shows, and the shadow knobs — which are one sample's controls and have no
 // business in a file every demo runs.
 //
+// The knobs reach three different kinds of state and `apps/sundial/src/web.rs`
+// is where that table is: the filter and the seam are `r_shadow_*` console
+// cells, the sun is the fixture's own clock, and the atlas viewer is the
+// engine's `r_debug_view`.
+//
 // The symbols are written out literally rather than built from the sample's
 // name. `web/tools/check-exports.mjs` scans the shim for `.__crcbl_…` to learn
 // which exports the JS depends on, and fails when one is missing from the
@@ -58,6 +63,7 @@ function installKnobs(ex) {
 
   const filter = button('knob-filter');
   const seam = button('knob-seam');
+  const atlas = button('knob-atlas');
   const sun = button('knob-sun');
   const reset = button('knob-reset');
   const seamAt = slider('knob-seam-at');
@@ -65,7 +71,7 @@ function installKnobs(ex) {
   const seamValue = el('knob-seam-value');
   const sunValue = el('knob-sun-value');
 
-  const controls = [filter, seam, sun, reset, seamAt, sunTick];
+  const controls = [filter, seam, atlas, sun, reset, seamAt, sunTick];
 
   // The arc the tick slider spans, off the engine's own `sun::SWEEP_TICKS`
   // rather than a number written into the markup — `web/pages/sundial.html`
@@ -98,6 +104,13 @@ function installKnobs(ex) {
     seamAt.value = String(at);
     seamValue.textContent =
       at > 0 ? `${at.toFixed(2)} of the width` : 'no seam';
+
+    // The engine holds one debug view, so this is "is the atlas the picture"
+    // rather than a flag of this control's own — a view some other route put up
+    // leaves this reading off, which is the truth about the frame.
+    atlas.textContent = ex.__crcbl_sundial_atlas_view(0)
+      ? 'hide it'
+      : 'show it';
 
     const running = ex.__crcbl_sundial_sun_running(-1);
     sun.textContent = running ? 'stop it' : 'start it';
@@ -147,6 +160,7 @@ function installKnobs(ex) {
 
   press(filter, () => ex.__crcbl_sundial_filter(1));
   press(seam, () => ex.__crcbl_sundial_seam(1));
+  press(atlas, () => ex.__crcbl_sundial_atlas_view(1));
   press(sun, () =>
     ex.__crcbl_sundial_sun_running(ex.__crcbl_sundial_sun_running(-1) ? 0 : 1)
   );
@@ -184,7 +198,7 @@ function installKnobs(ex) {
 
 bootDemo({
   init,
-  hint: 'the knobs under the canvas drive the filter, the seam and the sun · ESC opens the panel — CAMERA swaps to the free one · then WASD, Space/Shift and the arrows fly it · F3 shows the panel · F11 fullscreen',
+  hint: 'the knobs under the canvas drive the filter, the seam, the shadow atlas and the sun · ESC opens the panel — CAMERA swaps to the free one · then WASD, Space/Shift and the arrows fly it · F3 shows the panel · F11 fullscreen',
   savedLabel: 'Nothing',
   bind: (ex) => {
     installKnobs(ex);

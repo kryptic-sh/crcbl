@@ -56,6 +56,34 @@ const REVIEW_EXTENT: (u32, u32) = (1280, 960);
 /// Where a review-size frame is written, relative to the workspace root.
 const REVIEW_DIR: &str = "target/sundial";
 
+/// The extent the atlas viewer's golden is blessed at.
+///
+/// **Not [`EXTENT`], and the reason is what the viewer draws.** Every other
+/// golden here is a rendering of a scene, where two drivers disagree by a level
+/// or so per pixel and `crcbl_golden::Tolerance::RASTERISER` is sized for
+/// exactly that. The atlas viewer is a *point sample* of a
+/// `crcbl::render::shadow::atlas_extent()` depth image — `atlas_view.slang`
+/// `Load`s one texel per pixel and never filters, deliberately, because
+/// averaging across a silhouette would draw a height nothing in the scene
+/// occupies. So one texel on which radv and lavapipe disagree about coverage is
+/// not a level of drift in this picture: it is a whole pixel that reads
+/// `OCCUPIED_FLOOR` on one driver and `EMPTY_GREY` on the other.
+///
+/// What that costs is a function of how much of the atlas the frame samples.
+/// **Swept**, blessing on lavapipe and comparing on radv:
+///
+/// | extent | atlas texels per pixel | grossly wrong | budget |
+/// | --- | --- | --- | --- |
+/// | 256x192 | 256 | 70 — `0.1424%` | `0.1%` — fails |
+/// | 1024x768 | 16 | 312 — `0.0397%` | `0.1%` — passes |
+/// | 1280x960 | about 10 | 382 — `0.0311%` | `0.1%` — passes |
+///
+/// The middle row is this constant. At [`EXTENT`] the picture throws away 255
+/// texels in every 256 and is a moire nobody could review anyway; here a
+/// reviewer can see the tile grid and the shape of what is in each map, which is
+/// what a diagnostic golden is for.
+const ATLAS_EXTENT: (u32, u32) = (1024, 768);
+
 /// Half-extents, in pixels, of the block each claim averages over at [`EXTENT`].
 const BLOCK: (u32, u32) = (2, 2);
 
@@ -83,6 +111,9 @@ struct Arm {
     /// Whether the frame is taken from [`plaza::counter_camera`] rather than
     /// [`plaza::fixed_camera`].
     counters: bool,
+    /// Whether the shadow atlas is drawn over the picture rather than the
+    /// picture itself — [`crcbl::render::DebugView::ShadowAtlas`].
+    atlas: bool,
 }
 
 impl Arm {
@@ -102,6 +133,7 @@ impl Arm {
             split_permille: None,
             tick: sun::FIXTURE_TICK,
             counters: false,
+            atlas: false,
         }
     }
 
@@ -144,6 +176,15 @@ impl Arm {
     const fn framed_on_the_counters(self) -> Self {
         Self {
             counters: true,
+            ..self
+        }
+    }
+
+    /// The same arm with the shadow atlas drawn over the picture — what `T` and
+    /// the pause panel's `ATLAS` row put up.
+    const fn showing_the_atlas(self) -> Self {
+        Self {
+            atlas: true,
             ..self
         }
     }
@@ -282,6 +323,10 @@ fn build(
     // to — `plaza`'s `every_light_in_the_plaza_is_given_a_run_of_tiles` is what
     // holds the three of them inside the budget with no GPU.
     renderer.set_lights(&plaza::lights());
+    // The atlas viewer, which is a **pass** rather than a lane of the frame
+    // block — so an arm that does not ask for it records no pass at all and the
+    // four goldens blessed before it existed are untouched by its being here.
+    renderer.set_atlas_view(arm.atlas);
     Ok(renderer)
 }
 
@@ -892,6 +937,227 @@ fn the_scripted_sun_replays_a_tick_exactly_and_a_different_tick_differently() {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The atlas viewer
+// ---------------------------------------------------------------------------
+
+/// Where the atlas is drawn in a frame of `extent`, in pixels: `xy` the corner
+/// and `zw` the size.
+///
+/// The renderer's own letterbox rather than a second one — `begin_frame` writes
+/// the viewer's block with this very function — so a change to how the atlas is
+/// fitted moves the readings below with it instead of leaving them measuring
+/// whatever now falls there. The slot rectangles decide nothing about the
+/// letterbox and are passed empty.
+fn atlas_on_screen(extent: (u32, u32)) -> [f32; 4] {
+    crcbl::shaders::atlas_view::AtlasViewParams::letterboxed(
+        extent,
+        crcbl::render::shadow::atlas_extent(),
+        [[0.0; 4]; crcbl::shaders::mesh::SHADOW_ATLAS_TILES],
+    )
+    .view
+}
+
+/// Where the near cascade's root cell is drawn in a frame of `extent`:
+/// `(x, y, width, height)` in pixels, right and bottom exclusive.
+///
+/// Root cell [`CASCADE_CELL`] placed through [`crcbl::render::shadow`]'s own
+/// grid, which is what makes every reading below a reading taken **at** the
+/// atlas's geometry rather than one found by looking for amber. The sun's near
+/// cascade is rendered on every frame this fixture draws, so the cell is
+/// occupied and the viewer borders it.
+fn cascade_cell_on_screen(extent: (u32, u32)) -> (u32, u32, u32, u32) {
+    let view = atlas_on_screen(extent);
+    let (origin_x, origin_y) = crcbl::render::shadow::tile_origin(CASCADE_CELL);
+    let (atlas_width, atlas_height) = crcbl::render::shadow::atlas_extent();
+    let side = crcbl::render::shadow::TILE;
+    #[allow(clippy::cast_precision_loss)]
+    let (across, down) = (atlas_width as f32, atlas_height as f32);
+    #[allow(clippy::cast_precision_loss)]
+    let (origin, span) = (
+        (origin_x as f32 / across, origin_y as f32 / down),
+        (side as f32 / across, side as f32 / down),
+    );
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rect = (
+        origin.0.mul_add(view[2], view[0]) as u32,
+        origin.1.mul_add(view[3], view[1]) as u32,
+        (span.0 * view[2]) as u32,
+        (span.1 * view[3]) as u32,
+    );
+    assert!(
+        rect.2 > 0 && rect.3 > 0 && rect.0 + rect.2 <= extent.0 && rect.1 + rect.3 <= extent.1,
+        "root cell {CASCADE_CELL} lands at {rect:?}, which is not a rectangle of a {extent:?} frame"
+    );
+    rect
+}
+
+/// The red channel at `at`, which is the grey wherever the viewer drew one.
+fn level_at(image: &Image, at: (u32, u32)) -> f32 {
+    f32::from(image.pixel(at.0, at.1).expect("inside the frame")[0])
+}
+
+/// How far red leads blue at `at`, in 0-255 codes.
+///
+/// The reading that separates the tile borders from every grey in the picture:
+/// `crcbl::shaders::atlas_view::BORDER_TINT` is amber and everything else the
+/// viewer draws is a grey, so the two are not on one axis at all.
+fn tint_at(image: &Image, at: (u32, u32)) -> f32 {
+    let pixel = image.pixel(at.0, at.1).expect("inside the frame");
+    f32::from(pixel[0]) - f32::from(pixel[2])
+}
+
+/// Which root cell of the atlas the sun's near cascade is rendered into.
+///
+/// `crcbl::render::shadow::tile_origin`'s order — the cascades take the first
+/// cells of the top row — and the same cell
+/// `crates/crcbl/tests/forward_e2e/shadow.rs` reads the engine's own fixture at.
+const CASCADE_CELL: usize = 0;
+
+/// How far red must lead blue for a pixel to be one of the tile borders, in
+/// 0-255 codes.
+///
+/// **Swept, not guessed**, on both Vulkan adapters this workspace runs locally,
+/// over the very frame this check draws, at [`ATLAS_EXTENT`] into an
+/// `Rgba8UnormSrgb` swapchain:
+///
+/// | reading | radv | lavapipe |
+/// | --- | --- | --- |
+/// | the cascade cell's edge, red over blue | `147.0` | `147.0` |
+/// | the cascade cell's middle, red over blue | `0.0` | `0.0` |
+/// | the cascade cell's middle, out of 255 | `154.0` | `154.0` |
+/// | the letterbox, out of 255 | `0.0` | `0.0` |
+///
+/// The two adapters agree to the level on every one of them. Floored at roughly
+/// half the lead the border actually has, which is still far above anything a
+/// grey can produce — the greys measure `0.0`, because a grey has no lead at
+/// all.
+///
+/// `crates/crcbl/tests/forward_e2e/shadow.rs` measures the same amber on the
+/// engine's own fixture and reads the same `147.0`, which is the tell that both
+/// are looking at `crcbl::shaders::atlas_view::BORDER_TINT` rather than at
+/// something their own scene happened to put there.
+const ATLAS_BORDER_LEVELS: f32 = 70.0;
+
+/// How far above the letterbox an atlas tile has to draw, in 0-255 codes.
+///
+/// The other half of what the picture is for. `atlas_view.slang` asserts
+/// `SURROUND < EMPTY_GREY` at compile time so that the atlas's own edge is
+/// visible; this is that constant assertion read off a device, and it is what
+/// says a reviewer can tell how much of the frame the atlas covers.
+///
+/// **Swept** with the border above: the cell reads `154.0` against a letterbox
+/// of `0.0` on both adapters, because a caster stands in the near cascade at the
+/// pixel this reads. Floored at roughly half of what an *empty* tile draws
+/// instead — `crcbl::shaders::atlas_view::EMPTY_GREY` through the swapchain's
+/// encode, which the same sweep in `crates/crcbl/tests/forward_e2e/shadow.rs`
+/// measures at `69.0` — because that is the darker of the two states this
+/// reading can legitimately be in, and a bound above it would be a bound that
+/// fails the day the cascade moves off this caster.
+const ATLAS_TILE_OVER_SURROUND: f32 = 32.0;
+
+/// **The atlas viewer draws the atlas, borders the slot the near cascade was
+/// rendered into, and letterboxes the rest of the frame to black.**
+///
+/// `docs/plan/sample/18-sundial.md`'s milestone 1 diagnostic, from the sample's
+/// side. `crates/crcbl/tests/forward_e2e/shadow.rs` holds the grey the viewer
+/// draws to the depth a CPU readback finds at the very texel the shader sampled;
+/// what is added here is that the picture reaches **this** fixture's frame — the
+/// plaza, at the pose the goldens are blessed from, through the sample's own
+/// effect stack — and a golden of it, so the picture a reviewer presses `T` for
+/// is one that cannot change unnoticed.
+///
+/// Three readings, each placed from the atlas's own geometry rather than found
+/// by looking for amber:
+///
+/// * the middle of the near cascade's cell edge, which has to be the border
+///   tint and therefore off the grey axis entirely;
+/// * the middle of that same cell, which is a grey and therefore on it, and
+///   which has to stand clear of the letterbox;
+/// * a pixel outside the letterbox, which is the surround.
+///
+/// **Anti-vacuity.** A viewer that painted the whole frame amber would pass the
+/// border reading on its own, and the second reading is what refuses it; a
+/// viewer that drew nothing at all would leave the frame the plaza, which is lit
+/// out to its own edges, and the surround reading is what refuses that. The gap
+/// between the cell and the surround is `atlas_view.slang`'s own
+/// `SURROUND < EMPTY_GREY` — a compile-time assertion there — read off a device
+/// here.
+///
+/// # How it was shown to fail
+///
+/// Six runs, one per thing this check says.
+///
+/// * **The viewer never ran**, by building the renderer with
+///   `set_atlas_view(false)` whatever the arm asked for: the plaza's own frame
+///   *leads blue over red* at the cell's edge, so the border reading came back
+///   at `-20.0` against a floor of [`ATLAS_BORDER_LEVELS`].
+/// * **The border read where there is no border**, at the cell's middle: `0.0`.
+/// * **The grey read on the border**, which is what a picture drawn entirely in
+///   the tint would look like from here: `147.0`, and the anti-vacuity half
+///   refused it.
+/// * **The surround read inside the atlas**: `154.0` where the letterbox is
+///   asserted exact.
+/// * **The tile's grey read on the letterbox**, which is what a viewer whose
+///   empty tiles were the surround would draw: a gap of `0.0` against
+///   [`ATLAS_TILE_OVER_SURROUND`].
+/// * **The golden compared against another tick of the sun**, which moves the
+///   cascades in the atlas and nothing else this check reads: every reading
+///   above still passed and the comparison failed at `1.2193%` grossly wrong
+///   against a `0.1%` budget. That is the half that says the picture is held to
+///   *this* frame rather than to any frame with a grid on it.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
+fn the_atlas_viewer_draws_the_atlas_and_borders_the_cascade_it_rendered() {
+    let extent = ATLAS_EXTENT;
+    let (image, paths, _) = draw(extent, Arm::shipped().showing_the_atlas());
+
+    let (x, y, width, height) = cascade_cell_on_screen(extent);
+    let border_at = (x + width / 2, y);
+    let cell_at = (x + width / 2, y + height / 2);
+    let surround_at = (0, extent.1 / 2);
+    let (border, cell_tint) = (tint_at(&image, border_at), tint_at(&image, cell_at));
+    let (cell, surround) = (level_at(&image, cell_at), level_at(&image, surround_at));
+    eprintln!(
+        "sundial golden: the atlas viewer on {paths} — drawn at {view:?}, root cell \
+         {CASCADE_CELL} at {rect:?}; the border at {border_at:?} leads red over blue by \
+         {border:.1} and the cell's middle at {cell_at:?} by {cell_tint:.1}; the cell reads \
+         {cell:.1}/255 and the letterbox at {surround_at:?} {surround:.1}",
+        view = atlas_on_screen(extent),
+        rect = (x, y, width, height),
+    );
+
+    assert!(
+        border > ATLAS_BORDER_LEVELS,
+        "the edge of root cell {CASCADE_CELL} leads red over blue by {border:.1}, short of \
+         {ATLAS_BORDER_LEVELS} — so the picture has no tile grid on it and which slot holds \
+         which map is as unreadable as it was without the viewer"
+    );
+    assert!(
+        cell_tint.abs() < ATLAS_BORDER_LEVELS,
+        "the middle of root cell {CASCADE_CELL} leads red over blue by {cell_tint:.1}, which is \
+         the border's own colour axis — so the reading above cannot say which of the two it found"
+    );
+    assert_eq!(
+        surround, 0.0,
+        "the frame outside the atlas's rectangle reads {surround:.1}/255 rather than the \
+         surround, so the viewer is not drawing where this check thinks it is"
+    );
+    assert!(
+        cell - surround > ATLAS_TILE_OVER_SURROUND,
+        "the cascade's cell reads {cell:.1}/255 and the letterbox beside it {surround:.1} — a \
+         gap of {:.1}, short of {ATLAS_TILE_OVER_SURROUND}. The atlas's own edge is invisible \
+         and nothing in the picture says how much of the frame it covers",
+        cell - surround,
+    );
+
+    // And last, the picture itself, on the four goldens' terms.
+    match check_golden(&image, "plaza-atlas", &paths) {
+        Ok(line) => eprintln!("sundial golden: {line}"),
+        Err(fault) => panic!("{fault}"),
     }
 }
 

@@ -116,20 +116,24 @@ out of `FrameUniforms::shadow_filter`. What that change did **not** do:
   `crcbl_render::split`'s header carries both shapes and which client takes
   which.
 
-## sundial leaves the diagnostics and the page owed (2026-09-04)
+## What sundial still owes (2026-09-04)
 
 `apps/sundial` was built natively — the plaza, the scripted sun, the filter and
 seam bindings, and the golden suite that measures the penumbra ladder, the seam,
-the contact and the clock's determinism. What that slice did **not** do:
+the contact and the clock's determinism — and the atlas viewer now reaches a
+golden of its own and a button on the page. What is still **not** done:
 
-- **The atlas viewer reaches no golden and no page.** It landed 2026-09-04 as
-  `DebugView::ShadowAtlas` and this fixture binds it to `T` and the panel's
-  `ATLAS` row, but nothing draws it in CI: `apps/sundial/tests/golden.rs` has no
-  frame with the view on, and `apps/sundial/src/web.rs` exports no control for
-  it — the browser demo's controls are the filter, the seam and the clock, and a
-  phone has no `T`. A golden would be the natural place to catch a viewer that
-  stopped drawing the border or the letterbox, which the e2e's four placed
-  readings do not cover: those assert values at points, not the layout.
+- **The cascade overlay reaches neither.** `DebugView::Cascades` is bound to `C`
+  and to the panel's `CASCADES` row and nothing else: this sample's
+  `tests/golden.rs` blesses no frame with the tint on, and
+  `apps/sundial/src/web.rs` exports no control for it, so a phone cannot reach
+  it and CI never draws it. What `crates/crcbl/tests/forward_e2e/shadow.rs`
+  holds is the engine's own fixture — that the tint follows the cascade the
+  lighting sampled — not this sample's frame. The atlas viewer's pair is the
+  shape it would take: `Arm::showing_the_atlas`'s sibling and one more
+  `__crcbl_sundial_*` export. Left because the overlay multiplies the shaded
+  picture, so a golden of it moves whenever the plaza's shading does, where the
+  atlas viewer's replaces the frame and moves only with the atlas.
 - **The viewer is only exercised over whole root cells.** The e2e reads cascade
   0 and one free slot of the light region, and both are whole cells of
   `crcbl_render::shadow`'s grid. `atlas_view.slang`'s border loop reads each
@@ -179,11 +183,11 @@ than keys — `apps/sundial/src/web.rs` exports one call per knob and
 `web/demos/sundial/main.js` binds them. `web/tools/browser-e2e.mjs`'s `sundial`
 row presses **every one of them** and reads the effect off the demo's own
 heartbeat: the seam button, the seam slider, the filter button, the sun's
-stop/start button, the tick slider and `reset`. Each was watched to fail with
-the export behind it made a no-op, and the `reset` sabotage additionally
-reddened group D's changed-frame check — which is the evidence that this row is
-right to carry no `still`. That is where it differs from alcove's row below,
-where four controls are driven by nothing but a person.
+stop/start button, the tick slider, the atlas-viewer button and `reset`. Each
+was watched to fail with the export behind it made a no-op, and the `reset`
+sabotage additionally reddened group D's changed-frame check — which is the
+evidence that this row is right to carry no `still`. That is where it differs
+from alcove's row below, where four controls are driven by nothing but a person.
 
 What is **not** checked is `__crcbl_sundial_sun_sweep`. The gate never reads the
 tick slider's `max`, so a sweep export answering a wrong number would give the

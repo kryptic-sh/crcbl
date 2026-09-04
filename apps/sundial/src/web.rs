@@ -23,17 +23,18 @@
 //!
 //! `apps/alcove/src/web.rs`' argument, and this fixture has one more control to
 //! carry than that one does. Natively every knob here is a key or a pause-panel
-//! row: `F` cycles the filter, `X` raises the seam, `,` and `.` walk it, `P`
-//! stops the sun and `-` and `=` scrub it. **A phone has none of them**, and a
-//! shadow fixture with a sun nobody can stop is one whose artefacts cannot be
-//! looked at — acne, peter-panning and a swimming cascade edge each want the sun
-//! held at a pose.
+//! row: `F` cycles the filter, `X` raises the seam, `,` and `.` walk it, `T`
+//! puts the shadow atlas up, `P` stops the sun and `-` and `=` scrub it. **A
+//! phone has none of them**, and a shadow fixture with a sun nobody can stop is
+//! one whose artefacts cannot be looked at — acne, peter-panning and a swimming
+//! cascade edge each want the sun held at a pose.
 //!
-//! # Two kinds of knob, and they take different routes
+//! # Three kinds of knob, and they take different routes
 //!
 //! | Knob | Where the state lives | How this module reaches it |
 //! | --- | --- | --- |
 //! | the filter, the seam | a `r_shadow_*` console cell | [`crate::filter`], the same cell a key and a typed line write |
+//! | the atlas viewer | the engine's `r_debug_view` cell | `crate::app::toggle_atlas_view`, the same cell `T` and the pause panel's `ATLAS` row write |
 //! | the sun's tick, and whether it runs | `crate::app::Sundial` | [`crate::sun::page_clock`] and its `ask_*` pair, adopted by the next fixed step |
 //!
 //! **There is no second copy of either on the page.** Every call below answers
@@ -100,6 +101,7 @@
 //! | [`__crcbl_sundial_filter_ptr`] | `() -> i32` | Address of that name (UTF-8, not NUL-terminated). Read it **after** the call above: the two together are one read. |
 //! | [`__crcbl_sundial_seam`] | `(i32) -> f32` | A non-zero argument raises the comparison seam at the centre or drops it, as the `X` key does. Returns where it stands, and `0` for a frame comparing nothing. |
 //! | [`__crcbl_sundial_seam_at`] | `(f32) -> f32` | Where the seam stands, as a fraction of the frame's width — what `,` and `.` walk. Either edge takes it down. |
+//! | [`__crcbl_sundial_atlas_view`] | `(i32) -> i32` | A non-zero argument draws the shadow atlas over the frame or takes it away, as the `T` key does. `1`/`0` for whether it is the picture in force. |
 //! | [`__crcbl_sundial_sun_tick`] | `(f64) -> f64` | Which tick of the clock the sun is drawn at. Writing one **stops** the clock, as a scrub does. |
 //! | [`__crcbl_sundial_sun_sweep`] | `() -> f64` | How many ticks one sweep of the sun takes, so a page's slider spans the engine's own arc rather than a number written on the page. |
 //! | [`__crcbl_sundial_sun_running`] | `(i32) -> i32` | Whether the clock is moving — the `P` key. `1`/`0`. |
@@ -243,6 +245,40 @@ pub extern "C" fn __crcbl_sundial_seam_at(at: f32) -> f32 {
         return filter::set_seam(at).unwrap_or(0.0);
     }
     filter::seam().unwrap_or(0.0)
+}
+
+// ---------------------------------------------------------------------------
+// Exports: the atlas viewer, which is the engine's own debug-view cell
+// ---------------------------------------------------------------------------
+
+/// Draw the shadow atlas over the frame or take it away, and answer with
+/// whether it is the picture in force.
+///
+/// `toggle` of `0` reads. The `T` key and the pause panel's `ATLAS` row as
+/// something a finger can reach, through `crate::app::toggle_atlas_view` —
+/// the same [`crcbl::debug_view`] cell all three write, so a view put up by a
+/// typed `debug_view shadow atlas` is what this answers with too.
+///
+/// **A third route to a third kind of state**, and this page drives all three
+/// now: the filter and the seam are [`crate::filter`]'s console cells, the sun
+/// is the fixture's own clock, and the debug view is the engine's. The engine
+/// holds exactly **one** view, so this answers with whether the shadow atlas is
+/// *the* one rather than with a flag of its own — a picture some other view had
+/// replaced would otherwise read here as still up.
+///
+/// # What it is for
+///
+/// `docs/plan/sample/18-sundial.md`'s milestone 1 diagnostic. The plaza's sun
+/// and its three punctual lights all ask `crcbl::render::shadow` for a run of
+/// tiles, and a light that was refused one still lights — so the frame looks the
+/// same either way and the atlas is the only place the answer is written down.
+/// A visitor with no keyboard could not reach it at all.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_sundial_atlas_view(toggle: i32) -> i32 {
+    if toggle != 0 {
+        crate::app::toggle_atlas_view();
+    }
+    i32::from(crcbl::debug_view::current() == crcbl::render::DebugView::ShadowAtlas)
 }
 
 // ---------------------------------------------------------------------------

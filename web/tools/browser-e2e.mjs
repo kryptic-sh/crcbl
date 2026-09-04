@@ -910,6 +910,7 @@ const EXPECTATIONS = {
       line.includes('lighting: Rasterised') &&
       line.includes('filter: pcss') &&
       line.includes('seam: OFF') &&
+      line.includes('view: shaded') &&
       line.includes('sun: tick 120 of 600'),
     moving: /\bsun: tick (\d+)/,
     movingLabel: 'the scripted sun keeps sweeping under its own steam',
@@ -956,6 +957,26 @@ const EXPECTATIONS = {
       // `crate::app::Sundial`, and a page reaches them through
       // `crate::sun`'s channel instead — a different route to a different kind
       // of state, and the one this block exists to press.
+      // **AND THE DEBUG VIEW, WHICH IS A THIRD KIND AGAIN.** `r_shadow_*` is
+      // this sample's own console cell and the clock is its own game state;
+      // `crcbl::debug_view` is the *engine's* cell, shared with every other
+      // sample and with the `debug_view` console command, and this button is
+      // the only route to it on the whole site that a finger can reach.
+      //
+      // **Read off the heartbeat rather than off the canvas**, and here that is
+      // load-bearing rather than habit: what this control changes is the
+      // picture — the atlas viewer replaces the lit plaza with a grey readout —
+      // and a whole-canvas statistic cannot tell that from a demo that stopped
+      // drawing, because the HUD is drawn over the same canvas.
+      // `Sundial::log_heartbeat` prints `crcbl::debug_view::current` straight
+      // off the cell the button writes.
+      atlas: 'knob-atlas',
+      atlasField: /\bview: (.+?) {2}/,
+      // What `DebugView::ShadowAtlas::label` spells. The *off* value is not
+      // written down here — the check reads it off the heartbeat before it
+      // presses anything, so a fixture that opened on some other view is
+      // compared against where it actually started.
+      atlasLabel: 'shadow atlas',
       sun: 'knob-sun',
       sunAt: 'knob-sun-tick',
       // The sun's own tick, and the loop's. `moving` above reads the first of
@@ -4119,6 +4140,59 @@ try {
               ? `the sun reads ${sunNow || '(nothing)'}, the slider asked for ` +
                 `${asked || '(nothing)'}, and it was stopped at ${heldAt}`
               : `no heartbeat in ${pollCeiling()} ms after the drag`
+      );
+    }
+
+    // **AND THE DEBUG VIEW, WHICH THE RESET BELOW DOES NOT PUT BACK.** `R`
+    // resets this sample's own knobs and its clock; the debug view is the
+    // engine's cell and no sample's reset reaches it, so this block presses its
+    // control **twice** and the second press is what leaves the groups after
+    // this one the shaded frame they were written against.
+    //
+    // The second press is also the half that makes the first one a check.
+    // A button wired to a call that only ever *set* the view — or a heartbeat
+    // field stuck on whatever it first printed — passes "it turned on" and
+    // fails "it turned off again".
+    if (knobs.atlas) {
+      const startingView = stands(
+        hud()[hud().length - 1] ?? '',
+        knobs.atlasField
+      );
+      const shown = (await clickControl(knobs.atlas)) && (await resume());
+      const shownMark = hud().length;
+      const shownLine = shown ? await beatAfter(shownMark) : null;
+      const viewNow = stands(shownLine ?? '', knobs.atlasField);
+      check(
+        'C',
+        'a press on the page draws the shadow atlas over the frame',
+        Boolean(shownLine) && viewNow === knobs.atlasLabel,
+        !shown
+          ? `the page has no #${knobs.atlas} control, or the demo did not go ` +
+              'back into play after the press — status ' +
+              `${await evaluate(page, `crcbl.status()`)}`
+          : shownLine
+            ? `the frame draws ${viewNow || '(nothing)'}, and it opened on ` +
+              `${startingView || '(nothing)'}`
+            : `no heartbeat in ${pollCeiling()} ms after the press`
+      );
+
+      const hidden = (await clickControl(knobs.atlas)) && (await resume());
+      const hiddenMark = hud().length;
+      const hiddenLine = hidden ? await beatAfter(hiddenMark) : null;
+      const viewBack = stands(hiddenLine ?? '', knobs.atlasField);
+      check(
+        'C',
+        'and a second press takes it away again',
+        Boolean(hiddenLine) &&
+          viewBack === startingView &&
+          viewBack !== knobs.atlasLabel,
+        !hidden
+          ? 'the demo did not go back into play after the second press — ' +
+              `status ${await evaluate(page, `crcbl.status()`)}`
+          : hiddenLine
+            ? `the frame draws ${viewBack || '(nothing)'}, and it opened on ` +
+              `${startingView || '(nothing)'}`
+            : `no heartbeat in ${pollCeiling()} ms after the second press`
       );
     }
 

@@ -173,13 +173,23 @@ impl Sundial {
     /// has. It names the lighting path, so a page that opened some other device is
     /// legible, and the filter, the seam and the sun, which are the whole of what
     /// this sample is for.
+    ///
+    /// **`view` is here for a browser gate specifically.** The debug views are
+    /// the one control on this page whose effect is a *picture* — a whole-canvas
+    /// reading cannot see it, because the atlas viewer replaces a lit frame with
+    /// a grey one and a stat over the canvas mixes the scene with the HUD drawn
+    /// over it. `crcbl::debug_view::current` is the cell every route to it
+    /// writes, and printing it here is what makes
+    /// [`crate::web::__crcbl_sundial_atlas_view`]'s effect a reading rather
+    /// than an inference. `apps/quarry`'s heartbeat carries the same field for
+    /// the same reason.
     fn log_heartbeat(&self) {
         if !self.ticks.is_multiple_of(HEARTBEAT_TICKS) {
             return;
         }
         crcbl::log::info!(
             "[HUD] tick: {}  lighting: {:?}  geometry: {:?}  binding: {:?}  camera: {}  \
-             effects: {}  filter: {}  seam: {}  sun: {}",
+             effects: {}  filter: {}  seam: {}  view: {}  sun: {}",
             self.ticks,
             self.paths.lighting,
             self.paths.geometry,
@@ -188,6 +198,7 @@ impl Sundial {
             self.paths.effects_row(),
             self.knobs.filter.label(),
             self.knobs.seam_row(),
+            crcbl::debug_view::current().label(),
             self.sky().row(),
         );
     }

@@ -53,7 +53,8 @@ a shadow implementation whose artefacts ship.
   thing you can look at. **Built 2026-09-04** as
   `crcbl_render::DebugView::ShadowAtlas` — an engine slice, because drawing the
   atlas is a pass in `crcbl-render` rather than anything a sample can do — and
-  bound here to `T` and to the pause panel's `ATLAS` row.
+  bound here to `T`, to the pause panel's `ATLAS` row and to a button on the
+  page, with `tests/golden.rs`'s `plaza-atlas` frame drawing it in CI.
 - Technique selector and split screen, on sample 17's harness pattern. **Both
   are built as of 2026-09-04** — topic 45's fifteenth decision:
   `r_shadow_filter` selects between `pcss`, `disc` and `box`, and
@@ -65,14 +66,14 @@ a shadow implementation whose artefacts ship.
   walk it, and the pause panel and the debug overlay both name the filter on
   each side of the line.
 - Pages web demo. **Built 2026-09-04** at `/demos/sundial/`, on
-  [19-alcove.md](19-alcove.md)'s pattern: the filter, the seam and the sun's
-  clock as HTML controls rather than keys, because a seam walked with `,` and
-  `.` and a sun stopped with `P` are controls a phone cannot reach.
-  `apps/sundial/src/web.rs` exports one symbol per knob and each answers with
-  what the engine holds after the write, so nothing on the page keeps a copy.
-  What is new against alcove is the clock: a tick is game state rather than a
-  console cell, so the sun's two controls go through `crate::sun`'s channel and
-  are adopted on the next fixed step.
+  [19-alcove.md](19-alcove.md)'s pattern: the filter, the seam, the atlas viewer
+  and the sun's clock as HTML controls rather than keys, because a seam walked
+  with `,` and `.`, an atlas put up with `T` and a sun stopped with `P` are
+  controls a phone cannot reach. `apps/sundial/src/web.rs` exports one symbol
+  per knob and each answers with what the engine holds after the write, so
+  nothing on the page keeps a copy. What is new against alcove is the clock: a
+  tick is game state rather than a console cell, so the sun's two controls go
+  through `crate::sun`'s channel and are adopted on the next fixed step.
 
 ## Non-goals (hard cap)
 
@@ -93,11 +94,11 @@ fifteenth decision — and the sample followed the same day: the plaza
 seam bindings and panel rows (`src/filter.rs`, `src/menu.rs`), and the golden
 suite (`tests/golden.rs`) CI runs on lavapipe. **The browser demo followed the
 same day**: `apps/sundial/src/web.rs`, `web/pages/sundial.html` and
-`web/demos/sundial/main.js` put the filter, the seam and the sun's clock on the
-page as HTML controls, and `web/tools/browser-e2e.mjs`'s `sundial` row presses
-each of them and reads what the `[HUD]` line says they did. **Milestone 1's two
-diagnostics landed the same day**: the cascade overlay on `C`, and the atlas
-viewer on `T`.
+`web/demos/sundial/main.js` put the filter, the seam, the atlas viewer and the
+sun's clock on the page as HTML controls, and `web/tools/browser-e2e.mjs`'s
+`sundial` row presses each of them and reads what the `[HUD]` line says they
+did. **Milestone 1's two diagnostics landed the same day**: the cascade overlay
+on `C`, and the atlas viewer on `T`.
 
 What also exists is evidence that the shadow implementation is at the edge of
 its current budget: since the 2026-08-26 re-tiling that bought a second shadowed
@@ -137,7 +138,11 @@ hold in their head, and the only honest way to set them is to look.
    rather than a branch in `mesh.slang`, because the atlas is one image the
    whole frame shares rather than a function of any fragment, and it draws in
    display space after the tonemap so its greys do not move with the exposure.
-   `T` and the panel's `ATLAS` row show it.
+   `T`, the panel's `ATLAS` row and a button on the page all show it, and
+   `tests/golden.rs`'s `plaza-atlas` frame is what draws it in CI — with the
+   amber border round the near cascade's cell and the black letterbox asserted
+   beside the picture, because a golden alone cannot say which of the greys it
+   is looking at.
 
 2. **Normal-offset bias and the acne/peter-panning pair**, checkable at the
    contact points the scene was built for. The bias itself **shipped
