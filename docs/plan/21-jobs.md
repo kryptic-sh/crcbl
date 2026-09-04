@@ -367,22 +367,21 @@ is the constraint that already forbids a `crcbl::run(game)`.
 
 ### Order
 
-1. **Cross-origin isolation on the Pages deploy — rescoped 2026-08-30, the
-   user's call:** the deploy's origin is not the gate's business. GitHub Pages
-   sends no COOP/COEP, so a published demo runs the `Inline` fallback, and that
-   is a **supported configuration** rather than a gap — the seam exists so that
-   a page without `SharedArrayBuffer` still runs. What the gate owes is coverage
-   of **both** backends, and today it has half: `web/tools/serve.mjs` always
-   sends the pair, the driver asserts `crossOriginIsolated === true`, and
-   nothing exercises the origin a real visitor gets. The rung is therefore a
-   two-run gate: the jobs demo served once with the headers, asserting the
-   `Workers` backend reported in with its worker count, and once without them
-   (`serve.mjs` grows a switch), asserting `crossOriginIsolated === false` and
-   the `Inline` backend chosen — the backend by name in both, since the flag
-   alone is satisfied by a pool that silently fell back. Isolating the deploy (a
-   service-worker shim, or a proxy that adds the headers) stays available as a
-   later choice and gates nothing.
-2. Subsystem threads, in the order topic 21 already lists. **Only the pool's
+Both backends are gated, and the deploy's origin is not the gate's business —
+rescoped 2026-08-30, the user's call. GitHub Pages sends no COOP/COEP, so a
+published demo runs the `Inline` fallback, and that is a **supported
+configuration** rather than a gap: the seam exists so that a page without
+`SharedArrayBuffer` still runs. `web/run-jobs-e2e.sh` therefore drives its page
+twice — once cross-origin isolated, once behind
+`web/tools/serve.mjs --no-isolation`, which is the origin a real visitor gets —
+and each run names the backend it reached rather than reading the isolation
+flag, which a pool that had silently fallen back would satisfy too. Isolating
+the deploy (a service-worker shim, or a proxy that adds the headers) stays
+available as a later choice and gates nothing.
+
+What is left is one rung:
+
+1. Subsystem threads, in the order topic 21 already lists. **Only the pool's
    workers actually start through the seam.** The one bare `std::thread::spawn`
    in `crates/crcbl-audio/src/lib.rs` is `open_null`'s polling thread — the
    headless stream for tests and CI, not the DSP thread, which cpal creates
@@ -392,9 +391,10 @@ is the constraint that already forbids a `crcbl::run(game)`.
    any platform spawns an input, sim, net or io thread at all. The topology at
    the top of this file is still a design.
 
-Step 1 is a gate rather than a step: if isolation cannot be had on Pages, the
-demos stay single-threaded through the fallback and native keeps the topology —
-which is exactly what the spawn seam exists to make survivable.
+Isolation was a gate rather than a step, and it is settled the way the fallback
+was designed for: isolation cannot be had on Pages, so the demos stay
+single-threaded there and native keeps the topology — which is exactly what the
+spawn seam exists to make survivable.
 
 ## Topology on the web, settled (2026-08-03)
 

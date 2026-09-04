@@ -115,12 +115,35 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // Arguments and environment
 // ---------------------------------------------------------------------------
 
+/**
+ * Every option this driver reads, and therefore every option it accepts.
+ *
+ * **An unrecognised flag is an error, not a no-op.** `web/run-browser-e2e.sh`
+ * hands whatever it does not recognise itself straight to this file, so a flag
+ * belonging to a *different* gate used to be recorded here, read by nobody, and
+ * reported by nothing — the run went green having silently ignored half of what
+ * it was asked. `web/run-render-harness-e2e.sh`'s `--expect-fail ssr,ui` is the
+ * case that produced this list: a person copying a command line from that gate
+ * to this one got no warning at all. `web/tools/jobs-e2e.mjs` refuses an unknown
+ * option the same way.
+ *
+ * Every one of them takes a value, which is why the loop below can read the next
+ * argument without asking which flag it is reading for.
+ */
+const KNOWN_ARGS = ['adapter', 'demo', 'out', 'site', 'timeout'];
+
 /** @type {Record<string, string>} */
 const args = {};
 for (let i = 2; i < process.argv.length; i += 1) {
   const arg = process.argv[i];
   if (!arg.startsWith('--')) fail(`unexpected argument ${arg}`);
   const [name, inline] = arg.slice(2).split('=', 2);
+  if (!KNOWN_ARGS.includes(name)) {
+    fail(
+      `unknown option --${name}; this driver accepts ` +
+        `${KNOWN_ARGS.map((known) => `--${known} <value>`).join(', ')}`
+    );
+  }
   args[name] = inline ?? process.argv[++i] ?? '';
 }
 

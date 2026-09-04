@@ -164,6 +164,11 @@ site `build.sh` already produced, or pass `--build`:
 ./web/run-browser-e2e.sh --headless --hardware   # the real GPU, no display
 ```
 
+Anything past `--build`, `--headless` and `--hardware` goes to
+`tools/browser-e2e.mjs`, which takes `--site`, `--demo`, `--adapter`,
+`--timeout` and `--out` and **refuses anything else** by name — a flag borrowed
+from another gate used to be accepted and silently ignored.
+
 It starts its own Xvfb, serves the site through `web/tools/serve.mjs` — the same
 server `build.sh --serve` runs, so the origin the gate checks is the origin a
 human loads — opens Chromium over the DevTools protocol, sends a **real** click
@@ -276,6 +281,23 @@ asks that `worker-gate.mjs` cannot:
   worker could ever start, which is the one failure that makes the backend lie
   rather than degrade, so the page loads a plain build of the same example
   alongside the threaded one and asserts the refusal.
+
+**It drives the page twice, because both configurations are supported.** The run
+above is the cross-origin isolated one. GitHub Pages sends no COOP/COEP, so the
+origin every visitor gets has no `SharedArrayBuffer` and the backend degrades
+onto `Inline`'s behaviour — a supported configuration rather than a gap, and one
+nothing ever ran until the script started serving a second run behind
+`tools/serve.mjs --no-isolation`. That run asserts the document is not isolated,
+that a shared memory cannot be handed to a `Worker`, that the threaded artifact
+is refused outright rather than instantiated against an unshared memory, and
+that what is left is `Inline` **by name** at parallelism one, still reaching the
+checksum the threaded run reproduces. Both runs name their backend: the
+isolation flag on its own is satisfied by a pool that silently fell back.
+
+`--no-isolation` on the server and `?no-isolation` on the page are deliberately
+separate — the first withholds the headers, the second says which list to run —
+so one without the other fails loudly on its first line, which is what makes
+each of them falsifiable.
 
 Four red switches ride in the query string, and the script runs every one of
 them and insists the right assertion went red — and that the others did not.

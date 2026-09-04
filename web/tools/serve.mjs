@@ -2,7 +2,7 @@
 // The static server the demo site is served from, and the two headers that
 // decide whether the browser will give it shared memory.
 //
-//   node web/tools/serve.mjs <root> [--port 8000]
+//   node web/tools/serve.mjs <root> [--port 8000] [--no-isolation]
 //
 // `web/build.sh --serve` runs it as a command; `web/tools/browser-e2e.mjs`
 // imports `serve` and drives the same code on an ephemeral port. One
@@ -10,6 +10,15 @@
 // against whatever this file sends, and a second server for humans would be a
 // second set of headers nothing checks — so the demo that works under the gate
 // could stop working under `--serve` with nothing going red.
+//
+// `--no-isolation`, and the `isolated: false` option behind it, withhold the
+// pair. **The origin without them is not a broken configuration — it is the
+// published one.** GitHub Pages sends neither header, so every visitor to
+// crcbl.kryptic.sh gets a document where `SharedArrayBuffer` does not exist and
+// `crcbl_jobs`'s browser backend degrades onto `Inline`'s behaviour. That is a
+// supported configuration rather than a gap, which means it is one the gate owes
+// coverage of: `web/run-jobs-e2e.sh` drives its page twice, once each way, and
+// `docs/plan/21-jobs.md`'s first rung is the reasoning.
 //
 // Plain Node, no dependencies: `web/` has a no-npm policy and `build.sh`
 // already needs `node` for `check-exports.mjs` and `smoke.mjs`.
@@ -76,15 +85,26 @@ export const MIME = {
  * only one. It is served through here rather than from a `data:` URL because an
  * opaque origin is not a secure context, and WebGPU insists on one.
  *
+ * `isolated` is the one thing a caller can turn off. `false` withholds the
+ * COOP/COEP pair, which is what GitHub Pages does and therefore what a visitor
+ * to the published site gets; see the file header.
+ *
  * @param {string} root Directory to serve. Escapes out of it are refused.
- * @param {{ port?: number, host?: string,
+ * @param {{ port?: number, host?: string, isolated?: boolean,
  *           routes?: Record<string, { contentType: string, body: string }> }} [options]
  * @returns {Promise<{ origin: string, port: number, misses: string[],
- *                     close: () => Promise<void> }>}
+ *                     isolated: boolean, close: () => Promise<void> }>}
  */
 export function serve(root, options = {}) {
-  const { port = 0, host = '127.0.0.1', routes = {} } = options;
+  const {
+    port = 0,
+    host = '127.0.0.1',
+    routes = {},
+    isolated = true,
+  } = options;
   const base = resolve(root);
+  /** What every response carries. Empty when this origin is not isolated. */
+  const isolation = isolated ? ISOLATION_HEADERS : {};
   /** Requests that 404'd. A missing asset is a shim bug, not a warning. */
   const misses = [];
   const server = createServer((request, response) => {
@@ -95,7 +115,7 @@ export function serve(root, options = {}) {
     const route = routes[path] ?? routes[path.replace(/\/$/, '')];
     if (route) {
       response.writeHead(200, {
-        ...ISOLATION_HEADERS,
+        ...isolation,
         'content-type': route.contentType,
         'cache-control': 'no-store',
       });
@@ -128,7 +148,7 @@ export function serve(root, options = {}) {
       // Isolation is a property of the *document*, so it is the HTML response
       // that has to carry these. Sending them on everything costs two headers
       // per asset and removes the question of which responses are documents.
-      ...ISOLATION_HEADERS,
+      ...isolation,
       'content-type': MIME[extension] ?? 'application/octet-stream',
       'content-length': info.size,
       // A stale artifact served to a fresh browser is a debugging session
@@ -150,6 +170,7 @@ export function serve(root, options = {}) {
         origin: `http://localhost:${address.port}`,
         port: address.port,
         misses,
+        isolated,
         // **`close()` alone can hang forever, and did.** `server.close(cb)`
         // stops the server accepting new connections and then waits for every
         // existing one to end before calling back — so a browser holding a
@@ -169,7 +190,7 @@ export function serve(root, options = {}) {
   });
 }
 
-// Run as a command: `node web/tools/serve.mjs <root> [--port N]`.
+// Run as a command: `node web/tools/serve.mjs <root> [--port N] [--no-isolation]`.
 if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
@@ -177,20 +198,24 @@ if (
   const argv = process.argv.slice(2);
   const root = argv.find((a) => !a.startsWith('--'));
   if (!root) {
-    console.error('usage: serve.mjs <root> [--port 8000]');
+    console.error('usage: serve.mjs <root> [--port 8000] [--no-isolation]');
     process.exit(2);
   }
   const flag = argv.indexOf('--port');
   const port = flag === -1 ? 8000 : Number(argv[flag + 1]);
+  const isolated = !argv.includes('--no-isolation');
   // Loopback only. `python3 -m http.server`, which this replaced, binds every
   // interface — but `http://<lan-ip>:8000` is not a secure context, so the one
   // thing this server exists to provide would be silently absent there while
   // the page still loaded.
-  const site = await serve(root, { port, host: '127.0.0.1' });
+  const site = await serve(root, { port, host: '127.0.0.1', isolated });
   console.log(`serving ${resolve(root)} at ${site.origin}/`);
   console.log(
-    `cross-origin isolated: ${Object.entries(ISOLATION_HEADERS)
-      .map(([name, value]) => `${name}: ${value}`)
-      .join(', ')}`
+    site.isolated
+      ? `cross-origin isolated: ${Object.entries(ISOLATION_HEADERS)
+          .map(([name, value]) => `${name}: ${value}`)
+          .join(', ')}`
+      : 'not cross-origin isolated: neither COOP nor COEP is sent, which is ' +
+          'the shape of the published origin'
   );
 }

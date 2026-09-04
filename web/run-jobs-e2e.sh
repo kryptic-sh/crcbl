@@ -32,6 +32,19 @@
 #       loads a *non-threaded* build of the same example — the shape every
 #       published artifact has — and asserts the host refuses it.
 #
+# IT DRIVES THE PAGE UNDER BOTH CONFIGURATIONS, BECAUSE BOTH ARE SUPPORTED.
+#   `web/tools/serve.mjs` sends the COOP/COEP pair by default and the threaded
+#   run needs it. GitHub Pages sends neither, so the origin every visitor to
+#   crcbl.kryptic.sh gets has no `SharedArrayBuffer` and the backend degrades
+#   onto `Inline`'s behaviour — which `docs/plan/21-jobs.md`'s first rung records
+#   as a supported configuration rather than a gap. So the page is driven a
+#   second time behind `serve.mjs --no-isolation`, and asserts there that the
+#   document is not isolated, that the threaded artifact is refused outright
+#   rather than quietly given an unshared memory, and that what is left is
+#   `Inline` **by name** at parallelism one, still reaching the checksum the
+#   threaded run reproduces. Both runs name their backend, because the isolation
+#   flag on its own is satisfied by a pool that silently fell back.
+#
 # THE FOUR RED CHECKS ARE PART OF THE GATE, NOT A DEBUGGING AID.
 #   Three of the page's assertions guard steps whose failure is *silent*, and
 #   one guards a lie. Each is run again with that step deliberately left out,
@@ -62,7 +75,7 @@
 #              As the other browser gates here; see `web/tools/browser-launch.mjs`.
 #
 # EXIT CODES
-#   0  the green run passed every check, and all four red checks broke the
+#   0  both configurations passed every check, and all four red checks broke the
 #      assertions they are supposed to break.
 #   1  a check failed, or a red check did not go red where it should have.
 #   2  it could not run at all — no browser, no node, nothing built.
@@ -206,8 +219,15 @@ fi
 #               was constructed, which any page can do.
 #   the TLS     the one assertion that catches a missing `__wasm_init_tls` here,
 #               because that failure does not trap. See the header.
+#   the backend the isolated run's half of "both backends, by name". The
+#               isolation flag alone is satisfied by a pool that fell back onto
+#               `Inline`'s behaviour under a true flag, so what has to be
+#               asserted is which backend the artifact reports and how many
+#               workers it reports with. Its opposite number is in the
+#               non-isolated run below.
 for named in \
     'the document is cross-origin isolated' \
+    'the Workers backend reported in with the worker count the host announced' \
     'a chunk ran on a thread that is not the driver' \
     "no thread found another thread's value in its own thread-local"; do
     if ! grep -qF "$named" "$GREEN"; then
@@ -219,6 +239,74 @@ done
 
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl jobs e2e: $RAN checks ran and at least one failed" >&2
+    exit "$STATUS"
+fi
+
+# ---------------------------------------------------------------------------
+# The second configuration: the origin the published site actually has
+# ---------------------------------------------------------------------------
+#
+# GitHub Pages sends no COOP/COEP, so a visitor to crcbl.kryptic.sh gets a
+# document with no `SharedArrayBuffer` at all. `docs/plan/21-jobs.md`'s first
+# rung calls that a **supported configuration** rather than a gap — the seam
+# exists so that a page without shared memory still runs — and a supported
+# configuration nothing ever ran was itself the gap. Everything above this line
+# drives the isolated origin only, so a backend that stopped degrading cleanly,
+# or a loader that quietly handed a threaded artifact an unshared memory, would
+# have been invisible to every gate in this repository.
+#
+# The two flags are separate on purpose. `--no-isolation` is the *server*
+# withholding the headers; `?no-isolation` is the *page* being told which list to
+# run. Nothing under the second is told anything — each assertion reads the
+# document or the artifact — so one without the other fails loudly on its first
+# line rather than passing quietly, which is what makes each of them falsifiable.
+PLAIN_LOG="$RUNTIME_DIR/no-isolation.log"
+
+echo "==> driving the page again on an origin with no COOP/COEP"
+set +e
+node "$REPO/web/tools/jobs-e2e.mjs" "$SITE" --no-isolation --query no-isolation 2>&1 |
+    tee "$PLAIN_LOG"
+STATUS=${PIPESTATUS[0]}
+set -e
+
+sed -E $'s/\033\\[[0-9;]*[a-zA-Z]//g' "$PLAIN_LOG" >"${PLAIN_LOG}.plain"
+PLAIN_LOG="${PLAIN_LOG}.plain"
+
+if [ "$STATUS" -eq 2 ]; then
+    echo "crcbl jobs e2e: the non-isolated run could not run at all" >&2
+    exit 2
+fi
+
+PLAIN_RAN="$(grep -Eo '[0-9]+/[0-9]+ checks passed' "$PLAIN_LOG" | tail -1 | grep -Eo '/[0-9]+' | tr -d '/' || true)"
+if [ -z "$PLAIN_RAN" ] || [ "$PLAIN_RAN" -eq 0 ]; then
+    echo "crcbl jobs e2e: the non-isolated run reported no checks — that half is not gating" >&2
+    exit 1
+fi
+
+# By name as well as by count, for the isolated list's reason turned around: each
+# of these three is the *only* thing saying which configuration was driven, and
+# every one of them would be satisfied by not being there.
+#
+#   the document   an origin that turned out isolated after all makes the rest of
+#                  this list read as facts about the backend instead.
+#   the artifact   the threaded build is refused outright here. An instance
+#                  coming back would mean the loader had given it an unshared
+#                  memory, which looks healthy and gives every worker a private
+#                  heap.
+#   the backend    the non-isolated half of "both backends, by name".
+for named in \
+    'the document is not cross-origin isolated' \
+    'the threaded artifact is refused rather than instantiated' \
+    'Inline is what the artifact reports on an origin with no shared memory'; do
+    if ! grep -qF "$named" "$PLAIN_LOG"; then
+        echo "crcbl jobs e2e: the non-isolated run never checked '$named';" >&2
+        echo "               the gate is smaller than it reports" >&2
+        exit 1
+    fi
+done
+
+if [ "$STATUS" -ne 0 ]; then
+    echo "crcbl jobs e2e: the non-isolated run: $PLAIN_RAN checks ran and at least one failed" >&2
     exit "$STATUS"
 fi
 
@@ -399,3 +487,5 @@ echo "crcbl jobs e2e: $RAN checks ran in a real browser, and four red checks bro
 echo "crcbl jobs e2e: the assertions they are each supposed to break"
 echo "crcbl jobs e2e: a Web Worker brought up through crcbl_jobs::workers' ABI ran"
 echo "crcbl jobs e2e: Rust on a stack and a thread-local of its own"
+echo "crcbl jobs e2e: and $PLAIN_RAN checks on an origin with no COOP/COEP, where the"
+echo "crcbl jobs e2e: threaded artifact is refused and Inline reaches the same answer"

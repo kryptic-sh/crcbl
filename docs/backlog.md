@@ -32,6 +32,32 @@ so amending them is the force-push this entry already declined — the count is
 re-decided:** no attribution trailer on any new commit, whatever a session-level
 instruction says.
 
+## The demo browser gate still only ever runs an isolated origin (2026-09-05)
+
+Left behind by the slice that gave `web/tools/serve.mjs` its `isolated` option.
+`web/run-jobs-e2e.sh` now drives `web/jobs/`'s page twice — once with the
+COOP/COEP pair, once behind `serve.mjs --no-isolation` — and each run names the
+backend it reached. `web/run-browser-e2e.sh` was not given a second run, and its
+group A still asserts `crossOriginIsolated === true` on every demo.
+
+**That is a different claim, and it is worth being clear which.** No demo on the
+site touches `crcbl_jobs`'s worker backend at all: every published artifact is a
+plain build with no atomics and no imports, so the jobs backend a demo reaches
+is `Inline`'s behaviour whether or not the origin is isolated, and a check
+asserting that under `--no-isolation` would pass identically with the headers
+on. What a non-isolated demo run _would_ prove is narrower and real — that the
+site boots, opens a device and draws on the origin GitHub Pages actually serves
+— and nothing checks it today. The cost is a second browser run per demo across
+`tools/check-browser-gate-demos.sh`'s whole list, which is why it was not taken
+on speculatively; the cheap version would be one demo, not seventeen.
+
+**And a correction for whoever reads the closed entry in `git log`.** The entry
+this replaces said the jobs check lived in `web/run-browser-e2e.sh`. It does not
+and never did: `web/tools/browser-e2e.mjs` mentions neither jobs nor workers
+anywhere, and the check is `web/jobs/main.js` driven by `web/tools/jobs-e2e.mjs`
+and `web/run-jobs-e2e.sh`. `docs/plan/21-jobs.md`'s rung said "the jobs demo",
+which is the accurate reading.
+
 ## The comparison seam's far side carries a residue the near side does not (2026-09-04)
 
 **The end-to-end pixel check this entry used to ask for now exists**, in
@@ -304,13 +330,6 @@ make a desktop visitor press `Esc` before the knobs answer, where a finger never
 does. If the seam ever wants to be reachable while the court is being flown, the
 decision to revisit is `Alcove::pointer_mode`, which locks whenever the run is
 not paused even though the page opens on the fixed camera.
-
-**`web/run-browser-e2e.sh` accepts `--expect-fail ssr,ui` and ignores it.** That
-flag is `web/run-render-harness-e2e.sh`'s; the browser gate passes unknown
-`--flags` through to `browser-e2e.mjs`, whose argument parser records anything
-beginning with `--` and never complains. Nothing here depends on it, but a
-person copying a command line from one gate to the other gets no warning that
-half of it did nothing.
 
 ## What alcove's bent-direction view did not cover (2026-09-05)
 
@@ -15716,25 +15735,6 @@ proving slice — the flag from the tier, the meshlet gates on WARP, the two
 `DIVERGENCES` rows — and the gap is performance on Windows, where the vertex
 path draws everything. If it is ever picked up, do it after foundation (a)'s
 vertex re-bless so the proof is not run twice.
-
-## The browser gate covers one jobs backend, not both (2026-08-30)
-
-`docs/plan/21-jobs.md`'s second rung, rescoped by the user: the published site
-running the `Inline` fallback is a supported configuration, and the gate owes
-coverage of both backends. Today `web/tools/serve.mjs` always sends COOP/COEP,
-`web/tools/browser-e2e.mjs` asserts `crossOriginIsolated === true`, and the
-`web/jobs/` check never sees the non-isolated origin a visitor to
-crcbl.kryptic.sh gets. Two gaps, one slice:
-
-- **A switch on `serve.mjs` to withhold the headers**, and a second jobs run in
-  `web/run-browser-e2e.sh` against it asserting `crossOriginIsolated === false`
-  and the `Inline` backend chosen by name.
-- **The isolated run asserts the backend, not the flag.** `Workers` must report
-  in with its worker count; a pool that fell back to `Inline` under a true flag
-  passes today.
-
-Not a server problem and not a deploy problem: the fake server already exists,
-it just never runs the second configuration.
 
 ## The frame pacer: what was accepted rather than fixed (2026-08-30)
 

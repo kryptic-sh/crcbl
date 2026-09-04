@@ -35,6 +35,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The jobs gate drives both backends, and each run names the one it reached.**
+  `web/run-jobs-e2e.sh` runs `web/jobs/`'s page a second time behind
+  `web/tools/serve.mjs --no-isolation`, which withholds the COOP/COEP pair and
+  so reproduces the origin GitHub Pages gives every visitor —
+  `docs/plan/21-jobs.md` calls that a supported configuration rather than a gap,
+  and until now nothing ever ran it. The second run asserts that
+  `SharedArrayBuffer` is absent, that a shared memory cannot be handed to a
+  `Worker`, that the threaded artifact is refused outright rather than quietly
+  instantiated against an unshared memory, and that what a consumer above the
+  seam is left holding is `crcbl_jobs::Inline`'s behaviour **by name** —
+  parallelism one, a pool with no workers, nothing queued, and the same checksum
+  the threaded run reproduces. The isolated run names `crcbl_jobs::workers`'
+  `Workers` and the worker count the host announced, where it used to assert
+  `crossOriginIsolated` alone; a pool that had silently fallen back satisfied
+  that flag too.
+
+  The switch behind it is `serve` growing an `isolated` option and `serve.mjs` a
+  `--no-isolation` flag for it, with `web/tools/jobs-e2e.mjs` taking the same
+  flag. **A measurement that surprised us is written into the page:**
+  `new WebAssembly.Memory({ shared: true })` _succeeds_ on a non-isolated origin
+  in Chromium, and its buffer even reports `SharedArrayBuffer` as its
+  constructor's name — what is actually absent is the `SharedArrayBuffer`
+  global, and what actually fails is `postMessage`ing that memory to a `Worker`,
+  which is the step the host performs.
+
 - **The sun's two shadow bias counts are console variables.**
   `crcbl_render::shadow::r_shadow_bias` and
   `crcbl_render::shadow::r_shadow_normal_offset` are floats in **texels of the
@@ -408,6 +433,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   samples: the march takes the same count whatever its reach.
 
 ### Fixed
+
+- **`web/run-browser-e2e.sh` accepted flags it then ignored.** The script
+  forwards anything it does not recognise itself to `web/tools/browser-e2e.mjs`,
+  whose argument parser recorded any `--flag` and never complained — so
+  `--expect-fail ssr,ui`, which belongs to `web/run-render-harness-e2e.sh`, ran
+  a full browser gate having silently dropped half the command line. The driver
+  now names the flag and exits 2 for anything but `--site`, `--demo`,
+  `--adapter`, `--timeout` and `--out`; the script's usage block lists all five,
+  and it reports the driver's exit 2 as "could not run" rather than as a run
+  that checked nothing.
 
 - **Changing the shadow filter redrew the whole shadow atlas.** The shadow
   views' uniform blocks were the frame's block spread, so the `r_shadow_filter`

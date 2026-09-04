@@ -53,6 +53,25 @@
 //
 // Each must make the run go red, and go red *differently*; `web/run-jobs-e2e.sh`
 // runs all four and checks which assertions each one broke.
+//
+// AND ONE SWITCH THAT IS NOT A RED CHECK: `?no-isolation`.
+//
+//   It selects the *other* configuration rather than sabotaging this one. GitHub
+//   Pages sends no COOP/COEP, so the published origin has no
+//   `SharedArrayBuffer`, the threaded artifact cannot be instantiated there at
+//   all, and every artifact on the demo site degrades onto `Inline`'s behaviour
+//   — which `docs/plan/21-jobs.md`'s first rung records as a **supported
+//   configuration** rather than a gap. A supported configuration the gate never
+//   ran was still a gap, so `web/run-jobs-e2e.sh` drives this page a second time
+//   with `web/tools/serve.mjs --no-isolation` and this switch, and
+//   {@link runWithoutIsolation} is the list it runs.
+//
+//   The switch says what is *expected*, never what is true: every assertion
+//   under it reads the document and the artifact, so pairing it with an isolated
+//   origin fails on its first line rather than passing quietly. `?force-host-ready`
+//   composes with it, and is the falsifier for the one assertion there that
+//   nothing else can move — announcing the plain artifact anyway is the only way
+//   `Inline` becomes `Workers` on an origin with no shared memory.
 
 import { WorkerHost } from '../engine/jobs.js';
 
@@ -80,6 +99,32 @@ const POOL_THREAD_NAME = 'pool';
 
 /** How many workers to ask for when the query string does not say. */
 const DEFAULT_WORKERS = 3;
+
+/** `crcbl_jobs`'s browser backend, by the name its type has. */
+const WORKERS = 'Workers';
+
+/** The behaviour it degrades onto, by the name *that* type has. */
+const INLINE = 'Inline';
+
+/**
+ * Which of the two behaviours the artifact is actually running, asked of the
+ * artifact rather than assumed from the page.
+ *
+ * **The type is not the observable; its answer is.** `default_spawner` returns
+ * `Workers` on `wasm32` and there is no second choice to make, so naming the
+ * type would name a constant. What a caller above the seam sees is
+ * `Spawn::threaded` — false until a page announces through the shim — and until
+ * it does, `crcbl_jobs`'s own docs say the artifact "degrades onto `Inline`'s
+ * behaviour". So that is what this reports, and it is what the two runs of this
+ * page differ in: an isolated origin reaches {@link WORKERS}, the published one
+ * reaches {@link INLINE}.
+ *
+ * @param {Record<string, any>} exports
+ * @returns {string}
+ */
+function backendName(exports) {
+  return exports.gate_threaded() === 1 ? WORKERS : INLINE;
+}
 
 /** @type {{ name: string, ok: boolean }[]} */
 const checks = [];
@@ -109,6 +154,138 @@ function render() {
   log.textContent = [...notes, '', ...lines].join('\n');
 }
 
+/**
+ * The list for the origin a visitor to the published site actually gets.
+ *
+ * **Nothing here is sabotage.** GitHub Pages sends no COOP/COEP pair, so on
+ * crcbl.kryptic.sh `SharedArrayBuffer` does not exist, the artifact this page
+ * loads for the threaded run cannot be instantiated at all, and every artifact
+ * the demo site ships degrades onto `Inline`'s behaviour. `docs/plan/21-jobs.md`
+ * calls that a supported configuration — the seam exists so that a page without
+ * shared memory still runs — and a supported configuration nothing ever ran was
+ * the gap this closes.
+ *
+ * Two things are asserted that the isolated run cannot ask: that the threaded
+ * artifact is refused *outright* rather than quietly given an unshared memory,
+ * and that what a consumer above the seam is left holding is {@link INLINE} by
+ * name, at parallelism one, still reaching the same checksum.
+ *
+ * @param {number} requested How many workers the pool is asked for anyway.
+ * @param {boolean} forceHostReady `?force-host-ready`, which is what makes the
+ *   backend-by-name check below falsifiable: announcing the plain artifact
+ *   anyway is the one thing that turns `Inline` into `Workers` here.
+ */
+async function runWithoutIsolation(requested, forceHostReady) {
+  note('CONFIGURATION: no COOP/COEP — the origin the published site has');
+
+  // The document first: every assertion below is a consequence of this one, and
+  // on an isolated origin each would be a fact about something else entirely.
+  check(
+    globalThis.crossOriginIsolated === false,
+    'the document is not cross-origin isolated'
+  );
+  // **The constructor is not the gate, and measuring that is what this check is
+  // for.** `new WebAssembly.Memory({ shared: true })` *succeeds* on a
+  // non-isolated origin in Chromium — the buffer it hands back even reports
+  // `SharedArrayBuffer` as its constructor's name — while the
+  // `SharedArrayBuffer` global itself is absent and `new SharedArrayBuffer(8)`
+  // is a `ReferenceError`. So the two things asserted here are the two that
+  // actually differ: the global the platform exposes, and the step
+  // {@link WorkerHost.start} performs, which is handing that memory to a
+  // `Worker`. The second is the one the backend dies on.
+  check(
+    typeof SharedArrayBuffer === 'undefined',
+    'SharedArrayBuffer is not exposed on this origin'
+  );
+  let transfer = null;
+  const probeUrl = URL.createObjectURL(
+    new Blob(['self.onmessage = () => {};'], { type: 'text/javascript' })
+  );
+  const probe = new Worker(probeUrl);
+  try {
+    probe.postMessage(
+      new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true })
+    );
+  } catch (error) {
+    transfer = String(error);
+  } finally {
+    probe.terminate();
+    URL.revokeObjectURL(probeUrl);
+  }
+  check(
+    transfer !== null,
+    'a shared memory cannot be handed to a Worker here' +
+      (transfer ? ` — ${transfer}` : ', but one was')
+  );
+
+  // Refused outright, not degraded: the threaded artifact's memory is an
+  // *import*, and there is nothing to hand it. An instance that came back would
+  // mean the loader had quietly given it an unshared memory, which is the one
+  // way this page could look healthy while every worker read a private heap.
+  let refused = null;
+  try {
+    await WorkerHost.load(ARTIFACT);
+  } catch (error) {
+    refused = String(error);
+  }
+  check(
+    refused !== null && refused.includes('cross-origin isolated'),
+    'the threaded artifact is refused rather than instantiated' +
+      (refused ? ` — ${refused}` : ', and it was instantiated')
+  );
+
+  // The artifact that does load here is the plain one, which is the shape every
+  // artifact on the demo site has.
+  const plain = await WorkerHost.load(PLAIN_ARTIFACT);
+  const ex = plain.exports;
+  check(
+    plain.threaded === false && plain.refusal !== null,
+    `the artifact shape the site publishes is refused workers${
+      plain.refusal ? ` — ${plain.refusal}` : ' (it was not)'
+    }`
+  );
+  const announced = forceHostReady
+    ? ex.__crcbl_web_jobs_host_ready(requested + 1)
+    : plain.announce(requested + 1);
+  check(
+    announced === 0,
+    'announcing it answers 0, so nothing above the seam is told it has threads'
+  );
+
+  // The backend by name, which is the whole point of running this twice: the
+  // isolation flag alone is satisfied by a pool that fell back, and a pool that
+  // fell back is exactly what this configuration is supposed to produce.
+  check(
+    backendName(ex) === INLINE,
+    `${INLINE} is what the artifact reports on an origin with no shared memory`
+  );
+  check(
+    ex.gate_parallelism() === 1,
+    `${INLINE}'s parallelism is one, so nothing asks for a second thread`
+  );
+  check(
+    ex.gate_pool(requested) === 0,
+    `a pool asked for ${requested} workers gets none rather than workers that never arrive`
+  );
+  check(
+    ex.__crcbl_web_jobs_pending() === 0,
+    'and queues nothing for a host that could not drain it'
+  );
+
+  // The degradation is a whole answer rather than a broken one, which is the
+  // claim the seam is for.
+  const expected = ex.gate_expected();
+  check(
+    ex.gate_run() === expected,
+    `${INLINE} reaches the same checksum the threaded run has to reproduce`
+  );
+  check(ex.gate_threads() === 1, 'and every chunk ran on the driver itself');
+  check(
+    ex.gate_clobbered() === 0,
+    'with no chunk finding its stack array changed underneath it'
+  );
+}
+
 async function run() {
   const params = new URLSearchParams(location.search);
   const requested = Number(params.get('workers') ?? DEFAULT_WORKERS);
@@ -127,6 +304,12 @@ async function run() {
     ['force-host-ready', params.has('force-host-ready')],
   ]) {
     if (on) note(`RED CHECK: ?${flag}`);
+  }
+
+  // The other configuration, not another red check: see the file header.
+  if (params.has('no-isolation')) {
+    await runWithoutIsolation(requested, params.has('force-host-ready'));
+    return;
   }
 
   // Named exactly as `web/tools/browser-e2e.mjs` names it, because it is the
@@ -206,10 +389,16 @@ async function run() {
     announced === requested + 1,
     'host_ready answers the worker count it recorded'
   );
-  check(ex.gate_threaded() === 1, 'threaded() is true once the host has');
+  // Named rather than counted, in both runs of this page: `threaded()` and
+  // `parallelism()` are the whole of what a consumer above the seam can see, and
+  // a pool that fell back would satisfy a check on the isolation flag alone.
+  check(
+    backendName(ex) === WORKERS,
+    `the ${WORKERS} backend is what the artifact reports once the host has spoken`
+  );
   check(
     ex.gate_parallelism() === requested + 1,
-    'parallelism() is what the host reported'
+    `the ${WORKERS} backend reported in with the worker count the host announced`
   );
 
   // Before any worker exists, because it runs the same stack probes a worker

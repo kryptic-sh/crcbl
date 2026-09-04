@@ -7,6 +7,28 @@
 #
 #   ./web/run-browser-e2e.sh [--build] [--headless] [--hardware] [driver args…]
 #
+#     --build      build the site into $SITE_DIR first, rather than driving
+#                  whatever is already there
+#     --headless   skip Xvfb and run the browser `--headless=new`
+#     --hardware   pin the adapter mode instead of letting it choose
+#
+#   Everything after those is passed to `web/tools/browser-e2e.mjs`, which reads
+#   five options and **refuses any other**:
+#
+#     --site <dir>       the built site to serve. Set for you from $SITE_DIR
+#     --demo <path>      the demo directory inside it. Set for you from
+#                        $CRCBL_WEB_E2E_DEMO
+#     --adapter <mode>   `auto`, `hardware` or `swiftshader`
+#     --timeout <ms>     how long start-up is given
+#     --out <dir>        where the screenshot and the page log are written
+#
+#   The refusal is the point of writing them out here. This script recognises
+#   three flags and forwards the rest without looking at them, so a flag from a
+#   *different* gate — `web/run-render-harness-e2e.sh`'s `--expect-fail ssr,ui`
+#   is the one that prompted this — used to be accepted, ignored and never
+#   mentioned. The driver is the single list; it exits 2 naming the flag, and the
+#   branch below says so rather than reporting a run that checked nothing.
+#
 # The same shape as `crates/crcbl-vk/tests/run-vk-e2e.sh` and
 # `crates/crcbl-shell/tests/run-x11-e2e.sh`: it brings its own environment up,
 # says what it needs and why, prints what it actually checked, and **fails when
@@ -391,6 +413,16 @@ set -e
 # pattern as a literal `x1b[…` — it matches nothing and strips nothing, silently.
 # `web/run-probe-e2e.sh` carries the same line for the same reason.
 sed -E $'s/\033\\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"${OUTPUT}.plain"
+
+# Exit 2 is the driver saying it could not run at all — no browser, no site, or
+# an option it does not know. `web/run-jobs-e2e.sh` carries the same branch for
+# the same reason, and here it has to come before the count guard below: a driver
+# that refused its arguments printed no checks either, and "the gate is not
+# gating" is the wrong thing to tell someone who mistyped a flag.
+if [ "$STATUS" -eq 2 ]; then
+    echo "crcbl web e2e: the driver could not run; its reason is above" >&2
+    exit 2
+fi
 
 # The guard the other harnesses have, spelled the same way: a run that checked
 # nothing must not be able to report success. The driver exits non-zero on its

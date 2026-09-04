@@ -17,13 +17,21 @@
 //
 // USAGE
 //   node web/tools/jobs-e2e.mjs <site-dir> [--query <query-string>]
-//                                          [--timeout <ms>]
+//                                          [--timeout <ms>] [--no-isolation]
 //
-//   <site-dir>   A directory with `jobs/index.html` and the artifact beside it;
-//                `web/run-jobs-e2e.sh` assembles one.
-//   --query      Appended to the page URL. The page's red switches live there —
-//                `no-stack-pointer`, `no-init-tls`, `no-host-ready`, `workers=N`.
-//   --timeout    How long the page has to finish. Default below.
+//   <site-dir>      A directory with `jobs/index.html` and the artifact beside
+//                   it; `web/run-jobs-e2e.sh` assembles one.
+//   --query         Appended to the page URL. The page's red switches live there
+//                   — `no-stack-pointer`, `no-init-tls`, `no-host-ready`,
+//                   `workers=N` — and so does `no-isolation`, which is the page
+//                   asserting the degradation rather than the isolated run.
+//   --timeout       How long the page has to finish. Default below.
+//   --no-isolation  Serve without the COOP/COEP pair, which is the origin
+//                   GitHub Pages gives every visitor. It says nothing to the
+//                   page: pair it with `--query no-isolation` so the page runs
+//                   the list that expects the degradation, and expect the
+//                   isolated list to go red if you forget. `web/run-jobs-e2e.sh`
+//                   passes both.
 //
 // ENVIRONMENT
 //   CRCBL_CHROMIUM               Path to the Chromium/Chrome binary.
@@ -65,6 +73,7 @@ function parseArgs(argv) {
   let site = null;
   let query = '';
   let timeout = RUN_TIMEOUT_MS;
+  let isolated = true;
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--query') {
       query = argv[i + 1];
@@ -76,6 +85,8 @@ function parseArgs(argv) {
         fail('--timeout needs a whole number of milliseconds');
       }
       i += 1;
+    } else if (argv[i] === '--no-isolation') {
+      isolated = false;
     } else if (argv[i].startsWith('--')) {
       fail(`unknown option ${argv[i]}`);
     } else if (site === null) {
@@ -86,23 +97,32 @@ function parseArgs(argv) {
   }
   if (!site) {
     fail(
-      'usage: jobs-e2e.mjs <site-dir> [--query <query-string>] [--timeout <ms>]'
+      'usage: jobs-e2e.mjs <site-dir> [--query <query-string>] [--timeout <ms>] ' +
+        '[--no-isolation]'
     );
   }
-  return { site: resolve(site), query: query.replace(/^\?/, ''), timeout };
+  return {
+    site: resolve(site),
+    query: query.replace(/^\?/, ''),
+    timeout,
+    isolated,
+  };
 }
 
 async function main() {
-  const { site, query, timeout } = parseArgs(process.argv.slice(2));
+  const { site, query, timeout, isolated } = parseArgs(process.argv.slice(2));
   if (!existsSync(join(site, 'jobs', 'index.html'))) {
     fail(`${site}/jobs/index.html not found — run web/run-jobs-e2e.sh`);
   }
 
-  // Cross-origin isolation is the whole precondition, and it comes from these
-  // response headers rather than from anything the page does. `serve.mjs` is
-  // the same server `web/build.sh --serve` runs, so there is one set of headers
-  // and the page's own `crossOriginIsolated` check gates them.
-  const server = await serve(site, { host: '127.0.0.1' });
+  // Cross-origin isolation is the whole precondition for the threaded run, and
+  // it comes from these response headers rather than from anything the page
+  // does. `serve.mjs` is the same server `web/build.sh --serve` runs, so there
+  // is one set of headers and the page's own `crossOriginIsolated` check gates
+  // them. Under `--no-isolation` the pair is withheld and the page is expected
+  // to be driven with `?no-isolation`, which is the configuration a visitor to
+  // the published site gets.
+  const server = await serve(site, { host: '127.0.0.1', isolated });
   const browser = await launch({
     binary: findBrowser(fail),
     mode: 'swiftshader',
@@ -127,7 +147,10 @@ async function main() {
     });
 
     const url = `${server.origin}/jobs/index.html${query ? `?${query}` : ''}`;
-    console.log(`jobs-e2e: ${url}`);
+    console.log(
+      `jobs-e2e: ${url}` +
+        (server.isolated ? '' : ' (served without COOP/COEP)')
+    );
     await page.send('Page.navigate', { url });
 
     // Written out rather than run through the shared `until`: that one swallows
@@ -178,8 +201,11 @@ async function main() {
       return;
     }
     console.log(
-      'jobs-e2e: a Web Worker brought up through the spawn ABI ran Rust on a ' +
-        'stack and a thread-local of its own'
+      server.isolated
+        ? 'jobs-e2e: a Web Worker brought up through the spawn ABI ran Rust on ' +
+            'a stack and a thread-local of its own'
+        : 'jobs-e2e: on an origin with no COOP/COEP the backend degraded onto ' +
+            "Inline's behaviour and still reached the same answer"
     );
   } finally {
     // The browser dies before the server is awaited: Chromium holds a keep-alive
