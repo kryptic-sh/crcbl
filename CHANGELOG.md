@@ -35,6 +35,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`alcove`, the ambient-occlusion acceptance fixture, runs natively.**
+  `cargo run -p alcove` opens one interior of nothing but occlusion geometry —
+  an alcove with a recess, a cantilevered stair, boxes and a post on a floor, a
+  slot the sun runs straight down, and a sphere on a pedestal against the far
+  wall, all flat and near-untextured, because texture detail is what hides an
+  occlusion artefact. Every knob the occlusion chain ships is live and on the
+  pause panel: the AO-only view (`V`), the technique (`T`, cycling `gtao` and
+  `hemisphere`), the radius (`[` / `]`), the intensity (`-` / `=`), bent normals
+  (`B`), and the comparison seam (`X` to raise it, `,` / `.` to nudge it) — with
+  a row naming which technique each side of the seam is running. The panel and
+  the headless summary both carry the per-pass GPU time for `ssao` and
+  `ssao-shipped`, so a raised seam prices two techniques against each other in
+  one frame. `--camera fixed|free`, `--technique`, `--split`, `--no-ao`,
+  `--ao-view`, `--force-geometry` and `--force-binding` are the flags on top of
+  the common set. Native only for now: the browser demo is owed, and
+  `docs/backlog.md` lists what it needs.
+
 - **The occlusion chain ships two techniques, and a console variable picks which
   one a frame gathers with.** `r_ssao_technique` in `crcbl_render::ssao` takes
   `gtao` or `hemisphere` and defaults to `gtao`, which is the horizon integral

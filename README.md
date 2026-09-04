@@ -84,6 +84,7 @@ cargo run -p sandbox -- --headless        # needs neither; what CI runs
 # A game.
 cargo run -p breakout
 cargo run -p lantern                        # one room, every lighting effect
+cargo run -p alcove                         # one room, every ambient-occlusion knob
 
 # The glTF viewer: Suzanne, or bring your own model.
 cargo run -p viewer
@@ -201,6 +202,7 @@ built it.
 | `shard`          | a torch-lit interior zone, walked in an isometric-ish third person     | ✓              |
 | `sparks`         | the VFX fixture: stock effects, a hostile one, and the budget for them | ✓              |
 | `lantern`        | the lighting acceptance fixture: one room, every effect                | ✓              |
+| `alcove`         | the ambient-occlusion acceptance fixture — native only, so far         |                |
 | `quarry`         | the geometry acceptance fixture: one dense scene on every path         | ✓              |
 | `viewer`         | a glTF model viewer, and the asset pipeline's acceptance test          | ✓              |
 | `bare`           | the engine as a plain library, with a hand-written loop                |                |

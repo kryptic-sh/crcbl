@@ -103,6 +103,7 @@ VIEWER_MODEL="${RUNTIME_DIR}/triangle.glb"
 # table stays one line per sample rather than growing a second shape for one
 # member.
 SAMPLES=(
+    "alcove 960x720"
     "asteroids 960x720"
     "bare 960x720"
     "bracket 960x720"

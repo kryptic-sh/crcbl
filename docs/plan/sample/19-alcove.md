@@ -60,46 +60,64 @@ for it, and this sample must not quietly imply otherwise.
 flat untextured surfaces are the point. **Exempt from rules 2 and 10**, on the
 viewer's: no game state, no `World`, no `GameModule`.
 
-## Status: the view mode ships, the sample does not
+## Status: built natively, and not on the site
 
-**The AO-only view mode was built 2026-08-28** and is the part this document
-said to build first, for the reason it gave: the occlusion buffer was a texture
-nothing outside the forward pass ever displayed, and a buffer nobody can look at
-is a buffer whose defects are found by reading the shader. That prediction was
-paid out before the view even landed — the tilt-sign bug in
-[46-ambient-occlusion.md](../46-ambient-occlusion.md)'s delivery section drew a
-plausible vignette and was caught by an assertion, not by an eye.
+**`apps/alcove` exists and milestones 1 and 2 are done, 2026-09-04.** The court
+is one interior of nothing but occlusion geometry — an alcove with a recess, a
+cantilevered stair, boxes and a post on the floor, a slot the sun runs down, and
+a sphere on a pedestal against the far wall — and the sun's azimuth, the fixed
+camera's eye ray and the slot's axis are deliberately one line, so the floor at
+the bottom of that slot is in full sun at any depth and the crease claim is a
+claim about a directly lit surface rather than about a shaded one.
 
-It ships in the engine rather than here: `ForwardRenderer::set_occlusion_view`,
-`mesh.slang`'s `OCCLUSION_VIEW` branch, and an `AO VIEW` row on `lantern`'s
-pause panel. So the view mode this sample owes is **reachable today in a demo
-that exists**, and what is left for this one is the scene and the comparison.
+The engine half of both milestones landed the same day and is described where it
+lives: `crcbl_render::ssao`'s `r_ssao_technique`, `r_ssao_radius`,
+`r_ssao_intensity`, `r_ssao_split` and `r_ssao_bent_normals`, and
+`ForwardRenderer::set_occlusion_view`. The sample drives every one of them by
+name through `crcbl::render::console_table()`, which is the same seam a person
+typing a console line goes through — so a pause-panel row and a typed line
+cannot disagree.
 
-**Both technique rungs are reachable since 2026-09-04.** GTAO replaced the
-eight-tap hemisphere in place when it landed; `shaders/ssao_hemisphere.slang`
-brought that body back beside it and `crcbl_render::ssao::r_ssao_technique`
-selects between them, either side of `r_ssao_split`'s seam. So milestone 2's
-engine half is done and what is left of it is this sample's: the scene, and
-showing which technique each side of the seam is running.
+What holds it up is `apps/alcove/tests/golden.rs`, run by
+`apps/alcove/tests/run-alcove-golden.sh` and by CI's "Draw alcove on lavapipe"
+step. Its claims are the ones this document asked for: that occlusion scales the
+ambient term and leaves direct light alone, measured as a difference of
+differences with the sun switched off rather than as a ratio; that the alcove's
+back corner and the contact band under a box darken while open floor does not
+move at all; that the two gathers draw different occlusion and both darken the
+same corners; that the comparison seam runs the console's gather on the left and
+the shipped one on the right **to the column**, outside the blur's own bleed
+band; that a wider radius deepens the occlusion; and that a silhouette does not
+print onto the wall two metres behind it. Four goldens sit behind them. Every
+one was measured on lavapipe and on radv, and every one was watched to fail.
 
-Nothing else exists.
+## What is owed
+
+- **The Pages web demo.** Nothing of alcove is on the site: no `src/web.rs`, no
+  `cdylib` in `web/build.sh`, no page, no browser-gate expectation. The eight
+  registration points a browser demo needs are listed in `docs/backlog.md` under
+  "alcove's web demo is owed".
+- **Milestone 3, bent-normal visualisation.** `r_ssao_bent_normals` is a knob
+  the sample toggles and reports, and nothing draws the direction: a term that
+  steers where ambient is sampled from cannot be reviewed as a grey image, which
+  is what this document says and what the sample currently offers.
+- **Milestone 4, ray-traced AO**, gated on P7C. `Paths::ray_tracing_note` says
+  "raster only (P7C)" on the panel rather than leaving the row out, so the rung
+  that is missing is named rather than absent.
+- **Per-technique cost, on the second gather.** `OcclusionCost` reads the
+  frame's `ssao` and `ssao-shipped` timing rows and prints both on the panel and
+  in the headless summary, so the seam gives a cost per technique **when it is
+  up**. A cost for a technique the frame did not draw is not something a timing
+  seam can report, and the sample does not pretend otherwise.
 
 ## Milestones
 
-1. **The scene, the AO-only view mode, and the shipped technique.** Radius and
-   intensity controls land here. **The view mode and both controls are done** —
-   `crcbl_render::ssao::r_ssao_intensity` and `r_ssao_radius` are console
-   variables the pass reads every frame, the second reaching `ssao.slang`'s
-   `sampling_radius`. What is left of this milestone is the scene and _showing_
-   the two: this sample asks for them to be legible on screen, and a console
-   variable is live without being shown.
+1. **The scene, the AO-only view mode, and the shipped technique.** Done.
 2. **GTAO**, side by side with SSAO, with the silhouette-rim comparison the
-   escalation clause cares about. **The engine half is built** —
-   `crcbl_render::split` and `r_ssao_split` resolve one frame's depth two ways
-   either side of a seam, and `r_ssao_technique` puts a different _technique_ on
-   each side of it: the near side runs what the console holds and the far side
-   what ships. What is left of this milestone is the sample's own half — the
-   scene, and saying on screen which technique each side is running.
+   escalation clause cares about. Done, and the rim is a golden of its own from
+   a second camera pose: at the fixed camera the sphere is a few dozen pixels
+   across and a one-pixel halo is not something a person or a block average can
+   see.
 3. **Bent-normal visualisation**, once GTAO produces one.
 4. **Ray-traced AO**, gated on P7C, and the device clamp — and this is the rung
    that gives the screen-space rungs a reference to be judged against, which

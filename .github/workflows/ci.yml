@@ -1720,6 +1720,24 @@ jobs:
           CRCBL_VK_SYNC_VALIDATION: '1'
           CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/lantern/tests/run-lantern-golden.sh
+      # The ambient-occlusion acceptance fixture, and the only step that runs the
+      # occlusion pass against anything that can tell it apart from a no-op. An
+      # SSAO pass that never ran leaves a white channel, one whose intensity is
+      # stuck at zero leaves the same, and a `r_ssao_technique` wired to one
+      # pipeline draws two identical halves either side of the comparison seam —
+      # every one of those draws a plausible room and passes every other check in
+      # this workflow. The suite asserts which columns came off which gather, that
+      # occlusion scales the ambient term and leaves direct light alone, and that
+      # a silhouette does not print onto the wall two metres behind it, before it
+      # compares a golden at all.
+      - name: Draw alcove on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
+        run: apps/alcove/tests/run-alcove-golden.sh
       # The first playable sample, against a real driver. `run-vk-e2e.sh` drives
       # `--package sandbox` and every other harness script does too, so until
       # this step existed nothing outside breakout's own unit tests ever ran the

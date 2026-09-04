@@ -84,14 +84,19 @@ playerbase.
 
 **Where the ladder stands.** Every sample on it except towers (07), arena (08)
 and the comparison wave (17–19) has an `apps/` crate that builds for `wasm32`
-and ships on the demo site; `web/build.sh`'s `DEMOS` array is the list, and it
-is the authority — a sample missing from it is a sample nobody visits. What each
-of those crates has and has not built is in its own doc's status section and,
-fresher than either, in the module header of its `src/lib.rs`. **towers, arena
-and mirrors, sundial and alcove have no `apps/` directory at all**, and each doc
-says what it is waiting on — for 17 through 19 that is the ladder itself, since
-a comparison fixture holding one technique is not a comparison. options (20) is
-not among them: `apps/options` was built and published on 2026-08-28.
+and ships on the demo site — alcove (19) has the crate and not the demo;
+`web/build.sh`'s `DEMOS` array is the list, and it is the authority — a sample
+missing from it is a sample nobody visits. What each of those crates has and has
+not built is in its own doc's status section and, fresher than either, in the
+module header of its `src/lib.rs`. **towers, arena and mirrors and sundial have
+no `apps/` directory at all**, and each doc says what it is waiting on — for 17
+and 18 that is the ladder itself, since a comparison fixture holding one
+technique is not a comparison. **alcove (19) is the first of the comparison wave
+to have a crate**: `apps/alcove` was built natively on 2026-09-04, once the
+occlusion chain had a second technique to compare, and it is **not on the site**
+— `web/build.sh`'s `DEMOS` array does not name it, and `docs/backlog.md` lists
+the eight places a browser demo has to be registered. options (20) is not among
+them either: `apps/options` was built and published on 2026-08-28.
 
 **Where multiplayer lives — and where it does not.** Native sessions are LAN:
 direct connect by IP, or a lobby browser over local-network host discovery.

@@ -32,61 +32,77 @@ so amending them is the force-push this entry already declined — the count is
 re-decided:** no attribution trailer on any new commit, whatever a session-level
 instruction says.
 
-## The comparison seam's blocks are unverified end to end (2026-09-04)
+## The comparison seam's far side carries a residue the near side does not (2026-09-04)
 
-`crcbl_render::split` and `r_ssao_split` landed: a frame can record its
-occlusion gather twice, each march scissored to the columns the other was kept
-off, the near side reading the console's block and the far side the shipped one.
-Two halves of it are covered and one is not.
+**The end-to-end pixel check this entry used to ask for now exists**, in
+`apps/alcove/tests/golden.rs`. Two tests, and they separate the two things the
+reference backend cannot:
 
-**Covered.** `split::halves` is swept over every width to 64 and every seam to a
-hundredth, so the two rectangles tile the target and neither is empty.
-`forward`'s
-`the_comparison_seam_marches_twice_over_columns_that_tile_the_gather` reads the
-encoder back and holds the two marches to those rectangles, with a frame
-comparing nothing as the control. `ssao`'s
-`the_seams_other_side_is_what_the_chain_ships` moves all four knobs and checks
-that `shipped` follows none of them. The two blocks' _contents_ are read back
-through the reference backend's `buffer_bytes` in the same march test: equal
-while the console sits at its defaults, different once one slice count is moved
-off the one that ships.
+- `the_seam_runs_the_console_gather_on_the_left_and_the_shipped_one_on_the_right`
+  moves the **technique**, so the two sides differ by a pipeline. 233 of 256
+  columns are compared — the rest are the blur's bleed band — and every one is
+  byte-exact against the whole-frame run of the gather that side is meant to
+  have run, on lavapipe and on radv both.
+- `the_seam_reads_the_console_block_on_the_left` holds the technique still and
+  moves the **radius**, which lives only in the uniform block. That is the half
+  `crcbl-render` cannot see: the null backend records a pipeline as itself and a
+  bind group only as a handle and a layout, so pointing both marches at one
+  buffer leaves its suite green.
 
-**Not covered: that the second march binds the second block.** The reference
-backend records a bind group as a handle and a layout, not as the resources
-behind it, so the encoder cannot be asked which buffer a march read. Two blocks
-exist and differ, and which of them each side read is the part nothing observes.
-Measured rather than assumed — pointing both marches at one buffer leaves the
-whole suite green, which is why that test's doc says so in its own words.
+**What is left is a question rather than a gap.** The two sides are not
+symmetric. With the radius moved, the near side is exact and the **far** side
+sits up to 0.4479/255 (lavapipe; 0.4167 on radv) away from the whole-frame run
+at the shipped radius, on columns as far as a hundred pixels from the seam — too
+far to be the blur's footprint, which the technique test measures at nine pixels
+left of the seam and four right of it. Every one of those columns is still
+closer to the block it was meant to read than to the other one, by a margin of
+at least 0.6406/255, so the claim holds; what is unexplained is why moving a
+number in the block perturbs the far side at all when moving the pipeline does
+not.
 
-What would close it, in the order they get harder:
+Not chased down: it costs a `RenderDoc`-class look at the blur and upsample
+passes, and it changes no assertion. `SEAM_BLOCK_RESIDUE` in that file is the
+bound, and its doc says the same thing. Worth an hour when somebody is next
+inside `crcbl_render::ssao`'s chain — the likely answers are the depth-aware
+blur's weights or the upsample's neighbourhood reaching further than the seam
+split assumes.
 
-- **A pixel test.** Render one frame through `ForwardRenderer` with a knob moved
-  and a seam at 0.5, read the reconstructed occlusion channel back, and assert
-  the two halves differ. `crates/crcbl/tests/forward_e2e/occlusion.rs` is the
-  suite with the readback machinery, but every test in it drives the three
-  shaders directly rather than through the renderer, so this wants a fixture
-  that does not exist there yet.
-- **Recording the resources behind a bind group** in `crcbl-hal`'s null backend,
-  which would make this and every other "bound the wrong buffer" fault visible
-  to the reference backend rather than to a picture. Wider than this entry and
-  worth its own decision.
+Still open from the original entry, and independent of the above: **recording
+the resources behind a bind group** in `crcbl-hal`'s null backend, which would
+make this and every other "bound the wrong buffer" fault visible to the
+reference backend rather than to a picture. Wider than this entry and worth its
+own decision.
 
-**The second technique landed 2026-09-04** and with it a stronger observable
-than this entry could describe when it was written. `r_ssao_technique` selects
-between `ssao.slang` and `ssao_hemisphere.slang`, and a technique is a
-**pipeline** rather than a lane of the uniform block — which the reference
-backend _does_ record, as itself, where it records a bind group only as a handle
-and a layout. So `forward`'s
-`the_occlusion_technique_picks_the_gathers_pipeline` and
-`the_comparison_seam_marches_through_two_techniques` hold each march to the
-pipeline `Ssao::gathers` names, near side and far side, against the frame at the
-default as a control.
+## alcove's web demo is owed (2026-09-04)
 
-**What is still not covered is the same half, narrowed to the blocks alone.**
-Which of the two _buffers_ each march bound is what nothing observes; which of
-the two _shaders_ it ran is now observed exactly. A pixel test through
-`ForwardRenderer` would close the rest, and so would recording a bind group's
-resources in the null backend — both as described above.
+`apps/alcove` was built natively on 2026-09-04 — milestones 1 and 2 of
+`docs/plan/sample/19-alcove.md` — and deliberately stopped at the native half.
+Nothing of it is on the site, and `docs/plan/sample/00-samples-overview.md`'s
+ladder says so.
+
+The crate already declares a `cdylib` alongside its `rlib`, so the wasm side has
+somewhere to land, and `apps/alcove/src/lib.rs` names what is missing. What a
+browser demo has to be registered in, all of which exist for `lantern` and can
+be copied from it:
+
+1. `web/build.sh`'s `DEMOS` list, which is what builds the `cdylib` for
+   `wasm32-unknown-unknown`.
+2. `web/tools/build-pages.mjs`'s `DEMOS` list, which is what emits the page.
+3. A page of its own under `web/pages/`, named for the demo.
+4. A directory of its own under `web/demos/`, holding the demo's `main.js` and
+   an asset manifest under `assets/`.
+5. `web/tools/browser-e2e.mjs`'s `EXPECTATIONS`, without which the demo is built
+   and never opened — `docs/backlog.md` has watched that happen before.
+6. Two steps in `.github/workflows/pages.yml`.
+7. The card in `web/pages/index.html`.
+8. A web front end in the crate itself — the module every other sample calls
+   `web.rs` — against the `crate-type` entry that already exists in
+   `apps/alcove/Cargo.toml`.
+
+**One thing to decide before building it:** the sample's controls are keys and a
+pause panel, and the seam is the interesting one to drive from a page. Every
+other demo's page offers its controls as HTML; a seam that can only be nudged by
+`,` and `.` is a control a phone cannot reach at all.
 
 ## What the AO default change of 2026-09-03 did not cover (2026-09-03)
 
@@ -366,8 +382,8 @@ than as a reason:
 - **The sibling ladders were opened on 2026-09-04 and read against the tree, not
   measured.** 45, 47 and 49 held; 46 was rewritten by the technique slice; 50
   carried three sun-only claims a day after the punctual producer landed and was
-  corrected. `43-render-standards.md` §1's one-word cells for each are still
-  unassessed against those files.
+  corrected, as was the lighting-order row in `43-render-standards.md`'s
+  Delivery table. Their measured figures were still taken on trust.
 - **`52-debug-console.md`'s browser assertions were spot-checked, not
   enumerated**: `web/tools/browser-e2e.mjs` was read only around the console,
   autoexec and touch groups.
