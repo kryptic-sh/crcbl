@@ -15,7 +15,8 @@ day.** The grid below stays, and everything that _fills_ it changes:
 - **No static bakes.** `apps/lantern`'s `bounce` module and `apps/shard`'s
   `light::probes` computed a lighting result once, at load, from a sun and
   torches that then moved — a bake in the sense the rule forbids, whatever
-  thread computed it. Both went with the updater that replaced them.
+  thread computed it. Both bakes went with the updater that replaced them; the
+  modules stayed, and now place the probes and light nothing.
 - **Each probe carries a visibility map**: an octahedral depth + depth² map per
   probe, Majercik et al. 2019's contribution and the one thing that makes a
   probe grid stop leaking. Every reader weighs each of a fragment's eight probes

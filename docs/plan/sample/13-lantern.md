@@ -183,20 +183,24 @@ zeroed, its foot at 51.6 and 49.0, and the brass block's camera-facing face at
 real screen hit, and the block is mostly the sun's own specular with the
 environment on top.
 
-What is still owed there is that the environment is **baked** rather than
-traced: it is a blurry static grid, and it is the only answer this path has for
+What is still owed there is that the environment is a **probe grid** rather than
+a trace: a blurry low-frequency field, and the only answer this path has for
 anything outside the frame. Ray tracing is what replaces it. Nothing here fakes
 it — the debug panel's `unbuilt` section says so on the screen, and
 `crcbl_lantern::room`'s module docs say it where a reader of the scene will find
 it.
 
-**The coloured wall bounces**, and `crcbl_lantern::bounce` is how: a single
-analytic gather of the sun's first bounce off the room's axis-aligned shell,
-baked from the room's own dimensions into the probe volume the scene carries. It
-is one bounce off one box rather than a global-illumination solve — nothing
-standing inside the room occludes it and nothing bounces twice — and the fixed
-camera still deliberately puts a floor in full sun beside a wall in shadow,
-which is the configuration a general solve would change most.
+**The coloured wall bounces**, and since 2026-09-04 the engine is how, not the
+sample: `crcbl_lantern::bounce` only _places_ the probes from the room's own
+dimension constants and ships their rows zeroed with `ProbeUpdate::EveryFrame`,
+and `crcbl_render`'s reflective-shadow-map updater fills them every frame from
+the sun's near cascade and the lamp's shadow faces, each sample gated by the
+probe's captured visibility. The analytic one-box gather the module used to bake
+at load is gone with `docs/plan/50-irradiance-probes.md`'s no-bake rule — what
+the rows hold now sees the plinth, the panel, the block and the post as
+occluders, which the box never could. It is still one bounce and no history, and
+the fixed camera still deliberately puts a floor in full sun beside a wall in
+shadow, which is the configuration a second bounce would change most.
 
 ### Still owed at this milestone, and where
 
