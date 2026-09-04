@@ -1,0 +1,272 @@
+<!--meta
+{
+  "out": "demos/sundial/index.html",
+  "slug": "sundial",
+  "name": "Sundial",
+  "title": "Sundial — Crucible",
+  "description": "sundial, the shadow acceptance fixture, compiled to wasm32 and drawing cascaded shadow maps through WebGPU — with the filter, the seam and the sun on the page.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#knobs", "label": "the knobs" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/sundial", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/sundial\">apps/sundial</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/sundial/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S4D</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Sundial</span></h1>
+  <p class="tagline">
+    One open plaza and a sun on a scripted clock: a colonnade whose shadow
+    crosses a cascade boundary, a plinth resting on the ground so its contact is
+    checkable, and three counters hanging at graded heights so a penumbra that
+    widens with distance is a thing you can look at. Flat and untextured on
+    purpose — texture detail is exactly what hides a shadow artefact. Not a
+    game: the shadow is the content.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="knobs">
+  <h2>the shadows, from the page</h2>
+  <h3>
+    Every knob the sample binds to a key, as something a finger can reach.
+  </h3>
+  <p>
+    Natively these are keys and rows on the pause panel. A seam that can only be
+    nudged by <kbd>,</kbd> and <kbd>.</kbd> and a sun that can only be stopped
+    by <kbd>P</kbd> are controls a phone cannot reach at all. The filter and the
+    seam below drive the same <code>r_shadow_*</code> console variable the key
+    writes — one cell, three writers, no copy of the state on this page. The
+    sun's two are the fixture's own clock rather than a setting, so they are
+    taken up on its next fixed step; the label is the request either way, and
+    everything else here shows what the engine holds <em>after</em> it wrote.
+  </p>
+  <ul class="keys" id="shadow-knobs">
+    <li class="key-row">
+      <span>Which filter the shadow runs</span>
+      <span
+        ><button class="btn" type="button" id="knob-filter" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span>The comparison seam</span>
+      <span
+        ><button class="btn" type="button" id="knob-seam" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span><label for="knob-seam-at">Where the seam stands</label></span>
+      <span>
+        <input
+          type="range"
+          id="knob-seam-at"
+          min="0"
+          max="1"
+          step="0.01"
+          value="0"
+          disabled
+        />
+        <span id="knob-seam-value">…</span>
+      </span>
+    </li>
+    <li class="key-row">
+      <span>The sun's clock</span>
+      <span
+        ><button class="btn" type="button" id="knob-sun" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span><label for="knob-sun-tick">Where the sun stands</label></span>
+      <span>
+        <input
+          type="range"
+          id="knob-sun-tick"
+          min="0"
+          step="1"
+          value="0"
+          disabled
+        />
+        <span id="knob-sun-value">…</span>
+      </span>
+    </li>
+    <li class="key-row">
+      <span>Every knob and the clock back to where a run opens</span>
+      <span
+        ><button class="btn" type="button" id="knob-reset" disabled>
+          reset
+        </button></span
+      >
+    </li>
+  </ul>
+  <div class="note">
+    <strong>Clicked the canvas? Press <kbd>Esc</kbd> first.</strong> The fixture
+    takes the pointer while it is running, the way any mouse-look camera does,
+    and a captured pointer sends every click to the canvas — so nothing above
+    can be reached until the browser hands it back, and <kbd>Esc</kbd> is how it
+    does that. Letting the pointer go also pauses the fixture, as taking the
+    keyboard off the canvas does: the status line says <em>Paused</em> until you
+    click the canvas and press <kbd>Esc</kbd> again. That matters more here than
+    on the other fixtures — a paused loop runs no fixed step, and the sun's two
+    controls are adopted on the next one, so a stopped page shows the request
+    and the picture catches up when it ticks again. The filter and the seam
+    change the frame whether it is ticking or not.
+  </div>
+  <div class="note">
+    <strong>The sun is the one to reach for.</strong> Shadow quality is a set of
+    failure modes with names — acne, peter-panning, a cascade seam, edges that
+    swim — and every one of them is either invisible in a still or invisible
+    until the light moves. Let the clock run and watch the colonnade's shadow
+    cross the cascade boundary; then stop it, walk the tick slider to a grazing
+    sun at either end of the sweep, and raise the seam: the filter you picked on
+    the left of the line, the one the engine ships on the right, over the same
+    geometry in the same frame. Press <kbd>F3</kbd> and the panel names which is
+    which and prices the atlas render and the scene draw separately.
+  </div>
+</section>
+
+<section id="what-you-are-looking-at">
+  <h2>what you are looking at</h2>
+  <h3>Four things, and each one is a shadow claim you can check.</h3>
+  <p>
+    <strong>The open pavement at a grazing sun.</strong> A large flat plane lit
+    from a few degrees above the horizon is where shadow acne shows first, and
+    the sweep puts the sun there at both ends of its arc. What you should see is
+    an unbroken lit surface — a stipple or a moiré across it is the depth bias
+    being too small for the angle.
+  </p>
+  <p>
+    <strong>The plinth's contact with the ground.</strong> It rests on the
+    pavement, so the shadow has to start exactly where the plinth does. A gap
+    between the two is peter-panning: the same bias that cures acne, pushed far
+    enough to detach a shadow from the thing casting it. The two artefacts pull
+    in opposite directions, which is why they are looked at together.
+  </p>
+  <p>
+    <strong>The colonnade crossing a cascade boundary.</strong> Its shadow runs
+    from near the camera to far away, over the split between two cascades. A
+    step in the shadow's softness or its offset where it crosses is a seam
+    between the two maps; edges that shimmer as the sun moves are cascades that
+    are not snapped to whole texels, which is the claim a still frame cannot
+    check at all.
+  </p>
+  <p>
+    <strong>The three counters at graded heights.</strong> Each hangs a
+    different distance above the pavement, so its penumbra should be visibly
+    wider the further it is from what it lands on. That is the whole point of
+    contact hardening, and cycling the filter to the box or disc rungs is what
+    shows the difference: those two are the same width everywhere.
+  </p>
+</section>
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>Nothing to play. There is a camera, and there are the knobs above.</h3>
+  <p>
+    The page opens on the fixed pose the golden frames are taken from, with the
+    sun a tenth of the way into its sweep. Swapping to the free camera is a row
+    on the pause menu rather than a key, because the two cameras share one lens
+    — a free camera with a lens of its own would give you a frame nobody could
+    hold against the reference.
+  </p>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Swap between the fixed poses and the free camera</span>
+      <span><kbd>ESC</kbd>, then <kbd>ENTER</kbd> on <code>CAMERA</code></span>
+    </li>
+    <li class="key-row">
+      <span>Fly the free camera</span>
+      <span
+        ><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>,
+        <kbd>Space</kbd> and <kbd>Shift</kbd> for up and down, the arrows to
+        look</span
+      >
+    </li>
+    <li class="key-row">
+      <span>Cycle the filter</span>
+      <span><kbd>F</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>The seam: raise it, then walk it</span>
+      <span><kbd>X</kbd>, then <kbd>,</kbd> and <kbd>.</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Stop the sun, scrub it, and everything back</span>
+      <span><kbd>P</kbd>, <kbd>-</kbd> <kbd>=</kbd>, <kbd>R</kbd></span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="why-this-one">
+  <h2>why this one is worth publishing</h2>
+  <h3>
+    Because a shadow reviewed from stills is a shadow whose artefacts ship.
+  </h3>
+  <p>
+    The engine picks its lighting path from what the device offers. WebGPU
+    exposes no ray query, so this page draws the plaza through
+    <code>LightingPath::Rasterised</code> by construction — which is the honest
+    answer for a fixture whose ray-traced shadow rung is not built yet, and it
+    leaves the cascaded shadow map carrying the whole picture. That is the tier
+    being compared here: three filters, either side of one seam, in one frame,
+    under a sun that moves.
+  </p>
+  <p>
+    Press <kbd>F3</kbd> for the receipts. The panel names which geometry path,
+    which binding model and which lighting path this frame was drawn through,
+    which effects survived the four layers that resolve them, which filter each
+    side of the seam is running, and what the atlas render and the scene draw
+    cost — so a picture you think looks wrong comes with the arm that drew it.
+  </p>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The native sample, with three differences the browser forces.</h3>
+  <p>
+    Start-up is polled across several frames, because
+    <code>requestDevice</code> is a promise and the main thread cannot block on
+    it. The frame loop is driven by <code>requestAnimationFrame</code> out here
+    rather than by a <code>loop</code> inside the engine. And the clock is the
+    browser's, because <code>wasm32-unknown-unknown</code> has no
+    <code>Instant</code>.
+  </p>
+  <p>
+    The sun's clock is none of those. It counts fixed steps and reads no wall
+    clock at all, which is what makes tick <em>k</em> the same sun in every
+    process and on every machine — so a page running at a tenth of the speed
+    draws exactly the frames a desktop does, just fewer of them per second.
+  </p>
+  <p>
+    There is no fourth difference about saved data: this demo keeps nothing,
+    because there is no score to keep. It loads nothing either — the plaza's
+    geometry is built from literals in <code>apps/sundial</code> rather than
+    read off a disk, and the shaders and the font atlas are compiled into the
+    module.
+  </p>
+  <div class="note">
+    <strong>Expect it to be slow on a machine with no GPU.</strong> A software
+    WebGPU adapter renders the shadow atlas and then the scene every frame, and
+    with the seam up the scene pass samples two filters instead of one. The
+    plaza is small and flat-shaded, which is why it is nearer the light end of
+    this site's 3D demos than the heavy one — but the frame is a full lighting
+    stack either way.
+  </div>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

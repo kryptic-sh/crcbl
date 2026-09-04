@@ -12,11 +12,9 @@ publish = false
 # test can only reach the plaza it renders through a lib target — a bin crate
 # has no linkable artifact. `src/main.rs` owns argv and the exit code.
 #
-# `cdylib` is what `wasm32-unknown-unknown` links into a `.wasm`; `rlib` is what
-# `main.rs` and the golden suite link against. Both are declared now even though
-# the browser front end is not built yet — `docs/backlog.md`'s "sundial's web
-# demo is owed" lists what a page needs, and the crate type is the one item of
-# it that costs nothing to have already.
+# `cdylib` is what `wasm32-unknown-unknown` links into a `.wasm` — `src/web.rs`
+# is what it exports; `rlib` is what `main.rs` and the golden suite link
+# against.
 #
 # The lib is not called `sundial`: a lib and a bin of the same name in one
 # package write the same file, which cargo calls an output filename collision.

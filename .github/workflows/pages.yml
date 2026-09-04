@@ -421,10 +421,23 @@ jobs:
           # shard's own note here records 87x on a runner. Its `EXPECTATIONS`
           # row also carries `still`: nothing in the court moves, so group D
           # reads the loop's frame counter instead of a changed picture,
-          # exactly as options does. And it is the one demo whose *page*
+          # exactly as options does. And it is the first demo whose *page*
           # controls are gated — `knobs` in that row presses them and reads what
-          # the engine's own heartbeat says they did.
+          # the engine's own heartbeat says they did; sundial's row is the
+          # other.
           - alcove
+          # sundial is the fourth 3D fixture and it sits with alcove: one open
+          # plaza, flat-shaded, a fixed camera, and a shadow atlas rendered
+          # ahead of a scene pass that samples it — so what it costs is the
+          # shadow chain rather than the scene, and the seam its gate raises
+          # runs a second filter through the same pass rather than a second
+          # pass. Its `EXPECTATIONS` row does *not* carry `still`: the sun
+          # sweeps on the fixed step, so the picture moves by construction and
+          # group D reads a changed frame the way every other 3D demo does. It
+          # is the second demo whose *page* controls are gated — `knobs` in
+          # that row presses them and reads what the engine's own heartbeat says
+          # they did, and here that includes stopping the sun and scrubbing it.
+          - sundial
           # viewer and orbit are the two samples whose subject does not move on
           # its own, and both answer group C off something the sample itself
           # advances — viewer's idle turntable, orbit's scripted ascent.
@@ -641,6 +654,13 @@ jobs:
       - name: Render alcove in a real browser
         timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=alcove ./web/run-browser-e2e.sh --headless
+
+      # Twenty, on alcove's terms: this fixture renders a shadow atlas ahead of
+      # every scene pass, and the gate raises a seam that samples two filters
+      # inside it.
+      - name: Render sundial in a real browser
+        timeout-minutes: 20
+        run: CRCBL_WEB_E2E_DEMO=sundial ./web/run-browser-e2e.sh --headless
 
       - name: Render viewer in a real browser
         timeout-minutes: 12

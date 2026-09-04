@@ -47,21 +47,22 @@
 //!
 //! # What is not here, and where it is written down
 //!
-//! * **The cascade debug overlay and the atlas viewer.** Both are milestone 1's
-//!   and both are *engine* work — a pass that tints by cascade and a pass that
-//!   draws the atlas to screen — so neither can be built from an application
-//!   crate. `docs/backlog.md` carries them.
-//! * **The web demo**, which `docs/backlog.md` carries with what a page needs.
+//! * **The atlas viewer.** Milestone 1's other diagnostic, and *engine* work —
+//!   a pass that draws the atlas to screen — so it cannot be built from an
+//!   application crate. `docs/backlog.md` carries it. The cascade overlay is
+//!   here: `C` and the panel's `CASCADES` row show
+//!   [`crcbl::render::DebugView::Cascades`].
 //! * **Milestone 5's ray-traced shadows**, gated on P7C. The panel's `ray
 //!   tracing` row says `raster only` rather than implying a choice was made.
 //!
-//! # One library, two front ends
+//! # One library, three front ends
 //!
 //! `src/main.rs` is argv and an exit code; everything else is here, so
-//! `tests/golden.rs` can render the same plaza the binary does. The crate builds
-//! for `wasm32-unknown-unknown` as a `cdylib` already, which is what a browser
-//! front end will link — there is no `src/web.rs` yet, and the backlog says what
-//! one owes.
+//! `tests/golden.rs` can render the same plaza the binary does. `src/web.rs` is
+//! the browser's — compiled only on `wasm32`, which is why it is not linked on a
+//! host build — and it carries what a page needs on top of the shared boot
+//! protocol: the filter, the seam and the sun's clock as exports of their own,
+//! because natively they are keys and a phone has none.
 
 mod app;
 mod args;
@@ -70,6 +71,9 @@ mod gpu;
 pub mod menu;
 pub mod plaza;
 pub mod sun;
+
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 
 pub use app::{Loop, PendingLoop, Summary, Sundial, SundialError, run, start, with_shell};
 pub use args::{

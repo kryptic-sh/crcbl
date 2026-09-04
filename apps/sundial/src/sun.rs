@@ -3,7 +3,9 @@
 //! ```text
 //!  tick ──▶ phase ──▶ (elevation, azimuth) ──▶ towards() ──▶ DirectionalLight
 //!             │
-//!  keys ──────┘  (pause, scrub, reset)
+//!  keys ──────┤  (pause, scrub, reset)
+//!             │
+//!  page ──────┘  ask_tick / ask_running / ask_reset ──▶ adopted by advance()
 //! ```
 //!
 //! # Ticks, never a wall clock
@@ -228,10 +230,11 @@ impl Sky {
 
 /// The clock itself: which tick the sun is at, and whether it is running.
 ///
-/// The one piece of mutable state this fixture has, and it is a tick counter.
+/// The simulation state this fixture has, and it is a tick counter.
 /// `crate::filter` is the other half of what a run can change and it lives in the
 /// console's own cells; this does not, because a tick is not a setting — it is
-/// where the simulation has got to.
+/// where the simulation has got to. It lives on `crate::app::Sundial`, and
+/// [`page_clock`] is the only other way to reach it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Clock {
     /// Which tick the sun is at.
@@ -274,12 +277,25 @@ impl Clock {
         Sky::at(self.tick)
     }
 
-    /// One fixed step. A no-op while the clock is stopped, which is what makes
+    /// One fixed step, and the one place a page's request is taken up.
+    ///
+    /// The step is a no-op while the clock is stopped, which is what makes
     /// pausing the sun different from pausing the loop: the camera still flies.
-    pub const fn advance(&mut self) {
+    ///
+    /// **A request from [`ask_tick`], [`ask_running`] or [`ask_reset`] is
+    /// adopted first, whether or not the clock is running**, and where this
+    /// step got to is published back for [`page_clock`] to read — a browser has
+    /// no key to press, and this is the one method the fixed step already calls
+    /// every tick.
+    pub fn advance(&mut self) {
+        let mut page = page();
+        if let Some(asked) = page.asked.take() {
+            *self = asked;
+        }
         if self.running {
             self.tick = self.tick.wrapping_add(1);
         }
+        page.seen = *self;
     }
 
     /// Starts or stops the clock.
@@ -310,9 +326,189 @@ impl Clock {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The channel a page drives the clock through
+// ---------------------------------------------------------------------------
+
+/// What a page has asked the clock for, and where the clock has got to.
+///
+/// # Why the clock needs one and the filter does not
+///
+/// [`crate::filter`]'s knobs are console variables: a browser export writes the
+/// same cell a key and a typed line write, so there is one copy of the state and
+/// no channel is needed. **A tick is not a setting.** It lives on
+/// `crate::app::Sundial`, the fixed step is its only writer, and a page reaching
+/// it has nothing to write to — which is why `crate::web`'s sun exports go
+/// through this and the filter exports go straight at the console.
+///
+/// This is [`crcbl::debug_view`]'s shape and it is the smallest thing that
+/// works: one cell, written by whoever is driving, read back by whoever draws.
+/// [`Clock::advance`] is both ends of it — it takes `asked` up on the next fixed
+/// step and leaves `seen` behind — so the sun still moves on the fixed step and
+/// on nothing else, and the determinism claim
+/// `the_clock_is_a_pure_function_of_its_tick` makes is untouched: a page moves
+/// *which* tick is drawn, never what tick `k` looks like.
+///
+/// A [`std::sync::Mutex`] rather than a pair of atomics, so a request is one
+/// indivisible `(tick, running)` rather than two stores a reader can land
+/// between. It is taken once per fixed step and by nothing else.
+#[derive(Clone, Copy, Debug)]
+struct Page {
+    /// Where the last fixed step left the clock.
+    seen: Clock,
+    /// What a page has asked for and no step has adopted yet.
+    asked: Option<Clock>,
+}
+
+/// The one cell of it. See [`Page`].
+static PAGE: std::sync::Mutex<Page> = std::sync::Mutex::new(Page {
+    seen: Clock::at(FIXTURE_TICK, true),
+    asked: None,
+});
+
+/// [`PAGE`], with a poisoned lock taken anyway.
+///
+/// A panic while this is held would have to come from `Option::take` or a `u64`
+/// add, so a poisoned lock here means the process is already over; refusing to
+/// answer would turn that into a second, less legible failure inside the export
+/// a page called.
+fn page() -> std::sync::MutexGuard<'static, Page> {
+    PAGE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The clock as a page sees it: the request it made, or where the run has got
+/// to.
+///
+/// The request wins while one is outstanding, so a control reads back what it
+/// just asked for rather than the tick the last step happened to leave behind —
+/// which on a stopped clock is the same value and on a running one is a flicker
+/// backwards.
+#[must_use]
+pub fn page_clock() -> Clock {
+    let page = page();
+    page.asked.unwrap_or(page.seen)
+}
+
+/// Puts the sun at `tick`, **and stops the clock**, from the next fixed step.
+///
+/// Stopping is [`Clock::scrub`]'s rule rather than a second one: a tick written
+/// onto a running clock is a position the next step moves off, so a page's
+/// slider would fight the sun it is trying to place.
+pub fn ask_tick(tick: u64) -> Clock {
+    let mut page = page();
+    let asked = Clock::at(tick, false);
+    page.asked = Some(asked);
+    asked
+}
+
+/// Starts or stops the clock from the next fixed step, leaving the tick alone.
+pub fn ask_running(running: bool) -> Clock {
+    let mut page = page();
+    let asked = Clock::at(page.asked.unwrap_or(page.seen).tick, running);
+    page.asked = Some(asked);
+    asked
+}
+
+/// Back to [`FIXTURE_TICK`], running — [`Clock::reset`] asked for from a page.
+pub fn ask_reset() -> Clock {
+    let mut page = page();
+    let mut asked = page.seen;
+    asked.reset();
+    page.asked = Some(asked);
+    asked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialises every check that drives [`PAGE`], and empties it afterwards.
+    ///
+    /// **Every check that calls [`Clock::advance`] takes it, and that is the
+    /// point.** The cell is process-global by design and `cargo test` runs a
+    /// crate's tests as threads of one process, so two checks that ask the clock
+    /// for something are two writers to one cell — which shows up as a flake
+    /// rather than as a failure anybody can read. `crate::filter`'s own `Held` is
+    /// the same shape for the same reason.
+    struct Held {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    /// What an empty channel holds: the pose a fresh run opens on, and nothing
+    /// asked for.
+    fn empty() -> Page {
+        Page {
+            seen: Clock::default(),
+            asked: None,
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            *page() = empty();
+        }
+    }
+
+    /// The lock [`Held`] takes.
+    static CLOCK_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn held() -> Held {
+        let guard = CLOCK_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *page() = empty();
+        Held { _guard: guard }
+    }
+
+    /// **A page can stop the sun, place it and put it back**, and every request
+    /// reaches the clock through the fixed step rather than around it.
+    ///
+    /// The four claims, in order: a step publishes where it got to; a request is
+    /// read back the instant it is made, before any step has run; a request is
+    /// adopted **while the clock is stopped**, which is the state a page places a
+    /// tick from; and a reset leaves the fixture pose running again.
+    ///
+    /// The last clause of the third is what makes this more than a getter pair: a
+    /// channel whose requests were only taken up by a *running* clock would place
+    /// nothing at all, because [`ask_tick`] stops it.
+    #[test]
+    fn a_page_can_stop_the_sun_place_it_and_put_it_back() {
+        let _held = held();
+        let mut clock = Clock::default();
+        clock.advance();
+        assert_eq!(page_clock(), clock, "a step publishes where it got to");
+
+        assert!(!ask_running(false).running());
+        assert!(!page_clock().running(), "a page reads its own request back");
+        assert!(clock.running(), "and no step has run yet, so nothing moved");
+        let stopped_at = clock.tick();
+        clock.advance();
+        assert_eq!(clock.tick(), stopped_at, "the step adopted the stop");
+        assert_eq!(page_clock(), clock);
+
+        let asked = ask_tick(NOON_TICK);
+        assert_eq!(asked.tick(), NOON_TICK);
+        assert!(!asked.running(), "placing a tick stops the clock");
+        clock.advance();
+        assert_eq!(
+            clock.tick(),
+            NOON_TICK,
+            "a stopped clock must still adopt what the page placed"
+        );
+        assert_eq!(page_clock(), clock);
+        clock.advance();
+        assert_eq!(clock.tick(), NOON_TICK, "and the request is taken up once");
+
+        assert_eq!(ask_reset(), Clock::default());
+        clock.advance();
+        assert_eq!(
+            clock.tick(),
+            FIXTURE_TICK + 1,
+            "a reset run is a running one"
+        );
+        assert!(clock.running());
+    }
 
     /// **The sun at a tick is the same sun every time**, and a different one at a
     /// different tick.
@@ -434,6 +630,7 @@ mod tests {
     /// **The clock runs, pauses, scrubs and resets**, and a scrub stops it.
     #[test]
     fn the_clock_runs_pauses_scrubs_and_resets() {
+        let _held = held();
         let mut clock = Clock::default();
         assert_eq!(clock.tick(), FIXTURE_TICK);
         assert!(clock.running());

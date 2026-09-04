@@ -790,7 +790,7 @@ const EXPECTATIONS = {
     // compiles.
     effectsRow: 'effects: shadows ao ssr aa vfog',
   },
-  // **The demo whose subject is a comparison**, and the only one on the site
+  // **The demo whose subject is a comparison**, and the first on the site
   // whose controls are HTML rather than keys. `apps/alcove` is the
   // ambient-occlusion acceptance fixture: one flat, untextured court, a fixed
   // camera, and every `r_ssao_*` knob reachable from the page through
@@ -855,16 +855,117 @@ const EXPECTATIONS = {
       // The gather, cycled through the set `crcbl_render::ssao` declares. What
       // it cycles *to* is not spelled here for `crate::occlusion`'s reason: the
       // set is the engine's, and the check asks only that the name changed.
-      technique: 'knob-technique',
+      cycle: 'knob-technique',
+      cycleLabel: 'the gather the frame runs',
       // And everything back, which is also what leaves the demo in the state
       // the groups after this one were written against.
       reset: 'knob-reset',
       seamField: /\bseam: (OFF|[\d.]+)/,
-      techniqueField: /\btechnique: (\w+)/,
+      cycleField: /\btechnique: (\w+)/,
       // Where `occlusion::SEAM_CENTRE` puts the seam when the button raises it,
       // as the heartbeat prints it. The slider has to move it off this, or a
       // slider wired to nothing would pass on the button's own work.
       centre: '0.50',
+    },
+  },
+  // **The other demo whose subject is a comparison**, and the second on the
+  // site whose controls are HTML rather than keys. `apps/sundial` is the shadow
+  // acceptance fixture: one open plaza, a colonnade whose shadow crosses a
+  // cascade boundary, and a sun on a scripted clock — with the filter, the seam
+  // and the clock itself reachable from the page through
+  // `apps/sundial/src/web.rs`'s own exports, because natively they are `F`,
+  // `X`, `,`, `.`, `P`, `-` and `=`, and a phone has none of them.
+  //
+  // **No start key, and unlike alcove something that does move.** There is no
+  // run to begin, so there is nothing for a `Space` to leave; but the sun
+  // advances on the fixed step, so the picture changes from one frame to the
+  // next by construction and there is no `still` here — group D reads a changed
+  // frame the way it does for every other 3D demo.
+  //
+  // `moving` is that sun's own tick, and it is the strictest value this sample
+  // has. `crate::sun::Clock::advance` is called from `HostedGame::tick` and
+  // nowhere else, and it moves the count only while the clock is running — so a
+  // page presenting frames without ticking, a page stuck on its first tick, and
+  // a page whose clock was left stopped all leave it standing still. A frame
+  // counter and a wall clock cannot move it: `crate::sun::Sky::at` reads no
+  // clock at all.
+  //
+  // `waiting` is this sample's own claim, and it is four. `lighting:
+  // Rasterised` is the arm a browser resolves to by construction — no ray query
+  // — which is also the honest answer to this sample's ray-traced rung not being
+  // built: the seam compares two raster filters and nothing else. `filter: pcss`
+  // and `seam: OFF` are the knobs before anything has touched them, and they are
+  // the control for the page's own controls: a boot that had already moved one
+  // would report it here. And `sun: tick 120 of 600` is the determinism claim
+  // `crate::sun`'s header makes, read on a browser: the clock opens at
+  // `FIXTURE_TICK` and steps once per fixed step, so the sixtieth heartbeat is
+  // at tick 120 on every machine and every adapter or the two have come apart.
+  sundial: {
+    // The eighth demo that draws mesh instances, so the eighth whose cull pass
+    // has something to count. See lantern's row and group D.
+    culls: true,
+    key: null,
+    waiting: (line) =>
+      line.includes('[HUD] tick: 60') &&
+      line.includes('lighting: Rasterised') &&
+      line.includes('filter: pcss') &&
+      line.includes('seam: OFF') &&
+      line.includes('sun: tick 120 of 600'),
+    moving: /\bsun: tick (\d+)/,
+    movingLabel: 'the scripted sun keeps sweeping under its own steam',
+    // **The one thing this whole page is downstream of**: that shadows survived
+    // the four layers that resolve an effect and reached the frame the browser
+    // drew. Every control on this demo's page moves a shadow — the filter and
+    // the seam through `r_shadow_*`, the sun by moving what casts them — and on
+    // a device that clamped shadows away all of them would move a term nothing
+    // samples, while every other check here passed, because the plaza still
+    // draws and the loop still ticks.
+    //
+    // A prefix rather than the whole row, for alcove's reason: this is not a
+    // claim about which of `ao`, `ssr` and `aa` a given adapter kept. Measured
+    // on this machine's RDNA-3 adapter as `effects: shadows ao ssr aa`, and it
+    // is the `shadows` that is being asserted.
+    effectsRow: 'effects: shadows',
+    // **The page's own controls**, and the block above the `range` and `zone`
+    // blocks reads them. Every id here is one `web/pages/sundial.html` gives a
+    // control and `web/demos/sundial/main.js` binds; every pattern is a field of
+    // the `[HUD]` line `apps/sundial/src/app.rs` logs, which is the engine's own
+    // state rather than anything the page remembers.
+    knobs: {
+      // The seam, raised and lowered by a button and placed by a slider — the
+      // pair alcove's row carries for the same reason.
+      seam: 'knob-seam',
+      seamAt: 'knob-seam-at',
+      // The filter, cycled through the set `crcbl::render::shadow` declares.
+      // What it cycles *to* is not spelled here for `crate::filter`'s reason:
+      // the set is the engine's, and the check asks only that the name changed.
+      cycle: 'knob-filter',
+      cycleLabel: 'the filter the frame runs',
+      // And everything back, which is also what leaves the demo in the state
+      // the groups after this one were written against — including the clock,
+      // which the two controls below stop.
+      reset: 'knob-reset',
+      seamField: /\bseam: (OFF|[\d.]+)/,
+      cycleField: /\bfilter: (\w+)/,
+      // Where `crate::filter::SEAM_CENTRE` puts the seam when the button raises
+      // it, as the heartbeat prints it. The slider has to move it off this, or a
+      // slider wired to nothing would pass on the button's own work.
+      centre: '0.50',
+      // **AND THE CLOCK, WHICH IS THE CONTROL NO OTHER DEMO HAS.** The filter
+      // and the seam are console cells; the sun's tick and its run flag live on
+      // `crate::app::Sundial`, and a page reaches them through
+      // `crate::sun`'s channel instead — a different route to a different kind
+      // of state, and the one this block exists to press.
+      sun: 'knob-sun',
+      sunAt: 'knob-sun-tick',
+      // The sun's own tick, and the loop's. `moving` above reads the first of
+      // these for a different reason — that the simulation advances at all —
+      // and the block below reads them **together**, because that is the only
+      // way to tell a stopped sun from a stopped demo: pressing a control blurs
+      // the canvas and the engine pauses on blur, so a sun that stopped because
+      // nothing was ticking would pass a check that only watched the sun.
+      sunField: /\bsun: tick (\d+)/,
+      loopField: /\[HUD\] tick: (\d+)/,
     },
   },
   // **The third demo with no start key**, and the second that draws mesh
@@ -3694,10 +3795,11 @@ try {
           heldNote()
   );
 
-  // **AND THE PAGE'S OWN CONTROLS, WHICH NOTHING ELSE HERE PRESSES.** Only
-  // alcove has a `knobs` block, because it is the only demo on the site whose
-  // controls are HTML rather than keys — the seam it exists to drive is walked
-  // natively with `,` and `.`, and a phone has neither.
+  // **AND THE PAGE'S OWN CONTROLS, WHICH NOTHING ELSE HERE PRESSES.** Only the
+  // two comparison fixtures have a `knobs` block, because they are the only
+  // demos on the site whose controls are HTML rather than keys — the seam each
+  // exists to drive is walked natively with `,` and `.`, and sundial's sun is
+  // stopped with `P`, and a phone has none of them.
   //
   // Nothing else in this file would notice them going wrong.
   // `web/tools/check-exports.mjs` proves the symbols behind them are in the
@@ -3773,15 +3875,26 @@ try {
     };
 
     /**
-     * A real click a quarter of the way along a slider's track.
+     * A real click `along` of the way down a slider's track.
      *
-     * Not the middle, which is where the seam's own button has just put it: a
-     * click that landed on the value already in force would pass this block
-     * whether or not the slider is wired to anything. Where exactly the thumb
-     * lands is the browser's range geometry rather than this gate's business,
-     * so the check below asks that it moved rather than where to.
+     * A quarter by default, not the middle, which is where the seam's own
+     * button has just put it: a click that landed on the value already in force
+     * would pass this block whether or not the slider is wired to anything.
+     * Where exactly the thumb lands is the browser's range geometry rather than
+     * this gate's business, so the seam check asks that it moved rather than
+     * where to.
+     *
+     * **The sun's slider takes the argument**, because that check does compare
+     * an exact value: its track spans a whole sweep of the clock and the tick
+     * the sun happened to stop on can be anywhere in it, so a fixed position
+     * would collide with the value already in force about once in a sweep and
+     * report a working control as broken. See the block below, which moves to
+     * the other end when it does.
      */
-    const dragSlider = async (/** @type {string} */ id) => {
+    const dragSlider = async (
+      /** @type {string} */ id,
+      /** @type {number} */ along = 0.25
+    ) => {
       await releasePointer();
       const at = await evaluate(
         page,
@@ -3789,7 +3902,7 @@ try {
                   if (!e) return null;
                   e.scrollIntoView({ block: 'center', behavior: 'instant' });
                   const r = e.getBoundingClientRect();
-                  return { x: Math.round(r.x + r.width / 4),
+                  return { x: Math.round(r.x + r.width * ${along}),
                            y: Math.round(r.y + r.height / 2) }; })()`
       );
       if (at) await clickAt(at);
@@ -3839,13 +3952,37 @@ try {
     const beatAfter = async (/** @type {number} */ mark) =>
       until(async () => hud()[mark] ?? null);
 
+    /**
+     * How many consecutive heartbeats the clock checks read.
+     *
+     * Two, which is the fewest that can carry the pair those checks are: one
+     * value for the sun and two for the loop's own tick is a stopped clock
+     * inside a running demo, and neither half means anything without the other.
+     */
+    const HELD_BEATS = 2;
+
+    /** The `count` HUD lines from `mark` on, or `null` if they never arrive. */
+    const beatsAfter = async (
+      /** @type {number} */ mark,
+      /** @type {number} */ count
+    ) =>
+      until(async () =>
+        hud().length >= mark + count ? hud().slice(mark, mark + count) : null
+      );
+
+    /** Every distinct value `field` takes across `lines`. */
+    const across = (
+      /** @type {string[]} */ lines,
+      /** @type {RegExp} */ field
+    ) => new Set(lines.map((line) => line.match(field)?.[1] ?? ''));
+
     /** What the heartbeat `line` says a knob stands at. */
     const stands = (/** @type {string} */ line, /** @type {RegExp} */ field) =>
       line.match(field)?.[1] ?? '';
 
-    const startingTechnique = stands(
+    const startingCycled = stands(
       hud()[hud().length - 1] ?? '',
-      knobs.techniqueField
+      knobs.cycleField
     );
 
     // **The controls open only once there is a loop behind them.** They are
@@ -3872,11 +4009,12 @@ try {
             'page has no such control at all'
     );
 
-    // The seam up, the gather cycled, and the seam then moved off the centre
-    // the button chose — three presses, read off one heartbeat afterwards.
+    // The seam up, the technique or filter cycled, and the seam then moved off
+    // the centre the button chose — three presses, read off one heartbeat
+    // afterwards.
     const pressed =
       (await clickControl(knobs.seam)) &&
-      (await clickControl(knobs.technique)) &&
+      (await clickControl(knobs.cycle)) &&
       (await dragSlider(knobs.seamAt));
     const running = pressed && (await resume());
     const mark = hud().length;
@@ -3898,15 +4036,91 @@ try {
     );
     check(
       'C',
-      'a press on the page cycles the gather the frame runs',
+      `a press on the page cycles ${knobs.cycleLabel}`,
       Boolean(line) &&
-        stands(line ?? '', knobs.techniqueField) !== '' &&
-        stands(line ?? '', knobs.techniqueField) !== startingTechnique,
+        stands(line ?? '', knobs.cycleField) !== '' &&
+        stands(line ?? '', knobs.cycleField) !== startingCycled,
       line
-        ? `technique: ${stands(line, knobs.techniqueField) || '(nothing)'}, ` +
-            `and it opened on ${startingTechnique || '(nothing)'}`
+        ? `it now reads ${stands(line, knobs.cycleField) || '(nothing)'}, ` +
+            `and it opened on ${startingCycled || '(nothing)'}`
         : 'no heartbeat to read it off'
     );
+
+    // **AND THE CLOCK, WHICH IS A DIFFERENT KIND OF STATE.** Only sundial has
+    // one: the seam and the filter above are console cells a page writes
+    // directly, while the sun's tick and its run flag live on the fixture's own
+    // game state and reach it through `crate::sun`'s channel, adopted on the
+    // next fixed step. Two exports, two controls, and a route nothing else here
+    // exercises.
+    //
+    // **The pair is the whole check.** Pressing any control blurs the canvas and
+    // the engine pauses on blur, so a demo that had simply stopped ticking would
+    // show a sun standing still — which is exactly what a working stop button
+    // shows. So each reading below asks for both fields off the *same*
+    // heartbeats: the sun holds one value while the loop's own tick takes
+    // `HELD_BEATS` of them.
+    if (knobs.sun) {
+      const stopped = (await clickControl(knobs.sun)) && (await resume());
+      const heldMark = hud().length;
+      const beats = stopped ? await beatsAfter(heldMark, HELD_BEATS) : null;
+      const suns = beats ? across(beats, knobs.sunField) : new Set();
+      const loops = beats ? across(beats, knobs.loopField) : new Set();
+      check(
+        'C',
+        'a press on the page stops the sun while the loop goes on ticking',
+        Boolean(beats) && suns.size === 1 && loops.size === HELD_BEATS,
+        !stopped
+          ? `the page has no #${knobs.sun} control, or the demo did not go ` +
+              'back into play after the press — status ' +
+              `${await evaluate(page, `crcbl.status()`)}`
+          : beats
+            ? `the sun held at ${[...suns].join(', ') || '(nothing)'} across ` +
+              `${loops.size} loop tick(s): ${[...loops].join(', ')}`
+            : `no ${HELD_BEATS} heartbeats in ${pollCeiling()} ms after the press`
+      );
+
+      // **And the slider scrubs it.** Compared against the slider's own value
+      // rather than against "it changed", because the page writes that value
+      // back out of the engine's answer: an export that read instead of writing
+      // would leave the two agreeing on the tick the sun was already at. So
+      // both halves are asked — the heartbeat matches the control, *and* the
+      // control is no longer where the sun was stopped.
+      const heldAt = [...suns][0] ?? '';
+      /** Where the slider stands, as the page's own control reports it. */
+      const sliderValue = async () =>
+        String(
+          await evaluate(
+            page,
+            `document.getElementById('${knobs.sunAt}')?.value ?? ''`
+          )
+        );
+      let dragged = await dragSlider(knobs.sunAt);
+      // A whole sweep of the clock fits on this track, so the quarter mark can
+      // land on the tick the sun is already stopped at. The far end cannot also
+      // be that tick.
+      if (dragged && (await sliderValue()) === heldAt) {
+        dragged = await dragSlider(knobs.sunAt, 0.75);
+      }
+      const asked = dragged ? await sliderValue() : '';
+      const scrubbing = dragged && (await resume());
+      const scrubMark = hud().length;
+      const scrubbed = scrubbing ? await beatAfter(scrubMark) : null;
+      const sunNow = stands(scrubbed ?? '', knobs.sunField);
+      check(
+        'C',
+        'and a drag on the page scrubs the sun to where the slider stands',
+        Boolean(scrubbed) && sunNow === asked && sunNow !== heldAt,
+        !dragged
+          ? `the page has no #${knobs.sunAt} control`
+          : !scrubbing
+            ? 'the demo did not go back into play after the drag — status ' +
+              `${await evaluate(page, `crcbl.status()`)}`
+            : scrubbed
+              ? `the sun reads ${sunNow || '(nothing)'}, the slider asked for ` +
+                `${asked || '(nothing)'}, and it was stopped at ${heldAt}`
+              : `no heartbeat in ${pollCeiling()} ms after the drag`
+      );
+    }
 
     // **And back, so the frame every group after this one reads is the frame
     // they were written against.** It is also the check that `reset` reaches
@@ -3922,10 +4136,10 @@ try {
       'the page puts every knob back where the engine declares it',
       Boolean(restored) &&
         stands(restored ?? '', knobs.seamField) === 'OFF' &&
-        stands(restored ?? '', knobs.techniqueField) === startingTechnique,
+        stands(restored ?? '', knobs.cycleField) === startingCycled,
       restored
-        ? `seam: ${stands(restored, knobs.seamField)}, technique: ` +
-            `${stands(restored, knobs.techniqueField)}`
+        ? `seam: ${stands(restored, knobs.seamField)}, cycled: ` +
+            `${stands(restored, knobs.cycleField)}`
         : !wasReset
           ? `the page has no #${knobs.reset} control`
           : !backInPlay
@@ -3933,6 +4147,25 @@ try {
               `${await evaluate(page, `crcbl.status()`)}`
             : `no heartbeat in ${pollCeiling()} ms after the reset`
     );
+
+    // **And the clock is running again**, which the check above cannot see: the
+    // seam and the filter are values, and a clock is a thing that moves. This is
+    // also what leaves group D a demo whose picture changes, which is what that
+    // group asserts of every demo but the two that draw nothing moving.
+    if (knobs.sun && backInPlay) {
+      const runMark = hud().length;
+      const beats = await beatsAfter(runMark, HELD_BEATS);
+      const suns = beats ? across(beats, knobs.sunField) : new Set();
+      check(
+        'C',
+        'and the sun is sweeping again, which is what a fresh run opens on',
+        Boolean(beats) && suns.size === HELD_BEATS,
+        beats
+          ? `the sun took ${suns.size} tick(s) across ${HELD_BEATS} ` +
+              `heartbeats: ${[...suns].join(', ')}`
+          : `no ${HELD_BEATS} heartbeats in ${pollCeiling()} ms after the reset`
+      );
+    }
   }
 
   // **AND THE CONTROLLER BEING DRIVEN, WHICH THE CHECK ABOVE CANNOT SEE.**

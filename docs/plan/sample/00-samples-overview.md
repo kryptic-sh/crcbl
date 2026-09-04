@@ -84,22 +84,23 @@ playerbase.
 
 **Where the ladder stands.** Every sample on it except towers (07), arena (08)
 and mirrors (17) has an `apps/` crate that builds for `wasm32`, and every one of
-those but sundial (18) ships on the demo site; `web/build.sh`'s `DEMOS` array is
-the list, and it is the authority — a sample missing from it is a sample nobody
-visits. What each of those crates has and has not built is in its own doc's
-status section and, fresher than either, in the module header of its
-`src/lib.rs`. **towers, arena and mirrors have no `apps/` directory at all**,
-and each doc says what it is waiting on — for 17 that is the ladder itself,
-since a comparison fixture holding one technique is not a comparison. **alcove
-(19) is the first of the comparison wave to ship**: `apps/alcove` was built
-natively on 2026-09-04, once the occlusion chain had a second technique to
-compare, and its browser demo landed the same day at `/demos/alcove/` — the one
-page on the site whose controls are HTML rather than keys, because a seam walked
-with `,` and `.` is a comparison a phone cannot reach. **sundial (18) followed
-it natively the same day**, once the shadow ladder had three filters and a seam
-to compare them across; `apps/sundial` builds for `wasm32` and is not on the
-demo site yet, and `docs/backlog.md` carries what a page owes. options (20)
-shipped on 2026-08-28.
+them ships on the demo site; `web/build.sh`'s `DEMOS` array is the list, and it
+is the authority — a sample missing from it is a sample nobody visits. What each
+of those crates has and has not built is in its own doc's status section and,
+fresher than either, in the module header of its `src/lib.rs`. **towers, arena
+and mirrors have no `apps/` directory at all**, and each doc says what it is
+waiting on — for 17 that is the ladder itself, since a comparison fixture
+holding one technique is not a comparison. **alcove (19) is the first of the
+comparison wave to ship**: `apps/alcove` was built natively on 2026-09-04, once
+the occlusion chain had a second technique to compare, and its browser demo
+landed the same day at `/demos/alcove/` — the first page on the site whose
+controls are HTML rather than keys, because a seam walked with `,` and `.` is a
+comparison a phone cannot reach. **sundial (18) followed it the same day**, once
+the shadow ladder had three filters and a seam to compare them across, and its
+page landed with it at `/demos/sundial/` — the second on the site whose controls
+are HTML, and the only one that puts a simulation's own clock among them,
+because a sun nobody can stop is a fixture whose artefacts cannot be looked at.
+options (20) shipped on 2026-08-28.
 
 **Where multiplayer lives — and where it does not.** Native sessions are LAN:
 direct connect by IP, or a lobby browser over local-network host discovery.
