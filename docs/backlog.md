@@ -155,10 +155,6 @@ golden of its own and a button on the page. What is still **not** done:
   reconstruction of itself and its one-pixel borders are soft. Considered and
   left: drawing after the upscale would want a second pipeline at the caller's
   format for a case a reviewer can avoid by putting the scale back.
-- **No cost figure per filter.** The entry above this one asks for it and this
-  slice did not supply it: `ShadowCost` prints the `shadow` and `forward` rows
-  live, but nothing in the golden suite records a number, because a timing read
-  off one run of one adapter is not a figure worth writing into a doc.
 - **Only the `pcss` rung is tested on a second camera.** The penumbra ladder is
   read from `plaza::counter_camera`, which is the only pose where PCSS's
   estimate is unclamped; every other claim is from the fixture pose. A filter
