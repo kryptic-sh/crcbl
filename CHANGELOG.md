@@ -160,6 +160,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   a second entry in `alcove`'s `knobs.views`: it was the one control on that
   page nothing but a person had ever pressed.
 
+  **`--bent-view` opens a run on the picture**, beside `--ao-view`. The two
+  flags are one `crcbl::render::DebugView` on `alcove::Options` rather than a
+  `bool` each — the engine holds exactly one view, so the last of them on the
+  command line is the one that draws — and `Options::apply` puts it up before
+  the first frame, leaving the cell alone when neither flag named a picture. A
+  headless capture of the bent direction is `alcove --bent-view --screenshot`
+  now, where it wanted an `autoexec.cfg` carrying `debug_view bent normal`
+  before.
+
+  **And the radius slider on that page is checked by the browser gate.**
+  `#knob-radius` is a 0-to-1 dial while `Alcove::log_heartbeat` prints `radius:`
+  in world units, so `alcove`'s row carries the first `knobs.counts` entry to
+  name an `answer`: the drag is held against `__crcbl_alcove_radius(-1)` — the
+  engine's own answer for where the dial now stands, which is the same read the
+  page refreshes its own label from — rather than against the slider's raw
+  value, which is in the wrong unit to compare. `knobs.counts` entries also take
+  `decimals` now, because the two demos do not print their fields to the same
+  number of places. The bent-normals switch and the intensity slider on that
+  page are still driven by nothing but a person: neither is on the heartbeat.
+
 - **The shadow-atlas viewer**, which `docs/plan/sample/18-sundial.md`'s
   milestone 1 has owed since the sample was written and which closes
   `docs/plan/45-shadows.md`'s "no shadow-map inspector panel".

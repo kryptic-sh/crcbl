@@ -7,11 +7,12 @@
 //!
 //! # The occlusion flags write console variables and keep nothing
 //!
-//! `--technique`, `--split` and `--ao-view` are a *starting state* rather than a
-//! second copy of one: [`Options::apply`] writes them into the cells
-//! [`crate::occlusion`] reads, and after that the keys, the pause panel and a
-//! typed console line are all editing the same value. A flag that kept its own
-//! field would be a fourth writer that the other three could not see.
+//! `--technique`, `--split`, `--ao-view` and `--bent-view` are a *starting state*
+//! rather than a second copy of one: [`Options::apply`] writes them into the
+//! cells [`crate::occlusion`] and [`crcbl::debug_view`] read, and after that the
+//! keys, the pause panel and a typed console line are all editing the same
+//! value. A flag that kept its own field would be one more writer that none of
+//! the others could see.
 
 use crcbl::args::{Common, Consumed};
 use crcbl::hal::{BindingModel, GeometryPath};
@@ -44,8 +45,16 @@ pub struct Options {
     pub technique: Option<&'static str>,
     /// Where the comparison seam starts, or `None` for a run comparing nothing.
     pub split: Option<f32>,
-    /// Whether the run starts drawing the occlusion channel instead of shading.
-    pub ao_view: bool,
+    /// Which picture the run starts on: the shaded court, or one of the two
+    /// debug views this fixture has a flag for.
+    ///
+    /// **One [`DebugView`] rather than a flag each**, for
+    /// [`crate::occlusion::Knobs`]'s reason: the engine holds exactly one view,
+    /// so two `bool`s would be able to spell a state it cannot be in and the
+    /// precedence between them would be this parser's rather than
+    /// `ForwardRenderer::debug_view`'s. `--ao-view` and `--bent-view` each name
+    /// one, and the last of them on the command line is the one that stands.
+    pub view: DebugView,
 }
 
 impl Default for Options {
@@ -64,7 +73,7 @@ impl Default for Options {
             effects: RenderEffects::all(),
             technique: None,
             split: None,
-            ao_view: false,
+            view: DebugView::Shaded,
         }
     }
 }
@@ -89,8 +98,13 @@ impl Options {
                 crcbl::log::error!("alcove: --split {at} was refused: {fault}");
             }
         }
-        if self.ao_view {
-            crcbl::debug_view::set(DebugView::AmbientOcclusion);
+        // **Written only when a flag named a picture.** `crcbl::debug_view` is a
+        // process-wide cell shared with every other route to it, and this method
+        // is documented to leave what it does not name alone — so a run with
+        // neither flag must not write `DebugView::Shaded` over whatever is
+        // there.
+        if self.view != DebugView::Shaded {
+            crcbl::debug_view::set(self.view);
         }
     }
 }
@@ -158,6 +172,11 @@ OPTIONS:
     --ao-view            Start drawing the occlusion channel as grey instead of
                          the shaded picture — the AO VIEW row, and the console's
                          'debug_view ambient occlusion'. V toggles it.
+    --bent-view          Start drawing the bent direction the gather reported
+                         instead of the shaded picture — the BENT VIEW row, and
+                         the console's 'debug_view bent normal'. N toggles it.
+                         The engine holds one view, so this and --ao-view are
+                         the same cell: whichever comes last is what draws.
     --technique <T>      Which gather the near side of the seam runs: 'gtao' or
                          'hemisphere'. Default: whatever r_ssao_technique ships.
                          T cycles it, and the pause menu's TECHNIQUE row shows
@@ -228,7 +247,8 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 None => return Invocation::BadUsage("--force-binding needs a value".into()),
             },
             "--no-ao" => options.effects.remove(RenderEffects::AMBIENT_OCCLUSION),
-            "--ao-view" => options.ao_view = true,
+            "--ao-view" => options.view = DebugView::AmbientOcclusion,
+            "--bent-view" => options.view = DebugView::BentNormal,
             "--technique" => match args.next().as_deref().map(technique_from_name) {
                 Some(Some(technique)) => options.technique = Some(technique),
                 Some(None) => {
@@ -336,7 +356,11 @@ mod tests {
         );
         assert_eq!(options.technique, None, "a bare run takes what ships");
         assert_eq!(options.split, None, "a bare run compares nothing");
-        assert!(!options.ao_view, "a bare run draws the shaded picture");
+        assert_eq!(
+            options.view,
+            DebugView::Shaded,
+            "a bare run draws the shaded picture"
+        );
     }
 
     /// Every flag this sample adds parses, and reaches the field it names.
@@ -374,13 +398,88 @@ mod tests {
             RenderEffects::all().difference(RenderEffects::AMBIENT_OCCLUSION),
             "--no-ao clears the occlusion bit and no other"
         );
-        assert!(options.ao_view);
+        assert_eq!(options.view, DebugView::AmbientOcclusion);
         assert_eq!(options.technique, Some("hemisphere"));
         assert_eq!(options.split, Some(0.25));
         // And the shared half still landed, which is what a game parser that
         // consumed its own flags first would break.
         assert!(options.common.headless);
         assert_eq!(options.common.frames, Some(4));
+    }
+
+    /// **`--bent-view` puts the bent direction up, and it is the same cell
+    /// `--ao-view` writes.**
+    ///
+    /// Three claims, and the third is the one a second `bool` would have got
+    /// wrong: each flag alone names its own picture, and the two together are
+    /// *one* picture — whichever was typed last — rather than a pair of switches
+    /// whose combination this parser would have had to invent an answer for.
+    /// `crcbl::render::DebugView` is what the engine holds one of, and
+    /// `crate::occlusion::Knobs` made the same choice for the pause panel's two
+    /// rows.
+    #[test]
+    fn the_two_view_flags_name_one_picture_and_the_last_one_wins() {
+        let Invocation::Run(bent) = run(&["--bent-view"]) else {
+            panic!("--bent-view is a run");
+        };
+        assert_eq!(bent.view, DebugView::BentNormal);
+
+        let Invocation::Run(channel) = run(&["--ao-view"]) else {
+            panic!("--ao-view is a run");
+        };
+        assert_eq!(channel.view, DebugView::AmbientOcclusion);
+
+        let Invocation::Run(last) = run(&["--ao-view", "--bent-view"]) else {
+            panic!("both flags together are a run");
+        };
+        assert_eq!(last.view, DebugView::BentNormal);
+        let Invocation::Run(other) = run(&["--bent-view", "--ao-view"]) else {
+            panic!("both flags together are a run");
+        };
+        assert_eq!(other.view, DebugView::AmbientOcclusion);
+
+        assert!(
+            USAGE.contains("--bent-view"),
+            "the usage text does not offer --bent-view"
+        );
+    }
+
+    /// **[`Options::apply`] puts that picture up**, and leaves the cell alone
+    /// when neither flag named one.
+    ///
+    /// The half the test above cannot reach: a flag that parsed into the field
+    /// and was never applied leaves the run drawing the shaded court, and every
+    /// assertion on the field goes on passing. `crcbl::debug_view::for_test` is
+    /// what makes it safe to write here — the cell is process-global and
+    /// `cargo test` runs this crate's checks as threads of one process, which is
+    /// the same argument `crate::occlusion`'s own test module makes about the
+    /// occlusion knobs.
+    ///
+    /// The third arm is the one a run with no view flag at all takes:
+    /// `autoexec.cfg` and a typed `debug_view` line both write this cell, and
+    /// `apply` is documented to leave what it does not name alone.
+    #[test]
+    fn apply_puts_the_flags_picture_up_and_leaves_the_cell_alone_without_one() {
+        let _held = crcbl::debug_view::for_test();
+
+        let mut options = Options {
+            view: DebugView::BentNormal,
+            ..Options::default()
+        };
+        options.apply();
+        assert_eq!(crcbl::debug_view::current(), DebugView::BentNormal);
+
+        options.view = DebugView::AmbientOcclusion;
+        options.apply();
+        assert_eq!(crcbl::debug_view::current(), DebugView::AmbientOcclusion);
+
+        options.view = DebugView::Shaded;
+        options.apply();
+        assert_eq!(
+            crcbl::debug_view::current(),
+            DebugView::AmbientOcclusion,
+            "a run with neither flag wrote DebugView::Shaded over what was there"
+        );
     }
 
     /// **`--split` with no value is the middle of the frame, and it does not eat

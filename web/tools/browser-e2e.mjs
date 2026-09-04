@@ -898,6 +898,30 @@ const EXPECTATIONS = {
           noun: 'the occlusion channel instead of the shaded court',
         },
       ],
+      // **The radius, which is the one knob on this page whose control and
+      // whose reading are in different units.** `r_ssao_radius` is a console
+      // cell like the technique and the seam, and what it moves is how deep the
+      // recess and the crevice sit — a few pixels of one surface, which is why
+      // it is read off `Alcove::log_heartbeat`'s `radius:` field and not off the
+      // canvas. `#knob-radius` is a 0-to-1 dial, though: `occlusion::dial` maps
+      // it geometrically across the variable's own range, because a linear track
+      // across a range that wide spends most of its length at the top. So the
+      // drag is held against the engine's own answer for where the dial stands —
+      // `__crcbl_alcove_radius(-1)`, which is the read the page's own label is
+      // refreshed from — rather than against the slider's raw value.
+      //
+      // The bent-normals switch and the intensity slider are still driven by
+      // nothing but a person: neither is on this line, and adding either wants a
+      // field on it.
+      counts: [
+        {
+          control: 'knob-radius',
+          field: /\bradius: ([\d.]+)/,
+          noun: 'the radius the horizons sweep',
+          answer: 'crcbl.exports.__crcbl_alcove_radius(-1)',
+          decimals: 3,
+        },
+      ],
       // And everything back, which is also what leaves the demo in the state
       // the groups after this one were written against.
       reset: 'knob-reset',
@@ -4257,28 +4281,38 @@ try {
       );
     }
 
-    // **AND THE TWO BIAS COUNTS, WHICH ARE THE ONES A PICTURE CANNOT ANSWER
-    // FOR.** Only sundial has them: they are `r_shadow_*` console cells like
-    // the filter and the seam, but what either of them moves is acne on the
-    // open pavement or the gap under the plinth — a few pixels of one lit
-    // surface, on a canvas whose statistics also carry the HUD and a sun that
-    // is moving anyway. `Sundial::log_heartbeat` prints both off the console's
-    // own cells, which is what makes this a reading.
+    // **AND THE NUMBERS A PICTURE CANNOT ANSWER FOR.** sundial's two shadow
+    // biases and alcove's occlusion radius: console cells like the filter, the
+    // technique and the seam, but what any of them moves is acne on the open
+    // pavement, the gap under the plinth or how deep one corner of a court
+    // sits — a few pixels of one surface, on a canvas whose statistics also
+    // carry the HUD. Each sample's heartbeat prints the value off the console's
+    // own cell, which is what makes this a reading rather than an inference.
     //
-    // **Held against the slider's own value, not against "it changed"**, for
-    // the sun slider's reason: the page writes that value back out of the
-    // engine's answer, so an export that read instead of writing would leave
-    // the two agreeing on the count that was already in force. Both halves are
-    // asked — the heartbeat matches the control, *and* the count is no longer
-    // where the page opened it. A quarter of the way along either track is
-    // well clear of what the engine ships — both counts default to a couple of
-    // texels and both ranges run to dozens of them, which is
-    // `DEPTH_BIAS_TEXELS` and `NORMAL_OFFSET_TEXELS` read against their own
-    // `convar!` ranges — and the second clause below is what asserts that
-    // rather than this sentence.
+    // **Held against a number the page can be asked for, not against "it
+    // changed"**, for the sun slider's reason: the page writes its control back
+    // out of the engine's answer, so an export that read instead of writing
+    // would leave the two agreeing on the value that was already in force. Both
+    // halves are asked — the heartbeat matches that number, *and* the value is
+    // no longer where the page opened it.
     //
-    // The `reset` below is what puts them back: both are in
-    // `crate::filter::KNOBS`, which is the list that press walks.
+    // **Which number depends on whether the track is in the field's unit.**
+    // sundial's two are: the slider *is* a count of texels, so its own `value`
+    // is what the heartbeat has to print — and a quarter of the way along
+    // either track is well clear of what the engine ships, both counts
+    // defaulting to a couple of texels against ranges running to dozens, which
+    // is `DEPTH_BIAS_TEXELS` and `NORMAL_OFFSET_TEXELS` read against their own
+    // `convar!` ranges. alcove's is not: `#knob-radius` is a 0-to-1 dial and
+    // `Alcove::log_heartbeat` prints metres, so an entry naming `answer` is
+    // asked *that* expression instead — `__crcbl_alcove_radius(-1)`, the same
+    // read `web/demos/alcove/main.js` refreshes its own label from. Holding the
+    // dial's raw value against the heartbeat would compare two different units
+    // and fail on a page that works; `decimals` is how many places the field is
+    // printed to, which is not the same for the two demos either.
+    //
+    // The `reset` below is what puts them back: sundial's two are in
+    // `crate::filter::KNOBS` and alcove's radius is in `crate::occlusion`'s,
+    // which is the list each sample's reset walks.
     for (const count of knobs.counts ?? []) {
       const before = stands(hud()[hud().length - 1] ?? '', count.field);
       const dragged = await dragSlider(count.control);
@@ -4286,7 +4320,8 @@ try {
         ? String(
             await evaluate(
               page,
-              `document.getElementById('${count.control}')?.value ?? ''`
+              count.answer ??
+                `document.getElementById('${count.control}')?.value ?? ''`
             )
           )
         : '';
@@ -4300,15 +4335,16 @@ try {
         Boolean(countLine) &&
           countNow !== '' &&
           countNow !== before &&
-          countNow === Number(asked).toFixed(2),
+          countNow === Number(asked).toFixed(count.decimals ?? 2),
         !dragged
           ? `the page has no #${count.control} control`
           : !moved
             ? 'the demo did not go back into play after the drag — status ' +
               `${await evaluate(page, `crcbl.status()`)}`
             : countLine
-              ? `the count reads ${countNow || '(nothing)'}, the slider asked ` +
-                `for ${asked || '(nothing)'}, and it opened at ` +
+              ? `the count reads ${countNow || '(nothing)'}, ` +
+                `${count.answer ? 'the engine answered' : 'the slider asked for'} ` +
+                `${asked || '(nothing)'}, and it opened at ` +
                 `${before || '(nothing)'}`
               : `no heartbeat in ${pollCeiling()} ms after the drag`
       );

@@ -70,6 +70,12 @@ struct Arm {
     bent_normal_view: bool,
     /// The occlusion radius, or `None` for the shipped one.
     radius: Option<f32>,
+    /// Whether the gather reports a bent direction beside its scalar.
+    ///
+    /// `r_ssao_bent_normals`, and `false` is the arm that leaves every bent
+    /// channel at the zero sentinel — see
+    /// [`the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gathered`].
+    bent_normals: bool,
     /// Whether the sun is switched off, leaving the ambient term alone.
     sunless: bool,
     /// Whether the frame is taken from [`court::rim_camera`] rather than
@@ -95,6 +101,7 @@ impl Arm {
             occlusion_view: false,
             bent_normal_view: false,
             radius: None,
+            bent_normals: true,
             sunless: false,
             rim: false,
         }
@@ -112,6 +119,22 @@ impl Arm {
     const fn without_occlusion(self) -> Self {
         Self {
             effects: RenderEffects::DEFAULT_STACK.difference(RenderEffects::AMBIENT_OCCLUSION),
+            ..self
+        }
+    }
+
+    /// **The same arm with `r_ssao_bent_normals` off** — the gather still runs
+    /// and still writes its scalar, and every bent channel it writes is the zero
+    /// sentinel.
+    ///
+    /// The other half of [`Self::without_occlusion`]: that one takes the whole
+    /// pass out and leaves the renderer's 1×1 placeholder, this one leaves the
+    /// pass in and takes the direction out of it. Both are meant to draw the same
+    /// picture under [`Self::as_bent_direction`], which is what the sentinel test
+    /// asks.
+    const fn without_bent_normals(self) -> Self {
+        Self {
+            bent_normals: false,
             ..self
         }
     }
@@ -203,6 +226,14 @@ fn draw(extent: (u32, u32), arm: Arm) -> (Image, String, AdapterInfo) {
         occlusion::var(occlusion::SPLIT)
             .set(&crcbl::console::Value::Float(at))
             .expect("the seam is inside its own range");
+    }
+    // Written only when it is off, for the reason every `Option` above is left
+    // alone: the shipped arm must run whatever the engine declares, so that a
+    // change of default moves these frames rather than being papered over here.
+    if !arm.bent_normals {
+        occlusion::var(occlusion::BENT_NORMALS)
+            .set(&crcbl::console::Value::Bool(false))
+            .expect("the bent-direction switch takes a bool");
     }
 
     let mut setup = OffscreenSetup::open_forward_with(
@@ -1324,6 +1355,172 @@ fn the_bent_direction_is_the_normal_on_open_floor_and_leans_out_of_an_enclosure(
     match check_golden(&bent, "bent-normal", &paths) {
         Ok(line) => eprintln!("alcove golden: {line}"),
         Err(fault) => panic!("{fault}"),
+    }
+}
+
+/// How far a pixel of the sentinel picture may sit from the grey
+/// `crcbl::shaders::ssao::BENT_NORMAL_NONE` encodes to, in 0-255 codes.
+///
+/// **One code, which is a differing sRGB rounding on some other driver and
+/// nothing more.** `BENT_NORMAL_NONE` is `0x80` in an `Rgba8Unorm` channel, the
+/// bent view passes that through unchanged, and the swapchain's encode lands it
+/// between two bytes — so the picture is one byte everywhere and this bound
+/// admits that byte and its neighbour. The sweep in the test's own doc measured
+/// the same 0.16 codes on both adapters, over every pixel of both arms.
+const SENTINEL_GREY_TOLERANCE: f32 = 1.0;
+
+/// How far the shipped bent arm must stand off that same grey, in 0-255 codes on
+/// its furthest channel, at each of the blocks below.
+///
+/// **Measured, and floored at about half of it**, which is
+/// [`CORNER_BENT_LEAN`]'s rule: the readings are in the test's doc and the
+/// thinnest of them is the alcove's back corner at 57.64. What it separates is
+/// "the view drew a direction" from "the view drew the sentinel", so it has the
+/// whole distance between the two to spend and spends half.
+const SHIPPED_OFF_SENTINEL: f32 = 28.0;
+
+/// **Where the gather reports no direction, the bent view is one flat grey — and
+/// the shipped arm is not.**
+///
+/// The anti-vacuity
+/// [`the_bent_direction_is_the_normal_on_open_floor_and_leans_out_of_an_enclosure`]
+/// argues for in prose and does not draw. That test reads four points of one
+/// frame and says the direction is the normal here and leans there; both halves
+/// of it would go on passing if the view had been wired to the *shading* normal,
+/// or to any other picture that happens to be green on open floor. What separates
+/// those is the frame the sentinel makes, and until this test nothing in this
+/// crate drew it.
+///
+/// **Two arms, because there are two ways to have no direction and they must
+/// draw the same picture.** `r_ssao_bent_normals` off leaves the gather running
+/// and writing its scalar with the direction taken out of the arithmetic;
+/// `RenderEffects::AMBIENT_OCCLUSION` out takes the whole pass away and leaves
+/// `crcbl_render::forward`'s 1×1 placeholder, whose `gba` are the same sentinel
+/// bytes. `mesh.slang` says both are the mid grey and `web/pages/alcove.html`
+/// tells a visitor to expect it; this is what holds them to it.
+///
+/// **The claim is every pixel, not a block average.** The sentinel picture has no
+/// features in it to place a reading on, so a block mean would be four samples of
+/// a frame that is meant to be uniform — the scan below asks the whole frame and
+/// names the worst pixel when it is not. The four blocks are still read, off the
+/// *shipped* bent arm, and that is the half a picture of flat grey cannot supply:
+/// a view wired to a constant draws the sentinel frame perfectly.
+///
+/// # What was measured
+///
+/// Every pixel of both arms at [`EXTENT`], on radv (AMD Radeon RX 7900 XTX, RADV
+/// NAVI31) and on lavapipe (llvmpipe, LLVM 22.1.8). Both drivers, both arms:
+/// **0.16** codes off the encoded grey of 187.84 at the worst pixel, which is the
+/// distance from that grey to the byte 188 it rounds to — so the picture is that
+/// one byte at every pixel of both frames.
+///
+/// The shipped bent arm at the same four blocks, in codes off the same grey on
+/// its furthest channel:
+///
+/// ```text
+/// block                        radv   lavapipe
+/// open floor                  67.16      67.16
+/// the crease                  66.52      66.96
+/// the alcove's back corner    57.68      57.64
+/// the contact band            58.36      58.48
+/// ```
+///
+/// # How it was shown to fail
+///
+/// Three runs, one per thing this check says.
+///
+/// * **The sentinel arm made the shipped one**, by dropping
+///   `Arm::without_bent_normals` from the first arm — which is what a switch that
+///   had stopped reaching the gather would leave. The scan read the shaded
+///   court's bent picture instead:
+///   `the sentinel picture with r_ssao_bent_normals off draws [0, 186, 194] at (237, 0), 187.84 codes off the grey 187.84, past 1`.
+/// * **The encoded grey flipped**, by reading the sentinel off `0x40` rather than
+///   `crcbl::shaders::ssao::BENT_NORMAL_NONE` — what a reference spelled as a
+///   literal here would come to once the encoding moved. The picture that is
+///   right then failed at its first pixel:
+///   `the sentinel picture with r_ssao_bent_normals off draws [188, 188, 188] at (0, 0), 50.79 codes off the grey 137.21, past 1`.
+/// * **The shipped arm drawn with the switch off too**, which is what a view
+///   wired to a constant would put up on every arm. The scan above passed on both
+///   arms and the blocks are what caught it:
+///   `open floor draws [188.0, 188.0, 188.0] on the shipped bent arm, 0.16 codes off the sentinel grey 187.84 and short of 28`.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-alcove-golden.sh"]
+fn the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gathered() {
+    let block = block_for(EXTENT);
+    let camera = court::fixed_camera();
+    // The byte an `Rgba8Unorm` channel holds where there is no direction, put
+    // through the swapchain's encode exactly as the open-floor claim above puts
+    // the floor's own normal through it.
+    let grey = srgb_encode(f32::from(crcbl::shaders::ssao::BENT_NORMAL_NONE) / 255.0);
+
+    let (shipped, paths, _) = draw(EXTENT, Arm::shipped().as_bent_direction());
+
+    for (name, arm) in [
+        (
+            "r_ssao_bent_normals off",
+            Arm::shipped().without_bent_normals().as_bent_direction(),
+        ),
+        (
+            "the occlusion pass out",
+            Arm::shipped().without_occlusion().as_bent_direction(),
+        ),
+    ] {
+        let (frame, _, _) = draw(EXTENT, arm);
+
+        // Every pixel, and the worst one is what the message carries: "the frame
+        // is grey everywhere" is a claim a block average cannot make.
+        let mut worst = (0.0f32, (0, 0), [0u8; 3]);
+        for y in 0..frame.height() {
+            for x in 0..frame.width() {
+                let pixel = frame.pixel(x, y).expect("inside the frame");
+                let off = (0..3)
+                    .map(|at| (f32::from(pixel[at]) - grey).abs())
+                    .fold(0.0f32, f32::max);
+                if off > worst.0 {
+                    worst = (off, (x, y), [pixel[0], pixel[1], pixel[2]]);
+                }
+            }
+        }
+        let (off, at, drawn) = worst;
+        eprintln!(
+            "alcove golden: the sentinel picture with {name} on {paths} — the grey \
+             {grey:.2}, worst pixel {drawn:?} at {at:?}, {off:.2} codes off"
+        );
+        assert!(
+            off < SENTINEL_GREY_TOLERANCE,
+            "the sentinel picture with {name} draws {drawn:?} at {at:?}, {off:.2} codes off \
+             the grey {grey:.2}, past {SENTINEL_GREY_TOLERANCE}. With no direction gathered \
+             every bent channel is the {sentinel:#04x} `crcbl_shaders::ssao::BENT_NORMAL_NONE` \
+             names, and this view passes those bytes through",
+            sentinel = crcbl::shaders::ssao::BENT_NORMAL_NONE,
+        );
+
+        // **And the same blocks off the shipped arm, which is what a flat grey
+        // cannot say anything about.** A view wired to a constant draws the
+        // picture above and fails here.
+        for (place, point) in [
+            ("open floor", court::OPEN_FLOOR),
+            ("the crease", court::crease_lit()),
+            ("the alcove's back corner", court::ALCOVE_CORNER),
+            ("the contact band", court::CONTACT_BAND),
+        ] {
+            let where_ = project(&camera, EXTENT, point);
+            let here = channels(&frame, where_, block);
+            let there = channels(&shipped, where_, block);
+            let apart = (0..3)
+                .map(|at| (there[at] - grey).abs())
+                .fold(0.0f32, f32::max);
+            eprintln!(
+                "alcove golden: {place} with {name} — {here:?}; the shipped bent arm draws \
+                 {there:?}, {apart:.2} codes off the grey {grey:.2}"
+            );
+            assert!(
+                apart > SHIPPED_OFF_SENTINEL,
+                "{place} draws {there:?} on the shipped bent arm, {apart:.2} codes off the \
+                 sentinel grey {grey:.2} and short of {SHIPPED_OFF_SENTINEL} — so the frame \
+                 above is grey for want of a picture rather than for want of a direction"
+            );
+        }
     }
 }
 

@@ -81,15 +81,25 @@ cannot disagree.
 **Milestone 3 is the picture that switch was missing, 2026-09-05.**
 `ForwardRenderer::set_bent_normal_view` draws the direction the gather reported
 as `n * 0.5 + 0.5`, and the sample reaches it through `crcbl::debug_view` — one
-cell, written by `N`, by the panel's `BENT VIEW` row, by the page's own button
-and by a typed `debug_view bent normal`, so the panel reports which picture is
-in force rather than a flag of its own. What holds it is
+cell, written by `N`, by the panel's `BENT VIEW` row, by the page's own button,
+by `--bent-view` on the command line and by a typed `debug_view bent normal`, so
+the panel reports which picture is in force rather than a flag of its own. The
+flag is a `DebugView` beside `--ao-view` rather than a `bool` of its own, for
+the same reason the panel's two rows are: there is one cell, so the last flag on
+the line is the one that draws. What holds it is
 `the_bent_direction_is_the_normal_on_open_floor_and_leans_out_of_an_enclosure`:
 on open floor nothing stands inside the occlusion radius, so the average
 unblocked direction is the floor's own normal and the frame draws exactly that;
 in the slot, in the recess and on the floor beside a box it leans out towards
 the opening, which is the whole of what a direction says and a grey image
 cannot. `bent-normal.png` is behind those readings rather than in front of them.
+
+Its anti-vacuity is
+`the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gathered`,
+which draws the picture there is no direction in: with `r_ssao_bent_normals`
+off, and again with the occlusion pass out of the stack, every pixel of the
+frame is the grey `crcbl_shaders::ssao::BENT_NORMAL_NONE` encodes to — and the
+four blocks above are not that grey on the arm that ships.
 
 What holds it up is `apps/alcove/tests/golden.rs`, run by
 `apps/alcove/tests/run-alcove-golden.sh` and by CI's "Draw alcove on lavapipe"
@@ -136,11 +146,12 @@ compares two screen-space gathers.
    across and a one-pixel halo is not something a person or a block average can
    see.
 3. **Bent-normal visualisation**, once GTAO produces one. Done: `N`, the pause
-   panel's `BENT VIEW` row, the page's own button and `__crcbl_alcove_bent_view`
-   all put `crcbl_render::DebugView::BentNormal` up, and `bent-normal.png` is a
-   golden with four readings in front of it — the direction is the floor's own
-   normal on open floor and leans out towards the opening in the slot, the
-   recess and the box's contact band.
+   panel's `BENT VIEW` row, the page's own button, `--bent-view` and
+   `__crcbl_alcove_bent_view` all put `crcbl_render::DebugView::BentNormal` up,
+   and `bent-normal.png` is a golden with four readings in front of it — the
+   direction is the floor's own normal on open floor and leans out towards the
+   opening in the slot, the recess and the box's contact band — with the
+   sentinel frame behind them as their control.
 4. **Ray-traced AO**, gated on P7C, and the device clamp — and this is the rung
    that gives the screen-space rungs a reference to be judged against, which
    samples 17 and 18 do not get as cleanly.

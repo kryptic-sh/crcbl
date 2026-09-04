@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! alcove [--camera fixed|free] [--force-geometry P] [--force-binding B]
-//!        [--no-ao] [--ao-view] [--technique T] [--split [AT]] [--headless]
+//!        [--no-ao] [--ao-view] [--bent-view] [--technique T] [--split [AT]]
+//!        [--headless]
 //! ```
 //!
 //! Argv in, exit code out, and nothing else: the fixture itself is the

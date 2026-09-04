@@ -265,12 +265,12 @@ nor `crate::app` offers a hook to empty it from inside `apps/sundial`.
 `/demos/alcove/` is the first page on the site whose controls are HTML rather
 than keys — `apps/alcove/src/web.rs` exports one call per knob and
 `web/demos/alcove/main.js` binds them. `web/tools/browser-e2e.mjs`'s `alcove`
-row presses **five** of them and reads the effect off the demo's own heartbeat:
+row drives **six** of them and reads the effect off the demo's own heartbeat:
 the seam button, the seam slider, the technique button, the bent-direction
-button and the AO-only view button — the last two twice each, because no
-sample's `reset` reaches the engine's debug view — then `reset`. The
-**bent-normals switch, the radius slider and the intensity slider are driven by
-nothing but a person**.
+button, the AO-only view button — the last two twice each, because no sample's
+`reset` reaches the engine's debug view — and the radius slider, then `reset`.
+The **bent-normals switch and the intensity slider are driven by nothing but a
+person**.
 
 The AO-only button joined that list on 2026-09-05, once `Alcove::log_heartbeat`
 carried a `view:` field and `browser-e2e.mjs`'s debug-view block took a **list**
@@ -278,14 +278,20 @@ of `{control, label, noun}` entries against one shared `viewField`: it writes
 the same `crcbl::debug_view` cell the bent one does, its label is
 `ambient occlusion`, and `web/demos/alcove/main.js` presses it by reading the
 view back and asking for the other one — so the second press takes it away,
-which is the half that block asserts. Of the three left, **the radius is the
-cheap one**: it is on the heartbeat already, as `radius:` in world units, so it
-wants an entry of the shape sundial's `knobs.counts` took and a comparison that
-accounts for its control being a 0-to-1 dial rather than metres. The
-**bent-normals switch and the intensity slider are not on the heartbeat at
-all**, and checking either wants another field on that line or a reading taken
-off the canvas, and the second is what `still` in that row says this demo cannot
-give.
+which is the half that block asserts.
+
+The radius joined it the same day, and it was the cheap one for the reason this
+entry said it would be: it is on the heartbeat already, as `radius:` in world
+units. What it took was a `knobs.counts` entry of the shape sundial's two bias
+sliders take, plus the two fields that entry needed — `answer`, because
+`#knob-radius` is a 0-to-1 dial and the heartbeat prints metres, so the drag is
+held against `__crcbl_alcove_radius(-1)`'s return rather than against the
+slider's raw value; and `decimals`, because the two demos do not print their
+fields to the same number of places. Both default to what sundial's two entries
+already did, so those are unchanged. The **bent-normals switch and the intensity
+slider are not on the heartbeat at all**, and checking either wants another
+field on that line or a reading taken off the canvas, and the second is what
+`still` in that row says this demo cannot give.
 
 **Reaching those controls at all costs the pointer, and that surprised us.** The
 fixture asks for Pointer Lock while it is running, `web/engine/shell.js` takes
@@ -319,24 +325,25 @@ slice did not do:
   `Arm::shipped()` — the shipped gather, the shipped radius, no seam. The
   `hemisphere` gather writes the zero sentinel on every pixel and therefore
   draws mid grey everywhere under this view; that is the honest picture, and
-  nothing asserts it, so a cheap tier that started reporting a direction would
-  go unnoticed. `court::rim_camera` is not drawn under the view either, and it
-  is the pose where a depth-reconstructed normal is wrong — a bent direction at
-  a silhouette is exactly where topic 18's escalation clause would show, and no
-  claim is made about it.
+  nothing asserts it **on that gather** —
+  `the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gathered`
+  holds the same grey with `r_ssao_bent_normals` off and with the occlusion pass
+  out, and neither of those arms is `hemisphere` running. So a cheap tier that
+  started reporting a direction would go unnoticed. `court::rim_camera` is not
+  drawn under the view either, and it is the pose where a depth-reconstructed
+  normal is wrong — a bent direction at a silhouette is exactly where topic 18's
+  escalation clause would show, and no claim is made about it.
 
-- **Nothing reads the sentinel's own picture.** With `r_ssao_bent_normals` off,
-  or with `RenderEffects::AMBIENT_OCCLUSION` out of the stack, the frame is the
-  mid grey `crcbl_shaders::ssao::BENT_NORMAL_NONE` encodes to, everywhere —
-  `mesh.slang` says so, `web/pages/alcove.html` tells a visitor to expect it,
-  and no test in this crate looks. It is one more arm of the same `draw`, and it
-  is the anti-vacuity a reader would reach for first.
-
-- **A run cannot open on it.** `--ao-view` starts a run drawing the occlusion
-  channel and there is no `--bent-view` beside it, so a headless capture of this
-  picture wants an `autoexec.cfg` with `debug_view bent normal` in it. Left out
-  because nothing asked for it, not because it is hard: `Options::apply` is
-  where it would go.
+- **No run opens on either view flag; only the parse and the write are held.**
+  `the_two_view_flags_name_one_picture_and_the_last_one_wins` and
+  `apply_puts_the_flags_picture_up_and_leaves_the_cell_alone_without_one` in
+  `apps/alcove/src/args.rs` cover `--bent-view` and `--ao-view` from the
+  argument to the `crcbl::debug_view` cell, and stop there. That the frame a
+  flagged run then presents is the bent picture is not asserted by anything:
+  closing it wants `alcove --bent-view --screenshot` and a reading off the PNG,
+  and no sample in this repository has such a gate for any of its flags. Left
+  because it is a harness rather than a test, not because it is hard — the
+  screenshot path is `crcbl::args::Common::with_screenshot` and already works.
 
 - **`Knobs` grew a `DebugView` and the debug overlay's `view` row changed with
   it**, from `AO ONLY` / `SHADED` to the view's own name. That row is not
@@ -930,11 +937,6 @@ records what is now true. What it did not do:
   occlusion scalar sets — full occlusion keeps the bent answer, none keeps the
   shading normal — which is what the direction already does at the sentinel, but
   continuous. Not built.
-
-- **`docs/plan/52-debug-console.md` is stale about the view list.** Decision 6
-  says `DebugView::label`'s "six names" and decision 7's table spells six; there
-  are seven now, `bent normal` being the one neither has. That file was outside
-  this slice's permitted paths.
 
 - **Two gates were not run.** `crates/crcbl/tests/run-windowed-e2e.sh` opens a
   window, and nothing in this slice was allowed to. The browser gate was not run
