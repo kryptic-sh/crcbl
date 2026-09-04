@@ -654,42 +654,38 @@ than as a reason:
   enumerated**: `web/tools/browser-e2e.mjs` was read only around the console,
   autoexec and touch groups.
 
-## The `forward` timing bundles two clears, and a baseline row would split them (2026-09-02)
+## Three price fixtures still bundle `forward`'s two clears (2026-09-05)
 
-**Raised by the user**, on reading the area-light prices: is the `forward`
-measurement timing things that are not the forward pass?
+`forward`'s two full-extent attachment clears are `LoadOp::Clear`s fused into
+the pass's begin, so giving them their own timestamp means giving them their own
+pass and a second full-target write — **not worth doing, and the reason is the
+measurement's, not the renderer's.** What attributes them honestly is a
+zero-geometry configuration timed beside the loaded one, and
+`mesh_e2e/depth_only.rs`'s `the_price_of_the_depth_only_passes` now has one:
+`PRICED_FIELDS`' second row draws an empty list at the same extent through the
+same effect stack, interleaved a frame at a time with the field, and the helper
+holds the two rows apart by their `FrameCounters` instance counts rather than by
+a duration. Measured 2026-09-05 at 640x480 over 48 recorded frames, the floor is
+a `forward` p50 of 0.009 ms on an RX 7900 XTX and 0.258 ms on lavapipe — medians
+of three runs each, spread 0.009–0.010 and 0.256–0.268 — and it is written into
+`docs/plan/43-render-standards.md`'s Delivery preamble.
 
-**Mostly no, and the boundary is worth writing down.** `forward` at
-`crates/crcbl-render/src/forward.rs`'s `add_render_pass("forward")` is the
-opaque geometry draw plus its shading. `mesh.slang`'s per-light loop is inside
-it deliberately — a forward+ renderer has no separate lighting pass to move it
-to. Everything else carries its own label: `light-cluster`, `shadow`,
-`depth-prepass`, `sky`, `grid`, `debug-draw`, `sprites`, and every post pass.
+What is left:
 
-**Two things do ride along, and they are different cases.**
-
-- **The froxel clustering is outside `forward` and every price in
-  `44-lighting.md` excluded it.** Measured 2026-09-02: 0.002 ms for the sun
-  alone, 0.007 ms for sixteen lights, the same for rectangles as for point
-  lights, stable over three runs at 1920×1080/400 frames. So 0.31 µs per light,
-  kind-independent — which corroborates `mesh_e2e/rect_bound.rs` from the other
-  side, since the pass bounds a rectangle by a sphere exactly as a point light.
-  That plan now reports shading and clustering together.
-- **Two full-extent attachment clears are inside `forward` and cannot be taken
-  out.** `clear_color` is a `LoadOp::Clear` (`graph.rs`), fused into the render
-  pass's begin; giving it its own timestamp means giving it its own pass and a
-  second full-target write, so the renderer would get slower to make the number
-  tidier. **Not worth doing, and the reason is the measurement's, not the
-  renderer's.**
-
-**What would attribute them honestly, and is not built: a zero-geometry baseline
-row in the price fixture.** Time `forward` on a frame with the same attachments
-and an empty draw list; that is the clear-plus-pass-begin floor, and subtracting
-it turns `forward` into the draw's own cost. It changes no renderer code and
-costs one extra configuration per price run. It matters for any figure quoted as
-a **share** of a frame — `forward` is 21.9% of a headless lantern frame with the
-clears in it — and not for the per-light prices, where the clears are constant
-across rows and cancel in the subtraction.
+- **The other three `the_price_of_*` fixtures have no floor row.**
+  `mesh_e2e/area_light.rs` and `mesh_e2e/rect_bound.rs` both subtract a sun-only
+  configuration, so the clears cancel in their per-light figures and only an
+  absolute millisecond quoted off them carries the floor.
+  `mesh_e2e/debug_draw.rs` is the one that does not cancel: its "empty"
+  configuration empties the debug buffer while still drawing the scene, so the
+  `forward` figure it prints beside the debug-draw pass has the clears in it.
+  Adding a row is `depth_only.rs`'s pattern — one more entry in the fixture's
+  set of priced configurations, with an empty draw list — and costs one extra
+  configuration per price run.
+- **`docs/plan/47-reflections.md`'s shares are still unsplit**: `shadow` at
+  27.1% and `forward` at 21.9% of a headless lantern frame, with the clears
+  inside the `forward` number. Restating them needs a lantern-frame floor rather
+  than a mesh-e2e one, and nothing measures that yet.
 
 ## The multi-bounce tint narrowed AO's contrast, and two claims lost margin (2026-09-01)
 

@@ -25,6 +25,21 @@
 //! pass over the same field, timed by the GPU timestamps the render graph
 //! already takes around every pass.
 //!
+//! # Two clears ride inside `forward`, and a second row is what splits them
+//!
+//! `forward` begins by clearing the scene colour and the reflectivity target
+//! over the whole extent — `clear_color` is a `LoadOp::Clear` fused into the
+//! pass's begin, so no timestamp can be put around the two without giving them
+//! a pass and a second full-target write of their own. Every millisecond
+//! printed for `forward`, here and in the plans, therefore has them in it.
+//!
+//! What separates them from the draw is a second **configuration** rather than
+//! a second timestamp: the same extent, the same effect stack and an empty draw
+//! list. What that frame's `forward` costs is the clear-plus-pass-begin floor,
+//! and the difference between the two rows is the field's own price. It is
+//! measured beside the field below and printed beside it, so a share of a frame
+//! quoted off the loaded row can be read against the floor it stands on.
+//!
 //! # The mesh-shader path is not priced here and does not take this rung
 //!
 //! A device with a mesh stage draws these same tiles through
@@ -60,6 +75,14 @@ const FIELD_SIDE: usize = 12;
 /// ordering asserted below is between them.
 const PRICED_PASSES: [&str; 3] = ["shadow", "depth-prepass", "forward"];
 
+/// The configurations priced, as patches on a side of the field each draws.
+///
+/// The loaded field first and the empty draw list second, because the orderings
+/// asserted below are between them: the second is the header's floor, and the
+/// only thing that differs between the two is what is placed in front of the
+/// camera.
+const PRICED_FIELDS: [usize; 2] = [FIELD_SIDE, 0];
+
 /// Where the camera stands: back from the near edge of the field and a little
 /// way up, looking at its centre, so every patch is in front of it.
 fn field_camera() -> Camera {
@@ -72,22 +95,26 @@ fn field_camera() -> Camera {
     }
 }
 
-/// A renderer and a pool on `headless`, with the field of dunes patches in the
-/// frame.
+/// A renderer and a pool on `headless`, with `side` squared dunes patches in
+/// the frame.
 ///
 /// The patches tile without overlapping — a patch spans `2 * DUNES_EXTENT` on
 /// both axes and the step is that — so the vertex count in front of the camera
-/// is [`FIELD_SIDE`] squared patches and not one patch drawn many times into the
-/// same pixels. What each is drawn at is the level-of-detail cut's decision, as
-/// it would be in a frame of a real scene.
-fn dunes_field(headless: &Headless) -> (ForwardRenderer, TransientPool) {
+/// is `side` squared patches and not one patch drawn many times into the same
+/// pixels. What each is drawn at is the level-of-detail cut's decision, as it
+/// would be in a frame of a real scene.
+///
+/// A `side` of zero places nothing and is [`PRICED_FIELDS`]' second row: the
+/// same renderer built the same way on the same device, with an empty draw
+/// list.
+fn dunes_field(headless: &Headless, side: usize) -> (ForwardRenderer, TransientPool) {
     let mut renderer =
         ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
             .expect("the forward renderer builds");
     let step = 2.0 * DUNES_EXTENT;
-    let first = -(FIELD_SIDE as f32 - 1.0) / 2.0;
-    for row in 0..FIELD_SIDE {
-        for column in 0..FIELD_SIDE {
+    let first = -(side as f32 - 1.0) / 2.0;
+    for row in 0..side {
+        for column in 0..side {
             place(
                 &mut renderer,
                 crcbl::render::scene::DEMO_DUNES,
@@ -103,16 +130,32 @@ fn dunes_field(headless: &Headless) -> (ForwardRenderer, TransientPool) {
     (renderer, TransientPool::new())
 }
 
-/// Each of [`PRICED_PASSES`]' p50 and p95 in nanoseconds, in that order, or
-/// [`None`] where the device reports no way to time a pass.
+/// One configuration's measurement.
+#[derive(Debug)]
+struct Priced {
+    /// How many frames reached [`crcbl::render::PassStats`], which is not how
+    /// many were drawn: the timer ring hands the same report back until a new
+    /// slot resolves, and a repeat is not a second sample.
+    recorded: u64,
+    /// Each of [`PRICED_PASSES`]' p50 and p95 in nanoseconds, in that order.
+    passes: Vec<(u64, u64)>,
+}
+
+/// Each of [`PRICED_FIELDS`]' measurement, in that order, or [`None`] where the
+/// device reports no way to time a pass.
 ///
-/// `area_light.rs`'s helper is the shape this follows, down to the warm-up and
-/// the percentile floor — both are that file's constants rather than a second
-/// copy — and the difference is that one scene is drawn rather than three
-/// interleaved: the comparison here is between passes **of the same frame**, so
-/// contention that lands on one lands on all three and no interleaving can
-/// separate them.
-fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<Vec<(u64, u64)>> {
+/// `area_light.rs`'s helper is the shape this follows, down to the warm-up, the
+/// percentile floor and the interleaving — the first two are that file's
+/// constants rather than a second copy. **The configurations are drawn
+/// interleaved on one device, a frame each per turn**, for that helper's
+/// reason: the suite runs its tests at once and a software rasteriser's "GPU"
+/// time is CPU time, so a run measured configuration after configuration reads
+/// whatever else was on the machine during that configuration's turn. The
+/// comparison between the passes of one frame — the prepass against the forward
+/// pass — needs none of that, because contention that lands on one lands on all
+/// three; the comparison between the loaded row and the floor is between
+/// frames, and does.
+fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; PRICED_FIELDS.len()]> {
     let headless = Headless::open_at(
         extent,
         Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
@@ -123,9 +166,27 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<Vec<(u64, u64)
     // either way.
     let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
     let camera = field_camera();
-    let (mut renderer, mut pool) = dunes_field(&headless);
+    let mut priced = PRICED_FIELDS.map(|side| {
+        let (renderer, pool) = dunes_field(&headless, side);
+        let timers = timed.then(|| {
+            crcbl::render::PassTimers::new(
+                device,
+                crcbl::render::forward::FRAMES_IN_FLIGHT,
+                crcbl::render::MAX_TIMED_PASSES,
+            )
+            .expect("a device reporting TIMESTAMP_QUERY gives out timer sets")
+        });
+        (
+            renderer,
+            pool,
+            timers,
+            crcbl::render::PassStats::new(),
+            Vec::new(),
+        )
+    });
+    let (field, ..) = priced.first().expect("one row per priced configuration");
     assert!(
-        renderer.selects_levels(),
+        field.selects_levels(),
         "this device chooses no level of a DAG, so the field in front of the camera would be \
          empty and the price would be of an empty pass"
     );
@@ -135,93 +196,114 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<Vec<(u64, u64)
     // about a rung this one has not reached. The fixture asks for no mesh stage,
     // and this is what says the device honoured that.
     assert_ne!(
-        renderer.geometry_path(),
+        field.geometry_path(),
         crcbl::hal::GeometryPath::MeshShader,
         "the depth pipeline's geometry came from a mesh stage, so `depthVertexMain` drew none \
          of the frames this priced"
     );
-    let mut timers = timed.then(|| {
-        crcbl::render::PassTimers::new(
-            device,
-            crcbl::render::forward::FRAMES_IN_FLIGHT,
-            crcbl::render::MAX_TIMED_PASSES,
-        )
-        .expect("a device reporting TIMESTAMP_QUERY gives out timer sets")
-    });
-    let mut stats = crcbl::render::PassStats::new();
-    let mut recorded = Vec::new();
 
     for index in 0..PRICE_WARMUP + frames {
-        let acquired = device
-            .acquire_next_frame(headless.swapchain)
-            .expect("the ring always has an image");
-        renderer
-            .begin_frame(device, &camera, &turning_sun(index), extent)
-            .expect("the uniform buffer is writable");
-        let compiled = {
-            let mut graph = crcbl::render::RenderGraph::new(headless.queue);
-            let target = graph.import_image(
-                "swapchain",
-                crcbl::render::ImportedImage {
-                    image: acquired.image,
-                    view: acquired.view,
-                    format: headless.format,
-                    extent,
-                    initial: ResourceState::Undefined,
-                    claim: crcbl::render::InitialClaim::Acquired,
-                    final_state: ResourceState::Present,
-                },
-            );
-            renderer.add_passes(&mut graph, &pool, target, extent);
-            graph.compile(&pool).expect("a legal frame")
-        };
-        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("priced frame"),
-            queue: headless.queue,
-        });
-        compiled
-            .execute(device, &mut pool, encoder.as_mut(), timers.as_mut())
-            .expect("the graph executed");
-        let commands = encoder.finish().expect("recording succeeded");
-        device
-            .submit(headless.queue, &SubmitInfo::new(&[commands]))
-            .expect("submit");
-        device
-            .present(
-                headless.queue,
-                &PresentInfo {
-                    swapchain: headless.swapchain,
-                    waits: acquired.present_semaphore.as_slice(),
-                    present_id: None,
-                },
-            )
-            .expect("present");
-        if let (true, Some(timers)) = (index >= PRICE_WARMUP, timers.as_ref()) {
-            stats.record(timers.latest());
+        for (renderer, pool, timers, stats, recorded) in &mut priced {
+            let acquired = device
+                .acquire_next_frame(headless.swapchain)
+                .expect("the ring always has an image");
+            renderer
+                .begin_frame(device, &camera, &turning_sun(index), extent)
+                .expect("the uniform buffer is writable");
+            let compiled = {
+                let mut graph = crcbl::render::RenderGraph::new(headless.queue);
+                let target = graph.import_image(
+                    "swapchain",
+                    crcbl::render::ImportedImage {
+                        image: acquired.image,
+                        view: acquired.view,
+                        format: headless.format,
+                        extent,
+                        initial: ResourceState::Undefined,
+                        claim: crcbl::render::InitialClaim::Acquired,
+                        final_state: ResourceState::Present,
+                    },
+                );
+                renderer.add_passes(&mut graph, &*pool, target, extent);
+                graph.compile(&*pool).expect("a legal frame")
+            };
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("priced frame"),
+                queue: headless.queue,
+            });
+            compiled
+                .execute(device, pool, encoder.as_mut(), timers.as_mut())
+                .expect("the graph executed");
+            let commands = encoder.finish().expect("recording succeeded");
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device
+                .present(
+                    headless.queue,
+                    &PresentInfo {
+                        swapchain: headless.swapchain,
+                        waits: acquired.present_semaphore.as_slice(),
+                        present_id: None,
+                    },
+                )
+                .expect("present");
+            if let (true, Some(timers)) = (index >= PRICE_WARMUP, timers.as_ref()) {
+                stats.record(timers.latest());
+            }
+            recorded.push(commands);
         }
-        recorded.push(commands);
     }
 
     device.wait_idle().expect("idle");
-    let prices = timed.then(|| {
-        eprintln!("{}: {}", crate::SUITE, stats.report());
-        PRICED_PASSES
-            .iter()
-            .map(|pass| {
-                stats.percentiles(pass).unwrap_or_else(|| {
-                    panic!("the {pass} pass is timed and the window is past its floor")
-                })
-            })
-            .collect()
+    // **What makes the second configuration a floor rather than a second copy
+    // of the first**, asked of the renderers and not of the clock — a duration
+    // read off a busy machine cannot tell the two apart, and this can.
+    // `FrameCounters::instances` is the live instances the cull dispatches were
+    // handed plus the frame's direct draws, and the direct draws are the
+    // full-screen passes' triangles, which both configurations record alike on
+    // this one device. So the whole difference between the two counts is the
+    // field, and a baseline that drew anything fails here instead of reporting
+    // a floor that is not one.
+    let submitted = std::array::from_fn::<_, { PRICED_FIELDS.len() }, _>(|index| {
+        let (renderer, ..) = &priced[index];
+        renderer.counters().instances
     });
-    if let Some(mut timers) = timers.take() {
-        timers.destroy(device);
+    let [loaded, empty] = submitted;
+    assert_eq!(
+        loaded,
+        empty + (FIELD_SIDE * FIELD_SIDE) as u64,
+        "the field submitted {loaded} instances and the empty draw list {empty}, which do not \
+         differ by the {} patches that are the only thing between them",
+        FIELD_SIDE * FIELD_SIDE,
+    );
+    let prices = timed.then(|| {
+        std::array::from_fn(|index| {
+            let (_, _, _, stats, _) = &priced[index];
+            eprintln!("{}: {}", crate::SUITE, stats.report());
+            Priced {
+                recorded: stats.frames(),
+                passes: PRICED_PASSES
+                    .iter()
+                    .map(|pass| {
+                        stats.percentiles(pass).unwrap_or_else(|| {
+                            panic!("the {pass} pass is timed and the window is past its floor")
+                        })
+                    })
+                    .collect(),
+            }
+        })
+    });
+    for (renderer, mut pool, timers, _, recorded) in priced {
+        if let Some(mut timers) = timers {
+            timers.destroy(device);
+        }
+        for commands in recorded {
+            device.destroy_command_buffer(commands);
+        }
+        renderer.destroy(device);
+        pool.destroy(device);
     }
-    for commands in recorded {
-        device.destroy_command_buffer(commands);
-    }
-    renderer.destroy(device);
-    pool.destroy(device);
     headless.finish();
     prices
 }
@@ -257,6 +339,18 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<Vec<(u64, u64)
 /// would be an assertion about what the cascades cover rather than about a
 /// vertex fetch.
 ///
+/// # The floor row, and what is asserted about it
+///
+/// The second row is the header's empty draw list, and its `forward` is what
+/// the two attachment clears and the pass's begin cost before anything is
+/// drawn. Two things are asked of it, and neither is a threshold. That it was
+/// **measured** — frames reached the accumulator and every pass came back with
+/// a duration — because a floor of zero would satisfy an ordering without
+/// having observed anything. And that it is **not dearer than the loaded row**,
+/// which is the one direction a floor cannot go. What says the row is really
+/// empty is neither of those but the instance counts the helper compares, which
+/// need no timestamps at all.
+///
 /// # A backend that cannot time a pass cannot price one
 ///
 /// CI's Apple Paravirtual device reports no `TIMESTAMP_QUERY`. The frames are
@@ -268,7 +362,7 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<Vec<(u64, u64)
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh price"]
 fn the_price_of_the_depth_only_passes() {
     let (extent, frames) = price_frame();
-    let Some(prices) = depth_pass_prices(extent, frames) else {
+    let Some([field, empty]) = depth_pass_prices(extent, frames) else {
         eprintln!(
             "{}: a field of {} dunes patches drew through the depth prepass, the shadow atlas \
              and the forward pass, and this backend reports no TIMESTAMP_QUERY, so the rung's \
@@ -278,15 +372,21 @@ fn the_price_of_the_depth_only_passes() {
         );
         return;
     };
-    let [shadow, prepass, forward] = prices[..].try_into().expect("one price per priced pass");
+    let [shadow, prepass, forward] = field.passes[..]
+        .try_into()
+        .expect("one price per priced pass");
+    let [floor_shadow, floor_prepass, floor_forward] = empty.passes[..]
+        .try_into()
+        .expect("one price per priced pass");
     let ms = |nanos: u64| nanos as f64 / 1.0e6;
     eprintln!(
-        "{}: a field of {} dunes patches at {}x{} over {frames} recorded frames — shadow \
+        "{}: a field of {} dunes patches at {}x{} over {} recorded frames — shadow \
          {:.3}/{:.3} ms, depth prepass {:.3}/{:.3} ms, forward {:.3}/{:.3} ms (p50/p95)",
         crate::SUITE,
         FIELD_SIDE * FIELD_SIDE,
         extent.0,
         extent.1,
+        field.recorded,
         ms(shadow.0),
         ms(shadow.1),
         ms(prepass.0),
@@ -294,12 +394,35 @@ fn the_price_of_the_depth_only_passes() {
         ms(forward.0),
         ms(forward.1),
     );
+    eprintln!(
+        "{}: an empty draw list at {}x{} over {} recorded frames — shadow {:.3}/{:.3} ms, \
+         depth prepass {:.3}/{:.3} ms, forward {:.3}/{:.3} ms (p50/p95), which is the \
+         clear-plus-pass-begin floor under the row above",
+        crate::SUITE,
+        extent.0,
+        extent.1,
+        empty.recorded,
+        ms(floor_shadow.0),
+        ms(floor_shadow.1),
+        ms(floor_prepass.0),
+        ms(floor_prepass.1),
+        ms(floor_forward.0),
+        ms(floor_forward.1),
+    );
 
     // Anti-vacuity first: timestamps that came back as zeroes would satisfy the
-    // ordering below without having measured anything.
+    // orderings below without having measured anything, and so would a floor
+    // row no frame ever reached.
     assert!(
         shadow.0 > 0 && prepass.0 > 0 && forward.0 > 0,
         "a pass that took no time at all was not measured"
+    );
+    assert!(
+        empty.recorded > 0 && floor_shadow.0 > 0 && floor_forward.0 > 0,
+        "the empty draw list reached {} recorded frames and a {} ns forward pass, so the floor \
+         it reports was not measured",
+        empty.recorded,
+        floor_forward.0,
     );
     assert!(
         prepass.0 < forward.0,
@@ -308,5 +431,13 @@ fn the_price_of_the_depth_only_passes() {
          fragment stage to use",
         ms(prepass.0),
         ms(forward.0),
+    );
+    assert!(
+        floor_forward.0 <= forward.0,
+        "the forward pass cost {:.3} ms over an empty draw list against {:.3} ms over {} \
+         dunes patches; a floor dearer than the row it is the floor of is not one",
+        ms(floor_forward.0),
+        ms(forward.0),
+        FIELD_SIDE * FIELD_SIDE,
     );
 }
