@@ -51,7 +51,10 @@ a shadow implementation whose artefacts ship.
   nothing else in the tree is going to build.
 - An atlas viewer: the shadow atlas drawn to screen, so tile assignment is a
   thing you can look at.
-- Technique selector and split screen, on sample 17's harness pattern.
+- Technique selector and split screen, on sample 17's harness pattern. The split
+  screen itself is built — `crcbl_render::split` owns the seam's geometry and
+  `r_ssao_split` is its first caller — so what this sample owes is the selector
+  and a shadow variable to put either side of it.
 - Pages web demo.
 
 ## Non-goals (hard cap)

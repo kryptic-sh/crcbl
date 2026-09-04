@@ -17550,6 +17550,30 @@ mod tests {
 
         let _blurs = ssao_blur_switch();
         let split = ssao_split_switch();
+        // Third, after the two above: the only other test that takes this one
+        // takes it alone, so this is the whole order and there is no cycle in
+        // it. Moved below, because two blocks holding the same scalars are
+        // equal whatever the seam did.
+        let slices = ssao_slice_switch();
+        // The count the seam's far side reads, and one that is not it. Read off
+        // the variable rather than written down: which end of the range ships
+        // has changed once already, and a test naming the wrong end would be
+        // comparing the shipped configuration against itself.
+        let ships = match crate::ssao::r_ssao_slices.default() {
+            crcbl_console::Value::Int(count) => *count,
+            other => panic!("`r_ssao_slices` defaults to {other:?}, which is not a count"),
+        };
+        let moved = if ships == i64::from(ssao::SLICE_COUNT_MAX) {
+            i64::from(ssao::SLICE_COUNT_DEFAULT)
+        } else {
+            i64::from(ssao::SLICE_COUNT_MAX)
+        };
+        assert_ne!(
+            ships, moved,
+            "the two slice counts this compares are one count, so the blocks below would differ \
+             by nothing whatever the seam did"
+        );
+        slices.set(ships);
 
         let gathered = crate::ssao::half_extent(TEST_EXTENT);
         // One entry per march the frame recorded: the last rectangle that pass
@@ -17604,9 +17628,15 @@ mod tests {
         );
         let plain = marches(&recorder, 0);
         let after = recorder.commands().len();
+        let (console, shipped) = renderer.ssao.blocks(renderer.frame);
+        let (uncompared_console, uncompared_shipped) = (
+            recorder.buffer_bytes(console).expect("the console's block"),
+            recorder.buffer_bytes(shipped).expect("the seam's block"),
+        );
         alone.release(device);
 
         split.set(0.5);
+        slices.set(moved);
         let frame = frame_seen_from(
             device,
             &mut renderer,
@@ -17615,6 +17645,11 @@ mod tests {
             &DirectionalLight::default(),
         );
         let compared = marches(&recorder, after);
+        let (console, shipped) = renderer.ssao.blocks(renderer.frame);
+        let (compared_console, compared_shipped) = (
+            recorder.buffer_bytes(console).expect("the console's block"),
+            recorder.buffer_bytes(shipped).expect("the seam's block"),
+        );
         frame.finish(device, renderer);
 
         assert_eq!(
@@ -17666,6 +17701,23 @@ mod tests {
         assert_ne!(
             compared[0].1, compared[1].1,
             "the two marches bound one group, so they cannot be reading two blocks"
+        );
+
+        // How far the reference backend can follow the far side. It will say
+        // what bytes a buffer holds and it will not say which buffer a group
+        // names, so the two together are "there are two blocks, and they differ
+        // by the knob that was moved" — not "the right march read the right
+        // one". Pointing both marches at one buffer still passes; see this
+        // module's entry in `docs/backlog.md`.
+        assert_eq!(
+            uncompared_console, uncompared_shipped,
+            "the console sat at its defaults and the two blocks still differ, so the seam's far \
+             side is not this frame with the shipped scalars — it is another frame"
+        );
+        assert_ne!(
+            compared_console, compared_shipped,
+            "one slice count was moved off the shipped one and both blocks still hold the same \
+             bytes, so a comparison shows the same picture twice"
         );
 
         recorder.assert_valid();
@@ -18626,6 +18678,13 @@ mod tests {
     #[test]
     fn every_pass_of_the_frame_gets_a_timing_row() {
         let _blurs = ssao_blur_switch();
+        // And the comparison seam, so the frame this checks carries the
+        // occlusion chain's second march: `docs/plan/ROADMAP.md`'s S4D row asks
+        // for a *per-technique* cost, and what makes that true is this test's
+        // own claim — every pass that opens a scope gets a row — applied to a
+        // frame that compares. See `crate::ssao`'s `r_ssao_split`.
+        let split = ssao_split_switch();
+        split.set(0.5);
         let recorder = Recorder::new();
         let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
@@ -18693,6 +18752,17 @@ mod tests {
             .iter()
             .map(|timing| timing.label.as_str())
             .collect();
+        // Anti-vacuity for the seam held above: a frame that did not compare
+        // would satisfy the equality below and say nothing about a
+        // per-technique cost, because there would be one technique in it.
+        for label in ["ssao", "ssao-shipped"] {
+            assert!(
+                compiled_labels.iter().any(|pass| pass == label),
+                "the frame compiled no `{label}` pass, so the seam did not reach it and this \
+                 test says nothing about a comparison having a cost per side. Its passes: \
+                 {compiled_labels:?}"
+            );
+        }
         assert_eq!(
             reported,
             compiled_labels,

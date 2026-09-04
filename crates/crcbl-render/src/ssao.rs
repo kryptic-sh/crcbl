@@ -660,6 +660,19 @@ impl Ssao {
         device.write_buffer(self.split_uniforms[frame], 0, &baseline.to_bytes())
     }
 
+    /// The two blocks [`Ssao::begin_frame`] wrote for `frame`: the console's and
+    /// the comparison seam's.
+    ///
+    /// Test-only, and it exists because the reference backend can be asked what
+    /// bytes a buffer holds but not which buffer a bind group names — so this is
+    /// how far a check can follow the seam's far side. See
+    /// `crate::forward`'s `the_comparison_seam_marches_twice_over_columns_that_tile_the_gather`
+    /// for what that leaves uncovered.
+    #[cfg(test)]
+    pub(crate) fn blocks(&self, frame: usize) -> (BufferHandle, BufferHandle) {
+        (self.uniforms[frame], self.split_uniforms[frame])
+    }
+
     /// Adds the `ssao` pass, its blurs and the reconstruction, in that order,
     /// and returns the image the forward pass should read.
     ///

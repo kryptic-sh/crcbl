@@ -52,10 +52,14 @@ technique, so there is no selector either.
 - A second implementation of `horizon_cosine`'s caller in `ssao.slang` — the
   file already says "Replace this function, and only this function, to upgrade
   the technique", which is the seam a selector would switch on.
-- A `r_ssao_technique` variable and, for the sample, a way to resolve **both**
-  in one frame and show them either side of a split. Nothing in `crcbl_render`
-  renders one frame two ways today; the S4D row asks for that of mirrors and
-  sundial as well, so it is a wave-wide prerequisite rather than an alcove one.
+- A `r_ssao_technique` variable, and a second pipeline for the gather to record
+  so the two can stand either side of the seam. The seam itself is no longer
+  part of this: `crcbl_render::split` and `r_ssao_split` landed 2026-09-04 and
+  the chain already records its gather twice, both marches through one pipeline
+  and differing by a uniform block. A technique is a different shader, so the
+  selector has to reach the pipeline rather than the block — which is
+  `add_gather`'s `pipeline` argument and a second entry point in `ssao.slang`,
+  not a second module.
 
 **Milestone 1 is not blocked by any of this and has no engine gap left**: the
 AO-only view mode ships, `r_ssao_intensity` shipped 2026-09-02 and
@@ -76,13 +80,17 @@ hundredth, so the two rectangles tile the target and neither is empty.
 encoder back and holds the two marches to those rectangles, with a frame
 comparing nothing as the control. `ssao`'s
 `the_seams_other_side_is_what_the_chain_ships` moves all four knobs and checks
-that `shipped` follows none of them.
+that `shipped` follows none of them. The two blocks' _contents_ are read back
+through the reference backend's `buffer_bytes` in the same march test: equal
+while the console sits at its defaults, different once one slice count is moved
+off the one that ships.
 
 **Not covered: that the second march binds the second block.** The reference
 backend records a bind group as a handle and a layout, not as the resources
-behind it, so the encoder cannot be asked which buffer a march read. Measured
-rather than assumed — pointing both marches at one buffer leaves the whole suite
-green, which is why that test's doc says so in its own words.
+behind it, so the encoder cannot be asked which buffer a march read. Two blocks
+exist and differ, and which of them each side read is the part nothing observes.
+Measured rather than assumed — pointing both marches at one buffer leaves the
+whole suite green, which is why that test's doc says so in its own words.
 
 What would close it, in the order they get harder:
 
