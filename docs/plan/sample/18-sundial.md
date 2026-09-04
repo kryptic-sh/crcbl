@@ -88,7 +88,7 @@ place to reopen it. No authoring tools.
 **Exempt from sample rule 11**, on lantern's ground. **Exempt from rules 2 and
 10**, on the viewer's: no game state, no `World`, no `GameModule`.
 
-## Status: built and published 2026-09-04, milestone 1 complete
+## Status: built 2026-09-04, milestones 1–4 complete
 
 **`apps/sundial` exists and CI draws it.** The engine held exactly one shadow
 filter until 2026-09-04; it now holds three, selectable at runtime, with a
@@ -103,7 +103,10 @@ sun's clock on the page as HTML controls, and `web/tools/browser-e2e.mjs`'s
 `sundial` row presses each of them and reads what the `[HUD]` line says they
 did. **Milestone 1's two diagnostics landed the same day**: the cascade overlay
 on `C`, and the atlas viewer on `T`; **2026-09-05** gave the overlay the golden
-and the page button the viewer already had, and closed milestone 3.
+and the page button the viewer already had, and closed milestones 2, 3 and 4 —
+the acne/peter-panning pair on the two bias counts, the colonnade's shadow
+across the cascade split, and the whole filter ladder beside the shipped rung.
+What is left is milestone 5, which is gated on P7C.
 
 What also exists is evidence that the shadow implementation is at the edge of
 its current budget: since the 2026-08-26 re-tiling that bought a second shadowed
@@ -158,16 +161,59 @@ hold in their head, and the only honest way to set them is to look.
    is looking at.
 
 2. **Normal-offset bias and the acne/peter-panning pair**, checkable at the
-   contact points the scene was built for. The bias itself **shipped
-   2026-08-28** — `docs/plan/45-shadows.md`'s seventh decision — so what is left
-   here is the comparison, not the rung: a scene that shows the pair moving
-   against each other as the two counts change, where that decision could only
-   measure one fixture's strip and one patch's dots. **2026-09-04:** the acne
-   half now has a reading of its own, where before only peter-panning did —
-   `tests/golden.rs` counts what share of one block of open pavement sits more
-   than four luma under the median of its own 5x5 neighbourhood, at the bottom
-   of the sun's arc and again at the top of it, and holds the grazing share to
-   the steep one's.
+   contact points the scene was built for. **Complete 2026-09-05.**
+
+   The bias itself **shipped 2026-08-28** — `docs/plan/45-shadows.md`'s seventh
+   decision — so what was left here was the comparison, not the rung: a scene
+   that shows the pair moving against each other as the two counts change, where
+   that decision could only measure one fixture's strip and one patch's dots.
+   **2026-09-04** gave the acne half a reading of its own, where before only
+   peter-panning had one. **2026-09-05** made the two counts movable and put the
+   two artefacts on one frame.
+
+   The counts are console variables now — `crcbl_render::shadow::r_shadow_bias`
+   and `r_shadow_normal_offset`, floats in texels of the cascade a fragment
+   landed in, each declaring the constant it replaced as its own default, so no
+   golden moved. `Cascades::params` reads the cells rather than the constants,
+   which is the whole of the engine half. This sample binds them to `[` `]` and
+   `;` `'`, to the pause panel's `BIAS` and `NORMAL OFFSET` rows and to the
+   debug overlay's `shadow filter` section.
+
+   `tests/golden.rs`'s
+   `the_two_bias_counts_trade_acne_against_the_plinths_own_contact` is the
+   claim. Five arms of one frame at `sun::GRAZING_TICK` — what ships, each count
+   at zero, each count pushed — and two readings off each: what share of
+   `ACNE_CENTRE`'s block of open pavement is a self-shadowing dot, and the
+   **shadow term** at `plaza::PLINTH_CONTACT` and at five stations further along
+   the plinth's shadow. What comes out is three claims:
+   - **Zero either count and the pavement roughens; the contact does not move.**
+     The normal offset at zero takes the block to `41.53%` dots on radv and
+     `41.53%` on lavapipe, the constant bias at zero to `3.26%` and `3.23%`,
+     against `0.00%` on both as the sample ships — and the contact's term is
+     `70.73` on radv and `70.44` on lavapipe on all three arms, to a hundredth.
+   - **Push the constant bias and the shadow comes off the plinth.** At 96
+     texels the contact's term falls to `6.37` while the pavement past it still
+     carries `67.01`, which is peter-panning — a lit gap between a caster and
+     its shadow — rather than a shadow that has gone. Under 88 texels the
+     contact keeps its shadow outright and past 104 the shadow has left the
+     whole visible strip; the fixture's own constants carry the sweep.
+     **Eighty-eight is a large count and the plinth is why**: the depth pass
+     keeps front faces, so what the map stores along the ray from that contact
+     to the sun is the plinth's far face, and a bias has to cross the block's
+     whole 1.2 m depth. A thin caster loses its contact at a small count, which
+     is `apps/lantern`'s wall and the seventh decision's own fixture.
+   - **Push the normal offset twenty times as far and the contact does not
+     move.** At 40 texels its term is the shipped one to a hundredth, on both
+     adapters, though the frame is a different picture and the shadow's far end
+     has begun to go — which is the seventh decision's claim, that a sideways
+     move keeps a contact, measured rather than argued. At 44 the contact and
+     the pavement beyond it go together, which is a shadow that has gone.
+
+   The sabotage that says the reading has teeth is `Cascades::params` handing
+   the shader the constants again instead of the two cells: the four moved arms
+   then draw the shipped arm's frame byte for byte and the anti-vacuity
+   comparison fires first.
+
 3. **Cascade cross-fade**, against the seam the colonnade crosses. **Complete
    2026-09-05.**
 
@@ -198,12 +244,32 @@ hold in their head, and the only honest way to set them is to look.
    pose, and a walk that did not ask would be reading a column's lit face.
 
 4. **The filter ladder side by side**, with the penumbra-versus-distance claim.
+   **Complete 2026-09-05.**
+
    The filters themselves **shipped 2026-08-28 and 2026-09-04** — the ninth
    decision's rotated disc took the place of the Poisson set this line asked
    for, with the reason in that decision, and the fifteenth made all three rungs
-   selectable — so what is left here is the same as milestone 2's: the
-   comparison, not the rung. `r_shadow_filter` and `r_shadow_split` are what it
-   drives.
+   selectable — so what was left here was the same as milestone 2's: the
+   comparison, not the rung.
+
+   The **penumbra-versus-distance claim** is `tests/golden.rs`'s
+   `the_penumbra_widens_with_its_casters_height_under_pcss_and_not_under_disc`,
+   which was already the whole of it: three cubes of one size hanging at graded
+   heights over one plane, so the only thing differing between their shadows is
+   the distance from blocker to receiver, and the widths walked in **metres of
+   pavement** rather than pixels so the three are comparable. Under `pcss` they
+   read 0.0440 / 0.0640 / 0.1080 m, a ratio of 2.455; under `disc` 0.0440 /
+   0.0480 / 0.0440, a ratio of 1.000. The `disc` arm is the half that says the
+   widening came from the blocker search rather than from the scene.
+
+   The **side by side** is the seam claim,
+   `the_seam_runs_the_console_filter_on_the_left_and_the_shipped_one_on_the_right`,
+   which held one pair — `disc` against `pcss` — until **2026-09-05**. A rung
+   wired to its neighbour's branch is exactly the failure one pair cannot see,
+   so it now walks every rung the engine declares: 961 of the 1024 columns exact
+   on both adapters for each of them, with `disc` standing 3.110 and 324.498/255
+   from `pcss` down the two halves and `box` 26.417 and 363.250.
+
 5. **Ray-traced shadows**, gated on P7C, and the device clamp.
 
 ## Exit criteria

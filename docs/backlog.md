@@ -170,10 +170,45 @@ golden of their own and a button on the page. What is still **not** done:
   golden. The acne claim closed on 2026-09-04 is in that half: it counts
   self-shadowing dots over one 3 m by 2 m block of open pavement from the fixed
   pose, so acne on a surface that block does not cover is still nobody's claim.
-  It is also a claim about the normal offset alone: with `DEPTH_BIAS_TEXELS` at
-  zero and the offset kept, the block counts 3.3% dots grazing against 2.9%
-  steep and the claim holds, where the offset at zero counts 41.5% against 0.0%
-  and fails it.
+  The 2026-09-05 pair claim,
+  `the_two_bias_counts_trade_acne_against_the_plinths_own_contact`, is in the
+  same half: five arms, all from the fixed pose, all at `sun::GRAZING_TICK` and
+  all under the shipped `pcss`. Nothing reads either bias count from
+  `plaza::counter_camera`, at the top of the sun's arc, or under `disc` or `box`
+  — whose filter widths differ, so the count that covers a grazing receiver
+  under one of them need not cover it under another. Each is one more set of
+  arms of the same walk.
+- **`r_shadow_bias` and `r_shadow_normal_offset` are not on the page.**
+  Deliberately out of the 2026-09-05 slice. `/demos/sundial/` would want two
+  more exports on `apps/sundial/src/web.rs`' shape — a setter answering with
+  what the engine holds after the write, on `__crcbl_sundial_seam`'s pattern,
+  since a float knob is a slider rather than a cycle button — two sliders in
+  `web/pages/sundial.html` and `web/demos/sundial/main.js`, the counts added to
+  the `[HUD]` heartbeat so a reading is a reading rather than an inference, and
+  two more entries in `web/tools/browser-e2e.mjs`'s `sundial` row, each watched
+  to fail with the export behind it made a no-op. The native half — `[` `]`, `;`
+  `'`, the panel's `BIAS` and `NORMAL OFFSET` rows — is done.
+- **The keys walk the counts' neighbourhood and cannot reach the far end of
+  either range.** `filter::BIAS_STEP` is half a texel and the ranges run to 128
+  and 64, so the count at which `apps/sundial`'s plinth loses its shadow is 189
+  presses away. That is deliberate — a step coarse enough to walk the whole
+  range would be too coarse to sit on the shipped 1.5 — and it means the
+  artefact end of the comparison is reached by typing `r_shadow_bias 96` at the
+  console rather than by holding a key. A second, coarser step on a modifier
+  would close it; `apps/sundial/src/app.rs`'s key tables carry no modifier state
+  today. **What surprised us, and is not a bug (2026-09-05).** Peter-panning at
+  the plinth's contact needs a very large bias — 88 texels of `r_shadow_bias`,
+  against the 1.5 that ships — and the plinth's own thickness is why. The depth
+  pass keeps front faces, so what the shadow map stores along the ray from
+  `PLINTH_CONTACT` to the sun is the plinth's _far_ face, and a bias towards the
+  light has to cross the whole 1.2 m depth of the block before the contact
+  compares as lit. A thin caster loses its contact at a small count, which is
+  what `apps/lantern`'s 0.15 m shell showed `docs/plan/45-shadows.md`'s seventh
+  decision. The consequence for this fixture is that its peter-panning reading
+  is a claim about a _thick_ caster, and a thin one in the plaza would make the
+  same claim at a count near the shipped value — which is the version worth
+  building if the pair is ever wanted as a regression guard rather than as a
+  comparison.
 
 **What surprised us, and is not a bug.** The first cascade's extent is a
 function of the camera's **near plane** — `Cascades::splits` blends a

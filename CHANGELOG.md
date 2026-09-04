@@ -35,6 +35,48 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The sun's two shadow bias counts are console variables.**
+  `crcbl_render::shadow::r_shadow_bias` and
+  `crcbl_render::shadow::r_shadow_normal_offset` are floats in **texels of the
+  cascade a fragment landed in**, declared with `DEPTH_BIAS_TEXELS` and
+  `NORMAL_OFFSET_TEXELS` as their own defaults, so a frame nobody has typed at
+  draws exactly what it drew before. `Cascades::params` reads the cells rather
+  than the constants, which is what puts them in `FrameUniforms::shadow_params`
+  every frame. The ranges are `0..=128` and `0..=64`: zero at one end, because
+  that is where the acne each count covers is read, and a step past where
+  `apps/sundial`'s plinth loses its shadow at the other, because a comparison
+  has to be able to reach the artefact it is about.
+
+  `apps/sundial` binds them: `[` and `]` walk the constant bias, `;` and `'`
+  walk the normal offset, a half-texel a press, and the pause panel's `BIAS` and
+  `NORMAL OFFSET` rows and the debug overlay's `shadow filter` section both name
+  where they stand. `R` and the panel's `RESET` row put them back with the rest
+  of the knobs. Moving either count leaves a cached shadow atlas alone, as
+  moving the filter does: the bias row is kept out of the shadow views' blocks,
+  which are the cache's record of what a map was drawn from.
+
+- **`apps/sundial`'s milestone 2: acne and peter-panning, measured against each
+  other.** `docs/plan/45-shadows.md`'s seventh decision argued that a move along
+  the receiver's own normal keeps a contact shadow where a move towards the
+  light cannot; `the_two_bias_counts_trade_acne_against_the_plinths_own_contact`
+  is the fixture that measures it. Five arms of one grazing-sun frame — what
+  ships, each count at zero, each count pushed — and two readings off each: the
+  share of a block of open pavement that is a self-shadowing dot, and the
+  **shadow term** at the pavement the plinth stands on and at five stations
+  further along its shadow. Zeroing the normal offset takes the block to
+  `41.53%` dots and zeroing the constant bias to `3.26%`, against `0.00%` as the
+  sample ships, and neither moves the contact. Pushed to 96 texels the constant
+  bias lifts the shadow off the plinth while the pavement past it stays shadowed
+  — peter-panning rather than a shadow that has gone — and the normal offset at
+  twenty times what it ships leaves the contact exactly where it is.
+
+- **`apps/sundial`'s milestone 4: the whole filter ladder beside the shipped
+  rung.**
+  `the_seam_runs_the_console_filter_on_the_left_and_the_shipped_one_on_the_right`
+  held one pair — `disc` against `pcss` — and a rung wired to its neighbour's
+  branch is the failure a single pair cannot see. It now walks every rung the
+  engine declares, so `box` is held to the column as well.
+
 - **The cascade overlay reaches `apps/sundial`'s golden suite and its page.**
   `crcbl_render::DebugView::Cascades` has been on the `C` key and the pause
   panel's `CASCADES` row since it landed, and nothing else reached it: no golden

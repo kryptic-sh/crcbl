@@ -192,6 +192,8 @@ KEYS:
     F                    Cycle the shadow filter: pcss, disc, box
     X                    Raise the comparison seam at the centre, or drop it
     , .                  Walk the seam a step left or right
+    [ ]                  Walk the sun's constant shadow bias down or up
+    ; '                  Walk its normal offset the same way, in the same texels
     C                    Tint the picture by the cascade each shadow was read from
     T                    Draw the shadow atlas over the frame, tile by tile
     P                    Stop and start the sun

@@ -280,7 +280,13 @@ pub use volumetric::FroxelBuffers;
 /// purchases — and the shadow filter's two, `shadow::r_shadow_filter` and
 /// `shadow::r_shadow_split`, which are that module's answer to the occlusion
 /// chain's technique pair: which rung of `docs/plan/45-shadows.md`'s filter
-/// ladder runs, and the seam that puts it beside the one that ships.
+/// ladder runs, and the seam that puts it beside the one that ships — and the
+/// sun's two bias counts, `shadow::r_shadow_bias` and
+/// `shadow::r_shadow_normal_offset`, which are two variables for the reason
+/// `docs/plan/45-shadows.md`'s seventh decision gives: one moves the compared
+/// depth towards the light and the other moves the receiver sideways along its
+/// own normal, so acne and peter-panning are pulled by different numbers and a
+/// single knob could not show the pair moving against each other.
 /// `tests/console_table.rs` is
 /// what keeps this list in step with what the source actually declares.
 #[must_use]
@@ -299,6 +305,8 @@ pub fn console_table() -> crcbl_console::Table {
         shadow::r_shadow_cadence,
         shadow::r_shadow_faces,
         shadow::r_shadow_filter,
-        shadow::r_shadow_split
+        shadow::r_shadow_split,
+        shadow::r_shadow_bias,
+        shadow::r_shadow_normal_offset
     ]
 }

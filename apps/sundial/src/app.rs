@@ -281,6 +281,26 @@ pub(crate) const KEYS: [KeyBinding; 5] = [
 pub(crate) const SEAM_KEYS: [(KeyCode, bool, &str); 2] =
     [(KeyCode::Comma, false, ","), (KeyCode::Period, true, ".")];
 
+/// The two pairs that walk the sun's bias counts: `[` and `]` for the constant
+/// bias, `;` and `'` for the normal offset.
+///
+/// Not in [`KEYS`] for [`SEAM_KEYS`]' reason — an entry there is a bare `fn()`
+/// and these carry which cell they write and which way — and **a pair each**,
+/// because the whole of `docs/plan/sample/18-sundial.md`'s milestone 2 is the two
+/// counts moving against each other: a single key that cycled through presets
+/// could not put one at zero while the other stands where it ships.
+///
+/// **Bracket for the light-ward one and quote for the sideways one**, which is
+/// as much mnemonic as this fixture claims: the letters that would be better are
+/// taken. `A` and `S` are the flyer's, and the flyer is offered every key before
+/// this table is walked.
+pub(crate) const BIAS_KEYS: [(KeyCode, &str, bool, &str); 4] = [
+    (KeyCode::BracketLeft, filter::BIAS, false, "["),
+    (KeyCode::BracketRight, filter::BIAS, true, "]"),
+    (KeyCode::Semicolon, filter::OFFSET, false, ";"),
+    (KeyCode::Quote, filter::OFFSET, true, "'"),
+];
+
 /// What one of [`CLOCK_KEYS`] does to the clock.
 ///
 /// An enum rather than a `fn(&mut Clock)` because a function pointer in a
@@ -524,6 +544,12 @@ impl HostedGame for Sundial {
         for (bound, right, _) in SEAM_KEYS {
             if bound == key {
                 filter::nudge_seam(right);
+                return;
+            }
+        }
+        for (bound, cell, up, _) in BIAS_KEYS {
+            if bound == key {
+                filter::nudge_bias(cell, up);
                 return;
             }
         }
@@ -824,6 +850,10 @@ mod tests {
             named.push(name);
         }
         for (key, _, name) in SEAM_KEYS {
+            bound.push(key);
+            named.push(name);
+        }
+        for (key, _, _, name) in BIAS_KEYS {
             bound.push(key);
             named.push(name);
         }

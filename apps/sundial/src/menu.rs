@@ -171,6 +171,15 @@ pub const CASCADES_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 9;
 /// Appended past every id above, on [`CASCADES_ID`]'s terms and for its reason.
 pub const ATLAS_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 10;
 
+/// The reading naming the sun's constant shadow bias — no action; see this
+/// module's header.
+///
+/// Appended past every id above, on [`CASCADES_ID`]'s terms and for its reason.
+pub const BIAS_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 11;
+
+/// The reading naming the sun's normal offset, on [`BIAS_ID`]'s terms.
+pub const OFFSET_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 12;
+
 /// Every row `ENTER` fires, with the action it carries and the word it prints.
 ///
 /// One table rather than a row list beside an id match, because those are one
@@ -205,6 +214,13 @@ pub fn action_for(id: crcbl::ui::WidgetId) -> Option<SundialAction> {
 
 /// What the seam's readings' hint column prints: the pair that moves the seam.
 pub const SEAM_KEYS: &str = ", / .";
+
+/// What the constant bias's row prints in its hint column: the pair that walks
+/// it.
+pub const BIAS_KEYS: &str = "[ / ]";
+
+/// The same for the normal offset's row.
+pub const OFFSET_KEYS: &str = "; / '";
 
 /// What the sun reading's hint column prints: the pair that scrubs the clock.
 pub const SUN_KEYS: &str = "- / =";
@@ -323,6 +339,21 @@ pub fn pause_menu(
             SEAM_KEYS,
         ),
         MenuItem::new(FAR_SIDE_ID, format!("FAR SIDE: {}", knobs.far_side()), ""),
+        // The two counts `docs/plan/sample/18-sundial.md`'s milestone 2 is
+        // about, under the seam's readings because they are the other pair a
+        // reviewer walks rather than presses. **Readings and not pressed rows**,
+        // on this module's header's rule: each moves in two directions, and one
+        // `ENTER` cannot say which was meant.
+        MenuItem::new(
+            BIAS_ID,
+            format!("BIAS: {}", Knobs::bias_row(knobs.bias())),
+            BIAS_KEYS,
+        ),
+        MenuItem::new(
+            OFFSET_ID,
+            format!("NORMAL OFFSET: {}", Knobs::bias_row(knobs.offset())),
+            OFFSET_KEYS,
+        ),
         MenuItem::new(
             SUN_ID,
             format!(
@@ -423,7 +454,7 @@ mod tests {
         menus.show(true);
         let menu = menus.current().expect("the pause menu");
 
-        let readings = [NEAR_SIDE_ID, FAR_SIDE_ID, SUN_TIME_ID];
+        let readings = [NEAR_SIDE_ID, FAR_SIDE_ID, BIAS_ID, OFFSET_ID, SUN_TIME_ID];
         let mut actions: Vec<MenuAction> = Vec::new();
         for item in menu.items() {
             if readings.contains(&item.id) {
@@ -461,7 +492,12 @@ mod tests {
             actions.contains(&MenuAction::Game(SundialAction::CycleCamera)),
             "no row moves the camera"
         );
-        for (id, keys) in [(NEAR_SIDE_ID, SEAM_KEYS), (SUN_TIME_ID, SUN_KEYS)] {
+        for (id, keys) in [
+            (NEAR_SIDE_ID, SEAM_KEYS),
+            (BIAS_ID, BIAS_KEYS),
+            (OFFSET_ID, OFFSET_KEYS),
+            (SUN_TIME_ID, SUN_KEYS),
+        ] {
             let item = menu
                 .items()
                 .iter()

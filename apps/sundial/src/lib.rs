@@ -14,14 +14,14 @@
 //! surfaces are the point, because texture detail is exactly what hides a shadow
 //! artefact.
 //!
-//! # What is here at milestone 1
+//! # What is here
 //!
 //! The plaza [`plaza`] describes — a large pavement, a colonnade whose shadow
 //! crosses a cascade boundary, a plinth resting on the ground so its contact is
 //! checkable, three counters hanging at graded heights so a contact-hardening
 //! penumbra is visible, and two point lights and a spot, which is exactly what
-//! the shadow atlas's light region holds — and every control milestone 1 asks to
-//! be *legible*:
+//! the shadow atlas's light region holds — and every control the charter's
+//! first four milestones ask to be *legible*:
 //!
 //! * **The filter selector and the comparison seam**, which
 //!   `docs/plan/45-shadows.md`'s fifteenth decision landed as
@@ -30,6 +30,13 @@
 //! * **Which filter each side of the seam is running**, on the panel's `NEAR
 //!   SIDE` and `FAR SIDE` rows — because two shadowed pictures side by side name
 //!   neither.
+//! * **The sun's two bias counts**, which the same plan's seventh decision
+//!   landed and which are `r_shadow_bias` and `r_shadow_normal_offset` here:
+//!   `[` and `]` walk one, `;` and `'` walk the other, and the panel's `BIAS`
+//!   and `NORMAL OFFSET` rows say where they stand. Milestone 2 is the pair of
+//!   artefacts they trade against each other — acne where a count is too small,
+//!   a shadow off its caster where one is too large — and neither is a thing a
+//!   still frame shows.
 //! * **The sun on its clock**: [`sun::Clock`] is tick-driven and never reads a
 //!   wall clock, so tick `k` is the same sun in every process. `P` stops and
 //!   starts it, `-` and `=` scrub it, `R` puts it back, and the panel and the

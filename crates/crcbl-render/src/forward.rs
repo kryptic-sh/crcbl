@@ -6644,6 +6644,19 @@ impl ForwardRenderer {
                 // knob. `a_moved_shadow_filter_leaves_a_still_atlas_alone` holds
                 // it there.
                 shadow_filter: [0; 4],
+                // **Nor the console's bias row**, for the same reason: the
+                // two counts `Cascades::params` reads out of `r_shadow_bias`
+                // and `r_shadow_normal_offset` decide how far from a receiver
+                // the colour pass samples a map, and nothing drawing these
+                // views reads them. The atlas's two texel sizes beside them
+                // are the layout's and never move, so they stay. The same test
+                // holds this row at zero.
+                shadow_params: [
+                    uniforms.shadow_params[0],
+                    uniforms.shadow_params[1],
+                    0.0,
+                    0.0,
+                ],
                 ..uniforms
             }
         };
@@ -14603,10 +14616,35 @@ mod tests {
                 .expect("`r_shadow_split` is a writable float in range");
         }
 
+        /// Asks for `texels` of constant bias.
+        fn bias(&self, texels: f32) {
+            crate::shadow::r_shadow_bias
+                .set(&crcbl_console::Value::Float(texels))
+                .expect("`r_shadow_bias` is a writable float in range");
+        }
+
+        /// Asks for `texels` of normal offset.
+        fn offset(&self, texels: f32) {
+            crate::shadow::r_shadow_normal_offset
+                .set(&crcbl_console::Value::Float(texels))
+                .expect("`r_shadow_normal_offset` is a writable float in range");
+        }
+
         /// Back to the frame every golden was blessed as.
         fn reset(&self) {
             self.filter(shadow::shipped_filter());
             self.seam(0.0);
+            self.bias(shipped_float(&crate::shadow::r_shadow_bias));
+            self.offset(shipped_float(&crate::shadow::r_shadow_normal_offset));
+        }
+    }
+
+    /// The float `var` declares as its default — what a frame nobody typed at
+    /// is drawn with, read off the variable rather than written down here.
+    fn shipped_float(var: &crcbl_console::ConVar) -> f32 {
+        match var.default() {
+            crcbl_console::Value::Float(shipped) => *shipped,
+            other => panic!("`{}` defaults to {other:?}, not to a float", var.name()),
         }
     }
 
@@ -16407,7 +16445,9 @@ mod tests {
     /// **A console knob about *sampling* the atlas does not redraw it.**
     ///
     /// `r_shadow_filter` and `r_shadow_split` decide how the colour pass reads
-    /// a map, and not one byte of what the depth pass writes into it. Yet the
+    /// a map, and `r_shadow_bias` and `r_shadow_normal_offset` how far from a
+    /// receiver it reads — and not one byte of what the depth pass writes into
+    /// it is any of theirs. Yet the
     /// shadow views' blocks are the frame's block spread, and the cache record
     /// is those blocks' bytes — so until the views zeroed the row, a person
     /// typing `r_shadow_filter box` redrew every map in the atlas for nothing,
@@ -16463,6 +16503,26 @@ mod tests {
             ),
             "`r_shadow_filter` and `r_shadow_split` moved and the atlas was drawn again: a \
              sampling knob reached the record of what the maps were drawn from"
+        );
+
+        // The bias pair sits in a different row of the same block, and the
+        // second row it reaches is `Cascades::params`, which is rebuilt every
+        // frame — so this is the arm that says the *whole* row is kept out of
+        // the record rather than the one lane the filter is in.
+        switch.bias(8.0);
+        switch.offset(8.0);
+        assert!(
+            !drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ),
+            "`r_shadow_bias` and `r_shadow_normal_offset` moved and the atlas was drawn again: \
+             the bias row reached the record of what the maps were drawn from"
         );
 
         renderer.destroy(device);

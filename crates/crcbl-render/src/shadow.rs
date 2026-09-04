@@ -266,7 +266,8 @@ pub fn split_at() -> Option<f32> {
     (at > 0.0 && at < 1.0).then_some(at)
 }
 
-/// The lock [`r_shadow_filter`] and [`r_shadow_split`] are moved under.
+/// The lock [`r_shadow_filter`], [`r_shadow_split`], [`r_shadow_bias`] and
+/// [`r_shadow_normal_offset`] are moved under.
 ///
 /// **In this module rather than beside the test that takes it**, on
 /// `crate::ssao::TECHNIQUE_SWITCH`'s terms exactly: two files move these
@@ -274,9 +275,10 @@ pub fn split_at() -> Option<f32> {
 /// `shadow_filter_switch` — and a `cargo test` run shares one process between
 /// them, so a variable one left moved is a frame the other did not ask for.
 ///
-/// **One lock for both variables**, unlike the occlusion chain's, because the
-/// two are read into one row of one block: a test that moved the filter while
-/// another moved the seam would be reading a lane neither of them wrote.
+/// **One lock for the four variables**, unlike the occlusion chain's, because
+/// they are read into two rows of one block: a test that moved the filter while
+/// another moved the seam would be reading a lane neither of them wrote, and the
+/// bias pair's row is rebuilt by [`Cascades::params`] beside it.
 ///
 /// **Last in the lock order**, after `crate::ssao::TECHNIQUE_SWITCH`. A test
 /// that takes it with the others takes it after all of them, so there is no
@@ -539,6 +541,19 @@ const CASTER_REACH: f32 = crcbl_shaders::mesh::SHADOW_CASTER_REACH;
 /// strip has not yet come back. Two buys one more dark pixel and 15 mm of lit
 /// floor at the wall — a fortieth of the 0.391 m the seventh decision removed,
 /// but the wrong direction — so 1.5 ships.
+///
+/// # The console reads the cell, not this constant
+///
+/// [`r_shadow_bias`] declares this value as its own default and
+/// [`Cascades::params`] reads that variable, so the count a frame is drawn with
+/// is whatever the console holds. It is there for
+/// `docs/plan/sample/18-sundial.md`'s milestone 2 — the comparison, not the
+/// rung: acne and peter-panning are pulled in opposite directions by this number
+/// and a fixture is the only place that trade can be looked at. The variable's
+/// range starts at zero, which is where the acne it covers is read, and stops
+/// comfortably past 112 texels, which is where `apps/sundial`'s plinth has lost
+/// its shadow over the whole strip that fixture's camera can see — so nothing at
+/// the top of it draws anything the walk has not already drawn.
 const DEPTH_BIAS_TEXELS: f32 = 1.5;
 
 /// How far along its own geometric normal a receiver is moved before the sun's
@@ -571,7 +586,32 @@ const DEPTH_BIAS_TEXELS: f32 = 1.5;
 /// 150 mm. Three would be 187.5 mm and past it. That bound is a property
 /// of the scene rather than of this number, so it is the *reason* two is shipped
 /// rather than three and not a claim that a leak was seen — none was.
+///
+/// # The console reads the cell here too
+///
+/// [`r_shadow_normal_offset`] declares this value as its default, on
+/// [`DEPTH_BIAS_TEXELS`]' terms exactly and for its reason. **The ceiling is a
+/// long way past the bound above**, and deliberately: two texels is what ships
+/// because three would move a receiver through `apps/lantern`'s shell, and a
+/// variable that stopped at the shipped count could not show what walking
+/// through one looks like. It stops comfortably past 44 texels, which is where
+/// `apps/sundial`'s plinth loses its whole shadow rather than only its contact —
+/// that fixture's
+/// `the_two_bias_counts_trade_acne_against_the_plinths_own_contact` is what
+/// measured it.
 const NORMAL_OFFSET_TEXELS: f32 = 2.0;
+
+crcbl_console::convar! {
+    /// The sun's constant shadow bias, in texels of the cascade a fragment
+    /// landed in. Too little draws acne; too much lifts a shadow off its caster.
+    pub static r_shadow_bias: f32 in 0.0 ..= 128.0 = DEPTH_BIAS_TEXELS;
+}
+
+crcbl_console::convar! {
+    /// How far along its own normal a receiver moves before the sun's shadow
+    /// lookup, in the same cascade texels.
+    pub static r_shadow_normal_offset: f32 in 0.0 ..= 64.0 = NORMAL_OFFSET_TEXELS;
+}
 
 /// The cascade matrices a frame shades and culls with.
 ///
@@ -656,9 +696,16 @@ impl Cascades {
     }
 
     /// The `shadow_params` vector the fragment stage reads: the atlas's two
-    /// texel sizes, then the constant and slope-scaled biases — the biases in
+    /// texel sizes, then the constant and normal-offset biases — the biases in
     /// **cascade texels**, which is the unit this module's `DEPTH_BIAS_TEXELS`
     /// explains and `sun_visibility` in `shaders/mesh.slang` converts.
+    ///
+    /// **The two biases come from [`r_shadow_bias`] and
+    /// [`r_shadow_normal_offset`] rather than from the constants**, whose values
+    /// those variables declare as their defaults. This vector is rebuilt for
+    /// every frame's block, so a cell moved between two frames reaches the second
+    /// of them — which is what makes the pair a comparison a person can walk
+    /// rather than a rebuild.
     ///
     /// **Both texel sizes, even where the grid is square and they are equal.**
     /// The shader's PCF kernel steps in *tile* space and scales by
@@ -677,8 +724,8 @@ impl Cascades {
         [
             inverse[0],
             inverse[1],
-            DEPTH_BIAS_TEXELS,
-            NORMAL_OFFSET_TEXELS,
+            r_shadow_bias.get_f32(),
+            r_shadow_normal_offset.get_f32(),
         ]
     }
 }

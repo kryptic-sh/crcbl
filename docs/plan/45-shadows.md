@@ -309,6 +309,15 @@ of their own neighbourhood, which is what a self-shadowing dot is and a smooth
 Lambert gradient is not; at the golden's own 256×192 it reads 5 before and 3
 after.
 
+**Both counts are console variables as of 2026-09-05**, `r_shadow_bias` and
+`r_shadow_normal_offset` in `crcbl_render::shadow`, each declaring the constant
+below as its own default and read by `Cascades::params` rather than baked in —
+so `apps/sundial`'s
+`the_two_bias_counts_trade_acne_against_the_plinths_own_contact` can walk one
+against the other and measure the claim this decision argues: pushed past what
+acne needs, the constant bias lifts a shadow off its caster and the normal
+offset does not.
+
 **The two counts moved, and both were swept rather than kept.**
 `crcbl_render::shadow::NORMAL_OFFSET_TEXELS` is two and `DEPTH_BIAS_TEXELS` fell
 from three to one — the constant is what the offset earned back, which is what

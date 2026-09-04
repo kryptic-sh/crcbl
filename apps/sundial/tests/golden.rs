@@ -117,6 +117,38 @@ struct Arm {
     /// Whether the picture is tinted by the cascade each fragment's sun shadow
     /// came from — [`crcbl::render::DebugView::Cascades`].
     cascades: bool,
+    /// The sun's constant shadow bias in thousandths of a cascade texel, or
+    /// `None` for what the engine ships.
+    ///
+    /// Thousandths for [`Arm::split_permille`]' reason: an arm is printed into
+    /// every reading this suite reports and compared against its neighbours, and
+    /// both want `Eq`.
+    bias_millitexels: Option<u32>,
+    /// The sun's normal offset, in the same thousandths.
+    offset_millitexels: Option<u32>,
+}
+
+/// A count of cascade texels as the thousandths an [`Arm`] keeps.
+fn millitexels(count: f32) -> u32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "every caller passes a count inside the variable's own range"
+    )]
+    {
+        (count * 1000.0).round() as u32
+    }
+}
+
+/// A count of thousandths of a texel, back as the texels the console holds.
+fn texels(millitexels: u32) -> f32 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a bias count is a few thousand thousandths"
+    )]
+    {
+        millitexels as f32 / 1000.0
+    }
 }
 
 impl Arm {
@@ -138,6 +170,8 @@ impl Arm {
             counters: false,
             atlas: false,
             cascades: false,
+            bias_millitexels: None,
+            offset_millitexels: None,
         }
     }
 
@@ -202,6 +236,31 @@ impl Arm {
         }
     }
 
+    /// The same arm with the sun's constant bias at `count` cascade texels.
+    fn biased(self, count: f32) -> Self {
+        Self {
+            bias_millitexels: Some(millitexels(count)),
+            ..self
+        }
+    }
+
+    /// The same arm with the sun's normal offset at `count` of the same texels.
+    fn offset(self, count: f32) -> Self {
+        Self {
+            offset_millitexels: Some(millitexels(count)),
+            ..self
+        }
+    }
+
+    /// The two bias counts this arm asks for, each back as the texels the
+    /// console holds.
+    fn biases(self) -> [Option<f32>; 2] {
+        [
+            self.bias_millitexels.map(texels),
+            self.offset_millitexels.map(texels),
+        ]
+    }
+
     /// Which camera this arm is drawn from.
     fn camera(self) -> Camera {
         if self.counters {
@@ -245,6 +304,13 @@ fn draw(extent: (u32, u32), arm: Arm) -> (Image, String, AdapterInfo) {
         filter::var(filter::SPLIT)
             .set(&Value::Float(at))
             .expect("the seam is inside its own range");
+    }
+    for (name, count) in [filter::BIAS, filter::OFFSET].into_iter().zip(arm.biases()) {
+        if let Some(count) = count {
+            filter::var(name)
+                .set(&Value::Float(count))
+                .expect("the bias count is inside its own range");
+        }
     }
 
     let mut setup = OffscreenSetup::open_forward_with(
@@ -809,12 +875,20 @@ const SEAM_BLEED: u32 = 32;
 /// it on a scene a person can look at, and from the pose where the two filters
 /// are furthest apart.
 ///
-/// Three frames — the console's filter everywhere, the shipped one everywhere,
-/// and the seamed one — and then every column of the seamed frame is held
-/// against **both**. Outside [`SEAM_BLEED`] the agreement is exact, byte for
+/// Three frames per rung — the console's filter everywhere, the shipped one
+/// everywhere, and the seamed one — and then every column of the seamed frame is
+/// held against **both**. Outside [`SEAM_BLEED`] the agreement is exact, byte for
 /// byte, and the disagreement with the other reference is what stops the whole
 /// thing being vacuous: two identical references would satisfy the equality half
 /// perfectly.
+///
+/// **Every rung the engine declares, and not the first one that is not the
+/// shipped rung**, which is `docs/plan/sample/18-sundial.md`'s milestone 4: the
+/// filter *ladder* side by side. One pair held would say the selector routes
+/// a filter to a side; the ladder held says it routes every filter there, and a
+/// rung wired to its neighbour's branch is exactly the failure a single pair
+/// cannot see.
+///
 /// # How it was shown to fail
 ///
 /// Twice, once per half. Swapping the two references, so each side is compared
@@ -826,77 +900,91 @@ const SEAM_BLEED: u32 = 32;
 ///
 /// # What was measured
 ///
-/// 961 of the 1024 columns are compared — the rest are the bleed band — and
-/// every one of them is exact on both adapters. The two filters stand 3.110 and
-/// 324.498/255 apart down the two halves on radv and 3.101 and 324.678 on
-/// lavapipe, so the equality is not an equality of two identical pictures. The
-/// left half is the thinner of the two because it is mostly pavement with no
-/// shadow edge crossing it, which is why this is asserted per half rather than
-/// per column.
+/// 961 of the 1024 columns are compared per rung — the rest are the bleed band —
+/// and every one of them is exact on both adapters. What the rung and the shipped
+/// filter stand apart down the two halves, in luma out of 255:
+///
+/// | rung | left, radv | right, radv | left, lavapipe | right, lavapipe |
+/// | --- | --- | --- | --- | --- |
+/// | `disc` | `3.110` | `324.498` | `3.101` | `324.678` |
+/// | `box` | `26.417` | `363.250` | `26.267` | `363.425` |
+///
+/// so the equality is not an equality of two identical pictures. The left half is
+/// the thinner of the two because it is mostly pavement with no shadow edge
+/// crossing it, which is why this is asserted per half rather than per column.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
 fn the_seam_runs_the_console_filter_on_the_left_and_the_shipped_one_on_the_right() {
     let extent = CLAIM_EXTENT;
     let shipped = crcbl::render::shadow::shipped_filter().label();
-    let moved = filter::names(filter::FILTER)
+    let ladder: Vec<&str> = filter::names(filter::FILTER)
         .iter()
         .copied()
-        .find(|name| *name != shipped)
-        .expect("the engine declares a filter other than the shipped one");
+        .filter(|name| *name != shipped)
+        .collect();
+    assert!(
+        ladder.len() > 1,
+        "the engine declares {:?}, so there is no ladder to put beside the shipped rung — one \
+         rung compared would be a comparison and not a ladder",
+        filter::names(filter::FILTER)
+    );
 
     let pose = Arm::shipped()
         .framed_on_the_counters()
         .at_tick(sun::NOON_TICK);
-    let (whole_moved, paths, _) = draw(extent, pose.on(moved));
-    let (whole_shipped, _, _) = draw(extent, pose.on(shipped));
-    let (seamed, _, _) = draw(extent, pose.on(moved).split_at(filter::SEAM_CENTRE));
-
+    let (whole_shipped, paths, _) = draw(extent, pose.on(shipped));
     let seam = extent.0 / 2;
-    let mut columns = 0u32;
-    // What the two filters do to each half on their own, which is what says the
-    // exactness below separates anything. Per **half** and not per column: most
-    // of this frame is pavement no shadow edge crosses, and the two filters agree
-    // to the byte there — a demand that every single column differ would be a
-    // demand that the whole frame be a penumbra.
-    let mut apart = [0.0f32; 2];
-    for x in 0..extent.0 {
-        if x.abs_diff(seam) < SEAM_BLEED {
-            continue;
+
+    for moved in ladder {
+        let (whole_moved, _, _) = draw(extent, pose.on(moved));
+        let (seamed, _, _) = draw(extent, pose.on(moved).split_at(filter::SEAM_CENTRE));
+
+        let mut columns = 0u32;
+        // What the two filters do to each half on their own, which is what says
+        // the exactness below separates anything. Per **half** and not per
+        // column: most of this frame is pavement no shadow edge crosses, and the
+        // two filters agree to the byte there — a demand that every single column
+        // differ would be a demand that the whole frame be a penumbra.
+        let mut apart = [0.0f32; 2];
+        for x in 0..extent.0 {
+            if x.abs_diff(seam) < SEAM_BLEED {
+                continue;
+            }
+            let near_side = x < seam;
+            let mine = if near_side {
+                &whole_moved
+            } else {
+                &whole_shipped
+            };
+            let side = if near_side { moved } else { shipped };
+            let agreement = column_difference(&seamed, mine, x);
+            assert!(
+                agreement == 0.0,
+                "column {x} of the seamed frame differs from the whole-frame {side} run by \
+                 {agreement:.3}/255. With the seam at {} the {} of the frame is meant to be \
+                 that filter and nothing else",
+                filter::SEAM_CENTRE,
+                if near_side { "left" } else { "right" },
+            );
+            apart[usize::from(!near_side)] += column_difference(&whole_moved, &whole_shipped, x);
+            columns += 1;
         }
-        let near_side = x < seam;
-        let mine = if near_side {
-            &whole_moved
-        } else {
-            &whole_shipped
-        };
-        let side = if near_side { moved } else { shipped };
-        let agreement = column_difference(&seamed, mine, x);
         assert!(
-            agreement == 0.0,
-            "column {x} of the seamed frame differs from the whole-frame {side} run by \
-             {agreement:.3}/255. With the seam at {} the {} of the frame is meant to be that \
-             filter and nothing else",
-            filter::SEAM_CENTRE,
-            if near_side { "left" } else { "right" },
+            columns > 0,
+            "the bleed band swallowed the whole frame, so nothing was compared"
         );
-        apart[usize::from(!near_side)] += column_difference(&whole_moved, &whole_shipped, x);
-        columns += 1;
-    }
-    assert!(
-        columns > 0,
-        "the bleed band swallowed the whole frame, so nothing was compared"
-    );
-    eprintln!(
-        "sundial golden: the seam on {paths} — {columns} columns exact, the two filters {:.3} \
-         and {:.3}/255 apart down the two halves",
-        apart[0], apart[1]
-    );
-    for (side, total) in ["left", "right"].into_iter().zip(apart) {
-        assert!(
-            total > 0.0,
-            "the {moved} and {shipped} filters draw the same {side} half, so the exactness \
-             asserted for that side of the seam separates nothing"
+        eprintln!(
+            "sundial golden: the {moved} seam on {paths} — {columns} columns exact, {moved} and \
+             {shipped} {:.3} and {:.3}/255 apart down the two halves",
+            apart[0], apart[1]
         );
+        for (side, total) in ["left", "right"].into_iter().zip(apart) {
+            assert!(
+                total > 0.0,
+                "the {moved} and {shipped} filters draw the same {side} half, so the exactness \
+                 asserted for that side of the seam separates nothing"
+            );
+        }
     }
 }
 
@@ -1833,6 +1921,389 @@ fn the_grazing_sun_leaves_the_open_pavement_as_smooth_as_the_steep_one_does() {
          covers a steep receiver and not a grazing one",
         grazing_sky.elevation.to_degrees(),
         steep_sky.elevation.to_degrees(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The bias pair
+// ---------------------------------------------------------------------------
+
+/// How far out from [`plaza::PLINTH_CONTACT`], along the plinth's own shadow,
+/// the "and the shadow is still there" readings are taken, in metres of
+/// pavement.
+///
+/// The plinth's shadow runs `+z` at [`sun::GRAZING_TICK`] and
+/// [`plaza::fixed_camera`] sees a metre of it past the contact before the
+/// pavement leaves the bottom of the frame — `project` refuses anything further
+/// out, which is what set the last entry. Five stations rather than one because
+/// what the deepest of them says is "somewhere out here is still in shadow", and
+/// a single station could be the one place a shadow happened to have left.
+const BEYOND_CONTACT: [f32; 5] = [0.2, 0.4, 0.6, 0.8, 1.0];
+
+/// What `r_shadow_bias` is pushed to for the peter-panning half, in cascade
+/// texels.
+///
+/// **The count that lifts the plinth's shadow off its own contact while leaving
+/// the shadow beyond it**, which is what peter-panning *is*: a lit gap between a
+/// caster and the shadow it throws, rather than a shadow that has gone. The band
+/// that does both is narrow and this is the middle of it.
+///
+/// **Swept** at [`CLAIM_EXTENT`] from [`plaza::fixed_camera`] at
+/// [`sun::GRAZING_TICK`], with `r_shadow_normal_offset` left where it ships. The
+/// shadow term is the frame with the shadow passes off less the frame with them
+/// on, over a 5x5 block; `contact` is that term at [`plaza::PLINTH_CONTACT`] and
+/// `beyond` the deepest of it over [`BEYOND_CONTACT`]:
+///
+/// | `r_shadow_bias` | contact, radv | beyond, radv | contact, lavapipe | beyond, lavapipe |
+/// | --- | --- | --- | --- | --- |
+/// | 1.5 (ships) | `70.73` | `68.33` | `70.44` | `68.33` |
+/// | 80 | `70.73` | `68.33` | `70.44` | `68.33` |
+/// | 88 | `8.11` | `68.33` | `8.05` | `68.33` |
+/// | 96 (this) | `6.37` | `67.01` | `6.36` | `67.00` |
+/// | 104 | `6.09` | `18.73` | `5.97` | `18.87` |
+/// | 112 | `6.01` | `0.00` | `5.87` | `0.00` |
+///
+/// Under 88 the contact keeps its shadow outright; past 104 the shadow has left
+/// the whole visible strip and the reading would be a claim about a shadow that
+/// is not there. **Eighty-eight is a large number and the plinth is why**: the
+/// depth pass keeps front faces, so the surface stored in the map along the ray
+/// from this contact to the sun is the plinth's *far* face — the whole 1.2 m
+/// depth of the block stands between the contact and the depth it is compared
+/// against, and a bias has to cross all of it. A thin caster loses its contact
+/// at a small count, which is `apps/lantern`'s wall and
+/// `docs/plan/45-shadows.md`'s seventh decision's own fixture.
+const PETER_PAN_BIAS: f32 = 96.0;
+
+/// What `r_shadow_normal_offset` is pushed to for the other half, in the same
+/// texels.
+///
+/// **Twenty times what ships, and the contact does not move at all** — which is
+/// `docs/plan/45-shadows.md`'s seventh decision measured on a fixture rather
+/// than argued: a move along the receiver's own normal leaves the depth it
+/// compares alone, so it cannot lift a shadow off its caster the way the count
+/// above does. What it costs instead is the shadow's *far* end, and this is the
+/// last station before it costs both.
+///
+/// **Swept** with `r_shadow_bias` left where it ships, read exactly as
+/// [`PETER_PAN_BIAS`]' table is:
+///
+/// | `r_shadow_normal_offset` | contact, radv | beyond, radv | contact, lavapipe | beyond, lavapipe |
+/// | --- | --- | --- | --- | --- |
+/// | 2 (ships) | `70.73` | `68.33` | `70.44` | `68.33` |
+/// | 24 | `70.73` | `68.33` | `70.44` | `68.33` |
+/// | 36 | `70.73` | `68.33` | `70.44` | `68.33` |
+/// | 40 (this) | `70.73` | `66.59` | `70.44` | `66.53` |
+/// | 44 | `31.05` | `0.92` | `30.89` | `1.01` |
+///
+/// At 44 the contact and the pavement beyond it go together, which is a shadow
+/// that has gone rather than one that has come off its caster — so the claim
+/// below is made at 40, where the contact reads what it reads with the offset at
+/// two and the frame is nonetheless a different picture.
+const HELD_OFFSET: f32 = 40.0;
+
+/// How much shadow term a piece of pavement has to carry to count as shadowed,
+/// in luma out of 255.
+///
+/// **Swept:** every reading either constant's table calls shadowed is between
+/// `66.53` and `70.73`, and every one it calls lit is under `8.11`. Set between
+/// them, nearer the shadowed end, so the two are separated by a wide gap rather
+/// than by a threshold sitting on either.
+const CONTACT_SHADOWED: f32 = 40.0;
+
+/// How little term is left where the shadow has come off, out of the same 255.
+///
+/// The other side of the same gap: `8.11` is the largest reading either table
+/// calls lit, `66.53` the smallest it calls shadowed.
+const CONTACT_LIT: f32 = 20.0;
+
+/// How far the contact's term may move and still be *where it was*, out of 255.
+///
+/// The tolerance on every "and the contact holds" clause. **Swept:** the four
+/// arms that are meant to leave it alone read `70.73` on radv and `70.44` on
+/// lavapipe — the same number to a hundredth, on both, not a number inside a
+/// tolerance — so this is a guard against readback noise rather than slack the
+/// claim needs.
+const CONTACT_HELD: f32 = 2.0;
+
+/// What share of the acne block is a self-shadowing dot once the normal offset
+/// is gone, as a percentage.
+///
+/// **Swept:** `41.5329%` on radv and `41.5329%` on lavapipe with
+/// `r_shadow_normal_offset` at zero, against `0.0000%` on both where it ships.
+/// A floor at about half of what was seen, because it is a floor on an artefact
+/// there is a great deal of rather than a second golden written in numbers.
+const ACNE_WITHOUT_OFFSET: f32 = 20.0;
+
+/// The same once the constant bias is gone instead.
+///
+/// **Swept:** `3.2575%` on radv and `3.2335%` on lavapipe with `r_shadow_bias`
+/// at zero. Two orders smaller than the offset's, which is the whole shape of
+/// the seventh decision — over this block the offset covers a lost depth bias
+/// nearly on its own — so the floor is set under it rather than at half of it.
+const ACNE_WITHOUT_BIAS: f32 = 1.5;
+
+/// What share of the block may be dots on an arm that is meant to be smooth.
+///
+/// **Swept:** `0.0000%` on both adapters at every count either table lists at or
+/// above what ships, with a `0.0240%` seen at an offset of 32 — so this is set
+/// an order over the largest reading a smooth arm produced and well under
+/// [`ACNE_WITHOUT_BIAS`], which is the smallest rise it has to separate from.
+const SMOOTH_PERCENT: f32 = 1.0;
+
+/// The **shadow term** at a world point: the frame drawn without the shadow
+/// passes, less the frame drawn with them.
+///
+/// `the_colonnades_shadow_crosses_the_cascade_split_without_a_step`'s quantity
+/// and its reason: the pavement's own Lambert falloff, the occlusion pass and
+/// the tonemap are in both frames and cancel, so what is left is what the sun's
+/// shadow map did at that point. A brightness on its own could not say that —
+/// pavement beside a block is darker than open pavement whether a shadow reaches
+/// it or not.
+///
+/// **[`BLOCK`] unscaled**, where the readings at [`CLAIM_EXTENT`] elsewhere in
+/// this file take [`block_for`]'s scaled one: the contact is five centimetres
+/// from the plinth's face and the gap a lifted shadow opens is a few centimetres
+/// of pavement, so a block scaled with the extent would average the two together
+/// again — which is the very thing [`CLAIM_EXTENT`] exists to stop.
+fn shadow_term(
+    flat: &Image,
+    shadowed: &Image,
+    camera: &Camera,
+    extent: (u32, u32),
+    at: Vec3,
+) -> f32 {
+    let pixel = project(camera, extent, at);
+    brightness(flat, pixel, BLOCK) - brightness(shadowed, pixel, BLOCK)
+}
+
+/// **The sun's two bias counts trade acne against the plinth's own contact, and
+/// they do not trade it the same way.**
+///
+/// `docs/plan/sample/18-sundial.md`'s milestone 2: the pair of artefacts moving
+/// against each other as the two counts change, on the fixture the plaza was
+/// laid out for, where `docs/plan/45-shadows.md`'s seventh decision could only
+/// measure one room's wall-foot strip and one patch's dots.
+///
+/// Five arms of one frame, all at [`sun::GRAZING_TICK`] — the most grazing sun
+/// this clock reaches, and the worst case for both artefacts — and two readings
+/// off each: [`speckle_percent`] over [`acne_block`]'s open pavement, and
+/// [`shadow_term`] at [`plaza::PLINTH_CONTACT`] and at the [`BEYOND_CONTACT`]
+/// stations past it. The arms are what ships, each count at **zero**, and each
+/// count **pushed** — [`PETER_PAN_BIAS`] and [`HELD_OFFSET`].
+///
+/// What comes out is three claims, and the third is the one no still frame and
+/// no golden could make:
+///
+/// * **Zero either count and the pavement roughens; the contact does not
+///   move.** [`ACNE_WITHOUT_OFFSET`] and [`ACNE_WITHOUT_BIAS`] are the two
+///   rises, two orders apart.
+/// * **Push the constant bias and the shadow comes off the plinth** — the
+///   contact lights while the pavement past it is still shadowed, which is
+///   peter-panning rather than a shadow that has gone — and the acne block stays
+///   smooth.
+/// * **Push the normal offset twenty times as far and the contact does not
+///   move**, though the frame is a different picture. That is the seventh
+///   decision's claim — a sideways move keeps a contact — measured rather than
+///   argued.
+///
+/// # Anti-vacuity
+///
+/// Four ways this could pass while measuring nothing, and an assertion each. The
+/// five arms could be **one picture**, where every "holds" clause is trivially
+/// true and every "moves" clause would have failed — they are compared as bytes
+/// against the shipped arm. The acne block could be **in shadow**, where it
+/// counts no dots however the counts are set — [`LIT_PAVEMENT`] is read off
+/// every arm. The contact could be **lit to begin with**, where "it opened"
+/// means nothing — the shipped arm's own term is held over
+/// [`CONTACT_SHADOWED`]. And the pushed-offset arm could be a knob that never
+/// reached the shader, where a contact that did not move is exactly what a
+/// no-op draws — that arm's shadow beyond the contact is held to have *fallen*
+/// against the shipped one's, so the count is shown to have done something
+/// before it is credited with not doing this.
+///
+/// # How it was shown to fail
+///
+/// By making `crcbl_render::shadow::Cascades::params` hand the shader
+/// `DEPTH_BIAS_TEXELS` and `NORMAL_OFFSET_TEXELS` again instead of reading
+/// `r_shadow_bias` and `r_shadow_normal_offset` — a getter that ignores its own
+/// console cell, which is the failure this whole pair of variables can hide
+/// behind and the one every reading here would otherwise report as a clean
+/// frame. The four moved arms drew the shipped arm's picture and the byte
+/// comparison failed first:
+///
+/// ```text
+/// the no offset arm drew the shipped arm's frame byte for byte, so every reading
+/// taken off it below is the shipped reading under another name
+/// ```
+///
+/// # What was measured
+///
+/// The tables are on [`PETER_PAN_BIAS`] and [`HELD_OFFSET`], and the run prints
+/// every arm's four readings again on whatever adapter it opened.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
+fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
+    let extent = CLAIM_EXTENT;
+    let camera = plaza::fixed_camera();
+    let (centre, half) = acne_block(&camera, extent);
+    let base = Arm::shipped().at_tick(sun::GRAZING_TICK);
+    let (flat, paths, _) = draw(extent, base.without_shadows());
+
+    /// One arm's four readings.
+    struct Reading {
+        /// What share of [`acne_block`] is a self-shadowing dot.
+        dots: f32,
+        /// The block's mean, which [`LIT_PAVEMENT`] is read against.
+        mean: f32,
+        /// The shadow term at the contact.
+        contact: f32,
+        /// The deepest shadow term over [`BEYOND_CONTACT`].
+        beyond: f32,
+    }
+
+    let arms = [
+        ("shipped", base),
+        ("no offset", base.offset(0.0)),
+        ("no bias", base.biased(0.0)),
+        ("pushed bias", base.biased(PETER_PAN_BIAS)),
+        ("pushed offset", base.offset(HELD_OFFSET)),
+    ];
+    let mut readings = Vec::with_capacity(arms.len());
+    let mut shipped_pixels = Vec::new();
+    for (name, arm) in arms {
+        let (image, _, _) = draw(extent, arm);
+        if name == "shipped" {
+            shipped_pixels = image.pixels().to_vec();
+        } else {
+            assert!(
+                image.pixels() != shipped_pixels.as_slice(),
+                "the {name} arm drew the shipped arm's frame byte for byte, so every reading \
+                 taken off it below is the shipped reading under another name"
+            );
+        }
+        let reading = Reading {
+            dots: speckle_percent(&image, centre, half),
+            mean: brightness(&image, centre, half),
+            contact: shadow_term(&flat, &image, &camera, extent, plaza::PLINTH_CONTACT),
+            beyond: BEYOND_CONTACT
+                .into_iter()
+                .map(|out| {
+                    let at = plaza::PLINTH_CONTACT + Vec3::new(0.0, 0.0, out);
+                    shadow_term(&flat, &image, &camera, extent, at)
+                })
+                .fold(f32::MIN, f32::max),
+        };
+        eprintln!(
+            "sundial golden: the {name} arm on {paths} — {dots:.4}% of the block is a dot, mean \
+             {mean:.2}/255, shadow term {contact:.2} at the contact and {beyond:.2} deepest \
+             beyond it",
+            dots = reading.dots,
+            mean = reading.mean,
+            contact = reading.contact,
+            beyond = reading.beyond,
+        );
+        assert!(
+            reading.mean > LIT_PAVEMENT,
+            "the block reads {mean:.2}/255 on the {name} arm, under the {LIT_PAVEMENT} lit \
+             pavement stands at. This is a reading of a shadow, and a shadow counts no dots \
+             however the counts are set",
+            mean = reading.mean,
+        );
+        readings.push(reading);
+    }
+    let [shipped, no_offset, no_bias, pushed_bias, pushed_offset] =
+        <[Reading; 5]>::try_from(readings).unwrap_or_else(|_| panic!("one reading per arm"));
+
+    // The contact has to be a shadow before "it opened" is a statement about
+    // anything.
+    assert!(
+        shipped.contact > CONTACT_SHADOWED,
+        "the pavement at the plinth's contact carries {:.2} of shadow term as the sample ships, \
+         under the {CONTACT_SHADOWED} this reading calls shadowed — so there is no shadow here \
+         for a bias to take off",
+        shipped.contact,
+    );
+
+    // Zero either count: the pavement roughens, and the contact stays put.
+    for (name, reading, least) in [
+        ("normal offset", &no_offset, ACNE_WITHOUT_OFFSET),
+        ("constant bias", &no_bias, ACNE_WITHOUT_BIAS),
+    ] {
+        assert!(
+            reading.dots > least && reading.dots > shipped.dots,
+            "with the {name} at zero the block is {:.4}% dots against {:.4}% as the sample \
+             ships — short of the {least}% this count is worth. A count that buys no acne back \
+             when it is taken away is not what is covering the acne",
+            reading.dots,
+            shipped.dots,
+        );
+        assert!(
+            (reading.contact - shipped.contact).abs() < CONTACT_HELD,
+            "with the {name} at zero the contact's shadow term moved from {:.2} to {:.2}. Acne \
+             is what a count too small draws; a contact that moved as well says this reading is \
+             about the whole frame rather than about the pavement under the plinth",
+            shipped.contact,
+            reading.contact,
+        );
+    }
+
+    // Push the constant bias: the shadow comes off the plinth and stays on the
+    // pavement past it.
+    assert!(
+        pushed_bias.contact < CONTACT_LIT,
+        "at {PETER_PAN_BIAS} texels of constant bias the contact still carries {:.2} of shadow \
+         term, over the {CONTACT_LIT} this reading calls lit — the shadow has not come off its \
+         caster and there is no peter-panning here to measure",
+        pushed_bias.contact,
+    );
+    assert!(
+        pushed_bias.beyond > CONTACT_SHADOWED,
+        "at {PETER_PAN_BIAS} texels the pavement past the contact carries {:.2} of shadow term \
+         at its deepest, under the {CONTACT_SHADOWED} this reading calls shadowed. The shadow \
+         has gone rather than come off its caster, and peter-panning is the gap between the two",
+        pushed_bias.beyond,
+    );
+    assert!(
+        pushed_bias.dots < SMOOTH_PERCENT,
+        "at {PETER_PAN_BIAS} texels the block is {:.4}% dots, past {SMOOTH_PERCENT}% — a count \
+         raised past what acne needs must not draw acne of its own",
+        pushed_bias.dots,
+    );
+
+    // Push the normal offset the same way: the contact does not move.
+    assert!(
+        (pushed_offset.contact - shipped.contact).abs() < CONTACT_HELD,
+        "at {HELD_OFFSET} texels of normal offset the contact's shadow term moved from {:.2} to \
+         {:.2}. `docs/plan/45-shadows.md`'s seventh decision is that a move along the \
+         receiver's own normal leaves the depth it compares alone and therefore keeps a \
+         contact; this is the fixture that says so",
+        shipped.contact,
+        pushed_offset.contact,
+    );
+    assert!(
+        pushed_offset.beyond < shipped.beyond,
+        "at {HELD_OFFSET} texels of normal offset the pavement past the contact carries {:.2} \
+         of shadow term at its deepest against the shipped arm's {:.2} — the count reached the \
+         frame nowhere, so a contact that did not move is what a knob wired to nothing draws",
+        pushed_offset.beyond,
+        shipped.beyond,
+    );
+    assert!(
+        pushed_offset.dots < SMOOTH_PERCENT,
+        "at {HELD_OFFSET} texels the block is {:.4}% dots, past {SMOOTH_PERCENT}%",
+        pushed_offset.dots,
+    );
+
+    // And the two counts are not one knob: pushed the same way, one opens the
+    // contact and the other leaves it alone.
+    assert!(
+        pushed_bias.contact < pushed_offset.contact,
+        "pushed past what acne needs, the constant bias leaves {:.2} of shadow term at the \
+         contact and the normal offset {:.2}. Two counts that did the same thing to a contact \
+         would be one quality knob, and this sample's pair of variables would be a distinction \
+         with nothing behind it",
+        pushed_bias.contact,
+        pushed_offset.contact,
     );
 }
 

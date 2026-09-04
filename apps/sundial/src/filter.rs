@@ -1,5 +1,6 @@
-//! The shadow-filter knobs, as this sample reaches them: the console's own
-//! variables, read and written by name.
+//! The shadow knobs, as this sample reaches them: the console's own variables,
+//! read and written by name — which filter runs, where the comparison seam
+//! stands, and the sun's two bias counts.
 //!
 //! ```text
 //!  key / pause row ──▶ filter::* ──▶ crcbl_render's `r_shadow_*` ConVar
@@ -38,12 +39,30 @@ pub const FILTER: &str = "r_shadow_filter";
 /// Where the comparison seam stands, as a fraction of the frame's width.
 pub const SPLIT: &str = "r_shadow_split";
 
+/// The sun's constant shadow bias, in texels of the cascade a fragment landed
+/// in.
+///
+/// One of `docs/plan/45-shadows.md`'s seventh decision's pair, and the half that
+/// moves the compared depth **towards the light**: too little of it draws acne,
+/// too much lifts a shadow off the thing casting it.
+pub const BIAS: &str = "r_shadow_bias";
+
+/// How far along its own normal a receiver moves before the sun's shadow lookup,
+/// in the same texels.
+///
+/// The seventh decision's other half, and the one that moves the receiver
+/// **sideways** rather than light-ward. Two variables and not one quality knob,
+/// for that decision's own reason: the two are pulled in different directions by
+/// the same pair of artefacts, and a single count could not show them moving
+/// against each other.
+pub const OFFSET: &str = "r_shadow_normal_offset";
+
 /// Every variable this sample drives, in the order the panel prints them.
 ///
 /// One list rather than two call sites, because two things walk it: the panel
 /// and [`reset`], and a variable added to one and forgotten by the other is a
 /// knob a run cannot put back.
-pub const KNOBS: [&str; 2] = [FILTER, SPLIT];
+pub const KNOBS: [&str; 4] = [FILTER, SPLIT, BIAS, OFFSET];
 
 /// Where the seam stands when it is switched on.
 ///
@@ -54,6 +73,23 @@ pub const SEAM_CENTRE: f32 = 0.5;
 
 /// How far one press moves the seam.
 const SEAM_STEP: f32 = 0.02;
+
+/// How far one press moves either bias count, in cascade texels.
+///
+/// **One step for both**, because both are denominated in the same texel: a
+/// press means the same amount of bias whichever of the two it is spent on,
+/// which is what makes walking one against the other a comparison.
+///
+/// **Half a texel, which is the step the two constants' own sweeps are written
+/// in** — `crcbl_render::shadow`'s `DEPTH_BIAS_TEXELS` and `NORMAL_OFFSET_TEXELS`
+/// each carry a table walked in halves — and both shipped values are multiples
+/// of it, so a walk comes back to what ships rather than past it. It does **not**
+/// reach the far end of either range in any reasonable number of presses; that
+/// end is where `apps/sundial`'s plinth loses its shadow, it is dozens of texels
+/// out, and a console line is how a person goes there. A step coarse enough to
+/// walk that far would be too coarse to stand on the shipped count, which is
+/// where a comparison starts.
+const BIAS_STEP: f32 = 0.5;
 
 /// The variable `name` names, out of `crcbl-render`'s own console table.
 ///
@@ -140,6 +176,24 @@ pub fn nudge_seam(right: bool) {
     set(SPLIT, &Value::Float((at + step).clamp(min, max)));
 }
 
+/// Moves one bias count a `BIAS_STEP` up or down, inside its own range.
+///
+/// **[`BIAS`] and [`OFFSET`] through one function**, because a count walked by a
+/// key is one fact about a control and the two cells differ only in which is
+/// written. Clamped into the variable's own declared range, on [`nudge_seam`]'s
+/// terms: a press at either end leaves the count there rather than being refused
+/// by the console.
+pub fn nudge_bias(name: &str, up: bool) {
+    let Some((min, max)) = float_range(name) else {
+        return;
+    };
+    let step = if up { BIAS_STEP } else { -BIAS_STEP };
+    set(
+        name,
+        &Value::Float((var(name).get_f32() + step).clamp(min, max)),
+    );
+}
+
 /// Puts the seam at `at`, the same fraction of the frame's width the variable
 /// itself is in, and answers with where it stands afterwards.
 ///
@@ -202,6 +256,38 @@ pub struct Knobs {
     /// reading is how it knows. The seam's own step is a fiftieth of the width,
     /// so a thousandth resolves every position a key or a page can ask for.
     pub seam_permille: Option<u32>,
+    /// The sun's constant shadow bias, in **thousandths of a cascade texel**.
+    ///
+    /// Thousandths for [`Knobs::seam_permille`]' reason and no other: a reading
+    /// is compared against the last one to decide whether the panel is rebuilt,
+    /// and that comparison wants `Eq`. `BIAS_STEP` is half a texel, so a
+    /// thousandth resolves every value a key or a console line can leave here.
+    pub bias_millitexels: u32,
+    /// How far along its own normal a receiver moves, in the same thousandths.
+    pub offset_millitexels: u32,
+}
+
+/// A count of thousandths of a texel, back as the texels the console holds.
+fn texels(millitexels: u32) -> f32 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a bias count is a few thousand thousandths"
+    )]
+    {
+        millitexels as f32 / 1000.0
+    }
+}
+
+/// A count of texels as the thousandths a [`Knobs`] keeps.
+fn millitexels(count: f32) -> u32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "both variables declare a range above zero, at most a few hundred texels"
+    )]
+    {
+        (count * 1000.0).round() as u32
+    }
 }
 
 impl Knobs {
@@ -221,6 +307,8 @@ impl Knobs {
                     (at * 1000.0).round() as u32
                 }
             }),
+            bias_millitexels: millitexels(var(BIAS).get_f32()),
+            offset_millitexels: millitexels(var(OFFSET).get_f32()),
         }
     }
 
@@ -232,6 +320,30 @@ impl Knobs {
             reason = "a value under a thousand is exact in an f32"
         )]
         self.seam_permille.map(|permille| permille as f32 / 1000.0)
+    }
+
+    /// The sun's constant bias, back as the texels the console holds.
+    #[must_use]
+    pub fn bias(self) -> f32 {
+        texels(self.bias_millitexels)
+    }
+
+    /// The sun's normal offset, in the same texels.
+    #[must_use]
+    pub fn offset(self) -> f32 {
+        texels(self.offset_millitexels)
+    }
+
+    /// What a bias row prints: a count and the unit it is denominated in.
+    ///
+    /// **The unit is on the row**, because a bare `1.50` beside a seam printed as
+    /// a fraction of the width is two numbers a reviewer has no reason to read
+    /// differently — and these are texels of whichever cascade the fragment
+    /// landed in rather than metres, which is the whole of why the pair is
+    /// comparable across one frame at all.
+    #[must_use]
+    pub fn bias_row(count: f32) -> String {
+        format!("{count:.2} texels")
     }
 
     /// What the panel and the summary call the near side of the seam.
@@ -272,6 +384,8 @@ impl crcbl::ui::DebugModule for Knobs {
         section.row_str("seam", &self.seam_row());
         section.row_str("near side", &self.near_side());
         section.row_str("far side", &self.far_side());
+        section.row_str("bias", &Self::bias_row(self.bias()));
+        section.row_str("normal offset", &Self::bias_row(self.offset()));
     }
 }
 
@@ -340,7 +454,11 @@ mod tests {
     #[test]
     fn every_knob_this_sample_drives_is_declared_by_the_engine() {
         let _held = held();
-        assert_eq!(KNOBS.len(), 2, "the panel prints one row per knob");
+        assert_eq!(
+            KNOBS.len(),
+            4,
+            "the panel prints one row per knob: the filter, the seam and the two bias counts"
+        );
         for name in KNOBS {
             let var = var(name);
             assert_eq!(var.name(), name);
@@ -351,6 +469,24 @@ mod tests {
             "the filter is a name from a set"
         );
         assert!(matches!(var(SPLIT).kind(), Kind::Float { .. }));
+        for name in [BIAS, OFFSET] {
+            let Kind::Float { min, max } = var(name).kind() else {
+                panic!("{name} is a count of texels, so it is a float");
+            };
+            assert!(
+                min <= 0.0,
+                "{name} cannot reach zero, and zero is the end of its range this sample's \
+                 acne reading is taken at"
+            );
+            let Value::Float(shipped) = *var(name).default() else {
+                panic!("{name}'s default is the float the engine ships");
+            };
+            assert!(
+                max > shipped * 2.0,
+                "{name} ships at {shipped} and stops at {max}, so a walk cannot reach the far \
+                 side of what the engine draws with"
+            );
+        }
     }
 
     /// **Cycling the filter walks the engine's own set**, and comes back round
@@ -436,6 +572,62 @@ mod tests {
         assert_eq!(seam(), None, "a second press takes the comparison away");
     }
 
+    /// **Each bias count walks a step at a time and stops at its own ends**, and
+    /// walking one leaves the other where it was.
+    ///
+    /// The last clause is the half worth guarding: [`nudge_bias`] takes the cell
+    /// by name, so a key table that handed it the wrong one would move a knob
+    /// while the panel row beside it said the other had moved.
+    #[test]
+    fn each_bias_count_walks_a_step_at_a_time_and_stops_at_its_own_ends() {
+        let _held = held();
+        for name in [BIAS, OFFSET] {
+            let other = if name == BIAS { OFFSET } else { BIAS };
+            let (min, max) = float_range(name).expect("a bias count is a float");
+            let start = var(name).get_f32();
+            let untouched = var(other).get_f32();
+
+            nudge_bias(name, true);
+            assert!(
+                (var(name).get_f32() - (start + BIAS_STEP)).abs() < 1e-5,
+                "{name} went to {} rather than a step up from {start}",
+                var(name).get_f32()
+            );
+            nudge_bias(name, false);
+            assert!((var(name).get_f32() - start).abs() < 1e-5);
+            assert!(
+                (var(other).get_f32() - untouched).abs() < 1e-5,
+                "walking {name} moved {other} as well"
+            );
+
+            // Far more presses than either range is steps wide, so the walk
+            // arrives at the end rather than merely near it.
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a range of a few hundred texels over a half-texel step is a small count"
+            )]
+            let presses = ((max - min) / BIAS_STEP) as u32 + 2;
+            for _ in 0..presses {
+                nudge_bias(name, false);
+            }
+            assert!(
+                (var(name).get_f32() - min).abs() < 1e-5,
+                "{name} stopped at {} rather than at its own floor {min}",
+                var(name).get_f32()
+            );
+            for _ in 0..presses {
+                nudge_bias(name, true);
+            }
+            assert!(
+                (var(name).get_f32() - max).abs() < 1e-5,
+                "{name} stopped at {} rather than at its own ceiling {max}",
+                var(name).get_f32()
+            );
+            reset();
+        }
+    }
+
     /// **A caller can place the seam outright**, and either edge takes it down.
     #[test]
     fn the_seam_can_be_placed_outright_and_either_edge_takes_it_down() {
@@ -501,6 +693,8 @@ mod tests {
         let before: Vec<Value> = KNOBS.iter().map(|name| var(name).get()).collect();
         cycle(FILTER);
         toggle_seam();
+        nudge_bias(BIAS, true);
+        nudge_bias(OFFSET, false);
         let moved: Vec<Value> = KNOBS.iter().map(|name| var(name).get()).collect();
         assert_ne!(before, moved, "nothing moved, so there is nothing to reset");
 
