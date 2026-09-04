@@ -409,6 +409,26 @@ falls outside them. `crcbl_shaders::mesh`'s
 direction and its position, both of which draw a plausible frame when they are
 wrong.
 
+**2026-09-04: the band is now something you can look at.**
+`crcbl_render::DebugView::Cascades` — `debug_view cascades` from the console,
+`C` in `apps/sundial` — multiplies the shaded picture by
+`crcbl_shaders::mesh::CASCADE_TINTS` of the cascade each sun-lit fragment read,
+and inside the band by the blend of the two tints, weighted by the same value
+the visibility itself was mixed with. It is not a decision of its own: the band
+was already this shape, and what the overlay adds is an observer. Two things
+made it worth the slice. The **tint is reported by `sun_visibility` rather than
+derived beside it** — the function hands back the cascade it selected and the
+fade it applied — so the overlay cannot draw a boundary the lighting does not
+have, which is the failure an independently computed overlay has and which looks
+entirely plausible. And the sentinel is **negative** rather than one past the
+outermost debug view's, because this is the one view that keeps the shaded
+picture instead of replacing it; going the other way down the lane means no
+existing threshold in `mesh.slang` or `mesh_cluster.slang` sees it and no
+existing branch had to grow a condition. `crates/crcbl/tests/forward_e2e/`'s
+`the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from` reads three
+placed pixels — inside the near cascade, half way through the band, past it —
+and holds them in that order, which is the assertion a step would fail.
+
 ### A ninth, taken 2026-08-28: a rotated disc, and the count that makes it quiet
 
 **The filter is a 32-tap Vogel disc of radius two tile texels, turned by one of

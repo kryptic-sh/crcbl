@@ -35,6 +35,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The cascade debug overlay**, which `docs/plan/18-render-features.md` has
+  owed since P7. `crcbl_render::DebugView::Cascades` and
+  `ForwardRenderer::set_cascade_view` multiply the shaded picture by
+  `crcbl_shaders::mesh::CASCADE_TINTS` of the cascade each sun-lit fragment's
+  shadow was sampled from — warm for the near one, cool for the far one — and
+  across `docs/plan/45-shadows.md`'s eighth decision's cross-fade band by the
+  blend of the two, weighted by the same value the visibility itself was mixed
+  with. So the band reads as a gradient and a seam where two cascades disagree
+  reads as a step in it. The tint is reported by `mesh.slang`'s `sun_visibility`
+  rather than derived beside it, so the overlay cannot draw a boundary the
+  lighting does not have; a fragment facing away from the sun or past the last
+  cascade's reach keeps `CASCADE_TINT_NONE` and is drawn unchanged. It is the
+  one debug view that keeps the shaded picture, so it loses to every other one
+  and its lane sentinel is negative rather than one past the outermost — which
+  is what leaves every existing threshold, and every golden, untouched.
+
+  Reachable as `debug_view cascades` from the console in every sample, and bound
+  in `apps/sundial` to the `C` key and the pause panel's `CASCADES` row.
+
 - **Two console variables that put `docs/plan/45-shadows.md`'s filter ladder
   back in the tree and compare two rungs of it in one frame.** `r_shadow_filter`
   selects between `pcss` — the shipping filter, where a blocker search sizes the
@@ -51,22 +70,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   recording would be every triangle again. Both default to what shipped, so a
   frame nobody has touched them on is unchanged to the byte.
 
-- **`sundial`, the shadow acceptance fixture, natively.** `cargo run -p sundial`
-  opens one exterior plaza of nothing but shadow geometry — a colonnade of five
-  columns whose shadows cross the cascade boundary in frame, a plinth resting on
-  the pavement so its contact can be read, three counters hanging at graded
-  heights over one plane for the penumbra claim, a low parapet, and three
-  punctual lights (one spot, two point) which is exactly the atlas budget. The
-  sun runs on a **scripted clock**, a pure function of a tick rather than of the
-  wall, pausable with `P` and scrubbable with `-` and `=`, so any frame of the
-  sweep can be named and drawn again. Every rung of the filter ladder is live
-  and on the pause panel: the filter (`F`, cycling `pcss`, `disc` and `box`),
-  the comparison seam (`X` to raise it, `,` / `.` to nudge it) with a row naming
-  which filter each side is running, the shadow passes themselves, the camera
-  (`ENTER`, cycling the fixture pose, a pose beside the counters and free fly)
-  and `R` to put everything back. The panel and the headless summary both carry
-  the per-pass GPU time for `shadow` and `forward`, and the summary names the
-  sun's tick, without which no frame of this sample could be reproduced.
+- **`sundial`, the shadow acceptance fixture, natively and in a browser.**
+  `cargo run -p sundial` opens one exterior plaza of nothing but shadow geometry
+  — a colonnade of five columns whose shadows cross the cascade boundary in
+  frame, a plinth resting on the pavement so its contact can be read, three
+  counters hanging at graded heights over one plane for the penumbra claim, a
+  low parapet, and three punctual lights (one spot, two point) which is exactly
+  the atlas budget. The sun runs on a **scripted clock**, a pure function of a
+  tick rather than of the wall, pausable with `P` and scrubbable with `-` and
+  `=`, so any frame of the sweep can be named and drawn again. Every rung of the
+  filter ladder is live and on the pause panel: the filter (`F`, cycling `pcss`,
+  `disc` and `box`), the comparison seam (`X` to raise it, `,` / `.` to nudge
+  it) with a row naming which filter each side is running, the shadow passes
+  themselves, the camera (`ENTER`, cycling the fixture pose, a pose beside the
+  counters and free fly) and `R` to put everything back. The panel and the
+  headless summary both carry the per-pass GPU time for `shadow` and `forward`,
+  and the summary names the sun's tick, without which no frame of this sample
+  could be reproduced.
 
   `apps/sundial/tests/run-sundial-golden.sh` is the acceptance suite, and it
   asserts what a picture cannot: that the penumbra widens with its caster's
@@ -79,8 +99,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not. Four goldens follow those: one per filter at the fixture sun and one at
   the bottom of the sun's arc. CI runs the suite on lavapipe.
 
-  The crate builds for `wasm32-unknown-unknown` already; the browser demo is not
-  built yet, and `docs/backlog.md` says what a page owes.
+  **It is on the demo site too**, at `/demos/sundial/`, and it is the second
+  page there whose controls are HTML rather than keys: the filter, the seam, a
+  slider for where the seam stands, and — the part no other page has — the
+  fixture's own clock, a button that stops and starts the sun and a slider that
+  scrubs it across the sweep. The filter and the seam write the same
+  `r_shadow_*` console variable the key writes; the sun's two go through
+  `crate::sun`'s channel, because a tick is where the simulation has got to
+  rather than a setting, and are adopted on the next fixed step. Each answers
+  with what the engine holds afterwards, so nothing on the page keeps a copy of
+  a knob. That is the seam's and the sun's own reason — natively the seam is
+  walked with `,` and `.` and the sun is stopped with `P`, which a phone does
+  not have. A browser has no ray query, so the page draws through
+  `LightingPath::Rasterised` and compares two raster filters.
 
 - **`alcove`, the ambient-occlusion acceptance fixture, natively and in a
   browser.** `cargo run -p alcove` opens one interior of nothing but occlusion

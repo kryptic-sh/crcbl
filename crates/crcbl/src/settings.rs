@@ -1343,8 +1343,8 @@ pub fn apply_video_to(
 ///
 /// In
 /// [`ForwardRenderer::debug_view`](crcbl_render::ForwardRenderer::debug_view)'s
-/// own precedence order — bent normal, motion, occlusion, heatmap, LOD, normals
-/// — so `debug_view` of a renderer this was
+/// own precedence order — bent normal, motion, occlusion, heatmap, LOD, normals,
+/// cascades — so `debug_view` of a renderer this was
 /// applied to answers back the view it was handed, whichever it was. That
 /// round trip is what
 /// `every_debug_view_sets_exactly_the_switch_its_precedence_reads_back` asserts
@@ -1354,16 +1354,17 @@ pub fn apply_video_to(
 /// [`DebugView`](crcbl_render::DebugView) variant added later fails to compile
 /// here instead of silently drawing the shaded frame.
 #[must_use]
-pub const fn debug_view_switches(view: crcbl_render::DebugView) -> [bool; 6] {
+pub const fn debug_view_switches(view: crcbl_render::DebugView) -> [bool; 7] {
     use crcbl_render::DebugView as V;
     match view {
-        V::Shaded => [false, false, false, false, false, false],
-        V::BentNormal => [true, false, false, false, false, false],
-        V::Motion => [false, true, false, false, false, false],
-        V::AmbientOcclusion => [false, false, true, false, false, false],
-        V::Heatmap => [false, false, false, true, false, false],
-        V::LodTint => [false, false, false, false, true, false],
-        V::Normals => [false, false, false, false, false, true],
+        V::Shaded => [false, false, false, false, false, false, false],
+        V::BentNormal => [true, false, false, false, false, false, false],
+        V::Motion => [false, true, false, false, false, false, false],
+        V::AmbientOcclusion => [false, false, true, false, false, false, false],
+        V::Heatmap => [false, false, false, true, false, false, false],
+        V::LodTint => [false, false, false, false, true, false, false],
+        V::Normals => [false, false, false, false, false, true, false],
+        V::Cascades => [false, false, false, false, false, false, true],
     }
 }
 
@@ -1380,13 +1381,14 @@ pub const fn set_debug_view_on(
     renderer: &mut crcbl_render::ForwardRenderer,
     view: crcbl_render::DebugView,
 ) {
-    let [bent, motion, occlusion, heatmap, lod, normals] = debug_view_switches(view);
+    let [bent, motion, occlusion, heatmap, lod, normals, cascades] = debug_view_switches(view);
     renderer.set_bent_normal_view(bent);
     renderer.set_motion_view(motion);
     renderer.set_occlusion_view(occlusion);
     renderer.set_heatmap(heatmap);
     renderer.set_lod_view(lod);
     renderer.set_normals_view(normals);
+    renderer.set_cascade_view(cascades);
 }
 
 // ── The console's variables ─────────────────────────────────────────────────
@@ -3165,8 +3167,9 @@ mod tests {
     ///
     /// The renderer needs a device and these do not, so this asserts the table
     /// against that function's precedence order directly: bent normal, motion,
-    /// occlusion, heatmap, LOD, normals. A view that set two switches would be
-    /// drawn as whichever is outermost, silently.
+    /// occlusion, heatmap, LOD, normals, cascades. A view that set two switches
+    /// would be drawn as whichever is outermost, silently — and the cascade
+    /// view is the one that would go unnoticed, because it loses to all six.
     #[test]
     fn every_debug_view_sets_exactly_the_switch_its_precedence_reads_back() {
         use crcbl_render::DebugView as V;
@@ -3177,10 +3180,11 @@ mod tests {
             V::Heatmap,
             V::LodTint,
             V::Normals,
+            V::Cascades,
         ];
         assert_eq!(
             debug_view_switches(V::Shaded),
-            [false; 6],
+            [false; 7],
             "the shaded frame is every switch off",
         );
         for (index, view) in order.into_iter().enumerate() {

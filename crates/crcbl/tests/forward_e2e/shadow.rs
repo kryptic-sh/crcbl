@@ -861,6 +861,319 @@ fn a_wall_darkens_the_floor_it_stands_on_and_the_sun_decides_which_half() {
 }
 
 // ---------------------------------------------------------------------------
+// The cascade debug overlay
+// ---------------------------------------------------------------------------
+//
+// `docs/plan/45-shadows.md`'s eighth decision made the cascade switch a **band**
+// rather than a step, and until `DebugView::Cascades` existed nothing in this
+// workspace could show where that band falls. The overlay multiplies the shaded
+// picture by `crcbl::shaders::mesh::CASCADE_TINTS` of the cascade each sun-lit
+// fragment read, mixing the two tints across the band by the same weight the
+// visibility itself was mixed with.
+//
+// The scene is one flat pavement seen obliquely, and nothing else: no caster, so
+// the whole of it is lit and the only thing that varies along it is the cascade
+// its shadow lookup selected. That is what makes a pixel's colour readable as a
+// cascade rather than as a shadow.
+
+/// How much the cube is scaled by to get the cascade overlay's pavement, and how
+/// far it is dropped so its `+Y` face is the plane `y = 0`.
+///
+/// `SPOT_FLOOR_SCALE`'s shape and larger, because this camera looks *along* the
+/// surface rather than down at it: the far reading below stands past the last
+/// cascade's inner edge, and the pavement has to reach beyond that or the
+/// reading is of the clear colour.
+const PAVEMENT_SCALE: f32 = 30.0;
+
+/// How far above the pavement the eye stands, in world units.
+///
+/// The pavement is the plane `y = 0`, so this is also the shortest eye distance
+/// any pixel of it can have — [`pavement_pixel`] inverts that relation.
+const PAVEMENT_EYE_UP: f32 = 3.0;
+
+/// The camera the cascade overlay is read from: over the pavement, pitched down
+/// 45° so the surface fills the frame from close to far.
+///
+/// **The pitch is what puts a cascade boundary on screen.** Straight down and
+/// every pixel is at much the same eye distance, so one cascade covers the frame
+/// and there is no boundary to look at; along the surface and the near rows are
+/// metres closer than the far ones, which is the range the splits divide.
+fn pavement_camera() -> crcbl::render::Camera {
+    crcbl::render::Camera {
+        eye: crcbl::math::Vec3::new(0.0, PAVEMENT_EYE_UP, 0.0),
+        target: crcbl::math::Vec3::new(0.0, 0.0, -PAVEMENT_EYE_UP),
+        up: crcbl::math::Vec3::Y,
+        projection: crcbl::render::Projection::default(),
+    }
+}
+
+/// The sun the pavement is lit by: high and a little off both axes.
+///
+/// High, so the pavement's `+Y` face has a positive `N·L` everywhere and every
+/// pixel of it is a fragment `sun_visibility` actually selects a cascade for — a
+/// grazing sun would leave the far rows with the `CASCADE_NONE` a surface facing
+/// away gets, and the overlay would be white there for a reason that has nothing
+/// to do with the splits.
+fn pavement_sun() -> crcbl::render::DirectionalLight {
+    crcbl::render::DirectionalLight {
+        direction: crcbl::math::Vec3::new(0.35, 1.0, 0.2),
+        ..crcbl::render::DirectionalLight::default()
+    }
+}
+
+/// The pavement under [`pavement_sun`], with the cascade view `on` or off.
+fn render_pavement(on: bool) -> ShadowFrame {
+    let prepare = move |renderer: &mut crcbl::render::ForwardRenderer| {
+        renderer.set_cascade_view(on);
+    };
+    render_scene(&ShadowScene {
+        prepare: &prepare,
+        camera: pavement_camera(),
+        sun: pavement_sun(),
+        model: crcbl::math::Mat4::from_translation(crcbl::math::Vec3::new(
+            0.0,
+            -0.5 * PAVEMENT_SCALE,
+            0.0,
+        )) * crcbl::math::Mat4::from_scale(crcbl::math::Vec3::splat(PAVEMENT_SCALE)),
+    })
+}
+
+/// Which pixel the pavement point at eye distance `distance` lands on.
+///
+/// The pavement is the plane `y = 0` and the camera stands [`PAVEMENT_EYE_UP`]
+/// above it on the axis, so a point straight ahead at eye distance `d` is at
+/// `z = -sqrt(d² - up²)` — and the pixel is that point through the very matrix
+/// the frame was drawn with, which is what lets the readings below be *placed*
+/// from `Cascades::far` instead of found by looking at the picture.
+///
+/// # Panics
+///
+/// If `distance` is inside the eye's own height, where no pavement point has it,
+/// or if the point lands outside the frame.
+fn pavement_pixel(distance: f32) -> (u32, u32) {
+    let camera = pavement_camera();
+    assert!(
+        distance > PAVEMENT_EYE_UP,
+        "no point of the pavement is {distance} from an eye {PAVEMENT_EYE_UP} above it"
+    );
+    let point = crcbl::math::Vec3::new(
+        0.0,
+        0.0,
+        -distance
+            .mul_add(distance, -(PAVEMENT_EYE_UP * PAVEMENT_EYE_UP))
+            .sqrt(),
+    );
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a frame extent is a few hundred pixels"
+    )]
+    let (width, height) = (MESH_EXTENT.0 as f32, MESH_EXTENT.1 as f32);
+    let clip = camera.view_projection(width / height) * point.extend(1.0);
+    assert!(
+        clip.w > 0.0,
+        "the pavement point at {distance} is behind the eye"
+    );
+    // Y-up NDC — `Projection::matrix` says so and `crcbl-vk` submits the
+    // negative-height viewport that keeps it true — and row zero is the top.
+    let ndc = (clip.x / clip.w, clip.y / clip.w);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the assertion below is what says the result is a pixel of this frame"
+    )]
+    let pixel = (
+        (ndc.0.mul_add(0.5, 0.5) * width) as u32,
+        ((0.5 - ndc.1 * 0.5) * height) as u32,
+    );
+    assert!(
+        pixel.0 + 1 < MESH_EXTENT.0 && pixel.1 + 1 < MESH_EXTENT.1,
+        "the pavement point at {distance} projects to {pixel:?}, which is not a pixel of a \
+         {MESH_EXTENT:?} frame with a patch around it"
+    );
+    pixel
+}
+
+/// How far red leads blue over the 3×3 patch centred on `at`, in levels.
+///
+/// **The reading the tints were chosen for.** `CASCADE_TINTS`' near colour is
+/// red-dominant and its far one blue-dominant, so this is positive under the
+/// near cascade, negative under the far one, and between the two inside the
+/// band — a difference of channels rather than of brightness, which is what
+/// survives the tonemap and a pavement that is not white.
+///
+/// A patch rather than one pixel because the pavement is seen obliquely: one row
+/// either side is a few centimetres of eye distance, far less than the band is
+/// wide, and averaging over them is what stops a single sample landing on a
+/// dithered edge.
+fn red_over_blue(image: &crcbl_golden::Image, at: (u32, u32)) -> f32 {
+    let mut total = 0.0f32;
+    let mut count = 0u32;
+    for y in at.1 - 1..=at.1 + 1 {
+        for x in at.0 - 1..=at.0 + 1 {
+            let pixel = image.pixel(x, y).expect("inside the frame");
+            total += f32::from(pixel[0]) - f32::from(pixel[2]);
+            count += 1;
+        }
+    }
+    assert!(count > 0, "an empty patch measures nothing");
+    #[expect(clippy::cast_precision_loss, reason = "a patch is nine pixels")]
+    let mean = total / count as f32;
+    mean
+}
+
+/// How far apart two neighbouring readings have to be before the difference is
+/// the cascade rather than the pavement's own shading, in levels of red over
+/// blue.
+///
+/// **Swept before it was fixed**, on both Vulkan adapters this workspace runs
+/// locally — radv on an RX 7900 XTX and lavapipe — over the frame this test
+/// draws. The three readings, with the view on:
+///
+/// | reading | eye distance | radv    | lavapipe |
+/// | ------- | ------------ | ------- | -------- |
+/// | near    | 3.760 m      | `+62.0` | `+62.0`  |
+/// | band    | 4.464 m      | `-7.1`  | `-7.0`   |
+/// | far     | 6.109 m      | `-72.0` | `-72.0`  |
+///
+/// so the two gaps the assertions are made on are 69.1 and 64.9 on radv and
+/// 69.0 and 65.0 on lavapipe. The two adapters agree to a tenth of a level.
+/// Floored at roughly half the *narrower* of them: margin for a driver that
+/// tonemaps a shade differently, and nowhere near enough for a band that stepped
+/// to one cascade's flat tint, which moves that gap to zero.
+const CASCADE_TINT_LEVELS: f32 = 32.0;
+
+/// How flat the same three readings have to be with the view **off**, in the
+/// same levels.
+///
+/// The anti-vacuity constant, and it is separate from
+/// [`CASCADE_TINT_LEVELS`] because it is a different measurement rather than the
+/// same one loosened: what it bounds is the pavement's *own* spread across the
+/// three places, which the sweep above measured at `-7.0`, `-7.0` and `-7.0` on
+/// both adapters — a spread of a tenth of a level, because the surface is one
+/// flat unshadowed material and nothing about it varies with distance. Four
+/// levels is forty times that and still eight times under the gap the tint
+/// opens, so a frame in which the *shading* ordered the three places would fail
+/// here rather than quietly satisfying the assertions above.
+const PAVEMENT_FLATNESS_LEVELS: f32 = 4.0;
+
+/// **The cascade view tints each pixel by the cascade its sun shadow came from,
+/// and the band between two cascades is the blend of their two tints.**
+///
+/// The claim `docs/plan/45-shadows.md`'s eighth decision has had no observer
+/// for: the switch is a band, and a band is only a band if the picture across it
+/// is a mixture rather than a step. Three readings, placed from
+/// `Cascades::far[0]` rather than found by looking — well inside the near
+/// cascade, half way through the band, and past it in the far cascade — have to
+/// come out in that order, and the middle one strictly between its neighbours.
+///
+/// **Anti-vacuity, three ways.** The two tints have to differ, or every reading
+/// is the same colour and the ordering is noise; the middle reading has to be
+/// strictly between rather than merely not-equal, which is what a step would
+/// fail; and the same three readings under the view *off* must not order
+/// themselves that way, or the test is measuring the pavement's own shading and
+/// would pass with the overlay deleted.
+///
+/// **And the view off is the frame that was always drawn.** A renderer switched
+/// on and back off has to produce the frame byte for byte, which is the
+/// property every golden in this workspace depends on — the lane is negative
+/// precisely so that no other view's threshold sees it, and a sentinel that
+/// leaked would move goldens nobody re-blessed.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from() {
+    let tints = crcbl::shaders::mesh::CASCADE_TINTS;
+    assert_ne!(
+        tints[0], tints[1],
+        "the two cascades wear one colour, so no arrangement of readings below could tell them \
+         apart"
+    );
+
+    let cascades =
+        crcbl::render::shadow::Cascades::new(&pavement_camera(), pavement_sun().direction);
+    let reach = cascades.far[0];
+    let band = reach * crcbl::shaders::mesh::CASCADE_FADE_FRACTION;
+    // Two bands inside the near cascade's own edge, half way through the band,
+    // and three bands past it — all three off `reach`, so a change to the split
+    // scheme moves the readings with it instead of leaving them measuring
+    // whatever now falls there.
+    let places = [
+        ("near", reach - 2.0 * band),
+        ("band", reach - 0.5 * band),
+        ("far", reach + 3.0 * band),
+    ];
+
+    let tinted = render_pavement(true);
+    let shaded = render_pavement(false);
+    let mut readings = Vec::new();
+    for (name, distance) in places {
+        let at = pavement_pixel(distance);
+        let (on, off) = (
+            red_over_blue(&tinted.image, at),
+            red_over_blue(&shaded.image, at),
+        );
+        eprintln!(
+            "{suite}: shadow — the {name} reading at {distance:.3} m (cascade reach {reach:.3}, \
+             band {band:.3}) is pixel {at:?}: red over blue {on:.1} with the view on, {off:.1} \
+             with it off",
+            suite = crate::SUITE
+        );
+        readings.push((name, on, off));
+    }
+
+    let [
+        (_, near_on, near_off),
+        (_, band_on, band_off),
+        (_, far_on, far_off),
+    ] = <[(&str, f32, f32); 3]>::try_from(readings.as_slice()).expect("three readings");
+
+    assert!(
+        near_on - band_on > CASCADE_TINT_LEVELS,
+        "the near cascade's reading ({near_on:.1}) is not {CASCADE_TINT_LEVELS} levels redder \
+         than the band's ({band_on:.1}), so the tint is not reaching the picture"
+    );
+    assert!(
+        band_on - far_on > CASCADE_TINT_LEVELS,
+        "the band's reading ({band_on:.1}) is not {CASCADE_TINT_LEVELS} levels redder than the \
+         far cascade's ({far_on:.1}), so the band is a step rather than a blend — or the far \
+         cascade wears the near one's colour"
+    );
+
+    // The same three places with the view off do not order themselves that way,
+    // which is what says the ordering above is the overlay and not the scene.
+    assert!(
+        (near_off - band_off).abs() < PAVEMENT_FLATNESS_LEVELS
+            && (band_off - far_off).abs() < PAVEMENT_FLATNESS_LEVELS,
+        "the shaded pavement already separates these three places — {near_off:.1}, {band_off:.1}, \
+         {far_off:.1} — so the ordering above is a picture of the shading and would hold with the \
+         overlay deleted"
+    );
+
+    // And switching the view off puts the frame back exactly, not nearly.
+    let toggled = {
+        let prepare = |renderer: &mut crcbl::render::ForwardRenderer| {
+            renderer.set_cascade_view(true);
+            renderer.set_cascade_view(false);
+        };
+        render_scene(&ShadowScene {
+            prepare: &prepare,
+            camera: pavement_camera(),
+            sun: pavement_sun(),
+            model: crcbl::math::Mat4::from_translation(crcbl::math::Vec3::new(
+                0.0,
+                -0.5 * PAVEMENT_SCALE,
+                0.0,
+            )) * crcbl::math::Mat4::from_scale(crcbl::math::Vec3::splat(PAVEMENT_SCALE)),
+        })
+    };
+    assert_eq!(
+        difference(&shaded.image, &toggled.image),
+        (0, 0),
+        "a renderer the cascade view was switched on and off again does not draw the frame it \
+         drew before, so every golden blessed without the overlay is at risk of moving"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The shadowed spot
 // ---------------------------------------------------------------------------
 //

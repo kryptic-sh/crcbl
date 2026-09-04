@@ -101,6 +101,15 @@ pub enum SundialAction {
     ToggleEffect(RenderEffects),
     /// Move `r_shadow_filter` on to the next rung the engine declares.
     CycleFilter,
+    /// Show the cascade overlay, or take it away — `crcbl::debug_view`'s
+    /// `DebugView::Cascades`.
+    ///
+    /// **The one row that changes the picture rather than the shadow.** Every
+    /// other control here moves what the shadow *is*; this one leaves it alone
+    /// and colours the frame by which cascade each sun-lit fragment read, which
+    /// is the only way the cross-fade band `docs/plan/45-shadows.md`'s eighth
+    /// decision added is a thing a reviewer can look at.
+    ToggleCascades,
     /// Put the comparison seam up at [`crate::filter::SEAM_CENTRE`], or take it
     /// away.
     ToggleSeam,
@@ -139,17 +148,26 @@ pub const FAR_SIDE_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 7;
 /// The reading naming where the sun stands, on [`NEAR_SIDE_ID`]'s terms.
 pub const SUN_TIME_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 8;
 
+/// The cascade overlay's row.
+///
+/// **Appended past every id above rather than slotted beside the shadow row it
+/// reads next to**, because an id is what a saved selection and every test here
+/// name a row by: renumbering to put a new row in the middle would move rows
+/// that already exist.
+pub const CASCADES_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 9;
+
 /// Every row `ENTER` fires, with the action it carries and the word it prints.
 ///
 /// One table rather than a row list beside an id match, because those are one
 /// fact about a row written twice — and the way the two drift is a row that fires
 /// its neighbour's action while printing its own name.
-pub(crate) const PRESSED_ROWS: [(crcbl::ui::WidgetId, SundialAction, &str); 5] = [
+pub(crate) const PRESSED_ROWS: [(crcbl::ui::WidgetId, SundialAction, &str); 6] = [
     (
         SHADOWS_ID,
         SundialAction::ToggleEffect(RenderEffects::SHADOWS),
         "SHADOWS",
     ),
+    (CASCADES_ID, SundialAction::ToggleCascades, "CASCADES"),
     (FILTER_ID, SundialAction::CycleFilter, "FILTER"),
     (SEAM_ID, SundialAction::ToggleSeam, "SEAM"),
     (SUN_ID, SundialAction::ToggleSun, "SUN"),
@@ -223,6 +241,7 @@ pub fn pause_menu(
     device: RenderEffects,
     knobs: Knobs,
     clock: Clock,
+    cascades: bool,
 ) -> Menu {
     use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
     let resolved = request.resolve(device);
@@ -234,6 +253,17 @@ pub fn pause_menu(
         MenuItem::new(
             SHADOWS_ID,
             format!("SHADOWS: {}", effect_state(resolved, device)),
+            "ENTER",
+        ),
+        // Under the shadow row rather than beside the filter's, because it is
+        // about the *cascades* and not about the kernel: it says which map a
+        // pixel read, which is the question the rows below cannot answer at all.
+        MenuItem::new(
+            CASCADES_ID,
+            format!("CASCADES: {}", if cascades { "ON" } else { "OFF" }),
+            // `ENTER`, not `C`, on `FILTER`'s terms: a row with an action behind
+            // it says so, and the key beside it is a shortcut rather than the
+            // row's control. This module's header is where that split is drawn.
             "ENTER",
         ),
         MenuItem::new(
@@ -293,6 +323,7 @@ pub fn menus() -> Menus {
                 RenderEffects::all(),
                 Knobs::read(),
                 Clock::default(),
+                crate::app::cascade_view(),
             ),
         )],
     )
@@ -319,6 +350,7 @@ mod tests {
             RenderEffects::all(),
             Knobs::read(),
             Clock::default(),
+            false,
         ))
     }
 
@@ -410,6 +442,7 @@ mod tests {
             RenderEffects::all(),
             knobs,
             clock,
+            false,
         ));
         let has = |prefix: &str| {
             rows.iter()
@@ -434,6 +467,7 @@ mod tests {
             RenderEffects::all(),
             knobs,
             scrubbed,
+            false,
         ));
         let sun = moved
             .iter()
@@ -459,6 +493,7 @@ mod tests {
                 RenderEffects::all(),
                 Knobs::read(),
                 Clock::default(),
+                false,
             ))
             .into_iter()
             .find(|label| label.starts_with("CAMERA: "))
@@ -532,6 +567,7 @@ mod tests {
             clamped,
             Knobs::read(),
             Clock::default(),
+            false,
         ));
         assert!(
             rows.contains(&"SHADOWS: UNAVAILABLE".to_string()),

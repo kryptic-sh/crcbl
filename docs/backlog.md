@@ -122,22 +122,21 @@ out of `FrameUniforms::shadow_filter`. What that change did **not** do:
 seam bindings, and the golden suite that measures the penumbra ladder, the seam,
 the contact and the clock's determinism. What that slice did **not** do:
 
-- **The cascade overlay and the atlas viewer.** `docs/plan/sample/18-sundial.md`
-  puts both in milestone 1, and neither is a sample-side change: tinting a
-  fragment by the cascade it landed in is a mode lane in `mesh.slang` beside
-  `shadow_filter_mode`, and drawing `crcbl_render::shadow`'s atlas to screen is
-  a pass in `crcbl-render`. So they are two engine slices this fixture will bind
-  keys and a panel row to once they exist, not work `apps/sundial` could have
-  finished. The cascade overlay is the one `docs/plan/18-render-features.md` has
-  been owed since P7.
-- **The web demo.** The crate builds for `wasm32-unknown-unknown` as a `cdylib`
-  already, and there is no `src/web.rs`: a page owes an export per knob (filter,
-  seam, seam position, sun tick, sun pause, reset), a demo directory of its own
-  beside `web/demos/alcove/`, a row in `web/build.sh`'s `DEMOS`, a row in
-  `web/tools/browser-e2e.mjs`, and the demo-list guards
-  `crcbl-a-new-demo-joins-eight-lists` names. `apps/alcove`'s page is the shape
-  to follow — HTML controls rather than keys, for the same reason: a seam walked
-  with `,` and `.` is a comparison a phone cannot reach.
+- **The atlas viewer.** `docs/plan/sample/18-sundial.md` puts it in milestone 1
+  and it is not a sample-side change: drawing `crcbl_render::shadow`'s atlas to
+  screen is a pass in `crcbl-render`. So it is an engine slice this fixture will
+  bind a key and a panel row to once it exists, not work `apps/sundial` could
+  have finished — see the shadow-map inspector entry above. The **cascade
+  overlay**, which stood beside it here, landed 2026-09-04 as
+  `DebugView::Cascades`, and this fixture binds it to `C` and to the panel's
+  `CASCADES` row.
+- **`C` is bound but not in `--help`.** The cascade overlay's key landed
+  2026-09-04 in `app.rs`'s `KEYS` and on the pause panel, and `args.rs`'s
+  `USAGE` was not touched — it was outside that change's write set. `KEYS` is
+  what `every_key_is_bound_once_and_named_in_the_help` walks, and that check
+  passes for `C` only because the usage text contains the letter somewhere else,
+  which is the vacuous half of an otherwise real guard. What it wants is a line
+  under the other key descriptions saying `C` toggles the cascade overlay.
 - **No cost figure per filter.** The entry above this one asks for it and this
   slice did not supply it: `ShadowCost` prints the `shadow` and `forward` rows
   live, but nothing in the golden suite records a number, because a timing read
@@ -166,6 +165,60 @@ separation in a scene this size clamps to the same lower bound and `pcss` draws
 exactly what `disc` draws. `apps/sundial/src/plaza.rs`'s `NEAR` is half a metre
 for that reason and says so, and the split is read back out of `Cascades` by
 `the_colonnade_straddles_the_cascade_split` rather than assumed.
+
+## sundial's page knobs: what is checked, and what is not (2026-09-04)
+
+`/demos/sundial/` is the second page on the site whose controls are HTML rather
+than keys — `apps/sundial/src/web.rs` exports one call per knob and
+`web/demos/sundial/main.js` binds them. `web/tools/browser-e2e.mjs`'s `sundial`
+row presses **every one of them** and reads the effect off the demo's own
+heartbeat: the seam button, the seam slider, the filter button, the sun's
+stop/start button, the tick slider and `reset`. Each was watched to fail with
+the export behind it made a no-op, and the `reset` sabotage additionally
+reddened group D's changed-frame check — which is the evidence that this row is
+right to carry no `still`. That is where it differs from alcove's row below,
+where four controls are driven by nothing but a person.
+
+What is **not** checked is `__crcbl_sundial_sun_sweep`. The gate never reads the
+tick slider's `max`, so a sweep export answering a wrong number would give the
+page a slider spanning the wrong range and every check would still pass, because
+they compare the slider's value against the heartbeat rather than against the
+sweep. Closing it wants either the `max` read out of the DOM and held against a
+number this gate spells — a copy of `sun::SWEEP_TICKS` that goes stale — or a
+second field on `Sundial::log_heartbeat`'s line.
+
+## sundial's page: a filter cycle button rather than a select (2026-09-04)
+
+Considered and declined. A `<select>` would need the page to enumerate the set
+`crcbl::render::shadow` declares, which means a name-at-index export pair on top
+of `__crcbl_sundial_filter` / `_filter_ptr`. The cycle button is alcove's shape
+and carries alcove's argument: the set is the engine's, and a page spelling its
+members is a copy that goes stale the day a fourth rung lands. Worth revisiting
+when the set grows past three, where cycling stops being a reasonable way to
+reach a member.
+
+## sundial's sun is adopted a fixed step late (2026-09-04)
+
+Not a bug, and worth knowing before it is reported as one. The filter and the
+seam are console cells and move the frame at once, paused or not. The sun's tick
+and its run flag live on `crate::app::Sundial`, so `crate::sun`'s `ask_tick`,
+`ask_running` and `ask_reset` leave a request that `Clock::advance` adopts on
+the next fixed step — and a page whose canvas lost focus is a paused loop that
+runs no fixed step. So on a paused page the sun's controls show the request and
+the picture catches up when it ticks again; `web/pages/sundial.html` says so.
+
+The channel exists because there is no other route: `crcbl::web::App` keeps the
+running `Loop` in a private `Stage` and exposes no accessor for it, so an export
+cannot reach the hosted game. The alternative was an engine change
+(`App::with_game`, or similar), which was out of this slice's scope. If one
+lands for another reason, `crate::sun`'s channel should be deleted in favour of
+it.
+
+One consequence nothing clears: a request still outstanding when a run stops is
+adopted by the **next** run's first fixed step, because `PAGE` outlives the
+loop. For `ask_reset` that is a no-op; for a placed tick it would open the next
+run on the sun the page last placed. Neither `crcbl::web_exports!`'s `shutdown`
+nor `crate::app` offers a hook to empty it from inside `apps/sundial`.
 
 ## alcove's page knobs: what is checked, and what is not (2026-09-04)
 
@@ -4104,19 +4157,20 @@ field; `the_tonemap_block_carries_the_curve_a_caller_selected` in
 and `the_aces_curve_keeps_the_shading_the_clamp_flattens` in
 `crates/crcbl/tests/mesh_e2e/hdr.rs` is what proves the branch runs on a device.
 
-### Cascade debug overlay and shadow-map inspector (2026-08-27)
+### Shadow-map inspector (2026-08-27)
 
-**Not built.** `18-render-features.md`'s shadow section names both, and its risk
-list leans on the overlay as the mitigation for CSM artefact whack-a-mole. That
-risk arrived — the fifth and sixth decisions in that document are the record of
-fighting it — and was resolved by measurement through `apps/lantern`'s review
-frames instead. `ForwardRenderer::debug_view` offers `Shaded`, `Heatmap`,
-`LodTint`, `Normals`, `AmbientOcclusion` and `Motion` — six variants and nothing
-about shadows.
+**Not built.** `18-render-features.md`'s shadow section names it beside the
+cascade overlay, which landed 2026-09-04 as `ForwardRenderer::set_cascade_view`
+and `DebugView::Cascades`. The inspector is the other half: the `D32Float` atlas
+itself drawn to screen, so a tile that was never rendered into, or rendered at
+the wrong viewport, is visible rather than inferred from a frame.
 
-**What it would take.** The debug draw layer above for the split overlay; the
-inspector is a UI panel sampling the `D32Float` atlas, which needs a
-sampled-depth read the AO pass already does.
+**What it would take.** A UI panel sampling the atlas, which needs a
+sampled-depth read the AO pass already does. `crates/crcbl/tests/forward_e2e/`'s
+`the_shadow_atlas_is_written_rather_than_left_at_its_clear_value` and
+`a_shadowed_spot_fills_the_tile_it_was_given_and_no_other` are what stand in for
+it today, and they read the atlas back on the CPU — which no reviewer can do
+while looking at a live frame.
 
 **Blocks.** Nothing shipping. It is a diagnosis cost the next shadow bug pays.
 
@@ -25370,8 +25424,10 @@ price test runs under the mesh-e2e runner, which has no browser leg, and no demo
 appends a segment yet — so there is nothing for the browser gate to time.
 
 **What it would take.** A caller. The first system that appends its own geometry
-— the cascade overlay is the obvious one — gives the browser gate something to
-measure, and `PassStats` already reports the pass by name there.
+gives the browser gate something to measure, and `PassStats` already reports the
+pass by name there. The cascade overlay used to be named here as the obvious
+candidate; it landed 2026-09-04 as a fragment-stage tint — `DebugView::Cascades`
+— and appends no segments at all, so it is not one.
 
 ## The viewer's skeleton overlay still projects by hand (2026-08-24, narrowed 2026-08-31)
 

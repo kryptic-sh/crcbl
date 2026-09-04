@@ -702,6 +702,26 @@ static const float MOTION_VIEW = 4.5;
 /// rather than of what the occlusion pass produced.
 static const float BENT_NORMAL_VIEW = 5.5;
 
+/// The switch for the **cascade view**, which tints the shaded picture by the
+/// cascade this fragment's sun shadow was sampled from.
+///
+/// **Below the lane's off value rather than above its outermost sentinel**, and
+/// it is the one threshold in this file compared the other way round. Every view
+/// above draws something *instead of* the shaded picture and returns before the
+/// shading runs, so their sentinels ascend and the outermost test wins; this one
+/// draws the shaded picture and multiplies it, so it cannot be a rung of a
+/// ladder whose whole rule is "the outermost branch returns first". A negative
+/// sentinel clears none of the thresholds above — neither this file's nor
+/// `mesh_cluster.slang`'s overlays — so every one of them is skipped
+/// by the comparison it already makes, and no existing branch had to grow a
+/// second condition to let this view through to the shading.
+///
+/// `crcbl_shaders::mesh::FrameUniforms::CASCADE_VIEW_ON` is the `-1.0` the host
+/// writes and `..._OFF` is the `0.0` every other frame carries;
+/// `the_cascade_view_threshold_lies_below_every_replacing_view` is what holds
+/// the interleaving from the other end.
+static const float CASCADE_VIEW = -0.5;
+
 /// How far the motion view stretches a motion vector before centring it on
 /// grey.
 ///
@@ -3478,6 +3498,69 @@ float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
     return tile_pcf(cascade, tile_uv, ndc.z, pixel, radius);
 }
 
+/// What `sun_visibility` reports as the cascade of a fragment it asked no
+/// cascade about: one past the last real one.
+///
+/// A fragment facing away from the sun and a fragment past the last cascade's
+/// reach are both this, and they are the two cases `CASCADE_TINT_NONE` is the
+/// honest colour for — the first was never shadowed by the sun and the second is
+/// outside every map, so neither has a cascade to name.
+static const uint CASCADE_NONE = SHADOW_CASCADES;
+
+/// What the cascade view multiplies the shaded picture by, one colour per
+/// cascade, nearest first.
+///
+/// **Warm for the near cascade, cool for the far one**, and the two are chosen
+/// to separate on a channel rather than on brightness: a reader — and a test —
+/// tells them apart by whether red or blue dominates, which survives the tonemap
+/// and survives a surface that is already dark. A ramp of greys would put the
+/// cascade boundary and the scene's own shading on one axis.
+///
+/// **Multiplied into the finished radiance rather than replacing it**, so the
+/// geometry stays readable underneath: what the view is for is seeing *where*
+/// the cascades change over, and a flat false colour would hide the shadow the
+/// change is judged on.
+///
+/// `crcbl_shaders::mesh::CASCADE_TINTS` is the host's copy — `forward_e2e`'s
+/// cascade check reads the picture against it — and
+/// `the_cascade_tints_are_the_ones_the_host_declares` holds the two equal.
+static const float3 CASCADE_TINTS[SHADOW_CASCADES] = {
+    float3(1.0, 0.35, 0.35),
+    float3(0.35, 0.55, 1.0),
+};
+
+/// The tint a fragment no cascade covers keeps: none at all.
+///
+/// White, so the picture there is the shaded picture unchanged. That is the
+/// reading a neutral tint has to have — "the sun's cascades say nothing about
+/// this pixel" — and it is also what makes the view additive-free: everything
+/// outside the sun's reach looks exactly as it does with the view off.
+static const float3 CASCADE_TINT_NONE = float3(1.0, 1.0, 1.0);
+
+/// The colour the cascade view gives a fragment `sun_visibility` selected
+/// `cascade` for and faded `blend` of the way into the next one.
+///
+/// **The band is the point of the whole overlay.** A cascade switch is a step in
+/// resolution and therefore in bias, and `CASCADE_FADE_FRACTION` exists to smear
+/// the ring that step leaves into a gradient; mixing the two tints by the same
+/// weight the *visibility* was mixed by is what puts that gradient on screen. A
+/// view that drew one flat colour per cascade would show the boundary as a hard
+/// edge the shading does not actually have.
+float3 cascade_tint(uint cascade, float blend)
+{
+    if (cascade >= SHADOW_CASCADES)
+    {
+        return CASCADE_TINT_NONE;
+    }
+    if (cascade + 1 >= SHADOW_CASCADES)
+    {
+        // The last cascade fades into nothing, exactly as `sun_visibility`'s
+        // answer there is one cascade's and not a mix.
+        return CASCADE_TINTS[cascade];
+    }
+    return lerp(CASCADE_TINTS[cascade], CASCADE_TINTS[cascade + 1], blend);
+}
+
 /// The fraction of the sun this fragment can see: `1.0` fully lit, `0.0` fully
 /// shadowed, and the values between are the PCF filter and the cascade fade.
 ///
@@ -3492,8 +3575,18 @@ float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
 /// normal's: what it says is "this fragment's diffuse term is already zero", and
 /// that is a fact about the normal the shading used.
 float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
-                     float3 geometric_normal, float2 pixel)
+                     float3 geometric_normal, float2 pixel, out uint selected,
+                     out float fade)
 {
+    // **The two out-parameters are what the cascade view draws, and they are
+    // written on every path out of here.** The alternative was for
+    // `fragmentMain` to run this selection a second time beside the shading,
+    // which is exactly the arrangement an overlay must not have: an overlay
+    // derived independently can disagree with the lighting it claims to explain,
+    // and the disagreement is invisible — a plausible tint over a plausible
+    // shadow. Reported rather than recomputed, the tint *is* the selection.
+    selected = CASCADE_NONE;
+    fade = 0.0;
     if (n_dot_l <= 0.0)
     {
         return 1.0;
@@ -3506,13 +3599,24 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
     // plane the camera can rotate.
     float eye_distance = length(world_position - frame.camera_position.xyz);
     uint cascade = SHADOW_CASCADES - 1;
+    // Whether a cascade's reach actually covers this fragment, as against the
+    // fallback above. The two are the same *index* and a different fact: past
+    // the last split the shading still asks the last cascade — and gets "lit"
+    // out of its box test — while the overlay must say "no cascade covers this",
+    // because a tint there would colour the whole distance as if it were mapped.
+    bool covered = false;
     for (uint index = 0; index < SHADOW_CASCADES; ++index)
     {
         if (eye_distance < frame.cascade_far[index])
         {
             cascade = index;
+            covered = true;
             break;
         }
+    }
+    if (covered)
+    {
+        selected = cascade;
     }
 
     float visibility =
@@ -3532,6 +3636,10 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
     float reach = frame.cascade_far[cascade];
     float band = reach * CASCADE_FADE_FRACTION;
     float blend = saturate((eye_distance - (reach - band)) / band);
+    // Before the early return, not after it: `saturate` has already made a
+    // fragment short of the band an exact zero, and reporting it there as well
+    // is what keeps this parameter written on every path.
+    fade = blend;
     if (blend <= 0.0)
     {
         return visibility;
@@ -5050,6 +5158,14 @@ FragmentOutput fragmentMain(VertexOutput input)
     // construction instead of by four copies of the same maths agreeing.
     float3 direct = float3(0.0, 0.0, 0.0);
     float3 gloss = float3(0.0, 0.0, 0.0);
+    // The cascade view's colour for this fragment, filled by the sun's own arm
+    // below out of the selection that arm's shadow lookup made. It stays neutral
+    // on a fragment no directional light reaches, which is the honest answer:
+    // the cascades are the sun's and a froxel with no sun in it has no cascade.
+    // With more than one directional row in the froxel the last one's cascade is
+    // what is drawn — the engine ships one sun, and a second would be two
+    // answers to a question with one colour to say them in.
+    float3 sun_cascade_tint = CASCADE_TINT_NONE;
     for (uint slot = 0; slot < count; ++slot)
     {
         GpuLight light = lights[cluster_lights[base + 1 + slot]];
@@ -5158,8 +5274,10 @@ FragmentOutput fragmentMain(VertexOutput input)
         // window and its cone, and the shadow is a third factor on it.
         if (light.kind == KIND_DIRECTIONAL)
         {
+            uint sun_cascade;
+            float sun_fade;
             reach = sun_visibility(input.world_position, to_light, n_dot_l, geometric_normal,
-                                   input.position.xy)
+                                   input.position.xy, sun_cascade, sun_fade)
                   // The contact term, and it multiplies where the cascades
                   // *replace*: the atlas answers for everything a cascade texel
                   // can resolve and this answers for the sliver under it, so the
@@ -5167,6 +5285,9 @@ FragmentOutput fragmentMain(VertexOutput input)
                   // two opinions about one. `contact_shadow`'s declaration says
                   // why it is the sun's alone.
                   * contact_at(input.position.xy);
+            // The overlay's colour, read off the call above rather than derived
+            // beside it — `sun_visibility`'s out-parameters say why.
+            sun_cascade_tint = cascade_tint(sun_cascade, sun_fade);
         }
         else if (light.kind == KIND_POINT)
         {
@@ -5345,6 +5466,24 @@ FragmentOutput fragmentMain(VertexOutput input)
     output.reflectivity =
         float4(f0, floor(roughness * REFLECTIVITY_LEVELS + 0.5) / REFLECTIVITY_LEVELS);
     output.motion = motion;
+
+    // **The cascade view, and it is the only view that keeps the shaded
+    // picture.** Last rather than first, because that is what "keeps" it
+    // means: everything above ran, so the tint multiplies a finished radiance —
+    // the emission and the fog composite included — and every pixel the geometry
+    // covers carries the cascade its shadow was sampled from, whatever the terms
+    // that made it bright.
+    if (frame.ambient.w <= CASCADE_VIEW)
+    {
+        output.lit = float4(lit * sun_cascade_tint, albedo.a);
+        // Not reflective, for every other view's reason: `ssr.slang` must march
+        // nothing off a debug picture. It matters more here than there,
+        // because this one *is* the shaded picture — a reflection `ssr_blur.slang`
+        // composited on top would arrive untinted and break the one claim the
+        // view makes, that what you are looking at is the frame times one
+        // cascade's colour.
+        output.reflectivity = NO_REFLECTION;
+    }
     return output;
 }
 

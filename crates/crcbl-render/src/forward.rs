@@ -352,6 +352,16 @@ pub enum DebugView {
     /// `n * 0.5 + 0.5` — [`ForwardRenderer::set_bent_normal_view`]. **Wins over
     /// every other view.**
     BentNormal,
+    /// The shaded picture tinted by the cascade each sun-lit fragment's shadow
+    /// was sampled from, with the cross-fade band drawn as the blend of the two
+    /// — [`ForwardRenderer::set_cascade_view`].
+    ///
+    /// **Loses to every other view**, and it is the only one that does. The views
+    /// above draw something *instead of* the shaded picture; this one draws the
+    /// shaded picture and multiplies it, so there is nothing left for it to
+    /// modulate as soon as one of them is on. See
+    /// [`ForwardRenderer::debug_view`].
+    Cascades,
 }
 
 impl DebugView {
@@ -366,6 +376,7 @@ impl DebugView {
             Self::AmbientOcclusion => "ambient occlusion",
             Self::Motion => "motion",
             Self::BentNormal => "bent normal",
+            Self::Cascades => "cascades",
         }
     }
 }
@@ -1486,6 +1497,18 @@ pub struct ForwardRenderer {
     /// `crcbl_shaders`' `the_bent_normal_view_threshold_lies_above_the_motion_view`
     /// is what holds the shader's branch order to it.
     bent_normal_view: bool,
+
+    /// Whether the colour pass tints the shaded picture by the cascade each
+    /// sun-lit fragment's shadow was sampled from — see
+    /// [`set_cascade_view`](ForwardRenderer::set_cascade_view).
+    ///
+    /// **Loses to every other view**, which is the opposite of every field
+    /// above and for the reason [`DebugView::Cascades`] carries: every one of them
+    /// replaces the shaded picture and this one multiplies it, so a frame drawing
+    /// any of them has nothing for this tint to reach. `crcbl_shaders`'
+    /// `the_cascade_view_threshold_lies_below_every_replacing_view` is what
+    /// holds the shader to the same order, from the other end of the lane.
+    cascade_view: bool,
 
     /// Where [`begin_frame`](ForwardRenderer::begin_frame) projects
     /// `docs/plan/25-lod.md`'s selection from, when that is not the camera's own
@@ -5253,6 +5276,7 @@ impl ForwardRenderer {
             occlusion_view: false,
             motion_view: false,
             bent_normal_view: false,
+            cascade_view: false,
             // Following the camera, on the line above's terms: the selection eye
             // is the camera's until a caller pins it, so a renderer nobody calls
             // `set_frozen_selection_eye` on hands `begin_frame` exactly what it
@@ -10705,6 +10729,57 @@ impl ForwardRenderer {
         self.bent_normal_view
     }
 
+    /// Tints the shaded picture by the **cascade** each sun-lit fragment's
+    /// shadow was sampled from.
+    ///
+    /// `docs/plan/45-shadows.md`'s eighth decision made the cascade switch a
+    /// band rather than a step, and this is the picture that band is judged in:
+    /// each fragment's shading multiplied by
+    /// [`CASCADE_TINTS`](crcbl_shaders::mesh::CASCADE_TINTS) of the cascade it
+    /// selected, and inside the band by the *blend* of the two — the same weight
+    /// the visibility itself was mixed with. So the boundary reads as a
+    /// gradient, and a seam where two cascades disagree shows up as a step in
+    /// the gradient rather than as a ring somebody has to already suspect.
+    ///
+    /// # It keeps the shaded picture, which is why it loses to every other view
+    ///
+    /// Every other view replaces the frame; this one multiplies it, so the geometry
+    /// stays readable underneath and the shadow the cascades produced is still
+    /// in the picture being coloured. That is also what puts it last in
+    /// [`debug_view`](Self::debug_view)'s order: with a replacing view on there
+    /// is no shading left for a tint to reach.
+    ///
+    /// # What it draws where no cascade covers a fragment
+    ///
+    /// Nothing at all —
+    /// [`CASCADE_TINT_NONE`](crcbl_shaders::mesh::CASCADE_TINT_NONE) is white.
+    /// A surface facing away from the sun and one past the last cascade's reach
+    /// are both that, because neither was sampled through a cascade, and a
+    /// frame drawn without [`RenderEffects::SHADOWS`](crate::RenderEffects::SHADOWS) is
+    /// white everywhere for the same reason. Colouring those would be inventing
+    /// a cascade for a pixel no map covers.
+    ///
+    /// # It builds nothing and adds no pass
+    ///
+    /// One lane of the frame's uniform block, on
+    /// [`set_normals_view`](Self::set_normals_view)'s terms exactly, and like
+    /// the occlusion view it needs nothing from the geometry stage — so it draws
+    /// on every [`GeometryPath`].
+    pub const fn set_cascade_view(&mut self, on: bool) {
+        self.cascade_view = on;
+    }
+
+    /// Whether the colour pass tints the picture by the sun's cascades.
+    ///
+    /// **What was asked for, not what is drawn**, on
+    /// [`lod_view`](Self::lod_view)'s terms — and here that gap is the usual
+    /// case rather than the corner one: this view loses to every other one, so a
+    /// renderer with any of them also on answers `true` here and draws that one.
+    #[must_use]
+    pub const fn cascade_view(&self) -> bool {
+        self.cascade_view
+    }
+
     /// Pins the eye `docs/plan/25-lod.md`'s selection is projected from, so the
     /// cut stops following the camera.
     ///
@@ -10822,6 +10897,19 @@ impl ForwardRenderer {
             DebugView::LodTint
         } else if self.normals_view {
             DebugView::Normals
+        } else if self.cascade_view {
+            // **Innermost, and the only view that sits below the others rather
+            // than above them.** Every branch before this one draws something
+            // *instead of* the shaded picture and returns before the shading; a
+            // cascade tint is a multiply on that shading, so there is nothing
+            // for it to modulate while one of them is showing and a caller with
+            // both on has asked for the picture the outer one draws. The lane
+            // says the same thing from the other end — the cascade sentinel is
+            // negative, so it clears none of the shaders' thresholds — and
+            // `crcbl_shaders`'
+            // `the_cascade_view_threshold_lies_below_every_replacing_view` is
+            // what holds that half.
+            DebugView::Cascades
         } else {
             DebugView::Shaded
         }
@@ -10837,6 +10925,7 @@ impl ForwardRenderer {
             DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
             DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
             DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
+            DebugView::Cascades => mesh::FrameUniforms::CASCADE_VIEW_ON,
             DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
         }
     }
@@ -12243,6 +12332,13 @@ mod tests {
     /// order agrees with this one on every combination where at most one switch
     /// is set.
     ///
+    /// **[`DebugView::Cascades`] is the exception the walk is worth most for.**
+    /// It is the one view that keeps the shaded picture rather than replacing
+    /// it, so it resolves *last* and its sentinel runs the other way down the
+    /// lane; every combination where it is set beside a replacing view is a
+    /// combination an order written any other way answers differently, and there
+    /// is no single-switch case that could tell them apart.
+    ///
     /// [`ForwardRenderer::debug_view`] is asserted beside the lane, so the value
     /// a panel reads back and the value the shader branches on cannot drift —
     /// they are the same function.
@@ -12265,77 +12361,94 @@ mod tests {
                     for heatmap in [false, true] {
                         for lod in [false, true] {
                             for normals in [false, true] {
-                                renderer.set_bent_normal_view(bent);
-                                renderer.set_motion_view(motion);
-                                renderer.set_occlusion_view(occlusion);
-                                renderer.set_heatmap(heatmap);
-                                renderer.set_lod_view(lod);
-                                renderer.set_normals_view(normals);
-                                let set = format!(
-                                    "bent={bent} motion={motion} occlusion={occlusion} \
-                                 heatmap={heatmap} lod={lod} normals={normals}"
-                                );
-                                // Each switch reads back what it was set to, whatever
-                                // the others are: a caller's toggle is about the
-                                // caller's setting, and only `debug_view` is about the
-                                // picture.
-                                assert_eq!(renderer.bent_normal_view(), bent);
-                                assert_eq!(renderer.motion_view(), motion);
-                                assert_eq!(renderer.occlusion_view(), occlusion);
-                                assert_eq!(renderer.heatmap(), heatmap);
-                                assert_eq!(renderer.lod_view(), lod);
-                                assert_eq!(renderer.normals_view(), normals);
+                                for cascades in [false, true] {
+                                    renderer.set_bent_normal_view(bent);
+                                    renderer.set_motion_view(motion);
+                                    renderer.set_occlusion_view(occlusion);
+                                    renderer.set_heatmap(heatmap);
+                                    renderer.set_lod_view(lod);
+                                    renderer.set_normals_view(normals);
+                                    renderer.set_cascade_view(cascades);
+                                    let set = format!(
+                                        "bent={bent} motion={motion} occlusion={occlusion} \
+                                 heatmap={heatmap} lod={lod} normals={normals} \
+                                 cascades={cascades}"
+                                    );
+                                    // Each switch reads back what it was set to, whatever
+                                    // the others are: a caller's toggle is about the
+                                    // caller's setting, and only `debug_view` is about the
+                                    // picture.
+                                    assert_eq!(renderer.bent_normal_view(), bent);
+                                    assert_eq!(renderer.motion_view(), motion);
+                                    assert_eq!(renderer.occlusion_view(), occlusion);
+                                    assert_eq!(renderer.heatmap(), heatmap);
+                                    assert_eq!(renderer.lod_view(), lod);
+                                    assert_eq!(renderer.normals_view(), normals);
+                                    assert_eq!(renderer.cascade_view(), cascades);
 
-                                let expected = if bent {
-                                    DebugView::BentNormal
-                                } else if motion {
-                                    DebugView::Motion
-                                } else if occlusion {
-                                    DebugView::AmbientOcclusion
-                                } else if heatmap {
-                                    DebugView::Heatmap
-                                } else if lod {
-                                    DebugView::LodTint
-                                } else if normals {
-                                    DebugView::Normals
-                                } else {
-                                    DebugView::Shaded
-                                };
-                                assert_eq!(renderer.debug_view(), expected, "{set}");
+                                    let expected = if bent {
+                                        DebugView::BentNormal
+                                    } else if motion {
+                                        DebugView::Motion
+                                    } else if occlusion {
+                                        DebugView::AmbientOcclusion
+                                    } else if heatmap {
+                                        DebugView::Heatmap
+                                    } else if lod {
+                                        DebugView::LodTint
+                                    } else if normals {
+                                        DebugView::Normals
+                                    } else if cascades {
+                                        // **Last, which is the half of this order a
+                                        // chain in any other arrangement would get
+                                        // right by accident.** The cascade tint is a
+                                        // multiply on the shaded picture, so every
+                                        // combination that also names a replacing
+                                        // view has to resolve to *that* view — and
+                                        // those are exactly the combinations an
+                                        // `if cascades` written one line higher
+                                        // would answer differently.
+                                        DebugView::Cascades
+                                    } else {
+                                        DebugView::Shaded
+                                    };
+                                    assert_eq!(renderer.debug_view(), expected, "{set}");
 
-                                renderer
-                                    .begin_frame(device.as_ref(), &camera, &light, (64, 48))
-                                    .expect("write");
-                                let block = recorder
-                                    .buffer_bytes(renderer.uniforms[renderer.frame])
-                                    .expect("begin_frame wrote the block");
-                                let sentinel = match expected {
-                                    DebugView::BentNormal => {
-                                        mesh::FrameUniforms::BENT_NORMAL_VIEW_ON
-                                    }
-                                    DebugView::Motion => mesh::FrameUniforms::MOTION_VIEW_ON,
-                                    DebugView::AmbientOcclusion => {
-                                        mesh::FrameUniforms::OCCLUSION_VIEW_ON
-                                    }
-                                    DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
-                                    DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
-                                    DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
-                                    DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
-                                };
-                                assert_eq!(
-                                    &block[AMBIENT_W..AMBIENT_W + 4],
-                                    &sentinel.to_le_bytes(),
-                                    "{set} resolved to {expected:?}, and the lane says otherwise"
-                                );
-                                // And the resolve comes off for every one of them:
-                                // these frames are read back as data, so their colours
-                                // have to stay the ones the shader wrote — see
-                                // `resolved_effects`.
-                                assert_eq!(
-                                    renderer.effects().contains(RenderEffects::ANTIALIASING),
-                                    expected == DebugView::Shaded,
-                                    "{set}"
-                                );
+                                    renderer
+                                        .begin_frame(device.as_ref(), &camera, &light, (64, 48))
+                                        .expect("write");
+                                    let block = recorder
+                                        .buffer_bytes(renderer.uniforms[renderer.frame])
+                                        .expect("begin_frame wrote the block");
+                                    let sentinel = match expected {
+                                        DebugView::BentNormal => {
+                                            mesh::FrameUniforms::BENT_NORMAL_VIEW_ON
+                                        }
+                                        DebugView::Motion => mesh::FrameUniforms::MOTION_VIEW_ON,
+                                        DebugView::AmbientOcclusion => {
+                                            mesh::FrameUniforms::OCCLUSION_VIEW_ON
+                                        }
+                                        DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
+                                        DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
+                                        DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
+                                        DebugView::Cascades => mesh::FrameUniforms::CASCADE_VIEW_ON,
+                                        DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
+                                    };
+                                    assert_eq!(
+                                        &block[AMBIENT_W..AMBIENT_W + 4],
+                                        &sentinel.to_le_bytes(),
+                                        "{set} resolved to {expected:?}, and the lane says otherwise"
+                                    );
+                                    // And the resolve comes off for every one of them:
+                                    // these frames are read back as data, so their colours
+                                    // have to stay the ones the shader wrote — see
+                                    // `resolved_effects`.
+                                    assert_eq!(
+                                        renderer.effects().contains(RenderEffects::ANTIALIASING),
+                                        expected == DebugView::Shaded,
+                                        "{set}"
+                                    );
+                                }
                             }
                         }
                     }

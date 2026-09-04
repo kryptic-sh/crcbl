@@ -44,7 +44,7 @@ use crcbl::engine::{
     open_window, wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::render::{EffectRequest, Flyer, RenderEffects};
+use crcbl::render::{DebugView, EffectRequest, Flyer, RenderEffects};
 use crcbl::shell::{DisplayMode, PointerMode, ShellBackend as Backend, WindowDesc, WindowId};
 use crcbl::ui::draw_list::DrawList;
 
@@ -131,7 +131,7 @@ pub struct Sundial {
     shadow_cost: ShadowCost,
     /// The values the pause panel was last built for; `None` until the first
     /// pause, so the panel is always rebuilt once with the real ones.
-    shown: Option<(CameraMode, EffectRequest, Knobs, Clock)>,
+    shown: Option<(CameraMode, EffectRequest, Knobs, Clock, bool)>,
     /// Whether the loop has the simulation stopped, recorded in
     /// [`HostedGame::menu_kind`].
     paused: bool,
@@ -253,9 +253,10 @@ type KeyBinding = (KeyCode, fn(), &'static str);
 /// The clock's keys are not here: they move [`Sundial::clock`], which is state on
 /// this type rather than in the console, so they cannot be a `fn()` with nothing
 /// to write to. [`CLOCK_KEYS`] is theirs.
-pub(crate) const KEYS: [KeyBinding; 3] = [
+pub(crate) const KEYS: [KeyBinding; 4] = [
     (KeyCode::KeyF, cycle_filter, "F"),
     (KeyCode::KeyX, filter::toggle_seam, "X"),
+    (KeyCode::KeyC, toggle_cascade_view, "C"),
     (KeyCode::KeyR, reset_all, "R"),
 ];
 
@@ -290,6 +291,28 @@ pub(crate) const CLOCK_KEYS: [(KeyCode, ClockKey, &str); 3] = [
 
 fn cycle_filter() {
     filter::cycle(filter::FILTER);
+}
+
+/// Whether the frame tints the picture by the cascade each sun-lit fragment's
+/// shadow was sampled from.
+///
+/// **Read, not kept**, on `apps/alcove`'s `occlusion_view` terms exactly: the
+/// `CASCADES` row and the console's `debug_view cascades` are one value —
+/// `docs/plan/52-debug-console.md` decision 8 — and [`crcbl::engine::Loop`] is
+/// what puts it into force on the renderer.
+#[must_use]
+pub fn cascade_view() -> bool {
+    crcbl::debug_view::current() == DebugView::Cascades
+}
+
+/// Swaps between the shaded picture and that picture tinted by cascade.
+///
+/// What `C` and the panel's `CASCADES` row both do. `docs/plan/45-shadows.md`'s
+/// eighth decision made the cascade switch a band rather than a step, and this
+/// is the picture that band is looked at in — which is the one thing a shadow
+/// fixture could not show before the overlay existed.
+pub fn toggle_cascade_view() {
+    crcbl::debug_view::toggle(DebugView::Cascades);
 }
 
 /// Both halves of `R`: the console's knobs and this run's clock.
@@ -549,6 +572,7 @@ impl HostedGame for Sundial {
                     menu::toggled_effect(self.effect_request, self.device_effects, effect);
             }
             SundialAction::CycleFilter => filter::cycle(filter::FILTER),
+            SundialAction::ToggleCascades => toggle_cascade_view(),
             SundialAction::ToggleSeam => filter::toggle_seam(),
             SundialAction::ToggleSun => self.clock.toggle(),
             SundialAction::Reset => {
@@ -567,7 +591,21 @@ impl HostedGame for Sundial {
         // first panel is laid out and a knob a key moved while paused has to reach
         // the label on the same frame.
         let knobs = Knobs::read();
-        if paused && self.shown != Some((self.camera, self.effect_request, knobs, self.clock)) {
+        // The overlay is process-global console state like the knobs, so it is
+        // read here for the same reason and joins the rebuild key beside them:
+        // `C` pressed while paused has to move the `CASCADES` row on the frame
+        // it is pressed on.
+        let cascades = cascade_view();
+        if paused
+            && self.shown
+                != Some((
+                    self.camera,
+                    self.effect_request,
+                    knobs,
+                    self.clock,
+                    cascades,
+                ))
+        {
             // A row's label changed (or this is the first pause): rebuild the
             // panel with the values in force, restoring the selection so a press
             // on a row does not throw the reviewer back to the top.
@@ -583,6 +621,7 @@ impl HostedGame for Sundial {
                     self.device_effects,
                     knobs,
                     self.clock,
+                    cascades,
                 ),
             );
             if let Some(id) = selected {
@@ -591,7 +630,13 @@ impl HostedGame for Sundial {
                     .expect("the pause menu is in the set")
                     .select_id(id);
             }
-            self.shown = Some((self.camera, self.effect_request, knobs, self.clock));
+            self.shown = Some((
+                self.camera,
+                self.effect_request,
+                knobs,
+                self.clock,
+                cascades,
+            ));
         }
         self.knobs = knobs;
         paused
@@ -787,12 +832,31 @@ mod tests {
                 "{key:?} is bound twice, so one of the two controls is unreachable"
             );
         }
+        // The `KEYS:` block alone, and a key is named only where a row of it
+        // starts with that key: `USAGE.contains("C")` is true of "CI" and of
+        // "OPTIONS", which is a check that cannot fail.
+        let keys = crate::USAGE
+            .split("KEYS:")
+            .nth(1)
+            .expect("the usage text has a KEYS: block");
+        let names_a_row = |name: &str| {
+            keys.lines().any(|line| {
+                line.strip_prefix("    ")
+                    .and_then(|row| row.split("  ").next())
+                    .is_some_and(|spelt| spelt.split(' ').any(|token| token == name))
+            })
+        };
         for name in named {
             assert!(
-                crate::USAGE.contains(&format!("{name} ")) || crate::USAGE.contains(name),
-                "the usage text never mentions the {name} key"
+                names_a_row(name),
+                "the usage text's KEYS: block has no row for the {name} key"
             );
         }
+        assert!(
+            !names_a_row("Q"),
+            "a key nothing binds is named in the KEYS: block, so the check above is not \
+             reading rows"
+        );
     }
 
     /// **`R` puts the clock back as well as the knobs**, and so does the panel's
@@ -871,6 +935,85 @@ mod tests {
         // a fixture that acted on both would do everything twice.
         fixture.key_event(KeyCode::KeyP, false);
         assert_eq!(fixture.clock(), before, "a key release acted like a press");
+    }
+
+    /// **`C` shows the cascade overlay, a second press takes it away, and the
+    /// pause panel's `CASCADES` row says which of the two the frame is
+    /// drawing.**
+    ///
+    /// The two halves live in different files — this one's key table writes the
+    /// engine's `debug_view` cell and [`crate::menu::pause_menu`] reads it back
+    /// — which is exactly the shape that drifts into a key toggling a picture no
+    /// panel names. So the row is built from the value the key moved rather than
+    /// from a literal, and the panel's own `CASCADES` press is driven beside the
+    /// key, because [`SundialAction::ToggleCascades`] is a second route to the
+    /// same cell.
+    ///
+    /// [`crcbl::debug_view::for_test`] is held for the module docs' reason: the
+    /// view is a process-global console variable and `cargo test` runs a crate's
+    /// checks as threads of one process.
+    #[test]
+    fn the_c_key_shows_the_cascade_overlay_and_the_panel_names_it() {
+        let _view = crcbl::debug_view::for_test();
+        let mut fixture = Sundial::new(
+            CameraMode::Fixed,
+            Clock::default(),
+            Paths {
+                geometry: crcbl::hal::GeometryPath::MeshShader,
+                binding: crcbl::hal::BindingModel::Bindless,
+                lighting: crcbl::hal::LightingPath::Rasterised,
+                forced: crate::gpu::Forced::default(),
+                effects: RenderEffects::DEFAULT_STACK,
+            },
+            EffectRequest::default(),
+            RenderEffects::all(),
+        );
+        let row = || {
+            menu::pause_menu(
+                CameraMode::Fixed,
+                EffectRequest::default(),
+                RenderEffects::all(),
+                Knobs::read(),
+                Clock::default(),
+                cascade_view(),
+            )
+            .items()
+            .iter()
+            .find(|item| item.id == menu::CASCADES_ID)
+            .expect("the panel has a CASCADES row")
+            .label
+            .clone()
+        };
+
+        assert!(
+            !cascade_view(),
+            "a guard hands its holder the shaded frame, so this check starts with the overlay off"
+        );
+        assert_eq!(row(), "CASCADES: OFF");
+
+        fixture.key_event(KeyCode::KeyC, true);
+        assert_eq!(
+            crcbl::debug_view::current(),
+            DebugView::Cascades,
+            "C did not put the cascade overlay in force"
+        );
+        assert_eq!(row(), "CASCADES: ON", "the panel does not follow the key");
+
+        fixture.key_event(KeyCode::KeyC, true);
+        assert!(
+            !cascade_view(),
+            "a second press left the overlay up, so the key cannot take it back"
+        );
+        assert_eq!(row(), "CASCADES: OFF");
+
+        // The panel's own press, which is the other route to the same cell.
+        fixture.apply(SundialAction::ToggleCascades);
+        assert!(cascade_view(), "the CASCADES row did not show the overlay");
+        assert_eq!(row(), "CASCADES: ON");
+
+        // And a key release is not a press, on the clock keys' terms.
+        fixture.key_event(KeyCode::KeyC, false);
+        assert!(cascade_view(), "a key release acted like a press");
     }
 
     /// **The camera row cycles all three poses and the sky follows the clock**,

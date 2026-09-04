@@ -61,7 +61,15 @@ a shadow implementation whose artefacts ship.
   2026-09-04: `F` cycles the filter, `X` raises and drops the seam, `,` and `.`
   walk it, and the pause panel and the debug overlay both name the filter on
   each side of the line.
-- Pages web demo.
+- Pages web demo. **Built 2026-09-04** at `/demos/sundial/`, on
+  [19-alcove.md](19-alcove.md)'s pattern: the filter, the seam and the sun's
+  clock as HTML controls rather than keys, because a seam walked with `,` and
+  `.` and a sun stopped with `P` are controls a phone cannot reach.
+  `apps/sundial/src/web.rs` exports one symbol per knob and each answers with
+  what the engine holds after the write, so nothing on the page keeps a copy.
+  What is new against alcove is the clock: a tick is game state rather than a
+  console cell, so the sun's two controls go through `crate::sun`'s channel and
+  are adopted on the next fixed step.
 
 ## Non-goals (hard cap)
 
@@ -72,7 +80,7 @@ place to reopen it. No authoring tools.
 **Exempt from sample rule 11**, on lantern's ground. **Exempt from rules 2 and
 10**, on the viewer's: no game state, no `World`, no `GameModule`.
 
-## Status: built natively 2026-09-04; the diagnostics and the page are owed
+## Status: built and published 2026-09-04; the atlas viewer is owed
 
 **`apps/sundial` exists and CI draws it.** The engine held exactly one shadow
 filter until 2026-09-04; it now holds three, selectable at runtime, with a
@@ -80,9 +88,13 @@ per-fragment seam that puts any of them beside the one that ships — topic 45's
 fifteenth decision — and the sample followed the same day: the plaza
 (`src/plaza.rs`), the sun on its scripted clock (`src/sun.rs`), the filter and
 seam bindings and panel rows (`src/filter.rs`, `src/menu.rs`), and the golden
-suite (`tests/golden.rs`) CI runs on lavapipe. What remains owed is the
-diagnostic half of milestone 1 — the cascade overlay and the atlas viewer, both
-engine slices — and the Pages web demo; `docs/backlog.md` carries all three.
+suite (`tests/golden.rs`) CI runs on lavapipe. **The browser demo followed the
+same day**: `apps/sundial/src/web.rs`, `web/pages/sundial.html` and
+`web/demos/sundial/main.js` put the filter, the seam and the sun's clock on the
+page as HTML controls, and `web/tools/browser-e2e.mjs`'s `sundial` row presses
+each of them and reads what the `[HUD]` line says they did. What remains owed is
+the atlas viewer, an engine slice; `docs/backlog.md` carries it. The cascade
+overlay landed the same day and `C` shows it.
 
 What also exists is evidence that the shadow implementation is at the edge of
 its current budget: since the 2026-08-26 re-tiling that bought a second shadowed
@@ -109,10 +121,12 @@ hold in their head, and the only honest way to set them is to look.
    graded heights, holds the seam exact to the column, reads the pavement the
    plinth stands on and replays a tick of the clock byte for byte.
 
-   **The cascade overlay and the atlas viewer are still owed**, and neither is a
-   sample-side change: tinting per cascade and drawing the atlas to screen are
-   both `crcbl-render` work, so they are engine slices this fixture will bind
-   rather than build. `docs/backlog.md` carries them.
+   The **cascade debug overlay** landed 2026-09-04 as
+   `crcbl_render::DebugView::Cascades`: the shaded picture multiplied by a tint
+   per cascade, blended across [45-shadows.md](../45-shadows.md)'s eighth
+   decision's band. This sample binds it to `C` and to the pause panel's
+   `CASCADES` row. The **atlas viewer** is still owed — see `docs/backlog.md`'s
+   shadow-map inspector entry.
 
 2. **Normal-offset bias and the acne/peter-panning pair**, checkable at the
    contact points the scene was built for. The bias itself **shipped

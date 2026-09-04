@@ -988,6 +988,36 @@ impl FrameUniforms {
     /// `crcbl_render::ForwardRenderer::set_bent_normal_view` is what writes it.
     pub const BENT_NORMAL_VIEW_ON: f32 = 6.0;
 
+    /// [`ambient`](Self::ambient)`.w` for the **cascade view**: `mesh.slang`'s
+    /// fragment stage shades the picture as it always does and then multiplies
+    /// it by [`CASCADE_TINTS`] of the cascade this fragment's sun shadow was
+    /// sampled from, blended across the cross-fade band.
+    ///
+    /// **Negative, and that is the whole design.** Every sentinel above draws
+    /// something *instead of* the shaded picture, so they ascend and the shader
+    /// tests the outermost first; this one keeps the shaded picture, so it can
+    /// have no place in that ladder — a value above
+    /// [`BENT_NORMAL_VIEW_ON`](Self::BENT_NORMAL_VIEW_ON) would clear every
+    /// threshold below it and be caught by whichever replacing branch is tested
+    /// first. Going the other way from
+    /// [`NORMALS_VIEW_OFF`](Self::NORMALS_VIEW_OFF) clears nothing: the five
+    /// branches in `mesh.slang` and the two overlays in `mesh_cluster.slang` all
+    /// compare `>=` against a positive threshold, so a `-1.0` is skipped by
+    /// every one of them without a second condition anywhere, and the tint is
+    /// applied where the radiance is finished.
+    /// `the_cascade_view_threshold_lies_below_every_replacing_view` holds the
+    /// interleaving.
+    ///
+    /// A **fragment**-stage view like the occlusion, motion and bent-normal
+    /// ones, so it draws on every `GeometryPath`. What it draws on a frame
+    /// without `RenderEffects::SHADOWS` is the shaded picture in
+    /// [`CASCADE_TINT_NONE`]'s neutral — the sun is not sampled through a
+    /// cascade at all — which is the same honesty the occlusion view's white
+    /// has.
+    ///
+    /// `crcbl_render::ForwardRenderer::set_cascade_view` is what writes it.
+    pub const CASCADE_VIEW_ON: f32 = -1.0;
+
     /// The bytes a uniform buffer holds, in `std140` order.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; FRAME_UNIFORMS_SIZE] {
@@ -1068,6 +1098,45 @@ impl FrameUniforms {
 /// copy carries the account, and `crates/crcbl/tests/mesh_e2e/motion.rs`'s
 /// `REST_TOLERANCE` is that step measured.
 pub const MOTION_VIEW_SCALE: f32 = 8.0;
+
+/// What the cascade view multiplies the shaded picture by, one colour per
+/// cascade, nearest first — and `static const float3 CASCADE_TINTS` in
+/// `mesh.slang`.
+///
+/// Declared on both sides on [`MOTION_VIEW_SCALE`]'s terms exactly: the shader
+/// applies it and a test reading the picture has to know what it is looking for,
+/// so `crates/crcbl/tests/forward_e2e/shadow.rs` names the cascade a pixel came
+/// from out of this array. `the_cascade_tints_are_the_ones_the_host_declares`
+/// holds the two equal, and holds the length to [`SHADOW_CASCADES`] — a table
+/// short of a cascade is a cascade whose tint the shader reads out of bounds.
+///
+/// **Warm near, cool far, and they separate on a channel rather than on
+/// brightness.** Which of red and blue dominates survives the tonemap and
+/// survives a surface that is already dark, where a pair of greys would put the
+/// cascade boundary on the same axis as the scene's own shading.
+pub const CASCADE_TINTS: [[f32; 3]; SHADOW_CASCADES] = [[1.0, 0.35, 0.35], [0.35, 0.55, 1.0]];
+
+/// The tint a fragment no cascade covers keeps — white, so the picture there is
+/// the shaded picture unchanged — and `static const float3 CASCADE_TINT_NONE` in
+/// `mesh.slang`.
+///
+/// The two cases are a fragment facing away from the sun and one past the last
+/// cascade's reach, and neither has a cascade to name. See [`CASCADE_TINTS`].
+pub const CASCADE_TINT_NONE: [f32; 3] = [1.0, 1.0, 1.0];
+
+/// What fraction of a cascade's reach the fade into the next one takes up, and
+/// `static const float CASCADE_FADE_FRACTION` in `mesh.slang`.
+///
+/// `docs/plan/45-shadows.md`'s eighth decision: the cascade switch is a band
+/// rather than a step, so over the last of this much of a cascade's reach both
+/// cascades are sampled and their answers mixed by distance. The shader's copy
+/// carries the sweep the tenth came out of.
+///
+/// Declared here on [`CASCADE_TINTS`]' terms — a test that wants to stand a
+/// fragment *inside* the band has to know how wide it is, and
+/// `crates/crcbl/tests/forward_e2e/shadow.rs` is the one that does.
+/// `the_cascade_fade_grows_towards_the_outer_cascade` holds the two equal.
+pub const CASCADE_FADE_FRACTION: f32 = 0.1;
 
 /// One drawable object, matching `struct GpuInstance` in `shaders/mesh.slang`.
 ///
@@ -2952,6 +3021,199 @@ mod tests {
             "mesh_cluster.slang has grown a BENT_NORMAL_VIEW; the interleaving now has to hold \
              in two files and this test only checks one"
         );
+    }
+
+    /// **The cascade view's threshold lies below every replacing view's**, so
+    /// the one view that keeps the shaded picture is reached without any of the
+    /// five that discard it having to test for it.
+    ///
+    /// The other five thresholds ascend and the outermost branch returns first
+    /// — `the_bent_normal_view_threshold_lies_above_the_motion_view` is the top
+    /// of that ladder. This one cannot join it: its sentinel has to arrive at
+    /// the *end* of `fragmentMain`, where the radiance is finished, so a value
+    /// above the ladder would be caught by whichever replacing branch is tested
+    /// first and would draw a picture the view is not about. Below
+    /// [`FrameUniforms::NORMALS_VIEW_OFF`] instead, every `>=` above it is
+    /// false by the comparison it already makes.
+    ///
+    /// Both halves are asserted, and the second is the one a presence check
+    /// would miss: that the sentinel really clears **none** of the seven
+    /// thresholds the two files declare. A `CASCADE_VIEW_ON` that drifted above
+    /// one of them would draw that view instead, silently, and no golden could
+    /// see it — the golden is blessed with the view off.
+    #[test]
+    fn the_cascade_view_threshold_lies_below_every_replacing_view() {
+        let mesh = include_str!("../shaders/mesh.slang");
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        let cascade = shader_float(mesh, "CASCADE_VIEW");
+        assert!(
+            FrameUniforms::CASCADE_VIEW_ON < cascade && cascade < FrameUniforms::NORMALS_VIEW_OFF,
+            "mesh.slang switches at {cascade}, which does not separate the cascade view's {} \
+             from the shaded frame's {}",
+            FrameUniforms::CASCADE_VIEW_ON,
+            FrameUniforms::NORMALS_VIEW_OFF,
+        );
+
+        // The sentinel clears no other view's threshold, in either file. The
+        // thresholds `mesh.slang` tests, and the two overlays
+        // `mesh_cluster.slang` picks between — that file declares no threshold
+        // of its own for the normals view, which is
+        // `the_lod_view_threshold_lies_above_the_normals_view`'s subject.
+        let cleared = |mesh: &str, cluster: &str| -> Vec<String> {
+            [
+                (
+                    "mesh.slang",
+                    mesh,
+                    [
+                        "NORMALS_VIEW",
+                        "LOD_VIEW",
+                        "OCCLUSION_VIEW",
+                        "MOTION_VIEW",
+                        "BENT_NORMAL_VIEW",
+                    ]
+                    .as_slice(),
+                ),
+                (
+                    "mesh_cluster.slang",
+                    cluster,
+                    ["LOD_VIEW", "HEATMAP_VIEW"].as_slice(),
+                ),
+            ]
+            .into_iter()
+            .flat_map(|(name, source, views)| {
+                views.iter().filter_map(move |view| {
+                    let threshold = shader_float(source, view);
+                    (threshold <= FrameUniforms::CASCADE_VIEW_ON)
+                        .then(|| format!("{name}'s {view} at {threshold}"))
+                })
+            })
+            .collect()
+        };
+        assert!(
+            cleared(mesh, cluster).is_empty(),
+            "the cascade view's {} clears {:?} — so a frame asking for the cascade tint is \
+             caught by that branch and draws a picture nobody asked for",
+            FrameUniforms::CASCADE_VIEW_ON,
+            cleared(mesh, cluster),
+        );
+        // And the scan can see one, which the assertion above cannot show on a
+        // tree where it holds: a threshold moved *below* the sentinel is the
+        // drift it exists for, and it is invisible to the separation check
+        // above — that one is about this crate's two constants and says nothing
+        // about where the shader's own thresholds sit.
+        // `the_decode_comparison_notices_a_changed_line` is the same shape.
+        let drifted = mesh.replace(
+            "static const float NORMALS_VIEW = 0.5;",
+            "static const float NORMALS_VIEW = -1.5;",
+        );
+        assert_ne!(
+            drifted, mesh,
+            "the drifted copy is the source itself, so the scan below checked nothing"
+        );
+        assert_eq!(
+            cleared(&drifted, cluster),
+            ["mesh.slang's NORMALS_VIEW at -1.5"],
+            "a threshold moved under the cascade sentinel is invisible to the scan"
+        );
+
+        assert!(
+            mesh.contains("if (frame.ambient.w <= CASCADE_VIEW)"),
+            "mesh.slang no longer compares the ambient's `w` down against the threshold, so this \
+             crate is writing the switch into a lane nothing reads"
+        );
+        assert!(
+            !cluster.contains("CASCADE_VIEW"),
+            "mesh_cluster.slang has grown a CASCADE_VIEW; the cascade is a fragment-stage \
+             selection and the interleaving now has to hold in two files, and this test only \
+             checks one"
+        );
+    }
+
+    /// **The tints the shader multiplies by are the ones this crate declares**,
+    /// there is one per cascade, and no two of them are the same colour.
+    ///
+    /// Written on both sides for [`MOTION_VIEW_SCALE`]'s reason — the shader
+    /// applies them and `crates/crcbl/tests/forward_e2e/shadow.rs` reads the
+    /// picture against them — so a drift would leave that suite naming the wrong
+    /// cascade for a pixel while every assertion in it still passed.
+    ///
+    /// **The distinctness is the anti-vacuity half.** A table whose entries were
+    /// equal would tint the whole frame one colour: the overlay would draw, the
+    /// e2e's "the two tints differ" would be the only thing that failed, and a
+    /// reader looking at the picture would see no cascade boundary at all — which
+    /// is the entire point of the view.
+    #[test]
+    fn the_cascade_tints_are_the_ones_the_host_declares() {
+        let mesh = include_str!("../shaders/mesh.slang");
+        let table = mesh
+            .split_once("static const float3 CASCADE_TINTS[SHADOW_CASCADES] = {")
+            .expect("mesh.slang declares the tint table")
+            .1
+            .split_once("};")
+            .expect("the table closes")
+            .0;
+        let tints: Vec<[f32; 3]> = table
+            .match_indices("float3(")
+            .map(|(at, opener)| {
+                let body = table[at + opener.len()..]
+                    .split_once(')')
+                    .expect("a float3 closes")
+                    .0;
+                let mut channels = body.split(',').map(|value| {
+                    value
+                        .trim()
+                        .parse::<f32>()
+                        .unwrap_or_else(|_| panic!("`{value}` is not a float"))
+                });
+                [
+                    channels.next().expect("a red channel"),
+                    channels.next().expect("a green channel"),
+                    channels.next().expect("a blue channel"),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            tints.len(),
+            SHADOW_CASCADES,
+            "mesh.slang's tint table has {} entries for {SHADOW_CASCADES} cascades, so a \
+             cascade is read out of a slot nobody wrote",
+            tints.len()
+        );
+        assert_eq!(
+            tints.as_slice(),
+            CASCADE_TINTS.as_slice(),
+            "mesh.slang and this crate disagree about the cascade tints, so a test naming a \
+             cascade by its colour names the wrong one"
+        );
+        for (index, tint) in CASCADE_TINTS.into_iter().enumerate() {
+            assert!(
+                !CASCADE_TINTS[..index].contains(&tint),
+                "cascade {index} wears a tint another cascade already has, so the boundary the \
+                 view exists to show is invisible"
+            );
+        }
+        assert!(
+            mesh.contains("static const float3 CASCADE_TINT_NONE = float3(1.0, 1.0, 1.0);"),
+            "mesh.slang no longer leaves an uncovered fragment neutral, so a pixel past the last \
+             cascade is tinted as though it were mapped"
+        );
+        assert_eq!(CASCADE_TINT_NONE, [1.0, 1.0, 1.0]);
+
+        // And the tint is the selection the *shading* made rather than a second
+        // one: `sun_visibility` reports the cascade and the fade it used, and
+        // `fragmentMain` colours from those two values and multiplies the
+        // finished radiance by the result.
+        for line in [
+            "float2 pixel, out uint selected,",
+            "sun_cascade_tint = cascade_tint(sun_cascade, sun_fade);",
+            "output.lit = float4(lit * sun_cascade_tint, albedo.a);",
+        ] {
+            assert!(
+                mesh.contains(line),
+                "mesh.slang no longer spells `{line}`, so the overlay is derived beside the \
+                 lighting rather than read off it and the two can disagree"
+            );
+        }
     }
 
     /// The scale the motion view encodes with is the one this crate declares.
@@ -5261,6 +5523,12 @@ mod tests {
     #[test]
     fn the_cascade_fade_grows_towards_the_outer_cascade() {
         let source = include_str!("../shaders/mesh.slang");
+        assert_eq!(
+            shader_float(source, "CASCADE_FADE_FRACTION"),
+            CASCADE_FADE_FRACTION,
+            "mesh.slang and this crate disagree about how wide the band is, so a test placing a \
+             fragment inside it places one outside"
+        );
         let squeezed = source.split_whitespace().collect::<Vec<_>>().join(" ");
         for expected in [
             // The band sits at the outer edge: `blend` is zero until the

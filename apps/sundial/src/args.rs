@@ -186,7 +186,17 @@ OPTIONS:
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'
-    -h, --help           Print this help";
+    -h, --help           Print this help
+
+KEYS:
+    F                    Cycle the shadow filter: pcss, disc, box
+    X                    Raise the comparison seam at the centre, or drop it
+    , .                  Walk the seam a step left or right
+    C                    Tint the picture by the cascade each shadow was read from
+    P                    Stop and start the sun
+    - =                  Scrub the sun back or forward, and stop it
+    R                    Put every knob and the clock back where a run opens
+    ESC                  Pause, and the panel every row above is on";
 
 /// What the command line asked for.
 pub type Invocation = crcbl::args::Invocation<Options>;
