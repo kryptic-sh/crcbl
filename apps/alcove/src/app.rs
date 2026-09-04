@@ -163,13 +163,23 @@ impl Alcove {
     /// as what a person watching a headless run has. It names the lighting path,
     /// so a page that opened some other device is legible, and the occlusion
     /// state, which is the whole of what this sample is for.
+    ///
+    /// **`view` is here for a browser gate specifically.** The debug views are
+    /// the one control on this page whose effect is a *picture* — the AO channel
+    /// and the bent direction each replace the shaded court — and a whole-canvas
+    /// reading cannot see that, because a statistic over the canvas mixes the
+    /// scene with the HUD drawn over it. `crcbl::debug_view::current` is the cell
+    /// every route to it writes, so printing it here is what makes
+    /// `crate::web`'s `__crcbl_alcove_bent_view` and `__crcbl_alcove_view` an
+    /// effect a gate can *read* rather than infer. `apps/sundial`'s heartbeat
+    /// carries the same field for the same reason.
     fn log_heartbeat(&self) {
         if !self.ticks.is_multiple_of(HEARTBEAT_TICKS) {
             return;
         }
         crcbl::log::info!(
             "[HUD] tick: {}  lighting: {:?}  geometry: {:?}  binding: {:?}  camera: {}  \
-             effects: {}  technique: {}  radius: {:.3}  seam: {}",
+             effects: {}  technique: {}  radius: {:.3}  view: {}  seam: {}",
             self.ticks,
             self.paths.lighting,
             self.paths.geometry,
@@ -178,6 +188,7 @@ impl Alcove {
             self.paths.effects_row(),
             self.knobs.technique,
             self.knobs.radius,
+            self.knobs.view.label(),
             self.knobs.seam_row(),
         );
     }
@@ -225,10 +236,18 @@ impl Alcove {
 type KeyBinding = (KeyCode, fn(), &'static str);
 
 /// The bindings themselves.
-pub(crate) const KEYS: [KeyBinding; 9] = [
+pub(crate) const KEYS: [KeyBinding; 10] = [
     (KeyCode::KeyT, cycle_technique, "T"),
     (KeyCode::KeyV, occlusion::toggle_occlusion_view, "V"),
     (KeyCode::KeyB, occlusion::toggle_bent_normals, "B"),
+    // **`N` for normal**, which is what the picture is of, and it is the letter
+    // `apps/viewer` already binds the world-space normals view to — so one
+    // letter means "draw me a direction" across the workspace. The letters this
+    // fixture would rather have are taken: `B` is the gather's own switch beside
+    // it, and `D` is the flyer's, which is offered every key before this table
+    // is walked and would leave a binding on it unreachable rather than merely
+    // confusing.
+    (KeyCode::KeyN, occlusion::toggle_bent_normal_view, "N"),
     (KeyCode::KeyX, occlusion::toggle_seam, "X"),
     (KeyCode::KeyR, occlusion::reset, "R"),
     (KeyCode::BracketLeft, radius_down, "["),
@@ -486,6 +505,7 @@ impl HostedGame for Alcove {
             AlcoveAction::ToggleOcclusionView => occlusion::toggle_occlusion_view(),
             AlcoveAction::CycleTechnique => occlusion::cycle(occlusion::TECHNIQUE),
             AlcoveAction::ToggleBentNormals => occlusion::toggle_bent_normals(),
+            AlcoveAction::ToggleBentNormalView => occlusion::toggle_bent_normal_view(),
             AlcoveAction::ToggleSeam => occlusion::toggle_seam(),
             AlcoveAction::ResetKnobs => occlusion::reset(),
         }
@@ -662,5 +682,253 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
             return Ok(None);
         };
         Ok(Some(assemble(booted, &self.options)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crcbl::render::DebugView;
+
+    /// A fixture with no window and no GPU, on the fixed pose the goldens use.
+    ///
+    /// The paths are written down rather than asked of a device — there is none
+    /// here — and nothing below reads them: they exist because [`Alcove::new`]
+    /// takes them, and a check about a key must not need a swapchain.
+    fn fixture() -> Alcove {
+        Alcove::new(
+            CameraMode::Fixed,
+            Paths {
+                geometry: crcbl::hal::GeometryPath::MeshShader,
+                binding: crcbl::hal::BindingModel::Bindless,
+                lighting: crcbl::hal::LightingPath::Rasterised,
+                forced: crate::gpu::Forced::default(),
+                effects: RenderEffects::DEFAULT_STACK,
+            },
+            EffectRequest::default(),
+            RenderEffects::all(),
+        )
+    }
+
+    /// **Every key this sample binds is spelled in the usage text**, and no two
+    /// bindings take the same key.
+    ///
+    /// The failure this catches is a key added to one of the two tables and left
+    /// out of `--help`, which is a control nobody can find, and a key bound
+    /// twice, which is a control that does whichever of two things the tables
+    /// happen to be walked in.
+    #[test]
+    fn every_key_is_bound_once_and_named_in_the_help() {
+        let mut bound: Vec<KeyCode> = Vec::new();
+        let mut named: Vec<&str> = Vec::new();
+        for (key, _, name) in KEYS {
+            bound.push(key);
+            named.push(name);
+        }
+        for (key, _, name) in SEAM_KEYS {
+            bound.push(key);
+            named.push(name);
+        }
+        assert!(bound.len() > 5, "the fixture binds {} keys", bound.len());
+        for (at, key) in bound.iter().enumerate() {
+            assert!(
+                !bound[..at].contains(key),
+                "{key:?} is bound twice, so one of the two controls is unreachable"
+            );
+        }
+        // The `KEYS:` block alone, and a key is named only where a row of it
+        // starts with that key: `USAGE.contains("V")` is true of "OPTIONS", and
+        // `USAGE.contains("B")` of every "B" in a sentence, which is a check
+        // that cannot fail.
+        let keys = crate::USAGE
+            .split("KEYS:")
+            .nth(1)
+            .expect("the usage text has a KEYS: block");
+        let names_a_row = |name: &str| {
+            keys.lines().any(|line| {
+                line.strip_prefix("    ")
+                    .and_then(|row| row.split("  ").next())
+                    .is_some_and(|spelt| spelt.split(' ').any(|token| token == name))
+            })
+        };
+        for name in named {
+            assert!(
+                names_a_row(name),
+                "the usage text's KEYS: block has no row for the {name} key"
+            );
+        }
+        assert!(
+            !names_a_row("Q"),
+            "a key nothing binds is named in the KEYS: block, so the check above is not \
+             reading rows"
+        );
+    }
+
+    /// **Each debug-view key draws its picture, a second press takes it away,
+    /// the pause panel names which of the two the frame is drawing, and the
+    /// other key *replaces* the first.**
+    ///
+    /// The two halves live in different files — this one's key table writes the
+    /// engine's `debug_view` cell and [`crate::menu::pause_menu`] reads it back —
+    /// which is exactly the shape that drifts into a key toggling a picture no
+    /// panel names. So each row is built from the value its key moved rather than
+    /// from a literal, and the panel's own press is driven beside the key,
+    /// because an [`AlcoveAction`] is a second route to the same cell.
+    ///
+    /// **One table over both keys rather than a check each**, and the exclusivity
+    /// at the end is why it is worth being one: the engine holds exactly one
+    /// debug view, so `N` pressed while `V`'s channel is up must leave the panel
+    /// reading `ON` once. Two separate checks, each starting from the shaded
+    /// frame, could not see that at all — and a panel that read `ON` twice about
+    /// one picture is a panel nobody can act on.
+    ///
+    /// [`crcbl::debug_view::for_test`] is held for `crcbl::debug_view`'s own
+    /// reason: the view is a process-global console variable and `cargo test`
+    /// runs a crate's checks as threads of one process.
+    #[test]
+    fn each_debug_view_key_shows_its_picture_and_the_panel_names_it() {
+        let _view = crcbl::debug_view::for_test();
+        let mut alcove = fixture();
+        // The panel as it stands right now, row by row — built from the cell the
+        // key moved, exactly as `menu_kind` builds it.
+        let row = |id| {
+            menu::pause_menu(
+                CameraMode::Fixed,
+                EffectRequest::default(),
+                RenderEffects::all(),
+                Knobs::read(),
+            )
+            .items()
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap_or_else(|| panic!("the panel has no row {id:?}"))
+            .label
+            .clone()
+        };
+        // Every debug-view row the panel carries, so the count below is about the
+        // panel rather than about the two this check happens to drive.
+        let views: [(KeyCode, DebugView, crcbl::ui::WidgetId, &str, AlcoveAction); 2] = [
+            (
+                KeyCode::KeyV,
+                DebugView::AmbientOcclusion,
+                menu::AO_VIEW_ID,
+                "AO VIEW",
+                AlcoveAction::ToggleOcclusionView,
+            ),
+            (
+                KeyCode::KeyN,
+                DebugView::BentNormal,
+                menu::BENT_VIEW_ID,
+                "BENT VIEW",
+                AlcoveAction::ToggleBentNormalView,
+            ),
+        ];
+        // How many rows read `ON` — the count that says the panel is describing
+        // one picture.
+        let showing = || {
+            views
+                .iter()
+                .filter(|(_, _, id, _, _)| row(*id).ends_with(": ON"))
+                .count()
+        };
+
+        for (key, view, id, name, action) in views {
+            assert_eq!(
+                crcbl::debug_view::current(),
+                DebugView::Shaded,
+                "{name} starts from a frame that is already showing something"
+            );
+            assert_eq!(row(id), format!("{name}: OFF"));
+
+            alcove.key_event(key, true);
+            assert_eq!(
+                crcbl::debug_view::current(),
+                view,
+                "{key:?} did not put {view:?} in force"
+            );
+            assert_eq!(
+                row(id),
+                format!("{name}: ON"),
+                "the panel does not follow {key:?}"
+            );
+            assert_eq!(showing(), 1, "the panel names more than one picture");
+
+            alcove.key_event(key, true);
+            assert_eq!(
+                crcbl::debug_view::current(),
+                DebugView::Shaded,
+                "a second press left {view:?} up, so {key:?} cannot take it back"
+            );
+            assert_eq!(row(id), format!("{name}: OFF"));
+
+            // And the row itself, which is the second route to the same cell: a
+            // key wired to one and a row wired to another is the drift this pair
+            // exists to catch.
+            assert_eq!(
+                menu::action_for(id),
+                Some(action),
+                "the {name} row fires something else"
+            );
+            alcove.apply(action);
+            assert_eq!(
+                crcbl::debug_view::current(),
+                view,
+                "the {name} row does not reach the cell {key:?} writes"
+            );
+            alcove.apply(action);
+        }
+
+        // **The exclusivity, which neither key can show on its own.** `N` while
+        // the AO channel is up must replace it, leaving exactly one row `ON` —
+        // and it is the bent one.
+        alcove.key_event(KeyCode::KeyV, true);
+        alcove.key_event(KeyCode::KeyN, true);
+        assert_eq!(
+            crcbl::debug_view::current(),
+            DebugView::BentNormal,
+            "N did not replace the picture V had up"
+        );
+        assert_eq!(row(menu::AO_VIEW_ID), "AO VIEW: OFF");
+        assert_eq!(row(menu::BENT_VIEW_ID), "BENT VIEW: ON");
+        assert_eq!(showing(), 1);
+    }
+
+    /// **The heartbeat names the picture the frame is drawing**, which is the
+    /// field `web/tools/browser-e2e.mjs`'s `alcove` row reads a press off.
+    ///
+    /// The gate matches `view: <name>` followed by two spaces, so the field must
+    /// carry a `DebugView::label` and must not be the last thing on the line —
+    /// a `view:` written at the end would leave that pattern matching nothing
+    /// while every native check here still passed.
+    #[test]
+    fn the_heartbeat_names_the_view_the_frame_draws() {
+        let _view = crcbl::debug_view::for_test();
+        let mut alcove = fixture();
+        let beat = |alcove: &mut Alcove| {
+            let logs = crcbl::core::log::capture();
+            // The counter starts at zero and `log_heartbeat` writes on every
+            // multiple of `HEARTBEAT_TICKS`, so a fixture that has ticked
+            // nowhere logs.
+            alcove.knobs = Knobs::read();
+            alcove.log_heartbeat();
+            logs.records()
+                .into_iter()
+                .map(|record| record.message)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let shaded = beat(&mut alcove);
+        assert!(
+            shaded.contains("view: shaded  "),
+            "the heartbeat does not name the shaded frame, or names it last: {shaded}"
+        );
+
+        alcove.key_event(KeyCode::KeyN, true);
+        let bent = beat(&mut alcove);
+        assert!(
+            bent.contains(&format!("view: {}  ", DebugView::BentNormal.label())),
+            "N put the bent direction up and the heartbeat still names another picture: {bent}"
+        );
     }
 }

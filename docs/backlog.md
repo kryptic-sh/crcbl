@@ -236,15 +236,21 @@ nor `crate::app` offers a hook to empty it from inside `apps/sundial`.
 `/demos/alcove/` is the first page on the site whose controls are HTML rather
 than keys — `apps/alcove/src/web.rs` exports one call per knob and
 `web/demos/alcove/main.js` binds them. `web/tools/browser-e2e.mjs`'s `alcove`
-row presses **three** of them and reads the effect off the demo's own heartbeat:
-the seam button, the seam slider and the technique button, then `reset`. The
-**AO-only view, bent normals, the radius slider and the intensity slider are
-driven by nothing but a person**. Two of the four are not on the heartbeat at
-all (`view` and `bent normals` are panel rows, and `intensity` is not printed),
-which is why they were left out rather than skipped quietly: checking them wants
-either another field on `Alcove::log_heartbeat`'s line or a reading taken off
-the canvas, and the second is what `still` in that row says this demo cannot
-give.
+row presses **four** of them and reads the effect off the demo's own heartbeat:
+the seam button, the seam slider, the technique button and the bent-direction
+button — that last one twice, because no sample's `reset` reaches the engine's
+debug view — then `reset`. The **AO-only view, the bent-normals switch, the
+radius slider and the intensity slider are driven by nothing but a person**.
+
+The bent-direction slice of 2026-09-05 put a `view:` field on
+`Alcove::log_heartbeat`, so the **AO-only view button is now cheap to check**:
+it is the same `crcbl::debug_view` cell the bent one writes and the same block
+in `browser-e2e.mjs` would drive it, given a `viewLabel` of `ambient occlusion`.
+That block takes one control per demo, so a second one wants the block to take a
+list — which is why it was left rather than done in passing. The **bent-normals
+switch and the intensity slider are still not on the heartbeat at all**, and
+checking either wants another field on that line or a reading taken off the
+canvas, and the second is what `still` in that row says this demo cannot give.
 
 **Reaching those controls at all costs the pointer, and that surprised us.** The
 fixture asks for Pointer Lock while it is running, `web/engine/shell.js` takes
@@ -264,6 +270,43 @@ flag is `web/run-render-harness-e2e.sh`'s; the browser gate passes unknown
 beginning with `--` and never complains. Nothing here depends on it, but a
 person copying a command line from one gate to the other gets no warning that
 half of it did nothing.
+
+## What alcove's bent-direction view did not cover (2026-09-05)
+
+`docs/plan/sample/19-alcove.md`'s milestone 3 is closed: `N`, the pause panel's
+`BENT VIEW` row, `__crcbl_alcove_bent_view` and a button on `/demos/alcove/` all
+put `crcbl_render::DebugView::BentNormal` up, and
+`the_bent_direction_is_the_normal_on_open_floor_and_leans_out_of_an_enclosure`
+in `apps/alcove/tests/golden.rs` holds a golden and four readings. What the
+slice did not do:
+
+- **One pose and one arm.** Every reading and the golden are the fixed camera at
+  `Arm::shipped()` — the shipped gather, the shipped radius, no seam. The
+  `hemisphere` gather writes the zero sentinel on every pixel and therefore
+  draws mid grey everywhere under this view; that is the honest picture, and
+  nothing asserts it, so a cheap tier that started reporting a direction would
+  go unnoticed. `court::rim_camera` is not drawn under the view either, and it
+  is the pose where a depth-reconstructed normal is wrong — a bent direction at
+  a silhouette is exactly where topic 18's escalation clause would show, and no
+  claim is made about it.
+
+- **Nothing reads the sentinel's own picture.** With `r_ssao_bent_normals` off,
+  or with `RenderEffects::AMBIENT_OCCLUSION` out of the stack, the frame is the
+  mid grey `crcbl_shaders::ssao::BENT_NORMAL_NONE` encodes to, everywhere —
+  `mesh.slang` says so, `web/pages/alcove.html` tells a visitor to expect it,
+  and no test in this crate looks. It is one more arm of the same `draw`, and it
+  is the anti-vacuity a reader would reach for first.
+
+- **A run cannot open on it.** `--ao-view` starts a run drawing the occlusion
+  channel and there is no `--bent-view` beside it, so a headless capture of this
+  picture wants an `autoexec.cfg` with `debug_view bent normal` in it. Left out
+  because nothing asked for it, not because it is hard: `Options::apply` is
+  where it would go.
+
+- **`Knobs` grew a `DebugView` and the debug overlay's `view` row changed with
+  it**, from `AO ONLY` / `SHADED` to the view's own name. That row is not
+  asserted on anywhere, so the change is behind nothing; it was made because two
+  view rows cannot be spelled by one `bool`.
 
 ## What the AO default change of 2026-09-03 did not cover (2026-09-03)
 

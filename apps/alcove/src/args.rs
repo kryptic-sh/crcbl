@@ -170,7 +170,19 @@ OPTIONS:
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'
-    -h, --help           Print this help";
+    -h, --help           Print this help
+
+KEYS:
+    V                    Draw the occlusion channel as grey instead of the court
+    N                    Draw the bent direction the gather reported instead
+    T                    Cycle the gather the near side runs
+    B                    Gather a bent direction beside the scalar, or do not
+    X                    Raise the comparison seam at the centre, or drop it
+    , .                  Walk the seam a step left or right
+    [ ]                  Narrow and widen the radius the horizons sweep
+    - =                  Weaken and strengthen how hard the occlusion is applied
+    R                    Put every occlusion knob back where a run opens
+    ESC                  Pause, and the panel every row above is on";
 
 /// What the command line asked for.
 pub type Invocation = crcbl::args::Invocation<Options>;

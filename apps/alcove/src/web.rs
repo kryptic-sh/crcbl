@@ -30,6 +30,13 @@
 //! calls answers with what the console holds *afterwards*, so a slider that was
 //! clamped shows where it actually landed.
 //!
+//! **Two of them reach a different cell again.** [`__crcbl_alcove_view`] and
+//! [`__crcbl_alcove_bent_view`] name a [`crcbl::render::DebugView`], which is
+//! the *engine's* one cell rather than an `r_ssao_*` variable of this sample's —
+//! shared with every other sample and with the `debug_view` console command. The
+//! engine holds exactly one view, so each of them answers with whether its
+//! picture is **the** one being drawn.
+//!
 //! # What the page shows, and what decides it
 //!
 //! **The browser draws the court through [`crcbl::hal::LightingPath::Rasterised`]
@@ -89,6 +96,7 @@
 //! | Symbol | Signature (wasm) | Meaning |
 //! | --- | --- | --- |
 //! | [`__crcbl_alcove_view`] | `(i32) -> i32` | The AO-only view — the `V` key and the panel's `AO VIEW` row. `1` on, `0` off. |
+//! | [`__crcbl_alcove_bent_view`] | `(i32) -> i32` | The bent-direction view — the `N` key and the panel's `BENT VIEW` row. A non-zero argument toggles, `0` reads. `1`/`0`. |
 //! | [`__crcbl_alcove_bent_normals`] | `(i32) -> i32` | `r_ssao_bent_normals` — the `B` key. `1`/`0`. |
 //! | [`__crcbl_alcove_technique`] | `(i32) -> i32` | A non-zero argument moves the gather on to the next one the engine declares, as the `T` key does. Returns the **length** of the name now in force. |
 //! | [`__crcbl_alcove_technique_ptr`] | `() -> i32` | Address of that name (UTF-8, not NUL-terminated). Read it **after** the call above: the two together are one read. |
@@ -191,6 +199,39 @@ pub extern "C" fn __crcbl_alcove_view(on: i32) -> i32 {
         occlusion::toggle_occlusion_view();
     }
     i32::from(occlusion::occlusion_view())
+}
+
+/// Draw the bent direction the gather reported, or go back to the picture, and
+/// answer with whether it is the view in force.
+///
+/// `toggle` of `0` reads. The `N` key and the pause panel's `BENT VIEW` row as
+/// something a finger can reach, through [`occlusion::toggle_bent_normal_view`]
+/// — the same `crcbl::debug_view` cell all three write, so a view put up by a
+/// typed `debug_view bent normal` is what this answers with too.
+///
+/// **A different kind of state from every knob above it**, which is why it does
+/// not take the negative-reads convention they share: those are `r_ssao_*`
+/// console cells this sample owns, and the debug view is the *engine's*, held as
+/// one value rather than as a switch per view. So this answers with whether the
+/// bent direction is **the** view rather than with a flag of its own — a picture
+/// some other view had replaced would otherwise read here as still up — and a
+/// caller asking for a state it is already in must not be handed a toggle that
+/// leaves it somewhere else.
+///
+/// # What it is for
+///
+/// `docs/plan/sample/19-alcove.md`'s milestone 3.
+/// [`__crcbl_alcove_bent_normals`] is the switch that makes the gather report a
+/// direction; a scalar view of the frame says nothing about **which way** the
+/// ambient is being sampled from, and the charter is explicit that a term that
+/// steers that cannot be reviewed as a grey image. A visitor with no keyboard
+/// could not reach the picture at all.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_alcove_bent_view(toggle: i32) -> i32 {
+    if toggle != 0 {
+        occlusion::toggle_bent_normal_view();
+    }
+    i32::from(occlusion::bent_normal_view())
 }
 
 /// Gather a bent direction beside the scalar, or do not.

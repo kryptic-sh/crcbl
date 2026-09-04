@@ -60,6 +60,14 @@ struct Arm {
     split: Option<f32>,
     /// Whether the frame draws the occlusion channel instead of shading it.
     occlusion_view: bool,
+    /// Whether the frame draws the channel's **bent direction** instead of
+    /// shading it.
+    ///
+    /// A field of its own beside [`occlusion_view`](Self::occlusion_view) rather
+    /// than one enum, because [`ForwardRenderer`] is what this arm drives and it
+    /// carries a switch per view: the precedence between them is
+    /// `ForwardRenderer::debug_view`'s and not this fixture's to restate.
+    bent_normal_view: bool,
     /// The occlusion radius, or `None` for the shipped one.
     radius: Option<f32>,
     /// Whether the sun is switched off, leaving the ambient term alone.
@@ -85,6 +93,7 @@ impl Arm {
             technique: None,
             split: None,
             occlusion_view: false,
+            bent_normal_view: false,
             radius: None,
             sunless: false,
             rim: false,
@@ -111,6 +120,15 @@ impl Arm {
     const fn as_channel(self) -> Self {
         Self {
             occlusion_view: true,
+            ..self
+        }
+    }
+
+    /// The same arm drawing the channel's bent direction — what `N` and the
+    /// pause panel's `BENT VIEW` row put up.
+    const fn as_bent_direction(self) -> Self {
+        Self {
+            bent_normal_view: true,
             ..self
         }
     }
@@ -270,6 +288,7 @@ fn build(
         ..EffectRequest::default()
     });
     renderer.set_occlusion_view(arm.occlusion_view);
+    renderer.set_bent_normal_view(arm.bent_normal_view);
     if let Err(error) = court::place(&mut renderer) {
         renderer.destroy(device);
         return Err(crcbl::screenshot::OffscreenError::Hal(
@@ -374,6 +393,56 @@ fn linear_brightness(image: &Image, centre: (u32, u32), half: (u32, u32)) -> f32
     {
         total / count as f32
     }
+}
+
+/// Mean of each colour channel over a block of pixels, out of 255.
+///
+/// The unit the bent-direction claims are stated in, and the reason
+/// [`brightness`] cannot state them: the bent view draws a **direction** as
+/// `n * 0.5 + 0.5`, so `+Y` and `+X` have the same luminance and differ only in
+/// which channel carries it. A mean over the three would call them the same
+/// picture.
+fn channels(image: &Image, centre: (u32, u32), half: (u32, u32)) -> [f32; 3] {
+    let (mut total, mut count) = ([0.0f32; 3], 0u32);
+    let x0 = centre.0.saturating_sub(half.0);
+    let y0 = centre.1.saturating_sub(half.1);
+    let x1 = (centre.0 + half.0).min(image.width().saturating_sub(1));
+    let y1 = (centre.1 + half.1).min(image.height().saturating_sub(1));
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let pixel = image.pixel(x, y).expect("inside the frame");
+            for (channel, sum) in total.iter_mut().enumerate() {
+                *sum += f32::from(pixel[channel]);
+            }
+            count += 1;
+        }
+    }
+    assert!(count > 0, "an empty block at {centre:?} measures nothing");
+    #[allow(clippy::cast_precision_loss)]
+    total.map(|sum| sum / count as f32)
+}
+
+/// `value` in linear light, as the swapchain's sRGB encode writes it, out of
+/// 255.
+///
+/// IEC 61966-2-1's transfer function, which the Vulkan specification's sRGB
+/// conversion is. It is here because the bent-direction claim compares a colour
+/// **derived from the court's own geometry** against a readback byte, and the
+/// value `mesh.slang` returns is not the value that lands in the buffer: the
+/// bent view writes the encoded direction straight into the `Rgba16Float` scene
+/// target, the tonemap resolves that as the identity on `[0, 1]` at the default
+/// exposure, and the swapchain encodes on the way out. Every other claim in this
+/// file compares two readbacks with each other and needed no such thing.
+///
+/// A transcription of `crcbl`'s own `forward_e2e::depth_probe::srgb_encode`,
+/// which is `pub(crate)` to one test binary and cannot be reached from another.
+fn srgb_encode(value: f32) -> f32 {
+    let encoded = if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    };
+    encoded * 255.0
 }
 
 /// [`BLOCK`] scaled to `extent`.
@@ -1099,6 +1168,162 @@ fn the_silhouette_does_not_print_on_the_wall_behind_it() {
              {above:.2} for the same wall away from it — a halo of {halo:.4}, past {RIM_HALO}. \
              The sphere is four occlusion radii in front of that wall"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The bent direction
+// ---------------------------------------------------------------------------
+
+/// How far each channel on open floor may sit from the geometric normal's own
+/// colour, in 0-255 codes.
+///
+/// **A ceiling on quantisation and nothing else.** `court::OPEN_FLOOR` has
+/// nothing inside the shipped occlusion radius of it, so the average unblocked
+/// direction there is the floor's own normal and the frame draws `+Y` exactly:
+/// measured at 0.48 codes on both adapters, which is the distance from
+/// `srgb_encode(0.5)` to the byte it rounds to. It is set an order under the
+/// thinnest lean below, so it is a bound that separates "the direction is the
+/// normal" from "the direction leans" rather than one that admits both.
+const OPEN_FLOOR_BENT_TOLERANCE: f32 = 2.5;
+
+/// How far the crease's bent direction must lean out of the slot, in 0-255
+/// codes on the `+z` channel.
+///
+/// **Measured, and floored at about half of it.** The figures are in the test's
+/// own doc, and this is the thinnest of the three because it is the shallowest
+/// geometry: two walls a quarter of a metre apart open the whole sky strip above
+/// the slot, where the alcove's recess is closed on five sides.
+const CREASE_BENT_LEAN: f32 = 3.75;
+
+/// The same, at the alcove's back corner.
+///
+/// The deepest enclosure in the court, and the lean is an order above the
+/// crease's.
+const CORNER_BENT_LEAN: f32 = 28.0;
+
+/// The same, at the contact band beside the box.
+const CONTACT_BENT_LEAN: f32 = 18.0;
+
+/// **The bent direction is the geometric normal where nothing occludes, and
+/// leans out towards the opening where something does.**
+///
+/// `docs/plan/sample/19-alcove.md`'s milestone 3, and the reason the charter
+/// asked for a picture at all: the occlusion channel's scalar can only *dim* the
+/// ambient term, and the bent direction is what decides which part of the room
+/// the surviving ambient is sampled from — so a term steering that cannot be
+/// reviewed as a grey image, and until this view there was nothing to review.
+///
+/// Four readings off one frame, every one of them placed from the court's own
+/// geometry rather than found by looking for a colour.
+///
+/// * **Open floor**, which is the claim with an absolute answer. Nothing is
+///   within the shipped radius of [`court::OPEN_FLOOR`], so the average
+///   unblocked direction there is the floor's own normal — `+Y` — and the view
+///   draws a direction as `n * 0.5 + 0.5`, so the pixel is
+///   `(0.5, 1.0, 0.5)` in linear light. [`srgb_encode`] is what turns that into
+///   the byte the swapchain writes; nothing else in this file needed it, because
+///   every other claim compares two readbacks with each other.
+/// * **Three enclosed points**, each of which must lean **out of** its own
+///   enclosure. All three open towards `+z`, and not by coincidence: the alcove's
+///   mouth is cut in its `+z` face, the slot's near end is the end the fixed
+///   camera stands off, and the contact band is the floor on the `+z` side of
+///   the box — the fixed camera can only see a surface that faces it. So the
+///   claim on each is that the `b` channel, which carries `+z`, stands **above**
+///   the open floor's.
+///
+/// **Anti-vacuity, and it is the first reading that supplies it.** A view wired
+/// to a constant, or a gather that reported the sentinel everywhere, draws the
+/// mid grey `0x80` in all three channels — which is `(128, 128, 128)`, nowhere
+/// near the `+Y` the first assertion demands. And a view that drew the shading
+/// normal rather than the bent one passes the first assertion and fails all
+/// three of the others, because the floor's shading normal is `+Y` at every one
+/// of these points.
+///
+/// # What was measured
+///
+/// Open floor draws `(188.0, 255.0, 188.0)` on lavapipe (llvmpipe, LLVM 22.1.8)
+/// and on radv (AMD Radeon RX 7900 XTX, RADV NAVI31) against a geometric normal
+/// of `(187.5, 255.0, 187.5)` — 0.48 codes apart on both, which is the rounding.
+/// The `+z` lean is 7.68 codes at the crease, 57.48 at the alcove's back corner
+/// and 37.16 at the contact band on lavapipe, and 7.68 / 57.52 / 37.24 on radv.
+/// Each floor above is about half the lower of its pair. The run prints every
+/// one of them again on whatever adapter it opened.
+///
+/// # How it was shown to fail
+///
+/// Three runs, one per thing this check says.
+///
+/// * **The view never ran**, by drawing the arm without
+///   `Arm::as_bent_direction` — the shaded court, which is what a switch wired
+///   to nothing leaves. Open floor came out `(232.0, 230.0, 227.0)`, 44.48 codes
+///   from the geometric normal and past [`OPEN_FLOOR_BENT_TOLERANCE`].
+/// * **The open-floor reading taken at an occluded point**, `court::ALCOVE_CORNER`,
+///   which is what a reference block that had slipped onto geometry would do:
+///   `(214.16, 217.24, 245.48)`, 57.96 codes away, and the same assertion failed.
+/// * **The golden compared against a frame drawn at another radius**, which
+///   moves the direction everywhere the court encloses and nowhere it does not.
+///   All four readings above still passed — a wider radius leans the crease
+///   further, not less — and the comparison failed at 1.1230% grossly wrong
+///   against a 0.1% budget. That is the half that says the picture is held to
+///   *this* frame rather than to any frame with a green floor in it.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-alcove-golden.sh"]
+fn the_bent_direction_is_the_normal_on_open_floor_and_leans_out_of_an_enclosure() {
+    let block = block_for(EXTENT);
+    let camera = court::fixed_camera();
+    let (bent, paths, _) = draw(EXTENT, Arm::shipped().as_bent_direction());
+
+    let read = |point| channels(&bent, project(&camera, EXTENT, point), block);
+    let open = read(court::OPEN_FLOOR);
+    // `+Y` — the floor's own normal — encoded `n * 0.5 + 0.5` and put through the
+    // swapchain's sRGB encode, which is the only place in this file a claim is
+    // made against a derived colour rather than against a second readback.
+    let up = [srgb_encode(0.5), srgb_encode(1.0), srgb_encode(0.5)];
+    let drift = (0..3)
+        .map(|at| (open[at] - up[at]).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!(
+        "alcove golden: the bent direction on {paths} — open floor {open:?} against the \
+         geometric normal {up:?}, {drift:.2} codes apart"
+    );
+    assert!(
+        drift < OPEN_FLOOR_BENT_TOLERANCE,
+        "open floor draws {open:?} and the floor's own normal encodes to {up:?} — {drift:.2} \
+         codes apart, past {OPEN_FLOOR_BENT_TOLERANCE}. Nothing is within the occlusion radius \
+         of that point, so the average unblocked direction there is the normal itself"
+    );
+
+    // The `+z` channel: every enclosure in this court opens towards the camera,
+    // which is the only half-space a surface it can see faces into.
+    const OUT: usize = 2;
+    for (name, point, least) in [
+        ("the crease", court::crease_lit(), CREASE_BENT_LEAN),
+        (
+            "the alcove's back corner",
+            court::ALCOVE_CORNER,
+            CORNER_BENT_LEAN,
+        ),
+        ("the contact band", court::CONTACT_BAND, CONTACT_BENT_LEAN),
+    ] {
+        let here = read(point);
+        let lean = here[OUT] - open[OUT];
+        eprintln!(
+            "alcove golden: the bent direction at {name} — {here:?} against open floor \
+             {open:?}, leaning out by {lean:.2}"
+        );
+        assert!(
+            lean > least,
+            "{name} draws {here:?} and open floor {open:?}, so the direction leans out towards \
+             the opening by {lean:.2} codes, short of {least}. The gather reports where what is \
+             left of the sky lies, and at that point it is not overhead"
+        );
+    }
+
+    // And last, the picture itself, on the four goldens' terms.
+    match check_golden(&bent, "bent-normal", &paths) {
+        Ok(line) => eprintln!("alcove golden: {line}"),
+        Err(fault) => panic!("{fault}"),
     }
 }
 

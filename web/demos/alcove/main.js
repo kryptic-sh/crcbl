@@ -6,6 +6,12 @@
 // bar shows, and the occlusion knobs — which are one sample's controls and have
 // no business in a file every demo runs.
 //
+// The knobs reach two different kinds of state: every `r_ssao_*` control is a
+// console cell this sample owns, and the two view buttons name a
+// `crcbl::render::DebugView`, which is the engine's one cell — shared with every
+// other sample and with the `debug_view` console command.
+// `apps/alcove/src/web.rs` is where that table is.
+//
 // The symbols are written out literally rather than built from the sample's
 // name. `web/tools/check-exports.mjs` scans the shim for `.__crcbl_…` to learn
 // which exports the JS depends on, and fails when one is missing from the
@@ -51,6 +57,7 @@ function installKnobs(ex) {
   const slider = (id) => /** @type {HTMLInputElement} */ (el(id));
 
   const view = button('knob-view');
+  const bentView = button('knob-bent-view');
   const technique = button('knob-technique');
   const bent = button('knob-bent');
   const seam = button('knob-seam');
@@ -64,6 +71,7 @@ function installKnobs(ex) {
 
   const controls = [
     view,
+    bentView,
     technique,
     bent,
     seam,
@@ -94,6 +102,12 @@ function installKnobs(ex) {
   /** Puts every control where the console now is. */
   function refresh() {
     view.textContent = ex.__crcbl_alcove_view(-1) ? 'AO only' : 'shaded';
+    // The engine holds one debug view, so this is "is the bent direction the
+    // picture" rather than a flag of this control's own — a view some other
+    // route put up leaves this reading off, which is the truth about the frame.
+    bentView.textContent = ex.__crcbl_alcove_bent_view(0)
+      ? 'hide it'
+      : 'show it';
     technique.textContent = `${techniqueName(0)} →`;
     bent.textContent = ex.__crcbl_alcove_bent_normals(-1) ? 'on' : 'off';
 
@@ -146,6 +160,7 @@ function installKnobs(ex) {
   }
 
   press(view, () => ex.__crcbl_alcove_view(ex.__crcbl_alcove_view(-1) ? 0 : 1));
+  press(bentView, () => ex.__crcbl_alcove_bent_view(1));
   press(technique, () => ex.__crcbl_alcove_technique(1));
   press(bent, () =>
     ex.__crcbl_alcove_bent_normals(ex.__crcbl_alcove_bent_normals(-1) ? 0 : 1)

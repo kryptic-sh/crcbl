@@ -46,12 +46,24 @@ meta-->
     variable the key writes — one cell, three writers, no copy of the state on
     this page. Each control shows what the console holds <em>after</em> it
     wrote, so a value the engine clamped reads back where it actually landed.
+    The two view buttons are a second kind again: they name a debug view, which
+    is the engine's own cell — one shared with every other sample and with the
+    <code>debug_view</code> console command — and the engine holds exactly one
+    of them, so pressing either replaces whatever the other was drawing.
   </p>
   <ul class="keys" id="occlusion-knobs">
     <li class="key-row">
       <span>Draw the occlusion channel instead of the shaded court</span>
       <span
         ><button class="btn" type="button" id="knob-view" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span>Draw the bent direction instead of the shaded court</span>
+      <span
+        ><button class="btn" type="button" id="knob-bent-view" disabled>
           …
         </button></span
       >
@@ -149,6 +161,21 @@ meta-->
     triggers the capture at all, which is the case these controls exist for.
   </div>
   <div class="note">
+    <strong>The bent direction is the one that is not a grey image.</strong>
+    Ambient occlusion has two halves. The scalar says how much of the room
+    reaches a surface, and that is the grey picture the first button draws. The
+    <em>bent direction</em> says which way what is left of it lies, and the
+    ambient term is sampled along it rather than along the surface's own normal
+    — so it is the half that decides what colour a shadowed corner picks up. It
+    is drawn the way normals always are: the direction mapped to
+    <code>n × 0.5 + 0.5</code>, so +X is red, +Y green and +Z blue. Open floor
+    is flat green, because nothing is leaning it off vertical; a crease or a
+    corner leans it out towards the opening, and the colour shifts with it. Turn
+    the button above it off and the whole frame goes mid grey — that is the
+    sentinel for "no direction was gathered", and it is what the ambient term
+    then falls back to the shading normal for.
+  </div>
+  <div class="note">
     <strong>The seam is the one to reach for.</strong> Raise it and the frame is
     drawn twice: the technique you picked on the left of the line, the one the
     engine ships on the right, over the same geometry in the same frame. Press
@@ -214,8 +241,12 @@ meta-->
       >
     </li>
     <li class="key-row">
-      <span>The AO-only view, the technique, bent normals</span>
-      <span><kbd>V</kbd>, <kbd>T</kbd>, <kbd>B</kbd></span>
+      <span>The AO-only view, the bent-direction view</span>
+      <span><kbd>V</kbd>, <kbd>N</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>The technique, and whether a bent direction is gathered</span>
+      <span><kbd>T</kbd>, <kbd>B</kbd></span>
     </li>
     <li class="key-row">
       <span>The seam: raise it, then walk it</span>

@@ -35,6 +35,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The bent-direction view in `apps/alcove`**, which closes
+  `docs/plan/sample/19-alcove.md`'s milestone 3. The engine has drawn
+  `crcbl_render::DebugView::BentNormal` since bent normals landed — the
+  direction the occlusion gather reports beside its scalar, as `n * 0.5 + 0.5` —
+  and nothing in the ambient-occlusion fixture reached it, so
+  `r_ssao_bent_normals` was a switch a reviewer could flip without being able to
+  see what it did. It is now the `N` key, the pause panel's `BENT VIEW` row,
+  `__crcbl_alcove_bent_view` and a button on `/demos/alcove/`, all four writing
+  the one `crcbl::debug_view` cell a typed `debug_view bent normal` writes.
+
+  The panel's two view rows are read off a single `DebugView` rather than off a
+  flag each — `alcove::Knobs` carries the view itself now, and the debug
+  overlay's `view` row prints that view's own name instead of `AO ONLY` /
+  `SHADED` — so the panel cannot read `ON` twice about one picture.
+  `Alcove::log_heartbeat` gained a `view:` field, which is what lets the browser
+  gate read a press off the engine's cell rather than off a canvas that mixes
+  the scene with the HUD; and `alcove --help` gained the `KEYS:` block every key
+  the sample binds is now held against.
+
+  `apps/alcove/tests/golden.rs` blesses `bent-normal.png` and places four
+  readings from the court's own geometry in front of it: on open floor, where
+  nothing stands within the occlusion radius, the direction is the floor's own
+  normal, so the pixel is `(0.5, 1.0, 0.5)` in linear light — the one claim in
+  that file made against a derived colour rather than against a second readback;
+  and at the slot's crease, the alcove's back corner and the box's contact band
+  it leans out towards the opening, which the `+z` channel measures at 7.7, 57.5
+  and 37.2 codes. Every figure was swept on lavapipe and on radv.
+
 - **The shadow-atlas viewer**, which `docs/plan/sample/18-sundial.md`'s
   milestone 1 has owed since the sample was written and which closes
   `docs/plan/45-shadows.md`'s "no shadow-map inspector panel".

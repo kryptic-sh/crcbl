@@ -14,7 +14,7 @@
 //! untextured surfaces are the point, because texture detail is exactly what
 //! hides an occlusion artefact.
 //!
-//! # What is here at milestones 1 and 2
+//! # What is here at milestones 1, 2 and 3
 //!
 //! The court [`court`] describes — an alcove, a flight of cantilevered treads,
 //! boxes resting on a floor, a deep slot the sun runs down, and a sphere against
@@ -23,6 +23,14 @@
 //! * **The AO-only view**, which the engine ships as
 //!   `ForwardRenderer::set_occlusion_view` and this sample reaches through
 //!   `crcbl::debug_view` — the `V` key and the pause panel's `AO VIEW` row.
+//! * **The bent-direction view**, milestone 3, on the same seam:
+//!   `ForwardRenderer::set_bent_normal_view` draws the direction the gather
+//!   reported as `n * 0.5 + 0.5`, and the `N` key and the `BENT VIEW` row are
+//!   what reach it. It is a *picture* rather than the switch beside it —
+//!   `r_ssao_bent_normals`, the `B` key and the `BENT NORMALS` row decide
+//!   whether a direction is gathered at all — because the charter is explicit
+//!   that a term steering where ambient is sampled from cannot be reviewed as a
+//!   grey image.
 //! * **Radius and intensity**, live and shown. Both were already console
 //!   variables the pass reads every frame; what milestone 1 asked for and a
 //!   variable cannot give is that they be legible on screen, which is
@@ -44,11 +52,6 @@
 //!
 //! # What is not here, and where it is written down
 //!
-//! * **Milestone 3's bent-normal visualisation.** The switch is reachable —
-//!   `r_ssao_bent_normals`, the `B` key and a panel row — but a *visualisation*
-//!   of the direction is a debug view of its own, and the charter is explicit
-//!   that a term steering where ambient is sampled from cannot be reviewed as a
-//!   grey image.
 //! * **Milestone 4's ray-traced occlusion**, gated on P7C. The panel's
 //!   `ray tracing` row says `raster only` rather than implying a choice was
 //!   made.

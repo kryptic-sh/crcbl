@@ -62,21 +62,34 @@ viewer's: no game state, no `World`, no `GameModule`.
 
 ## Status: built and published
 
-**`apps/alcove` exists and milestones 1 and 2 are done, 2026-09-04.** The court
-is one interior of nothing but occlusion geometry — an alcove with a recess, a
-cantilevered stair, boxes and a post on the floor, a slot the sun runs down, and
-a sphere on a pedestal against the far wall — and the sun's azimuth, the fixed
-camera's eye ray and the slot's axis are deliberately one line, so the floor at
-the bottom of that slot is in full sun at any depth and the crease claim is a
-claim about a directly lit surface rather than about a shaded one.
+**`apps/alcove` exists and milestones 1, 2 and 3 are done, 2026-09-05.** The
+court is one interior of nothing but occlusion geometry — an alcove with a
+recess, a cantilevered stair, boxes and a post on the floor, a slot the sun runs
+down, and a sphere on a pedestal against the far wall — and the sun's azimuth,
+the fixed camera's eye ray and the slot's axis are deliberately one line, so the
+floor at the bottom of that slot is in full sun at any depth and the crease
+claim is a claim about a directly lit surface rather than about a shaded one.
 
-The engine half of both milestones landed the same day and is described where it
-lives: `crcbl_render::ssao`'s `r_ssao_technique`, `r_ssao_radius`,
+The engine half of the first two milestones landed the same day and is described
+where it lives: `crcbl_render::ssao`'s `r_ssao_technique`, `r_ssao_radius`,
 `r_ssao_intensity`, `r_ssao_split` and `r_ssao_bent_normals`, and
 `ForwardRenderer::set_occlusion_view`. The sample drives every one of them by
 name through `crcbl::render::console_table()`, which is the same seam a person
 typing a console line goes through — so a pause-panel row and a typed line
 cannot disagree.
+
+**Milestone 3 is the picture that switch was missing, 2026-09-05.**
+`ForwardRenderer::set_bent_normal_view` draws the direction the gather reported
+as `n * 0.5 + 0.5`, and the sample reaches it through `crcbl::debug_view` — one
+cell, written by `N`, by the panel's `BENT VIEW` row, by the page's own button
+and by a typed `debug_view bent normal`, so the panel reports which picture is
+in force rather than a flag of its own. What holds it is
+`the_bent_direction_is_the_normal_on_open_floor_and_leans_out_of_an_enclosure`:
+on open floor nothing stands inside the occlusion radius, so the average
+unblocked direction is the floor's own normal and the frame draws exactly that;
+in the slot, in the recess and on the floor beside a box it leans out towards
+the opening, which is the whole of what a direction says and a grey image
+cannot. `bent-normal.png` is behind those readings rather than in front of them.
 
 What holds it up is `apps/alcove/tests/golden.rs`, run by
 `apps/alcove/tests/run-alcove-golden.sh` and by CI's "Draw alcove on lavapipe"
@@ -105,10 +118,6 @@ compares two screen-space gathers.
 
 ## What is owed
 
-- **Milestone 3, bent-normal visualisation.** `r_ssao_bent_normals` is a knob
-  the sample toggles and reports, and nothing draws the direction: a term that
-  steers where ambient is sampled from cannot be reviewed as a grey image, which
-  is what this document says and what the sample currently offers.
 - **Milestone 4, ray-traced AO**, gated on P7C. `Paths::ray_tracing_note` says
   "raster only (P7C)" on the panel rather than leaving the row out, so the rung
   that is missing is named rather than absent.
@@ -126,7 +135,12 @@ compares two screen-space gathers.
    a second camera pose: at the fixed camera the sphere is a few dozen pixels
    across and a one-pixel halo is not something a person or a block average can
    see.
-3. **Bent-normal visualisation**, once GTAO produces one.
+3. **Bent-normal visualisation**, once GTAO produces one. Done: `N`, the pause
+   panel's `BENT VIEW` row, the page's own button and `__crcbl_alcove_bent_view`
+   all put `crcbl_render::DebugView::BentNormal` up, and `bent-normal.png` is a
+   golden with four readings in front of it — the direction is the floor's own
+   normal on open floor and leans out towards the opening in the slot, the
+   recess and the box's contact band.
 4. **Ray-traced AO**, gated on P7C, and the device clamp — and this is the rung
    that gives the screen-space rungs a reference to be judged against, which
    samples 17 and 18 do not get as cleanly.

@@ -297,6 +297,31 @@ pub fn toggle_occlusion_view() {
     crcbl::debug_view::toggle(DebugView::AmbientOcclusion);
 }
 
+/// Whether the frame draws the **bent direction** the occlusion channel carries
+/// beside its scalar, as `n * 0.5 + 0.5`.
+///
+/// [`occlusion_view`]'s sibling and read the same way, off the one cell.
+#[must_use]
+pub fn bent_normal_view() -> bool {
+    crcbl::debug_view::current() == DebugView::BentNormal
+}
+
+/// Swaps between the shaded picture and that bent direction.
+///
+/// What `N` and the panel's `BENT VIEW` row both do —
+/// `docs/plan/sample/19-alcove.md`'s milestone 3, and the charter's reason is
+/// the whole of why it is a picture rather than a switch: a term that steers
+/// **where** the ambient is sampled from cannot be reviewed as a grey image, and
+/// [`BENT_NORMALS`] — the switch that makes the gather report a direction at all
+/// — moves nothing a reviewer can see without this.
+///
+/// The two are different questions and the panel keeps them apart: `BENT
+/// NORMALS` is whether a direction is gathered, `BENT VIEW` is whether it is
+/// what the frame draws.
+pub fn toggle_bent_normal_view() {
+    crcbl::debug_view::toggle(DebugView::BentNormal);
+}
+
 /// What every knob reads right now.
 ///
 /// A reading rather than a store — see this module's header — taken once per
@@ -318,8 +343,17 @@ pub struct Knobs {
     pub seam: Option<f32>,
     /// Whether the gather reports a bent direction beside the scalar.
     pub bent_normals: bool,
-    /// Whether the frame draws the occlusion channel instead of shading it.
-    pub occlusion_view: bool,
+    /// **Which picture the frame draws**, out of the engine's one debug-view
+    /// cell.
+    ///
+    /// A [`DebugView`] rather than a flag per row, and that is the shape rather
+    /// than a convenience: the engine holds exactly one view —
+    /// `crcbl::debug_view::current` is the cell — so a pair of `bool`s here
+    /// could spell a panel reading `ON` twice about one frame, and two adjacent
+    /// `bool` arguments could be handed over the wrong way round and still
+    /// compile. `apps/sundial`'s pause panel takes the same value for the same
+    /// reason.
+    pub view: DebugView,
 }
 
 impl Knobs {
@@ -333,7 +367,7 @@ impl Knobs {
             intensity: var(INTENSITY).get_f32(),
             seam: seam(),
             bent_normals: var(BENT_NORMALS).get_bool(),
-            occlusion_view: occlusion_view(),
+            view: crcbl::debug_view::current(),
         }
     }
 
@@ -386,14 +420,11 @@ pub fn shipped_technique() -> &'static str {
 impl crcbl::ui::DebugModule for Knobs {
     fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
         section.set_title("occlusion");
-        section.row_str(
-            "view",
-            if self.occlusion_view {
-                "AO ONLY"
-            } else {
-                "SHADED"
-            },
-        );
+        // The view's own name rather than a word this sample coined for it:
+        // `crcbl::debug_view` is where every view is spelled, so a row printing
+        // `AO ONLY` or `SHADED` would have nothing to say about any view this
+        // sample does not bind a key to — and a console line can put one up.
+        section.row_str("view", self.view.label());
         section.row("radius", format_args!("{:.3} m", self.radius));
         section.row("intensity", format_args!("{:.2}", self.intensity));
         section.row_str("bent normals", if self.bent_normals { "ON" } else { "OFF" });

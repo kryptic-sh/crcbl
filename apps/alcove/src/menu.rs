@@ -5,10 +5,18 @@
 //! `GAME OVER` panel would be a screen it could never show.
 //!
 //! What it does have is every control
-//! `docs/plan/sample/19-alcove.md`'s milestones 1 and 2 ask to be *legible*: the
-//! technique, the radius, the intensity, the bent-direction switch, the
+//! `docs/plan/sample/19-alcove.md`'s milestones 1, 2 and 3 ask to be *legible*:
+//! the technique, the radius, the intensity, the bent-direction switch, the
 //! comparison seam — and, because that is the whole of what milestone 2 adds to
 //! the engine's half, **which technique each side of the seam is running**.
+//!
+//! # Two rows are a picture rather than a knob
+//!
+//! `AO VIEW` and `BENT VIEW` do not write a `r_ssao_*` cell at all: they name a
+//! [`crcbl::render::DebugView`], and the engine holds exactly one of those. So
+//! both are read off the single [`Knobs::view`] the panel is handed — see
+//! `showing` — and a press on either replaces whatever the other was drawing
+//! rather than adding to it.
 //!
 //! # Two kinds of row, and the difference is deliberate
 //!
@@ -25,7 +33,7 @@
 //! — carries the same readings for a run nobody has paused.
 
 use crcbl::engine::FIRST_GAME_ID;
-use crcbl::render::{EffectRequest, RenderEffects};
+use crcbl::render::{DebugView, EffectRequest, RenderEffects};
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
 use crate::occlusion::Knobs;
@@ -97,6 +105,18 @@ pub enum AlcoveAction {
     CycleTechnique,
     /// Flip `r_ssao_bent_normals`.
     ToggleBentNormals,
+    /// Draw the bent direction the gather reported, or go back to the picture —
+    /// `crcbl::debug_view`'s `DebugView::BentNormal`.
+    ///
+    /// **Not [`ToggleBentNormals`](Self::ToggleBentNormals)**, and the pair is
+    /// the split [`ToggleOcclusionView`](Self::ToggleOcclusionView) makes beside
+    /// [`ToggleEffect`](Self::ToggleEffect) said again: that one decides whether
+    /// a direction is *gathered* and the ambient steered by it, this one decides
+    /// whether the frame draws it. Standing them beside each other is also what
+    /// makes this row legible — with the gather's switch off the picture is the
+    /// mid grey the zero sentinel encodes to, everywhere, because that is the
+    /// direction nothing computed.
+    ToggleBentNormalView,
     /// Put the comparison seam up at [`crate::occlusion::SEAM_CENTRE`], or take
     /// it away.
     ToggleSeam,
@@ -138,12 +158,19 @@ pub const NEAR_SIDE_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 9;
 /// The reading naming the technique on its **far** side.
 pub const FAR_SIDE_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 10;
 
+/// The bent-direction **view**'s row.
+///
+/// Appended past every id above rather than slotted in beside [`BENT_ID`], which
+/// is where it sits on the panel: an id is a widget's identity across a rebuild,
+/// and renumbering the rows between the two would move every one of them.
+pub const BENT_VIEW_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 11;
+
 /// Every row `ENTER` fires, with the action it carries and the word it prints.
 ///
 /// One table rather than a row list beside an id match, because those are one
 /// fact about a row written twice — and the way the two drift is a row that
 /// fires its neighbour's action while printing its own name.
-pub(crate) const PRESSED_ROWS: [(crcbl::ui::WidgetId, AlcoveAction, &str); 6] = [
+pub(crate) const PRESSED_ROWS: [(crcbl::ui::WidgetId, AlcoveAction, &str); 7] = [
     (
         AO_ID,
         AlcoveAction::ToggleEffect(RenderEffects::AMBIENT_OCCLUSION),
@@ -152,6 +179,11 @@ pub(crate) const PRESSED_ROWS: [(crcbl::ui::WidgetId, AlcoveAction, &str); 6] = 
     (AO_VIEW_ID, AlcoveAction::ToggleOcclusionView, "AO VIEW"),
     (TECHNIQUE_ID, AlcoveAction::CycleTechnique, "TECHNIQUE"),
     (BENT_ID, AlcoveAction::ToggleBentNormals, "BENT NORMALS"),
+    (
+        BENT_VIEW_ID,
+        AlcoveAction::ToggleBentNormalView,
+        "BENT VIEW",
+    ),
     (SEAM_ID, AlcoveAction::ToggleSeam, "SEAM"),
     (RESET_ID, AlcoveAction::ResetKnobs, "RESET KNOBS"),
 ];
@@ -208,6 +240,18 @@ fn effect_state(resolved: RenderEffects, device: RenderEffects) -> &'static str 
     }
 }
 
+/// What a debug-view row says: `ON` where the frame draws `named` and `OFF`
+/// otherwise.
+///
+/// A function rather than the comparison written out at each row, and separate
+/// from the `on_off` closure below because the two answer different questions:
+/// that one reports a `bool` a console cell holds, this one reports **which of
+/// one cell's values** is in force. A row that spelled the comparison itself is
+/// a row that can disagree with its neighbour about what "on" means.
+fn showing(view: DebugView, named: DebugView) -> &'static str {
+    if view == named { "ON" } else { "OFF" }
+}
+
 /// The pause panel: the camera, the occlusion pass, and every knob
 /// `docs/plan/sample/19-alcove.md` asks to be shown.
 #[must_use]
@@ -232,7 +276,10 @@ pub fn pause_menu(
         ),
         MenuItem::new(
             AO_VIEW_ID,
-            format!("AO VIEW: {}", on_off(knobs.occlusion_view)),
+            format!(
+                "AO VIEW: {}",
+                showing(knobs.view, DebugView::AmbientOcclusion)
+            ),
             "ENTER",
         ),
         MenuItem::new(
@@ -243,6 +290,18 @@ pub fn pause_menu(
         MenuItem::new(
             BENT_ID,
             format!("BENT NORMALS: {}", on_off(knobs.bent_normals)),
+            "ENTER",
+        ),
+        // **Under the switch it is a picture of**, rather than beside `AO VIEW`.
+        // The two rows are one subject read in order — gather a direction, then
+        // look at it — and the row above is what decides whether there is
+        // anything here but the sentinel's mid grey.
+        //
+        // Both view rows are read off `knobs.view`, which is why that field is a
+        // `DebugView` and not a flag each: see `crate::occlusion::Knobs`.
+        MenuItem::new(
+            BENT_VIEW_ID,
+            format!("BENT VIEW: {}", showing(knobs.view, DebugView::BentNormal)),
             "ENTER",
         ),
         MenuItem::new(
