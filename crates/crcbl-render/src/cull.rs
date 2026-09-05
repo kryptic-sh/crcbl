@@ -62,7 +62,7 @@
 //! `the_infinite_far_plane_is_degenerate_and_rejects_nothing` is what says so.
 
 use crcbl_core::bounds::{max_lanes, min_lanes};
-use crcbl_shaders::mesh::{GpuInstance, GpuMesh};
+use crcbl_shaders::mesh::{GpuInstance, GpuMaterial, GpuMesh};
 use crcbl_shaders::meshlet::ClusterBounds;
 use glam::{Mat3, Mat4, Vec3, Vec4};
 
@@ -315,6 +315,11 @@ pub enum ClusterVerdict {
 /// [`radius`](ClusterBounds::radius) term is what stops it rejecting a cluster
 /// that has a front-facing triangle.
 ///
+/// **`material_mode` decides whether the second half runs at all** — see
+/// [`cone_may_reject`], which is where the argument lives. It is the instance's
+/// own [`GpuInstance::material_mode`], the same two bits the draw-argument pass
+/// keys buckets on.
+///
 /// **This is the oracle, not the path.** Nothing in a frame calls it — the
 /// amplification stage is what culls — and it exists so a test can state the
 /// answer for a case a picture cannot show, exactly as [`visible_instances`]
@@ -326,9 +331,10 @@ pub fn cluster_survives_cull(
     frustum: &Frustum,
     camera: Vec3,
     transform: Mat4,
+    material_mode: u32,
     bounds: &ClusterBounds,
 ) -> bool {
-    cluster_cull_verdict(frustum, camera, transform, bounds) == ClusterVerdict::Kept
+    cluster_cull_verdict(frustum, camera, transform, material_mode, bounds) == ClusterVerdict::Kept
 }
 
 /// The same rule as [`cluster_survives_cull`], answering **which test** refused.
@@ -342,12 +348,16 @@ pub fn cluster_survives_cull(
 ///
 /// The order is the shader's: frustum first against the bounding sphere, then
 /// the cone. A cluster that fails both is [`ClusterVerdict::RejectedByFrustum`]
-/// on both sides.
+/// on both sides, and a double-sided instance — [`cone_may_reject`] — has no
+/// second half, so it answers [`ClusterVerdict::Kept`] or
+/// [`ClusterVerdict::RejectedByFrustum`] and never
+/// [`ClusterVerdict::RejectedByCone`].
 #[must_use]
 pub fn cluster_cull_verdict(
     frustum: &Frustum,
     camera: Vec3,
     transform: Mat4,
+    material_mode: u32,
     bounds: &ClusterBounds,
 ) -> ClusterVerdict {
     let basis = Mat3::from_mat4(transform);
@@ -366,7 +376,8 @@ pub fn cluster_cull_verdict(
     let sine = (1.0 - bounds.cone_cutoff * bounds.cone_cutoff)
         .max(0.0)
         .sqrt();
-    let faces_away = preserves_angles(basis)
+    let faces_away = cone_may_reject(material_mode)
+        && preserves_angles(basis)
         && bounds.cone_cutoff > 0.0
         && axis.dot(to_center) > sine.mul_add(to_center.length(), radius);
     if faces_away {
@@ -374,6 +385,33 @@ pub fn cluster_cull_verdict(
     } else {
         ClusterVerdict::Kept
     }
+}
+
+/// Whether a cluster of an instance in this **material mode** may be rejected
+/// by its normal cone.
+///
+/// **Which way a surface faces is the material's business, not the geometry's.**
+/// A cluster's cone is a statement about where its triangles' normals point, and
+/// it is *true* whatever material draws them. What turns it into a rejection is
+/// a second claim — that a triangle seen from behind puts nothing on the screen
+/// — and that claim is the back-face cull, which glTF 2.0 §3.9.6's
+/// `doubleSided` switches off. So for a double-sided instance the cone's
+/// arithmetic is still right and the conclusion drawn from it is not: an open
+/// surface with one flat cluster carries `cone_cutoff == 1.0` and an axis
+/// pointing away from the camera, and every pixel of it is visible.
+///
+/// **Only the cone.** The frustum half and the `+ radius` conservatism are about
+/// where the geometry *is*, which no material moves, so they are unchanged for a
+/// double-sided instance — a back-facing cluster off the side of the screen is
+/// still rejected, by the test that was always the right one for that.
+///
+/// `mesh_cluster.slang`'s `cone_may_reject` is this same predicate in the
+/// amplification stage, and `material_mode` is
+/// [`GpuInstance::material_mode`]'s value on both sides — two bits, of which
+/// [`GpuMaterial::DOUBLE_SIDED`] is the one read here.
+#[must_use]
+pub const fn cone_may_reject(material_mode: u32) -> bool {
+    material_mode & GpuMaterial::DOUBLE_SIDED == 0
 }
 
 /// Whether `basis` carries every angle across unchanged — a rotation, a uniform
@@ -829,10 +867,26 @@ mod tests {
         }
     }
 
-    /// The cull as [`ahead`]'s clusters see it: identity transform, and the
-    /// camera [`frustum`] was built from.
+    /// glTF's default material mode: single-sided, so the cone test runs. What
+    /// every case below is about unless it says otherwise.
+    const SINGLE_SIDED: u32 = 0;
+
+    /// The cull as [`ahead`]'s clusters see it, for an instance in
+    /// `material_mode`: identity transform, and the camera [`frustum`] was built
+    /// from.
+    fn survives_as(material_mode: u32, bounds: &ClusterBounds) -> bool {
+        cluster_survives_cull(
+            &frustum(),
+            Camera::default().eye,
+            Mat4::IDENTITY,
+            material_mode,
+            bounds,
+        )
+    }
+
+    /// [`survives_as`] for the single-sided instance most of these cases place.
     fn survives(bounds: &ClusterBounds) -> bool {
-        cluster_survives_cull(&frustum(), Camera::default().eye, Mat4::IDENTITY, bounds)
+        survives_as(SINGLE_SIDED, bounds)
     }
 
     /// A flat cluster whose normals point at the camera is drawn, and the same
@@ -851,6 +905,72 @@ mod tests {
         assert!(
             !survives(&ahead(Vec3::NEG_Z, 1.0, 0.5)),
             "a face turned away is the whole point of the cone test"
+        );
+    }
+
+    /// **A cluster facing away is kept when its instance is double-sided and
+    /// rejected when it is not**, which is the whole of what [`cone_may_reject`]
+    /// changes.
+    ///
+    /// Both directions, because either on its own passes for a wrong reason: a
+    /// predicate stuck at `false` drops the cone test for every material in the
+    /// tree, and one stuck at `true` is the code as it stood before
+    /// double-sided materials existed.
+    ///
+    /// The bit is read and not the whole mode, so an alpha-masked single-sided
+    /// row is still single-sided and a row carrying both modes is still
+    /// double-sided.
+    ///
+    /// The last case is the one the predicate must **not** reach. A
+    /// double-sided instance off the side of the screen is still rejected — by
+    /// the frustum, which is about where the geometry is rather than which way
+    /// it faces — so what this buys is a cluster kept in front of the camera and
+    /// no work anywhere else.
+    #[test]
+    fn a_double_sided_instance_keeps_the_cluster_that_faces_away() {
+        let away = ahead(Vec3::NEG_Z, 1.0, 0.5);
+        assert!(
+            !survives_as(SINGLE_SIDED, &away),
+            "a single-sided face turned away puts nothing on the screen, so the cone is \
+             right to reject it"
+        );
+        assert!(
+            survives_as(GpuMaterial::DOUBLE_SIDED, &away),
+            "glTF 2.0 §3.9.6 draws the back face, so the cluster carrying it has to reach \
+             the mesh stage"
+        );
+        assert!(
+            !survives_as(GpuMaterial::ALPHA_MODE_MASK, &away),
+            "the alpha-mask bit says nothing about which sides are drawn"
+        );
+        assert!(
+            survives_as(GpuMaterial::MODE_MASK, &away),
+            "a cutout material may also be double-sided, and then it is double-sided"
+        );
+
+        let frustum = frustum();
+        let camera = Camera::default().eye;
+        assert_eq!(
+            cluster_cull_verdict(
+                &frustum,
+                camera,
+                Mat4::IDENTITY,
+                GpuMaterial::DOUBLE_SIDED,
+                &away
+            ),
+            ClusterVerdict::Kept,
+            "a double-sided instance never answers RejectedByCone"
+        );
+        assert_eq!(
+            cluster_cull_verdict(
+                &frustum,
+                camera,
+                Mat4::from_translation(Vec3::new(40.0, 0.0, 0.0)),
+                GpuMaterial::DOUBLE_SIDED,
+                &away
+            ),
+            ClusterVerdict::RejectedByFrustum,
+            "the frustum half is not the material's business and still culls"
         );
     }
 
@@ -942,7 +1062,7 @@ mod tests {
             cone_cutoff: 1.0,
         };
         let survives = |bounds: &ClusterBounds| {
-            cluster_survives_cull(&frustum, camera, Mat4::IDENTITY, bounds)
+            cluster_survives_cull(&frustum, camera, Mat4::IDENTITY, SINGLE_SIDED, bounds)
         };
         assert!(survives(&at([0.0, 0.0, -10.0])), "straight ahead");
         assert!(
@@ -1015,12 +1135,12 @@ mod tests {
                 ClusterVerdict::RejectedByFrustum,
             ),
         ] {
-            let verdict = cluster_cull_verdict(&frustum, camera, transform, &bounds);
+            let verdict = cluster_cull_verdict(&frustum, camera, transform, SINGLE_SIDED, &bounds);
             assert_eq!(verdict, expected, "{case}");
             // And the bool every existing caller reads is this answer and not a
             // second rule beside it.
             assert_eq!(
-                cluster_survives_cull(&frustum, camera, transform, &bounds),
+                cluster_survives_cull(&frustum, camera, transform, SINGLE_SIDED, &bounds),
                 verdict == ClusterVerdict::Kept,
                 "{case}: the bool and the verdict disagree",
             );
@@ -1047,14 +1167,14 @@ mod tests {
         };
         let back = Mat4::from_translation(Vec3::new(0.0, 0.0, -10.0));
         assert!(
-            !cluster_survives_cull(&frustum, camera, back, &bounds),
+            !cluster_survives_cull(&frustum, camera, back, SINGLE_SIDED, &bounds),
             "translation alone leaves it facing away"
         );
 
         // Turned half a turn about Y, the same cluster faces the camera.
         let turned = back * Mat4::from_rotation_y(core::f32::consts::PI);
         assert!(
-            cluster_survives_cull(&frustum, camera, turned, &bounds),
+            cluster_survives_cull(&frustum, camera, turned, SINGLE_SIDED, &bounds),
             "the cone axis must be transformed with the instance"
         );
 
@@ -1062,7 +1182,13 @@ mod tests {
         // is the half the translation is responsible for.
         let aside = Mat4::from_translation(Vec3::new(40.0, 0.0, -10.0))
             * Mat4::from_rotation_y(core::f32::consts::PI);
-        assert!(!cluster_survives_cull(&frustum, camera, aside, &bounds));
+        assert!(!cluster_survives_cull(
+            &frustum,
+            camera,
+            aside,
+            SINGLE_SIDED,
+            &bounds
+        ));
     }
 
     /// **Which of the open box's five clusters survive from each of the three
@@ -1116,7 +1242,7 @@ mod tests {
                 .iter()
                 .zip(crcbl_shaders::mesh::OPEN_BOX_FACES)
                 .filter(|(cluster, _)| {
-                    cluster_survives_cull(&frustum, eye, transform, &cluster.bounds)
+                    cluster_survives_cull(&frustum, eye, transform, SINGLE_SIDED, &cluster.bounds)
                 })
                 .map(|(_, face)| face.name)
                 .collect()
@@ -1180,7 +1306,9 @@ mod tests {
         let conservative = clusters
             .clusters
             .iter()
-            .filter(|cluster| cluster_survives_cull(&frustum, eye, transform, &cluster.bounds))
+            .filter(|cluster| {
+                cluster_survives_cull(&frustum, eye, transform, SINGLE_SIDED, &cluster.bounds)
+            })
             .count();
         assert_eq!(
             conservative,
@@ -1338,7 +1466,8 @@ mod tests {
             );
 
             assert_eq!(
-                cluster_cull_verdict(&frustum, eye, transform, &bounds) == ClusterVerdict::Kept,
+                cluster_cull_verdict(&frustum, eye, transform, SINGLE_SIDED, &bounds)
+                    == ClusterVerdict::Kept,
                 kept,
                 "{case}: a cluster facing the camera must survive, and one facing away \
                  under a transform the cone can be trusted through must not",
@@ -1470,7 +1599,7 @@ mod tests {
                  there is nothing here for a cull to wrongly reject"
             );
             assert!(
-                cluster_survives_cull(&frustum, camera.eye, transform, &floor.bounds),
+                cluster_survives_cull(&frustum, camera.eye, transform, SINGLE_SIDED, &floor.bounds),
                 "the floor puts {on_screen} of its vertices in the frame from {offset} \
                  units out and the cull rejected it — that is the box that stops \
                  drawing"
@@ -1484,7 +1613,13 @@ mod tests {
             !clusters
                 .clusters
                 .iter()
-                .any(|cluster| cluster_survives_cull(&frustum, camera.eye, away, &cluster.bounds)),
+                .any(|cluster| cluster_survives_cull(
+                    &frustum,
+                    camera.eye,
+                    away,
+                    SINGLE_SIDED,
+                    &cluster.bounds
+                )),
             "forty units out the whole trough is outside the frustum, radius and all"
         );
     }

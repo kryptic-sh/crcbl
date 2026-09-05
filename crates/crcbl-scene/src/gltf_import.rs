@@ -1178,7 +1178,7 @@ fn build(
             // solid pane reads as a pane. Opaque loses the transparency and
             // nothing else, and `warn_dropped_features` names the count so the
             // loss is not silent.
-            let (alpha_cutoff, flags) = match material.alpha_mode() {
+            let (alpha_cutoff, alpha_flags) = match material.alpha_mode() {
                 AlphaMode::Mask => (
                     // The document's threshold where it wrote one, and
                     // otherwise the specification's own default — which is the
@@ -1191,6 +1191,24 @@ fn build(
                 ),
                 AlphaMode::Opaque | AlphaMode::Blend => (GpuMaterial::UNTINTED.alpha_cutoff, 0),
             };
+            // **`doubleSided` arrives whole too**, and it is the second mode
+            // rather than a variation on the first: glTF 2.0 §3.9.6 asks for
+            // back-face culling off *and* the back face's normals reversed, and
+            // `crcbl-render` honours both — a `CullMode::None` twin of every
+            // pipeline that draws the surface, and `mesh.slang`'s
+            // `double_sided_normal`. A leaf card authored as a cutout is nearly
+            // always double-sided, so the two bits together are what makes a
+            // foliage material import as the thing it is.
+            //
+            // Absent means `false`, which is the specification's own default and
+            // what `gltf::Material::double_sided` answers for a material that
+            // wrote nothing.
+            let flags = alpha_flags
+                | if material.double_sided() {
+                    GpuMaterial::DOUBLE_SIDED
+                } else {
+                    0
+                };
             GpuMaterial {
                 base_color: pbr.base_color_factor(),
                 metallic: pbr.metallic_factor(),
@@ -1226,7 +1244,7 @@ fn build(
                 normal_scale: material.normal_texture().map_or(1.0, |info| info.scale()),
                 // Both resolved above, where the argument for them is: the
                 // document's `alphaMode` and `alphaCutoff`, with `BLEND`
-                // flattened onto `OPAQUE`.
+                // flattened onto `OPAQUE`, and its `doubleSided`.
                 alpha_cutoff,
                 flags,
             }
@@ -2400,6 +2418,68 @@ pub(crate) mod tests {
         );
     }
 
+    /// **`doubleSided: true` sets the bit the renderer routes and the shader
+    /// reverses a normal through; absent and `false` do not.**
+    ///
+    /// Three documents rather than one, because the failure this catches is a
+    /// reader that answers the same thing whatever the document says — an
+    /// importer that set the bit unconditionally would satisfy the first
+    /// assertion alone, and one that never set it would satisfy the other two.
+    /// The absent case is separate from the explicit `false` because glTF's
+    /// default for the key is what the absent case has to mean, and nothing
+    /// else in this module would notice if it stopped.
+    ///
+    /// The alpha mode is asserted beside it in the third case: the two are
+    /// independent modes and a material can carry both, which is what a cutout
+    /// leaf card is.
+    #[test]
+    fn a_double_sided_material_carries_the_bit_and_a_single_sided_one_does_not() {
+        let json = material_with(r#""doubleSided": true"#);
+        let scene = import_glb(&json).expect("the fixture imports");
+        assert_eq!(
+            scene.materials()[0].flags,
+            GpuMaterial::DOUBLE_SIDED,
+            "`doubleSided: true` did not set the bit the renderer routes on, so the surface is \
+             back-face culled and a leaf card is invisible from behind",
+        );
+
+        let warnings = import_warnings(&json);
+        assert!(
+            warnings.is_empty(),
+            "`doubleSided` is imported rather than dropped, so nothing about it is worth a \
+             line: {warnings:#?}",
+        );
+
+        for (document, what) in [
+            (
+                material_with(r#""doubleSided": false"#),
+                "an explicit `false`",
+            ),
+            (
+                triangle_json(BIN_CHUNK_BUFFER),
+                "a material with no such key",
+            ),
+        ] {
+            let scene = import_glb(&document).expect("the fixture imports");
+            assert_eq!(
+                scene.materials()[0].flags & GpuMaterial::DOUBLE_SIDED,
+                0,
+                "{what} must leave the material single-sided, which is glTF's own default",
+            );
+        }
+
+        let both = import_glb(&material_with(
+            r#""doubleSided": true, "alphaMode": "MASK""#,
+        ))
+        .expect("the fixture imports");
+        assert_eq!(
+            both.materials()[0].flags,
+            GpuMaterial::ALPHA_MODE_MASK | GpuMaterial::DOUBLE_SIDED,
+            "a cutout leaf card carries both modes, and an importer that let one overwrite the \
+             other would draw a solid card or a single-sided hole",
+        );
+    }
+
     /// **`BLEND` is recorded as `OPAQUE`, and that is the decision rather than
     /// an oversight.** This renderer builds no blended pipeline at all —
     /// `docs/plan/43-render-standards.md` §3 — so no bit could honour it, and
@@ -2936,7 +3016,11 @@ pub(crate) mod tests {
         let json = replacing(
             &triangle_json(BIN_CHUNK_BUFFER),
             "\"pbrMetallicRoughness\": { \"baseColorFactor\": [0.25, 0.5, 0.75, 1.0] }",
-            "\"doubleSided\": true",
+            // Something inert in the block's place, and `false` rather than
+            // `true` because the importer reads this key now: glTF's own
+            // default for it, so the row it produces is still the default
+            // material this test is about.
+            "\"doubleSided\": false",
         );
         let json = replacing(&json, ",\n      \"material\": 0", "");
         let scene = import_glb(&json).unwrap();

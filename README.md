@@ -59,9 +59,11 @@ What is real today:
   render-scale upscaling, GPU skinning, alpha-masked cutout materials cut in the
   depth prepass and the shadows as well as in the shading and routed per draw
   bucket, so an opaque mesh keeps its vertex-only depth stage in a scene that
-  has a cutout in it; specular antialiasing that widens the lobe by the
-  screen-space variance of the shading normal, tonemapping and a screen-space
-  grid, with mesh shaders and bindless where the device has them.
+  has a cutout in it; double-sided materials, drawn through a cull-none twin of
+  every pass and lit through a reversed normal on the back face; specular
+  antialiasing that widens the lobe by the screen-space variance of the shading
+  normal, tonemapping and a screen-space grid, with mesh shaders and bindless
+  where the device has them.
 - **glTF import** with meshlet building, a cluster DAG and QEM simplification.
 - **A server-authoritative game stack** — fixed-tick simulation, snapshots,
   interpolation, an ECS, physics, input mapping, audio, persistence and a job

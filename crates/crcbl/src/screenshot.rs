@@ -347,6 +347,65 @@ pub enum Scene {
     /// a plane at a known scale and a pixel maps to a floor position by a
     /// division.
     AlphaMask,
+    /// `docs/plan/43-render-standards.md` §2's rung 4, second half: **glTF's
+    /// `doubleSided`** — back-face culling off, and the back face lit through a
+    /// reversed normal.
+    ///
+    /// Three flat quads hanging over a floor, seen from straight above and lit
+    /// by a sun at 45°. Every one of them is the same single mesh, and that mesh
+    /// **faces down**: its authored normal is `-Y` and its winding puts its
+    /// front face on the `-Y` side, so the camera and the sun are both behind
+    /// it. What differs between the three is the material row and one transform.
+    ///
+    /// * **The culled one**, on the axis, through a single-sided row. The
+    ///   rasteriser drops it in every pass, so the frame shows the floor where
+    ///   it is and the floor under it carries no shadow.
+    /// * **The double-sided one**, out along `-x`, through a row carrying
+    ///   `crcbl_shaders::mesh::GpuMaterial::DOUBLE_SIDED`. It is drawn — that is
+    ///   the cull mode — and it is **lit**, which is the reversed normal: a back
+    ///   face shaded through its authored `-Y` normal has the sun behind it and
+    ///   reads as the ambient term alone.
+    /// * **The mirror**, out along `+x` at the same distance, through the
+    ///   *single-sided* row and turned over by `double_sided_mirror` so its
+    ///   front face is up. Nothing double-sided touches it: it is what a front
+    ///   face at that orientation reads, and the double-sided quad has to match
+    ///   it.
+    ///
+    /// # Why the mirror is the reference and not a number
+    ///
+    /// "Lit rather than ambient" is a threshold somebody has to choose. The
+    /// mirror is the same mesh, the same material factors, the same height and
+    /// the same distance from the frame's axis on the other side — and the sun
+    /// has no `x` component, so under `x → -x` the Lambert term, the
+    /// half-vector's `y` and therefore the whole lobe are unchanged. So the two
+    /// quads must read the *same brightness*, and a build that drew the back
+    /// face without reversing its normal reads the ambient term against a lit
+    /// surface.
+    ///
+    /// # The shadow half, and why it needs an open quad
+    ///
+    /// A cull mode changes nothing about a closed solid's shadow: whichever face
+    /// the light sees, some face of the slab is front-facing to it. An open quad
+    /// is where it shows, and this one's front face is away from the sun — so
+    /// the single-sided quads' shadows are the claim. The culled one casts
+    /// **none**, the double-sided one casts one, and the mirror — whose front
+    /// face is towards the sun — casts one as well, which is what says the
+    /// shadow pass draws at all and that the difference is the side.
+    ///
+    /// # What is in the frame, and why each piece is the size it is
+    ///
+    /// The floor is [`Scene::AlphaMask`]'s exactly — the cube at
+    /// `DOUBLE_FLOOR_SCALE`, dropped so its `+Y` face is the plane `y = 0` —
+    /// and the camera and the sun are that scene's too, for its reasons: an
+    /// overhead camera makes a pixel a floor position by a division, and a sun
+    /// with no `x` component moves a shadow purely along `-z` so each quad's
+    /// shadow is directly down-frame of it.
+    ///
+    /// Every quad's edge lands on an integer pixel column and row of the golden
+    /// frame — see `DOUBLE_PLATE_HALF_X`, which is
+    /// [`Scene::SpecularAa`]'s `SPECULAR_STRIP_PITCH` argument at this
+    /// fixture's own scale.
+    DoubleSided,
     /// `docs/plan/44-lighting.md`'s rung 4: **specular antialiasing by
     /// roughness regularisation**, and the one frame in the tree whose normal
     /// field moves faster than the pixel grid samples it.
@@ -3823,6 +3882,390 @@ fn alpha_sun() -> crcbl_render::DirectionalLight {
     }
 }
 
+/// [`Scene::DoubleSided`]'s floor row, in the description
+/// `double_sided_scene` builds — the row past the demo scene's three.
+const DOUBLE_FLOOR: usize = 3;
+
+/// Its single-sided quad row, the one past the floor's.
+///
+/// Worn by two of the three quads: the one the camera and the sun both see the
+/// back of, which is therefore culled everywhere, and the mirror, which is the
+/// same row turned over.
+const DOUBLE_SINGLE: usize = 4;
+
+/// Its double-sided quad row, the one past that — the same factors with
+/// [`GpuMaterial::DOUBLE_SIDED`] set and nothing else.
+///
+/// **The same factors is the whole of what makes the frame a comparison.** The
+/// claim is that the double-sided quad reads what the mirror reads, so a row
+/// that also differed in a colour or a roughness would make the two bands
+/// incomparable and the claim untestable.
+///
+/// [`GpuMaterial::DOUBLE_SIDED`]: crate::shaders::mesh::GpuMaterial::DOUBLE_SIDED
+const DOUBLE_DOUBLE: usize = 5;
+
+/// [`Scene::DoubleSided`]'s quad, the mesh past the demo scene's four.
+const DOUBLE_QUAD_MESH: usize = 4;
+
+/// The frame height every pixel figure in this fixture is arithmetic for, on
+/// [`SPECULAR_ALIGNED_ROWS`]' terms exactly.
+const DOUBLE_ALIGNED_ROWS: f32 = 192.0;
+
+/// The frame width that goes with it.
+const DOUBLE_ALIGNED_COLUMNS: f32 = 256.0;
+
+/// The tangent of half [`double_camera`]'s vertical field of view.
+///
+/// Thirty degrees, written out because a trigonometric function is not `const`.
+/// Nothing rests on the last digit: [`double_sided_quad_mesh`] asserts the pixel
+/// alignment through the camera's own matrix, so an inaccurate constant here
+/// fails there rather than drifting into the golden.
+const DOUBLE_TAN_HALF_FOV: f32 = 0.577_350_3;
+
+/// How far above the floor [`Scene::DoubleSided`]'s camera stands, and how far
+/// the frame reaches across the floor because of it.
+///
+/// [`ALPHA_CAMERA_UP`] exactly, and for its reasons — the floor's own edges are
+/// inside the frame on all four sides, and each quad and each shadow is tens of
+/// pixels across.
+const DOUBLE_CAMERA_UP: f32 = ALPHA_CAMERA_UP;
+
+/// How far above the floor the three quads hang.
+///
+/// [`ALPHA_PLATE_UP`] exactly: [`double_sun`] comes in at 45° with no `x`
+/// component, so a caster at height `h` throws its shadow `h` along `-z`, and
+/// this height clears the quad's own footprint with a band of lit floor left
+/// between the two. Past `crcbl_shaders::ssao::RADIUS_DEFAULT` for that
+/// constant's reason as well: the floor under a quad is lit floor and not floor
+/// darkened by the quad's proximity.
+const DOUBLE_QUAD_UP: f32 = ALPHA_PLATE_UP;
+
+/// How many pixels of the golden frame one world unit **at the quads' height**
+/// covers.
+///
+/// The three quads are one plane at one distance under a camera looking
+/// straight down, so their projection is affine and this is the whole of it —
+/// [`SPECULAR_ALIGNED_PIXELS_PER_UNIT`]'s arithmetic with the plane's own
+/// distance from the eye in place of the plate's.
+const DOUBLE_QUAD_PIXELS_PER_UNIT: f32 =
+    DOUBLE_ALIGNED_ROWS * 0.5 / ((DOUBLE_CAMERA_UP - DOUBLE_QUAD_UP) * DOUBLE_TAN_HALF_FOV);
+
+/// Half a quad's extent along `x`, in world units — **eleven whole pixels of
+/// the golden frame either side of its centre.**
+///
+/// [`SPECULAR_STRIP_PITCH`]'s argument at this fixture's scale: Vulkan
+/// guarantees only four `subPixelPrecisionBits`, so a vertex at an arbitrary
+/// fraction of a pixel snaps to different points on radv's eighth-bit grid and
+/// SwiftShader's sixteenth, and a quad edge is the highest-contrast thing in
+/// this frame. On an integer coordinate it snaps to the same point on any of
+/// those grids. [`double_sided_quad_mesh`] asserts the property through the
+/// scene's own camera and model matrices rather than trusting this arithmetic.
+///
+/// Thirty-six pixels across is wide enough for a band of twenty-four with six
+/// clear either side, and narrow enough that three of them and the gaps between
+/// them fit inside the floor — see [`DOUBLE_QUAD_AT`].
+const DOUBLE_PLATE_HALF_X: f32 = 18.0 / DOUBLE_QUAD_PIXELS_PER_UNIT;
+
+/// Half a quad's extent along `z`, on [`DOUBLE_PLATE_HALF_X`]'s terms and the
+/// same size: square, so the shadow it throws is as legible along the axis the
+/// sun moves it on as the quad is across it.
+const DOUBLE_PLATE_HALF_Z: f32 = DOUBLE_PLATE_HALF_X;
+
+/// How far out along `x` the double-sided quad and its mirror stand, in world
+/// units — thirty pixels of the golden frame, and a whole number for
+/// [`DOUBLE_PLATE_HALF_X`]'s reason.
+///
+/// **The pair is symmetric about the frame's axis, and that is what makes the
+/// mirror a reference rather than a second reading.** [`double_sun`] has no `x`
+/// component and the quads' normals have none either, so under `x → -x` the
+/// Lambert term is unchanged, the eye vector's `y` is unchanged and the
+/// half-vector's `y` with it — every term of the lobe is the same number on
+/// both sides.
+///
+/// Far enough out that the three quads do not touch: their projected half-width
+/// is [`DOUBLE_PLATE_HALF_X`]'s eighteen pixels, so forty-four leaves eight
+/// clear between the axis quad and each neighbour. Near enough in that the
+/// outer edge at sixty-two pixels is inside the floor's own edge, which
+/// [`DOUBLE_FLOOR_SCALE`] puts at about eighty-three.
+const DOUBLE_QUAD_AT: f32 = 44.0 / DOUBLE_QUAD_PIXELS_PER_UNIT;
+
+/// How far off a pixel boundary [`double_sided_quad_mesh`] lets a projected
+/// vertex sit — [`SPECULAR_ALIGNMENT_SLACK`]'s thousandth of a pixel, for its
+/// reason.
+const DOUBLE_ALIGNMENT_SLACK: f32 = SPECULAR_ALIGNMENT_SLACK;
+
+/// How much [`Scene::DoubleSided`] scales the cube by to get its floor —
+/// [`ALPHA_FLOOR_SCALE`], for that constant's reasons.
+const DOUBLE_FLOOR_SCALE: f32 = ALPHA_FLOOR_SCALE;
+
+/// The base-colour factor [`Scene::DoubleSided`]'s floor shades through —
+/// [`ALPHA_FLOOR_ALBEDO`]'s grey, so the floor's colour is the cube's own `+Y`
+/// face and the quads are the only things in the frame carrying a hue.
+const DOUBLE_FLOOR_ALBEDO: f32 = ALPHA_FLOOR_ALBEDO;
+
+/// The base-colour factor all three quads shade through.
+///
+/// [`ALPHA_PLATE_TINT`]'s red against the floor's green, and for its reason: a
+/// band on a quad and a band of floor seen where a quad was culled are then
+/// separated by a factor in one channel rather than by a brightness a shading
+/// change could also produce. `tests/render_e2e.rs` reads that channel.
+const DOUBLE_QUAD_TINT: [f32; 4] = ALPHA_PLATE_TINT;
+
+/// The roughness all three quads shade through.
+///
+/// **Rough on purpose.** The claim is that the double-sided quad and its mirror
+/// read the same brightness, and the two are symmetric about the frame's axis
+/// rather than at the same place — so the flatter the specular lobe, the less
+/// any residual asymmetry in the frame can separate them. A near-mirror lobe
+/// would put the highlight on one of them and not the other.
+///
+/// Under one, so the row is not the extreme the clamp in `mesh.slang` would
+/// pin, and a dielectric — `UNTINTED`'s zero metallic — so the diffuse term
+/// carries the band.
+const DOUBLE_QUAD_ROUGHNESS: f32 = 0.9;
+
+/// The transform that turns one of [`Scene::DoubleSided`]'s quads over, so its
+/// front face and its normal both point up.
+///
+/// **A rotation, not a mirror.** A half turn about `z` written as a scale by
+/// `(-1, -1, 1)`: its determinant is `+1`, so the winding is preserved and the
+/// face still faces along its own normal, and every entry is exact in binary so
+/// the turned quad's vertices land on the same pixel grid as the others. A
+/// negative scale on one axis would flip the winding *and* need the cofactor
+/// matrix to carry the normal, which is two ways for a fixture to be measuring
+/// its own transform rather than the renderer.
+///
+/// The quad is centred on its own origin and square, so the turn moves no
+/// vertex anywhere the untouched quad does not already reach.
+fn double_sided_mirror() -> glam::Mat4 {
+    glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0))
+}
+
+/// [`Scene::DoubleSided`]'s quad: one square in the plane `y = 0`, facing `-Y`.
+///
+/// **Both halves of "facing `-Y`" and they have to agree.** The authored normal
+/// is `(0, -1, 0)`, which is what the lighting reads, and the corner order is
+/// `crcbl_shaders::mesh`'s own `-Y` face — so the winding the rasteriser reads
+/// puts the front face on the same side. A quad whose two disagreed would be
+/// drawn by the cull mode of one side and lit by the normal of the other, and
+/// nothing in the frame could say which.
+///
+/// **An open quad and not a slab**, which is what the shadow half of this
+/// fixture needs: whichever way a closed solid is lit, some face of it is
+/// front-facing to the light, so a cull mode cannot change its shadow. This has
+/// one face, and it is turned away from the sun.
+///
+/// **The cluster carries its real normal cone**, which points the way the face
+/// does: straight down, away from a camera above it. That is what makes the
+/// mesh path's per-cluster cull the thing this fixture measures — the
+/// amplification stage rejects a wholly back-facing cluster, so the
+/// double-sided quad reaches the rasteriser only because
+/// `mesh_cluster.slang`'s `cone_may_reject` reads the instance's material mode
+/// and declines to run the cone test at all. A cone softened here would be a
+/// fixture that draws the same frame whether or not that predicate exists.
+fn double_sided_quad_mesh() -> crate::render::scene::MeshDesc<'static> {
+    use crate::shaders::mesh::MeshVertex;
+    use crate::shaders::meshlet::{MeshClusters, Meshlet};
+
+    let range = crate::shaders::mesh::demo_uv_range();
+    let tint = [1.0, 1.0, 1.0, 1.0];
+    let normal = [0.0, -1.0, 0.0];
+    // `crcbl_shaders::mesh`'s `-Y` face corner order, which `0 1 2, 0 2 3`
+    // winds counter-clockwise seen from below.
+    let corners = [
+        [-DOUBLE_PLATE_HALF_X, 0.0, -DOUBLE_PLATE_HALF_Z],
+        [DOUBLE_PLATE_HALF_X, 0.0, -DOUBLE_PLATE_HALF_Z],
+        [DOUBLE_PLATE_HALF_X, 0.0, DOUBLE_PLATE_HALF_Z],
+        [-DOUBLE_PLATE_HALF_X, 0.0, DOUBLE_PLATE_HALF_Z],
+    ];
+    let vertices: Vec<MeshVertex> = corners
+        .iter()
+        .zip(&SPECULAR_QUAD_UV)
+        .map(|(corner, uv)| MeshVertex::from_normal(*corner, normal, tint, *uv, &range))
+        .collect();
+
+    // Every vertex of every placed quad on an integer pixel of the golden
+    // frame, checked through the scene's own camera and each instance's own
+    // model matrix rather than re-derived from the constants above — which is
+    // the check `SPECULAR_STRIP_PITCH` argues for, and the mirror's turn is one
+    // of the transforms it has to hold under.
+    let clip = double_camera().view_projection(DOUBLE_ALIGNED_COLUMNS / DOUBLE_ALIGNED_ROWS);
+    for model in double_sided_quads().map(|(_, model)| model) {
+        for corner in &corners {
+            let projected = clip * model * glam::Vec4::new(corner[0], corner[1], corner[2], 1.0);
+            let ndc = projected.truncate() / projected.w;
+            for (coordinate, extent, axis) in [
+                (ndc.x, DOUBLE_ALIGNED_COLUMNS, "column"),
+                (ndc.y, DOUBLE_ALIGNED_ROWS, "row"),
+            ] {
+                let frame = (coordinate * 0.5 + 0.5) * extent;
+                // A full assertion rather than a debug one, on
+                // `specular_plate_mesh`'s terms: the browser gate draws this
+                // scene through a second rasteriser in release.
+                assert!(
+                    (frame - frame.round()).abs() <= DOUBLE_ALIGNMENT_SLACK,
+                    "a quad has a vertex at {axis} {frame}, off the pixel grid, so two \
+                     rasterisers may put its edge in different pixels: see \
+                     DOUBLE_PLATE_HALF_X"
+                );
+            }
+        }
+    }
+
+    let mut clusters = MeshClusters::default();
+    // `crcbl_scene::meshlet`'s own rule for this cluster, spelled out because
+    // this mesh is authored here rather than cooked: the axis is the
+    // area-weighted average of the triangles' normals, which for one flat quad
+    // is the face normal, and the cutoff is the smallest dot of that with them,
+    // which is one. `specular_cluster_bounds` writes that cutoff already and an
+    // axis of `+Y`, which is the plate it is named for rather than this quad.
+    let bounds = crate::shaders::meshlet::ClusterBounds {
+        cone_axis: normal,
+        ..specular_cluster_bounds(&corners)
+    };
+    clusters.clusters.push(
+        Meshlet::new(0, 4, 0, 2, bounds)
+            .unwrap_or_else(|error| unreachable!("four vertices of fixture geometry: {error}")),
+    );
+    clusters.vertices.extend_from_slice(&[0, 1, 2, 3]);
+    clusters.corners.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    clusters
+        .check(vertices.len())
+        .unwrap_or_else(|fault| unreachable!("the fixture's own cluster is in range: {fault}"));
+
+    crate::render::scene::MeshDesc {
+        label: std::borrow::Cow::Borrowed("double sided quad"),
+        geometry: crate::render::scene::Geometry::Flat {
+            vertices: std::borrow::Cow::Owned(crate::shaders::mesh::vertex_bytes(&vertices)),
+            uv_range: range,
+            indices: std::borrow::Cow::Owned(vec![0u32, 1, 2, 0, 2, 3]),
+            clusters,
+            // No authored tangents, on `specular_plate_mesh`'s terms.
+            flags: 0,
+        },
+    }
+}
+
+/// The three quads [`Scene::DoubleSided`] places, as the material row each
+/// wears and the transform it wears it at.
+///
+/// One list because two readers need exactly the same one: the scene builder
+/// places them, and [`double_sided_quad_mesh`] projects each corner through
+/// each of these matrices to check the pixel alignment. A second copy is a
+/// second chance for a transform to move in one and not the other.
+///
+/// The order is left to right down the `x` axis as the world spells it, which
+/// the overhead camera puts **right to left** across the frame — see
+/// `tests/render_e2e.rs`'s reader, which is where each band's column comes
+/// from.
+fn double_sided_quads() -> impl Iterator<Item = (usize, glam::Mat4)> {
+    [
+        // The double-sided one, out along `-x`.
+        (
+            DOUBLE_DOUBLE,
+            glam::Mat4::from_translation(glam::Vec3::new(-DOUBLE_QUAD_AT, DOUBLE_QUAD_UP, 0.0)),
+        ),
+        // The culled one, on the axis: a single-sided row and the mesh as
+        // authored, so both the camera and the sun see its back.
+        (
+            DOUBLE_SINGLE,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, DOUBLE_QUAD_UP, 0.0)),
+        ),
+        // The mirror, out along `+x`: the same single-sided row, turned over.
+        (
+            DOUBLE_SINGLE,
+            glam::Mat4::from_translation(glam::Vec3::new(DOUBLE_QUAD_AT, DOUBLE_QUAD_UP, 0.0))
+                * double_sided_mirror(),
+        ),
+    ]
+    .into_iter()
+}
+
+/// [`Scene::DoubleSided`]'s floor: the cube at [`DOUBLE_FLOOR_SCALE`], dropped
+/// so its `+Y` face is the plane `y = 0` — [`alpha_floor`]'s shape at this
+/// scene's own scale.
+fn double_floor() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.5 * DOUBLE_FLOOR_SCALE, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::splat(DOUBLE_FLOOR_SCALE))
+}
+
+/// The camera [`Scene::DoubleSided`] is drawn with — [`alpha_camera`]'s, at
+/// this scene's own height, and straight down for that camera's reason.
+fn double_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, DOUBLE_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// The sun [`Scene::DoubleSided`] runs under — [`alpha_sun`]'s, and for its
+/// reason: no `x` component, so each quad's shadow is that quad translated
+/// along `-z` by exactly its height and sits directly down-frame of it.
+///
+/// It is also what puts the sun on the **camera's** side of every quad, which is
+/// the whole of the lighting claim: a quad whose authored normal points away
+/// from both has a negative Lambert term until something reverses it.
+fn double_sun() -> crcbl_render::DirectionalLight {
+    crcbl_render::DirectionalLight {
+        direction: glam::Vec3::new(0.0, 1.0, 1.0).normalize(),
+        ..crcbl_render::DirectionalLight::default()
+    }
+}
+
+/// [`Scene::DoubleSided`]'s scene: the engine's own, with the quad mesh and the
+/// three material rows appended.
+///
+/// A description of its own on [`specular_aa_scene`]'s terms — this fixture
+/// needs a mesh and materials the demo scene has not got — and the two quad rows
+/// differ in one flags word, which is what the frame is a comparison of.
+fn double_sided_scene() -> crate::render::scene::SceneDesc<'static> {
+    use crate::shaders::mesh::GpuMaterial;
+
+    let mut scene = crate::render::scene::demo();
+    scene.meshes.push(double_sided_quad_mesh());
+    debug_assert_eq!(
+        scene.meshes.len() - 1,
+        DOUBLE_QUAD_MESH,
+        "the quad is the mesh past the demo scene's four"
+    );
+    scene.materials.push(GpuMaterial {
+        base_color: [
+            DOUBLE_FLOOR_ALBEDO,
+            DOUBLE_FLOOR_ALBEDO,
+            DOUBLE_FLOOR_ALBEDO,
+            1.0,
+        ],
+        ..GpuMaterial::UNTINTED
+    });
+    debug_assert_eq!(
+        scene.materials.len() - 1,
+        DOUBLE_FLOOR,
+        "the floor row is the one past the demo scene's three"
+    );
+    let quad = GpuMaterial {
+        base_color: DOUBLE_QUAD_TINT,
+        roughness: DOUBLE_QUAD_ROUGHNESS,
+        ..GpuMaterial::UNTINTED
+    };
+    scene.materials.push(quad);
+    debug_assert_eq!(scene.materials.len() - 1, DOUBLE_SINGLE);
+    scene.materials.push(GpuMaterial {
+        // The whole of what makes this scene a fixture, and the only field that
+        // differs from the row above: without the bit the row is an ordinary
+        // single-sided one, its quad is culled in every pass, and the frame
+        // shows floor where the evidence should be.
+        flags: GpuMaterial::DOUBLE_SIDED,
+        ..quad
+    });
+    debug_assert_eq!(scene.materials.len() - 1, DOUBLE_DOUBLE);
+    scene
+}
+
 /// How many quad strips [`Scene::SpecularAa`] cuts the corrugated half of its
 /// plate into.
 ///
@@ -4866,6 +5309,30 @@ impl SceneState {
                 Self::Forward {
                     camera: alpha_camera(),
                     light: alpha_sun(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::DoubleSided => {
+                // **The floor first, and the three quads over it**, on
+                // `Scene::AlphaMask`'s terms exactly: the cube is placed rather
+                // than parked so it holds the pool slot every forward scene
+                // gives it, and through the grey row `double_sided_scene`
+                // appends for it rather than through `DEMO_UNTINTED`.
+                //
+                // Nothing else is in the frame. Four of this scene's bands are
+                // read off *floor* — one where a culled quad is not, one of open
+                // lit floor, and two inside shadows — and any other object
+                // standing on that floor is something a band could be measuring
+                // instead.
+                let mut renderer =
+                    ForwardRenderer::with_scene(device, queue, format, &double_sided_scene())?;
+                place(&mut renderer, DEMO_CUBE, DOUBLE_FLOOR, double_floor());
+                for (material, model) in double_sided_quads() {
+                    place(&mut renderer, DOUBLE_QUAD_MESH, material, model);
+                }
+                Self::Forward {
+                    camera: double_camera(),
+                    light: double_sun(),
                     renderer: Box::new(renderer),
                 }
             }

@@ -685,13 +685,54 @@ const fn buckets_for(levels: usize, emit: EmitTail) -> usize {
 ///
 /// [`GpuMaterial::mode`](mesh::GpuMaterial::mode)'s whole range, which is why
 /// the routing is total rather than checked: a row's mode is
-/// `flags & GpuMaterial::MODE_MASK` and that mask is one bit today, so no
+/// `flags & GpuMaterial::MODE_MASK`, that mask is the alpha-mask bit and the
+/// double-sided one, and the four combinations of them are these — so no
 /// material can carry a mode that is not in this list and no instance can
 /// scatter into a bucket that does not exist. Widening the mask means adding the
 /// mode here **and** giving it a depth pipeline in
 /// [`ForwardRenderer::depth_partitions`] in the same change — the two are the
 /// producer and the consumer of one list.
-const DEPTH_MODES: [u32; 2] = [0, mesh::GpuMaterial::ALPHA_MODE_MASK];
+///
+/// **A scene emits a twin per mode its own materials carry**, not one per
+/// entry here: two materials of two modes are two twins whichever two they are,
+/// and only a scene actually holding all four pays for four. The build below is
+/// where that filter is, and this module's
+/// `an_all_opaque_scene_keeps_one_bucket_per_mesh_level` is what holds it.
+const DEPTH_MODES: [u32; 4] = [
+    0,
+    mesh::GpuMaterial::ALPHA_MODE_MASK,
+    mesh::GpuMaterial::DOUBLE_SIDED,
+    mesh::GpuMaterial::ALPHA_MODE_MASK | mesh::GpuMaterial::DOUBLE_SIDED,
+];
+
+/// A pipeline and its [`CullMode::None`] twin: the two objects a pass binds to
+/// draw single-sided and double-sided buckets of one frame.
+///
+/// **A pipeline rather than a per-draw state, because no backend seam exposes
+/// dynamic cull mode** — and `crcbl_hal::CommandEncoder::set_stencil_reference`
+/// is the precedent for why one would not be added: a raster state a recorded
+/// stream carried per draw is a state every backend has to be able to change
+/// between two indirect calls, and the portable answer to "this draw rasterises
+/// differently" is a second pipeline. Which draws take which is
+/// [`ForwardRenderer::sided_partitions`].
+///
+/// Four passes need the pair — the colour pass, the two depth-only ones and the
+/// reflective shadow map — so it is a type rather than eight fields, and the
+/// twins are built together so a renderer can never hold one without the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SidedPipelines {
+    /// [`CullMode::Back`]: every bucket whose material is single-sided, which is
+    /// every bucket of every scene that does not use `doubleSided`.
+    single: GraphicsPipelineHandle,
+    /// [`CullMode::None`]: the buckets whose material carries
+    /// [`GpuMaterial::DOUBLE_SIDED`](mesh::GpuMaterial::DOUBLE_SIDED).
+    ///
+    /// Built on every scene rather than only on one that has such a material,
+    /// for [`MeshModules::depth_masked_pipeline`]'s stated reason: the modules
+    /// are released inside `build` and a pipeline built later would need them
+    /// back, which is a second shader compilation.
+    double: GraphicsPipelineHandle,
+}
 
 /// The pixel budget `docs/plan/25-lod.md`'s descent compares a group's projected
 /// error against, unless a caller sets another with
@@ -1463,7 +1504,7 @@ pub struct ForwardRenderer {
 
     mesh_layout: BindGroupLayoutHandle,
     mesh_pipeline_layout: PipelineLayoutHandle,
-    mesh_pipeline: GraphicsPipelineHandle,
+    mesh_pipeline: SidedPipelines,
     /// [`ForwardRenderer::mesh_pipeline`] again in
     /// [`PolygonMode::Line`], for
     /// [`set_wireframe`](ForwardRenderer::set_wireframe).
@@ -1474,7 +1515,13 @@ pub struct ForwardRenderer {
     /// never asks for a wireframe, which is all of them. Once built it is kept,
     /// because switching the view off is
     /// [`ForwardRenderer::wireframe_on`] and not a release.
-    wireframe_pipeline: Option<GraphicsPipelineHandle>,
+    ///
+    /// **A pair, like the pipeline it replaces**, because [`PolygonMode::Line`]
+    /// does not disable culling: a single-sided wireframe drawn over a
+    /// double-sided bucket would leave a surface out of the debug view that the
+    /// shaded frame beside it draws, which is a view of the document that
+    /// disagrees with the document.
+    wireframe_pipeline: Option<SidedPipelines>,
     /// Whether [`add_passes`](ForwardRenderer::add_passes) drives the forward
     /// pass through [`ForwardRenderer::wireframe_pipeline`]. **`false` by
     /// default**: a wireframe is a tool's view of a document, and every sample
@@ -1661,7 +1708,7 @@ pub struct ForwardRenderer {
     /// `depthVertexMain` where the geometry comes from a vertex stage, the same
     /// geometry stage as [`ForwardRenderer::mesh_pipeline`] where it comes from
     /// a mesh one, and no fragment stage in either case.
-    shadow_pipeline: GraphicsPipelineHandle,
+    shadow_pipeline: SidedPipelines,
     /// The same two passes' pipeline for the buckets whose material mode cuts
     /// an alpha mask: `vertexMain` and `depthMaskedFragmentMain` — see
     /// [`MeshModules::depth_masked_pipeline`].
@@ -1672,7 +1719,7 @@ pub struct ForwardRenderer {
     /// a second shader compilation. Which buckets are drawn with it is
     /// [`ForwardRenderer::depth_partitions`], and it is a **partition of one
     /// frame's draws** rather than a choice for the whole frame.
-    depth_masked_pipeline: GraphicsPipelineHandle,
+    depth_masked_pipeline: SidedPipelines,
     /// The pipeline that resets one tile of the atlas before it is redrawn, on a
     /// frame that is keeping some of the others — see
     /// [`MeshModules::depth_clear_pipeline`], which is where the whole argument
@@ -1681,7 +1728,7 @@ pub struct ForwardRenderer {
     /// `docs/plan/50-irradiance-probes.md`'s reflective shadow map — see
     /// [`MeshModules::rsm_pipeline`]. Built on every scene and bound only by a
     /// frame whose volume asked for [`ProbeUpdate::EveryFrame`].
-    rsm_pipeline: GraphicsPipelineHandle,
+    rsm_pipeline: SidedPipelines,
     /// The compute pass that reads that map into the probe rows, and [`None`]
     /// for every scene whose volume is [`ProbeUpdate::Authored`] — which is the
     /// whole of what the default costs such a scene: no pipeline, no buffers, no
@@ -5025,13 +5072,29 @@ impl ForwardRenderer {
         // modules — see [`MeshModules`], which is where the two shapes and the
         // reasons for them live. Both are created before either is unwrapped and
         // the modules are released between, so a failing creation leaks nothing.
+        //
+        // **Each shape is built twice, once per material side** — see
+        // [`SidedPipelines`], which is where the cull modes and the reason for a
+        // pipeline rather than a per-draw state live. The shadow tile clear is
+        // the one exception: its triangle comes out of `SV_VertexID` and it
+        // already culls nothing.
         let modules = MeshModules::new(device, emit, culls_clusters)?;
-        let mesh_pipeline =
-            modules.color_pipeline(device, mesh_pipeline_layout, PolygonMode::Fill, "forward");
-        let shadow_pipeline_result = modules.depth_pipeline(device, mesh_pipeline_layout);
+        let mesh_results = MeshModules::sided(|cull| {
+            modules.color_pipeline(
+                device,
+                mesh_pipeline_layout,
+                PolygonMode::Fill,
+                cull,
+                "forward",
+            )
+        });
+        let shadow_results =
+            MeshModules::sided(|cull| modules.depth_pipeline(device, mesh_pipeline_layout, cull));
         // And its cutout twin, which a frame whose material table masks alpha is
         // recorded with instead — see [`MeshModules::depth_masked_pipeline`].
-        let depth_masked_result = modules.depth_masked_pipeline(device, mesh_pipeline_layout);
+        let depth_masked_results = MeshModules::sided(|cull| {
+            modules.depth_masked_pipeline(device, mesh_pipeline_layout, cull)
+        });
         // And the one that resets a tile, which the cadence rung needs and the
         // attachment's load operation cannot express — see
         // [`MeshModules::depth_clear_pipeline`].
@@ -5042,18 +5105,32 @@ impl ForwardRenderer {
         // on one whose probes ask to be updated: the modules are released a line
         // below and a pipeline built later would need them back, which is a
         // second shader compilation for a field a `ProbeGrid` decides.
-        let rsm_result = modules.rsm_pipeline(device, mesh_pipeline_layout);
+        let rsm_results =
+            MeshModules::sided(|cull| modules.rsm_pipeline(device, mesh_pipeline_layout, cull));
         modules.destroy(device);
-        let mesh_pipeline = mesh_pipeline?;
-        rollback.pipelines.push(mesh_pipeline);
-        let shadow_pipeline = shadow_pipeline_result?;
-        rollback.pipelines.push(shadow_pipeline);
-        let depth_masked_pipeline = depth_masked_result?;
-        rollback.pipelines.push(depth_masked_pipeline);
+        // Unwrapped in creation order and each handed to the rollback as it is,
+        // so a failure part way through releases everything already made — see
+        // [`MeshModules::sided`], which is why the pairs arrive as results.
+        //
+        // The **field** and not the whole rollback, because `rollback.lights` is
+        // already borrowed above and a helper taking the struct would conflict
+        // with it — the loose `push`es this replaces borrowed one field each.
+        let into_rollback = |results: [Result<GraphicsPipelineHandle, HalError>; 2],
+                             pipelines: &mut Vec<GraphicsPipelineHandle>|
+         -> Result<SidedPipelines, HalError> {
+            let [single, double] = results;
+            let single = single?;
+            pipelines.push(single);
+            let double = double?;
+            pipelines.push(double);
+            Ok(SidedPipelines { single, double })
+        };
+        let mesh_pipeline = into_rollback(mesh_results, &mut rollback.pipelines)?;
+        let shadow_pipeline = into_rollback(shadow_results, &mut rollback.pipelines)?;
+        let depth_masked_pipeline = into_rollback(depth_masked_results, &mut rollback.pipelines)?;
         let shadow_clear_pipeline = shadow_clear_result?;
         rollback.pipelines.push(shadow_clear_pipeline);
-        let rsm_pipeline = rsm_result?;
-        rollback.pipelines.push(rsm_pipeline);
+        let rsm_pipeline = into_rollback(rsm_results, &mut rollback.pipelines)?;
 
         // --- the tonemap pass ---
         let tonemap_entries = [
@@ -7622,51 +7699,101 @@ impl ForwardRenderer {
         self.probe_volume
     }
 
-    /// `draws` split by material mode, each partition under the depth-only
-    /// pipeline that honours its mode — what the depth prepass and every shadow
-    /// view record instead of one call list under one pipeline.
+    /// `draws` split by the `key` bits of each bucket's material mode, each
+    /// partition under the pipeline `pipelines` pairs that value with.
     ///
     /// **The point of the whole arrangement.** A bucket's mode is fixed when the
     /// table is built and an instance is scattered into the bucket matching its
-    /// mesh *and* its own mode, so the opaque buckets can be drawn with
-    /// [`shadow_pipeline`](Self::shadow_pipeline) — `depthVertexMain` and no
-    /// fragment stage — while the masked ones are drawn with
-    /// [`depth_masked_pipeline`](Self::depth_masked_pipeline), which can
-    /// `discard`. A scene with one cutout in it therefore pays a fragment stage
-    /// for that mesh's draws and for no others; before this it paid for the
-    /// whole frame, which on lavapipe roughly doubled the prepass and added two
-    /// thirds to the shadow pass.
+    /// mesh *and* its own mode, so a pass can bind a pipeline per mode instead
+    /// of choosing one for the whole frame — a fragment stage for the mesh that
+    /// masks, back-face culling off for the mesh that is double-sided, and
+    /// neither for anything else.
     ///
-    /// **An empty partition is dropped**, so a scene whose materials are all
-    /// opaque records exactly one partition under exactly the pipeline it always
-    /// bound: same binds, same draws, same order.
+    /// **An empty partition is dropped**, which is the zero-cost half: a scene
+    /// whose materials are all one mode records exactly one partition under
+    /// exactly the pipeline it always bound — same binds, same draws, same
+    /// order, byte for byte the stream every golden in this tree was blessed
+    /// against.
     ///
-    /// The two pipelines cover [`DEPTH_MODES`] exhaustively, which is what makes
-    /// the split total — every bucket lands in one partition, and no bucket's
-    /// draws are dropped. The colour pass and the reflective shadow map take no
-    /// partition at all: their pipelines have a fragment stage either way and
-    /// cut the mask inside it.
-    fn depth_partitions(&self, draws: &BucketDraws) -> Vec<BucketDraws> {
-        [
-            (DEPTH_MODES[0], self.shadow_pipeline),
-            (DEPTH_MODES[1], self.depth_masked_pipeline),
-        ]
-        .into_iter()
-        .filter_map(|(mode, pipeline)| {
-            let calls: Vec<(u32, u64, u64, u64)> = draws
-                .calls
-                .iter()
-                .zip(&self.bucket_modes)
-                .filter(|(_, bucket)| **bucket == mode)
-                .map(|(call, _)| *call)
-                .collect();
-            (!calls.is_empty()).then(|| BucketDraws {
-                pipeline,
-                calls,
-                ..draws.clone()
+    /// `pipelines` must cover every value of `mode & key` a bucket can carry, or
+    /// that bucket's draws are dropped from the pass entirely — the two callers
+    /// below are what make that total, and both are exhaustive over
+    /// [`DEPTH_MODES`] masked by their own `key`.
+    fn partitions(
+        &self,
+        draws: &BucketDraws,
+        key: u32,
+        pipelines: &[(u32, GraphicsPipelineHandle)],
+    ) -> Vec<BucketDraws> {
+        pipelines
+            .iter()
+            .filter_map(|(mode, pipeline)| {
+                let calls: Vec<(u32, u64, u64, u64)> = draws
+                    .calls
+                    .iter()
+                    .zip(&self.bucket_modes)
+                    .filter(|(_, bucket)| (**bucket & key) == *mode)
+                    .map(|(call, _)| *call)
+                    .collect();
+                (!calls.is_empty()).then(|| BucketDraws {
+                    pipeline: *pipeline,
+                    calls,
+                    ..draws.clone()
+                })
             })
-        })
-        .collect()
+            .collect()
+    }
+
+    /// `draws` split by the **whole** material mode, each partition under the
+    /// depth-only pipeline that honours it — what the depth prepass and every
+    /// shadow view record instead of one call list under one pipeline.
+    ///
+    /// Four pipelines for [`DEPTH_MODES`]' four values, which is what makes the
+    /// split total: the opaque buckets are drawn with
+    /// [`shadow_pipeline`](Self::shadow_pipeline) — `depthVertexMain` and no
+    /// fragment stage — the masked ones with
+    /// [`depth_masked_pipeline`](Self::depth_masked_pipeline), which can
+    /// `discard`, and each of those has a [`CullMode::None`] twin for the
+    /// buckets whose material is double-sided. A scene with one cutout in it
+    /// pays a fragment stage for that mesh's draws and for no others; before
+    /// this it paid for the whole frame, which on lavapipe roughly doubled the
+    /// prepass and added two thirds to the shadow pass.
+    ///
+    /// **Both depth passes and not just the atlas.** A double-sided plate whose
+    /// back face the prepass culled writes no depth there, so the colour pass's
+    /// `GreaterOrEqual` test against it rejects the fragment and the surface is
+    /// missing from the frame; and a cascade that culled it casts no shadow.
+    fn depth_partitions(&self, draws: &BucketDraws) -> Vec<BucketDraws> {
+        self.partitions(
+            draws,
+            mesh::GpuMaterial::MODE_MASK,
+            &[
+                (DEPTH_MODES[0], self.shadow_pipeline.single),
+                (DEPTH_MODES[1], self.depth_masked_pipeline.single),
+                (DEPTH_MODES[2], self.shadow_pipeline.double),
+                (DEPTH_MODES[3], self.depth_masked_pipeline.double),
+            ],
+        )
+    }
+
+    /// `draws` split by the material's **side** alone, each partition under the
+    /// matching half of `pipelines` — what the colour pass and the two
+    /// reflective shadow maps record.
+    ///
+    /// Two partitions where [`depth_partitions`](Self::depth_partitions) has
+    /// four, and the difference is the whole of what these passes do not care
+    /// about: their pipelines carry a fragment stage either way and cut the
+    /// alpha mask inside it, so a masked bucket and an opaque one are the same
+    /// draw here. What they cannot express inside the stage is the cull mode.
+    fn sided_partitions(&self, draws: &BucketDraws, pipelines: SidedPipelines) -> Vec<BucketDraws> {
+        self.partitions(
+            draws,
+            mesh::GpuMaterial::DOUBLE_SIDED,
+            &[
+                (0, pipelines.single),
+                (mesh::GpuMaterial::DOUBLE_SIDED, pipelines.double),
+            ],
+        )
     }
 
     /// Resolves a description's mesh and material indices into the table ids the
@@ -8728,7 +8855,11 @@ impl ForwardRenderer {
         // prepass drew — see `MeshModules::color_depth_stencil`.
         let wireframe = self.wireframe_pipeline.filter(|_| self.wireframe_on);
         let bucket_draws = BucketDraws {
-            pipeline: wireframe.unwrap_or(self.mesh_pipeline),
+            // Replaced per partition below, in both passes that draw this list —
+            // see [`ForwardRenderer::sided_partitions`] and
+            // [`ForwardRenderer::depth_partitions`]. The field is what the
+            // partitions inherit everything else from.
+            pipeline: self.mesh_pipeline.single,
             layout: self.mesh_pipeline_layout,
             indices: self.pool.index_buffer(),
             emit,
@@ -8815,6 +8946,13 @@ impl ForwardRenderer {
         // Resolved before the gather takes its mutable borrow of `self`, and it
         // is the one thing below that has to ask the renderer a question.
         let prepass_partitions = self.depth_partitions(&bucket_draws);
+        // And the colour pass's own split, which is by **side** alone: its
+        // pipeline has a fragment stage either way, so an alpha mask is nothing
+        // it has to route around and a cull mode is. The wireframe twin pair
+        // substitutes for the shaded one here exactly as the single pipeline
+        // used to.
+        let color_partitions =
+            self.sided_partitions(&bucket_draws, wireframe.unwrap_or(self.mesh_pipeline));
         if let Some((gather, images)) = self.probe_gather.as_mut().zip(rsm_images) {
             gather.add_pass(graph, frame, images, probe_visibility_view, probe_table);
         }
@@ -9157,8 +9295,13 @@ impl ForwardRenderer {
             // and no sun in it.
             .unwrap_or(group);
             let encoder = ctx.encoder();
-            bucket_draws.open(encoder);
-            bucket_draws.record(encoder, group, &generated);
+            // One `open` per partition and its own buckets under it, on the
+            // depth prepass's terms: the pass is still one indirect call per
+            // bucket, drawn under the pipeline that bucket's side asked for.
+            for partition in &color_partitions {
+                partition.open(encoder);
+                partition.record(encoder, group, &generated);
+            }
         });
 
         // --- the background ---
@@ -9841,7 +9984,7 @@ impl ForwardRenderer {
         let bucket_draws = BucketDraws {
             // Replaced per partition below; the field is what the tile clears
             // and the reflective shadow map inherit, and neither binds it.
-            pipeline: self.shadow_pipeline,
+            pipeline: self.shadow_pipeline.single,
             layout: self.mesh_pipeline_layout,
             indices: self.pool.index_buffer(),
             emit: self.emit,
@@ -9991,15 +10134,20 @@ impl ForwardRenderer {
             rsm = rsm.use_buffer(buffer, ResourceState::ShaderReadWrite);
         }
         rsm = read_draw_sources(rsm, &cascade_draws, self.emit);
-        let rsm_draws = BucketDraws {
-            pipeline: self.rsm_pipeline,
-            ..bucket_calls.clone()
-        };
-        let rsm_recorded = rsm_draws.calls.len() as u64;
+        // Split by side, on the colour pass's terms: this stage cuts the alpha
+        // mask itself, so the only thing it cannot say inside the fragment stage
+        // is which faces the rasteriser keeps.
+        let rsm_partitions = self.sided_partitions(&bucket_calls, self.rsm_pipeline);
+        let rsm_recorded: u64 = rsm_partitions
+            .iter()
+            .map(|partition| partition.calls.len() as u64)
+            .sum();
         rsm.execute(move |ctx| {
             let encoder = ctx.encoder();
-            rsm_draws.open(encoder);
-            rsm_draws.record(encoder, cascade_group, &cascade_draws);
+            for partition in &rsm_partitions {
+                partition.open(encoder);
+                partition.record(encoder, cascade_group, &cascade_draws);
+            }
         });
 
         // --- the punctual reflective shadow map ---
@@ -10055,17 +10203,22 @@ impl ForwardRenderer {
         for draws in &punctual_sources {
             punctual_pass = read_draw_sources(punctual_pass, draws, self.emit);
         }
-        let punctual_draws = BucketDraws {
-            pipeline: self.rsm_pipeline,
-            ..bucket_calls
-        };
-        let punctual_recorded = (punctual_views.len() * punctual_draws.calls.len()) as u64;
+        let punctual_partitions = self.sided_partitions(&bucket_calls, self.rsm_pipeline);
+        let punctual_recorded = (punctual_views.len()
+            * punctual_partitions
+                .iter()
+                .map(|partition| partition.calls.len())
+                .sum::<usize>()) as u64;
         punctual_pass.execute(move |ctx| {
             let encoder = ctx.encoder();
-            punctual_draws.open(encoder);
-            for (group, tile, draws) in &punctual_views {
-                set_shadow_tile(encoder, *tile);
-                punctual_draws.record(encoder, *group, draws);
+            // The partition is **outside** the view loop, on the shadow atlas's
+            // terms: one pipeline bind covers every face of that side.
+            for partition in &punctual_partitions {
+                partition.open(encoder);
+                for (group, tile, draws) in &punctual_views {
+                    set_shadow_tile(encoder, *tile);
+                    partition.record(encoder, *group, draws);
+                }
             }
         });
 
@@ -10881,14 +11034,29 @@ impl ForwardRenderer {
                 });
             }
             let modules = MeshModules::new(device, self.emit, self.culls_clusters)?;
-            let pipeline = modules.color_pipeline(
-                device,
-                self.mesh_pipeline_layout,
-                PolygonMode::Line,
-                "wireframe",
-            );
+            let [single, double] = MeshModules::sided(|cull| {
+                modules.color_pipeline(
+                    device,
+                    self.mesh_pipeline_layout,
+                    PolygonMode::Line,
+                    cull,
+                    "wireframe",
+                )
+            });
             modules.destroy(device);
-            self.wireframe_pipeline = Some(pipeline?);
+            // **Both or neither.** A caller that got one twin back would draw a
+            // frame missing every double-sided surface and nothing would say
+            // so; released here rather than kept, because `destroy` is what
+            // releases what this field holds and it holds nothing yet.
+            let pipelines = match (single, double) {
+                (Ok(single), Ok(double)) => SidedPipelines { single, double },
+                (Ok(built), Err(error)) | (Err(error), Ok(built)) => {
+                    device.destroy_graphics_pipeline(built);
+                    return Err(error);
+                }
+                (Err(error), Err(_)) => return Err(error),
+            };
+            self.wireframe_pipeline = Some(pipelines);
         }
         self.wireframe_on = true;
         Ok(())
@@ -11908,9 +12076,14 @@ impl ForwardRenderer {
         device.destroy_pipeline_layout(self.tonemap_pipeline_layout);
         device.destroy_bind_group_layout(self.tonemap_layout);
 
-        device.destroy_graphics_pipeline(self.shadow_pipeline);
-        device.destroy_graphics_pipeline(self.depth_masked_pipeline);
-        device.destroy_graphics_pipeline(self.rsm_pipeline);
+        for pipelines in [
+            self.shadow_pipeline,
+            self.depth_masked_pipeline,
+            self.rsm_pipeline,
+        ] {
+            device.destroy_graphics_pipeline(pipelines.single);
+            device.destroy_graphics_pipeline(pipelines.double);
+        }
         device.destroy_graphics_pipeline(self.shadow_clear_pipeline);
         for groups in self.shadow_groups {
             for group in groups {
@@ -11964,12 +12137,14 @@ impl ForwardRenderer {
         self.ltc_table.destroy(device);
         self.normal_page.destroy(device);
 
-        device.destroy_graphics_pipeline(self.mesh_pipeline);
-        // The one place the wireframe twin is released — `set_wireframe(.., false)`
+        device.destroy_graphics_pipeline(self.mesh_pipeline.single);
+        device.destroy_graphics_pipeline(self.mesh_pipeline.double);
+        // The one place the wireframe pair is released — `set_wireframe(.., false)`
         // deliberately is not, because this call is the one that requires an
         // idle device.
-        if let Some(pipeline) = self.wireframe_pipeline {
-            device.destroy_graphics_pipeline(pipeline);
+        if let Some(pipelines) = self.wireframe_pipeline {
+            device.destroy_graphics_pipeline(pipelines.single);
+            device.destroy_graphics_pipeline(pipelines.double);
         }
         device.destroy_pipeline_layout(self.mesh_pipeline_layout);
         for group in self
@@ -12309,21 +12484,55 @@ impl MeshModules {
         })
     }
 
-    /// The rasteriser state both pipeline shapes share, because the only thing
-    /// that differs between them is which stage produces the geometry.
+    /// The rasteriser state every pipeline shape here shares, because the only
+    /// things that differ between them are which stage produces the geometry and
+    /// which side of it survives.
     ///
-    /// Back-face culling is on from the first mesh. The cube's winding is
-    /// asserted by `crcbl-shaders`' own tests, so a face that vanished would be a
-    /// *test* failure rather than a debugging session — and a mesh drawn without
+    /// [`CullMode::Back`] is what a single-sided bucket asks for, and it has
+    /// been on from the first mesh. The cube's winding is asserted by
+    /// `crcbl-shaders`' own tests, so a face that vanished would be a *test*
+    /// failure rather than a debugging session — and a mesh drawn without
     /// culling would let a winding mistake survive into P7's geometry pool. The
     /// mesh stage emits its corner triples in the index buffer's own order, so
     /// the winding it produces is the same one.
-    fn primitive(polygon_mode: PolygonMode) -> PrimitiveState {
+    ///
+    /// [`CullMode::None`] is what a double-sided bucket asks for — glTF 2.0
+    /// §3.9.6's first half — and the twin built with it is the only way a back
+    /// face reaches `mesh.slang` at all. See [`SidedPipelines`].
+    fn primitive(polygon_mode: PolygonMode, cull_mode: CullMode) -> PrimitiveState {
         PrimitiveState {
-            cull_mode: CullMode::Back,
+            cull_mode,
             polygon_mode,
             ..PrimitiveState::default()
         }
+    }
+
+    /// What a pipeline built with `cull` adds to its label, so a capture and
+    /// `crcbl_hal::null`'s recorder tell a [`SidedPipelines::double`] twin from
+    /// the [`SidedPipelines::single`] it was built beside.
+    ///
+    /// Empty for the culling modes, because those pipelines' labels are the ones
+    /// every existing capture and every test lookup already names.
+    fn side_label(cull: CullMode) -> &'static str {
+        match cull {
+            CullMode::None => " double-sided",
+            CullMode::Front | CullMode::Back => "",
+        }
+    }
+
+    /// Both sides of one pipeline shape, single-sided first, **created and not
+    /// yet unwrapped**.
+    ///
+    /// The results rather than the pair, because that is the discipline `build`
+    /// keeps for every pipeline it makes: everything is created while the
+    /// modules are alive, the modules are released once, and only then is each
+    /// result unwrapped and handed to the rollback that will release it. A
+    /// helper that unwrapped here would have to drop a handle it had already
+    /// created when its twin failed, and nothing would ever destroy it.
+    fn sided(
+        build: impl Fn(CullMode) -> Result<GraphicsPipelineHandle, HalError>,
+    ) -> [Result<GraphicsPipelineHandle, HalError>; 2] {
+        [build(CullMode::Back), build(CullMode::None)]
     }
 
     /// Milestone 3's depth test, and the seam's default is already reversed-Z:
@@ -12360,27 +12569,30 @@ impl MeshModules {
         }
     }
 
-    /// The colour pass's pipeline, filled or wireframe.
+    /// The colour pass's pipeline, filled or wireframe, culling back faces or
+    /// nothing.
     ///
     /// `label` names the caller — `"forward"` for the frame's own, `"wireframe"`
-    /// for [`ForwardRenderer::set_wireframe`]'s — so a capture tells the two
-    /// apart.
+    /// for [`ForwardRenderer::set_wireframe`]'s — and [`MeshModules::side_label`]
+    /// names the side, so a capture tells all four apart.
     fn color_pipeline(
         &self,
         device: &dyn Device,
         layout: PipelineLayoutHandle,
         polygon_mode: PolygonMode,
+        cull: CullMode,
         label: &str,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        let primitive = Self::primitive(polygon_mode);
+        let primitive = Self::primitive(polygon_mode, cull);
         let depth_stencil = Self::color_depth_stencil(polygon_mode);
+        let side = Self::side_label(cull);
         let fragment = Some(ShaderEntry {
             module: self.mesh,
             entry_point: self.fragment,
         });
         match self.cluster.as_ref() {
             Some(cluster) => device.create_mesh_pipeline(&MeshPipelineDesc {
-                label: Some(&format!("{label} mesh cluster")),
+                label: Some(&format!("{label}{side} mesh cluster")),
                 layout,
                 task: cluster
                     .task
@@ -12402,7 +12614,7 @@ impl MeshModules {
                 color_targets: &Self::COLOR_TARGETS,
             }),
             None => device.create_graphics_pipeline(&GraphicsPipelineDesc {
-                label: Some(&format!("{label} mesh")),
+                label: Some(&format!("{label}{side} mesh")),
                 layout,
                 vertex: ShaderEntry {
                     module: self.mesh,
@@ -12446,11 +12658,13 @@ impl MeshModules {
         &self,
         device: &dyn Device,
         layout: PipelineLayoutHandle,
+        cull: CullMode,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        let primitive = Self::primitive(PolygonMode::Fill);
+        let primitive = Self::primitive(PolygonMode::Fill, cull);
+        let side = Self::side_label(cull);
         match self.cluster.as_ref() {
             Some(cluster) => device.create_mesh_pipeline(&MeshPipelineDesc {
-                label: Some("shadow cascade mesh cluster"),
+                label: Some(&format!("shadow cascade{side} mesh cluster")),
                 layout,
                 task: cluster
                     .task
@@ -12472,7 +12686,7 @@ impl MeshModules {
                 color_targets: &[],
             }),
             None => device.create_graphics_pipeline(&GraphicsPipelineDesc {
-                label: Some("shadow cascade"),
+                label: Some(&format!("shadow cascade{side}")),
                 layout,
                 vertex: ShaderEntry {
                     module: self.mesh,
@@ -12515,15 +12729,17 @@ impl MeshModules {
         &self,
         device: &dyn Device,
         layout: PipelineLayoutHandle,
+        cull: CullMode,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        let primitive = Self::primitive(PolygonMode::Fill);
+        let primitive = Self::primitive(PolygonMode::Fill, cull);
+        let side = Self::side_label(cull);
         let fragment = Some(ShaderEntry {
             module: self.mesh,
             entry_point: self.depth_masked_fragment,
         });
         match self.cluster.as_ref() {
             Some(cluster) => device.create_mesh_pipeline(&MeshPipelineDesc {
-                label: Some("shadow cascade masked mesh cluster"),
+                label: Some(&format!("shadow cascade masked{side} mesh cluster")),
                 layout,
                 task: cluster
                     .task
@@ -12545,7 +12761,7 @@ impl MeshModules {
                 color_targets: &[],
             }),
             None => device.create_graphics_pipeline(&GraphicsPipelineDesc {
-                label: Some("shadow cascade masked"),
+                label: Some(&format!("shadow cascade masked{side}")),
                 layout,
                 vertex: ShaderEntry {
                     module: self.mesh,
@@ -12583,15 +12799,17 @@ impl MeshModules {
         &self,
         device: &dyn Device,
         layout: PipelineLayoutHandle,
+        cull: CullMode,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        let primitive = Self::primitive(PolygonMode::Fill);
+        let primitive = Self::primitive(PolygonMode::Fill, cull);
+        let side = Self::side_label(cull);
         let fragment = Some(ShaderEntry {
             module: self.mesh,
             entry_point: self.rsm_fragment,
         });
         match self.cluster.as_ref() {
             Some(cluster) => device.create_mesh_pipeline(&MeshPipelineDesc {
-                label: Some("rsm mesh cluster"),
+                label: Some(&format!("rsm{side} mesh cluster")),
                 layout,
                 task: cluster
                     .task
@@ -12613,7 +12831,7 @@ impl MeshModules {
                 color_targets: &Self::RSM_TARGETS,
             }),
             None => device.create_graphics_pipeline(&GraphicsPipelineDesc {
-                label: Some("rsm"),
+                label: Some(&format!("rsm{side}")),
                 layout,
                 vertex: ShaderEntry {
                     module: self.mesh,
@@ -14448,11 +14666,24 @@ mod tests {
     /// The oracle is [`level_buckets`](ForwardRenderer::level_buckets), which is
     /// built from a mesh's own level count rather than from the table's length —
     /// so a build that emitted a twin per mesh has more buckets than levels and
-    /// this says so. And the masked twin of the same scene is asserted to be
-    /// **exactly twice** as long, or the comparison would pass on a renderer
-    /// that had stopped twinning at all.
+    /// this says so. And the twinned scenes below are asserted to be exactly as
+    /// many times as long as they hold modes, or the comparison would pass on a
+    /// renderer that had stopped twinning at all.
+    ///
+    /// # A twin per mode the scene **holds**, not per mode that exists
+    ///
+    /// [`DEPTH_MODES`] has four entries and a bucket is not free —
+    /// `DrawGen::bucket_base` gives each one a whole instance capacity of `u32`
+    /// in the scattered runs, and every pass records one indirect call per
+    /// bucket — so the rule that matters is which values the description's own
+    /// materials carry. Two rows of two modes are two twins whichever two they
+    /// are, and the pair below says so both ways: three modes across three rows
+    /// is three, and three rows collapsed onto two *values* is two even though
+    /// between them they set both mode bits.
     #[test]
     fn an_all_opaque_scene_keeps_one_bucket_per_mesh_level() {
+        use crcbl_shaders::mesh::GpuMaterial;
+
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
@@ -14482,34 +14713,95 @@ mod tests {
         renderer.destroy(device);
         recorder.assert_valid();
 
-        let masked_scene = {
-            let mut scene = crate::scene::demo();
-            scene.materials[DEMO_UNTINTED].flags =
-                crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK;
-            scene
-        };
-        let (recorder, device, queue) = open();
-        let device = device.as_ref();
-        let masked =
-            ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, &masked_scene)
-                .expect("the null backend accepts the demo description");
-        assert_eq!(
-            masked.bucket_constants.len(),
-            2 * levels,
-            "a scene holding both modes gets each mesh's levels twice, or the assertion above \
-             is about a renderer that never twins"
-        );
-        assert_eq!(
-            masked
-                .bucket_modes
-                .iter()
-                .filter(|mode| **mode == crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK)
-                .count(),
-            levels,
-            "half of them masked"
-        );
-        masked.destroy(device);
-        recorder.assert_valid();
+        // Every arrangement worth stating, as the modes its material rows carry
+        // and the number of twins that has to produce. The demo has three rows;
+        // a fourth is appended where four distinct modes are wanted, which
+        // nothing instances and which therefore changes nothing but the mode
+        // set.
+        for (rows, modes, what) in [
+            (
+                vec![GpuMaterial::ALPHA_MODE_MASK, 0, 0],
+                2,
+                "one masked row beside two opaque ones",
+            ),
+            (
+                vec![GpuMaterial::DOUBLE_SIDED, 0, 0],
+                2,
+                "one double-sided row beside two opaque ones",
+            ),
+            (
+                vec![GpuMaterial::ALPHA_MODE_MASK, GpuMaterial::DOUBLE_SIDED, 0],
+                3,
+                "a masked row, a double-sided one and an opaque one",
+            ),
+            (
+                vec![
+                    GpuMaterial::ALPHA_MODE_MASK,
+                    GpuMaterial::DOUBLE_SIDED,
+                    GpuMaterial::ALPHA_MODE_MASK,
+                ],
+                2,
+                "three rows carrying two mode values between them — both mode bits are set \
+                 somewhere and neither row is opaque, so a rule counting bits rather than \
+                 values would say three",
+            ),
+            (
+                vec![
+                    0,
+                    GpuMaterial::ALPHA_MODE_MASK,
+                    GpuMaterial::DOUBLE_SIDED,
+                    GpuMaterial::MODE_MASK,
+                ],
+                4,
+                "one row of each mode, which is the only arrangement that pays for four",
+            ),
+        ] {
+            let scene = {
+                let mut scene = crate::scene::demo();
+                while scene.materials.len() < rows.len() {
+                    scene.materials.push(GpuMaterial::UNTINTED);
+                }
+                for (row, flags) in scene.materials.iter_mut().zip(&rows) {
+                    row.flags = *flags;
+                }
+                scene
+            };
+            let (recorder, device, queue) = open();
+            let device = device.as_ref();
+            let twinned =
+                ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, &scene)
+                    .expect("the null backend accepts the demo description");
+            assert_eq!(
+                twinned.bucket_constants.len(),
+                modes * levels,
+                "{what}: {modes} mode(s) over {levels} level(s) is {} bucket(s), and the table \
+                 has {}",
+                modes * levels,
+                twinned.bucket_constants.len()
+            );
+            // The modes present, as a set — which is the claim, since the order
+            // is `DEPTH_MODES`' and the count above already pins the length.
+            let held: std::collections::BTreeSet<u32> =
+                twinned.bucket_modes.iter().copied().collect();
+            let want: std::collections::BTreeSet<u32> = rows.iter().copied().collect();
+            assert_eq!(
+                held, want,
+                "{what}: the table twins the modes its materials carry and no others"
+            );
+            for mode in &held {
+                assert_eq!(
+                    twinned
+                        .bucket_modes
+                        .iter()
+                        .filter(|held| *held == mode)
+                        .count(),
+                    levels,
+                    "{what}: every mode present gets every mesh's levels once"
+                );
+            }
+            twinned.destroy(device);
+            recorder.assert_valid();
+        }
     }
 
     /// **The two pyramids differ in exactly one field, and it is the material
@@ -19929,8 +20221,8 @@ mod tests {
                 .execute(device, &mut pool, encoder.as_mut(), None)
                 .expect("the graph executed");
             encoder.finish().expect("recording succeeded");
-            let plain = renderer.shadow_pipeline;
-            let cutout = renderer.depth_masked_pipeline;
+            let plain = renderer.shadow_pipeline.single;
+            let cutout = renderer.depth_masked_pipeline.single;
             assert_ne!(
                 plain, cutout,
                 "the two depth pipelines have to be two objects, or nothing below discriminates"
@@ -20094,6 +20386,325 @@ mod tests {
         );
     }
 
+    /// **A double-sided material moves every pass's draws for its own buckets
+    /// onto the `CullMode::None` twins, and moves nothing else.**
+    ///
+    /// [`a_masked_material_moves_its_own_meshs_depth_draws_onto_the_cutout_pipeline`]'s
+    /// claim for glTF's other mode, and it is wider by construction: an alpha
+    /// mask is cut inside a fragment stage, so only the two depth-only passes
+    /// route around it, while a cull mode is a pipeline state and **every** pass
+    /// that draws the surface has to route around it — the colour pass, both
+    /// depth passes and the two reflective shadow maps.
+    ///
+    /// So this walks the whole recorded stream rather than two named passes:
+    /// every render pass that recorded an indirect draw is read back as the
+    /// (side, bucket) pairs it recorded, and each of the four claims below is
+    /// about all of them at once.
+    ///
+    /// * a scene with nothing double-sided binds **no** cull-none twin
+    ///   anywhere, which is the "an all-single-sided frame costs what it always
+    ///   did" claim at the level a null device can see it;
+    /// * a scene with one double-sided row binds a twin in every pass that
+    ///   draws — a frame that had only routed the colour pass would satisfy
+    ///   nothing below, and one that had only routed the depth passes would
+    ///   draw a surface the prepass wrote no depth for;
+    /// * the calls following each bind are exactly that side's buckets, in
+    ///   bucket order. A split that bound both pipelines and drew every bucket
+    ///   under each would satisfy the claim above and double the frame's draws;
+    /// * and folding each twin onto the pipeline it is a twin of — then
+    ///   collapsing the runs of equal binds the fold creates — leaves the two
+    ///   frames' bind streams **equal**, so nothing else in the frame moved.
+    ///
+    /// The two scenes differ in one flags word and nothing else.
+    ///
+    /// [`a_masked_material_moves_its_own_meshs_depth_draws_onto_the_cutout_pipeline`]: fn@a_masked_material_moves_its_own_meshs_depth_draws_onto_the_cutout_pipeline
+    #[test]
+    fn a_double_sided_material_moves_every_passs_draws_onto_the_cull_none_twins() {
+        use crcbl_hal::null::Command;
+
+        // The occlusion blur count is a process-global console variable and a
+        // frame binds one pipeline per blur — the masked test's hazard exactly.
+        let _blurs = ssao_blur_switch();
+
+        // **A scene whose probes ask to be updated**, because the reflective
+        // shadow maps are recorded by a volume rather than by an effect bit —
+        // and they are two of the five passes this claim is about. The demo's
+        // empty grid records neither, which would leave the widest half of the
+        // routing unchecked.
+        let scene_with_probes = || {
+            let mut scene = crate::scene::demo();
+            scene.capacities.probes = 1;
+            scene.probes = crate::scene::ProbeGrid {
+                volume: crcbl_shaders::probe::ProbeVolume {
+                    origin: [0.0; 3],
+                    inv_spacing: [1.0; 3],
+                    counts: [1, 1, 1],
+                    levels: 1,
+                    steps: crcbl_shaders::probe::ProbeSteps::default(),
+                },
+                probes: vec![crcbl_shaders::probe::GpuProbe::ZERO],
+                update: ProbeUpdate::EveryFrame,
+            };
+            scene
+        };
+        let single_scene = scene_with_probes();
+        let double_scene = {
+            let mut scene = scene_with_probes();
+            scene.materials[DEMO_UNTINTED].flags = crcbl_shaders::mesh::GpuMaterial::DOUBLE_SIDED;
+            scene
+        };
+
+        /// What one scene's frame reveals: each bucket's mode, how often a
+        /// cull-none twin was bound at all, every drawing pass's (side, bucket)
+        /// pairs in record order, and the whole bind stream with each twin
+        /// folded onto the pipeline it twins.
+        struct Recorded {
+            modes: Vec<u32>,
+            twins_bound: usize,
+            passes: Vec<(String, Vec<(bool, u32)>)>,
+            folded: Vec<GraphicsPipelineHandle>,
+        }
+
+        // One frame each, from two renderers rather than two frames from one, on
+        // the masked test's terms: a bucket table is fixed at build, and two
+        // builds keep both frames a first frame.
+        let bound = |scene: &crate::scene::SceneDesc<'_>| -> Recorded {
+            let (recorder, device, queue) = open();
+            let device = device.as_ref();
+            let mut renderer =
+                ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, scene)
+                    .expect("the null backend accepts the demo description");
+            assert!(
+                !renderer.emit.is_mesh(),
+                "this preset built a mesh-shader path, whose draws carry no argument offset to \
+                 recover a bucket from"
+            );
+            place_cube(&mut renderer, Mat4::IDENTITY);
+            // **One shadowed spot**, so the punctual reflective shadow map has a
+            // face to draw into: the pass is recorded on every frame but its
+            // view loop is empty without one, and an empty loop records no draw
+            // for the claim below to be about.
+            renderer.set_lights(&[crate::Light::Spot(crate::SpotLight {
+                position: Vec3::new(0.0, 2.0, 0.0),
+                radius: 8.0,
+                color: Vec3::splat(4.0),
+                direction: Vec3::NEG_Y,
+                inner_angle: 0.3,
+                outer_angle: 0.6,
+                fill: false,
+            })]);
+            let imported = swapchain_image(device);
+            let mut pool = crate::TransientPool::new();
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    (64, 48),
+                )
+                .expect("write");
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, &pool, target, (64, 48));
+            let compiled = graph.compile(&pool).expect("a legal frame");
+            let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("double sided lap"),
+                queue,
+            });
+            compiled
+                .execute(device, &mut pool, encoder.as_mut(), None)
+                .expect("the graph executed");
+            encoder.finish().expect("recording succeeded");
+
+            // Every twin and the pipeline it twins, so a bind can be reported as
+            // a side and folded back. Asserted distinct, or nothing here
+            // discriminates.
+            let sided = [
+                renderer.mesh_pipeline,
+                renderer.shadow_pipeline,
+                renderer.depth_masked_pipeline,
+                renderer.rsm_pipeline,
+            ];
+            for pair in sided {
+                assert_ne!(
+                    pair.single, pair.double,
+                    "a pipeline and its cull-none twin have to be two objects"
+                );
+            }
+            let twin_of = |handle: GraphicsPipelineHandle| -> Option<GraphicsPipelineHandle> {
+                sided
+                    .iter()
+                    .find(|pair| pair.double == handle)
+                    .map(|pair| pair.single)
+            };
+            let bucket_of = |args_offset: u64| -> u32 {
+                (0..u32::try_from(renderer.bucket_constants.len()).expect("a few buckets"))
+                    .find(|bucket| renderer.draws.args_offset(*bucket) == args_offset)
+                    .unwrap_or_else(|| {
+                        panic!("a draw read its arguments at {args_offset}, which is no bucket's")
+                    })
+            };
+
+            let mut passes: Vec<(String, Vec<(bool, u32)>)> = Vec::new();
+            let mut folded: Vec<GraphicsPipelineHandle> = Vec::new();
+            let mut twins_bound = 0usize;
+            let mut current: Option<GraphicsPipelineHandle> = None;
+            let mut label: Option<String> = None;
+            let mut calls: Vec<(bool, u32)> = Vec::new();
+            let commands = recorder.commands();
+            for command in &commands {
+                match command {
+                    Command::BeginRenderPass { label: name, .. } => {
+                        label = name.clone();
+                        calls = Vec::new();
+                    }
+                    Command::EndRenderPass => {
+                        if !calls.is_empty() {
+                            passes.push((
+                                label.clone().expect("every pass here is labelled"),
+                                std::mem::take(&mut calls),
+                            ));
+                        }
+                    }
+                    Command::BindGraphicsPipeline(handle) => {
+                        current = Some(*handle);
+                        if twin_of(*handle).is_some() {
+                            twins_bound += 1;
+                        }
+                        // The fold turns a `single, double` pair into
+                        // `single, single`; collapsing a run of equal binds is
+                        // what makes the two streams comparable without hiding
+                        // a bind of anything else.
+                        let folded_handle = twin_of(*handle).unwrap_or(*handle);
+                        if folded.last() != Some(&folded_handle) {
+                            folded.push(folded_handle);
+                        }
+                    }
+                    Command::DrawIndexedIndirectCount(draw) => {
+                        let handle = current.expect("a draw follows a pipeline bind");
+                        calls.push((twin_of(handle).is_some(), bucket_of(draw.args_offset)));
+                    }
+                    Command::DrawIndexedIndirect(draw) => {
+                        let handle = current.expect("a draw follows a pipeline bind");
+                        calls.push((twin_of(handle).is_some(), bucket_of(draw.offset)));
+                    }
+                    _ => {}
+                }
+            }
+            let modes = renderer.bucket_modes.clone();
+            renderer.destroy(device);
+            pool.destroy(device);
+            device.destroy_image_view(imported.view);
+            device.destroy_image(imported.image);
+            recorder.assert_valid();
+            Recorded {
+                modes,
+                twins_bound,
+                passes,
+                folded,
+            }
+        };
+
+        let single = bound(&single_scene);
+        let double = bound(&double_scene);
+
+        assert_eq!(
+            single.twins_bound, 0,
+            "a scene with nothing double-sided must never bind a cull-none twin"
+        );
+        // Named rather than counted, because the claim is that **every** pass
+        // that draws the surface routes: a frame that had quietly stopped
+        // recording one of them would satisfy a count and leave that pass's
+        // routing unchecked for ever.
+        let drawing: Vec<&str> = single
+            .passes
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        for pass in ["shadow", "depth-prepass", "forward", "rsm", "rsm-punctual"] {
+            assert!(
+                drawing.contains(&pass),
+                "`{pass}` drew nothing in this frame, so its routing is unchecked: {drawing:?}"
+            );
+        }
+        assert!(
+            double.twins_bound > 0,
+            "a double-sided scene must bind the cull-none twins"
+        );
+        assert_eq!(
+            double
+                .passes
+                .iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            single
+                .passes
+                .iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            "the two frames must draw in the same passes, or they are not comparable"
+        );
+
+        // What each drawing pass should have recorded: every single-sided bucket
+        // under the plain pipeline in bucket order, then every double-sided one
+        // under the twin — the partition order `sided_partitions` lays down —
+        // repeated once per view for a pass that draws several.
+        let want: Vec<(bool, u32)> = [false, true]
+            .into_iter()
+            .flat_map(|twin| {
+                double
+                    .modes
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, mode)| {
+                        (**mode & crcbl_shaders::mesh::GpuMaterial::DOUBLE_SIDED != 0) == twin
+                    })
+                    .map(move |(bucket, _)| (twin, u32::try_from(bucket).expect("a few buckets")))
+            })
+            .collect();
+        assert!(
+            want.iter().any(|(twin, _)| *twin) && want.iter().any(|(twin, _)| !*twin),
+            "the double-sided demo has to hold buckets of both sides, or this compares one \
+             partition against itself: {:?}",
+            double.modes
+        );
+        for (name, calls) in &double.passes {
+            let views = calls.len() / want.len();
+            assert!(
+                views > 0 && calls.len() % want.len() == 0,
+                "`{name}` recorded {} call(s) over {} bucket(s), which is not a whole number of \
+                 views",
+                calls.len(),
+                want.len()
+            );
+            // The partition is **outside** any view loop — one pipeline bind
+            // covers every view of that side — so the stream is each partition's
+            // bucket list repeated once per view.
+            let mut expected: Vec<(bool, u32)> = Vec::with_capacity(calls.len());
+            for twin in [false, true] {
+                let partition: Vec<(bool, u32)> = want
+                    .iter()
+                    .copied()
+                    .filter(|(side, _)| *side == twin)
+                    .collect();
+                for _ in 0..views {
+                    expected.extend_from_slice(&partition);
+                }
+            }
+            assert_eq!(
+                *calls, expected,
+                "`{name}` must record each bucket once per view, under the pipeline its own \
+                 side asked for"
+            );
+        }
+
+        assert_eq!(
+            double.folded, single.folded,
+            "the frame gained or lost a pipeline bind beyond a cull-none twin beside the \
+             pipeline it twins"
+        );
+    }
+
     /// **The wireframe view swaps the colour pass's pipeline and nothing else.**
     ///
     /// The mechanism, at the level a null device can observe it: which pipeline
@@ -20172,7 +20783,7 @@ mod tests {
             bound
         };
 
-        let filled = renderer.mesh_pipeline;
+        let filled = renderer.mesh_pipeline.single;
         let off = pipelines_in_a_frame(&mut renderer, &mut pool);
         assert!(
             off.contains(&filled),
@@ -20190,7 +20801,8 @@ mod tests {
         assert!(renderer.wireframe());
         let lines = renderer
             .wireframe_pipeline
-            .expect("switching on is what builds it");
+            .expect("switching on is what builds it")
+            .single;
         let on = pipelines_in_a_frame(&mut renderer, &mut pool);
         assert!(
             !on.contains(&filled),

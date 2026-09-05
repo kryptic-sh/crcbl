@@ -1380,13 +1380,13 @@ impl GpuInstance {
     pub const MATERIAL_MODE_SHIFT: u32 = 2;
 
     /// The material mode's bits in [`GpuInstance::flags`]: bits 2 and 3, two
-    /// wide, of which one is spoken for.
+    /// wide, and both of them are spoken for.
     ///
-    /// Two rather than one so the next mode — see
-    /// [`GpuMaterial::MODE_MASK`](GpuMaterial::MODE_MASK) — needs no change to
-    /// the record's layout or to any shader that reads it. The unused bit is
-    /// zero in every instance this engine writes, which is what makes a mode
-    /// comparison in the scatter a comparison of the whole field.
+    /// [`GpuMaterial::MODE_MASK`](GpuMaterial::MODE_MASK) is the alpha-mask bit
+    /// and the double-sided one, so this field carries the mode whole and a
+    /// mode comparison in the scatter is a comparison of the whole field. A
+    /// third mode would widen both, which is why they are documented as one
+    /// pair.
     pub const MATERIAL_MODE_MASK: u32 = 0b11 << Self::MATERIAL_MODE_SHIFT;
 
     /// This instance's material mode, unpacked from
@@ -1830,13 +1830,15 @@ pub struct GpuMaterial {
     /// base-colour page's — so a page with no alpha channel authored masks
     /// nothing.
     pub alpha_cutoff: f32,
-    /// Per-material bits. Today there is one:
-    /// [`ALPHA_MODE_MASK`](Self::ALPHA_MODE_MASK).
+    /// Per-material bits: [`ALPHA_MODE_MASK`](Self::ALPHA_MODE_MASK) and
+    /// [`DOUBLE_SIDED`](Self::DOUBLE_SIDED).
     ///
     /// The word §2's table names beside the alpha cutoff, and the home glTF's
-    /// alpha modes take: `OPAQUE` is the absence of every bit, `MASK` is the bit
-    /// below, and `BLEND` has no bit because the renderer has no blended pass to
-    /// honour one with — see `docs/plan/43-render-standards.md` §3.
+    /// alpha modes take: `OPAQUE` is the absence of every bit, `MASK` is the
+    /// first bit below, and `BLEND` has no bit because the renderer has no
+    /// blended pass to honour one with — see
+    /// `docs/plan/43-render-standards.md` §3. `doubleSided` is the second, and
+    /// it is a mode in its own right rather than an alpha mode.
     ///
     /// **Zero is the honest default**, exactly as [`GpuMesh::flags`] is: a
     /// material nobody marked is opaque, which is what every row written before
@@ -1924,24 +1926,39 @@ impl GpuMaterial {
     /// hole it can see through, which is the failure this bit exists to avoid.
     pub const ALPHA_MODE_MASK: u32 = 1;
 
+    /// [`flags`](Self::flags) bit 1: glTF's `doubleSided: true`. Back-face
+    /// culling is off for this material, and a back face is shaded with its
+    /// normals reversed.
+    ///
+    /// **Both halves, because either alone is a wrong picture** — glTF 2.0
+    /// §3.9.6 states them together. Drawing the back face and shading it
+    /// through the front face's normal lights a leaf card from behind as
+    /// though the sun were on the other side of it, which reads as an unlit
+    /// black surface under a key light; reversing the normal without drawing
+    /// the face changes nothing at all. `crcbl_render::ForwardRenderer` routes
+    /// the draw — the colour pass, both depth passes and the reflective shadow
+    /// map each bind a `CullMode::None` twin for this mode's buckets — and
+    /// `shaders/mesh.slang`'s `double_sided_normal` is the reversal.
+    ///
+    /// **It is a mode and `ALPHA_MODE_MASK` is a mode, so a material can carry
+    /// both**: a cutout leaf card is the ordinary case, and it is the reason
+    /// this bit is worth more than the mask on its own.
+    pub const DOUBLE_SIDED: u32 = 1 << 1;
+
     /// The bits of [`flags`](Self::flags) that decide which draw **bucket** an
     /// instance of this material is routed into — the row's *mode*.
     ///
-    /// Today that is [`ALPHA_MODE_MASK`](Self::ALPHA_MODE_MASK) and nothing
-    /// else, so a row's mode is zero or one. The *field* the mode travels in is
-    /// wider than the vocabulary — see
+    /// [`ALPHA_MODE_MASK`](Self::ALPHA_MODE_MASK) and
+    /// [`DOUBLE_SIDED`](Self::DOUBLE_SIDED), so a row's mode is one of four
+    /// values and the field it travels in —
     /// [`GpuInstance::MATERIAL_MODE_MASK`](GpuInstance::MATERIAL_MODE_MASK),
-    /// which reserves two bits — and the occupant that second bit is reserved
-    /// for is glTF's `doubleSided`. It is **not declared here** until the
-    /// renderer can honour it: routing needs a pipeline per mode that actually
-    /// differs, and a double-sided mode needs `CullMode::None` twins of the
-    /// colour, depth, cutout and reflective-shadow-map pipelines first. Until
-    /// then it would be a bucket table twice as long drawing the same picture,
-    /// which is `ALPHA_MODE_MASK`'s own argument about `BLEND`.
+    /// two bits — is exactly full. A scene emits a twin of every mesh's levels
+    /// per mode **its own materials carry**, not per mode that exists, so two
+    /// materials of two modes are two twins whichever two they are.
     ///
     /// A bit outside this mask is not a mode: it changes how a fragment shades
     /// and nothing about which draw the fragment arrived in.
-    pub const MODE_MASK: u32 = Self::ALPHA_MODE_MASK;
+    pub const MODE_MASK: u32 = Self::ALPHA_MODE_MASK | Self::DOUBLE_SIDED;
 
     /// This row's mode — the [`MODE_MASK`](Self::MODE_MASK) bits of
     /// [`flags`](Self::flags).
@@ -4810,6 +4827,51 @@ mod tests {
             0,
             "a row nobody wrote is opaque"
         );
+        // **And single-sided, on the same argument**: glTF's own `doubleSided`
+        // default is `false`, so a row written before the bit existed already
+        // means what the specification means.
+        assert_eq!(
+            GpuMaterial::UNTINTED.flags & GpuMaterial::DOUBLE_SIDED,
+            0,
+            "the untinted material is back-face culled"
+        );
+        assert_eq!(
+            GpuMaterial::default().flags & GpuMaterial::DOUBLE_SIDED,
+            0,
+            "a row nobody wrote is back-face culled"
+        );
+        // **The two mode bits are two bits and the mask is both of them**, or a
+        // masked material and a double-sided one route into one bucket and the
+        // renderer binds one pipeline for two modes.
+        assert_eq!(GpuMaterial::ALPHA_MODE_MASK & GpuMaterial::DOUBLE_SIDED, 0);
+        assert_eq!(
+            GpuMaterial::MODE_MASK,
+            GpuMaterial::ALPHA_MODE_MASK | GpuMaterial::DOUBLE_SIDED
+        );
+        // Every mode a row can carry survives the shift into an instance
+        // record's own field, which is what makes the routing key round-trip.
+        for mode in [
+            0,
+            GpuMaterial::ALPHA_MODE_MASK,
+            GpuMaterial::DOUBLE_SIDED,
+            GpuMaterial::MODE_MASK,
+        ] {
+            let row = GpuMaterial {
+                flags: mode,
+                ..GpuMaterial::UNTINTED
+            };
+            assert_eq!(row.mode(), mode, "the row reports the mode it carries");
+            let instance = GpuInstance {
+                flags: mode << GpuInstance::MATERIAL_MODE_SHIFT,
+                ..GpuInstance::default()
+            };
+            assert_eq!(
+                instance.material_mode(),
+                mode,
+                "a mode that did not survive the record's own field is one the scatter cannot \
+                 compare against a bucket's"
+            );
+        }
         // The bit rides in the flags word the layout above pinned at 60, so a
         // marked row differs from an unmarked one in the bytes the device reads
         // rather than only on the host.
@@ -5362,6 +5424,94 @@ mod tests {
                  and thrown away"
             );
         }
+    }
+
+    /// glTF's back-face reversal, as both shaded stages must spell it.
+    ///
+    /// Held byte for byte for [`ALPHA_MASKED`]' reason: what this decides is
+    /// which way a surface faces, and a copy that reversed on the *front* face
+    /// in one stage is a scene lit from the wrong side in that pass alone —
+    /// which no golden of a single-sided scene can show, because the whole
+    /// function is the identity there.
+    const DOUBLE_SIDED_NORMAL: &str = concat!(
+        "float3 double_sided_normal(GpuMaterial material, float3 normal, bool front_facing)\n",
+        "{\n",
+        "    return ((material.flags & DOUBLE_SIDED) != 0u && !front_facing) ? -normal : normal;\n",
+        "}\n",
+    );
+
+    /// **Both stages that shade a surface reverse a double-sided back face, and
+    /// both of them do it with one function.**
+    ///
+    /// [`every_stage_cuts_the_alpha_mask_the_same_way`]'s claim for the other
+    /// half of glTF 2.0 §3.9.6. Two of `mesh.slang`'s three surface stages
+    /// evaluate a lighting equation — the shaded one and the reflective shadow
+    /// map's, which records the normal a probe gathers a patch through — and a
+    /// back face reversed in one and not the other is a leaf that shades lit and
+    /// bounces black.
+    ///
+    /// `depthMaskedFragmentMain` is deliberately **not** in the list: it writes
+    /// depth and cuts an alpha and evaluates no lighting equation, so it has no
+    /// normal to reverse. The assertion below is what says so rather than
+    /// leaving it an omission — a reversal that drifted in there would be
+    /// reading a side the depth pass has no use for.
+    ///
+    /// The three claims per stage rule out the three ways this passes wrongly: a
+    /// stage that never asks the rasteriser which side it is on, one that asks
+    /// and computes the reversal into a value it drops, and one that reversed by
+    /// hand rather than through the shared function.
+    ///
+    /// [`every_stage_cuts_the_alpha_mask_the_same_way`]: fn@every_stage_cuts_the_alpha_mask_the_same_way
+    #[test]
+    fn both_shaded_stages_reverse_a_double_sided_back_face() {
+        let source = include_str!("../shaders/mesh.slang");
+        assert!(
+            source.contains(DOUBLE_SIDED_NORMAL),
+            "mesh.slang does not carry this exact function, so its shaded stages can turn a \
+             surface over two ways:\n{DOUBLE_SIDED_NORMAL}"
+        );
+        assert!(
+            source.contains(&format!(
+                "static const uint DOUBLE_SIDED = {};",
+                GpuMaterial::DOUBLE_SIDED
+            )),
+            "mesh.slang's DOUBLE_SIDED is not the host's {}, so a row the importer marked is a \
+             row the shader does not",
+            GpuMaterial::DOUBLE_SIDED
+        );
+
+        let stage_of = |entry: &str| -> &str {
+            source
+                .split("[shader(\"")
+                .find(|chunk| chunk.contains(entry))
+                .unwrap_or_else(|| panic!("mesh.slang declares no stage `{entry}`"))
+        };
+
+        for entry in ["FragmentOutput fragmentMain(", "RsmOutput rsmFragmentMain("] {
+            let stage = stage_of(entry);
+            assert!(
+                stage.contains("SV_IsFrontFace"),
+                "`{entry}` shades a surface and never asks the rasteriser which side of it is \
+                 in front, so a double-sided back face is lit through the front face's normal"
+            );
+            assert!(
+                stage.contains("double_sided_normal(material,"),
+                "`{entry}` takes the side and never turns the normal over with it, so the \
+                 answer is read and thrown away"
+            );
+            assert!(
+                !stage.contains("-vertex_normal"),
+                "`{entry}` negates the surface normal by hand somewhere, which is the one way \
+                 two stages can disagree about a side while both look reversed"
+            );
+        }
+
+        let depth = stage_of("void depthMaskedFragmentMain(");
+        assert!(
+            !depth.contains("double_sided_normal("),
+            "the depth-only cutout stage evaluates no lighting equation, so it has no normal \
+             to reverse and reading a side there is work with no consumer"
+        );
     }
 
     /// Tokuyoshi and Kaplanyan's kernel, as `mesh.slang` must spell it.

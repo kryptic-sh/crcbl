@@ -268,8 +268,9 @@ static const uint INSTANCE_MATERIAL_MODE_SHIFT = 2;
 /// The material mode's bits in `GpuInstance::flags`, matching
 /// `crcbl_shaders::mesh::GpuInstance::MATERIAL_MODE_MASK`.
 ///
-/// Two bits, of which one is spoken for today — glTF's `alphaMode: "MASK"`. The
-/// host is what decides which modes exist at all; this pass only compares.
+/// Two bits, and both are spoken for — glTF's `alphaMode: "MASK"` and its
+/// `doubleSided`. The host is what decides which modes exist at all; this pass
+/// only compares.
 static const uint INSTANCE_MATERIAL_MODE_MASK = 12;
 
 /// Words in one indexed-indirect argument structure, matching

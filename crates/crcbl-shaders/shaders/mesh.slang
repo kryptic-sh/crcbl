@@ -1028,8 +1028,9 @@ struct GpuMaterial
     /// Read only where `ALPHA_MODE_MASK` is set in `flags` — see `alpha_masked`,
     /// which is the one comparison every stage that draws this surface makes.
     float alpha_cutoff;
-    /// Per-material bits. Today there is one — `ALPHA_MODE_MASK` — and zero is
-    /// glTF's `OPAQUE`, so a row written before the bit existed is opaque.
+    /// Per-material bits: `ALPHA_MODE_MASK` and `DOUBLE_SIDED`. Zero is glTF's
+    /// `OPAQUE` and single-sided both, so a row written before either bit
+    /// existed already means what the specification means.
     uint flags;
 };
 
@@ -1090,6 +1091,17 @@ static const uint TILING_PHYSICAL = 1;
 /// a mode. See `docs/plan/43-render-standards.md` §3.
 static const uint ALPHA_MODE_MASK = 1;
 
+/// `GpuMaterial::flags` bit 1: glTF's `doubleSided: true`, matching
+/// `crcbl_shaders::mesh::GpuMaterial::DOUBLE_SIDED`.
+///
+/// Zero is single-sided, which is glTF's own default and what every row written
+/// before this bit existed already meant. It is a *mode*, like the mask beside
+/// it: `crcbl_render::ForwardRenderer` routes a double-sided bucket's draws
+/// onto a `CullMode::None` twin of every pipeline that draws the surface, so
+/// the back face reaches this file at all. See `double_sided_normal`, which is
+/// the other half of glTF 2.0 §3.9.6.
+static const uint DOUBLE_SIDED = 2;
+
 /// Whether this fragment is cut away by the material's alpha mask.
 ///
 /// glTF 2.0 §3.9.4's `MASK`: the surface is opaque where the alpha is at or
@@ -1111,6 +1123,41 @@ static const uint ALPHA_MODE_MASK = 1;
 bool alpha_masked(GpuMaterial material, float alpha)
 {
     return (material.flags & ALPHA_MODE_MASK) != 0u && alpha < material.alpha_cutoff;
+}
+
+/// The surface normal a fragment is shaded through, given which side of the
+/// primitive the rasteriser is looking at.
+///
+/// glTF 2.0 §3.9.6: "When `doubleSided` is `true`, back-face culling is
+/// disabled and double-sided lighting is enabled. **The back-face must have its
+/// normals reversed before the lighting equation is evaluated.**" This is that
+/// reversal, and the pipeline's cull mode is the other half.
+///
+/// **The whole tangent frame turns over with it, and that is why the flip is
+/// here rather than at each reader.** `shading_normal_of` builds its basis
+/// around the normal it is handed — `bitangent = cross(normal, tangent)` in
+/// both of its arms — so handing it the reversed normal keeps the tangent and
+/// reverses the bitangent with the normal, which is the mirrored frame a back
+/// face actually wears. Reversing only the interpolated normal *after* the map
+/// had been applied would light the bumps from the wrong side of themselves.
+///
+/// **It is the identity for every single-sided material**, bit for bit: the
+/// test is on the material row, so a fragment of a row without the bit computes
+/// the same instructions on the same value it did before this function existed.
+/// That is what keeps every golden in the tree — none of which carries the bit
+/// — where it was.
+///
+/// **`front_facing` is the rasteriser's own answer** (`SV_IsFrontFace`), which
+/// is decided by the primitive's winding under the pipeline's front-face
+/// setting. It is *not* `dot(normal, to_eye)`: an interpolated normal on a
+/// curved silhouette disagrees with the winding, and the two stages that shade
+/// a surface have to agree with the depth the third one wrote.
+///
+/// `crcbl_shaders::mesh::both_shaded_stages_reverse_a_double_sided_back_face`
+/// holds the callers to it.
+float3 double_sided_normal(GpuMaterial material, float3 normal, bool front_facing)
+{
+    return ((material.flags & DOUBLE_SIDED) != 0u && !front_facing) ? -normal : normal;
 }
 
 /// One irradiance probe, matching `crcbl_shaders::probe::GpuProbe`.
@@ -5044,7 +5091,7 @@ float2 motion_vector(float4 current, float4 previous)
 }
 
 [shader("fragment")]
-FragmentOutput fragmentMain(VertexOutput input)
+FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace)
 {
     // Interpolation denormalises, so this and `to_eye` below are renormalised per
     // fragment. Skipping it makes large triangles darken towards their centres —
@@ -5224,8 +5271,19 @@ FragmentOutput fragmentMain(VertexOutput input)
         discard;
     }
 
+    // **Which side of the primitive this is, and glTF's reversal for it.**
+    // `double_sided_normal` is the identity on every single-sided row, so the
+    // whole of what follows is bit for bit what it was; on a double-sided one
+    // seen from behind it is the surface turned over, and the tangent frame
+    // built around it below turns over with it.
+    //
+    // Not `vertex_normal`, which stays the geometry's own answer: the UV
+    // projection above and the alpha cut it feeds must agree with
+    // `depthMaskedFragmentMain`, which shades nothing and has no side.
+    float3 surface_normal = double_sided_normal(material, vertex_normal, front_facing);
+
     float3 normal =
-        shading_normal_of(normal_layer(material), material.normal_scale, input, vertex_normal, uv);
+        shading_normal_of(normal_layer(material), material.normal_scale, input, surface_normal, uv);
 
     if (frame.ambient.w >= NORMALS_VIEW)
     {
@@ -5256,7 +5314,7 @@ FragmentOutput fragmentMain(VertexOutput input)
     // The facet under the shading normal, taken once for the fragment and read
     // by the shadow biases alone — never by the shading, which is the authored
     // normal's job. `geometric_normal_of` says why it cannot live inside them.
-    float3 geometric_normal = geometric_normal_of(input.world_position, vertex_normal);
+    float3 geometric_normal = geometric_normal_of(input.world_position, surface_normal);
 
     // The row's two shading factors, clamped once for the fragment rather than
     // once per light. `roughness` is squared into GGX's `alpha` — the
@@ -5797,7 +5855,7 @@ struct RsmOutput
 /// an occlusion channel or a probe row: the pass is a description of the
 /// surface, and every term that varies with the sun is applied by the gather.
 [shader("fragment")]
-RsmOutput rsmFragmentMain(VertexOutput input)
+RsmOutput rsmFragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace)
 {
     // Renormalised for `fragmentMain`'s reason: interpolation denormalises, and
     // a shortened normal here is a patch whose cosine and whose solid angle are
@@ -5831,7 +5889,13 @@ RsmOutput rsmFragmentMain(VertexOutput input)
     // `diffuse_albedo` and the same one interpolation: what a metal does with
     // light is reflect it into a lobe no probe row can represent.
     written.albedo = float4(albedo.rgb * (1.0 - saturate(material.metallic)), 1.0);
-    written.normal = float4(vertex_normal * 0.5 + 0.5, 1.0);
+    // glTF's back-face reversal, on `fragmentMain`'s terms and for a reason of
+    // this pass's own: the gather measures a patch's solid angle at a probe and
+    // its cosine against the sun off this vector, so a double-sided patch
+    // recorded facing away from the probe that can see it contributes nothing
+    // where it should contribute most.
+    written.normal =
+        float4(double_sided_normal(material, vertex_normal, front_facing) * 0.5 + 0.5, 1.0);
     written.world = float4(input.world_position, 1.0);
     return written;
 }

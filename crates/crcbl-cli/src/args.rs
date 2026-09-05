@@ -170,6 +170,8 @@ OPTIONS:
                                                each half of it a fill light
                            alpha_mask          a masked plate over a floor, and
                                                the hole in its shadow
+                           double_sided        three quads facing away from the
+                                               camera, one of them double-sided
                            specular_aa         a corrugated conductor plate
                                                beside a flat one, under one sun
                            ao                  the inside of a box, ambient only
@@ -1247,6 +1249,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::AreaLight,
         Scene::FillLight,
         Scene::AlphaMask,
+        Scene::DoubleSided,
         Scene::SpecularAa,
         Scene::Ao,
         Scene::Ssr,
@@ -1275,6 +1278,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::AreaLight => "area_light",
         Scene::FillLight => "fill_light",
         Scene::AlphaMask => "alpha_mask",
+        Scene::DoubleSided => "double_sided",
         Scene::SpecularAa => "specular_aa",
         Scene::Ao => "ao",
         Scene::Ssr => "ssr",

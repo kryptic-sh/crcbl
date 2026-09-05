@@ -1754,6 +1754,352 @@ fn the_alpha_mask_scene_draws_the_same_frame_on_every_geometry_path() {
     );
 }
 
+/// The anti-vacuity floor for [`Scene::DoubleSided`].
+///
+/// [`MIN_COLORS_ALPHA_MASK`]'s number and its reason at this frame's own scale:
+/// a lit floor, three shadows and two drawn quads are a continuum of levels, and
+/// the floor sits far below the count so that what it separates is a drawn frame
+/// from a cleared one. *Which* quad is drawn and how it is lit is
+/// [`the_double_sided_quad_is_drawn_lit_and_casts_a_shadow`]'s claim.
+///
+/// [`the_double_sided_quad_is_drawn_lit_and_casts_a_shadow`]: fn@the_double_sided_quad_is_drawn_lit_and_casts_a_shadow
+const MIN_COLORS_DOUBLE_SIDED: usize = 64;
+
+/// How many pixels of the frame one world unit of [`Scene::DoubleSided`]'s
+/// **floor** is.
+///
+/// [`ALPHA_PIXELS_PER_UNIT`]'s arithmetic, and the same numbers: that scene's
+/// camera height and field of view are the ones `screenshot`'s `double_camera`
+/// carries.
+const DOUBLE_PIXELS_PER_UNIT: f32 = ALPHA_PIXELS_PER_UNIT;
+
+/// How much further from the frame's axis a point on a quad lands than the point
+/// of floor directly under it — [`ALPHA_PLATE_LIFT`]'s magnification, out of the
+/// same two heights.
+const DOUBLE_QUAD_LIFT: f32 = ALPHA_PLATE_LIFT;
+
+/// Where a point on [`Scene::DoubleSided`]'s floor lands in the frame —
+/// [`alpha_pixel`]'s flip, for its reason.
+fn double_pixel(x: f32, z: f32) -> (u32, u32) {
+    alpha_pixel(x, z)
+}
+
+/// Where a band sits, given its offset from the frame's axis in **columns** and
+/// its offset down the frame in **rows**.
+///
+/// Every band in this fixture is placed in pixels rather than in world units —
+/// see [`DOUBLE_QUAD_COLUMNS`], which is where `screenshot`'s own constant is
+/// written that way too. A world `x` of `+k` is *left* of the axis, which is
+/// [`alpha_pixel`]'s flip; a positive `columns` here is that same side, so the
+/// two agree about which quad is which.
+fn double_pixel_at_column(columns: f32, rows: f32) -> (u32, u32) {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "every band is inside the frame, which the block reader asserts"
+    )]
+    (
+        (EXTENT.0 as f32 / 2.0 - columns) as u32,
+        (EXTENT.1 as f32 / 2.0 + rows) as u32,
+    )
+}
+
+/// How far from the frame's axis the outer two quads' bands sit, in **frame
+/// columns**.
+///
+/// `screenshot`'s `DOUBLE_QUAD_AT` is written as this many pixels of this frame
+/// and divided by the projection that gets it back to world units, so the two
+/// are the same number arrived at from opposite ends — and reading it in pixels
+/// here is what makes the shadow offset below one division rather than three.
+const DOUBLE_QUAD_COLUMNS: f32 = 44.0;
+
+/// How far from the axis each outer quad's **shadow** sits, in frame columns.
+///
+/// The same world `x` read on the floor instead of on the quad, so it is the
+/// column offset above divided by the magnification: a shadow is on the floor
+/// and the quad casting it is not.
+const DOUBLE_SHADOW_COLUMNS: f32 = DOUBLE_QUAD_COLUMNS / DOUBLE_QUAD_LIFT;
+
+/// How far down the frame each shadow sits from its quad's own row, in frame
+/// rows.
+///
+/// `screenshot`'s `double_sun` comes in at 45° with no `x` component, so a
+/// caster at height `h` throws its shadow `h` along `-z` — which is `h` world
+/// units of **floor**, and this is that in pixels. The height is
+/// `DOUBLE_QUAD_UP`'s, written out here for [`ALPHA_PLATE_LIFT`]'s reason.
+const DOUBLE_SHADOW_ROWS: f32 = 0.75 * DOUBLE_PIXELS_PER_UNIT;
+
+/// Half the size of a band read off a quad, in pixels.
+///
+/// A quad is thirty-six pixels across — `screenshot`'s `DOUBLE_PLATE_HALF_X` —
+/// so twenty-four across leaves six clear of every edge, which is more than the
+/// shadow filter or a rasteriser's sub-pixel grid can reach into.
+const DOUBLE_BAND: (u32, u32) = (12, 12);
+
+/// Half the size of a band read off a shadow, in pixels.
+///
+/// Smaller than [`DOUBLE_BAND`] because a shadow is the quad projected onto the
+/// floor at the floor's own scale — about twenty-five pixels across rather than
+/// thirty-six — and because its edge is a filtered penumbra rather than a
+/// rasterised edge.
+const DOUBLE_SHADOW_BAND: (u32, u32) = (6, 6);
+
+/// Where [`Scene::DoubleSided`]'s open-floor control band sits, in world `z`.
+///
+/// Up-frame of the quads, which is the direction the sun comes from and so the
+/// direction no shadow falls in. Far enough that the quads' own images — which
+/// reach `DOUBLE_PLATE_HALF_Z` magnified, about eighteen rows either side of the
+/// axis — are nowhere near it, and inside the floor, which reaches `1.2`.
+const DOUBLE_CONTROL_Z: f32 = 0.75;
+
+/// Where the background band sits, and how big it is: a block the floor does not
+/// reach and no quad's image covers.
+///
+/// The floor stops at `1.2` world units, which is about eighty-three columns
+/// from the axis, and the furthest quad image reaches sixty-two — so a block a
+/// hundred and eight columns out is background on both counts.
+const DOUBLE_BACKGROUND_AT: ((u32, u32), (u32, u32)) = ((236, 96), (6, 6));
+
+/// The [`Image::pixel`] channel [`Scene::DoubleSided`]'s "is this quad or
+/// floor" claims are read in — green, on [`ALPHA_CHANNEL`]'s terms and for its
+/// reason: the quads are red and the floor is green, so the two are separated by
+/// a factor in one channel rather than by a brightness.
+const DOUBLE_CHANNEL: usize = ALPHA_CHANNEL;
+
+/// How much more green a band of floor seen where a quad was culled must carry
+/// than a band on a drawn quad.
+///
+/// The quads are red and the floor is green — see [`DOUBLE_CHANNEL`] — so this
+/// is the factor that says "this band is floor and that one is not". Measured
+/// **2.06** on both local drivers (228.3 of green where the culled quad is,
+/// 111.0 on a drawn one), and every way this claim can fail lands at 1.0: a
+/// single-sided back face that was drawn puts a quad in both bands, and a
+/// double-sided one that was culled puts floor in both. Set well inside that
+/// gap, and swept — moving every band by ±5 pixels in each axis moves the floor
+/// reading by at most 0.7 of a level and the quad reading by 0.1, on both
+/// drivers.
+const DOUBLE_CULLED_RATIO: f32 = 1.5;
+
+/// How far a drawn double-sided back face's brightness may be from its mirror's.
+///
+/// **This is the reversal, and it is the whole of it.** The two quads are the
+/// same mesh through the same factors at the same height, mirrored about the
+/// frame's axis under a sun with no `x` component — so every term of the lobe
+/// is the same number on both sides and the two must read the *same* level.
+/// They do: **158.0 against 158.0** on radv and on lavapipe, unmoved by a ±5
+/// pixel sweep of either band.
+///
+/// A build that drew the back face without reversing its normal reads **43.3**
+/// there — the ambient term alone, since the sun is behind an unreversed `-Y`
+/// normal — which is a factor of 3.65. This bound is set well inside that, and
+/// above the widest any band in this frame moves under the same ±5 pixel sweep
+/// — the shadow bands, by a factor of 1.10.
+const DOUBLE_SIDE_TOLERANCE: f32 = 1.15;
+
+/// How much brighter unshadowed floor must be than floor inside a quad's
+/// shadow.
+///
+/// Measured 3.73 on both drivers — 169.1 of unshadowed floor against 45.3
+/// inside a shadow — and a frame in which a quad cast nothing reads 1.0 there.
+const DOUBLE_SHADOW_RATIO: f32 = 2.0;
+
+/// How far two bands of floor that must agree may be apart.
+///
+/// The two pairs it holds are the widest apart of any two floor readings in the
+/// frame: the band where the culled quad is against open floor (**1.028** on
+/// both drivers, and they differ because the floor's own specular lobe varies
+/// with position), and the band under the culled quad — which has no shadow in
+/// it — against the same open floor (**1.074**). What it has to refuse is a
+/// quad drawn into either (2.06 in green) or a shadow cast into the second
+/// (4.01), so the bound sits between 1.074 and 2.06 with margin on both sides.
+const DOUBLE_FLOOR_TOLERANCE: f32 = 1.20;
+
+/// How far above the frame's background the lit floor bands must read, in
+/// levels.
+///
+/// [`ALPHA_LIT_FLOOR`]'s anti-vacuity check and its number: every claim above is
+/// a ratio between two bands of this floor, and a frame in which the floor drew
+/// nothing makes each of them a ratio between two clear colours. Both drivers
+/// separate the two by more than 140 levels.
+const DOUBLE_LIT_FLOOR: f32 = 10.0;
+
+/// [`Scene::DoubleSided`]'s claim: **the cull mode drew the back face, the
+/// reversal lit it, and the shadow pass drew it too** — three passes' worth of
+/// glTF 2.0 §3.9.6, in one frame.
+///
+/// Six bands and two controls, and every claim is a relation between two of them
+/// rather than an absolute colour:
+///
+/// * **The cull mode dropped the single-sided quad.** The band where it hangs
+///   must carry floor — within [`DOUBLE_FLOOR_TOLERANCE`] of open floor's green
+///   — and at least [`DOUBLE_CULLED_RATIO`] times as much green as a drawn
+///   quad. The pair is what makes it "the quad is not there" rather than "the
+///   quad is a different colour".
+/// * **The cull mode kept the double-sided one.** Its band must carry a quad
+///   rather than floor, which is that same ratio the other way round. A frame
+///   whose double-sided partition was drawn with the culling pipeline shows
+///   floor here and satisfies neither.
+/// * **And the reversal lit it.** Its brightness must be within
+///   [`DOUBLE_SIDE_TOLERANCE`] of the mirror's — the same mesh, the same row's
+///   factors, turned over so its front face is towards the camera and the sun.
+///   This is the assertion that separates a back face that was drawn from a back
+///   face that was drawn *and shaded as the surface it is*: without the reversal
+///   the sun is behind an unreversed `-Y` normal and the band reads the ambient
+///   term.
+/// * **The single-sided quad casts no shadow.** Its front face is away from the
+///   sun, so the shadow pass's own culling drops it: the floor where its shadow
+///   would fall must be within [`DOUBLE_FLOOR_TOLERANCE`] of open lit floor.
+/// * **The double-sided one casts one**, by [`DOUBLE_SHADOW_RATIO`] against
+///   that unshadowed band — which is the depth passes' twin, and a different
+///   pipeline from the colour pass's.
+/// * **And the shadow pass draws at all.** The mirror's own shadow, by the same
+///   ratio. Without it the claim above is satisfied by a frame with no shadows
+///   in it and one lit band that happens to be dark.
+///
+/// **A closed solid could not carry any of the shadow half.** Whichever way a
+/// slab is lit, some face of it is front-facing to the light, so its shadow is
+/// the same with culling on or off. These are open quads with one face each, and
+/// that face is turned away from the sun.
+///
+/// # Each of these was watched go red
+///
+/// Not argued — run, on radv, with the tree sabotaged one change at a time and
+/// this test alone selected. Each quoted line is the one this function printed
+/// on that run.
+///
+/// **`mesh.slang`'s `double_sided_normal` returning `normal` on both sides** —
+/// the reversal removed and the cull mode left alone, the artifacts
+/// regenerated: "brightness on the double-sided quad 43.3, where the culled one
+/// is 172.1, on the mirror 158.0; green 25.0 / 228.3 / 111.0". The quad is
+/// still drawn and still tinted, so every green claim passes and the shadow
+/// bands do not move at all; the side claim fires on its own — "a double-sided
+/// back face must be lit as the surface it is: 43.3 against the mirror's
+/// 158.0". That is the ambient term, which is what an unreversed `-Y` normal
+/// under a sun on the camera's side leaves.
+///
+/// **The colour pass's double-sided partition handed the single-sided
+/// pipeline** — the cull mode removed from that one pass and the reversal left
+/// alone: "brightness on the double-sided quad 37.0 … green 34.0 / 228.3 /
+/// 111.0". The band is the frame's clear rather than floor, because the depth
+/// prepass still wrote the quad's silhouette and the floor behind it fails the
+/// colour pass's equality test; the side claim fires again, at 37.0 against
+/// 158.0.
+///
+/// **`DEPTH_MODES` without its double-sided entries**, so no bucket carries the
+/// mode and the depth partitions have no pipeline for it: "green 227.7 / 228.3
+/// / 111.0; shadows 169.1 / 169.1 / 45.3". The quad is gone from the frame
+/// entirely and its shadow with it, and the claim that it was drawn fires — "a
+/// double-sided back face must be drawn: the band carries 227.7 of green
+/// against 228.3 where a culled quad shows floor".
+///
+/// **`fragmentMain` handing `geometric_normal_of` the unreversed normal** — the
+/// shading reversed and the shadow biases taken off the facet the geometry
+/// authored: "brightness on the double-sided quad 74.7, where the culled one is
+/// 172.1, on the mirror 158.0; shadows 45.3 / 169.1 / 45.3". The quad is drawn,
+/// tinted and lit, and shadows itself: the normal offset moves its receiver
+/// position into the side the atlas recorded it from, so the side claim fires
+/// at 74.7 against 158.0. The reversal has to reach both readers of the normal,
+/// and this is the line that says the second one is measured.
+fn the_double_sided_quad_is_drawn_lit_and_casts_a_shadow(image: &Image) {
+    let quad =
+        |columns: f32| block_brightness(image, double_pixel_at_column(columns, 0.0), DOUBLE_BAND);
+    let quad_green = |columns: f32| {
+        block_channel(
+            image,
+            double_pixel_at_column(columns, 0.0),
+            DOUBLE_BAND,
+            DOUBLE_CHANNEL,
+        )
+    };
+    let shadow = |columns: f32| {
+        block_brightness(
+            image,
+            double_pixel_at_column(columns, DOUBLE_SHADOW_ROWS),
+            DOUBLE_SHADOW_BAND,
+        )
+    };
+
+    // `screenshot`'s `double_sided_quads` puts the double-sided quad at world
+    // `-x` and the mirror at `+x`, and the overhead camera flips the axis — see
+    // `double_pixel_at_column`, which is where the sign is reconciled.
+    let double = quad(-DOUBLE_QUAD_COLUMNS);
+    let culled = quad(0.0);
+    let mirror = quad(DOUBLE_QUAD_COLUMNS);
+    let double_green = quad_green(-DOUBLE_QUAD_COLUMNS);
+    let culled_green = quad_green(0.0);
+    let mirror_green = quad_green(DOUBLE_QUAD_COLUMNS);
+
+    let shadow_double = shadow(-DOUBLE_SHADOW_COLUMNS);
+    let shadow_culled = shadow(0.0);
+    let shadow_mirror = shadow(DOUBLE_SHADOW_COLUMNS);
+
+    let open = block_brightness(image, double_pixel(0.0, DOUBLE_CONTROL_Z), DOUBLE_BAND);
+    let open_green = block_channel(
+        image,
+        double_pixel(0.0, DOUBLE_CONTROL_Z),
+        DOUBLE_BAND,
+        DOUBLE_CHANNEL,
+    );
+    let (background_at, background_half) = DOUBLE_BACKGROUND_AT;
+    let background = block_brightness(image, background_at, background_half);
+
+    eprintln!(
+        "crcbl render e2e: double sided — brightness on the double-sided quad {double:.1}, \
+         where the culled one is {culled:.1}, on the mirror {mirror:.1}; green \
+         {double_green:.1} / {culled_green:.1} / {mirror_green:.1} against open floor \
+         {open_green:.1}; shadows {shadow_double:.1} / {shadow_culled:.1} / \
+         {shadow_mirror:.1} against open floor {open:.1} and a background of {background:.1}"
+    );
+
+    assert!(
+        culled_green < open_green * DOUBLE_FLOOR_TOLERANCE
+            && open_green < culled_green * DOUBLE_FLOOR_TOLERANCE,
+        "a single-sided back face must be culled and the floor seen through it: {culled_green:.1} \
+         of green where the quad hangs against {open_green:.1} on floor no quad covers"
+    );
+    assert!(
+        mirror_green * DOUBLE_CULLED_RATIO < culled_green,
+        "and what is drawn where a quad is *not* culled has to look different: the mirror \
+         carries {mirror_green:.1} of green against {culled_green:.1} where the culled quad \
+         hangs, so the two bands are the same surface and the claim above is vacuous"
+    );
+    assert!(
+        double_green * DOUBLE_CULLED_RATIO < culled_green,
+        "a double-sided back face must be drawn: the band carries {double_green:.1} of green \
+         against {culled_green:.1} where a culled quad shows floor, which is a quad the cull \
+         mode dropped"
+    );
+    assert!(
+        double < mirror * DOUBLE_SIDE_TOLERANCE && mirror < double * DOUBLE_SIDE_TOLERANCE,
+        "a double-sided back face must be lit as the surface it is: {double:.1} against the \
+         mirror's {mirror:.1}, which is the same mesh and the same row's factors turned over — \
+         a back face shaded through an unreversed normal has the sun behind it and reads the \
+         ambient term"
+    );
+    assert!(
+        shadow_culled < open * DOUBLE_FLOOR_TOLERANCE
+            && open < shadow_culled * DOUBLE_FLOOR_TOLERANCE,
+        "a single-sided back face must cast no shadow either: the floor where its shadow would \
+         fall measures {shadow_culled:.1} against {open:.1} of open lit floor"
+    );
+    assert!(
+        shadow_double * DOUBLE_SHADOW_RATIO < shadow_culled,
+        "and a double-sided one must cast one: {shadow_double:.1} under it against \
+         {shadow_culled:.1} under the culled quad, which is a caster the shadow pass dropped"
+    );
+    assert!(
+        shadow_mirror * DOUBLE_SHADOW_RATIO < shadow_culled,
+        "there must be a shadow pass at all: the mirror's front face is towards the sun and \
+         measures {shadow_mirror:.1} under it against {shadow_culled:.1}, so a frame with no \
+         shadows in it would satisfy the claim above"
+    );
+    assert!(
+        open > background + DOUBLE_LIT_FLOOR,
+        "the lit bands are lit floor and not an empty frame: {open:.1} against a background of \
+         {background:.1}, so there is nothing here for a quad or a shadow to be visible in"
+    );
+}
+
 /// The anti-vacuity floor for [`Scene::SpecularAa`].
 ///
 /// [`MIN_COLORS_ALPHA_MASK`]'s reason at this frame's own scale: two bands of a
@@ -2027,6 +2373,51 @@ fn the_corrugation_is_regularised_and_the_flat_band_is_not_touched(image: &Image
         "and that band has to be lit by the lobe for its level to say anything: {control:.1} \
          against a background of {background:.1}, which is a control band measuring the \
          clear colour"
+    );
+}
+
+/// `docs/plan/43-render-standards.md` §2's rung 4, second half — **glTF's
+/// `doubleSided`** — drawn.
+///
+/// The golden is the picture that was reviewed and it cannot be the evidence:
+/// a frame that drew the back face without reversing its normal is still three
+/// quads over a floor, and a reader cannot tell it from a working one by
+/// looking. [`the_double_sided_quad_is_drawn_lit_and_casts_a_shadow`] is what
+/// tells them apart.
+///
+/// [`the_double_sided_quad_is_drawn_lit_and_casts_a_shadow`]: fn@the_double_sided_quad_is_drawn_lit_and_casts_a_shadow
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_double_sided_scene_draws_its_back_face_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::DoubleSided,
+        "double_sided",
+        EXTENT,
+        MIN_COLORS_DOUBLE_SIDED,
+        the_double_sided_quad_is_drawn_lit_and_casts_a_shadow,
+    );
+}
+
+/// The double-sided scene on both geometry paths — see
+/// [`draw_scene_on_every_geometry_path`].
+///
+/// The claim this arm carries that no other scene's does: a cull mode is a
+/// *pipeline* state, so the twin the mesh-shader path builds is a mesh pipeline
+/// and the twin the raster path builds is a vertex one — two objects built from
+/// two different stages, and only byte equality says they rasterise the same
+/// side of the same triangles. The cluster's own normal cone is the other half:
+/// it points away from this camera, and a path that read it would drop the quad
+/// entirely on one side of the comparison.
+///
+/// [`draw_scene_on_every_geometry_path`]: fn@draw_scene_on_every_geometry_path
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_double_sided_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::DoubleSided,
+        "double_sided",
+        MIN_COLORS_DOUBLE_SIDED,
+        the_double_sided_quad_is_drawn_lit_and_casts_a_shadow,
     );
 }
 

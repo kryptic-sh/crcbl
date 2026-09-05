@@ -736,9 +736,9 @@ fn a_bucket_fills_and_empties_as_its_instance_comes_and_goes() {
     teardown(headless, renderer, pool);
 }
 
-/// **Two instances of one mesh, one opaque and one masked, scatter into two
-/// different buckets — and the depth passes therefore bind a pipeline per
-/// bucket rather than one per frame.**
+/// **Two instances of one mesh in two material modes scatter into two different
+/// buckets — so the passes that route on a mode bind a pipeline per bucket
+/// rather than one per frame.**
 ///
 /// The routing half of `docs/plan/43-render-standards.md` §3's per-bucket
 /// split, on the device that actually does it. The host writes a material's
@@ -763,17 +763,17 @@ fn a_bucket_fills_and_empties_as_its_instance_comes_and_goes() {
 /// twin of a flat mesh's opaque bucket is the next one. That derivation is
 /// asserted rather than assumed: the twin has to be the bucket the masked
 /// pyramid actually landed in, and every other bucket has to be empty.
-#[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
-fn an_opaque_and_a_masked_instance_of_one_mesh_scatter_into_two_buckets() {
-    use crcbl::shaders::mesh::GpuMaterial;
-
-    // The demo description with its tinted row marked as a cutout, so the scene
-    // holds both modes and every mesh gets a twin. Nothing else moves: the two
-    // pyramids below differ in their material row and in where they stand.
+/// `mode` is the non-opaque one of the two, and it is the **only** thing that
+/// differs between the two callers below: the scatter compares the whole mode
+/// field, so which mode it is cannot matter, and a routing that had learnt one
+/// bit rather than the field would pass one caller and fail the other.
+fn two_modes_of_one_mesh_scatter_into_two_buckets(mode: u32, what: &str) {
+    // The demo description with its tinted row marked, so the scene holds both
+    // modes and every mesh gets a twin. Nothing else moves: the two pyramids
+    // below differ in their material row and in where they stand.
     let scene = {
         let mut scene = crcbl::render::scene::demo();
-        scene.materials[crcbl::render::scene::DEMO_TINTED].flags = GpuMaterial::ALPHA_MODE_MASK;
+        scene.materials[crcbl::render::scene::DEMO_TINTED].flags = mode;
         scene
     };
 
@@ -787,7 +787,7 @@ fn an_opaque_and_a_masked_instance_of_one_mesh_scatter_into_two_buckets() {
     // file expects — then the opaque pyramid and the masked one.
     place_cube_at(&mut renderer, cube_model());
     let opaque_at = Vec3::new(-1.05, 0.0, 0.0);
-    let masked_at = Vec3::new(1.05, 0.0, 0.0);
+    let marked_at = Vec3::new(1.05, 0.0, 0.0);
     place(
         &mut renderer,
         crcbl::render::scene::DEMO_PYRAMID,
@@ -798,7 +798,7 @@ fn an_opaque_and_a_masked_instance_of_one_mesh_scatter_into_two_buckets() {
         &mut renderer,
         crcbl::render::scene::DEMO_PYRAMID,
         crcbl::render::scene::DEMO_TINTED,
-        Mat4::from_translation(masked_at),
+        Mat4::from_translation(marked_at),
     );
 
     // The buckets each mesh's levels occupy in the scene's **first** mode, which
@@ -817,9 +817,9 @@ fn an_opaque_and_a_masked_instance_of_one_mesh_scatter_into_two_buckets() {
     );
     let cube_bucket = cube_buckets[0] as usize;
     let opaque_bucket = pyramid_buckets[0] as usize;
-    // A flat mesh's mode runs are one bucket long, so the masked twin is the
+    // A flat mesh's mode runs are one bucket long, so the marked twin is the
     // next bucket. Held to what the device did, below.
-    let masked_bucket = opaque_bucket + 1;
+    let marked_bucket = opaque_bucket + 1;
 
     let camera = mesh_camera(Projection::default());
     let generated = generate(&headless, &mut renderer, &mut pool, &camera);
@@ -836,7 +836,7 @@ fn an_opaque_and_a_masked_instance_of_one_mesh_scatter_into_two_buckets() {
     let mut want = vec![0u32; buckets];
     want[cube_bucket] = 1;
     want[opaque_bucket] = 1;
-    want[masked_bucket] = 1;
+    want[marked_bucket] = 1;
     let got: Vec<u32> = generated
         .args
         .iter()
@@ -845,8 +845,8 @@ fn an_opaque_and_a_masked_instance_of_one_mesh_scatter_into_two_buckets() {
     assert_eq!(
         got, want,
         "each instance must scatter into the bucket matching its mesh **and** its material \
-         mode: cube in {cube_bucket}, the opaque pyramid in {opaque_bucket}, the masked one in \
-         {masked_bucket}"
+         mode: cube in {cube_bucket}, the opaque pyramid in {opaque_bucket}, the {what} one in \
+         {marked_bucket}"
     );
 
     // And the runs name the right instances, which the counts alone cannot say:
@@ -862,13 +862,13 @@ fn an_opaque_and_a_masked_instance_of_one_mesh_scatter_into_two_buckets() {
         "the opaque pyramid is instance 1, and it belongs to the opaque twin"
     );
     assert_eq!(
-        generated.run(masked_bucket),
+        generated.run(marked_bucket),
         vec![2],
-        "and the masked pyramid is instance 2, in the masked twin — a scatter that compared \
-         the mesh alone would have put it beside instance 1"
+        "and the {what} pyramid is instance 2, in its own twin — a scatter that compared the \
+         mesh alone would have put it beside instance 1"
     );
 
-    for bucket in [cube_bucket, opaque_bucket, masked_bucket] {
+    for bucket in [cube_bucket, opaque_bucket, marked_bucket] {
         assert_eq!(
             generated.counts[bucket], 1,
             "bucket {bucket} has something in it, so it draws once"
@@ -876,4 +876,33 @@ fn an_opaque_and_a_masked_instance_of_one_mesh_scatter_into_two_buckets() {
     }
 
     teardown(headless, renderer, pool);
+}
+
+/// The alpha-mask half of [`two_modes_of_one_mesh_scatter_into_two_buckets`] —
+/// `docs/plan/43-render-standards.md` §3's per-bucket split, on the device that
+/// actually does the scatter.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
+fn an_opaque_and_a_masked_instance_of_one_mesh_scatter_into_two_buckets() {
+    two_modes_of_one_mesh_scatter_into_two_buckets(
+        crcbl::shaders::mesh::GpuMaterial::ALPHA_MODE_MASK,
+        "masked",
+    );
+}
+
+/// The double-sided half of the same claim — §2's rung 4, and the mode that
+/// makes the field two bits wide rather than one.
+///
+/// **Worth its own run rather than its own argument.** `draw_gen.slang`'s
+/// scatter compares `instance_material_mode` against `bucket_mode` as whole
+/// values, and the host writes the whole of `GpuMaterial::mode` into the
+/// record — so a scatter or a writer that had learnt the mask bit alone routes
+/// this scene's two pyramids into one bucket while passing the test above.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
+fn an_opaque_and_a_double_sided_instance_of_one_mesh_scatter_into_two_buckets() {
+    two_modes_of_one_mesh_scatter_into_two_buckets(
+        crcbl::shaders::mesh::GpuMaterial::DOUBLE_SIDED,
+        "double-sided",
+    );
 }

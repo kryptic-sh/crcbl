@@ -1214,6 +1214,84 @@ mod tests {
         }
     }
 
+    /// **The amplification stage skips the normal cone for a double-sided
+    /// instance**, and reads the bit out of the bits the host writes it into.
+    ///
+    /// Four claims, each a different silence. The constants have to be the
+    /// host's, or the stage unpacks the mode out of bits nothing writes and
+    /// every instance answers mode zero — which is the tree as it was, with the
+    /// back-facing clusters of a double-sided surface dropped from the mesh path
+    /// and drawn on every other one. The predicate has to be *called* from the
+    /// cone test rather than merely declared, which a constant check cannot see.
+    /// It has to be called from exactly one place, because a second call in
+    /// front of the frustum loop would keep every cluster of a double-sided
+    /// instance whether or not it is on screen. And the amplification stage has
+    /// to hand it the instance's own mode rather than a literal.
+    ///
+    /// `crcbl_render::cull::cone_may_reject` is the Rust twin, and its
+    /// `a_double_sided_instance_keeps_the_cluster_that_faces_away` is where the
+    /// answers themselves are stated.
+    #[test]
+    fn the_amplification_stage_skips_the_cone_for_a_double_sided_instance() {
+        use crate::mesh::{GpuInstance, GpuMaterial};
+
+        let source = include_str!("../shaders/mesh_cluster.slang");
+        for (name, value) in [
+            (
+                "INSTANCE_MATERIAL_MODE_SHIFT",
+                GpuInstance::MATERIAL_MODE_SHIFT,
+            ),
+            (
+                "INSTANCE_MATERIAL_MODE_MASK",
+                GpuInstance::MATERIAL_MODE_MASK,
+            ),
+            ("DOUBLE_SIDED", GpuMaterial::DOUBLE_SIDED),
+        ] {
+            let declaration = format!("static const uint {name} = {value};");
+            assert!(
+                source.contains(&declaration),
+                "shaders/mesh_cluster.slang must declare `{declaration}`, or the \
+                 amplification stage reads the material mode out of bits the host does \
+                 not write it into"
+            );
+        }
+
+        let predicate = concat!(
+            "bool cone_may_reject(uint material_mode)\n",
+            "{\n",
+            "    return (material_mode & DOUBLE_SIDED) == 0u;\n",
+            "}\n",
+        );
+        assert!(
+            source.contains(predicate),
+            "shaders/mesh_cluster.slang does not carry this exact predicate:\n{predicate}"
+        );
+
+        let guard = concat!(
+            "    if (cone_may_reject(material_mode) && preserves_angles(basis)",
+            " && cluster.cone_cutoff > 0.0\n",
+        );
+        assert!(
+            source.contains(guard),
+            "shaders/mesh_cluster.slang does not open the cone test with this line, so a \
+             double-sided instance loses its back-facing clusters:\n{guard}"
+        );
+        assert_eq!(
+            source.matches("cone_may_reject(material_mode)").count(),
+            1,
+            "the predicate is called somewhere other than the cone test — in front of the \
+             frustum loop it would keep every cluster of a double-sided instance, on \
+             screen or not"
+        );
+        assert!(
+            source.contains(
+                "cluster_survives(cluster, instance.transform, instance_material_mode(instance))"
+            ),
+            "the amplification stage does not hand `cluster_survives` the instance's own \
+             material mode, so the predicate answers for whatever it was handed instead"
+        );
+    }
+
     mod clusters_check {
         use super::super::*;
 

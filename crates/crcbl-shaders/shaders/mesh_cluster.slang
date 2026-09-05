@@ -396,6 +396,57 @@ struct GpuInstance
 /// Matching `static const uint INSTANCE_BASE_VERTEX_OVERRIDE` in `mesh.slang`.
 static const uint INSTANCE_BASE_VERTEX_OVERRIDE = 2;
 
+/// Where the material mode starts in `GpuInstance::flags`, matching
+/// `draw_gen.slang` and `crcbl_shaders::mesh::GpuInstance::MATERIAL_MODE_SHIFT`.
+static const uint INSTANCE_MATERIAL_MODE_SHIFT = 2;
+
+/// The material mode's bits in `GpuInstance::flags`, matching `draw_gen.slang`
+/// and `crcbl_shaders::mesh::GpuInstance::MATERIAL_MODE_MASK`.
+static const uint INSTANCE_MATERIAL_MODE_MASK = 12;
+
+/// glTF 2.0 §3.9.6's `doubleSided`, matching `mesh.slang`'s constant of the same
+/// name and `crcbl_shaders::mesh::GpuMaterial::DOUBLE_SIDED`.
+///
+/// One value, two places it is read: `mesh.slang` reads it out of
+/// `GpuMaterial::flags`, and the amplification stage below reads it out of the
+/// *mode* the instance record carries. Those are the same two bits — the host
+/// packs `GpuMaterial::MODE_MASK` into `GpuInstance::flags` unshifted within the
+/// field — so one constant serves both.
+static const uint DOUBLE_SIDED = 2;
+
+/// This instance's material mode, unpacked from `GpuInstance::flags` — the same
+/// three lines as `draw_gen.slang`'s function of this name, and the host twin is
+/// `crcbl_shaders::mesh::GpuInstance::material_mode`.
+uint instance_material_mode(GpuInstance instance)
+{
+    return (instance.flags & INSTANCE_MATERIAL_MODE_MASK) >> INSTANCE_MATERIAL_MODE_SHIFT;
+}
+
+/// Whether a cluster of an instance in this material mode may be rejected by its
+/// normal cone.
+///
+/// **Which way a surface faces is the material's business, not the geometry's.**
+/// A cluster's cone says where its triangles' normals point, and that is true
+/// whatever material draws them. What turns it into a rejection is a second
+/// claim — that a triangle seen from behind puts nothing on the screen — and
+/// that claim is the back-face cull, which `doubleSided` switches off. So for a
+/// double-sided instance the cone's arithmetic is still right and the conclusion
+/// drawn from it is not: an open surface with one flat cluster carries
+/// `cone_cutoff == 1.0` and an axis pointing away from the camera, and every
+/// pixel of it is visible.
+///
+/// **Only the cone.** The frustum half and the `+ radius` conservatism are about
+/// where the geometry *is*, which no material moves, so a back-facing cluster
+/// off the side of the screen is still rejected — by the test that was always
+/// the right one for it.
+///
+/// `crcbl_render::cull::cone_may_reject` is the same predicate in Rust, and the
+/// oracle it guards is what a test can state answers for by hand.
+bool cone_may_reject(uint material_mode)
+{
+    return (material_mode & DOUBLE_SIDED) == 0u;
+}
+
 /// Matching `struct GpuMesh` in `mesh.slang`.
 struct GpuMesh
 {
@@ -1321,6 +1372,10 @@ static const uint CLUSTER_REJECTED_BY_CONE = 2;
 /// angles**, which is the one thing the whole transform cannot carry a cone
 /// across: see `preserves_angles`. The sphere still culls there.
 ///
+/// **And skipped for a double-sided material**, which is `cone_may_reject` above
+/// and the reason written out there. `material_mode` is the caller's
+/// `instance_material_mode`; the frustum half does not read it.
+///
 /// The radius used to be carried across unchanged, on the grounds that
 /// `GpuInstance::transform` is rigid. The engine's own scenes are not —
 /// `crcbl::screenshot`'s trough is the open box scaled by `6 x 2 x 1.6` — and an
@@ -1357,7 +1412,11 @@ static const uint CLUSTER_REJECTED_BY_CONE = 2;
 /// `sqrt(1 - cutoff^2)` is even in `cutoff`, so it cannot tell a narrow cone
 /// from a cone wider than a hemisphere, and the latter holds a front-facing
 /// normal for every possible view.
-uint cluster_survives(Meshlet cluster, float4x4 transform)
+///
+/// A double-sided instance never reaches any of it: `CLUSTER_REJECTED_BY_CONE`
+/// is unreachable for one, and its clusters are kept or rejected by the frustum
+/// alone.
+uint cluster_survives(Meshlet cluster, float4x4 transform, uint material_mode)
 {
     float3x3 basis = (float3x3)transform;
     float3 center = mul(transform, float4(cluster.center_x, cluster.center_y, cluster.center_z, 1.0)).xyz;
@@ -1386,7 +1445,7 @@ uint cluster_survives(Meshlet cluster, float4x4 transform)
     axis = axis_length > 0.0 ? axis / axis_length : float3(0.0, 0.0, 0.0);
     float3 to_center = center - frame.camera_position.xyz;
     float sine = sqrt(max(0.0, 1.0 - cluster.cone_cutoff * cluster.cone_cutoff));
-    if (preserves_angles(basis) && cluster.cone_cutoff > 0.0
+    if (cone_may_reject(material_mode) && preserves_angles(basis) && cluster.cone_cutoff > 0.0
         && dot(axis, to_center) > sine * length(to_center) + radius)
     {
         return CLUSTER_REJECTED_BY_CONE;
@@ -1652,7 +1711,7 @@ void taskMain(uint3 group: SV_GroupID)
 
     uint index = draw.cluster_base + group.x * active;
     uint selected = cluster_is_selected(cluster_select[index], instance_index);
-    uint verdict = cluster_survives(cluster, instance.transform);
+    uint verdict = cluster_survives(cluster, instance.transform, instance_material_mode(instance));
     uint keep = active * selected * (verdict == CLUSTER_KEPT ? 1u : 0u);
 
     // **Only a cluster that was actually tested lands in a bucket, and it lands

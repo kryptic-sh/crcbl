@@ -86,14 +86,16 @@ pixel grid.
   accepts them at `fragmentMain`'s top level — and that SwiftShader draws the
   scene, which the entry above measures.
 
-## What alpha-mask materials shipped without (2026-09-05)
+## What the alpha-mask and double-sided material modes shipped without (2026-09-05)
 
 `GpuMaterial::ALPHA_MODE_MASK`, `mesh.slang`'s `alpha_masked` and
 `depthMaskedFragmentMain` landed with `docs/plan/43-render-standards.md` §3's
 first step; the per-bucket routing that replaced the whole-frame pipeline swing
 — `GpuMaterial::MODE_MASK`, `GpuInstance::MATERIAL_MODE_SHIFT`,
 `draw_gen.slang`'s `bucket_mode` and `ForwardRenderer::depth_partitions` —
-landed after it. What they left:
+landed after it, and `GpuMaterial::DOUBLE_SIDED` with
+`ForwardRenderer::sided_partitions`, the `CullMode::None` twins and
+`mesh.slang`'s `double_sided_normal` the same day. What they left:
 
 - **The bucket table is twinned per scene, not per mesh, and the empty twins
   cost measurable time on the raster tier.** `ForwardRenderer::build` walks
@@ -111,6 +113,16 @@ landed after it. What they left:
   view rather than the `discard`. On lavapipe the split still wins by a wide
   margin, and on radv lantern's shape (twelve tiny meshes, two shadow views)
   loses.
+
+  **A twin per mode the scene's materials carry, not per mode that exists.**
+  `DEPTH_MODES` grew to four entries when `doubleSided` landed on 2026-09-05 and
+  the table did not grow with it: `ForwardRenderer::build` filters that list by
+  the mode _values_ its own `SceneDesc::materials` hold, so two materials of two
+  modes are two twins whichever two they are, and only a description holding all
+  four modes pays for four.
+  `an_all_opaque_scene_keeps_one_bucket_per_mesh_level` states both halves — a
+  scene whose three rows carry two mode values between them, setting both mode
+  bits, still gets two.
 
   A finer rule needs something the description does not currently say: which
   `(mesh, material)` pairs a scene will actually instance. The two shapes worth
@@ -159,29 +171,54 @@ landed after it. What they left:
   counts it; that stands only while §3's "Transparency — absent, structurally"
   does. When a blended pass exists, the arm and the warning change together.
 
-- **`doubleSided` is still unread, and it is now the next material mode.** Every
-  imported material is back-face culled whatever the document says, and
-  `GpuMaterial` has no bit for it. That matters more than it did: a leaf card
-  authored as a cutout is nearly always double-sided, so the rung that makes
-  foliage actually look right is this one and not the mask. What it now takes,
-  in the order the pieces fall:
-  - **A second bit in `GpuMaterial::MODE_MASK`**, which is `ALPHA_MODE_MASK`
-    alone today. `GpuInstance::MATERIAL_MODE_MASK` is already two bits wide and
-    the `tables` region and `DEPTH_MODES` are already keyed on the whole field,
-    so the routing needs no layout change — only the mask widening and
-    `DEPTH_MODES` growing to four entries, which doubles the bucket table again
-    for a scene that holds all four (see the twin-cost entry above).
-  - **`CullMode::None` twins of the colour, depth-only, cutout and
-    reflective-shadow-map pipelines.** No backend seam exposes dynamic cull
-    state, and adding one would be a state a recorded stream carries per draw;
-    `set_stencil_reference`'s doc is the precedent argument for why a _pipeline_
-    is the engine's answer to a per-draw raster state and a seam call is not.
-    Four more pipelines is the cost, built at scene build like
-    `depth_masked_pipeline` is and for its reason.
-  - **The importer reading the flag.** `gltf_import` drops `doubleSided`
-    silently today; it should set the bit and stop counting it in
-    `warn_dropped_features`, on the same change as the pipelines — a mode
-    nothing can honour is not a mode.
+- **No double-sided mesh is drawn on a multi-cluster DAG anywhere.**
+  `mesh_cluster.slang`'s `cone_may_reject` and
+  `crcbl_render::cull::cone_may_reject` skip the normal-cone rejection for a
+  double-sided instance, and `crcbl::screenshot`'s `double_sided_quad_mesh`
+  carries a real cone — the face normal, cutoff one — so
+  `the_double_sided_scene_draws_the_same_frame_on_every_geometry_path` fails
+  without the predicate. That is **one** cluster of two triangles. A
+  `crcbl_scene::cluster_dag` DAG whose parent levels are decimated across a
+  double-sided shell has not been built or drawn, so what is unmeasured is
+  whether the cut a descent chooses for such a shell is the same on the mesh
+  path as elsewhere — the cone is skipped for it, but `cluster_is_selected` is
+  not, and nothing here exercises the two together. It would need a double-sided
+  glTF with enough triangles to decimate.
+
+- **A double-sided surface is a back face for the shadow map as well, and
+  self-shadowing is unmeasured beyond the fixture.** `Scene::DoubleSided`'s
+  double-sided quad is drawn into the shadow atlas and then reads that atlas
+  back as its own receiver, and it comes out fully lit on both local drivers —
+  `shadow_normal_offset` takes the _reversed_ facet, because `fragmentMain`
+  hands `geometric_normal_of` the reversed normal, so the offset is the same one
+  a front face at that orientation would get, and the fixture does hold that
+  half: with `geometric_normal_of` handed the unreversed normal instead, the
+  double-sided quad shadows itself down to 74.7 against the mirror's 158.0 on
+  radv. That is one flat quad square-on to a 45° sun. A curved double-sided
+  shell, or one nearly edge-on to the light, has not been drawn anywhere, and
+  acne there would look like a shadow-bias problem rather than a mode problem.
+
+- **`fragmentMain` reverses the normal and not the UV projection**,
+  deliberately. `physical_tile_uv` and the alpha cut above it read
+  `vertex_normal` — the geometry's own answer — because
+  `depthMaskedFragmentMain` shades nothing, has no side, and must cut the _same_
+  silhouette the colour pass does. The consequence is that a double-sided
+  material under `TILING_PHYSICAL` wears the same texel projection on both faces
+  rather than a mirrored one. No scene in the tree pairs physical tiling with
+  `DOUBLE_SIDED`, so this is a decision recorded rather than a measurement.
+
+- **`rsmFragmentMain`'s reversal is held by a text test and no picture.**
+  `both_shaded_stages_reverse_a_double_sided_back_face` asserts the reflective
+  shadow map's stage calls `double_sided_normal` and reads `SV_IsFrontFace`;
+  nothing draws a double-sided surface into a probe volume that is updated every
+  frame and reads a probe row back. `Scene::DoubleSided` has the demo's empty
+  grid, so a build whose RSM wrote the unreversed normal — a patch recorded
+  facing away from the probe that sees it, contributing nothing — would pass
+  every golden and every reader in the tree. Closing it is a fourth quad under a
+  `ProbeUpdate::EveryFrame` volume of one probe and a reader on that probe's row
+  against the mirror's, on
+  `the_updater_gathers_what_a_probe_can_see_and_nothing_through_a_wall`'s terms
+  in `tests/render_e2e.rs`.
 
 - **No masked material reaches the mesh-shader path's own goldens.** The cutout
   fragment stage is shared by both geometry paths by construction — it reads
@@ -205,6 +242,24 @@ landed after it. What they left:
   and lavapipe's. A `discard` is the one fragment-stage construct that can cost
   a target its early-depth optimisation, and what that costs on a tiler or under
   WARP is not known here — this machine has no Apple or Windows hardware.
+
+## Sections older than 2026-09 were symbol-swept, not re-verified (2026-09-05)
+
+The re-verification that landed on 2026-09-05 read every bullet of this file's
+first quarter — the 2026-09 sections — against the tree, deleted what had
+shipped and corrected what had drifted. The roughly hundred and eighty sections
+below that, from 2026-08 and earlier, were only swept for symbol names: each
+backtick-quoted identifier was looked up in the tree, and 106 of them resolve to
+nothing. Among them `TORCH_FLAT_SHARE`, `vis_culled`, `assumed_thickness`,
+`World::entity_count_after_sweep`, `PhysicsWorld::closest_hit`,
+`Features::TIER_A`, `QuerySetLayout::values_per_query`,
+`Device::can_create_pipeline_layout`, `set_dunes` / `set_pyramid` /
+`set_open_box`, `SPECULAR_POWER` / `SPECULAR_STRENGTH` and `REQUIRED_MESHES` /
+`REQUIRED_MATERIALS`. An unresolved name is either a renamed symbol the entry
+should follow, or a shipped or deleted feature whose entry should go — and the
+sweep cannot say which. **Not reviewed** beyond that: every claim in those
+sections about what the tree does is as old as its date line. Whoever next
+touches one of them re-reads the whole section first.
 
 ## What the atmosphere shipped without (2026-09-05)
 

@@ -35,6 +35,70 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Double-sided materials — glTF's `doubleSided`.**
+  `crcbl_shaders::mesh::GpuMaterial::DOUBLE_SIDED` is the second bit of
+  `GpuMaterial::MODE_MASK`, so a material's mode is now one of four values and
+  the two bits `GpuInstance::MATERIAL_MODE_MASK` reserved are both spoken for.
+  glTF 2.0 §3.9.6 asks for two things at once and this is both of them:
+  `crcbl_render::ForwardRenderer` builds a `CullMode::None` twin of every
+  pipeline that draws a surface — the colour pass's, the depth-only one behind
+  the prepass and the shadow atlas, the cutout one and the reflective shadow
+  map's, plus the wireframe view's — and `shaders/mesh.slang`'s
+  `double_sided_normal` reverses the shading normal on a back face before the
+  lighting equation is evaluated, in `fragmentMain` and in `rsmFragmentMain`.
+
+  **Routed per bucket, on the alpha mask's own machinery.**
+  `ForwardRenderer::partitions` splits a frame's per-bucket call list by the
+  material mode: the two depth passes split four ways on `(mask, side)` and the
+  colour pass and both reflective shadow maps split two ways on the side alone,
+  since their pipelines cut the mask inside a fragment stage either way. **A
+  scene emits a twin per mode its own materials carry, not one per mode that
+  exists** — two materials of two modes are two twins whichever two they are —
+  and an empty partition is dropped, so a scene with no double-sided material in
+  it records the same binds, the same draws and the same order it always did.
+
+  **The importer reads the flag.** `crcbl_scene`'s `gltf_import` sets the bit
+  from `doubleSided`, beside the alpha mode it already read, so a cutout leaf
+  card imports carrying both modes. It was silently dropped before, and not even
+  counted as dropped.
+
+  `crcbl::screenshot::Scene::DoubleSided` is the new fixture: three flat quads
+  hanging over a floor with their faces turned away from an overhead camera and
+  a 45° sun, one single-sided and culled everywhere, one double-sided, and one
+  single-sided turned over as the reference. On radv and on lavapipe the
+  double-sided quad reads **158.0** against its mirror's **158.0** where a build
+  that drew the back face without reversing its normal reads **43.3**, the
+  ambient term alone; the culled quad shows floor through it and casts no
+  shadow, and the double-sided one casts the same shadow the mirror does.
+
+  **The mesh path culls it correctly too.** A cluster's normal cone says where
+  its triangles' normals point; turning that into a rejection needs the second
+  claim that a triangle seen from behind draws nothing, and that claim is the
+  back-face cull — which `doubleSided` switches off. `mesh_cluster.slang`'s
+  `cone_may_reject` and `crcbl_render::cull::cone_may_reject` therefore skip the
+  cone rejection for an instance whose material mode carries the bit, and leave
+  the frustum half and the radius term alone. `cluster_survives_cull` and
+  `cluster_cull_verdict` take the instance's `material_mode` as a new argument
+  for it. Without the predicate a double-sided open surface loses its
+  back-facing clusters on the mesh-shader path and draws on every other one,
+  which is what
+  `the_double_sided_scene_draws_the_same_frame_on_every_geometry_path` asserts
+  against — the fixture's quad carries its real cone, the face normal at a
+  cutoff of one.
+
+  **Priced** with
+  `lantern --headless --frames 400 --size 1920x1080 --backend vk`, medians of
+  three runs each side, on an RX 7900 XTX under radv and on lavapipe. Lantern as
+  shipped is all single-sided and is the control: `shadow` **0.137 ms** and
+  **9.321 ms**, `depth-prepass` **0.038** and **1.386**, `forward` **0.341** and
+  **32.705**. With its monitor row marked double-sided by an uncommitted edit —
+  one row of six, worn by one instance — `shadow` reads **0.221** and **9.997**,
+  `depth-prepass` **0.042** and **1.442**, `forward` **0.319** and **32.746**.
+  That is the bucket table's cost and not the cull mode's: the alpha mask's own
+  per-bucket run reads `shadow` 0.221 ms on radv for the same twelve extra
+  dispatches per shadow view, and the forward pass moves _down_ by the same
+  amount in both.
+
 - **Specular antialiasing by roughness regularisation.** `shaders/mesh.slang`'s
   `specular_aa_kernel` is Tokuyoshi and Kaplanyan's isotropic filter from
   "Improved Geometric Specular Antialiasing" (I3D 2019), transcribed: the
