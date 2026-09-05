@@ -4359,6 +4359,16 @@ deploy, which is the remedy. Worth keeping because the standing rule is to hold
 a push until the previous Pages run completes, and a run like this one never
 will.
 
+**The next run said how slow that pool can be without being lost.** `0fb2d93`'s
+Pages run (33937587672) finished green with `render shard in a real browser`
+taking 72 minutes: its log reads "every budget here scaled 204.7x", the gate's
+own scaling of its budgets to the demo's measured tick rate, with 17-minute and
+10-minute gaps between consecutive checks. So a job on that pool can run two
+hundred times slower than nominal and still pass, and the difference between
+that and the three jobs above is whether the runner was still reporting — a job
+past its own `timeout-minutes` with no log blob is lost; one inside it is slow.
+Hold the push for the second kind.
+
 ### The Windows lavapipe leg draws runners three times apart, and a readback deadline sat inside the spread (2026-09-05)
 
 `vk e2e (lavapipe, windows)` went red twice in a day in `Headless::readback` —
