@@ -302,20 +302,11 @@ was shown going red on.
 
 ## The comparison seam's far side carries a residue the near side does not (2026-09-04)
 
-**The end-to-end pixel check this entry used to ask for now exists**, in
-`apps/alcove/tests/golden.rs`. Two tests, and they separate the two things the
-reference backend cannot:
-
-- `the_seam_runs_the_console_gather_on_the_left_and_the_shipped_one_on_the_right`
-  moves the **technique**, so the two sides differ by a pipeline. 233 of 256
-  columns are compared — the rest are the blur's bleed band — and every one is
-  byte-exact against the whole-frame run of the gather that side is meant to
-  have run, on lavapipe and on radv both.
-- `the_seam_reads_the_console_block_on_the_left` holds the technique still and
-  moves the **radius**, which lives only in the uniform block. That is the half
-  `crcbl-render` cannot see: the null backend records a pipeline as itself and a
-  bind group only as a handle and a layout, so pointing both marches at one
-  buffer leaves its suite green.
+`apps/alcove/tests/golden.rs` holds the seam to both blocks —
+`the_seam_runs_the_console_gather_on_the_left_and_the_shipped_one_on_the_right`
+moves the technique and `the_seam_reads_the_console_block_on_the_left` moves the
+radius, which the null backend cannot see because it records a bind group only
+as a handle and a layout. What those two left is below.
 
 **What is left is explained, and it is a small inconsistency rather than a
 gap.** The two sides are not symmetric. With the radius moved, the near side is
@@ -419,22 +410,6 @@ golden of their own and a button on the page. What is still **not** done:
     flat profile — the step against the walk's own spread over the whole window
     rather than against its steepest neighbouring pair, say — and that is its
     own sweep and its own sabotage.
-  - **`plaza::counter_camera`, and the pose that replaced it (2026-09-05).**
-    Measured with the plaza's own predicates and no GPU: 48665 of the walk's
-    88020 candidate samples land inside the shell window from that pose, and
-    `plaza::hidden_from`, `plaza::lamplit` and the frame between them refuse
-    every one — `hidden_from` refuses none the frame had not refused already.
-    The colonnade stands across the plaza from the counters and the window is a
-    shell of distance about the eye, so the two do not meet on screen at all,
-    and an arm there has no pair of shells either side of the split. That is
-    unchanged and it is still not an arm. What the walk reads instead is a new
-    arm at `plaza::pavement_camera`, at `sun::FIXTURE_TICK` on the shipped rung:
-    12 walks over three columns read across the split, and the steepest against
-    its own is column 3 at `-0.22` m — `0.90`/255 across the split against
-    `0.94` clear of the band on radv (ratio `0.96`), `1.03` against `0.78` on
-    lavapipe (`1.32`), against the `5x` the claim holds it to. Both sides darken
-    well over the floor: `77.89`/`77.56` and `77.78`/`77.48` over 231 and 76
-    shells. Three runs per adapter, identical to the digit.
 - **Nine readings cross the split now, at six offsets, and all six are one
   column's.** The shipped and `disc` arms each read column 4 at `-0.26`, `-0.22`
   and `-0.18` m off its shadow axis; the grazing arm reads column 4 at `+0.18`,
@@ -453,96 +428,6 @@ golden of their own and a button on the page. What is still **not** done:
   one every golden is blessed from — so a change to `COLONNADE_NEAR_Z`,
   `COLONNADE_SPACING` or either fixture arm's sun can still leave one of them
   with none, and the test refuses the run rather than passing it.
-- **The viewer is read at every rung of the ladder, but on one map at a time
-  (2026-09-05).** `the_atlas_view_borders_a_subdivided_slot_at_its_own_size`
-  loops over every level of `atlas::TILE_LEVELS` below a whole cell, a frame per
-  rung: `subdivided_camera_up` scales the eye's distance from
-  `SUBDIVIDED_CAMERA_UP` by a power of two per rung — which is the ladder's own
-  geometry, since coverage divides by that distance — and each frame's rectangle
-  is asserted to be that rung's own texel side before a pixel is read through
-  it, so a rung either side of the one drawn for is refused rather than read
-  under its name. Faults are collected per level and asserted once, so a red run
-  prints every rung. Measured identical on radv and lavapipe, three runs each:
-  `24`, `12` and `6` frame pixels a side, the border tint at `147.0` on each
-  map's own far edges and `0.0` at every pixel held clear of one, the root
-  cell's own edges included.
-  - **Nothing was held back and the width guard was not loosened.** At
-    `MESH_EXTENT` the finest rung — `atlas::MIN_TILE`, six frame pixels a side
-    against a `BORDER_PIXELS` border on each edge — clears the guard by the
-    least margin it admits: the border leaves a 2×2 block in the middle and the
-    centre reading sits half a pixel clear of the tint. A smaller frame, a wider
-    border or a deeper ladder puts that rung under the guard, and the guard then
-    refuses the level rather than the level loosening the guard. `MESH_EXTENT`
-    is one constant shared by every check in the suite rather than a per-test
-    parameter, so drawing a rung larger would move every other frame in it.
-  - **Two rungs of one root cell are read now, and the pair is asserted rather
-    than hoped for.**
-    `the_atlas_view_borders_two_maps_of_one_root_cell_at_their_own_rungs` lights
-    the ladder's own `subdivided_spot` beside `paired_fine_spot` — the same cone
-    at `PAIRED_FINE_RADIUS_SHARE` of its radius, which halves `shadow`'s
-    `map_extent` and so its `coverage`, the same halving `subdivided_camera_up`
-    gets from doubling the eye's distance — under one camera at
-    `PAIRED_COARSE_LEVEL`'s height. `AtlasAllocator::free_node` puts both in one
-    cell by its own rule and not by luck: `Selection::lay_out` spends the
-    coarsest request first, which splits the lowest free root and takes its
-    first quarter, and the finer request behind it splits the quarter beside it.
-    The check refuses the frame unless it actually got that — exactly two
-    occupied light slots, one map of `TILE >> 1` texels and one of `TILE >> 2`
-    found **by side** so a rung either side is a slot the search cannot find,
-    and `root_cell_of` equal for the two — and every pixel it holds clear of the
-    tint is asserted to lie in no slot's rectangle first. Measured identical on
-    radv and lavapipe, three runs each: root cell 2 at `(128, 0, 48, 48)`, a
-    `24`-pixel map at `(128, 0)` and a `12`-pixel one at `(152, 0)`, the border
-    tint at `147.0` on all four of their far edges and `0.0` at the eight pixels
-    held clear — including the quarter of the cell neither map was cut from, the
-    sixteenth beside the finer map, and the root cell's own edges. `MESH_EXTENT`
-    and every shared constant are untouched.
-    - **The middle of the coarse map's right edge has no clear pixel past it**,
-      because the finer map's left edge is against it with
-      `crcbl::shaders::atlas_view::BORDER_PIXELS` of its own border there. That
-      reading is taken three quarters down the edge instead, below the finer map
-      entirely, and the containment guard is what says so. Verified, not
-      guessed: swapping the two maps' rectangles reds on the containment guard
-      and **not** on the border readings, because both maps' far edges really
-      are tinted — what the frame separates is which rectangle a pixel came
-      from.
-    - **Still nobody's claim: a released tile whose map is simply gone, and a
-      merge past one level.**
-      `the_atlas_view_borders_the_quarter_a_released_tile_merged_back_into`
-      draws two frames on one device through `render_scenes` and grows
-      `paired_fine_spot` back to `subdivided_spot`'s radius between them, so the
-      slot wants a quarter where it holds a sixteenth, `Selection::lay_out`
-      hands the sixteenth back before it spends the frame's requests, and the
-      re-issued map is bordered on the quarter that came back. The frame is
-      refused unless the allocator did exactly that — the neighbour's rectangle
-      identical across the two frames, the released slot's side risen to
-      `TILE >> PAIRED_COARSE_LEVEL`, and its origin equal to the released node's
-      _parent_, which is the rectangle a release that freed the node and stopped
-      could not produce: that one hands out the next free quarter, which is
-      bordered exactly as well and is different pixels. Measured identical on
-      radv and lavapipe, three runs each: the released map at atlas texels
-      `(1920, 0)` with a `192`-texel side, `12x12` frame pixels at `(152, 0)`;
-      the re-issued one at `(1920, 0)` with a `384`-texel side, `24x24` pixels
-      at the same corner; the tint `147.0` at `(163, 6)` and `(158, 11)` in the
-      first frame and `0.0` at both in the second. What it leaves: `lay_out`'s
-      _other_ release trigger, a slot whose `wanted` is `None` because the light
-      went away or lost its slot, which
-      `a_light_that_leaves_hands_every_tile_it_held_back` reads on the host and
-      no picture reads; `AtlasAllocator::release` climbing more than one level,
-      which `a_demoted_light_gives_its_cell_back_and_can_take_it_again` reads on
-      the host and which this frame cannot reach because the coarse map holds
-      the sibling quarter; and a point light's run of `POINT_FACES` tiles
-      released together, which nothing in `forward_e2e/shadow.rs` draws through
-      the viewer at all.
-    - **A fixture that copies a renderer-owned image back must hand it back
-      too.** Found while building the check above: `ShadowFixture::draw`
-      barriers the atlas `ShaderRead → TransferSrc` for its readback copy, and
-      before 2026-09-05 nothing put it back — harmless with one frame per
-      device, but the _second_ frame's colour pass then sampled a `TransferSrc`
-      image, which `run-forward-e2e.sh`'s validation gate reported as
-      `VUID-vkCmdDraw-None-09600` beside four PASSing tests rather than as a
-      failed one. Any future multi-frame reader of a renderer-owned image owes
-      the same barrier back.
 - **Subdivision is the coverage ladder's doing, not the allocator running out.**
   Recorded because the entry this replaces said the opposite: a scene with more
   shadowed lights than the atlas has root cells subdivides nothing.
@@ -630,21 +515,6 @@ golden of their own and a button on the page. What is still **not** done:
     same depth for the contact and for every station still inside so short a
     shadow. Reading the pair at noon wants a **second, thin caster** whose noon
     shadow outruns the gap a bias opens; it is not another arm of this walk.
-  - **`plaza::counter_camera`, and the pose that replaced it (2026-09-05).**
-    Measured with `on_screen` and no GPU at `CLAIM_EXTENT`:
-    `plaza::PLINTH_CONTACT` and every one of `BEYOND_CONTACT`'s stations is
-    behind that pose's eye — it stands past the plinth's near face looking away
-    down the plaza — so all six are refused and `project` would panic rather
-    than report. The acne half _is_ framed from there. That is unchanged and it
-    is still not a setup. What the pair reads instead is a setup on the shipped
-    rung at `plaza::pavement_camera`, and **every constant holds there unmoved,
-    none widened and none given a station of its own**: contact `69.84` radv /
-    `69.59` lavapipe as the sample ships, `41.9155%`/`42.0500%` dots with the
-    normal offset zeroed and `3.3629%`/`3.4974%` with the constant bias zeroed
-    against `0.0000%` shipped, `6.48`/`6.41` at the contact and `65.80`/`65.80`
-    beyond it at `PETER_PAN_BIAS`, and the contact held to the digit at
-    `HELD_OFFSET` while the pavement past it fell from `68.08` to `65.75` and
-    from `68.00` to `65.60`. Three runs per adapter, identical to the digit.
   - **The ladder's rungs are read from one pose only (2026-09-05).** `disc`,
     `box` and `box` at `REDUCED_OFFSET` all stay on `plaza::fixed_camera`; only
     the shipped rung has a second pose. Deliberate: which kernel reads a texel
@@ -854,13 +724,10 @@ forward. It was carried once — across the half-resolution change — read
 in both this file and `docs/plan/46-ambient-occlusion.md`.
 
 - **Every occlusion threshold but the shipping one is swept at a configuration
-  nobody runs.** `forward_e2e::occlusion`'s baseline knobs were called
-  `Knobs::SHIPPING` while holding the shader's floor slice count and a single
-  blur, with a doc claiming they were what every golden was blessed under. They
-  are now `Knobs::SPARSE`, which is what they are, and
-  `the_tangential_occlusion_line_does_not_step` reads what actually ships from
-  `crcbl_render`'s console table through `shipped_counts` — so reverting either
-  default reddens `crates/crcbl/tests/run-forward-e2e.sh`. Every _other_ test in
+  nobody runs.** `forward_e2e::occlusion`'s baseline knobs are `Knobs::SPARSE` —
+  the shader's floor slice count and a single blur — and only
+  `the_tangential_occlusion_line_does_not_step` reads what actually ships, from
+  `crcbl_render`'s console table through `shipped_counts`. Every _other_ test in
   that file still runs at `Knobs::SPARSE`, so `MAX_HALO`, `MIN_SWING`,
   `MIN_TECHNIQUE_GAP` and the terracing, intensity and radius bounds all
   describe a picture a player does not get. Closing that is a re-sweep of each
@@ -1263,6 +1130,13 @@ and `AO_LIFT` 1.02. Both still clear, and both clear by less: the AO scene now
 guards 4.9% where this entry recorded 5.8%, and the corner 3.5% where it
 recorded 3.8%.
 
+**Re-read against the tree 2026-09-05, and the lift's figures above are a day
+old.** `AO_LIFT` is **1.008**, not 1.02, and the corner reads 66.7 against 67.6
+on radv (1.0135) and 66.8 against 67.6 on lavapipe (1.0120): the punctual RSM
+producer narrowed it again on 2026-09-04 (`5874479`), and the constant's own doc
+in `apps/lantern/tests/golden.rs` says it has run out of room to narrow a third
+time. `AO_RATIO` and its 1.03 are as written.
+
 The lift is measured on a frame whose bounce is the RSM updater's rather than
 lantern's old CPU bake, since both landed before this reading. The ratio is not:
 `Scene::Ao` is `ProbeUpdate::Authored`, so nothing about the updater reaches it
@@ -1402,7 +1276,7 @@ sweep knows where to start rather than re-deriving it.
 **What was verified**: the `debug_view` flake, the four-file size table, the
 `probe.rs` split argument, the DXIL register-class coverage, the settings
 catalogue's key counts, the `CRCBL_ADAPTER` entry's reader claim, the
-`crcbl-wgpu` parity bookkeeping, the "no test owns a real `ForwardRenderer`"
+`crcbl-webgpu` parity bookkeeping, the "no test owns a real `ForwardRenderer`"
 bullet, the `FrameArena` doc claim, and the read-only-depth "only pass" clause.
 
 **What was not reached, and is where a next pass should go**:
@@ -1492,7 +1366,10 @@ records what is now true. What it did not do:
   constant guards — a fallback substituted for the hit, which reads at or below
   1.0 — is still an order of magnitude away. Not a defect, recorded because a
   widened tolerance is a thing a later reader should be able to check rather
-  than trust.
+  than trust. **It widened again to 0.28 on 2026-09-04** (`5874479`), when the
+  punctual producer put the lamp's bounce behind the hit as well — 61.2 to 47.7
+  on radv, 22.1% — and the constant's doc in `apps/lantern/tests/golden.rs`
+  carries each step; the teeth are unchanged, the miss still pinned at 0.0.
 
 ## What the half-resolution occlusion harness does not cover (2026-09-02)
 
@@ -1579,9 +1456,10 @@ Activision original. That is not the gap.
   pass producing an AO-shaped depth chain, not a binding the AO pass forgot to
   add — a rung, not an oversight.
 
-- **It spends about twenty taps per gathered pixel**, every one of them into the
-  full-resolution depth image. Sixteen for the horizons —
-  `slice_count() * 2 * SLICE_STEPS`, with `SLICE_COUNT_DEFAULT` 2 and
+- **It spends thirty-six taps per gathered pixel as shipped**, every one of them
+  into the full-resolution depth image. Thirty-two for the horizons —
+  `slice_count() * 2 * SLICE_STEPS`, with `r_ssao_slices` defaulting to 4 since
+  2026-09-03 (`SLICE_COUNT_DEFAULT` 2 is the floor, not the default) and
   `SLICE_STEPS` 4 — plus four more, because `ssao.slang` reconstructs the normal
   from its four neighbours rather than reading one. It reconstructs because the
   AO prepass has no colour target to have written a G-buffer normal into, which
