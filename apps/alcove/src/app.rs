@@ -173,13 +173,23 @@ impl Alcove {
     /// `crate::web`'s `__crcbl_alcove_bent_view` and `__crcbl_alcove_view` an
     /// effect a gate can *read* rather than infer. `apps/sundial`'s heartbeat
     /// carries the same field for the same reason.
+    ///
+    /// **`intensity` and `bent normals` are here for that gate too**, and the
+    /// argument is the one `radius` already makes: what either of them moves is
+    /// how dark one recess sits, or whether the gather carries a direction at
+    /// all beside the scalar it always carries — a handful of pixels of one
+    /// surface, on a canvas whose statistics also carry the HUD. With the whole
+    /// of [`crate::occlusion::KNOBS`] on this line every control
+    /// `web/pages/alcove.html` offers has an effect that can be read off a
+    /// heartbeat instead of inferred from a picture.
     fn log_heartbeat(&self) {
         if !self.ticks.is_multiple_of(HEARTBEAT_TICKS) {
             return;
         }
         crcbl::log::info!(
             "[HUD] tick: {}  lighting: {:?}  geometry: {:?}  binding: {:?}  camera: {}  \
-             effects: {}  technique: {}  radius: {:.3}  view: {}  seam: {}",
+             effects: {}  technique: {}  radius: {:.3}  intensity: {:.2}  bent normals: {}  \
+             view: {}  seam: {}",
             self.ticks,
             self.paths.lighting,
             self.paths.geometry,
@@ -188,6 +198,8 @@ impl Alcove {
             self.paths.effects_row(),
             self.knobs.technique,
             self.knobs.radius,
+            self.knobs.intensity,
+            if self.knobs.bent_normals { "ON" } else { "OFF" },
             self.knobs.view.label(),
             self.knobs.seam_row(),
         );

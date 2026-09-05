@@ -957,21 +957,19 @@ const EXPECTATIONS = {
           noun: 'the occlusion channel instead of the shaded court',
         },
       ],
-      // **The radius, which is the one knob on this page whose control and
-      // whose reading are in different units.** `r_ssao_radius` is a console
-      // cell like the technique and the seam, and what it moves is how deep the
-      // recess and the crevice sit — a few pixels of one surface, which is why
-      // it is read off `Alcove::log_heartbeat`'s `radius:` field and not off the
-      // canvas. `#knob-radius` is a 0-to-1 dial, though: `occlusion::dial` maps
-      // it geometrically across the variable's own range, because a linear track
-      // across a range that wide spends most of its length at the top. So the
-      // drag is held against the engine's own answer for where the dial stands —
-      // `__crcbl_alcove_radius(-1)`, which is the read the page's own label is
-      // refreshed from — rather than against the slider's raw value.
-      //
-      // The bent-normals switch and the intensity slider are still driven by
-      // nothing but a person: neither is on this line, and adding either wants a
-      // field on it.
+      // **The two dials, whose controls and whose readings are in different
+      // units.** `r_ssao_radius` and `r_ssao_intensity` are console cells like
+      // the technique and the seam, and what they move is how deep the recess
+      // and the crevice sit and how hard that darkening is applied — a few
+      // pixels of one surface either way, which is why both are read off
+      // `Alcove::log_heartbeat` and not off the canvas. Their controls are
+      // 0-to-1 dials, though: `occlusion::dial` maps each geometrically across
+      // its variable's own range, because a linear track across a range that
+      // wide spends most of its length at the top. So each drag is held against
+      // the engine's own answer for where that dial stands — the same read
+      // `web/demos/alcove/main.js` refreshes the label beside it from — rather
+      // than against the slider's raw value. `decimals` differs because the
+      // heartbeat prints a radius in metres to more places than an exponent.
       counts: [
         {
           control: 'knob-radius',
@@ -979,6 +977,35 @@ const EXPECTATIONS = {
           noun: 'the radius the horizons sweep',
           answer: 'crcbl.exports.__crcbl_alcove_radius(-1)',
           decimals: 3,
+        },
+        {
+          control: 'knob-intensity',
+          field: /\bintensity: ([\d.]+)/,
+          noun: 'the exponent the measured occlusion is raised to',
+          answer: 'crcbl.exports.__crcbl_alcove_intensity(-1)',
+        },
+      ],
+      // **The bent-normals switch, which is a knob with two positions and no
+      // number.** `r_ssao_bent_normals` is a console cell like the two dials,
+      // and what it changes is whether the gather reports a direction beside
+      // the scalar it always reports — which the shaded court barely moves,
+      // because the direction is what the *bent* view above draws rather than
+      // something this frame shades with. So the heartbeat's `bent normals:` is
+      // where it is legible at all.
+      //
+      // **Two positions, so the entry carries no value to compare against**:
+      // the block below reads where the switch opened off the heartbeat and
+      // asks that a press move it and a second press bring it back, which is
+      // the shape the debug views take. Neither position is written down here
+      // either — `r_ssao_bent_normals` ships **on**, and a fixture opened with
+      // it off is still a fixture this block can drive. `reset` below does put
+      // this cell back, unlike a debug view: it is one of
+      // `crate::occlusion::KNOBS`.
+      switches: [
+        {
+          control: 'knob-bent',
+          field: /\bbent normals: (ON|OFF)/,
+          noun: 'the direction the gather reports beside the scalar',
         },
       ],
       // And everything back, which is also what leaves the demo in the state
@@ -4375,12 +4402,13 @@ try {
     }
 
     // **AND THE NUMBERS A PICTURE CANNOT ANSWER FOR.** sundial's two shadow
-    // biases and alcove's occlusion radius: console cells like the filter, the
-    // technique and the seam, but what any of them moves is acne on the open
-    // pavement, the gap under the plinth or how deep one corner of a court
-    // sits — a few pixels of one surface, on a canvas whose statistics also
-    // carry the HUD. Each sample's heartbeat prints the value off the console's
-    // own cell, which is what makes this a reading rather than an inference.
+    // biases and alcove's occlusion radius and intensity: console cells like
+    // the filter, the technique and the seam, but what any of them moves is
+    // acne on the open pavement, the gap under the plinth or how deep one
+    // corner of a court sits — a few pixels of one surface, on a canvas whose
+    // statistics also carry the HUD. Each sample's heartbeat prints the value
+    // off the console's own cell, which is what makes this a reading rather
+    // than an inference.
     //
     // **Held against a number the page can be asked for, not against "it
     // changed"**, for the sun slider's reason: the page writes its control back
@@ -4395,16 +4423,19 @@ try {
     // either track is well clear of what the engine ships, both counts
     // defaulting to a couple of texels against ranges running to dozens, which
     // is `DEPTH_BIAS_TEXELS` and `NORMAL_OFFSET_TEXELS` read against their own
-    // `convar!` ranges. alcove's is not: `#knob-radius` is a 0-to-1 dial and
-    // `Alcove::log_heartbeat` prints metres, so an entry naming `answer` is
-    // asked *that* expression instead — `__crcbl_alcove_radius(-1)`, the same
-    // read `web/demos/alcove/main.js` refreshes its own label from. Holding the
+    // `convar!` ranges. alcove's two are not: each is a 0-to-1 dial while
+    // `Alcove::log_heartbeat` prints metres and an exponent, so an entry naming
+    // `answer` is asked *that* expression instead — `__crcbl_alcove_radius(-1)`
+    // and `__crcbl_alcove_intensity(-1)`, the same reads
+    // `web/demos/alcove/main.js` refreshes its own labels from. Holding a
     // dial's raw value against the heartbeat would compare two different units
     // and fail on a page that works; `decimals` is how many places the field is
-    // printed to, which is not the same for the two demos either.
+    // printed to, which is not the same for every entry either. A quarter of
+    // the way along is clear of where each of those dials opens too — both are
+    // geometric, so the middle of the track is the shipped value.
     //
     // The `reset` below is what puts them back: sundial's two are in
-    // `crate::filter::KNOBS` and alcove's radius is in `crate::occlusion`'s,
+    // `crate::filter::KNOBS` and alcove's pair is in `crate::occlusion`'s,
     // which is the list each sample's reset walks.
     for (const count of knobs.counts ?? []) {
       const before = stands(hud()[hud().length - 1] ?? '', count.field);
@@ -4440,6 +4471,63 @@ try {
                 `${asked || '(nothing)'}, and it opened at ` +
                 `${before || '(nothing)'}`
               : `no heartbeat in ${pollCeiling()} ms after the drag`
+      );
+    }
+
+    // **AND THE KNOBS WITH TWO POSITIONS AND NO NUMBER.** alcove's
+    // bent-normals switch is the only one on the site: a console cell like the
+    // dials above, but what it changes is whether the gather reports a
+    // direction *beside* the scalar — which the shaded court barely moves,
+    // because the direction is what the bent view draws rather than something
+    // this frame shades with. So the heartbeat is where it is legible at all,
+    // and there is no value to hold it against: a switch has the position it
+    // did not open in, and that is the whole of what a press can be asked for.
+    //
+    // **Pressed twice, and not for the debug views' reason.** `reset` below
+    // does reach these cells, so the second press is not what puts the demo
+    // back; it is what makes the first one a check. A page has no toggle to
+    // call — the export takes the position it is to be left in — so a demo's
+    // `main.js` reads the switch and asks for the other one, and a read arm
+    // stuck at the position the page opened in moves it once and can never
+    // move it back. A block that only watched it move would pass for that page.
+    for (const flip of knobs.switches ?? []) {
+      const before = stands(hud()[hud().length - 1] ?? '', flip.field);
+      const flipped = (await clickControl(flip.control)) && (await resume());
+      const flipMark = hud().length;
+      const flipLine = flipped ? await beatAfter(flipMark) : null;
+      const flipNow = stands(flipLine ?? '', flip.field);
+      check(
+        'C',
+        `a press on the page flips ${flip.noun}`,
+        Boolean(flipLine) &&
+          flipNow !== '' &&
+          before !== '' &&
+          flipNow !== before,
+        !flipped
+          ? `the page has no #${flip.control} control, or the demo did not go ` +
+              'back into play after the press — status ' +
+              `${await evaluate(page, `crcbl.status()`)}`
+          : flipLine
+            ? `the switch reads ${flipNow || '(nothing)'}, and it opened at ` +
+              `${before || '(nothing)'}`
+            : `no heartbeat in ${pollCeiling()} ms after the press`
+      );
+
+      const back = (await clickControl(flip.control)) && (await resume());
+      const backMark = hud().length;
+      const backLine = back ? await beatAfter(backMark) : null;
+      const backNow = stands(backLine ?? '', flip.field);
+      check(
+        'C',
+        `and a second press on #${flip.control} flips it back`,
+        Boolean(backLine) && backNow !== '' && backNow === before,
+        !back
+          ? 'the demo did not go back into play after the second press — ' +
+              `status ${await evaluate(page, `crcbl.status()`)}`
+          : backLine
+            ? `the switch reads ${backNow || '(nothing)'}, and it opened at ` +
+              `${before || '(nothing)'}`
+            : `no heartbeat in ${pollCeiling()} ms after the second press`
       );
     }
 

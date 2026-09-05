@@ -359,50 +359,24 @@ loop. For `ask_reset` that is a no-op; for a placed tick it would open the next
 run on the sun the page last placed. Neither `crcbl::web_exports!`'s `shutdown`
 nor `crate::app` offers a hook to empty it from inside `apps/sundial`.
 
-## alcove's page knobs: what is checked, and what is not (2026-09-04)
+## Reaching alcove's page knobs costs the pointer (2026-09-04)
 
-`/demos/alcove/` is the first page on the site whose controls are HTML rather
-than keys — `apps/alcove/src/web.rs` exports one call per knob and
-`web/demos/alcove/main.js` binds them. `web/tools/browser-e2e.mjs`'s `alcove`
-row drives **six** of them and reads the effect off the demo's own heartbeat:
-the seam button, the seam slider, the technique button, the bent-direction
-button, the AO-only view button — the last two twice each, because no sample's
-`reset` reaches the engine's debug view — and the radius slider, then `reset`.
-The **bent-normals switch and the intensity slider are driven by nothing but a
-person**.
+**Reaching a control on `/demos/alcove/` at all costs the pointer, and that
+surprised us.** The fixture asks for Pointer Lock while it is running,
+`web/engine/shell.js` takes it on the first mouse press inside the canvas, and
+under a lock every mouse event goes to the canvas — so a click on a page control
+never arrives. `Esc` is the way out and the page says so; letting the pointer go
+also pauses the fixture, and focus coming back does not resume it. None of that
+is a bug — each half is behaviour a check in this tree asserts on purpose — but
+together they make a desktop visitor press `Esc` before the knobs answer, where
+a finger never does. If the seam ever wants to be reachable while the court is
+being flown, the decision to revisit is `Alcove::pointer_mode`, which locks
+whenever the run is not paused even though the page opens on the fixed camera.
 
-The AO-only button joined that list on 2026-09-05, once `Alcove::log_heartbeat`
-carried a `view:` field and `browser-e2e.mjs`'s debug-view block took a **list**
-of `{control, label, noun}` entries against one shared `viewField`: it writes
-the same `crcbl::debug_view` cell the bent one does, its label is
-`ambient occlusion`, and `web/demos/alcove/main.js` presses it by reading the
-view back and asking for the other one — so the second press takes it away,
-which is the half that block asserts.
-
-The radius joined it the same day, and it was the cheap one for the reason this
-entry said it would be: it is on the heartbeat already, as `radius:` in world
-units. What it took was a `knobs.counts` entry of the shape sundial's two bias
-sliders take, plus the two fields that entry needed — `answer`, because
-`#knob-radius` is a 0-to-1 dial and the heartbeat prints metres, so the drag is
-held against `__crcbl_alcove_radius(-1)`'s return rather than against the
-slider's raw value; and `decimals`, because the two demos do not print their
-fields to the same number of places. Both default to what sundial's two entries
-already did, so those are unchanged. The **bent-normals switch and the intensity
-slider are not on the heartbeat at all**, and checking either wants another
-field on that line or a reading taken off the canvas, and the second is what
-`still` in that row says this demo cannot give.
-
-**Reaching those controls at all costs the pointer, and that surprised us.** The
-fixture asks for Pointer Lock while it is running, `web/engine/shell.js` takes
-it on the first mouse press inside the canvas, and under a lock every mouse
-event goes to the canvas — so a click on a page control never arrives. `Esc` is
-the way out and the page says so; letting the pointer go also pauses the
-fixture, and focus coming back does not resume it. None of that is a bug — each
-half is behaviour a check in this tree asserts on purpose — but together they
-make a desktop visitor press `Esc` before the knobs answer, where a finger never
-does. If the seam ever wants to be reachable while the court is being flown, the
-decision to revisit is `Alcove::pointer_mode`, which locks whenever the run is
-not paused even though the page opens on the fixed camera.
+Nothing else on that page is owed: `web/tools/browser-e2e.mjs`'s `alcove` row
+drives every control `web/pages/alcove.html` offers and reads each one off
+`Alcove::log_heartbeat`, and `releasePointer` in that file is the release above
+made a step of the gate.
 
 ## What alcove's bent-direction view did not cover (2026-09-05)
 

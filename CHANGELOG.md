@@ -222,8 +222,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   page refreshes its own label from — rather than against the slider's raw
   value, which is in the wrong unit to compare. `knobs.counts` entries also take
   `decimals` now, because the two demos do not print their fields to the same
-  number of places. The bent-normals switch and the intensity slider on that
-  page are still driven by nothing but a person: neither is on the heartbeat.
+  number of places.
+
+  **And so are the intensity slider and the bent-normals switch**, which were
+  the last two controls on that page nothing but a person had ever pressed.
+  `Alcove::log_heartbeat` carries an `intensity:` field and a `bent normals:`
+  field beside `radius:`, so every `r_ssao_*` control the page offers has an
+  effect a gate can read off the engine's own line instead of inferring it from
+  a canvas that mixes the scene with the HUD. The intensity is a second
+  `knobs.counts` entry, held against `__crcbl_alcove_intensity(-1)` for the
+  radius's reason; the switch is the first `knobs.switches` entry — a knob with
+  two positions and no number, pressed twice, because a page reads such a switch
+  and asks for the other position and a read arm stuck at the position the page
+  opened in moves it once and can never move it back.
 
 - **The shadow-atlas viewer**, which `docs/plan/sample/18-sundial.md`'s
   milestone 1 has owed since the sample was written and which closes
