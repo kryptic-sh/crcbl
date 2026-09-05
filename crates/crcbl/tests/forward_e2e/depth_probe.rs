@@ -236,9 +236,8 @@ const PROBE_MATERIALS: [crcbl::shaders::mesh::GpuMaterial; 2] = [
         // assertion looks.
         emissive: [0.0; 3],
         // **No page on the remaining columns either**, for the reason the
-        // tiling comment gives: this probe's scene carries the one white layer
-        // and the one neutral normal layer `PageDesc::opaque_white` describes,
-        // so a row naming any layer at all would be naming one for no reason.
+        // tiling comment gives: this probe's scene names no page of any kind, so
+        // a row naming a layer would be naming one that does not exist.
         normal_texture: crcbl::shaders::mesh::GpuMaterial::NO_PAGE,
         normal_scale: crcbl::shaders::mesh::GpuMaterial::UNTINTED.normal_scale,
         metallic_roughness_occlusion_texture: crcbl::shaders::mesh::GpuMaterial::NO_PAGE,
@@ -326,7 +325,7 @@ impl DepthProbe {
                     [0.0, 0.0, 1.0],
                     [color[0], color[1], color[2], 1.0],
                     // The corner's own position mapped to `0..=1`. It selects
-                    // nothing here — the probe's page has one white layer.
+                    // nothing here — the probe's scene names no page at all.
                     [x * 0.5 + 0.5, y * 0.5 + 0.5],
                     &PROBE_UV_RANGE,
                 ));

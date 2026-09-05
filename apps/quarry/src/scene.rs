@@ -39,11 +39,6 @@ pub(crate) const ROCK: GpuMaterial = GpuMaterial {
     ..GpuMaterial::UNTINTED
 };
 
-/// Texels a side of the page. One, because nothing here samples a texture: the
-/// page exists because a material table indexes one, and the smallest legal
-/// page is the honest size for a scene with no images.
-pub(crate) const PAGE_EXTENT: u32 = 1;
-
 /// Headroom over the exact counts, as a multiplier.
 ///
 /// The pools do not grow — [`SceneDesc`] is read once at `with_scene` — so a
@@ -81,7 +76,9 @@ pub fn quarry_scene(face: &Face) -> Result<SceneDesc<'static>, MeshletError> {
         // Row 0 is what an instance written without a material id names, so the
         // rock has to be the first row rather than merely present.
         materials: vec![ROCK],
-        page: PageDesc::opaque_white(PAGE_EXTENT),
+        // Nothing here samples a texture, so the description names no page at
+        // all and the renderer allocates one placeholder texel per kind.
+        page: PageDesc::empty(),
         probes: ProbeGrid::default(),
         capacities: capacities_for(face),
     })

@@ -36,7 +36,7 @@ use crate::hdr::HdrTarget;
 use crate::mesh_scene::{MESH_EXTENT, render_mesh};
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::scene::{
-    CHECKER_LAYER, CHECKER_TEXELS, Capacities, Geometry, MeshDesc, PAGE_EXTENT, PageDesc,
+    CHECKER_LAYER, CHECKER_TEXELS, Capacities, Geometry, MeshDesc, PAGE_EXTENT, PageDesc, PageKind,
     ProbeGrid, SceneDesc,
 };
 use crcbl::render::{
@@ -176,16 +176,17 @@ pub(crate) fn quad_clusters() -> MeshClusters {
 /// [`demo`](crcbl::render::scene::demo)'s page and material rows, with
 /// `meshes` in place of its geometry.
 ///
-/// Row 0 is the untextured white one every unassigned instance shades through;
-/// row [`TEXTURED_ROW`] samples the checker. Both are `demo`'s, spelled out
+/// Row 0 names no page at all, which is what every unassigned instance shades
+/// through; row [`TEXTURED_ROW`] samples the checker. Both are `demo`'s, spelled out
 /// here because the mesh ids have to be this file's own — a description that
 /// appended to `demo` would put every quad past four meshes and one DAG.
 pub(crate) fn quad_scene(meshes: Vec<MeshDesc<'static>>) -> SceneDesc<'static> {
-    let mut page = PageDesc::opaque_white(PAGE_EXTENT);
-    let checker = page.push_layer(&CHECKER_TEXELS[..]);
+    let mut page = PageDesc::empty();
+    page.set_extent(PageKind::BaseColor, PAGE_EXTENT);
+    let checker = page.push_layer(PageKind::BaseColor, &CHECKER_TEXELS[..]);
     assert_eq!(
         checker, CHECKER_LAYER,
-        "the checker is the layer past white"
+        "the checker is the page's one layer"
     );
     SceneDesc {
         meshes,

@@ -18,9 +18,9 @@
 //! * **The texture reaches the page.** A material whose image was dropped keeps
 //!   `GpuMaterial::NO_PAGE` and multiplies by `1.0` — the frame would be one
 //!   flat colour and the four hue assertions would fail together.
-//! * **The row names the right layer.** A row pointed at the page's white layer
-//!   is the same flat white; a row pointed past the end of the page is refused
-//!   by `with_scene` before a device object exists.
+//! * **The row names the right layer.** A row naming `NO_PAGE` is the same flat
+//!   white; a row pointed past the end of the page is refused by `with_scene`
+//!   before a device object exists.
 //! * **The UVs survive.** Without `TEXCOORD_0` every vertex samples one texel and
 //!   the quad is a single hue.
 //! * **The hierarchy composes.** The parent's rotation carries the corners a
@@ -503,7 +503,7 @@ fn an_imported_gltf_draws_its_own_texture_where_its_own_hierarchy_puts_it() {
         spread > 40.0,
         "the four quadrants differ by at most {spread:.0} in any channel, so the quad is \
          one flat colour — the texture never reached the page, or the material row names \
-         the untextured layer"
+         no page at all"
     );
 
     for ((right, bottom), hue) in expected {

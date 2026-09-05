@@ -15,7 +15,7 @@ use crcbl::hal::{
     ImageAspect, ImageBarrier, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange,
     MemoryLocation, ResourceState, SubmitInfo,
 };
-use crcbl::render::scene::{Geometry, MeshDesc, PageDesc, ProbeGrid};
+use crcbl::render::scene::{Geometry, MeshDesc, PageDesc, PageKind, ProbeGrid};
 use crcbl::render::{Capacities, ForwardRenderer, SceneDesc, mip};
 use crcbl::shaders::mesh::GpuMaterial;
 use std::borrow::Cow;
@@ -23,12 +23,12 @@ use std::borrow::Cow;
 /// The page's side, in texels: three levels, so the chain has a middle.
 const EXTENT: u32 = 4;
 
-/// The layer this appends past the white one `PageDesc::opaque_white` burns.
-const PATTERN_LAYER: u32 = 1;
+/// The page's only layer, and its first: nothing burns one ahead of it.
+const PATTERN_LAYER: u32 = 0;
 
-/// A 4×4 layer whose quadrants differ, so every level of its chain differs
-/// from every other and from the white layer beside it: a red/black checker,
-/// solid green, a blue/white checker and solid yellow.
+/// A 4×4 layer whose quadrants differ, so every level of its chain differs from
+/// every other and from a flat white field: a red/black checker, solid green, a
+/// blue/white checker and solid yellow.
 fn pattern() -> Vec<u8> {
     let mut texels = Vec::with_capacity((EXTENT * EXTENT * 4) as usize);
     for y in 0..EXTENT {
@@ -140,10 +140,9 @@ fn read_level(headless: &Headless, image: ImageHandle, layer: u32, level: u32) -
         .collect()
 }
 
-/// **Every level of every layer is on the device, and it is the host's
-/// chain.** Level 0 of the pattern layer is the pattern, its two lower levels
-/// are what `crcbl::render::mip::chain` computed for it, and the white layer's
-/// lower levels are white — so the copies landed in the right layer and the
+/// **Every level of the layer is on the device, and it is the host's chain.**
+/// Level 0 of the pattern layer is the pattern and its two lower levels are what
+/// `crcbl::render::mip::chain` computed for it — so the copies landed in the
 /// right mip, from the right offset, and not one of the four backends did it
 /// differently.
 #[test]
@@ -159,16 +158,20 @@ fn the_page_carries_the_hosts_mip_chain_on_every_layer() {
         2,
         "a 4×4 layer has two levels below its own"
     );
-    // Anti-vacuity: the levels this compares differ from each other and from
-    // the white layer beside them, so a copy that wrote the wrong level, or the
-    // wrong layer, cannot compare equal by accident.
+    // Anti-vacuity: the levels this compares differ from each other and from a
+    // flat white field, so a copy that wrote the wrong level cannot compare
+    // equal by accident.
     let white = |side: u32| vec![0xFFu8; (side * side * 4) as usize];
     assert_ne!(expected[0], white(2));
     assert_ne!(expected[1], white(1));
     assert_ne!(&expected[0][..4], &expected[1][..]);
 
-    let mut page = PageDesc::opaque_white(EXTENT);
-    assert_eq!(page.push_layer(level0.clone()), PATTERN_LAYER);
+    let mut page = PageDesc::empty();
+    page.set_extent(PageKind::BaseColor, EXTENT);
+    assert_eq!(
+        page.push_layer(PageKind::BaseColor, level0.clone()),
+        PATTERN_LAYER
+    );
     // One cube and one row, because a description with no mesh is not one the
     // renderer builds — `docs/backlog.md` has the entry. Nothing here draws it.
     let scene = SceneDesc {
@@ -206,12 +209,6 @@ fn the_page_carries_the_hosts_mip_chain_on_every_layer() {
         expected[1],
         "level 2 of the pattern layer is the host's one texel"
     );
-    assert_eq!(
-        read_level(&headless, image, 0, 1),
-        white(2),
-        "the white layer's chain is white"
-    );
-
     eprintln!(
         "{}: the page's {EXTENT}² chain reads back level for level on layer {PATTERN_LAYER}",
         crate::SUITE

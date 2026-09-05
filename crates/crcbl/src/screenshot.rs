@@ -4102,10 +4102,10 @@ fn fill_light_pairs() -> [crcbl_render::Light; 4] {
 /// [`Scene::AlphaMask`]'s page layer, in the description `alpha_mask_scene`
 /// builds.
 ///
-/// The demo scene's two layers and this one after them, so
+/// The demo scene's one layer and this one after it, so
 /// `crcbl_render::scene::CHECKER_LAYER` keeps the index it has always had —
 /// [`AREA_FLOOR`]'s arrangement, one page along.
-const ALPHA_MASK_LAYER: u32 = 2;
+const ALPHA_MASK_LAYER: u32 = 1;
 
 /// [`ALPHA_MASK_LAYER`]: one column of texels at alpha `0x00` and one at
 /// `0xFF`, at the same white RGB.
@@ -4184,7 +4184,10 @@ fn alpha_mask_scene() -> crate::render::scene::SceneDesc<'static> {
         );
     }
     let mut scene = crate::render::scene::demo();
-    let mask = scene.page.push_layer(&ALPHA_MASK_TEXELS[..]);
+    let mask = scene.page.push_layer(
+        crate::render::scene::PageKind::BaseColor,
+        &ALPHA_MASK_TEXELS[..],
+    );
     debug_assert_eq!(
         mask, ALPHA_MASK_LAYER,
         "the mask is the layer past the demo scene's checker"

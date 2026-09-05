@@ -107,17 +107,22 @@
 //!
 //! # What this does with textures, and what a page cannot hold
 //!
-//! A [`PageDesc`] is one image: every layer shares one square extent and one
-//! format — `docs/backlog.md`'s `ArrayPages` entry says what still binds. Real
-//! glTF textures are neither square nor equally sized, so they are
-//! **resampled** onto a common extent — the largest side of the largest decoded
-//! image, clamped to [`MAX_PAGE_EXTENT`] — by [`crcbl_render::mip::resample`],
-//! the alpha-weighted box filter that averages in *linear* light and re-encodes
-//! to sRGB, which is what the page's `Rgba8UnormSrgb` format means. The same
-//! filter builds each layer's mip chain when the page is uploaded. The normal
-//! page has a filter of its own; see below.
+//! A [`PageDesc`] holds one image per [`PageKind`]: every layer of a kind shares
+//! that kind's square extent and its one format — `docs/backlog.md`'s
+//! `ArrayPages` entry says what still binds. Real glTF textures are neither
+//! square nor equally sized, so they are **resampled** onto their kind's common
+//! extent — the largest side of the largest image *that kind* named, clamped to
+//! [`MAX_PAGE_EXTENT`] — by [`crcbl_render::mip::resample`], the alpha-weighted
+//! box filter that averages in *linear* light and re-encodes to sRGB, which is
+//! what the base-colour page's `Rgba8UnormSrgb` format means. The same filter
+//! builds each layer's mip chain when the page is uploaded. The normal page has
+//! an extent and a filter of its own; see below.
 //!
-//! The page costs `layers × extent² × 4` bytes on the device, and a third again
+//! **A kind no material names is left empty**, and a document with no textures
+//! at all therefore allocates nothing: the renderer creates one placeholder
+//! texel where the image would have been, and no material row points at it.
+//!
+//! A page costs `layers × extent² × 4` bytes on the device, and a third again
 //! for the chain below level 0, so a document with many large textures is
 //! expensive by construction. That is the single-page shape's limit rather than
 //! this module's choice; the fix is the bindless form the backlog entry
@@ -137,8 +142,8 @@
 //! The colour filter's sRGB decode is wrong by a gamma for the linear
 //! tangent-space vectors a normal map holds — exact for an image the page does
 //! not resize, and skewed for every averaged texel of one it does. An image both
-//! slots name is therefore resampled twice, once through each filter, because
-//! the two pages hold different kinds of value.
+//! slots name is therefore resampled twice, once through each filter and once
+//! per extent, because the two pages hold different kinds of value.
 //!
 //! # Everything unsupported is skipped loudly
 //!
@@ -156,7 +161,7 @@ use std::fmt;
 use std::path::Path;
 
 use crcbl_render::scene::{
-    Capacities, Geometry, InstanceDesc, MeshDesc, PAGE_EXTENT, PageDesc, ProbeGrid, SceneDesc,
+    Capacities, Geometry, InstanceDesc, MeshDesc, PageDesc, PageKind, ProbeGrid, SceneDesc,
 };
 use crcbl_shaders::mesh::{self, MeshVertex, VERTEX_STRIDE};
 use crcbl_shaders::skinning::SkinBinding;
@@ -338,16 +343,18 @@ fn image_label(scene: &GltfScene, image: usize) -> String {
 // The texture page
 // ---------------------------------------------------------------------------
 
-/// Decode every image the document actually uses, resample them onto one square
-/// extent, and return the page with a map from image index to layer for each of
-/// its two pages: base colour, then normal.
+/// Decode every image the document actually uses, resample each page's onto that
+/// page's own square extent, and return the page with a map from image index to
+/// layer for each of its two kinds: base colour, then normal.
 ///
 /// A map is `None` for an image that is not in that page — never wanted, never
 /// decoded, or decoded and refused — and a material naming one keeps
 /// [`GpuMaterial::NO_PAGE`](mesh::GpuMaterial::NO_PAGE) in that column.
 ///
-/// **One extent covers both pages**, because a [`PageDesc`] has one; an image
-/// larger than it is resampled down whichever slot named it.
+/// **Each [`PageKind`] is sized from its own images**, so a document with a
+/// 2048² albedo map and a 512² normal map allocates one of each rather than two
+/// of the larger — and a kind no material names is left empty, which costs one
+/// texel on the device rather than an image nothing samples.
 fn pack_page(
     scene: &GltfScene,
     skips: &mut Skips<'_>,
@@ -382,30 +389,44 @@ fn pack_page(
         }
     }
 
-    // One extent for every layer, and it has to hold the largest thing in the
-    // document or that texture loses detail no later pass can put back. The
-    // floor is the extent the engine's own demo page uses, so a document with no
-    // textures at all still gets a page every backend has drawn through.
-    let extent = decoded
-        .iter()
-        .map(|(_, rgba)| rgba.width.max(rgba.height))
-        .max()
-        .unwrap_or(PAGE_EXTENT)
-        .clamp(PAGE_EXTENT, MAX_PAGE_EXTENT);
+    // One extent per kind, and it has to hold the largest thing *that kind*
+    // named or the texture loses detail no later pass can put back. `None` for a
+    // kind no image reached: the page is then left empty and the renderer
+    // creates one placeholder texel for it, rather than the engine's demo extent
+    // filled with a layer nothing samples.
+    let extent_of = |wanted: &[usize]| -> Option<u32> {
+        decoded
+            .iter()
+            .filter(|(image, _)| wanted.contains(image))
+            .map(|(_, rgba)| rgba.width.max(rgba.height))
+            .max()
+            .map(|side| side.min(MAX_PAGE_EXTENT))
+    };
+    let base_extent = extent_of(&base_wanted);
+    let normal_extent = extent_of(&normal_wanted);
 
-    let mut page = PageDesc::opaque_white(extent);
+    let mut page = PageDesc::empty();
+    for (kind, extent) in [
+        (PageKind::BaseColor, base_extent),
+        (PageKind::Normal, normal_extent),
+    ] {
+        if let Some(extent) = extent {
+            page.set_extent(kind, extent);
+        }
+    }
     let mut base_layers = vec![None; scene.images().len()];
     let mut normal_layers = vec![None; scene.images().len()];
     for (image, rgba) in decoded {
         // The two pages are two device images, so one texel run cannot be
         // shared between them; an image both slots name is resampled per page.
         if base_wanted.contains(&image) {
-            base_layers[image] = Some(page.push_layer(crcbl_render::mip::resample(
-                &rgba.pixels,
-                rgba.width,
-                rgba.height,
-                extent,
-            )));
+            let extent = base_extent.unwrap_or_else(|| {
+                unreachable!("this image is one of the ones `base_extent` was taken over")
+            });
+            base_layers[image] = Some(page.push_layer(
+                PageKind::BaseColor,
+                crcbl_render::mip::resample(&rgba.pixels, rgba.width, rgba.height, extent),
+            ));
         }
         if normal_wanted.contains(&image) {
             // **`normal_resample`, not `resample`** — the filter that averages
@@ -415,7 +436,11 @@ fn pack_page(
             // right answer rather than an inefficiency: the two pages hold
             // different kinds of value and neither filter is correct for the
             // other's.
-            normal_layers[image] = Some(page.push_normal_layer(
+            let extent = normal_extent.unwrap_or_else(|| {
+                unreachable!("this image is one of the ones `normal_extent` was taken over")
+            });
+            normal_layers[image] = Some(page.push_layer(
+                PageKind::Normal,
                 crcbl_render::mip::normal_resample(&rgba.pixels, rgba.width, rgba.height, extent),
             ));
         }
@@ -1255,32 +1280,173 @@ mod tests {
         }
     }
 
+    /// [`two_extents_glb`]'s base-colour image, in texels a side.
+    ///
+    /// Twice [`NORMAL_SIDE`], and the two are the whole of what this fixture is
+    /// for: one shared extent could only be the larger of them, and would put
+    /// the normal map on the page resampled to sixteen texels rather than the
+    /// four its author wrote.
+    const BASE_SIDE: u32 = 4;
+
+    /// [`two_extents_glb`]'s normal image, in texels a side — [`IMAGE_TEXELS`],
+    /// which is 2×2.
+    const NORMAL_SIDE: u32 = 2;
+
+    /// [`BASE_SIDE`]² RGBA8 texels, no two alike, so a layer that arrived
+    /// resampled, flipped or from the other image is a different set of numbers.
+    fn base_side_texels() -> Vec<u8> {
+        (0..BASE_SIDE * BASE_SIDE)
+            .flat_map(|index| {
+                let step = u8::try_from(index).expect("sixteen texels") * 0x0F;
+                [step, 0xFF - step, step / 2, 0xFF]
+            })
+            .collect()
+    }
+
+    /// A one-triangle document whose material names a **4×4** `baseColorTexture`
+    /// and a **2×2** `normalTexture` — two images, one per page, at two sizes.
+    ///
+    /// Built from [`textured_parts`] with a second image appended to the `BIN`
+    /// chunk and a second `bufferView`, `image` and `texture` spliced into the
+    /// JSON, so the geometry and the accessors are the ones every other fixture
+    /// here uses.
+    fn two_extents_glb() -> Vec<u8> {
+        let (json, mut bin) = textured_parts(
+            &png_bytes(BASE_SIDE, BASE_SIDE, &base_side_texels()),
+            "image/png",
+            0,
+        );
+        let base_bin_len = bin.len();
+        // A bufferView holding image data is four-byte aligned like any other,
+        // on `textured_parts`' terms exactly.
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let normal_offset = bin.len();
+        let normal_png = png_bytes(NORMAL_SIDE, NORMAL_SIDE, &IMAGE_TEXELS);
+        bin.extend_from_slice(&normal_png);
+
+        let json = replacing(
+            &json,
+            r#""textures": [{ "source": 0 }],"#,
+            r#""textures": [{ "source": 0 }, { "source": 1 }],"#,
+        );
+        let json = replacing(
+            &json,
+            r#""images": [{ "name": "paint", "bufferView": 4, "mimeType": "image/png" }],"#,
+            r#""images": [
+    { "name": "paint", "bufferView": 4, "mimeType": "image/png" },
+    { "name": "bumps", "bufferView": 5, "mimeType": "image/png" }
+  ],"#,
+        );
+        let json = replacing(
+            &json,
+            r#""baseColorTexture": { "index": 0, "texCoord": 0 }
+    }
+  }],"#,
+            r#""baseColorTexture": { "index": 0, "texCoord": 0 }
+    },
+    "normalTexture": { "index": 1, "texCoord": 0 }
+  }],"#,
+        );
+        let json = replacing(
+            &json,
+            &format!("\n  ],\n  \"buffers\": [{{ \"byteLength\": {base_bin_len} }}]"),
+            &format!(
+                ",\n    {{ \"buffer\": 0, \"byteOffset\": {normal_offset}, \"byteLength\": {} }}\n                   ],\n  \"buffers\": [{{ \"byteLength\": {} }}]",
+                normal_png.len(),
+                bin.len()
+            ),
+        );
+        glb(&json, Some(&bin))
+    }
+
+    /// **Each page is sized from its own images**, and a normal map smaller than
+    /// the albedo arrives at the size its author wrote it.
+    ///
+    /// Until row (d) a [`PageDesc`] carried one extent for both images, so the
+    /// larger of the two decided both: this document's 2×2 normal map was
+    /// resampled up to 4×4 and uploaded at four times the bytes, through a
+    /// filter that averages texels no author put next to each other. Nothing
+    /// about the frame said so — an upsampled normal map is a plausible normal
+    /// map — which is why the claim is read off the description's own layers.
+    ///
+    /// # Sabotage
+    ///
+    /// `pack_page`'s `extent_of` taking its maximum over every decoded image
+    /// rather than over the kind's own — the one shared extent this replaced.
+    /// Red on 2026-09-06 with `"assertion `left == right` failed: the normal
+    /// page is sized by the normal image, and not by the larger one beside it /
+    /// left: 4 / right: 2"`.
+    #[test]
+    fn a_document_sizes_each_page_from_its_own_images() {
+        let converted = convert(&two_extents_glb());
+        assert_eq!(converted.skipped, [], "{:?}", converted.skipped);
+
+        let page = &converted.scene.page;
+        assert_eq!(
+            page.extent(PageKind::BaseColor),
+            BASE_SIDE,
+            "the base-colour page is sized by the base-colour image"
+        );
+        assert_eq!(
+            page.extent(PageKind::Normal),
+            NORMAL_SIDE,
+            "the normal page is sized by the normal image, and not by the larger one \
+             beside it"
+        );
+        assert_eq!(
+            &page.layers(PageKind::Normal)[0][..],
+            &IMAGE_TEXELS[..],
+            "the normal map arrives texel for texel: it is no longer resampled onto the \
+             albedo's extent"
+        );
+        assert_eq!(
+            &page.layers(PageKind::BaseColor)[0][..],
+            &base_side_texels()[..],
+            "and the base-colour image arrives at its own size, unresampled"
+        );
+
+        // The rows name layer 0 of each kind, which is the same number on two
+        // different images — the reason `check_scene` bounds them per kind.
+        assert_eq!(
+            (
+                converted.scene.materials[1].base_color_texture,
+                converted.scene.materials[1].normal_texture
+            ),
+            (0, 0),
+            "each kind numbers its own layers from zero"
+        );
+    }
+
     #[test]
     fn a_normal_map_lands_on_its_own_page_layer_and_the_row_names_it() {
         let converted = convert(&normal_mapped_glb());
         assert_eq!(converted.skipped, []);
 
         let page = &converted.scene.page;
-        assert_eq!(page.extent(), 2, "the page is sized by the one image in it");
         assert_eq!(
-            page.layers().len(),
-            1,
-            "the base-colour page keeps its white layer alone: this material names no \
-             baseColorTexture, so nothing but the normal slot wanted the image",
+            page.extent(PageKind::Normal),
+            2,
+            "the normal page is sized by the one image in it"
         );
         assert_eq!(
-            page.normal_layers().len(),
-            2,
-            "the neutral layer the type owns, then the image"
+            page.extent(PageKind::BaseColor),
+            0,
+            "this material names no baseColorTexture, so nothing wanted the image for that \
+             page and the renderer allocates one placeholder texel for it",
         );
         assert!(
-            page.normal_layers()[0]
-                .chunks_exact(4)
-                .all(|texel| texel == PageDesc::NEUTRAL_NORMAL),
-            "layer 0 is still the neutral texel the type burns",
+            page.layers(PageKind::BaseColor).is_empty(),
+            "a kind no image reached carries no layers at all",
         );
         assert_eq!(
-            &page.normal_layers()[1][..],
+            page.layers(PageKind::Normal).len(),
+            1,
+            "the image, and nothing burned ahead of it"
+        );
+        assert_eq!(
+            &page.layers(PageKind::Normal)[0][..],
             &IMAGE_TEXELS[..],
             "the image arrives texel for texel, in row-major order, unresampled"
         );
@@ -1289,7 +1455,7 @@ mod tests {
             converted.scene.materials[1],
             mesh::GpuMaterial {
                 base_color: BASE_COLOR,
-                normal_texture: 1,
+                normal_texture: 0,
                 normal_scale: NORMAL_SCALE,
                 ..GLTF_DEFAULT_ROW
             },
@@ -1308,18 +1474,25 @@ mod tests {
         );
 
         let page = &converted.scene.page;
-        assert_eq!(page.extent(), 2, "the page is sized by the one image in it");
-        assert_eq!(page.layers().len(), 2, "the white layer, then the image");
-        assert!(
-            page.layers()[0]
-                .iter()
-                .all(|&texel| texel == PageDesc::WHITE),
-            "layer 0 is still the white layer `opaque_white` burns"
+        assert_eq!(
+            page.extent(PageKind::BaseColor),
+            2,
+            "the page is sized by the one image in it"
         );
         assert_eq!(
-            &page.layers()[1][..],
+            page.layers(PageKind::BaseColor).len(),
+            1,
+            "the image alone: nothing burns a layer ahead of it"
+        );
+        assert_eq!(
+            &page.layers(PageKind::BaseColor)[0][..],
             &IMAGE_TEXELS[..],
             "the image arrives texel for texel, in row-major order, unresampled"
+        );
+        assert_eq!(
+            page.extent(PageKind::Normal),
+            0,
+            "this document names no normalTexture, so that page stays unallocated"
         );
 
         // Row 0 is the glTF default and row 1 is the document's own, textured.
@@ -1332,7 +1505,7 @@ mod tests {
             converted.scene.materials[1],
             mesh::GpuMaterial {
                 base_color: BASE_COLOR,
-                base_color_texture: 1,
+                base_color_texture: 0,
                 ..GLTF_DEFAULT_ROW
             },
             "the document's material keeps its factors and gains the page layer"
@@ -1353,11 +1526,12 @@ mod tests {
         let converted = convert_json(&triangle_json(BIN_CHUNK_BUFFER));
 
         assert_eq!(converted.skipped, []);
-        assert_eq!(
-            converted.scene.page.layers().len(),
-            1,
-            "a document with no textures gets the white layer and nothing else"
-        );
+        for kind in PageKind::ALL {
+            assert!(
+                converted.scene.page.layers(kind).is_empty(),
+                "a document with no textures allocates nothing at all"
+            );
+        }
         assert_eq!(
             converted.scene.materials[1].base_color_texture,
             mesh::GpuMaterial::NO_PAGE
@@ -1387,7 +1561,7 @@ mod tests {
             skip.why
         );
 
-        assert_eq!(converted.scene.page.layers().len(), 1);
+        assert!(converted.scene.page.layers(PageKind::BaseColor).is_empty());
         assert_eq!(
             converted.scene.materials[1].base_color_texture,
             mesh::GpuMaterial::NO_PAGE,
@@ -1412,9 +1586,8 @@ mod tests {
             "the reason names the set the file asked for: {}",
             converted.skipped[0].why
         );
-        assert_eq!(
-            converted.scene.page.layers().len(),
-            1,
+        assert!(
+            converted.scene.page.layers(PageKind::BaseColor).is_empty(),
             "an image nothing can sample must not take a layer"
         );
         assert_eq!(
@@ -1595,7 +1768,14 @@ mod tests {
 
         assert_eq!(converted.scene.meshes, []);
         assert_eq!(converted.instances, []);
-        assert_eq!(converted.scene.page.extent(), PAGE_EXTENT);
+        for kind in PageKind::ALL {
+            assert_eq!(
+                converted.scene.page.extent(kind),
+                0,
+                "a document of nothing allocates no page: the renderer creates one \
+                 placeholder texel per kind instead"
+            );
+        }
         for capacity in [
             converted.scene.capacities.vertices,
             converted.scene.capacities.indices,
@@ -1632,12 +1812,12 @@ mod tests {
         let converted = convert(&glb(&json, Some(&bin)));
 
         assert_eq!(
-            converted.scene.page.layers().len(),
-            2,
+            converted.scene.page.layers(PageKind::BaseColor).len(),
+            1,
             "the image is on the page, put there by the material that can sample it"
         );
         assert_eq!(
-            converted.scene.materials[1].base_color_texture, 1,
+            converted.scene.materials[1].base_color_texture, 0,
             "the TEXCOORD_0 material samples it"
         );
         assert_eq!(
@@ -1673,7 +1853,7 @@ mod tests {
         // Reported, not refused: the geometry is fine and the texture is on the
         // page, so the surface draws — flatly.
         assert_eq!(converted.scene.meshes.len(), 1);
-        assert_eq!(converted.scene.materials[1].base_color_texture, 1);
+        assert_eq!(converted.scene.materials[1].base_color_texture, 0);
         let range = uv_range_of(&converted.scene.meshes[0]);
         for vertex in vertices_of(&converted.scene.meshes[0]) {
             assert_eq!(range.decode(vertex.uv0), [0.0; 2]);

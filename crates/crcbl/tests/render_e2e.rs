@@ -6243,8 +6243,8 @@ const PYRAMID_BAND: std::ops::Range<u32> = 0..80;
 ///
 /// `Scene::Cube`'s left column holds two instances of one mesh at one
 /// orientation whose materials differ in nothing but their base-colour page
-/// layer: the upper names the page's white layer, the lower a layer of four
-/// unequal texels. So the upper pyramid's faces are flat — one lit colour each,
+/// column: the upper names no page, the lower a layer of four unequal texels. So
+/// the upper pyramid's faces are flat — one lit colour each,
 /// because the mesh has flat normals — and the lower one's are quartered.
 ///
 /// Counting distinct colours is what tells those apart without knowing which
@@ -6265,7 +6265,7 @@ fn the_textured_pyramid_is_quartered_and_the_plain_one_is_flat(image: &Image) {
     // so the gap is several colours wide and not one.
     assert!(
         textured >= plain + 4,
-        "the lower pyramid samples a four-texel layer and the upper one a flat white layer, \
+        "the lower pyramid samples a four-texel layer and the upper one no page at all, \
          so it must hold several more distinct colours: {textured} below vs {plain} above"
     );
 }

@@ -241,7 +241,8 @@ pub use nine_slice::{NineQuads, NineSliceSource, SliceQuad};
 pub use orbit::OrbitCamera;
 pub use pass_stats::PassStats;
 pub use scene::{
-    Capacities, Geometry, InstanceDesc, MeshDesc, PageDesc, ProbeGrid, ProbeUpdate, SceneDesc,
+    Capacities, Geometry, InstanceDesc, MeshDesc, PageDesc, PageKind, ProbeGrid, ProbeUpdate,
+    SceneDesc,
 };
 pub use shadow::Cascades;
 pub use skinning::{

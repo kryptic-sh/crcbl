@@ -50,7 +50,7 @@ use crate::vertex_v2::{
 };
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::scene::{
-    Capacities, Geometry, MeshDesc, PAGE_EXTENT, PageDesc, ProbeGrid, SceneDesc,
+    Capacities, Geometry, MeshDesc, PAGE_EXTENT, PageDesc, PageKind, ProbeGrid, SceneDesc,
 };
 use crcbl::render::{
     Camera, DirectionalLight, EffectOverride, EffectRequest, ForwardRenderer, InstanceDesc,
@@ -82,8 +82,8 @@ fn tilted_tangent_normal() -> [f32; 3] {
 ///
 /// `n * 0.5 + 0.5` per channel, rounded to the nearest eight-bit level, which
 /// is what a normal map is and what
-/// [`PageDesc::push_normal_layer`](crcbl::render::scene::PageDesc::push_normal_layer)
-/// takes. Alpha is opaque and read by nothing: `shaders/mesh.slang` takes the
+/// [`PageDesc::push_layer`](crcbl::render::scene::PageDesc::push_layer) takes
+/// for [`PageKind::Normal`]. Alpha is opaque and read by nothing: `shaders/mesh.slang` takes the
 /// `xyz` of the fetch.
 ///
 /// **Every texel the same**, so nothing here depends on where in the layer a
@@ -144,18 +144,18 @@ fn leaning_normal_texels() -> Vec<u8> {
 
 /// The layer [`normal_scene`] pushes [`tilted_normal_texels`] into.
 ///
-/// One past the neutral texel `PageDesc` owns, which is the whole of the layer
-/// convention: `0` is "no map" on both pages.
-const TILTED_LAYER: u32 = 1;
+/// **Zero, and layer zero is an ordinary layer.** "No map" is
+/// `GpuMaterial::NO_PAGE` on both pages and nothing is burned ahead of this
+/// one — see [`PLAIN_ROW`], which is the row that names none.
+const TILTED_LAYER: u32 = 0;
 
-/// A layer holding the **neutral** texel a normal map is authored against,
-/// pushed as an ordinary layer rather than being layer 0.
+/// A layer holding the **neutral** texel a normal map is authored against.
 ///
 /// It exists to make one point that nothing else here can: sampling it is *not*
 /// the same as naming no map. `(0.5, 0.5, 1.0)` has no exact eight-bit
-/// encoding, so this layer tilts by a fifth of a degree where layer 0's index
-/// tells the shader to skip the perturbation altogether.
-const NEUTRAL_LAYER: u32 = 2;
+/// encoding, so this layer tilts by a fifth of a degree where
+/// `GpuMaterial::NO_PAGE` tells the shader to skip the perturbation altogether.
+const NEUTRAL_LAYER: u32 = 1;
 
 /// The material row that names no normal map at all.
 const PLAIN_ROW: usize = 0;
@@ -171,7 +171,7 @@ const NEUTRAL_ROW: usize = 2;
 const HALF_SCALE_ROW: usize = 3;
 
 /// The layer [`leaning_normal_texels`] is pushed into.
-const LEANING_LAYER: u32 = 3;
+const LEANING_LAYER: u32 = 2;
 
 /// The row that samples [`LEANING_LAYER`].
 const LEANING_ROW: usize = 4;
@@ -354,19 +354,34 @@ fn the_stand_in_frame_for_a_flat_quad_is_its_own_true_tangent() {
 }
 
 /// The description every frame here draws: `meshes`, the four material rows,
-/// and a page carrying the tilted and neutral normal layers.
+/// and a **normal** page carrying the tilted, neutral and leaning layers. It
+/// names no base-colour page at all: every row here shades by its factors.
+///
+/// # The off-by-one this file is the fixture for, and what catches it
+///
+/// Every layer number here shifted down by one when row (d) stopped burning
+/// layer 0, and a producer that shifted its page and not its rows names a layer
+/// the page has not got. `ForwardRenderer::with_scene` refuses that before it
+/// creates a device object.
+///
+/// **Sabotage:** [`LEANING_LAYER`] left at its old `3` while the page numbers
+/// from zero, with the `assert_eq!` below relaxed so the refusal is what
+/// reports. Red on radv on 2026-09-06 at
+/// `a_normal_map_tilted_towards_the_sun_lights_a_quad_the_sun_is_edge_on_to`
+/// with `"the forward renderer builds this description:
+/// InvalidDescriptor(\"material row 4 samples normal page layer 3, and that
+/// page has 3\")"`.
 fn normal_scene(meshes: Vec<MeshDesc<'static>>) -> SceneDesc<'static> {
-    let mut page = PageDesc::opaque_white(PAGE_EXTENT);
-    let tilted = page.push_normal_layer(tilted_normal_texels());
-    assert_eq!(
-        tilted, TILTED_LAYER,
-        "the tilted layer is the one past neutral"
-    );
-    let neutral = page.push_normal_layer(
+    let mut page = PageDesc::empty();
+    page.set_extent(PageKind::Normal, PAGE_EXTENT);
+    let tilted = page.push_layer(PageKind::Normal, tilted_normal_texels());
+    assert_eq!(tilted, TILTED_LAYER, "the tilted layer is the page's first");
+    let neutral = page.push_layer(
+        PageKind::Normal,
         PageDesc::NEUTRAL_NORMAL.repeat(PAGE_EXTENT as usize * PAGE_EXTENT as usize),
     );
     assert_eq!(neutral, NEUTRAL_LAYER);
-    let leaning = page.push_normal_layer(leaning_normal_texels());
+    let leaning = page.push_layer(PageKind::Normal, leaning_normal_texels());
     assert_eq!(leaning, LEANING_LAYER);
     let rows = vec![
         GpuMaterial::UNTINTED,
@@ -652,7 +667,7 @@ const DERIVATIVE_TOLERANCE: f32 = 1.0 / 255.0;
 /// have moved, and it is a stronger statement than any tolerance.
 ///
 /// **The neutral layer is the control**, and it is what says the exactness comes
-/// from the layer-0 test in `shading_normal_of` rather than from the page
+/// from the `NO_PAGE` test in `shading_normal_of` rather than from the page
 /// happening to be neutral. `(0.5, 0.5, 1.0)` has no eight-bit encoding: `0x80`
 /// decodes to `128 / 255`, which is a fifth of a degree off vertical, and that
 /// shows up here as a red channel several half-float steps away from `0.5`.
@@ -682,8 +697,8 @@ fn no_normal_map_returns_the_surface_normal_exactly_and_the_neutral_texel_does_n
     let red = neutral.pixel(x, y)[0];
     assert_ne!(
         red, 0.5,
-        "sampling the neutral texel must not be the same as naming no map, or the layer-0 \
-         test in the shader is doing nothing"
+        "sampling the neutral texel must not be the same as naming no map, or the \
+         NO_PAGE test in the shader is doing nothing"
     );
     // And it is off by about the eight-bit step the encoding cannot represent,
     // rather than by something structural. Half of `1 / 255`, because the view

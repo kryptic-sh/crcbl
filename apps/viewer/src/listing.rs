@@ -108,7 +108,7 @@
 //! [`SKIPPED`], because nothing on the engine's panel is a warning.
 
 use crcbl::math::Vec2;
-use crcbl::render::{Geometry, MeshDesc};
+use crcbl::render::{Geometry, MeshDesc, PageKind};
 use crcbl::shaders::mesh::VERTEX_STRIDE;
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::text::FontAtlas;
@@ -209,10 +209,11 @@ impl Listing {
         let materials = scene.materials.len().saturating_sub(1);
         lines.push(row("materials", materials.to_string()));
 
-        // Layer 0 is the page's opaque-white layer, which belongs to the
-        // renderer rather than to the document — see the module docs.
-        let textures = scene.page.layers().len().saturating_sub(1);
-        let extent = scene.page.extent();
+        // Every layer of the base-colour page is a document image: nothing is
+        // burned ahead of them, and a document with no textures allocates no
+        // page at all — see `crcbl::scene::gltf_render`'s module docs.
+        let textures = scene.page.layers(PageKind::BaseColor).len();
+        let extent = scene.page.extent(PageKind::BaseColor);
         lines.push(row(
             "textures",
             if textures == 0 {
@@ -582,8 +583,8 @@ mod tests {
     /// written out in `crate::fixture`: one quad, four vertices, six indices,
     /// one primitive on one node. A panel that drew a plausible-looking listing
     /// of the wrong document — the renderer's capacities instead of its
-    /// contents, say, or the page's white layer counted as a texture — passes
-    /// "the panel drew something" and fails here.
+    /// contents, say, or a layer the conversion never made counted as a
+    /// texture — passes "the panel drew something" and fails here.
     #[test]
     fn the_panel_lists_the_documents_own_counts() {
         let (_dir, listing) = shown("panel.glb", &fixture::quad_glb(fixture::QUAD_CENTRE));
@@ -603,7 +604,7 @@ mod tests {
         assert_eq!(
             value_of(&lines, "textures"),
             "none",
-            "the page's opaque-white layer is the renderer's, not the document's",
+            "a document with no images allocates no page at all",
         );
         assert_eq!(
             value_of(&lines, "rig"),

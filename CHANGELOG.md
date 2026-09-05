@@ -814,8 +814,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   difference, and a row left at `0` now samples whatever layer 0 of the page
   actually holds. `PageDesc::UNTEXTURED_LAYER` is removed for that reason: every
   use of it was a row meaning "none", and it is `GpuMaterial::NO_PAGE` now.
-  `PageDesc::WHITE` and `PageDesc::NEUTRAL_NORMAL` stay, and `PageDesc` still
-  writes layer 0 of both pages.
+  `PageDesc::WHITE` and `PageDesc::NEUTRAL_NORMAL` stay as texel constants, and
+  the burned layers they used to fill are gone with the entry below.
 
   **`GpuMaterial::default()` is no longer all zeros.** `Default` is written out
   rather than derived so the four page columns are `NO_PAGE`, which makes
@@ -824,6 +824,45 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `default()` — it decodes to layer 0 on all four columns. It is still black and
   no instance can name it: ids come from rows a caller took, and
   `MaterialTable::remove` clears a freed row by writing `default()`.
+
+- **`PageDesc` is a table over page kinds, and layer 0 is an ordinary layer.**
+  It described two images sharing one extent and burned layer 0 of each on a
+  neutral texel. It is now indexed by a new `crcbl_render::scene::PageKind`
+  (`BaseColor`, `Normal`), with an extent and a layer list per kind:
+  `PageDesc::empty` replaces `opaque_white`, and `set_extent(kind, extent)`,
+  `push_layer(kind, texels)`, `extent(kind)` and `layers(kind)` replace the
+  untagged `push_layer`/`push_normal_layer`/`extent`/`layers` pairs, which are
+  removed. `check` keeps the per-layer byte count — per kind, and naming the
+  kind — and drops the two layer-0 arms, whose invariant moved into the shader's
+  out-of-band `NO_PAGE` test in the entry above.
+
+  **A kind nothing names allocates nothing.** `extent(kind)` is `0` for it and
+  `ForwardRenderer::with_scene` creates a 1×1 single-layer image in that kind's
+  format for the binding to point at — magenta, and never sampled for its value.
+  Every scene in this tree with no normal map used to carry a full neutral layer
+  and a third again for its mip chain; `apps/alcove`, `apps/sundial` and
+  `apps/quarry` name no page of either kind and now allocate two texels between
+  them. The renderer creates both pages in one loop over `PageKind::ALL`, and
+  the two graph declarations report each kind's own extent, so a caller
+  importing a page to copy a render-to-texture view into it still gets a
+  conflict if it declares a different one.
+
+  **The importer sizes each page from its own images.** A glTF document with a
+  2048² `baseColorTexture` beside a 512² `normalTexture` allocates one of each,
+  rather than resampling the normal map up onto the albedo's extent through a
+  filter that averages texels no author put together; `MAX_PAGE_EXTENT` clamps
+  each kind separately, and the `PAGE_EXTENT` floor is gone, so a document with
+  no textures at all allocates no page.
+
+  **What a caller must do.** Build a page with `PageDesc::empty()`, then
+  `set_extent(PageKind::BaseColor, extent)` before the first `push_layer`, which
+  now takes the kind as its first argument. **Every layer index shifts down by
+  one**, because nothing is burned ahead of a caller's first layer:
+  `crcbl_render::scene::CHECKER_LAYER` and `crcbl_greybox::GRID_LAYER` are `0`,
+  `GreyboxColor::layer` runs `0..=6`, and a producer of its own layers numbers
+  them from zero. A row left at the old index either names a layer the page has
+  not got — refused by `with_scene`, naming the kind, the row and the layer — or
+  silently names the layer beside the one it meant.
 
 - **A sun that moves is marched a stripe per frame instead of whole.**
   `ForwardRenderer::refresh_sky_view` used to rebuild the entire sky-view LUT

@@ -11,7 +11,7 @@ use crcbl_greybox::{
     greybox_color_texels, greybox_material, greybox_page, grid_material, platform, quad, ramp,
     scene3d, sphere, stairs, unit_cube, wall,
 };
-use crcbl_render::scene::{Geometry, PageDesc};
+use crcbl_render::scene::{Geometry, PageDesc, PageKind};
 use crcbl_shaders::mesh::{GpuMaterial, MeshVertex, VERTEX_STRIDE};
 use crcbl_shaders::meshlet::{MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES};
 use glam::Vec3;
@@ -316,14 +316,15 @@ fn the_scene_constants_name_their_own_meshes() {
 }
 
 #[test]
-fn the_scene_page_has_a_white_layer_and_the_grid() {
+fn the_scene_page_is_the_grid_and_nothing_else() {
     let scene = scene3d();
-    assert_eq!(scene.page.extent(), GRID_EXTENT);
+    assert_eq!(scene.page.extent(PageKind::BaseColor), GRID_EXTENT);
     let texels = (GRID_EXTENT * GRID_EXTENT) as usize * 4;
-    let layers = scene.page.layers();
-    assert!(
-        layers[0].iter().all(|&texel| texel == PageDesc::WHITE),
-        "layer 0 must be opaque white, or every surface that names it is scaled by it"
+    let layers = scene.page.layers(PageKind::BaseColor);
+    assert_eq!(
+        layers.len(),
+        1,
+        "the grid is the page: the neutral material names no page at all"
     );
     assert_eq!(
         layers[GRID_LAYER as usize].len(),
@@ -334,7 +335,12 @@ fn the_scene_page_has_a_white_layer_and_the_grid() {
         layers[GRID_LAYER as usize]
             .iter()
             .any(|&texel| texel != PageDesc::WHITE),
-        "the grid layer must draw something, or it is the white layer twice"
+        "the grid layer must draw something, or it is a flat white field"
+    );
+    assert_eq!(
+        scene.page.extent(PageKind::Normal),
+        0,
+        "a greybox scene has no normal map, so that page is one placeholder texel"
     );
 }
 
@@ -371,9 +377,9 @@ fn scene3d_fits_inside_the_capacities_it_reserves() {
 }
 
 /// The seven colour tiles, their layers, page and materials stay in lockstep:
-/// `ALL` order is layer order, every material names its own physical-tiling row,
-/// and the page holds the white layer plus one tile per colour at the declared
-/// extent.
+/// `ALL` order is layer order from zero, every material names its own
+/// physical-tiling row, and the page holds one tile per colour at the declared
+/// extent and nothing else.
 #[test]
 fn every_greybox_colour_tiles_by_physical_size_out_of_its_own_layer() {
     assert_eq!(
@@ -384,14 +390,14 @@ fn every_greybox_colour_tiles_by_physical_size_out_of_its_own_layer() {
 
     let page = greybox_page();
     assert_eq!(
-        page.extent(),
+        page.extent(PageKind::BaseColor),
         GREYBOX_TILE_EXTENT,
         "the colour page is authored at the declared extent"
     );
     assert_eq!(
-        page.layers().len(),
-        GreyboxColor::ALL.len() + 1,
-        "the white untextured layer plus one tile per colour"
+        page.layers(PageKind::BaseColor).len(),
+        GreyboxColor::ALL.len(),
+        "one tile per colour, and nothing burned ahead of them"
     );
 
     let texel_count = (GREYBOX_TILE_EXTENT * GREYBOX_TILE_EXTENT) as usize * 4;
@@ -399,8 +405,8 @@ fn every_greybox_colour_tiles_by_physical_size_out_of_its_own_layer() {
         let layer = color.layer();
         assert_eq!(
             layer as usize,
-            index + 1,
-            "{}'s layer must be its ALL position past the white layer 0",
+            index,
+            "{}'s layer must be its own ALL position",
             color.label()
         );
 
@@ -435,7 +441,10 @@ fn every_greybox_colour_tiles_by_physical_size_out_of_its_own_layer() {
             "{} is a full page-sized image",
             color.label()
         );
-        assert_eq!(page.layers()[layer as usize].as_ref(), texels.as_slice());
+        assert_eq!(
+            page.layers(PageKind::BaseColor)[layer as usize].as_ref(),
+            texels.as_slice()
+        );
 
         // A ruled tile is not a flat field: it has both line and field texels,
         // or there is no grid to read a size off.

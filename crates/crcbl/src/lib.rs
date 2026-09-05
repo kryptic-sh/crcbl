@@ -548,7 +548,7 @@ mod tests {
                 },
             }],
             materials: vec![mesh::GpuMaterial::UNTINTED],
-            page: PageDesc::opaque_white(1),
+            page: PageDesc::empty(),
             probes: ProbeGrid::default(),
             capacities: Capacities::default(),
         };

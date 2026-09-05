@@ -39,10 +39,11 @@
 //!   bounding box out of the entry the *instance* names — level 0's, for a DAG.
 //!   The renderer uploads [`SceneDesc::meshes`] in order, so a description's
 //!   own order is what the ids are.
-//! * **Page layer 0 must be opaque white**, because a material naming no
-//!   texture samples it and every untextured surface is multiplied by whatever
-//!   it holds. [`PageDesc`] owns that layer for exactly this reason — see its
-//!   docs.
+//! * **A page layer's index is its position in [`PageDesc`]**, counted per
+//!   [`PageKind`], and a material row's texture column is that number. A
+//!   producer that pushes its layers in one order and names them in another
+//!   shades every surface with somebody else's texture — a plausible frame,
+//!   built from the right images.
 //! * **One bucket per description mesh, in order**, because `draw_gen.slang`'s
 //!   scatter takes the first bucket whose mesh id matches. Two buckets naming
 //!   one mesh would leave the second drawing nothing forever, which the bucket
@@ -126,9 +127,9 @@ pub const PAGE_EXTENT: u32 = 2;
 /// Bytes in one layer of [`demo`]'s page: [`PAGE_EXTENT`]² RGBA texels.
 const PAGE_LAYER_BYTES: usize = (PAGE_EXTENT * PAGE_EXTENT) as usize * 4;
 
-/// The layer [`DEMO_TEXTURED`] shades with — the one [`demo`] appends past the
-/// white layer [`PageDesc::opaque_white`] writes.
-pub const CHECKER_LAYER: u32 = 1;
+/// The layer [`DEMO_TEXTURED`] shades with — the only one [`demo`]'s
+/// base-colour page carries.
+pub const CHECKER_LAYER: u32 = 0;
 
 /// [`CHECKER_LAYER`]: four **distinct** greys, one per texel.
 ///
@@ -231,8 +232,77 @@ impl Default for Capacities {
     }
 }
 
-/// §3.2's texture side: one `D2Array` image whose layers a material row selects
-/// with [`GpuMaterial::base_color_texture`](mesh::GpuMaterial::base_color_texture).
+/// Which of the renderer's material pages a layer belongs to.
+///
+/// The renderer creates one `D2Array` image per kind, and a material row indexes
+/// them separately: [`base_color_texture`] names a layer of
+/// [`BaseColor`](Self::BaseColor)'s image and [`normal_texture`] names one of
+/// [`Normal`](Self::Normal)'s. They are different formats, filtered by different
+/// filters, and sized by their own extents — so a layer number means nothing
+/// without the kind beside it, and this enum is what makes a caller write the
+/// kind down.
+///
+/// `docs/plan/43-render-standards.md` §2's rung 3 appends the
+/// metallic-roughness and emissive pages here; every arm below is what it has to
+/// fill in.
+///
+/// [`base_color_texture`]: mesh::GpuMaterial::base_color_texture
+/// [`normal_texture`]: mesh::GpuMaterial::normal_texture
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PageKind {
+    /// The base-colour page: sRGB-encoded colour, which is what glTF defines a
+    /// `baseColorTexture` to be, created `Rgba8UnormSrgb` so the sampler decodes
+    /// it and mipped through the alpha-weighted filter that averages in linear
+    /// light.
+    BaseColor,
+    /// The normal page: tangent-space normals stored **linear**, as
+    /// `n * 0.5 + 0.5` per channel, created `Rgba8Unorm` so nothing puts them
+    /// through a transfer curve and mipped through the filter that averages the
+    /// decoded vectors and renormalises.
+    Normal,
+}
+
+impl PageKind {
+    /// Every kind, in the order a [`PageDesc`] stores them.
+    pub const ALL: [Self; 2] = [Self::BaseColor, Self::Normal];
+
+    /// This kind's slot in [`PageDesc`]'s table.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::BaseColor => 0,
+            Self::Normal => 1,
+        }
+    }
+
+    /// How a refusal names this page — an adjective, read before the word
+    /// "page", so `check_scene`'s sentence reads the same for every kind.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::BaseColor => "base-colour",
+            Self::Normal => "normal",
+        }
+    }
+}
+
+/// One page of [`PageDesc`]'s table: a square extent and the layers written at
+/// it.
+///
+/// Both zero is "no scene here names this page", which is what
+/// [`PageDesc::empty`] leaves every kind at and what makes the renderer create a
+/// placeholder texel rather than an image. `layers` is never non-empty at an
+/// extent of zero — [`PageDesc::push_layer`] refuses that — and the reverse,
+/// an extent set and nothing pushed, is a page nothing samples and is treated as
+/// empty at upload.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Page<'a> {
+    extent: u32,
+    layers: Vec<Cow<'a, [u8]>>,
+}
+
+/// §3.2's texture side: one `D2Array` image per [`PageKind`], whose layers a
+/// material row selects with that kind's own texture column.
 ///
 /// One image with a layer per texture rather than an array of descriptors —
 /// [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) rather than
@@ -241,58 +311,61 @@ impl Default for Capacities {
 /// [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING), which
 /// `crcbl-mtl` withdraws.
 ///
-/// # Layer 0 belongs to this type, and that is the whole point of the type
+/// # A table over the kinds, each with an extent of its own
 ///
-/// **Layer 0 has to decode to exactly `1.0` in every channel** — a page whose
-/// first layer is anything else scales every surface that names it by a texel
-/// that is not one, which reads as a global albedo change, is indistinguishable
-/// from a lighting bug, and is visible in no assertion the CPU can make.
+/// [`set_extent`](Self::set_extent) sizes one kind and
+/// [`push_layer`](Self::push_layer) appends into it, so a 512² normal page
+/// beside a 2048² base-colour page is two calls rather than a resample of one
+/// onto the other's size. A kind nothing names is left alone: it holds no
+/// layers, [`extent`](Self::extent) reports zero for it, and the renderer
+/// creates a single placeholder texel in its place rather than an `extent²`
+/// image nobody samples.
 ///
-/// It is no longer what a material naming *no* texture samples: that column
-/// carries [`mesh::GpuMaterial::NO_PAGE`], which is out of band, and the
-/// fragment stage multiplies by the literal `1.0`. The layer is still burned
-/// here because every producer in this tree numbers its own layers past it;
-/// `docs/plan/43-render-standards.md` §2's row (d) is where it goes.
+/// # Layer 0 is an ordinary layer, and where its old invariant went
 ///
-/// So there is no constructor that takes layer 0: [`opaque_white`](Self::opaque_white)
-/// writes it, [`push_layer`](Self::push_layer) can only append past it, and a
-/// caller has no way to spell the mistake.
-/// # It describes **two** images, and they share one extent
+/// Until `docs/plan/43-render-standards.md` §2's row (d) this type **burned**
+/// layer 0 on both pages — an all-white texel on the base-colour page, the
+/// neutral normal on the other — because
+/// [`NO_PAGE`](mesh::GpuMaterial::NO_PAGE) was zero and a material naming no
+/// texture sampled it. Two arms of `check` existed to hold that:
+/// layer 0 is white, layer 0 is neutral.
 ///
-/// The base-colour page and `docs/plan/43-render-standards.md` §2's normal page:
-/// same square extent, same layer numbering rules, same sampler, one type. Two
-/// descriptions would be two extents a caller could set apart and two layer-0
-/// conventions to get right, for a pair of images the renderer creates in the
-/// same call and binds into the same group. What it costs is that a normal map
-/// has to be the base-colour page's size, which is already true of every layer
-/// of the base-colour page itself; §2's generalised page allocator is the rung
-/// that lifts it, and `docs/backlog.md` carries the gap.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `NO_PAGE` is `0xFFFF` now and `mesh.slang` tests it, so the neutral value is
+/// a literal in the fragment stage rather than a texel in an image, and both
+/// arms are gone with the layers they guarded. **That is a trade, and it is
+/// worth writing down which way it runs.** What it bought: a page nothing names
+/// costs one texel rather than `extent² × 4` bytes and a third again for its
+/// chain, on every scene in the tree; a producer numbers its layers from zero
+/// like any other array; and the two pages stopped having to be one size. What
+/// it sold: the invariant is no longer checkable on the host at all. A fragment
+/// that read a page for a row carrying `NO_PAGE` used to find white and draw the
+/// right frame anyway, and now it finds whatever the placeholder holds — which
+/// nothing but a *picture* can report. So `crate::forward`'s
+/// `PAGE_PLACEHOLDER_TEXEL` is magenta rather than white or black: the mistake
+/// this type used to absorb silently is one a golden now shows loudly.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageDesc<'a> {
-    extent: u32,
-    layers: Vec<Cow<'a, [u8]>>,
-    normal_layers: Vec<Cow<'a, [u8]>>,
+    pages: [Page<'a>; PageKind::ALL.len()],
 }
 
 impl<'a> PageDesc<'a> {
-    /// The texel layer 0 of the base-colour page is filled with.
+    /// The texel an all-white base-colour layer is filled with.
     ///
     /// The page is `Rgba8UnormSrgb` and `0xFF` is the one value that encoding
     /// leaves alone, so the sampler returns exactly `1.0` — the same product a
     /// material was shaded by before there was a page at all.
     ///
-    /// **A material naming no texture no longer samples it.** That column now
+    /// **Nothing needs such a layer any more.** A material naming no texture
     /// carries [`mesh::GpuMaterial::NO_PAGE`], which is out of band, and the
     /// fragment stage multiplies by the literal `1.0` instead of by this. The
-    /// layer is still written and still white — `docs/plan/43-render-standards.md`
-    /// §2's row (d) takes it out in its second step — and
-    /// `crcbl/tests/mesh_e2e/base_color_page.rs` is what measured, on a device,
-    /// that the two routes shade a surface to the same bits.
+    /// constant stays for the callers that want a white layer *deliberately* —
+    /// `crcbl/tests/mesh_e2e/base_color_page.rs` is the one that measured, on a
+    /// device, that the two routes shade a surface to the same bits, and
+    /// `crcbl/src/screenshot.rs`'s alpha mask keeps this RGB under a cut alpha.
     pub const WHITE: u8 = 0xFF;
 
-    /// The texel the **normal** page's layer 0 is filled with:
-    /// `(0.5, 0.5, 1.0)` in RGBA8, which is `docs/plan/43-render-standards.md`
-    /// §2's neutral normal.
+    /// The neutral tangent-space normal texel: `(0.5, 0.5, 1.0)` in RGBA8,
+    /// which is `docs/plan/43-render-standards.md` §2's neutral normal.
     ///
     /// # It is not exactly flat, and the shader is what makes "no map" exact
     ///
@@ -303,171 +376,149 @@ impl<'a> PageDesc<'a> {
     /// backends with no tolerance, so a material sampling this texel and
     /// perturbing by it would move every frame in the tree that draws a lit
     /// surface. `mesh.slang`'s `shading_normal_of` therefore tests the layer
-    /// index and returns the surface normal untouched at layer 0;
+    /// index against [`mesh::GpuMaterial::NO_PAGE`] and returns the surface
+    /// normal untouched;
     /// `crcbl_shaders::mesh::a_neutral_normal_texel_is_not_exactly_flat`
     /// measures the error this constant would otherwise introduce.
     ///
-    /// So what this layer is *for* is the material that names it explicitly and
-    /// the read that runs off the end of an authored layer's edge — a neutral
-    /// texel is what those must find, rather than the `(0, 0, 0)` an unwritten
-    /// image holds, which decodes to a normal pointing straight backwards.
+    /// So what a layer of this is *for* is the material that names it
+    /// explicitly and the read that runs off the end of an authored layer's
+    /// edge — a neutral texel is what those must find, rather than the
+    /// `(0, 0, 0)` an unwritten image holds, which decodes to a normal pointing
+    /// straight backwards.
     pub const NEUTRAL_NORMAL: [u8; 4] = [0x80, 0x80, 0xFF, 0xFF];
 
-    /// A square page of `extent` texels a side, holding one white layer and
-    /// nothing else.
+    /// A description that names no page at all: every kind empty, and nothing
+    /// but one placeholder texel apiece allocated on the device.
+    ///
+    /// A caller adds a page by sizing it with
+    /// [`set_extent`](Self::set_extent) and pushing layers into it with
+    /// [`push_layer`](Self::push_layer). A scene whose every material row
+    /// carries [`NO_PAGE`](mesh::GpuMaterial::NO_PAGE) — `apps/alcove` and
+    /// `apps/sundial` are both such scenes — stops here.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Sizes `kind`'s page: texels a side, square.
+    ///
+    /// Every layer of that kind is then exactly `extent² × 4` bytes, which
+    /// `check` is what enforces. The kinds are separate device
+    /// images and each carries its own number, so sizing one says nothing about
+    /// the other.
     ///
     /// # Panics
     ///
-    /// If `extent` is zero, which is an image no device will create.
-    #[must_use]
-    pub fn opaque_white(extent: u32) -> Self {
+    /// If `extent` is zero, which is an image no device will create, or if
+    /// `kind` already holds a layer — those layers were authored against the
+    /// extent that was in force when they were pushed, and moving it under them
+    /// would refuse every one of them at `check` with a byte
+    /// count nobody wrote.
+    pub fn set_extent(&mut self, kind: PageKind, extent: u32) {
         assert!(extent > 0, "a page must have at least one texel a side");
-        let texels = extent as usize * extent as usize;
-        Self {
-            extent,
-            layers: vec![Cow::Owned(vec![Self::WHITE; texels * 4])],
-            // **The normal page is born with its own layer 0**, so a caller
-            // that never mentions a normal map still describes a page the
-            // renderer can create and every material's `normal_texture` of zero
-            // still names a texel that exists. One texel repeated: this is a
-            // description, and the whole point of the type owning layer 0 is
-            // that no caller can spell it any other way.
-            normal_layers: vec![Cow::Owned(Self::NEUTRAL_NORMAL.repeat(texels))],
-        }
+        let page = &mut self.pages[kind.index()];
+        assert!(
+            page.layers.is_empty(),
+            "the {} page already holds {} layer(s) authored at {} texels a side",
+            kind.label(),
+            page.layers.len(),
+            page.extent
+        );
+        page.extent = extent;
     }
 
-    /// Appends a **normal** page layer and returns its index — the number a
-    /// material row's
-    /// [`normal_texture`](mesh::GpuMaterial::normal_texture) carries.
+    /// Appends a layer to `kind` and returns its index — the number the
+    /// material row's own texture column carries.
     ///
-    /// `texels` is RGBA8, row-major, and **linear**: a tangent-space normal
-    /// encoded as `n * 0.5 + 0.5` per channel, which is what glTF's
-    /// `normalTexture` holds and what every authoring tool writes. The renderer
-    /// creates the image as `Rgba8Unorm` — *not* the base-colour page's
-    /// `Rgba8UnormSrgb` — so nothing decodes it through a transfer curve; see
-    /// `docs/plan/44-lighting.md`'s rung 2, which is where that is argued, and
-    /// `crcbl_render::forward::NORMAL_PAGE_FORMAT`.
+    /// `texels` is RGBA8, row-major, and exactly `extent² × 4` bytes, which
+    /// [`ForwardRenderer::with_scene`](crate::forward::ForwardRenderer::with_scene)
+    /// checks before it uploads anything. What the bytes *mean* is the kind's,
+    /// and the two differ: a [`BaseColor`](PageKind::BaseColor) layer is
+    /// sRGB-encoded, because that is what glTF defines a base-colour texture to
+    /// be and the renderer creates that image as `Rgba8UnormSrgb` so the sampler
+    /// decodes it; a [`Normal`](PageKind::Normal) layer is **linear**, a
+    /// tangent-space normal encoded as `n * 0.5 + 0.5` per channel, and its
+    /// image is `Rgba8Unorm` so nothing decodes it at all — see
+    /// `crcbl_render::forward::NORMAL_PAGE_FORMAT` and
+    /// `docs/plan/44-lighting.md`'s rung 2.
     ///
-    /// Its length must be `extent² × 4`, on
-    /// [`push_layer`](Self::push_layer)'s terms exactly — the two pages share
-    /// one extent, which is this type's own constraint and not the device's.
-    pub fn push_normal_layer(&mut self, texels: impl Into<Cow<'a, [u8]>>) -> u32 {
-        let layer = u32::try_from(self.normal_layers.len())
+    /// # Panics
+    ///
+    /// If `kind` has no extent yet: a layer's length is only meaningful against
+    /// one, so [`set_extent`](Self::set_extent) comes first.
+    pub fn push_layer(&mut self, kind: PageKind, texels: impl Into<Cow<'a, [u8]>>) -> u32 {
+        let page = &mut self.pages[kind.index()];
+        assert!(
+            page.extent > 0,
+            "the {} page has no extent, so this layer's length would be measured against \
+             nothing: set_extent comes first",
+            kind.label()
+        );
+        let layer = u32::try_from(page.layers.len())
             .unwrap_or_else(|_| unreachable!("a page of more layers than a u32 can name"));
-        self.normal_layers.push(texels.into());
+        page.layers.push(texels.into());
         layer
     }
 
-    /// Every **normal** page layer, in order: element `n` is layer `n`, and
-    /// element 0 is [`NEUTRAL_NORMAL`](Self::NEUTRAL_NORMAL) repeated.
+    /// `kind`'s texels a side, or **zero** when nothing has named that page.
     #[must_use]
-    pub fn normal_layers(&self) -> &[Cow<'a, [u8]>] {
-        &self.normal_layers
+    pub const fn extent(&self, kind: PageKind) -> u32 {
+        self.pages[kind.index()].extent
     }
 
-    /// Appends a layer and returns its index — the number a material row's
-    /// [`base_color_texture`](mesh::GpuMaterial::base_color_texture) carries.
-    ///
-    /// `texels` is RGBA8, row-major, sRGB-encoded: that is what glTF defines a
-    /// base-colour texture to be, and the renderer creates the image as
-    /// `Rgba8UnormSrgb` so the sampler decodes it. Its length must be
-    /// `extent² × 4`, which [`ForwardRenderer::with_scene`](crate::forward::ForwardRenderer::with_scene)
-    /// checks before it uploads anything.
-    pub fn push_layer(&mut self, texels: impl Into<Cow<'a, [u8]>>) -> u32 {
-        let layer = u32::try_from(self.layers.len())
-            .unwrap_or_else(|_| unreachable!("a page of more layers than a u32 can name"));
-        self.layers.push(texels.into());
-        layer
-    }
-
-    /// Texels a side.
+    /// Every layer of `kind`, in order: element `n` is layer `n`.
     #[must_use]
-    pub const fn extent(&self) -> u32 {
-        self.extent
+    pub fn layers(&self, kind: PageKind) -> &[Cow<'a, [u8]>] {
+        &self.pages[kind.index()].layers
     }
 
-    /// Every layer, in order: element `n` is layer `n`.
-    #[must_use]
-    pub fn layers(&self) -> &[Cow<'a, [u8]>] {
-        &self.layers
-    }
-
-    /// Whether this page can be uploaded as written, checked by
+    /// Whether this description can be uploaded as written, checked by
     /// [`ForwardRenderer::with_scene`](crate::forward::ForwardRenderer::with_scene)
     /// before it creates anything.
     ///
     /// Two things, and they fail for different reasons.
     /// [`push_layer`](Self::push_layer) takes bytes it cannot measure against an
     /// extent it does not see, so a layer of the wrong length is an ordinary
-    /// caller mistake. Layer 0's whiteness, on the other hand, is
-    /// [`opaque_white`](Self::opaque_white)'s to guarantee and no caller can
-    /// spell it wrong today — this is what would catch a *second* constructor
-    /// that let one through, which is why it is checked here rather than
-    /// asserted at construction.
+    /// caller mistake. Layers at *no* extent, on the other hand, are unspellable
+    /// through this type's own methods — `set_extent` refuses zero and
+    /// `push_layer` refuses a page without one — so that arm is what would catch
+    /// a *second* constructor that let one through, which is why it is checked
+    /// here rather than asserted at construction.
     ///
     /// # Errors
     ///
-    /// [`HalError::InvalidDescriptor`] naming the layer and what is wrong with
-    /// it.
+    /// [`HalError::InvalidDescriptor`] naming the kind, the layer and what is
+    /// wrong with it.
     pub(crate) fn check(&self) -> Result<(), HalError> {
-        let texels = self.extent as usize * self.extent as usize * 4;
-        for (what, layers) in [
-            ("page", self.layers.as_slice()),
-            ("normal page", self.normal_layers.as_slice()),
-        ] {
-            for (layer, bytes) in layers.iter().enumerate() {
+        for kind in PageKind::ALL {
+            let page = &self.pages[kind.index()];
+            if page.layers.is_empty() {
+                continue;
+            }
+            if page.extent == 0 {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "the {} page carries {} layer(s) at no extent, so there is no image for \
+                     them to go into",
+                    kind.label(),
+                    page.layers.len()
+                )));
+            }
+            let texels = page.extent as usize * page.extent as usize * 4;
+            for (layer, bytes) in page.layers.iter().enumerate() {
                 if bytes.len() != texels {
                     return Err(HalError::InvalidDescriptor(format!(
-                        "{what} layer {layer} carries {} bytes, and a {}×{} RGBA8 layer is \
+                        "{} page layer {layer} carries {} bytes, and a {}×{} RGBA8 layer is \
                          {texels}",
+                        kind.label(),
                         bytes.len(),
-                        self.extent,
-                        self.extent
+                        page.extent,
+                        page.extent
                     )));
                 }
             }
         }
-        match self.layers.first() {
-            Some(white) if white.iter().all(|&texel| texel == Self::WHITE) => {}
-            Some(_) => {
-                return Err(HalError::InvalidDescriptor(
-                    "page layer 0 is not opaque white, so every material naming no texture \
-                     would be scaled by a texel that is not 1.0"
-                        .to_string(),
-                ));
-            }
-            None => {
-                return Err(HalError::InvalidDescriptor(
-                    "a page with no layers has nothing for a material naming no texture to \
-                     sample"
-                        .to_string(),
-                ));
-            }
-        }
-        // The normal page's own layer 0, on exactly the terms above: a material
-        // naming no normal map names it, and a read that runs past an authored
-        // layer's edge lands in it. What it must hold is the neutral texel and
-        // not the zero an unwritten image carries, which decodes to a normal
-        // pointing away from the surface.
-        match self.normal_layers.first() {
-            Some(neutral)
-                if neutral
-                    .chunks_exact(4)
-                    .all(|texel| texel == Self::NEUTRAL_NORMAL) =>
-            {
-                Ok(())
-            }
-            Some(_) => Err(HalError::InvalidDescriptor(
-                "normal page layer 0 is not the neutral texel, so a material naming no \
-                 normal map would be perturbed by one nobody authored"
-                    .to_string(),
-            )),
-            None => Err(HalError::InvalidDescriptor(
-                "a normal page with no layers has nothing for a material naming no normal \
-                 map to sample"
-                    .to_string(),
-            )),
-        }
+        Ok(())
     }
 }
 
@@ -888,11 +939,12 @@ pub const DEMO_TEXTURED: usize = 2;
 /// control.
 #[must_use]
 pub fn demo() -> SceneDesc<'static> {
-    let mut page = PageDesc::opaque_white(PAGE_EXTENT);
-    let checker = page.push_layer(&CHECKER_TEXELS[..]);
+    let mut page = PageDesc::empty();
+    page.set_extent(PageKind::BaseColor, PAGE_EXTENT);
+    let checker = page.push_layer(PageKind::BaseColor, &CHECKER_TEXELS[..]);
     debug_assert_eq!(
         checker, CHECKER_LAYER,
-        "the checker is the layer past the white one"
+        "the checker is this page's first and only layer"
     );
 
     SceneDesc {
@@ -1008,8 +1060,8 @@ fn dunes_geometry() -> Geometry<'static> {
 mod tests {
     use super::*;
 
-    /// **Row 0 is [`mesh::GpuMaterial::UNTINTED`] with the untextured layer**,
-    /// and nothing else may take that place.
+    /// **Row 0 is [`mesh::GpuMaterial::UNTINTED`] naming no page**, and nothing
+    /// else may take that place.
     ///
     /// It is the row [`mesh::GpuInstance::default`] names, so every instance
     /// written by omission shades through it. A description that inserted the
@@ -1043,170 +1095,154 @@ mod tests {
         );
     }
 
-    /// **Page layer 0 is opaque white**, in every texel and at whatever extent.
+    /// **[`PageDesc::empty`] allocates nothing, and the two kinds are sized and
+    /// numbered apart.**
     ///
-    /// Any other value is a global albedo scale on every surface that names it —
-    /// which reads as a lighting difference and is visible in no CPU assertion.
+    /// The whole of what row (d) changed, in one place: a description starts
+    /// with no page at all, a kind nothing names keeps an extent of zero, and
+    /// each kind's layers count from zero on their own — so a row pointed at a
+    /// base-colour layer number is not pointed at a normal layer that happens to
+    /// exist.
     #[test]
-    fn page_layer_zero_is_white_whatever_the_caller_appends() {
-        let mut page = PageDesc::opaque_white(4);
-        let appended = page.push_layer(vec![0x00; 4 * 4 * 4]);
-        assert_ne!(appended, 0, "a caller can only append past the white layer");
-        assert!(
-            page.layers()[0]
-                .iter()
-                .all(|&texel| texel == PageDesc::WHITE),
-            "layer 0 must decode to 1.0 in every channel"
-        );
-        assert_eq!(page.layers()[0].len(), 4 * 4 * 4);
+    fn a_page_names_each_kind_apart_and_starts_naming_none() {
+        let page = PageDesc::empty();
+        for kind in PageKind::ALL {
+            assert_eq!(page.extent(kind), 0, "{} starts unsized", kind.label());
+            assert!(
+                page.layers(kind).is_empty(),
+                "{} starts empty",
+                kind.label()
+            );
+        }
+        page.check().expect("a description naming no page is legal");
 
-        let demo_page = demo().page;
-        assert_eq!(demo_page.extent(), PAGE_EXTENT);
-        assert!(
-            demo_page.layers()[0]
-                .iter()
-                .all(|&texel| texel == PageDesc::WHITE)
+        // Two extents, and the smaller one is the normal page — the shape the
+        // one shared extent could not describe at all.
+        let mut page = PageDesc::empty();
+        page.set_extent(PageKind::BaseColor, 4);
+        page.set_extent(PageKind::Normal, 2);
+        let colour = page.push_layer(PageKind::BaseColor, vec![0x11; 4 * 4 * 4]);
+        let normal = page.push_layer(PageKind::Normal, vec![0x22; 2 * 2 * 4]);
+        assert_eq!(
+            (colour, normal),
+            (0, 0),
+            "each kind numbers its own layers, and both start at zero"
         );
         assert_eq!(
-            demo_page.layers()[CHECKER_LAYER as usize].as_ref(),
-            &CHECKER_TEXELS[..]
+            (
+                page.extent(PageKind::BaseColor),
+                page.extent(PageKind::Normal)
+            ),
+            (4, 2),
+            "one kind's extent says nothing about the other's"
         );
-        demo_page.check().expect("the demo page uploads as written");
+        assert_eq!(page.layers(PageKind::BaseColor)[0][0], 0x11);
+        assert_eq!(page.layers(PageKind::Normal)[0][0], 0x22);
+        page.check()
+            .expect("two kinds at two extents, each layer its own extent's worth");
     }
 
-    /// **[`PageDesc::check`] refuses every page that would draw a wrong
-    /// frame**, built here through the private fields no caller has.
+    /// **[`PageDesc::check`] refuses every page the renderer could not upload**,
+    /// including the one shape no caller can spell, built here through the
+    /// private fields no caller has.
     ///
-    /// Without this the layer-0 checks are checks that cannot fail:
-    /// [`PageDesc::opaque_white`] is the only way in from outside the crate and
-    /// it writes both pages' layer 0 itself, so nothing a caller can spell would
-    /// ever reach those arms. What they are there for is a *second*
-    /// constructor — slice 4's app-supplied page — and this is what says they
-    /// still bite when one arrives.
+    /// The length arm is an ordinary caller mistake: `push_layer` takes bytes it
+    /// cannot measure. The no-extent arm is not spellable through the type's own
+    /// methods at all — which is exactly why it is checked rather than asserted,
+    /// and why it is built here from the fields.
     #[test]
-    fn a_page_that_would_rescale_every_untextured_surface_is_refused() {
+    fn a_page_the_device_could_not_upload_is_refused() {
         // The shape that is right, which every wrong one below is one field
         // away from — and which is checked last, so a `check` that refused
         // everything could not pass this test.
-        let good = |extent: u32| PageDesc {
-            extent,
-            layers: vec![Cow::Owned(vec![
-                PageDesc::WHITE;
-                extent as usize * extent as usize * 4
-            ])],
-            normal_layers: vec![Cow::Owned(
-                PageDesc::NEUTRAL_NORMAL.repeat(extent as usize * extent as usize),
-            )],
+        let good = || {
+            let mut page = PageDesc::empty();
+            page.set_extent(PageKind::BaseColor, 2);
+            page.set_extent(PageKind::Normal, 2);
+            page
         };
 
-        let grey = PageDesc {
-            layers: vec![Cow::Owned(vec![0x80; 2 * 2 * 4])],
-            ..good(2)
-        };
-        grey.check()
-            .expect_err("a grey layer 0 scales every untextured material");
+        for kind in PageKind::ALL {
+            let mut short = good();
+            short.push_layer(kind, vec![0x00; 4]);
+            let refusal = short
+                .check()
+                .expect_err("a layer of the wrong length would upload another layer's texels");
+            let HalError::InvalidDescriptor(said) = refusal else {
+                panic!("a description is refused as a description");
+            };
+            assert!(
+                said.contains(&format!("{} page layer 0 carries 4 bytes", kind.label())),
+                "the refusal must name the kind and the layer, and it said {said:?}"
+            );
 
-        let short = PageDesc {
-            layers: vec![
-                Cow::Owned(vec![PageDesc::WHITE; 2 * 2 * 4]),
-                Cow::Owned(vec![0x00; 4]),
-            ],
-            ..good(2)
-        };
-        short
-            .check()
-            .expect_err("a layer of the wrong length would upload another layer's texels");
+            // Layers at no extent: the pair `set_extent` and `push_layer`
+            // between them make unreachable, and the arm that would catch a
+            // second constructor letting one through.
+            let mut unsized_page = PageDesc::empty();
+            unsized_page.pages[kind.index()]
+                .layers
+                .push(Cow::Owned(vec![0x00; 2 * 2 * 4]));
+            let refusal = unsized_page
+                .check()
+                .expect_err("layers at no extent name an image that was never sized");
+            let HalError::InvalidDescriptor(said) = refusal else {
+                panic!("a description is refused as a description");
+            };
+            assert!(
+                said.contains(&format!(
+                    "the {} page carries 1 layer(s) at no extent",
+                    kind.label()
+                )),
+                "the refusal must name the kind, and it said {said:?}"
+            );
+        }
 
-        let empty = PageDesc {
-            layers: Vec::new(),
-            ..good(2)
-        };
-        empty
-            .check()
-            .expect_err("a material naming no texture has nothing to sample");
-
-        // And the normal page's own three, which are the same three failures
-        // over a different neutral: a layer 0 that is not
-        // `NEUTRAL_NORMAL` perturbs every material that named no normal map by
-        // a direction nobody authored, and the other two are the base-colour
-        // page's word for word.
-        let tilted = PageDesc {
-            normal_layers: vec![Cow::Owned(vec![0x00; 2 * 2 * 4])],
-            ..good(2)
-        };
-        tilted
-            .check()
-            .expect_err("a zeroed normal layer 0 decodes to a normal pointing backwards");
-
-        let short_normal = PageDesc {
-            normal_layers: vec![
-                Cow::Owned(PageDesc::NEUTRAL_NORMAL.repeat(4)),
-                Cow::Owned(vec![0x00; 4]),
-            ],
-            ..good(2)
-        };
-        short_normal
-            .check()
-            .expect_err("a normal layer of the wrong length would upload another's texels");
-
-        let no_normal = PageDesc {
-            normal_layers: Vec::new(),
-            ..good(2)
-        };
-        no_normal
-            .check()
-            .expect_err("a material naming no normal map has nothing to sample");
-
-        // Every layer past 0 is unconstrained on both pages — only its length
-        // is checked — so the accepted shape carries one of each.
-        let mut whole = good(2);
-        whole.layers.push(Cow::Owned(vec![0x00; 2 * 2 * 4]));
-        whole.normal_layers.push(Cow::Owned(vec![0x00; 2 * 2 * 4]));
+        // Every layer is unconstrained but for its length, on both kinds, so the
+        // accepted shape carries two of each and nothing white or neutral about
+        // any of them.
+        let mut whole = good();
+        for kind in PageKind::ALL {
+            whole.push_layer(kind, vec![0x00; 2 * 2 * 4]);
+            whole.push_layer(kind, vec![0x7B; 2 * 2 * 4]);
+        }
         whole
             .check()
-            .expect("a white layer 0, a neutral normal layer 0 and a full-length layer 1 each");
+            .expect("two full-length layers on each kind is a page the renderer uploads");
     }
 
-    /// [`PageDesc::opaque_white`] describes a normal page as well, and its
-    /// layer 0 is the neutral texel rather than the white one.
+    /// **[`demo`]'s page is its checker and nothing else**, at
+    /// [`CHECKER_LAYER`], and it names no normal page at all.
     ///
-    /// The two pages' layer 0 hold *different* bytes and are written by the same
-    /// constructor, which is exactly the shape a copy-paste gets wrong — and a
-    /// white normal layer 0 is a tangent-space normal of `(1, 1, 1)`
-    /// normalised, tilted 55° off the surface, which every material naming no
-    /// normal map would then be shaded through.
+    /// The layer number is the one [`DEMO_TEXTURED`] carries, so a page that
+    /// pushed its checker anywhere else would shade that row through a layer the
+    /// description does not have — refused at `with_scene` — or, worse, through
+    /// one it does.
     #[test]
-    fn the_page_is_born_with_a_neutral_normal_layer() {
-        let page = PageDesc::opaque_white(4);
-        assert_eq!(page.normal_layers().len(), 1);
-        assert_eq!(page.layers().len(), 1);
-        assert_eq!(page.normal_layers()[0].len(), 4 * 4 * 4);
-        assert!(
-            page.normal_layers()[0]
-                .chunks_exact(4)
-                .all(|texel| texel == PageDesc::NEUTRAL_NORMAL),
-            "every texel of the normal page's layer 0 is the neutral one"
+    fn the_demo_page_is_one_checker_layer_and_no_normal_page() {
+        let page = demo().page;
+        assert_eq!(page.extent(PageKind::BaseColor), PAGE_EXTENT);
+        assert_eq!(
+            page.layers(PageKind::BaseColor).len(),
+            1,
+            "the demo page is the checker alone: nothing burns a layer any more"
         );
-        assert_ne!(
-            &page.normal_layers()[0][..4],
-            &page.layers()[0][..4],
-            "the two pages' layer 0 are different texels, and a constructor that \
-             wrote one twice would pass every length check"
+        assert_eq!(
+            page.layers(PageKind::BaseColor)[CHECKER_LAYER as usize].as_ref(),
+            &CHECKER_TEXELS[..]
         );
-        page.check()
-            .expect("the page a caller gets uploads as written");
-
-        // And a layer pushed onto one page does not appear on the other: they
-        // are two images and two layer numberings, which is what
-        // `GpuMaterial`'s two index columns mean.
-        let mut page = PageDesc::opaque_white(2);
-        let colour = page.push_layer(vec![0x11; 2 * 2 * 4]);
-        let normal = page.push_normal_layer(vec![0x22; 2 * 2 * 4]);
-        assert_eq!((colour, normal), (1, 1));
-        assert_eq!(page.layers().len(), 2);
-        assert_eq!(page.normal_layers().len(), 2);
-        assert_eq!(page.layers()[1][0], 0x11);
-        assert_eq!(page.normal_layers()[1][0], 0x22);
+        assert_eq!(
+            demo().materials[DEMO_TEXTURED].base_color_texture,
+            CHECKER_LAYER,
+            "the textured row names the layer the page actually pushed"
+        );
+        assert_eq!(
+            page.extent(PageKind::Normal),
+            0,
+            "nothing in the demo scene names a normal map, so that page is one \
+             placeholder texel on the device"
+        );
+        page.check().expect("the demo page uploads as written");
     }
 
     /// The description the renderer consumes really is the resident set it used

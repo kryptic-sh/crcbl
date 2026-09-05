@@ -46,7 +46,7 @@ use crate::hdr::HdrTarget;
 use crate::mesh_scene::{MESH_EXTENT, render_mesh_lit};
 use crate::vertex_v2::{flat_frame, pixel_at, quad_camera, quad_mesh};
 use crcbl::math::{Mat4, Vec3};
-use crcbl::render::scene::{Capacities, PAGE_EXTENT, PageDesc, ProbeGrid, SceneDesc};
+use crcbl::render::scene::{Capacities, PAGE_EXTENT, PageDesc, PageKind, ProbeGrid, SceneDesc};
 use crcbl::render::{
     Camera, DirectionalLight, EffectOverride, EffectRequest, ForwardRenderer, InstanceDesc,
     RenderEffects, TransientPool,
@@ -61,11 +61,11 @@ const UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 
 /// The layer [`page`] pushes a full square of [`PageDesc::WHITE`] into.
 ///
-/// **Pushed rather than layer 0.** Layer 0 is the white one
-/// `PageDesc::opaque_white` still burns, and the claim here is about *a* white
-/// layer rather than about that one — so the test says the same thing after
-/// row (d)'s second step takes the burned layer out.
-const WHITE_LAYER: u32 = 1;
+/// **Zero, and layer zero is an ordinary layer.** Nothing is burned ahead of it:
+/// a caller that wants a white layer writes one, and the claim here is about
+/// that layer rather than about a convention. Row (d)'s second step is what
+/// removed the burned one, and this test says the same thing either side of it.
+const WHITE_LAYER: u32 = 0;
 
 /// The row that names no base-colour page at all.
 const NO_PAGE_ROW: usize = 0;
@@ -96,15 +96,13 @@ fn sun() -> DirectionalLight {
     }
 }
 
-/// The page: the white layer `opaque_white` burns, then [`WHITE_LAYER`].
+/// The page: one layer, [`WHITE_LAYER`], every texel [`PageDesc::WHITE`].
 fn page() -> PageDesc<'static> {
-    let mut page = PageDesc::opaque_white(PAGE_EXTENT);
+    let mut page = PageDesc::empty();
+    page.set_extent(PageKind::BaseColor, PAGE_EXTENT);
     let texels = PAGE_EXTENT as usize * PAGE_EXTENT as usize * 4;
-    let white = page.push_layer(vec![PageDesc::WHITE; texels]);
-    assert_eq!(
-        white, WHITE_LAYER,
-        "the pushed white layer is the one past the burned one"
-    );
+    let white = page.push_layer(PageKind::BaseColor, vec![PageDesc::WHITE; texels]);
+    assert_eq!(white, WHITE_LAYER, "the white layer is the page's only one");
     page
 }
 

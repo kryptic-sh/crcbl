@@ -27,8 +27,8 @@
 //! to know which model the device it is bound on selected.
 //!
 //! **This type does not own the page.** It stores an index and nothing else:
-//! which image the layers live in, how many there are and what layer 0 holds
-//! are [`crate::forward`]'s, exactly as which *mesh* a `GpuInstance::mesh`
+//! which image the layers live in, how many there are and which page kind they
+//! belong to are [`crate::forward`]'s, exactly as which *mesh* a `GpuInstance::mesh`
 //! names is [`crate::mesh_pool`]'s. So a row naming a layer the page does not
 //! have samples out of range and nothing *here* can tell — which is why the
 //! type that does own both refuses it: [`ForwardRenderer::with_scene`] checks

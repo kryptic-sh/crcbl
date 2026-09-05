@@ -4,8 +4,8 @@
 //! # Two rows, one page
 //!
 //! * [`greybox_material`] is the plain grey every primitive shows by default —
-//!   [`GpuMaterial::UNTINTED`], which samples the page's white layer 0 and so
-//!   shades a surface in its own vertex albedo, [`crate::GREYBOX_ALBEDO`].
+//!   [`GpuMaterial::UNTINTED`], which names no page at all and so shades a
+//!   surface in its own vertex albedo, [`crate::GREYBOX_ALBEDO`].
 //! * [`grid_material`] samples [`GRID_LAYER`] instead: a metric grid a dev turns
 //!   on to read sizes straight off a surface.
 //!
@@ -35,13 +35,13 @@
 
 use std::borrow::Cow;
 
-use crcbl_render::scene::PageDesc;
+use crcbl_render::scene::{PageDesc, PageKind};
 use crcbl_shaders::mesh::GpuMaterial;
 
 /// The grid layer's index in the page — the number [`grid_material`]'s
-/// `base_color_texture` carries. Layer 0 is the white layer
-/// [`PageDesc::opaque_white`] burns, so the grid is the first layer past it.
-pub const GRID_LAYER: u32 = 1;
+/// `base_color_texture` carries. The only layer [`grid_page`] holds, and layer 0
+/// is an ordinary layer: nothing is burned ahead of it.
+pub const GRID_LAYER: u32 = 0;
 
 /// The grid page's extent, in texels a side.
 ///
@@ -65,9 +65,9 @@ const GRID_FIELD: [u8; 4] = [0xB0, 0xB0, 0xB0, 0xFF];
 /// The sRGB grey of the grid's lines, drawn along every cell boundary.
 const GRID_LINE: [u8; 4] = [0x40, 0x40, 0x40, 0xFF];
 
-/// The neutral greybox material: [`GpuMaterial::UNTINTED`], a mid-grey dielectric
-/// on the page's white layer. Row 0 of [`crate::scene3d`], so it is what an
-/// instance placed without a named material shades through.
+/// The neutral greybox material: [`GpuMaterial::UNTINTED`], a mid-grey
+/// dielectric naming no page at all. Row 0 of [`crate::scene3d`], so it is what
+/// an instance placed without a named material shades through.
 #[must_use]
 pub fn greybox_material() -> GpuMaterial {
     GpuMaterial::UNTINTED
@@ -100,16 +100,14 @@ pub fn grid_texels() -> Vec<u8> {
     texels
 }
 
-/// The base-colour page a greybox scene uploads: the white untextured layer 0,
-/// then the grid as [`GRID_LAYER`].
+/// The base-colour page a greybox scene uploads: the grid as [`GRID_LAYER`],
+/// and nothing else.
 #[must_use]
 pub fn grid_page() -> PageDesc<'static> {
-    let mut page = PageDesc::opaque_white(GRID_EXTENT);
-    let layer = page.push_layer(Cow::Owned(grid_texels()));
-    debug_assert_eq!(
-        layer, GRID_LAYER,
-        "the grid is the one layer past the white one"
-    );
+    let mut page = PageDesc::empty();
+    page.set_extent(PageKind::BaseColor, GRID_EXTENT);
+    let layer = page.push_layer(PageKind::BaseColor, Cow::Owned(grid_texels()));
+    debug_assert_eq!(layer, GRID_LAYER, "the grid is the page's only layer");
     page
 }
 
@@ -171,7 +169,7 @@ pub enum GreyboxColor {
 
 impl GreyboxColor {
     /// Every colour, in the order [`greybox_page`] lays them out — so `ALL[i]`
-    /// occupies page layer `i + 1`, past the white untextured layer 0.
+    /// occupies page layer `i`.
     pub const ALL: [GreyboxColor; 7] = [
         Self::Grey,
         Self::Red,
@@ -186,18 +184,18 @@ impl GreyboxColor {
     /// a [`greybox_color_material`] row's
     /// [`base_color_texture`](GpuMaterial::base_color_texture) carries.
     ///
-    /// Layer 0 is the page's white untextured layer, so the colours start at 1,
-    /// in [`ALL`](Self::ALL) order.
+    /// The colours are the whole page, in [`ALL`](Self::ALL) order, from layer
+    /// zero: nothing burns a layer ahead of them.
     #[must_use]
     pub const fn layer(self) -> u32 {
         match self {
-            Self::Grey => 1,
-            Self::Red => 2,
-            Self::Green => 3,
-            Self::Blue => 4,
-            Self::Orange => 5,
-            Self::Brown => 6,
-            Self::Black => 7,
+            Self::Grey => 0,
+            Self::Red => 1,
+            Self::Green => 2,
+            Self::Blue => 3,
+            Self::Orange => 4,
+            Self::Brown => 5,
+            Self::Black => 6,
         }
     }
 
@@ -267,18 +265,19 @@ pub fn greybox_color_texels(color: GreyboxColor) -> Vec<u8> {
     texels
 }
 
-/// The base-colour page the greybox colour tiles upload: the white untextured
-/// layer 0, then the seven [`GreyboxColor`] tiles in [`GreyboxColor::ALL`] order,
-/// so [`GreyboxColor::layer`] names each one.
+/// The base-colour page the greybox colour tiles upload: the seven
+/// [`GreyboxColor`] tiles in [`GreyboxColor::ALL`] order and nothing else, so
+/// [`GreyboxColor::layer`] names each one.
 #[must_use]
 pub fn greybox_page() -> PageDesc<'static> {
-    let mut page = PageDesc::opaque_white(GREYBOX_TILE_EXTENT);
+    let mut page = PageDesc::empty();
+    page.set_extent(PageKind::BaseColor, GREYBOX_TILE_EXTENT);
     for color in GreyboxColor::ALL {
-        let layer = page.push_layer(Cow::Owned(greybox_color_texels(color)));
+        let layer = page.push_layer(PageKind::BaseColor, Cow::Owned(greybox_color_texels(color)));
         debug_assert_eq!(
             layer,
             color.layer(),
-            "the colour tiles follow the white layer in ALL order"
+            "the colour tiles are the page, in ALL order"
         );
     }
     page

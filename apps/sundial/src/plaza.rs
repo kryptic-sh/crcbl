@@ -3,14 +3,15 @@
 //! ```text
 //!  MeshBuilder ──▶ build_meshlets ──▶ Geometry::Flat ──┐
 //!  GpuMaterial rows ───────────────────────────────────┼─▶ SceneDesc ──▶ with_scene
-//!  PageDesc::opaque_white ─────────────────────────────┘
+//!  PageDesc::empty ────────────────────────────────────┘
 //!  place() ──▶ add_instance ×N
 //! ```
 //!
 //! Nothing here names a device and nothing here is the engine's content, on
 //! `apps/alcove/src/court.rs`' terms exactly: the meshes are baked from literals
 //! by this module's own quad builder, the two material rows are this sample's,
-//! and the page is [`PageDesc::opaque_white`] with no layer pushed onto it.
+//! and the page is [`PageDesc::empty`] — every row names
+//! `GpuMaterial::NO_PAGE`, so there is no image to allocate at all.
 //! Godot-style axes throughout — `+Y` up, `-Z` forward.
 //!
 //! # Every shape here is here because a named shadow artefact needs somewhere to
@@ -59,7 +60,7 @@
 //! light's own shadow map, which occludes the light it was drawn to represent —
 //! `apps/lantern`'s lamp is unmodelled for the same reason.
 //!
-//! [`PageDesc::opaque_white`]: crcbl::render::scene::PageDesc::opaque_white
+//! [`PageDesc::empty`]: crcbl::render::scene::PageDesc::empty
 
 use std::borrow::Cow;
 
@@ -423,14 +424,6 @@ pub(crate) const GROUND_COLOR: [f32; 4] = [0.80, 0.79, 0.76, 1.0];
 /// second factor in a reading that is meant to be about the filter.
 pub(crate) const OBJECT_COLOR: [f32; 4] = [0.62, 0.60, 0.57, 1.0];
 
-/// The page's extent, in texels a side.
-///
-/// One: every material row names [`GpuMaterial::NO_PAGE`], so nothing samples
-/// the page at all and the frame has no pattern in it anywhere — texture
-/// detail is what hides a shadow artefact. The renderer still needs an image,
-/// so the page is one white texel.
-const PAGE_EXTENT: u32 = 1;
-
 // ---------------------------------------------------------------------------
 // The meshes
 // ---------------------------------------------------------------------------
@@ -566,9 +559,9 @@ impl MeshBuilder {
         let clusters = crcbl::scene::build_meshlets(&self.positions, &self.indices)
             .unwrap_or_else(|why| panic!("{label} is a whole number of triangles: {why}"))
             .into_clusters();
-        // Every surface samples the page's one white texel, so every vertex
-        // carries the same texture coordinate and the range is degenerate on
-        // purpose — see `PAGE_EXTENT`.
+        // No surface here samples a page at all — every material row names
+        // `GpuMaterial::NO_PAGE` — so every vertex carries the same texture
+        // coordinate and the range is degenerate on purpose.
         let uv_range = UvRange::from_uvs(&[[0.0, 0.0]]);
         let vertices: Vec<MeshVertex> = self
             .vertices
@@ -666,7 +659,7 @@ pub fn plaza() -> SceneDesc<'static> {
                 ..GpuMaterial::UNTINTED
             },
         ],
-        page: PageDesc::opaque_white(PAGE_EXTENT),
+        page: PageDesc::empty(),
         probes: crcbl::render::ProbeGrid::default(),
         capacities: CAPACITIES,
     }

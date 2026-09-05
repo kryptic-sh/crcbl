@@ -5138,8 +5138,9 @@ mod tests {
     }
 
     /// The neutral normal texel is **not** exactly flat, which is why
-    /// [`GpuMaterial::normal_texture`] is tested for zero in the shader rather
-    /// than left to the page's layer 0.
+    /// [`GpuMaterial::normal_texture`] is tested against
+    /// [`GpuMaterial::NO_PAGE`] in the shader rather than left to a neutral
+    /// layer on the page.
     ///
     /// `(0.5, 0.5, 1.0)` is the neutral a normal map is authored against, and an
     /// eight-bit unorm channel has no `0.5`: `128 / 255` is the nearest, and it
@@ -5153,8 +5154,9 @@ mod tests {
     /// later change to the neutral texel or to the decode reports what it did.
     #[test]
     fn a_neutral_normal_texel_is_not_exactly_flat() {
-        // The texel `crcbl_render::scene::PageDesc` writes into the normal
-        // page's layer 0, read back the way an `Rgba8Unorm` sampler reads it.
+        // `crcbl_render::scene::PageDesc::NEUTRAL_NORMAL`, the texel a caller
+        // writes when it wants a neutral normal layer *deliberately*, read back
+        // the way an `Rgba8Unorm` sampler reads it.
         let neutral = [0x80u8, 0x80, 0xFF, 0xFF];
         let decoded = crate::vertex::decode_rgba8(neutral);
         let tangent_space = [

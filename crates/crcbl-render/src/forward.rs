@@ -188,7 +188,7 @@ use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshUp
 use crate::probe::{ProbeTable, ProbeTableDesc};
 use crate::probe_gather::{ProbeGather, ProbeGatherDesc, RsmImages, RsmTargets};
 use crate::rsm;
-use crate::scene::{self, Geometry, InstanceDesc, ProbeUpdate, SceneDesc};
+use crate::scene::{self, Geometry, InstanceDesc, PageKind, ProbeUpdate, SceneDesc};
 use crate::shadow::{self, Cascades};
 use crate::skinning::{SkinRange, SkinnedMesh, Skinning, SkinningError};
 use crate::sky_pass::SkyPass;
@@ -285,6 +285,74 @@ const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 ///
 /// [`docs/plan/44-lighting.md`]: https://docs.rs/crcbl-render
 const NORMAL_PAGE_FORMAT: Format = Format::Rgba8Unorm;
+
+/// What the renderer needs of a [`PageKind`] to create and fill its image.
+///
+/// Written here rather than in [`crate::scene`] because the two answers are the
+/// device's: the format is the one [`base_color_page_import`] and
+/// [`normal_page_import`] have to declare, and the filter is the one
+/// [`crate::mip`] builds the chain with. A kind added by
+/// `docs/plan/43-render-standards.md` §2's rung 3 is a new arm in each.
+///
+/// [`base_color_page_import`]: ForwardRenderer::base_color_page_import
+/// [`normal_page_import`]: ForwardRenderer::normal_page_import
+impl PageKind {
+    /// The format this kind's image is created with.
+    ///
+    /// The sRGB in one and its absence in the other is the whole colour-space
+    /// decision — see [`BASE_COLOR_PAGE_FORMAT`] and [`NORMAL_PAGE_FORMAT`],
+    /// which is where each is argued.
+    const fn format(self) -> Format {
+        match self {
+            Self::BaseColor => BASE_COLOR_PAGE_FORMAT,
+            Self::Normal => NORMAL_PAGE_FORMAT,
+        }
+    }
+
+    /// Every mip level below `level0`, built on the host with this kind's own
+    /// filter.
+    ///
+    /// [`crate::mip::normal_chain`] averages the decoded vectors plainly and
+    /// renormalises, where [`crate::mip::chain`] decodes an sRGB curve and
+    /// weights by alpha. A normal map mipped through the colour filter leans
+    /// further off vertical at every level than the map it was built from, and
+    /// nothing in a frame reports it.
+    fn chain(self, level0: &[u8], extent: u32) -> Vec<Vec<u8>> {
+        match self {
+            Self::BaseColor => crate::mip::chain(level0, extent),
+            Self::Normal => crate::mip::normal_chain(level0, extent),
+        }
+    }
+
+    /// The device label this kind's image is created under.
+    const fn upload_label(self) -> &'static str {
+        match self {
+            Self::BaseColor => "material base colour",
+            Self::Normal => "material normals",
+        }
+    }
+}
+
+/// The one texel a page **nothing names** is created with.
+///
+/// [`crate::texture::upload_texture_mip_layers`] refuses a zero-layer image, and
+/// every bind group of the mesh layout has to fill both page bindings whether or
+/// not the description carried either page — so a [`PageKind`] with no layers
+/// gets a 1×1 single-layer image in its own format instead of an `extent²` one
+/// nobody samples. That is the whole of what row (d) bought back:
+/// `apps/alcove`, `apps/sundial` and `apps/quarry` name no page at all, and
+/// every scene in the tree that has no normal map used to carry a full neutral
+/// layer and a third again for its chain.
+///
+/// **Magenta, and it is never sampled for its value.** A material naming no page
+/// carries [`GpuMaterial::NO_PAGE`](mesh::GpuMaterial::NO_PAGE):
+/// `mesh.slang`'s `base_color_texel` discards the fetch with a select and
+/// returns the literal `1.0`, and `shading_normal_of` returns before it fetches
+/// at all. So nothing should ever read this — and the value is chosen so that if
+/// something does, the frame says so in a colour no lit surface in this engine
+/// produces. White would blend into every untextured surface and black would
+/// read as a shadow; both are failures a golden could pass.
+const PAGE_PLACEHOLDER_TEXEL: [u8; 4] = [0xFF, 0x00, 0xFF, 0xFF];
 
 /// The format the motion-vector target is created with: two channels of half
 /// float, `docs/plan/43-render-standards.md` §9's third colour attachment.
@@ -1410,17 +1478,21 @@ pub struct ForwardRenderer {
     ///
     /// The base-colour page's own shape at [`NORMAL_PAGE_BINDING`], sampled
     /// through the same UV and the same sampler, and **created linear** — see
-    /// [`NORMAL_PAGE_FORMAT`]. Its extent is the base-colour page's, because
-    /// [`PageDesc`](crate::scene::PageDesc) carries one for both.
+    /// [`NORMAL_PAGE_FORMAT`]. Its extent is its own: a description sizes each
+    /// [`PageKind`] separately, so a 512² normal page beside a 2048²
+    /// base-colour one is what the caller wrote and what this holds.
     normal_page: UploadedTexture,
-    /// The page's size in texels, as a width and a height.
+    /// Each [`PageKind`]'s image size in texels, as a width and a height,
+    /// indexed by [`PageKind::index`].
     ///
     /// Square, because [`PageDesc`](crate::scene::PageDesc) carries one extent
-    /// for every layer. Kept rather than re-derived because
-    /// [`add_passes`](Self::add_passes) declares the page to the graph and an
-    /// [`ImportedImage`] names an extent — and the description it came from is
-    /// the caller's, read once at build.
-    base_color_page_extent: (u32, u32),
+    /// per kind rather than a rectangle. `(1, 1)` for a kind the description
+    /// named no layer of, which is the placeholder's extent and not the
+    /// description's — see [`PAGE_PLACEHOLDER_TEXEL`]. Kept rather than
+    /// re-derived because [`add_passes`](Self::add_passes) declares both pages
+    /// to the graph and an [`ImportedImage`] names an extent, and the
+    /// description they came from is the caller's, read once at build.
+    page_extents: [(u32, u32); PageKind::ALL.len()],
     /// The sampler the page is read through.
     base_color_sampler: SamplerHandle,
     /// The anisotropy [`ForwardRenderer::base_color_sampler`] was created
@@ -3279,9 +3351,9 @@ impl ForwardRenderer {
     /// # Errors
     ///
     /// [`HalError::InvalidDescriptor`] if the description cannot be made
-    /// resident as written: a page layer that is not the extent's worth of RGBA8, a page
-    /// whose layer 0 is not opaque white, a material row naming a layer the page
-    /// has not got, a DAG carrying a vertex array for anything but each of its
+    /// resident as written: a page layer that is not its kind's extent's worth of
+    /// RGBA8, a page kind holding layers at no extent, a material row naming a
+    /// layer that kind's page has not got, a DAG carrying a vertex array for anything but each of its
     /// levels, a cluster array with a read outside itself in it (see
     /// [`MeshClusters::check`]), or more vertices, indices, mesh table entries or
     /// material rows than [`SceneDesc::capacities`] reserves — that last naming the pool, the
@@ -3327,11 +3399,10 @@ impl ForwardRenderer {
     /// is wrong with it.
     fn check_scene(scene: &SceneDesc<'_>) -> Result<(), HalError> {
         let refuse = |what: String| Err(HalError::InvalidDescriptor(what));
-        // Every layer's length, and **layer 0's whiteness** — the invariant
-        // whose failure is a global albedo scale on every untextured surface.
-        // Checked by the type that owns the page rather than here, because that
-        // is where a page can be built wrong and where the check can be made to
-        // fail; see `PageDesc::check`.
+        // Every layer's length against its own kind's extent, and layers at no
+        // extent at all. Checked by the type that owns the page rather than
+        // here, because that is where a page can be built wrong and where the
+        // check can be made to fail; see `PageDesc::check`.
         scene.page.check()?;
         // The probe grid's counts against the rows it carries, which is what
         // bounds the shader's fetch. Checked by the type that owns the grid, on
@@ -3345,30 +3416,29 @@ impl ForwardRenderer {
         // `mesh::MAX_PAGE_LAYER`, so no page can grow to hold it — and the
         // fragment stage never reads a page for it. Exempting it here is what
         // lets a material name no texture without the page having to carry a
-        // white layer for it to point at.
-        let layers = scene.page.layers().len();
-        let normal_layers = scene.page.normal_layers().len();
+        // layer for it to point at — or, since row (d), having to exist at all.
+        //
+        // **Per kind**, because the kinds are separate images with separate
+        // layer lists and separate extents: a row pointed at a base-colour layer
+        // number would pass a check that only counted one of them and then
+        // sample past the end of the other image.
         for (row, material) in scene.materials.iter().enumerate() {
-            if material.base_color_texture != mesh::GpuMaterial::NO_PAGE
-                && material.base_color_texture as usize >= layers
-            {
-                return refuse(format!(
-                    "material row {row} samples page layer {}, and the page has {layers}",
-                    material.base_color_texture
-                ));
-            }
-            // The normal page on the same terms, and it is worth its own check
-            // rather than sharing the one above: the two pages have separate
-            // layer lists, so a row pointed at a base-colour layer number would
-            // pass that check and sample past the end of this image.
-            if material.normal_texture != mesh::GpuMaterial::NO_PAGE
-                && material.normal_texture as usize >= normal_layers
-            {
-                return refuse(format!(
-                    "material row {row} samples normal page layer {}, and the normal page \
-                     has {normal_layers}",
-                    material.normal_texture
-                ));
+            for kind in PageKind::ALL {
+                let names = match kind {
+                    PageKind::BaseColor => material.base_color_texture,
+                    PageKind::Normal => material.normal_texture,
+                };
+                if names == mesh::GpuMaterial::NO_PAGE {
+                    continue;
+                }
+                let have = scene.page.layers(kind).len();
+                if names as usize >= have {
+                    return refuse(format!(
+                        "material row {row} samples {} page layer {names}, and that page \
+                         has {have}",
+                        kind.label()
+                    ));
+                }
             }
         }
 
@@ -3556,97 +3626,77 @@ impl ForwardRenderer {
         // §3.2's texture side, before the table that indexes it: a material row
         // is written with a layer number, so the layer has to exist to be named.
         //
-        // **`Rgba8UnormSrgb`, and that is the colour-space decision.** A
+        // **One loop over [`PageKind::ALL`]**, because the kinds differ only in
+        // three answers the kind itself owns — its format, its mip filter and
+        // its device label — and everything else about creating a page is the
+        // same code. Two hand-written copies were what let the normal page be
+        // created through the colour page's filter for as long as nobody
+        // compared the two, and rung 3 adds two more kinds to get wrong.
+        //
+        // **`Rgba8UnormSrgb` on the base-colour page, `Rgba8Unorm` on the
+        // normal page, and that is the colour-space decision.** A base-colour
         // description's texels are sRGB-encoded, which is what glTF defines a
         // base-colour texture to be, so the format is what makes the sampler
         // decode them — and `mesh.slang` then multiplies a linear texel by a
         // linear `base_color` and lights in linear, exactly as it did before
-        // there was a texture. Taking the decode off the format would mean
-        // multiplying an encoded value by a linear one, which is
-        // `crate::sprite_pass`'s "darkens every half-transparent edge" defect
-        // in a different place.
+        // there was a texture. A normal texel is a *number* and nothing decodes
+        // it. See `PageKind::format`, and `docs/plan/44-lighting.md`'s rung 2.
         //
-        // Layer 0's whiteness and every layer's length were settled by
+        // Every layer's length against its kind's extent was settled by
         // `check_scene` above, before this device object existed.
         //
         // **Every layer goes up with its mip chain**, built here on the host by
         // [`crate::mip`] — `docs/plan/43-render-standards.md`'s filtering rung.
         // The chain is what a trilinear sampler needs to stop shimmering on a
         // minified surface, and it is built at upload rather than by a compute
-        // pass because the page's sRGB format is what decodes it and a host
-        // chain is the same bytes on every backend.
-        let extent = scene.page.extent();
-        let chains: Vec<Vec<Vec<u8>>> = scene
-            .page
-            .layers()
-            .iter()
-            .map(|texels| crate::mip::chain(texels, extent))
-            .collect();
-        let page_levels: Vec<Vec<&[u8]>> = scene
-            .page
-            .layers()
-            .iter()
-            .zip(&chains)
-            .map(|(level0, below)| {
-                std::iter::once(level0.as_ref())
-                    .chain(below.iter().map(Vec::as_slice))
-                    .collect()
-            })
-            .collect();
-        let page_layers: Vec<&[&[u8]]> = page_levels.iter().map(Vec::as_slice).collect();
-        let base_color_page = upload_texture_mip_layers(
-            device,
-            queue,
-            "material base colour",
-            BASE_COLOR_PAGE_FORMAT,
-            extent,
-            extent,
-            &page_layers,
-        )?;
-        rollback.textures.push(base_color_page);
-
-        // §2's normal page, on exactly the terms above and with one difference
-        // that is the whole of the colour-space decision: it is created
-        // `Rgba8Unorm` where the page above is `Rgba8UnormSrgb`, so nothing
-        // decodes its texels through a transfer curve. See
-        // [`NORMAL_PAGE_FORMAT`], and `docs/plan/44-lighting.md`'s rung 2.
+        // pass because the page's format is what decodes it and a host chain is
+        // the same bytes on every backend.
         //
-        // **Its mips are a chain of its own**, and not the base-colour page's:
-        // `crate::mip::normal_chain` averages the decoded vectors plainly and
-        // renormalises, where `chain` decodes an sRGB curve and weights by
-        // alpha. A normal map mipped through the colour filter leans further off
-        // vertical at every level than the map it was built from, and nothing in
-        // a frame reports it. What the renormalise still does *not* recover is
-        // the length the average lost, which is `docs/plan/44-lighting.md`'s
-        // rung 4 and `docs/backlog.md`'s.
-        let normal_chains: Vec<Vec<Vec<u8>>> = scene
-            .page
-            .normal_layers()
-            .iter()
-            .map(|texels| crate::mip::normal_chain(texels, extent))
-            .collect();
-        let normal_levels: Vec<Vec<&[u8]>> = scene
-            .page
-            .normal_layers()
-            .iter()
-            .zip(&normal_chains)
-            .map(|(level0, below)| {
-                std::iter::once(level0.as_ref())
-                    .chain(below.iter().map(Vec::as_slice))
-                    .collect()
-            })
-            .collect();
-        let normal_page_layers: Vec<&[&[u8]]> = normal_levels.iter().map(Vec::as_slice).collect();
-        let normal_page = upload_texture_mip_layers(
-            device,
-            queue,
-            "material normals",
-            NORMAL_PAGE_FORMAT,
-            extent,
-            extent,
-            &normal_page_layers,
-        )?;
-        rollback.textures.push(normal_page);
+        // **A kind with no layers takes one texel.** `upload_texture_mip_layers`
+        // refuses a zero-layer image and every bind group has to fill both page
+        // bindings, so a page nothing names is created 1×1 in its own format
+        // holding [`PAGE_PLACEHOLDER_TEXEL`] — which the shader never reads,
+        // and which is magenta so that a frame says so if it ever does.
+        let mut pages: [Option<UploadedTexture>; PageKind::ALL.len()] = [None; PageKind::ALL.len()];
+        let mut page_extents = [(1, 1); PageKind::ALL.len()];
+        for kind in PageKind::ALL {
+            let authored = scene.page.extent(kind);
+            let layers = scene.page.layers(kind);
+            let chains: Vec<Vec<Vec<u8>>> = layers
+                .iter()
+                .map(|texels| kind.chain(texels, authored))
+                .collect();
+            let levels: Vec<Vec<&[u8]>> = layers
+                .iter()
+                .zip(&chains)
+                .map(|(level0, below)| {
+                    std::iter::once(level0.as_ref())
+                        .chain(below.iter().map(Vec::as_slice))
+                        .collect()
+                })
+                .collect();
+            let placeholder: [&[u8]; 1] = [&PAGE_PLACEHOLDER_TEXEL[..]];
+            let (extent, uploading): (u32, Vec<&[&[u8]]>) = if levels.is_empty() {
+                (1, vec![&placeholder[..]])
+            } else {
+                (authored, levels.iter().map(Vec::as_slice).collect())
+            };
+            let page = upload_texture_mip_layers(
+                device,
+                queue,
+                kind.upload_label(),
+                kind.format(),
+                extent,
+                extent,
+                &uploading,
+            )?;
+            rollback.textures.push(page);
+            page_extents[kind.index()] = (extent, extent);
+            pages[kind.index()] = Some(page);
+        }
+        let [Some(base_color_page), Some(normal_page)] = pages else {
+            unreachable!("the loop above fills a slot for every PageKind::ALL entry");
+        };
 
         // The page's sampler at the device's default — see `create_page_sampler`
         // for what it filters, and `set_anisotropy` for how a caller moves it.
@@ -5513,7 +5563,7 @@ impl ForwardRenderer {
             probe_volume: scene.probes.volume,
             base_color_page,
             normal_page,
-            base_color_page_extent: (scene.page.extent(), scene.page.extent()),
+            page_extents,
             base_color_sampler,
             anisotropy,
             // Every slot's groups were just built naming this sampler.
@@ -10483,9 +10533,12 @@ impl ForwardRenderer {
     /// [`ImageUsage::TRANSFER_DST`](crcbl_hal::ImageUsage::TRANSFER_DST),
     /// because the upload that filled it is a copy, so a per-frame copy into it
     /// needs no new usage flag. Its extent is
-    /// [`PageDesc::extent`](crate::scene::PageDesc::extent) squared and it has
-    /// one layer per [`SceneDesc::page`](crate::scene::SceneDesc::page) layer;
-    /// the description is the caller's, so the caller already knows both.
+    /// [`PageDesc::extent`](crate::scene::PageDesc::extent) of
+    /// [`PageKind::BaseColor`] squared and it has one layer per
+    /// [`PageDesc::layers`](crate::scene::PageDesc::layers) entry of that kind;
+    /// the description is the caller's, so the caller already knows both. A
+    /// description naming no base-colour layer gets a 1×1 placeholder instead —
+    /// see this module's `PAGE_PLACEHOLDER_TEXEL`.
     #[must_use]
     pub const fn base_color_page(&self) -> UploadedTexture {
         self.base_color_page
@@ -10531,7 +10584,7 @@ impl ForwardRenderer {
             image: self.base_color_page.image,
             view: self.base_color_page.view,
             format: BASE_COLOR_PAGE_FORMAT,
-            extent: self.base_color_page_extent,
+            extent: self.page_extents[PageKind::BaseColor.index()],
             initial: ResourceState::ShaderRead,
             claim: InitialClaim::Tracked,
             final_state: ResourceState::ShaderRead,
@@ -10542,8 +10595,8 @@ impl ForwardRenderer {
     ///
     /// [`base_color_page`](Self::base_color_page)'s counterpart, on every one of
     /// its terms: one `D2Array` image, one layer per
-    /// [`PageDesc::normal_layers`](crate::scene::PageDesc::normal_layers) entry,
-    /// the same extent, and created with
+    /// [`PageDesc::layers`](crate::scene::PageDesc::layers) entry of
+    /// [`PageKind::Normal`], at **that kind's own extent**, and created with
     /// [`ImageUsage::TRANSFER_DST`](crcbl_hal::ImageUsage::TRANSFER_DST) so a
     /// per-frame copy into a layer needs no new usage flag. What it is *not* is
     /// the same format: it is `Rgba8Unorm`, where the base-colour page is
@@ -10569,7 +10622,7 @@ impl ForwardRenderer {
             image: self.normal_page.image,
             view: self.normal_page.view,
             format: NORMAL_PAGE_FORMAT,
-            extent: self.base_color_page_extent,
+            extent: self.page_extents[PageKind::Normal.index()],
             initial: ResourceState::ShaderRead,
             claim: InitialClaim::Tracked,
             final_state: ResourceState::ShaderRead,
@@ -14301,18 +14354,21 @@ mod tests {
                 |scene| {
                     scene.materials[DEMO_TEXTURED].base_color_texture = 7;
                 },
-                "material row 2 samples page layer 7",
+                "material row 2 samples base-colour page layer 7",
             ),
             // The one page refusal a caller can actually spell: `push_layer`
             // takes bytes it cannot measure against the extent.
             (
                 "a page layer of the wrong length",
                 |scene| {
-                    scene.page = scene::PageDesc::opaque_white(scene::PAGE_EXTENT);
-                    scene.page.push_layer(vec![0x00; 4]);
+                    scene.page = scene::PageDesc::empty();
+                    scene
+                        .page
+                        .set_extent(PageKind::BaseColor, scene::PAGE_EXTENT);
+                    scene.page.push_layer(PageKind::BaseColor, vec![0x00; 4]);
                     scene.materials[DEMO_TEXTURED].base_color_texture = scene::CHECKER_LAYER;
                 },
-                "page layer 1 carries 4 bytes",
+                "base-colour page layer 0 carries 4 bytes",
             ),
             (
                 "a DAG level with no vertices",
@@ -14506,7 +14562,7 @@ mod tests {
                 },
             }],
             materials: vec![mesh::GpuMaterial::UNTINTED],
-            page: scene::PageDesc::opaque_white(1),
+            page: scene::PageDesc::empty(),
             probes: scene::ProbeGrid::default(),
             capacities: scene::Capacities::default(),
         };
@@ -15116,22 +15172,24 @@ mod tests {
             row(textured.material),
             "two rows naming the same layer would make the pair prove nothing"
         );
-        // The layers those numbers name are layers the page has, and they hold
-        // different texels — a page whose two layers were the same image would
-        // pass every assertion above and draw one picture.
+        // The layer that number names is a layer the page has, and it is not
+        // one flat colour — a checker of one repeated texel would pass every
+        // assertion above and draw the picture the untextured row draws.
         let page = scene::demo().page;
-        assert_ne!(
-            page.layers()[0],
-            page.layers()[scene::CHECKER_LAYER as usize]
+        let layers = page.layers(PageKind::BaseColor);
+        assert!(
+            (scene::CHECKER_LAYER as usize) < layers.len(),
+            "layer {} is past the end of a {}-layer page, which is an out-of-range sample \
+             nothing below the seam would report",
+            scene::CHECKER_LAYER,
+            layers.len()
         );
-        for layer in [0, scene::CHECKER_LAYER] {
-            assert!(
-                (layer as usize) < page.layers().len(),
-                "layer {layer} is past the end of a {}-layer page, which is an out-of-range \
-                 sample nothing below the seam would report",
-                page.layers().len()
-            );
-        }
+        let checker = &layers[scene::CHECKER_LAYER as usize];
+        assert!(
+            checker.chunks_exact(4).any(|texel| texel != &checker[..4]),
+            "a flat checker layer would shade the textured row exactly as the untextured \
+             one shades, and the pair would prove nothing"
+        );
 
         renderer.remove_instance(textured_handle);
         assert!(
@@ -15142,9 +15200,91 @@ mod tests {
         renderer.destroy(device.as_ref());
     }
 
+    /// **A [`PageKind`] nothing names costs one texel**, not `extent² × 4` bytes
+    /// and a third again for its chain.
+    ///
+    /// This is what row (d) bought, and it is the half of it no picture can
+    /// show: the frame a scene with no normal map draws is byte-identical either
+    /// way, because `mesh.slang` returns before it fetches. What changes is the
+    /// image the renderer created, and the copies into it are where that is
+    /// visible. `crcbl/tests/mesh_e2e/normal_map.rs`'s
+    /// `no_normal_map_returns_the_surface_normal_exactly_and_the_neutral_texel_does_not`
+    /// is the device-side half saying the frame did not move.
+    ///
+    /// [`scene::demo`] is the scene: every one of its rows carries
+    /// [`NO_PAGE`](mesh::GpuMaterial::NO_PAGE) in the normal column, and it is
+    /// the description every golden in this tree is a variation of.
+    ///
+    /// # Sabotage
+    ///
+    /// The empty-kind arm of the upload loop uploading a full 64² neutral layer
+    /// and its chain instead of the placeholder — the shape this replaced. Red
+    /// on 2026-09-06 with `"a description with no normal map must upload the
+    /// one-texel placeholder, and this copied 7 level(s) at [Extent3d { width:
+    /// 64, height: 64, depth_or_layers: 1 }, … ] — a burned neutral layer costs
+    /// extent² × 4 bytes and a third again for its chain, on every scene in the
+    /// tree"`.
+    #[test]
+    fn a_page_kind_nothing_names_costs_one_texel() {
+        use crcbl_hal::null::Command;
+
+        let scene = scene::demo();
+        assert!(
+            scene
+                .materials
+                .iter()
+                .all(|row| row.normal_texture == mesh::GpuMaterial::NO_PAGE),
+            "a row naming a normal layer would make the description one that *does* name \
+             the page, and this test would be about the other case"
+        );
+        assert!(
+            scene.page.layers(PageKind::Normal).is_empty()
+                && scene.page.extent(PageKind::BaseColor) > 1,
+            "the description must name no normal layer while naming base-colour ones, or \
+             a placeholder-sized copy says nothing about which page it landed in"
+        );
+
+        let (recorder, device, queue) = open();
+        let renderer =
+            ForwardRenderer::with_scene(device.as_ref(), queue, Format::Rgba8UnormSrgb, &scene)
+                .expect("a description naming no normal page is one this can make resident");
+
+        let copies: Vec<crcbl_hal::BufferImageCopy> = recorder
+            .commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::CopyBufferToImage(copy) if copy.image == renderer.normal_page.image => {
+                    Some(copy)
+                }
+                _ => None,
+            })
+            .collect();
+        let extents: Vec<crcbl_hal::Extent3d> =
+            copies.iter().map(|copy| copy.image_extent).collect();
+        assert_eq!(
+            extents,
+            vec![crcbl_hal::Extent3d::d2(1, 1)],
+            "a description with no normal map must upload the one-texel placeholder, and \
+             this copied {} level(s) at {extents:?} — a burned neutral layer costs \
+             extent² × 4 bytes and a third again for its chain, on every scene in the tree",
+            copies.len()
+        );
+
+        // The placeholder is one layer, and the graph declaration says so: a
+        // caller importing this page to write a layer of its own would get
+        // `ImportDeclarationConflict` against an extent that was not 1×1.
+        assert_eq!(
+            renderer.normal_page_import().extent,
+            (1, 1),
+            "the declaration names the placeholder's extent, not the base-colour page's"
+        );
+        renderer.destroy(device.as_ref());
+    }
+
     /// **A page and a material table that are the caller's own, not
-    /// [`scene::demo`]'s**: a different extent, more layers than the demo page
-    /// holds, and rows past the three the demo writes.
+    /// [`scene::demo`]'s**: a different extent per kind, more layers than the
+    /// demo page holds, a normal page the demo does not have at all, and rows
+    /// past the three the demo writes.
     ///
     /// Every other scene in the tree is `scene::demo()` — with a mesh appended,
     /// at most — so until this nothing had put an app-supplied *layer* or an
@@ -15166,35 +15306,63 @@ mod tests {
         /// Not [`scene::PAGE_EXTENT`], so an extent that had been compiled in
         /// rather than read off the page shows up as a copy of the wrong size.
         const APP_EXTENT: u32 = 4;
+
+        /// **Not [`APP_EXTENT`]**, which is the whole of what row (d)'s per-kind
+        /// extent bought: a renderer that still sized the normal page from the
+        /// base-colour page's number would copy this layer at 4² and the copy
+        /// list below would say so.
+        const APP_NORMAL_EXTENT: u32 = 2;
         let layer_bytes = APP_EXTENT as usize * APP_EXTENT as usize * 4;
 
-        // Layers past the white one, each flat and each a value of its own: a
+        // Three base-colour layers, each flat and each a value of its own: a
         // build that uploaded one layer twice, or that stopped short, is a
-        // different sequence of copies.
-        let mut page = scene::PageDesc::opaque_white(APP_EXTENT);
+        // different sequence of copies. Then one normal layer at the other
+        // extent, which the demo scene has no page for at all.
+        let mut page = scene::PageDesc::empty();
+        page.set_extent(PageKind::BaseColor, APP_EXTENT);
+        page.set_extent(PageKind::Normal, APP_NORMAL_EXTENT);
         let app_layers: Vec<u32> = [0x11_u8, 0x22, 0x33]
             .into_iter()
-            .map(|value| page.push_layer(vec![value; layer_bytes]))
+            .map(|value| page.push_layer(PageKind::BaseColor, vec![value; layer_bytes]))
             .collect();
+        let app_normal = page.push_layer(
+            PageKind::Normal,
+            scene::PageDesc::NEUTRAL_NORMAL
+                .repeat(APP_NORMAL_EXTENT as usize * APP_NORMAL_EXTENT as usize),
+        );
 
         let mut scene = scene::demo();
         scene.page = page;
         // One row per appended layer, and each with a factor of its own as well,
         // so a row that landed at another row's id is not a row that happens to
-        // look like it.
+        // look like it. The last of them names the normal layer too, so the
+        // table carries a row through both pages.
         for (nth, &layer) in app_layers.iter().enumerate() {
             let shade = 0.25 * (nth as f32 + 1.0);
+            let last = nth + 1 == app_layers.len();
             scene.materials.push(mesh::GpuMaterial {
                 base_color: [shade, shade, shade, 1.0],
                 base_color_texture: layer,
+                normal_texture: if last {
+                    app_normal
+                } else {
+                    mesh::GpuMaterial::NO_PAGE
+                },
                 ..mesh::GpuMaterial::UNTINTED
             });
         }
         assert!(
             scene.materials.len() > scene::demo().materials.len()
-                && scene.page.layers().len() > scene::demo().page.layers().len(),
+                && scene.page.layers(PageKind::BaseColor).len()
+                    > scene::demo().page.layers(PageKind::BaseColor).len(),
             "the description under test must exceed the demo's in both, or this is a \
              demo test wearing another name"
+        );
+        assert_eq!(
+            scene::demo().page.extent(PageKind::Normal),
+            0,
+            "the demo scene must name no normal page, or the normal copies below are \
+             evidence about the demo's page rather than the caller's"
         );
 
         let (recorder, device, queue) = open();
@@ -15222,7 +15390,8 @@ mod tests {
         let levels = crcbl_hal::Extent3d::d2(APP_EXTENT, APP_EXTENT)
             .full_mip_levels(crcbl_hal::ImageType::D2);
         assert_eq!(levels, 3, "a 4² page has three levels down to one texel");
-        let layer_count = u32::try_from(scene.page.layers().len()).expect("a page of a few layers");
+        let layer_count = u32::try_from(scene.page.layers(PageKind::BaseColor).len())
+            .expect("a page of a few layers");
         assert_eq!(
             copies
                 .iter()
@@ -15244,6 +15413,51 @@ mod tests {
             }),
             "the page is the extent the caller wrote, not the demo's, halved per level: \
              {copies:?}"
+        );
+
+        // The normal page, at **its own** extent. One layer, two levels for a
+        // 2² image, and every copy sized from `APP_NORMAL_EXTENT` — a renderer
+        // that carried one extent for both kinds would put this layer up at 4².
+        let normal_copies: Vec<crcbl_hal::BufferImageCopy> = recorder
+            .commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::CopyBufferToImage(copy) if copy.image == renderer.normal_page.image => {
+                    Some(copy)
+                }
+                _ => None,
+            })
+            .collect();
+        let normal_levels = crcbl_hal::Extent3d::d2(APP_NORMAL_EXTENT, APP_NORMAL_EXTENT)
+            .full_mip_levels(crcbl_hal::ImageType::D2);
+        assert_eq!(
+            normal_copies
+                .iter()
+                .map(|copy| (
+                    copy.image_subresource.base_layer,
+                    copy.image_subresource.mip,
+                    copy.image_extent
+                ))
+                .collect::<Vec<(u32, u32, crcbl_hal::Extent3d)>>(),
+            (0..normal_levels)
+                .map(|level| {
+                    let side = crate::mip::level_extent(APP_NORMAL_EXTENT, level);
+                    (0, level, crcbl_hal::Extent3d::d2(side, side))
+                })
+                .collect::<Vec<(u32, u32, crcbl_hal::Extent3d)>>(),
+            "the normal page is the extent the caller wrote for *that* kind, halved per \
+             level: {normal_copies:?}"
+        );
+        assert_eq!(
+            renderer.normal_page_import().extent,
+            (APP_NORMAL_EXTENT, APP_NORMAL_EXTENT),
+            "the graph declaration names the normal page's own extent, or a caller \
+             importing it to write a layer gets ImportDeclarationConflict"
+        );
+        assert_eq!(
+            renderer.base_color_page_import().extent,
+            (APP_EXTENT, APP_EXTENT),
+            "and the base-colour declaration names its own, which is a different number"
         );
 
         // The table, row by row, out of the buffer `mesh.slang` indexes.
@@ -16128,6 +16342,11 @@ mod tests {
     fn the_two_page_formats_differ() {
         assert_eq!(BASE_COLOR_PAGE_FORMAT, Format::Rgba8UnormSrgb);
         assert_eq!(NORMAL_PAGE_FORMAT, Format::Rgba8Unorm);
+        // Through the dispatch the upload loop actually calls, rather than the
+        // constants alone: one loop creates both images now, and a `format` arm
+        // pointed at the wrong constant is the way that loop gets it wrong.
+        assert_eq!(PageKind::BaseColor.format(), BASE_COLOR_PAGE_FORMAT);
+        assert_eq!(PageKind::Normal.format(), NORMAL_PAGE_FORMAT);
         assert_ne!(
             BASE_COLOR_PAGE_FORMAT, NORMAL_PAGE_FORMAT,
             "a normal page created sRGB decodes every texel through a gamma it never had"

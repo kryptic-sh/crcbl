@@ -3,15 +3,15 @@
 //! ```text
 //!  MeshBuilder ──▶ build_meshlets ──▶ Geometry::Flat ──┐
 //!  GpuMaterial rows ───────────────────────────────────┼─▶ SceneDesc ──▶ with_scene
-//!  PageDesc (white + checker) ─────────────────────────┘
+//!  PageDesc (floor + monitor) ─────────────────────────┘
 //!  place() ──▶ add_instance ×N
 //! ```
 //!
 //! Nothing here names a device, and nothing here is the engine's content: the
 //! meshes are baked from literals by this module's own quad builder, the
 //! material rows are this sample's, and the page is built through
-//! [`PageDesc::opaque_white`](crcbl::render::scene::PageDesc::opaque_white) and
-//! `push_layer` like any other caller's. That is the whole of what
+//! [`PageDesc::empty`](crcbl::render::scene::PageDesc::empty),
+//! `set_extent` and `push_layer` like any other caller's. That is the whole of what
 //! `crcbl::render::scene` bought, and this module is the first application-side
 //! use of it.
 //!
@@ -92,8 +92,8 @@ use std::borrow::Cow;
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
     Camera, Capacities, DirectionalLight, ForwardRenderer, Geometry, InstanceDesc,
-    InstancePoolError, Light, MeshDesc, PageDesc, PointLight, Projection, RenderEffects, SceneDesc,
-    SpotLight,
+    InstancePoolError, Light, MeshDesc, PageDesc, PageKind, PointLight, Projection, RenderEffects,
+    SceneDesc, SpotLight,
 };
 use crcbl::shaders::mesh::{self, GpuMaterial, MeshVertex};
 use crcbl::shaders::vertex::UvRange;
@@ -424,9 +424,9 @@ pub const MONITOR_NEAR: f32 = 0.01;
 
 /// The render-to-texture view's extent, in pixels a side.
 ///
-/// Square because the page is: [`PageDesc`] carries one extent for every layer,
-/// so the layer the monitor is copied into is [`PAGE_EXTENT`] both ways and a
-/// view rendered at any other aspect would arrive stretched. The screen is
+/// Square because the page is: [`PageDesc`] carries one extent per page kind and
+/// it is square, so the layer the monitor is copied into is [`PAGE_EXTENT`] both
+/// ways and a view rendered at any other aspect would arrive stretched. The screen is
 /// square for the same reason, and [`monitor_camera`] therefore frames at 1:1.
 pub const MONITOR_EXTENT: (u32, u32) = (PAGE_EXTENT, PAGE_EXTENT);
 
@@ -520,7 +520,7 @@ pub fn monitor_camera() -> Camera {
 /// The base-colour page's extent, in texels a side.
 ///
 /// **The monitor's resolution, and therefore every layer's.** [`PageDesc`]
-/// carries one extent for the whole page, so the layer the render-to-texture
+/// carries one extent for a whole page kind, so the layer the render-to-texture
 /// camera is copied into decides how large the floor's check is stored as well —
 /// which costs a little memory and changes no picture, because [`FLOOR_CELLS`]
 /// is what the floor's pattern is actually made of and it is a count of cells
@@ -595,9 +595,8 @@ fn no_signal_texels() -> Vec<u8> {
     texels
 }
 
-/// The page layer [`FLOOR`] samples — the one [`room`] appends past the white
-/// one.
-const FLOOR_LAYER: u32 = 1;
+/// The page layer [`FLOOR`] samples — the first one [`room`] pushes.
+const FLOOR_LAYER: u32 = 0;
 
 /// The page layer [`MONITOR`] samples, and the one the monitor camera's frame is
 /// copied into every frame.
@@ -605,7 +604,17 @@ const FLOOR_LAYER: u32 = 1;
 /// Public because the copy is `crate::gpu`'s and the layer is this module's: a
 /// second constant naming the same index is the shape that lets a page grow a
 /// layer and a copy go on writing the one below it.
-pub const MONITOR_LAYER: u32 = 2;
+///
+/// # Nothing but a golden catches a copy landing in the wrong layer
+///
+/// The page's layers hold plausible pictures either way, and no CPU assertion
+/// sees which layer a device-side copy reached. **Sabotage:** `crate::gpu`'s
+/// two uses of this constant changed to `MONITOR_LAYER - 1`, so the monitor's
+/// render-to-texture frame lands in the floor's layer. Red on radv on
+/// 2026-09-06 at `the_screen_in_the_room_shows_the_room_and_matches_its_golden`
+/// with `"the part of the screen showing the ceiling reads 0.7 — the monitor is
+/// black, so the render-to-texture view never reached the page"`.
+pub const MONITOR_LAYER: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // The material rows
@@ -1005,13 +1014,14 @@ fn shell_slab(label: &'static str, min: Vec3, max: Vec3) -> MeshDesc<'static> {
 /// checks the description against them with no GPU in the room.
 #[must_use]
 pub fn room() -> SceneDesc<'static> {
-    let mut page = PageDesc::opaque_white(PAGE_EXTENT);
-    let floor_layer = page.push_layer(floor_texels());
+    let mut page = PageDesc::empty();
+    page.set_extent(PageKind::BaseColor, PAGE_EXTENT);
+    let floor_layer = page.push_layer(PageKind::BaseColor, floor_texels());
     debug_assert_eq!(
         floor_layer, FLOOR_LAYER,
-        "the floor's check is the layer past the white one"
+        "the floor's check is the page's first layer"
     );
-    let monitor_layer = page.push_layer(no_signal_texels());
+    let monitor_layer = page.push_layer(PageKind::BaseColor, no_signal_texels());
     debug_assert_eq!(
         monitor_layer, MONITOR_LAYER,
         "the monitor's frame is the layer past the floor's check"
@@ -2660,19 +2670,18 @@ mod tests {
         );
     }
 
-    /// The floor's layer is a check rather than a flat colour, and layer 0 is
-    /// still the white one `PageDesc::opaque_white` burns.
+    /// The floor's layer is a check rather than a flat colour, and the page
+    /// holds the room's own two layers and nothing else.
     #[test]
-    fn the_page_carries_a_white_layer_and_a_floor_that_is_not_flat() {
+    fn the_page_carries_a_floor_that_is_not_flat_and_an_unwritten_monitor() {
         let page = room().page;
-        assert_eq!(page.extent(), PAGE_EXTENT);
-        assert!(
-            page.layers()[0]
-                .iter()
-                .all(|&texel| texel == PageDesc::WHITE),
-            "layer 0 must decode to 1.0 in every channel"
+        assert_eq!(page.extent(PageKind::BaseColor), PAGE_EXTENT);
+        assert_eq!(
+            page.layers(PageKind::BaseColor).len(),
+            2,
+            "the floor's check and the monitor's screen, and nothing burned ahead of them"
         );
-        let floor = &page.layers()[FLOOR_LAYER as usize];
+        let floor = &page.layers(PageKind::BaseColor)[FLOOR_LAYER as usize];
         assert_eq!(floor.len(), PAGE_LAYER_BYTES);
         assert!(
             floor.chunks_exact(4).any(|texel| texel != &floor[..4]),
@@ -2703,7 +2712,7 @@ mod tests {
         // **The monitor's layer is black when nothing has written it**, which is
         // what makes "the screen is showing the room" a claim a fill cannot
         // satisfy — see `no_signal_texels`.
-        let monitor = &page.layers()[MONITOR_LAYER as usize];
+        let monitor = &page.layers(PageKind::BaseColor)[MONITOR_LAYER as usize];
         assert_eq!(monitor.len(), PAGE_LAYER_BYTES);
         assert!(
             monitor

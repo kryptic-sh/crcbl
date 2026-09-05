@@ -32,7 +32,7 @@ use crcbl::scene::cluster_dag::{ClusterDagError, build_cluster_dag};
 use crcbl::shaders::cluster_dag::ClusterDag;
 
 use crate::face::{Face, normals_of};
-use crate::scene::{HEADROOM, PAGE_EXTENT, ROCK, vertex_bytes};
+use crate::scene::{HEADROOM, ROCK, vertex_bytes};
 
 /// The face's cluster DAG: level 0 is the face itself, and each level above it
 /// is the one below grouped, simplified and resplit.
@@ -82,7 +82,7 @@ pub fn dag_scene(face: &Face) -> Result<SceneDesc<'static>, ClusterDagError> {
             },
         }],
         materials: vec![ROCK],
-        page: PageDesc::opaque_white(PAGE_EXTENT),
+        page: PageDesc::empty(),
         probes: ProbeGrid::default(),
     })
 }

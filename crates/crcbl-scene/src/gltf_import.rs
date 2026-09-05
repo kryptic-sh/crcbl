@@ -3192,7 +3192,7 @@ pub(crate) mod tests {
         assert_eq!(
             scene.materials()[0].base_color_texture,
             GpuMaterial::UNTINTED.base_color_texture,
-            "the row's texture column stays at the untextured layer: a page layer is not \
+            "the row's texture column stays at UNTINTED's own: a page layer is not \
              something this module can know"
         );
     }

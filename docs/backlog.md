@@ -16258,6 +16258,48 @@ every constructor use it. Left behind, each its own slice:
   spanning a hundredth of a unit) is dominated by `f32` spacing at that
   magnitude and was not swept. Not believed to matter for real UVs.
 
+## The generalised page allocator: what row (d) left (2026-09-06)
+
+`docs/plan/43-render-standards.md` §2's row (d) landed in two commits:
+`GpuMaterial::NO_PAGE` went out of band at `0xFFFF`, and
+`crcbl_render::scene::PageDesc` became a table over `PageKind` with an extent
+and a layer list per kind. What it left:
+
+- **The placeholder texel is never read, so nothing asserts its colour.** A
+  `PageKind` with no layers gets a 1×1 image of `crcbl_render::forward`'s
+  `PAGE_PLACEHOLDER_TEXEL` — magenta — and every path that could sample it
+  early-outs first: `mesh.slang`'s `base_color_texel` discards the fetch with a
+  select and `shading_normal_of` returns before it fetches. The image itself is
+  covered by goldens after all, contrary to what the design expected:
+  `apps/alcove`, `apps/sundial` and `apps/quarry` name no page of either kind,
+  so their base-colour binding is the placeholder, and every scene in the tree
+  without a normal map binds it for that kind. What no test does is _drive_ a
+  read of it deliberately — the value's whole job is to make a shader regression
+  loud in a frame, and the frame that would show it is one nobody has drawn.
+  Deliberate: a fixture that sampled it would need a shader built wrong on
+  purpose, which is a sabotage rather than a test.
+- **`pack_page` still returns one `Vec<Option<u32>>` per kind by hand.**
+  `crcbl_scene::gltf_render::pack_page` returns
+  `(PageDesc, base_layers, normal_layers)` and `material_rows` takes the two
+  separately. Rung 3 adds two more kinds, at which point those become four
+  positional arguments and want a `[Vec<Option<u32>>; PageKind::ALL.len()]`
+  table on `PageKind::index`'s terms — the same shape `PageDesc` itself took.
+  Left alone here because two is not four and this slice's obligation was not to
+  build the abstraction ahead of its second caller.
+- **No caller sizes a page after pushing into it, and `set_extent` panics if one
+  tries.** The alternative — an extent inferred from the first layer's length —
+  was considered and declined: a layer's byte count does not determine a square
+  extent (a 4-byte layer is 1×1, a 64-byte one is 4×4 only if it is square), and
+  a page whose extent came from its first layer would refuse the second with a
+  message about a number nobody wrote.
+- **Coverage gap: no e2e draws a document whose two pages differ in extent.**
+  `crcbl_scene::gltf_render`'s `a_document_sizes_each_page_from_its_own_images`
+  is a host test over the description, and `crates/crcbl/tests/gltf_e2e.rs`
+  builds no glTF with a `normalTexture` at all (the entry below records that
+  gap, which row (d) did not close). So the two-extent path reaches a device
+  only through `crcbl_render::forward`'s
+  `an_app_page_and_table_reach_the_device_whole`, on the null recorder.
+
 ## Normal maps: what the tangent and page rungs left (2026-08-30)
 
 `docs/plan/43-render-standards.md` §2's rung 1 and the normal half of its rung 2
@@ -16284,24 +16326,6 @@ they left:
   through `ALPHA_MODE_MASK`, `DOUBLE_SIDED` and `depthMaskedFragmentMain`, which
   is §2 rung 4. Wiring the two page columns is rung 3, and the space is already
   there, so neither moves a stride again.
-- **Layer 0 of the normal page is a constant that costs a full page layer.**
-  `PageDesc::opaque_white` writes the neutral texel across the whole extent, and
-  `crcbl_scene::gltf_render` sizes that extent from the largest image in the
-  document (up to `MAX_PAGE_EXTENT`). On a 2048² document that is 16 MiB of one
-  repeated texel, 21 MiB with its mip chain, for a value the shader could have
-  as a literal — and it is paid by every scene, including the ones with no
-  normal map at all. The shader already tests the layer index and returns early
-  (`shading_normal_of` in `mesh.slang`), so nothing _samples_ it; what allocates
-  it is the page's own rule that layer 0 exists. The fix is a page whose layer
-  count starts at zero with the "no page" index kept out of band, which is the
-  same generalisation the row below wants.
-- **The two pages share one extent.** `crcbl_render::scene::PageDesc` has a
-  single `extent` for the base-colour layers and the normal layers alike, so a
-  normal map authored at a different resolution than the albedo beside it is
-  resampled to the albedo's. Fine while both come out of the same asset
-  pipeline; a limit the moment a project ships 2K albedo and 512 normals to save
-  memory. The fix is a per-page extent, which is the same generalisation §2's
-  page-allocator row already wants for the decal and shadow atlases.
 - **The normal mip chain throws away the length it averaged.**
   `crcbl_render::mip::normal_resample` averages the decoded vectors and
   renormalises, so a mip level over a busy region is a unit vector with no
@@ -21151,24 +21175,26 @@ another sample in `fragmentMain` and another _page_, because an `ArrayPages`
 page is one image and one format. A generic page manager still has not arrived.
 
 **A page is one image, which is the limit `Bindless` exists to lift.** Every
-layer shares an extent, a format and a mip count, so two textures of different
-sizes cannot share a page. The extent is the caller's now — `PageDesc::extent`,
-whatever `PageDesc::opaque_white` was given, asserted against the recorded
-copies by `forward`'s `an_app_page_and_table_reach_the_device_whole` — but it is
-still _one_ extent for every layer. Real content does not look like that. See
-"The base-colour page is still `ArrayPages`" below for what stands between here
-and the bindless form.
+layer of a kind shares that kind's extent, format and mip count, so two textures
+of different sizes cannot share a page. Row (d) gave each `PageKind` its own
+extent — `PageDesc::set_extent(kind, extent)`, asserted against the recorded
+copies by `forward`'s `an_app_page_and_table_reach_the_device_whole`, which
+uploads a base-colour page and a normal page at two different sizes — but a
+kind's layers are still all one extent. Real content does not look like that.
+See "The base-colour page is still `ArrayPages`" below for what stands between
+here and the bindless form.
 
 **glTF base-colour and normal import landed; metallic-roughness and emissive are
 still unimported.** `crcbl-scene`'s `gltf_render` decodes the `baseColorTexture`
-of every material that names one, resamples them onto one square extent
-(`MAX_PAGE_EXTENT`) with an alpha-weighted box filter in linear light, and hands
-back a `PageDesc` plus the per-material layer indices. `GpuMaterial::NO_PAGE` is
-what a material with no texture — or one that would not decode — keeps, so the
-surface shades by its factors rather than black, and every skip is logged. What
-is not imported is everything the single texture column cannot hold:
-metallic-roughness and emissive maps, each of which needs a page of its own for
-the reason the first bullet gives.
+of every material that names one, resamples them onto the base-colour page's own
+square extent (its largest image, clamped to `MAX_PAGE_EXTENT`) with an
+alpha-weighted box filter in linear light, and hands back a `PageDesc` sized per
+kind plus the per-material layer indices. `GpuMaterial::NO_PAGE` is what a
+material with no texture — or one that would not decode — keeps, so the surface
+shades by its factors rather than black, and every skip is logged. What is not
+imported is everything the single texture column cannot hold: metallic-roughness
+and emissive maps, each of which needs a page of its own for the reason the
+first bullet gives.
 
 **A material is a start-up write.** `MaterialTable` is one host-visible buffer
 with no ring — the mesh table's shape, not `InstancePool`'s — because nothing
@@ -24551,17 +24577,16 @@ Ordered by how quietly each would fail. Row 0 of the material table is what
 `GpuInstance::default` names, so a reordered description swaps the pyramids'
 materials. Mesh table ids come from upload order and the cull pass reads a
 bounding box out of the entry the instance names, which for a DAG is level 0's.
-Page layer 0 must stay opaque white or every material that _names_ it is scaled
-by a texel that is not 1.0 — a global albedo change that reads as a lighting
-difference. (Row (d)'s first step took the untextured material off that layer:
-`GpuMaterial::NO_PAGE` is out of band and the shader multiplies by a literal
-`1.0`, so the burned layer is now a numbering convention rather than a
-correctness one.) `draw_gen`'s scatter takes the first bucket whose mesh id
-matches, so two buckets naming one mesh means the second never draws. Instance
-index is the LOD hysteresis key, inert with one DAG instance and not inert with
-two. And the rollback path gains new early-failure points that must sit on the
-same side of the self-cleaning handover, or a rejected description leaks two
-device-local buffers.
+Page layer numbers are a producer's own and nothing checks that a row names the
+layer its producer meant — a row pointed one layer along shades a surface with
+somebody else's texture. (Row (d) closed the older version of this: layer 0 used
+to have to be opaque white, and `GpuMaterial::NO_PAGE` is out of band now, so
+layer 0 is an ordinary layer and no page burns one.) `draw_gen`'s scatter takes
+the first bucket whose mesh id matches, so two buckets naming one mesh means the
+second never draws. Instance index is the LOD hysteresis key, inert with one DAG
+instance and not inert with two. And the rollback path gains new early-failure
+points that must sit on the same side of the self-cleaning handover, or a
+rejected description leaks two device-local buffers.
 
 **Four of these are invisible to `cargo test`**: `crcbl-render`'s unit tests run
 on the null backend and cannot tell a right frame from a wrong one. Every
@@ -24573,15 +24598,15 @@ row order is `SceneDesc::materials` order and `material_rows` inserts in it,
 asserted by `scene`'s
 `the_demo_scene_shades_by_omission_through_an_untinted_row`; ids are description
 order, asserted by `forward`'s
-`the_description_resolves_to_the_ids_it_was_written_in`; layer 0 is
-`PageDesc::opaque_white`'s to write and `PageDesc::check`'s to verify; buckets
-are built by walking the mesh list, so a duplicate is not refused but
-unspellable; and every description check runs from the top of
-`ForwardRenderer::check_scene`, before the first device object exists, which
-`a_refused_description_creates_nothing_at_all` reads off the recorder's live
-object count — with one arm deliberately refused _after_ the pool exists, so
-that count is evidence about `build_geometry`'s rollback and not only about
-`check_scene`.
+`the_description_resolves_to_the_ids_it_was_written_in`; a layer's length
+against its kind's extent is `PageDesc::check`'s to verify and a row naming a
+layer that kind has not got is `check_scene`'s; buckets are built by walking the
+mesh list, so a duplicate is not refused but unspellable; and every description
+check runs from the top of `ForwardRenderer::check_scene`, before the first
+device object exists, which `a_refused_description_creates_nothing_at_all` reads
+off the recorder's live object count — with one arm deliberately refused _after_
+the pool exists, so that count is evidence about `build_geometry`'s rollback and
+not only about `check_scene`.
 
 ### The materials-and-layers slice was almost entirely already done
 
@@ -24592,16 +24617,18 @@ delivered all three:
 - The constants a caller reads the pattern off — `PYRAMID_TINT`,
   `PYRAMID_ROUGHNESS`, `CHECKER_TEXELS`, `CHECKER_LAYER`, `PAGE_EXTENT` — are
   public on `crcbl_render::scene`, and `scene::demo` builds its page through
-  `PageDesc::opaque_white` and `push_layer` like any other caller.
-  `UNTEXTURED_TEXELS` does not exist any more: layer 0's texels are
-  `opaque_white`'s to write, which is what makes the mistake unspellable.
+  `PageDesc::empty`, `set_extent` and `push_layer` like any other caller.
+  `UNTEXTURED_TEXELS` does not exist any more, and neither does the burned white
+  layer it described: a material that names no texture carries
+  `GpuMaterial::NO_PAGE`.
 - A row naming a layer the page has not got is already refused by
   `ForwardRenderer::check_scene`, naming the row, the layer and the page's layer
   count, before any device object exists — and
   `a_refused_description_creates_nothing_at_all` already has an arm for it. Not
   duplicated.
-- `PageDesc` already lets a caller append layers and gives it no way to spell a
-  bad layer 0, its fields being private and `opaque_white` its only constructor.
+- `PageDesc` already lets a caller append layers and gives it no way to write
+  one at no extent, its fields being private and `set_extent` the only way to
+  size a kind.
 
 What was actually missing was **evidence**, not mechanism: every scene built
 anywhere in the tree was `scene::demo()` — three rows, two layers, one extent —
@@ -24615,12 +24642,13 @@ buffer's bytes per row. Shown red three ways — the page upload truncated, the
 row insert truncated, and the row insert reversed.
 
 **Considered and declined: a `PageDesc::layer_bytes` accessor.** `extent² × 4`
-is computed in `opaque_white`, in `check` and by any app producing texels for
-`push_layer`, so there is a real second caller for it. Left out anyway: it is a
-convenience rather than a sufficiency gap — an app has `extent()` and the RGBA8
-layout is documented on `push_layer` — and this slice's whole obligation was not
-to manufacture work. Revisit if a second page format arrives, at which point the
-arithmetic stops being a constant an app can safely transcribe.
+is computed in `check` and by any app producing texels for `push_layer`, so
+there is a real second caller for it. Left out anyway: it is a convenience
+rather than a sufficiency gap — an app has `extent(kind)` and the RGBA8 layout
+is documented on `push_layer` — and this slice's whole obligation was not to
+manufacture work. Re-checked when row (d) landed on 2026-09-06: still declined,
+and the per-kind extent makes it `layer_bytes(kind)` rather than a constant, so
+the accessor would now have to carry the kind too.
 
 The instance-index risk is now **documented rather than removed**, on
 `ForwardRenderer::add_instance`: the index is the LOD hysteresis key and the
