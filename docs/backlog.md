@@ -409,17 +409,19 @@ slice did not do:
   — are held by the whole-frame scan. Blessing the rim's is a fifth entry in
   `the_court_matches_its_goldens` and was left because the readings, not a
   picture, are what say it is right.
-- **No run opens on either view flag; only the parse and the write are held.**
-  `the_two_view_flags_name_one_picture_and_the_last_one_wins` and
-  `apply_puts_the_flags_picture_up_and_leaves_the_cell_alone_without_one` in
-  `apps/alcove/src/args.rs` cover `--bent-view` and `--ao-view` from the
-  argument to the `crcbl::debug_view` cell, and stop there. That the frame a
-  flagged run then presents is the bent picture is not asserted by anything:
-  closing it wants `alcove --bent-view --screenshot` and a reading off the PNG,
-  and no sample in this repository has such a gate for any of its flags. Left
-  because it is a harness rather than a test, not because it is hard — the
-  screenshot path is `crcbl::args::Common::with_screenshot` and already works.
-
+- **Only the two view flags are gated on a frame; alcove's other flags are
+  not.** `apps/alcove/tests/run-alcove-views.sh` runs the binary once per
+  debug-view flag and reads the open-floor block and the frame's channel spread
+  out of the three PNGs, so `--bent-view` and `--ao-view` are now held end to
+  end — argument, `crcbl::debug_view` cell, presented frame — and CI runs it on
+  lavapipe beside the alcove golden step. `--technique`, `--split`, `--no-ao`,
+  `--camera` and the two `--force-*` flags still stop at the parser:
+  `apps/alcove/tests/golden.rs` draws each of those states from a fixture that
+  sets the switch itself and never goes through `Options::apply`. Extending the
+  harness is cheap — a fourth arm and one more reading — but each needs its own
+  measured discriminator, and `--split`'s would be a column comparison rather
+  than a block. Not attempted, and no evidence either way that those flags reach
+  the renderer from the command line.
 - **`Knobs` grew a `DebugView` and the debug overlay's `view` row changed with
   it**, from `AO ONLY` / `SHADED` to the view's own name. That row is not
   asserted on anywhere, so the change is behind nothing; it was made because two

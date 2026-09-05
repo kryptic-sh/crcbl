@@ -1738,6 +1738,25 @@ jobs:
           CRCBL_VK_SYNC_VALIDATION: '1'
           CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/alcove/tests/run-alcove-golden.sh
+      # The same fixture from outside, through the command line a person types.
+      # The step above reaches `ForwardRenderer` from a fixture and sets the
+      # debug view by hand, so it never touches the argument parser or the
+      # console cell between them; `apps/alcove/src/args.rs`'s tests cover the
+      # flags from the argument to `crcbl::debug_view` and stop there. Nothing
+      # asked that a flagged run of the *binary* presents the picture the flag
+      # names, which is exactly what a view wired to a cell the renderer no
+      # longer reads would still pass. This runs alcove once per flag and reads
+      # the three frames back: the bent picture carries the encoded normal on
+      # open floor, the occlusion picture is grey at every pixel, and the
+      # unflagged one is neither.
+      - name: Draw alcove's debug views on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
+        run: apps/alcove/tests/run-alcove-views.sh
       # The shadow acceptance fixture, and the only step that runs the shadow
       # ladder against anything that can tell PCSS apart from a fixed-width
       # filter. A blocker search that never ran draws the same picture the disc
