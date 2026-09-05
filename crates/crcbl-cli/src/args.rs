@@ -177,6 +177,8 @@ OPTIONS:
                            ao                  the inside of a box, ambient only
                            ssr                 a pyramid reflected in a smooth
                                                floor
+                           atmosphere_mirror   a mirror floor under a low sun,
+                                               reflecting the sky-view LUT
                            bloom               one very bright patch and its
                                                halo
                            aa                  a slab whose silhouette runs
@@ -1253,6 +1255,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::SpecularAa,
         Scene::Ao,
         Scene::Ssr,
+        Scene::AtmosphereMirror,
         Scene::Bloom,
         Scene::Aa,
         Scene::Probes,
@@ -1282,6 +1285,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::SpecularAa => "specular_aa",
         Scene::Ao => "ao",
         Scene::Ssr => "ssr",
+        Scene::AtmosphereMirror => "atmosphere_mirror",
         Scene::Bloom => "bloom",
         Scene::Aa => "aa",
         Scene::Probes => "probes",

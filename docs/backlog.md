@@ -279,12 +279,13 @@ landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
 - **No demo has been switched to it, and that re-bless is owed.** Every shipped
   demo still draws no sky at all — nothing in `apps/` calls `set_sky` or
   `set_atmosphere` — so the whole rung is exercised by
-  `crcbl::screenshot::atmosphere_forward` and `render_e2e`'s
-  `an_atmosphere_frame_is_the_host_lut` and by nothing else. Giving `lantern`,
-  `sundial` or `alcove` an atmosphere moves that demo's golden images, which is
-  its own slice: pick the demo, set the sun to the one its `DirectionalLight`
-  already uses, re-bless on both local adapters, and check the browser gate,
-  which has its own copies.
+  `crcbl::screenshot::atmosphere_forward` and `Scene::AtmosphereMirror`, through
+  `render_e2e`'s `an_atmosphere_frame_is_the_host_lut` and
+  `an_atmosphere_mirror_reflects_the_luts_limb`, and by nothing else. Giving
+  `lantern`, `sundial` or `alcove` an atmosphere moves that demo's golden
+  images, which is its own slice: pick the demo, set the sun to the one its
+  `DirectionalLight` already uses, re-bless on both local adapters, and check
+  the browser gate, which has its own copies.
 
 - **The sun disc is not drawn.** The sky-view LUT holds the scattered sky, as
   Hillaire's does; the disc is whatever `DirectionalLight` the scene set. A
@@ -309,19 +310,71 @@ landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
   the multiple-scattering cook, where it belongs. Revisit only if a scene wants
   a sky with no floor under it.
 
-- **SSR reflects the atmosphere as three bands, not as the LUT.** `ssr.slang`'s
-  `sky_prefiltered` convolves a gradient, so an atmosphere frame hands it
-  `SkyView::gradient_fit` — the LUT's poles and its azimuthal mean at the
-  horizon. A mirror agrees with the background at those three directions and a
-  rough lobe blends between them, but the bright limb beside the sun does not
-  reflect. **The upgrade** is binding the sky-view LUT into the reflection pass
-  as a second storage buffer and reading it along the mirror direction at
-  roughness zero, with the three bands still carrying the rougher lobes; it
-  costs one more binding in `crcbl_render::ssr`'s layout (appended past
-  `PROBE_VISIBILITY_BINDING`) and the `msl`/`dxil`/`wgsl` regeneration that
-  comes with it. Not done here because the slice was already the sky, and
-  because the gradient substitution is right at every roughness a rough surface
-  actually has.
+- **A rough lobe still reflects the atmosphere as three bands.** The mirror half
+  shipped: `ssr.slang`'s `sky_environment` reads the sky-view LUT along the
+  reflected direction and weights it by `sharpness_of`'s ramp, so a surface at
+  `ROUGHNESS_CUTOFF` and above takes `sky_prefiltered`'s three bands exactly as
+  it did. **What that leaves** is the azimuth of a wide lobe: a rough conductor
+  beside the sun gathers the horizon's azimuthal mean rather than a cone of the
+  aureole. The upgrade is a convolution of the LUT itself — a second cooked
+  table, or a mip chain over `SkyView::rows` — and it is not a committed cook
+  like `sky_prefilter.bin`, because the field it convolves changes whenever the
+  sun moves. Declined here on those terms and because the error shrinks as the
+  lobe widens, which is the direction that matters: the widest lobes are the
+  ones the azimuthal mean is closest to.
+
+- **`sky_environment`'s early return is byte-identity by reading, not by any
+  golden.** The claim that a frame with no atmosphere is unchanged rests on
+  `ssr.slang` returning `sky_prefiltered`'s bands before it touches the LUT.
+  Removing that return and regenerating the artifacts left
+  `the_ssr_scene_reflects_its_pyramid_and_matches_its_golden` at zero pixels
+  differing on radv (2026-09-06): every golden without an atmosphere also has no
+  sky, so its bands are zero and the zeroed LUT blends to the same zero. Nothing
+  in the tree combines a gradient sky (`set_sky`) with a reflective surface,
+  which is the frame that would move. A fixture that does is what would guard
+  the return; until one exists the return is a cost saving whose correctness is
+  read, not measured.
+
+- **The share between the LUT and the bands is argued, not measured.**
+  `sky_environment` takes `sharpness_of`'s ramp because that ramp is already
+  this pass's statement that one screen-space ray stands for the lobe, and the
+  same statement decides whether one LUT tap does. Nothing in the tree compares
+  a partially rough reflection of an atmosphere against a reference, so the
+  ramp's _shape_ between a mirror and the cutoff is unverified — only its two
+  ends are, by `an_atmosphere_mirror_reflects_the_luts_limb` at
+  `ATMOSPHERE_MIRROR_ROUGHNESS` and by every unmoved golden at the cutoff. A
+  reference would be a brute-force GGX gather over the LUT on the host, which is
+  a fixture rather than a shipped path.
+
+- **The new binding is unmeasured on Metal and D3D12.** `crcbl_render::ssr`'s
+  `SKY_VIEW_BINDING` lands at `msl/ssr.metal`'s `buffer(2)` and is declared
+  `ShaderStages::FRAGMENT` alone — matching the probe table at binding 4, and
+  unlike `crcbl_render::sky_pass`'s copy of the same buffer, which names
+  `VERTEX` beside `FRAGMENT` because Slang's Metal backend materialises every
+  global into every entry point. `ssr.metal`'s `vertexMain` has taken `probes`
+  at `buffer(1)` unbound since that binding landed, which is the evidence the
+  narrower visibility is safe here; it is evidence by analogy and not a run.
+  There is no Apple or Windows hardware here, so CI's software adapters are the
+  only verdict, and `ATMOSPHERE_MIRROR_BAND_LEVELS` carries headroom for them.
+
+- **`Scene::AtmosphereMirror` is NOT on the browser gate's excuse list, and that
+  is a measurement.** `./web/run-render-harness-e2e.sh --expect-fail ssr,ui` was
+  run locally on 2026-09-06 — headless Chromium on SwiftShader, which is CI's
+  linux leg — and reported `atmosphere_mirror  pass` with 17/19 matching. It
+  behaves unlike `ssr`, which is excused, because every ray in this fixture
+  _misses_: there is no crossing for two rasterisers to land on different taps
+  at, only a smooth environment term. If it ever starts failing there, the
+  excuse belongs in `.github/workflows/pages.yml`'s `render-harness` matrix
+  beside `ssr` and `ui`, not in a wider tolerance.
+
+- **The demo cube's faces carry vertex colours, and `mesh.slang` multiplies them
+  into the albedo.** `crcbl_shaders::mesh::FACES` gives the `+Y` face
+  `[0.25, 0.80, 0.30]`, and `albedo = input.color * material.base_color * texel`
+  — so a floor placed as the demo cube through a white conductor row has a green
+  `F0` and reflects a green sky. Not a bug and not new; it cost an afternoon to
+  find because the tint is plausible. `Scene::AtmosphereMirror` authors its own
+  plate (`atmosphere_mirror_mesh`) for that reason, and `Scene::Ssr`'s
+  `SSR_CHANNEL` doc is the one place the tree already said so.
 
 - **The presented sky lags a moving sun by up to one whole build.** The striped
   march shipped: `SkyViewBuild` in `crcbl_shaders::atmosphere` and
@@ -337,8 +390,9 @@ landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
   reaches a colour". Neither is needed until an app sweeps a sun.
 
 - **No app drives an atmosphere, so the stripe is unmeasured against a real
-  frame.** `ForwardRenderer::set_atmosphere` has one caller in the tree,
-  `crcbl::screenshot::atmosphere_forward`, and it draws one frame — so the
+  frame.** `ForwardRenderer::set_atmosphere` has two callers in the tree, both
+  in `crcbl::screenshot` — `atmosphere_forward` and `Scene::AtmosphereMirror`'s
+  builder — and each draws one frame under a sun that never moves, so the
   striped march is covered by `crcbl-render`'s null-backend tests
   (`a_moving_sun_is_marched_a_stripe_per_frame` and the two beside it) and by
   the shader crate's `a_striped_build_is_the_one_shot_build`, and by nothing

@@ -294,6 +294,25 @@ impl SkyPass {
         Ok(())
     }
 
+    /// The sky-view LUT this frame's slot holds — the buffer
+    /// [`SkyPass::begin_frame`] writes [`atmosphere::SkyView::rows`] into.
+    ///
+    /// **Handed to [`crate::ssr`] rather than copied for it.** A mirror
+    /// reflects the sky the background draws, so the reflection pass reads this
+    /// very buffer; a second ring would be a second
+    /// [`atmosphere::SKY_VIEW_BUFFER_BYTES`] write on every atmosphere frame
+    /// and one more place for the two skies to disagree. Nothing on the device
+    /// writes it — both passes only read, and the write is a host upload — so
+    /// there is no barrier for the graph to be told about and neither pass
+    /// declares it.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    pub(crate) fn lut(&self, frame: usize) -> BufferHandle {
+        self.luts[frame]
+    }
+
     /// The sky-view LUT buffers, one per frame in flight, in slot order.
     ///
     /// Test-only, on `crate::ssao::Ssao::blocks`' terms: the reference backend

@@ -139,6 +139,7 @@ const SCENES: &[(Scene, &str)] = &[
     (Scene::SpecularAa, "specular_aa"),
     (Scene::Ao, "ao"),
     (Scene::Ssr, "ssr"),
+    (Scene::AtmosphereMirror, "atmosphere_mirror"),
     (Scene::Probes, "probes"),
     (Scene::Bloom, "bloom"),
     (Scene::Aa, "aa"),

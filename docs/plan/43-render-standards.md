@@ -1028,18 +1028,35 @@ of them together — so the whole host cost of a frame under a sun that has not
 moved is the last row of that table, the encoding of the LUT into that frame's
 own ring slot.
 
-**SSR reads the atmosphere as its own three bands.** `ssr.slang`'s
+**A mirror reads the LUT; a rough lobe reads the three bands.** `ssr.slang`'s
 `sky_prefiltered` takes a gradient — that is what the committed
-`sky_prefilter.bin` convolves — so an atmosphere frame fills `SsrParams::sky`
-from `SkyView::gradient_fit`: the LUT's own zenith and its own straight-down
-value for the two poles, and its azimuthal mean at `y = 0` for the horizon.
-**The least that keeps the two consistent**: a mirror pointed at the zenith, the
-horizon or the ground reflects what the background shows there, and a rougher
-lobe blends between the three exactly as it already did. What it cannot carry is
-the aureole — a reflection of the sky _beside_ the sun reads the azimuthal mean
-rather than the bright band — because a gradient has no azimuth in it. Binding
-the sky-view LUT into the reflection pass as well is the upgrade, and it is in
-the backlog rather than here.
+`sky_prefilter.bin` convolves — so an atmosphere frame still fills
+`SsrParams::sky` from `SkyView::gradient_fit`: the LUT's own zenith and its own
+straight-down value for the two poles, and its azimuthal mean at `y = 0` for the
+horizon. What a gradient cannot carry is the aureole, because it has no azimuth
+in it at all, and a mirror beside a low sun is exactly where that shows.
+
+So the reflection pass binds the **same** sky-view buffer the background pass
+draws from — `crcbl_render::sky_pass`'s per-slot ring, handed to
+`crcbl_render::ssr` through `SkyPass::lut`, so one upload feeds both and the two
+cannot be looking at two different skies. `sky_environment` is what mixes them:
+the three bands at the surface's roughness, the LUT along the mirror direction,
+and `sharpness_of`'s own ramp as the share. That ramp is already this pass's
+statement that a single screen-space ray stands for the lobe, and the same
+statement decides whether a single LUT tap does — so a mirror is almost all LUT,
+a surface at `ROUGHNESS_CUTOFF` is all three bands, and nothing in between
+steps. A frame with no atmosphere returns the bands before any of it, which is
+what leaves every golden blessed before this byte-identical.
+
+It costs `crcbl_render::ssr`'s layout one binding, appended past
+`PROBE_VISIBILITY_BINDING`, and that is the pass's **second** storage buffer
+against the eight per stage a WebGPU device guarantees.
+`Scene::AtmosphereMirror` is the fixture — a metallic plate to the horizon under
+a sun 45° off the camera's forward, with two bands at mirrored columns of one
+row — and `render_e2e`'s `an_atmosphere_mirror_reflects_the_luts_limb` is the
+claim: the three bands answer those two blocks identically, the frame separates
+them by 1.640 in red, and both sit inside 0.09 levels of the host's own
+`SkyView`.
 
 **What the rung does not do**, each on purpose: no sun disc (the LUT holds the
 scattered sky, and the disc is the `DirectionalLight` the forward pass already

@@ -194,7 +194,7 @@ use crate::skinning::{SkinRange, SkinnedMesh, Skinning, SkinningError};
 use crate::sky_pass::SkyPass;
 use crate::smaa::Smaa;
 use crate::ssao::{Ssao, cached_group};
-use crate::ssr::{Ssr, SsrImages};
+use crate::ssr::{Ssr, SsrEnvironment, SsrImages};
 use crate::texture::{
     UploadedTexture, upload_texture, upload_texture_layers, upload_texture_mip_layers,
 };
@@ -6713,6 +6713,17 @@ impl ForwardRenderer {
                 // which the march adds to its probe fallback and changes
                 // nothing.
                 sky: gradient.rows(),
+                // And the arm, on the background pass's terms below: an
+                // atmosphere frame hands the march the sun its LUT was built
+                // around, and every other frame the exactly-zero `w` that
+                // leaves `ssr.slang` evaluating the gradient it always did.
+                atmosphere: match sky_view {
+                    Some(presented) => {
+                        let sun = presented.view.sun_direction();
+                        [sun[0], sun[1], sun[2], crcbl_shaders::sky::ATMOSPHERE_ON]
+                    }
+                    None => [0.0, 0.0, 0.0, crcbl_shaders::sky::ATMOSPHERE_OFF],
+                },
             },
         )?;
         // The background pass's block: the same two inverses `SsrParams` above
@@ -9424,6 +9435,9 @@ impl ForwardRenderer {
         // off-switch.
         let tonemapped = match reflected {
             Some((reflection, composited)) => {
+                // Read before the split borrow below: `self.ssr` is taken
+                // mutably by `add_passes` and this names a different field.
+                let sky_view_lut = self.sky_pass.lut(frame);
                 // The pyramid first: the march climbs it, so every level has to
                 // be written before the pass that reads it is recorded. Skipped
                 // outright on a frame whose extent has no levels, which
@@ -9441,14 +9455,22 @@ impl ForwardRenderer {
                         composited,
                         pyramid: crate::hiz::level_slots(scene_depth, &pyramid),
                     },
-                    probe_buffer,
-                    probe_table,
-                    // The same view the forward pass's own group named, so the
-                    // reflection's probe fallback is weighed by the maps the
-                    // diffuse gather was weighed by — or by the placeholder,
-                    // when there are none and every probe keeps all of its
-                    // weight.
-                    probe_visibility_view,
+                    SsrEnvironment {
+                        probes: probe_buffer,
+                        probe_id: probe_table,
+                        // The same view the forward pass's own group named, so
+                        // the reflection's probe fallback is weighed by the
+                        // maps the diffuse gather was weighed by — or by the
+                        // placeholder, when there are none and every probe
+                        // keeps all of its weight.
+                        probe_visibility: probe_visibility_view,
+                        // The background pass's own LUT slot, not a copy of it
+                        // — see [`crate::sky_pass::SkyPass::lut`]. A frame with
+                        // no atmosphere binds the zeroes that buffer was
+                        // created holding, and `ssr.slang` returns before
+                        // reading it.
+                        sky_view: sky_view_lut,
+                    },
                 );
                 composited
             }

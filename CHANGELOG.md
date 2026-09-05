@@ -35,6 +35,42 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A mirror reflects the atmosphere's aureole, not its azimuthal mean.**
+  `shaders/ssr.slang` binds the sky-view LUT — `SKY_VIEW_BINDING` in
+  `crcbl_render::ssr`'s layout, appended past `PROBE_VISIBILITY_BINDING` — and
+  its new `sky_environment` reads it along the mirror direction for the sharp
+  end of the lobe while `sky_prefiltered`'s three bands still carry the rough
+  end. The share between them is `sharpness_of`'s own ramp, which is already
+  this pass's statement that one screen-space ray stands for the lobe. Before
+  this, an atmosphere frame handed the reflection pass
+  `crcbl_shaders::atmosphere::SkyView::gradient_fit` and nothing else, so a
+  mirror beside a low sun reflected the horizon's azimuthal mean where the
+  background showed the bright limb.
+
+  **It is the background pass's own buffer, not a second copy.**
+  `crcbl_render::sky_pass::SkyPass::lut` hands `crcbl_render::ssr` the slot the
+  background pass already writes `SkyView::rows` into, so an atmosphere frame
+  still pays one `SKY_VIEW_BUFFER_BYTES` write and a mirror cannot be looking at
+  a different sky than the one behind it. `crcbl_shaders::ssr::SsrParams` grows
+  a final `atmosphere` row carrying the sun and the arm, matching
+  `crcbl_shaders::sky::SkyParams`'.
+
+  **A frame with no atmosphere is byte-identical**: `sky_environment` returns
+  the three bands before it touches the LUT, and the new binding names a buffer
+  that was already allocated and zero-filled per frame slot. Priced on
+  `apps/lantern`, which has no atmosphere, at
+  `--headless --frames 400 --size 1920x1080 --backend vk`, medians of three: the
+  `ssr` pass row goes 0.174 → 0.175 ms mean on an RX 7900 XTX and 15.503 →
+  15.528 ms on lavapipe, where the run-to-run spread is 0.084 ms before and
+  0.183 ms after. `ssr-blur` does not move on either.
+
+  **`crcbl::screenshot::Scene::AtmosphereMirror`** is the fixture — a white
+  metallic plate to the horizon under a sun 45° off a level camera's forward —
+  and `render_e2e`'s `an_atmosphere_mirror_reflects_the_luts_limb` reads two
+  bands at mirrored columns of one row, where the three bands predict the same
+  number twice. It measures 1.640 apart in red on radv and 1.642 on lavapipe,
+  each inside 0.09 levels of the host's own `SkyView`.
+
 - **Double-sided materials — glTF's `doubleSided`.**
   `crcbl_shaders::mesh::GpuMaterial::DOUBLE_SIDED` is the second bit of
   `GpuMaterial::MODE_MASK`, so a material's mode is now one of four values and

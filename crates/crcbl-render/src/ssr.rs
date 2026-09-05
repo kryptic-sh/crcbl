@@ -71,6 +71,21 @@ const DFG_SIZE: u32 = dfg::DFG_SIZE as u32;
 /// that table.
 const PROBE_VISIBILITY_BINDING: u32 = DFG_BINDING + 1;
 
+/// The binding `ssr.slang` reads the sky-view LUT through — the very buffer
+/// [`crate::sky_pass`] draws the background out of, so a mirror and the sky
+/// behind it cannot be reading two different skies.
+///
+/// **Appended past [`PROBE_VISIBILITY_BINDING`], never inserted**, for that
+/// constant's own reason: `crcbl-mtl` numbers a resource by counting the
+/// same-table entries in ascending binding order and Slang numbers a stage's
+/// arguments by declaration order, so the two agree only while both ascend.
+/// This is the pass's **second** storage buffer — [`crate::forward`]'s probe
+/// table is the first — against the eight per stage a WebGPU device
+/// guarantees, and `check_portable_storage_buffers` below is what says so
+/// rather than this comment. `msl/ssr.metal` puts it at `buffer(2)`, the next
+/// free index of that table.
+const SKY_VIEW_BINDING: u32 = PROBE_VISIBILITY_BINDING + 1;
+
 /// Vertices in the over-sized full-screen triangle `ssr.slang` and
 /// `ssr_blur.slang` generate from `SV_VertexID`. No geometry is bound anywhere.
 const FULLSCREEN_VERTICES: u32 = 3;
@@ -105,6 +120,39 @@ pub(crate) struct SsrImages {
     /// what the caller fills this with, and `SsrParams::hiz_levels`, which is
     /// what stops the march reading a slot that is a repeat.
     pub(crate) pyramid: [ImageId; crate::hiz::MAX_LEVELS as usize],
+}
+
+/// The environment a missed ray falls back to, as the four handles the march
+/// binds it through.
+///
+/// **One struct rather than four positional arguments**, on [`SsrImages`]'
+/// terms exactly: it is what `clippy::too_many_arguments` objects to, and two
+/// of these are `BufferHandle`s that would be indistinguishable at the call
+/// site. They travel together because they are one idea —
+/// `docs/plan/43-render-standards.md` §8's "the environment a missed ray falls
+/// back to is the term a sky provides", plus
+/// `docs/plan/50-irradiance-probes.md`'s grid for the bounce light around it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SsrEnvironment {
+    /// The irradiance table the forward pass binds to `mesh.slang`, so a
+    /// reflection's probe fallback is the same grid the diffuse gather reads.
+    pub(crate) probes: BufferHandle,
+    /// [`SsrEnvironment::probes`] as the graph knows it, for the read this pass
+    /// declares.
+    pub(crate) probe_id: crate::graph::BufferId,
+    /// The per-probe visibility maps — the caller's captured ones when it has
+    /// them and the console switch is on, and its one-texel placeholder
+    /// otherwise, which every probe keeps all of its weight through. Not a
+    /// graph transient, so it is not realised in the pass body; it does change
+    /// between frames when the switch moves, which is why it joins the bind
+    /// group's cache key.
+    pub(crate) probe_visibility: ImageViewHandle,
+    /// [`crate::sky_pass::SkyPass::lut`] for the same frame slot — the buffer
+    /// the background pass draws this frame's sky out of, holding zeroes on a
+    /// frame whose sky is a gradient or which has none. One handle per slot
+    /// that never moves within a slot, so it stays out of the cache key beside
+    /// the uniforms and the probe table.
+    pub(crate) sky_view: BufferHandle,
 }
 
 /// Everything the reflection pair owns.
@@ -321,6 +369,22 @@ impl Ssr {
             count: 1,
             flags: BindingFlags::empty(),
         });
+        // The sky-view LUT, past it — see [`SKY_VIEW_BINDING`]. `FRAGMENT`
+        // alone, like the probe table at binding 4 and unlike
+        // `crate::sky_pass`'s copy of this buffer: Slang's Metal backend
+        // materialises every global into both entry points there too, and
+        // `msl/ssr.metal`'s `vertexMain` has taken `probes` at `buffer(1)`
+        // without reading it since that binding landed.
+        entries.push(BindGroupLayoutEntry {
+            binding: SKY_VIEW_BINDING,
+            visibility: ShaderStages::FRAGMENT,
+            kind: BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
         entries.extend(
             (0..crate::hiz::MAX_LEVELS).map(|level| BindGroupLayoutEntry {
                 binding: 5 + level,
@@ -480,11 +544,9 @@ impl Ssr {
     /// hand back: the reflection is *in* it, and the scene colour it was added
     /// to is not the finished picture any more.
     ///
-    /// `probe_visibility` is the caller's own — the captured maps when it has
-    /// them and the console switch is on, and its one-texel placeholder
-    /// otherwise, which every probe keeps all of its weight through. It is not a
-    /// graph transient, so it is not realised here; it does change between
-    /// frames when the switch moves, which is why it joins the cache key below.
+    /// `environment` is what a ray that found nothing falls back to — see
+    /// [`SsrEnvironment`], which is where each of its four handles is
+    /// described.
     ///
     /// # Panics
     ///
@@ -494,10 +556,14 @@ impl Ssr {
         graph: &mut RenderGraph<'a>,
         frame: usize,
         images: SsrImages,
-        probes: BufferHandle,
-        probe_id: crate::graph::BufferId,
-        probe_visibility: ImageViewHandle,
+        environment: SsrEnvironment,
     ) {
+        let SsrEnvironment {
+            probes,
+            probe_id,
+            probe_visibility,
+            sky_view,
+        } = environment;
         let SsrImages {
             depth,
             color,
@@ -612,6 +678,14 @@ impl Ssr {
                     binding: PROBE_VISIBILITY_BINDING,
                     array_index: 0,
                     resource: BindingResource::ImageView(probe_visibility),
+                },
+                // Static within a frame slot, like the uniforms and the probes
+                // above: the sky pass owns one buffer per slot and writes this
+                // frame's LUT into it before the graph runs.
+                BindGroupEntry {
+                    binding: SKY_VIEW_BINDING,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(sky_view),
                 },
             ];
             let pyramid_views = pyramid.map(|level| ctx.image_view(level));

@@ -149,8 +149,20 @@ struct SsrParams
     /// roughness, and a zeroed sky adds nothing to the probe environment a
     /// missed ray already had.
     ///
-    /// **Last in the block**, so no member above it moves.
+    /// On an atmosphere frame these are still filled, with
+    /// `crcbl_shaders::atmosphere::SkyView::gradient_fit`'s three bands, and
+    /// they are what the *rough* lobes read — see [`sky_environment`].
     float4 sky[3];
+    /// The unit direction **towards** the sun in `xyz`, and in `w` whether this
+    /// frame's sky is [`sky_view`] rather than the gradient above.
+    ///
+    /// The same row `sky.slang`'s block closes with, and it means the same
+    /// thing there: `crcbl_shaders::sky::ATMOSPHERE_OFF` and `ATMOSPHERE_ON`
+    /// are the two values, and a frame drawn before an atmosphere existed
+    /// writes a `w` of exactly zero.
+    ///
+    /// **Last in the block**, so no member above it moves.
+    float4 atmosphere;
 };
 
 struct GpuProbe
@@ -303,6 +315,41 @@ Texture2D<float4> dfg;
 /// ascend.
 [[vk::binding(12, 0)]]
 Texture2DArray<float4> probe_visibility;
+
+/// `crcbl_shaders::atmosphere::SkyView::rows` — this frame's marched sky, one
+/// `float4` per texel with the direction's `y` slow, and **the same buffer
+/// `sky.slang` draws the background out of**: `crcbl_render::sky_pass` owns the
+/// ring and `crcbl_render::ssr` names its slot here, so a mirror and the sky
+/// behind it cannot be reading two different skies and the frame pays for one
+/// upload rather than two.
+///
+/// # What a gradient could not carry
+///
+/// [`sky_prefiltered`] convolves three bands, so it has no azimuth in it at all
+/// and reflects the sky beside the sun as the horizon's azimuthal mean. This is
+/// the field itself, read along the mirror direction — see
+/// [`sky_environment`], which is what decides how much of each a lobe takes.
+///
+/// It is bound on **every** frame, including the ones whose sky is a gradient
+/// or which have none, and holds zeroes there: a binding that came and went
+/// with the arm would be two pipeline layouts and two pipelines, which is the
+/// reason `sky.slang` gives at the same declaration.
+///
+/// **Appended past [`probe_visibility`], never inserted**, for the reason that
+/// binding's own paragraph gives: `crcbl-mtl` numbers a resource by counting
+/// the same-table entries in ascending binding order and Slang numbers a
+/// stage's arguments by declaration order, so the two agree only while both
+/// ascend. `msl/ssr.metal` puts it at `buffer(2)`, the next free index of that
+/// table.
+[[vk::binding(13, 0)]]
+StructuredBuffer<float4> sky_view;
+
+/// `crcbl_shaders::atmosphere::SKY_VIEW_WIDTH`, which is the azimuth away from
+/// the sun.
+static const uint SKY_VIEW_WIDTH = 96;
+
+/// `crcbl_shaders::atmosphere::SKY_VIEW_HEIGHT`, which is the direction's `y`.
+static const uint SKY_VIEW_HEIGHT = 64;
 
 /// The reversed-Z far plane: `crcbl_hal::depth::CLEAR`, and the value
 /// `ssao.slang` declares under this name.
@@ -816,6 +863,101 @@ float3 sky_prefiltered(float3 direction, float roughness)
     return camera.sky[1].rgb * horizon + far * weights.x + opposite * weights.y;
 }
 
+/// `crcbl_shaders::atmosphere::SkyView::sample`: the LUT read bilinearly at an
+/// azimuth cosine and a direction's `y`, clamped at every edge.
+///
+/// `sky.slang`'s function of the same name, character for character — the two
+/// coordinate maps are `atmosphere::sky_view_u_of` and `sky_view_v_of` and the
+/// tap arithmetic is `atmosphere::axis_taps`, spelled a third time because
+/// Slang has no `#include`. `crcbl_shaders::atmosphere`'s
+/// `the_shader_reads_the_lut_the_way_the_host_does` holds all three spellings
+/// to each other.
+float3 sky_view_at(float up, float azimuth_cosine)
+{
+    float u = sqrt(max(0.0, (1.0 - clamp(azimuth_cosine, -1.0, 1.0)) * 0.5));
+    float clamped = clamp(up, -1.0, 1.0);
+    float root = sqrt(abs(clamped));
+    float v = 0.5 + 0.5 * (clamped >= 0.0 ? root : -root);
+
+    float across = clamp(u, 0.0, 1.0) * float(SKY_VIEW_WIDTH) - 0.5;
+    float x0 = clamp(floor(across), 0.0, float(SKY_VIEW_WIDTH - 1));
+    float x1 = min(x0 + 1.0, float(SKY_VIEW_WIDTH - 1));
+    float fx = clamp(across - x0, 0.0, 1.0);
+
+    float down = clamp(v, 0.0, 1.0) * float(SKY_VIEW_HEIGHT) - 0.5;
+    float y0 = clamp(floor(down), 0.0, float(SKY_VIEW_HEIGHT - 1));
+    float y1 = min(y0 + 1.0, float(SKY_VIEW_HEIGHT - 1));
+    float fy = clamp(down - y0, 0.0, 1.0);
+
+    uint row0 = uint(y0) * SKY_VIEW_WIDTH;
+    uint row1 = uint(y1) * SKY_VIEW_WIDTH;
+    float3 top = sky_view[row0 + uint(x0)].rgb * (1.0 - fx)
+               + sky_view[row0 + uint(x1)].rgb * fx;
+    float3 bottom = sky_view[row1 + uint(x0)].rgb * (1.0 - fx)
+                  + sky_view[row1 + uint(x1)].rgb * fx;
+    return top * (1.0 - fy) + bottom * fy;
+}
+
+/// `crcbl_shaders::atmosphere::SkyView::radiance`: the LUT read along a world
+/// direction, by turning it into the LUT's sun-relative coordinates.
+///
+/// The row is the direction's own `y`; the column is the cosine between the two
+/// horizontal projections, the view's and the sun's. A sun straight overhead
+/// leaves that cosine undefined and the sky azimuthally symmetric exactly then,
+/// so the column falls back to the one facing the sun's azimuth.
+float3 atmosphere_radiance(float3 direction)
+{
+    float3 sun = camera.atmosphere.xyz;
+    float view_flat = sqrt(direction.x * direction.x + direction.z * direction.z);
+    float sun_flat = sqrt(sun.x * sun.x + sun.z * sun.z);
+    float cosine = 1.0;
+    if (view_flat > 0.0 && sun_flat > 0.0)
+    {
+        cosine = (direction.x * sun.x + direction.z * sun.z) / (view_flat * sun_flat);
+    }
+    return sky_view_at(direction.y, cosine);
+}
+
+/// The environment a lobe of `roughness` about `direction` gathers from the
+/// sky, and `share` is how much of it the **mirror** direction may speak for.
+///
+/// # Two skies, and the lobe is what chooses between them
+///
+/// A gradient has no azimuth in it, so [`sky_prefiltered`] reflects the bright
+/// limb beside the sun as the horizon's azimuthal mean — which is right at
+/// every direction a gradient *can* describe and wrong exactly where an
+/// atmosphere is interesting. [`atmosphere_radiance`] is the field itself along
+/// one direction, and one direction stands for a lobe only while that lobe is
+/// narrow.
+///
+/// **So `share` is [`sharpness_of`]'s own ramp**, passed in rather than
+/// recomputed: it is already the number this pass uses to say a single ray
+/// stands for the lobe, and the same statement decides whether a single LUT tap
+/// does. A mirror is almost all LUT, a surface at [`ROUGHNESS_CUTOFF`] is all
+/// three bands, and nothing in between steps. `docs/backlog.md`'s residue is
+/// what that leaves: the rough half is still the gradient's azimuthal mean, and
+/// convolving the LUT itself is a cook this rung did not do.
+///
+/// # A frame with no atmosphere returns before any of it
+///
+/// `camera.atmosphere.w` is `crcbl_shaders::sky::ATMOSPHERE_OFF` — exactly zero
+/// — on a gradient frame and on a frame with no sky at all, and then this is
+/// [`sky_prefiltered`] and nothing else, evaluated by the same expression it
+/// always was. That is what makes every golden blessed before this existed
+/// byte-identical rather than merely close.
+float3 sky_environment(float3 direction, float roughness, float share)
+{
+    float3 bands = sky_prefiltered(direction, roughness);
+    if (camera.atmosphere.w <= 0.0)
+    {
+        return bands;
+    }
+    // The two-ended form and not `lerp`, because `crcbl_shaders::atmosphere`'s
+    // host mirror of this line is written the same way and the two do not agree
+    // in floating point.
+    return bands * (1.0 - share) + atmosphere_radiance(direction) * share;
+}
+
 /// `+1` for a positive or zero value and `-1` for a negative one — the
 /// octahedral mapping's `signNotZero`, and `mesh.slang`'s body character for
 /// character.
@@ -1212,13 +1354,16 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // off. `docs/plan/43-render-standards.md` §8 is why the sky is here at all:
     // the environment a missed ray falls back to is the term a sky provides.
     //
-    // The sky at the surface's roughness, not along the one mirror direction:
-    // a rough lobe gathers the gradient from a cone about the reflection, and
+    // The sky at the surface's roughness rather than only along the mirror
+    // direction: a rough lobe gathers a cone about the reflection, and
     // `docs/plan/44-lighting.md`'s rung 3 cooked that gather into
-    // `sky_prefilter`. This is the split-sum's prefiltered half; `env_brdf`
-    // below is the other.
+    // `sky_prefilter`. On an atmosphere frame the narrow end of that ramp reads
+    // the sky-view LUT instead, which is the one thing three bands cannot say —
+    // see [`sky_environment`], and `sharpness` is passed because it is already
+    // this pass's statement about how narrow the lobe is. This is the
+    // split-sum's prefiltered half; `env_brdf` below is the other.
     float3 environment = probe_environment(world_position, world_normal, reflection_direction)
-                       + sky_prefiltered(reflection_direction, surface.a);
+                       + sky_environment(reflection_direction, surface.a, sharpness);
 
     // The split-sum's second half: the `DFG` pair at `(N·V, roughness)`, and
     // `f0 * scale + bias` is what the lobe's Fresnel and visibility integrate

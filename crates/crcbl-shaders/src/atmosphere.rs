@@ -2331,75 +2331,127 @@ mod tests {
         u32::from_le_bytes(bytes.try_into().expect("four"))
     }
 
-    /// `sky.slang` reads the LUT the way [`SkyView::sample`] and
+    /// `sky.slang` and `ssr.slang` read the LUT the way [`SkyView::sample`] and
     /// [`SkyView::radiance`] do.
     ///
-    /// Slang has no `#include`, so the shader spells the two coordinate maps
-    /// and the clamped bilinear a second time. The **dimensions** are checked
-    /// numerically — parsed out of the shader and compared to this module's
-    /// constants — because a LUT read at the wrong width is a sky that is
-    /// smoothly and plausibly wrong rather than an error; the rest are the
-    /// lines whose absence would change what the shader computes.
+    /// Slang has no `#include`, so **each** shader spells the two coordinate
+    /// maps and the clamped bilinear again — the background pass because it
+    /// draws the sky, the reflection pass because a mirror reflects it. The
+    /// **dimensions** are checked numerically — parsed out of each shader and
+    /// compared to this module's constants — because a LUT read at the wrong
+    /// width is a sky that is smoothly and plausibly wrong rather than an
+    /// error; the rest are the lines whose absence would change what the shader
+    /// computes.
     #[test]
     fn the_shader_reads_the_lut_the_way_the_host_does() {
-        let source = include_str!("../shaders/sky.slang");
-        let declared = |name: &str| {
-            source
-                .split_once(&format!("static const uint {name} = "))
-                .unwrap_or_else(|| panic!("sky.slang declares `{name}`"))
-                .1
-                .split_once(';')
-                .expect("the constant ends")
-                .0
-                .trim()
-                .parse::<usize>()
-                .expect("the constant is a literal")
-        };
-        assert_eq!(declared("SKY_VIEW_WIDTH"), SKY_VIEW_WIDTH);
-        assert_eq!(declared("SKY_VIEW_HEIGHT"), SKY_VIEW_HEIGHT);
+        for (file, source) in [
+            ("sky.slang", include_str!("../shaders/sky.slang")),
+            ("ssr.slang", include_str!("../shaders/ssr.slang")),
+        ] {
+            let declared = |name: &str| {
+                source
+                    .split_once(&format!("static const uint {name} = "))
+                    .unwrap_or_else(|| panic!("{file} declares `{name}`"))
+                    .1
+                    .split_once(';')
+                    .expect("the constant ends")
+                    .0
+                    .trim()
+                    .parse::<usize>()
+                    .expect("the constant is a literal")
+            };
+            assert_eq!(declared("SKY_VIEW_WIDTH"), SKY_VIEW_WIDTH);
+            assert_eq!(declared("SKY_VIEW_HEIGHT"), SKY_VIEW_HEIGHT);
 
+            let body = source
+                .split_once("float3 sky_view_at(float up, float azimuth_cosine)\n{")
+                .unwrap_or_else(|| panic!("{file} declares `sky_view_at`"))
+                .1
+                .split_once("\n}")
+                .expect("the function has a body")
+                .0;
+            for line in [
+                // `sky_view_u_of`: the column map's inverse.
+                "float u = sqrt(max(0.0, (1.0 - clamp(azimuth_cosine, -1.0, 1.0)) * 0.5));",
+                // `sky_view_v_of`: the row map's, sign and all.
+                "float v = 0.5 + 0.5 * (clamped >= 0.0 ? root : -root);",
+                // `axis_taps`, both axes: centres, floor, and both ends clamped.
+                "float across = clamp(u, 0.0, 1.0) * float(SKY_VIEW_WIDTH) - 0.5;",
+                "float down = clamp(v, 0.0, 1.0) * float(SKY_VIEW_HEIGHT) - 0.5;",
+                // The blend, in the two-ended form `sample` uses — `lerp` is the
+                // other one, and the two do not agree in floating point.
+                "return top * (1.0 - fy) + bottom * fy;",
+            ] {
+                assert!(
+                    body.contains(line),
+                    "{file}'s `sky_view_at` no longer contains `{line}`, so it and \
+                     `SkyView::sample` are reading different LUTs"
+                );
+            }
+
+            let radiance = source
+                .split_once("float3 atmosphere_radiance(float3 direction)\n{")
+                .unwrap_or_else(|| panic!("{file} declares `atmosphere_radiance`"))
+                .1
+                .split_once("\n}")
+                .expect("the function has a body")
+                .0;
+            assert!(
+                radiance.contains(
+                    "(direction.x * sun.x + direction.z * sun.z) / (view_flat * sun_flat)"
+                ),
+                "{file} no longer takes the azimuth cosine between the two horizontal \
+                 projections, so its column and `SkyView::radiance`'s are different columns"
+            );
+            assert!(
+                radiance.contains("return sky_view_at(direction.y, cosine);"),
+                "{file} no longer reads the row from the direction's own `y`"
+            );
+        }
+    }
+
+    /// `ssr.slang` mixes the LUT into the three bands the way a host predicting
+    /// a reflected pixel has to.
+    ///
+    /// The bullet this rung closed said a mirror must read the LUT and a rough
+    /// lobe must keep the gradient, and the *ramp between them* is the whole of
+    /// what a test can hold: `render_e2e`'s `an_atmosphere_mirror_reflects_the_
+    /// luts_limb` predicts a floor band by evaluating this same blend on the
+    /// host, so a shader that weighted the two differently would move every
+    /// prediction at once. The share is `sharpness_of`'s ramp, which is why the
+    /// argument is passed in rather than derived here.
+    #[test]
+    fn the_reflection_pass_blends_the_lut_over_the_bands() {
+        let source = include_str!("../shaders/ssr.slang");
         let body = source
-            .split_once("float3 sky_view_at(float up, float azimuth_cosine)\n{")
-            .expect("sky.slang declares `sky_view_at`")
+            .split_once("float3 sky_environment(float3 direction, float roughness, float share)\n{")
+            .expect("ssr.slang declares `sky_environment`")
             .1
-            .split_once("\n}")
+            .split_once("\n}\n")
             .expect("the function has a body")
             .0;
         for line in [
-            // `sky_view_u_of`: the column map's inverse.
-            "float u = sqrt(max(0.0, (1.0 - clamp(azimuth_cosine, -1.0, 1.0)) * 0.5));",
-            // `sky_view_v_of`: the row map's, sign and all.
-            "float v = 0.5 + 0.5 * (clamped >= 0.0 ? root : -root);",
-            // `axis_taps`, both axes: centres, floor, and both ends clamped.
-            "float across = clamp(u, 0.0, 1.0) * float(SKY_VIEW_WIDTH) - 0.5;",
-            "float down = clamp(v, 0.0, 1.0) * float(SKY_VIEW_HEIGHT) - 0.5;",
-            // The blend, in the two-ended form `sample` uses — `lerp` is the
-            // other one, and the two do not agree in floating point.
-            "return top * (1.0 - fy) + bottom * fy;",
+            // The bands, at the surface's own roughness.
+            "float3 bands = sky_prefiltered(direction, roughness);",
+            // A frame with no atmosphere returns them untouched, which is what
+            // keeps every golden blessed before this existed byte-identical.
+            "if (camera.atmosphere.w <= 0.0)",
+            "return bands;",
+            // And the two-ended blend, in the form the host mirror is written
+            // in — `lerp` is the other one and the two differ in floating point.
+            "return bands * (1.0 - share) + atmosphere_radiance(direction) * share;",
         ] {
             assert!(
                 body.contains(line),
-                "sky.slang's `sky_view_at` no longer contains `{line}`, so it and \
-                 `SkyView::sample` are reading different LUTs"
+                "ssr.slang's `sky_environment` no longer contains `{line}`, so a host \
+                 predicting a reflected pixel is predicting a different blend"
             );
         }
-
-        let radiance = source
-            .split_once("float3 atmosphere_radiance(float3 direction)\n{")
-            .expect("sky.slang declares `atmosphere_radiance`")
-            .1
-            .split_once("\n}")
-            .expect("the function has a body")
-            .0;
         assert!(
-            radiance
-                .contains("(direction.x * sun.x + direction.z * sun.z) / (view_flat * sun_flat)"),
-            "sky.slang no longer takes the azimuth cosine between the two horizontal \
-             projections, so its column and `SkyView::radiance`'s are different columns"
-        );
-        assert!(
-            radiance.contains("return sky_view_at(direction.y, cosine);"),
-            "sky.slang no longer reads the row from the direction's own `y`"
+            source.contains("+ sky_environment(reflection_direction, surface.a, sharpness);"),
+            "ssr.slang no longer hands `sky_environment` the march's own sharpness ramp, so \
+             the lobe that reads one LUT tap and the lobe that trusts one screen-space ray \
+             are no longer the same lobe"
         );
     }
 

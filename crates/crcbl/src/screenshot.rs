@@ -509,6 +509,46 @@ pub enum Scene {
     /// twenty-fifth — and `ssr_sun` for why the sun has no X component, which is
     /// what makes the two bands beside the reflection its controls.
     Ssr,
+    /// `docs/plan/43-render-standards.md` §8's sky **in a mirror**: a metallic
+    /// floor to the horizon under an atmosphere with a low sun, looked at
+    /// level.
+    ///
+    /// **The frame is one claim and the frame's own symmetry is what makes
+    /// it.** The camera looks along `-Z` with no tilt, so the horizon is the
+    /// middle row and two floor pixels at mirrored columns of one row reflect
+    /// two directions with the *same* elevation and opposite azimuths. Every
+    /// term the reflection is multiplied by is therefore equal at the two — the
+    /// Fresnel pair, the split-sum's `DFG`, the roughness ramp — and so is
+    /// [`crcbl_shaders::sky_prefilter`]'s convolution of the three bands, which
+    /// is a function of the direction's `y` alone.
+    ///
+    /// So the gradient the reflection pass used to reflect an atmosphere with
+    /// predicts those two bands as **exactly equal**, and the sky-view LUT does
+    /// not: `atmosphere_mirror_sun` sits about 45° to the right of the camera's
+    /// forward, so the right-hand band reflects the bright limb beside the sun
+    /// and the left-hand one the sky nearly ninety degrees away from it.
+    /// `tests/render_e2e.rs`'s `an_atmosphere_mirror_reflects_the_luts_limb` is
+    /// what reads the ratio, and the fixture would have nothing to say about
+    /// `ssr.slang`'s `sky_environment` without the mirroring.
+    ///
+    /// # Every measured pixel is the reflection and nothing else
+    ///
+    /// * The floor is **fully metallic**, so `mesh.slang`'s diffuse albedo is
+    ///   exactly zero and neither the flat ambient, the probe grid nor the
+    ///   sky's own L1 term can reach it.
+    /// * Its light has zero colour and zero ambient — see
+    ///   `atmosphere_mirror_sun` — so the specular lobe is zero too, and the
+    ///   forward pass leaves the floor black.
+    /// * The demo scene authors no probes, so `ssr.slang`'s probe fallback is
+    ///   zero and the environment it adds is the sky alone.
+    ///
+    /// What is left in a floor pixel is `sky_environment × (f0·scale + bias)`,
+    /// which is what makes an absolute comparison against the host's own
+    /// `SkyView` possible rather than only a ratio.
+    ///
+    /// Nothing else stands on the floor: an object would be something a ray
+    /// could hit, and what these bands are evidence about is the miss.
+    AtmosphereMirror,
     /// `docs/plan/18-render-features.md`'s **bloom chain**: a flat floor with
     /// one small, very bright patch on it, looked straight down at.
     ///
@@ -1507,6 +1547,233 @@ pub fn atmosphere_forward(
         },
         renderer: Box::new(renderer),
     })
+}
+
+/// The sun [`Scene::AtmosphereMirror`]'s atmosphere is built around.
+///
+/// Not normalised, for [`ATMOSPHERE_SUNS`]' reason: `crcbl_render::Atmosphere`
+/// normalises on the way in.
+///
+/// Both components are the scene. The horizontal part is `(1, 0, -1)`, which is
+/// **45° to the right of the camera's forward** — see
+/// [`atmosphere_mirror_camera`] — so the sun's own azimuth sits just outside
+/// the frame's right edge and the band reflected there is a few degrees off the
+/// limb while the band at the mirrored column is nearly ninety degrees away
+/// from it. The vertical part puts the sun about eleven degrees up: low enough
+/// that the aureole is the brightest thing the LUT holds and high enough that
+/// the band elevations this scene measures at — about fifteen degrees — are
+/// still inside it.
+const ATMOSPHERE_MIRROR_SUN: [f32; 3] = [1.0, 0.28, -1.0];
+
+/// How rough [`Scene::AtmosphereMirror`]'s floor is.
+///
+/// **Not zero, and the reason is a constant a test would otherwise have to
+/// copy.** `mesh.slang` clamps a material's roughness to its own
+/// `MIN_ROUGHNESS` before shading and before the reflectivity store, and that
+/// number has no Rust mirror — so a floor authored at zero would reload as a
+/// level the host could only predict by re-spelling a shader constant. Above
+/// it, `crcbl_shaders::ssr::stored_roughness` is the whole of what the
+/// attachment does to this value, and that function is already public for
+/// exactly this.
+///
+/// It is far under `ssr.slang`'s `ROUGHNESS_CUTOFF`, so the sharpness ramp —
+/// which is also the share of the reflection that reads the sky-view LUT
+/// rather than the three bands — is close to one.
+pub const ATMOSPHERE_MIRROR_ROUGHNESS: f32 = 0.05;
+
+/// How far above the floor [`Scene::AtmosphereMirror`]'s eye stands, in world
+/// units.
+///
+/// One, and nothing rests on the value: the camera is level, so a floor pixel's
+/// reflected *direction* is a function of the pixel alone and the eye height
+/// only decides which floor point that pixel is. What it does have to be is
+/// above the floor and well inside the near plane.
+const ATMOSPHERE_MIRROR_EYE_UP: f32 = 1.0;
+
+/// How wide [`Scene::AtmosphereMirror`]'s floor plate is, in world units.
+///
+/// **Large enough that its far edge lands within a pixel of the horizon**,
+/// which is what makes the frame floor below the middle row and sky above it
+/// with nothing between. A plate ending short of the horizon would show a strip
+/// of the sky-view LUT's lower hemisphere — deliberately black, see
+/// `docs/backlog.md` — as a dark band across the picture, and a band a reader
+/// would have to be told to ignore.
+///
+/// At this size the far edge sits about `0.29°` below the horizon, against the
+/// `0.31°` a row of the golden's extent spans — so it is inside the first row
+/// under the middle one.
+const ATMOSPHERE_MIRROR_FLOOR_SCALE: f32 = 400.0;
+
+/// The atmosphere [`Scene::AtmosphereMirror`] is drawn under.
+///
+/// **Public because the test predicts the frame from it**, on
+/// [`atmosphere_sky`]'s terms: the claim is that the mirror's reflection is the
+/// host's own `SkyView` along the reflected direction, and a test that built
+/// its own atmosphere would be comparing two guesses.
+#[must_use]
+pub fn atmosphere_mirror_sky() -> crcbl_render::Atmosphere {
+    crcbl_render::Atmosphere {
+        sun_direction: glam::Vec3::from_array(ATMOSPHERE_MIRROR_SUN),
+        sun_illuminance: glam::Vec3::splat(ATMOSPHERE_ILLUMINANCE),
+        altitude_km: 0.0,
+    }
+}
+
+/// The sky-view LUT [`atmosphere_mirror_sky`] resolves to, marched on the host.
+///
+/// [`atmosphere_view`]'s job for this scene, and it goes through
+/// `crcbl_render::Atmosphere` for that function's reason — the normalisation
+/// the renderer applies is on this side of the comparison too.
+#[must_use]
+pub fn atmosphere_mirror_view() -> crate::shaders::atmosphere::SkyView {
+    crate::shaders::atmosphere::SkyView::build(&atmosphere_mirror_sky().parameters())
+}
+
+/// The camera [`Scene::AtmosphereMirror`] is drawn with: level, on the `+Y`
+/// axis, looking along `-Z`.
+///
+/// **Level, and every band rests on that.** With the eye's forward horizontal,
+/// a pixel's view ray has an elevation that depends on its row and its column
+/// only through `|ndc.x|`, so two pixels at mirrored columns of one row look
+/// down at exactly the same angle and their reflections rise at exactly the
+/// same angle. The three-band gradient is a function of that elevation alone
+/// and therefore predicts the two identically; the sky-view LUT has an azimuth
+/// in it and does not. That difference is this fixture's whole subject.
+///
+/// It is also what puts the horizon on the frame's middle row, so the picture
+/// is floor under sky with no tilt to reconstruct.
+///
+/// Public so the test can unproject a pixel into the same world ray the shaders
+/// do — [`atmosphere_camera`]'s reason.
+#[must_use]
+pub fn atmosphere_mirror_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, ATMOSPHERE_MIRROR_EYE_UP, 0.0),
+        target: glam::Vec3::new(0.0, ATMOSPHERE_MIRROR_EYE_UP, -1.0),
+        up: glam::Vec3::Y,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.05,
+        },
+    }
+}
+
+/// [`Scene::AtmosphereMirror`]'s mesh index, the one past the demo scene's
+/// four.
+const ATMOSPHERE_MIRROR_MESH: usize = 4;
+
+/// [`Scene::AtmosphereMirror`]'s floor: **one authored quad**, in the plane
+/// `y = 0` and facing `+Y`, [`ATMOSPHERE_MIRROR_FLOOR_SCALE`] on a side.
+///
+/// **Not the demo cube, and that is the fixture rather than a preference.**
+/// `crcbl_shaders::mesh::FACES` gives every face of that cube a vertex colour —
+/// the `+Y` one is green — and `mesh.slang` multiplies it into the albedo, so a
+/// mirror made of it has a green `F0` and reflects a green sky. This scene's
+/// claim is an absolute comparison against a host `SkyView`, so the surface has
+/// to be the neutral one: a white vertex tint, a white material factor, and an
+/// `F0` of exactly one that needs no rounding step modelled on the host.
+///
+/// `double_sided_quad_mesh` is the same construction facing the other way, and
+/// the paragraphs it carries about the cluster's cone and the absent tangents
+/// are this function's too.
+fn atmosphere_mirror_mesh() -> crate::render::scene::MeshDesc<'static> {
+    use crate::shaders::mesh::MeshVertex;
+    use crate::shaders::meshlet::{MeshClusters, Meshlet};
+
+    let range = crate::shaders::mesh::demo_uv_range();
+    let tint = [1.0, 1.0, 1.0, 1.0];
+    let normal = [0.0, 1.0, 0.0];
+    let half = 0.5 * ATMOSPHERE_MIRROR_FLOOR_SCALE;
+    // `crcbl_shaders::mesh`'s `+Y` face corner order, which `0 1 2, 0 2 3`
+    // winds counter-clockwise seen from above.
+    let corners = [
+        [-half, 0.0, half],
+        [half, 0.0, half],
+        [half, 0.0, -half],
+        [-half, 0.0, -half],
+    ];
+    let vertices: Vec<MeshVertex> = corners
+        .iter()
+        .zip(&SPECULAR_QUAD_UV)
+        .map(|(corner, uv)| MeshVertex::from_normal(*corner, normal, tint, *uv, &range))
+        .collect();
+
+    let mut clusters = MeshClusters::default();
+    // `specular_cluster_bounds` already writes the `+Y` axis and the cutoff of
+    // one that a single flat quad in this plane has exactly.
+    let bounds = specular_cluster_bounds(&corners);
+    clusters.clusters.push(
+        Meshlet::new(0, 4, 0, 2, bounds)
+            .unwrap_or_else(|error| unreachable!("four vertices of fixture geometry: {error}")),
+    );
+    clusters.vertices.extend_from_slice(&[0, 1, 2, 3]);
+    clusters.corners.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    clusters
+        .check(vertices.len())
+        .unwrap_or_else(|fault| unreachable!("the fixture's own cluster is in range: {fault}"));
+
+    crate::render::scene::MeshDesc {
+        label: std::borrow::Cow::Borrowed("atmosphere mirror floor"),
+        geometry: crate::render::scene::Geometry::Flat {
+            vertices: std::borrow::Cow::Owned(crate::shaders::mesh::vertex_bytes(&vertices)),
+            uv_range: range,
+            indices: std::borrow::Cow::Owned(vec![0u32, 1, 2, 0, 2, 3]),
+            clusters,
+            // No authored tangents, on `specular_plate_mesh`'s terms.
+            flags: 0,
+        },
+    }
+}
+
+/// The light [`Scene::AtmosphereMirror`] runs under: the atmosphere's own sun
+/// direction, and **no light at all**.
+///
+/// The direction is the sun's so the frame is honest about where its sky's sun
+/// is; the colour and the ambient are zero so nothing in the frame is lit by
+/// it. Both halves are load-bearing: a metallic floor has no diffuse lobe, so
+/// what a non-zero colour would add is the specular gleam of a directional
+/// light — a second bright term on the very floor whose reflection the bands
+/// measure, and one the host would have to model to predict a pixel.
+fn atmosphere_mirror_sun() -> crcbl_render::DirectionalLight {
+    crcbl_render::DirectionalLight {
+        direction: glam::Vec3::from_array(ATMOSPHERE_MIRROR_SUN).normalize(),
+        color: glam::Vec3::ZERO,
+        ambient: glam::Vec3::ZERO,
+    }
+}
+
+/// [`Scene::AtmosphereMirror`]'s material row: the one past the demo scene's
+/// three.
+const ATMOSPHERE_MIRROR_MATERIAL: usize = 3;
+
+/// [`Scene::AtmosphereMirror`]'s scene: the demo scene with
+/// [`atmosphere_mirror_mesh`] appended and one material row after it — a white
+/// conductor at [`ATMOSPHERE_MIRROR_ROUGHNESS`].
+///
+/// White and fully metallic, which is what makes the prediction short: `F0` is
+/// `(1, 1, 1)` exactly, it stores into the `Rgba8Unorm` reflectivity attachment
+/// without a rounding step, and the split-sum's `f0 · scale + bias` is the
+/// table's own energy at that roughness rather than a tint the host would have
+/// to carry through.
+fn atmosphere_mirror_scene() -> crate::render::scene::SceneDesc<'static> {
+    let mut scene = crate::render::scene::demo();
+    scene.meshes.push(atmosphere_mirror_mesh());
+    debug_assert_eq!(
+        scene.meshes.len() - 1,
+        ATMOSPHERE_MIRROR_MESH,
+        "the plate is the mesh past the demo scene's four"
+    );
+    scene.materials.push(crate::shaders::mesh::GpuMaterial {
+        metallic: 1.0,
+        roughness: ATMOSPHERE_MIRROR_ROUGHNESS,
+        ..crate::shaders::mesh::GpuMaterial::UNTINTED
+    });
+    debug_assert_eq!(
+        scene.materials.len() - 1,
+        ATMOSPHERE_MIRROR_MATERIAL,
+        "the conductor is the row past the demo scene's three"
+    );
+    scene
 }
 
 /// [`ssr_forward`] with its floor **fully rough**: the same scene through a
@@ -5601,6 +5868,42 @@ impl SceneState {
                 )?
                 .into()
             }
+            Scene::AtmosphereMirror => {
+                // The floor, and nothing else in the frame — see the variant.
+                // It is a plate of its own rather than the demo cube, for the
+                // reason `atmosphere_mirror_mesh` gives: that cube's faces
+                // carry vertex colours and a green mirror is not what this
+                // fixture is predicting.
+                let mut renderer =
+                    ForwardRenderer::with_scene(device, queue, format, &atmosphere_mirror_scene())?;
+                // **The reflection pair and nothing else.** Shadows have no
+                // caster and no lit surface to fall on; the occlusion pass
+                // scales an ambient term a conductor does not have; the
+                // antialiasing resolve would filter the very gradient the
+                // bands measure. Each of those is a term the host would have
+                // to model to predict a floor pixel, and none of them is what
+                // this frame is about.
+                renderer.set_effect_request(EffectRequest {
+                    camera: RenderEffects::REFLECTIONS,
+                    ..EffectRequest::default()
+                });
+                renderer.set_atmosphere(Some(atmosphere_mirror_sky()));
+                // Authored at its final size, so the instance carries the
+                // identity: a plate whose corners are already world-space is
+                // one fewer transform between the fixture and the host's own
+                // prediction of a reflected ray.
+                place(
+                    &mut renderer,
+                    ATMOSPHERE_MIRROR_MESH,
+                    ATMOSPHERE_MIRROR_MATERIAL,
+                    glam::Mat4::IDENTITY,
+                );
+                Self::Forward {
+                    camera: atmosphere_mirror_camera(),
+                    light: atmosphere_mirror_sun(),
+                    renderer: Box::new(renderer),
+                }
+            }
             Scene::Bloom => {
                 // The floor every other overhead fixture stands on, and the
                 // emitter laid on it — see `bloom_emitter`. Nothing else is in
@@ -7447,7 +7750,30 @@ mod tests {
             before_tonemap..before_tonemap,
             [("render", "bloom-down-1"), ("render", "bloom-composite")],
         );
-        let expected: [(Scene, &[(&str, &str)]); 12] = [
+        // **`Scene::AtmosphereMirror` is the shortest forward frame here**, and
+        // written out rather than derived because what it differs from the cube
+        // list by is most of that list: its request is the reflection pair
+        // alone, so there is no occlusion chain and no resolve, and with the
+        // shadow bit clear the cascades cost no culls — one triple for the
+        // camera and nothing else. `crcbl_render::shadow` still opens its atlas
+        // pass to clear the tiles it will not draw into, which is why `shadow`
+        // is still a row and why deriving this list from `forward_passes` would
+        // have hidden that.
+        let mirror_passes: &[(&str, &str)] = &[
+            ("compute", "clear-counters"),
+            ("compute", "cull"),
+            ("compute", "draw-args"),
+            ("compute", "light-cluster"),
+            ("render", "shadow"),
+            ("render", "depth-prepass"),
+            ("render", "forward"),
+            ("render", "sky"),
+            ("render", "hiz-1"),
+            ("render", "ssr"),
+            ("render", "ssr-blur"),
+            ("render", "tonemap"),
+        ];
+        let expected: [(Scene, &[(&str, &str)]); 13] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -7491,6 +7817,14 @@ mod tests {
             // atlas tile and no cull of its own. The `ssr` pass itself is in
             // every row here — it is not a scene's to opt into.
             (Scene::Ssr, &cube_passes),
+            // The one row whose frame draws a **background**, and the one row
+            // that asks for the reflection pair alone — see the variant, whose
+            // bands are predicted absolutely and so cannot carry an occlusion
+            // term or a resolve. `sky` sits after `forward` and before the
+            // march, which is where `crcbl_render::forward` puts it: a sky
+            // composited after the reflection would be a background the mirror
+            // never saw.
+            (Scene::AtmosphereMirror, mirror_passes),
             // The only row that is not one of the two lists above: every other
             // fixture draws `RenderEffects::DEFAULT_STACK`, which leaves the
             // lens effect out — see that constant, and see `Scene::Bloom` for

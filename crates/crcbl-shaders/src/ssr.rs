@@ -18,11 +18,12 @@
 //!
 //! [`tests::the_shared_screen_space_helpers_have_not_drifted`]: self
 
-/// Bytes of the uniform block: three `float4x4`, two `float4`, and two `uint4`.
+/// Bytes of the uniform block: three `float4x4`, the probe-volume header, the
+/// pyramid row, the three gradient bands and the sun row.
 ///
 /// `std140` gives each row sixteen-byte alignment, so the three matrices, the
 /// probe-volume header and the pyramid row fill the block without tail padding.
-pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE + 16 + 48;
+pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE + 16 + 48 + 16;
 
 /// The roughness at which SSR's sharpness ramp reaches zero, matching
 /// `static const float ROUGHNESS_CUTOFF` in `ssr.slang` — the one shader that
@@ -135,8 +136,24 @@ pub struct SsrParams {
     /// environment a missed ray already fell back to, so this rung arrived
     /// switched off like the ambient half did.
     ///
-    /// **Last in the block**, so no existing member's offset moves.
+    /// On an atmosphere frame these are still filled, with
+    /// [`crate::atmosphere::SkyView::gradient_fit`]'s bands, and they are what
+    /// the pass's *rough* lobes read — see [`Self::atmosphere`].
     pub sky: [[f32; 4]; 3],
+    /// The atmosphere arm: the unit direction towards the sun in `xyz`, and in
+    /// `w` whether this frame's sky is [`crate::atmosphere::SkyView`]'s LUT
+    /// rather than the gradient above.
+    ///
+    /// The same row [`crate::sky::SkyParams::atmosphere`] closes the background
+    /// pass's block with, carrying the same two values —
+    /// [`crate::sky::ATMOSPHERE_OFF`] and [`crate::sky::ATMOSPHERE_ON`] — so
+    /// the mirror and the sky behind it take the same arm. `ssr.slang`'s
+    /// `sky_environment` is what reads it, and the LUT itself arrives as the
+    /// storage buffer `crcbl_render::sky_pass` already keeps per frame.
+    ///
+    /// **Last in the block**, so no existing member's offset moves and a frame
+    /// blessed before an atmosphere existed writes a `w` of exactly zero.
+    pub atmosphere: [f32; 4],
 }
 
 impl SsrParams {
@@ -165,7 +182,7 @@ impl SsrParams {
         // initialised to.
         bytes[at..at + 4].copy_from_slice(&self.hiz_levels.to_le_bytes());
         at += 16;
-        for row in self.sky {
+        for row in self.sky.into_iter().chain([self.atmosphere]) {
             for value in row {
                 bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
                 at += 4;
@@ -173,7 +190,7 @@ impl SsrParams {
         }
         debug_assert_eq!(
             at, PARAMS_SIZE,
-            "the matrices, probe volume, pyramid row and sky fill the block exactly"
+            "the matrices, probe volume, pyramid row, sky and sun fill the block exactly"
         );
         bytes
     }
@@ -563,6 +580,9 @@ mod tests {
         let sky = source
             .find("float4 sky[3];")
             .expect("ssr.slang declares `float4 sky[3];`");
+        let atmosphere = source
+            .find("float4 atmosphere;")
+            .expect("ssr.slang declares `float4 atmosphere;`");
         assert!(
             inv_proj < proj
                 && proj < inv_view
@@ -570,7 +590,8 @@ mod tests {
                 && probe_counts < probe_inv_spacing
                 && probe_inv_spacing < probe_offset
                 && probe_offset < hiz
-                && hiz < sky,
+                && hiz < sky
+                && sky < atmosphere,
             "ssr.slang declares the block in a different order than `to_bytes` writes it"
         );
     }
@@ -605,6 +626,7 @@ mod tests {
                 [17.0, 18.0, 19.0, 20.0],
                 [21.0, 22.0, 23.0, 24.0],
             ],
+            atmosphere: [25.0, 26.0, 27.0, crate::sky::ATMOSPHERE_ON],
         }
         .to_bytes();
 
@@ -624,9 +646,10 @@ mod tests {
         let hiz = probes + crate::probe::PROBE_VOLUME_SIZE;
         assert_eq!(&bytes[hiz..hiz + 4], &3u32.to_le_bytes());
         assert_eq!(&bytes[hiz + 4..hiz + 16], &[0u8; 12]);
-        // And the sky's three rows past it, which is where the block now ends.
+        // And the sky's three rows past it, then the sun row that closes the
+        // block.
         let sky = hiz + 16;
-        for (lane, expected) in (13u32..=24).enumerate() {
+        for (lane, expected) in (13u32..=27).enumerate() {
             let at = sky + lane * 4;
             assert_eq!(
                 &bytes[at..at + 4],
@@ -634,6 +657,11 @@ mod tests {
                 "the sky's lane {lane} at offset {at}"
             );
         }
-        assert_eq!(sky + 48, PARAMS_SIZE);
+        assert_eq!(
+            &bytes[sky + 60..sky + 64],
+            &crate::sky::ATMOSPHERE_ON.to_le_bytes(),
+            "the sun row's `w` is the arm the frame takes"
+        );
+        assert_eq!(sky + 64, PARAMS_SIZE);
     }
 }

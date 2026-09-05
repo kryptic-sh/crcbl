@@ -855,15 +855,15 @@ jobs:
   # anywhere in it, so none of the compositor machinery the demo and probe gates
   # need applies. Headless Chromium plus SwiftShader is the whole environment.
   #
-  # **`--expect-fail ssr,ui` IS A MEASUREMENT, NOT A TOLERANCE.** Nine of the
-  # scenes match SwiftShader's output exactly within
-  # `Tolerance::RASTERISER`. Two do not, and reproduce to the digit across runs:
+  # **`--expect-fail ssr,ui` IS A MEASUREMENT, NOT A TOLERANCE.** Every scene
+  # but two matches SwiftShader's output exactly within
+  # `Tolerance::RASTERISER`. Those two reproduce to the digit across runs:
   # `ssr` at 58 grossly-wrong pixels and ssim 0.988822, `ui` at 506 and ssim
   # 0.983257. They are rasteriser differences rather than backend defects — the
   # same `ssr` scene matches on real hardware with a max channel delta of 9 and
   # zero gross pixels, and its diff is banding confined to the reflection
   # ray-march and the horizon edges, so the geometry and the instancing that a
-  # real regression would break are right. A step reporting 9 of 11 as success
+  # real regression would break are right. A step reporting all but two as success
   # would be worse than no step, so the two are excused *by name*: they still
   # render, still compare, still print their numbers every run, and
   # `web/tools/render-harness-verdict.mjs` fails this job the moment either one
