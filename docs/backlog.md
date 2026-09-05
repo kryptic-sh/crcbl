@@ -4198,6 +4198,19 @@ duplicated shape.
 
 ## Surprises worth keeping — not bugs
 
+### Four mesh readbacks on the Windows lavapipe leg stayed Pending past 30 s (2026-09-05)
+
+`vk e2e (lavapipe, windows)` went red on `e9e0283` with
+`draw_gen::every_geometry_path_draws_the_same_frame` and three `mesh::` tests
+each panicking in `Headless::readback` after the harness's 30 s deadline — "the
+196608-byte readback was still Pending" — on a push that touched nothing under
+`crates/crcbl-vk`, `crates/crcbl-shaders` or the harness. A rerun of the failed
+job alone was green. Four tests in a row hitting the same deadline on a shared
+software rasteriser is the shape of a starved runner rather than a lost copy,
+and the harness's message already says which. Worth keeping because the failure
+names the mesh-shader tests and reads as a regression in them; the diagnosis is
+the diff, and the remedy is `gh run rerun --failed`.
+
 ### `--document-private-items` does not license a link to a private item (2026-09-04)
 
 rustdoc's own note on `private_intra_doc_links` reads "this link will resolve
