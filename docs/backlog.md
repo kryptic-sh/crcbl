@@ -26139,6 +26139,47 @@ reach, which is the real coupling.
 outline it: per-cluster error figures, a light's name beside its reach, a
 joint's index on a skeleton. Nothing shipping.
 
+## The Windows lavapipe vk e2e job reds in bursts of readback timeouts (2026-09-06)
+
+**Three times now, on three unrelated commits, and every time a rerun of the one
+job was green.** `vk e2e (lavapipe, windows)` fails a handful of
+`crcbl-vk::vk_e2e mesh::*` tests with `harness.rs`'s readback deadline — "the
+196608-byte readback was still Pending after 30.0s, past the 30s this polls for"
+— while the same suite passes on the Linux lavapipe leg of the same run and on
+both local drivers. The failing job runs about half as long as a green one (five
+minutes against ten), which is the shape of a starved runner rather than a slow
+one: the tests that red are the frame-sized readbacks, and the copies simply
+never complete inside the deadline. Seen once before 2026-09-05, on `03830d0`
+(eight tests) and on `e17f0df` (four tests):
+
+- `the_mesh_dispatch_extent_is_the_culled_instance_count`
+- `the_mesh_shader_path_matches_the_indirect_path_s_golden`
+- `the_shadow_cascades_select_coarser_than_the_camera`
+- `the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is`
+
+**What is known and what is not.** Verified: the log carries no validation line,
+no panic other than the deadline, and the run's other GPU jobs are green; the
+job's duration is the only measurable difference from a green run. Not verified:
+what starves it. `READBACK_DEADLINE` in
+`crates/crcbl-vk/tests/vk_e2e/harness.rs` is 30 s per readback, and a lavapipe
+frame at 256×192 through the mesh path takes well under a second on an idle
+runner, so a 30 s stall is not the frame — it is the runner. Nothing here says
+whether the hosted Windows image throttles, whether another job on the same VM
+competes, or whether `poll_readback` on the Windows lavapipe ICD can lose a
+fence under load.
+
+**Options, and none is taken yet.** (1) Raise the deadline for that leg alone —
+cheap, but a longer wait on a starved runner is still a wait, and the deadline
+exists so a hung copy is reported rather than sat on. (2) Retry the
+readback-timeout tests once inside the job (nextest's `retries` for that
+profile) — turns a burst into a slow green, at the cost of hiding a real hang
+behind one retry. (3) Read the runner's load in the job (`Get-Counter` processor
+time before the suite) and print it beside the summary, so the next red carries
+the evidence this entry lacks. (3) costs nothing and decides between (1) and
+(2); it is the one to do first. Until then the answer is
+`gh run rerun <id> --failed`, and a fourth burst without (3) in place is a
+fourth guess.
+
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
 `r_debug_draw` is a single `bool`, while `docs/plan/07-ui-debug.md` item 5's
