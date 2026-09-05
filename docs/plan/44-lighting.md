@@ -219,13 +219,16 @@ Two consequences worth stating before somebody meets them:
 The lobe above is a physically based BRDF and the rest of the frame is built to
 match it — linear HDR from the first pass, a tonemap that maps scene-referred
 radiance to display, and a metallic-roughness row whose two factors mean what
-glTF says they mean. **The BRDF is not this engine's PBR gap.** What separates
-it from a current engine's look is that the BRDF's _inputs_ are constants, that
-it loses energy at high roughness, and that it has no environment to reflect —
-three rungs, each independently landable, in the order their benefit per unit of
-work falls.
+glTF says they mean. **The BRDF is not this engine's PBR gap.** What separated
+it from a current engine's look on 2026-08-27 was that the BRDF's _inputs_ were
+constants, that it lost energy at high roughness, and that it had no environment
+to reflect — rungs ordered by their benefit per unit of work. The energy is back
+(rung 1, 2026-08-27) and the gradient sky is reflected through the split-sum
+(rung 3, 2026-08-29); the rungs below keep the decisions each was built on.
+Still open: rung 2's remaining pages and alpha modes, which
+[43-render-standards.md](43-render-standards.md)'s §2 carries, and rung 4.
 
-### Rung 1 — Multi-scatter energy compensation
+### Rung 1 — Multi-scatter energy compensation — landed 2026-08-27
 
 A single-scatter GGX lobe accounts for light that bounces off the microsurface
 **once**. Everything that bounces twice or more is dropped, and the share
@@ -269,9 +272,11 @@ exactly as `spirv/manifest.txt` compares a compiled shader — where the same
 arithmetic evaluated per fragment is four platforms' `pow` disagreeing in the
 last place.
 
-**Blocked on nothing.** The term needs `f0`, roughness and `N·V`, and
-`fragmentMain` holds all three before it enters the light loop. This rung can
-land before rung 3 and hand rung 3 a `DFG` table that already exists.
+**Where it lives.** `crcbl_shaders::dfg::energy_compensation` is the host
+mirror, `tables/dfg.bin` the committed table, and `mesh.slang`'s
+`specular_compensation` scales the specular sum by it once the light loop has
+run — the diffuse term is left alone, since what the lobe dropped left the
+surface as specular. Rung 3 reads the same table for its scale-and-bias pair.
 
 ### Rung 2 — The inputs: a texture set, and its colour space
 
@@ -311,7 +316,7 @@ rather than of the material asset:
   divided out, so rung 4 has nothing to read yet; that is `docs/backlog.md`'s
   and it is the same change as the MRO page's roughness channel.
 
-### Rung 3 — Specular IBL by the split-sum approximation
+### Rung 3 — Specular IBL by the split-sum approximation — landed 2026-08-29
 
 [43-render-standards.md](43-render-standards.md)'s §5 states the gap: L1
 irradiance answers a diffuse question, and a rough metal needs prefiltered
