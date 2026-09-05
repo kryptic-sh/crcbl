@@ -196,17 +196,36 @@ golden of their own and a button on the page. What is still **not** done:
   which case the test refuses the run rather than passing it, which is the
   failure mode to expect. Widening it wants either a pose that sees more of that
   pavement or a caster placed for it.
-- **The viewer is exercised over one subdivided cell, at one level.**
-  `the_atlas_view_borders_a_subdivided_slot_at_its_own_size` (2026-09-05) draws
-  a spot demoted by `SUBDIVIDED_CAMERA_UP` and reads the border on the
-  quarter-cell's far edges — which are interior to its root cell, where a grid
-  drawn on whole cells leaves grey — and the absence of one on the root cell's
-  own far edges, so the two viewers are told apart. What is still nobody's claim
-  is the rest of `atlas::TILE_LEVELS`' ladder: only a quarter of a cell is ever
-  drawn, so a sixteenth or a `MIN_TILE` tile — a handful of frame pixels a side
-  at the fixture's extent, against a `BORDER_PIXELS` border on each edge — is
-  bordered by nothing anybody has looked at. The check's own width guard is what
-  would refuse such a frame rather than pass it.
+- **The viewer is read at every rung of the ladder, but on one map at a time
+  (2026-09-05).** `the_atlas_view_borders_a_subdivided_slot_at_its_own_size`
+  loops over every level of `atlas::TILE_LEVELS` below a whole cell, a frame per
+  rung: `subdivided_camera_up` scales the eye's distance from
+  `SUBDIVIDED_CAMERA_UP` by a power of two per rung — which is the ladder's own
+  geometry, since coverage divides by that distance — and each frame's rectangle
+  is asserted to be that rung's own texel side before a pixel is read through
+  it, so a rung either side of the one drawn for is refused rather than read
+  under its name. Faults are collected per level and asserted once, so a red run
+  prints every rung. Measured identical on radv and lavapipe, three runs each:
+  `24`, `12` and `6` frame pixels a side, the border tint at `147.0` on each
+  map's own far edges and `0.0` at every pixel held clear of one, the root
+  cell's own edges included.
+  - **Nothing was held back and the width guard was not loosened.** At
+    `MESH_EXTENT` the finest rung — `atlas::MIN_TILE`, six frame pixels a side
+    against a `BORDER_PIXELS` border on each edge — clears the guard by the
+    least margin it admits: the border leaves a 2×2 block in the middle and the
+    centre reading sits half a pixel clear of the tint. A smaller frame, a wider
+    border or a deeper ladder puts that rung under the guard, and the guard then
+    refuses the level rather than the level loosening the guard. `MESH_EXTENT`
+    is one constant shared by every check in the suite rather than a per-test
+    parameter, so drawing a rung larger would move every other frame in it.
+  - **Still one map per frame.** Every rung's scene lights one shadowable light
+    and the check asserts exactly one occupied light slot, so the case nobody
+    reads is **two maps of different levels inside the same root cell** — which
+    `AtlasAllocator` can hand out. The border loop's per-slot containment test
+    is therefore exercised against empty slots and the cascades, never against a
+    second subdivided neighbour whose own border sits a few pixels away. Closing
+    it wants a second shadowable light whose coverage lands on a different rung
+    of the same root: a fixture change, not another arm of this loop.
 - **Subdivision is the coverage ladder's doing, not the allocator running out.**
   Recorded because the entry this replaces said the opposite: a scene with more
   shadowed lights than the atlas has root cells subdivides nothing.

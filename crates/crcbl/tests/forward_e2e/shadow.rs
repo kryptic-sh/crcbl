@@ -1658,37 +1658,61 @@ fn the_atlas_view_draws_the_stored_depth_and_borders_the_slots_that_hold_a_map()
 // `shadow::tile_level` says its coverage does not earn a whole one, and
 // `atlas_view.slang`'s border loop reads each slot's own
 // `FrameUniforms::shadow_atlas_rect` so the border lands on that map's real
-// edges. The scene below is the first in this module to lay one out.
+// edges. The scene below is the first in this module to lay one out, and it
+// lays one out at every rung of `atlas::TILE_LEVELS`' ladder below a whole
+// cell rather than at the first of them.
 
 /// Where the spot that earns a subdivided tile hangs: over the box, aimed
 /// straight down at its floor.
 ///
 /// Inside the scene rather than out beside the camera, so the map in the
-/// quarter cell is a map of this box. What demotes it is the **camera's**
+/// subdivided cell is a map of this box. What demotes it is the **camera's**
 /// distance, which is the term `shadow::coverage` divides by.
 const SUBDIVIDED_SPOT_AT: crcbl::math::Vec3 = crcbl::math::Vec3::new(0.0, 1.2, 0.0);
 
-/// How far above the box that scene's camera stands.
+/// How far above the box that scene's camera stands to halve the spot's tile
+/// exactly once — the ladder's first rung below a whole cell, and the anchor
+/// [`subdivided_camera_up`] derives every other rung from.
 ///
 /// **Swept before it was fixed.** A light's coverage is its map's extent over
 /// its distance from the eye, so with the cone below fixed this height alone
 /// decides which rung of `shadow::tile_level`'s ladder the spot lands on. The
-/// level is host arithmetic — no adapter is in it — and this is what
-/// `Selection::atlas_rect` answered for this scene's light at each height:
+/// level is host arithmetic — no adapter is in it — so the sweep is a walk of
+/// the height with `Selection::atlas_rect` read at each step, and these are the
+/// bands it answered with for this scene's light:
 ///
-/// | height  | the tile the spot is given |
-/// | ------- | -------------------------- |
-/// | `10.64` | a whole root cell          |
-/// | `10.66` | a quarter of one           |
-/// | `14.5`  | a quarter of one           |
-/// | `20.08` | a quarter of one           |
-/// | `20.10` | a sixteenth                |
+/// | height             | the tile the spot is given |
+/// | ------------------ | -------------------------- |
+/// | below `10.646`     | a whole root cell          |
+/// | `10.646`–`20.085`  | its side halved            |
+/// | `20.085`–`38.969`  | halved again               |
+/// | `38.969` and above | `atlas::MIN_TILE`          |
 ///
-/// so the band that halves the tile exactly once runs from just under `10.66`
-/// to just over `20.08`. This stands at the geometric middle of the two
-/// distances, which is the middle of the band: the ladder's rungs are a
-/// geometric series, so that is where the margin either way is equal.
+/// **Every boundary is twice the one before it**, which is the whole of
+/// [`subdivided_camera_up`]'s argument: a rung is a halving of the coverage a
+/// map must reach, and coverage divides by this distance. This height stands at
+/// the geometric middle of the first band, which is where the margin either way
+/// is equal.
 const SUBDIVIDED_CAMERA_UP: f32 = 14.5;
+
+/// How far above the box the camera stands to land the spot on `level` of
+/// `shadow::tile_level`'s ladder.
+///
+/// Derived from [`SUBDIVIDED_CAMERA_UP`] rather than swept once per level, and
+/// that constant's own sweep is the evidence the derivation is the ladder's:
+/// doubling the eye's distance from the light halves the coverage, which is
+/// exactly one rung. The anchor sits at the middle of its band, so scaling its
+/// distance by the same powers of two lands in the middle of every other band —
+/// and the check below reads the rung the allocator actually gave back rather
+/// than trusting this, so a height that came out on the wrong one is refused
+/// instead of read as that rung's evidence.
+///
+/// The eye is straight above [`SUBDIVIDED_SPOT_AT`], so the height and the
+/// distance differ by the light's own, and it is the distance that scales.
+fn subdivided_camera_up(level: usize) -> f32 {
+    let rungs = i32::try_from(level).expect("a ladder of TILE_LEVELS rungs counts in an i32");
+    SUBDIVIDED_SPOT_AT.y + (SUBDIVIDED_CAMERA_UP - SUBDIVIDED_SPOT_AT.y) * 2.0f32.powi(rungs - 1)
+}
 
 /// The cone [`SUBDIVIDED_CAMERA_UP`] demotes.
 ///
@@ -1708,24 +1732,24 @@ fn subdivided_spot() -> crcbl::render::Light {
     })
 }
 
-/// A camera straight down over the box from [`SUBDIVIDED_CAMERA_UP`].
+/// A camera straight down over the box from [`subdivided_camera_up`] of `level`.
 ///
 /// Not [`overhead_camera`] lifted: that one keeps `up` at `+Y` while looking
 /// very nearly down `-Y`, which is a basis two parallel vectors cannot span once
 /// the eye is this far off the floor. `+Z` is the up every straight-down camera
 /// in this module takes — see [`spot_camera`].
-fn subdivided_camera() -> crcbl::render::Camera {
+fn subdivided_camera(level: usize) -> crcbl::render::Camera {
     crcbl::render::Camera {
-        eye: BOX_AT + crcbl::math::Vec3::new(0.0, SUBDIVIDED_CAMERA_UP, 0.0),
+        eye: BOX_AT + crcbl::math::Vec3::new(0.0, subdivided_camera_up(level), 0.0),
         target: BOX_AT,
         up: crcbl::math::Vec3::Z,
         projection: crcbl::render::Projection::default(),
     }
 }
 
-/// The atlas viewer over a frame whose one shadowed light was given a quarter
-/// of a root cell.
-fn render_subdivided_atlas_view() -> ShadowFrame {
+/// The atlas viewer over a frame whose one shadowed light was given `level` of
+/// the ladder's tile — a halving of a root cell's side per level.
+fn render_subdivided_atlas_view(level: usize) -> ShadowFrame {
     let prepare = |renderer: &mut crcbl::render::ForwardRenderer| {
         crate::mesh_scene::place(
             renderer,
@@ -1738,7 +1762,7 @@ fn render_subdivided_atlas_view() -> ShadowFrame {
     };
     render_scene(&ShadowScene {
         prepare: &prepare,
-        camera: subdivided_camera(),
+        camera: subdivided_camera(level),
         sun: crcbl::render::DirectionalLight {
             direction: sun(1.0),
             ..crcbl::render::DirectionalLight::default()
@@ -1747,24 +1771,68 @@ fn render_subdivided_atlas_view() -> ShadowFrame {
     })
 }
 
-/// A whole root cell as the uniform block spells a rectangle: `TileRect::to_uv`
-/// of a tile of `TILE` texels, on each axis of the atlas.
+/// The map at `rect` back in atlas texels: the side of it on each axis.
 ///
-/// What the anti-vacuity assertion below compares against, and the reason it is
-/// derived here rather than written down: the block carries fractions of the
-/// atlas, so the size of a cell in it moves with both `TILE` and
-/// `atlas_extent`.
-fn whole_cell_rect() -> (f32, f32) {
+/// `TileRect::to_uv`'s divide run backwards, and a texel count rather than the
+/// fraction the block carries because a texel count **names the rung**: level
+/// `n` of the ladder is `TILE` halved `n` times, so a map that landed a rung
+/// either side of the one its camera height was derived for reads as a
+/// different number here rather than as one more small fraction. That is what
+/// the anti-vacuity assertion below compares, and deriving it rather than
+/// writing it down is what keeps it true when `TILE` or `atlas_extent` moves.
+///
+/// Two axes even though a tile is square in texels, because the *atlas* need
+/// not be and the rectangle carries a fraction of each: a pair that disagrees
+/// is a rectangle no allocation could have produced.
+fn tile_side(rect: [f32; 4]) -> (u32, u32) {
     let (width, height) = crcbl::render::shadow::atlas_extent();
     #[expect(
         clippy::cast_precision_loss,
-        reason = "an atlas extent is a few thousand texels and a tile's side is inside it"
+        reason = "an atlas extent is a few thousand texels"
     )]
-    let cell = (
-        crcbl::render::shadow::TILE as f32 / width as f32,
-        crcbl::render::shadow::TILE as f32 / height as f32,
+    let extent = (width as f32, height as f32);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a fraction of the atlas back in texels is a count inside that extent"
+    )]
+    let side = (
+        (rect[0] * extent.0).round() as u32,
+        (rect[1] * extent.1).round() as u32,
     );
-    cell
+    side
+}
+
+/// Which root cell of the grid the map at `rect` was subdivided out of: the one
+/// [`tile_origin`] puts the rectangle's corner in.
+///
+/// A quadtree's roots are those cells, so this is where a viewer that borders
+/// whole cells would draw instead — which is why the check below reads this
+/// cell's own far edges and holds them clear of the tint.
+fn root_cell_of(rect: [f32; 4]) -> usize {
+    let (atlas_width, atlas_height) = crcbl::render::shadow::atlas_extent();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "an atlas extent is a few thousand texels"
+    )]
+    let extent = (atlas_width as f32, atlas_height as f32);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the rectangle is inside the atlas, so its corner is inside the grid"
+    )]
+    let (column, row) = {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a tile's side is a few hundred texels"
+        )]
+        let side = crcbl::render::shadow::TILE as f32;
+        (
+            (rect[2] * extent.0 / side) as usize,
+            (rect[3] * extent.1 / side) as usize,
+        )
+    };
+    row * crcbl::render::shadow::ATLAS_COLUMNS as usize + column
 }
 
 /// Where the map whose rectangle is `rect` is drawn in the frame:
@@ -1823,20 +1891,21 @@ fn slot_covering(
 }
 
 /// **The viewer borders a map the allocator subdivided at the map's own size,
-/// not at its root cell's.**
+/// not at its root cell's — at every size the ladder hands out.**
 ///
 /// [`the_atlas_view_draws_the_stored_depth_and_borders_the_slots_that_hold_a_map`]
 /// reads two whole root cells, so every border it looks at falls on
 /// [`tile_origin`]'s grid and a viewer that never read
-/// `FrameUniforms::shadow_atlas_rect` would pass it. This frame is the one that
-/// tells the two apart: its spot stands [`SUBDIVIDED_CAMERA_UP`] from the eye,
-/// which is the middle of the band `shadow::tile_level` gives a quarter of a
-/// cell, so the map is bordered inside a cell rather than around one.
+/// `FrameUniforms::shadow_atlas_rect` would pass it. This is the check that
+/// tells the two apart, and it draws **a frame per rung of `atlas::TILE_LEVELS`'
+/// ladder below a whole cell**: the spot stands at [`subdivided_camera_up`] of
+/// the level, so its map is bordered inside a cell rather than around one, at a
+/// side halved once, halved again, and down to `atlas::MIN_TILE`.
 ///
 /// Every reading is placed off the rectangle [`ShadowFrame::rects`] carries:
 ///
-/// * the quarter's far edges, which lie in the *middle* of its root cell, must
-///   be the border tint;
+/// * the map's far edges, which lie in the *middle* of its root cell, must be
+///   the border tint;
 /// * its own centre must not be, or a viewer that filled the tile amber would
 ///   answer the first reading too;
 /// * a pixel past its far edge must not be, which is what says the border stops
@@ -1844,14 +1913,28 @@ fn slot_covering(
 /// * and the root cell's own far edges must not be — that is the reading a
 ///   viewer bordering whole cells draws, and this one may not.
 ///
-/// **Anti-vacuity.** The rectangle is asserted smaller than a whole root cell
-/// before anything is read through it, so a frame whose maps all took whole
-/// cells fails here rather than passing by reading a cell's edge under another
-/// name; the tile is asserted wider than the border it draws on both sides, so
-/// the centre reading is a pixel the border does not reach; and each pixel
-/// asserted clear of the tint outside the map is asserted to lie in no slot's
-/// rectangle at all, so it cannot be a neighbouring map's border read as this
-/// one's absence.
+/// **Anti-vacuity.** The rectangle's side in atlas texels is asserted to be the
+/// one this level names before anything is read through it, so a frame whose
+/// maps all took whole cells fails here rather than passing by reading a cell's
+/// edge under another name — and so does one that landed a rung either side of
+/// the height it was drawn for, which no "smaller than a cell" comparison could
+/// tell from the rung that was asked for. The tile is asserted wider than the
+/// border it draws on both sides, so the centre reading is a pixel the border
+/// does not reach; and each pixel asserted clear of the tint outside the map is
+/// asserted to lie in no slot's rectangle at all, so it cannot be a
+/// neighbouring map's border read as this one's absence.
+///
+/// **No rung is held back for being too small to read.** At [`MESH_EXTENT`]
+/// every one of them clears that width guard — the finest by the least margin
+/// the guard admits, its centre pixel half a pixel clear of the border — and
+/// the run prints each level's size in frame pixels beside its readings. A
+/// smaller frame or a deeper ladder would put the finest rung under the guard,
+/// and it is the guard that would refuse the level rather than the level that
+/// loosens the guard.
+///
+/// **A red run prints every rung.** The readings are collected as faults per
+/// level and asserted once at the end, so the first level that fails is not one
+/// that hides what the levels after it did.
 ///
 /// **No atlas readback.** What this check reads is the rectangle the block
 /// carries and the pixels the pass drew, neither of which is a depth — so unlike
@@ -1875,147 +1958,164 @@ fn slot_covering(
 /// cell's rectangle, the centre and the outside readings moved onto and off the
 /// map, and a second shadowed light in the scene, each refused by the guard
 /// written for it.
+///
+/// **Each rung reds on its own axis**, and both sabotages were run on radv with
+/// the loop in place, which is what says the per-level faults are collected
+/// rather than the first of them ending the run. [`subdivided_camera_up`] made
+/// to answer level 0's height whatever level it is asked for:
+///
+/// > level 1: slot 2's rectangle [0.25, 0.25, 0.5, 0.0] is (768, 768) texels a
+/// > side where this rung of the ladder is 384 — so the spot was not demoted
+/// > the way subdivided_camera_up derives, and every reading below would be
+/// > reading another rung under this one's name
+///
+/// with the same line for levels 2 and 3 against `192` and `96`. And the two
+/// border readings moved onto the root cell's rectangle, which is the reading
+/// a viewer that borders whole cells would satisfy:
+///
+/// > level 3: the map's right edge at (175, 24) is not the border tint, so the
+/// > viewer is not bordering the rectangle the block carries — this pixel is in
+/// > the middle of root cell 2, which a grid drawn on whole cells leaves grey
+///
+/// again on every level and on both of the map's edges, six lines in one panic.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn the_atlas_view_borders_a_subdivided_slot_at_its_own_size() {
-    let viewed = render_subdivided_atlas_view();
-
-    // The light region's occupied slots. This scene lights one shadowable light,
-    // so there is one — and finding it here rather than naming a slot is what
-    // keeps the check on the allocator's answer instead of on a guess at it.
-    let held: Vec<usize> = (crcbl::render::shadow::CASCADES..crcbl::render::shadow::TILES)
-        .filter(|slot| viewed.rects[*slot][0] > 0.0)
-        .collect();
-    assert_eq!(
-        held.len(),
-        1,
-        "{count} slots of the light region hold a map, and this check is written for the one \
-         this scene's spot earns: {rects:?}",
-        count = held.len(),
-        rects = viewed.rects,
-    );
-    let slot = held[0];
-    let rect = viewed.rects[slot];
-    let cell = whole_cell_rect();
-    assert!(
-        rect[0] < cell.0 && rect[1] < cell.1,
-        "slot {slot}'s rectangle {rect:?} is a whole root cell of the atlas, which is {cell:?} \
-         in these units — so the ladder gave this scene's spot no halving and every reading \
-         below would be reading the grid again"
-    );
-
-    let (x, y, width, height) = slot_on_screen(rect);
-    // The cell the allocator subdivided: the one `tile_origin` puts this
-    // rectangle's corner in.
-    let root = {
-        let (atlas_width, atlas_height) = crcbl::render::shadow::atlas_extent();
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "an atlas extent is a few thousand texels"
-        )]
-        let extent = (atlas_width as f32, atlas_height as f32);
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "the rectangle is inside the atlas, so its corner is inside the grid"
-        )]
-        let (column, row) = {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "a tile's side is a few hundred texels"
-            )]
-            let side = crcbl::render::shadow::TILE as f32;
-            (
-                (rect[2] * extent.0 / side) as usize,
-                (rect[3] * extent.1 / side) as usize,
-            )
-        };
-        row * crcbl::render::shadow::ATLAS_COLUMNS as usize + column
-    };
-    let (cell_x, cell_y, cell_width, cell_height) = cell_on_screen(root);
-
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "the border is a couple of pixels wide"
     )]
     let border = crcbl::shaders::atlas_view::BORDER_PIXELS as u32;
-    assert!(
-        width > 2 * border && height > 2 * border,
-        "the subdivided map is {width}x{height} pixels of the frame, which the border drawn on \
-         both of its sides covers entirely — the centre reading below would be a border pixel \
-         and could not say the tile is not simply filled"
-    );
 
-    let bordered = [
-        ("the map's right edge", (x + width - 1, y + height / 2)),
-        ("the map's bottom edge", (x + width / 2, y + height - 1)),
-    ];
-    let centre = (x + width / 2, y + height / 2);
-    let outside = [
-        (
-            "just past the map's right edge",
-            (x + width + border, y + height / 2),
-        ),
-        (
-            "the root cell's right edge",
-            (cell_x + cell_width - 1, cell_y + cell_height / 2),
-        ),
-        (
-            "the root cell's bottom edge",
-            (cell_x + cell_width / 2, cell_y + cell_height - 1),
-        ),
-    ];
-    eprintln!(
-        "{suite}: shadow — the atlas is drawn at {view:?}; slot {slot} holds {rect:?}, which is \
-         {width}x{height} pixels at ({x}, {y}) inside root cell {root}'s {cell:?}. The map's \
-         edges lead red over blue by {right:.1} at {right_at:?} and {bottom:.1} at \
-         {bottom_at:?}; its centre {centre:?} by {middle:.1}, and {outside:?}",
-        suite = crate::SUITE,
-        view = atlas_on_screen(),
-        cell = (cell_x, cell_y, cell_width, cell_height),
-        right = tint_at(&viewed.image, bordered[0].1),
-        right_at = bordered[0].1,
-        bottom = tint_at(&viewed.image, bordered[1].1),
-        bottom_at = bordered[1].1,
-        middle = tint_at(&viewed.image, centre),
-        outside = outside.map(|(name, at)| (name, at, tint_at(&viewed.image, at))),
-    );
+    let mut faults = Vec::new();
+    // Level 0 is a whole root cell, which the check above already reads at two
+    // of them; what this one is for is every rung under it.
+    for level in 1..crcbl::render::shadow::TILE_LEVELS {
+        let viewed = render_subdivided_atlas_view(level);
 
-    for (name, at) in bordered {
-        assert!(
-            tint_at(&viewed.image, at) > ATLAS_BORDER_LEVELS,
-            "{name} at {at:?} is not the border tint, so the viewer is not bordering the \
-             rectangle the block carries — this pixel is in the middle of root cell {root}, \
-             which a grid drawn on whole cells leaves grey"
+        // The light region's occupied slots. This scene lights one shadowable
+        // light, so there is one — and finding it here rather than naming a slot
+        // is what keeps the check on the allocator's answer instead of on a
+        // guess at it.
+        let held: Vec<usize> = (crcbl::render::shadow::CASCADES..crcbl::render::shadow::TILES)
+            .filter(|slot| viewed.rects[*slot][0] > 0.0)
+            .collect();
+        if held.len() != 1 {
+            faults.push(format!(
+                "level {level}: {count} slots of the light region hold a map, and this check is \
+                 written for the one this scene's spot earns: {rects:?}",
+                count = held.len(),
+                rects = viewed.rects,
+            ));
+            continue;
+        }
+        let slot = held[0];
+        let rect = viewed.rects[slot];
+        let side = tile_side(rect);
+        let wanted = crcbl::render::shadow::TILE >> level;
+        if side != (wanted, wanted) {
+            faults.push(format!(
+                "level {level}: slot {slot}'s rectangle {rect:?} is {side:?} texels a side where \
+                 this rung of the ladder is {wanted} — so the spot was not demoted the way \
+                 subdivided_camera_up derives, and every reading below would be reading another \
+                 rung under this one's name"
+            ));
+            continue;
+        }
+
+        let (x, y, width, height) = slot_on_screen(rect);
+        let root = root_cell_of(rect);
+        let (cell_x, cell_y, cell_width, cell_height) = cell_on_screen(root);
+
+        if width <= 2 * border || height <= 2 * border {
+            faults.push(format!(
+                "level {level}: the subdivided map is {width}x{height} pixels of the frame, \
+                 which the border drawn on both of its sides covers entirely — the centre \
+                 reading below would be a border pixel and could not say the tile is not simply \
+                 filled"
+            ));
+            continue;
+        }
+
+        let bordered = [
+            ("the map's right edge", (x + width - 1, y + height / 2)),
+            ("the map's bottom edge", (x + width / 2, y + height - 1)),
+        ];
+        let centre = (x + width / 2, y + height / 2);
+        let outside = [
+            (
+                "just past the map's right edge",
+                (x + width + border, y + height / 2),
+            ),
+            (
+                "the root cell's right edge",
+                (cell_x + cell_width - 1, cell_y + cell_height / 2),
+            ),
+            (
+                "the root cell's bottom edge",
+                (cell_x + cell_width / 2, cell_y + cell_height - 1),
+            ),
+        ];
+        eprintln!(
+            "{suite}: shadow — the atlas is drawn at {view:?}; at level {level} slot {slot} holds \
+             {rect:?}, which is {width}x{height} pixels at ({x}, {y}) inside root cell {root}'s \
+             {cell:?}. The map's edges lead red over blue by {right:.1} at {right_at:?} and \
+             {bottom:.1} at {bottom_at:?}; its centre {centre:?} by {middle:.1}, and {outside:?}",
+            suite = crate::SUITE,
+            view = atlas_on_screen(),
+            cell = (cell_x, cell_y, cell_width, cell_height),
+            right = tint_at(&viewed.image, bordered[0].1),
+            right_at = bordered[0].1,
+            bottom = tint_at(&viewed.image, bordered[1].1),
+            bottom_at = bordered[1].1,
+            middle = tint_at(&viewed.image, centre),
+            outside = outside.map(|(name, at)| (name, at, tint_at(&viewed.image, at))),
         );
+
+        for (name, at) in bordered {
+            if tint_at(&viewed.image, at) <= ATLAS_BORDER_LEVELS {
+                faults.push(format!(
+                    "level {level}: {name} at {at:?} is not the border tint, so the viewer is \
+                     not bordering the rectangle the block carries — this pixel is in the middle \
+                     of root cell {root}, which a grid drawn on whole cells leaves grey"
+                ));
+            }
+        }
+        if slot_covering(&viewed.rects, centre) == Some(slot) {
+            if tint_at(&viewed.image, centre).abs() >= ATLAS_BORDER_LEVELS {
+                faults.push(format!(
+                    "level {level}: the middle of the subdivided map at {centre:?} carries the \
+                     border tint, so the viewer filled the tile rather than bordering it and the \
+                     edge readings above say nothing"
+                ));
+            }
+        } else {
+            faults.push(format!(
+                "level {level}: the centre reading at {centre:?} is not inside slot {slot}'s own \
+                 rectangle, so it cannot say whether the viewer filled the tile"
+            ));
+        }
+        for (name, at) in outside {
+            if slot_covering(&viewed.rects, at).is_some() {
+                faults.push(format!(
+                    "level {level}: {name} at {at:?} is inside a slot's rectangle, so this scene \
+                     is not the fixture the reading below needs: {rects:?}",
+                    rects = viewed.rects,
+                ));
+                continue;
+            }
+            if tint_at(&viewed.image, at).abs() >= ATLAS_BORDER_LEVELS {
+                faults.push(format!(
+                    "level {level}: {name} at {at:?} carries the border tint, and no map was \
+                     laid out there — so the viewer is drawing the grid's own cells rather than \
+                     the rectangles the block carries, which is exactly the picture a subdivided \
+                     cell must not produce"
+                ));
+            }
+        }
     }
-    assert_eq!(
-        slot_covering(&viewed.rects, centre),
-        Some(slot),
-        "the centre reading at {centre:?} is not inside slot {slot}'s own rectangle, so it \
-         cannot say whether the viewer filled the tile"
-    );
-    assert!(
-        tint_at(&viewed.image, centre).abs() < ATLAS_BORDER_LEVELS,
-        "the middle of the subdivided map at {centre:?} carries the border tint, so the viewer \
-         filled the tile rather than bordering it and the edge readings above say nothing"
-    );
-    for (name, at) in outside {
-        assert_eq!(
-            slot_covering(&viewed.rects, at),
-            None,
-            "{name} at {at:?} is inside a slot's rectangle, so this scene is not the fixture \
-             the reading below needs: {rects:?}",
-            rects = viewed.rects,
-        );
-        assert!(
-            tint_at(&viewed.image, at).abs() < ATLAS_BORDER_LEVELS,
-            "{name} at {at:?} carries the border tint, and no map was laid out there — so the \
-             viewer is drawing the grid's own cells rather than the rectangles the block \
-             carries, which is exactly the picture a subdivided cell must not produce"
-        );
-    }
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 
 // ---------------------------------------------------------------------------
