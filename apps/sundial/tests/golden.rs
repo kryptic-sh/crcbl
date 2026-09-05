@@ -91,6 +91,23 @@ const BLOCK: (u32, u32) = (2, 2);
 // Rendering
 // ---------------------------------------------------------------------------
 
+/// Which of the plaza's poses an arm is drawn from.
+///
+/// An enum and not a pair of flags: a pose is one choice, and two booleans would
+/// let an arm ask for two cameras at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pose {
+    /// [`plaza::fixed_camera`] — the fixture pose every golden is blessed from
+    /// and every constant in this file was swept on.
+    Fixed,
+    /// [`plaza::counter_camera`] — where the penumbra ladder is read, and the
+    /// only pose PCSS's estimate is unclamped at.
+    Counters,
+    /// [`plaza::pavement_camera`] — the second pose the two pavement claims are
+    /// read from, the contact pair and the cascade walk alike.
+    Pavement,
+}
+
 /// One arm of a comparison: which effects, which filter, which seam, which tick
 /// of the clock and which pose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,9 +125,8 @@ struct Arm {
     split_permille: Option<u32>,
     /// Which tick of the scripted clock the sun stands at.
     tick: u64,
-    /// Whether the frame is taken from [`plaza::counter_camera`] rather than
-    /// [`plaza::fixed_camera`].
-    counters: bool,
+    /// Which of the plaza's three poses the frame is taken from.
+    pose: Pose,
     /// Whether the shadow atlas is drawn over the picture rather than the
     /// picture itself — [`crcbl::render::DebugView::ShadowAtlas`].
     atlas: bool,
@@ -167,7 +183,7 @@ impl Arm {
             filter: None,
             split_permille: None,
             tick: sun::FIXTURE_TICK,
-            counters: false,
+            pose: Pose::Fixed,
             atlas: false,
             cascades: false,
             bias_millitexels: None,
@@ -213,7 +229,15 @@ impl Arm {
     /// The same arm framed by [`plaza::counter_camera`].
     const fn framed_on_the_counters(self) -> Self {
         Self {
-            counters: true,
+            pose: Pose::Counters,
+            ..self
+        }
+    }
+
+    /// The same arm framed by [`plaza::pavement_camera`].
+    const fn framed_on_the_pavement(self) -> Self {
+        Self {
+            pose: Pose::Pavement,
             ..self
         }
     }
@@ -263,10 +287,10 @@ impl Arm {
 
     /// Which camera this arm is drawn from.
     fn camera(self) -> Camera {
-        if self.counters {
-            plaza::counter_camera()
-        } else {
-            plaza::fixed_camera()
+        match self.pose {
+            Pose::Fixed => plaza::fixed_camera(),
+            Pose::Counters => plaza::counter_camera(),
+            Pose::Pavement => plaza::pavement_camera(),
         }
     }
 
@@ -1935,7 +1959,10 @@ fn the_grazing_sun_leaves_the_open_pavement_as_smooth_as_the_steep_one_does() {
 /// The plinth's shadow runs `+z` at [`sun::GRAZING_TICK`] and
 /// [`plaza::fixed_camera`] sees a metre of it past the contact before the
 /// pavement leaves the bottom of the frame — `project` refuses anything further
-/// out, which is what set the last entry. Five stations rather than one because
+/// out, which is what set the last entry. [`plaza::pavement_camera`] frames all
+/// five as well, and `plaza`'s own
+/// `the_pavement_pose_frames_the_shadows_the_fixed_one_stands_in_front_of` is
+/// what holds them there with no GPU. Five stations rather than one because
 /// what the deepest of them says is "somewhere out here is still in shadow", and
 /// a single station could be the one place a shadow happened to have left.
 const BEYOND_CONTACT: [f32; 5] = [0.2, 0.4, 0.6, 0.8, 1.0];
@@ -1980,13 +2007,18 @@ const BEYOND_CONTACT: [f32; 5] = [0.2, 0.4, 0.6, 0.8, 1.0];
 /// | --- | --- | --- | --- | --- |
 /// | the `disc` rung | `0.45` | `67.01` | `0.37` | `67.00` |
 /// | the `box` rung | `0.00` | `68.08` | `0.00` | `68.08` |
+/// | [`plaza::pavement_camera`] | `6.48` | `65.80` | `6.41` | `65.80` |
 /// | the top of the arc | `0.00` | `0.00` | `0.00` | `0.00` |
 ///
-/// The first two lift the contact and leave the pavement past it, which is the
+/// The first three lift the contact and leave the pavement past it, which is the
 /// gap the claim below is about; `disc`'s own window runs from 92 to 100 texels
 /// on both adapters, so this count sits inside it as it sits inside the shipped
-/// rung's. The third does not — and **no** count does. The same sweep at
-/// [`sun::NOON_TICK`] takes the contact and the pavement past it away together:
+/// rung's. The third of them is the same rung and the same count read from
+/// another pose, and it lands on the same side of both bounds (2026-09-05) —
+/// which is what says the count is about the shadow map and not about the pixels
+/// one camera resolves. The last does not — and **no** count does. The same
+/// sweep at [`sun::NOON_TICK`] takes the contact and the pavement past it away
+/// together:
 ///
 /// | `r_shadow_bias` | contact, radv | beyond, radv | contact, lavapipe | beyond, lavapipe |
 /// | --- | --- | --- | --- | --- |
@@ -2034,7 +2066,13 @@ const PETER_PAN_BIAS: f32 = 96.0;
 ///
 /// **This count on the other arms.** The `disc` rung reads what the shipped rung
 /// reads to a hundredth: contact `70.73` and beyond `66.59` on radv, `70.44` and
-/// `66.53` on lavapipe. `box` reads the shipped arm's own numbers exactly —
+/// `66.53` on lavapipe. From [`plaza::pavement_camera`] the shipped rung holds
+/// its own contact exactly — `69.84` on radv and `69.59` on lavapipe, the same
+/// digits its shipped arm reads there — while the pavement past it falls from
+/// `68.08` to `65.75` and from `68.00` to `65.60` (2026-09-05), so both halves
+/// of the pair hold at that pose as they do at the fixture one.
+///
+/// `box` reads the shipped arm's own numbers exactly —
 /// `70.73`/`68.33` and `70.44`/`68.33` — which is a count that reached that
 /// rung's frame nowhere these two readings can see, so that rung is pushed to
 /// [`HELD_OFFSET_COVERED_RUNG`] instead. At the top of the arc the contact holds
@@ -2461,6 +2499,15 @@ struct Setup {
 ///   at the offset that ships there is no rise for that count to be about. Its
 ///   other clause — the normal offset zeroed outright — is read on its first row
 ///   like every other rung's. That constant carries the sweep.
+/// * **The shipped rung a second time, from [`plaza::pavement_camera`]**
+///   (2026-09-05), which is the one row not framed from the fixture pose. Every
+///   constant above was swept from [`plaza::fixed_camera`], and two of the three
+///   claims are read through a screen-space statistic — [`speckle_percent`]
+///   counts pixels, and [`shadow_term`] averages a block of them — so a count
+///   that was right only about the pixels one pose resolves would pass all of
+///   them. The ladder's rungs stay on the fixture pose: which kernel reads a
+///   texel is not a function of where the camera stands, where how much of a
+///   texel one pixel covers is.
 ///
 /// So the acne half is read on **every** rung of the ladder — the normal
 /// offset's clause at the offset the sample ships throughout, the constant
@@ -2470,8 +2517,9 @@ struct Setup {
 /// sideways reach puts it at, which is that constant on every rung but
 /// [`OFFSET_COVERED_RUNG`] and [`HELD_OFFSET_COVERED_RUNG`] on that one.
 ///
-/// Every setup shares [`plaza::fixed_camera`] and [`sun::GRAZING_TICK`], which
-/// is what lets [`BEYOND_CONTACT`]'s stations run down `+z` for all of them.
+/// Every setup shares [`sun::GRAZING_TICK`], which is what lets
+/// [`BEYOND_CONTACT`]'s stations run down `+z` for all of them, and every one
+/// but the last is framed from [`plaza::fixed_camera`].
 ///
 /// # What it is not read on
 ///
@@ -2490,13 +2538,15 @@ struct Setup {
 /// caster**, a thin one whose noon shadow outruns the gap a bias opens, and not
 /// another arm of this walk.
 ///
-/// The second is [`plaza::counter_camera`]. [`plaza::PLINTH_CONTACT`] and every
-/// one of [`BEYOND_CONTACT`]'s stations is **behind that pose's eye**: it stands
-/// past the plinth's near face looking away down the plaza, so [`on_screen`]
-/// refuses all of them and [`project`] would panic rather than report. The acne
-/// half of the pair *is* framed from there — the block's four corners all
-/// project — so what that pose is short of is the contact, and reaching it wants
-/// a **third pose**. `docs/backlog.md` carries both.
+/// The second is [`plaza::counter_camera`], and the third pose above is what a
+/// session spent looking for it closed (2026-09-05). [`plaza::PLINTH_CONTACT`]
+/// and every one of [`BEYOND_CONTACT`]'s stations is **behind that pose's eye**:
+/// it stands past the plinth's near face looking away down the plaza, so
+/// [`on_screen`] refuses all of them and [`project`] would panic rather than
+/// report. The acne half of the pair *is* framed from there — the block's four
+/// corners all project — so what that pose is short of is the contact, and it is
+/// still not a setup here. [`plaza::pavement_camera`] is the pose that frames
+/// both, and its own doc carries what places it.
 ///
 /// # Anti-vacuity
 ///
@@ -2575,6 +2625,35 @@ struct Setup {
 /// > the engine declares ["pcss", "disc", "box"] and no setup zeroes the
 /// > constant bias on `box`, so that rung is one this pair no longer says
 /// > anything about that count on, and nothing else would say so
+///
+/// **The row added for [`plaza::pavement_camera`] was reddened on two axes**
+/// (2026-09-05). `r_shadow_bias` held at zero on both of that row's arms, so its
+/// `no bias` arm is the shipped arm under another name and the rise it is
+/// credited with is nothing — both halves, on both adapters:
+///
+/// > on the shipped pcss from the pavement pose the no bias arm drew the shipped
+/// > arm's frame byte for byte, so every reading taken off it is the shipped
+/// > reading under another name
+/// >
+/// > on the shipped pcss from the pavement pose with the constant bias at zero
+/// > the block is 3.3629% dots against 3.3629% as the sample ships — short of
+/// > the 1.5% this count is worth. …
+///
+/// and on lavapipe both numbers in the second line read `3.4974%`. Then the pose
+/// itself pitched to the horizontal, so the pavement a metre past the contact
+/// leaves the bottom of the frame — the row refuses the run rather than reading
+/// a pixel that is not there:
+///
+/// > Vec3(-0.2, 0.0, 3.8) is behind a 1024x768 frame or outside it, so the claim
+/// > about it would be about a pixel that is not there
+///
+/// [`plaza`]'s own
+/// `the_pavement_pose_frames_the_shadows_the_fixed_one_stands_in_front_of`
+/// refuses that pose first, with no GPU and naming the station it lost:
+///
+/// > the contact reading 1.0 m out at Vec3(-0.2, 0.0, 3.8) is behind the
+/// > pavement pose's eye or outside its frame, so `tests/golden.rs`'s `project`
+/// > would panic on it
 ///
 /// **[`HELD_OFFSET_COVERED_RUNG`] was reddened from both sides** (2026-09-05),
 /// which is what says the window it sits in has two edges rather than one. Moved
@@ -2659,6 +2738,19 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
         acne_without_bias: Some(ACNE_WITHOUT_BIAS_REDUCED),
         pushed_to: HELD_OFFSET_COVERED_RUNG,
         held_offset: false,
+    });
+
+    // And the shipped rung a second time, from the other pose that frames the
+    // plinth's contact. The ladder's rows stay on the fixture pose: what a
+    // second pose is owed is a second place for a mis-set count to show, and
+    // which kernel reads a texel is not a function of where the camera stands.
+    setups.push(Setup {
+        name: format!("the shipped {shipped} from the pavement pose"),
+        rung: shipped,
+        base: grazing.framed_on_the_pavement(),
+        acne_without_bias: Some(ACNE_WITHOUT_BIAS),
+        pushed_to: HELD_OFFSET,
+        held_offset: true,
     });
 
     // A rung no row reads the constant bias's clause on is a rung that dropped
@@ -3112,10 +3204,11 @@ const CASCADE_SHADOWED_LEVELS: f32 = 14.0;
 /// | the `disc` rung | `2.08` | `9.76` | `2.68` | `9.24` |
 /// | the grazing sun | `0.49` | `35.46` | `0.63` | `31.06` |
 /// | the `box` rung | `13.17` | `10.20` | `38.50` | `9.13` |
+/// | the pavement pose | `0.96` | `14.11` | `1.32` | `18.67` |
 ///
-/// The first two sit either side of five the way the shipped arm does, and are
-/// the arms the claim is read on. The third does not, which is what
-/// [`CASCADE_UNSEPARATED_RUNG`] is.
+/// The first two and the fourth sit either side of five the way the shipped arm
+/// does, and are the arms the claim is read on. The third does not, which is
+/// what [`CASCADE_UNSEPARATED_RUNG`] is.
 const CASCADE_STEP_OVER_NEIGHBOURS: f32 = 5.0;
 
 /// The rung of the filter ladder the claim below is **not** read on.
@@ -3317,6 +3410,14 @@ fn crossing(extent: (u32, u32), name: &str, arm: Arm) -> Crossing {
 ///   times longer and the stretch of shadow that lands in the same window of
 ///   distance is a different one — the walks that come back are on the *other*
 ///   side of the shadow's axis from the fixture arm's.
+/// * **[`plaza::pavement_camera`]** (2026-09-05), at [`sun::FIXTURE_TICK`] on
+///   the shipped rung, which is the arm that reads more than one column. From
+///   the fixture pose [`plaza::hidden_from`] refuses about half of every sample
+///   that lands in the shell window — the colonnade stands in front of the
+///   pavement its own shadows fall on — and the walks that keep a pair of shells
+///   either side of the split are one column's. From a pose set across the row
+///   rather than along it, it refuses under a quarter and twelve walks over
+///   three columns read across the split.
 ///
 /// # What it is not read on
 ///
@@ -3327,16 +3428,17 @@ fn crossing(extent: (u32, u32), name: &str, arm: Arm) -> Crossing {
 /// higher with the band than with it collapsed, so no bound on it separates the
 /// two.
 ///
-/// The second is [`plaza::counter_camera`]. Every sample of every walk that
-/// lands in the shell window is **outside that pose's frame** — the colonnade
-/// stands across the plaza from the counters and the window is a shell of
-/// distance around the eye, so the two do not meet on screen. Not one sample is
-/// refused by [`plaza::hidden_from`] that the frame had not refused already, and
-/// no walk is left with a pair of shells either side of the split. That is a
-/// refusal rather than a pass: an arm with no such pair fails the run below, so
-/// putting the counter pose in the list would red the suite rather than widen
-/// the claim. Framing the colonnade from a second pose wants a pose, not another
-/// arm — `docs/backlog.md` carries it.
+/// The second is [`plaza::counter_camera`], and the pavement arm above is what
+/// closed it (2026-09-05). Every sample of every walk that lands in the shell
+/// window is **outside that pose's frame** — the colonnade stands across the
+/// plaza from the counters and the window is a shell of distance around the eye,
+/// so the two do not meet on screen. Not one sample is refused by
+/// [`plaza::hidden_from`] that the frame had not refused already, and no walk is
+/// left with a pair of shells either side of the split. That is a refusal rather
+/// than a pass: an arm with no such pair fails the run below, so putting the
+/// counter pose in the list would red the suite rather than widen the claim.
+/// Framing the colonnade from a second pose wanted a pose and not another arm,
+/// and [`plaza::pavement_camera`] is it.
 ///
 /// # Anti-vacuity
 ///
@@ -3381,6 +3483,15 @@ fn crossing(extent: (u32, u32), name: &str, arm: Arm) -> Crossing {
 /// a shell the near lamp's reach had all but emptied read a `13.88`/255 step
 /// across the split, *and the same `13.88` with the band collapsed*, which is
 /// how a step that was never the cascade's was told from one that is.
+///
+/// **The pavement arm's own control** (2026-09-05, run after the arm landed):
+/// with the band it reads `0.90`/255 across the split against `0.94` clear of
+/// it on radv and `1.03` against `0.78` on lavapipe; with the band collapsed the
+/// same walk — column 3 at `-0.22` m — steps `13.23` against `0.94` on radv and
+/// `13.25` against `0.71` on lavapipe. So the bound separates a band from an edge
+/// at this pose the way it does on the fixture arms, and neither term is noise,
+/// which is what [`CASCADE_UNSEPARATED_RUNG`] is about: `box`'s own denominator
+/// on this walk is `0.12` and `0.04`.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
 fn the_colonnades_shadow_crosses_the_cascade_split_without_a_step() {
@@ -3407,6 +3518,10 @@ fn the_colonnades_shadow_crosses_the_cascade_split_without_a_step() {
     arms.push((
         "the grazing sun".to_string(),
         Arm::shipped().at_tick(sun::GRAZING_TICK),
+    ));
+    arms.push((
+        "the pavement pose".to_string(),
+        Arm::shipped().framed_on_the_pavement(),
     ));
 
     let mut faults = Vec::new();

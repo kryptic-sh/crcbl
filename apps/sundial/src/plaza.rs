@@ -842,7 +842,12 @@ pub const FIXED_EYE: Vec3 = Vec3::new(0.0, 1.75, 6.0);
 /// What it looks at: down the plaza, a little below eye height.
 const FIXED_TARGET: Vec3 = Vec3::new(0.0, 0.30, 0.0);
 
-/// The vertical field of view both poses share, in radians.
+/// The vertical field of view [`fixed_camera`] and [`pavement_camera`] share,
+/// in radians.
+///
+/// The free camera opens on it too, because it starts at the fixture pose.
+/// [`counter_camera`] takes a wider one of its own, for the reason its doc
+/// gives.
 const FOV_Y: f32 = 60.0 * core::f32::consts::PI / 180.0;
 
 /// How close to the eye a surface may be and still be drawn, in metres.
@@ -921,6 +926,95 @@ pub fn counter_camera() -> Camera {
         up: Vec3::Y,
         projection: Projection::Perspective {
             fov_y: COUNTER_FOV_Y,
+            near: NEAR,
+        },
+    }
+}
+
+/// Where the pavement pose stands.
+///
+/// A little above eye height, a metre back from [`FIXED_EYE`] and off the
+/// plaza's own axis, looking **across** the colonnade rather than down it.
+/// Three things pin it, and they pull against each other:
+///
+/// * **Off the axis, so the columns stop standing in front of their own
+///   shadows.** [`hidden_from`] refuses half of what `tests/golden.rs`'s cascade
+///   walk samples from [`fixed_camera`] — the colonnade is a row of
+///   [`COLUMN_HEIGHT`] columns across the middle of that frame and the pavement
+///   its shadows fall on is behind them. From here it refuses under a quarter,
+///   and the walks that keep a shell of pavement either side of the cascade
+///   split are several columns' rather than one's.
+///   `the_pavement_pose_frames_the_shadows_the_fixed_one_stands_in_front_of` is
+///   what measures that.
+/// * **Near enough that [`PLINTH_CONTACT`] and every station past it stay
+///   inside cascade 0**, clear of the cross-fade band. `r_shadow_bias` and
+///   `r_shadow_normal_offset` are counts of texels *of the cascade the fragment
+///   landed in*, and the outer cascade's texel is several times the near one's
+///   here — so a pose that pushed the contact past the split would be reading
+///   those two counts at a different size, and the stations `tests/golden.rs`
+///   swept from the fixture pose would not be the stations here.
+/// * **Low enough that the acne block is still seen at a grazing incidence.**
+///   That reading is a count of pixels below their own neighbourhood's median,
+///   so it is a screen-space statistic: the shallower the view of the block, the
+///   more shadow texels fall in one pixel and the more of the speckle the count
+///   can see. Raised, the rise a constant bias is worth over that block falls
+///   away, and `tests/golden.rs`'s floor under it stops being cleared.
+///
+/// **The height is where the last two of those meet, and it was swept** — on
+/// radv at `CLAIM_EXTENT` with the rest of this pose held still, three runs per
+/// station and the same digits every time (2026-09-05). The first two columns
+/// are `tests/golden.rs`'s two acne readings, the third the ratio its cascade
+/// walk bounds:
+///
+/// | eye height | `no bias` dots | `no offset` dots | walk ratio |
+/// | --- | --- | --- | --- |
+/// | 1.9 | `3.5980%` | `43.6812%` | `0.59` |
+/// | 2.0 (this) | `3.3629%` | `41.9155%` | `0.96` |
+/// | 2.1 | `2.8518%` | `39.3059%` | `3.25` |
+/// | 2.2 | `2.2845%` | `37.0671%` | `2.31` |
+/// | 2.5 | `1.4857%` | `29.4400%` | `3.97` |
+///
+/// At 2.5 the constant bias's rise is under the floor that clause is held over
+/// and the row goes red; from 2.1 up the walk's own denominator — the steepest
+/// step the same walk shows clear of the band — falls to a fraction of a level
+/// and the ratio is a reading of the pavement's noise, which is the defect
+/// `tests/golden.rs`'s `CASCADE_UNSEPARATED_RUNG` is about. Here the two steps
+/// the ratio is made of are `0.90` and `0.94` out of 255, so neither of them is
+/// noise, and 1.9 is a working station on the other side.
+pub const PAVEMENT_EYE: Vec3 = Vec3::new(0.5, 2.0, 7.0);
+
+/// What it looks at: the pavement between the plinth and the colonnade, on the
+/// far side of the columns from the eye.
+const PAVEMENT_TARGET: Vec3 = Vec3::new(-0.5, 0.30, 0.5);
+
+/// **Where the pavement's own shadows are framed from.**
+///
+/// A third pose, and the one both of `tests/golden.rs`'s pavement claims are
+/// read a **second** time from: the plinth's contact with the shadow a bias
+/// trades against acne, and the colonnade's shadows where they cross the cascade
+/// split. [`fixed_camera`] frames both and is the pose every constant either
+/// claim holds to was swept on, so what those claims were short of is a second
+/// place for a mis-set count or a hard cascade edge to show.
+///
+/// [`counter_camera`] could not be that place. It stands past the plinth's near
+/// face looking away down the plaza, so [`PLINTH_CONTACT`] and every station
+/// past it is behind its eye; and the colonnade stands across the plaza from the
+/// counters, so no part of those shadows is both on screen there and inside the
+/// shell of distance the split runs through.
+///
+/// **What it buys is the colonnade's own occlusion**, and what it is held to is
+/// on [`PAVEMENT_EYE`], which carries the three constraints that place it.
+/// `the_pavement_pose_frames_the_shadows_the_fixed_one_stands_in_front_of`
+/// measures the two that can be measured here, with no GPU, rather than
+/// asserting them in this paragraph.
+#[must_use]
+pub fn pavement_camera() -> Camera {
+    Camera {
+        eye: PAVEMENT_EYE,
+        target: PAVEMENT_TARGET,
+        up: Vec3::Y,
+        projection: Projection::Perspective {
+            fov_y: FOV_Y,
             near: NEAR,
         },
     }
@@ -1440,11 +1534,12 @@ mod tests {
             points * POINT_FACES + spots
         );
 
-        // Both poses, because the ranking is by what a map covers on *screen* and
-        // the two cameras stand in different places.
+        // Every pose, because the ranking is by what a map covers on *screen*
+        // and the cameras stand in different places.
         for (name, camera) in [
             ("the fixed pose", fixed_camera()),
             ("the counter pose", counter_camera()),
+            ("the pavement pose", pavement_camera()),
         ] {
             let mut selection = Selection::default();
             selection.update(&plaza_lights, &camera);
@@ -1496,6 +1591,130 @@ mod tests {
                 "{name} at {point:?} projects to {ndc:?}, outside its own frame"
             );
         }
+    }
+
+    /// **The pavement pose frames the shadows the fixed one stands in front
+    /// of.**
+    ///
+    /// [`pavement_camera`]'s reason, measured here rather than argued in its
+    /// doc. Two halves, and the pose is owed for both:
+    ///
+    /// * **The plinth's contact and the stations past it are in frame.** That is
+    ///   what [`counter_camera`] is short of — they stand behind its eye — and
+    ///   it is why the bias pair in `tests/golden.rs` had one pose and not two.
+    /// * **More of the colonnade's shadow reaches this frame**, over the window
+    ///   of distance the cascade split runs through, where "reaches" is the
+    ///   golden suite's own set of refusals: [`hidden_from`], [`lamplit`] and
+    ///   the frame itself. From [`FIXED_EYE`], down the plaza's own axis, the
+    ///   colonnade stands in front of most of the pavement its own shadows fall
+    ///   on; from [`PAVEMENT_EYE`] the sight lines cross the row instead of
+    ///   running along it.
+    ///
+    /// The second half is a comparison and not a floor, because what it is about
+    /// is the *difference* between the two poses — a floor would go on holding
+    /// if the pose were moved back down to eye level and the colonnade were
+    /// moved out of its way instead.
+    #[test]
+    fn the_pavement_pose_frames_the_shadows_the_fixed_one_stands_in_front_of() {
+        /// The aspect every reading in `tests/golden.rs` is taken at.
+        const ASPECT: f32 = 4.0 / 3.0;
+        /// How far past [`PLINTH_CONTACT`], along the plinth's own shadow, the
+        /// stations `tests/golden.rs`'s `BEYOND_CONTACT` reads stand, in metres
+        /// of pavement. Spelled here because nothing exports them.
+        const BEYOND: [f32; 6] = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
+
+        let in_frame = |camera: &Camera, at: Vec3| {
+            let clip = camera.view_projection(ASPECT) * at.extend(1.0);
+            if clip.w <= 0.0 {
+                return false;
+            }
+            let ndc = clip.truncate() / clip.w;
+            ndc.x.abs() < 1.0 && ndc.y.abs() < 1.0
+        };
+
+        let camera = pavement_camera();
+        for out in BEYOND {
+            let at = PLINTH_CONTACT + Vec3::new(0.0, 0.0, out);
+            assert!(
+                in_frame(&camera, at),
+                "the contact reading {out:.1} m out at {at:?} is behind the pavement pose's eye \
+                 or outside its frame, so `tests/golden.rs`'s `project` would panic on it"
+            );
+            assert!(
+                !hidden_from(camera.eye, at),
+                "the plaza's own geometry stands between the pavement pose and the contact \
+                 reading {out:.1} m out at {at:?}, so what is read there is a solid's face"
+            );
+        }
+
+        // How many walks along the colonnade's shadows a pose can read on both
+        // sides of its own cascade split — the golden suite's own window, and
+        // its own refusals.
+        //
+        // Off the shadow's axis and not down the middle of it, because that is
+        // where a cascade switch shows and where `tests/golden.rs` reads: two
+        // cascades answer the same nothing deep in an umbra and the same
+        // everything out on open pavement, and they differ at the edge. The
+        // offsets are [`COLUMN_HALF`]'s own multiples, which is where the
+        // geometric edge of a vertical caster's shadow stands.
+        const OFF_AXIS: [f32; 6] = [-1.5, -1.0, -0.5, 0.5, 1.0, 1.5];
+
+        let sky = Sky::at(FIXTURE_TICK);
+        let towards = sky.towards();
+        let axis = Vec3::new(-towards.x, 0.0, -towards.z).normalize();
+        let perp = Vec3::new(axis.z, 0.0, -axis.x);
+        let walks_read = |camera: &Camera| {
+            let split = cascade_split(camera, sky);
+            let band = split * FADE_FRACTION;
+            let (near_end, far_end) = (band.mul_add(-2.0, split), band.mul_add(0.5, split));
+            let steps = 2048;
+            let mut walks = 0u32;
+            for column in 0..COLONNADE_COUNT {
+                let foot = column_foot(column);
+                let along = COLUMN_HEIGHT / towards.y;
+                let tip = Vec3::new(foot.x - towards.x * along, 0.0, foot.z - towards.z * along);
+                for lateral in OFF_AXIS {
+                    let sideways = perp * (lateral * COLUMN_HALF);
+                    let (mut inside, mut outside) = (false, false);
+                    for step in 0..=steps {
+                        #[expect(clippy::cast_precision_loss, reason = "a step index of 2048")]
+                        let at = foot.lerp(tip, step as f32 / steps as f32) + sideways;
+                        let distance = at.distance(camera.eye);
+                        if distance < near_end
+                            || distance >= far_end
+                            || hidden_from(camera.eye, at)
+                            || lamplit(at)
+                            || !in_frame(camera, at)
+                        {
+                            continue;
+                        }
+                        if distance < split - band {
+                            inside = true;
+                        } else if distance > split {
+                            outside = true;
+                        }
+                    }
+                    if inside && outside {
+                        walks += 1;
+                    }
+                }
+            }
+            walks
+        };
+
+        let (fixed, raised) = (walks_read(&fixed_camera()), walks_read(&camera));
+        assert!(
+            fixed >= 1,
+            "the fixed pose reads none of the colonnade's shadows across its own split, so the \
+             comparison below is against nothing and `tests/golden.rs`'s cascade walk reads \
+             nothing from that pose either"
+        );
+        assert!(
+            raised > fixed,
+            "the pavement pose reads {raised} walks along the colonnade's shadows across the \
+             cascade split and the fixed pose reads {fixed} — a second pose that sees no more \
+             of them than the first is a second frame of the same claim"
+        );
     }
 
     /// **The grazing golden's sun really is the lowest one the clock reaches**,

@@ -173,16 +173,22 @@ golden of their own and a button on the page. What is still **not** done:
     flat profile — the step against the walk's own spread over the whole window
     rather than against its steepest neighbouring pair, say — and that is its
     own sweep and its own sabotage.
-  - **`plaza::counter_camera`.** Measured with the plaza's own predicates and no
-    GPU: 48665 of the walk's 88020 candidate samples land inside the shell
-    window, and `on_screen` refuses **every one** of them. `plaza::hidden_from`
-    refuses none that the frame had not refused already. The colonnade stands
-    across the plaza from the counters and the window is a shell of distance
-    about the eye, so the two do not meet on screen at all — an arm there has no
-    pair of shells either side of the split and would red the suite rather than
-    widen the claim. Widening this wants a **third pose**, framing the colonnade
-    from somewhere its shadows are both visible and near the split; it is not
-    another arm of this walk.
+  - **`plaza::counter_camera`, and the pose that replaced it (2026-09-05).**
+    Measured with the plaza's own predicates and no GPU: 48665 of the walk's
+    88020 candidate samples land inside the shell window from that pose, and
+    `plaza::hidden_from`, `plaza::lamplit` and the frame between them refuse
+    every one — `hidden_from` refuses none the frame had not refused already.
+    The colonnade stands across the plaza from the counters and the window is a
+    shell of distance about the eye, so the two do not meet on screen at all,
+    and an arm there has no pair of shells either side of the split. That is
+    unchanged and it is still not an arm. What the walk reads instead is a new
+    arm at `plaza::pavement_camera`, at `sun::FIXTURE_TICK` on the shipped rung:
+    12 walks over three columns read across the split, and the steepest against
+    its own is column 3 at `-0.22` m — `0.90`/255 across the split against
+    `0.94` clear of the band on radv (ratio `0.96`), `1.03` against `0.78` on
+    lavapipe (`1.32`), against the `5x` the claim holds it to. Both sides darken
+    well over the floor: `77.89`/`77.56` and `77.78`/`77.48` over 231 and 76
+    shells. Three runs per adapter, identical to the digit.
 - **Nine readings cross the split now, at six offsets, and all six are one
   column's.** The shipped and `disc` arms each read column 4 at `-0.26`, `-0.22`
   and `-0.18` m off its shadow axis; the grazing arm reads column 4 at `+0.18`,
@@ -194,8 +200,13 @@ golden of their own and a button on the page. What is still **not** done:
   is therefore thinner than it looks, and a change to `COLONNADE_NEAR_Z`,
   `COLONNADE_SPACING` or either arm's sun could leave one of them with none — in
   which case the test refuses the run rather than passing it, which is the
-  failure mode to expect. Widening it wants either a pose that sees more of that
-  pavement or a caster placed for it.
+  failure mode to expect. Widening it wanted either a pose that sees more of
+  that pavement or a caster placed for it, and the pose landed on 2026-09-05:
+  `plaza::pavement_camera` is an arm of its own reading 12 walks over three
+  columns. The fixture arms were left where they are, because that pose is the
+  one every golden is blessed from — so a change to `COLONNADE_NEAR_Z`,
+  `COLONNADE_SPACING` or either fixture arm's sun can still leave one of them
+  with none, and the test refuses the run rather than passing it.
 - **The viewer is read at every rung of the ladder, but on one map at a time
   (2026-09-05).** `the_atlas_view_borders_a_subdivided_slot_at_its_own_size`
   loops over every level of `atlas::TILE_LEVELS` below a whole cell, a frame per
@@ -373,15 +384,41 @@ golden of their own and a button on the page. What is still **not** done:
     same depth for the contact and for every station still inside so short a
     shadow. Reading the pair at noon wants a **second, thin caster** whose noon
     shadow outruns the gap a bias opens; it is not another arm of this walk.
-  - **`plaza::counter_camera`.** Measured with `on_screen` and no GPU at
-    `CLAIM_EXTENT`: `plaza::PLINTH_CONTACT` and every one of `BEYOND_CONTACT`'s
-    stations is **behind that pose's eye** — it stands past the plinth's near
-    face looking away down the plaza — so all of them are refused and `project`
-    would panic rather than report. The acne half _is_ framed from there: all
-    four corners of `acne_block` project and `plaza::hidden_from` refuses none
-    of them. So what that pose is short of is the contact, and reaching it wants
-    a **third pose**, one framing a contact and a stretch of the shadow past it,
-    rather than another arm.
+  - **`plaza::counter_camera`, and the pose that replaced it (2026-09-05).**
+    Measured with `on_screen` and no GPU at `CLAIM_EXTENT`:
+    `plaza::PLINTH_CONTACT` and every one of `BEYOND_CONTACT`'s stations is
+    behind that pose's eye — it stands past the plinth's near face looking away
+    down the plaza — so all six are refused and `project` would panic rather
+    than report. The acne half _is_ framed from there. That is unchanged and it
+    is still not a setup. What the pair reads instead is a setup on the shipped
+    rung at `plaza::pavement_camera`, and **every constant holds there unmoved,
+    none widened and none given a station of its own**: contact `69.84` radv /
+    `69.59` lavapipe as the sample ships, `41.9155%`/`42.0500%` dots with the
+    normal offset zeroed and `3.3629%`/`3.4974%` with the constant bias zeroed
+    against `0.0000%` shipped, `6.48`/`6.41` at the contact and `65.80`/`65.80`
+    beyond it at `PETER_PAN_BIAS`, and the contact held to the digit at
+    `HELD_OFFSET` while the pavement past it fell from `68.08` to `65.75` and
+    from `68.00` to `65.60`. Three runs per adapter, identical to the digit.
+  - **The ladder's rungs are read from one pose only (2026-09-05).** `disc`,
+    `box` and `box` at `REDUCED_OFFSET` all stay on `plaza::fixed_camera`; only
+    the shipped rung has a second pose. Deliberate: which kernel reads a texel
+    is not a function of where the camera stands, where how much of a texel one
+    pixel covers is, and that is what the second pose is about. A filter wrong
+    only from one place on a rung that is not the shipped one is therefore still
+    nobody's claim.
+  - **What surprised us, and is not a bug (2026-09-05).** The pavement claims
+    cannot be read from a pose high enough to look down on the whole plaza, and
+    two independent reasons stop it. A raised eye puts `plaza::PLINTH_CONTACT`
+    **past the cascade split** — 6.69 m from an eye at `(0, 3.5, 8.5)` against a
+    split at 6.100 — and `r_shadow_bias` and `r_shadow_normal_offset` are counts
+    of texels _of the cascade the fragment landed in_, so `PETER_PAN_BIAS`'s 96
+    texels stop being the shipped station and wipe the shadow outright (contact
+    `0.00`, beyond `19.88`, and `HELD_OFFSET` takes the contact from `69.11` to
+    `0.00`). And `speckle_percent` is a **screen-space** statistic: from an eye
+    at 2.5 m the constant bias's rise over the acne block is `1.4857%`, under
+    the `1.5%` floor, where at 2.0 m it is `3.3629%` and at the fixture pose
+    `3.2575%`. Both are why `plaza::PAVEMENT_EYE` is a modest 2.0 m rather than
+    an overlook.
 - **A game cannot see a modifier, so a chord is not available to any sample
   (2026-09-05).** `crcbl-shell` stamps `crcbl_core::input::Modifiers` onto every
   `ShellEvent::Key` it produces and `HostedGame::key_event` takes a `KeyCode`

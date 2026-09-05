@@ -242,6 +242,16 @@ hold in their head, and the only honest way to set them is to look.
    Both refusals and what closing them would take are in
    [backlog.md](../../backlog.md).
 
+   **2026-09-05 gave the pair a second pose.** `plaza::pavement_camera` stands a
+   metre back from the fixture pose, half a metre off the plaza's axis and 25 cm
+   higher, looking across the colonnade rather than down it — the one vantage
+   that frames the plinth's contact, the five stations past it and the acne
+   block at once while keeping all six contact readings inside cascade 0, which
+   is what makes a texel of bias there the same size the constants were swept
+   at. Every constant the pair holds to reads on the far side of its own bound
+   from that pose, unmoved and on both adapters, so the three claims are no
+   longer claims about the pixels one camera resolves.
+
    The sabotage that says the reading has teeth is `Cascades::params` handing
    the shader the constants again instead of the two cells: every setup's four
    moved arms then draw that setup's own shipped frame byte for byte, and the
