@@ -3912,17 +3912,22 @@ fn srgb_encode(linear: f32) -> f32 {
     }
 }
 
-/// The floor's albedo, read out of the mesh the room is made of.
+/// The open box's face called `name`, read out of the mesh the room is made of.
 ///
-/// Read rather than written down: it is the one number in the forward model
-/// below that belongs to somebody else, and a copy of it here would be a second
-/// place that has to change when the open box is recoloured.
-fn probe_floor_albedo() -> [f32; 3] {
-    crcbl::shaders::mesh::OPEN_BOX_FACES
+/// Read rather than written down: a face's albedo and its normal are the two
+/// numbers in the forward models below that belong to somebody else, and a copy
+/// of either here would be a second place that has to change when the open box
+/// is recoloured or re-cut.
+fn probe_face(name: &str) -> crcbl::shaders::mesh::Face {
+    *crcbl::shaders::mesh::OPEN_BOX_FACES
         .iter()
-        .find(|face| face.name == "floor")
-        .expect("the open box has a floor")
-        .color
+        .find(|face| face.name == name)
+        .expect("the open box has the named face")
+}
+
+/// The floor's albedo.
+fn probe_floor_albedo() -> [f32; 3] {
+    probe_face("floor").color
 }
 
 /// What the Rust mirror says one channel of one block of a probe-lit floor
@@ -7371,7 +7376,10 @@ const SKY_AMBIENT_SUN: usize = 0;
 ///
 /// **Swept on both local adapters before it was fixed**, over three bands ×
 /// three channels: the worst miss measured 0.27 levels on radv and 0.27 on
-/// lavapipe.
+/// lavapipe. [`an_atmospheres_ambient_rows_light_a_wall`] reads its own bands
+/// against this budget and against the same model, with a wall's albedo and
+/// normal in the floor's place; that sweep measured 0.49 levels on radv and
+/// 0.49 on lavapipe.
 const SKY_AMBIENT_LEVELS: f32 = 1.0;
 
 /// The least the LUT's own L1 projection and the three-band fit's may predict
@@ -7395,25 +7403,33 @@ const SKY_AMBIENT_FIT_APART: f32 = 8.0;
 /// is zero. One level is 8-bit rounding and nothing else.
 const SKY_AMBIENT_DARK: f32 = 1.0;
 
-/// What the host says a sky-lit floor block should measure on `channel`, in the
-/// frame's own levels.
+/// What the host says a sky-lit block of `face` should measure on `channel`, in
+/// the frame's own levels.
 ///
 /// `mesh.slang`'s `sky_irradiance` is
 /// [`crcbl_shaders::probe::GpuProbe::irradiance`](crcbl::shaders::probe::GpuProbe::irradiance)
 /// — the same three dot products against `float4(N, 1)` and the same clamp at
 /// zero — so the mirror is that function of the rows the frame block carries,
-/// times the floor's own albedo, through the sRGB encode.
+/// times the face's own albedo, through the sRGB encode.
+///
+/// **The face's own normal is the one the fragment stage shades with**, because
+/// `screenshot`'s `probe_room` scales the open box along the axes its faces are
+/// aligned to: a diagonal scale leaves an axis-aligned normal pointing where it
+/// already pointed, whichever way round the shader builds its normal matrix.
 ///
 /// **One number for the whole block**, unlike [`predicted_block_channel`], and
 /// that is a property of the field rather than a shortcut: this term reads the
-/// normal and nothing else, and every pixel of this floor faces `+Y`. So there
-/// is no gradient across a block for the encode's non-linearity to bite on, and
-/// the three bands the test reads all predict the same number — which is itself
-/// the claim that the sky lights a plane flatly.
-fn predicted_sky_ambient_channel(rows: &crcbl::shaders::probe::GpuProbe, channel: usize) -> f32 {
-    let albedo = probe_floor_albedo();
-    let irradiance = rows.irradiance([0.0, 1.0, 0.0]);
-    srgb_encode((albedo[channel] * irradiance[channel]).min(1.0)) * 255.0
+/// normal and nothing else, and a face is one flat quad. So there is no
+/// gradient across a block for the encode's non-linearity to bite on, and the
+/// bands each test reads all predict the same number — which is itself the
+/// claim that the sky lights a plane flatly.
+fn predicted_sky_ambient_channel(
+    rows: &crcbl::shaders::probe::GpuProbe,
+    face: &crcbl::shaders::mesh::Face,
+    channel: usize,
+) -> f32 {
+    let irradiance = rows.irradiance(face.normal);
+    srgb_encode((face.color[channel] * irradiance[channel]).min(1.0)) * 255.0
 }
 
 /// **The sky's ambient term lights a surface on a device, and what it lights it
@@ -7447,6 +7463,10 @@ fn predicted_sky_ambient_channel(rows: &crcbl::shaders::probe::GpuProbe, channel
 ///    says the term arrived from the sky rather than from anything else the
 ///    fixture happens to have in it.
 ///
+/// What it does *not* say is anything about the row's two horizontal lanes:
+/// every pixel it measures faces `+Y`, which multiplies both by zero.
+/// [`an_atmospheres_ambient_rows_light_a_wall`] is the band that does.
+///
 /// **Shown red by sabotage** (2026-09-06, radv). `crcbl_render::forward`'s
 /// `PresentedSky::new` was changed to take `view.gradient_fit().irradiance()`
 /// in place of `view.irradiance()` — the swap `docs/backlog.md` recorded
@@ -7459,12 +7479,13 @@ fn predicted_sky_ambient_channel(rows: &crcbl::shaders::probe::GpuProbe, channel
 fn an_atmospheres_ambient_rows_light_a_floor() {
     crcbl_core::log::init_logging();
 
+    let floor = probe_face("floor");
     let view = crcbl::screenshot::atmosphere_view(SKY_AMBIENT_SUN);
     let marched = view.irradiance();
     let fitted = view.gradient_fit().irradiance();
     for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
-        let predicted = predicted_sky_ambient_channel(&marched, channel);
-        let alternative = predicted_sky_ambient_channel(&fitted, channel);
+        let predicted = predicted_sky_ambient_channel(&marched, &floor, channel);
+        let alternative = predicted_sky_ambient_channel(&fitted, &floor, channel);
         let apart = (predicted - alternative).abs();
         assert!(
             apart > SKY_AMBIENT_FIT_APART,
@@ -7498,7 +7519,7 @@ fn an_atmospheres_ambient_rows_light_a_floor() {
         let at = probe_pixel(x, 0.0);
         for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
             let measured = block_channel(&lit, at, PROBE_BAND, channel);
-            let predicted = predicted_sky_ambient_channel(&marched, channel);
+            let predicted = predicted_sky_ambient_channel(&marched, &floor, channel);
             let miss = (measured - predicted).abs();
             worst = worst.max(miss);
             assert!(
@@ -7526,11 +7547,191 @@ fn an_atmospheres_ambient_rows_light_a_floor() {
          {worst:.2} level(s) at worst over three bands and all three channels, where the \
          three-band fit would predict {:.2}, {:.2} and {:.2} against the LUT's {:.2}, {:.2} \
          and {:.2}; with no atmosphere the brightest of the same bands reads {darkest:.2}",
-        predicted_sky_ambient_channel(&fitted, 0),
-        predicted_sky_ambient_channel(&fitted, 1),
-        predicted_sky_ambient_channel(&fitted, 2),
-        predicted_sky_ambient_channel(&marched, 0),
-        predicted_sky_ambient_channel(&marched, 1),
-        predicted_sky_ambient_channel(&marched, 2),
+        predicted_sky_ambient_channel(&fitted, &floor, 0),
+        predicted_sky_ambient_channel(&fitted, &floor, 1),
+        predicted_sky_ambient_channel(&fitted, &floor, 2),
+        predicted_sky_ambient_channel(&marched, &floor, 0),
+        predicted_sky_ambient_channel(&marched, &floor, 1),
+        predicted_sky_ambient_channel(&marched, &floor, 2),
+    );
+}
+
+/// Which of `crcbl::screenshot::ATMOSPHERE_SUNS` the wall band is read under:
+/// the third, low and behind the frame's centre.
+///
+/// **Chosen for the size of the `z` lane, which is the whole of what this test
+/// adds.** [`SKY_AMBIENT_SUN`]'s sun is straight overhead, where the sky is
+/// azimuthally symmetric: its row's `z` lane comes back exactly zero and its
+/// `x` lane at two parts in ten billion, so a wall lit by it predicts what a
+/// wall lit by the constant band and the `y` lane alone would and the
+/// comparison below would hold under a shader that read neither. Of the two
+/// suns that are not overhead, this one opens the wider gap on the face the
+/// fixture faces: zeroing the `z` lane moves the band by 10.88, 5.51 and 3.02
+/// levels in red, green and blue, against 8.15, 3.37 and 2.01 for
+/// `ATMOSPHERE_SUNS[1]`'s `x` lane on the `-X` wall.
+const SKY_AMBIENT_WALL_SUN: usize = 2;
+
+/// The least the wall band's prediction may move when the row's two horizontal
+/// lanes are zeroed, in levels of 255.
+///
+/// **The premise this test rests on**, and [`SKY_AMBIENT_FIT_APART`]'s shape: a
+/// band whose prediction does not move when `x` and `z` go to zero is a band
+/// that observes neither, which is what
+/// [`an_atmospheres_ambient_rows_light_a_floor`] already had and the reason its
+/// pose could not close the gap. A swapped lane is the same thing here — this
+/// sun's `x` lane is zero, so a device reading `z` out of it is reading a zero
+/// — which is the sabotage the doc below records.
+///
+/// See [`SKY_AMBIENT_WALL_SUN`] for the three measured separations; this is
+/// under the smallest of them and over [`SKY_AMBIENT_LEVELS`]. The margin is
+/// narrower than [`SKY_AMBIENT_FIT_APART`]'s, blue being the tight channel of
+/// the three, and `docs/backlog.md` records what a wider one would take.
+const SKY_AMBIENT_LANE_APART: f32 = 2.5;
+
+/// Where the wall bands are read, in fractions of the frame's extent.
+///
+/// Three columns across the frame's middle row, [`ATMOSPHERE_BANDS`]' shape
+/// without its rows: the wall is one flat quad of one albedo under a term that
+/// reads the normal and nothing else, so all three predict the same number, and
+/// what spreading them buys is that a frame lit unevenly — by any of the things
+/// this fixture refuses — misses at one band even where it happened to be right
+/// at another.
+const SKY_AMBIENT_WALL_BANDS: [(f32, f32); 3] = [(0.25, 0.5), (0.5, 0.5), (0.75, 0.5)];
+
+/// **The sky's ambient row lights a surface whose normal is not the floor's**,
+/// which is what puts one of the row's horizontal lanes in front of a
+/// measurement for the first time on a device.
+///
+/// [`an_atmospheres_ambient_rows_light_a_floor`]'s claim at a second normal.
+/// Every pixel that test measures faces `+Y`, so `sky_irradiance`'s
+/// `dot(sh, float4(N, 1))` multiplies the row's `x` and `z` lanes by zero and
+/// only the `y` lane and the constant band reach the frame.
+/// `crcbl::screenshot::sky_ambient_wall_forward` is the same room, the same
+/// refusals and the same colourless sun from a pose that fills the frame with
+/// `crcbl::screenshot::SKY_AMBIENT_WALL_FACE` instead, whose normal is `+Z` —
+/// so the band's prediction is a lane the floor could not move.
+///
+/// Three claims, in the order they are asserted:
+///
+/// 1. **The lane is observable**: zeroing the row's two horizontal lanes moves
+///    the host's own prediction of this band by [`SKY_AMBIENT_LANE_APART`] at
+///    least, in every channel, on the host and before a frame is drawn.
+///    Without it the comparison below would pass on a device that never read
+///    them, which is exactly what the floor pose does.
+/// 2. **The frame is the LUT's projection at that normal**, absolutely, at
+///    [`SKY_AMBIENT_WALL_BANDS`] on three channels and to
+///    [`SKY_AMBIENT_LEVELS`] — the same forward model, with the wall's albedo
+///    and normal where the floor's were.
+/// 3. **And the same room with no atmosphere is black**, on
+///    [`SKY_AMBIENT_DARK`]'s terms, which is what says the term arrived from
+///    the sky.
+///
+/// **Shown red by sabotage** (2026-09-06, radv). `crcbl_render::forward`'s
+/// `PresentedSky::new` was changed to swap lanes `x` and `z` of every band of
+/// `view.irradiance()` before storing it — this sun's `x` lane is zero, so the
+/// swap is what a device that read the wrong horizontal lane would draw — and
+/// this reported `the wall band at (64, 96) measures 35.00 on red and the
+/// host's own SkyView::irradiance at this face's normal predicts 24.49, a miss
+/// of 10.51 level(s) against a budget of 1`. The same run of
+/// [`an_atmospheres_ambient_rows_light_a_floor`] stayed green at its usual 0.27
+/// levels, which is the half of the sabotage that says this band observes a
+/// lane the floor's could not. Restored, and the re-run agreed to 0.49 levels.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn an_atmospheres_ambient_rows_light_a_wall() {
+    crcbl_core::log::init_logging();
+
+    let wall = probe_face(crcbl::screenshot::SKY_AMBIENT_WALL_FACE);
+    let view = crcbl::screenshot::atmosphere_view(SKY_AMBIENT_WALL_SUN);
+    let marched = view.irradiance();
+    // The same rows with the horizontal lanes gone: what the frame would
+    // predict if `sky_irradiance` reached neither, which is what every band of
+    // the floor fixture measures.
+    let mut upright = marched;
+    for band in [&mut upright.sh_r, &mut upright.sh_g, &mut upright.sh_b] {
+        band[0] = 0.0;
+        band[2] = 0.0;
+    }
+    for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
+        let predicted = predicted_sky_ambient_channel(&marched, &wall, channel);
+        let flattened = predicted_sky_ambient_channel(&upright, &wall, channel);
+        let apart = (predicted - flattened).abs();
+        assert!(
+            apart > SKY_AMBIENT_LANE_APART,
+            "this sun's LUT predicts {predicted:.2} on {name} at this wall and its own row with \
+             the `x` and `z` lanes zeroed {flattened:.2}, {apart:.2} level(s) apart against \
+             {SKY_AMBIENT_LANE_APART} — a band this close together is a band a device that \
+             never read a horizontal lane would satisfy, and reading one is what this fixture \
+             is for"
+        );
+    }
+
+    let frame = |atmosphere| {
+        let setup =
+            OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, move |device, queue, format| {
+                crcbl::screenshot::sky_ambient_wall_forward(device, queue, format, atmosphere)
+            })
+            .unwrap_or_else(|why| {
+                panic!("a GPU backend opens for the sky-ambient wall scene: {why}")
+            });
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format))
+            .expect("the readback is exactly one image")
+    };
+
+    let lit = frame(Some(crcbl::screenshot::atmosphere_sky(
+        SKY_AMBIENT_WALL_SUN,
+    )));
+    let unlit = frame(None);
+
+    let mut worst = 0.0f32;
+    let mut darkest = 0.0f32;
+    for (across, down) in SKY_AMBIENT_WALL_BANDS {
+        let at = (
+            (across * EXTENT.0 as f32) as u32,
+            (down * EXTENT.1 as f32) as u32,
+        );
+        for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
+            let measured = block_channel(&lit, at, PROBE_BAND, channel);
+            let predicted = predicted_sky_ambient_channel(&marched, &wall, channel);
+            let miss = (measured - predicted).abs();
+            worst = worst.max(miss);
+            assert!(
+                miss <= SKY_AMBIENT_LEVELS,
+                "the wall band at {at:?} measures {measured:.2} on {name} and the host's own \
+                 `SkyView::irradiance` at this face's normal predicts {predicted:.2}, a miss of \
+                 {miss:.2} level(s) against a budget of {SKY_AMBIENT_LEVELS} — the horizontal \
+                 lanes of the row the frame block carries are not this LUT's, or this frame \
+                 drew something other than the wall here"
+            );
+
+            let dark = block_channel(&unlit, at, PROBE_BAND, channel);
+            darkest = darkest.max(dark);
+            assert!(
+                dark <= SKY_AMBIENT_DARK,
+                "the same band of the same room with no atmosphere measures {dark:.2} on \
+                 {name} against {SKY_AMBIENT_DARK} — something other than the sky is lighting \
+                 this wall, and the agreement above is not about the sky's rows at all"
+            );
+        }
+    }
+
+    eprintln!(
+        "crcbl render e2e: sky ambient wall — the frame and `SkyView::irradiance` at the {} \
+         agree to {worst:.2} level(s) at worst over {} bands and all three channels, where the \
+         same row with its `x` and `z` lanes zeroed would predict {:.2}, {:.2} and {:.2} \
+         against the LUT's {:.2}, {:.2} and {:.2}; with no atmosphere the brightest of the same \
+         bands reads {darkest:.2}",
+        wall.name,
+        SKY_AMBIENT_WALL_BANDS.len(),
+        predicted_sky_ambient_channel(&upright, &wall, 0),
+        predicted_sky_ambient_channel(&upright, &wall, 1),
+        predicted_sky_ambient_channel(&upright, &wall, 2),
+        predicted_sky_ambient_channel(&marched, &wall, 0),
+        predicted_sky_ambient_channel(&marched, &wall, 1),
+        predicted_sky_ambient_channel(&marched, &wall, 2),
     );
 }

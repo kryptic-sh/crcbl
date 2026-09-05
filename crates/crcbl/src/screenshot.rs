@@ -1877,6 +1877,11 @@ fn gradient_mirror_sky() -> crcbl_render::Sky {
 /// One normal is one prediction: `sky_irradiance` reads the normal and nothing
 /// else, so this floor is uniform and a band may be read anywhere on it.
 ///
+/// That one normal is also the whole of what this pose cannot say, and
+/// [`sky_ambient_wall_forward`] is the pose that can: `+Y` multiplies the
+/// row's two horizontal lanes by zero, so no band of *this* frame observes
+/// them.
+///
 /// # Errors
 ///
 /// [`OffscreenError::Hal`] if the renderer cannot be built.
@@ -1902,6 +1907,78 @@ pub fn sky_ambient_forward(
         camera: probe_camera(),
         sun: probe_sun(),
         renderer: Box::new(renderer),
+    })
+}
+
+/// The face of `crcbl_shaders::mesh::OPEN_BOX_FACES` that fills
+/// [`sky_ambient_wall_forward`]'s frame.
+///
+/// **Public because the test predicts the frame from it**, on [`probe_grid`]'s
+/// terms: the band's albedo and its normal are both this face's own, and a
+/// test that named a wall of its own would be predicting a surface the frame
+/// does not draw.
+pub const SKY_AMBIENT_WALL_FACE: &str = "-Z wall";
+
+/// How far in front of [`SKY_AMBIENT_WALL_FACE`] [`sky_ambient_wall_camera`]
+/// stands, in world units.
+///
+/// **Close enough that the frame is nothing but that wall.** The frame's short
+/// half-axis covers this distance times the tangent of half [`probe_camera`]'s
+/// field of view, which is under the wall's own half-height — so the floor
+/// below it and the room's open top above it are both outside the frustum, and
+/// every pixel of the frame carries the wall's one normal. The long axis is the
+/// short one times the frame's aspect and stays inside the wall's half-width
+/// for any aspect under the room's own width-to-height ratio.
+///
+/// Far enough that the bands `tests/render_e2e.rs` reads clear every edge of
+/// the wall by more than `crcbl_render::ForwardRenderer`'s occlusion radius,
+/// which is that file's `PROBE_BAND_AT` condition on the floor bands exactly:
+/// a band close enough to an edge to be darkened would be measuring
+/// `ssao.slang` instead of the sky.
+const SKY_AMBIENT_WALL_BACK: f32 = 1.2;
+
+/// Where [`sky_ambient_wall_forward`] is seen from: level with the middle of
+/// [`SKY_AMBIENT_WALL_FACE`] and facing it square on.
+///
+/// [`probe_camera`]'s own projection, spread from it rather than written out
+/// again, so the two poses differ in where the eye stands and in nothing else.
+fn sky_ambient_wall_camera() -> Camera {
+    let middle = glam::Vec3::new(0.0, 0.5 * PROBE_ROOM_HEIGHT, -0.5 * PROBE_ROOM_DEPTH);
+    Camera {
+        eye: middle + glam::Vec3::Z * SKY_AMBIENT_WALL_BACK,
+        target: middle,
+        up: glam::Vec3::Y,
+        ..probe_camera()
+    }
+}
+
+/// [`sky_ambient_forward`] from the pose that fills the frame with a **wall**:
+/// the same room, the same refusals and the same colourless sun, seen from
+/// `sky_ambient_wall_camera`.
+///
+/// **The one thing the floor pose cannot say.** `mesh.slang`'s
+/// `sky_irradiance` is `dot(sh, float4(N, 1))`, and a normal of `+Y`
+/// multiplies the row's `x` and `z` lanes by zero — so every band
+/// [`sky_ambient_forward`]'s frame offers reads the `y` lane and the constant
+/// band and nothing else, whatever the other two hold. This wall's normal is
+/// `+Z`, so a band on it is the first measurement in the tree that a wrong
+/// horizontal lane can move.
+///
+/// The frame is that one face throughout, so a band may be read anywhere in it
+/// for [`sky_ambient_forward`]'s reason: one normal is one prediction.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built.
+pub fn sky_ambient_wall_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    atmosphere: Option<crcbl_render::Atmosphere>,
+) -> Result<ForwardScene, OffscreenError> {
+    Ok(ForwardScene {
+        camera: sky_ambient_wall_camera(),
+        ..sky_ambient_forward(device, queue, format, atmosphere)?
     })
 }
 

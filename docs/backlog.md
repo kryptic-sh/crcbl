@@ -414,27 +414,46 @@ landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
   is the shape of the demo that would answer it. The same gap as the demo switch
   at the top of this section.
 
-- **The sky's ambient rows are held at one normal.**
-  `crcbl::screenshot::sky_ambient_forward` shades `Scene::Probes`' room under an
-  atmosphere with the sun, the flat ambient, the probes and the reflection pair
-  all zero or refused, so `render_e2e`'s
-  `an_atmospheres_ambient_rows_light_a_floor` pins `mesh.slang`'s
-  `sky_irradiance` against `SkyView::irradiance` absolutely. Every measured
-  pixel faces `+Y`, though, so the L1 row's `x` and `z` lanes are multiplied by
-  zero and only `y` and the constant band are observed — `Scene::Probes`' gap
-  exactly, and for its reason. `crcbl_shaders::probe`'s own literature tests
-  cover those lanes on the host; closing it on a device wants a second band on a
-  surface whose normal is not the floor's, and the room's own wall is the
-  cheapest one.
+- **The sky's ambient row's `x` lane is unobserved on a device.** `render_e2e`'s
+  `an_atmospheres_ambient_rows_light_a_wall` closed the `z` one:
+  `crcbl::screenshot::sky_ambient_wall_forward` fills the frame with
+  `SKY_AMBIENT_WALL_FACE` — `Scene::Probes`' `-Z` wall, seen square on — under
+  `ATMOSPHERE_SUNS[2]`, so a band's normal is `+Z` and zeroing the row's `z`
+  lane moves the host's own prediction of it by 10.88, 5.51 and 3.02 levels in
+  red, green and blue, against a measured frame-versus-host miss of 0.49 levels
+  on radv and 0.49 on lavapipe. Under that sun the `x` lane comes back exactly
+  zero, and that normal multiplies it by zero anyway, so a device that read it
+  wrong would still not be caught anywhere in the tree. Closing it is the same
+  fixture facing the `-X` wall under `ATMOSPHERE_SUNS[1]`, and two things stand
+  in the way of it being one more call to the builder. The sweep that picked the
+  sun measured that lane's separation at 8.15, 3.37 and 2.01 levels there, and
+  blue sits under the `SKY_AMBIENT_LANE_APART` the `z` band is held to, so it
+  wants a constant of its own and a reason to trust a two-level premise against
+  a half-level miss. And the pose is tighter: at `SKY_AMBIENT_WALL_BACK` the
+  frame's long axis runs along `z`, where the room is `PROBE_ROOM_DEPTH` rather
+  than `PROBE_ROOM_WIDTH` wide — on paper the `±Z` walls stay just outside it at
+  the suite's 4:3 extent, which no run has confirmed. Declined for now on that:
+  one horizontal lane on a device is what `mesh.slang`'s `dot(sh, float4(N, 1))`
+  had none of, and `crcbl_shaders::probe`'s literature tests cover all three on
+  the host.
 
-- **`sky_ambient_forward` is a builder and not a `Scene`.** It is reached only
-  from `render_e2e`, so it has no golden, is absent from `crcbl-cli`'s scene
-  list and never reaches the render-harness browser gate. Deliberate on two
-  counts: the picture is a flat lit floor, which a golden could not tell from
-  any other flat lit floor, and the fixture needs the same room drawn twice —
-  with an atmosphere and without — which the `Scene` enum has no way to ask for.
-  If the browser leg or the Metal and D3D12 legs ever need a sky-lit _surface_
-  rather than a sky-lit background, this becomes a variant and gains a golden.
+- **No measured band's normal has more than one non-zero component.** Every band
+  either fixture reads faces an axis — `+Y` on the floor, `+Z` on the wall — so
+  what is pinned is each lane on its own rather than a normal that mixes them.
+  L1 is linear in the normal, so an oblique band is a combination of directions
+  already read and there is no new arithmetic in it; recorded because "the row
+  is evaluated at an arbitrary normal" is a stronger claim than anything here
+  makes, not because a fix is planned.
+
+- **`sky_ambient_forward` and `sky_ambient_wall_forward` are builders and not
+  `Scene`s.** They are reached only from `render_e2e`, so they have no golden,
+  are absent from `crcbl-cli`'s scene list and never reach the render-harness
+  browser gate. Deliberate on two counts: the picture is a flat lit floor or a
+  flat lit wall, which a golden could not tell from any other flat lit surface,
+  and each fixture needs the same room drawn twice — with an atmosphere and
+  without — which the `Scene` enum has no way to ask for. If the browser leg or
+  the Metal and D3D12 legs ever need a sky-lit _surface_ rather than a sky-lit
+  background, these become variants and gain goldens.
 
 - **Nothing reflects a ray downward, `Scene::GradientMirror` included.** Every
   ray in that fixture leaves the plate upward, so
