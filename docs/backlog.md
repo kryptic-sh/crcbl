@@ -4949,15 +4949,82 @@ not camera-relative rendering."
 transparent pass, and its 2026-07-27 correction names the algorithm — a GPU
 radix sort over packed depth keys, bitonic for small counts — "so it isn't
 rediscovered at P7". `crcbl_render::forward` records no blended geometry pass;
-the only alpha blending in the renderer is `crcbl_render::sprite_pass`'s and
-`crcbl_render::ui_pass`'s, both of which are 2D and both of which rely on
-submission order.
+the only alpha blending in the renderer composites rather than shades —
+`crcbl_render::sprite_pass`, `crcbl_render::ui_pass`, `crcbl_render::grid`,
+`crcbl_render::debug_draw` and `crcbl_render::bloom`'s upsample — and none of
+them sorts.
 
-**What it would take.** A second geometry pass with a blend state, a
-per-instance depth key, and the sort. `18-render-features.md`'s SSR section
-already records the interaction to honour: a transparent surface must not write
-the reflectivity attachment, because it would overwrite the opaque `F0` behind
-it while the scene colour at that pixel is a blend.
+**Scoped 2026-09-06, and held on the decisions below.** The whole rung was read
+against the tree before anything was written, because `43-render-standards.md`
+§3 says the order-independent question "should decide about before it is built,
+not after", and the sort's shape turns out to be a decision too. What the
+reading settled:
+
+- **The blend state and every backend are already there.**
+  `crcbl_hal::pipeline::BlendState::alpha` is the match — `mesh.slang`'s
+  `fragmentMain` already writes `float4(lit, albedo.a)` in straight alpha, so
+  the value a blend would consume is in the target today — and `crcbl-vk`,
+  `crcbl-dx12`, `crcbl-mtl` and `crcbl-webgpu` each translate it for the overlay
+  passes. The only hal work is a constructor beside `ColorTargetState::opaque`
+  that carries a blend, plus one with an empty write mask for the reflectivity
+  and motion targets, which a blended surface must not write
+  (`47-reflections.md`'s refusal, and motion has no opaque history to be
+  consistent with).
+- **Where it sits.** After `"sky"` (`crcbl_render::sky_pass` is `LoadOp::Load`
+  and fills only far-depth pixels, so a pass before it blends over clear), with
+  `depth_read(scene_depth)` and no depth write, exactly the attachment shape
+  `sky` already has; `debug_draw` is the precedent for the blend state over HDR.
+  Whether it lands before or after `"volumetric-composite"` and `"ssr"` decides
+  whether a blended surface is fogged and whether it can be a reflection source;
+  both answers are defensible and neither is chosen.
+- **The mode bits have room, and the room is a layout change.** Nothing reads
+  `GpuInstance::flags` above `MATERIAL_MODE_MASK`'s two bits, so widening it to
+  three is byte-neutral for every instance record; the cost is the twin
+  constants (`INSTANCE_MATERIAL_MODE_MASK` in `draw_gen.slang` and
+  `mesh_cluster.slang`), `DEPTH_MODES` and `ForwardRenderer::depth_partitions`
+  moving together as their docs demand, and a bucket per mode the scene holds in
+  `DrawGen::bucket_base`'s scattered run. An all-opaque scene keeps one bucket
+  per mesh level, which is what should keep every golden untouched, and
+  `an_all_opaque_scene_keeps_one_bucket_per_mesh_level` is the assertion to read
+  before spending anything else on the claim.
+- **The scatter's order is arbitrary by design.** `draw_gen.slang` says "nothing
+  here depends on the order" of the slots its atomic hands out, so a blended run
+  is nondeterministic today; the sort is what would fix that, and
+  `draw_scene_on_every_geometry_path`'s byte equality across `EmitTail` arms is
+  the test that would prove it.
+- **One key per instance is not enough.** A bucket is one indirect call whose
+  instance count is the whole run (`BucketDraws::record`), so sorting inside a
+  bucket orders one mesh's instances and two blended meshes still interleave in
+  bucket-table order. A global order needs one call per blended instance (breaks
+  §3.3's fixed CPU-side record), or one bucket per blended mesh (only if they
+  share a mesh), or an argument array the sort writes with the count from GPU
+  memory — which only `EmitTail::Count` can consume; `PerBatch` and `Mesh` have
+  no such tail. This is the rung's largest open question.
+
+**Decisions only the user can make, in the order they gate the work:**
+
+1. Is order-independent transparency refused now, or left open? Weighted-blended
+   OIT cannot be blessed against a reference; deciding this first is what stops
+   the sort being built and then discarded.
+2. Which of the three indirect shapes above carries the global order, given two
+   geometry paths cannot do the third.
+3. Do blended surfaces cast shadows? glTF says nothing — `alphaMode` governs
+   only the base colour's alpha. Excluding the mode from `depth_partitions`
+   gives "no", keeps the prepass honest and makes one sabotage serve two claims;
+   an opaque shadow is free and wrong-looking; a partial shadow needs a
+   mechanism the atlas has not got.
+4. Before or after the volumetric composite and the SSR march.
+5. Is `BLEND` exclusive with `MASK` (six modes, as glTF's one `alphaMode`) or
+   orthogonal to it (eight, more buckets)?
+
+**Sized.** Small in `crcbl-hal`, `gltf_import` (the `AlphaMode::Blend` arm and
+`warn_dropped_features` change together, as the `BLEND` importer entry near the
+top of this file says), `args.rs` and `render-harness`; medium in
+`screenshot.rs` and `render_e2e.rs` (a fixture in `Scene::AlphaMask`'s shape,
+with a control band the quad never covers so "the blend happened" is two claims,
+not one); large in `forward.rs` (a fourth `SidedPipelines`, `RENDER_PASSES` and
+its doc list, `blended_partitions`) and in the sort shader, which has nothing in
+the tree to reuse.
 
 **Blocks.** Glass, water, foliage alpha, and `20-particles.md`'s alpha-blended
 particle buckets. Additive effects do not need it.
