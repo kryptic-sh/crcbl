@@ -1753,6 +1753,328 @@ fn the_alpha_mask_scene_draws_the_same_frame_on_every_geometry_path() {
         the_mask_cuts_the_plate_its_depth_and_its_shadow,
     );
 }
+
+/// The anti-vacuity floor for [`Scene::SpecularAa`].
+///
+/// [`MIN_COLORS_ALPHA_MASK`]'s reason at this frame's own scale: two bands of a
+/// conductor under one sun are a continuum of levels, and radv counts 690
+/// distinct colours in this frame against lavapipe's 695. The floor sits far
+/// below both because what it separates is a drawn plate from a cleared frame
+/// or a flat quad; *which* band holds what is
+/// [`the_corrugation_is_regularised_and_the_flat_band_is_not_touched`]'s claim.
+///
+/// [`the_corrugation_is_regularised_and_the_flat_band_is_not_touched`]: fn@the_corrugation_is_regularised_and_the_flat_band_is_not_touched
+const MIN_COLORS_SPECULAR_AA: usize = 128;
+
+/// How many pixels of the frame one world unit of [`Scene::SpecularAa`]'s plate
+/// is.
+///
+/// The frame's half height in pixels over the world half height the camera
+/// covers at the plate — `screenshot`'s `SPECULAR_HALF_HEIGHT`, which is one,
+/// and `specular_camera` derives its field of view from exactly that. So a
+/// plate coordinate is a pixel by one multiplication and nothing here has to
+/// re-derive a projection.
+const SPECULAR_PIXELS_PER_UNIT: f32 = EXTENT.1 as f32 / 2.0;
+
+/// Where a point on [`Scene::SpecularAa`]'s plate lands in the frame.
+///
+/// [`alpha_pixel`]'s flip for [`alpha_pixel`]'s reason — the camera looks down
+/// `-Y` with `+Z` up, so world `+X` is the frame's left and world `+Z` its top
+/// — and no lift, because this scene's only geometry *is* the plate and the
+/// projection is derived from its own distance.
+fn specular_pixel(x: f32, z: f32) -> (u32, u32) {
+    let column = EXTENT.0 as f32 / 2.0 - x * SPECULAR_PIXELS_PER_UNIT;
+    let row = EXTENT.1 as f32 / 2.0 - z * SPECULAR_PIXELS_PER_UNIT;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "both bands are inside the frame, which the band reader asserts"
+    )]
+    (column as u32, row as u32)
+}
+
+/// Half the size of each of [`Scene::SpecularAa`]'s two bands, in pixels.
+///
+/// **Wide, and that is the measurement rather than a framing choice.** What the
+/// corrugated band is read for is the *distribution* of one population — its
+/// maximum over its mean — and a firefly is by definition rare, so a block of a
+/// few dozen pixels would report whichever streaks happened to fall in it. This
+/// covers 176 of the plate's own 186 columns and half the band's depth, which
+/// is 10912 pixels — and 176 is 22 whole periods of the corrugation, so the
+/// block holds the same number of each of the eight phases and its mean is not
+/// a function of where it was cut.
+const SPECULAR_BAND: (u32, u32) = (88, 31);
+
+/// Where each band's centre is on the plate: the corrugated one `+Z` of the
+/// seam and the flat control one `-Z` of it, both on the frame's axis.
+///
+/// The midpoint of a band's own depth — the mean of `screenshot`'s
+/// `SPECULAR_BAND_INNER_Z` and `SPECULAR_BAND_OUTER_Z` — so with
+/// [`SPECULAR_BAND`]'s depth the block leaves the same margin of unread plate
+/// at the seam as at the outer edge, and neither band can reach the row where
+/// the two bands' normals meet.
+const SPECULAR_BAND_Z: f32 = 0.468_75;
+
+/// Where [`the_corrugation_is_regularised_and_the_flat_band_is_not_touched`]
+/// reads the frame's background, and how big that block is.
+///
+/// Outside the plate's own half width on the near side of the frame — see
+/// `screenshot`'s `SPECULAR_PLATE_HALF_X`, which leaves 35 clear columns on
+/// each side. It is the level the control band has to stand above for that
+/// band's brightness to mean "the lobe reached here" rather than "something was
+/// drawn".
+///
+/// [`the_corrugation_is_regularised_and_the_flat_band_is_not_touched`]: fn@the_corrugation_is_regularised_and_the_flat_band_is_not_touched
+const SPECULAR_BACKGROUND_X: f32 = 1.28;
+
+/// The block that background level is read over.
+const SPECULAR_BACKGROUND_BAND: (u32, u32) = (5, 60);
+
+/// The most the corrugated band's brightest pixel may exceed its mean.
+///
+/// **This is the fireflies, and it is the number the rung is about.** A lobe
+/// sampled once per pixel where its peak is a tenth of a pixel wide reports
+/// whatever the pixel centre happened to land on, so the band is a scatter of
+/// bright spikes over a dark floor and its maximum runs far ahead of its mean.
+/// Widening the lobe by the variance the pixel could not resolve is what pulls
+/// the two together.
+///
+/// **Swept on both drivers before it was fixed here.** With the kernel landed
+/// the ratio is **1.52 on radv and 1.52 on lavapipe**; with `mesh.slang`'s
+/// `SPECULAR_AA_KAPPA` forced to zero — the mechanism switched off and nothing
+/// else changed — it is **1.86 and 1.85**; with the kernel added to `alpha`
+/// instead of to `alpha2`, which is the same idea in the wrong space, **1.78
+/// and 1.77**. This bound sits between the measurement and the nearest of
+/// those, with about eight per cent of margin either way.
+const SPECULAR_FIREFLY_BOUND: f32 = 1.64;
+
+/// The least the corrugated band's mean brightness may be.
+///
+/// **The energy claim, and it is a floor rather than a window because the
+/// measurement is not monotonic in the kernel.** An undersampled lobe loses the
+/// energy its peaks carried between the samples, so regularising the band does
+/// not conserve its measured mean — it *raises* it, by four fifths here — while
+/// over-widening throws the highlight away again and lowers it. The mean is
+/// therefore highest near the kernel the paper asks for, and a floor is the
+/// shape of check that says so: too little widening and too much both fall
+/// under it.
+///
+/// **Swept on both drivers.** Landed, the mean is **147.3 on radv and 147.1 on
+/// lavapipe**. With `SPECULAR_AA_KAPPA` at zero it is **81.1 and 81.2**; with
+/// `SPECULAR_AA_SIGMA_PX` doubled — the over-blur, which the ratio above cannot
+/// see because a blurred band has no spikes at all — **121.3 and 121.4**; with
+/// the kernel in `alpha`'s space **117.2 and 117.0**; and with the kernel's
+/// first `dot` replaced by a constant, **102.0 and 102.1**. This floor sits
+/// about ten per cent over the highest of those and nine per cent under the
+/// landed pair.
+const SPECULAR_BAND_MEAN_FLOOR: f32 = 134.0;
+
+/// The band the flat control band's mean brightness must land in.
+///
+/// **The control claim: a surface whose normal does not vary pays nothing.**
+/// `mesh.slang`'s `specular_aa_kernel` returns exactly zero on this quad — one
+/// normal at all four corners interpolates to that same normal, both
+/// derivatives are exactly zero, and `min` of zero is zero — so `alpha2 + 0.0`
+/// is the `alpha2` the shading used before this rung existed.
+///
+/// **It was checked as byte equality and not only as this window.** The same
+/// frame rendered against a build with `SPECULAR_AA_KAPPA` at zero differs in
+/// rows 11 to 90 and in no other row of the image: the corrugated band alone,
+/// with this band and the background identical channel for channel.
+///
+/// **And the window is not vacuous, which is the harder half.** The band is on
+/// the lobe's shoulder rather than at its peak or on its floor — see
+/// `screenshot`'s `SPECULAR_CONTROL_OFFSET` — so its level is a function of
+/// `alpha2` and moves when `alpha2` does. A build whose kernel ignored the
+/// derivative and returned a constant reads **114.6 on both drivers** here
+/// against the landed **110.6 on both**, which is what says this window would
+/// catch a regularisation that leaked onto flat geometry — and it is why the
+/// window is only a few levels wide. It can afford to be: this band is the same
+/// number on every rasteriser the scene has been drawn on, radv, lavapipe and
+/// the browser gate's SwiftShader alike.
+const SPECULAR_CONTROL_MEAN: std::ops::RangeInclusive<f32> = 106.0..=113.0;
+
+/// How far the control band must stand above the frame's background.
+///
+/// The anti-vacuity floor under [`SPECULAR_CONTROL_MEAN`]: a window around a
+/// number says nothing if the number is the clear colour. Landed, the band
+/// reads 110.6 against a background of 37.0 on radv and 37.3 on lavapipe, so
+/// the two are separated by three times rather than by this.
+const SPECULAR_CONTROL_RATIO: f32 = 2.0;
+
+/// The mean and the maximum of one band of [`Scene::SpecularAa`]'s plate.
+///
+/// Both out of one walk, because the claim is the *ratio* between them and two
+/// loops over one block are two loops that will not agree. The per-pixel value
+/// is [`block_brightness`]' — the mean of the three channels — which is the
+/// level this plate's near-neutral tint carries in all three.
+fn specular_band(image: &Image, centre: (u32, u32), half: (u32, u32)) -> (f32, f32) {
+    let mut total = 0.0f32;
+    let mut peak = 0.0f32;
+    let mut count = 0u32;
+    for (x, y) in block_pixels(centre, half) {
+        let pixel = image.pixel(x, y).expect("inside the frame");
+        let level = (f32::from(pixel[0]) + f32::from(pixel[1]) + f32::from(pixel[2])) / 3.0;
+        total += level;
+        peak = peak.max(level);
+        count += 1;
+    }
+    assert!(count > 0, "an empty block measures nothing");
+    (total / count as f32, peak)
+}
+
+/// [`Scene::SpecularAa`]'s claim: **the corrugated band's fireflies are gone,
+/// its energy is not, and the flat band beside it was not touched.**
+///
+/// Three bands of one frame, one material, one lobe. `docs/plan/44-lighting.md`'s
+/// rung 4 is the argument; `mesh.slang`'s `specular_aa_kernel` is the mechanism.
+///
+/// * **The corrugated band.** Its maximum over its mean must be under
+///   [`SPECULAR_FIREFLY_BOUND`]. That band's authored normal turns by
+///   `screenshot`'s `SPECULAR_SWING` every strip and a strip is two pixels
+///   wide, so at this material's roughness the lobe's peak is a fraction of a
+///   pixel across and which pixels find it is a lottery — the definition of a
+///   firefly, and the one aliasing
+///   `docs/plan/49-antialiasing.md`'s ladder cannot reach, because no coverage
+///   filter can average a signal the shading invented.
+/// * **Its energy.** The same band's mean must clear
+///   [`SPECULAR_BAND_MEAN_FLOOR`]. Without it the first claim is satisfied by
+///   any frame that lost the highlight altogether: a lobe widened to nothing
+///   has no spikes either, which is exactly what a doubled filter width
+///   produces and what the floor refuses.
+/// * **The flat band.** Its mean must land inside [`SPECULAR_CONTROL_MEAN`] and
+///   stand [`SPECULAR_CONTROL_RATIO`] clear of the frame's background. This is
+///   the half that says the rung costs an unregularised surface nothing: same
+///   material, same lobe, same sun, and a normal that does not vary.
+///
+/// # Each of these was watched go red
+///
+/// Not argued — run, on radv, with `mesh.slang` sabotaged one change at a time,
+/// the artifacts regenerated and this scene alone drawn. Each quoted number is
+/// what that build measured.
+///
+/// **`SPECULAR_AA_KAPPA` forced to zero** — the kernel computed and clamped to
+/// nothing, so `alpha2 + 0.0` is the old `alpha2` everywhere: the corrugated
+/// band reads 1.86 against this bound's 1.64 and a mean of 81.1 under the
+/// floor's 134.0. The control band and the background do not move at all — the
+/// two frames are equal channel for channel outside rows 11 to 90 — which is
+/// what says those two are evidence about something else.
+///
+/// **`SPECULAR_AA_SIGMA_PX` doubled** — the paper's half-pixel filter widened to
+/// a whole one, so the kernel is four times what it should be: the ratio falls
+/// to 1.27, *passing* the first claim, and the mean falls to 121.3 and fails the
+/// floor. Over-blur has no fireflies in it; the energy is the only claim that
+/// can see it.
+///
+/// **The kernel added to `alpha` rather than to `alpha2`** — the same variance
+/// in the wrong space, so almost none of the widening survives the squaring:
+/// 1.78 against the bound's 1.64.
+///
+/// **`specular_aa_kernel`'s first `dot` replaced by `1.0`** — the
+/// regularisation leaking onto flat geometry and the corrugation over-filtered
+/// at the same time. The corrugated band's mean fires first at 102.0; with that
+/// claim held aside the control one fires on its own, "the flat band means
+/// 114.6, outside 106.0..=113.0".
+///
+/// # And one this reader does not see
+///
+/// **The paper's factor of two dropped** — `min(variance, KAPPA)`, a kernel at
+/// half strength — reads 1.61 against the bound's 1.64 and a mean of 148.7,
+/// inside both claims; only the golden (mismatch on radv) and
+/// `crcbl_shaders::mesh`'s `the_specular_antialiasing_kernel_is_spelled_the_same_way`,
+/// which holds that factor byte for byte, go red. The bound is not tightened
+/// onto it: 1.52 to 1.61 is the whole gap, and a bound inside it is one a
+/// second rasteriser could not be trusted to clear.
+fn the_corrugation_is_regularised_and_the_flat_band_is_not_touched(image: &Image) {
+    let (corrugated, spike) =
+        specular_band(image, specular_pixel(0.0, SPECULAR_BAND_Z), SPECULAR_BAND);
+    let (control, _) = specular_band(image, specular_pixel(0.0, -SPECULAR_BAND_Z), SPECULAR_BAND);
+    let (background, _) = specular_band(
+        image,
+        specular_pixel(SPECULAR_BACKGROUND_X, 0.0),
+        SPECULAR_BACKGROUND_BAND,
+    );
+    let ratio = spike / corrugated;
+
+    eprintln!(
+        "crcbl render e2e: specular aa — the corrugated band means {corrugated:.1} and peaks \
+         at {spike:.1}, a ratio of {ratio:.2}; the flat band means {control:.1} against a \
+         background of {background:.1}"
+    );
+
+    assert!(
+        ratio <= SPECULAR_FIREFLY_BOUND,
+        "the corrugated band's lobe must be widened by the variance the pixel could not \
+         resolve: it peaks at {spike:.1} over a mean of {corrugated:.1}, a ratio of \
+         {ratio:.2} against {SPECULAR_FIREFLY_BOUND:.2} — which is a band of fireflies, so \
+         the regularisation reached nothing"
+    );
+    assert!(
+        corrugated >= SPECULAR_BAND_MEAN_FLOOR,
+        "and widening it must not have thrown the highlight away: the band means \
+         {corrugated:.1}, under {SPECULAR_BAND_MEAN_FLOOR:.1} — which is where both a lobe \
+         that was never widened and one blurred into a flat grey land, and the ratio above \
+         passes for the second of them"
+    );
+    assert!(
+        SPECULAR_CONTROL_MEAN.contains(&control),
+        "a surface whose normal does not vary must shade exactly as it did: the flat band \
+         means {control:.1}, outside {SPECULAR_CONTROL_MEAN:?} — so the kernel is firing \
+         where both screen-space derivatives of the normal are zero"
+    );
+    assert!(
+        control > background * SPECULAR_CONTROL_RATIO,
+        "and that band has to be lit by the lobe for its level to say anything: {control:.1} \
+         against a background of {background:.1}, which is a control band measuring the \
+         clear colour"
+    );
+}
+
+/// `docs/plan/44-lighting.md`'s rung 4 — **specular antialiasing by roughness
+/// regularisation** — drawn.
+///
+/// The golden is the picture that was reviewed;
+/// [`the_corrugation_is_regularised_and_the_flat_band_is_not_touched`] is the
+/// evidence, on [`the_alpha_mask_scene_cuts_its_plate_and_matches_its_golden`]'s
+/// terms: a frame with the kernel switched off is still a corrugated plate under
+/// a sun and a reader cannot tell the two apart by looking.
+///
+/// [`the_corrugation_is_regularised_and_the_flat_band_is_not_touched`]: fn@the_corrugation_is_regularised_and_the_flat_band_is_not_touched
+/// [`the_alpha_mask_scene_cuts_its_plate_and_matches_its_golden`]: fn@the_alpha_mask_scene_cuts_its_plate_and_matches_its_golden
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_specular_aa_scene_regularises_its_corrugation_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::SpecularAa,
+        "specular_aa",
+        EXTENT,
+        MIN_COLORS_SPECULAR_AA,
+        the_corrugation_is_regularised_and_the_flat_band_is_not_touched,
+    );
+}
+
+/// The specular-antialiasing scene on both geometry paths — see
+/// [`draw_scene_on_every_geometry_path`].
+///
+/// The claim this arm carries that no other scene's does: this is the only
+/// fixture in the tree whose mesh is authored here rather than in
+/// `crcbl_shaders::mesh`, so its cluster runs and its index buffer are two
+/// hand-written descriptions of one surface. Byte equality between the paths is
+/// what says they describe the same triangles in the same order — a cluster
+/// whose triangle count was in strips rather than in triangles draws half of
+/// itself on the mesh path and all of itself on the other.
+///
+/// [`draw_scene_on_every_geometry_path`]: fn@draw_scene_on_every_geometry_path
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_specular_aa_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::SpecularAa,
+        "specular_aa",
+        MIN_COLORS_SPECULAR_AA,
+        the_corrugation_is_regularised_and_the_flat_band_is_not_touched,
+    );
+}
 /// The anti-vacuity floor for [`Scene::Ao`].
 ///
 /// Lower than the shadow scenes', and deliberately: this frame is one flat floor

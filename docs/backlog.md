@@ -3,6 +3,89 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## What specular antialiasing shipped without (2026-09-05)
+
+`mesh.slang`'s `specular_aa_kernel`, the `SPECULAR_AA_SIGMA_PX` /
+`SPECULAR_AA_KAPPA` pair mirrored in `crcbl_shaders::mesh`, and
+`crcbl::screenshot::Scene::SpecularAa` landed with `docs/plan/44-lighting.md`'s
+rung 4. What they left:
+
+### Considered and declined: a per-scene golden tolerance
+
+`specular_aa` failed the browser gate on its first geometry — 4788 pixels over
+`Tolerance::RASTERISER`'s two levels (9.7412%) against an allowance of one per
+cent — and the obvious lever was a third tolerance in `crcbl-golden` that a
+scene could name, so an awkward frame could be compared on its population rather
+than pixel by pixel. **Not built, and now not needed.** The cause was the
+fixture's geometry, not the comparison: its strips were 1.49 pixels wide and
+landed at arbitrary sub-pixel positions, and Vulkan guarantees only four
+`subPixelPrecisionBits`, so SwiftShader's sixteenth-of-a-pixel vertex grid put
+each strip edge somewhere radv's eighth-bit grid did not. Sizing the strips to
+exactly two pixels on integer columns — `screenshot`'s `SPECULAR_STRIP_PITCH`,
+which asserts the property vertex by vertex — took the disagreement to **one
+pixel over tolerance, max channel delta 3**. Anyone reaching for a per-scene
+tolerance again should first check whether the fixture's own edges are on the
+pixel grid.
+
+### The mechanism's own gaps
+
+- **Only the direct GGX lobe is regularised.** The `dfg` split-sum pair, the
+  `ltc` transform an area light's specular is fitted through, and the roughness
+  the reflectivity attachment hands `ssr.slang` all keep the material's own
+  perceptual roughness; the call site in `fragmentMain` argues each refusal. The
+  one that is a real gap rather than a decision is **LTC**: a rectangle's
+  specular is a mirror image of the rectangle, and at a low roughness on a fast
+  normal field it aliases the way a punctual highlight does. Regularising it
+  needs a widened _perceptual_ roughness to index the table with, which is two
+  square roots out of `alpha2` and a second table tap — measurable work, and it
+  would have to be shown not to move the flat-normalled goldens. No fixture in
+  the tree puts an area light on a corrugated surface, so the gap is unmeasured
+  as well as unfixed.
+
+- **The anisotropic form was not built.** Tokuyoshi and Kaplanyan's paper gives
+  an anisotropic kernel — a 2×2 covariance of the half-vector rather than one
+  scalar — which is what keeps a highlight elongated along a scratch instead of
+  swelling it in every direction. This engine's BRDF is isotropic (`ggx_lobe`
+  takes one `alpha2`), so the anisotropic kernel has nothing to widen; it
+  becomes worth doing only when an anisotropic material row exists.
+
+- **The `render_e2e` reader cannot see a half-strength kernel.** With the
+  paper's factor of two dropped from `specular_aa_kernel` the corrugated band
+  reads a ratio of 1.61 against `SPECULAR_FIREFLY_BOUND`'s 1.64 and a mean of
+  148.7 over the floor, so both band claims pass; the golden and
+  `the_specular_antialiasing_kernel_is_spelled_the_same_way` are what catch that
+  slip. Tightening the bound into the 1.52–1.61 gap would leave a second
+  rasteriser no margin, so the reader's evidence stops at "regularised at all",
+  and the spelling test carries the constants.
+
+- **The residual after regularisation is not zero, and it is the method's.** The
+  filter is calibrated to a half-pixel Gaussian, so on the fixture's
+  12.5-degrees-per-pixel normal field the widened lobe is several degrees wide
+  and the band still has structure — max over mean 1.52 rather than near 1.0.
+  Raising the strip count or lowering the roughness does not change that ratio:
+  the kernel and the base lobe both scale with the turn per pixel, so the
+  coverage is set by `SPECULAR_AA_SIGMA_PX` and by nothing a fixture can choose.
+  Anyone expecting the band to go flat should read that as the paper's design
+  rather than as a tuning miss.
+
+### What was not measured
+
+- **The fixture's own frame has no price.** `docs/plan/44-lighting.md`'s rung 4
+  prices the rung through `apps/lantern`, whose room is flat-normalled, and
+  argues that the cost is unconditional because `specular_aa_kernel` is
+  straight-line code with no branch. That argument is sound but it is an
+  argument: there is no headless timing harness for a `screenshot::Scene`, so no
+  run in this tree has reported a `forward` p50 for a frame where the kernel is
+  non-zero. Building one is a small app or a `mesh_e2e` fixture on
+  `the_price_of_a_froxel_full_of_area_lights`' pattern.
+
+- **Metal, D3D12 and the browser are unpriced**, on the alpha-mask rung's terms:
+  this machine has no Apple or Windows hardware, and the browser tier has no
+  timing path. What is known about the browser tier is that the module compiles
+  — Slang emits `dpdx`/`dpdy` for the kernel and WGSL's uniformity analysis
+  accepts them at `fragmentMain`'s top level — and that SwiftShader draws the
+  scene, which the entry above measures.
+
 ## What alpha-mask materials shipped without (2026-09-05)
 
 `GpuMaterial::ALPHA_MODE_MASK`, `mesh.slang`'s `alpha_masked` and

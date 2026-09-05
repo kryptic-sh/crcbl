@@ -2123,6 +2123,64 @@ float3 ggx_lobe(float alpha2, float3 f0, float n_dot_l, float n_dot_v, float n_d
     return d * visibility * fresnel;
 }
 
+/// The standard deviation, in pixels, of the screen-space filter the specular
+/// antialiasing below convolves the normal field with.
+///
+/// Tokuyoshi and Kaplanyan, "Improved Geometric Specular Antialiasing" (I3D
+/// 2019), and their own value: the pixel filter is an isotropic Gaussian and
+/// half a pixel is the width they fit the kernel for. It is read squared and
+/// nowhere else, which is why `specular_aa_kernel` squares it rather than a
+/// second constant carrying the square.
+/// `crcbl_shaders::mesh::SPECULAR_AA_SIGMA_PX` is the Rust mirror.
+static const float SPECULAR_AA_SIGMA_PX = 0.5;
+
+/// The ceiling that paper puts on the variance the kernel may add.
+///
+/// A silhouette is where the interpolated normal turns through most of a
+/// hemisphere inside one quad, and an unclamped kernel would take a polished
+/// surface there to fully rough — a grey rim around every object, which is a
+/// worse artefact than the aliasing. The paper's own value.
+/// `crcbl_shaders::mesh::SPECULAR_AA_KAPPA` is the Rust mirror.
+static const float SPECULAR_AA_KAPPA = 0.18;
+
+/// How much variance the shading normal's screen-space spread adds to the
+/// specular lobe — Tokuyoshi and Kaplanyan's isotropic kernel, transcribed.
+///
+/// `docs/plan/44-lighting.md`'s rung 4. The aliasing it removes is in the
+/// *shading* rather than in the geometry, so no pass in
+/// `docs/plan/49-antialiasing.md`'s ladder can reach it: a normal field that
+/// moves faster than the pixel grid samples it puts the lobe's peak inside some
+/// pixels and not others, and at a low roughness that peak is `1 / alpha2`.
+/// Widening the lobe by the variance the pixel could not resolve is the
+/// integral the sampling missed, done analytically.
+///
+/// The three lines are the paper's listing term for term: the squared filter
+/// width times the summed squared derivatives is the normal field's variance
+/// over the pixel, twice that is the variance it contributes to the half-vector
+/// distribution, and the clamp is `SPECULAR_AA_KAPPA`.
+///
+/// **Exactly zero on a flat facet, and that is a property rather than an
+/// approximation.** Every corner of a flat face carries one normal, so the
+/// varying interpolates to that same vector across the primitive, both
+/// derivatives are exactly zero, both dot products are exactly zero and `min`
+/// returns exactly zero. The caller adds it, so every surface in this engine
+/// that was not already changing its normal across a pixel shades with the
+/// bits it shaded with before this function existed.
+///
+/// **A fragment stage only**, on `geometric_normal_of`'s terms: `ddx`/`ddy` are
+/// a quad's finite differences and mean nothing in any other stage. It is
+/// called at `fragmentMain`'s top level for the same reason `shading_normal_of`
+/// takes its derivatives there — WGSL's uniformity analysis, which the header
+/// on that function argues.
+float specular_aa_kernel(float3 normal)
+{
+    float3 dndx = ddx(normal);
+    float3 dndy = ddy(normal);
+    float variance =
+        SPECULAR_AA_SIGMA_PX * SPECULAR_AA_SIGMA_PX * (dot(dndx, dndx) + dot(dndy, dndy));
+    return min(2.0 * variance, SPECULAR_AA_KAPPA);
+}
+
 /// The smallest directional albedo `specular_compensation` will divide by.
 ///
 /// The table never comes near it — its floor is a rough conductor seen head on,
@@ -5208,6 +5266,38 @@ FragmentOutput fragmentMain(VertexOutput input)
     float roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
     float alpha = roughness * roughness;
     float alpha2 = alpha * alpha;
+
+    // **Specular antialiasing, and it widens this one lobe and nothing else.**
+    // `specular_aa_kernel` carries the paper; what is decided here is which
+    // consumer of the chain above takes the widened number, and only
+    // `ggx_lobe` below does.
+    //
+    // That lobe is the whole of the aliasing: its `D` is `alpha2` over a
+    // squared shape, so its peak is `1 / alpha2` and at `MIN_ROUGHNESS` that is
+    // five orders of magnitude of swing inside one pixel. Nothing else in this
+    // stage moves like that. The two table taps — `dfg_at` for the split-sum
+    // energy and `ltc_at` for an area light's transform — are bilinear reads of
+    // a 64-square table in `roughness`, so a normal turning across a pixel
+    // moves them by a fraction of a texel and no firefly comes out of them;
+    // they keep the material's own roughness, which is the axis they were
+    // fitted on.
+    //
+    // The reflectivity attachment keeps it too, and there the refusal is the
+    // load-bearing half: `ssr.slang` reloads that alpha to choose how sharp a
+    // march to blur, and what it is reflecting is the *scene* rather than a
+    // light. A per-pixel widening written there would blur a mirror wherever
+    // the geometry happened to be dense on screen and un-blur it as the camera
+    // moved, which is a swimming artefact rather than an antialiased one — and
+    // the store is quantised to `REFLECTIVITY_LEVELS`, so the noise would land
+    // as dither in the level a whole surface reflects at.
+    //
+    // Going the other way — regularising `roughness` itself, so every consumer
+    // followed — costs two square roots to climb back out of `alpha2`, and that
+    // round trip is not the identity in floating point. Every golden in the
+    // tree would then move on a fragment whose kernel is exactly zero, which is
+    // the one thing this rung is not allowed to do. `docs/backlog.md` carries
+    // the area-light half as a known gap.
+    alpha2 = saturate(alpha2 + specular_aa_kernel(normal));
 
     // **A conductor has no diffuse lobe**: what a metal does with light is
     // reflect it, and its reflectance is coloured where a dielectric's is the

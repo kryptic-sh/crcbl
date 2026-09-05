@@ -1138,6 +1138,25 @@ pub const CASCADE_TINT_NONE: [f32; 3] = [1.0, 1.0, 1.0];
 /// `the_cascade_fade_grows_towards_the_outer_cascade` holds the two equal.
 pub const CASCADE_FADE_FRACTION: f32 = 0.1;
 
+/// The standard deviation, in pixels, of the screen-space filter
+/// `mesh.slang`'s specular antialiasing convolves the normal field with, and
+/// `static const float SPECULAR_AA_SIGMA_PX` there.
+///
+/// Tokuyoshi and Kaplanyan, "Improved Geometric Specular Antialiasing" (I3D
+/// 2019), and the paper's own value for the pixel filter's width.
+/// `docs/plan/44-lighting.md`'s rung 4 is the argument for the rung, and this
+/// module's `the_specular_antialiasing_kernel_is_spelled_the_same_way` is what
+/// holds this number and the shader's to each other.
+pub const SPECULAR_AA_SIGMA_PX: f32 = 0.5;
+
+/// The ceiling the same paper puts on the variance that kernel may add to the
+/// lobe, and `static const float SPECULAR_AA_KAPPA` in `mesh.slang`.
+///
+/// Unclamped, a silhouette — where the interpolated normal turns through most
+/// of a hemisphere inside one quad — would widen a polished surface to a fully
+/// rough one and read as a grey rim. The paper's own value.
+pub const SPECULAR_AA_KAPPA: f32 = 0.18;
+
 /// One drawable object, matching `struct GpuInstance` in `shaders/mesh.slang`.
 ///
 /// `docs/plan/03-gpu-driven-rendering.md` §3.2's instance record: "transform,
@@ -5264,6 +5283,107 @@ mod tests {
                 stage.contains("discard;"),
                 "`{entry}` calls `alpha_masked` and discards nothing, so the answer is computed \
                  and thrown away"
+            );
+        }
+    }
+
+    /// Tokuyoshi and Kaplanyan's kernel, as `mesh.slang` must spell it.
+    ///
+    /// Held byte for byte for [`ALPHA_MASKED`]' reason and one of its own: this
+    /// is a transcription from a paper, and the recurring way a transcription
+    /// goes wrong is a factor that reads plausibly and is not what was
+    /// published — the filter width unsquared, the factor of two dropped, the
+    /// clamp applied to the variance instead of to the kernel. Nothing else in
+    /// this tree knows what the right answer was, so the spelling is the check.
+    const SPECULAR_AA_KERNEL: &str = concat!(
+        "float specular_aa_kernel(float3 normal)\n",
+        "{\n",
+        "    float3 dndx = ddx(normal);\n",
+        "    float3 dndy = ddy(normal);\n",
+        "    float variance =\n",
+        "        SPECULAR_AA_SIGMA_PX * SPECULAR_AA_SIGMA_PX * (dot(dndx, dndx) + dot(dndy, dndy));\n",
+        "    return min(2.0 * variance, SPECULAR_AA_KAPPA);\n",
+        "}\n",
+    );
+
+    /// How the shaded stage must widen the lobe with it.
+    ///
+    /// **The space is the whole claim.** The paper's variance is added to the
+    /// squared GGX alpha, and adding it to `alpha` instead is the same number
+    /// in a space where it means something else — a quarter of the widening at
+    /// this fixture's roughness, which still removes *some* aliasing and so
+    /// draws a picture a reviewer would accept. `crates/crcbl/tests/render_e2e.rs`
+    /// measures the difference on a real frame; this holds the source that
+    /// frame is drawn from.
+    ///
+    /// The `saturate` is here for the same reason: `alpha2` is at most one and
+    /// the clamp is the identity on a fragment whose kernel is zero, so the
+    /// widening cannot cost an unregularised surface its bits.
+    const SPECULAR_AA_APPLIED: &str =
+        "    alpha2 = saturate(alpha2 + specular_aa_kernel(normal));\n";
+
+    /// **The shaded stage widens its lobe by the paper's kernel, and it is the
+    /// only stage that does.**
+    ///
+    /// `docs/plan/44-lighting.md`'s rung 4. The other two stages of this file
+    /// that draw a material's own geometry write depth and an albedo patch; a
+    /// specular lobe reaches neither, so a kernel that appeared in one of them
+    /// would be arithmetic with nowhere to go.
+    ///
+    /// The second assertion is what stops the function being decoration, on
+    /// [`every_stage_cuts_the_alpha_mask_the_same_way`]'s terms: a kernel
+    /// declared and never added leaves every fragment shaded exactly as it was,
+    /// which is the picture the tree had before this rung and which every
+    /// golden of a flat-normalled scene still matches.
+    ///
+    /// [`every_stage_cuts_the_alpha_mask_the_same_way`]: fn@every_stage_cuts_the_alpha_mask_the_same_way
+    #[test]
+    fn the_specular_antialiasing_kernel_is_spelled_the_same_way() {
+        let source = include_str!("../shaders/mesh.slang");
+        for (name, spelling) in [
+            (
+                "SPECULAR_AA_SIGMA_PX",
+                format!("static const float SPECULAR_AA_SIGMA_PX = {SPECULAR_AA_SIGMA_PX:.1};"),
+            ),
+            (
+                "SPECULAR_AA_KAPPA",
+                format!("static const float SPECULAR_AA_KAPPA = {SPECULAR_AA_KAPPA:.2};"),
+            ),
+        ] {
+            assert!(
+                source.contains(&spelling),
+                "mesh.slang does not declare `{spelling}`; {name} has drifted from this \
+                 module's copy and the paper's constant is now whatever the shader says"
+            );
+        }
+        assert!(
+            source.contains(SPECULAR_AA_KERNEL),
+            "mesh.slang does not carry this exact function, so what the frame filters is \
+             no longer the kernel this crate names:\n{SPECULAR_AA_KERNEL}"
+        );
+
+        // Each `[shader("` opens a stage and the next one ends it, so a chunk
+        // is one entry point's attribute, signature and body.
+        let stage_of = |entry: &str| {
+            source
+                .split("[shader(\"")
+                .find(|chunk| chunk.contains(entry))
+                .unwrap_or_else(|| panic!("mesh.slang declares no stage `{entry}`"))
+                .to_owned()
+        };
+        assert!(
+            stage_of("FragmentOutput fragmentMain(").contains(SPECULAR_AA_APPLIED),
+            "`fragmentMain` declares the kernel and never widens its lobe with it, so the \
+             regularisation is arithmetic nothing reads:\n{SPECULAR_AA_APPLIED}"
+        );
+        for entry in [
+            "void depthMaskedFragmentMain(",
+            "RsmOutput rsmFragmentMain(",
+        ] {
+            assert!(
+                !stage_of(entry).contains("specular_aa_kernel("),
+                "`{entry}` evaluates no specular lobe, so a kernel there is a derivative \
+                 taken for nothing"
             );
         }
     }

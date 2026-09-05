@@ -35,6 +35,44 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Specular antialiasing by roughness regularisation.** `shaders/mesh.slang`'s
+  `specular_aa_kernel` is Tokuyoshi and Kaplanyan's isotropic filter from
+  "Improved Geometric Specular Antialiasing" (I3D 2019), transcribed: the
+  screen-space derivatives of the shading normal give the variance the pixel
+  could not resolve, and twice that — clamped to `SPECULAR_AA_KAPPA` — widens
+  GGX's `alpha2` before the lobe is evaluated. Both paper constants are
+  `static const` in the shader and mirrored in `crcbl_shaders::mesh` as
+  `SPECULAR_AA_SIGMA_PX` and `SPECULAR_AA_KAPPA`, with
+  `the_specular_antialiasing_kernel_is_spelled_the_same_way` holding the two
+  copies and the kernel's own arithmetic to each other.
+
+  **It widens the direct specular lobe and nothing else.** The `dfg` and `ltc`
+  table taps and the reflectivity attachment `ssr.slang` reloads all keep the
+  material's own perceptual roughness — they are smooth functions of it, and a
+  per-pixel widening written into the attachment would blur a mirror wherever
+  screen-space geometry happened to be dense. `docs/backlog.md` carries the area
+  lights as the known gap.
+
+  **A surface whose normal does not vary pays exactly zero**: one normal at
+  every corner of a facet interpolates to that normal, both derivatives are
+  exactly zero and `alpha2 + 0.0` is the `alpha2` that shaded before. Every
+  flat-normalled golden in the tree is therefore byte-identical; the one with
+  real curvature, the dunes cluster DAG, has its crests regularised and its
+  reference re-blessed.
+
+  `crcbl::screenshot::Scene::SpecularAa` is the new fixture: a flat plate whose
+  authored vertex normals swing 25° every strip beside a flat control band of
+  the same conductor, under a long lens so the mirror direction is the same
+  across the plate. On radv and on lavapipe the corrugated band's maximum over
+  its mean falls from 1.86 to 1.52 and its mean rises from 81.1 to 147.3 — the
+  energy the undersampled lobe was losing between pixel centres — while the flat
+  band is unchanged channel for channel.
+
+  **Priced** with
+  `lantern --headless --frames 400 --size 1920x1080 --backend vk`, medians of
+  three runs each side: `forward` 0.342 → 0.341 ms on an RX 7900 XTX under radv
+  and 35.475 → 35.488 ms on lavapipe, both inside their own run-to-run spread.
+
 - **Alpha-mask materials — glTF's `alphaMode: "MASK"`.**
   `crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK` is the mode bit beside the
   `alpha_cutoff` the row already carried, and `shaders/mesh.slang`'s

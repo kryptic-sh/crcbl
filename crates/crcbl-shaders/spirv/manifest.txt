@@ -237,18 +237,18 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 5670af850adcbc4a8667c6370e1d269b081eafad989693886bb2b5cf40a916c8
+source-sha256 = b501d0b3f34a20f157014e1834e0e9281b57c0b6c79e4911599a4bb9feaa2646
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = 2e0f64ccefcd243df8879f48cf56659bd932399f18f1133a3123306b75be2f5b
+spirv-sha256 = ca5f83545e41613c7e410278adb3a6b598a9e4603df3c0e734233a85547ac86a
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 5d1bd7184d5916bde84bf4df0c483da698d5a252f226661a12becca930bbd98d
+wgsl-sha256 = a5f0195d4185e668e1ea11ea3e78657bb7ea0bff25fe95e1facaba4b98ba8fe6
 msl = msl/mesh.metal
-msl-sha256 = 053bc1f0d2a4cb433e62620349955624b3794133c6b4815e46a729de62714fd3
+msl-sha256 = b4dcf2913edad3372cdf5019dee045195ddd7a07f0fca769c106045ae40563b9
 dxil = vertexMain:dxil/mesh.vertex.dxil:7be67c51fde9b7644a1255403c0131212203545583ed16fd904eb39e1c71915f
 dxil = depthVertexMain:dxil/mesh.depth_vertex.dxil:54166251ef71b7ead624305ae82f7a6e640a0e63d9805f50e34ef66726735b36
 dxil = depthClearVertexMain:dxil/mesh.depth_clear_vertex.dxil:e2007f43be9438f2c6d5022cb8fb44f825ab39426569a45117fd8c1494ab53a4
-dxil = fragmentMain:dxil/mesh.fragment.dxil:fb98284d44211a3ea8b8b3e972dd97456ebf90c20b021c05fda106e0002f32d9
+dxil = fragmentMain:dxil/mesh.fragment.dxil:a20d08934b214d316793e2c6f4f45bcec7e322e1b48d3333860e8ba8ab65654d
 dxil = depthMaskedFragmentMain:dxil/mesh.depth_masked_fragment.dxil:4692ee1d0dc80727b7c04592eec7bc92205d352479d33788b1ba6435532ceefc
 dxil = rsmFragmentMain:dxil/mesh.rsm_fragment.dxil:244216bf5ebdb5ebd0692435be116b13c6955f27d3698d8ec10c9f947a0f0eeb
 entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:vertex, fragmentMain:fragment, depthMaskedFragmentMain:fragment, rsmFragmentMain:fragment

@@ -348,6 +348,56 @@ pub enum Scene {
     /// a plane at a known scale and a pixel maps to a floor position by a
     /// division.
     AlphaMask,
+    /// `docs/plan/44-lighting.md`'s rung 4: **specular antialiasing by
+    /// roughness regularisation**, and the one frame in the tree whose normal
+    /// field moves faster than the pixel grid samples it.
+    ///
+    /// A single flat plate seen through a long lens from straight above, with a
+    /// conductor's material on it and the sun placed so its highlight lands on
+    /// the plate. The plate is geometrically one plane; what varies is the
+    /// *authored* vertex normal, and it varies in two ways across the two
+    /// halves of the same mesh:
+    ///
+    /// * the **corrugated band**, `+z` of the centre line, whose normal swings
+    ///   by `SPECULAR_SWING` every strip — and a strip is two pixels wide, so
+    ///   the mirror direction crosses the sun twice inside distances the frame
+    ///   cannot resolve. That is specular aliasing, and it is the one
+    ///   aliasing `docs/plan/49-antialiasing.md`'s whole ladder is silent about:
+    ///   no coverage-based pass can average a signal the shading generated.
+    /// * the **control band**, `-z` of it, one quad whose normal is constant.
+    ///   `mesh.slang`'s `specular_aa_kernel` returns exactly zero there — one
+    ///   normal at every corner interpolates to that same normal, so both
+    ///   derivatives are exactly zero — and the band is what says the
+    ///   regularisation costs an unregularised surface nothing at all.
+    ///
+    /// # Why a mesh and not a page
+    ///
+    /// `crcbl_render::scene::PAGE_EXTENT` is two texels a side and the page is
+    /// read through a trilinear sampler, so tiling it tightly enough to alias
+    /// is tiling it tightly enough that the mip chain hands the fragment a flat
+    /// surface — correct filtering, and nothing left for a kernel to do. A
+    /// vertex normal reaches the fragment through the rasteriser's interpolator
+    /// instead, which has no such filter, so a mesh is the only fixture in this
+    /// engine that can put the signal in front of the kernel at all.
+    /// `specular_plate_mesh` is the geometry.
+    ///
+    /// # Why a conductor
+    ///
+    /// `metallic` of one removes the diffuse lobe *and* the ambient term, which
+    /// multiplies the diffuse albedo — so every lit pixel of this plate is the
+    /// specular lobe and nothing else. A band's mean is then the lobe's energy
+    /// and its maximum over that mean is how badly the lobe was undersampled,
+    /// which is what `tests/render_e2e.rs` reads.
+    ///
+    /// # What is deliberately switched off
+    ///
+    /// `RenderEffects::REFLECTIONS`, because
+    /// [`crcbl_shaders::ssr::ROUGHNESS_CUTOFF`] is a half and this plate is
+    /// smoother than that: a screen-space march would write its own answer into
+    /// the very pixels both bands are read out of.
+    ///
+    /// [`crcbl_shaders::ssr::ROUGHNESS_CUTOFF`]: crate::shaders::ssr::ROUGHNESS_CUTOFF
+    SpecularAa,
     /// `docs/plan/18-render-features.md`'s **screen-space ambient occlusion**:
     /// the inside of a box, looked straight down into, lit almost entirely by
     /// ambient.
@@ -3772,6 +3822,528 @@ fn alpha_sun() -> crcbl_render::DirectionalLight {
         ..crcbl_render::DirectionalLight::default()
     }
 }
+
+/// How many quad strips [`Scene::SpecularAa`] cuts the corrugated half of its
+/// plate into.
+///
+/// A multiple of [`SPECULAR_STRIPS_PER_CLUSTER`], so every cluster below is
+/// full and none of them is a remainder with its own bounds arithmetic.
+///
+/// The count is what sets the plate's width, because a strip's own width is
+/// fixed by [`SPECULAR_STRIP_PITCH`]: at this many the plate covers 186 of the
+/// golden frame's 256 columns and leaves a margin of unwritten pixels either
+/// side, which is the region `tests/render_e2e.rs` reads its background level
+/// out of.
+///
+/// Two pixels a strip makes the corrugation's period eight, so the normal turns
+/// through [`SPECULAR_SWING`] over two pixels — far inside the specular lobe's
+/// own width, which is the aliasing `mesh.slang`'s `specular_aa_kernel` exists
+/// for.
+const SPECULAR_STRIPS: usize = 93;
+
+/// The frame height every pixel figure in this fixture is arithmetic for.
+///
+/// The golden suite draws this scene at 256×192, so [`SPECULAR_STRIP_PITCH`]'s
+/// alignment is a statement about *that* frame. Asked for another size the
+/// plate still draws correctly, but its strips no longer land on pixel
+/// boundaries; the golden, which is what the alignment exists for, is always
+/// this one.
+const SPECULAR_ALIGNED_ROWS: f32 = 192.0;
+
+/// How many pixels of that frame one world unit of the plate covers.
+///
+/// Half the rows over [`SPECULAR_HALF_HEIGHT`], which is the figure
+/// [`specular_camera`] derives its field of view from — and it holds
+/// horizontally too, because the projection's aspect is the frame's own and so
+/// its pixels are square.
+const SPECULAR_ALIGNED_PIXELS_PER_UNIT: f32 = SPECULAR_ALIGNED_ROWS * 0.5 / SPECULAR_HALF_HEIGHT;
+
+/// How wide one corrugation strip is, in world units.
+///
+/// **Two pixels exactly, with every strip edge on an integer pixel column. That
+/// is a portability property, not a tidiness one.**
+///
+/// The plate lies in a single plane at a constant distance under a camera
+/// looking straight down at it, so its projection is affine: a point at world
+/// `x` lands at frame column `columns / 2 - x *
+/// SPECULAR_ALIGNED_PIXELS_PER_UNIT`, with no perspective divide to make the
+/// spacing uneven. Two pixels is therefore `2 /
+/// SPECULAR_ALIGNED_PIXELS_PER_UNIT` of world. The plate is centred on the
+/// frame's axis and cut into whole strips, so strip `k`'s edge sits at column
+/// `columns / 2 + SPECULAR_STRIPS - 2 * k`: an integer for every `k`, which
+/// puts each pixel centre a quarter and three quarters of the way across its
+/// strip.
+///
+/// **Why that matters.** Vulkan guarantees only four `subPixelPrecisionBits`,
+/// so a rasteriser is entitled to snap a vertex to a sixteenth of a pixel; radv
+/// carries eight bits and SwiftShader four. An edge at an arbitrary fraction
+/// therefore lands up to a sixteenth of a pixel apart on the two, and on this
+/// plate's lobe flank — tens of levels per pixel — that is a difference a
+/// golden can see. An edge already on an integer coordinate snaps to the same
+/// point on any of those grids. [`specular_plate_mesh`] asserts the property
+/// through the scene's own camera rather than trusting the arithmetic, so a
+/// later change to the camera or the extent fails loudly instead of reappearing
+/// as a cross-backend diff.
+const SPECULAR_STRIP_PITCH: f32 = 2.0 / SPECULAR_ALIGNED_PIXELS_PER_UNIT;
+
+/// The frame width that goes with [`SPECULAR_ALIGNED_ROWS`].
+const SPECULAR_ALIGNED_COLUMNS: f32 = 256.0;
+
+/// How far off a pixel boundary [`specular_plate_mesh`] lets a vertex sit.
+///
+/// A thousandth of a pixel: far under the sixteenth
+/// [`SPECULAR_STRIP_PITCH`] is about, and far over the rounding of the two
+/// multiplications that get there.
+const SPECULAR_ALIGNMENT_SLACK: f32 = 1e-3;
+
+/// How many strips one cluster of that plate carries.
+///
+/// A strip adds one vertex column of two vertices, so a run of `n` strips
+/// spans `2 * (n + 1)` vertices: 31 is the largest run that fits
+/// `crcbl_shaders::meshlet::MAX_CLUSTER_VERTICES`, and its 62 triangles are
+/// well inside `MAX_CLUSTER_TRIANGLES`.
+const SPECULAR_STRIPS_PER_CLUSTER: usize = 31;
+
+/// Half [`Scene::SpecularAa`]'s plate along `x`, the axis the corrugation runs
+/// across.
+///
+/// The strips' own total width, so it is derived rather than chosen: the
+/// alignment [`SPECULAR_STRIP_PITCH`] argues for holds only if the plate is
+/// exactly the strips it is cut into. It comes out inside the frame's own half
+/// width at this camera — [`SPECULAR_HALF_HEIGHT`] times the aspect is
+/// `1.333` — leaving the margin `tests/render_e2e.rs` reads its background
+/// level out of.
+const SPECULAR_PLATE_HALF_X: f32 = SPECULAR_STRIPS as f32 * SPECULAR_STRIP_PITCH * 0.5;
+
+/// How far from the plate's centre line each of its two bands starts.
+///
+/// The bands are separate quads with their own vertices, so the flat one's
+/// normal cannot bleed into the corrugated one's across a shared edge — which
+/// would put a kernel of its own into the control band's first rows. This is
+/// the gap between them, and it is a few pixels rather than none so that the
+/// seam is visible in the golden.
+///
+/// A whole number of pixels off the axis, in [`SPECULAR_STRIP_PITCH`]'s terms:
+/// the `z` edges are the ones the rasteriser snaps vertically, and the same
+/// sixteenth-of-a-pixel argument applies to them.
+const SPECULAR_BAND_INNER_Z: f32 = 6.0 / SPECULAR_ALIGNED_PIXELS_PER_UNIT;
+
+/// How far each band reaches away from that centre line — a whole number of
+/// pixels again, and inside [`SPECULAR_HALF_HEIGHT`] so both bands are wholly
+/// on screen.
+const SPECULAR_BAND_OUTER_Z: f32 = 84.0 / SPECULAR_ALIGNED_PIXELS_PER_UNIT;
+
+/// How far the corrugation swings [`Scene::SpecularAa`]'s authored normal
+/// either side of [`SPECULAR_MIRROR_TILT`], in radians.
+///
+/// **The authored normals do not match the flat geometry, and that is the
+/// fixture.** A page cannot do this job — `crcbl_render::scene::PAGE_EXTENT` is
+/// two texels a side and the trilinear sampler mips a tiled page of that size
+/// to flat — so the corrugation is in the vertex normals of a plate that is
+/// geometrically one plane.
+///
+/// Wide enough that the swing carries the mirror direction past the sun and
+/// back twice per period, so every period holds two highlight streaks and the
+/// pixels between them are the lobe's floor.
+const SPECULAR_SWING: f32 = 0.436_332_3;
+
+/// Which way [`Scene::SpecularAa`]'s sun stands, in radians from straight up,
+/// tilted in the `x` plane alone.
+///
+/// No `z` component, on [`alpha_sun`]'s terms: the corrugation runs across `x`,
+/// so a sun with a `z` component would make the mirror condition a function of
+/// the row as well as the column and no band could be read as one population.
+const SPECULAR_SUN_TILT: f32 = 0.436_332_3;
+
+/// The tilt of the normal that reflects this camera into that sun: half
+/// [`SPECULAR_SUN_TILT`].
+///
+/// The eye looks straight down and the sun stands at `SPECULAR_SUN_TILT`, so
+/// the half vector between them is at half that angle and a surface whose
+/// normal is there sits on the lobe's peak. The corrugation swings about it.
+const SPECULAR_MIRROR_TILT: f32 = SPECULAR_SUN_TILT * 0.5;
+
+/// How far off that peak [`Scene::SpecularAa`]'s flat control band is tilted,
+/// in radians.
+///
+/// **The control band has to be specular-bright without being clipped**, which
+/// is what makes its byte-for-byte stability evidence rather than decoration: a
+/// band sitting at the peak saturates to white and would read the same however
+/// wide the lobe got, and a band on the lobe's floor is a dark region a
+/// widening cannot move either. This puts it on the shoulder, where the same
+/// kernel the corrugated band gets would visibly darken it — see
+/// `tests/render_e2e.rs`, which measures exactly that.
+const SPECULAR_CONTROL_OFFSET: f32 = 0.12;
+
+/// How high above the plate [`Scene::SpecularAa`]'s camera stands.
+///
+/// **A long lens, and it is load-bearing.** `mesh.slang` builds `to_eye` from
+/// the camera's position per fragment, so a wide-angle overhead camera puts a
+/// different mirror direction under every column of the plate and a band across
+/// it would be a gradient rather than a population. At this distance the view
+/// direction varies by under two degrees corner to corner, so every strip meets
+/// the sun on the same terms and the two bands are comparable to each other.
+const SPECULAR_CAMERA_UP: f32 = 40.0;
+
+/// How high the plate itself floats.
+///
+/// Off the origin so the camera distance above is a distance to the *plate*,
+/// and low enough that it changes nothing else: nothing is under it and its
+/// shadow falls on nothing.
+const SPECULAR_PLATE_UP: f32 = 0.75;
+
+/// Half the world height [`Scene::SpecularAa`]'s frame covers at the plate.
+///
+/// The camera's field of view is derived from this and the distance rather than
+/// written down, so `tests/render_e2e.rs` can turn a plate coordinate into a
+/// pixel by one multiplication: the frame's half height in pixels over this.
+const SPECULAR_HALF_HEIGHT: f32 = 1.0;
+
+/// [`Scene::SpecularAa`]'s plate in [`crate::render::scene::SceneDesc::meshes`]
+/// — the entry past the demo scene's four.
+const SPECULAR_PLATE_MESH: usize = 4;
+
+/// Its material row, the one past the demo scene's three.
+const SPECULAR_MATERIAL: usize = 3;
+
+/// The base-colour factor [`Scene::SpecularAa`]'s plate shades through, and it
+/// is a **conductor**.
+///
+/// `metallic` of one is what makes this frame an instrument: a metal has no
+/// diffuse lobe at all, so every lit pixel of the plate is the specular term
+/// and nothing else — no albedo floor for a firefly to be measured against, and
+/// no ambient, because the ambient sum multiplies the diffuse albedo a
+/// conductor does not have. The colour is a neutral steel, so the three
+/// channels carry the same signal and a luminance is the lobe.
+const SPECULAR_PLATE_TINT: [f32; 4] = [0.55, 0.58, 0.62, 1.0];
+
+/// The roughness that plate shades at.
+///
+/// **Swept rather than picked**, against the two things the frame has to do at
+/// once: a lobe narrow enough that the corrugation undersamples it, and a peak
+/// the `Rgba16Float` target can still separate from its neighbours after the
+/// tonemap. See `docs/plan/44-lighting.md`'s rung 4 for the measured numbers.
+const SPECULAR_ROUGHNESS: f32 = 0.18;
+
+/// How bright [`Scene::SpecularAa`]'s sun is, in every channel.
+///
+/// **Far under the default sun's, and the dimming is what makes the frame an
+/// instrument.** A specular lobe's peak is `1 / alpha2`, which at
+/// [`SPECULAR_ROUGHNESS`] is in the hundreds; under a key light of ordinary
+/// strength every pixel of both bands clips to white and a widened lobe draws
+/// the same picture as a narrow one. Swept so that the regularised corrugated
+/// band sits below the swapchain's ceiling while the unregularised one runs
+/// past it — which is the difference `tests/render_e2e.rs` measures.
+///
+/// Neutral rather than the default sun's warm tint, so the three channels carry
+/// one signal and a luminance over the band is the lobe itself.
+const SPECULAR_SUN_LEVEL: f32 = 0.24;
+
+/// The four texture coordinates every quad of [`specular_plate_mesh`] carries,
+/// in the corner order the `+Y` face of `crcbl_shaders::mesh::FACES` uses.
+///
+/// The plate names no page, so nothing samples through these — they are here
+/// because a vertex has a UV lane and [`demo_uv_range`] is what it is quantised
+/// against, and the unit square is the range that module declares.
+///
+/// [`demo_uv_range`]: crcbl_shaders::mesh::demo_uv_range
+const SPECULAR_QUAD_UV: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+/// The bounding sphere and normal cone of a run of this plate's vertices.
+///
+/// Every triangle of the plate is in the plane `y = 0` and wound the same way,
+/// so the cone is exact rather than conservative: one axis, and a cutoff of one
+/// meaning "every triangle faces exactly here". The **geometric** normal, which
+/// is what a cluster cone is about — the authored normals swing either side of
+/// it and no cull reads them.
+fn specular_cluster_bounds(positions: &[[f32; 3]]) -> crate::shaders::meshlet::ClusterBounds {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for position in positions {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(position[axis]);
+            max[axis] = max[axis].max(position[axis]);
+        }
+    }
+    let center = [
+        0.5 * (min[0] + max[0]),
+        0.5 * (min[1] + max[1]),
+        0.5 * (min[2] + max[2]),
+    ];
+    let mut radius: f32 = 0.0;
+    for position in positions {
+        let offset = [
+            position[0] - center[0],
+            position[1] - center[1],
+            position[2] - center[2],
+        ];
+        radius = radius
+            .max((offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2]).sqrt());
+    }
+    crate::shaders::meshlet::ClusterBounds {
+        center,
+        radius,
+        cone_axis: [0.0, 1.0, 0.0],
+        cone_cutoff: 1.0,
+    }
+}
+
+/// How far the corrugation's authored normal is from
+/// [`SPECULAR_MIRROR_TILT`] at vertex column `column`, as a multiple of
+/// [`SPECULAR_SWING`].
+///
+/// A four-column zigzag — level, up, level, down — so the normal crosses the
+/// mirror direction twice a period and every period holds two highlight
+/// streaks. Sampled at the vertices and interpolated between them, which is
+/// what makes the derivative the kernel reads constant inside a strip and
+/// exactly what the paper's filter is written for.
+fn specular_swing_at(column: usize) -> f32 {
+    match column % 4 {
+        1 => 1.0,
+        3 => -1.0,
+        _ => 0.0,
+    }
+}
+
+/// [`Scene::SpecularAa`]'s plate: a flat control quad and
+/// [`SPECULAR_STRIPS`] corrugated strips, in one mesh a description can carry.
+///
+/// **Geometrically one plane.** Every vertex is at `y = 0` and every triangle
+/// faces `+Y`; what differs between the two halves is the *authored* normal —
+/// constant across the control quad, swinging by [`SPECULAR_SWING`] every strip
+/// across the corrugated run. So `mesh.slang`'s `geometric_normal_of` reads one
+/// facet over the whole plate while `specular_aa_kernel` reads a normal field
+/// that turns faster than the pixel grid samples it, which is the one case the
+/// rung is about.
+fn specular_plate_mesh() -> crate::render::scene::MeshDesc<'static> {
+    use crate::shaders::mesh::MeshVertex;
+    use crate::shaders::meshlet::{MeshClusters, Meshlet};
+
+    let range = crate::shaders::mesh::demo_uv_range();
+    let tint = [1.0, 1.0, 1.0, 1.0];
+    let normal_at = |tilt: f32| [tilt.sin(), tilt.cos(), 0.0];
+
+    // The control quad first, so its four vertices are 0 to 3 and every
+    // corrugated column below is at a known offset past them.
+    let control = normal_at(SPECULAR_MIRROR_TILT - SPECULAR_CONTROL_OFFSET);
+    let control_corners = [
+        [-SPECULAR_PLATE_HALF_X, 0.0, -SPECULAR_BAND_INNER_Z],
+        [SPECULAR_PLATE_HALF_X, 0.0, -SPECULAR_BAND_INNER_Z],
+        [SPECULAR_PLATE_HALF_X, 0.0, -SPECULAR_BAND_OUTER_Z],
+        [-SPECULAR_PLATE_HALF_X, 0.0, -SPECULAR_BAND_OUTER_Z],
+    ];
+    let mut positions = Vec::with_capacity(4 + 2 * (SPECULAR_STRIPS + 1));
+    let mut vertices = Vec::with_capacity(4 + 2 * (SPECULAR_STRIPS + 1));
+    for (corner, uv) in control_corners.iter().zip(&SPECULAR_QUAD_UV) {
+        positions.push(*corner);
+        vertices.push(MeshVertex::from_normal(*corner, control, tint, *uv, &range));
+    }
+
+    // Then the corrugated run: two vertices a column, the far one first, so a
+    // strip's four corners are two consecutive columns and the cluster corners
+    // below are arithmetic rather than a table.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a few hundred strips, each exactly representable"
+    )]
+    for column in 0..=SPECULAR_STRIPS {
+        // `(2k - strips) / pixels-per-unit`, which is
+        // `-SPECULAR_PLATE_HALF_X + k * SPECULAR_STRIP_PITCH` written so the
+        // numerator is a small integer and there is one rounded divide: a pitch
+        // added up a column at a time would leave the last edge less exact than
+        // the first, and it is the edges the two rasterisers have to agree
+        // about.
+        let x = (2.0 * column as f32 - SPECULAR_STRIPS as f32) / SPECULAR_ALIGNED_PIXELS_PER_UNIT;
+        let normal = normal_at(SPECULAR_MIRROR_TILT + SPECULAR_SWING * specular_swing_at(column));
+        for (z, uv) in [
+            (SPECULAR_BAND_OUTER_Z, SPECULAR_QUAD_UV[0]),
+            (SPECULAR_BAND_INNER_Z, SPECULAR_QUAD_UV[3]),
+        ] {
+            let position = [x, 0.0, z];
+            positions.push(position);
+            vertices.push(MeshVertex::from_normal(position, normal, tint, uv, &range));
+        }
+    }
+
+    // Every vertex on an integer pixel of the golden frame, checked rather
+    // than trusted — the whole of `SPECULAR_STRIP_PITCH`'s argument, and the
+    // kind of property a later edit to the camera or the extent breaks without
+    // breaking anything that looks related. **Through the scene's own camera
+    // and model matrix**, not through the constants the pitch was derived
+    // from: a check that re-derives the pixel from `SPECULAR_ALIGNED_PIXELS_PER_UNIT`
+    // passes for any field of view, and the field of view is exactly what a
+    // later edit would move.
+    let clip = specular_camera().view_projection(SPECULAR_ALIGNED_COLUMNS / SPECULAR_ALIGNED_ROWS)
+        * specular_plate();
+    for position in &positions {
+        let projected = clip * glam::Vec4::new(position[0], position[1], position[2], 1.0);
+        let ndc = projected.truncate() / projected.w;
+        for (coordinate, extent, axis) in [
+            (ndc.x, SPECULAR_ALIGNED_COLUMNS, "column"),
+            (ndc.y, SPECULAR_ALIGNED_ROWS, "row"),
+        ] {
+            // Which way the axis runs does not matter to whether the result is
+            // whole; the viewport maps `-1..1` onto `0..extent` either way.
+            let frame = (coordinate * 0.5 + 0.5) * extent;
+            // A full assertion rather than a debug one: the release build is
+            // where this matters, because the browser gate renders the scene
+            // through a second rasteriser in release and a drifted edge shows
+            // up there as an unexplained golden diff.
+            assert!(
+                (frame - frame.round()).abs() <= SPECULAR_ALIGNMENT_SLACK,
+                "the plate has a vertex at {axis} {frame}, off the pixel grid, \
+                 so two rasterisers may put its edge in different pixels: see \
+                 SPECULAR_STRIP_PITCH"
+            );
+        }
+    }
+
+    // `0 1 2, 0 2 3` per quad, preserving the counter-clockwise corner order
+    // `crcbl_shaders::mesh::cube_indices` uses for the same `+Y` facing.
+    let mut indices = vec![0u32, 1, 2, 0, 2, 3];
+    for strip in 0..SPECULAR_STRIPS {
+        let far = 4 + 2 * strip as u32;
+        let (near, next_far, next_near) = (far + 1, far + 2, far + 3);
+        indices.extend_from_slice(&[far, next_far, next_near, far, next_near, near]);
+    }
+
+    // The control quad is a cluster of its own and the corrugated run is cut
+    // into full chunks — see `SPECULAR_STRIPS_PER_CLUSTER`, which is what makes
+    // both the vertex count and the triangle count fit a meshlet.
+    let mut clusters = MeshClusters::default();
+    let too_large = |error| unreachable!("a few hundred vertices of fixture geometry: {error}");
+    clusters.clusters.push(
+        Meshlet::new(0, 4, 0, 2, specular_cluster_bounds(&positions[..4]))
+            .unwrap_or_else(too_large),
+    );
+    clusters.vertices.extend_from_slice(&[0, 1, 2, 3]);
+    clusters.corners.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    for chunk in 0..SPECULAR_STRIPS / SPECULAR_STRIPS_PER_CLUSTER {
+        let first = chunk * SPECULAR_STRIPS_PER_CLUSTER;
+        let vertex_offset = clusters.vertices.len();
+        let triangle_offset = clusters.corners.len();
+        let mut run = Vec::with_capacity(2 * (SPECULAR_STRIPS_PER_CLUSTER + 1));
+        for column in first..=first + SPECULAR_STRIPS_PER_CLUSTER {
+            run.push(4 + 2 * column as u32);
+            run.push(4 + 2 * column as u32 + 1);
+        }
+        for strip in 0..SPECULAR_STRIPS_PER_CLUSTER {
+            let far = u8::try_from(2 * strip)
+                .unwrap_or_else(|_| unreachable!("a cluster holds at most 256 vertices"));
+            let (near, next_far, next_near) = (far + 1, far + 2, far + 3);
+            clusters
+                .corners
+                .extend_from_slice(&[far, next_far, next_near, far, next_near, near]);
+        }
+        let span: Vec<[f32; 3]> = run
+            .iter()
+            .map(|&vertex| positions[vertex as usize])
+            .collect();
+        clusters.clusters.push(
+            Meshlet::new(
+                vertex_offset,
+                run.len(),
+                triangle_offset,
+                // Two triangles a strip, which is what the corner run above
+                // just wrote — a count in strips would draw half of every
+                // cluster and leave the other half to the index buffer alone,
+                // so only the mesh path would lose it.
+                2 * SPECULAR_STRIPS_PER_CLUSTER,
+                specular_cluster_bounds(&span),
+            )
+            .unwrap_or_else(too_large),
+        );
+        clusters.vertices.extend_from_slice(&run);
+    }
+    clusters
+        .check(vertices.len())
+        .unwrap_or_else(|fault| unreachable!("the fixture's own clusters are in range: {fault}"));
+
+    crate::render::scene::MeshDesc {
+        label: std::borrow::Cow::Borrowed("specular aa plate"),
+        geometry: crate::render::scene::Geometry::Flat {
+            vertices: std::borrow::Cow::Owned(crate::shaders::mesh::vertex_bytes(&vertices)),
+            uv_range: range,
+            indices: std::borrow::Cow::Owned(indices),
+            clusters,
+            // No authored tangents: `MeshVertex::from_normal` fills the frame
+            // with the stand-in basis, on `crcbl_render::scene::demo`'s terms.
+            flags: 0,
+        },
+    }
+}
+
+/// [`Scene::SpecularAa`]'s scene: the engine's own, with the plate and its
+/// conductor row appended.
+///
+/// A description of its own on [`alpha_mask_scene`]'s terms — this fixture
+/// needs a mesh and a material the demo scene has not got — and it is the only
+/// description in this module that appends a **mesh**, because it is the only
+/// fixture whose subject is a vertex normal.
+fn specular_aa_scene() -> crate::render::scene::SceneDesc<'static> {
+    let mut scene = crate::render::scene::demo();
+    scene.meshes.push(specular_plate_mesh());
+    debug_assert_eq!(
+        scene.meshes.len() - 1,
+        SPECULAR_PLATE_MESH,
+        "the plate is the mesh past the demo scene's four"
+    );
+    scene.materials.push(crate::shaders::mesh::GpuMaterial {
+        base_color: SPECULAR_PLATE_TINT,
+        metallic: 1.0,
+        roughness: SPECULAR_ROUGHNESS,
+        ..crate::shaders::mesh::GpuMaterial::UNTINTED
+    });
+    debug_assert_eq!(
+        scene.materials.len() - 1,
+        SPECULAR_MATERIAL,
+        "the conductor row is the one past the demo scene's three"
+    );
+    scene
+}
+
+/// [`Scene::SpecularAa`]'s plate, lifted to [`SPECULAR_PLATE_UP`].
+///
+/// A pure translation, and that is a requirement rather than a simplification:
+/// the plate's normals are authored to disagree with its geometry, so a scale
+/// in the model matrix would send them through the cofactor transform and turn
+/// the corrugation into an angle nobody chose. The mesh is authored at the size
+/// it is drawn at.
+fn specular_plate() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, SPECULAR_PLATE_UP, 0.0))
+}
+
+/// The camera [`Scene::SpecularAa`] is drawn with: straight down at the plate
+/// through the long lens [`SPECULAR_CAMERA_UP`] argues for.
+///
+/// The field of view is derived from [`SPECULAR_HALF_HEIGHT`] and the distance
+/// to the plate rather than written down, so the frame covers that much world
+/// whatever the height becomes and `tests/render_e2e.rs` turns a plate
+/// coordinate into a pixel by one division.
+fn specular_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, SPECULAR_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        // `Y` is the view direction, so `up` cannot also be `Y`; `+Z` puts the
+        // world's `+Z` at the top of the frame, on `alpha_camera`'s terms.
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: 2.0 * (SPECULAR_HALF_HEIGHT / (SPECULAR_CAMERA_UP - SPECULAR_PLATE_UP)).atan(),
+            near: 0.01,
+        },
+    }
+}
+
+/// The sun [`Scene::SpecularAa`] runs under: the default sun's colour, tilted
+/// by [`SPECULAR_SUN_TILT`] in the `x` plane alone.
+fn specular_sun() -> crcbl_render::DirectionalLight {
+    crcbl_render::DirectionalLight {
+        direction: glam::Vec3::new(SPECULAR_SUN_TILT.sin(), SPECULAR_SUN_TILT.cos(), 0.0),
+        color: glam::Vec3::splat(SPECULAR_SUN_LEVEL),
+        ..crcbl_render::DirectionalLight::default()
+    }
+}
+
 /// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
 /// light — which is what a clear value on an sRGB attachment means.
 ///
@@ -4294,6 +4866,34 @@ impl SceneState {
                 Self::Forward {
                     camera: alpha_camera(),
                     light: alpha_sun(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::SpecularAa => {
+                let mut renderer =
+                    ForwardRenderer::with_scene(device, queue, format, &specular_aa_scene())?;
+                // **Nothing marches over this frame.** The plate is smoother
+                // than `ssr.slang`'s cutoff, so a screen-space reflection pass
+                // would compose its own answer into both bands — and what the
+                // bands are evidence about is one lobe evaluated in one stage.
+                renderer.set_effect_request(EffectRequest {
+                    programmatic: EffectOverride::none()
+                        .force(RenderEffects::REFLECTIONS, Some(false)),
+                    ..EffectRequest::default()
+                });
+                // The plate alone: nothing else may stand in a band, and there
+                // is no floor for its shadow to fall on either — a caster over
+                // an empty frame is the whole scene, which is what leaves the
+                // margin either side of the plate readable as background.
+                place(
+                    &mut renderer,
+                    SPECULAR_PLATE_MESH,
+                    SPECULAR_MATERIAL,
+                    specular_plate(),
+                );
+                Self::Forward {
+                    camera: specular_camera(),
+                    light: specular_sun(),
                     renderer: Box::new(renderer),
                 }
             }
@@ -5867,6 +6467,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The alignment `SPECULAR_STRIP_PITCH` argues for is what keeps
+    /// `specular_aa`'s golden the same picture on a rasteriser carrying the
+    /// four sub-pixel bits Vulkan guarantees as on one carrying eight. The
+    /// builder asserts it vertex by vertex through the scene's camera; this
+    /// pins the constant the vertices are spaced by and the count they come
+    /// in, so the arithmetic is stated in a test that names it rather than
+    /// only inside a loop.
+    #[test]
+    fn the_specular_plate_is_cut_into_strips_two_pixels_wide() {
+        let pixels = SPECULAR_STRIP_PITCH * SPECULAR_ALIGNED_PIXELS_PER_UNIT;
+        assert!(
+            (pixels - 2.0).abs() <= SPECULAR_ALIGNMENT_SLACK,
+            "a strip is {pixels} pixels across, not the two the alignment needs"
+        );
+        assert_eq!(
+            SPECULAR_STRIPS % SPECULAR_STRIPS_PER_CLUSTER,
+            0,
+            "a strip count that is not whole clusters leaves a remainder cluster with bounds \
+             arithmetic of its own"
+        );
+        // Which is the builder's own assertion, over every vertex it writes,
+        // projected through `specular_camera` and `specular_plate`.
+        let _ = specular_plate_mesh();
     }
 
     /// The UI scene has to exercise rectangles, outlines and text — a frame of

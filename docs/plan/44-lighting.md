@@ -368,7 +368,7 @@ substitution cannot carry — the bright limb beside the sun, which a gradient h
 no azimuth to hold — is §8's paragraph and `docs/backlog.md`'s entry rather than
 this one's.
 
-### Rung 4 — Specular antialiasing, once normal maps exist
+### Rung 4 — Specular antialiasing — landed 2026-09-05
 
 A high-frequency normal map under a low roughness aliases: the shading signal
 moves faster than the pixel grid samples it, and the result is a field of
@@ -391,6 +391,105 @@ that hold today. So screen-space derivatives are not banned here and never were.
 What §2's argument actually rules out is deriving a **tangent frame** from
 derivatives, and the reason is mirrored UVs, where the derivative route gives a
 handedness the vertex route gets right.
+
+**What landed.** `mesh.slang`'s `specular_aa_kernel` is Tokuyoshi and
+Kaplanyan's isotropic filter transcribed from their listing: `SIGMA_PX` squared
+times the summed squared screen-space derivatives of the shading normal is the
+variance the pixel could not resolve, twice that is what it contributes to the
+half-vector distribution, `KAPPA` clamps it, and the sum widens GGX's `alpha2`.
+Both constants are the paper's — `SPECULAR_AA_SIGMA_PX` a half pixel and
+`SPECULAR_AA_KAPPA` 0.18 — and `crcbl_shaders::mesh` mirrors them beside a
+source-text test that holds the shader's spelling of the whole function to this
+crate's copy, which is what a transcription needs when nothing else in the tree
+knows the right answer.
+
+**It widens the direct lobe alone**, and the refusals are argued at the call
+site: the `dfg` split-sum pair and the `ltc` transform are bilinear reads of a
+64-square table in the _perceptual_ roughness and move by a fraction of a texel
+under a turning normal, and the reflectivity attachment has to describe the
+material because `ssr.slang` reflects the scene rather than a light — a
+per-pixel widening there would blur a mirror wherever screen-space geometry was
+dense and unblur it as the camera moved. Regularising `roughness` itself, so
+every consumer followed, needs two square roots to climb back out of `alpha2`
+and that round trip is not the identity in floating point; every golden in the
+tree would then move on a fragment whose kernel is exactly zero.
+
+**The zero-kernel identity holds to the bit, and it was checked as bytes.** A
+facet carrying one normal at every corner interpolates to that normal, both
+derivatives are exactly zero and `alpha2 + 0.0` is the old `alpha2`. Against a
+build with `SPECULAR_AA_KAPPA` forced to zero, the new fixture's frame differs
+in rows 11 to 90 — its corrugated band — and in no other row. Across the rest of
+the tree the same holds: `run-render-e2e.sh`, `run-forward-e2e.sh`,
+`run-mesh-e2e.sh`, `run-draw-gen-e2e.sh` and the lantern, sundial, alcove and
+quarry suites all pass unchanged on radv, quarry's curved DAG included — the
+dunes patch is the single exception, and the paragraph below is its.
+
+**The one golden that moves is the dunes patch, and it is re-blessed here.**
+That surface is the only one in the tree with real curvature, and the
+interpolated normal of a coarse DAG level turns several degrees a pixel, so its
+kernel is not zero and its crests soften. Against the old reference
+`the_dunes_scene_draws_its_cluster_dag_and_matches_its_golden` reported 4618
+pixels differing (9.3953%), max channel delta 84, 595 over tolerance (1.2105%),
+22 grossly wrong (0.0448%), ssim 0.999681 on radv and 29870 differing
+(60.7707%), max 84, 617 over tolerance (1.2553%), ssim 0.999505 on lavapipe —
+**and that scene's own reader passed both times**, its three claims about a lit
+patch under a clear sky intact and 254 shades down the patch's middle on radv,
+252 on lavapipe, so what failed was the picture and nothing about the frame.
+Blessed on radv, the new reference is matched on lavapipe at 43 pixels over
+tolerance (0.0875%), none grossly wrong, ssim 0.999777, and through the browser
+backend on SwiftShader at 252 over tolerance (0.5127%), 12 grossly wrong
+(0.0244%), ssim 0.999553.
+
+**The fixture is `crcbl::screenshot::Scene::SpecularAa`.** A plate that is
+geometrically one plane, drawn through a long lens from straight overhead so the
+mirror direction is the same across it, carrying a conductor's material — no
+diffuse lobe and no ambient, so every lit pixel is the specular term. Its `+z`
+half is cut into 93 strips whose authored vertex normals zigzag 25° either side
+of the mirror direction, a turn of 12.5 degrees per pixel against a lobe 1.9°
+wide; its `-z` half is one quad with a constant normal on the lobe's shoulder.
+Measured over a band of each, on radv and on lavapipe: the corrugated band's
+maximum over its mean falls from **1.86 to 1.52** and its mean rises from **81.1
+to 147.3** — the energy the undersampled lobe was losing between pixel centres —
+while the flat band reads **110.6** either way, and the two frames are equal
+channel for channel everywhere outside the corrugated band's own rows.
+`crates/crcbl/tests/render_e2e.rs` holds all three claims, and its own doc
+carries the four sabotages each bound was watched go red under.
+
+**Every strip is exactly two pixels wide, on integer pixel columns, and that is
+a portability property rather than a tidiness one.** Vulkan guarantees only four
+`subPixelPrecisionBits`: a rasteriser may snap a vertex to a sixteenth of a
+pixel, and radv carries eight bits where SwiftShader carries four. The first
+version of this plate had 1.49-pixel strips at arbitrary sub-pixel positions,
+and the two rasterisers put its edges in different places — 4788 pixels over
+`Tolerance::RASTERISER` through the browser backend (9.7412%), max channel delta
+24, all of it inside the corrugated band, with the flat band and the background
+agreeing exactly. Sizing the plate so the projection — affine, since the plate
+is one plane at a constant distance under a camera looking straight down it —
+puts every edge on an integer column takes that to **1 pixel over tolerance
+(0.0020%), max channel delta 3, ssim 0.999923**, and the gate passes on the
+scene. The same comparison against a build with `SPECULAR_AA_KAPPA` forced to
+zero now has **no pixel over tolerance at all and a max delta of 2**, which says
+the residue was the vertex grid and not the kernel. `screenshot`'s
+`SPECULAR_STRIP_PITCH` carries the arithmetic and `specular_plate_mesh` asserts
+it vertex by vertex, so a later change to the camera or the extent fails loudly
+instead of reappearing as a cross-backend diff.
+
+**Priced** with
+`apps/lantern --headless --frames 400 --size 1920x1080 --backend vk`, three runs
+a configuration and the median of the p50s each run reported, against the same
+tree with the kernel's one call site deleted so the derivatives are never taken.
+Lantern's room is flat-normalled, so this is the unconditional cost — the kernel
+is straight-line code with no branch, so a fragment whose variance is zero pays
+what one whose variance is not pays. `forward` goes **0.342 → 0.341 ms** on an
+RX 7900 XTX under radv (spreads 0.340–0.343 and 0.340–0.344) and **35.475 →
+35.488 ms** on lavapipe (35.396–35.780 and 35.342–35.962), so on both tiers the
+rung costs less than three runs can separate from noise. `shadow` and
+`depth-prepass` evaluate no specular lobe and take no kernel at all, and they
+are quoted as the noise floor of this measurement rather than as a result:
+**0.141 → 0.140 ms** and **0.038 → 0.039 ms** on radv, **10.963 → 10.562 ms**
+and **1.540 → 1.515 ms** on lavapipe. The software tier's shadow pass moved four
+tenths of a millisecond between two builds that cannot have changed it, which is
+the scale of drift any conclusion about its `forward` has to clear.
 
 ### Rung 5 — LTC area lights, and the fill flag — rectangles landed 2026-08-31
 
