@@ -168,6 +168,8 @@ OPTIONS:
                            fill_light          a point pair and a spot pair on
                                                that floor, each mirrored and
                                                each half of it a fill light
+                           alpha_mask          a masked plate over a floor, and
+                                               the hole in its shadow
                            ao                  the inside of a box, ambient only
                            ssr                 a pyramid reflected in a smooth
                                                floor
@@ -1242,6 +1244,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::PointShadow,
         Scene::AreaLight,
         Scene::FillLight,
+        Scene::AlphaMask,
         Scene::Ao,
         Scene::Ssr,
         Scene::Bloom,
@@ -1268,6 +1271,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::PointShadow => "point_shadow",
         Scene::AreaLight => "area_light",
         Scene::FillLight => "fill_light",
+        Scene::AlphaMask => "alpha_mask",
         Scene::Ao => "ao",
         Scene::Ssr => "ssr",
         Scene::Bloom => "bloom",

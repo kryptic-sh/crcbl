@@ -1397,6 +1397,362 @@ fn the_fill_lights_light_the_floor_without_gleaming_on_it(image: &Image) {
     }
 }
 
+/// The anti-vacuity floor for [`Scene::AlphaMask`].
+///
+/// [`MIN_COLORS_SPOT_SHADOW`]'s number for its reason: this frame is a lit
+/// floor, a plate and a shadow band, so the count is dominated by shading and
+/// runs into the hundreds — radv reads 526 distinct colours and lavapipe 538.
+/// The floor sits far below that because what it has to separate is a drawn
+/// frame from a cleared one and from one flat quad, and *where* the plate, the
+/// hole and the shadow are is
+/// [`the_mask_cuts_the_plate_its_depth_and_its_shadow`]'s claim.
+///
+/// [`the_mask_cuts_the_plate_its_depth_and_its_shadow`]: fn@the_mask_cuts_the_plate_its_depth_and_its_shadow
+const MIN_COLORS_ALPHA_MASK: usize = 64;
+
+/// How many pixels of the frame one world unit of [`Scene::AlphaMask`]'s floor
+/// is.
+///
+/// [`POINT_PIXELS_PER_UNIT`]'s arithmetic with that scene's camera height
+/// swapped for `screenshot`'s `ALPHA_CAMERA_UP`.
+const ALPHA_PIXELS_PER_UNIT: f32 = (EXTENT.1 as f32 / 2.0) / (2.4 * 0.577_350_3);
+
+/// Where a point on [`Scene::AlphaMask`]'s floor lands in the frame.
+///
+/// [`point_pixel`]'s flip for [`point_pixel`]'s reason: the camera looks down
+/// `-Y` with `+Z` up, so world `+X` is the frame's left and world `+Z` is its
+/// top.
+fn alpha_pixel(x: f32, z: f32) -> (u32, u32) {
+    let column = EXTENT.0 as f32 / 2.0 - x * ALPHA_PIXELS_PER_UNIT;
+    let row = EXTENT.1 as f32 / 2.0 - z * ALPHA_PIXELS_PER_UNIT;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "every band below is inside the frame, which the block reader asserts"
+    )]
+    (column as u32, row as u32)
+}
+
+/// How much further from the frame's axis a point on the plate lands than the
+/// point of floor directly under it.
+///
+/// **The plate is not on the floor, so [`alpha_pixel`] alone cannot place a band
+/// on it.** With the eye on the axis at `screenshot`'s `ALPHA_CAMERA_UP` and the
+/// plate at its `ALPHA_PLATE_UP`, a point of the plate projects where the floor
+/// point at `up / (up - plate)` times its own `(x, z)` does — so a band on the
+/// plate is [`alpha_pixel`] of its coordinates scaled by this.
+///
+/// Written out of the two heights rather than measured off the picture: the
+/// magnification is what the projection does, and a number read off one frame
+/// is one nobody could check against the scene.
+const ALPHA_PLATE_LIFT: f32 = 2.4 / (2.4 - 0.75);
+
+/// How far from the frame's axis each band on the plate, and each band under its
+/// shadow, sits — in the `x` of whichever surface it is on.
+///
+/// **One number for both halves and for both surfaces, and that is what makes
+/// the four bands a comparison.** The mask cuts at the plate's own `x = 0` and
+/// `screenshot`'s `alpha_sun` has no `x` component, so the shadow's cut is at
+/// the same `x` as the plate's: `+0.35` is the middle of the kept half on the
+/// plate *and* the middle of the shadow that half throws, and `-0.35` is the
+/// middle of the hole and of the gap in the shadow.
+///
+/// Half of `ALPHA_PLATE_SCALE`'s `x` half-extent, so each band is centred in its
+/// own half with that much clear on either side. Swept rather than guessed:
+/// moving every band below by ±6 pixels in each axis moves the plate's own band
+/// by at most 2.3 levels and no other by more than 3, on both local drivers.
+const ALPHA_HALF_X: f32 = 0.35;
+
+/// How far along `+z` the open-floor control band sits, in world units.
+///
+/// **Up-frame of the plate rather than beside it.** The plate is nearly as wide
+/// as the floor, so there is no room for a band of open floor to its left or
+/// right; there is room above it, and the sun points along `z` with no `x`
+/// component, so a band at the same `x` as the hole's takes the same everything
+/// but the plate's proximity. Past the plate's own image — the plate reaches
+/// `0.25` along `z` and the projection magnifies that to `0.36` — and inside the
+/// floor, which stops at `1.2`.
+const ALPHA_CONTROL_Z: f32 = 0.75;
+
+/// Where the plate's shadow is measured, in world units along `z`.
+///
+/// `screenshot`'s `alpha_sun` is 45° from vertical in the `z` plane alone, so a
+/// caster at height `h` throws its shadow `h` along `-z` — and this is that
+/// scene's `ALPHA_PLATE_UP`, which puts the band on the centre of the shadow the
+/// plate's middle casts.
+const ALPHA_SHADOW_Z: f32 = -0.75;
+
+/// The half-extent of each band on the plate, in the hole and on the open floor,
+/// in pixels.
+///
+/// The plate's kept half is about 71 pixels wide and 51 tall at
+/// [`ALPHA_PIXELS_PER_UNIT`] and the hole beside it about the same, so a band
+/// this size sits well inside either with room for the antialiasing resolve's
+/// several pixels of edge.
+const ALPHA_BAND: (u32, u32) = (8, 8);
+
+/// The half-extent of each band inside the shadow, in pixels.
+///
+/// [`SPOT_SHADOW_BAND`]'s number for its reason: the shadow is about 36 pixels
+/// deep where it is sampled, and a band this size averages over the cascade's
+/// several-texel gradient while staying inside it.
+const ALPHA_SHADOW_BAND: (u32, u32) = (6, 6);
+
+/// The corner of the frame the background is read from, and its half-extent.
+///
+/// **A region the frame never drew geometry into**, which is what
+/// `screenshot`'s `ALPHA_FLOOR_SCALE` exists to leave: the floor's near corner
+/// is 13 rows down and 45 columns in, so this block is entirely
+/// `crcbl_render::forward::SCENE_CLEAR` through the tonemap.
+const ALPHA_BACKGROUND_AT: ((u32, u32), (u32, u32)) = ((8, 8), (4, 4));
+
+/// Which channel the plate and the floor are told apart in.
+///
+/// **Green.** The cube's `+Y` face is `(0.25, 0.80, 0.30)` and `screenshot`'s
+/// `ALPHA_PLATE_TINT` scales that channel to a small fraction of the floor's
+/// while leaving red near it, so this is the channel where "the plate is there"
+/// and "the floor is there" are a factor apart. In the mean of three they are
+/// much closer, which is what would let a merely dimmer plate pass.
+const ALPHA_CHANNEL: usize = 1;
+
+/// How much more of [`ALPHA_CHANNEL`] the floor seen through the hole must carry
+/// than the solid half of the plate beside it.
+///
+/// A ratio rather than a difference, on [`SPOT_SHADOW_RATIO`]'s terms. A floor
+/// rather than a prediction, and swept: radv reads `2.222` and lavapipe `2.221`,
+/// and the worst either shows under a ±6 pixel sweep of both bands is `2.19`.
+const ALPHA_HOLE_RATIO: f32 = 1.6;
+
+/// How far apart the hole's band and the open-floor band are allowed to be, in
+/// [`ALPHA_CHANNEL`].
+///
+/// **Just above one, because the claim is that they are the same floor.**
+/// [`AREA_ACROSS_TOLERANCE`]'s number and its argument: the measured excess is
+/// `2.5%` on radv and `2.5%` on lavapipe — the two bands are three quarters of a
+/// unit apart on a floor whose sun comes in at 45°, so a little of the specular
+/// lobe separates them — and this is more than three times that. Not a knob: a
+/// hole reading as anything but floor is off by a factor, not by a twelfth.
+const ALPHA_FLOOR_TOLERANCE: f32 = 1.08;
+
+/// How much brighter the hole's band must be than the background it is read
+/// against.
+///
+/// **This is the depth prepass's own claim.** The colour pass tests
+/// `GreaterOrEqual` with depth writes off, so a prepass that wrote the plate's
+/// whole silhouette rejects the floor fragment behind the hole and nothing at
+/// all is shaded there — the hole then reads as the frame's clear rather than as
+/// floor. radv separates the two by `4.64` times and lavapipe by `4.60`.
+const ALPHA_BACKGROUND_RATIO: f32 = 2.5;
+
+/// How much brighter the lit bands must be than the shadowed one.
+///
+/// [`SPOT_SHADOW_RATIO`]'s argument at this scene's own numbers: what survives
+/// Lambert, the cascade filter and the tonemap is which side leads and by how
+/// much in proportion. radv reads `3.73` for the gap in the shadow against the
+/// shadow itself and `3.98` for open floor against it; lavapipe reads `3.73` and
+/// `3.97`.
+const ALPHA_SHADOW_RATIO: f32 = 2.0;
+
+/// How far above the background the open floor must measure.
+///
+/// The anti-vacuity half of the ratios above, on [`SPOT_SHADOW_LIT_FLOOR`]'s
+/// terms and with that constant's number: a frame that drew no floor at all has
+/// every band equal to the clear, and ratios between equal numbers say nothing.
+/// Both drivers separate the two by more than 140 levels.
+const ALPHA_LIT_FLOOR: f32 = 10.0;
+
+/// [`Scene::AlphaMask`]'s claim: **the mask cut the plate, the depth it wrote
+/// and the shadow it cast** — three passes, three regions of one frame.
+///
+/// Six bands, and every claim is a relation between two of them rather than an
+/// absolute colour:
+///
+/// * **The colour pass cut it.** The band inside the hole must carry
+///   [`ALPHA_HOLE_RATIO`] times as much [`ALPHA_CHANNEL`] as the band on the
+///   solid half of the plate, and must be within [`ALPHA_FLOOR_TOLERANCE`] of a
+///   control band of floor the plate never covered. The two together are what
+///   says the hole is *floor* rather than merely something else: a plate drawn
+///   in a second colour passes the first and fails the second.
+/// * **The depth prepass cut it too, and this is what makes that observable.**
+///   The colour pass tests `GreaterOrEqual` with depth writes off against the
+///   prepass's depth. So a prepass recorded with the vertex-only pipeline —
+///   `ForwardRenderer::depth_only_pipeline` ignoring
+///   `MaterialTable::masks_alpha` — writes the plate's whole silhouette, the
+///   floor fragment behind the hole fails that test, the plate's own fragment is
+///   discarded by the colour pass anyway, and **nothing is shaded there**: the
+///   hole reads as the frame's clear. The band against
+///   [`ALPHA_BACKGROUND_AT`] is what separates those two frames, and without it
+///   the two claims above are satisfied by a hole with no floor in it.
+/// * **The shadow atlas cut it.** Inside the shadow the plate throws, the band
+///   under the hole's projection must lead the band under the solid half's by
+///   [`ALPHA_SHADOW_RATIO`], and the shadowed band must trail open lit floor by
+///   the same. One ratio alone would be satisfied by a frame with no shadow at
+///   all; the pair is what says there is a shadow *and* that it has a hole in
+///   it.
+///
+/// **The mirror is what makes the shadow half evidence.** `screenshot`'s
+/// `alpha_sun` has no `x` component, so the shadow is the plate translated along
+/// `-z` and the two shadow bands are at the same `x` as the two plate bands.
+/// Every term that varies over this floor — the sun's lobe, the ambient, the
+/// occlusion — is a function of position, and the two shadow bands are the same
+/// distance from the frame's axis and in the same row.
+///
+/// # Each of these was watched go red
+///
+/// Not argued — run, on radv, with the tree sabotaged one change at a time and
+/// this test alone selected. Each quoted line is the one this function printed
+/// on that run.
+///
+/// **`mesh.slang`'s `fragmentMain` with its `alpha_masked` call replaced by
+/// `false`** — the colour pass's cut alone, the artifacts regenerated:
+/// "green on the plate 102.6, through the hole 103.0, on open floor 233.7; the
+/// hole reads 109.4 against a background of 37.0; in the shadow 45.3 against
+/// 169.1 through its hole and 180.3 of open floor". The first claim fired: "the
+/// hole carries 103.0 of green against the plate's own 102.6, which is a plate
+/// that is still there". The shadow's hole survived, which is what says the
+/// three passes here are separable rather than one claim written three times.
+///
+/// **`ForwardRenderer::depth_only_pipeline` returning `self.shadow_pipeline`
+/// unconditionally** — the prepass and the atlas back on the vertex-only
+/// pipeline: "green on the plate 102.6, through the hole 34.0, on open floor
+/// 233.7; the hole reads 37.0 against a background of 37.0; in the shadow 45.3
+/// against 45.3 through its hole and 180.3 of open floor". The hole is the
+/// frame's clear exactly, so the first claim reaches the panic first; run again
+/// with the first two claims held aside, the background one fires on its own:
+/// "the hole measures 37.0 against a background of 37.0, so nothing was shaded
+/// behind it".
+///
+/// **`alpha_masked` comparing `alpha > material.alpha_cutoff`** — the cut the
+/// wrong way round, in all three passes at once: "green on the plate 227.9,
+/// through the hole 103.0, on open floor 233.7; the hole reads 109.4 against a
+/// background of 37.0; in the shadow 169.1 against 45.3 through its hole and
+/// 180.3 of open floor". The picture is its own mirror — the kept half gone,
+/// the cut half solid, and the shadow the same way round — so the first claim
+/// fires; with the first three held aside the shadow one fires on its own:
+/// "under the hole's projection the floor measures 45.3 against 169.1 under the
+/// solid half's, which is a cutout casting a solid shadow".
+fn the_mask_cuts_the_plate_its_depth_and_its_shadow(image: &Image) {
+    let plate = |x: f32, z: f32| {
+        block_channel(
+            image,
+            alpha_pixel(x * ALPHA_PLATE_LIFT, z * ALPHA_PLATE_LIFT),
+            ALPHA_BAND,
+            ALPHA_CHANNEL,
+        )
+    };
+    let floor = |x: f32, z: f32| block_channel(image, alpha_pixel(x, z), ALPHA_BAND, ALPHA_CHANNEL);
+    let solid = plate(ALPHA_HALF_X, 0.0);
+    let hole = floor(-ALPHA_HALF_X, 0.0);
+    let open = floor(-ALPHA_HALF_X, ALPHA_CONTROL_Z);
+
+    let (background_at, background_half) = ALPHA_BACKGROUND_AT;
+    let background = block_brightness(image, background_at, background_half);
+    let hole_level = block_brightness(image, alpha_pixel(-ALPHA_HALF_X, 0.0), ALPHA_BAND);
+    let open_level = block_brightness(
+        image,
+        alpha_pixel(-ALPHA_HALF_X, ALPHA_CONTROL_Z),
+        ALPHA_BAND,
+    );
+
+    let shadowed = block_brightness(
+        image,
+        alpha_pixel(ALPHA_HALF_X, ALPHA_SHADOW_Z),
+        ALPHA_SHADOW_BAND,
+    );
+    let through = block_brightness(
+        image,
+        alpha_pixel(-ALPHA_HALF_X, ALPHA_SHADOW_Z),
+        ALPHA_SHADOW_BAND,
+    );
+
+    eprintln!(
+        "crcbl render e2e: alpha mask — green on the plate {solid:.1}, through the hole \
+         {hole:.1}, on open floor {open:.1}; the hole reads {hole_level:.1} against a \
+         background of {background:.1}; in the shadow {shadowed:.1} against {through:.1} \
+         through its hole and {open_level:.1} of open floor"
+    );
+
+    assert!(
+        solid * ALPHA_HOLE_RATIO < hole,
+        "the colour pass must not draw the masked half of the plate: the hole carries \
+         {hole:.1} of green against the plate's own {solid:.1}, which is a plate that is \
+         still there"
+    );
+    assert!(
+        hole < open * ALPHA_FLOOR_TOLERANCE && open < hole * ALPHA_FLOOR_TOLERANCE,
+        "and what is behind the hole must be this scene's floor: {hole:.1} of green against \
+         {open:.1} on floor the plate never covered — a hole showing anything else satisfies \
+         the ratio above without the plate having been cut"
+    );
+    assert!(
+        background * ALPHA_BACKGROUND_RATIO < hole_level,
+        "the depth prepass must have cut the plate too: the hole measures {hole_level:.1} \
+         against a background of {background:.1}, so nothing was shaded behind it — a \
+         prepass that wrote the whole silhouette rejects the floor fragment there and the \
+         colour pass discards the plate's own"
+    );
+    assert!(
+        shadowed * ALPHA_SHADOW_RATIO < through,
+        "the shadow atlas must have cut the plate as well: under the hole's projection the \
+         floor measures {through:.1} against {shadowed:.1} under the solid half's, which is \
+         a cutout casting a solid shadow"
+    );
+    assert!(
+        shadowed * ALPHA_SHADOW_RATIO < open_level,
+        "and there must be a shadow there at all: {shadowed:.1} against {open_level:.1} of \
+         open lit floor, which is a frame the plate cast nothing in"
+    );
+    assert!(
+        open_level > background + ALPHA_LIT_FLOOR,
+        "the lit bands are lit floor and not an empty frame: {open_level:.1} against a \
+         background of {background:.1}, so there is nothing here for a hole or a shadow to \
+         be visible in"
+    );
+}
+
+/// `docs/plan/43-render-standards.md` §3's **alpha-mask cutout**, drawn — the
+/// only frame in the tree that discards a fragment.
+///
+/// The golden is not the evidence and cannot be, on
+/// [`the_spot_shadow_scene_draws_its_shadow_and_matches_its_golden`]'s terms and
+/// one of this scene's own: a mask honoured in the colour pass alone draws a
+/// plate with a hole in it, which is what a working frame also looks like, and
+/// the two differ only in a band of floor and a band of shadow.
+/// [`the_mask_cuts_the_plate_its_depth_and_its_shadow`] is what tells them
+/// apart.
+///
+/// [`the_spot_shadow_scene_draws_its_shadow_and_matches_its_golden`]: fn@the_spot_shadow_scene_draws_its_shadow_and_matches_its_golden
+/// [`the_mask_cuts_the_plate_its_depth_and_its_shadow`]: fn@the_mask_cuts_the_plate_its_depth_and_its_shadow
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_alpha_mask_scene_cuts_its_plate_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::AlphaMask,
+        "alpha_mask",
+        EXTENT,
+        MIN_COLORS_ALPHA_MASK,
+        the_mask_cuts_the_plate_its_depth_and_its_shadow,
+    );
+}
+
+/// The alpha-mask scene on both geometry paths — see
+/// [`draw_scene_on_every_geometry_path`].
+///
+/// The claim this arm carries that no other scene's does: the masked depth
+/// pipeline is a second pipeline with a fragment stage, and the mesh path builds
+/// it from a mesh shader where the lesser path builds it from a vertex one. A
+/// discard that read a different material row — or no row — on one of the two
+/// draws the same picture on the other, and byte equality is what refuses that.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_alpha_mask_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::AlphaMask,
+        "alpha_mask",
+        MIN_COLORS_ALPHA_MASK,
+        the_mask_cuts_the_plate_its_depth_and_its_shadow,
+    );
+}
 /// The anti-vacuity floor for [`Scene::Ao`].
 ///
 /// Lower than the shadow scenes', and deliberately: this frame is one flat floor

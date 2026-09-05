@@ -35,6 +35,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Alpha-mask materials — glTF's `alphaMode: "MASK"`.**
+  `crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK` is the mode bit beside the
+  `alpha_cutoff` the row already carried, and `shaders/mesh.slang`'s
+  `alpha_masked` is the one comparison every stage that draws the surface makes:
+  the shaded stage, the new `depthMaskedFragmentMain` behind the depth prepass
+  and the shadow atlas, and `rsmFragmentMain` behind the reflective shadow map.
+  So a cutout is cut everywhere it is drawn — it does not occlude itself through
+  the hole it can see through, and it casts the shadow it actually has.
+  `crcbl_render::forward` builds a second depth-only pipeline for it and
+  `ForwardRenderer::depth_only_pipeline` chooses between the two **per frame**,
+  from `MaterialTable::masks_alpha`: a frame whose material table masks nothing
+  is recorded through the vertex-only pipeline exactly as before, with no
+  fragment stage in either depth pass. A frame that masks something pays that
+  stage on its opaque surfaces too — a finer split, per draw bucket, is
+  `docs/backlog.md`'s and is blocked on `draw_gen.slang`'s routing key. Priced
+  on `apps/lantern` at 1920x1080: an unmasked frame is unchanged to within its
+  own run-to-run spread, and forcing the cutout pipeline on takes the depth
+  prepass from 0.038 to 0.043 ms on an RX 7900 XTX and from 1.423 to 3.269 ms on
+  lavapipe, with the shadow atlas moving 0.140 to 0.142 ms and 9.511 to 15.543
+  ms.
+
+  `crcbl_scene`'s glTF importer fills both fields from the document's
+  `alphaMode` and `alphaCutoff` (glTF's own `0.5` where none is written), so
+  imported foliage and grates cut out instead of drawing solid. **`BLEND` is
+  deliberately recorded as `OPAQUE`** — this renderer builds no blended pipeline
+  at all, and reading it as `MASK` would punch a hard-edged hole through a
+  surface the author asked to fade — and the importer warns with the count it
+  flattened.
+
 - **A physically based sky.** `crcbl_shaders::atmosphere` is Hillaire's "A
   Scalable and Production Ready Sky and Atmosphere Rendering Technique"
   (EGSR 2020) over Bruneton's Earth: a transmittance LUT and a

@@ -1753,21 +1753,29 @@ pub struct GpuMaterial {
     /// The alpha below which a masked material discards, glTF's
     /// `alphaCutoff`.
     ///
-    /// **Laid out and read by nothing**, on
-    /// [`metallic_roughness_occlusion_texture`](Self::metallic_roughness_occlusion_texture)'s
-    /// terms. §2's fourth rung is the `discard` that spends it, and it needs an
-    /// alpha mode in [`flags`](Self::flags) beside it — a cutoff with no mode
-    /// selecting it is a number, not a behaviour, which is why nothing here
-    /// reads either yet.
-    pub alpha_cutoff: f32,
-    /// Per-material bits, **all of them unassigned**.
+    /// **Read only where [`ALPHA_MODE_MASK`](Self::ALPHA_MODE_MASK) is set in
+    /// [`flags`](Self::flags)** — a cutoff with no mode selecting it is a
+    /// number, not a behaviour. Where the mode is set, a fragment whose alpha is
+    /// *below* this is not there at all: `shaders/mesh.slang`'s `alpha_masked`
+    /// is the comparison, and the three stages that make it are the shaded one,
+    /// the depth-only masked one and the reflective shadow map's.
     ///
-    /// The word §2's table names beside the alpha cutoff, and the home the
-    /// alpha modes of its fourth rung will take: `OPAQUE` is the absence of
-    /// every bit, `MASK` and `BLEND` are one each. Laid out now for
-    /// [`normal_texture`](Self::normal_texture)'s reason — the row's stride is
-    /// mirrored in five shader declarations and a pinned offsets test, and
-    /// widening it twice is that work twice.
+    /// The alpha compared against it is glTF's own product —
+    /// [`base_color`](Self::base_color)'s `a`, the vertex colour's and the
+    /// base-colour page's — so a page with no alpha channel authored masks
+    /// nothing.
+    pub alpha_cutoff: f32,
+    /// Per-material bits. Today there is one:
+    /// [`ALPHA_MODE_MASK`](Self::ALPHA_MODE_MASK).
+    ///
+    /// The word §2's table names beside the alpha cutoff, and the home glTF's
+    /// alpha modes take: `OPAQUE` is the absence of every bit, `MASK` is the bit
+    /// below, and `BLEND` has no bit because the renderer has no blended pass to
+    /// honour one with — see `docs/plan/43-render-standards.md` §3.
+    ///
+    /// **Zero is the honest default**, exactly as [`GpuMesh::flags`] is: a
+    /// material nobody marked is opaque, which is what every row written before
+    /// this bit existed meant.
     pub flags: u32,
 }
 
@@ -1811,10 +1819,11 @@ impl GpuMaterial {
         normal_scale: 1.0,
         metallic_roughness_occlusion_texture: Self::NO_PAGE,
         emissive_texture: Self::NO_PAGE,
-        // glTF's own `alphaCutoff` default. Read by nothing today; spelled
-        // rather than left at zero so the rung that reads it inherits the
-        // specification's value from every row spread out of this one.
+        // glTF's own `alphaCutoff` default, so a row spread out of this one and
+        // marked `ALPHA_MODE_MASK` cuts where the specification says. Unread
+        // until it is marked — see `alpha_cutoff`.
         alpha_cutoff: 0.5,
+        // No bits, which is `OPAQUE`.
         flags: 0,
     };
 
@@ -1831,6 +1840,24 @@ impl GpuMaterial {
     ///
     /// See `physical_tile_uv` in `shaders/mesh.slang` for the projection.
     pub const TILING_PHYSICAL: u32 = 1;
+
+    /// [`flags`](Self::flags) bit 0: glTF's `alphaMode: "MASK"`. A fragment
+    /// whose alpha is below [`alpha_cutoff`](Self::alpha_cutoff) is discarded.
+    ///
+    /// **A cutout, not a fade**: there is no sorting, no blend state and no new
+    /// pass — the surface is either there or it is not, which is what foliage,
+    /// grates and chain-link want and is the whole of
+    /// `docs/plan/43-render-standards.md` §3's first step. `BLEND` has no
+    /// constant beside this one because it has no pass to be drawn in; an
+    /// importer that meets one records `OPAQUE` and says so.
+    ///
+    /// **The mask is honoured wherever the surface is drawn**, which is more
+    /// than the shaded pass: `shaders/mesh.slang`'s `depthMaskedFragmentMain`
+    /// carries it into the depth prepass and the shadow atlas, and
+    /// `rsmFragmentMain` into the reflective shadow map. A cutout honoured in
+    /// the colour pass alone casts a solid shadow and occludes itself through a
+    /// hole it can see through, which is the failure this bit exists to avoid.
+    pub const ALPHA_MODE_MASK: u32 = 1;
 
     /// The four page layer indices as the two words the row carries them in:
     /// base colour in the low half of the first and the normal page in its
@@ -4672,7 +4699,30 @@ mod tests {
         // from it and pointed at a normal page gets the map as authored.
         assert_eq!(GpuMaterial::UNTINTED.normal_scale, 1.0);
         assert_eq!(GpuMaterial::UNTINTED.alpha_cutoff, 0.5);
+        // **Neither the untinted row nor an unwritten one is masked**, which is
+        // what makes the bit safe to add to a table full of rows written before
+        // it existed: glTF's own `OPAQUE` is the absence of every bit, and every
+        // such row already carries zero here.
         assert_eq!(GpuMaterial::UNTINTED.flags, 0);
+        assert_eq!(
+            GpuMaterial::UNTINTED.flags & GpuMaterial::ALPHA_MODE_MASK,
+            0,
+            "the untinted material is opaque"
+        );
+        assert_eq!(
+            GpuMaterial::default().flags & GpuMaterial::ALPHA_MODE_MASK,
+            0,
+            "a row nobody wrote is opaque"
+        );
+        // The bit rides in the flags word the layout above pinned at 60, so a
+        // marked row differs from an unmarked one in the bytes the device reads
+        // rather than only on the host.
+        let masked = GpuMaterial {
+            flags: GpuMaterial::ALPHA_MODE_MASK,
+            ..GpuMaterial::UNTINTED
+        };
+        assert_ne!(masked.to_bytes(), GpuMaterial::UNTINTED.to_bytes());
+        assert_eq!(GpuMaterial::from_bytes(&masked.to_bytes()), masked);
 
         // Two materials differing in nothing but their texture are different
         // rows, which is the whole of what the second column buys.
@@ -5138,6 +5188,82 @@ mod tests {
                 )),
                 "{name}'s MESH_AUTHORED_TANGENTS is not the host's {}",
                 GpuMesh::MESH_AUTHORED_TANGENTS
+            );
+        }
+    }
+
+    /// The alpha-mask comparison, as every stage that draws a masked surface
+    /// must spell it.
+    ///
+    /// Held byte for byte for [`NORMAL_BASIS`]' reason: what this decides is
+    /// whether a fragment exists, and a copy that compared the other way round
+    /// in one stage is a leaf shaded through a hole it still casts a shadow
+    /// through — a defect no golden of an unmasked scene can show.
+    const ALPHA_MASKED: &str = concat!(
+        "bool alpha_masked(GpuMaterial material, float alpha)\n",
+        "{\n",
+        "    return (material.flags & ALPHA_MODE_MASK) != 0u && alpha < material.alpha_cutoff;\n",
+        "}\n",
+    );
+
+    /// **Every stage that draws a surface cuts its alpha mask, and all of them
+    /// cut it with one function.**
+    ///
+    /// Three stages of `mesh.slang` draw a material's own geometry: the shaded
+    /// one, the depth-only masked one the prepass and the shadow atlas run, and
+    /// the reflective shadow map's. Each writes something a later pass believes
+    /// — a colour, a depth, a patch of albedo — so a mask honoured in one and
+    /// not another is not a softer version of the feature but a different
+    /// silhouette in each buffer.
+    ///
+    /// The second assertion is what stops the function being decoration. A copy
+    /// declared and never called leaves every fragment drawn, which is exactly
+    /// the picture the tree had before this rung and which every existing
+    /// golden still matches.
+    ///
+    /// **The stage a call sits in is what is checked, not the file.** The
+    /// source is cut at its `[shader("` markers, so a call that drifted out of
+    /// `depthMaskedFragmentMain` and into the shaded stage — where it would look
+    /// like it was working — fails here.
+    #[test]
+    fn every_stage_cuts_the_alpha_mask_the_same_way() {
+        let source = include_str!("../shaders/mesh.slang");
+        assert!(
+            source.contains(ALPHA_MASKED),
+            "mesh.slang does not carry this exact function, so its stages can cut one \
+             silhouette three ways:\n{ALPHA_MASKED}"
+        );
+        assert!(
+            source.contains(&format!(
+                "static const uint ALPHA_MODE_MASK = {};",
+                GpuMaterial::ALPHA_MODE_MASK
+            )),
+            "mesh.slang's ALPHA_MODE_MASK is not the host's {}, so a row the importer marked \
+             is a row the shader does not",
+            GpuMaterial::ALPHA_MODE_MASK
+        );
+
+        // Each `[shader("` opens a stage and the next one ends it, so a chunk is
+        // one entry point's attribute, signature and body — which is the unit
+        // the claim below is about.
+        for entry in [
+            "FragmentOutput fragmentMain(",
+            "void depthMaskedFragmentMain(",
+            "RsmOutput rsmFragmentMain(",
+        ] {
+            let stage = source
+                .split("[shader(\"")
+                .find(|chunk| chunk.contains(entry))
+                .unwrap_or_else(|| panic!("mesh.slang declares no stage `{entry}`"));
+            assert!(
+                stage.contains("alpha_masked(material,"),
+                "`{entry}` draws a material's surface and never asks whether the fragment was \
+                 masked away, so a cutout it writes is a full silhouette"
+            );
+            assert!(
+                stage.contains("discard;"),
+                "`{entry}` calls `alpha_masked` and discards nothing, so the answer is computed \
+                 and thrown away"
             );
         }
     }

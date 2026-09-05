@@ -237,20 +237,21 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 5943c7c53dcdb97126bbf50443468e12cff088307b12a5eea0c79375400c9a48
+source-sha256 = 5670af850adcbc4a8667c6370e1d269b081eafad989693886bb2b5cf40a916c8
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = 8ee51638512cd60b69289bfc1a9011f2c86d5895a93345991360f4183e094fe7
+spirv-sha256 = 2e0f64ccefcd243df8879f48cf56659bd932399f18f1133a3123306b75be2f5b
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 19ee1fdd305ad61f25655057284e047e00455073da9d721d3c1bdfd25928b224
+wgsl-sha256 = 5d1bd7184d5916bde84bf4df0c483da698d5a252f226661a12becca930bbd98d
 msl = msl/mesh.metal
-msl-sha256 = 2d25d383a5d6978ab614a952a39ef2c213f74051791a552533f138ebefa76634
+msl-sha256 = 053bc1f0d2a4cb433e62620349955624b3794133c6b4815e46a729de62714fd3
 dxil = vertexMain:dxil/mesh.vertex.dxil:7be67c51fde9b7644a1255403c0131212203545583ed16fd904eb39e1c71915f
 dxil = depthVertexMain:dxil/mesh.depth_vertex.dxil:54166251ef71b7ead624305ae82f7a6e640a0e63d9805f50e34ef66726735b36
 dxil = depthClearVertexMain:dxil/mesh.depth_clear_vertex.dxil:e2007f43be9438f2c6d5022cb8fb44f825ab39426569a45117fd8c1494ab53a4
-dxil = fragmentMain:dxil/mesh.fragment.dxil:c94bf7fb22060bbc48c549116323bd97f305c035533815801c84ee47aa8ffd35
-dxil = rsmFragmentMain:dxil/mesh.rsm_fragment.dxil:f89ccef154f78f3b1020618c2d39114c4025bb0e7850be27343704dfb58ceb30
-entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:vertex, fragmentMain:fragment, rsmFragmentMain:fragment
+dxil = fragmentMain:dxil/mesh.fragment.dxil:fb98284d44211a3ea8b8b3e972dd97456ebf90c20b021c05fda106e0002f32d9
+dxil = depthMaskedFragmentMain:dxil/mesh.depth_masked_fragment.dxil:4692ee1d0dc80727b7c04592eec7bc92205d352479d33788b1ba6435532ceefc
+dxil = rsmFragmentMain:dxil/mesh.rsm_fragment.dxil:244216bf5ebdb5ebd0692435be116b13c6955f27d3698d8ec10c9f947a0f0eeb
+entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:vertex, fragmentMain:fragment, depthMaskedFragmentMain:fragment, rsmFragmentMain:fragment
 
 [mesh_cluster]
 source = shaders/mesh_cluster.slang

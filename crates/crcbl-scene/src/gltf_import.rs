@@ -149,6 +149,8 @@ use crcbl_shaders::mesh::GpuMaterial;
 use glam::Mat4;
 use gltf::animation::Interpolation;
 use gltf::animation::util::ReadOutputs;
+use gltf::json::validation::Checked;
+use gltf::material::AlphaMode;
 use gltf::mesh::Mode;
 
 use crate::gltf_check::{check_document, check_glb_header, malformed};
@@ -1149,6 +1151,46 @@ fn build(
             // All three factors off one accessor, which is what makes them one
             // material rather than a colour and two numbers that could drift.
             let pbr = material.pbr_metallic_roughness();
+            // **The alpha mode and the cutoff resolve together**, because the
+            // cutoff is not a number a row carries in its own right: glTF says
+            // `alphaCutoff` is to be ignored unless the mode is `MASK`, and
+            // `GpuMaterial::alpha_cutoff` is read only where
+            // `ALPHA_MODE_MASK` is set in `flags`. Deciding them in one place
+            // is what stops a row claiming a threshold nothing will ever
+            // compare against.
+            //
+            // **`MASK` arrives whole.** It is a cutout rather than a fade — a
+            // fragment below the cutoff is simply not there — which needs no
+            // sorting, no blend state and no pass of its own, so every stage
+            // that draws the surface can honour it and `shaders/mesh.slang`
+            // does: the shaded pass, the depth-only one behind the prepass and
+            // the shadow atlas, and the reflective shadow map.
+            //
+            // **`BLEND` is recorded as `OPAQUE`, and the loss is chosen.**
+            // `docs/plan/43-render-standards.md` §3 — "Transparency — absent,
+            // structurally" — is that `crcbl-render`'s forward pass builds no
+            // shaded pipeline with a `BlendState` at all, so there is nothing
+            // a blend bit could select and no reading of it that comes out
+            // right. Of the two wrong pictures available, `MASK` is the louder
+            // one: a surface the author asked to fade smoothly would come back
+            // with a hard-edged hole punched through wherever its alpha fell
+            // under a cutoff nobody wrote, and holes read as damage where a
+            // solid pane reads as a pane. Opaque loses the transparency and
+            // nothing else, and `warn_dropped_features` names the count so the
+            // loss is not silent.
+            let (alpha_cutoff, flags) = match material.alpha_mode() {
+                AlphaMode::Mask => (
+                    // The document's threshold where it wrote one, and
+                    // otherwise the specification's own default — which is the
+                    // number `UNTINTED` already carries, so it is taken from
+                    // there rather than spelled a second time.
+                    material
+                        .alpha_cutoff()
+                        .unwrap_or(GpuMaterial::UNTINTED.alpha_cutoff),
+                    GpuMaterial::ALPHA_MODE_MASK,
+                ),
+                AlphaMode::Opaque | AlphaMode::Blend => (GpuMaterial::UNTINTED.alpha_cutoff, 0),
+            };
             GpuMaterial {
                 base_color: pbr.base_color_factor(),
                 metallic: pbr.metallic_factor(),
@@ -1182,13 +1224,11 @@ fn build(
                 // So the two halves of one glTF object split here, and this is
                 // the half a row can hold.
                 normal_scale: material.normal_texture().map_or(1.0, |info| info.scale()),
-                // Read by nothing yet, on `GpuMaterial::alpha_cutoff`'s and
-                // `flags`' own terms. `UNTINTED`'s values rather than the
-                // document's `alphaCutoff` and `alphaMode`: a cutoff with no
-                // mode selecting it is a number, and reporting one the renderer
-                // would not honour is worse than reporting the default.
-                alpha_cutoff: GpuMaterial::UNTINTED.alpha_cutoff,
-                flags: GpuMaterial::UNTINTED.flags,
+                // Both resolved above, where the argument for them is: the
+                // document's `alphaMode` and `alphaCutoff`, with `BLEND`
+                // flattened onto `OPAQUE`.
+                alpha_cutoff,
+                flags,
             }
         })
         .collect();
@@ -1271,6 +1311,24 @@ fn warn_dropped_features(document: &gltf::Document, key: &Path) {
             "{}: skipping {imageless} texture(s) that name no image: it is supplied by an \
              extension this importer does not implement, so every material using them shades \
              with its base colour",
+            key.display(),
+        );
+    }
+
+    // Counted off the JSON rather than through `gltf::Material::alpha_mode`,
+    // which is an `unwrap` on a `Checked` and panics on a document naming a
+    // mode the specification does not have — the same reason
+    // `texture_has_an_image` reads the JSON. `MASK` is not counted here: it is
+    // imported, not dropped.
+    let blended = root
+        .materials
+        .iter()
+        .filter(|material| material.alpha_mode == Checked::Valid(AlphaMode::Blend))
+        .count();
+    if blended > 0 {
+        crcbl_core::log::warn!(
+            "{}: drawing {blended} BLEND material(s) opaque: this renderer has no blended pass, \
+             so a surface the document asked to fade through is solid",
             key.display(),
         );
     }
@@ -2255,6 +2313,124 @@ pub(crate) mod tests {
             scene.materials()[0].normal_scale,
             GLTF_DEFAULT_MATERIAL.normal_scale,
             "glTF's own `normalTexture.scale` default, which is a map left as authored",
+        );
+    }
+
+    /// The fixture with `fields` spliced into its one material, which is how
+    /// each alpha-mode test writes the `alphaMode` and `alphaCutoff` the
+    /// document under test declares.
+    fn material_with(fields: &str) -> String {
+        replacing(
+            &triangle_json(BIN_CHUNK_BUFFER),
+            r#""name": "paint","#,
+            &format!(r#""name": "paint", {fields},"#),
+        )
+    }
+
+    /// **A `MASK` material arrives as a cutout at the threshold the document
+    /// wrote.** The mode is the bit the shaders test and the cutoff is what
+    /// they test against, so a row carrying one without the other discards at
+    /// the wrong alpha or not at all.
+    #[test]
+    fn a_mask_material_carries_the_mask_bit_and_its_authored_cutoff() {
+        let json = material_with(r#""alphaMode": "MASK", "alphaCutoff": 0.25"#);
+        let scene = import_glb(&json).expect("the fixture imports");
+
+        assert_eq!(
+            scene.materials()[0].flags,
+            GpuMaterial::ALPHA_MODE_MASK,
+            "`alphaMode: MASK` did not set the bit the shaders test, so a cutout surface draws \
+             solid and casts a solid shadow",
+        );
+        assert_eq!(
+            scene.materials()[0].alpha_cutoff,
+            0.25,
+            "the document's own `alphaCutoff` was not carried, so the cutout is at somebody \
+             else's alpha",
+        );
+
+        let warnings = import_warnings(&json);
+        assert!(
+            warnings.is_empty(),
+            "`MASK` is imported rather than dropped, so nothing about it is worth a line: \
+             {warnings:#?}",
+        );
+    }
+
+    /// A `MASK` material with no `alphaCutoff` cuts where the specification
+    /// says. The comparand is [`GLTF_DEFAULT_MATERIAL`] rather than
+    /// `UNTINTED`'s row for that constant's own reason: this asserts what the
+    /// *document* means, which a change to the engine's neutral row must not
+    /// be able to move.
+    #[test]
+    fn a_mask_material_with_no_cutoff_takes_the_specification_default() {
+        let scene = import_glb(&material_with(r#""alphaMode": "MASK""#)).expect("it imports");
+
+        assert_eq!(
+            scene.materials()[0].flags,
+            GpuMaterial::ALPHA_MODE_MASK,
+            "the bit is the mode's alone — an absent `alphaCutoff` does not unmask a material",
+        );
+        assert_eq!(
+            scene.materials()[0].alpha_cutoff,
+            GLTF_DEFAULT_MATERIAL.alpha_cutoff,
+            "a `MASK` material that wrote no threshold must cut at glTF's own default, not at \
+             whatever the row was initialised to",
+        );
+    }
+
+    /// An explicit `alphaMode: "OPAQUE"` is the absence of every bit, which is
+    /// also what the unmarked fixture means — the two have to agree, or `flags`
+    /// says two different things about one material the document describes two
+    /// ways.
+    #[test]
+    fn an_opaque_material_carries_no_bits() {
+        let scene = import_glb(&material_with(r#""alphaMode": "OPAQUE""#)).expect("it imports");
+
+        assert_eq!(
+            scene.materials()[0].flags,
+            0,
+            "`OPAQUE` set a bit, and every bit `flags` carries selects a behaviour this \
+             material asked not to have",
+        );
+        assert_eq!(
+            scene.materials()[0].alpha_cutoff,
+            GLTF_DEFAULT_MATERIAL.alpha_cutoff,
+            "an unmasked row's cutoff is never compared against, so it reports the default",
+        );
+    }
+
+    /// **`BLEND` is recorded as `OPAQUE`, and that is the decision rather than
+    /// an oversight.** This renderer builds no blended pipeline at all —
+    /// `docs/plan/43-render-standards.md` §3 — so no bit could honour it, and
+    /// reading it as `MASK` would punch a hard-edged hole through a surface the
+    /// author asked to fade. The warning is what keeps the loss visible, so it
+    /// is asserted beside the row.
+    #[test]
+    fn a_blend_material_is_recorded_opaque_and_named_in_a_warning() {
+        let json = material_with(r#""alphaMode": "BLEND""#);
+        let scene = import_glb(&json).expect("the fixture imports");
+
+        assert_eq!(
+            scene.materials()[0].flags,
+            0,
+            "`BLEND` must flatten onto `OPAQUE`: a mask bit here cuts holes through a surface \
+             the document asked to fade smoothly",
+        );
+        assert_eq!(
+            scene.materials()[0].alpha_cutoff,
+            GLTF_DEFAULT_MATERIAL.alpha_cutoff,
+            "a flattened `BLEND` has no threshold of its own to report",
+        );
+
+        let warnings = import_warnings(&json);
+        let named = warnings
+            .iter()
+            .find(|line| line.contains("BLEND"))
+            .unwrap_or_else(|| panic!("no line named the flattened material: {warnings:#?}"));
+        assert!(
+            named.contains("1 BLEND material(s)"),
+            "the line does not name the count, so a document with fifty reads like one: {named}",
         );
     }
 

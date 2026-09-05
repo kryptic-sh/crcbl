@@ -1025,12 +1025,11 @@ struct GpuMaterial
     /// flat surface. Read only where `normal_layer` is non-zero.
     float normal_scale;
     /// The alpha below which a masked material discards, glTF's `alphaCutoff`.
-    /// **Declared and read by nothing** — §3's alpha-mask rung is what spends
-    /// it, and it needs a mode bit in `flags` beside it before a cutoff means
-    /// anything.
+    /// Read only where `ALPHA_MODE_MASK` is set in `flags` — see `alpha_masked`,
+    /// which is the one comparison every stage that draws this surface makes.
     float alpha_cutoff;
-    /// Per-material bits, **all unassigned**. The word §2's table names beside
-    /// the cutoff, and where its alpha modes will land.
+    /// Per-material bits. Today there is one — `ALPHA_MODE_MASK` — and zero is
+    /// glTF's `OPAQUE`, so a row written before the bit existed is opaque.
     uint flags;
 };
 
@@ -1081,6 +1080,38 @@ static const uint TILING_AUTHORED = 0;
 /// the texture repeats once per `tile_metres` — see `physical_tile_uv`. Matching
 /// `crcbl_shaders::mesh::GpuMaterial::TILING_PHYSICAL`.
 static const uint TILING_PHYSICAL = 1;
+
+/// `GpuMaterial::flags` bit 0: glTF's `alphaMode: "MASK"`, matching
+/// `crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK`.
+///
+/// Zero is `OPAQUE`, so a row nobody marked is not masked and pays nothing —
+/// `TILING_AUTHORED`'s arrangement exactly. There is no `BLEND` bit: this
+/// renderer builds no blended pipeline, and a mode nothing could honour is not
+/// a mode. See `docs/plan/43-render-standards.md` §3.
+static const uint ALPHA_MODE_MASK = 1;
+
+/// Whether this fragment is cut away by the material's alpha mask.
+///
+/// glTF 2.0 §3.9.4's `MASK`: the surface is opaque where the alpha is at or
+/// above `alphaCutoff` and **not there at all** below it. `alpha` is the
+/// specification's own product — the base-colour factor's `a`, the vertex
+/// colour's and the page texel's — so a page authored with no alpha channel
+/// masks nothing however the bit is set.
+///
+/// **One function, because three stages have to cut the same silhouette.**
+/// `fragmentMain` shades the surface, `depthMaskedFragmentMain` writes its
+/// depth into the prepass and the shadow atlas, and `rsmFragmentMain` records
+/// what it reflects; a copy of this comparison that rounded the other way in
+/// one of them is a leaf that shades through a hole it still casts a shadow
+/// through. `crcbl_shaders::mesh::every_stage_cuts_the_alpha_mask_the_same_way`
+/// is what holds the callers to it.
+///
+/// Strictly below, not at or below, because that is how the specification
+/// spells it: a texel exactly at the cutoff is drawn.
+bool alpha_masked(GpuMaterial material, float alpha)
+{
+    return (material.flags & ALPHA_MODE_MASK) != 0u && alpha < material.alpha_cutoff;
+}
 
 /// One irradiance probe, matching `crcbl_shaders::probe::GpuProbe`.
 ///
@@ -1935,11 +1966,12 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
 /// `ATTRIBUTE_WORDS` and a second position load for the motion vector, on top of
 /// the `POSITION_WORDS` this one reads; here the fetch is stream 0 alone.
 ///
-/// **Only `SV_Position`, and nothing on this path wants more.** The atlas and
-/// the prepass image carry depth alone, and there is no alpha-mask cutout to
-/// serve: a cutout needs a fragment stage to `discard` in, this pipeline binds
-/// none, and §2's rung 4 will want its own entry point and its own pipeline
-/// rather than a UV bolted onto this one.
+/// **Only `SV_Position`, and nothing drawn through this wants more.** The atlas
+/// and the prepass image carry depth alone. A cutout needs a fragment stage to
+/// `discard` in and a UV to sample with, and both went where §2 said they would
+/// — into `depthMaskedFragmentMain` and a pipeline of its own, rather than onto
+/// this one. So a frame with no masked material in it is drawn through exactly
+/// this stage and pays exactly what it paid before the cutout existed.
 ///
 /// **The clip position is the same two multiplies in the same order as
 /// `vertexMain`'s**, deliberately. The prepass writes the depth the occlusion
@@ -5100,6 +5132,40 @@ FragmentOutput fragmentMain(VertexOutput input)
     {
         uv = physical_tile_uv(input.world_position, vertex_normal, material.tile_metres);
     }
+
+    // Both halves of §3.2's "texture indices + factors", multiplied together.
+    // The sample is why the lookup had to move to this stage at all: a texture
+    // fetch is not constant across a primitive, so nothing it feeds could have
+    // been folded into a varying at the corners.
+    //
+    // The texel arrives **linear** — the page is an sRGB-format image, so the
+    // sampler decoded it — which is the space `base_color` and `input.color`
+    // are in. See the binding above.
+    //
+    // The UV was resolved above, because the normal page is sampled through it
+    // too. The wrapped sampler is what lets the physical UV, which runs past
+    // `0..1`, repeat rather than smear.
+    float4 texel = base_color_textures.Sample(
+        base_color_sampler, float3(uv, float(base_color_layer(material))));
+    float4 albedo = input.color * material.base_color * texel;
+
+    // **The cutout, and it is above every view below rather than beside the
+    // shading.** A masked fragment is not there — so the normals view must not
+    // draw a normal for it and the lighting must not shade one, and both follow
+    // from the surface ending here. The three views that returned above this
+    // point read attachments another pass wrote and never sample the material
+    // at all, so there is nothing for the mask to remove from them.
+    //
+    // The discard is in non-uniform control flow on purpose and that is legal
+    // everywhere, including WGSL, where an implicit-LOD sample would not be:
+    // `discard` demotes the invocation and leaves the quad's derivatives alone,
+    // which is why the sample above it and `shading_normal_of` below it are
+    // both still reached in the control flow they were written for.
+    if (alpha_masked(material, albedo.a))
+    {
+        discard;
+    }
+
     float3 normal =
         shading_normal_of(normal_layer(material), material.normal_scale, input, vertex_normal, uv);
 
@@ -5133,22 +5199,6 @@ FragmentOutput fragmentMain(VertexOutput input)
     // by the shadow biases alone — never by the shading, which is the authored
     // normal's job. `geometric_normal_of` says why it cannot live inside them.
     float3 geometric_normal = geometric_normal_of(input.world_position, vertex_normal);
-
-    // Both halves of §3.2's "texture indices + factors", multiplied together.
-    // The sample is why the lookup had to move to this stage at all: a texture
-    // fetch is not constant across a primitive, so nothing it feeds could have
-    // been folded into a varying at the corners.
-    //
-    // The texel arrives **linear** — the page is an sRGB-format image, so the
-    // sampler decoded it — which is the space `base_color` and `input.color`
-    // are in. See the binding above.
-    //
-    // The UV was resolved above the normals view, because the normal page is
-    // sampled through it too. The wrapped sampler is what lets the physical UV,
-    // which runs past `0..1`, repeat rather than smear.
-    float4 texel = base_color_textures.Sample(
-        base_color_sampler, float3(uv, float(base_color_layer(material))));
-    float4 albedo = input.color * material.base_color * texel;
 
     // The row's two shading factors, clamped once for the fragment rather than
     // once per light. `roughness` is squared into GGX's `alpha` — the
@@ -5531,6 +5581,61 @@ FragmentOutput fragmentMain(VertexOutput input)
     return output;
 }
 
+/// The depth-only pass's fragment stage: the alpha mask and **nothing else**.
+///
+/// `docs/plan/43-render-standards.md` §3's cutout, in the two passes that write
+/// depth without shading — `crcbl_render::forward`'s depth prepass and its
+/// shadow atlas, which are one pipeline driven with two frame blocks. Without
+/// it a masked surface writes a full silhouette into both: it occludes itself
+/// through the hole it can see through, and it casts the shadow of a leaf that
+/// has none.
+///
+/// **It writes no target at all.** The prepass and the atlas carry depth alone,
+/// which the rasteriser writes from `SV_Position`; the only thing a fragment
+/// stage can add to them is to stop being one, which is what `discard` is. So
+/// this returns `void` and every fragment it does not discard costs exactly the
+/// depth write it would have cost with no fragment stage bound, plus the fetch.
+///
+/// **`depthVertexMain` cannot feed this and that is why it does not.** That
+/// stage reads stream 0 and emits `SV_Position` alone — §2 split the vertex
+/// pool so it could — and a cutout needs the UV, which lives in stream 1. The
+/// pipeline that names this therefore names `vertexMain` on the raster path and
+/// `mesh_cluster.slang`'s mesh stage on the mesh one: the *same* geometry
+/// stages the colour pass runs, which is what lets one fragment entry point
+/// serve both paths rather than one per path with the comparison written twice.
+/// What it costs is the attribute region and the previous frame's position,
+/// read and then dropped — paid only by a pass that has a mask to honour, since
+/// `MeshModules::depth_pipeline` is still what an unmasked frame is drawn with.
+///
+/// The clip position is `vertexMain`'s, so the prepass's depth is the colour
+/// pass's own arithmetic rather than a second spelling of it — which is
+/// stricter than the invariance the vertex-only pipeline rests on, not looser.
+[shader("fragment")]
+void depthMaskedFragmentMain(VertexOutput input)
+{
+    GpuMaterial material = materials[input.material];
+    // `fragmentMain`'s UV, including the physical-tiling branch: a surface whose
+    // texture repeats by world extent has to be cut where the texels it actually
+    // wears say, or its depth and its shading disagree about where the holes
+    // are. The surface normal and not the shading one, for that function's
+    // reason — and a normal map cannot move a cutout anyway.
+    float2 uv = input.uv;
+    if (material.tiling == TILING_PHYSICAL)
+    {
+        uv = physical_tile_uv(
+            input.world_position, normalize(input.world_normal), material.tile_metres);
+    }
+    float4 texel = base_color_textures.Sample(
+        base_color_sampler, float3(uv, float(base_color_layer(material))));
+    // The whole product glTF measures the cutoff against, exactly as
+    // `fragmentMain` builds it — the alpha channel alone would ignore a factor
+    // or a vertex colour that had already made the surface disappear.
+    if (alpha_masked(material, input.color.a * material.base_color.a * texel.a))
+    {
+        discard;
+    }
+}
+
 /// What the reflective shadow map's three targets hold, one member per
 /// `SV_Target` — `crcbl_render::forward::MeshModules::RSM_TARGETS` is the
 /// matching `ColorTargetState` array and
@@ -5621,6 +5726,15 @@ RsmOutput rsmFragmentMain(VertexOutput input)
     float4 texel = base_color_textures.Sample(
         base_color_sampler, float3(uv, float(base_color_layer(material))));
     float4 albedo = input.color * material.base_color * texel;
+    // The cutout, on `fragmentMain`'s terms and for a reason of this pass's own:
+    // a texel of this map is a patch a probe gathers light off, and a patch
+    // where the leaf is not would hand the gather an albedo and a normal for a
+    // surface no ray could ever have hit. The pass's own depth attachment is
+    // written by the same discard, so the texel keeps whatever is behind it.
+    if (alpha_masked(material, albedo.a))
+    {
+        discard;
+    }
 
     RsmOutput written;
     // **A conductor bounces no diffuse light**, which is `fragmentMain`'s

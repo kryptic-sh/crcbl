@@ -3,6 +3,77 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## What alpha-mask materials shipped without (2026-09-05)
+
+`GpuMaterial::ALPHA_MODE_MASK`, `mesh.slang`'s `alpha_masked` and
+`depthMaskedFragmentMain`, and `ForwardRenderer::depth_only_pipeline` landed
+with `docs/plan/43-render-standards.md` §3's first step. What they left:
+
+- **The choice is per frame, not per draw bucket, so a masked scene's opaque
+  meshes pay a fragment stage in the depth prepass and the shadow atlas too.**
+  `ForwardRenderer::depth_only_pipeline` asks `MaterialTable::masks_alpha` — a
+  question about the whole table — and swings both depth passes onto the cutout
+  pipeline. The finer arrangement is a bucket per alpha mode, so an unmasked
+  mesh keeps the vertex-only stage in a scene that has a cutout somewhere else.
+  Three things block it, and all three were read out of the code rather than
+  guessed:
+  - `draw_gen.slang`'s scatter takes the **first** bucket whose mesh id matches
+    and stops, so a second bucket naming one mesh receives nothing — the comment
+    above `bucket_meshes` in `ForwardRenderer::build` says so. The routing key
+    would have to grow an alpha mode, which is a per-instance input that pass
+    does not read: `GpuInstance::material` is declared there and unread, and the
+    material table is not one of its bindings (it packs five host tables into
+    one storage buffer already, to stay inside WebGPU's eight per stage). The
+    cheap form is a bit in `GpuInstance::flags`, written by `ForwardRenderer`
+    from the instance's material row.
+  - the bucket table is written once in `ForwardRenderer::build` and never
+    again, where instances arrive and leave through `add_instance` /
+    `remove_instance` afterwards and `MaterialTable::set` can rewrite a mode. So
+    which meshes want a masked twin is not knowable when the table is written,
+    and a twin allocated on a build-time guess is silently wrong in exactly the
+    case it exists for.
+  - a bucket costs a whole instance capacity of `u32` in the scattered runs —
+    `DrawGen::bucket_base` is `capacity + bucket * capacity` — so twinning the
+    table doubles that buffer for every scene.
+
+  Whoever takes this should price it against what it saves: the measurement in
+  §3 of the plan is what the whole-frame swing costs, and a per-bucket split
+  only pays where a scene is mostly opaque geometry with a little foliage in it.
+
+- **`BLEND` is not implemented and the importer flattens it.** `gltf_import`'s
+  alpha arm maps `AlphaMode::Blend` onto opaque and `warn_dropped_features`
+  counts it; that stands only while §3's "Transparency — absent, structurally"
+  does. When a blended pass exists, the arm and the warning change together.
+
+- **`doubleSided` is still unread.** Every imported material is back-face culled
+  whatever the document says, and `GpuMaterial` has no bit for it. That matters
+  more now than it did: a leaf card authored as a cutout is nearly always
+  double-sided, so the rung that makes foliage actually look right is this one
+  and not the mask.
+
+- **No masked material reaches the mesh-shader path's own goldens.** The cutout
+  fragment stage is shared by both geometry paths by construction — it reads
+  `mesh.slang`'s `VertexOutput`, which `vertexMain` and `mesh_cluster.slang`'s
+  mesh stage both write — and the `render_e2e` scene is drawn on every geometry
+  path, which is what checks it. What is _not_ checked is a masked **cluster
+  DAG**: no scene in the tree gives a masked material to a `Geometry::Dag` mesh.
+
+- **The reflective shadow map's cut is checked as text, not as a picture.**
+  `rsmFragmentMain` discards on `alpha_masked` and
+  `crcbl_shaders::mesh::every_stage_cuts_the_alpha_mask_the_same_way` holds the
+  call and the `discard` in that stage's source, but no scene gives a masked
+  material to a probe volume, so nothing reads a probe that should have gathered
+  floor through a hole and did not. The fixture would be `Scene::Probes`'s
+  arrangement with `Scene::AlphaMask`'s plate over it, read at the probe under
+  the hole; not built because the probe updater's own evidence is a band per
+  probe and this slice was the mask.
+
+- **Metal, D3D12 and the browser are unmeasured.** The artifacts compile for all
+  four targets and the WGSL parses, but the only numbers in the plan are radv's
+  and lavapipe's. A `discard` is the one fragment-stage construct that can cost
+  a target its early-depth optimisation, and what that costs on a tiler or under
+  WARP is not known here — this machine has no Apple or Windows hardware.
+
 ## What the atmosphere shipped without (2026-09-05)
 
 `crcbl_shaders::atmosphere` and `crcbl_render::ForwardRenderer::set_atmosphere`

@@ -1631,6 +1631,17 @@ pub struct ForwardRenderer {
     /// geometry stage as [`ForwardRenderer::mesh_pipeline`] where it comes from
     /// a mesh one, and no fragment stage in either case.
     shadow_pipeline: GraphicsPipelineHandle,
+    /// The same two passes' pipeline for a frame whose material table cuts an
+    /// alpha mask: `vertexMain` and `depthMaskedFragmentMain` — see
+    /// [`MeshModules::depth_masked_pipeline`].
+    ///
+    /// Built on every scene rather than only on one that has a masked material,
+    /// for [`ForwardRenderer::rsm_pipeline`]'s reason: the modules are released
+    /// inside `build` and a pipeline built later would need them back, which is
+    /// a second shader compilation for a field a `set` on the material table can
+    /// move. Which of the two a frame *binds* is
+    /// [`ForwardRenderer::depth_only_pipeline`].
+    depth_masked_pipeline: GraphicsPipelineHandle,
     /// The pipeline that resets one tile of the atlas before it is redrawn, on a
     /// frame that is keeping some of the others — see
     /// [`MeshModules::depth_clear_pipeline`], which is where the whole argument
@@ -4945,6 +4956,9 @@ impl ForwardRenderer {
         let mesh_pipeline =
             modules.color_pipeline(device, mesh_pipeline_layout, PolygonMode::Fill, "forward");
         let shadow_pipeline_result = modules.depth_pipeline(device, mesh_pipeline_layout);
+        // And its cutout twin, which a frame whose material table masks alpha is
+        // recorded with instead — see [`MeshModules::depth_masked_pipeline`].
+        let depth_masked_result = modules.depth_masked_pipeline(device, mesh_pipeline_layout);
         // And the one that resets a tile, which the cadence rung needs and the
         // attachment's load operation cannot express — see
         // [`MeshModules::depth_clear_pipeline`].
@@ -4961,6 +4975,8 @@ impl ForwardRenderer {
         rollback.pipelines.push(mesh_pipeline);
         let shadow_pipeline = shadow_pipeline_result?;
         rollback.pipelines.push(shadow_pipeline);
+        let depth_masked_pipeline = depth_masked_result?;
+        rollback.pipelines.push(depth_masked_pipeline);
         let shadow_clear_pipeline = shadow_clear_result?;
         rollback.pipelines.push(shadow_clear_pipeline);
         let rsm_pipeline = rsm_result?;
@@ -5380,6 +5396,7 @@ impl ForwardRenderer {
             shadow_placeholder_view,
             shadow_sampler,
             shadow_pipeline,
+            depth_masked_pipeline,
             shadow_clear_pipeline,
             rsm_pipeline,
             probe_gather,
@@ -7531,6 +7548,47 @@ impl ForwardRenderer {
         self.probe_volume
     }
 
+    /// Which pipeline this frame's depth prepass and shadow atlas are recorded
+    /// with: the vertex-only one, or the one that can cut an alpha mask.
+    ///
+    /// **The question is asked of the material table and not of the scene**, so
+    /// it is answered afresh for every frame — a material inserted or rewritten
+    /// between frames moves the choice with it. See
+    /// [`MaterialTable::masks_alpha`].
+    ///
+    /// # Why the whole frame moves, and not the masked draws alone
+    ///
+    /// The finer arrangement would be a bucket per alpha mode, so that a mesh
+    /// with nothing masked in it kept the vertex-only stage in a scene that has
+    /// a cutout somewhere else. Three things in the code as it stands make that
+    /// its own slice rather than a variation of this one, and they are recorded
+    /// in `docs/backlog.md`:
+    ///
+    /// * `draw_gen.slang`'s scatter takes the **first** bucket whose mesh id
+    ///   matches and stops, so a second bucket naming one mesh never draws — the
+    ///   routing key would have to grow an alpha mode, which is a per-instance
+    ///   input that pass does not read today.
+    /// * the bucket table is fixed when the renderer is built, where instances
+    ///   arrive and leave afterwards and a material's mode can be rewritten, so
+    ///   which meshes want a masked twin is not knowable when the table is
+    ///   written.
+    /// * a bucket costs a whole instance capacity of `u32` in the scattered runs
+    ///   — see [`DrawGen::bucket_base`](crate::draw_gen::DrawGen::bucket_base) —
+    ///   so twinning the table doubles that buffer.
+    ///
+    /// What this arrangement costs instead is stated rather than hidden: in a
+    /// scene that masks anything, the opaque surfaces in it pay a fragment stage
+    /// in the two depth passes as well. A scene that masks nothing — which is
+    /// every demo and every golden in this tree — pays nothing at all, and that
+    /// is the claim the pass prices assert.
+    fn depth_only_pipeline(&self) -> GraphicsPipelineHandle {
+        if self.materials.masks_alpha() {
+            self.depth_masked_pipeline
+        } else {
+            self.shadow_pipeline
+        }
+    }
+
     /// Resolves a description's mesh and material indices into the table ids the
     /// GPU reads.
     ///
@@ -8552,8 +8610,8 @@ impl ForwardRenderer {
         // terms, and the `filter` is what keeps "switched on" from outrunning
         // "built": the field is only `Some` after a build that succeeded.
         //
-        // The depth prepass below takes `shadow_pipeline` and is untouched by
-        // this, which is the half that makes a wireframe frame legible: the
+        // The depth prepass below takes the depth-only pipeline and is untouched
+        // by this, which is the half that makes a wireframe frame legible: the
         // occlusion pair still reads solid depth. **It is also what makes this
         // one variable rather than two**: the colour pass's depth attachment
         // branches on it as well, because a wireframe is not the geometry the
@@ -8644,6 +8702,9 @@ impl ForwardRenderer {
             _ => self.probe_visibility_placeholder.view,
         };
         let frame = self.frame;
+        // Resolved before the gather takes its mutable borrow of `self`, and it
+        // is the one thing below that has to ask the renderer a question.
+        let depth_only = self.depth_only_pipeline();
         if let Some((gather, images)) = self.probe_gather.as_mut().zip(rsm_images) {
             gather.add_pass(graph, frame, images, probe_visibility_view, probe_table);
         }
@@ -8651,12 +8712,15 @@ impl ForwardRenderer {
         // --- the depth prepass ---
         //
         // `docs/plan/18-render-features.md`'s prepass, and it is unusually cheap:
-        // `shadow_pipeline` is already the depth-only twin of the colour pipeline,
-        // built from the same modules and the same layout, so driven with the
-        // camera's draws and a copy of the camera's bind group it *is* a scene
-        // depth prepass — no new pipeline and no new shader. It shares the
-        // cascades' `depthVertexMain` too, which is why the split-stream vertex
-        // pool pays for this pass as well as for the atlas.
+        // the depth-only pipeline is already the shadow cascades' own, built from
+        // the same modules and the same layout as the colour pipeline, so driven
+        // with the camera's draws and a copy of the camera's bind group it *is* a
+        // scene depth prepass — no new pipeline and no new shader. On a frame
+        // whose material table masks nothing it is `depthVertexMain` and no
+        // fragment stage, which is why the split-stream vertex pool pays for this
+        // pass as well as for the atlas; on a frame that masks something it is
+        // the cutout twin, and `depth_only_pipeline` is where that choice and its
+        // price are argued.
         //
         // **Stored, unlike the depth the forward pass writes.** This is what the
         // occlusion pass samples, and it is the only reason
@@ -8678,12 +8742,14 @@ impl ForwardRenderer {
         // **same** geometry stage — `depth_pipeline`'s doc says so — so there is
         // nothing to diverge. On the vertex path `depthVertexMain` is the same
         // clip position written the same way as `vertexMain`'s, out of the same
-        // module compiled in one invocation. The observable is a screenshot:
+        // module compiled in one invocation — and the cutout pipeline runs
+        // `vertexMain` itself, so a masked frame's prepass is not merely the same
+        // arithmetic as the colour pass's but the same code. The observable is a screenshot:
         // holes are not subtle, and the render-e2e goldens are what would catch
         // them on a rasteriser this machine does not have.
         let depth_group = self.prepass_groups[self.frame];
         let prepass_draws = BucketDraws {
-            pipeline: self.shadow_pipeline,
+            pipeline: depth_only,
             ..bucket_draws.clone()
         };
         // The prepass's own cluster counter — see
@@ -8704,17 +8770,18 @@ impl ForwardRenderer {
                     ..crcbl_hal::ClearValue::default()
                 },
             )
-            // Both are in this pass's bind group. Nothing samples either — the
-            // depth-only pipeline has no fragment stage — but a bound descriptor
-            // whose image is in the wrong layout is what
+            // Both are in this pass's bind group and neither is sampled by
+            // either depth-only pipeline — but a bound descriptor whose image is
+            // in the wrong layout is what
             // `VUID-vkCmdDrawIndexedIndirectCount-imageLayout-00344` names, and
             // the other backends read whatever the last writer left behind.
             .read_image(shadow_atlas)
             .read_image(occlusion_placeholder)
-            // And the page, on the same terms: `mesh_layout` names it in every
-            // group, this pass's included. Nothing samples it here either, and
-            // declaring it is what lets the graph order a copy into a page layer
-            // against this pass — see `base_color_page_import`.
+            // And the page, which the **cutout** pipeline does sample: the alpha
+            // it cuts against is a texel of it. Declared on every frame rather
+            // than on the masked ones, because a declaration is also what lets
+            // the graph order a copy into a page layer against this pass — see
+            // `base_color_page_import`.
             .read_image(base_color_page)
             // And §2's normal page, which is in the same groups for the same
             // reason and is sampled here just as little.
@@ -9660,7 +9727,7 @@ impl ForwardRenderer {
             })
             .collect();
         let bucket_draws = BucketDraws {
-            pipeline: self.shadow_pipeline,
+            pipeline: self.depth_only_pipeline(),
             layout: self.mesh_pipeline_layout,
             indices: self.pool.index_buffer(),
             emit: self.emit,
@@ -11721,6 +11788,7 @@ impl ForwardRenderer {
         device.destroy_bind_group_layout(self.tonemap_layout);
 
         device.destroy_graphics_pipeline(self.shadow_pipeline);
+        device.destroy_graphics_pipeline(self.depth_masked_pipeline);
         device.destroy_graphics_pipeline(self.rsm_pipeline);
         device.destroy_graphics_pipeline(self.shadow_clear_pipeline);
         for groups in self.shadow_groups {
@@ -11885,6 +11953,16 @@ struct MeshModules {
     /// geometry is a primitive, not a cluster.
     depth_clear_vertex: &'static str,
     fragment: &'static str,
+    /// `depthMaskedFragmentMain`, which [`MeshModules::depth_masked_pipeline`]
+    /// puts *behind* [`MeshModules::vertex`] — the alpha mask and no target at
+    /// all.
+    ///
+    /// **The same stage on both paths**, unlike the two vertex entry points
+    /// above: it reads `mesh.slang`'s own `VertexOutput`, which is what
+    /// `vertexMain` writes on the raster path and what `mesh_cluster.slang`'s
+    /// mesh stage writes on the mesh one. So the cutout is one comparison in one
+    /// place rather than one per geometry path.
+    depth_masked_fragment: &'static str,
     /// `rsmFragmentMain`, which [`MeshModules::rsm_pipeline`] takes in
     /// [`MeshModules::fragment`]'s place: the same geometry stage, three targets
     /// describing the surface rather than shading it.
@@ -12007,6 +12085,7 @@ impl MeshModules {
         // a stage lookup here refuses the build outright with "exposes no
         // unambiguous Fragment entry point".
         let fragment = named_entry(&MESH, "fragmentMain", Stage::Fragment)?;
+        let depth_masked_fragment = named_entry(&MESH, "depthMaskedFragmentMain", Stage::Fragment)?;
         let rsm_fragment = named_entry(&MESH, "rsmFragmentMain", Stage::Fragment)?;
         // **Named rather than looked up by stage**, because the module has two
         // mesh entry points and a stage lookup would refuse an ambiguous one —
@@ -12103,6 +12182,7 @@ impl MeshModules {
             depth_vertex,
             depth_clear_vertex,
             fragment,
+            depth_masked_fragment,
             rsm_fragment,
             cluster,
         })
@@ -12278,6 +12358,78 @@ impl MeshModules {
                     entry_point: self.depth_vertex,
                 },
                 fragment: None,
+                primitive,
+                depth_stencil: Self::depth_stencil(),
+                multisample: MultisampleState::default(),
+                color_targets: &[],
+            }),
+        }
+    }
+
+    /// [`MeshModules::depth_pipeline`] with an alpha mask in it: the same depth
+    /// state and the same absent colour targets, `depthMaskedFragmentMain`
+    /// behind the geometry stage, and [`MeshModules::vertex`] in
+    /// [`MeshModules::depth_vertex`]'s place.
+    ///
+    /// `docs/plan/43-render-standards.md` §3's cutout, in the two passes that
+    /// write depth without shading. A masked instance drawn through the pipeline
+    /// above writes its full silhouette: it occludes itself through the hole it
+    /// can see through, and it casts the shadow of a leaf that has none.
+    ///
+    /// **The vertex stage is the colour pass's, and it has to be.** A cutout
+    /// needs the UV, which lives in the attribute region `depthVertexMain`
+    /// exists not to read — so this stage reads a whole vertex, exactly as
+    /// [`MeshModules::rsm_pipeline`] does beside it and for the same reason.
+    /// What that buys is one fragment entry point for both geometry paths: the
+    /// mesh path already emits `mesh.slang`'s `VertexOutput`, so the mask is
+    /// compared in one place rather than once per path.
+    ///
+    /// **Which of the two a frame is drawn with is
+    /// [`MaterialTable::masks_alpha`]**, asked afresh each frame — see
+    /// [`ForwardRenderer::depth_only_pipeline`]. A frame whose table holds
+    /// nothing masked is recorded through the pipeline above, with no fragment
+    /// stage anywhere, and costs exactly what it cost before this one existed.
+    fn depth_masked_pipeline(
+        &self,
+        device: &dyn Device,
+        layout: PipelineLayoutHandle,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        let primitive = Self::primitive(PolygonMode::Fill);
+        let fragment = Some(ShaderEntry {
+            module: self.mesh,
+            entry_point: self.depth_masked_fragment,
+        });
+        match self.cluster.as_ref() {
+            Some(cluster) => device.create_mesh_pipeline(&MeshPipelineDesc {
+                label: Some("shadow cascade masked mesh cluster"),
+                layout,
+                task: cluster
+                    .task
+                    .zip(cluster.task_module)
+                    .map(|(entry_point, module)| ShaderEntry {
+                        module,
+                        entry_point,
+                    }),
+                task_workgroup_size: Self::TASK_WORKGROUP_SIZE,
+                mesh: ShaderEntry {
+                    module: cluster.mesh_module,
+                    entry_point: cluster.mesh,
+                },
+                mesh_workgroup_size: Self::MESH_WORKGROUP_SIZE,
+                fragment,
+                primitive,
+                depth_stencil: Self::depth_stencil(),
+                multisample: MultisampleState::default(),
+                color_targets: &[],
+            }),
+            None => device.create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("shadow cascade masked"),
+                layout,
+                vertex: ShaderEntry {
+                    module: self.mesh,
+                    entry_point: self.vertex,
+                },
+                fragment,
                 primitive,
                 depth_stencil: Self::depth_stencil(),
                 multisample: MultisampleState::default(),
@@ -19412,9 +19564,145 @@ mod tests {
             "the colour pass needs every attribute the depth pass skips, so it is the entry \
              point that reads a whole vertex"
         );
+        assert_eq!(
+            entry_of("shadow cascade masked"),
+            "vertexMain",
+            "the cutout twin has to read a whole vertex: the UV it samples the mask from lives \
+             in the attribute region `depthVertexMain` exists not to read"
+        );
 
         renderer.destroy(device);
         recorder.assert_valid();
+    }
+
+    /// **A masked material moves the depth prepass and the shadow atlas onto the
+    /// cutout pipeline, and moves nothing else.**
+    ///
+    /// The mechanism is which pipeline handle the recorded stream binds — the
+    /// wireframe test's observable, for the same reason: a field saying
+    /// [`MaterialTable::masks_alpha`] answered `true` would prove the flag was
+    /// read, not that the frame changed.
+    ///
+    /// Three claims, and each rules out a different way of passing wrongly:
+    ///
+    /// * a scene with nothing masked binds the vertex-only pipeline and **never**
+    ///   the cutout one, which is the "an opaque frame costs what it always
+    ///   did" claim at the level a null device can see it;
+    /// * one masked row swaps every bind of the first for the second — both
+    ///   depth passes, not one of them;
+    /// * and substituting one handle for the other makes the two streams
+    ///   **equal**, so the colour pass, the tile clears and the reflective
+    ///   shadow map are all where they were. A change that had also moved the
+    ///   colour pass would satisfy the first two and fail this.
+    ///
+    /// The two scenes differ in one flags word and nothing else, so any
+    /// difference in the stream is that word's.
+    #[test]
+    fn a_masked_material_moves_the_depth_passes_onto_the_cutout_pipeline() {
+        use crcbl_hal::null::Command;
+
+        // The occlusion blur count is a process-global console variable and a
+        // frame binds one pipeline per blur, so a concurrent test moving it
+        // would put a bind in one of these frames and not the other — the
+        // wireframe test's hazard exactly.
+        let _blurs = ssao_blur_switch();
+
+        let masked_scene = {
+            let mut scene = crate::scene::demo();
+            scene.materials[DEMO_UNTINTED].flags =
+                crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK;
+            scene
+        };
+
+        // One frame each, from two renderers rather than two frames from one:
+        // the choice is made per frame, but a table cannot be un-masked without
+        // an API for it, and two builds keep the frames' shadow-atlas state
+        // identical — both are a first frame.
+        // Per scene: how often the cutout pipeline was bound, how often the
+        // vertex-only one was, and the whole bind stream with the two folded
+        // together — which is what makes the streams from two devices
+        // comparable at all, since only *which of the two* is meant to differ.
+        let bound =
+            |scene: &crate::scene::SceneDesc<'_>| -> (usize, usize, Vec<GraphicsPipelineHandle>) {
+                let (recorder, device, queue) = open();
+                let device = device.as_ref();
+                let mut renderer =
+                    ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, scene)
+                        .expect("the null backend accepts the demo description");
+                place_cube(&mut renderer, Mat4::IDENTITY);
+                let imported = swapchain_image(device);
+                let mut pool = crate::TransientPool::new();
+                renderer
+                    .begin_frame(
+                        device,
+                        &Camera::default(),
+                        &DirectionalLight::default(),
+                        (64, 48),
+                    )
+                    .expect("write");
+                let mut graph = crate::RenderGraph::new(queue);
+                let target = graph.import_image("target", imported);
+                renderer.add_passes(&mut graph, &pool, target, (64, 48));
+                let compiled = graph.compile(&pool).expect("a legal frame");
+                let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                    label: Some("alpha mask lap"),
+                    queue,
+                });
+                compiled
+                    .execute(device, &mut pool, encoder.as_mut(), None)
+                    .expect("the graph executed");
+                encoder.finish().expect("recording succeeded");
+                let plain = renderer.shadow_pipeline;
+                let cutout = renderer.depth_masked_pipeline;
+                assert_ne!(
+                    plain, cutout,
+                    "the two depth pipelines have to be two objects, or nothing below discriminates"
+                );
+                let binds: Vec<GraphicsPipelineHandle> = recorder
+                    .commands()
+                    .iter()
+                    .filter_map(|command| match command {
+                        Command::BindGraphicsPipeline(handle) => Some(*handle),
+                        _ => None,
+                    })
+                    .collect();
+                let cutouts = binds.iter().filter(|handle| **handle == cutout).count();
+                let plains = binds.iter().filter(|handle| **handle == plain).count();
+                let folded = binds
+                    .into_iter()
+                    .map(|handle| if handle == cutout { plain } else { handle })
+                    .collect();
+                renderer.destroy(device);
+                recorder.assert_valid();
+                (cutouts, plains, folded)
+            };
+
+        let (opaque_cutouts, opaque_plains, opaque_stream) = bound(&crate::scene::demo());
+        let (masked_cutouts, masked_plains, masked_stream) = bound(&masked_scene);
+
+        assert_eq!(
+            opaque_cutouts, 0,
+            "a scene with nothing masked must never bind the cutout pipeline"
+        );
+        assert!(
+            opaque_plains > 0,
+            "a scene with nothing masked must bind the vertex-only pipeline, or the assertion \
+             above is about a frame with no depth pass in it"
+        );
+        assert_eq!(
+            masked_plains, 0,
+            "a masked scene must bind the vertex-only pipeline nowhere: a depth pass left on it \
+             writes a full silhouette"
+        );
+        assert_eq!(
+            masked_cutouts, opaque_plains,
+            "the cutout pipeline has to be bound exactly as often as the vertex-only one was — \
+             both depth passes moved, not one of them"
+        );
+        assert_eq!(
+            masked_stream, opaque_stream,
+            "the frame gained or lost a pipeline bind beyond the two depth passes'"
+        );
     }
 
     /// **The wireframe view swaps the colour pass's pipeline and nothing else.**

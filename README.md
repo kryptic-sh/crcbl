@@ -56,8 +56,9 @@ What is real today:
   sun-dependent view is marched on the host, so the background, the ambient term
   and a missed reflection are one atmosphere and the device pays four buffer
   loads for it; volumetric fog, bloom, auto-exposure, SMAA and FXAA,
-  render-scale upscaling, GPU skinning, tonemapping and a screen-space grid,
-  with mesh shaders and bindless where the device has them.
+  render-scale upscaling, GPU skinning, alpha-masked cutout materials cut in the
+  depth prepass and the shadows as well as in the shading, tonemapping and a
+  screen-space grid, with mesh shaders and bindless where the device has them.
 - **glTF import** with meshlet building, a cluster DAG and QEM simplification.
 - **A server-authoritative game stack** — fixed-tick simulation, snapshots,
   interpolation, an ECS, physics, input mapping, audio, persistence and a job

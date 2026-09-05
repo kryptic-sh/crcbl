@@ -291,6 +291,63 @@ pub enum Scene {
     /// out where neither highlight reaches and holds them to a tolerance its
     /// own sweep set.
     FillLight,
+    /// `docs/plan/43-render-standards.md` §3's **alpha-mask cutout**: a masked
+    /// plate floating over a small flat floor, under a sun tilted far enough
+    /// that the plate's shadow lands clear of the plate's own footprint.
+    ///
+    /// **The only frame in the tree that discards a fragment.** Every other
+    /// scene here shades an opaque surface, so
+    /// `crcbl_render::MaterialTable::masks_alpha` answers `false` for all of
+    /// them, `mesh.slang`'s `alpha_masked` compiled to four targets and cut
+    /// nothing anywhere, and the second depth-only pipeline
+    /// `ForwardRenderer` builds for a masked scene was recorded by no frame at
+    /// all. A cutout is honoured in three passes and each of them can be wired
+    /// to nothing on its own, so this scene separates the three into three
+    /// regions of one picture rather than needing three frames:
+    ///
+    /// * **the colour pass** — the plate's cut half is not drawn, and the floor
+    ///   is seen through it;
+    /// * **the depth prepass** — the floor seen through the hole is *shaded*.
+    ///   The colour pass tests `GreaterOrEqual` with depth writes off against
+    ///   the prepass's depth, so a prepass that wrote the plate's whole
+    ///   silhouette rejects the floor fragment behind the hole and the hole
+    ///   reads as `crcbl_render::forward::SCENE_CLEAR` rather than as floor;
+    /// * **the shadow atlas** — the plate's shadow on the floor carries the same
+    ///   hole, because the cascade is drawn with that same pipeline.
+    ///
+    /// # The sun's tilt, and the arithmetic that set it
+    ///
+    /// The default sun is `(0.4, 0.8, 0.6)` normalised, which offsets a shadow
+    /// by `h * (0.4, 0.6) / 0.8` for a caster at height `h` — `(0.375, 0.5625)`
+    /// here, and the plate is `0.7` by `0.25`, so most of its shadow would land
+    /// under the plate itself where nothing can read it. `alpha_sun` tilts to
+    /// `(0, 1, 1)` instead: no `x` component at all, so the shadow moves purely
+    /// along `-z` by exactly the caster's height and the mask's cut — which runs
+    /// along `z` — is at the same `x` in the plate and in its shadow. At
+    /// `ALPHA_PLATE_UP` the slab's shadow covers `z` in `-1.01 ..= -0.49` where
+    /// the plate's own footprint is `-0.25 ..= 0.25`: near a quarter of a unit
+    /// of lit floor between the two, which is the gap the bands in
+    /// `tests/render_e2e.rs` are placed in.
+    ///
+    /// # What is in the frame, and why each piece is the size it is
+    ///
+    /// The floor is the cube on `spot_floor`'s plan — scaled and dropped so its
+    /// `+Y` face is the plane `y = 0` — but at `ALPHA_FLOOR_SCALE` rather than
+    /// that helper's, and the smaller floor is load-bearing: this scene's second
+    /// claim needs a region the frame **never drew geometry into**, and a floor
+    /// that runs past every edge leaves none. See `alpha_floor`.
+    ///
+    /// The plate is the same cube scaled flat and wide — see `ALPHA_PLATE_SCALE`
+    /// — through a row carrying `crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK`
+    /// and `ALPHA_MASK_LAYER`, whose texels are half transparent and half
+    /// opaque at the same RGB. **The same RGB is the point**: a golden in which
+    /// the hole were a colour difference rather than an absence would pass every
+    /// assertion below while the discard did nothing.
+    ///
+    /// The camera looks straight down, on `spot_camera`'s terms, so the floor is
+    /// a plane at a known scale and a pixel maps to a floor position by a
+    /// division.
+    AlphaMask,
     /// `docs/plan/18-render-features.md`'s **screen-space ambient occlusion**:
     /// the inside of a box, looked straight down into, lit almost entirely by
     /// ambient.
@@ -3461,6 +3518,260 @@ fn fill_light_pairs() -> [crcbl_render::Light; 4] {
     ]
 }
 
+/// [`Scene::AlphaMask`]'s page layer, in the description `alpha_mask_scene`
+/// builds.
+///
+/// The demo scene's two layers and this one after them, so
+/// `crcbl_render::scene::CHECKER_LAYER` keeps the index it has always had —
+/// [`AREA_FLOOR`]'s arrangement, one page along.
+const ALPHA_MASK_LAYER: u32 = 2;
+
+/// [`ALPHA_MASK_LAYER`]: one column of texels at alpha `0x00` and one at
+/// `0xFF`, at the same white RGB.
+///
+/// **A straight cut and not a speckle.** `crcbl_render::scene::PAGE_EXTENT` is
+/// two texels a side and the page is read through the renderer's trilinear
+/// sampler, so a single transparent texel would arrive as a blend of its
+/// neighbours and the mip chain would average it away entirely. Half the layer
+/// is the one shape that survives both: the sampled alpha is exactly `0` for
+/// the first quarter of the axis, exactly `1` for the last quarter and a ramp
+/// between, so the cut against `alpha_cutoff` lands on the plane where the ramp
+/// crosses it — the middle of the plate — however the sampler filters.
+///
+/// The cut is in **u**, which on the cube's `+Y` face runs along `+x` — see
+/// `crcbl_shaders::mesh::cube_vertices`, whose quad puts `u = 0` at `-x`. So
+/// the transparent half is the plate's `-x` half, which
+/// [`alpha_camera`](fn@alpha_camera)'s framing puts on the **right** of the
+/// frame.
+///
+/// **Every texel's RGB is [`PageDesc::WHITE`]**, cut and kept alike, which is
+/// what makes the hole an absence rather than a colour. A layer whose
+/// transparent half were also a different colour would draw very nearly this
+/// picture with the discard wired to nothing, and every band below would still
+/// read what it expects.
+///
+/// [`PageDesc::WHITE`]: crate::render::scene::PageDesc::WHITE
+const ALPHA_MASK_TEXELS: [u8; 16] = [
+    0xFF, 0xFF, 0xFF, 0x00, // (0, 0) — cut
+    0xFF, 0xFF, 0xFF, 0xFF, // (1, 0) — kept
+    0xFF, 0xFF, 0xFF, 0x00, // (0, 1) — cut
+    0xFF, 0xFF, 0xFF, 0xFF, // (1, 1) — kept
+];
+
+/// [`Scene::AlphaMask`]'s floor row, in the description `alpha_mask_scene`
+/// builds.
+const ALPHA_FLOOR: usize = 3;
+
+/// Its masked plate's row, the one past the floor's.
+const ALPHA_PLATE: usize = 4;
+
+/// The base-colour factor [`Scene::AlphaMask`]'s floor shades through.
+///
+/// A **grey** factor rather than a tint, on [`AREA_ALBEDO`]'s terms exactly: the
+/// floor's colour is then the cube's own `+Y` face and nothing else, and the
+/// plate is the only thing in the frame carrying a hue of its own. Bright rather
+/// than dark, because two of this scene's three claims are about a *shadow* on
+/// this floor and the third is about seeing it through a hole — all three want
+/// the lit floor as far above the ambient as the sun can put it.
+const ALPHA_FLOOR_ALBEDO: f32 = 0.8;
+
+/// The base-colour factor [`Scene::AlphaMask`]'s plate shades through.
+///
+/// **Red against the floor's green, and the hue is what the first claim is read
+/// in.** The cube's `+Y` face is `(0.25, 0.80, 0.30)`, so this row's green
+/// channel lands near a seventh of the floor's while its red lands above it: a
+/// band inside the hole and a band on the solid half of the plate are then
+/// separated by a factor in one channel rather than by a brightness a shading
+/// bug could also produce. `tests/render_e2e.rs` reads exactly that channel —
+/// see its `ALPHA_HOLE_RATIO`.
+const ALPHA_PLATE_TINT: [f32; 4] = [1.0, 0.12, 0.12, 1.0];
+
+/// [`Scene::AlphaMask`]'s scene: the engine's own, with the mask layer and the
+/// two material rows appended.
+///
+/// A description of its own for [`Scene::Bloom`]'s reason — this fixture needs
+/// materials the demo scene does not have — and it is the only description in
+/// this module that appends a **page layer**, because it is the only fixture
+/// whose subject is a texel's alpha.
+fn alpha_mask_scene() -> crate::render::scene::SceneDesc<'static> {
+    const {
+        let extent = crate::render::scene::PAGE_EXTENT as usize;
+        assert!(
+            ALPHA_MASK_TEXELS.len() == extent * extent * 4,
+            "the mask layer is authored at the page's own extent, and a layer of any other \
+             length is refused before a frame is drawn"
+        );
+    }
+    let mut scene = crate::render::scene::demo();
+    let mask = scene.page.push_layer(&ALPHA_MASK_TEXELS[..]);
+    debug_assert_eq!(
+        mask, ALPHA_MASK_LAYER,
+        "the mask is the layer past the demo scene's checker"
+    );
+    scene.materials.push(crate::shaders::mesh::GpuMaterial {
+        base_color: [
+            ALPHA_FLOOR_ALBEDO,
+            ALPHA_FLOOR_ALBEDO,
+            ALPHA_FLOOR_ALBEDO,
+            1.0,
+        ],
+        ..crate::shaders::mesh::GpuMaterial::UNTINTED
+    });
+    debug_assert_eq!(
+        scene.materials.len() - 1,
+        ALPHA_FLOOR,
+        "the floor row is the one past the demo scene's three"
+    );
+    scene.materials.push(crate::shaders::mesh::GpuMaterial {
+        base_color: ALPHA_PLATE_TINT,
+        base_color_texture: mask,
+        // The whole of what makes this scene a fixture: without the bit the row
+        // is an ordinary opaque one, `MaterialTable::masks_alpha` answers
+        // `false`, and the frame draws a solid plate over a solid shadow.
+        flags: crate::shaders::mesh::GpuMaterial::ALPHA_MODE_MASK,
+        ..crate::shaders::mesh::GpuMaterial::UNTINTED
+    });
+    debug_assert_eq!(
+        scene.materials.len() - 1,
+        ALPHA_PLATE,
+        "the plate's row is the one past the floor's"
+    );
+    scene
+}
+
+/// How much [`Scene::AlphaMask`] scales the cube by to get its floor.
+///
+/// **Deliberately smaller than [`SPOT_FLOOR_SCALE`], and that is a claim rather
+/// than a framing choice.** This scene's second claim is that the hole reads as
+/// *floor* and not as the frame's clear — which is what a depth prepass that
+/// wrote the plate's whole silhouette would leave there — and a claim of that
+/// shape needs a band of clear in the same frame to be read against. A floor
+/// running past every edge leaves none, so this one stops inside all four: at
+/// [`ALPHA_CAMERA_UP`] the frame covers `±1.85` of floor across and `±1.39`
+/// along, and the floor reaches `±1.2`.
+///
+/// Large enough that the plate, the whole of its shadow and every band beside
+/// them are on it: the furthest is the shadow's own far edge at `z = -1.01`.
+const ALPHA_FLOOR_SCALE: f32 = 2.4;
+
+/// [`Scene::AlphaMask`]'s floor: the cube scaled by [`ALPHA_FLOOR_SCALE`] and
+/// dropped so its `+Y` face is the plane `y = 0`.
+///
+/// [`spot_floor`]'s shape at this scene's own scale — the cube spans half a unit
+/// either side of its origin, so the drop is half the scale. Not that helper
+/// itself, for the reason [`ALPHA_FLOOR_SCALE`] gives.
+fn alpha_floor() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.5 * ALPHA_FLOOR_SCALE, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::splat(ALPHA_FLOOR_SCALE))
+}
+
+/// How far above the floor [`Scene::AlphaMask`] hangs its plate.
+///
+/// **This is the separation between the shadow and the thing casting it.**
+/// [`alpha_sun`] comes in at 45° with no `x` component, so a caster at height
+/// `h` throws its shadow `h` along `-z` — and the plate reaches `0.25` along
+/// that axis, so any height past `0.5` puts the shadow clear of the footprint.
+/// This is half again as far, which leaves near a quarter of a unit of lit
+/// floor between the plate's near edge and its shadow's, wide enough to be
+/// legible in the golden.
+///
+/// Not higher: the shadow's far edge is already at `z = -1.01` and the floor
+/// stops at `-1.2`. Past `crcbl_shaders::ssao::RADIUS_DEFAULT`, which is what
+/// the occlusion pass gathers within: nothing of the plate is then in reach of
+/// the floor under it, so the band inside the hole is lit floor and not a floor
+/// darkened by the plate's proximity.
+const ALPHA_PLATE_UP: f32 = 0.75;
+
+/// How much [`Scene::AlphaMask`] scales the cube by to get its plate: flat and
+/// wide.
+///
+/// Wide along `x`, which is the axis the mask cuts across, so both halves are
+/// tens of pixels wide at the golden suite's 256×192 and a band fits inside
+/// each. Short along `z`, which is the axis the shadow travels along, because
+/// the gap between the plate and its own shadow is [`ALPHA_PLATE_UP`] less this
+/// half-depth — a deeper plate walks its shadow back under itself.
+///
+/// **Thin, and the thinness was swept rather than picked.** A slab's two faces
+/// cast two shadow edges a slab-thickness apart, so at a thickness comparable to
+/// the cascade filter's own width the near edge of the shadow is a double edge
+/// inside that filter — which is exactly where a last-bit depth difference
+/// between the two geometry paths flips a tap. Measured on lavapipe, as the
+/// channels `render_e2e.rs`'s
+/// `the_alpha_mask_scene_draws_the_same_frame_on_every_geometry_path` reports:
+/// `0.02` and `0.24` disagree about **nothing**, `0.12` about one channel by one
+/// level, and `0.06` about sixteen channels by up to seven — every one of them
+/// along that near edge, and radv answers zero at all four. So the thickness is
+/// either well inside the filter or well outside it, and this is the first:
+/// `0.02` puts the two edges about one and a half pixels apart at this framing,
+/// which is one edge.
+///
+/// Not zero: a zero-thickness slab has a back face coincident with its front
+/// one, and the depth prepass this scene is evidence about would then be
+/// measuring z-fighting.
+const ALPHA_PLATE_SCALE: glam::Vec3 = glam::Vec3::new(1.4, 0.02, 0.5);
+
+/// [`Scene::AlphaMask`]'s plate: the cube at [`ALPHA_PLATE_SCALE`], centred over
+/// the floor's origin at [`ALPHA_PLATE_UP`].
+fn alpha_plate() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, ALPHA_PLATE_UP, 0.0))
+        * glam::Mat4::from_scale(ALPHA_PLATE_SCALE)
+}
+
+/// How far above the floor [`Scene::AlphaMask`]'s camera stands.
+///
+/// Sets the scale of the picture on [`POINT_CAMERA_UP`]'s terms — the frame's
+/// short half-axis on the floor is `up * tan(30°)`. High enough that the floor's
+/// own edges are inside the frame on all four sides, which is what
+/// [`ALPHA_FLOOR_SCALE`] needs of it; low enough that the plate's two halves and
+/// the two halves of its shadow are each tens of pixels across.
+const ALPHA_CAMERA_UP: f32 = 2.4;
+
+/// The camera [`Scene::AlphaMask`] is drawn with: straight down at the floor, on
+/// [`spot_camera`]'s terms exactly.
+///
+/// Overhead so the floor is a plane at a known scale and a pixel maps to a floor
+/// position by a division — which is what lets the assertions name the band the
+/// hole and its shadow fall in rather than searching for them.
+fn alpha_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, ALPHA_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        // `Y` is the view direction, so `up` cannot also be `Y`; `+Z` puts the
+        // world's `+Z` axis at the top of the frame, which is the direction the
+        // light comes from and so the direction the shadow falls away from.
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// The sun [`Scene::AlphaMask`] runs under: [`DirectionalLight::default`]'s
+/// colour and ambient, tilted to 45° in the `z` plane alone.
+///
+/// **No `x` component, and that is the whole of the tilt's job.** The mask's cut
+/// runs along `z` at the plate's own `x = 0`, so a sun with an `x` component
+/// would slide the shadow's cut away from the plate's and the two bands under
+/// the shadow would no longer be the shadow of the two bands on the plate. With
+/// the `x` component gone the shadow is the plate translated along `-z` by
+/// exactly its height, and every band below is its own mirror one step down the
+/// frame.
+///
+/// 45° rather than steeper, on [`SPOT_SHADOW_LIGHT_AT`]'s terms: the shadow
+/// moves by the caster's height, which is what carries it out from under the
+/// plate. Not shallower, which would run the shadow off the floor — see
+/// [`ALPHA_PLATE_UP`], where the arithmetic is.
+///
+/// The colour and ambient are the default sun's rather than a dimmed pair: this
+/// scene's claims are ratios between lit floor, shadowed floor and a plate, and
+/// each of them is widest under a bright key.
+fn alpha_sun() -> crcbl_render::DirectionalLight {
+    crcbl_render::DirectionalLight {
+        direction: glam::Vec3::new(0.0, 1.0, 1.0).normalize(),
+        ..crcbl_render::DirectionalLight::default()
+    }
+}
 /// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
 /// light — which is what a clear value on an sRGB attachment means.
 ///
@@ -3958,6 +4269,31 @@ impl SceneState {
                 Self::Forward {
                     camera: area_camera(),
                     light: area_sun(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::AlphaMask => {
+                // **The floor first, and the plate over it.** The cube is
+                // placed rather than parked, so it is still the first insertion
+                // and still holds the pool slot every other forward scene gives
+                // it — see `place`, where insertion order is argued — and it is
+                // placed through the grey row `alpha_mask_scene` appends for it
+                // rather than through `DEMO_UNTINTED`, which is why there is no
+                // `place_cube` call.
+                //
+                // The plate is the second and last: nothing else is in the
+                // frame, for `Scene::Spot`'s reason and one sharper. Two of this
+                // scene's three claims are read off bands of *floor* — one seen
+                // through the hole, one in the shadow's hole — and any other
+                // object standing on that floor is something a band could be
+                // measuring instead.
+                let mut renderer =
+                    ForwardRenderer::with_scene(device, queue, format, &alpha_mask_scene())?;
+                place(&mut renderer, DEMO_CUBE, ALPHA_FLOOR, alpha_floor());
+                place(&mut renderer, DEMO_CUBE, ALPHA_PLATE, alpha_plate());
+                Self::Forward {
+                    camera: alpha_camera(),
+                    light: alpha_sun(),
                     renderer: Box::new(renderer),
                 }
             }

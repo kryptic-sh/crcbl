@@ -175,6 +175,21 @@ pub struct MaterialTable {
     /// [`crate::instance_pool`] does.
     slots: Pool<()>,
     capacity: u32,
+    /// Which rows carry [`GpuMaterial::ALPHA_MODE_MASK`], one entry per row —
+    /// the only thing about a row's *value* this type keeps a copy of.
+    ///
+    /// It is kept because the renderer has to answer a question about the table
+    /// as a whole before it records a frame: whether anything in it cuts an
+    /// alpha mask, and therefore whether the depth prepass and the shadow atlas
+    /// need a fragment stage at all. See [`MaterialTable::masks_alpha`].
+    /// Reading it back off the buffer is not open to a `HostUpload` binding, and
+    /// asking every caller to remember what it inserted is the drift this
+    /// removes.
+    ///
+    /// Written only where a row is — see [`MaterialTable::write`], which is the
+    /// single point of contact — so a refused write leaves the entry describing
+    /// the bytes the device actually holds.
+    masked: Vec<bool>,
 }
 
 impl MaterialTable {
@@ -215,6 +230,9 @@ impl MaterialTable {
             buffer,
             slots: Pool::new(),
             capacity: desc.capacity,
+            // Every row cleared, so every row opaque — which is what the zeroes
+            // written above actually say.
+            masked: vec![false; usize::try_from(desc.capacity).unwrap_or(usize::MAX)],
         })
     }
 
@@ -246,6 +264,25 @@ impl MaterialTable {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.slots.is_empty()
+    }
+
+    /// Whether any row in the table cuts an alpha mask —
+    /// [`GpuMaterial::ALPHA_MODE_MASK`] set in its `flags`.
+    ///
+    /// **A question about the table rather than about a row**, and the caller is
+    /// [`crate::forward`]: a depth prepass and a shadow atlas drawn for a scene
+    /// with nothing masked in it need no fragment stage at all, and one drawn
+    /// for a scene that has one needs a stage that can `discard`. Which of the
+    /// two pipelines a frame is recorded with is therefore this answer, taken
+    /// afresh each frame — so a material inserted or rewritten between frames
+    /// moves the choice with it rather than leaving a cutout casting a solid
+    /// shadow until something rebuilt the renderer.
+    ///
+    /// A removed row answers `false`: [`MaterialTable::remove`] clears it to
+    /// [`GpuMaterial::default`], whose flags are zero.
+    #[must_use]
+    pub fn masks_alpha(&self) -> bool {
+        self.masked.iter().any(|row| *row)
     }
 
     /// Takes a row, writes `material` into it, and returns its handle.
@@ -366,13 +403,19 @@ impl MaterialTable {
     /// The one place a [`GpuMaterial`] becomes bytes, so the element/byte
     /// conversion has a single point of contact rather than one per call site.
     fn write(
-        &self,
+        &mut self,
         device: &dyn Device,
         index: u32,
         material: &GpuMaterial,
     ) -> Result<(), HalError> {
         let at = u64::from(index) * MATERIAL_STRIDE as u64;
-        device.write_buffer(self.buffer, at, &material.to_bytes())
+        device.write_buffer(self.buffer, at, &material.to_bytes())?;
+        // After the write and not before it: the record is of what the device
+        // holds, and a refused write left the row as it was.
+        if let Some(entry) = self.masked.get_mut(index as usize) {
+            *entry = material.flags & GpuMaterial::ALPHA_MODE_MASK != 0;
+        }
+        Ok(())
     }
 }
 
@@ -464,6 +507,79 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// **The table answers whether anything in it cuts an alpha mask, and the
+    /// answer tracks every way a row can change.**
+    ///
+    /// [`crate::forward`] asks this once a frame to decide whether the depth
+    /// prepass and the shadow atlas need a fragment stage, so a stale answer is
+    /// either a cutout casting a solid shadow or every opaque frame in the tree
+    /// paying for a `discard` nothing uses.
+    ///
+    /// Four transitions, because the record is written in one place —
+    /// `MaterialTable::write` — and each of the four reaches it differently: an
+    /// unmasked insert, a masked insert, a `set` that un-masks a live row, and a
+    /// `remove`, which clears the row to [`GpuMaterial::default`] and must
+    /// therefore also clear the record. The second masked row is what stops the
+    /// answer being "the last row written": un-masking one of two must not
+    /// un-mask the table.
+    #[test]
+    fn the_table_reports_whether_any_row_cuts_an_alpha_mask() {
+        let (recorder, device) = open();
+        let device = device.as_ref();
+        let mut table = table(device, 8);
+        let masked = |n: u32| GpuMaterial {
+            flags: GpuMaterial::ALPHA_MODE_MASK,
+            ..material(n)
+        };
+        // `material`'s own flags word is a distinctness scheme rather than a
+        // meaning — it carries `n + 19`, which has bit 0 set for every even `n`
+        // — so the rows this test calls opaque have to say so.
+        let unmasked = |n: u32| GpuMaterial {
+            flags: 0,
+            ..material(n)
+        };
+
+        assert!(
+            !table.masks_alpha(),
+            "an empty table masks nothing, or every frame drawn before a material exists pays \
+             for a cutout"
+        );
+        let opaque = table
+            .insert(device, &unmasked(0))
+            .expect("a table of eight has room");
+        assert!(
+            !table.masks_alpha(),
+            "an opaque row must not mask the table"
+        );
+
+        let first = table.insert(device, &masked(1)).expect("room");
+        assert!(
+            table.masks_alpha(),
+            "a row inserted with the mask bit must move the answer, or the depth passes go on \
+             writing its full silhouette"
+        );
+        let second = table.insert(device, &masked(2)).expect("room");
+
+        table
+            .set(device, first, &unmasked(3))
+            .expect("a live handle rewrites its row");
+        assert!(
+            table.masks_alpha(),
+            "un-masking one of two masked rows must leave the table masked"
+        );
+        table
+            .remove(device, second)
+            .expect("a live handle frees its row");
+        assert!(
+            !table.masks_alpha(),
+            "removing the last masked row clears it to black, so the table masks nothing again"
+        );
+
+        table.remove(device, opaque).expect("live");
+        table.destroy(device);
+        recorder.assert_valid();
     }
 
     /// **The headline claim: a material id is a row, and the row it is is
