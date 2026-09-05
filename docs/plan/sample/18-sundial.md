@@ -215,20 +215,23 @@ hold in their head, and the only honest way to set them is to look.
      move keeps a contact, measured rather than argued. At 44 the contact and
      the pavement beyond it go together, which is a shadow that has gone.
 
-   **2026-09-05 widened it from one setup to two**, each read against its own
-   control. The `disc` rung takes the same five arms and the same constants and
-   reads what the shipped rung reads to a hundredth on both adapters, except at
-   the pushed bias, where its contact falls to `0.45` on radv and `0.37` on
-   lavapipe against `6.37` and `6.36`; its own peter-panning window runs from 92
-   to 100 texels, so 96 sits inside it as it sits inside `pcss`'s, and no
-   constant moved. Three setups were measured and are **not** read, and not one
-   is a bound that was loosened. The `box` rung fails two of the three claims:
-   zeroing the constant bias leaves its block at `0.0000%` dots on both
-   adapters, so there is no rise for the acne half, and 40 texels of normal
-   offset leaves contact and beyond at the shipped arm's own numbers — the
-   anti-vacuity clause refusing a count it cannot see reach the frame, with the
-   next station up, 44 texels, moving the contact itself. Its peter-panning half
-   is fine, `0.00` against `68.08`. The **top of the sun's arc**,
+   **2026-09-05 widened it from one setup to four rows over three rungs**, each
+   read against its own control. The `disc` rung takes the same five arms and
+   the same constants and reads what the shipped rung reads to a hundredth on
+   both adapters, except at the pushed bias, where its contact falls to `0.45`
+   on radv and `0.37` on lavapipe against `6.37` and `6.36`; its own
+   peter-panning window runs from 92 to 100 texels, so 96 sits inside it as it
+   sits inside `pcss`'s, and no constant moved. The `box` rung reads every claim
+   but one: under the ladder's narrowest kernel the shipped normal offset covers
+   the acne block on its own, so zeroing the constant bias there leaves it at
+   `0.0000%` dots — that clause is read on a fourth row at 1.5 texels of normal
+   offset instead, where `29.1737%` (radv) / `29.5090%` (lavapipe) trades
+   against `4.6467%` / `4.9581%` at the shipped bias, while the normal offset's
+   own clause reads where the sample ships. What `box` still does not read is
+   `HELD_OFFSET`'s pair: 40 texels leaves contact and beyond at the shipped
+   arm's own numbers and 44 moves the contact itself, so that half wants an
+   offset station between the two. Two setups were measured and are **not**
+   read, and neither is a bound that was loosened. The **top of the sun's arc**,
    `sun::NOON_TICK`, fails the same two and for one reason: a sun that steep
    throws a plinth shadow a fraction of the block's height long, so zeroing the
    offset draws `0.0000%` dots and the bias sweep takes the contact and the
@@ -236,7 +239,7 @@ hold in their head, and the only honest way to set them is to look.
    `91.65`/`96.31` at 52, `0.00`/`0.00` at 56 — leaving no count with a gap to
    read. And `plaza::counter_camera` frames the acne block but not the contact:
    `plaza::PLINTH_CONTACT` and every station past it is behind that pose's eye.
-   All three refusals and what closing them would take are in
+   Both refusals and what closing them would take are in
    [backlog.md](../../backlog.md).
 
    The sabotage that says the reading has teeth is `Cascades::params` handing

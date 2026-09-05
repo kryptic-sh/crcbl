@@ -2036,11 +2036,11 @@ const PETER_PAN_BIAS: f32 = 96.0;
 /// reads to a hundredth: contact `70.73` and beyond `66.59` on radv, `70.44` and
 /// `66.53` on lavapipe. `box` reads the shipped arm's own numbers exactly —
 /// `70.73`/`68.33` and `70.44`/`68.33` — which is a count that reached that
-/// rung's frame nowhere these two readings can see, and half of what
-/// [`BIAS_UNTRADED_RUNG`] is. At the top of the arc the contact holds at
-/// `176.00` and `175.93` while beyond falls to `24.27` and `24.33`, so this half
-/// of the claim is one that arm could make; it is [`PETER_PAN_BIAS`]' half it
-/// cannot.
+/// rung's frame nowhere these two readings can see, and the whole of what
+/// [`OFFSET_COVERED_RUNG`] still holds back. At the top of the arc the contact
+/// holds at `176.00` and `175.93` while beyond falls to `24.27` and `24.33`, so
+/// this half of the claim is one that arm could make; it is [`PETER_PAN_BIAS`]'
+/// half it cannot.
 const HELD_OFFSET: f32 = 40.0;
 
 /// How much shadow term a piece of pavement has to carry to count as shadowed,
@@ -2092,9 +2092,13 @@ const ACNE_WITHOUT_OFFSET: f32 = 20.0;
 /// the seventh decision — over this block the offset covers a lost depth bias
 /// nearly on its own — so the floor is set under it rather than at half of it.
 ///
-/// The `disc` rung reads the same pair. `box` reads `0.0000%` on both adapters,
-/// which is the other half of [`BIAS_UNTRADED_RUNG`]; at [`sun::NOON_TICK`] the
-/// shipped rung reads `2.9222%` on radv and `1.1737%` on lavapipe.
+/// The `disc` rung reads the same pair. `box` reads `0.0000%` on both adapters —
+/// [`OFFSET_COVERED_RUNG`]'s own reading, and why *this* clause on that rung is
+/// read against [`ACNE_WITHOUT_BIAS_REDUCED`] at another offset instead of
+/// against this floor here; the clause above it, which zeroes the normal offset
+/// outright, is read on that rung where the sample ships like every other. At
+/// [`sun::NOON_TICK`] the shipped rung reads `2.9222%` on radv and `1.1737%` on
+/// lavapipe.
 const ACNE_WITHOUT_BIAS: f32 = 1.5;
 
 /// What share of the block may be dots on an arm that is meant to be smooth.
@@ -2105,38 +2109,101 @@ const ACNE_WITHOUT_BIAS: f32 = 1.5;
 /// [`ACNE_WITHOUT_BIAS`], which is the smallest rise it has to separate from.
 const SMOOTH_PERCENT: f32 = 1.0;
 
-/// The rung of the filter ladder the claim below is **not** read on.
+/// What `r_shadow_normal_offset` is pulled back to to read the **constant
+/// bias's** clause on [`OFFSET_COVERED_RUNG`], in the same texels.
 ///
-/// `box`, and it is two of the readings rather than the frame.
+/// **Under the narrowest kernel on the ladder the offset the sample ships covers
+/// this block on its own** — [`OFFSET_COVERED_RUNG`] carries what that costs —
+/// and this is the station where it stops covering it, so this is where that
+/// rung's two counts trade again.
 ///
-/// **Zeroing the constant bias leaves its block smooth**: `0.0000%` dots on both
+/// **Swept** on that rung at [`sun::GRAZING_TICK`] over [`acne_block`] at
+/// [`CLAIM_EXTENT`], three runs per adapter and the same digits every time
+/// (2026-09-05). The columns are the arm a setup at that offset calls `shipped`
+/// and the arm it calls `no bias` — the same frames with `r_shadow_bias` at zero:
+///
+/// | `r_shadow_normal_offset` | shipped bias, radv | zero bias, radv | shipped bias, lavapipe | zero bias, lavapipe |
+/// | --- | --- | --- | --- | --- |
+/// | 1.00 | `43.3054%` | `44.0240%` | `43.3293%` | `44.0240%` |
+/// | 1.25 | `27.9521%` | `43.6886%` | `27.8802%` | `43.6886%` |
+/// | 1.50 (this) | `4.6467%` | `29.1737%` | `4.9581%` | `29.5090%` |
+/// | 1.75 | `0.0000%` | `6.4192%` | `0.0000%` | `6.4192%` |
+/// | 2.00 (ships) | `0.0000%` | `0.0000%` | `0.0000%` | `0.0000%` |
+///
+/// **The middle of the window rather than either edge of it.** At 1.00 the row's
+/// own shipped arm is rougher than its `no offset` arm — `43.3054%` against that
+/// arm's `42.6108%` — so [`ACNE_WITHOUT_OFFSET`]'s clause inverts on that row
+/// and goes red. At 1.75 the two counts do trade, but the rise is `6.4192%` and
+/// the next station, 2.00, reads `0.0000%` on both adapters: 1.75 is the last
+/// station before the rise disappears, and a driver a fraction wider than radv
+/// would stand on the wrong side of it. Here both clauses are wide, and there is
+/// a working station on either side.
+const REDUCED_OFFSET: f32 = 1.5;
+
+/// What share of the block is a dot at [`REDUCED_OFFSET`] once the constant bias
+/// is gone, as a percentage.
+///
+/// [`ACNE_WITHOUT_BIAS`]' floor for the one row read at that offset, and a
+/// second constant rather than that one because the rise a constant bias is
+/// worth is a function of how much of it the normal offset had already covered:
+/// where the sample ships, zeroing the bias buys back about three points of this
+/// block, and pulled back to [`REDUCED_OFFSET`] it buys back about twenty-nine.
+///
+/// **Swept:** [`REDUCED_OFFSET`]'s own table, whose middle row is this reading —
+/// `29.1737%` on radv and `29.5090%` on lavapipe against the `4.6467%` and
+/// `4.9581%` the same frames read with the bias where it ships (2026-09-05). Set
+/// at about half the rise, on [`ACNE_WITHOUT_OFFSET`]'s terms, which also leaves
+/// it three times clear of the arm it has to separate from.
+const ACNE_WITHOUT_BIAS_REDUCED: f32 = 15.0;
+
+/// The rung of the filter ladder whose own kernel the shipped normal offset
+/// covers, and the two things the walk below does about it.
+///
+/// `box`. Its `tile_box_pcf` takes a three-by-three of taps a texel apart and
+/// has no radius at all, where `disc` and the shipped rung both run `tile_pcf`
+/// at `SHADOW_FILTER_TEXELS` — so it is the narrowest kernel on the ladder, and
+/// a kernel reads its own quantised depth back only where it reaches further
+/// *back* than the sideways walk `r_shadow_normal_offset` makes. At the two
+/// texels that ship, this one does not.
+///
+/// **One clause of its acne half is read at [`REDUCED_OFFSET`] rather than where
+/// the sample ships**, and it is the constant bias's. With `r_shadow_bias`
+/// zeroed at the shipped offset this rung's block is `0.0000%` dots on both
 /// adapters, against the `3.2575%` and `3.2335%` the shipped rung reads on the
-/// same frames, which is [`ACNE_WITHOUT_BIAS`]' own sweep. Under this rung the
-/// normal offset covers this block on its own, so there is no rise for that half
-/// of the claim to be about. **Why** the narrowest kernel on the ladder is the
-/// one that leaves nothing behind was not established here; what was measured is
-/// that it leaves nothing.
+/// same frames — [`ACNE_WITHOUT_BIAS`]' own sweep — so there is no rise there
+/// for that clause to be about. Pulled back, the two counts trade on this rung
+/// as they do on the others, and [`ACNE_WITHOUT_BIAS_REDUCED`] is the floor they
+/// trade over. **One offset per rung for that clause and not both on every
+/// rung**: at the offset that ships, every other rung's rise is the rise the
+/// sample actually has, and reading those again at an offset nothing ships would
+/// be a second claim about a configuration nobody runs.
 ///
-/// And **[`HELD_OFFSET`] reaches this rung's frame nowhere these readings can
-/// see it**: pushed there, the contact reads `70.73` on radv and `70.44` on
-/// lavapipe and the pavement past it `68.33` on both, which is the shipped arm's
-/// own pair to a hundredth. That is the very reading the anti-vacuity clause
-/// below refuses — a contact that did not move is what a knob wired to nothing
-/// draws — and the next station up is no answer either: at 44 texels the contact
-/// itself falls to `31.29` and `31.13`, which is the clause the arm was meant to
-/// make going the wrong way rather than a station it can be pushed to.
+/// The acne half's **other** clause — the normal offset zeroed outright — is
+/// read on this rung where the sample ships, like every other rung: its block
+/// counts `42.6108%` dots on radv and `42.7305%` on lavapipe against the
+/// `0.0000%` its own shipped arm reads, with the contact unmoved at `70.73` and
+/// `70.44`. Only the constant bias has nothing to be about at two texels.
 ///
-/// **Its peter-panning half is fine**, which is what makes this a rung the
-/// readings cannot carry rather than a rung with a defect in it: at
-/// [`PETER_PAN_BIAS`] its contact reads `0.00` on both adapters and the pavement
-/// past it `68.08`. Reading `box` wants an acne rise that does not depend on
-/// which kernel drew it, and an offset station between the two this rung has —
-/// `docs/backlog.md` carries both.
+/// **[`HELD_OFFSET`]'s two clauses are not read on this rung at either offset**,
+/// and that is the whole of what is still held back. Pushed there, the contact
+/// reads `70.73` on radv and `70.44` on lavapipe and the pavement past it
+/// `68.33` on both, which is this rung's own shipped arm to a hundredth. That is
+/// the very reading the anti-vacuity clause refuses — a contact that did not
+/// move is what a knob wired to nothing draws — and the next station up is no
+/// answer either: at 44 texels the contact itself falls to `31.29` and `31.13`,
+/// which is the clause the arm was meant to make going the wrong way rather than
+/// a station it can be pushed to. `docs/backlog.md` carries what an offset
+/// station between the two would want.
+///
+/// **Every other clause is read on this rung like any other**, which is what
+/// makes the line above a reading this fixture cannot take rather than a rung
+/// with a defect in it: at [`PETER_PAN_BIAS`] its contact reads `0.00` on both
+/// adapters and the pavement past it `68.08`.
 ///
 /// Held against the ladder the engine declares rather than trusted: a rung
 /// renamed out from under this fails the run, where an exclusion that silently
 /// excluded nothing would leave the ladder short by one and say so nowhere.
-const BIAS_UNTRADED_RUNG: &str = "box";
+const OFFSET_COVERED_RUNG: &str = "box";
 
 /// The **shadow term** at a world point: the frame drawn without the shadow
 /// passes, less the frame drawn with them.
@@ -2252,6 +2319,44 @@ fn bias_trade(extent: (u32, u32), name: &str, base: Arm) -> Trade {
     Trade { paths, arms }
 }
 
+/// One row of the walk below: an [`Arm`]'s five readings, and what this row's
+/// own normal offset lets them say.
+///
+/// A row rather than a rung, because [`OFFSET_COVERED_RUNG`] is two of them: the
+/// one clause that rung cannot carry at the offset the sample ships is read on a
+/// second row at [`REDUCED_OFFSET`], and everything else on its first.
+struct Setup {
+    /// What the run's lines and the faults call this row.
+    name: String,
+    /// Which rung of the ladder drew it, which is what holds the constant
+    /// bias's clause to being read on every one of them.
+    rung: &'static str,
+    /// The arm every reading is taken off.
+    base: Arm,
+    /// The floor the **"zero the constant bias"** clause is held over here, or
+    /// `None` where this row's own normal offset leaves that count nothing to be
+    /// about — [`OFFSET_COVERED_RUNG`] at the offset that ships, whose reading
+    /// is the row below it instead.
+    ///
+    /// **That one clause and no other.** The acne half's other clause zeroes the
+    /// normal offset outright, which leaves a rise under every kernel on the
+    /// ladder, so it is read on every row and this field says nothing about it.
+    ///
+    /// A floor per row rather than one constant, because the rise a constant
+    /// bias is worth is a function of how much of it the normal offset had
+    /// already covered: [`ACNE_WITHOUT_BIAS`] where the sample's own offset drew
+    /// the frame, [`ACNE_WITHOUT_BIAS_REDUCED`] at [`REDUCED_OFFSET`].
+    acne_without_bias: Option<f32>,
+    /// Whether [`HELD_OFFSET`]'s pair of clauses is read on this row.
+    ///
+    /// `false` on [`OFFSET_COVERED_RUNG`] at both of its offsets, where that
+    /// count reaches the frame nowhere either reading can see it — that constant
+    /// carries the sweep. The two pushed arms are still drawn and still held to
+    /// the anti-vacuity clauses below; it is only what those two readings are
+    /// asked to say about each other that is held back.
+    held_offset: bool,
+}
+
 /// **The sun's two bias counts trade acne against the plinth's own contact, and
 /// they do not trade it the same way.**
 ///
@@ -2291,25 +2396,34 @@ fn bias_trade(extent: (u32, u32), name: &str, base: Arm) -> Trade {
 ///
 /// * **The shipped rung**, which is the setup every constant above was swept on.
 /// * **Every other rung the engine declares**, out of
-///   `filter::names(filter::FILTER)` rather than written down here, less
-///   [`BIAS_UNTRADED_RUNG`] — today that is `disc`. A rung is a kernel over the
-///   same shadow map and both of the artefacts this pair is about are things a
-///   kernel averages over, so a count that covers a grazing receiver under one
-///   kernel need not cover it under another.
+///   `filter::names(filter::FILTER)` rather than written down here — today that
+///   is `disc` and `box`. A rung is a kernel over the same shadow map and both
+///   of the artefacts this pair is about are things a kernel averages over, so a
+///   count that covers a grazing receiver under one kernel need not cover it
+///   under another.
+/// * **[`OFFSET_COVERED_RUNG`] a second time, at [`REDUCED_OFFSET`]**, which is
+///   where the **constant bias's** clause is read on it: under the ladder's
+///   narrowest kernel the shipped normal offset covers this block on its own, so
+///   at the offset that ships there is no rise for that count to be about. Its
+///   other clause — the normal offset zeroed outright — is read on its first row
+///   like every other rung's. That constant carries the sweep, and the row above
+///   it carries what is *not* read at either offset: [`HELD_OFFSET`]'s two
+///   clauses, and nothing else.
+///
+/// So the acne half is read on **every** rung of the ladder — the normal
+/// offset's clause at the offset the sample ships throughout, the constant
+/// bias's at the one offset per rung where the two counts trade — and the
+/// contact half on every rung less [`HELD_OFFSET`]'s pair.
 ///
 /// Every setup shares [`plaza::fixed_camera`] and [`sun::GRAZING_TICK`], which
 /// is what lets [`BEYOND_CONTACT`]'s stations run down `+z` for all of them.
 ///
 /// # What it is not read on
 ///
-/// Three more setups were measured and are not here, and not one of them is a
-/// bound that was loosened to fit it.
+/// Two more setups were measured and are not here, and neither is a bound that
+/// was loosened to fit it.
 ///
-/// [`BIAS_UNTRADED_RUNG`] carries the first: on `box` there is no acne left to
-/// buy back by zeroing the constant bias, and [`HELD_OFFSET`] moves nothing
-/// these readings can see.
-///
-/// The second is **the top of the sun's arc**, [`sun::NOON_TICK`]. Two of the
+/// The first is **the top of the sun's arc**, [`sun::NOON_TICK`]. Two of the
 /// three claims fail there and both for one reason — a sun that steep throws a
 /// plinth shadow a fraction of the block's own height long. Zeroing the normal
 /// offset draws `0.0000%` dots on both adapters, so there is no rise for the
@@ -2321,7 +2435,7 @@ fn bias_trade(extent: (u32, u32), name: &str, base: Arm) -> Trade {
 /// caster**, a thin one whose noon shadow outruns the gap a bias opens, and not
 /// another arm of this walk.
 ///
-/// The third is [`plaza::counter_camera`]. [`plaza::PLINTH_CONTACT`] and every
+/// The second is [`plaza::counter_camera`]. [`plaza::PLINTH_CONTACT`] and every
 /// one of [`BEYOND_CONTACT`]'s stations is **behind that pose's eye**: it stands
 /// past the plinth's near face looking away down the plaza, so [`on_screen`]
 /// refuses all of them and [`project`] would panic rather than report. The acne
@@ -2342,9 +2456,12 @@ fn bias_trade(extent: (u32, u32), name: &str, base: Arm) -> Trade {
 /// that never reached the shader, where a contact that did not move is exactly
 /// what a no-op draws — that arm's shadow beyond the contact is held to have
 /// *fallen* against its own setup's shipped one, so the count is shown to have
-/// done something before it is credited with not doing this. And
-/// [`BIAS_UNTRADED_RUNG`] could name a rung the engine no longer declares, where
-/// the exclusion silently excludes nothing — it is held against the ladder.
+/// done something before it is credited with not doing this. And the constant
+/// bias's clause could **silently stop being read on a rung**, which is exactly
+/// what [`REDUCED_OFFSET`] exists to stop happening again — every rung the
+/// engine declares is held to appear on a setup that reads it, and
+/// [`OFFSET_COVERED_RUNG`] is held against the ladder besides, so a rung renamed
+/// out from under either fails the run rather than dropping out of it.
 ///
 /// # How it was shown to fail
 ///
@@ -2372,11 +2489,42 @@ fn bias_trade(extent: (u32, u32), name: &str, base: Arm) -> Trade {
 ///
 /// and on lavapipe the last of those read `70.44`.
 ///
+/// **The rows added for [`OFFSET_COVERED_RUNG`] were reddened on their own
+/// axes** (2026-09-05). The reduced row's offset put back to the two texels
+/// that ship, so its constant bias has nothing to buy back:
+///
+/// > on the box rung at 2 texels of normal offset with the constant bias at
+/// > zero the block is 0.0000% dots against 0.0000% as the sample ships — short
+/// > of the 15% this count is worth. …
+///
+/// `r_shadow_bias` held at zero on both of that row's readings, so the `no bias`
+/// arm is the shipped arm under another name and its rise is nothing:
+///
+/// > on the box rung at 1.5 texels of normal offset the no bias arm drew the
+/// > shipped arm's frame byte for byte, …
+/// >
+/// > on the box rung at 1.5 texels of normal offset with the constant bias at
+/// > zero the block is 29.1737% dots against 29.1737% as the sample ships …
+///
+/// The shipped-offset `box` row's own offset zeroed, so the normal offset's
+/// clause — which is read on that row — has no rise either:
+///
+/// > on the box rung with the normal offset at zero the block is 42.6108% dots
+/// > against 42.6108% as the sample ships — short of the 20% this count is
+/// > worth. …
+///
+/// And the reduced row's floor taken away, which is the exclusion silently
+/// excluding a rung again:
+///
+/// > the engine declares ["pcss", "disc", "box"] and no setup zeroes the
+/// > constant bias on `box`, so that rung is one this pair no longer says
+/// > anything about that count on, and nothing else would say so
+///
 /// # What was measured
 ///
-/// The tables are on [`PETER_PAN_BIAS`], [`HELD_OFFSET`] and
-/// [`BIAS_UNTRADED_RUNG`], and the run prints every arm's four readings again on
-/// whatever adapter it opened.
+/// The tables are on [`PETER_PAN_BIAS`], [`HELD_OFFSET`], [`REDUCED_OFFSET`] and
+/// [`OFFSET_COVERED_RUNG`], and the run prints every arm's four readings again
+/// on whatever adapter it opened.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
 fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
@@ -2384,21 +2532,32 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
     let shipped = crcbl::render::shadow::shipped_filter().label();
     let ladder = filter::names(filter::FILTER);
     assert!(
-        ladder.contains(&BIAS_UNTRADED_RUNG),
-        "the engine declares {ladder:?} and none of them is `{BIAS_UNTRADED_RUNG}`, so the rung \
-         this pair holds itself back from is a rung nothing runs and the exclusion excludes \
+        ladder.contains(&OFFSET_COVERED_RUNG),
+        "the engine declares {ladder:?} and none of them is `{OFFSET_COVERED_RUNG}`, so the rung \
+         this pair reads at its own offset is a rung nothing runs and the exclusion excludes \
          nothing"
     );
-    let mut setups = vec![(
-        format!("the shipped {shipped}"),
-        Arm::shipped().at_tick(sun::GRAZING_TICK),
-    )];
+    let grazing = Arm::shipped().at_tick(sun::GRAZING_TICK);
+
+    // One row per rung, at the offset the sample ships. The rung whose kernel
+    // that offset already covers reads the constant bias's clause a row further
+    // down instead, and [`HELD_OFFSET`]'s pair at neither offset; the rule is
+    // applied here rather than to the rows afterwards so it still holds if the
+    // engine ever ships that rung as its default.
+    let row = |name: String, rung: &'static str, base: Arm| {
+        let covered = rung == OFFSET_COVERED_RUNG;
+        Setup {
+            name,
+            rung,
+            base,
+            acne_without_bias: (!covered).then_some(ACNE_WITHOUT_BIAS),
+            held_offset: !covered,
+        }
+    };
+    let mut setups = vec![row(format!("the shipped {shipped}"), shipped, grazing)];
     for name in ladder {
-        if *name != shipped && *name != BIAS_UNTRADED_RUNG {
-            setups.push((
-                format!("the {name} rung"),
-                Arm::shipped().at_tick(sun::GRAZING_TICK).on(name),
-            ));
+        if *name != shipped {
+            setups.push(row(format!("the {name} rung"), name, grazing.on(name)));
         }
     }
     assert!(
@@ -2407,8 +2566,37 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
          claim is a claim about one filter"
     );
 
+    setups.push(Setup {
+        name: format!("the {OFFSET_COVERED_RUNG} rung at {REDUCED_OFFSET} texels of normal offset"),
+        rung: OFFSET_COVERED_RUNG,
+        base: grazing.on(OFFSET_COVERED_RUNG).offset(REDUCED_OFFSET),
+        acne_without_bias: Some(ACNE_WITHOUT_BIAS_REDUCED),
+        held_offset: false,
+    });
+
+    // A rung no row reads the constant bias's clause on is a rung that dropped
+    // out of it rather than one read where the two counts trade — the very thing
+    // the row above exists to stop, and the one an exclusion can hide.
+    for rung in ladder {
+        assert!(
+            setups
+                .iter()
+                .any(|setup| setup.rung == *rung && setup.acne_without_bias.is_some()),
+            "the engine declares {ladder:?} and no setup zeroes the constant bias on `{rung}`, so \
+             that rung is one this pair no longer says anything about that count on, and nothing \
+             else would say so"
+        );
+    }
+
     let mut faults = Vec::new();
-    for (name, base) in setups {
+    for Setup {
+        name,
+        rung: _,
+        base,
+        acne_without_bias,
+        held_offset,
+    } in setups
+    {
         let Trade { paths, arms } = bias_trade(extent, &name, base);
         for arm in &arms {
             if arm.unmoved {
@@ -2450,10 +2638,16 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
         }
 
         // Zero either count: the pavement roughens, and the contact stays put.
-        for (count, arm, least) in [
-            ("normal offset", no_offset, ACNE_WITHOUT_OFFSET),
-            ("constant bias", no_bias, ACNE_WITHOUT_BIAS),
-        ] {
+        //
+        // The normal offset on every row, because zeroing it outright leaves a
+        // rise under every kernel on the ladder; the constant bias only where
+        // this row's own offset left it something to be about, which is what
+        // `acne_without_bias` carries.
+        let zeroed = [
+            Some(("normal offset", no_offset, ACNE_WITHOUT_OFFSET)),
+            acne_without_bias.map(|least| ("constant bias", no_bias, least)),
+        ];
+        for (count, arm, least) in zeroed.into_iter().flatten() {
             if arm.dots <= least || arm.dots <= shipped_arm.dots {
                 faults.push(format!(
                     "on {name} with the {count} at zero the block is {:.4}% dots against {:.4}% \
@@ -2503,24 +2697,30 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
             ));
         }
 
-        // Push the normal offset the same way: the contact does not move.
-        if (pushed_offset.contact - shipped_arm.contact).abs() >= CONTACT_HELD {
-            faults.push(format!(
-                "on {name} at {HELD_OFFSET} texels of normal offset the contact's shadow term \
-                 moved from {:.2} to {:.2}. `docs/plan/45-shadows.md`'s seventh decision is that \
-                 a move along the receiver's own normal leaves the depth it compares alone and \
-                 therefore keeps a contact; this is the fixture that says so",
-                shipped_arm.contact, pushed_offset.contact,
-            ));
-        }
-        if pushed_offset.beyond >= shipped_arm.beyond {
-            faults.push(format!(
-                "on {name} at {HELD_OFFSET} texels of normal offset the pavement past the \
-                 contact carries {:.2} of shadow term at its deepest against the shipped arm's \
-                 {:.2} — the count reached the frame nowhere, so a contact that did not move is \
-                 what a knob wired to nothing draws",
-                pushed_offset.beyond, shipped_arm.beyond,
-            ));
+        // Push the normal offset the same way: the contact does not move. The
+        // two clauses go together or not at all — a contact that held is what a
+        // knob wired to nothing draws, so the reading that shows the count
+        // reached the frame is the only thing that makes the other one a claim.
+        if held_offset {
+            if (pushed_offset.contact - shipped_arm.contact).abs() >= CONTACT_HELD {
+                faults.push(format!(
+                    "on {name} at {HELD_OFFSET} texels of normal offset the contact's shadow \
+                     term moved from {:.2} to {:.2}. `docs/plan/45-shadows.md`'s seventh \
+                     decision is that a move along the receiver's own normal leaves the depth it \
+                     compares alone and therefore keeps a contact; this is the fixture that says \
+                     so",
+                    shipped_arm.contact, pushed_offset.contact,
+                ));
+            }
+            if pushed_offset.beyond >= shipped_arm.beyond {
+                faults.push(format!(
+                    "on {name} at {HELD_OFFSET} texels of normal offset the pavement past the \
+                     contact carries {:.2} of shadow term at its deepest against the shipped \
+                     arm's {:.2} — the count reached the frame nowhere, so a contact that did \
+                     not move is what a knob wired to nothing draws",
+                    pushed_offset.beyond, shipped_arm.beyond,
+                ));
+            }
         }
         if pushed_offset.dots >= SMOOTH_PERCENT {
             faults.push(format!(

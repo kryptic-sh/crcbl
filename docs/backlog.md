@@ -277,51 +277,45 @@ golden of their own and a button on the page. What is still **not** done:
   golden. The acne claim closed on 2026-09-04 is in that half: it counts
   self-shadowing dots over one 3 m by 2 m block of open pavement from the fixed
   pose, so acne on a surface that block does not cover is still nobody's claim.
-- **The bias pair reads two rungs now, and the three setups it does not read
-  were measured rather than skipped (2026-09-05).**
+- **The bias pair reads every rung now, and the setups it does not read were
+  measured rather than skipped (2026-09-05).**
   `the_two_bias_counts_trade_acne_against_the_plinths_own_contact` runs its five
-  arms once per setup: `Arm::shipped()` and every other rung the engine declares
-  less `BIAS_UNTRADED_RUNG` — today that is `disc` — both at `sun::GRAZING_TICK`
-  from `plaza::fixed_camera`, each read against its own control frame. `disc`
-  holds on every constant already in the file, so none of them moved. Three
-  setups were swept on both local Vulkan adapters and held back, and not one is
-  a bound that was loosened:
-  - **The `box` rung.** Two of the three claims fail on it. Zeroing
-    `r_shadow_bias` leaves its block at `0.0000%` dots on both adapters, against
-    `3.2575%` on radv and `3.2335%` on lavapipe for the shipped rung on the same
-    frames — under `box` the normal offset covers this block on its own, so
-    `ACNE_WITHOUT_BIAS` is a floor nothing there reaches. And `HELD_OFFSET`
-    leaves contact and beyond at exactly the shipped arm's numbers
-    (`70.73`/`68.33` on radv, `70.44`/`68.33` on lavapipe), which is the
-    anti-vacuity clause refusing a count it cannot see reach the frame; the next
-    station up, 44 texels, moves the contact itself to `31.29` and `31.13`, so
-    there is no station between the two. Its peter-panning half is fine — `0.00`
-    at the contact against `68.08` beyond it at `PETER_PAN_BIAS` — so this is a
-    rung the readings cannot carry rather than a rung with a defect. **Why**:
-    the normal offset walks the lookup exactly `r_shadow_normal_offset` texels
-    along the shadow map's lateral axis — `shadow_normal_offset`'s
-    `sqrt(1 − cos²)` scaling is what cancels the receiver's incidence out of
-    that walk — so a kernel reads its own quantised depth back only where it
-    reaches further _back_ than the walk, and a tap does so when its lateral
-    offset exceeds `r_shadow_normal_offset` plus `r_shadow_bias` times the
-    cotangent of the light's angle to the receiver. Swept at `r_shadow_bias 0`
-    on both adapters (2026-09-05), countable dots vanish above **1.85** texels
-    of offset under `box` and above **2.20** under `disc` and the shipped rung —
-    `tile_box_pcf` reaches one texel and `tile_pcf` reaches
-    `SHADOW_FILTER_TEXELS`, plus the comparison sampler's bilinear footprint
-    either way — and `NORMAL_OFFSET_TEXELS` ships at **2.0**, between the two.
-    Under `box` the constant bias is then a no-op over this block: its mean is
-    `185.73` on radv and `185.60` on lavapipe at `r_shadow_bias` 0, 0.5, 1.5 and
-    96 alike, where the shipped rung's own mean is `185.29`/`185.15` at the bias
-    it ships against `185.73`/`185.60` fully biased — the acne that bias is
-    still covering. The same cutoffs hold at `sun` tick 90 (30.4° up) on both
-    adapters, so this is a property of the kernels rather than of this block or
-    this sun. So the acne half is unreadable on `box` **by construction at the
-    shipped normal offset**, and no receiver or sun rescues it; what would make
-    it readable is an arm at a _reduced_ offset, where the two counts do trade —
-    `box` at 1.5 texels of offset reads `29.1737%` dots (radv) / `29.5090%`
-    (lavapipe) at zero bias against `4.6467%` at the shipped bias. The
-    `HELD_OFFSET` half still wants an offset station between 40 and 44 texels.
+  arms once per row: `Arm::shipped()`, `disc` and `box` at the offset the sample
+  ships, and `box` again at `REDUCED_OFFSET`, all at `sun::GRAZING_TICK` from
+  `plaza::fixed_camera`, each read against its own control frame. `disc` holds
+  on every constant already in the file, so none of them moved. What is held
+  back was swept on both local Vulkan adapters, and not one item is a bound that
+  was loosened:
+  - **`box` reads everything but one clause, and the last one wants an offset
+    station.** `OFFSET_COVERED_RUNG` — what `BIAS_UNTRADED_RUNG` became — holds
+    `box` back from `HELD_OFFSET`'s two clauses and from nothing else, and a new
+    clause in the test holds every rung the engine declares to appear on a row
+    that zeroes the constant bias, so a rung cannot drop out of that clause
+    silently again. **Why the shipped offset covers `box`**: the normal offset
+    walks the lookup exactly `r_shadow_normal_offset` texels along the shadow
+    map's lateral axis — `shadow_normal_offset`'s `sqrt(1 − cos²)` scaling is
+    what cancels the receiver's incidence out of that walk — so a kernel reads
+    its own quantised depth back only where it reaches further _back_ than the
+    walk. Swept at `r_shadow_bias 0` on both adapters, countable dots vanish
+    above **1.85** texels of offset under `box` and above **2.20** under `disc`
+    and the shipped rung — `tile_box_pcf` reaches one texel and `tile_pcf`
+    reaches `SHADOW_FILTER_TEXELS`, plus the comparison sampler's bilinear
+    footprint either way — and `NORMAL_OFFSET_TEXELS` ships at **2.0**, between
+    the two. The same cutoffs hold at `sun` tick 90 (30.4° up), so this is a
+    property of the kernels rather than of this block or this sun. So the
+    constant bias's clause is read on `box` at `REDUCED_OFFSET`, 1.5 texels, and
+    the normal offset's where the sample ships. Verified on both adapters, three
+    runs each and identical to the digit: at 1.5 texels `box` reads `4.6467%`
+    (radv) / `4.9581%` (lavapipe) dots at the shipped bias against `29.1737%` /
+    `29.5090%` at zero, and `42.6108%` / `42.7305%` with the offset zeroed
+    outright; 1.0 inverts the offset clause and 1.75 is the last station before
+    the rise vanishes, so `REDUCED_OFFSET` sits in the middle of the window with
+    a working station either side. What is **still nobody's claim** is
+    `HELD_OFFSET` on `box`: pushed to 40 texels it leaves contact and beyond at
+    the shipped arm's own numbers (`70.73`/`68.33` radv, `70.44`/`68.33`
+    lavapipe) and 44 texels moves the contact itself to `31.29`/`31.13`, so that
+    half still wants an offset station between 40 and 44 — the one reading of
+    the pair no row takes, and the gap was not swept.
   - **The top of the sun's arc, `sun::NOON_TICK`.** The same two claims fail,
     and for one reason: a sun at `sun::MAX_ELEVATION` throws a plinth shadow a
     fraction of the block's own height long. Zeroing `r_shadow_normal_offset`
