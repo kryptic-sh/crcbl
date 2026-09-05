@@ -378,7 +378,24 @@ pub const MATERIAL_STRIDE: usize = 64;
 /// does not have and is refused by
 /// [`ForwardRenderer::with_scene`](https://docs.rs/crcbl-render), which checks
 /// every row against the page's length.
-pub const MAX_PAGE_LAYER: u32 = u16::MAX as u32;
+///
+/// **One short of what the half holds, and that one is
+/// [`GpuMaterial::NO_PAGE`].** The saturation target has to be an index the
+/// renderer's row check *refuses*, and `NO_PAGE` is the one value that check
+/// exempts: were an out-of-range index to saturate onto it, a caller's mistake
+/// would arrive at the device as "this material has no texture" and shade a
+/// surface white instead of being reported. So the sentinel sits at the top of
+/// the half and the largest real layer sits one below it.
+pub const MAX_PAGE_LAYER: u32 = 0xFFFE;
+
+/// The mask that recovers one page layer from the half of the word it rides in
+/// — see [`MATERIAL_STRIDE`], which is where the pairing is argued.
+///
+/// Sixteen bits and **not** [`MAX_PAGE_LAYER`], which is one short of them: the
+/// half has to give [`GpuMaterial::NO_PAGE`] back unchanged, and a mask of
+/// `MAX_PAGE_LAYER` would clear the sentinel's low bit and decode every
+/// untextured row as layer `0xFFFE`.
+const PAGE_HALF_MASK: u32 = 0xFFFF;
 
 /// Bytes in one draw's constant block.
 ///
@@ -1680,8 +1697,22 @@ impl GpuMesh {
 /// "black" are the same bytes and nothing can tell them apart. The consequence
 /// is a contract rather than a defect: an instance names a material it was
 /// given, and a row nobody wrote shades black, which is visible immediately
-/// rather than plausible. **The texture column does not change that**: a zeroed
-/// row names layer 0, and zero times any texel is still black.
+/// rather than plausible. **The texture columns do not change that**: a
+/// `default`-constructed row names [`NO_PAGE`](Self::NO_PAGE) on all four and
+/// multiplies by `1.0`, and zero times one is still black.
+///
+/// # `default` is not the zeroed row any more
+///
+/// [`Default`] is written out rather than derived, because
+/// [`NO_PAGE`](Self::NO_PAGE) is `0xFFFF` and every other field's neutral is
+/// zero. So [`to_bytes`](Self::to_bytes) of a default row is `0xFFFF_FFFF` in
+/// each of its two page words and zero everywhere else, and the device's own
+/// zero-filled *unwritten* row is no longer the same value: it decodes to layer
+/// 0 on all four columns. That row is still black — its `base_color` is
+/// `[0.0; 4]` — and nothing can name it, because a material id comes from a
+/// table row somebody took; `MaterialTable::remove` clears a freed row by
+/// writing this `default`, which under this constant means "no page" rather
+/// than "layer 0".
 ///
 /// The two shading factors do not change it either, and one of them is worth
 /// being precise about: a zeroed row is `metallic 0.0`, so its diffuse albedo
@@ -1695,7 +1726,7 @@ impl GpuMesh {
 ///
 /// [`BindingModel::Bindless`]: https://docs.rs/crcbl-hal
 /// [`ArrayPages`]: https://docs.rs/crcbl-hal
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuMaterial {
     /// Linear RGBA factor multiplied into the vertex albedo and the texel.
     ///
@@ -1703,16 +1734,15 @@ pub struct GpuMaterial {
     /// tonemap pass and the swapchain's sRGB encode are what turn this into
     /// pixels, so `[1.0; 4]` is the material that changes nothing.
     pub base_color: [f32; 4],
-    /// Which layer of the pass's base-colour page this material samples.
+    /// Which layer of the pass's base-colour page this material samples, or
+    /// [`NO_PAGE`](Self::NO_PAGE) for a material that samples none.
     ///
-    /// **Layer 0 is the untextured value by convention**, and the convention is
-    /// the page owner's to keep: whoever fills the page writes a white texel
-    /// there, so a material that names no texture multiplies by `1.0`.
-    /// `crcbl_render::scene`'s
-    /// [`PageDesc`](https://docs.rs/crcbl-render/latest/crcbl_render/scene/struct.PageDesc.html)
-    /// is the one that does — it owns layer 0 and gives a caller no way to
-    /// spell it any other way — and [`GpuMaterial::UNTINTED`] is the row that
-    /// relies on it.
+    /// **The untextured value is out of band**, not layer 0: the fragment stage
+    /// tests this column against [`NO_PAGE`](Self::NO_PAGE) and multiplies by
+    /// the literal `float4(1, 1, 1, 1)` rather than by a texel, so no page owner
+    /// has to fill a layer with white and no layer of a page is special.
+    /// `base_color_texel` in `shaders/mesh.slang` is the one reader, and
+    /// [`GpuMaterial::UNTINTED`] is the row that names no page.
     pub base_color_texture: u32,
     /// How metallic the surface is: `0.0` a dielectric, `1.0` a conductor.
     ///
@@ -1788,16 +1818,16 @@ pub struct GpuMaterial {
     /// Which layer of the pass's **normal** page this material samples, on
     /// [`base_color_texture`](Self::base_color_texture)'s terms exactly.
     ///
-    /// **Zero means "no normal map"**, and it means it twice over. Layer 0 of
-    /// the normal page is the neutral texel — see
-    /// [`PageDesc::NEUTRAL_NORMAL`](https://docs.rs/crcbl-render), which owns it
-    /// the way it owns the white one — *and* the fragment stage selects the
-    /// interpolated surface normal outright rather than the perturbed one when
-    /// this is zero. Both are needed: an 8-bit unorm cannot encode `0.5`
-    /// exactly, so the neutral texel decodes to a tangent-space normal about
-    /// `0.22°` off `(0, 0, 1)` and a page fetch alone would move every golden in
-    /// the tree by a last bit. `a_neutral_normal_texel_is_not_exactly_flat` is
-    /// that error measured.
+    /// **[`NO_PAGE`](Self::NO_PAGE) means "no normal map"**, and the fragment
+    /// stage selects the interpolated surface normal outright rather than
+    /// perturbing it. Nothing about layer 0 is neutral, and nothing needs to
+    /// be: an 8-bit unorm cannot encode `0.5` exactly, so a neutral texel
+    /// decodes to a tangent-space normal about `0.22°` off `(0, 0, 1)` and a
+    /// page fetch would move every golden in the tree by a last bit even where
+    /// the author wrote the neutral value.
+    /// `a_neutral_normal_texel_is_not_exactly_flat` is that error measured, and
+    /// it is why this column has always been tested rather than trusted to a
+    /// texel.
     ///
     /// glTF's `normalTexture.index` reaches it through
     /// `crcbl_scene::gltf_render`, which is what turns a document's image into a
@@ -1863,9 +1893,39 @@ pub struct GpuMaterial {
     pub flags: u32,
 }
 
+impl Default for GpuMaterial {
+    /// The black row a table holds until somebody writes it, naming
+    /// [`NO_PAGE`](Self::NO_PAGE) on all four page columns.
+    ///
+    /// **Written out rather than derived**, and the four columns are why: every
+    /// other field's neutral is zero, and `NO_PAGE` is not zero any more. A
+    /// derived `Default` would name layer 0 on all four — a real layer of
+    /// whatever the page happens to hold — where this row means "no texture",
+    /// which is what a row nobody wrote has always meant. See the type's own
+    /// docs for what that costs: the device's zero-filled unwritten row and this
+    /// value are no longer the same bytes.
+    fn default() -> Self {
+        Self {
+            base_color: [0.0; 4],
+            base_color_texture: Self::NO_PAGE,
+            metallic: 0.0,
+            roughness: 0.0,
+            tiling: Self::TILING_AUTHORED,
+            tile_metres: 0.0,
+            emissive: [0.0; 3],
+            normal_texture: Self::NO_PAGE,
+            normal_scale: 0.0,
+            metallic_roughness_occlusion_texture: Self::NO_PAGE,
+            emissive_texture: Self::NO_PAGE,
+            alpha_cutoff: 0.0,
+            flags: 0,
+        }
+    }
+}
+
 impl GpuMaterial {
     /// The material that tints nothing: a plain dielectric with a soft
-    /// highlight, on the page's white layer.
+    /// highlight, naming no page at all.
     ///
     /// **Not "every factor `1.0`" any more**, and the two that are not are the
     /// point. [`base_color`](Self::base_color) is still `[1.0; 4]`, because a
@@ -1880,14 +1940,27 @@ impl GpuMaterial {
     /// Named for the same reason it always was: a table's rows are black until
     /// something writes them, and the numbers spelled at each such call site
     /// would be ones a reader has to recognise rather than read.
-    /// The row's neutral: no page, on any of the four rows.
+    /// The row's neutral: no page, on any of the four page columns.
     ///
-    /// Layer 0 by the convention `PageDesc` keeps — the base-colour page's
-    /// white texel and the normal page's neutral one — and *also* the value the
-    /// fragment stage tests to decide whether a page was named at all. See
-    /// [`normal_texture`](Self::normal_texture), which is where the second half
-    /// of that is argued.
-    pub const NO_PAGE: u32 = 0;
+    /// **Out of band**, and that is the whole of what it buys. It is
+    /// `0xFFFF` — every bit of the sixteen a page column rides in, one past
+    /// [`MAX_PAGE_LAYER`] — so it names no layer any page can have, and layer 0
+    /// is an ordinary layer like every other. `shaders/mesh.slang` declares the
+    /// same constant and every page read tests against it: a material naming no
+    /// base colour multiplies by the literal `1.0` rather than by a white
+    /// texel somebody had to remember to write, and one naming no normal map
+    /// returns the interpolated surface normal, as it always did.
+    ///
+    /// The value in band was `0`, and what that cost was a burned layer per
+    /// page — a full `extent² × 4` bytes of white on the colour page and of
+    /// `(0.5, 0.5, 1.0)` on the normal one — plus an invariant every producer
+    /// of a page had to keep and `crcbl_render`'s `PageDesc::check` had to
+    /// police. See `docs/plan/43-render-standards.md` §2's row (d).
+    ///
+    /// [`ForwardRenderer::with_scene`](https://docs.rs/crcbl-render) exempts a
+    /// column carrying this from the row check it applies to every other, which
+    /// is why [`MAX_PAGE_LAYER`] stops one short of it.
+    pub const NO_PAGE: u32 = 0xFFFF;
 
     pub const UNTINTED: Self = Self {
         base_color: [1.0; 4],
@@ -2000,7 +2073,17 @@ impl GpuMaterial {
     /// drawn.
     #[must_use]
     fn page_words(&self) -> [u32; 2] {
-        let pair = |low: u32, high: u32| low.min(MAX_PAGE_LAYER) | (high.min(MAX_PAGE_LAYER) << 16);
+        // `NO_PAGE` sits one past `MAX_PAGE_LAYER` and rides through untouched:
+        // it is a sentinel rather than an index, and clamping it would turn
+        // every untextured row into one naming the page's last layer.
+        let clamp = |layer: u32| {
+            if layer == Self::NO_PAGE {
+                layer
+            } else {
+                layer.min(MAX_PAGE_LAYER)
+            }
+        };
+        let pair = |low: u32, high: u32| clamp(low) | (clamp(high) << 16);
         [
             pair(self.base_color_texture, self.normal_texture),
             pair(
@@ -2072,7 +2155,7 @@ impl GpuMaterial {
                     .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
             )
         };
-        let low = |word: u32| word & MAX_PAGE_LAYER;
+        let low = |word: u32| word & PAGE_HALF_MASK;
         let high = |word: u32| word >> 16;
         Self {
             base_color: [float_at(0), float_at(4), float_at(8), float_at(12)],
@@ -4788,17 +4871,38 @@ mod tests {
 
         // A row nothing has written is black, not untinted — the contract the
         // type's docs state, and the one that makes a forgotten material
-        // visible instead of harmless. Naming layer 0 does not soften it:
-        // zero times the page's white texel is still zero.
-        assert_eq!(GpuMaterial::default().to_bytes(), [0u8; MATERIAL_STRIDE]);
+        // visible instead of harmless. Naming no page does not soften it: zero
+        // times the `1.0` an unnamed page multiplies by is still zero.
+        //
+        // **And it is no longer all zeros**, which is the fact `NO_PAGE` going
+        // out of band costs: the two page words are every bit set and every
+        // other byte of the row is zero. Pinned rather than relaxed, so a
+        // column that drifted back in band shows up here.
+        let cleared = GpuMaterial::default().to_bytes();
+        let mut want = [0u8; MATERIAL_STRIDE];
+        want[16..20].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        want[48..52].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        assert_eq!(
+            cleared, want,
+            "a cleared row names no page in both page words and is zero everywhere else"
+        );
         assert_eq!(GpuMaterial::default().base_color, [0.0; 4]);
-        assert_eq!(GpuMaterial::default().base_color_texture, 0);
+        assert_eq!(
+            GpuMaterial::default().base_color_texture,
+            GpuMaterial::NO_PAGE
+        );
         assert_eq!(GpuMaterial::UNTINTED.base_color, [1.0; 4]);
         assert_eq!(
             GpuMaterial::UNTINTED.base_color_texture,
-            0,
-            "the untextured material names the page's white layer"
+            GpuMaterial::NO_PAGE,
+            "the untextured material names no base-colour page"
         );
+        // **Out of band, so no page can hold it.** A sentinel inside the range
+        // of layer indices is one a page could grow to have, and then a
+        // material meaning "no texture" would silently sample somebody's
+        // layer — which is exactly what layer 0 was.
+        assert_eq!(GpuMaterial::NO_PAGE, MAX_PAGE_LAYER + 1);
+        assert_eq!(GpuMaterial::NO_PAGE, 0xFFFF);
         // **The untinted row is not every factor 1.0**, and a `roughness` of
         // 1.0 would be the fully diffuse extreme rather than the ordinary
         // painted surface the row is meant to be — see its docs.
@@ -4815,10 +4919,9 @@ mod tests {
         // The zeroed row is authored-UV, so no unwritten material silently tiles
         // by world extent.
         assert_eq!(GpuMaterial::default().tiling, GpuMaterial::TILING_AUTHORED);
-        // **And it names no page on any of the four rows**, which is what makes
-        // a widened row safe: every material in the tree that was written before
-        // these columns existed carries zero in each, and zero is "no page" on
-        // all four.
+        // **And it names no page on any of the four rows**, which is what a
+        // hand-written `Default` is for: the four columns are the only fields
+        // whose neutral is not zero.
         assert_eq!(GpuMaterial::default().normal_texture, GpuMaterial::NO_PAGE);
         assert_eq!(
             GpuMaterial::default().metallic_roughness_occlusion_texture,
@@ -4953,17 +5056,85 @@ mod tests {
         // a mistake. `MAX_PAGE_LAYER` is far past any page a device will let
         // this engine create, so the renderer's own row check refuses it — see
         // `MAX_PAGE_LAYER`, which is where that is argued.
+        //
+        // Two past, not one: one past `MAX_PAGE_LAYER` is `NO_PAGE` itself,
+        // which is the value below.
         let past = GpuMaterial {
-            base_color_texture: MAX_PAGE_LAYER + 1,
+            base_color_texture: MAX_PAGE_LAYER + 2,
             normal_texture: MAX_PAGE_LAYER + 9,
             ..GpuMaterial::UNTINTED
         };
         let decoded = GpuMaterial::from_bytes(&past.to_bytes());
         assert_eq!(
             decoded.base_color_texture, MAX_PAGE_LAYER,
-            "an index past the half saturates rather than naming layer 0"
+            "an index past the half saturates rather than naming no page at all"
         );
         assert_eq!(decoded.normal_texture, MAX_PAGE_LAYER);
+
+        // **And the sentinel is not saturated**, which is the other half of the
+        // same rule: it sits one past `MAX_PAGE_LAYER`, so a clamp written as a
+        // plain `min` would turn every untextured row into one naming the
+        // page's last layer, and the renderer would refuse a scene that is
+        // perfectly well formed.
+        let untextured = GpuMaterial {
+            base_color_texture: GpuMaterial::NO_PAGE,
+            normal_texture: GpuMaterial::NO_PAGE,
+            metallic_roughness_occlusion_texture: GpuMaterial::NO_PAGE,
+            emissive_texture: GpuMaterial::NO_PAGE,
+            ..GpuMaterial::UNTINTED
+        };
+        let decoded = GpuMaterial::from_bytes(&untextured.to_bytes());
+        assert_eq!(decoded.base_color_texture, GpuMaterial::NO_PAGE);
+        assert_eq!(decoded.normal_texture, GpuMaterial::NO_PAGE);
+        assert_eq!(
+            decoded.metallic_roughness_occlusion_texture,
+            GpuMaterial::NO_PAGE
+        );
+        assert_eq!(decoded.emissive_texture, GpuMaterial::NO_PAGE);
+    }
+
+    /// The shader declares the same `NO_PAGE` the host does.
+    ///
+    /// **A wire agreement with nothing else holding it.** The constant decides
+    /// which materials read a page at all: drift it on one side and either every
+    /// untextured surface samples layer 0 — whatever that page happens to hold —
+    /// or every material naming layer `0xFFFF` early-outs. Neither is a compile
+    /// error on either side, and the frame it draws is plausible.
+    ///
+    /// Matched against the source text rather than the compiled artifact, on
+    /// `ssao.rs`'s `the_bent_normal_length_matches_the_constant_the_shaders_declare`
+    /// pattern: the artifacts are generated from this file and `build.rs`
+    /// refuses a mismatch between them, so the source is the thing to pin.
+    ///
+    /// # Sabotage
+    ///
+    /// `mesh.slang`'s constant left at `0x0000u` while this one is `0xFFFF`,
+    /// artifacts regenerated. Red on 2026-09-06 with `"mesh.slang does not
+    /// declare `static const uint NO_PAGE = 0xffffu;`; the host's `NO_PAGE` and
+    /// the shader's have drifted, and every material naming no texture reads the
+    /// wrong page"`.
+    ///
+    /// **And the device agrees it is not cosmetic.** Under that same sabotage,
+    /// `crcbl/tests/mesh_e2e/normal_map.rs`'s
+    /// `no_normal_map_returns_the_surface_normal_exactly_and_the_neutral_texel_does_not`
+    /// went red on radv the same day, reading `[0.61621094, 0.5029297,
+    /// 0.98583984]` where the surface normal is `[0.5, 0.5, 1.0]`: a row
+    /// carrying `0xFFFF` no longer early-outs, and the out-of-range layer the
+    /// fetch then asks for lands on somebody else's normal map rather than
+    /// failing.
+    #[test]
+    fn the_shader_declares_the_same_no_page_the_host_does() {
+        let declaration = format!(
+            "static const uint NO_PAGE = 0x{:04x}u;",
+            GpuMaterial::NO_PAGE
+        );
+        let source = include_str!("../shaders/mesh.slang");
+        assert!(
+            source.contains(&declaration),
+            "mesh.slang does not declare `{declaration}`; the host's `NO_PAGE` and the \
+             shader's have drifted, and every material naming no texture reads the wrong \
+             page"
+        );
     }
 
     /// The neutral normal texel is **not** exactly flat, which is why

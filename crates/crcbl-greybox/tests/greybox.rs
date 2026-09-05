@@ -322,10 +322,8 @@ fn the_scene_page_has_a_white_layer_and_the_grid() {
     let texels = (GRID_EXTENT * GRID_EXTENT) as usize * 4;
     let layers = scene.page.layers();
     assert!(
-        layers[PageDesc::UNTEXTURED_LAYER as usize]
-            .iter()
-            .all(|&texel| texel == PageDesc::WHITE),
-        "layer 0 must be opaque white, or every grey surface is scaled by it"
+        layers[0].iter().all(|&texel| texel == PageDesc::WHITE),
+        "layer 0 must be opaque white, or every surface that names it is scaled by it"
     );
     assert_eq!(
         layers[GRID_LAYER as usize].len(),

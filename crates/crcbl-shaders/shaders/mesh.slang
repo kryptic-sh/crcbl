@@ -922,6 +922,20 @@ struct GpuMesh
 /// `docs/plan/43-render-standards.md` §2's rung 1 in one bit.
 static const uint MESH_AUTHORED_TANGENTS = 1;
 
+/// The page column value that means "this material names no page", matching
+/// `crcbl_shaders::mesh::GpuMaterial::NO_PAGE`.
+///
+/// **Out of band**: `0xffff` is every bit of the sixteen a page column rides in
+/// and one past `MAX_PAGE_LAYER`, so it names no layer any page can have and
+/// layer 0 is an ordinary layer. Every page read in this file tests against it
+/// — `base_color_texel` and `shading_normal_of` are the two — and returns the
+/// value a surface with no texture is supposed to have rather than fetching a
+/// texel somebody had to remember to write. `docs/plan/43-render-standards.md`
+/// §2's row (d) is where that trade is argued, and
+/// `crcbl_shaders::mesh::the_shader_declares_the_same_no_page_the_host_does` is
+/// what holds the two declarations together.
+static const uint NO_PAGE = 0xffffu;
+
 /// One material's shading factors **and its base-colour texture**, matching
 /// `crcbl_shaders::mesh::GpuMaterial`.
 ///
@@ -952,9 +966,9 @@ struct GpuMaterial
     /// `MAX_PAGE_LAYER` the bound. `base_color_layer` and `normal_layer` below
     /// are the two readers, so no call site does the shift by hand.
     ///
-    /// Layer 0 by convention is the page's neutral — a white texel on the
-    /// base-colour page and `(0.5, 0.5, 1.0)` on the normal one — so a material
-    /// that wants no texture leaves both halves at zero.
+    /// A half carrying `NO_PAGE` is a material that names no page there, and
+    /// both readers test for it: there is no neutral layer on either page and
+    /// no layer index is special.
     uint color_normal_pages;
     /// How metallic the surface is: 0 a dielectric, 1 a conductor. glTF's
     /// `metallicFactor`.
@@ -1022,7 +1036,7 @@ struct GpuMaterial
     /// glTF's `normalTexture.scale`: the factor the decoded tangent-space
     /// normal's `x` and `y` are multiplied by before it is renormalised, with
     /// `z` left alone — glTF 2.0 §3.9.3. One is the map as authored, zero is a
-    /// flat surface. Read only where `normal_layer` is non-zero.
+    /// flat surface. Read only where `normal_layer` is not `NO_PAGE`.
     float normal_scale;
     /// The alpha below which a masked material discards, glTF's `alphaCutoff`.
     /// Read only where `ALPHA_MODE_MASK` is set in `flags` — see `alpha_masked`,
@@ -1049,11 +1063,11 @@ uint base_color_layer(GpuMaterial material)
 /// The normal page layer a material row names — the high half of
 /// `GpuMaterial::color_normal_pages`.
 ///
-/// **Zero means the material has no normal map**, and `fragmentMain` tests it
-/// rather than trusting layer 0's neutral texel. An eight-bit unorm has no
-/// exact `0.5`, so that texel decodes to a tangent-space normal about a fifth
-/// of a degree off flat; perturbing by it would move every golden in the tree
-/// that draws a lit surface, for a picture nobody asked to change.
+/// **`NO_PAGE` means the material has no normal map**, and `shading_normal_of`
+/// tests it rather than trusting a neutral texel. An eight-bit unorm has no
+/// exact `0.5`, so a neutral texel decodes to a tangent-space normal about a
+/// fifth of a degree off flat; perturbing by it would move every golden in the
+/// tree that draws a lit surface, for a picture nobody asked to change.
 /// `crcbl_shaders::mesh::a_neutral_normal_texel_is_not_exactly_flat` is that
 /// error measured on the host.
 uint normal_layer(GpuMaterial material)
@@ -1387,6 +1401,11 @@ StructuredBuffer<GpuMaterial> materials;
 /// so this one declaration runs on all four and the layout that binds it sets
 /// no `BindingFlags` at all.
 ///
+/// **No layer of this page is special.** A material that names no base-colour
+/// texture carries `NO_PAGE` rather than an index, and `base_color_texel` — the
+/// one reader — returns `float4(1, 1, 1, 1)` for it without the page having to
+/// carry a white layer for the multiply to be a no-op.
+///
 /// **The layers are sRGB-encoded and the sampler is what decodes them.**
 /// `crcbl_render::forward` creates the image as `Rgba8UnormSrgb`, and the
 /// format is the whole of the decode: the sampler returns linear light, which
@@ -1415,6 +1434,41 @@ Texture2DArray<float4> base_color_textures;
 /// forward pass is what sets the address mode and says so.
 [[vk::binding(8, 0)]]
 SamplerState base_color_sampler;
+
+/// The base-colour texel a material row samples at `uv`, or the multiplicative
+/// identity when the row names no page.
+///
+/// **One helper for three fragment stages.** `fragmentMain`, the
+/// `depthMaskedFragmentMain` cutout and the reflective shadow map's fragment
+/// all multiply this into `input.color * material.base_color`, and all three
+/// have to agree about what a material with no texture means — a surface whose
+/// cutout is decided one way and whose shading is decided another is a hole in
+/// one pass and not in the next.
+///
+/// # The branch is on the *index*, and the sample is unconditional
+///
+/// WGSL's uniformity analysis reports the fragment's material id as possibly
+/// non-uniform, so anything derived from the material row is non-uniform as far
+/// as it can prove — and an implicit-LOD sample is legal only in uniform control
+/// flow. A `Sample` inside `if (layer != NO_PAGE)` therefore fails
+/// `CreateShaderModule` in the browser while SPIR-V, MSL and DXIL compile it
+/// without a word; `shading_normal_of` and `fxaa.slang`'s `tap` both carry that
+/// scar. So the fetch stays at this function's top level with a layer of `0`
+/// substituted for the unnamed case, and the *select* below it is what
+/// discards the texel. A page always has at least one layer, so the substituted
+/// index is in range.
+///
+/// What that costs is one page fetch on a surface with no base-colour texture.
+/// What it buys is that the module parses at all in the browser, which is the
+/// same trade `shading_normal_of`'s derivatives make one step earlier.
+float4 base_color_texel(GpuMaterial material, float2 uv)
+{
+    uint layer = base_color_layer(material);
+    bool named = layer != NO_PAGE;
+    float4 texel = base_color_textures.Sample(
+        base_color_sampler, float3(uv, float(named ? layer : 0u)));
+    return named ? texel : float4(1.0, 1.0, 1.0, 1.0);
+}
 
 /// The sun's cascaded shadow map: `SHADOW_CASCADES` square tiles **side by side
 /// in one 2D image**, tile `i` holding cascade `i`.
@@ -1606,7 +1660,8 @@ Texture2D<float4> specular_dfg;
 /// UV and the *same sampler* — `base_color_sampler`, so a normal map gets the
 /// trilinear anisotropic filtering the colour page already has without a second
 /// sampler, a second layout entry, or a second index in Metal's sampler
-/// argument table.
+/// argument table. No layer of it is special either: a material with no normal
+/// map carries `NO_PAGE` and `shading_normal_of` never reads the image.
 ///
 /// # `Rgba8Unorm`, and the missing `Srgb` is the whole point
 ///
@@ -4827,12 +4882,12 @@ TangentFrame derivative_frame(float3 dpdx, float3 dpdy, float2 duvdx, float2 duv
 /// would spend the page fetch and the frame on every untextured surface in the
 /// scene for a picture identical to the branch's.
 ///
-/// The first branch is also what makes "no normal map" **exact**. Layer 0 of the
-/// page is the neutral texel, but an eight-bit unorm has no exact `0.5`, so that
-/// texel decodes to a tangent-space normal about a fifth of a degree off
+/// The first branch is also what makes "no normal map" **exact**. A neutral
+/// texel would not do: an eight-bit unorm has no exact `0.5`, so `(0.5, 0.5,
+/// 1.0)` decodes to a tangent-space normal about a fifth of a degree off
 /// vertical — enough to move every golden in the tree that draws a lit surface.
 /// Returning `normal` untouched returns the same bits the shading used before
-/// this function existed. See `normal_layer`.
+/// this function existed. See `normal_layer` and `NO_PAGE`.
 ///
 /// # The decode is glTF's, term for term
 ///
@@ -4881,7 +4936,7 @@ float3 shading_normal_of(uint layer,
     float2 duvdx = ddx(uv);
     float2 duvdy = ddy(uv);
 
-    if (layer == 0u)
+    if (layer == NO_PAGE)
     {
         return normal;
     }
@@ -5250,8 +5305,11 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // The UV was resolved above, because the normal page is sampled through it
     // too. The wrapped sampler is what lets the physical UV, which runs past
     // `0..1`, repeat rather than smear.
-    float4 texel = base_color_textures.Sample(
-        base_color_sampler, float3(uv, float(base_color_layer(material))));
+    //
+    // A row naming no page gets `1.0` back rather than a texel — see
+    // `base_color_texel`, which is the one place the three fragment stages
+    // decide that.
+    float4 texel = base_color_texel(material, uv);
     float4 albedo = input.color * material.base_color * texel;
 
     // **The cutout, and it is above every view below rather than beside the
@@ -5773,8 +5831,7 @@ void depthMaskedFragmentMain(VertexOutput input)
         uv = physical_tile_uv(
             input.world_position, normalize(input.world_normal), material.tile_metres);
     }
-    float4 texel = base_color_textures.Sample(
-        base_color_sampler, float3(uv, float(base_color_layer(material))));
+    float4 texel = base_color_texel(material, uv);
     // The whole product glTF measures the cutoff against, exactly as
     // `fragmentMain` builds it — the alpha channel alone would ignore a factor
     // or a vertex colour that had already made the surface disappear.
@@ -5871,8 +5928,7 @@ RsmOutput rsmFragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace
     {
         uv = physical_tile_uv(input.world_position, vertex_normal, material.tile_metres);
     }
-    float4 texel = base_color_textures.Sample(
-        base_color_sampler, float3(uv, float(base_color_layer(material))));
+    float4 texel = base_color_texel(material, uv);
     float4 albedo = input.color * material.base_color * texel;
     // The cutout, on `fragmentMain`'s terms and for a reason of this pass's own:
     // a texel of this map is a patch a probe gathers light off, and a patch

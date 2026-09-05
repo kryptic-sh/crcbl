@@ -125,13 +125,12 @@
 //!
 //! Only images a slot the shading actually reads can use are decoded:
 //! `baseColorTexture` and `normalTexture`, which is what [`mesh::GpuMaterial`]'s
-//! two live page columns are. A material with no base-colour texture, or one
-//! this module could not decode, keeps [`PageDesc::UNTEXTURED_LAYER`] — the
-//! page's white layer, so the surface shades by its factors alone rather than
-//! black — and one with no normal map keeps
-//! [`GpuMaterial::NO_PAGE`](mesh::GpuMaterial::NO_PAGE), which is both the
-//! normal page's neutral texel and the value the fragment stage reads as "no
-//! normal map".
+//! two live page columns are. A material with no texture in a slot, or one this
+//! module could not decode, keeps
+//! [`GpuMaterial::NO_PAGE`](mesh::GpuMaterial::NO_PAGE) in that column — the
+//! out-of-band value the fragment stage reads as "no page", so the surface
+//! shades by its factors alone rather than black and no page has to carry a
+//! neutral layer for it to point at.
 //!
 //! **A normal map goes through its own resampler**, [`crcbl_render::mip::normal_resample`]:
 //! no transfer curve, no alpha weighting, and a renormalise after the average.
@@ -345,8 +344,7 @@ fn image_label(scene: &GltfScene, image: usize) -> String {
 ///
 /// A map is `None` for an image that is not in that page — never wanted, never
 /// decoded, or decoded and refused — and a material naming one keeps
-/// [`PageDesc::UNTEXTURED_LAYER`] or
-/// [`GpuMaterial::NO_PAGE`](mesh::GpuMaterial::NO_PAGE) accordingly.
+/// [`GpuMaterial::NO_PAGE`](mesh::GpuMaterial::NO_PAGE) in that column.
 ///
 /// **One extent covers both pages**, because a [`PageDesc`] has one; an image
 /// larger than it is resampled down whichever slot named it.
@@ -546,15 +544,14 @@ fn decode_image(
 /// [`crate::gltf_import`]'s tests assert an unstyled material imports as.
 const GLTF_DEFAULT_ROW: mesh::GpuMaterial = mesh::GpuMaterial {
     base_color: [1.0; 4],
-    base_color_texture: PageDesc::UNTEXTURED_LAYER,
+    base_color_texture: mesh::GpuMaterial::NO_PAGE,
     metallic: 1.0,
     roughness: 1.0,
     tiling: mesh::GpuMaterial::TILING_AUTHORED,
     tile_metres: 1.0,
     emissive: [0.0; 3],
     // The default material names no texture of any kind, so every page column
-    // is the layer that means "none" — which for the normal page is also its
-    // neutral texel, `PageDesc::NEUTRAL_NORMAL`.
+    // carries the out-of-band value that means "none" and no page is read.
     normal_texture: mesh::GpuMaterial::NO_PAGE,
     // glTF's own default `normalTexture.scale`.
     normal_scale: 1.0,
@@ -603,7 +600,7 @@ fn material_rows(
         let layer = layer_at(
             scene.base_color_textures()[index],
             base_layers,
-            PageDesc::UNTEXTURED_LAYER,
+            mesh::GpuMaterial::NO_PAGE,
         );
         let normal_layer = layer_at(
             scene.normal_textures()[index],
@@ -1277,10 +1274,10 @@ mod tests {
             "the neutral layer the type owns, then the image"
         );
         assert!(
-            page.normal_layers()[mesh::GpuMaterial::NO_PAGE as usize]
+            page.normal_layers()[0]
                 .chunks_exact(4)
                 .all(|texel| texel == PageDesc::NEUTRAL_NORMAL),
-            "layer 0 is the neutral texel a row naming no normal map samples",
+            "layer 0 is still the neutral texel the type burns",
         );
         assert_eq!(
             &page.normal_layers()[1][..],
@@ -1314,10 +1311,10 @@ mod tests {
         assert_eq!(page.extent(), 2, "the page is sized by the one image in it");
         assert_eq!(page.layers().len(), 2, "the white layer, then the image");
         assert!(
-            page.layers()[PageDesc::UNTEXTURED_LAYER as usize]
+            page.layers()[0]
                 .iter()
                 .all(|&texel| texel == PageDesc::WHITE),
-            "layer 0 is the untextured white every unnamed material multiplies by"
+            "layer 0 is still the white layer `opaque_white` burns"
         );
         assert_eq!(
             &page.layers()[1][..],
@@ -1352,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn a_material_with_no_texture_stays_on_the_untextured_layer() {
+    fn a_material_with_no_texture_names_no_page() {
         let converted = convert_json(&triangle_json(BIN_CHUNK_BUFFER));
 
         assert_eq!(converted.skipped, []);
@@ -1363,7 +1360,7 @@ mod tests {
         );
         assert_eq!(
             converted.scene.materials[1].base_color_texture,
-            PageDesc::UNTEXTURED_LAYER
+            mesh::GpuMaterial::NO_PAGE
         );
     }
 
@@ -1393,8 +1390,8 @@ mod tests {
         assert_eq!(converted.scene.page.layers().len(), 1);
         assert_eq!(
             converted.scene.materials[1].base_color_texture,
-            PageDesc::UNTEXTURED_LAYER,
-            "a row whose image never reached the page must name the white layer, not a \
+            mesh::GpuMaterial::NO_PAGE,
+            "a row whose image never reached the page must name no page at all, not a \
              layer that is not there"
         );
         assert_eq!(
@@ -1422,7 +1419,7 @@ mod tests {
         );
         assert_eq!(
             converted.scene.materials[1].base_color_texture,
-            PageDesc::UNTEXTURED_LAYER
+            mesh::GpuMaterial::NO_PAGE
         );
     }
 
@@ -1562,7 +1559,7 @@ mod tests {
         assert_ne!(
             GLTF_DEFAULT_ROW,
             mesh::GpuMaterial {
-                base_color_texture: PageDesc::UNTEXTURED_LAYER,
+                base_color_texture: mesh::GpuMaterial::NO_PAGE,
                 ..mesh::GpuMaterial::UNTINTED
             },
             "the two defaults disagree, which is the whole reason row 0 is spelled out"
@@ -1645,7 +1642,7 @@ mod tests {
         );
         assert_eq!(
             converted.scene.materials[2].base_color_texture,
-            PageDesc::UNTEXTURED_LAYER,
+            mesh::GpuMaterial::NO_PAGE,
             "the TEXCOORD_1 material must not, even though the layer exists"
         );
         assert_eq!(

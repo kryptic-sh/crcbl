@@ -191,7 +191,7 @@ pub(crate) fn quad_scene(meshes: Vec<MeshDesc<'static>>) -> SceneDesc<'static> {
         meshes,
         materials: vec![
             GpuMaterial {
-                base_color_texture: PageDesc::UNTEXTURED_LAYER,
+                base_color_texture: GpuMaterial::NO_PAGE,
                 ..GpuMaterial::UNTINTED
             },
             GpuMaterial {

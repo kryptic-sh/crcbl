@@ -514,10 +514,9 @@ pub(crate) const OBJECT_COLOR: [f32; 4] = [0.78, 0.77, 0.75, 1.0];
 /// The page's extent, in texels a side.
 ///
 /// One, and that is the whole of what this sample's page is: every material row
-/// names [`PageDesc::UNTEXTURED_LAYER`], so the page carries a single white
-/// texel and the frame has no pattern in it anywhere.
-///
-/// [`PageDesc::UNTEXTURED_LAYER`]: crcbl::render::scene::PageDesc::UNTEXTURED_LAYER
+/// names [`GpuMaterial::NO_PAGE`], so nothing samples the page and the frame has
+/// no pattern in it anywhere. The renderer still needs an image, so the page is
+/// one white texel.
 const PAGE_EXTENT: u32 = 1;
 
 // ---------------------------------------------------------------------------
@@ -950,13 +949,13 @@ pub fn court() -> SceneDesc<'static> {
         materials: vec![
             GpuMaterial {
                 base_color: SHELL_COLOR,
-                base_color_texture: PageDesc::UNTEXTURED_LAYER,
+                base_color_texture: GpuMaterial::NO_PAGE,
                 roughness: ROUGHNESS,
                 ..GpuMaterial::UNTINTED
             },
             GpuMaterial {
                 base_color: OBJECT_COLOR,
-                base_color_texture: PageDesc::UNTEXTURED_LAYER,
+                base_color_texture: GpuMaterial::NO_PAGE,
                 roughness: ROUGHNESS,
                 ..GpuMaterial::UNTINTED
             },

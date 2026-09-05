@@ -21163,12 +21163,12 @@ and the bindless form.
 still unimported.** `crcbl-scene`'s `gltf_render` decodes the `baseColorTexture`
 of every material that names one, resamples them onto one square extent
 (`MAX_PAGE_EXTENT`) with an alpha-weighted box filter in linear light, and hands
-back a `PageDesc` plus the per-material layer indices.
-`PageDesc::UNTEXTURED_LAYER` is what a material with no texture — or one that
-would not decode — keeps, so the surface shades by its factors rather than
-black, and every skip is logged. What is not imported is everything the single
-texture column cannot hold: metallic-roughness and emissive maps, each of which
-needs a page of its own for the reason the first bullet gives.
+back a `PageDesc` plus the per-material layer indices. `GpuMaterial::NO_PAGE` is
+what a material with no texture — or one that would not decode — keeps, so the
+surface shades by its factors rather than black, and every skip is logged. What
+is not imported is everything the single texture column cannot hold:
+metallic-roughness and emissive maps, each of which needs a page of its own for
+the reason the first bullet gives.
 
 **A material is a start-up write.** `MaterialTable` is one host-visible buffer
 with no ring — the mesh table's shape, not `InstancePool`'s — because nothing
@@ -24551,14 +24551,17 @@ Ordered by how quietly each would fail. Row 0 of the material table is what
 `GpuInstance::default` names, so a reordered description swaps the pyramids'
 materials. Mesh table ids come from upload order and the cull pass reads a
 bounding box out of the entry the instance names, which for a DAG is level 0's.
-Page layer 0 must stay opaque white or every untextured material is scaled by a
-texel that is not 1.0 — a global albedo change that reads as a lighting
-difference. `draw_gen`'s scatter takes the first bucket whose mesh id matches,
-so two buckets naming one mesh means the second never draws. Instance index is
-the LOD hysteresis key, inert with one DAG instance and not inert with two. And
-the rollback path gains new early-failure points that must sit on the same side
-of the self-cleaning handover, or a rejected description leaks two device-local
-buffers.
+Page layer 0 must stay opaque white or every material that _names_ it is scaled
+by a texel that is not 1.0 — a global albedo change that reads as a lighting
+difference. (Row (d)'s first step took the untextured material off that layer:
+`GpuMaterial::NO_PAGE` is out of band and the shader multiplies by a literal
+`1.0`, so the burned layer is now a numbering convention rather than a
+correctness one.) `draw_gen`'s scatter takes the first bucket whose mesh id
+matches, so two buckets naming one mesh means the second never draws. Instance
+index is the LOD hysteresis key, inert with one DAG instance and not inert with
+two. And the rollback path gains new early-failure points that must sit on the
+same side of the self-cleaning handover, or a rejected description leaks two
+device-local buffers.
 
 **Four of these are invisible to `cargo test`**: `crcbl-render`'s unit tests run
 on the null backend and cannot tell a right frame from a wrong one. Every

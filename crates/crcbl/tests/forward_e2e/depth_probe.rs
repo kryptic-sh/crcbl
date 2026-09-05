@@ -107,10 +107,11 @@ struct DepthProbe {
     visible_instances: crcbl::hal::BufferHandle,
     /// A one-layer `D2Array` page of one white texel, and its view.
     ///
-    /// `mesh.slang` samples `base_color_textures` unconditionally, so the probe
-    /// has to bind *something*; white is the one thing that leaves the two
-    /// quads the colours this test asserts, because the material row names
-    /// layer 0 and the shader multiplies by what it finds there.
+    /// `mesh.slang`'s `base_color_texel` keeps its fetch in uniform control flow
+    /// and discards the texel with a select, so the page is sampled even for a
+    /// row naming no page and the probe has to bind *something*. White, so that
+    /// a select read the wrong way round still leaves the two quads the colours
+    /// this test asserts rather than turning them black.
     base_color_page: crcbl::render::UploadedTexture,
     /// `mesh.slang`'s occlusion channel, one white texel — `crcbl::render::forward`'s
     /// own placeholder, and the subject of this file's third question.
@@ -215,7 +216,7 @@ const PROBE_MATERIALS: [crcbl::shaders::mesh::GpuMaterial; 2] = [
         // two equal channels are two a swizzle could swap unseen. Scaling one of
         // them makes all three of the expected triple distinct.
         base_color: [1.0, 1.0, 0.4, 1.0],
-        base_color_texture: 0,
+        base_color_texture: crcbl::shaders::mesh::GpuMaterial::NO_PAGE,
         // **A conductor, so `F0` is coloured.** A dielectric's `F0` is grey
         // whatever its albedo, and a grey triple cannot fail a channel swap.
         metallic: 1.0,
@@ -234,10 +235,10 @@ const PROBE_MATERIALS: [crcbl::shaders::mesh::GpuMaterial; 2] = [
         // is the row above's value, so the two rows still differ only where the
         // assertion looks.
         emissive: [0.0; 3],
-        // **No page on any of the material rows either**, for the reason the
+        // **No page on the remaining columns either**, for the reason the
         // tiling comment gives: this probe's scene carries the one white layer
         // and the one neutral normal layer `PageDesc::opaque_white` describes,
-        // so a row naming any other layer would name one that does not exist.
+        // so a row naming any layer at all would be naming one for no reason.
         normal_texture: crcbl::shaders::mesh::GpuMaterial::NO_PAGE,
         normal_scale: crcbl::shaders::mesh::GpuMaterial::UNTINTED.normal_scale,
         metallic_roughness_occlusion_texture: crcbl::shaders::mesh::GpuMaterial::NO_PAGE,

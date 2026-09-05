@@ -3339,10 +3339,19 @@ impl ForwardRenderer {
         scene.probes.check()?;
         // A row naming a layer the page does not have is an out-of-range sample,
         // which nothing below the seam reports.
+        //
+        // **A column carrying `NO_PAGE` is exempt**, and it is the only exempt
+        // value: it is a sentinel rather than an index — `0xFFFF`, one past
+        // `mesh::MAX_PAGE_LAYER`, so no page can grow to hold it — and the
+        // fragment stage never reads a page for it. Exempting it here is what
+        // lets a material name no texture without the page having to carry a
+        // white layer for it to point at.
         let layers = scene.page.layers().len();
         let normal_layers = scene.page.normal_layers().len();
         for (row, material) in scene.materials.iter().enumerate() {
-            if material.base_color_texture as usize >= layers {
+            if material.base_color_texture != mesh::GpuMaterial::NO_PAGE
+                && material.base_color_texture as usize >= layers
+            {
                 return refuse(format!(
                     "material row {row} samples page layer {}, and the page has {layers}",
                     material.base_color_texture
@@ -3352,7 +3361,9 @@ impl ForwardRenderer {
             // rather than sharing the one above: the two pages have separate
             // layer lists, so a row pointed at a base-colour layer number would
             // pass that check and sample past the end of this image.
-            if material.normal_texture as usize >= normal_layers {
+            if material.normal_texture != mesh::GpuMaterial::NO_PAGE
+                && material.normal_texture as usize >= normal_layers
+            {
                 return refuse(format!(
                     "material row {row} samples normal page layer {}, and the normal page \
                      has {normal_layers}",
@@ -15094,7 +15105,7 @@ mod tests {
         );
         assert_eq!(
             row(plain.material).base_color_texture,
-            scene::PageDesc::UNTEXTURED_LAYER
+            mesh::GpuMaterial::NO_PAGE
         );
         assert_eq!(
             row(textured.material).base_color_texture,
@@ -15110,10 +15121,10 @@ mod tests {
         // pass every assertion above and draw one picture.
         let page = scene::demo().page;
         assert_ne!(
-            page.layers()[scene::PageDesc::UNTEXTURED_LAYER as usize],
+            page.layers()[0],
             page.layers()[scene::CHECKER_LAYER as usize]
         );
-        for layer in [scene::PageDesc::UNTEXTURED_LAYER, scene::CHECKER_LAYER] {
+        for layer in [0, scene::CHECKER_LAYER] {
             assert!(
                 (layer as usize) < page.layers().len(),
                 "layer {layer} is past the end of a {}-layer page, which is an out-of-range \

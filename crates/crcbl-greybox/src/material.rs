@@ -39,8 +39,8 @@ use crcbl_render::scene::PageDesc;
 use crcbl_shaders::mesh::GpuMaterial;
 
 /// The grid layer's index in the page — the number [`grid_material`]'s
-/// `base_color_texture` carries. Layer 0 is the white untextured layer
-/// [`PageDesc::opaque_white`] owns, so the grid is the first layer past it.
+/// `base_color_texture` carries. Layer 0 is the white layer
+/// [`PageDesc::opaque_white`] burns, so the grid is the first layer past it.
 pub const GRID_LAYER: u32 = 1;
 
 /// The grid page's extent, in texels a side.

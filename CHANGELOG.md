@@ -793,6 +793,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`GpuMaterial::NO_PAGE` is out of band, and a material naming no texture no
+  longer samples a page.** It was `0`, which meant every page had to burn its
+  layer 0 on a value the shading would be a no-op over — an `extent² × 4` white
+  layer on the base-colour page and a `(0.5, 0.5, 1.0)` one on the normal page,
+  on every scene in the tree — and meant no material could name layer 0 for
+  real. It is now `0xFFFF`, one past the new
+  `crcbl_shaders::mesh::MAX_PAGE_LAYER` of `0xFFFE`, so it names no layer any
+  page can hold. `mesh.slang` declares the same constant, its new
+  `base_color_texel` helper returns `float4(1, 1, 1, 1)` for a row that names no
+  page instead of sampling one, and `shading_normal_of` tests `NO_PAGE` where it
+  tested zero. `ForwardRenderer::with_scene` exempts a column carrying `NO_PAGE`
+  from the row check it applies to every other. No layer index moved and no
+  golden moved: `crcbl/tests/mesh_e2e/base_color_page.rs`'s
+  `a_row_naming_no_page_shades_exactly_as_a_white_layer_does` is that measured
+  bit for bit on radv and on lavapipe, rather than argued.
+
+  **What a caller must do.** A material row that named layer 0 to mean "no
+  texture" has to say `GpuMaterial::NO_PAGE` — the compiler cannot see the
+  difference, and a row left at `0` now samples whatever layer 0 of the page
+  actually holds. `PageDesc::UNTEXTURED_LAYER` is removed for that reason: every
+  use of it was a row meaning "none", and it is `GpuMaterial::NO_PAGE` now.
+  `PageDesc::WHITE` and `PageDesc::NEUTRAL_NORMAL` stay, and `PageDesc` still
+  writes layer 0 of both pages.
+
+  **`GpuMaterial::default()` is no longer all zeros.** `Default` is written out
+  rather than derived so the four page columns are `NO_PAGE`, which makes
+  `default().to_bytes()` `0xFFFF_FFFF` in each of its two page words. A row the
+  device zero-filled and nobody wrote is therefore no longer the same value as
+  `default()` — it decodes to layer 0 on all four columns. It is still black and
+  no instance can name it: ids come from rows a caller took, and
+  `MaterialTable::remove` clears a freed row by writing `default()`.
+
 - **A sun that moves is marched a stripe per frame instead of whole.**
   `ForwardRenderer::refresh_sky_view` used to rebuild the entire sky-view LUT
   inside the `begin_frame` that first saw a moved sun — 24.57 ms of CPU on this

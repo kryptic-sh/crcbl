@@ -23,7 +23,7 @@ use std::borrow::Cow;
 /// The page's side, in texels: three levels, so the chain has a middle.
 const EXTENT: u32 = 4;
 
-/// The layer this appends past [`PageDesc::UNTEXTURED_LAYER`].
+/// The layer this appends past the white one `PageDesc::opaque_white` burns.
 const PATTERN_LAYER: u32 = 1;
 
 /// A 4×4 layer whose quadrants differ, so every level of its chain differs
@@ -207,7 +207,7 @@ fn the_page_carries_the_hosts_mip_chain_on_every_layer() {
         "level 2 of the pattern layer is the host's one texel"
     );
     assert_eq!(
-        read_level(&headless, image, PageDesc::UNTEXTURED_LAYER, 1),
+        read_level(&headless, image, 0, 1),
         white(2),
         "the white layer's chain is white"
     );

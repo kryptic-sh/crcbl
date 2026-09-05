@@ -126,8 +126,8 @@ pub const PAGE_EXTENT: u32 = 2;
 /// Bytes in one layer of [`demo`]'s page: [`PAGE_EXTENT`]² RGBA texels.
 const PAGE_LAYER_BYTES: usize = (PAGE_EXTENT * PAGE_EXTENT) as usize * 4;
 
-/// The layer [`DEMO_TEXTURED`] shades with — the one [`demo`] appends past
-/// [`PageDesc::UNTEXTURED_LAYER`].
+/// The layer [`DEMO_TEXTURED`] shades with — the one [`demo`] appends past the
+/// white layer [`PageDesc::opaque_white`] writes.
 pub const CHECKER_LAYER: u32 = 1;
 
 /// [`CHECKER_LAYER`]: four **distinct** greys, one per texel.
@@ -243,11 +243,16 @@ impl Default for Capacities {
 ///
 /// # Layer 0 belongs to this type, and that is the whole point of the type
 ///
-/// A material that names no texture samples layer 0, so **layer 0 has to decode
-/// to exactly `1.0` in every channel** or every untextured surface in the frame
-/// is scaled by a texel that is not one. That reads as a global albedo change,
-/// which is indistinguishable from a lighting bug and visible in no assertion
-/// the CPU can make.
+/// **Layer 0 has to decode to exactly `1.0` in every channel** — a page whose
+/// first layer is anything else scales every surface that names it by a texel
+/// that is not one, which reads as a global albedo change, is indistinguishable
+/// from a lighting bug, and is visible in no assertion the CPU can make.
+///
+/// It is no longer what a material naming *no* texture samples: that column
+/// carries [`mesh::GpuMaterial::NO_PAGE`], which is out of band, and the
+/// fragment stage multiplies by the literal `1.0`. The layer is still burned
+/// here because every producer in this tree numbers its own layers past it;
+/// `docs/plan/43-render-standards.md` §2's row (d) is where it goes.
 ///
 /// So there is no constructor that takes layer 0: [`opaque_white`](Self::opaque_white)
 /// writes it, [`push_layer`](Self::push_layer) can only append past it, and a
@@ -270,19 +275,22 @@ pub struct PageDesc<'a> {
 }
 
 impl<'a> PageDesc<'a> {
-    /// The layer a material naming no texture samples, which
-    /// [`mesh::GpuMaterial::UNTINTED`] is written against.
-    pub const UNTEXTURED_LAYER: u32 = 0;
-
-    /// The texel [`UNTEXTURED_LAYER`](Self::UNTEXTURED_LAYER) is filled with.
+    /// The texel layer 0 of the base-colour page is filled with.
     ///
     /// The page is `Rgba8UnormSrgb` and `0xFF` is the one value that encoding
     /// leaves alone, so the sampler returns exactly `1.0` — the same product a
     /// material was shaded by before there was a page at all.
+    ///
+    /// **A material naming no texture no longer samples it.** That column now
+    /// carries [`mesh::GpuMaterial::NO_PAGE`], which is out of band, and the
+    /// fragment stage multiplies by the literal `1.0` instead of by this. The
+    /// layer is still written and still white — `docs/plan/43-render-standards.md`
+    /// §2's row (d) takes it out in its second step — and
+    /// `crcbl/tests/mesh_e2e/base_color_page.rs` is what measured, on a device,
+    /// that the two routes shade a surface to the same bits.
     pub const WHITE: u8 = 0xFF;
 
-    /// The texel the **normal** page's
-    /// [`UNTEXTURED_LAYER`](Self::UNTEXTURED_LAYER) is filled with:
+    /// The texel the **normal** page's layer 0 is filled with:
     /// `(0.5, 0.5, 1.0)` in RGBA8, which is `docs/plan/43-render-standards.md`
     /// §2's neutral normal.
     ///
@@ -305,8 +313,8 @@ impl<'a> PageDesc<'a> {
     /// image holds, which decodes to a normal pointing straight backwards.
     pub const NEUTRAL_NORMAL: [u8; 4] = [0x80, 0x80, 0xFF, 0xFF];
 
-    /// A square page of `extent` texels a side, holding
-    /// [`UNTEXTURED_LAYER`](Self::UNTEXTURED_LAYER) and nothing else.
+    /// A square page of `extent` texels a side, holding one white layer and
+    /// nothing else.
     ///
     /// # Panics
     ///
@@ -934,11 +942,11 @@ pub fn demo() -> SceneDesc<'static> {
         materials: vec![
             // **First, so it is row 0** — which is what
             // `mesh::GpuInstance::default` names, and therefore what an
-            // instance written without a material id shades with. The layer is
-            // named rather than left to `UNTINTED`'s own zero, so the two
+            // instance written without a material id shades with. The page
+            // column is named rather than left to `UNTINTED`'s own, so the two
             // agreeing is a fact visible at the call site.
             mesh::GpuMaterial {
-                base_color_texture: PageDesc::UNTEXTURED_LAYER,
+                base_color_texture: mesh::GpuMaterial::NO_PAGE,
                 ..mesh::GpuMaterial::UNTINTED
             },
             mesh::GpuMaterial {
@@ -1019,7 +1027,7 @@ mod tests {
         assert_eq!(
             scene.materials[mesh::GpuInstance::default().material as usize],
             mesh::GpuMaterial {
-                base_color_texture: PageDesc::UNTEXTURED_LAYER,
+                base_color_texture: mesh::GpuMaterial::NO_PAGE,
                 ..mesh::GpuMaterial::UNTINTED
             },
             "row 0 is what an instance with no material id names"
@@ -1037,20 +1045,15 @@ mod tests {
 
     /// **Page layer 0 is opaque white**, in every texel and at whatever extent.
     ///
-    /// A material naming no texture samples it, so any other value is a global
-    /// albedo scale on every untextured surface — which reads as a lighting
-    /// difference and is visible in no CPU assertion.
+    /// Any other value is a global albedo scale on every surface that names it —
+    /// which reads as a lighting difference and is visible in no CPU assertion.
     #[test]
     fn page_layer_zero_is_white_whatever_the_caller_appends() {
         let mut page = PageDesc::opaque_white(4);
         let appended = page.push_layer(vec![0x00; 4 * 4 * 4]);
-        assert_ne!(
-            appended,
-            PageDesc::UNTEXTURED_LAYER,
-            "a caller can only append past the white layer"
-        );
+        assert_ne!(appended, 0, "a caller can only append past the white layer");
         assert!(
-            page.layers()[PageDesc::UNTEXTURED_LAYER as usize]
+            page.layers()[0]
                 .iter()
                 .all(|&texel| texel == PageDesc::WHITE),
             "layer 0 must decode to 1.0 in every channel"
@@ -1060,7 +1063,7 @@ mod tests {
         let demo_page = demo().page;
         assert_eq!(demo_page.extent(), PAGE_EXTENT);
         assert!(
-            demo_page.layers()[PageDesc::UNTEXTURED_LAYER as usize]
+            demo_page.layers()[0]
                 .iter()
                 .all(|&texel| texel == PageDesc::WHITE)
         );

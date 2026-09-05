@@ -595,9 +595,6 @@ fn no_signal_texels() -> Vec<u8> {
     texels
 }
 
-/// The page layer [`PLASTER`] and every other untextured row samples.
-const UNTEXTURED_LAYER: u32 = PageDesc::UNTEXTURED_LAYER;
-
 /// The page layer [`FLOOR`] samples — the one [`room`] appends past the white
 /// one.
 const FLOOR_LAYER: u32 = 1;
@@ -1079,11 +1076,11 @@ pub fn room() -> SceneDesc<'static> {
         ],
         materials: vec![
             // **First, so it is row 0** — the row `mesh::GpuInstance::default`
-            // names. The layer is written out rather than left to `UNTINTED`'s
-            // own zero, so the two agreeing is visible at the call site.
+            // names. The page column is written out rather than left to
+            // `UNTINTED`'s own, so the two agreeing is visible at the call site.
             GpuMaterial {
                 base_color: PLASTER_COLOR,
-                base_color_texture: UNTEXTURED_LAYER,
+                base_color_texture: GpuMaterial::NO_PAGE,
                 roughness: PLASTER_ROUGHNESS,
                 ..GpuMaterial::UNTINTED
             },
@@ -1095,19 +1092,19 @@ pub fn room() -> SceneDesc<'static> {
             },
             GpuMaterial {
                 base_color: BOUNCE_COLOR,
-                base_color_texture: UNTEXTURED_LAYER,
+                base_color_texture: GpuMaterial::NO_PAGE,
                 roughness: PLASTER_ROUGHNESS,
                 ..GpuMaterial::UNTINTED
             },
             GpuMaterial {
-                base_color_texture: UNTEXTURED_LAYER,
+                base_color_texture: GpuMaterial::NO_PAGE,
                 metallic: 1.0,
                 roughness: MIRROR_ROUGHNESS,
                 ..GpuMaterial::UNTINTED
             },
             GpuMaterial {
                 base_color: ROUGH_METAL_COLOR,
-                base_color_texture: UNTEXTURED_LAYER,
+                base_color_texture: GpuMaterial::NO_PAGE,
                 metallic: BRASS_METALLIC,
                 roughness: BRASS_ROUGHNESS,
                 ..GpuMaterial::UNTINTED
@@ -2664,16 +2661,16 @@ mod tests {
     }
 
     /// The floor's layer is a check rather than a flat colour, and layer 0 is
-    /// still the white one every untextured row samples.
+    /// still the white one `PageDesc::opaque_white` burns.
     #[test]
     fn the_page_carries_a_white_layer_and_a_floor_that_is_not_flat() {
         let page = room().page;
         assert_eq!(page.extent(), PAGE_EXTENT);
         assert!(
-            page.layers()[UNTEXTURED_LAYER as usize]
+            page.layers()[0]
                 .iter()
                 .all(|&texel| texel == PageDesc::WHITE),
-            "every untextured material is scaled by layer 0"
+            "layer 0 must decode to 1.0 in every channel"
         );
         let floor = &page.layers()[FLOOR_LAYER as usize];
         assert_eq!(floor.len(), PAGE_LAYER_BYTES);

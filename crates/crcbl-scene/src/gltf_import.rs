@@ -45,7 +45,7 @@
 //! says it means.
 //!
 //! The row also has a `base_color_texture` column, and **this importer leaves
-//! it at the untextured layer**. That column is a layer of the renderer's page,
+//! it at [`GpuMaterial::NO_PAGE`]**. That column is a layer of the renderer's page,
 //! and which layer an image lands in is decided by whoever builds the page —
 //! [`crate::gltf_render`], which owns both. What this module supplies instead is
 //! the link the page builder needs: [`GltfScene::base_color_textures`] says
@@ -1218,10 +1218,9 @@ fn build(
                 // This column is a *page layer*, and which layer an image lands
                 // in is known only to whoever builds the page. The document's
                 // own answer — which image this material wants — is carried
-                // beside the row in `base_color_textures` instead. Naming layer
-                // 0 here is the honest value in the meantime: it is the page's
-                // white layer, so a row nobody re-pointed shades with its
-                // factors and nothing else.
+                // beside the row in `base_color_textures` instead. `NO_PAGE` is
+                // the honest value in the meantime: a row nobody re-pointed
+                // reads no page and shades with its factors and nothing else.
                 base_color_texture: GpuMaterial::UNTINTED.base_color_texture,
                 // glTF texture coordinates are authored per vertex, so an
                 // imported material samples the vertex UV — physical tiling is
@@ -1892,7 +1891,7 @@ pub(crate) mod tests {
     /// is claimed to say.
     const GLTF_DEFAULT_MATERIAL: GpuMaterial = GpuMaterial {
         base_color: [1.0; 4],
-        base_color_texture: 0,
+        base_color_texture: GpuMaterial::NO_PAGE,
         metallic: 1.0,
         roughness: 1.0,
         tiling: GpuMaterial::TILING_AUTHORED,
