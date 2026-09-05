@@ -310,12 +310,24 @@ golden of their own and a button on the page. What is still **not** done:
     `29.5090%` at zero, and `42.6108%` / `42.7305%` with the offset zeroed
     outright; 1.0 inverts the offset clause and 1.75 is the last station before
     the rise vanishes, so `REDUCED_OFFSET` sits in the middle of the window with
-    a working station either side. What is **still nobody's claim** is
-    `HELD_OFFSET` on `box`: pushed to 40 texels it leaves contact and beyond at
-    the shipped arm's own numbers (`70.73`/`68.33` radv, `70.44`/`68.33`
-    lavapipe) and 44 texels moves the contact itself to `31.29`/`31.13`, so that
-    half still wants an offset station between 40 and 44 — the one reading of
-    the pair no row takes, and the gap was not swept.
+    a working station either side. `HELD_OFFSET` is read on `box` too, at a
+    station of its own (2026-09-05). Swept between the two ends the last session
+    left — 40 to 44 in half-texel steps, three runs per adapter on radv and
+    lavapipe, identical to the digit — the contact holds at its own shipped
+    reading (`70.73`/`70.44`) through 42 while the pavement past it falls from
+    `68.33` to `65.91`/`65.87` at 40.5, `52.25`/`52.21` at 41, `39.49`/`39.49`
+    at 41.5 and `28.35`/`28.40` at 42; the contact first moves at 42.5
+    (`69.48`/`69.19`) and is gone by 43. So `HELD_OFFSET_COVERED_RUNG` ships at
+    41.5, the middle of the 41-to-42 window, and `Setup` carries a `pushed_to`
+    per row that `bias_trade` draws the pushed-offset arm at.
+    `OFFSET_COVERED_RUNG` now holds back only its `REDUCED_OFFSET` row, and only
+    for the constant bias's clause; the one row that does not read the pushed
+    pair is that reduced row itself, deliberately, because its shipped arm
+    stands at an offset nothing ships and the pair is read on the rung's
+    shipped-offset row instead. **Still nobody's claim**: whether the 41.5
+    station holds on a third driver — verified on radv and lavapipe only, and
+    40.5's fall of about two of the 255 is why the station is not at the
+    window's near edge.
   - **The top of the sun's arc, `sun::NOON_TICK`.** The same two claims fail,
     and for one reason: a sun at `sun::MAX_ELEVATION` throws a plinth shadow a
     fraction of the block's own height long. Zeroing `r_shadow_normal_offset`

@@ -2036,12 +2036,51 @@ const PETER_PAN_BIAS: f32 = 96.0;
 /// reads to a hundredth: contact `70.73` and beyond `66.59` on radv, `70.44` and
 /// `66.53` on lavapipe. `box` reads the shipped arm's own numbers exactly —
 /// `70.73`/`68.33` and `70.44`/`68.33` — which is a count that reached that
-/// rung's frame nowhere these two readings can see, and the whole of what
-/// [`OFFSET_COVERED_RUNG`] still holds back. At the top of the arc the contact
-/// holds at `176.00` and `175.93` while beyond falls to `24.27` and `24.33`, so
-/// this half of the claim is one that arm could make; it is [`PETER_PAN_BIAS`]'
-/// half it cannot.
+/// rung's frame nowhere these two readings can see, so that rung is pushed to
+/// [`HELD_OFFSET_COVERED_RUNG`] instead. At the top of the arc the contact holds
+/// at `176.00` and `175.93` while beyond falls to `24.27` and `24.33`, so this
+/// half of the claim is one that arm could make; it is [`PETER_PAN_BIAS`]' half
+/// it cannot.
 const HELD_OFFSET: f32 = 40.0;
+
+/// What it is pushed to on [`OFFSET_COVERED_RUNG`] instead, in the same texels.
+///
+/// **A texel and a half further out, and the narrowest kernel on the ladder is
+/// why** — the same property [`OFFSET_COVERED_RUNG`] is about, seen from the
+/// other end. `r_shadow_normal_offset` walks the lookup sideways and then the
+/// kernel takes its taps around wherever the walk ended, so the two reaches add:
+/// `tile_pcf` has left the far end of this strip at [`HELD_OFFSET`] and
+/// `tile_box_pcf`, which reaches one texel, has not. Pushed there its arm draws
+/// that rung's own shipped readings, contact *and* far end — what a knob wired
+/// to nothing draws, and what the anti-vacuity clause refuses.
+///
+/// **Swept** on that rung at [`sun::GRAZING_TICK`] from [`plaza::fixed_camera`]
+/// at [`CLAIM_EXTENT`], read exactly as [`HELD_OFFSET`]'s table is — three runs
+/// per adapter and the same digits every time (2026-09-05):
+///
+/// | `r_shadow_normal_offset` | contact, radv | beyond, radv | contact, lavapipe | beyond, lavapipe |
+/// | --- | --- | --- | --- | --- |
+/// | 2 (ships) | `70.73` | `68.33` | `70.44` | `68.33` |
+/// | 40 | `70.73` | `68.33` | `70.44` | `68.33` |
+/// | 40.5 | `70.73` | `65.91` | `70.44` | `65.87` |
+/// | 41 | `70.73` | `52.25` | `70.44` | `52.21` |
+/// | 41.5 (this) | `70.73` | `39.49` | `70.44` | `39.49` |
+/// | 42 | `70.73` | `28.35` | `70.44` | `28.40` |
+/// | 42.5 | `69.48` | `18.44` | `69.19` | `18.48` |
+/// | 43 | `56.77` | `9.37` | `56.48` | `9.47` |
+/// | 43.5 | `43.09` | `1.57` | `42.88` | `1.59` |
+/// | 44 | `31.29` | `0.00` | `31.13` | `0.00` |
+///
+/// **The middle of the window rather than either edge of it.** At 40 the far end
+/// has not moved at all, so both of the arm's readings are that rung's shipped
+/// readings and the anti-vacuity clause refuses it; at 40.5 it has moved by
+/// about two of the 255, which is inside what a third driver could flatten. At
+/// 42.5 the contact has started to go and by 43 it is going fast, which is the
+/// claim the arm was meant to make running backwards. So the window is 41 to 42
+/// — the contact identical to its own shipped arm to the hundredth on both
+/// adapters while the pavement past it has lost most of its shadow — and this is
+/// the station in the middle of it, with a working station on either side.
+const HELD_OFFSET_COVERED_RUNG: f32 = 41.5;
 
 /// How much shadow term a piece of pavement has to carry to count as shadowed,
 /// in luma out of 255.
@@ -2062,9 +2101,9 @@ const CONTACT_LIT: f32 = 20.0;
 ///
 /// The tolerance on every "and the contact holds" clause. **Swept:** every arm
 /// that is meant to leave it alone reads `70.73` on radv and `70.44` on
-/// lavapipe, on both of the rungs the claim is read on — the same number to a
-/// hundredth, not a number inside a tolerance — so this is a guard against
-/// readback noise rather than slack the claim needs.
+/// lavapipe, on every rung the claim is read on and at every station it is
+/// pushed to — the same number to a hundredth, not a number inside a tolerance —
+/// so this is a guard against readback noise rather than slack the claim needs.
 const CONTACT_HELD: f32 = 2.0;
 
 /// What share of the acne block is a self-shadowing dot once the normal offset
@@ -2184,21 +2223,20 @@ const ACNE_WITHOUT_BIAS_REDUCED: f32 = 15.0;
 /// `0.0000%` its own shipped arm reads, with the contact unmoved at `70.73` and
 /// `70.44`. Only the constant bias has nothing to be about at two texels.
 ///
-/// **[`HELD_OFFSET`]'s two clauses are not read on this rung at either offset**,
-/// and that is the whole of what is still held back. Pushed there, the contact
-/// reads `70.73` on radv and `70.44` on lavapipe and the pavement past it
-/// `68.33` on both, which is this rung's own shipped arm to a hundredth. That is
-/// the very reading the anti-vacuity clause refuses — a contact that did not
-/// move is what a knob wired to nothing draws — and the next station up is no
-/// answer either: at 44 texels the contact itself falls to `31.29` and `31.13`,
-/// which is the clause the arm was meant to make going the wrong way rather than
-/// a station it can be pushed to. `docs/backlog.md` carries what an offset
-/// station between the two would want.
+/// **[`HELD_OFFSET`]'s two clauses are read on this rung at a station of its
+/// own**, [`HELD_OFFSET_COVERED_RUNG`], and it is the paragraph above turned
+/// around. Pushed to [`HELD_OFFSET`] the contact reads `70.73` on radv and
+/// `70.44` on lavapipe and the pavement past it `68.33` on both, which is this
+/// rung's own shipped arm to a hundredth — the very reading the anti-vacuity
+/// clause refuses, because a contact that did not move is what a knob wired to
+/// nothing draws. A narrower kernel carries the sideways walk less far, so the
+/// station where this one loses the far end of the strip is further out; that
+/// constant carries the sweep between the two.
 ///
-/// **Every other clause is read on this rung like any other**, which is what
-/// makes the line above a reading this fixture cannot take rather than a rung
-/// with a defect in it: at [`PETER_PAN_BIAS`] its contact reads `0.00` on both
-/// adapters and the pavement past it `68.08`.
+/// **Every other clause is read on this rung at the count the sample ships**,
+/// which is what makes the station above one kernel's own reach rather than a
+/// rung with a defect in it: at [`PETER_PAN_BIAS`] its contact reads `0.00` on
+/// both adapters and the pavement past it `68.08`.
 ///
 /// Held against the ladder the engine declares rather than trusted: a rung
 /// renamed out from under this fails the run, where an exclusion that silently
@@ -2270,7 +2308,12 @@ struct Trade {
 /// frame every shadow term here is a difference against is that setup drawn with
 /// the shadow passes out, and [`acne_block`] is projected through that setup's
 /// own camera.
-fn bias_trade(extent: (u32, u32), name: &str, base: Arm) -> Trade {
+///
+/// `pushed_offset` is the count the last arm's `r_shadow_normal_offset` is
+/// pushed to, off the [`Setup`] rather than a constant here: how far a sideways
+/// walk has to go before it reaches this strip is a function of the kernel doing
+/// the reading, which is what [`HELD_OFFSET_COVERED_RUNG`] is about.
+fn bias_trade(extent: (u32, u32), name: &str, base: Arm, pushed_offset: f32) -> Trade {
     let camera = base.camera();
     let (centre, half) = acne_block(&camera, extent);
     let (flat, paths, _) = draw(extent, base.without_shadows());
@@ -2314,7 +2357,7 @@ fn bias_trade(extent: (u32, u32), name: &str, base: Arm) -> Trade {
         read("no offset", base.offset(0.0)),
         read("no bias", base.biased(0.0)),
         read("pushed bias", base.biased(PETER_PAN_BIAS)),
-        read("pushed offset", base.offset(HELD_OFFSET)),
+        read("pushed offset", base.offset(pushed_offset)),
     ];
     Trade { paths, arms }
 }
@@ -2347,13 +2390,24 @@ struct Setup {
     /// already covered: [`ACNE_WITHOUT_BIAS`] where the sample's own offset drew
     /// the frame, [`ACNE_WITHOUT_BIAS_REDUCED`] at [`REDUCED_OFFSET`].
     acne_without_bias: Option<f32>,
+    /// What this row's pushed-offset arm pushes `r_shadow_normal_offset` to.
+    ///
+    /// [`HELD_OFFSET`] on every row but [`OFFSET_COVERED_RUNG`]'s, which reads
+    /// the pair at [`HELD_OFFSET_COVERED_RUNG`]: a count of texels is a distance
+    /// the lookup walks sideways, and how far it has to walk before it reaches
+    /// the pavement this pair reads is a function of how far the kernel reading
+    /// it already reaches. Per row rather than per rung only because a [`Setup`]
+    /// is a row; both of [`OFFSET_COVERED_RUNG`]'s carry the same count.
+    pushed_to: f32,
     /// Whether [`HELD_OFFSET`]'s pair of clauses is read on this row.
     ///
-    /// `false` on [`OFFSET_COVERED_RUNG`] at both of its offsets, where that
-    /// count reaches the frame nowhere either reading can see it — that constant
-    /// carries the sweep. The two pushed arms are still drawn and still held to
-    /// the anti-vacuity clauses below; it is only what those two readings are
-    /// asked to say about each other that is held back.
+    /// `false` on [`OFFSET_COVERED_RUNG`]'s [`REDUCED_OFFSET`] row alone, whose
+    /// shipped arm stands at an offset nothing ships — the pair is read on that
+    /// rung's other row, against the frame the sample actually draws, and
+    /// reading it twice would be a second claim about a configuration nobody
+    /// runs. That row's pushed arm is still drawn and still held to the
+    /// anti-vacuity clauses below; it is only what those two readings are asked
+    /// to say about each other that is held back.
     held_offset: bool,
 }
 
@@ -2382,7 +2436,7 @@ struct Setup {
 ///   contact lights while the pavement past it is still shadowed, which is
 ///   peter-panning rather than a shadow that has gone — and the acne block stays
 ///   smooth.
-/// * **Push the normal offset twenty times as far and the contact does not
+/// * **Push the normal offset far past what acne needs and the contact does not
 ///   move**, though the frame is a different picture. That is the seventh
 ///   decision's claim — a sideways move keeps a contact — measured rather than
 ///   argued.
@@ -2406,14 +2460,15 @@ struct Setup {
 ///   narrowest kernel the shipped normal offset covers this block on its own, so
 ///   at the offset that ships there is no rise for that count to be about. Its
 ///   other clause — the normal offset zeroed outright — is read on its first row
-///   like every other rung's. That constant carries the sweep, and the row above
-///   it carries what is *not* read at either offset: [`HELD_OFFSET`]'s two
-///   clauses, and nothing else.
+///   like every other rung's. That constant carries the sweep.
 ///
 /// So the acne half is read on **every** rung of the ladder — the normal
 /// offset's clause at the offset the sample ships throughout, the constant
 /// bias's at the one offset per rung where the two counts trade — and the
-/// contact half on every rung less [`HELD_OFFSET`]'s pair.
+/// contact half on every rung as well: [`PETER_PAN_BIAS`] at the one count
+/// throughout, and [`HELD_OFFSET`]'s pair at the station each kernel's own
+/// sideways reach puts it at, which is that constant on every rung but
+/// [`OFFSET_COVERED_RUNG`] and [`HELD_OFFSET_COVERED_RUNG`] on that one.
 ///
 /// Every setup shares [`plaza::fixed_camera`] and [`sun::GRAZING_TICK`], which
 /// is what lets [`BEYOND_CONTACT`]'s stations run down `+z` for all of them.
@@ -2456,7 +2511,8 @@ struct Setup {
 /// that never reached the shader, where a contact that did not move is exactly
 /// what a no-op draws — that arm's shadow beyond the contact is held to have
 /// *fallen* against its own setup's shipped one, so the count is shown to have
-/// done something before it is credited with not doing this. And the constant
+/// done something before it is credited with not doing this, and that is the
+/// clause [`HELD_OFFSET_COVERED_RUNG`] exists to satisfy. And the constant
 /// bias's clause could **silently stop being read on a rung**, which is exactly
 /// what [`REDUCED_OFFSET`] exists to stop happening again — every rung the
 /// engine declares is held to appear on a setup that reads it, and
@@ -2520,11 +2576,35 @@ struct Setup {
 /// > constant bias on `box`, so that rung is one this pair no longer says
 /// > anything about that count on, and nothing else would say so
 ///
+/// **[`HELD_OFFSET_COVERED_RUNG`] was reddened from both sides** (2026-09-05),
+/// which is what says the window it sits in has two edges rather than one. Moved
+/// to the next station past that window, so the contact goes with the pavement:
+///
+/// > on the box rung at 44 texels of normal offset the contact's shadow term
+/// > moved from 70.73 to 31.29. `docs/plan/45-shadows.md`'s seventh decision is
+/// > that a move along the receiver's own normal leaves the depth it compares
+/// > alone and therefore keeps a contact; this is the fixture that says so
+///
+/// and on lavapipe that line read `70.44` and `31.13`. Pulled back to the offset
+/// the sample ships, so the pushed arm is that row's own shipped frame and the
+/// clause it is credited with is the one a knob wired to nothing passes — both
+/// halves of the anti-vacuity pair, identically on both adapters:
+///
+/// > on the box rung the pushed offset arm drew the shipped arm's frame byte for
+/// > byte, so every reading taken off it is the shipped reading under another
+/// > name
+/// >
+/// > on the box rung at 2 texels of normal offset the pavement past the contact
+/// > carries 68.33 of shadow term at its deepest against the shipped arm's 68.33
+/// > — the count reached the frame nowhere, so a contact that did not move is
+/// > what a knob wired to nothing draws
+///
 /// # What was measured
 ///
-/// The tables are on [`PETER_PAN_BIAS`], [`HELD_OFFSET`], [`REDUCED_OFFSET`] and
-/// [`OFFSET_COVERED_RUNG`], and the run prints every arm's four readings again
-/// on whatever adapter it opened.
+/// The tables are on [`PETER_PAN_BIAS`], [`HELD_OFFSET`],
+/// [`HELD_OFFSET_COVERED_RUNG`], [`REDUCED_OFFSET`] and [`OFFSET_COVERED_RUNG`],
+/// and the run prints every arm's four readings again on whatever adapter it
+/// opened.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-sundial-golden.sh"]
 fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
@@ -2541,9 +2621,10 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
 
     // One row per rung, at the offset the sample ships. The rung whose kernel
     // that offset already covers reads the constant bias's clause a row further
-    // down instead, and [`HELD_OFFSET`]'s pair at neither offset; the rule is
-    // applied here rather than to the rows afterwards so it still holds if the
-    // engine ever ships that rung as its default.
+    // down instead, and pushes the normal offset a station further out for
+    // `HELD_OFFSET`'s pair; the rule is applied here rather than to the rows
+    // afterwards so it still holds if the engine ever ships that rung as its
+    // default.
     let row = |name: String, rung: &'static str, base: Arm| {
         let covered = rung == OFFSET_COVERED_RUNG;
         Setup {
@@ -2551,7 +2632,12 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
             rung,
             base,
             acne_without_bias: (!covered).then_some(ACNE_WITHOUT_BIAS),
-            held_offset: !covered,
+            pushed_to: if covered {
+                HELD_OFFSET_COVERED_RUNG
+            } else {
+                HELD_OFFSET
+            },
+            held_offset: true,
         }
     };
     let mut setups = vec![row(format!("the shipped {shipped}"), shipped, grazing)];
@@ -2571,6 +2657,7 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
         rung: OFFSET_COVERED_RUNG,
         base: grazing.on(OFFSET_COVERED_RUNG).offset(REDUCED_OFFSET),
         acne_without_bias: Some(ACNE_WITHOUT_BIAS_REDUCED),
+        pushed_to: HELD_OFFSET_COVERED_RUNG,
         held_offset: false,
     });
 
@@ -2594,10 +2681,11 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
         rung: _,
         base,
         acne_without_bias,
+        pushed_to,
         held_offset,
     } in setups
     {
-        let Trade { paths, arms } = bias_trade(extent, &name, base);
+        let Trade { paths, arms } = bias_trade(extent, &name, base, pushed_to);
         for arm in &arms {
             if arm.unmoved {
                 faults.push(format!(
@@ -2620,7 +2708,7 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
         eprintln!(
             "sundial golden: the bias pair on {name}, {paths} — the contact reads {ships:.2}/255 \
              as the sample ships, {lifted:.2} at {PETER_PAN_BIAS} texels of constant bias and \
-             {held:.2} at {HELD_OFFSET} of normal offset",
+             {held:.2} at {pushed_to} of normal offset",
             ships = shipped_arm.contact,
             lifted = pushed_bias.contact,
             held = pushed_offset.contact,
@@ -2704,7 +2792,7 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
         if held_offset {
             if (pushed_offset.contact - shipped_arm.contact).abs() >= CONTACT_HELD {
                 faults.push(format!(
-                    "on {name} at {HELD_OFFSET} texels of normal offset the contact's shadow \
+                    "on {name} at {pushed_to} texels of normal offset the contact's shadow \
                      term moved from {:.2} to {:.2}. `docs/plan/45-shadows.md`'s seventh \
                      decision is that a move along the receiver's own normal leaves the depth it \
                      compares alone and therefore keeps a contact; this is the fixture that says \
@@ -2714,7 +2802,7 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
             }
             if pushed_offset.beyond >= shipped_arm.beyond {
                 faults.push(format!(
-                    "on {name} at {HELD_OFFSET} texels of normal offset the pavement past the \
+                    "on {name} at {pushed_to} texels of normal offset the pavement past the \
                      contact carries {:.2} of shadow term at its deepest against the shipped \
                      arm's {:.2} — the count reached the frame nowhere, so a contact that did \
                      not move is what a knob wired to nothing draws",
@@ -2724,7 +2812,7 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
         }
         if pushed_offset.dots >= SMOOTH_PERCENT {
             faults.push(format!(
-                "on {name} at {HELD_OFFSET} texels the block is {:.4}% dots, past \
+                "on {name} at {pushed_to} texels the block is {:.4}% dots, past \
                  {SMOOTH_PERCENT}%",
                 pushed_offset.dots,
             ));
