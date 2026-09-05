@@ -484,19 +484,29 @@ slice did not do:
   — are held by the whole-frame scan. Blessing the rim's is a fifth entry in
   `the_court_matches_its_goldens` and was left because the readings, not a
   picture, are what say it is right.
-- **Only the two view flags are gated on a frame; alcove's other flags are
-  not.** `apps/alcove/tests/run-alcove-views.sh` runs the binary once per
-  debug-view flag and reads the open-floor block and the frame's channel spread
-  out of the three PNGs, so `--bent-view` and `--ao-view` are now held end to
-  end — argument, `crcbl::debug_view` cell, presented frame — and CI runs it on
-  lavapipe beside the alcove golden step. `--technique`, `--split`, `--no-ao`,
-  `--camera` and the two `--force-*` flags still stop at the parser:
-  `apps/alcove/tests/golden.rs` draws each of those states from a fixture that
-  sets the switch itself and never goes through `Options::apply`. Extending the
-  harness is cheap — a fourth arm and one more reading — but each needs its own
-  measured discriminator, and `--split`'s would be a column comparison rather
-  than a block. Not attempted, and no evidence either way that those flags reach
-  the renderer from the command line.
+- **Alcove's frame-visible flags are gated now; the ones whose effect is not a
+  picture are not.** `apps/alcove/tests/run-alcove-views.sh` draws six frames
+  and holds five flags end to end — argument, console cell, presented frame:
+  `--bent-view` and `--ao-view` as before, plus `--no-ao` (the occlusion
+  channel's darkest pixel, `255.00` with the pass out against `184.00` with it
+  in), `--technique` (the `hemisphere` gather has no bisector to report, so its
+  bent picture is the `BENT_NORMAL_NONE` grey — `0.16` codes off it against
+  `67.16` for the shipped gather, and spread `0` against `194`) and `--split`
+  (every column outside `golden.rs`'s `SEAM_BLEED` exactly equal to the
+  whole-frame run its own side ran, and at least `21.83` codes from the other
+  one). Measured three runs per arm on radv and on lavapipe, identical on both,
+  and each arm has a self-test mode — `no-ao-flag`, `no-technique-flag`,
+  `no-split-flag` — that drops its own flag and was watched go red. What is left
+  is `--camera` and the two `--force-*` flags, and neither has a frame to be
+  read off: `Alcove::new` seats the `Flyer` at `court::fixed_camera`, so a
+  headless `--camera free` run with no input draws a **byte-identical** PNG to
+  the fixed one (verified with `cmp`, three runs on both drivers), and the
+  forced paths are meant to draw the picture the selected ones do — that is what
+  makes them a fallback, and it is reasoning from `Gpu::open` rather than a
+  measurement. Holding those means reading the `[HUD]` line
+  `Alcove::log_heartbeat` prints (`camera:`, `geometry:`, `binding:`) or
+  `Summary`'s own fields out of the run's stdout, which `draw` already captures
+  per run and no claim reads. Not attempted.
 - **`Knobs` grew a `DebugView` and the debug overlay's `view` row changed with
   it**, from `AO ONLY` / `SHADED` to the view's own name. That row is not
   asserted on anywhere, so the change is behind nothing; it was made because two

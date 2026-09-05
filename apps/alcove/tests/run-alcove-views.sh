@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-# Run the alcove binary three times — once per debug-view flag — and read the
-# three frames back to say which picture each flag actually presented.
+# Run the alcove binary once per occlusion flag and read the frames back to say
+# what each flag actually presented.
 #
 #   CRCBL_GPU=vk apps/alcove/tests/run-alcove-views.sh
 #
 # # What this is for
 #
-# `--bent-view` and `--ao-view` were covered from the argument to the
-# `crcbl::debug_view` cell and stopped there: `apps/alcove/src/args.rs` has tests
-# that the flags parse and that `Options::apply` writes the view, and
-# `apps/alcove/tests/golden.rs` draws every one of those pictures from a fixture
-# it builds itself. Between them sat the half nothing asked — that the frame a
-# *flagged run of the shipped binary* presents is the picture the flag names.
-# Every route the parse test covers would go on passing with the flag wired to a
-# cell the renderer no longer reads.
+# The flags were covered from the argument to the console cell and stopped
+# there: `apps/alcove/src/args.rs` has tests that each of them parses and that
+# `Options::apply` writes the cell, and `apps/alcove/tests/golden.rs` draws every
+# one of those pictures from a fixture it builds itself. Between them sat the
+# half nothing asked — that the frame a *flagged run of the shipped binary*
+# presents is the picture the flag names. Every route the parse test covers would
+# go on passing with the flag wired to a cell the renderer no longer reads.
 #
 # So this is the outside view: the command line a person types, and a reading off
-# the PNG that came out of it.
+# the PNG that came out of it. Five flags are held that way here — `--bent-view`
+# and `--ao-view` name the picture, `--no-ao` takes the occlusion pass out from
+# under it, `--technique` names the gather that fills it, and `--split` runs that
+# gather against the shipped one down the frame — and each is read through the
+# picture its own effect is visible in.
 #
 # # Why it drives the binary and not a suite
 #
@@ -34,9 +37,11 @@
 # placed at that suite's own projection of `apps/alcove/src/court.rs`'s
 # `OPEN_FLOOR` through `court::fixed_camera` — pixel (49, 146), averaged over the
 # block its `BLOCK` half-extents give there. Running at any other size would put
-# the reading somewhere nobody measured. The three frames this script writes read
-# identically to the three checked-in goldens at that block, which is the
-# cross-check that the pixel is the one the suite means.
+# the reading somewhere nobody measured. The bent, ao and shaded frames this
+# script writes read identically to the three checked-in goldens at that block,
+# which is the cross-check that the pixel is the one the suite means. The seam
+# arm's bleed band is that suite's `SEAM_BLEED` for the same reason: it is a
+# texel count rather than a fraction of the frame, so it holds at this extent.
 #
 # # Why the debug overlay is turned off
 #
@@ -50,17 +55,19 @@
 #   CRCBL_GPU                      Which backend draws. Required; no default.
 #   CRCBL_VK_ICD                   Which Vulkan driver, when `CRCBL_GPU=vk`.
 #   CRCBL_ALCOVE_VIEWS_SELF_TEST   Break one claim on purpose, to watch it go
-#                                  red. `no-bent-flag` draws the bent arm with
-#                                  `--bent-view` dropped; `off-floor` reads the
-#                                  block off the open floor and onto a vertical
-#                                  surface. See "How it was shown to fail".
+#                                  red. `no-bent-flag`, `no-ao-flag`,
+#                                  `no-technique-flag` and `no-split-flag` each
+#                                  draw one arm with the flag it is about
+#                                  dropped; `off-floor` reads the block off the
+#                                  open floor and onto a vertical surface. See
+#                                  "How it was shown to fail".
 #
 # # What was measured
 #
 # Three runs per arm on each of this workstation's two Vulkan drivers — radv (AMD
 # Radeon RX 7900 XTX, RADV NAVI31) and lavapipe (llvmpipe, LLVM 22.1.8), the one
-# CI runs. Every run of an arm gave the same numbers, so the columns below are
-# each three identical readings:
+# CI runs. Every run of an arm gave the same numbers, so each column below is
+# three identical readings. The two view arms and their control:
 #
 # ```text
 # arm            drift from the encoded +Y normal      widest channel spread
@@ -89,14 +96,65 @@
 #   * a picture that is not grey must spread at least 5, halfway between that 0
 #     and the 10 the thinnest colour arm measured.
 #
+# The three arms added on 2026-09-05 are each read through a different statistic,
+# because each of their flags moves a different thing. Same two drivers, three
+# runs per arm, every run of an arm identical:
+#
+# ```text
+# reading                                          radv    lavapipe   flag it is for
+# --ao-view --no-ao, darkest pixel               255.00      255.00   --no-ao
+# --ao-view, darkest pixel                       184.00      184.00     (its control)
+# --bent-view --technique hemisphere,              0.16        0.16   --technique
+#   codes off the sentinel grey
+# --bent-view, the same                           67.16       67.16     (its control)
+# --bent-view --technique hemisphere --split,     0.0000      0.0000   --split
+#   worst column residue against its own side
+# the same, thinnest column disagreement         21.8368     21.8906     (its control)
+#   with the reference the other side read
+# ```
+#
+# "Darkest" is the mean of a pixel's three channels at the darkest pixel of the
+# whole frame — the statistic the occlusion channel's picture has, since a block
+# on open floor reads 255 whether or not the pass ran. "The sentinel grey" is
+# what `crcbl::shaders::ssao::BENT_NORMAL_NONE` encodes to, which is the picture
+# a gather with no bisector to accumulate draws. The seam's two numbers are
+# `golden.rs`'s `column_difference` in this reader's terms, over every column
+# outside the bleed band.
+#
+# Their bounds come out of those pairs:
+#
+#   * the occlusion channel with `--no-ao` is held at or above 254 at its darkest
+#     pixel: `crcbl_render::forward` binds a 1x1 white where the pass would be, so
+#     the picture is white everywhere and the one code is another driver's sRGB
+#     rounding. Measured 255.00, and what it has to reject is the same picture
+#     with the pass in at 184.00;
+#   * that control is held the other way at or under 220, halfway between the two;
+#   * the hemisphere arm's block is held within 1 code of the sentinel grey —
+#     `golden.rs`'s `SENTINEL_GREY_TOLERANCE`, and its whole-frame spread within
+#     the same 1 — and at least 28 codes from the block the same command draws
+#     without the flag, which is that suite's `SHIPPED_OFF_SENTINEL` and about
+#     half the 67.00 measured;
+#   * the seamed frame's columns are held *exactly* equal to the reference for
+#     their own side, as `golden.rs` holds its own seam: measured 0.0000 on both
+#     drivers, and the two frames being compared come off one driver in one run,
+#     so there is no rounding to admit. The disagreement with the other side's
+#     reference is held above 10, half the thinnest measured, which is what stops
+#     the equality being an equality of two identical pictures.
+#
 # # How it was shown to fail
 #
-# Two of them have a switch, because they are the ones a reader will want to
+# Five of them have a switch, because they are the ones a reader will want to
 # re-run:
 #
 #   CRCBL_GPU=vk CRCBL_ALCOVE_VIEWS_SELF_TEST=no-bent-flag \
 #     apps/alcove/tests/run-alcove-views.sh
 #   CRCBL_GPU=vk CRCBL_ALCOVE_VIEWS_SELF_TEST=off-floor \
+#     apps/alcove/tests/run-alcove-views.sh
+#   CRCBL_GPU=vk CRCBL_ALCOVE_VIEWS_SELF_TEST=no-ao-flag \
+#     apps/alcove/tests/run-alcove-views.sh
+#   CRCBL_GPU=vk CRCBL_ALCOVE_VIEWS_SELF_TEST=no-technique-flag \
+#     apps/alcove/tests/run-alcove-views.sh
+#   CRCBL_GPU=vk CRCBL_ALCOVE_VIEWS_SELF_TEST=no-split-flag \
 #     apps/alcove/tests/run-alcove-views.sh
 #
 # The first drops `--bent-view` from the arm that is meant to carry it, which is
@@ -108,6 +166,25 @@
 # `(0.54, 0.19, 0.80)` — pointing out of the frame rather than up — and the same
 # claim reports `63.80 codes apart, past 2.5`. A claim that survived a reading
 # placed anywhere would be no claim about the open floor at all.
+#
+# The last three drop the flag their own arm is about, which is what a flag that
+# had stopped reaching the console cell would leave. Each was run on both drivers
+# on 2026-09-05:
+#
+#   * `no-ao-flag` draws the occlusion channel with the pass left in, and the
+#     white picture is gone:
+#     `--no-ao draws 184.00/255 at the darkest pixel of the occlusion channel (74, 96), short of 254.0`;
+#   * `no-technique-flag` draws the bent picture on the shipped gather, so all
+#     three of that arm's claims go red together:
+#     `--technique hemisphere spreads 194 codes across its channels at (237, 0), past 1`,
+#     then `[188.00, 255.00, 188.00] … 67.16 codes apart, past 1.0` off the
+#     sentinel grey, and `0.00 codes apart, short of 28.0` from the block the
+#     same command draws without the flag. Lavapipe spreads 195, at (236, 5);
+#   * `no-split-flag` runs the hemisphere gather over the whole frame, so the far
+#     side of the seam is the wrong picture:
+#     `column 254 of the --split frame differs from the whole-frame bent run by 41.6076/255`
+#     — column 255 at 41.5573 on lavapipe, the worst column of the 233 rather
+#     than a column picked out.
 #
 # The other four were reddened by giving one arm another arm's flag, on a copy
 # of this script, which is what a parser that had crossed two flags would do:
@@ -155,10 +232,11 @@ fi
 
 SELF_TEST="${CRCBL_ALCOVE_VIEWS_SELF_TEST:-}"
 case "$SELF_TEST" in
-    '' | no-bent-flag | off-floor) ;;
+    '' | no-bent-flag | no-ao-flag | no-technique-flag | no-split-flag | off-floor) ;;
     *)
         echo "alcove views: CRCBL_ALCOVE_VIEWS_SELF_TEST=$SELF_TEST is not one of" >&2
-        echo "  'no-bent-flag' or 'off-floor'. A misspelt sabotage that ran the" >&2
+        echo "  'no-bent-flag', 'no-ao-flag', 'no-technique-flag'," >&2
+        echo "  'no-split-flag' or 'off-floor'. A misspelt sabotage that ran the" >&2
         echo "  ordinary check would report a green run as a red one caught." >&2
         exit 1
         ;;
@@ -242,9 +320,45 @@ if [ "$SELF_TEST" = no-bent-flag ]; then
     echo "alcove views: SELF TEST — the bent arm draws with --bent-view dropped"
 fi
 
+# **`--no-ao` is read through the occlusion channel's own picture**, because
+# that is where taking the pass out has an absolute answer: `crcbl_render::forward`
+# binds a 1x1 white where the chain would be, so the channel a flagged run draws
+# is white at every pixel. The shaded court would show the same thing as a few
+# codes at two blocks, which is a reading the driver's rounding is in.
+NO_AO_ARGS=(--ao-view --no-ao)
+if [ "$SELF_TEST" = no-ao-flag ]; then
+    NO_AO_ARGS=(--ao-view)
+    echo "alcove views: SELF TEST — the no-ao arm draws with --no-ao dropped"
+fi
+
+# **`--technique` is read through the bent picture**, because the two gathers
+# differ there by the whole of it rather than by a few codes:
+# `crates/crcbl-shaders/shaders/ssao_hemisphere.slang` sums depth comparisons
+# instead of sweeping a horizon, so it has no bisector to accumulate and writes
+# `crcbl::shaders::ssao::BENT_NORMAL_NONE` beside every scalar — one flat grey,
+# against the direction the shipped gather draws. `golden.rs`'s
+# `the_bent_direction_view_draws_the_sentinel_grey_where_no_direction_was_gathered`
+# is the same picture from the inside.
+HEMISPHERE_ARGS=(--bent-view --technique hemisphere)
+if [ "$SELF_TEST" = no-technique-flag ]; then
+    HEMISPHERE_ARGS=(--bent-view)
+    echo "alcove views: SELF TEST — the hemisphere arm draws with --technique dropped"
+fi
+
+# And the seam runs that gather against the shipped one in one frame, which is
+# the only arm here whose reading is a column rather than a pixel.
+SEAM_ARGS=(--bent-view --technique hemisphere --split)
+if [ "$SELF_TEST" = no-split-flag ]; then
+    SEAM_ARGS=(--bent-view --technique hemisphere)
+    echo "alcove views: SELF TEST — the seam arm draws with --split dropped"
+fi
+
 draw bent "${BENT_ARGS[@]}"
 draw ao --ao-view
 draw shaded
+draw no-ao "${NO_AO_ARGS[@]}"
+draw hemisphere "${HEMISPHERE_ARGS[@]}"
+draw seam "${SEAM_ARGS[@]}"
 
 # The readings, and every claim made from them.
 #
@@ -273,6 +387,32 @@ COLOUR_SPREAD_LEAST = 5
 # How far the shaded arm's open-floor block must stand off the encoded normal,
 # on the same furthest channel.
 SHADED_DRIFT_LEAST = 20.0
+# How dark the darkest pixel of the occlusion channel may be with the pass out,
+# out of 255. White everywhere, and the one code is another driver's rounding.
+NO_AO_WHITE_LEAST = 254.0
+# How dark that same pixel must be with the pass in — halfway to the reading
+# above, and what says the claim above is about a pass that darkened something.
+AO_DARKEST_MOST = 220.0
+# The byte an `Rgba8Unorm` bent channel holds where the gather reported no
+# direction: `crcbl::shaders::ssao::BENT_NORMAL_NONE`, which the bent view passes
+# through unchanged.
+BENT_NORMAL_NONE = 128
+# How far the hemisphere arm's block may sit from what that byte encodes to.
+# `golden.rs`'s SENTINEL_GREY_TOLERANCE, and its reasoning: one code is a
+# differing sRGB rounding on some other driver and nothing more.
+SENTINEL_GREY_MOST = 1.0
+# How far that arm's block must stand from the block the same command draws with
+# no `--technique` at all. `golden.rs`'s SHIPPED_OFF_SENTINEL.
+TECHNIQUE_MOVES_THE_BLOCK_BY = 28.0
+# How many pixels either side of the seam are not compared. Not slack: the blur
+# and the depth-aware upsample run over the whole target where `crcbl_render::split`
+# divides the gather alone, so those columns belong to neither reference frame.
+# `golden.rs`'s SEAM_BLEED, and it is a texel count rather than a fraction of the
+# frame.
+SEAM_BLEED = 12
+# How far a column outside that band must sit from the reference the *other* side
+# of the seam read, in mean 0-255 codes. Half the thinnest measured.
+SEAM_SIDES_DIFFER_BY = 10.0
 
 
 def read_png(path):
@@ -354,7 +494,8 @@ class Frame:
     def __init__(self, name):
         self.name = name
         self.path = f"{SHOTS}/{name}.png"
-        self.width, self.height, step, pixels = read_png(self.path)
+        self.width, self.height, self.step, self.pixels = read_png(self.path)
+        step, pixels = self.step, self.pixels
 
         total, count = [0.0, 0.0, 0.0], 0
         for y in range(max(0, CY - HALF), min(self.height - 1, CY + HALF) + 1):
@@ -368,6 +509,7 @@ class Frame:
         self.block = [sum_ / count for sum_ in total]
 
         self.spread, self.worst = 0, (0, 0)
+        self.darkest, self.darkest_at = 255.0, (0, 0)
         for y in range(self.height):
             for x in range(self.width):
                 at = (y * self.width + x) * step
@@ -375,17 +517,40 @@ class Frame:
                 here = max(r, g, b) - min(r, g, b)
                 if here > self.spread:
                     self.spread, self.worst = here, (x, y)
+                mean = (r + g + b) / 3.0
+                if mean < self.darkest:
+                    self.darkest, self.darkest_at = mean, (x, y)
 
     def readings(self):
         return "[%.2f, %.2f, %.2f]" % tuple(self.block)
+
+
+def column_difference(a, b, x):
+    """Mean absolute difference down column `x` of two frames, out of 255.
+
+    `golden.rs`'s own `column_difference` in this reader's terms, and the unit
+    its seam claim is stated in: a column either agrees with a reference frame or
+    it does not, and reducing it to one number is what makes "to the column" a
+    thing to assert."""
+    total = 0.0
+    for y in range(a.height):
+        at_a, at_b = (y * a.width + x) * a.step, (y * b.width + x) * b.step
+        mean_a = sum(a.pixels[at_a + channel] for channel in range(3)) / 3.0
+        mean_b = sum(b.pixels[at_b + channel] for channel in range(3)) / 3.0
+        total += abs(mean_a - mean_b)
+    return total / a.height
 
 
 # `+Y` — the open floor's own normal — encoded `n * 0.5 + 0.5` and put through
 # the swapchain's sRGB encode, which is `golden.rs`'s open-floor claim verbatim.
 UP = [srgb_encode(0.5), srgb_encode(1.0), srgb_encode(0.5)]
 UP_TEXT = "[%.2f, %.2f, %.2f]" % tuple(UP)
+# The sentinel byte through the same encode — the picture a gather with no
+# bisector to accumulate draws, everywhere.
+GREY = srgb_encode(BENT_NORMAL_NONE / 255.0)
 
 bent, ao, shaded = Frame("bent"), Frame("ao"), Frame("shaded")
+no_ao, hemisphere, seamed = Frame("no-ao"), Frame("hemisphere"), Frame("seam")
 
 
 def drift(frame):
@@ -442,6 +607,95 @@ if shaded.spread < COLOUR_SPREAD_LEAST:
         f" short of {COLOUR_SPREAD_LEAST} — that is a grey picture, from a run that"
         " asked for the shaded court"
     )
+
+print(
+    f"alcove views: --no-ao draws the occlusion channel at {no_ao.darkest:.2f}/255 at"
+    f" its darkest pixel {no_ao.darkest_at}, against {ao.darkest:.2f} at {ao.darkest_at}"
+    " with the pass in"
+)
+if no_ao.darkest < NO_AO_WHITE_LEAST:
+    faults.append(
+        f"--no-ao draws {no_ao.darkest:.2f}/255 at the darkest pixel of the occlusion"
+        f" channel {no_ao.darkest_at}, short of {NO_AO_WHITE_LEAST}. With the pass out the"
+        " renderer binds its 1x1 white in place of the chain, so the picture of that"
+        " channel is white at every pixel"
+    )
+if ao.darkest > AO_DARKEST_MOST:
+    faults.append(
+        f"the occlusion channel with the pass *in* reads {ao.darkest:.2f}/255 at its darkest"
+        f" pixel {ao.darkest_at}, past {AO_DARKEST_MOST} — so it is the white picture too and"
+        " the claim above is one about a pass that darkened nothing"
+    )
+
+sentinel = max(abs(hemisphere.block[at] - GREY) for at in range(3))
+moved = max(abs(hemisphere.block[at] - bent.block[at]) for at in range(3))
+print(
+    f"alcove views: --technique hemisphere draws {hemisphere.readings()} at ({CX}, {CY}),"
+    f" {sentinel:.2f} codes off the sentinel grey {GREY:.2f} and {moved:.2f} from the block"
+    f" the same command draws without it, and spreads {hemisphere.spread} at"
+    f" {hemisphere.worst}"
+)
+if hemisphere.spread > GREY_SPREAD_MOST:
+    faults.append(
+        f"--technique hemisphere spreads {hemisphere.spread} codes across its channels at"
+        f" {hemisphere.worst}, past {GREY_SPREAD_MOST}. That gather sums depth comparisons"
+        " instead of sweeping a horizon, so it has no bisector to report and its bent picture"
+        " is one flat grey"
+    )
+if sentinel > SENTINEL_GREY_MOST:
+    faults.append(
+        f"--technique hemisphere draws {hemisphere.readings()} on the open floor and the byte"
+        f" a gather with no direction writes encodes to {GREY:.2f} — {sentinel:.2f} codes"
+        f" apart, past {SENTINEL_GREY_MOST}"
+    )
+if moved < TECHNIQUE_MOVES_THE_BLOCK_BY:
+    faults.append(
+        f"--technique hemisphere draws {hemisphere.readings()} on the open floor and the same"
+        f" command with no --technique draws {bent.readings()} — {moved:.2f} codes apart,"
+        f" short of {TECHNIQUE_MOVES_THE_BLOCK_BY}. The two gathers are meant to draw"
+        " different pictures there, so the flag reached neither the console cell nor the pass"
+    )
+
+# The seam: every column of the seamed frame against **both** whole-frame runs.
+# The near side is the gather `--technique` named and the far side is what ships,
+# so each column has one reference it must equal and one it must not.
+seam_at = seamed.width // 2
+columns, worst, thinnest = 0, None, None
+for x in range(seamed.width):
+    if abs(x - seam_at) < SEAM_BLEED:
+        continue
+    near_side = x < seam_at
+    mine, theirs = (hemisphere, bent) if near_side else (bent, hemisphere)
+    residue = column_difference(seamed, mine, x)
+    if worst is None or residue > worst[0]:
+        worst = (residue, x, "left" if near_side else "right", mine.name)
+    disagreement = column_difference(seamed, theirs, x)
+    thinnest = disagreement if thinnest is None else min(thinnest, disagreement)
+    columns += 1
+if worst is None or thinnest is None:
+    faults.append(
+        f"the bleed band swallowed the whole {seamed.width}-column frame, so the seam claim"
+        " compared nothing"
+    )
+else:
+    print(
+        f"alcove views: --split compares {columns} columns either side of {seam_at} — worst"
+        f" {worst[0]:.4f} against the gather that side ran, thinnest {thinnest:.4f} against"
+        " the other one"
+    )
+    if worst[0] > 0:
+        residue, x, side, name = worst
+        faults.append(
+            f"column {x} of the --split frame differs from the whole-frame {name} run by"
+            f" {residue:.4f}/255. With the seam at the centre the {side} of the frame is meant"
+            " to be that gather and nothing else"
+        )
+    if thinnest < SEAM_SIDES_DIFFER_BY:
+        faults.append(
+            f"some column of the --split frame outside the bleed band sits {thinnest:.4f}/255"
+            f" from the gather the *other* side ran, short of {SEAM_SIDES_DIFFER_BY} — the two"
+            " sides cannot be told apart there, so the equality above proves nothing"
+        )
 
 if faults:
     # Flushed first: stderr is unbuffered and stdout is not when this is piped,

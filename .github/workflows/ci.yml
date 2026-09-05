@@ -1746,9 +1746,12 @@ jobs:
       # asked that a flagged run of the *binary* presents the picture the flag
       # names, which is exactly what a view wired to a cell the renderer no
       # longer reads would still pass. This runs alcove once per flag and reads
-      # the three frames back: the bent picture carries the encoded normal on
-      # open floor, the occlusion picture is grey at every pixel, and the
-      # unflagged one is neither.
+      # six frames back: the bent picture carries the encoded normal on open
+      # floor, the occlusion picture is grey at every pixel, the unflagged one
+      # is neither, `--no-ao` leaves that channel white everywhere,
+      # `--technique hemisphere` draws the sentinel grey a gather with no
+      # bisector reports, and `--split` runs that gather against the shipped
+      # one to the column.
       - name: Draw alcove's debug views on lavapipe
         env:
           CRCBL_GPU: vk
