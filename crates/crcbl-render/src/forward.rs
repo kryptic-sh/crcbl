@@ -680,6 +680,19 @@ const fn buckets_for(levels: usize, emit: EmitTail) -> usize {
     if emit.is_mesh() { 1 } else { levels }
 }
 
+/// Every material mode this renderer routes a draw by, and the order the bucket
+/// table repeats a mesh's levels in.
+///
+/// [`GpuMaterial::mode`](mesh::GpuMaterial::mode)'s whole range, which is why
+/// the routing is total rather than checked: a row's mode is
+/// `flags & GpuMaterial::MODE_MASK` and that mask is one bit today, so no
+/// material can carry a mode that is not in this list and no instance can
+/// scatter into a bucket that does not exist. Widening the mask means adding the
+/// mode here **and** giving it a depth pipeline in
+/// [`ForwardRenderer::depth_partitions`] in the same change — the two are the
+/// producer and the consumer of one list.
+const DEPTH_MODES: [u32; 2] = [0, mesh::GpuMaterial::ALPHA_MODE_MASK];
+
 /// The pixel budget `docs/plan/25-lod.md`'s descent compares a group's projected
 /// error against, unless a caller sets another with
 /// [`ForwardRenderer::set_lod_error_budget`].
@@ -1227,6 +1240,19 @@ pub struct ForwardRenderer {
     /// draw needs — how many instances, which indices, which vertices — is in
     /// the arguments the GPU wrote or in a table it resolves them through.
     bucket_constants: Vec<u32>,
+    /// The material mode of each bucket, in the same order — the copy the
+    /// **passes** read, where `DrawGen`'s copy is the one the GPU scatters
+    /// against.
+    ///
+    /// What it is for: the depth prepass and the shadow atlas partition their
+    /// call list on it and bind a pipeline per partition, so an opaque mesh in a
+    /// scene with a cutout in it keeps the vertex-only stage. See
+    /// [`ForwardRenderer::depth_partitions`].
+    ///
+    /// All zeroes for a scene whose materials are all opaque — every demo and
+    /// every golden in this tree — which is exactly one bucket per mesh and one
+    /// partition, byte for byte the stream they recorded before modes existed.
+    bucket_modes: Vec<u32>,
 
     // The instance array, and the objects' places in it. Nothing here is
     // rewritten per frame: the pool uploads what a caller changed and nothing
@@ -1369,6 +1395,11 @@ pub struct ForwardRenderer {
     /// The bucket each level of each description mesh draws through, finest
     /// first, in [`SceneDesc::meshes`] order — and empty on the mesh path. See
     /// [`ForwardRenderer::level_buckets`].
+    ///
+    /// **The run for the scene's first material mode**, which is `OPAQUE`
+    /// wherever the scene has an opaque material at all: a mesh's buckets are
+    /// its levels once per mode the scene holds, and this names the first of
+    /// those runs. See [`ForwardRenderer::bucket_modes`].
     mesh_level_buckets: Vec<Vec<u32>>,
     /// One buffer per frame in flight holding the cut the descent chose, or
     /// empty where there is no amplification stage to choose one. See
@@ -1631,16 +1662,16 @@ pub struct ForwardRenderer {
     /// geometry stage as [`ForwardRenderer::mesh_pipeline`] where it comes from
     /// a mesh one, and no fragment stage in either case.
     shadow_pipeline: GraphicsPipelineHandle,
-    /// The same two passes' pipeline for a frame whose material table cuts an
-    /// alpha mask: `vertexMain` and `depthMaskedFragmentMain` — see
+    /// The same two passes' pipeline for the buckets whose material mode cuts
+    /// an alpha mask: `vertexMain` and `depthMaskedFragmentMain` — see
     /// [`MeshModules::depth_masked_pipeline`].
     ///
     /// Built on every scene rather than only on one that has a masked material,
     /// for [`ForwardRenderer::rsm_pipeline`]'s reason: the modules are released
     /// inside `build` and a pipeline built later would need them back, which is
-    /// a second shader compilation for a field a `set` on the material table can
-    /// move. Which of the two a frame *binds* is
-    /// [`ForwardRenderer::depth_only_pipeline`].
+    /// a second shader compilation. Which buckets are drawn with it is
+    /// [`ForwardRenderer::depth_partitions`], and it is a **partition of one
+    /// frame's draws** rather than a choice for the whole frame.
     depth_masked_pipeline: GraphicsPipelineHandle,
     /// The pipeline that resets one tile of the atlas before it is redrawn, on a
     /// frame that is keeping some of the others — see
@@ -3594,17 +3625,51 @@ impl ForwardRenderer {
         // *first* bucket whose mesh id matches, so a second bucket naming one
         // mesh would never draw anything at all.
         //
-        // One bucket per mesh, except that a DAG is one bucket where an
-        // amplification stage picks its cut per cluster and one per level where
-        // the cull pass picks a uniform one — see [`buckets_for`].
-        let mut bucket_meshes: Vec<u32> = Vec::with_capacity(residents.len());
+        // One bucket per mesh, except for two things. A DAG is one bucket where
+        // an amplification stage picks its cut per cluster and one per level
+        // where the cull pass picks a uniform one — see [`buckets_for`]. And the
+        // whole run is repeated once per **material mode** the scene holds, so
+        // an instance's mode picks a bucket exactly as its mesh does; see
+        // [`ForwardRenderer::bucket_modes`].
+        //
+        // **Once per mode the scene holds, not once per mode that exists.** A
+        // scene whose materials are all opaque gets exactly the table it always
+        // had — same length, same order, same bytes — so the twin costs nothing
+        // where nothing is masked, which is every demo and every golden here. A
+        // bucket is not free: `DrawGen::bucket_base` gives each one a whole
+        // instance capacity of `u32` in the scattered runs.
+        let scene_modes: Vec<u32> = {
+            let held: Vec<u32> = DEPTH_MODES
+                .into_iter()
+                .filter(|mode| {
+                    scene
+                        .materials
+                        .iter()
+                        .any(|material| material.mode() == *mode)
+                })
+                .collect();
+            // A description with no materials at all still needs a bucket per
+            // mesh, or nothing it holds can be drawn.
+            if held.is_empty() {
+                vec![DEPTH_MODES[0]]
+            } else {
+                held
+            }
+        };
+        let mut bucket_meshes: Vec<u32> = Vec::with_capacity(residents.len() * scene_modes.len());
+        // The mode each of those buckets draws, in step with it.
+        let mut bucket_modes: Vec<u32> = Vec::with_capacity(bucket_meshes.capacity());
         // Where each description mesh's buckets start, so the tables below can
         // be filled in mesh by mesh rather than by re-deriving the arithmetic.
+        // A mesh's run is its levels once per mode, mode by mode.
         let mut bucket_bases: Vec<usize> = Vec::with_capacity(residents.len());
         for resident in &residents {
             bucket_bases.push(bucket_meshes.len());
-            bucket_meshes
-                .extend_from_slice(&resident.levels[..buckets_for(resident.levels.len(), emit)]);
+            let levels = &resident.levels[..buckets_for(resident.levels.len(), emit)];
+            for mode in &scene_modes {
+                bucket_meshes.extend_from_slice(levels);
+                bucket_modes.extend(std::iter::repeat_n(*mode, levels.len()));
+            }
         }
         let bucket_count = u32::try_from(bucket_meshes.len())
             .unwrap_or_else(|_| unreachable!("a table of a few buckets"));
@@ -3761,15 +3826,21 @@ impl ForwardRenderer {
             mesh_clusters.reserve(residents.len());
             for (index, resident) in residents.iter().enumerate() {
                 let entry = entry_bases[index];
-                let bucket = bucket_bases[index];
-                bucket_cluster_bases[bucket] = range(entry).base;
-                bucket_clusters[bucket] = (entry..entry + resident.levels.len())
+                let base = range(entry).base;
+                let count: u32 = (entry..entry + resident.levels.len())
                     .map(|entry| range(entry).count)
                     .sum();
-                mesh_clusters.push(ClusterRange {
-                    base: bucket_cluster_bases[bucket],
-                    count: bucket_clusters[bucket],
-                });
+                // **Every one of this mesh's buckets, not only the first.** A
+                // mode twin draws the same geometry, so it dispatches over the
+                // same clusters; a twin left at zero launches no workgroup and
+                // its instances vanish from the frame. One bucket per mode here,
+                // because the mesh path takes `buckets_for` of one.
+                for slot in 0..scene_modes.len() {
+                    let bucket = bucket_bases[index] + slot;
+                    bucket_cluster_bases[bucket] = base;
+                    bucket_clusters[bucket] = count;
+                }
+                mesh_clusters.push(ClusterRange { base, count });
             }
 
             rollback.clusters = Some(clusters);
@@ -3783,6 +3854,7 @@ impl ForwardRenderer {
                 instances: &instance_buffers,
                 mesh_table,
                 bucket_meshes: &bucket_meshes,
+                bucket_modes: &bucket_modes,
                 bucket_clusters: &bucket_clusters,
                 mesh_levels: &mesh_levels,
                 level_groups: &level_groups,
@@ -4690,6 +4762,7 @@ impl ForwardRenderer {
                     instances: &instance_buffers,
                     mesh_table,
                     bucket_meshes: &bucket_meshes,
+                    bucket_modes: &bucket_modes,
                     bucket_clusters: &bucket_clusters,
                     mesh_levels: &mesh_levels,
                     level_groups: &level_groups,
@@ -5278,6 +5351,7 @@ impl ForwardRenderer {
                 .take()
                 .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
             bucket_constants,
+            bucket_modes,
             instances: rollback
                 .instances
                 .take()
@@ -7548,45 +7622,51 @@ impl ForwardRenderer {
         self.probe_volume
     }
 
-    /// Which pipeline this frame's depth prepass and shadow atlas are recorded
-    /// with: the vertex-only one, or the one that can cut an alpha mask.
+    /// `draws` split by material mode, each partition under the depth-only
+    /// pipeline that honours its mode — what the depth prepass and every shadow
+    /// view record instead of one call list under one pipeline.
     ///
-    /// **The question is asked of the material table and not of the scene**, so
-    /// it is answered afresh for every frame — a material inserted or rewritten
-    /// between frames moves the choice with it. See
-    /// [`MaterialTable::masks_alpha`].
+    /// **The point of the whole arrangement.** A bucket's mode is fixed when the
+    /// table is built and an instance is scattered into the bucket matching its
+    /// mesh *and* its own mode, so the opaque buckets can be drawn with
+    /// [`shadow_pipeline`](Self::shadow_pipeline) — `depthVertexMain` and no
+    /// fragment stage — while the masked ones are drawn with
+    /// [`depth_masked_pipeline`](Self::depth_masked_pipeline), which can
+    /// `discard`. A scene with one cutout in it therefore pays a fragment stage
+    /// for that mesh's draws and for no others; before this it paid for the
+    /// whole frame, which on lavapipe roughly doubled the prepass and added two
+    /// thirds to the shadow pass.
     ///
-    /// # Why the whole frame moves, and not the masked draws alone
+    /// **An empty partition is dropped**, so a scene whose materials are all
+    /// opaque records exactly one partition under exactly the pipeline it always
+    /// bound: same binds, same draws, same order.
     ///
-    /// The finer arrangement would be a bucket per alpha mode, so that a mesh
-    /// with nothing masked in it kept the vertex-only stage in a scene that has
-    /// a cutout somewhere else. Three things in the code as it stands make that
-    /// its own slice rather than a variation of this one, and they are recorded
-    /// in `docs/backlog.md`:
-    ///
-    /// * `draw_gen.slang`'s scatter takes the **first** bucket whose mesh id
-    ///   matches and stops, so a second bucket naming one mesh never draws — the
-    ///   routing key would have to grow an alpha mode, which is a per-instance
-    ///   input that pass does not read today.
-    /// * the bucket table is fixed when the renderer is built, where instances
-    ///   arrive and leave afterwards and a material's mode can be rewritten, so
-    ///   which meshes want a masked twin is not knowable when the table is
-    ///   written.
-    /// * a bucket costs a whole instance capacity of `u32` in the scattered runs
-    ///   — see [`DrawGen::bucket_base`](crate::draw_gen::DrawGen::bucket_base) —
-    ///   so twinning the table doubles that buffer.
-    ///
-    /// What this arrangement costs instead is stated rather than hidden: in a
-    /// scene that masks anything, the opaque surfaces in it pay a fragment stage
-    /// in the two depth passes as well. A scene that masks nothing — which is
-    /// every demo and every golden in this tree — pays nothing at all, and that
-    /// is the claim the pass prices assert.
-    fn depth_only_pipeline(&self) -> GraphicsPipelineHandle {
-        if self.materials.masks_alpha() {
-            self.depth_masked_pipeline
-        } else {
-            self.shadow_pipeline
-        }
+    /// The two pipelines cover [`DEPTH_MODES`] exhaustively, which is what makes
+    /// the split total — every bucket lands in one partition, and no bucket's
+    /// draws are dropped. The colour pass and the reflective shadow map take no
+    /// partition at all: their pipelines have a fragment stage either way and
+    /// cut the mask inside it.
+    fn depth_partitions(&self, draws: &BucketDraws) -> Vec<BucketDraws> {
+        [
+            (DEPTH_MODES[0], self.shadow_pipeline),
+            (DEPTH_MODES[1], self.depth_masked_pipeline),
+        ]
+        .into_iter()
+        .filter_map(|(mode, pipeline)| {
+            let calls: Vec<(u32, u64, u64, u64)> = draws
+                .calls
+                .iter()
+                .zip(&self.bucket_modes)
+                .filter(|(_, bucket)| **bucket == mode)
+                .map(|(call, _)| *call)
+                .collect();
+            (!calls.is_empty()).then(|| BucketDraws {
+                pipeline,
+                calls,
+                ..draws.clone()
+            })
+        })
+        .collect()
     }
 
     /// Resolves a description's mesh and material indices into the table ids the
@@ -7600,8 +7680,26 @@ impl ForwardRenderer {
             transform: desc.transform.to_cols_array(),
             mesh: self.mesh_ids[desc.mesh],
             material: self.material_ids[desc.material],
+            flags: self.material_mode_bits(desc.material),
             ..mesh::GpuInstance::default()
         }
+    }
+
+    /// The material mode of description material `material`, in the bits an
+    /// instance record carries it in.
+    ///
+    /// **Read out of the table rather than out of the description**, because the
+    /// table is what a `set` would move and the row is what the shader shades
+    /// through. It is the other half of the record's routing key: `draw_gen`
+    /// buckets an instance by [`mesh`](mesh::GpuInstance::mesh) and by this,
+    /// which is how a masked material costs a fragment stage in the depth passes
+    /// for its own mesh alone.
+    ///
+    /// The mode is captured **here**, when the record is written — see
+    /// [`GpuInstance::MATERIAL_MODE_SHIFT`](mesh::GpuInstance::MATERIAL_MODE_SHIFT)
+    /// for what that means for a material rewritten afterwards.
+    fn material_mode_bits(&self, material: usize) -> u32 {
+        self.materials.mode(self.material_ids[material]) << mesh::GpuInstance::MATERIAL_MODE_SHIFT
     }
 
     // --- skinning: reserving the region, placing the object, ordering the
@@ -7789,7 +7887,10 @@ impl ForwardRenderer {
             transform: desc.transform.to_cols_array(),
             mesh: desc.mesh.mesh_id(),
             material: self.material_ids[desc.material],
-            flags: mesh::GpuInstance::BASE_VERTEX_OVERRIDE,
+            // The override bit **and** the material mode: a skinned instance is
+            // routed by the same key as a rigid one, so a skinned cutout lands
+            // in its mesh's masked bucket rather than in the opaque twin.
+            flags: mesh::GpuInstance::BASE_VERTEX_OVERRIDE | self.material_mode_bits(desc.material),
             base_vertex,
             // At rest, which is what a record this call writes has to be: the
             // object has not been drawn out of this region yet, so the other
@@ -8057,6 +8158,15 @@ impl ForwardRenderer {
     /// level is chosen per cluster instead — see
     /// [`cluster_selection`](Self::cluster_selection), which is that path's
     /// observable.
+    ///
+    /// **These are the buckets of the scene's first material mode** — `OPAQUE`
+    /// in any scene that has an opaque material, since a mesh's buckets are its
+    /// levels once per mode the scene holds and the modes are laid down in
+    /// `DEPTH_MODES` order. An instance of another mode selects the same level
+    /// and lands in that level's bucket in its own mode's run, which this does
+    /// not name; every scene in this tree that reads this accessor is all
+    /// opaque, so "exactly one of these has a non-zero instance count" holds for
+    /// them as it always did.
     ///
     /// # Panics
     ///
@@ -8704,7 +8814,7 @@ impl ForwardRenderer {
         let frame = self.frame;
         // Resolved before the gather takes its mutable borrow of `self`, and it
         // is the one thing below that has to ask the renderer a question.
-        let depth_only = self.depth_only_pipeline();
+        let prepass_partitions = self.depth_partitions(&bucket_draws);
         if let Some((gather, images)) = self.probe_gather.as_mut().zip(rsm_images) {
             gather.add_pass(graph, frame, images, probe_visibility_view, probe_table);
         }
@@ -8718,9 +8828,10 @@ impl ForwardRenderer {
         // scene depth prepass — no new pipeline and no new shader. On a frame
         // whose material table masks nothing it is `depthVertexMain` and no
         // fragment stage, which is why the split-stream vertex pool pays for this
-        // pass as well as for the atlas; on a frame that masks something it is
-        // the cutout twin, and `depth_only_pipeline` is where that choice and its
-        // price are argued.
+        // pass as well as for the atlas; a scene that masks something records its
+        // masked buckets under the cutout twin and its opaque ones under this
+        // one, and `depth_partitions` is where that split and its price are
+        // argued.
         //
         // **Stored, unlike the depth the forward pass writes.** This is what the
         // occlusion pass samples, and it is the only reason
@@ -8748,10 +8859,6 @@ impl ForwardRenderer {
         // holes are not subtle, and the render-e2e goldens are what would catch
         // them on a rasteriser this machine does not have.
         let depth_group = self.prepass_groups[self.frame];
-        let prepass_draws = BucketDraws {
-            pipeline: depth_only,
-            ..bucket_draws.clone()
-        };
         // The prepass's own cluster counter — see
         // [`ForwardRenderer::prepass_stats`]. Imported in the state the last frame
         // on this slot left it in, on `cluster-selection`'s terms exactly: a
@@ -8819,8 +8926,13 @@ impl ForwardRenderer {
         };
         prepass.execute(move |ctx| {
             let encoder = ctx.encoder();
-            prepass_draws.open(encoder);
-            prepass_draws.record(encoder, depth_group, &generated);
+            // One `open` per partition and its own buckets under it: the whole
+            // pass is still one indirect call per bucket, drawn under the
+            // pipeline that bucket's mode asked for.
+            for partition in &prepass_partitions {
+                partition.open(encoder);
+                partition.record(encoder, depth_group, &generated);
+            }
         });
 
         let frame = self.frame;
@@ -9727,7 +9839,9 @@ impl ForwardRenderer {
             })
             .collect();
         let bucket_draws = BucketDraws {
-            pipeline: self.depth_only_pipeline(),
+            // Replaced per partition below; the field is what the tile clears
+            // and the reflective shadow map inherit, and neither binds it.
+            pipeline: self.shadow_pipeline,
             layout: self.mesh_pipeline_layout,
             indices: self.pool.index_buffer(),
             emit: self.emit,
@@ -9752,6 +9866,11 @@ impl ForwardRenderer {
         // plays exactly this trick with the camera's. Cloned before the pass
         // body takes the original.
         let bucket_calls = bucket_draws.clone();
+        // The atlas's own split by material mode: an opaque bucket's tile is
+        // drawn with no fragment stage in a scene that has a cutout in it. Every
+        // view draws every partition, so the recorded count below is unchanged —
+        // one call per bucket per view, under a pipeline per mode.
+        let tile_partitions = self.depth_partitions(&bucket_draws);
 
         // Counted off the two loops the body below runs, before it takes them:
         // one call per bucket per occupied view. `ForwardRenderer::counters` is
@@ -9809,10 +9928,12 @@ impl ForwardRenderer {
                     encoder.draw(0..TILE_CLEAR_VERTICES, 0..1);
                 }
             }
-            bucket_draws.open(encoder);
-            for (view, tile, cull) in &views {
-                set_shadow_tile(encoder, *tile);
-                bucket_draws.record(encoder, groups[*view], &generated[*cull].1);
+            for partition in &tile_partitions {
+                partition.open(encoder);
+                for (view, tile, cull) in &views {
+                    set_shadow_tile(encoder, *tile);
+                    partition.record(encoder, groups[*view], &generated[*cull].1);
+                }
             }
         });
 
@@ -12384,11 +12505,12 @@ impl MeshModules {
     /// mesh path already emits `mesh.slang`'s `VertexOutput`, so the mask is
     /// compared in one place rather than once per path.
     ///
-    /// **Which of the two a frame is drawn with is
-    /// [`MaterialTable::masks_alpha`]**, asked afresh each frame — see
-    /// [`ForwardRenderer::depth_only_pipeline`]. A frame whose table holds
-    /// nothing masked is recorded through the pipeline above, with no fragment
-    /// stage anywhere, and costs exactly what it cost before this one existed.
+    /// **Which draws are recorded with it is the bucket's own material mode**,
+    /// not the frame's — see [`ForwardRenderer::depth_partitions`]. A scene that
+    /// masks nothing has no bucket in this partition, records through the
+    /// pipeline above with no fragment stage anywhere, and costs exactly what it
+    /// cost before this one existed; a scene that masks one mesh pays the
+    /// fragment stage for that mesh's draws alone.
     fn depth_masked_pipeline(
         &self,
         device: &dyn Device,
@@ -14245,6 +14367,149 @@ mod tests {
              copying a run back uses that accessor and the shader uses this block"
         );
         renderer.destroy(device.as_ref());
+    }
+
+    /// **An instance's record carries its material's mode**, in the bits
+    /// `draw_gen.slang` routes by.
+    ///
+    /// The host half of the per-bucket split, and the half no picture and no
+    /// pipeline bind can show: the bucket table can be perfectly twinned and
+    /// every partition bound to the right pipeline while every instance still
+    /// answers mode zero, in which case the masked twins are empty, the cutout
+    /// partition draws nothing, and a cutout casts a solid shadow. The record is
+    /// where that is decided.
+    ///
+    /// Both directions, so the check is shown to discriminate: the opaque
+    /// instance's mode bits have to be **clear**, or a writer that set them
+    /// unconditionally would satisfy a one-sided assertion. And the two records
+    /// are asserted to differ in `flags` and nothing else, so this is about the
+    /// mode rather than about two unrelated instances.
+    #[test]
+    fn an_instances_record_carries_its_materials_mode() {
+        let masked_scene = {
+            let mut scene = crate::scene::demo();
+            scene.materials[DEMO_TINTED].flags = crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK;
+            scene
+        };
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, &masked_scene)
+                .expect("the null backend accepts the demo description");
+        let at = Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0));
+        let opaque = place_demo(&mut renderer, DEMO_PYRAMID, DEMO_UNTINTED, at);
+        let masked = place_demo(&mut renderer, DEMO_PYRAMID, DEMO_TINTED, at);
+
+        let record = |handle: InstanceHandle| {
+            renderer
+                .instances
+                .get(handle)
+                .expect("the instance was inserted and is live")
+        };
+        let opaque = record(opaque);
+        let masked = record(masked);
+        assert_eq!(
+            opaque.material_mode(),
+            0,
+            "an opaque material's instance carries no mode bits, or every instance in the tree \
+             routes to a cutout bucket"
+        );
+        assert_eq!(
+            masked.material_mode(),
+            crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK,
+            "and a masked material's instance carries its mode, or it scatters into the opaque \
+             twin and the depth passes write its full silhouette"
+        );
+        assert_eq!(
+            mesh::GpuInstance {
+                flags: opaque.flags,
+                material: opaque.material,
+                ..masked
+            },
+            opaque,
+            "the two records differ in the mode bits and the material id and in nothing else"
+        );
+
+        renderer.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **A scene whose materials are all opaque gets exactly the bucket table
+    /// it had before material modes existed** — one bucket per (mesh, level),
+    /// and no twin.
+    ///
+    /// The zero-cost half of the per-bucket split, and the one a null device can
+    /// state exactly. A bucket is not free: `DrawGen::bucket_base` gives each one
+    /// a whole instance capacity of `u32` in the scattered runs, and every pass
+    /// records one indirect call per bucket per view. So a table that twinned
+    /// unconditionally would double the runs buffer and the recorded draws of
+    /// every demo and every golden in this tree, none of which mask anything.
+    ///
+    /// The oracle is [`level_buckets`](ForwardRenderer::level_buckets), which is
+    /// built from a mesh's own level count rather than from the table's length —
+    /// so a build that emitted a twin per mesh has more buckets than levels and
+    /// this says so. And the masked twin of the same scene is asserted to be
+    /// **exactly twice** as long, or the comparison would pass on a renderer
+    /// that had stopped twinning at all.
+    #[test]
+    fn an_all_opaque_scene_keeps_one_bucket_per_mesh_level() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        // The uniform-cut path, where a DAG is one bucket per level. The mesh
+        // path folds a DAG into one bucket and reports no level buckets at all,
+        // which would leave the oracle below empty.
+        assert!(
+            !renderer.emit.is_mesh(),
+            "this preset built a mesh-shader path, whose level buckets are empty"
+        );
+        let levels: usize = (0..crate::scene::demo().meshes.len())
+            .map(|mesh| renderer.level_buckets(mesh).len())
+            .sum();
+        assert!(levels > 0, "the demo has meshes, so it has levels");
+        assert_eq!(
+            renderer.bucket_constants.len(),
+            levels,
+            "an all-opaque scene's bucket table is one bucket per (mesh, level) and no mode \
+             twin: {levels} level(s) against {} bucket(s)",
+            renderer.bucket_constants.len()
+        );
+        assert_eq!(
+            renderer.bucket_modes,
+            vec![0; levels],
+            "and every one of them draws the OPAQUE mode"
+        );
+        renderer.destroy(device);
+        recorder.assert_valid();
+
+        let masked_scene = {
+            let mut scene = crate::scene::demo();
+            scene.materials[DEMO_UNTINTED].flags =
+                crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK;
+            scene
+        };
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let masked =
+            ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, &masked_scene)
+                .expect("the null backend accepts the demo description");
+        assert_eq!(
+            masked.bucket_constants.len(),
+            2 * levels,
+            "a scene holding both modes gets each mesh's levels twice, or the assertion above \
+             is about a renderer that never twins"
+        );
+        assert_eq!(
+            masked
+                .bucket_modes
+                .iter()
+                .filter(|mode| **mode == crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK)
+                .count(),
+            levels,
+            "half of them masked"
+        );
+        masked.destroy(device);
+        recorder.assert_valid();
     }
 
     /// **The two pyramids differ in exactly one field, and it is the material
@@ -19575,30 +19840,35 @@ mod tests {
         recorder.assert_valid();
     }
 
-    /// **A masked material moves the depth prepass and the shadow atlas onto the
-    /// cutout pipeline, and moves nothing else.**
+    /// **A masked material moves that mesh's depth draws onto the cutout
+    /// pipeline, and moves nothing else.**
     ///
-    /// The mechanism is which pipeline handle the recorded stream binds — the
-    /// wireframe test's observable, for the same reason: a field saying
-    /// [`MaterialTable::masks_alpha`] answered `true` would prove the flag was
-    /// read, not that the frame changed.
+    /// The mechanism is which pipeline handle the recorded stream binds and
+    /// which buckets' indirect calls follow each bind — the wireframe test's
+    /// observable, for the same reason: a field saying a mode was read would
+    /// prove the flag was read, not that the frame changed.
     ///
-    /// Three claims, and each rules out a different way of passing wrongly:
+    /// Four claims, and each rules out a different way of passing wrongly:
     ///
-    /// * a scene with nothing masked binds the vertex-only pipeline and **never**
-    ///   the cutout one, which is the "an opaque frame costs what it always
-    ///   did" claim at the level a null device can see it;
-    /// * one masked row swaps every bind of the first for the second — both
-    ///   depth passes, not one of them;
-    /// * and substituting one handle for the other makes the two streams
+    /// * a scene with nothing masked binds the vertex-only pipeline and
+    ///   **never** the cutout one, which is the "an opaque frame costs what it
+    ///   always did" claim at the level a null device can see it;
+    /// * a scene with one masked row binds **both** in the depth prepass and
+    ///   both in the shadow atlas — a per-frame choice binds one or the other,
+    ///   never the pair;
+    /// * the calls following each bind are exactly that mode's buckets, in
+    ///   bucket order, read off the argument offsets the draws name. A split
+    ///   that bound both pipelines and drew every bucket under each would
+    ///   satisfy the claim above and double the frame's draws;
+    /// * and folding the two handles together — then collapsing the runs of
+    ///   equal binds the fold creates — leaves the two frames' bind streams
     ///   **equal**, so the colour pass, the tile clears and the reflective
     ///   shadow map are all where they were. A change that had also moved the
-    ///   colour pass would satisfy the first two and fail this.
+    ///   colour pass would satisfy the first three and fail this.
     ///
-    /// The two scenes differ in one flags word and nothing else, so any
-    /// difference in the stream is that word's.
+    /// The two scenes differ in one flags word and nothing else.
     #[test]
-    fn a_masked_material_moves_the_depth_passes_onto_the_cutout_pipeline() {
+    fn a_masked_material_moves_its_own_meshs_depth_draws_onto_the_cutout_pipeline() {
         use crcbl_hal::null::Command;
 
         // The occlusion blur count is a process-global console variable and a
@@ -19614,94 +19884,213 @@ mod tests {
             scene
         };
 
-        // One frame each, from two renderers rather than two frames from one:
-        // the choice is made per frame, but a table cannot be un-masked without
-        // an API for it, and two builds keep the frames' shadow-atlas state
-        // identical — both are a first frame.
-        // Per scene: how often the cutout pipeline was bound, how often the
-        // vertex-only one was, and the whole bind stream with the two folded
-        // together — which is what makes the streams from two devices
-        // comparable at all, since only *which of the two* is meant to differ.
-        let bound =
-            |scene: &crate::scene::SceneDesc<'_>| -> (usize, usize, Vec<GraphicsPipelineHandle>) {
-                let (recorder, device, queue) = open();
-                let device = device.as_ref();
-                let mut renderer =
-                    ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, scene)
-                        .expect("the null backend accepts the demo description");
-                place_cube(&mut renderer, Mat4::IDENTITY);
-                let imported = swapchain_image(device);
-                let mut pool = crate::TransientPool::new();
-                renderer
-                    .begin_frame(
-                        device,
-                        &Camera::default(),
-                        &DirectionalLight::default(),
-                        (64, 48),
-                    )
-                    .expect("write");
-                let mut graph = crate::RenderGraph::new(queue);
-                let target = graph.import_image("target", imported);
-                renderer.add_passes(&mut graph, &pool, target, (64, 48));
-                let compiled = graph.compile(&pool).expect("a legal frame");
-                let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
-                    label: Some("alpha mask lap"),
-                    queue,
-                });
-                compiled
-                    .execute(device, &mut pool, encoder.as_mut(), None)
-                    .expect("the graph executed");
-                encoder.finish().expect("recording succeeded");
-                let plain = renderer.shadow_pipeline;
-                let cutout = renderer.depth_masked_pipeline;
-                assert_ne!(
-                    plain, cutout,
-                    "the two depth pipelines have to be two objects, or nothing below discriminates"
-                );
-                let binds: Vec<GraphicsPipelineHandle> = recorder
-                    .commands()
-                    .iter()
-                    .filter_map(|command| match command {
-                        Command::BindGraphicsPipeline(handle) => Some(*handle),
-                        _ => None,
-                    })
-                    .collect();
-                let cutouts = binds.iter().filter(|handle| **handle == cutout).count();
-                let plains = binds.iter().filter(|handle| **handle == plain).count();
-                let folded = binds
-                    .into_iter()
-                    .map(|handle| if handle == cutout { plain } else { handle })
-                    .collect();
-                renderer.destroy(device);
-                recorder.assert_valid();
-                (cutouts, plains, folded)
-            };
+        /// What one scene's frame reveals: the bucket count and each bucket's
+        /// mode, how often each depth pipeline was bound, the (pipeline, bucket)
+        /// pairs the depth prepass and the shadow atlas recorded, and the whole
+        /// bind stream with the two depth handles folded into one.
+        struct Recorded {
+            modes: Vec<u32>,
+            cutouts: usize,
+            plains: usize,
+            prepass: Vec<(bool, u32)>,
+            atlas: Vec<(bool, u32)>,
+            folded: Vec<GraphicsPipelineHandle>,
+        }
 
-        let (opaque_cutouts, opaque_plains, opaque_stream) = bound(&crate::scene::demo());
-        let (masked_cutouts, masked_plains, masked_stream) = bound(&masked_scene);
+        // One frame each, from two renderers rather than two frames from one:
+        // a bucket table is fixed at build, and two builds keep the frames'
+        // shadow-atlas state identical — both are a first frame.
+        let bound = |scene: &crate::scene::SceneDesc<'_>| -> Recorded {
+            let (recorder, device, queue) = open();
+            let device = device.as_ref();
+            let mut renderer =
+                ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, scene)
+                    .expect("the null backend accepts the demo description");
+            place_cube(&mut renderer, Mat4::IDENTITY);
+            let imported = swapchain_image(device);
+            let mut pool = crate::TransientPool::new();
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    (64, 48),
+                )
+                .expect("write");
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, &pool, target, (64, 48));
+            let compiled = graph.compile(&pool).expect("a legal frame");
+            let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("alpha mask lap"),
+                queue,
+            });
+            compiled
+                .execute(device, &mut pool, encoder.as_mut(), None)
+                .expect("the graph executed");
+            encoder.finish().expect("recording succeeded");
+            let plain = renderer.shadow_pipeline;
+            let cutout = renderer.depth_masked_pipeline;
+            assert_ne!(
+                plain, cutout,
+                "the two depth pipelines have to be two objects, or nothing below discriminates"
+            );
+            // Which bucket a draw is, recovered from the argument offset it
+            // names — the offsets are the renderer's own accessor, so a call
+            // pointing at the wrong bucket has no entry here at all.
+            let bucket_of = |args_offset: u64| -> u32 {
+                (0..u32::try_from(renderer.bucket_constants.len()).expect("a few buckets"))
+                    .find(|bucket| renderer.draws.args_offset(*bucket) == args_offset)
+                    .unwrap_or_else(|| {
+                        panic!("a draw read its arguments at {args_offset}, which is no bucket's")
+                    })
+            };
+            // Per depth pass: the pipeline in force at each indirect call and
+            // the bucket that call drew, in the order they were recorded.
+            let pass_calls = |label: &str| -> Vec<(bool, u32)> {
+                let mut current = None;
+                let mut out = Vec::new();
+                for command in commands_in_pass(&recorder, label) {
+                    match command {
+                        Command::BindGraphicsPipeline(handle) => current = Some(handle),
+                        Command::DrawIndexedIndirectCount(draw) => {
+                            let handle = current.expect("a draw follows a pipeline bind");
+                            assert!(
+                                handle == plain || handle == cutout,
+                                "a depth pass drew under a pipeline that is neither depth one"
+                            );
+                            out.push((handle == cutout, bucket_of(draw.args_offset)));
+                        }
+                        _ => {}
+                    }
+                }
+                out
+            };
+            let prepass = pass_calls("depth-prepass");
+            let atlas = pass_calls("shadow");
+            let binds: Vec<GraphicsPipelineHandle> = recorder
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    Command::BindGraphicsPipeline(handle) => Some(*handle),
+                    _ => None,
+                })
+                .collect();
+            let cutouts = binds.iter().filter(|handle| **handle == cutout).count();
+            let plains = binds.iter().filter(|handle| **handle == plain).count();
+            let mut folded: Vec<GraphicsPipelineHandle> = Vec::with_capacity(binds.len());
+            for handle in binds {
+                let handle = if handle == cutout { plain } else { handle };
+                // The fold turns the masked frame's `plain, cutout` pair into
+                // `plain, plain`; collapsing a run of equal binds is what makes
+                // the two streams comparable without hiding a bind of anything
+                // else, since no pass in either frame binds two *different*
+                // pipelines that the fold could bring together.
+                if folded.last() != Some(&handle) {
+                    folded.push(handle);
+                }
+            }
+            let modes = renderer.bucket_modes.clone();
+            renderer.destroy(device);
+            recorder.assert_valid();
+            Recorded {
+                modes,
+                cutouts,
+                plains,
+                prepass,
+                atlas,
+                folded,
+            }
+        };
+
+        let opaque = bound(&crate::scene::demo());
+        let masked = bound(&masked_scene);
 
         assert_eq!(
-            opaque_cutouts, 0,
+            opaque.cutouts, 0,
             "a scene with nothing masked must never bind the cutout pipeline"
         );
         assert!(
-            opaque_plains > 0,
+            opaque.plains > 0,
             "a scene with nothing masked must bind the vertex-only pipeline, or the assertion \
              above is about a frame with no depth pass in it"
         );
-        assert_eq!(
-            masked_plains, 0,
-            "a masked scene must bind the vertex-only pipeline nowhere: a depth pass left on it \
-             writes a full silhouette"
+        assert!(
+            opaque.modes.iter().all(|mode| *mode == 0),
+            "and every one of its buckets is opaque: {:?}",
+            opaque.modes
         );
         assert_eq!(
-            masked_cutouts, opaque_plains,
-            "the cutout pipeline has to be bound exactly as often as the vertex-only one was — \
-             both depth passes moved, not one of them"
+            opaque.prepass.iter().filter(|(cutout, _)| *cutout).count(),
+            0,
+            "so no opaque draw is recorded under the cutout pipeline"
+        );
+
+        assert!(
+            masked.cutouts > 0 && masked.plains > 0,
+            "a masked scene must bind **both** depth pipelines — {} cutout and {} plain — or \
+             the choice is still per frame",
+            masked.cutouts,
+            masked.plains
+        );
+        // What each depth pass should have recorded: every opaque bucket under
+        // the plain pipeline in bucket order, then every masked one under the
+        // cutout, which is the partition order `depth_partitions` lays down.
+        let want: Vec<(bool, u32)> = [false, true]
+            .into_iter()
+            .flat_map(|cutout| {
+                masked
+                    .modes
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, mode)| {
+                        (**mode == crcbl_shaders::mesh::GpuMaterial::ALPHA_MODE_MASK) == cutout
+                    })
+                    .map(move |(bucket, _)| (cutout, u32::try_from(bucket).expect("a few buckets")))
+            })
+            .collect();
+        assert!(
+            want.iter().any(|(cutout, _)| *cutout) && want.iter().any(|(cutout, _)| !*cutout),
+            "the masked demo has to hold buckets of both modes, or this compares one partition \
+             against itself: {:?}",
+            masked.modes
         );
         assert_eq!(
-            masked_stream, opaque_stream,
-            "the frame gained or lost a pipeline bind beyond the two depth passes'"
+            masked.prepass, want,
+            "the depth prepass must record each bucket once, under the pipeline its own mode \
+             asked for"
+        );
+        // The atlas draws every bucket once per occupied view, and the
+        // partition is **outside** the view loop — one pipeline bind covers
+        // every view of that mode — so its stream is each partition's bucket
+        // list repeated once per view.
+        let views = masked.atlas.len() / want.len();
+        assert!(
+            views > 0 && masked.atlas.len() % want.len() == 0,
+            "the shadow atlas recorded {} calls over {} buckets, which is not a whole number \
+             of views",
+            masked.atlas.len(),
+            want.len()
+        );
+        let mut atlas_want: Vec<(bool, u32)> = Vec::with_capacity(masked.atlas.len());
+        for cutout in [false, true] {
+            let partition: Vec<(bool, u32)> = want
+                .iter()
+                .copied()
+                .filter(|(mode, _)| *mode == cutout)
+                .collect();
+            for _ in 0..views {
+                atlas_want.extend_from_slice(&partition);
+            }
+        }
+        assert_eq!(
+            masked.atlas, atlas_want,
+            "and every shadow view draws both partitions, each under its own pipeline"
+        );
+
+        assert_eq!(
+            masked.folded, opaque.folded,
+            "the frame gained or lost a pipeline bind beyond the cutout twin beside a plain one"
         );
     }
 

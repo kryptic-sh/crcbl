@@ -735,3 +735,145 @@ fn a_bucket_fills_and_empties_as_its_instance_comes_and_goes() {
 
     teardown(headless, renderer, pool);
 }
+
+/// **Two instances of one mesh, one opaque and one masked, scatter into two
+/// different buckets — and the depth passes therefore bind a pipeline per
+/// bucket rather than one per frame.**
+///
+/// The routing half of `docs/plan/43-render-standards.md` §3's per-bucket
+/// split, on the device that actually does it. The host writes a material's
+/// [`GpuMaterial::mode`] into
+/// [`GpuInstance::MATERIAL_MODE_SHIFT`](crcbl::shaders::mesh::GpuInstance::MATERIAL_MODE_SHIFT)'s
+/// bits of the instance record, and `draw_gen.slang`'s scatter skips a bucket
+/// whose mesh id **or** whose mode differs. Neither half can be seen in a
+/// picture: an instance sent to the wrong twin draws the same pixels, because
+/// both twins name the same mesh and the same index range. What separates them
+/// is which bucket's run the instance index lands in, which is what this reads
+/// back.
+///
+/// The oracle is the whole per-bucket instance count, not the two buckets under
+/// test: a scatter that ignored the mode would put both pyramids in the first
+/// bucket whose mesh matched, leaving its twin empty, and one that keyed on the
+/// mode alone would leave the cube's bucket wrong. Either shows up as a mismatch
+/// in this vector.
+///
+/// The masked twin's bucket is derived from the layout `ForwardRenderer::build`
+/// lays down and `ForwardRenderer::level_buckets` documents — a mesh's levels
+/// once per material mode the scene holds, in `DEPTH_MODES` order, so the
+/// twin of a flat mesh's opaque bucket is the next one. That derivation is
+/// asserted rather than assumed: the twin has to be the bucket the masked
+/// pyramid actually landed in, and every other bucket has to be empty.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]
+fn an_opaque_and_a_masked_instance_of_one_mesh_scatter_into_two_buckets() {
+    use crcbl::shaders::mesh::GpuMaterial;
+
+    // The demo description with its tinted row marked as a cutout, so the scene
+    // holds both modes and every mesh gets a twin. Nothing else moves: the two
+    // pyramids below differ in their material row and in where they stand.
+    let scene = {
+        let mut scene = crcbl::render::scene::demo();
+        scene.materials[crcbl::render::scene::DEMO_TINTED].flags = GpuMaterial::ALPHA_MODE_MASK;
+        scene
+    };
+
+    let headless = Headless::open_for_mesh();
+    let device = headless.device.as_ref();
+    let mut renderer = ForwardRenderer::with_scene(device, headless.queue, headless.format, &scene)
+        .expect("the forward renderer builds from the demo description");
+    let mut pool = TransientPool::new();
+
+    // The cube first, so it is instance 0, exactly as every reference in this
+    // file expects — then the opaque pyramid and the masked one.
+    place_cube_at(&mut renderer, cube_model());
+    let opaque_at = Vec3::new(-1.05, 0.0, 0.0);
+    let masked_at = Vec3::new(1.05, 0.0, 0.0);
+    place(
+        &mut renderer,
+        crcbl::render::scene::DEMO_PYRAMID,
+        crcbl::render::scene::DEMO_UNTINTED,
+        Mat4::from_translation(opaque_at),
+    );
+    place(
+        &mut renderer,
+        crcbl::render::scene::DEMO_PYRAMID,
+        crcbl::render::scene::DEMO_TINTED,
+        Mat4::from_translation(masked_at),
+    );
+
+    // The buckets each mesh's levels occupy in the scene's **first** mode, which
+    // is `OPAQUE` — see `ForwardRenderer::level_buckets`.
+    let cube_buckets = renderer
+        .level_buckets(crcbl::render::scene::DEMO_CUBE)
+        .to_vec();
+    let pyramid_buckets = renderer
+        .level_buckets(crcbl::render::scene::DEMO_PYRAMID)
+        .to_vec();
+    assert_eq!(
+        (cube_buckets.len(), pyramid_buckets.len()),
+        (1, 1),
+        "both meshes are flat, so each has one bucket per mode; this suite's device took the \
+         uniform-cut path, where a flat mesh is one bucket"
+    );
+    let cube_bucket = cube_buckets[0] as usize;
+    let opaque_bucket = pyramid_buckets[0] as usize;
+    // A flat mesh's mode runs are one bucket long, so the masked twin is the
+    // next bucket. Held to what the device did, below.
+    let masked_bucket = opaque_bucket + 1;
+
+    let camera = mesh_camera(Projection::default());
+    let generated = generate(&headless, &mut renderer, &mut pool, &camera);
+
+    assert_eq!(
+        generated.visible_count, 3,
+        "all three objects have to be on screen, or this compares a routing decision against a \
+         frustum decision"
+    );
+
+    // The CPU oracle: one instance in the cube's bucket, one in each of the
+    // pyramid's two, and nothing anywhere else.
+    let buckets = generated.args.len();
+    let mut want = vec![0u32; buckets];
+    want[cube_bucket] = 1;
+    want[opaque_bucket] = 1;
+    want[masked_bucket] = 1;
+    let got: Vec<u32> = generated
+        .args
+        .iter()
+        .map(|args| args.instance_count)
+        .collect();
+    assert_eq!(
+        got, want,
+        "each instance must scatter into the bucket matching its mesh **and** its material \
+         mode: cube in {cube_bucket}, the opaque pyramid in {opaque_bucket}, the masked one in \
+         {masked_bucket}"
+    );
+
+    // And the runs name the right instances, which the counts alone cannot say:
+    // two instances swapped between the twins keeps every count at one.
+    assert_eq!(
+        generated.run(cube_bucket),
+        vec![0],
+        "the cube's bucket walks the cube's instance"
+    );
+    assert_eq!(
+        generated.run(opaque_bucket),
+        vec![1],
+        "the opaque pyramid is instance 1, and it belongs to the opaque twin"
+    );
+    assert_eq!(
+        generated.run(masked_bucket),
+        vec![2],
+        "and the masked pyramid is instance 2, in the masked twin — a scatter that compared \
+         the mesh alone would have put it beside instance 1"
+    );
+
+    for bucket in [cube_bucket, opaque_bucket, masked_bucket] {
+        assert_eq!(
+            generated.counts[bucket], 1,
+            "bucket {bucket} has something in it, so it draws once"
+        );
+    }
+
+    teardown(headless, renderer, pool);
+}

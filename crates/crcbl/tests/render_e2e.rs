@@ -1575,9 +1575,9 @@ const ALPHA_LIT_FLOOR: f32 = 10.0;
 ///   in a second colour passes the first and fails the second.
 /// * **The depth prepass cut it too, and this is what makes that observable.**
 ///   The colour pass tests `GreaterOrEqual` with depth writes off against the
-///   prepass's depth. So a prepass recorded with the vertex-only pipeline —
-///   `ForwardRenderer::depth_only_pipeline` ignoring
-///   `MaterialTable::masks_alpha` — writes the plate's whole silhouette, the
+///   prepass's depth. So a prepass that drew the plate with the vertex-only
+///   pipeline — `ForwardRenderer::depth_partitions` routing the masked buckets
+///   there — writes the plate's whole silhouette, the
 ///   floor fragment behind the hole fails that test, the plate's own fragment is
 ///   discarded by the colour pass anyway, and **nothing is shaded there**: the
 ///   hole reads as the frame's clear. The band against
@@ -1612,9 +1612,9 @@ const ALPHA_LIT_FLOOR: f32 = 10.0;
 /// that is still there". The shadow's hole survived, which is what says the
 /// three passes here are separable rather than one claim written three times.
 ///
-/// **`ForwardRenderer::depth_only_pipeline` returning `self.shadow_pipeline`
-/// unconditionally** — the prepass and the atlas back on the vertex-only
-/// pipeline: "green on the plate 102.6, through the hole 34.0, on open floor
+/// **the depth prepass and the shadow atlas forced onto
+/// `ForwardRenderer::shadow_pipeline` for every bucket** — both back on the
+/// vertex-only pipeline: "green on the plate 102.6, through the hole 34.0, on open floor
 /// 233.7; the hole reads 37.0 against a background of 37.0; in the shadow 45.3
 /// against 45.3 through its hole and 180.3 of open floor". The hole is the
 /// frame's clear exactly, so the first claim reaches the panic first; run again

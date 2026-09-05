@@ -1269,8 +1269,9 @@ pub struct GpuInstance {
     /// format is cheap to extend today and expensive to extend once §3.3's
     /// shaders index it.
     pub sector: u32,
-    /// Per-instance bits. [`GpuInstance::LIVE`] is the only one defined; the
-    /// rest are reserved.
+    /// Per-instance bits: [`GpuInstance::LIVE`], then
+    /// [`GpuInstance::BASE_VERTEX_OVERRIDE`], then the two-bit material mode at
+    /// [`GpuInstance::MATERIAL_MODE_SHIFT`]. The rest are reserved.
     ///
     /// A `u32` rather than a `bitflags` type, which is what
     /// [`crcbl_hal::Features`] would be the pattern to follow: this crate has
@@ -1352,6 +1353,51 @@ impl GpuInstance {
     /// names. The record is one `uint` wider instead, which costs a whole
     /// 16-byte lane — see [`INSTANCE_STRIDE`].
     pub const BASE_VERTEX_OVERRIDE: u32 = 1 << 1;
+
+    /// Where the **material mode** starts in [`GpuInstance::flags`]: bit 2.
+    ///
+    /// `draw_gen.slang`'s scatter routes an instance by mesh id *and* by this
+    /// field, so a mesh drawn by an opaque material and by a cutout one lands in
+    /// two buckets and the depth passes bind a pipeline per bucket. Without it
+    /// the choice is per frame and every opaque mesh in a scene with one leaf
+    /// pays a fragment stage in the depth prepass and the shadow atlas.
+    ///
+    /// **The value is [`GpuMaterial::mode`] of the row
+    /// [`material`](GpuInstance::material) names, shifted here** — the material
+    /// table is not one of that pass's bindings and cannot become one, because
+    /// WebGPU guarantees eight storage buffers per stage and `draw_gen.slang`
+    /// already merges five host tables into one to fit.
+    ///
+    /// # The precondition, which nothing enforces
+    ///
+    /// An instance's mode is captured when its record is written. A material
+    /// rewritten afterwards does **not** re-key the instances that name it, so
+    /// they keep drawing in the bucket their old mode chose. No public route
+    /// does that today — `crcbl_render::ForwardRenderer` exposes no material
+    /// insert or rewrite, so a scene's modes are fixed when it is built — and
+    /// the shape of the fix if one appears is a `rekey_instances` over
+    /// `InstancePool::live`, rewriting each record's mode from its row.
+    pub const MATERIAL_MODE_SHIFT: u32 = 2;
+
+    /// The material mode's bits in [`GpuInstance::flags`]: bits 2 and 3, two
+    /// wide, of which one is spoken for.
+    ///
+    /// Two rather than one so the next mode — see
+    /// [`GpuMaterial::MODE_MASK`](GpuMaterial::MODE_MASK) — needs no change to
+    /// the record's layout or to any shader that reads it. The unused bit is
+    /// zero in every instance this engine writes, which is what makes a mode
+    /// comparison in the scatter a comparison of the whole field.
+    pub const MATERIAL_MODE_MASK: u32 = 0b11 << Self::MATERIAL_MODE_SHIFT;
+
+    /// This instance's material mode, unpacked from
+    /// [`flags`](GpuInstance::flags).
+    ///
+    /// The host twin of `draw_gen.slang`'s `instance_material_mode`, and what a
+    /// reader compares against a bucket's own mode.
+    #[must_use]
+    pub const fn material_mode(&self) -> u32 {
+        (self.flags & Self::MATERIAL_MODE_MASK) >> Self::MATERIAL_MODE_SHIFT
+    }
 
     /// The bytes one storage-buffer element holds, in `std430` order.
     #[must_use]
@@ -1877,6 +1923,37 @@ impl GpuMaterial {
     /// the colour pass alone casts a solid shadow and occludes itself through a
     /// hole it can see through, which is the failure this bit exists to avoid.
     pub const ALPHA_MODE_MASK: u32 = 1;
+
+    /// The bits of [`flags`](Self::flags) that decide which draw **bucket** an
+    /// instance of this material is routed into — the row's *mode*.
+    ///
+    /// Today that is [`ALPHA_MODE_MASK`](Self::ALPHA_MODE_MASK) and nothing
+    /// else, so a row's mode is zero or one. The *field* the mode travels in is
+    /// wider than the vocabulary — see
+    /// [`GpuInstance::MATERIAL_MODE_MASK`](GpuInstance::MATERIAL_MODE_MASK),
+    /// which reserves two bits — and the occupant that second bit is reserved
+    /// for is glTF's `doubleSided`. It is **not declared here** until the
+    /// renderer can honour it: routing needs a pipeline per mode that actually
+    /// differs, and a double-sided mode needs `CullMode::None` twins of the
+    /// colour, depth, cutout and reflective-shadow-map pipelines first. Until
+    /// then it would be a bucket table twice as long drawing the same picture,
+    /// which is `ALPHA_MODE_MASK`'s own argument about `BLEND`.
+    ///
+    /// A bit outside this mask is not a mode: it changes how a fragment shades
+    /// and nothing about which draw the fragment arrived in.
+    pub const MODE_MASK: u32 = Self::ALPHA_MODE_MASK;
+
+    /// This row's mode — the [`MODE_MASK`](Self::MODE_MASK) bits of
+    /// [`flags`](Self::flags).
+    ///
+    /// What `crcbl_render::MaterialTable::mode` hands back, and what
+    /// `crcbl_render::ForwardRenderer` shifts into an instance's
+    /// [`GpuInstance::flags`] — see
+    /// [`GpuInstance::MATERIAL_MODE_SHIFT`](GpuInstance::MATERIAL_MODE_SHIFT).
+    #[must_use]
+    pub const fn mode(&self) -> u32 {
+        self.flags & Self::MODE_MASK
+    }
 
     /// The four page layer indices as the two words the row carries them in:
     /// base colour in the low half of the first and the normal page in its

@@ -144,9 +144,9 @@
 // Three merges bring fourteen to eight, and each one is a place where a reader
 // has to know the layout rather than the name:
 //
-// * `tables` is every host-written table this pass reads — the bucket table, the
-//   per-bucket cluster counts, and `docs/plan/25-lod.md`'s three selection
-//   tables — as one flat array of words. **The cost is the typed
+// * `tables` is every host-written table this pass reads — the bucket table and
+//   its per-bucket modes, the per-bucket cluster counts, and
+//   `docs/plan/25-lod.md`'s three selection tables — as one flat array of words. **The cost is the typed
 //   `StructuredBuffer`**: `LevelGroup`'s five floats are read back through
 //   `asfloat`, and the word each field lands on is a named constant below
 //   rather than a struct member Slang lays out. `crcbl_shaders::level_select` is
@@ -187,9 +187,13 @@ struct GpuInstance
     /// draw cover instances of different meshes.
     uint mesh;
     /// Which material to shade with: an index into the material table
-    /// `mesh.slang` shades through. Nothing here reads it — this pass buckets
-    /// survivors by mesh, and a bucket key that included the material is the
-    /// longer key §3.4's binning wants rather than anything this slice needs.
+    /// `mesh.slang` shades through. **Nothing here reads it**, and it is not
+    /// what routes: the material table is not one of this pass's bindings and
+    /// cannot become one — eight storage buffers per stage is what WebGPU
+    /// guarantees and the merges in the header are what fit inside it. What the
+    /// key grew instead is the material's *mode*, which the host writes into
+    /// `flags` below. A bucket key on the material **id** is the longer key
+    /// §3.4's binning wants, and is still not what this pass does.
     uint material;
     /// Which sector `transform` is relative to. **Reserved**: the f64
     /// sector→camera offset table and the addition that would make this mean
@@ -200,7 +204,9 @@ struct GpuInstance
     /// the visible list is a live instance by construction, so nothing here
     /// asks. Bit 1 is the base-vertex override the raster stages read, and this
     /// pass buckets by mesh rather than by base, so nothing here asks about that
-    /// one either.
+    /// one either. Bits 2 and 3 are the **material mode** — see
+    /// `instance_material_mode` below, which is the half of this pass's routing
+    /// key that is not the mesh id.
     uint flags;
     /// The pool vertex this instance's indices are relative to, read **instead
     /// of** the mesh entry's when `INSTANCE_BASE_VERTEX_OVERRIDE` is set in
@@ -254,6 +260,17 @@ struct GpuMesh
     /// this one at the wrong offset, and nothing anywhere reports that.
     uint flags;
 };
+
+/// Where the material mode starts in `GpuInstance::flags`, matching
+/// `crcbl_shaders::mesh::GpuInstance::MATERIAL_MODE_SHIFT`.
+static const uint INSTANCE_MATERIAL_MODE_SHIFT = 2;
+
+/// The material mode's bits in `GpuInstance::flags`, matching
+/// `crcbl_shaders::mesh::GpuInstance::MATERIAL_MODE_MASK`.
+///
+/// Two bits, of which one is spoken for today — glTF's `alphaMode: "MASK"`. The
+/// host is what decides which modes exist at all; this pass only compares.
+static const uint INSTANCE_MATERIAL_MODE_MASK = 12;
 
 /// Words in one indexed-indirect argument structure, matching
 /// `crcbl_shaders::draw_gen::DRAW_ARGS_WORDS`.
@@ -398,6 +415,16 @@ struct DrawGenParams
     /// `ClusterDrawConstants::group_stride` carries, because that stage reads
     /// what this one writes.
     uint group_stride;
+    /// Where the per-bucket **material modes** start in `tables`, in words.
+    ///
+    /// The other half of a bucket's key: bucket `b` draws mesh `bucket_mesh(b)`
+    /// shaded in mode `bucket_mode(b)`, and the scatter below sends an instance
+    /// to the bucket that matches both. A scene whose materials are all one mode
+    /// has one bucket per mesh exactly as it always did — the region is there,
+    /// every word of it equal, and no draw is added.
+    ///
+    /// Host-computed on `bucket_clusters_at`'s terms below.
+    uint bucket_modes_at;
     /// Where the per-bucket cluster counts start in `tables`, in words.
     ///
     /// The bucket table itself starts at word zero, so it needs no offset; every
@@ -481,13 +508,14 @@ StructuredBuffer<uint> visible_count;
 
 /// Every host-written table this pass reads, as one flat array of words.
 ///
-/// **One binding for five tables**, because a WebGPU device guarantees only
+/// **One binding for every one of them**, because a WebGPU device guarantees only
 /// eight storage buffers per shader stage — see the header. The regions, in
 /// order, and what indexes each:
 ///
 /// | region | starts at | stride | indexed by |
 /// |---|---|---|---|
 /// | bucket table: which mesh each bucket draws | word 0 | 1 | bucket |
+/// | per-bucket material modes | `gen.bucket_modes_at` | 1 | bucket |
 /// | per-bucket cluster counts | `gen.bucket_clusters_at` | 1 | bucket |
 /// | `MeshLevels` per mesh | `gen.mesh_levels_at` | `MESH_LEVELS_WORDS` | `GpuInstance::mesh` |
 /// | `LevelGroup` per DAG group | `gen.level_groups_at` | `LEVEL_GROUP_WORDS` | `MeshLevels::first_group + i` |
@@ -598,6 +626,29 @@ RWStructuredBuffer<uint> group_state;
 uint bucket_mesh(uint bucket)
 {
     return tables[bucket];
+}
+
+/// Which material mode bucket `bucket` draws — the half of its key that is not
+/// the mesh id.
+///
+/// Compared against `instance_material_mode` below, so a mesh drawn by an opaque
+/// material and by a cutout one occupies two buckets and the depth passes bind a
+/// pipeline per bucket rather than one per frame.
+uint bucket_mode(uint bucket)
+{
+    return tables[gen.bucket_modes_at + bucket];
+}
+
+/// This instance's material mode, unpacked from `GpuInstance::flags` — the host
+/// twin is `crcbl_shaders::mesh::GpuInstance::material_mode`.
+///
+/// Written when the instance's record was written, from the row
+/// `GpuInstance::material` names. A material rewritten afterwards does not
+/// re-key the instances that carry its old mode; `MATERIAL_MODE_SHIFT`'s Rust
+/// doc is where that precondition is stated.
+uint instance_material_mode(GpuInstance instance)
+{
+    return (instance.flags & INSTANCE_MATERIAL_MODE_MASK) >> INSTANCE_MATERIAL_MODE_SHIFT;
 }
 
 /// How many clusters bucket `bucket`'s mesh has — the x extent of that bucket's
@@ -889,12 +940,18 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     // resolves back to itself, so there is no branch for the ordinary case.
     uint mesh_id = level_mesh_at(
         mesh_levels_of(instance.mesh).first_level + select_level(instance, instance_index));
+    // The other half of the key, and the reason a cutout costs only its own
+    // mesh: an opaque instance and a masked one of the same geometry go to
+    // different buckets, so the depth prepass and the shadow atlas record the
+    // first under a vertex-only pipeline and the second under the cutout twin.
+    uint mode = instance_material_mode(instance);
     // A linear walk of the bucket table. The table is small and fixed — one
-    // entry per resident mesh today — so this is a couple of comparisons; a
-    // mesh → bucket map is what a table large enough to notice would want.
+    // entry per (resident mesh, mode present in the scene) today — so this is a
+    // couple of comparisons; a (mesh, mode) → bucket map is what a table large
+    // enough to notice would want.
     for (uint bucket = 0; bucket < gen.bucket_count; ++bucket)
     {
-        if (bucket_mesh(bucket) != mesh_id)
+        if (bucket_mesh(bucket) != mesh_id || bucket_mode(bucket) != mode)
         {
             continue;
         }

@@ -296,10 +296,13 @@ RenderDoc capture is recorded anywhere.
   shader scatters compacted instances into per-bucket indirect draws with
   per-bucket count buffers. Per-bucket capacity is sized from scene stats with
   an overflow counter. `IndirectPerBatch` emits the same buckets as per-batch
-  indirect draws. The bucket is one resident mesh today because an argument
-  structure's index range is per draw; the
-  `(material template, permutation, pass)` key is the same table with a longer
-  one.
+  indirect draws. The key today is `(resident mesh, material mode)` — the mesh
+  because an argument structure's index range is per draw, and the mode because
+  the depth prepass and the shadow atlas bind a pipeline per bucket, so a cutout
+  costs a fragment stage on its own mesh's draws and on no others. A scene
+  holding one mode has one bucket per mesh, exactly as before the mode joined
+  the key; the `(material template, permutation, pass)` key is the same table
+  with a longer one.
 - **Transparent sorting**: GPU **radix sort over packed depth keys** (bitonic is
   the fallback for small counts) — named so it isn't rediscovered at P7.
   Unbuilt, and nothing needs it yet: §3.4 has no transparent pass.

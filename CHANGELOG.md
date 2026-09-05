@@ -81,18 +81,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and the shadow atlas, and `rsmFragmentMain` behind the reflective shadow map.
   So a cutout is cut everywhere it is drawn — it does not occlude itself through
   the hole it can see through, and it casts the shadow it actually has.
-  `crcbl_render::forward` builds a second depth-only pipeline for it and
-  `ForwardRenderer::depth_only_pipeline` chooses between the two **per frame**,
-  from `MaterialTable::masks_alpha`: a frame whose material table masks nothing
-  is recorded through the vertex-only pipeline exactly as before, with no
-  fragment stage in either depth pass. A frame that masks something pays that
-  stage on its opaque surfaces too — a finer split, per draw bucket, is
-  `docs/backlog.md`'s and is blocked on `draw_gen.slang`'s routing key. Priced
-  on `apps/lantern` at 1920x1080: an unmasked frame is unchanged to within its
-  own run-to-run spread, and forcing the cutout pipeline on takes the depth
-  prepass from 0.038 to 0.043 ms on an RX 7900 XTX and from 1.423 to 3.269 ms on
-  lavapipe, with the shadow atlas moving 0.140 to 0.142 ms and 9.511 to 15.543
-  ms.
+  `crcbl_render::forward` builds a second depth-only pipeline for it and binds
+  it **per draw bucket** — see the routing entry under _Changed_, which is where
+  the mode key and its own prices are — so a scene that masks nothing is
+  recorded through the vertex-only pipeline exactly as before, with no fragment
+  stage in either depth pass, and a scene that masks one mesh pays that stage on
+  that mesh's draws. What the cut itself costs, priced on `apps/lantern` at
+  1920x1080 with every depth draw forced onto the cutout pipeline: the depth
+  prepass goes from 0.038 to 0.043 ms on an RX 7900 XTX and from 1.423 to 3.269
+  ms on lavapipe, and the shadow atlas from 0.140 to 0.142 ms and 9.511 to
+  15.543 ms.
 
   `crcbl_scene`'s glTF importer fills both fields from the document's
   `alphaMode` and `alphaCutoff` (glTF's own `0.5` where none is written), so
@@ -686,6 +684,49 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **A masked material costs a fragment stage on its own mesh's depth draws, not
+  on the whole frame's.** The depth prepass and the shadow atlas used to swing
+  entirely onto the cutout pipeline as soon as anything in the material table
+  cut an alpha mask, so a scene with one leaf in it paid a fragment stage for
+  every opaque surface in both passes. A draw bucket's routing key has grown the
+  material's **mode** and the two passes now bind a pipeline per bucket.
+
+  What is new, by name. `GpuMaterial::MODE_MASK` is the flag bits a draw is
+  routed by — `ALPHA_MODE_MASK` alone today — and `GpuMaterial::mode` reads
+  them; `MaterialTable::mode` reports a row's, replacing
+  `MaterialTable::masks_alpha`, which had no caller left and is gone.
+  `ForwardRenderer` shifts that mode into each instance record at
+  `GpuInstance::MATERIAL_MODE_SHIFT`, a two-bit field at bits 2 and 3 of
+  `GpuInstance::flags` masked by `GpuInstance::MATERIAL_MODE_MASK`, with
+  `GpuInstance::material_mode` reading it back. `draw_gen.slang` gained a
+  per-bucket mode region of its packed `tables` buffer —
+  `DrawGenParams::bucket_modes_at`, mirrored as
+  `crcbl_shaders::draw_gen::Params::bucket_modes_at` and
+  `TableOffsets::bucket_modes_at`, with `pack_tables` taking the modes beside
+  the bucket meshes — and its scatter now skips a bucket whose mesh id **or**
+  whose mode differs. No new binding: the region rides in the buffer that
+  already merges the host tables to stay inside WebGPU's eight storage buffers
+  per stage. `crcbl_shaders::draw_gen::PARAMS_SIZE` is 80 bytes rather than 64
+  as a result.
+
+  **A scene whose materials are all one mode is byte-for-byte the frame it
+  was.** `ForwardRenderer::build` emits a mesh's levels once per mode the
+  description actually holds, so every demo and every golden in this tree — all
+  opaque — keeps one bucket per mesh, one partition, and the same recorded
+  stream. Every golden image is unchanged on radv and on lavapipe.
+
+  **The price, from
+  `apps/lantern --headless --frames 400 --size 1920x1080 --backend vk`** with
+  the room's monitor-screen material marked as a cutout, one instance of the
+  twelve the room places, three runs a configuration and the medians of the
+  p50s. On lavapipe `depth-prepass` goes **3.209 → 1.444 ms** and `shadow`
+  **15.462 → 9.770 ms**. On radv `depth-prepass` does not move (**0.043 ms**)
+  and `shadow` goes **0.138 → 0.221 ms**: the raster tier pays for the doubled
+  bucket table rather than for the `discard`, which a fourth run with empty
+  twins and no cutout at all confirms at 0.222 ms.
+  `docs/plan/43-render-standards.md` §3 carries every figure and
+  `docs/backlog.md` what a per-mesh twin rule would need.
 
 - **The debug console draws command output and trouble, not the engine's
   commentary.** The panel used to draw every record the ring held, which at info

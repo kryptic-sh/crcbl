@@ -2634,6 +2634,7 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
             instances: &instances,
             mesh_table,
             bucket_meshes: &[0],
+            bucket_modes: &[0],
             bucket_clusters: &[4],
             // One mesh, no hierarchy: what the hysteresis state is *sized* by is
             // not what this asserts about it, and a flat record keeps the

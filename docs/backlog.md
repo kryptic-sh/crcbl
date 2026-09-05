@@ -89,50 +89,99 @@ pixel grid.
 ## What alpha-mask materials shipped without (2026-09-05)
 
 `GpuMaterial::ALPHA_MODE_MASK`, `mesh.slang`'s `alpha_masked` and
-`depthMaskedFragmentMain`, and `ForwardRenderer::depth_only_pipeline` landed
-with `docs/plan/43-render-standards.md` §3's first step. What they left:
+`depthMaskedFragmentMain` landed with `docs/plan/43-render-standards.md` §3's
+first step; the per-bucket routing that replaced the whole-frame pipeline swing
+— `GpuMaterial::MODE_MASK`, `GpuInstance::MATERIAL_MODE_SHIFT`,
+`draw_gen.slang`'s `bucket_mode` and `ForwardRenderer::depth_partitions` —
+landed after it. What they left:
 
-- **The choice is per frame, not per draw bucket, so a masked scene's opaque
-  meshes pay a fragment stage in the depth prepass and the shadow atlas too.**
-  `ForwardRenderer::depth_only_pipeline` asks `MaterialTable::masks_alpha` — a
-  question about the whole table — and swings both depth passes onto the cutout
-  pipeline. The finer arrangement is a bucket per alpha mode, so an unmasked
-  mesh keeps the vertex-only stage in a scene that has a cutout somewhere else.
-  Three things block it, and all three were read out of the code rather than
-  guessed:
-  - `draw_gen.slang`'s scatter takes the **first** bucket whose mesh id matches
-    and stops, so a second bucket naming one mesh receives nothing — the comment
-    above `bucket_meshes` in `ForwardRenderer::build` says so. The routing key
-    would have to grow an alpha mode, which is a per-instance input that pass
-    does not read: `GpuInstance::material` is declared there and unread, and the
-    material table is not one of its bindings (it packs five host tables into
-    one storage buffer already, to stay inside WebGPU's eight per stage). The
-    cheap form is a bit in `GpuInstance::flags`, written by `ForwardRenderer`
-    from the instance's material row.
-  - the bucket table is written once in `ForwardRenderer::build` and never
-    again, where instances arrive and leave through `add_instance` /
-    `remove_instance` afterwards and `MaterialTable::set` can rewrite a mode. So
-    which meshes want a masked twin is not knowable when the table is written,
-    and a twin allocated on a build-time guess is silently wrong in exactly the
-    case it exists for.
-  - a bucket costs a whole instance capacity of `u32` in the scattered runs —
-    `DrawGen::bucket_base` is `capacity + bucket * capacity` — so twinning the
-    table doubles that buffer for every scene.
+- **The bucket table is twinned per scene, not per mesh, and the empty twins
+  cost measurable time on the raster tier.** `ForwardRenderer::build` walks
+  `SceneDesc::materials` for the set of modes present and emits every resident
+  mesh's levels once per mode in it, because which mesh will be drawn by which
+  material is not knowable there: instances arrive later through `add_instance`,
+  and the description pairs meshes with materials nowhere. So a scene with one
+  cutout in it doubles its bucket table, and every pass records one indirect
+  call per bucket whatever is in it — topic 03 §3.3's own invariant.
 
-  Whoever takes this should price it against what it saves: the measurement in
-  §3 of the plan is what the whole-frame swing costs, and a per-bucket split
-  only pays where a scene is mostly opaque geometry with a little foliage in it.
+  **Measured, not feared.** §3 of the plan carries the run: lantern with an
+  unconditional empty twin per mesh reads `shadow` 0.222 ms on radv against
+  0.138 ms with one bucket per mesh, which is the same number the genuinely
+  masked build reads — so the cost is the twelve extra dispatches per shadow
+  view rather than the `discard`. On lavapipe the split still wins by a wide
+  margin, and on radv lantern's shape (twelve tiny meshes, two shadow views)
+  loses.
+
+  A finer rule needs something the description does not currently say: which
+  `(mesh, material)` pairs a scene will actually instance. The two shapes worth
+  weighing are a declared pair list on `SceneDesc`, checked against
+  `add_instance` the way `check_scene` checks page layers; and rebuilding the
+  bucket table when an `add_instance` introduces a pair no bucket covers, which
+  is a device allocation inside a frame-adjacent call and is why it was not
+  taken here. A third shape keeps that allocation out of `add_instance`: rebuild
+  the table in `begin_frame` when the set of live `(mesh, mode)` pairs has
+  changed since the last build — the pool's host mirror knows the set — so the
+  stream still depends only on which pairs exist and never on how many instances
+  there are, which is the property topic 03 opens with and
+  `the_frame_records_one_indirect_call_per_bucket_whatever_the_scene_holds`
+  pins. Skipping empty buckets at record time was considered and declined for
+  that property's sake: it would make the recorded stream a function of the
+  instance count. **Which of the three, if any, is the user's call**; none is
+  worth doing before a scene in this tree actually has foliage in it — every
+  demo is still all opaque, so every one of them emits exactly the table it
+  emitted before modes existed.
+
+- **A material rewritten after its instances are placed does not re-key them.**
+  An instance's mode is captured in its record when
+  `ForwardRenderer::gpu_instance` or `skinned_gpu_instance` writes it, so a
+  `MaterialTable::set` that turns a row from `OPAQUE` to `MASK` leaves every
+  instance already naming it in the opaque bucket — whose depth pass has no
+  fragment stage, so the cutout would cast a solid shadow. **Nothing in the tree
+  can reach that state**: the renderer takes its materials from the description
+  at build and exposes no public insert or rewrite, which is why this is
+  documented on `MaterialTable::set` and on `GpuInstance::MATERIAL_MODE_SHIFT`
+  rather than guarded. The fix if a public route ever appears is a
+  `ForwardRenderer::rekey_instances` over `InstancePool::live`, rewriting each
+  record's mode from its row and re-uploading the dirty range — the same shape
+  as `point_skinned_instances`.
+
+- **`level_buckets` names only the scene's first material mode.** A mesh's
+  buckets are its levels once per mode, and
+  `ForwardRenderer::mesh_level_buckets` is built from the first run — `OPAQUE`
+  wherever the scene has an opaque material. Its doc says so and every reader in
+  the tree is an all-opaque scene, so "exactly one of these has a non-zero
+  instance count" still holds for them; a caller reading the uniform cut of a
+  masked instance would be reading the wrong run. Widening it means returning a
+  run per mode, which nothing wants yet.
 
 - **`BLEND` is not implemented and the importer flattens it.** `gltf_import`'s
   alpha arm maps `AlphaMode::Blend` onto opaque and `warn_dropped_features`
   counts it; that stands only while §3's "Transparency — absent, structurally"
   does. When a blended pass exists, the arm and the warning change together.
 
-- **`doubleSided` is still unread.** Every imported material is back-face culled
-  whatever the document says, and `GpuMaterial` has no bit for it. That matters
-  more now than it did: a leaf card authored as a cutout is nearly always
-  double-sided, so the rung that makes foliage actually look right is this one
-  and not the mask.
+- **`doubleSided` is still unread, and it is now the next material mode.** Every
+  imported material is back-face culled whatever the document says, and
+  `GpuMaterial` has no bit for it. That matters more than it did: a leaf card
+  authored as a cutout is nearly always double-sided, so the rung that makes
+  foliage actually look right is this one and not the mask. What it now takes,
+  in the order the pieces fall:
+  - **A second bit in `GpuMaterial::MODE_MASK`**, which is `ALPHA_MODE_MASK`
+    alone today. `GpuInstance::MATERIAL_MODE_MASK` is already two bits wide and
+    the `tables` region and `DEPTH_MODES` are already keyed on the whole field,
+    so the routing needs no layout change — only the mask widening and
+    `DEPTH_MODES` growing to four entries, which doubles the bucket table again
+    for a scene that holds all four (see the twin-cost entry above).
+  - **`CullMode::None` twins of the colour, depth-only, cutout and
+    reflective-shadow-map pipelines.** No backend seam exposes dynamic cull
+    state, and adding one would be a state a recorded stream carries per draw;
+    `set_stencil_reference`'s doc is the precedent argument for why a _pipeline_
+    is the engine's answer to a per-draw raster state and a seam call is not.
+    Four more pipelines is the cost, built at scene build like
+    `depth_masked_pipeline` is and for its reason.
+  - **The importer reading the flag.** `gltf_import` drops `doubleSided`
+    silently today; it should set the bit and stop counting it in
+    `warn_dropped_features`, on the same change as the pipelines — a mode
+    nothing can honour is not a mode.
 
 - **No masked material reaches the mesh-shader path's own goldens.** The cutout
   fragment stage is shared by both geometry paths by construction — it reads

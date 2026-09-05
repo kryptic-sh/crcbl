@@ -296,12 +296,11 @@ pub enum Scene {
     /// that the plate's shadow lands clear of the plate's own footprint.
     ///
     /// **The only frame in the tree that discards a fragment.** Every other
-    /// scene here shades an opaque surface, so
-    /// `crcbl_render::MaterialTable::masks_alpha` answers `false` for all of
-    /// them, `mesh.slang`'s `alpha_masked` compiled to four targets and cut
-    /// nothing anywhere, and the second depth-only pipeline
-    /// `ForwardRenderer` builds for a masked scene was recorded by no frame at
-    /// all. A cutout is honoured in three passes and each of them can be wired
+    /// scene here shades an opaque surface, so every row's
+    /// `crcbl_render::MaterialTable::mode` is `OPAQUE`, `mesh.slang`'s
+    /// `alpha_masked` compiled to four targets and cut nothing anywhere, and the
+    /// second depth-only pipeline `ForwardRenderer` builds is in no frame's
+    /// masked partition and is recorded by no frame at all. A cutout is honoured in three passes and each of them can be wired
     /// to nothing on its own, so this scene separates the three into three
     /// regions of one picture rather than needing three frames:
     ///
@@ -3676,8 +3675,9 @@ fn alpha_mask_scene() -> crate::render::scene::SceneDesc<'static> {
         base_color: ALPHA_PLATE_TINT,
         base_color_texture: mask,
         // The whole of what makes this scene a fixture: without the bit the row
-        // is an ordinary opaque one, `MaterialTable::masks_alpha` answers
-        // `false`, and the frame draws a solid plate over a solid shadow.
+        // is an ordinary opaque one, `MaterialTable::mode` answers `OPAQUE`, the
+        // plate's instances scatter into the opaque bucket, and the frame draws
+        // a solid plate over a solid shadow.
         flags: crate::shaders::mesh::GpuMaterial::ALPHA_MODE_MASK,
         ..crate::shaders::mesh::GpuMaterial::UNTINTED
     });

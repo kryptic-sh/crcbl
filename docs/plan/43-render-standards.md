@@ -308,21 +308,62 @@ spread — `shadow` **0.142 → 0.140 ms** on radv (spreads 0.141–0.144 and
 0.038 ms** and **1.379 → 1.423 ms**, `forward` **0.344 → 0.344 ms** and **32.561
 → 32.718 ms**. Nothing in the recorded stream differs either, which
 `crcbl_render::forward`'s
-`a_masked_material_moves_the_depth_passes_onto_the_cutout_pipeline` is what
-says: the frame binds the same pipeline handles in the same order.
+`a_masked_material_moves_its_own_meshs_depth_draws_onto_the_cutout_pipeline` is
+what says: the frame binds the same pipeline handles in the same order.
+
+**The routing is per bucket since 2026-09-05, and the control is unchanged by
+it.** A bucket's key grew the material's alpha mode — `crcbl_shaders::mesh`'s
+`GpuMaterial::MODE_MASK`, carried into each instance record at
+`GpuInstance::MATERIAL_MODE_SHIFT` and compared by `draw_gen.slang`'s scatter —
+and `ForwardRenderer::depth_partitions` splits the two depth passes' call list
+on it, so the opaque buckets keep `depthVertexMain` while the masked ones take
+the cutout twin. A scene whose materials are all one mode emits one bucket per
+mesh exactly as it always did, which the same three runs say: `shadow` **0.138
+ms** on radv and **9.203 ms** on lavapipe, `depth-prepass` **0.039** and
+**1.367**, `forward` **0.344** and **32.652**, every one inside the spread
+above.
 
 **What a masked scene pays is the third configuration**, and it is the number to
-argue with rather than a share: the same lantern with
-`ForwardRenderer::depth_only_pipeline` forced to the cutout twin, so the
-geometry, the extent and the effect stack are identical and only the two depth
-passes' fragment stage differs. `depth-prepass` goes **0.038 → 0.043 ms** on
-radv and **1.423 → 3.269 ms** on lavapipe; `shadow` goes **0.140 → 0.142 ms**
-and **9.511 → 15.543 ms**; `forward` does not move on either. So the cutout
-costs about **five microseconds of prepass on the raster tier and nothing
-measurable in the atlas**, and on the software tier it roughly **doubles the
-prepass and adds two thirds to the shadow pass** — which is the tier every
-golden runs on, and the reason the per-bucket split in `docs/backlog.md` is
-worth taking when a scene is mostly opaque geometry with a little foliage in it.
+argue with rather than a share: the same lantern with its `room::MONITOR`
+material marked `ALPHA_MODE_MASK` by an uncommitted edit — one row of six, worn
+by one instance of the twelve `room::OBJECTS` places, the monitor screen — so
+the geometry, the extent and the effect stack are identical and only the depth
+passes' routing differs. Two builds of it, both measured here: the whole-frame
+swing this rung shipped with, reproduced by collapsing the mode set to one and
+forcing both depth passes onto the cutout pipeline, and the per-bucket split.
+
+| pass          | tier     | whole frame | per bucket |
+| ------------- | -------- | ----------- | ---------- |
+| depth-prepass | radv     | 0.043 ms    | 0.043 ms   |
+| depth-prepass | lavapipe | 3.209 ms    | 1.444 ms   |
+| shadow        | radv     | 0.138 ms    | 0.221 ms   |
+| shadow        | lavapipe | 15.462 ms   | 9.770 ms   |
+| forward       | radv     | 0.343 ms    | 0.318 ms   |
+| forward       | lavapipe | 32.668 ms   | 32.590 ms  |
+
+**On the software tier the split is most of the cutout's cost back.** The
+prepass loses **55 per cent** of the whole-frame figure and the atlas **37 per
+cent**, leaving each within a millisecond of the all-opaque control — 1.444
+against 1.367, 9.770 against 9.203. That is the tier every golden runs on.
+
+**On the raster tier it is a loss, and the cause is the bucket table rather than
+the fragment stage.** The atlas goes 0.138 → 0.221 ms, where the whole-frame
+swing had cost nothing measurable there. A fourth configuration separates the
+two: the **unmasked** lantern with a twin emitted for every mesh regardless of
+what the scene holds, so twelve of the twenty-four buckets are permanently empty
+and the cutout pipeline draws nothing at all. It reads `shadow` **0.222 ms**,
+`depth-prepass` **0.041 ms**, `forward` **0.324 ms** on radv — the masked
+build's numbers to three figures. So what radv is paying for is twelve extra
+indirect dispatches per shadow view, not a `discard`: the cost scales with the
+bucket count and not with the geometry or the mask, which also explains the
+forward pass moving _down_ by the same amount in both. Lantern is the worst
+shape for it — twelve tiny meshes and two shadow views, where a dispatch of
+nothing is a measurable share of the pass — and the trade is stated rather than
+hidden: **a scene mostly of opaque geometry with a little foliage in it wins on
+every tier where the fragment stage costs more than an empty dispatch, and
+lantern on radv is the case where it does not.** `docs/backlog.md` carries what
+a finer rule would need.
+
 Metal, D3D12 and the browser are unmeasured; `discard` is the one fragment-stage
 construct that can cost a target its early-depth path, and this machine has no
 Apple or Windows hardware.

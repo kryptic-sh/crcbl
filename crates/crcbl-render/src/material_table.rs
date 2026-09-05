@@ -175,21 +175,20 @@ pub struct MaterialTable {
     /// [`crate::instance_pool`] does.
     slots: Pool<()>,
     capacity: u32,
-    /// Which rows carry [`GpuMaterial::ALPHA_MODE_MASK`], one entry per row —
-    /// the only thing about a row's *value* this type keeps a copy of.
+    /// Each row's [`GpuMaterial::mode`], one entry per row — the only thing
+    /// about a row's *value* this type keeps a copy of.
     ///
-    /// It is kept because the renderer has to answer a question about the table
-    /// as a whole before it records a frame: whether anything in it cuts an
-    /// alpha mask, and therefore whether the depth prepass and the shadow atlas
-    /// need a fragment stage at all. See [`MaterialTable::masks_alpha`].
-    /// Reading it back off the buffer is not open to a `HostUpload` binding, and
-    /// asking every caller to remember what it inserted is the drift this
-    /// removes.
+    /// It is kept because a mode is what **routes** a draw: `draw_gen.slang`
+    /// buckets an instance by its mesh and by the mode of the material it names,
+    /// so the renderer has to be able to read a row's mode back when it writes
+    /// an instance record. See [`MaterialTable::mode`]. Reading it off the
+    /// buffer is not open to a `HostUpload` binding, and asking every caller to
+    /// remember what it inserted is the drift this removes.
     ///
     /// Written only where a row is — see [`MaterialTable::write`], which is the
     /// single point of contact — so a refused write leaves the entry describing
     /// the bytes the device actually holds.
-    masked: Vec<bool>,
+    modes: Vec<u32>,
 }
 
 impl MaterialTable {
@@ -230,9 +229,9 @@ impl MaterialTable {
             buffer,
             slots: Pool::new(),
             capacity: desc.capacity,
-            // Every row cleared, so every row opaque — which is what the zeroes
-            // written above actually say.
-            masked: vec![false; usize::try_from(desc.capacity).unwrap_or(usize::MAX)],
+            // Every row cleared, so every row's mode is zero — `OPAQUE`, which
+            // is what the zeroes written above actually say.
+            modes: vec![0; usize::try_from(desc.capacity).unwrap_or(usize::MAX)],
         })
     }
 
@@ -266,23 +265,26 @@ impl MaterialTable {
         self.slots.is_empty()
     }
 
-    /// Whether any row in the table cuts an alpha mask —
-    /// [`GpuMaterial::ALPHA_MODE_MASK`] set in its `flags`.
+    /// Row `index`'s [`GpuMaterial::mode`] — the bits a draw is routed by.
     ///
-    /// **A question about the table rather than about a row**, and the caller is
-    /// [`crate::forward`]: a depth prepass and a shadow atlas drawn for a scene
-    /// with nothing masked in it need no fragment stage at all, and one drawn
-    /// for a scene that has one needs a stage that can `discard`. Which of the
-    /// two pipelines a frame is recorded with is therefore this answer, taken
-    /// afresh each frame — so a material inserted or rewritten between frames
-    /// moves the choice with it rather than leaving a cutout casting a solid
-    /// shadow until something rebuilt the renderer.
+    /// **What the caller does with it is write it into an instance**:
+    /// [`crate::forward`] shifts it into
+    /// [`GpuInstance::flags`](crcbl_shaders::mesh::GpuInstance::flags) at
+    /// [`MATERIAL_MODE_SHIFT`](crcbl_shaders::mesh::GpuInstance::MATERIAL_MODE_SHIFT),
+    /// and `draw_gen.slang` buckets the instance by its mesh id and that field
+    /// together. So a scene's cutout materials cost a fragment stage in the
+    /// depth passes for their own meshes and for no others.
     ///
-    /// A removed row answers `false`: [`MaterialTable::remove`] clears it to
-    /// [`GpuMaterial::default`], whose flags are zero.
+    /// **An instance's mode is captured when its record is written.** Rewriting
+    /// a row with [`MaterialTable::set`] moves this answer and does *not* re-key
+    /// the instances already naming the row — see that method's own note.
+    ///
+    /// Zero — `OPAQUE` — for a row past the table's capacity and for a removed
+    /// one: [`MaterialTable::remove`] clears it to [`GpuMaterial::default`],
+    /// whose flags are zero.
     #[must_use]
-    pub fn masks_alpha(&self) -> bool {
-        self.masked.iter().any(|row| *row)
+    pub fn mode(&self, index: u32) -> u32 {
+        self.modes.get(index as usize).copied().unwrap_or(0)
     }
 
     /// Takes a row, writes `material` into it, and returns its handle.
@@ -331,6 +333,23 @@ impl MaterialTable {
     /// table has no ring, so a row rewritten while a frame is in flight is a
     /// read-after-write hazard across submissions. The [module docs](self) say
     /// what would have to change first.
+    ///
+    /// # A rewritten mode does not re-key the instances that name the row
+    ///
+    /// [`GpuMaterial::mode`] decides which draw bucket an instance of this
+    /// material is scattered into, and that decision is baked into the
+    /// instance's own record when the record is written — the draw-argument pass
+    /// has no binding for this table and cannot get one. So a row that goes from
+    /// `OPAQUE` to `MASK` here leaves every instance already naming it in the
+    /// opaque bucket, whose depth pass has no fragment stage: the cutout would
+    /// cast a solid shadow.
+    ///
+    /// Nothing in the tree can reach that state — `crcbl_render::ForwardRenderer`
+    /// takes its materials from the scene description at build and exposes no
+    /// insert or rewrite — which is why this is a documented precondition rather
+    /// than a guard. The fix, if a caller ever needs one, is a renderer-side
+    /// re-key over the live instances rather than anything this type can do
+    /// alone; `docs/backlog.md` carries it.
     ///
     /// # Errors
     ///
@@ -412,8 +431,8 @@ impl MaterialTable {
         device.write_buffer(self.buffer, at, &material.to_bytes())?;
         // After the write and not before it: the record is of what the device
         // holds, and a refused write left the row as it was.
-        if let Some(entry) = self.masked.get_mut(index as usize) {
-            *entry = material.flags & GpuMaterial::ALPHA_MODE_MASK != 0;
+        if let Some(entry) = self.modes.get_mut(index as usize) {
+            *entry = material.mode();
         }
         Ok(())
     }
@@ -509,23 +528,25 @@ mod tests {
             .collect()
     }
 
-    /// **The table answers whether anything in it cuts an alpha mask, and the
-    /// answer tracks every way a row can change.**
+    /// **The table reports each row's material mode, and the answer tracks every
+    /// way a row can change.**
     ///
-    /// [`crate::forward`] asks this once a frame to decide whether the depth
-    /// prepass and the shadow atlas need a fragment stage, so a stale answer is
-    /// either a cutout casting a solid shadow or every opaque frame in the tree
-    /// paying for a `discard` nothing uses.
+    /// [`crate::forward`] reads this when it writes an instance record, and the
+    /// mode is what routes the draw: a stale answer is either a cutout scattered
+    /// into the opaque bucket — whose depth pass has no fragment stage, so it
+    /// casts a solid shadow — or an opaque mesh paying for a `discard` nothing
+    /// uses.
     ///
     /// Four transitions, because the record is written in one place —
     /// `MaterialTable::write` — and each of the four reaches it differently: an
-    /// unmasked insert, a masked insert, a `set` that un-masks a live row, and a
+    /// opaque insert, a masked insert, a `set` that un-masks a live row, and a
     /// `remove`, which clears the row to [`GpuMaterial::default`] and must
-    /// therefore also clear the record. The second masked row is what stops the
-    /// answer being "the last row written": un-masking one of two must not
-    /// un-mask the table.
+    /// therefore also clear the record. **Per row and not "does anything mask"**,
+    /// so un-masking one of two masked rows is visible as the one row it moved:
+    /// an answer about the table as a whole would report the same `true` before
+    /// and after.
     #[test]
-    fn the_table_reports_whether_any_row_cuts_an_alpha_mask() {
+    fn the_table_reports_each_rows_material_mode() {
         let (recorder, device) = open();
         let device = device.as_ref();
         let mut table = table(device, 8);
@@ -540,41 +561,60 @@ mod tests {
             flags: 0,
             ..material(n)
         };
+        let mode = |table: &MaterialTable, handle: MaterialHandle| table.mode(handle.index());
 
-        assert!(
-            !table.masks_alpha(),
-            "an empty table masks nothing, or every frame drawn before a material exists pays \
-             for a cutout"
+        assert_eq!(
+            table.mode(0),
+            0,
+            "a row nothing has written is cleared, and a cleared row is OPAQUE — or every \
+             instance placed before a material exists routes to a cutout bucket"
         );
         let opaque = table
             .insert(device, &unmasked(0))
             .expect("a table of eight has room");
-        assert!(
-            !table.masks_alpha(),
-            "an opaque row must not mask the table"
+        assert_eq!(
+            mode(&table, opaque),
+            0,
+            "an opaque row's mode is zero, whatever else is in its flags"
         );
 
         let first = table.insert(device, &masked(1)).expect("room");
-        assert!(
-            table.masks_alpha(),
-            "a row inserted with the mask bit must move the answer, or the depth passes go on \
-             writing its full silhouette"
+        assert_eq!(
+            mode(&table, first),
+            GpuMaterial::ALPHA_MODE_MASK,
+            "a row inserted with the mask bit reports it, or the instances naming it scatter \
+             into the opaque bucket and the depth passes write their full silhouette"
         );
         let second = table.insert(device, &masked(2)).expect("room");
 
         table
             .set(device, first, &unmasked(3))
             .expect("a live handle rewrites its row");
-        assert!(
-            table.masks_alpha(),
-            "un-masking one of two masked rows must leave the table masked"
+        assert_eq!(
+            mode(&table, first),
+            0,
+            "a rewritten row reports its new mode"
+        );
+        assert_eq!(
+            mode(&table, second),
+            GpuMaterial::ALPHA_MODE_MASK,
+            "and the other masked row is untouched, which is what a per-row answer buys over \
+             one about the table"
         );
         table
             .remove(device, second)
             .expect("a live handle frees its row");
-        assert!(
-            !table.masks_alpha(),
-            "removing the last masked row clears it to black, so the table masks nothing again"
+        assert_eq!(
+            table.mode(second.index()),
+            0,
+            "removing a row clears it to black, whose flags are zero"
+        );
+
+        assert_eq!(
+            table.mode(table.capacity()),
+            0,
+            "a row past the table is OPAQUE rather than a panic: an index the caller cannot \
+             have been given is not a routing decision"
         );
 
         table.remove(device, opaque).expect("live");

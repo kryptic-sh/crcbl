@@ -117,9 +117,10 @@
 //! * [`DrawGen::counts`] and [`DrawGen::mesh_args`] are one buffer. The counts
 //!   are at offset zero and bucket `b`'s dispatch extents at
 //!   [`DrawGen::mesh_args_offset`]`(b)`.
-//! * Every host-written table — the bucket table, the per-bucket cluster counts
-//!   and `docs/plan/25-lod.md`'s three selection tables — is one buffer, packed
-//!   by [`crcbl_shaders::draw_gen::pack_tables`].
+//! * Every host-written table — the bucket table, its per-bucket material
+//!   modes, the per-bucket cluster counts and `docs/plan/25-lod.md`'s three
+//!   selection tables — is one buffer, packed by
+//!   [`crcbl_shaders::draw_gen::pack_tables`].
 //!
 //! So a reader that copies a region back must take its offset from the accessor
 //! that names it. Reading at zero because a region used to be its own allocation
@@ -155,6 +156,19 @@ pub struct DrawGenDesc<'a> {
     /// Which mesh each bucket draws, as an index into the mesh table, in bucket
     /// order. One entry per indirect call the caller will record.
     pub bucket_meshes: &'a [u32],
+    /// Which material **mode** each bucket draws, in the same order — the other
+    /// half of a bucket's routing key.
+    ///
+    /// [`GpuMaterial::mode`](crcbl_shaders::mesh::GpuMaterial::mode) of the rows
+    /// the scene holds, and the scatter sends an instance to the bucket matching
+    /// its mesh *and* the mode its own record carries. So one mesh drawn by an
+    /// opaque material and by a cutout one is two buckets, and the depth prepass
+    /// and the shadow atlas bind a pipeline per bucket instead of one per frame.
+    ///
+    /// The same length as [`bucket_meshes`](Self::bucket_meshes). All zeroes for
+    /// a scene whose materials are all opaque, which is every demo in this tree:
+    /// one bucket per mesh, and the region costs one word each.
+    pub bucket_modes: &'a [u32],
     /// How many clusters each bucket's mesh has, in the same order — the x
     /// extent of that bucket's mesh dispatch, and the only word of the
     /// mesh-dispatch arguments — see [`DrawGen::mesh_args`] — the GPU does not
@@ -373,6 +387,13 @@ impl DrawGen {
             "draw generation with no buckets would generate no draws"
         );
         assert_eq!(
+            desc.bucket_modes.len(),
+            desc.bucket_meshes.len(),
+            "one material mode per bucket: a shorter table would key a bucket on a mode that \
+             belongs to another bucket, or to nothing, and the instances meant for it would \
+             scatter nowhere and never be drawn"
+        );
+        assert_eq!(
             desc.bucket_clusters.len(),
             desc.bucket_meshes.len(),
             "one cluster count per bucket: a shorter table would leave a bucket's mesh dispatch \
@@ -410,12 +431,13 @@ impl DrawGen {
             Ok(handle)
         };
 
-        // **Five tables, one buffer**, because the draw-argument pass has eight
-        // storage bindings to spend and a WebGPU device guarantees no more — see
-        // the module docs. They are packed together rather than any other five
-        // because they are the five written at build and never per frame: the
-        // bucket table, its cluster counts, and `docs/plan/25-lod.md`'s three
-        // selection tables all follow residency and nothing else.
+        // **Every host-written table in one buffer**, because the draw-argument
+        // pass has eight storage bindings to spend and a WebGPU device
+        // guarantees no more — see the module docs. They are packed together
+        // rather than any other set because they are the ones written at build
+        // and never per frame: the bucket table, its material modes, its cluster
+        // counts, and `docs/plan/25-lod.md`'s three selection tables all follow
+        // residency and nothing else.
         //
         // `pack_tables` is what pads an empty selection region out to one zeroed
         // record, which is the ordinary case for a renderer whose meshes have no
@@ -423,6 +445,7 @@ impl DrawGen {
         // region whether it has a DAG or not.
         let packed = draw_gen::pack_tables(
             desc.bucket_meshes,
+            desc.bucket_modes,
             desc.bucket_clusters,
             desc.mesh_levels,
             desc.level_groups,
@@ -532,6 +555,7 @@ impl DrawGen {
                     bucket_capacity: capacity,
                     visible_capacity: capacity,
                     group_stride,
+                    bucket_modes_at: table_offsets.bucket_modes_at,
                     bucket_clusters_at: table_offsets.bucket_clusters_at,
                     mesh_levels_at: table_offsets.mesh_levels_at,
                     level_groups_at: table_offsets.level_groups_at,
@@ -1077,6 +1101,7 @@ impl DrawGen {
                 bucket_capacity: self.capacity,
                 visible_capacity: self.capacity,
                 group_stride: self.group_stride,
+                bucket_modes_at: self.table_offsets.bucket_modes_at,
                 bucket_clusters_at: self.table_offsets.bucket_clusters_at,
                 mesh_levels_at: self.table_offsets.mesh_levels_at,
                 level_groups_at: self.table_offsets.level_groups_at,

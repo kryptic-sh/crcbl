@@ -37,11 +37,12 @@ pub const WORKGROUP_SIZE: u32 = 64;
 
 /// Bytes of the uniform block.
 ///
-/// Eight `uint`, which is exactly the 32 bytes `std140` puts in front of the
-/// `float4` that follows, and two `float4`. Checked against the `Offset`
-/// decorations `slangc` emits by this module's
+/// Nine `uint`, then the padding `std140` puts in front of the `float4` that
+/// follows — a `float4` is 16-aligned, so the ninth `uint` costs a whole row —
+/// and then two `float4`. Checked against the `Offset` decorations `slangc`
+/// emits by this module's
 /// `the_draw_gen_params_block_matches_the_offsets_slangc_emits`.
-pub const PARAMS_SIZE: usize = 64;
+pub const PARAMS_SIZE: usize = 80;
 
 /// The uniform block, matching `struct DrawGenParams` in
 /// `shaders/draw_gen.slang`.
@@ -68,18 +69,29 @@ pub struct Params {
     /// carries: this pass writes the state and the amplification stage reads it,
     /// so the two must index it identically.
     pub group_stride: u32,
-    /// Where the per-bucket cluster counts start, in words, in the single
+    /// Where the per-bucket material modes start, in words, in the single
     /// host-written table buffer `draw_gen.slang` binds.
     ///
-    /// **Five tables share one storage binding**, because WebGPU guarantees only
-    /// eight storage buffers per shader stage and this pass bound fourteen — see
-    /// `shaders/draw_gen.slang`'s header, which is where that is argued. The
-    /// bucket table is at word zero and needs no offset; these four say where
-    /// each later region begins, and only the host knows, because each is as
-    /// long as what is resident.
+    /// A bucket's key is its mesh id **and** this word, which is what lets a
+    /// mesh drawn by an opaque material and by a cutout one occupy two buckets —
+    /// so a masked material costs a fragment stage in the depth passes for its
+    /// own mesh and for no other. [`GpuMaterial::mode`](crate::mesh::GpuMaterial::mode)
+    /// is the value; `crcbl_render::ForwardRenderer` is what emits one bucket
+    /// per mode a scene actually holds, so an all-opaque scene's table is
+    /// exactly the one it had before this region existed.
+    pub bucket_modes_at: u32,
+    /// Where the per-bucket cluster counts start, in words, in the same buffer.
     ///
-    /// [`pack_tables`] is what computes all four from the table lengths, so a
-    /// caller packing the buffer and a caller filling this block cannot disagree.
+    /// **Every host-written table shares one storage binding**, because WebGPU
+    /// guarantees only eight storage buffers per shader stage and this pass
+    /// bound fourteen — see `shaders/draw_gen.slang`'s header, which is where
+    /// that is argued. The bucket table is at word zero and needs no offset;
+    /// the offsets here say where each later region begins, and only the host
+    /// knows, because each is as long as what is resident.
+    ///
+    /// [`pack_tables`] is what computes every one of them from the table
+    /// lengths, so a caller packing the buffer and a caller filling this block
+    /// cannot disagree.
     pub bucket_clusters_at: u32,
     /// Where the per-mesh [`MeshLevels`](crate::level_select::MeshLevels)
     /// records start, in words.
@@ -137,6 +149,7 @@ impl Params {
             self.bucket_capacity,
             self.visible_capacity,
             self.group_stride,
+            self.bucket_modes_at,
             self.bucket_clusters_at,
             self.mesh_levels_at,
             self.level_groups_at,
@@ -147,13 +160,13 @@ impl Params {
         {
             put(slot * 4, value.to_le_bytes());
         }
-        // Offset 32 is where `std140` puts the first `float4`, the eight `uint`
-        // above having filled two whole 16-byte rows.
+        // Offset 48 is where `std140` puts the first `float4`: the nine `uint`
+        // above end at 36, and a `float4` is 16-aligned.
         for (axis, value) in self.camera_position.into_iter().enumerate() {
-            put(32 + axis * 4, value.to_le_bytes());
+            put(48 + axis * 4, value.to_le_bytes());
         }
         for (slot, value) in self.lod_params.into_iter().enumerate() {
-            put(48 + slot * 4, value.to_le_bytes());
+            put(64 + slot * 4, value.to_le_bytes());
         }
         bytes
     }
@@ -181,6 +194,8 @@ pub struct Tables {
 /// [`Params`] carries, and the bytes are wanted exactly once.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TableOffsets {
+    /// [`Params::bucket_modes_at`].
+    pub bucket_modes_at: u32,
     /// [`Params::bucket_clusters_at`].
     pub bucket_clusters_at: u32,
     /// [`Params::mesh_levels_at`].
@@ -194,13 +209,14 @@ pub struct TableOffsets {
 /// Packs every host-written table `draw_gen.slang` reads into one buffer.
 ///
 /// The regions are laid out in the order that shader's `tables` binding
-/// documents: the bucket table at word zero, then the per-bucket cluster counts,
-/// then the per-mesh [`MeshLevels`](crate::level_select::MeshLevels) records,
-/// then the [`LevelGroup`](crate::level_select::LevelGroup) records, then the
-/// level → mesh id table. **One buffer because a WebGPU device guarantees only
-/// eight storage buffers per shader stage** and the pass bound fourteen; the
-/// tables were chosen for the merge because they are written together, when a
-/// mesh becomes resident, and never per frame.
+/// documents: the bucket table at word zero, then the per-bucket material modes,
+/// then the per-bucket cluster counts, then the per-mesh
+/// [`MeshLevels`](crate::level_select::MeshLevels) records, then the
+/// [`LevelGroup`](crate::level_select::LevelGroup) records, then the level →
+/// mesh id table. **One buffer because a WebGPU device guarantees only eight
+/// storage buffers per shader stage** and the pass bound fourteen; the tables
+/// were chosen for the merge because they are written together, when a mesh
+/// becomes resident, and never per frame.
 ///
 /// **Each of the three selection regions is padded to at least one record**, so
 /// a renderer whose meshes have no hierarchy at all — the ordinary case — still
@@ -216,6 +232,7 @@ pub struct TableOffsets {
 #[must_use]
 pub fn pack_tables(
     bucket_meshes: &[u32],
+    bucket_modes: &[u32],
     bucket_clusters: &[u32],
     mesh_levels: &[crate::level_select::MeshLevels],
     level_groups: &[crate::level_select::LevelGroup],
@@ -239,6 +256,8 @@ pub fn pack_tables(
     };
 
     bytes.extend_from_slice(&words(bucket_meshes));
+    let bucket_modes_at = offset(&bytes)?;
+    bytes.extend_from_slice(&words(bucket_modes));
     let bucket_clusters_at = offset(&bytes)?;
     bytes.extend_from_slice(&words(bucket_clusters));
     let mesh_levels_at = offset(&bytes)?;
@@ -261,6 +280,7 @@ pub fn pack_tables(
     Some(Tables {
         bytes,
         offsets: TableOffsets {
+            bucket_modes_at,
             bucket_clusters_at,
             mesh_levels_at,
             level_groups_at,
@@ -445,8 +465,8 @@ mod tests {
     #[test]
     fn the_draw_gen_params_block_matches_the_offsets_slangc_emits() {
         // `OpMemberDecorate %DrawGenParams_std140 n Offset …`: 0, 4, 8, 12, 16,
-        // 20, 24, 28, 32, 48.
-        assert_eq!(PARAMS_SIZE, 64);
+        // 20, 24, 28, 32, 48, 64.
+        assert_eq!(PARAMS_SIZE, 80);
         assert_eq!(
             PARAMS_SIZE % 16,
             0,
@@ -458,6 +478,7 @@ mod tests {
             bucket_capacity: 5,
             visible_capacity: 9,
             group_stride: 11,
+            bucket_modes_at: 12,
             bucket_clusters_at: 13,
             mesh_levels_at: 17,
             level_groups_at: 19,
@@ -474,20 +495,26 @@ mod tests {
         assert_eq!(uint_at(4), 5, "bucket_capacity at offset 4");
         assert_eq!(uint_at(8), 9, "visible_capacity at offset 8");
         assert_eq!(uint_at(12), 11, "group_stride at offset 12");
-        assert_eq!(uint_at(16), 13, "bucket_clusters_at at offset 16");
-        assert_eq!(uint_at(20), 17, "mesh_levels_at at offset 20");
-        assert_eq!(uint_at(24), 19, "level_groups_at at offset 24");
-        assert_eq!(uint_at(28), 23, "level_meshes_at at offset 28");
-        assert_eq!(float_at(32), 1.5, "camera_position at offset 32");
-        assert_eq!(float_at(40), 3.5, "and it is three floats wide");
-        assert_eq!(uint_at(44), 0, "the fourth component is padding, and zero");
-        assert_eq!(float_at(48), 4.5, "lod_params at offset 48");
-        assert_eq!(float_at(52), 5.5, "and its expand budget beside it");
-        assert_eq!(float_at(56), 6.5, "and the hold budget after that");
+        assert_eq!(uint_at(16), 12, "bucket_modes_at at offset 16");
+        assert_eq!(uint_at(20), 13, "bucket_clusters_at at offset 20");
+        assert_eq!(uint_at(24), 17, "mesh_levels_at at offset 24");
+        assert_eq!(uint_at(28), 19, "level_groups_at at offset 28");
+        assert_eq!(uint_at(32), 23, "level_meshes_at at offset 32");
         assert!(
-            bytes[60..].iter().all(|byte| *byte == 0),
+            bytes[36..48].iter().all(|byte| *byte == 0),
+            "the row std140 pads out before the first float4 is written, and it is zero: {:?}",
+            &bytes[36..48]
+        );
+        assert_eq!(float_at(48), 1.5, "camera_position at offset 48");
+        assert_eq!(float_at(56), 3.5, "and it is three floats wide");
+        assert_eq!(uint_at(60), 0, "the fourth component is padding, and zero");
+        assert_eq!(float_at(64), 4.5, "lod_params at offset 64");
+        assert_eq!(float_at(68), 5.5, "and its expand budget beside it");
+        assert_eq!(float_at(72), 6.5, "and the hold budget after that");
+        assert!(
+            bytes[76..].iter().all(|byte| *byte == 0),
             "the std140 tail padding is written, and it is zero: {:?}",
-            &bytes[60..]
+            &bytes[76..]
         );
     }
 
@@ -505,6 +532,10 @@ mod tests {
         use crate::level_select::{LEVEL_GROUP_STRIDE, LevelGroup, MESH_LEVELS_STRIDE, MeshLevels};
 
         let bucket_meshes = [7u32, 8, 9];
+        // Two modes over three buckets, so a packer that wrote the mesh ids into
+        // this region — or read it at the bucket table's offset — is a different
+        // set of words rather than the same ones.
+        let bucket_modes = [0u32, 1, 0];
         let bucket_clusters = [70u32, 80, 90];
         let mesh_levels = [
             MeshLevels {
@@ -535,6 +566,7 @@ mod tests {
 
         let packed = pack_tables(
             &bucket_meshes,
+            &bucket_modes,
             &bucket_clusters,
             &mesh_levels,
             &level_groups,
@@ -549,6 +581,11 @@ mod tests {
         for (bucket, mesh) in bucket_meshes.iter().enumerate() {
             let bucket = u32::try_from(bucket).expect("small");
             assert_eq!(word_at(bucket), *mesh, "bucket table at word 0");
+            assert_eq!(
+                word_at(packed.offsets.bucket_modes_at + bucket),
+                bucket_modes[bucket as usize],
+                "material modes at bucket_modes_at"
+            );
             assert_eq!(
                 word_at(packed.offsets.bucket_clusters_at + bucket),
                 bucket_clusters[bucket as usize],
@@ -589,7 +626,7 @@ mod tests {
     /// so a region packed at zero length would put that read past the end.
     #[test]
     fn the_empty_selection_regions_are_padded_to_one_record() {
-        let packed = pack_tables(&[3], &[0], &[], &[], &[]).expect("addresses");
+        let packed = pack_tables(&[3], &[0], &[0], &[], &[], &[]).expect("addresses");
         let words = u32::try_from(packed.bytes.len() / 4).expect("small");
         assert!(
             packed.offsets.level_meshes_at < words,
@@ -653,6 +690,48 @@ mod tests {
         assert!(
             source.contains(&declaration),
             "draw_gen.slang does not declare `{declaration}`"
+        );
+    }
+
+    /// **The scatter's routing key is the mesh id and the material mode**, in
+    /// the bits this crate writes them into.
+    ///
+    /// Three claims, and the third is the one a constant check alone would
+    /// miss. The two `static const uint` lines have to be the host's numbers, or
+    /// the shader reads the mode out of the wrong bits of
+    /// [`GpuInstance::flags`](crate::mesh::GpuInstance::flags) and every
+    /// instance answers mode zero — which routes a cutout into the opaque bucket
+    /// and looks exactly like a scene with no cutout in it. And the scatter's
+    /// skip has to compare **both** halves: a shader that grew the region, the
+    /// offset and the accessor while going on comparing the mesh alone passes
+    /// every layout check in this module and sends both twins to whichever
+    /// bucket comes first.
+    #[test]
+    fn the_scatter_routes_by_the_mesh_and_the_material_mode() {
+        use crate::mesh::GpuInstance;
+
+        let source = include_str!("../shaders/draw_gen.slang");
+        for (name, value) in [
+            (
+                "INSTANCE_MATERIAL_MODE_SHIFT",
+                GpuInstance::MATERIAL_MODE_SHIFT,
+            ),
+            (
+                "INSTANCE_MATERIAL_MODE_MASK",
+                GpuInstance::MATERIAL_MODE_MASK,
+            ),
+        ] {
+            let declaration = format!("static const uint {name} = {value};");
+            assert!(
+                source.contains(&declaration),
+                "draw_gen.slang does not declare `{declaration}`, so the pass reads the \
+                 material mode out of bits the host does not write it into"
+            );
+        }
+        assert!(
+            source.contains("if (bucket_mesh(bucket) != mesh_id || bucket_mode(bucket) != mode)"),
+            "draw_gen.slang's scatter no longer skips a bucket whose mode differs, so a mesh's \
+             opaque and masked twins collapse into whichever bucket the table lists first"
         );
     }
 

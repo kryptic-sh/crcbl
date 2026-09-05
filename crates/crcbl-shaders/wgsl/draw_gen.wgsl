@@ -4,10 +4,11 @@ struct DrawGenParams_std140_0
     @align(4) bucket_capacity_0 : u32,
     @align(8) visible_capacity_0 : u32,
     @align(4) group_stride_0 : u32,
-    @align(16) bucket_clusters_at_0 : u32,
-    @align(4) mesh_levels_at_0 : u32,
-    @align(8) level_groups_at_0 : u32,
-    @align(4) level_meshes_at_0 : u32,
+    @align(16) bucket_modes_at_0 : u32,
+    @align(4) bucket_clusters_at_0 : u32,
+    @align(8) mesh_levels_at_0 : u32,
+    @align(4) level_groups_at_0 : u32,
+    @align(16) level_meshes_at_0 : u32,
     @align(16) camera_position_0 : vec4<f32>,
     @align(16) lod_params_0 : vec4<f32>,
 };
@@ -195,14 +196,19 @@ fn level_mesh_at_0( level_1 : u32) -> u32
     return tables_0[gen_0.level_meshes_at_0 + level_1];
 }
 
-fn bucket_base_0( bucket_3 : u32) -> u32
+fn bucket_mode_0( bucket_3 : u32) -> u32
 {
-    return gen_0.visible_capacity_0 + bucket_3 * gen_0.bucket_capacity_0;
+    return tables_0[gen_0.bucket_modes_at_0 + bucket_3];
 }
 
-fn count_word_0( bucket_4 : u32) -> u32
+fn bucket_base_0( bucket_4 : u32) -> u32
 {
-    return bucket_4;
+    return gen_0.visible_capacity_0 + bucket_4 * gen_0.bucket_capacity_0;
+}
+
+fn count_word_0( bucket_5 : u32) -> u32
+{
+    return bucket_5;
 }
 
 fn select_level_0( _S7 : u32,  _S8 : u32) -> u32
@@ -246,6 +252,11 @@ fn select_level_0( _S7 : u32,  _S8 : u32) -> u32
     return chosen_0;
 }
 
+fn instance_material_mode_0( _S15 : u32) -> u32
+{
+    return ((((instances_0[_S15].flags_1) & (u32(12)))) >> (u32(2)));
+}
+
 @compute
 @workgroup_size(64, 1, 1)
 fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
@@ -267,30 +278,40 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
         return;
     }
     var instance_index_0 : u32 = visible_instances_0[index_0];
-    var _S15 : MeshLevels_0 = mesh_levels_of_0(instances_0[visible_instances_0[index_0]].mesh_0);
-    var _S16 : u32 = select_level_0(visible_instances_0[index_0], visible_instances_0[index_0]);
-    var _S17 : u32 = level_mesh_at_0(_S15.first_level_0 + _S16);
-    var bucket_5 : u32 = u32(0);
+    var _S16 : MeshLevels_0 = mesh_levels_of_0(instances_0[visible_instances_0[index_0]].mesh_0);
+    var _S17 : u32 = select_level_0(visible_instances_0[index_0], visible_instances_0[index_0]);
+    var _S18 : u32 = level_mesh_at_0(_S16.first_level_0 + _S17);
+    var _S19 : u32 = instance_material_mode_0(visible_instances_0[index_0]);
+    var bucket_6 : u32 = u32(0);
     for(;;)
     {
-        if(bucket_5 < (gen_0.bucket_count_0))
+        if(bucket_6 < (gen_0.bucket_count_0))
         {
         }
         else
         {
             break;
         }
-        if((bucket_mesh_0(bucket_5)) != _S17)
+        var _S20 : bool;
+        if((bucket_mesh_0(bucket_6)) != _S18)
         {
-            bucket_5 = bucket_5 + u32(1);
+            _S20 = true;
+        }
+        else
+        {
+            _S20 = (bucket_mode_0(bucket_6)) != _S19;
+        }
+        if(_S20)
+        {
+            bucket_6 = bucket_6 + u32(1);
             continue;
         }
-        var slot_1 : u32 = atomicAdd(&(args_0[bucket_5 * u32(5) + u32(1)]), u32(1));
-        var _S18 : u32 = atomicAdd(&(counts_and_mesh_args_0[mesh_arg_word_0(bucket_5, u32(1))]), u32(1));
-        visible_instances_0[bucket_base_0(bucket_5) + slot_1] = instance_index_0;
+        var slot_1 : u32 = atomicAdd(&(args_0[bucket_6 * u32(5) + u32(1)]), u32(1));
+        var _S21 : u32 = atomicAdd(&(counts_and_mesh_args_0[mesh_arg_word_0(bucket_6, u32(1))]), u32(1));
+        visible_instances_0[bucket_base_0(bucket_6) + slot_1] = instance_index_0;
         if(slot_1 == u32(0))
         {
-            atomicStore(&(counts_and_mesh_args_0[count_word_0(bucket_5)]), u32(1));
+            atomicStore(&(counts_and_mesh_args_0[count_word_0(bucket_6)]), u32(1));
         }
         break;
     }

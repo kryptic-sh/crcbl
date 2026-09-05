@@ -144,15 +144,15 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [draw_gen]
 source = shaders/draw_gen.slang
-source-sha256 = ce1b89ccadbbf4a3c4cc38a30b7d20cda8af7cdac3b7f3d64523a37c144cd9f3
+source-sha256 = 2af5a0f2fcadedde161a87d89f4839206da40288c6002b895abc42e321ea76cb
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/draw_gen.spv
-spirv-sha256 = ecd54a0163e82ef3ab171b44cd05816a38538e1a0dd708c682273cc2b64f54bc
+spirv-sha256 = dd4c7b664c9fedb5c713b8e5575bfd024977c6d6ff256ac004e2b60004d3f34b
 wgsl = wgsl/draw_gen.wgsl
-wgsl-sha256 = b781d9c54767b29d753b76ce7634801e961e99af3562d9e7dc045b2725649272
+wgsl-sha256 = 417e9256cff1cb47a42e8e176336916ba735181a9637d7ad893cb76068b5ad2b
 msl = msl/draw_gen.metal
-msl-sha256 = 62a4ca168f90595bf993683922c18622aaff6c1d29d871c25f2f6ba3470a1894
-dxil = computeMain:dxil/draw_gen.compute.dxil:516329336aa6bada4dba7b7158684466237723e03873dc9deb3777ebe3b0c432
+msl-sha256 = d6e48e2d633c8e5951ccc83deb2e22106faa8fdd1bf603b0731c81fd5a835e37
+dxil = computeMain:dxil/draw_gen.compute.dxil:417d816f3f393d1c8f288dbfe74a4dc7ab5ea82b2a8beec69906e3670fd4a3d0
 entry-points = computeMain:glcompute
 
 [exposure]
