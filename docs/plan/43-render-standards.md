@@ -1001,12 +1001,32 @@ The pass is under a third of a per cent of the frame on the desktop tier and
 under half a per cent on the software one, and the frame totals are inside their
 own run-to-run spread either way — which is the claim "one fetch" was making.
 
-**What is not free is moving the sun.** `SkyView::build` is 25.3 ms of CPU
-(measured over three builds on this machine), its L1 projection 0.24 ms and its
-row encoding 0.014 ms. The renderer caches the LUT against the normalised sun,
-so a scene that sets an atmosphere and leaves it pays that once; a scene that
-sweeps the sun continuously pays it every frame it moves, and `docs/backlog.md`
-carries the amortisation that is owed.
+**What is not free is moving the sun, and it is paid a stripe at a time.**
+`SkyView::build` marches the whole LUT, and `SkyViewBuild` is that same march
+broken into rows — `start`, `step`, `finish`, with `build` itself now one call
+of it stepped straight to the end. `ForwardRenderer::refresh_sky_view` marches
+the first LUT whole, because a renderer with no LUT has no sky to draw, and
+every later move of the sun `SKY_VIEW_BUILD_ROWS` rows per `begin_frame` with
+the last finished LUT still the one uploaded. A sun that moves again mid-march
+restarts the build from row zero rather than finishing a LUT that is already
+wrong, so **a scene sweeping its sun pays a bounded cost per frame and sees a
+sky that lags** — up to a whole build behind — where before it paid the whole
+march in every frame the sun moved. Priced 2026-09-06 by
+`the_amortised_step_is_a_fraction_of_the_whole_build`, `--release`, medians of
+three:
+
+| host cost, this machine                  |          |
+| ---------------------------------------- | -------- |
+| `SkyView::build`, the whole march        | 24.57 ms |
+| `SkyViewBuild::step`, one frame's stripe | 1.496 ms |
+| `gradient_fit` + `irradiance`            | 0.224 ms |
+| `SkyView::rows`, the upload's encoding   | 0.007 ms |
+
+The two projections are taken where a march finishes rather than in every
+`begin_frame` — `crcbl_render::forward`'s `PresentedSky` is the LUT and the two
+of them together — so the whole host cost of a frame under a sun that has not
+moved is the last row of that table, the encoding of the LUT into that frame's
+own ring slot.
 
 **SSR reads the atmosphere as its own three bands.** `ssr.slang`'s
 `sky_prefiltered` takes a gradient — that is what the committed

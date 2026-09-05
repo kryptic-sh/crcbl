@@ -665,45 +665,15 @@ impl SkyView {
     /// enforces it. Two builds from the same [`Atmosphere`] produce the same
     /// bytes on every machine, which
     /// `the_lut_is_bit_identical_across_two_builds` asserts.
+    ///
+    /// **The whole LUT in one call**, which is what a caller that has no frame
+    /// to fit it into wants. A caller that does — the renderer — steps a
+    /// [`SkyViewBuild`] instead and gets the same bytes out of it.
     #[must_use]
     pub fn build(atmosphere: &Atmosphere) -> Self {
-        let sun_up = atmosphere.sun_direction[1].clamp(-1.0, 1.0);
-        // The sun in the LUT's own frame, where the sun's azimuth is the `+x`
-        // axis: horizontal component first, then up. The frame is only ever
-        // used through the two cosines below, so it needs no basis vectors.
-        let sun_side = (1.0 - sun_up * sun_up).max(0.0).sqrt();
-        let view_radius = atmosphere.view_radius_km();
-
-        let mut radiance = Vec::with_capacity(SKY_VIEW_WIDTH * SKY_VIEW_HEIGHT);
-        for row in 0..SKY_VIEW_HEIGHT {
-            let up = sky_view_up_of(axis_value(row, SKY_VIEW_HEIGHT));
-            let side = (1.0 - up * up).max(0.0).sqrt();
-            for column in 0..SKY_VIEW_WIDTH {
-                let cosine = sky_view_cosine_of(axis_value(column, SKY_VIEW_WIDTH));
-                let across = side * (1.0 - cosine * cosine).max(0.0).sqrt();
-                let direction = [side * cosine, up, across];
-                // The scattering cosine: the view direction against the sun,
-                // both in the LUT's frame where the sun has no `z`.
-                let sun_cosine = direction[0] * sun_side + up * sun_up;
-                let scattered = march(
-                    view_radius,
-                    direction,
-                    sun_side,
-                    sun_up,
-                    sun_cosine,
-                    SKY_VIEW_STEPS,
-                );
-                let mut lit = [0.0f32; 3];
-                for (channel, slot) in lit.iter_mut().enumerate() {
-                    *slot = scattered[channel] * atmosphere.sun_illuminance[channel];
-                }
-                radiance.push(lit);
-            }
-        }
-        Self {
-            radiance,
-            sun_direction: atmosphere.sun_direction,
-        }
+        let mut build = SkyViewBuild::start(atmosphere);
+        build.step(SKY_VIEW_HEIGHT);
+        build.finish()
     }
 
     /// The stored radiance at `(column, row)`.
@@ -900,6 +870,168 @@ impl SkyView {
             zenith,
             horizon,
             ground,
+        }
+    }
+}
+
+/// Rows [`SkyViewBuild::step`] marches per call.
+///
+/// **The renderer's frame budget is what picks it**, so it is a fraction of
+/// [`SKY_VIEW_HEIGHT`] rather than a round number: one step costs that share of
+/// [`SkyView::build`]'s whole march, and `crcbl_render::forward` takes one step
+/// per frame while the sun is moving. It divides [`SKY_VIEW_HEIGHT`] — so a
+/// build is a whole number of steps and no step is a short one — which the
+/// assertion below holds it to, and
+/// `the_amortised_step_is_a_fraction_of_the_whole_build` prints what the two
+/// actually cost.
+pub const SKY_VIEW_BUILD_ROWS: usize = 4;
+
+/// [`SKY_VIEW_BUILD_ROWS`] is a proper divisor of [`SKY_VIEW_HEIGHT`].
+///
+/// Its doc says a build is a whole number of steps and that one step is a
+/// fraction of the whole march. A stripe that divided nothing would make the
+/// first claim false; one as tall as the LUT amortises nothing and would make
+/// the second false. Neither is a runtime condition, so neither is a test.
+const _: () = assert!(
+    SKY_VIEW_BUILD_ROWS > 0
+        && SKY_VIEW_BUILD_ROWS < SKY_VIEW_HEIGHT
+        && SKY_VIEW_HEIGHT.is_multiple_of(SKY_VIEW_BUILD_ROWS),
+    "SKY_VIEW_BUILD_ROWS must be a proper divisor of SKY_VIEW_HEIGHT"
+);
+
+/// A sky-view LUT part way through its march.
+///
+/// [`SkyView::build`] is this stepped straight to the end. A caller with a
+/// frame to fit the march into steps it [`SKY_VIEW_BUILD_ROWS`] rows at a time
+/// instead and keeps showing the LUT it last finished, which is what
+/// `crcbl_render::forward` does with a sun that moves.
+///
+/// **Rows are independent**: the loop body reads the sun, the viewpoint and the
+/// committed tables, and nothing another row wrote. That is what makes a march
+/// stopped between two rows and resumed produce the same bytes as one that ran
+/// straight through — `a_striped_build_is_the_one_shot_build` asserts it at
+/// three stripe widths, one of them not a divisor.
+#[derive(Clone, Debug)]
+pub struct SkyViewBuild {
+    /// The sun and viewpoint this march was started from.
+    ///
+    /// Kept so a caller stepping one across frames can tell a build of the sun
+    /// it wants now from a build of a sun that has since moved.
+    atmosphere: Atmosphere,
+    /// The sun's horizontal component in the LUT's own frame, from
+    /// [`Self::start`].
+    ///
+    /// **Derived once for the whole march** rather than per step. It is the
+    /// same for every row, so deriving it again where a stripe resumes would be
+    /// a second copy of [`Self::start`]'s arithmetic that nothing holds to
+    /// agreeing with the first — which is exactly the shape of bug a march that
+    /// stops and resumes is exposed to.
+    sun_side: f32,
+    /// The sun's vertical component, on [`Self::sun_side`]'s terms.
+    sun_up: f32,
+    /// The viewpoint's radius from the planet's centre, on [`Self::sun_side`]'s
+    /// terms.
+    view_radius: f32,
+    /// The rows marched so far, in [`SkyView::radiance`]'s order.
+    ///
+    /// Its length is [`Self::rows_done`] times [`SKY_VIEW_WIDTH`], which is why
+    /// there is no second counter to disagree with it.
+    radiance: Vec<[f32; 3]>,
+}
+
+impl SkyViewBuild {
+    /// Starts a march of `atmosphere`'s sky with no row marched yet.
+    #[must_use]
+    pub fn start(atmosphere: &Atmosphere) -> Self {
+        let sun_up = atmosphere.sun_direction[1].clamp(-1.0, 1.0);
+        // The sun in the LUT's own frame, where the sun's azimuth is the `+x`
+        // axis: horizontal component first, then up. The frame is only ever
+        // used through the two cosines the march takes, so it needs no basis
+        // vectors.
+        let sun_side = (1.0 - sun_up * sun_up).max(0.0).sqrt();
+        Self {
+            atmosphere: *atmosphere,
+            sun_side,
+            sun_up,
+            view_radius: atmosphere.view_radius_km(),
+            radiance: Vec::with_capacity(SKY_VIEW_WIDTH * SKY_VIEW_HEIGHT),
+        }
+    }
+
+    /// The sun and viewpoint this march was started from.
+    #[must_use]
+    pub const fn atmosphere(&self) -> Atmosphere {
+        self.atmosphere
+    }
+
+    /// How many rows of the LUT are marched.
+    #[must_use]
+    pub fn rows_done(&self) -> usize {
+        self.radiance.len() / SKY_VIEW_WIDTH
+    }
+
+    /// Whether every row is marched, so [`Self::finish`] will not panic.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.rows_done() == SKY_VIEW_HEIGHT
+    }
+
+    /// Marches the next `rows` rows — or what is left of the LUT, if that is
+    /// fewer — and returns [`Self::is_complete`].
+    ///
+    /// A `rows` past the end is clamped rather than refused, so a caller may
+    /// step a build it does not know the progress of and a last short stripe
+    /// needs no arithmetic at the call site.
+    pub fn step(&mut self, rows: usize) -> bool {
+        let from = self.rows_done();
+        let until = from.saturating_add(rows).min(SKY_VIEW_HEIGHT);
+        for row in from..until {
+            let up = sky_view_up_of(axis_value(row, SKY_VIEW_HEIGHT));
+            let side = (1.0 - up * up).max(0.0).sqrt();
+            for column in 0..SKY_VIEW_WIDTH {
+                let cosine = sky_view_cosine_of(axis_value(column, SKY_VIEW_WIDTH));
+                let across = side * (1.0 - cosine * cosine).max(0.0).sqrt();
+                let direction = [side * cosine, up, across];
+                // The scattering cosine: the view direction against the sun,
+                // both in the LUT's frame where the sun has no `z`.
+                let sun_cosine = direction[0] * self.sun_side + up * self.sun_up;
+                let scattered = march(
+                    self.view_radius,
+                    direction,
+                    self.sun_side,
+                    self.sun_up,
+                    sun_cosine,
+                    SKY_VIEW_STEPS,
+                );
+                let mut lit = [0.0f32; 3];
+                for (channel, slot) in lit.iter_mut().enumerate() {
+                    *slot = scattered[channel] * self.atmosphere.sun_illuminance[channel];
+                }
+                self.radiance.push(lit);
+            }
+        }
+        self.is_complete()
+    }
+
+    /// The finished LUT.
+    ///
+    /// # Panics
+    ///
+    /// If any row is still unmarched. A LUT short of rows is not a stale sky
+    /// but a broken one — [`SkyView::rows`] would encode fewer bytes than
+    /// [`SKY_VIEW_BUFFER_BYTES`] and the buffer's tail would keep whatever was
+    /// there — so this is loud rather than padded: a caller steps until
+    /// [`Self::step`] says the march is done.
+    #[must_use]
+    pub fn finish(self) -> SkyView {
+        assert!(
+            self.is_complete(),
+            "{} of {SKY_VIEW_HEIGHT} rows are marched, so this LUT is not a sky yet",
+            self.rows_done()
+        );
+        SkyView {
+            radiance: self.radiance,
+            sun_direction: self.atmosphere.sun_direction,
         }
     }
 }
@@ -1679,6 +1811,130 @@ mod tests {
         assert!(
             first.rows().iter().any(|byte| *byte != 0),
             "the LUT is all zeroes, so the equality above says nothing"
+        );
+    }
+
+    /// A build marched in stripes is the build marched in one call.
+    ///
+    /// **What the amortisation rests on.** `crcbl_render::forward` shows the
+    /// LUT it last finished while a [`SkyViewBuild`] catches up with a sun that
+    /// moved, and that is only a stale sky rather than a wrong one if stopping
+    /// between two rows changes nothing about the rows either side. Three
+    /// stripe widths: one row at a time, seven — which divides neither
+    /// [`SKY_VIEW_HEIGHT`] nor [`SKY_VIEW_BUILD_ROWS`], so the last stripe is
+    /// short and every stripe after the first starts at an odd row — and the
+    /// whole LUT in one step.
+    #[test]
+    fn a_striped_build_is_the_one_shot_build() {
+        let whole = SkyView::build(&LOW_SUN).rows();
+        assert!(
+            whole.iter().any(|byte| *byte != 0),
+            "the reference LUT is all zeroes, so the equalities below say nothing"
+        );
+        for stripe in [1usize, 7, SKY_VIEW_HEIGHT] {
+            let mut build = SkyViewBuild::start(&LOW_SUN);
+            let mut steps = 0usize;
+            while !build.step(stripe) {
+                steps += 1;
+                assert_eq!(
+                    build.rows_done(),
+                    (steps * stripe).min(SKY_VIEW_HEIGHT),
+                    "a {stripe}-row step left the march somewhere other than where it says"
+                );
+            }
+            assert_eq!(
+                build.rows_done(),
+                SKY_VIEW_HEIGHT,
+                "a completed {stripe}-row build has not marched the whole LUT"
+            );
+            assert_eq!(
+                build.finish().rows(),
+                whole,
+                "a build marched {stripe} rows at a time is not the build marched in one go"
+            );
+        }
+    }
+
+    /// Prints what a whole [`SkyView::build`] costs and what one
+    /// [`SkyViewBuild::step`] of [`SKY_VIEW_BUILD_ROWS`] costs beside it:
+    ///
+    /// ```text
+    /// cargo test -p crcbl-shaders --release --lib -- --ignored --nocapture \
+    ///     --exact atmosphere::tests::the_amortised_step_is_a_fraction_of_the_whole_build
+    /// ```
+    ///
+    /// `#[ignore]` because it is a measurement and not a check: a wall clock on
+    /// a shared machine is not something to fail a build on. It is what the
+    /// numbers in `docs/plan/43-render-standards.md` §8 and the `CHANGELOG`
+    /// entry come from, so it is here rather than in a scratch file. Medians of
+    /// three, and `--release` because a debug march is not the one that ships.
+    #[test]
+    #[ignore = "measures wall time rather than checking anything"]
+    fn the_amortised_step_is_a_fraction_of_the_whole_build() {
+        use std::time::Instant;
+
+        let median = |mut runs: Vec<f64>| -> f64 {
+            runs.sort_by(f64::total_cmp);
+            runs[runs.len() / 2]
+        };
+        let runs = 3;
+        let whole = median(
+            (0..runs)
+                .map(|_| {
+                    let at = Instant::now();
+                    let built = SkyView::build(&LOW_SUN);
+                    let elapsed = at.elapsed().as_secs_f64() * 1.0e3;
+                    // Read the LUT back so no optimiser can decide the march
+                    // was not worth doing.
+                    assert!(built.entry(0, SKY_VIEW_HEIGHT - 1)[0] >= 0.0);
+                    elapsed
+                })
+                .collect(),
+        );
+        let stripe = median(
+            (0..runs)
+                .map(|_| {
+                    let mut build = SkyViewBuild::start(&LOW_SUN);
+                    let at = Instant::now();
+                    build.step(SKY_VIEW_BUILD_ROWS);
+                    let elapsed = at.elapsed().as_secs_f64() * 1.0e3;
+                    assert_eq!(build.rows_done(), SKY_VIEW_BUILD_ROWS);
+                    elapsed
+                })
+                .collect(),
+        );
+        // What a frame under a *static* sun used to pay: both projections were
+        // taken from the presented LUT every frame until they were cached
+        // beside it.
+        let built = SkyView::build(&LOW_SUN);
+        let projections = median(
+            (0..runs)
+                .map(|_| {
+                    let at = Instant::now();
+                    let gradient = built.gradient_fit();
+                    let probe = built.irradiance();
+                    let elapsed = at.elapsed().as_secs_f64() * 1.0e3;
+                    assert!(gradient.horizon[0] >= 0.0 && probe.sh_r[3] >= 0.0);
+                    elapsed
+                })
+                .collect(),
+        );
+        // The one host cost left in a frame whose sun has not moved: the LUT
+        // still has to reach that frame's own ring slot.
+        let encode = median(
+            (0..runs)
+                .map(|_| {
+                    let at = Instant::now();
+                    let rows = built.rows();
+                    let elapsed = at.elapsed().as_secs_f64() * 1.0e3;
+                    assert_eq!(rows.len(), SKY_VIEW_BUFFER_BYTES);
+                    elapsed
+                })
+                .collect(),
+        );
+        println!(
+            "SkyView::build {whole:.2} ms, one {SKY_VIEW_BUILD_ROWS}-row step {stripe:.3} ms, \
+             gradient_fit + irradiance {projections:.3} ms, rows {encode:.3} ms"
         );
     }
 

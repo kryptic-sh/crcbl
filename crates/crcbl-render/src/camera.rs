@@ -582,11 +582,13 @@ impl Default for Sky {
 /// The sky-view LUT is marched on the **host** — see
 /// [`crcbl_shaders::atmosphere::SkyView::build`] — so a frame's device cost is
 /// four buffer loads and a blend, the same as the gradient's. What is not free
-/// is changing this value: the renderer rebuilds the LUT on the next
-/// [`ForwardRenderer::begin_frame`] after it moves, which is tens of
-/// milliseconds of CPU. A scene sweeping the sun continuously pays that every
-/// frame it moves it, and `docs/backlog.md` carries the amortisation that is
-/// owed.
+/// is changing this value: the first [`ForwardRenderer::begin_frame`] after an
+/// atmosphere is set marches the whole LUT, which is tens of milliseconds of
+/// CPU. Every later move of the sun is marched
+/// [`crcbl_shaders::atmosphere::SKY_VIEW_BUILD_ROWS`] rows per frame with the
+/// last finished LUT still drawn, so a scene that sweeps the sun pays a stripe
+/// per frame and sees a sky that lags — `ForwardRenderer::refresh_sky_view`
+/// carries that trade.
 ///
 /// [`ForwardRenderer::set_atmosphere`]: crate::forward::ForwardRenderer::set_atmosphere
 /// [`ForwardRenderer::begin_frame`]: crate::forward::ForwardRenderer::begin_frame

@@ -749,6 +749,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A sun that moves is marched a stripe per frame instead of whole.**
+  `ForwardRenderer::refresh_sky_view` used to rebuild the entire sky-view LUT
+  inside the `begin_frame` that first saw a moved sun — 24.57 ms of CPU on this
+  machine, in every frame a scene sweeping its sun would draw.
+  `crcbl_shaders::atmosphere::SkyViewBuild` is that march broken into rows:
+  `start`, `step(rows)`, `rows_done`, `is_complete`, `atmosphere` and `finish`,
+  with `SkyView::build` now one call of it stepped straight to the end, so there
+  is a single march loop rather than two copies. The renderer keeps uploading
+  the LUT the last completed march produced and steps a build
+  `crcbl_shaders::atmosphere::SKY_VIEW_BUILD_ROWS` rows per frame — 1.496 ms of
+  CPU, and the LUT catches up in `SKY_VIEW_HEIGHT / SKY_VIEW_BUILD_ROWS` frames.
+  The first march after `set_atmosphere` is still synchronous, because a
+  renderer with no LUT has no sky to draw.
+
+  A sun that moves again mid-march restarts the build from row zero rather than
+  finishing a LUT that is already wrong on arrival, so a sun that moves every
+  frame goes on showing the last sky the march caught up with. That is the
+  trade, and `refresh_sky_view`'s doc states it: a bounded per-frame cost, and a
+  sky that lags a sweeping sun by up to one build.
+
+  `SkyView::gradient_fit` and `SkyView::irradiance` are now taken where a march
+  finishes rather than in every `begin_frame` — 0.224 ms per frame that a scene
+  whose sun has not moved no longer pays, leaving `SkyView::rows`' 0.007 ms
+  encoding as the whole host cost of such a frame. No device-side change: the
+  second buffer this needed is the host-side build, and `crcbl_render::sky_pass`
+  still writes its ring slot whole. Figures are medians of three from
+  `the_amortised_step_is_a_fraction_of_the_whole_build`, `--release`,
+  2026-09-06.
+
 - **A masked material costs a fragment stage on its own mesh's depth draws, not
   on the whole frame's.** The depth prepass and the shadow atlas used to swing
   entirely onto the cutout pipeline as soon as anything in the material table

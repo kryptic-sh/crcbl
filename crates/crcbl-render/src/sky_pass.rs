@@ -294,6 +294,17 @@ impl SkyPass {
         Ok(())
     }
 
+    /// The sky-view LUT buffers, one per frame in flight, in slot order.
+    ///
+    /// Test-only, on `crate::ssao::Ssao::blocks`' terms: the reference backend
+    /// can be asked what bytes a buffer holds, and the LUT that reaches the
+    /// device is the only place `crate::forward`'s striped march is visible —
+    /// `a_moving_sun_is_marched_a_stripe_per_frame` is what reads it.
+    #[cfg(test)]
+    pub(crate) fn luts(&self) -> &[BufferHandle] {
+        &self.luts
+    }
+
     /// Adds the `sky` pass, drawing into `color` where `depth` is still the far
     /// plane.
     ///

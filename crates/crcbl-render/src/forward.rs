@@ -201,7 +201,7 @@ use crate::texture::{
 use crate::transient::{TransientImageDesc, TransientPool};
 use crate::upscale::Upscale;
 use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages};
-use crcbl_shaders::atmosphere::SkyView;
+use crcbl_shaders::atmosphere::{SKY_VIEW_BUILD_ROWS, SkyView, SkyViewBuild};
 
 /// The clear behind the mesh, in **linear** light.
 ///
@@ -1265,6 +1265,42 @@ pub struct SkinnedInstanceDesc<'a> {
     pub transform: Mat4,
 }
 
+/// The sky-view LUT a frame is drawn from, and everything taken out of it.
+///
+/// **The two projections are cached beside the LUT rather than taken per
+/// frame**, which is what makes a frame under a sun that has not moved do no
+/// host LUT work at all: both are functions of the LUT alone, and the LUT only
+/// changes when [`ForwardRenderer::refresh_sky_view`] swaps a finished build
+/// in. [`crate::sky_pass`] still encodes [`SkyView::rows`] per frame, because
+/// that is a write into the frame's own ring slot rather than a projection.
+#[derive(Clone, Debug)]
+struct PresentedSky {
+    /// The normalised sun and viewpoint the LUT was marched for, which is what
+    /// [`ForwardRenderer::refresh_sky_view`] compares this frame's atmosphere
+    /// against.
+    parameters: crcbl_shaders::atmosphere::Atmosphere,
+    /// The marched LUT: what [`crate::sky_pass`] uploads and the background
+    /// samples.
+    view: SkyView,
+    /// [`SkyView::gradient_fit`], which `ssr.slang` reflects with and the sky
+    /// pass's block carries.
+    gradient: crcbl_shaders::sky::SkyGradient,
+    /// [`SkyView::irradiance`], which is the frame block's L1 ambient term.
+    irradiance: crcbl_shaders::probe::GpuProbe,
+}
+
+impl PresentedSky {
+    /// Takes both projections from a LUT that has just been marched.
+    fn new(parameters: crcbl_shaders::atmosphere::Atmosphere, view: SkyView) -> Self {
+        Self {
+            parameters,
+            gradient: view.gradient_fit(),
+            irradiance: view.irradiance(),
+            view,
+        }
+    }
+}
+
 /// Everything the forward frame owns, created once.
 #[derive(Debug)]
 pub struct ForwardRenderer {
@@ -1563,15 +1599,33 @@ pub struct ForwardRenderer {
     /// `None` by default, so a renderer nobody calls that on is the renderer it
     /// was.
     atmosphere: Option<Atmosphere>,
-    /// [`Self::atmosphere`]'s marched sky-view LUT, and the parameters it was
-    /// marched for.
+    /// The marched sky-view LUT this renderer is drawing, with the parameters
+    /// it was marched for and the projections taken from it.
     ///
     /// **Cached against the parameters rather than rebuilt per frame**, because
     /// the march is tens of milliseconds of CPU and the sun in most frames has
     /// not moved. The stored parameters are the *normalised* ones the shader
     /// crate takes, so a caller handing over the same sun spelled two lengths
     /// does not force a rebuild.
-    sky_view: Option<(crcbl_shaders::atmosphere::Atmosphere, SkyView)>,
+    ///
+    /// This is the LUT a frame is **drawn from**, which is not the one being
+    /// marched: see [`Self::sky_view_build`].
+    sky_view: Option<PresentedSky>,
+    /// The march in flight, when the sun has moved away from
+    /// [`Self::sky_view`]'s.
+    ///
+    /// [`ForwardRenderer::refresh_sky_view`] steps it
+    /// [`SKY_VIEW_BUILD_ROWS`] rows per frame and swaps it into
+    /// [`Self::sky_view`] when it finishes.
+    ///
+    /// **The host side is where the double buffer is**: the LUT being drawn and
+    /// the LUT being marched are these two fields, and [`crate::sky_pass`]'s
+    /// device ring is untouched. Putting the stripe on the device instead would
+    /// mean writing part of a ring slot per frame, and that ring's slots are
+    /// written whole precisely because each is a frame in flight — a partial
+    /// write would have to track, per slot, which rows of *which* sun that slot
+    /// already holds, which is bookkeeping the host copy does not need at all.
+    sky_view_build: Option<SkyViewBuild>,
 
     /// Whether the colour pass tints each cluster by its DAG level instead of
     /// shading — see [`set_lod_view`](ForwardRenderer::set_lod_view).
@@ -5529,6 +5583,7 @@ impl ForwardRenderer {
             sky: Sky::NONE,
             atmosphere: None,
             sky_view: None,
+            sky_view_build: None,
             lod_view: false,
             heatmap: false,
             occlusion_view: false,
@@ -6429,18 +6484,21 @@ impl ForwardRenderer {
         // because all three consumers below want it and the march is the
         // expensive part: `gradient_fit` is what the reflection pass and the
         // background's own gradient rows take, `irradiance` is the ambient
-        // term, and the LUT itself is what the background samples.
+        // term, and the LUT itself is what the background samples. The first
+        // two are taken when a march finishes rather than here — see
+        // `PresentedSky` — so a frame whose sun has not moved reads them.
         self.refresh_sky_view();
-        let sky_view = self.sky_view.as_ref().map(|(_, view)| view);
+        let sky_view = self.sky_view.as_ref();
         let gradient = match sky_view {
-            Some(view) => view.gradient_fit(),
+            Some(presented) => presented.gradient,
             None => self.sky.gradient(),
         };
-        // Projected once per frame on the host, which is also why the shading
-        // rule that governs `mesh.slang` has nothing to say about it: these
-        // coefficients reach every backend as uploaded numbers.
+        // Projected on the host — once per gradient, and for an atmosphere once
+        // per completed march rather than once per frame — which is also why
+        // the shading rule that governs `mesh.slang` has nothing to say about
+        // it: these coefficients reach every backend as uploaded numbers.
         let sky = match sky_view {
-            Some(view) => view.irradiance(),
+            Some(presented) => presented.irradiance,
             None => gradient.irradiance(),
         };
         let uniforms = mesh::FrameUniforms {
@@ -6669,7 +6727,7 @@ impl ForwardRenderer {
             inv_projection.to_cols_array(),
             camera.view().inverse().to_cols_array(),
             &gradient,
-            sky_view,
+            sky_view.map(|presented| &presented.view),
         )?;
         // The bloom chain's blocks, one row per step: each step needs the texel
         // size of the image it reads, and the chain's shape is a function of the
@@ -10595,28 +10653,69 @@ impl ForwardRenderer {
         self.sky != Sky::NONE || self.atmosphere.is_some()
     }
 
-    /// Marches [`Self::atmosphere`]'s sky-view LUT if the sun it was marched
-    /// for is not the sun this frame has.
+    /// Brings [`Self::sky_view`] up to the sun this frame has, a stripe of rows
+    /// per frame.
     ///
     /// Called once per [`Self::begin_frame`]. The comparison is on the
     /// normalised parameters rather than on the [`Atmosphere`] a caller handed
     /// over, so re-setting the same sun spelled a different length is not a
     /// rebuild — and a caller that sets the same value every frame, which is
-    /// the ordinary shape of a scene's update, pays the march once.
+    /// the ordinary shape of a scene's update, pays the comparison and nothing
+    /// else.
+    ///
+    /// # The first LUT is marched whole; every later one is marched in stripes
+    ///
+    /// A renderer that has no LUT has no sky to draw, so the first march after
+    /// [`set_atmosphere`](Self::set_atmosphere) runs to completion inside this
+    /// call and a caller that draws a single frame gets that frame's sky. After
+    /// that there is always a finished LUT to show, so a sun that moved starts
+    /// a [`SkyViewBuild`] and this steps it [`SKY_VIEW_BUILD_ROWS`] rows per
+    /// frame — the frames in between keep drawing the LUT the last completed
+    /// march produced, and no frame pays the whole march.
+    ///
+    /// # A sun that moves again restarts the march rather than finishing it
+    ///
+    /// The build in flight is kept only while its own sun is still the one the
+    /// caller wants; a sun that moved during it is a new build from row zero,
+    /// because finishing the old one would swap in a LUT for a sun that is
+    /// already wrong and then immediately start marching again. **A sun that
+    /// moves every frame therefore never completes a build and goes on showing
+    /// the last one it finished** — a sky frozen at the sun it last caught up
+    /// with, rather than a sky that stutters at whatever the march last passed.
+    /// That is the trade this makes: the frame cost is bounded and the sky
+    /// lags, where the whole-march rebuild it replaced had the sky exact and
+    /// the frame cost unbounded. A caller that wants the sky exact stops the
+    /// sun on a value and leaves it there: the march then completes, and the
+    /// frames it takes are `SKY_VIEW_HEIGHT` over [`SKY_VIEW_BUILD_ROWS`].
     fn refresh_sky_view(&mut self) {
         let Some(atmosphere) = self.atmosphere else {
             self.sky_view = None;
+            self.sky_view_build = None;
             return;
         };
         let parameters = atmosphere.parameters();
         if self
             .sky_view
             .as_ref()
-            .is_some_and(|(built, _)| *built == parameters)
+            .is_some_and(|presented| presented.parameters == parameters)
         {
+            self.sky_view_build = None;
             return;
         }
-        self.sky_view = Some((parameters, SkyView::build(&parameters)));
+        if self.sky_view.is_none() {
+            self.sky_view_build = None;
+            self.sky_view = Some(PresentedSky::new(parameters, SkyView::build(&parameters)));
+            return;
+        }
+        let mut build = match self.sky_view_build.take() {
+            Some(build) if build.atmosphere() == parameters => build,
+            _ => SkyViewBuild::start(&parameters),
+        };
+        if build.step(SKY_VIEW_BUILD_ROWS) {
+            self.sky_view = Some(PresentedSky::new(parameters, build.finish()));
+        } else {
+            self.sky_view_build = Some(build);
+        }
     }
 
     /// Sets the multiplier the tonemap pass applies before its clamp, clamped
@@ -11200,16 +11299,18 @@ impl ForwardRenderer {
     ///
     /// # What it costs
     ///
-    /// **A march on the host, not on the device.** The next
-    /// [`begin_frame`](Self::begin_frame) after the sun moves rebuilds
-    /// [`crcbl_shaders::atmosphere::SkyView`], which is tens of milliseconds of
-    /// CPU; every frame after it, with the same sun, costs the comparison that
-    /// finds nothing to do. The device pays four buffer loads and a blend,
-    /// which is what the gradient pays.
-    ///
-    /// So a scene that sweeps its sun continuously pays that march every frame,
-    /// and `docs/backlog.md` carries the amortisation that is owed. A scene
-    /// that sets a sun and leaves it pays it once.
+    /// **A march on the host, not on the device.** The first
+    /// [`begin_frame`](Self::begin_frame) after this is called marches
+    /// [`crcbl_shaders::atmosphere::SkyView`] whole, which is tens of
+    /// milliseconds of CPU — a renderer with no LUT has no sky, so that one is
+    /// paid where it is asked for. Every later move of the sun is marched
+    /// [`SKY_VIEW_BUILD_ROWS`] rows per frame with the last finished LUT still
+    /// drawn, so no frame after the first pays the whole march;
+    /// `refresh_sky_view` is where that is written down, including what a sun
+    /// that moves *every* frame gets. A frame whose
+    /// sun has not moved costs the comparison that finds nothing to do and
+    /// nothing else: the LUT's two projections are cached beside it. The device
+    /// pays four buffer loads and a blend, which is what the gradient pays.
     ///
     /// # Off is exactly off
     ///
@@ -22309,6 +22410,271 @@ mod tests {
         assert_eq!(
             DepthStencilState::default().depth_compare,
             crcbl_hal::CompareOp::Greater
+        );
+    }
+
+    /// A sun ten degrees or so above the horizon, and one further round: two
+    /// atmospheres whose LUTs are nowhere near each other, so a comparison
+    /// between them cannot pass by the two skies being alike.
+    ///
+    /// Spelled as directions rather than as angles for
+    /// `crcbl_shaders::atmosphere`'s reason — nothing here takes a `sin` of its
+    /// own — and normalised by `Atmosphere::parameters` on the way in.
+    const MOVED_SUN: Atmosphere = Atmosphere {
+        sun_direction: Vec3::new(1.0, 0.2, 0.0),
+        ..Atmosphere::NOON
+    };
+
+    /// [`MOVED_SUN`] again, further round and lower.
+    const MOVED_AGAIN: Atmosphere = Atmosphere {
+        sun_direction: Vec3::new(1.0, 0.05, 0.5),
+        ..Atmosphere::NOON
+    };
+
+    /// Frames the striped march takes to cross the LUT.
+    const MARCH_FRAMES: usize = crcbl_shaders::atmosphere::SKY_VIEW_HEIGHT / SKY_VIEW_BUILD_ROWS;
+
+    /// The bytes the most recent sky-view LUT upload put on the device.
+    ///
+    /// `crate::sky_pass` writes the whole buffer at offset zero on every frame
+    /// that has an atmosphere, into the slot that frame is using — so the last
+    /// write to any of the ring's buffers is the LUT the frame just recorded
+    /// would draw. That is the only place the presented LUT is observable: the
+    /// renderer's own copy is what a test could assert about instead, and it
+    /// would then be asserting about the thing rather than about what reached
+    /// the device.
+    fn presented_lut(recorder: &Recorder, luts: &[BufferHandle]) -> Vec<u8> {
+        recorder
+            .events()
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                crcbl_hal::null::Event::BufferWritten { buffer, .. } if luts.contains(&buffer) => {
+                    recorder.buffer_bytes(buffer)
+                }
+                _ => None,
+            })
+            .expect("a frame with an atmosphere uploads a sky-view LUT")
+    }
+
+    /// A renderer with an atmosphere set and its first LUT marched, and the
+    /// buffers that LUT reaches the device through.
+    ///
+    /// The three tests below all start here: the first march is synchronous, so
+    /// one frame is what it takes to have a sky to be stale about.
+    fn with_marched_atmosphere(
+        device: &dyn Device,
+        queue: QueueHandle,
+        atmosphere: Atmosphere,
+    ) -> (ForwardRenderer, Vec<BufferHandle>) {
+        let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb)
+            .expect("the null backend builds a renderer");
+        let luts = renderer.sky_pass.luts().to_vec();
+        renderer.set_atmosphere(Some(atmosphere));
+        atmosphere_frame(&mut renderer, device);
+        (renderer, luts)
+    }
+
+    /// One frame of the atmosphere tests: nothing is drawn, and `begin_frame`
+    /// is what writes the blocks and steps the march.
+    fn atmosphere_frame(renderer: &mut ForwardRenderer, device: &dyn Device) {
+        renderer
+            .begin_frame(
+                device,
+                &Camera::default(),
+                &DirectionalLight::default(),
+                (64, 48),
+            )
+            .expect("the frame's blocks are written");
+    }
+
+    /// A sun that moved is marched a stripe per frame, and every frame until it
+    /// is finished still uploads the LUT of the sun before it.
+    ///
+    /// **The amortisation, from the device's side.** Before this, one
+    /// `begin_frame` marched the whole LUT, so a scene that swept its sun paid
+    /// tens of milliseconds of CPU in every frame. The claim now is three
+    /// things at once, and only the middle one is about performance: the march
+    /// advances by `SKY_VIEW_BUILD_ROWS` per frame, the bytes reaching the
+    /// device meanwhile are the *previous* sun's rather than a half-marched
+    /// sky, and the new sun's LUT arrives whole on the frame the march ends.
+    #[test]
+    fn a_moving_sun_is_marched_a_stripe_per_frame() {
+        let (recorder, device, queue) = open();
+        let (mut renderer, luts) =
+            with_marched_atmosphere(device.as_ref(), queue, Atmosphere::NOON);
+
+        let before = SkyView::build(&Atmosphere::NOON.parameters()).rows();
+        let after = SkyView::build(&MOVED_SUN.parameters()).rows();
+        assert_ne!(
+            before, after,
+            "the two suns march to the same LUT, so nothing below distinguishes them"
+        );
+        assert!(
+            renderer.sky_view_build.is_none(),
+            "the first march is synchronous, so no build is left in flight"
+        );
+        assert_eq!(
+            presented_lut(&recorder, &luts),
+            before,
+            "the frame after `set_atmosphere` did not upload that sun's LUT"
+        );
+
+        renderer.set_atmosphere(Some(MOVED_SUN));
+        for step in 1..MARCH_FRAMES {
+            atmosphere_frame(&mut renderer, device.as_ref());
+            assert_eq!(
+                renderer
+                    .sky_view_build
+                    .as_ref()
+                    .map(SkyViewBuild::rows_done),
+                Some(step * SKY_VIEW_BUILD_ROWS),
+                "frame {step} of the march is not a stripe further along than frame {} was",
+                step - 1
+            );
+            assert_eq!(
+                presented_lut(&recorder, &luts),
+                before,
+                "frame {step} of the march uploaded something other than the sky it is still \
+                 drawing"
+            );
+        }
+
+        atmosphere_frame(&mut renderer, device.as_ref());
+        assert!(
+            renderer.sky_view_build.is_none(),
+            "the march did not finish in the frames its own stripe says it takes"
+        );
+        assert_eq!(
+            presented_lut(&recorder, &luts),
+            after,
+            "the frame that finished the march did not upload the new sun's LUT"
+        );
+    }
+
+    /// A sun that moves while a march is in flight restarts it from row zero.
+    ///
+    /// **The decision `refresh_sky_view` writes down**, and the reason a sun
+    /// that moves every frame shows a frozen sky rather than a stuttering one:
+    /// finishing a march for a sun that has already moved would swap in a LUT
+    /// that is wrong on arrival. What is observable is the progress counter —
+    /// a build that kept its rows would be two stripes along here rather than
+    /// one — and the sun the build in flight names.
+    #[test]
+    fn a_sun_that_moves_mid_march_restarts_it() {
+        let (recorder, device, queue) = open();
+        let (mut renderer, luts) =
+            with_marched_atmosphere(device.as_ref(), queue, Atmosphere::NOON);
+        let before = SkyView::build(&Atmosphere::NOON.parameters()).rows();
+
+        renderer.set_atmosphere(Some(MOVED_SUN));
+        atmosphere_frame(&mut renderer, device.as_ref());
+        atmosphere_frame(&mut renderer, device.as_ref());
+        assert_eq!(
+            renderer
+                .sky_view_build
+                .as_ref()
+                .map(SkyViewBuild::rows_done),
+            Some(2 * SKY_VIEW_BUILD_ROWS),
+            "two frames of marching did not leave two stripes marched"
+        );
+
+        renderer.set_atmosphere(Some(MOVED_AGAIN));
+        atmosphere_frame(&mut renderer, device.as_ref());
+        assert_eq!(
+            renderer
+                .sky_view_build
+                .as_ref()
+                .map(SkyViewBuild::rows_done),
+            Some(SKY_VIEW_BUILD_ROWS),
+            "the march kept the rows it had marched for a sun that has since moved"
+        );
+        assert_eq!(
+            renderer
+                .sky_view_build
+                .as_ref()
+                .map(SkyViewBuild::atmosphere),
+            Some(MOVED_AGAIN.parameters()),
+            "the build in flight is marching a sun the caller has moved away from"
+        );
+        assert_eq!(
+            presented_lut(&recorder, &luts),
+            before,
+            "a restart uploaded something other than the last LUT that finished"
+        );
+    }
+
+    /// A frame whose sun has not moved marches nothing and re-takes neither
+    /// projection.
+    ///
+    /// **What `PresentedSky` is for.** `gradient_fit` and `irradiance` used to
+    /// be taken from the LUT in every `begin_frame`, which is host work a still
+    /// sun has no reason to pay. Both are now taken once, where the march
+    /// finishes — so a sentinel written over the cached gradient survives a
+    /// frame if and only if that frame took neither the march nor the
+    /// projection again, and the same sentinel's bytes turn up in what the
+    /// frame wrote, which is what says the cache is the thing being read.
+    #[test]
+    fn a_still_sun_marches_nothing_and_reprojects_nothing() {
+        let (recorder, device, queue) = open();
+        let (mut renderer, _luts) =
+            with_marched_atmosphere(device.as_ref(), queue, Atmosphere::NOON);
+
+        let sentinel = crcbl_shaders::sky::SkyGradient {
+            zenith: [0.125, 0.25, 0.375],
+            horizon: [0.5, 0.625, 0.75],
+            ground: [0.875, 1.125, 1.375],
+        };
+        let presented = renderer
+            .sky_view
+            .as_mut()
+            .expect("the first frame marched a LUT");
+        assert_ne!(
+            presented.gradient, sentinel,
+            "the sentinel is what the real projection already returns, so it proves nothing"
+        );
+        presented.gradient = sentinel;
+
+        let before = recorder.events().len();
+        atmosphere_frame(&mut renderer, device.as_ref());
+        assert_eq!(
+            renderer
+                .sky_view
+                .as_ref()
+                .map(|presented| presented.gradient),
+            Some(sentinel),
+            "a frame under a sun that has not moved re-took the projections"
+        );
+        assert!(
+            renderer.sky_view_build.is_none(),
+            "a frame under a sun that has not moved started a march"
+        );
+
+        let wanted: Vec<u8> = sentinel
+            .rows()
+            .iter()
+            .flatten()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let used = recorder
+            .events()
+            .into_iter()
+            .skip(before)
+            .filter_map(|event| match event {
+                crcbl_hal::null::Event::BufferWritten { buffer, .. } => {
+                    recorder.buffer_bytes(buffer)
+                }
+                _ => None,
+            })
+            .any(|bytes| {
+                bytes
+                    .windows(wanted.len())
+                    .any(|window| window == wanted.as_slice())
+            });
+        assert!(
+            used,
+            "the cached gradient reached no block this frame wrote, so the frame is not reading \
+             the cache at all"
         );
     }
 }

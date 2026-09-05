@@ -313,18 +313,44 @@ landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
   because the gradient substitution is right at every roughness a rough surface
   actually has.
 
-- **Moving the sun costs a full rebuild, unamortised.** `SkyView::build` is 25.3
-  ms of CPU on this machine at the shipped
-  `SKY_VIEW_WIDTH`/`SKY_VIEW_HEIGHT`/`SKY_VIEW_STEPS`, and
-  `ForwardRenderer::refresh_sky_view` rebuilds the whole LUT whenever the
-  normalised sun changes. A scene sweeping the sun continuously — `sundial` is
-  the shape of one — would pay that every frame. §8's own decision text says the
-  rebuild "is amortised over frames when the sun moves continuously" and **that
-  amortisation is not built**: the options are a row-striped rebuild across N
-  frames with the previous LUT still bound, a coarser LUT while the sun is
-  moving, or moving the march to a compute pass and giving up the "no
-  transcendental reaches a colour" guarantee for it. The first is the cheapest
-  and keeps the guarantee; it needs a second LUT buffer and a swap.
+- **The presented sky lags a moving sun by up to one whole build.** The striped
+  march shipped: `SkyViewBuild` in `crcbl_shaders::atmosphere` and
+  `ForwardRenderer::refresh_sky_view` stepping it `SKY_VIEW_BUILD_ROWS` rows per
+  frame. What it leaves is the trade that choice makes — a sun that moves again
+  mid-march restarts the build, so a sun that moves _every_ frame never
+  completes one and the frame goes on drawing the LUT of the last sun the march
+  caught up with. Deliberate, and written down in `refresh_sky_view`'s doc: the
+  alternative is a sky that stutters at whatever the march last passed. If a
+  scene ever wants the sky to track a continuous sweep rather than lag it, the
+  two options left are the ones this rung declined — a coarser LUT while the sun
+  is moving, or the march on a compute pass, which gives up "no transcendental
+  reaches a colour". Neither is needed until an app sweeps a sun.
+
+- **No app drives an atmosphere, so the stripe is unmeasured against a real
+  frame.** `ForwardRenderer::set_atmosphere` has one caller in the tree,
+  `crcbl::screenshot::atmosphere_forward`, and it draws one frame — so the
+  striped march is covered by `crcbl-render`'s null-backend tests
+  (`a_moving_sun_is_marched_a_stripe_per_frame` and the two beside it) and by
+  the shader crate's `a_striped_build_is_the_one_shot_build`, and by nothing
+  that has ever put a moving sun on a screen. `SKY_VIEW_BUILD_ROWS` was picked
+  from the measured cost of one step against a frame budget, not from watching a
+  sweep: whether the lag it buys is the right trade is unverified, and `sundial`
+  is the shape of the demo that would answer it. The same gap as the demo switch
+  at the top of this section.
+
+- **The atmosphere's ambient term reaches the frame block unobserved.**
+  `SkyView::irradiance` is the L1 projection `ForwardRenderer::begin_frame`
+  writes into `mesh::FrameUniforms`' `sky_sh_*` rows, and nothing reads it back:
+  with `PresentedSky::new` handed `view.gradient_fit().irradiance()` instead —
+  the three-band fit's projection rather than the LUT's — every crcbl-render
+  null test, the whole radv render suite (`an_atmosphere_frame_is_the_host_lut`
+  reads sky pixels only) and the browser gate stay green (verified 2026-09-06).
+  The projection itself is held by
+  `the_l1_projection_matches_a_brute_force_integral` in the shader crate; what
+  is unheld is the wiring from it to the block. A null-backend test on
+  `sky_sh_r` in the written frame block against `SkyView::irradiance` of the
+  same sun would close it, on
+  `a_still_sun_marches_nothing_and_reprojects_nothing`'s sentinel pattern.
 
 - **Not measured on Metal, D3D12 or in the browser.** The device path was run on
   `vk` only, on radv and on lavapipe. The `msl`, `dxil` and `wgsl` artifacts are
