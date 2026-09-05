@@ -66,7 +66,19 @@ pub(crate) fn poisoned(len: usize) -> Vec<u8> {
 }
 
 /// How long [`Headless::readback`] polls before it declares the copy lost.
-const READBACK_DEADLINE: Duration = Duration::from_secs(30);
+///
+/// A copy that never lands is what this bounds, so the only thing the value
+/// decides is how long a hung test takes to fail — and it has to sit above the
+/// longest a copy legitimately takes, or the assertion below fires on a frame
+/// that was still being drawn. **Swept off CI rather than guessed** (2026-09-05):
+/// on `vk e2e (lavapipe, windows)` the three `lights::` tests of the forward
+/// pass, which run four abreast on a software rasteriser, landed their readbacks
+/// in 9 s on one runner and 24 to 30 s on two others with no change to the tree
+/// between — and at 30 s this deadline fired on frames that would have landed.
+/// Four times the slowest of those keeps it well inside `.config/nextest.toml`'s
+/// own per-test kill, so a lost copy is still reported by the message below
+/// rather than by nextest's terminate.
+const READBACK_DEADLINE: Duration = Duration::from_secs(120);
 
 /// Opens whatever backend `CRCBL_GPU` names.
 ///

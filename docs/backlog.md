@@ -4289,18 +4289,26 @@ duplicated shape.
 
 ## Surprises worth keeping — not bugs
 
-### Four mesh readbacks on the Windows lavapipe leg stayed Pending past 30 s (2026-09-05)
+### The Windows lavapipe leg draws runners three times apart, and a readback deadline sat inside the spread (2026-09-05)
 
-`vk e2e (lavapipe, windows)` went red on `e9e0283` with
-`draw_gen::every_geometry_path_draws_the_same_frame` and three `mesh::` tests
-each panicking in `Headless::readback` after the harness's 30 s deadline — "the
-196608-byte readback was still Pending" — on a push that touched nothing under
-`crates/crcbl-vk`, `crates/crcbl-shaders` or the harness. A rerun of the failed
-job alone was green. Four tests in a row hitting the same deadline on a shared
-software rasteriser is the shape of a starved runner rather than a lost copy,
-and the harness's message already says which. Worth keeping because the failure
-names the mesh-shader tests and reads as a regression in them; the diagnosis is
-the diff, and the remedy is `gh run rerun --failed`.
+`vk e2e (lavapipe, windows)` went red twice in a day in `Headless::readback` —
+"the 196608-byte readback was still Pending" after the harness's deadline —
+first on `e9e0283` with `draw_gen::every_geometry_path_draws_the_same_frame` and
+three `mesh::` tests, then on `90c454a` with the forward pass's three `lights::`
+tests, and on the second a rerun of the job went red again with the two
+surviving `lights::` tests **passing at 29.8 s and 30.0 s**. Neither push
+touched `crates/crcbl-vk`, `crates/crcbl-shaders` or the harness, and between
+`e9e0283` and `55f27ac` nothing outside tests changed at all, yet the same
+`depth_probe::` test took 4.4 s on one run's runner and 12.8 s on the next's,
+and the `lights::` readbacks 9 s against 24 to 30 s. So the first diagnosis — a
+starved pool, rerun and move on — was wrong in the half that matters: the pool
+is the variable, but the spread is the ordinary spread of that runner class, and
+`READBACK_DEADLINE` at 30 s sat inside it. It is 120 s now, four times the
+slowest legitimate landing seen and still under `.config/nextest.toml`'s
+per-test kill, so a lost copy is still reported by the harness's own message.
+Worth keeping because the failure names whichever tests drew the slow runner and
+reads as a regression in them, and because a green rerun of a threshold that
+sits inside the spread proves nothing about the threshold.
 
 ### `--document-private-items` does not license a link to a private item (2026-09-04)
 
