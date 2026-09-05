@@ -62,9 +62,13 @@ What is real today:
   as in the shading and routed per draw bucket, so an opaque mesh keeps its
   vertex-only depth stage in a scene that has a cutout in it; double-sided
   materials, drawn through a cull-none twin of every pass and lit through a
-  reversed normal on the back face; specular antialiasing that widens the lobe
-  by the screen-space variance of the shading normal, tonemapping and a
-  screen-space grid, with mesh shaders and bindless where the device has them.
+  reversed normal on the back face; the whole glTF metallic-roughness texture
+  set on the device — base colour, tangent-space normals, the packed
+  occlusion-roughness-metallic map and emissive, each its own array page in its
+  own format, with occlusion scaling the indirect terms alone; specular
+  antialiasing that widens the lobe by the screen-space variance of the shading
+  normal, tonemapping and a screen-space grid, with mesh shaders and bindless
+  where the device has them.
 - **glTF import** with meshlet building, a cluster DAG and QEM simplification.
 - **A server-authoritative game stack** — fixed-tick simulation, snapshots,
   interpolation, an ECS, physics, input mapping, audio, persistence and a job

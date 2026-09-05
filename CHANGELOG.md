@@ -35,6 +35,55 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The packed metallic-roughness-occlusion page and the emissive page, on the
+  device.** `docs/plan/43-render-standards.md` §2's rung 3, first half:
+  `crcbl_render::scene::PageKind` gains `MetallicRoughnessOcclusion` (linear
+  `Rgba8Unorm`) and `Emissive` (`Rgba8UnormSrgb`, because an emissive texel is a
+  colour), so all four columns `GpuMaterial` has carried since 2026-08-30 now
+  reach a page. `mesh.slang` declares `mro_textures` at binding 30 and
+  `emissive_textures` at 31 — appended past `probe_visibility`, sharing
+  `base_color_sampler`, `t16`/`t17` on D3D12 and `texture(8)`/`texture(9)` in
+  MSL — and reads them through `mro_texel` and `emissive_texel`, whose shape is
+  `base_color_texel`'s: an unconditional `Sample` with the select below it,
+  which is what WGSL's uniformity analysis accepts.
+
+  **What each channel does**, glTF 2.0 term for term: roughness is
+  `material.roughness * texel.g` (§3.9.2) and metalness
+  `material.metallic * texel.b`, both resolved once for the fragment and taken
+  by the direct lobe, by the reflectivity attachment SSR reloads and by the
+  reflective shadow map's `metallic_of`, so the three cannot disagree about a
+  surface; occlusion is `texel.r` and multiplies the **indirect** terms only —
+  the flat ambient, the sky and the probe grid, beside the screen-space
+  channel's own factor — never the direct lobe (§3.9.5); emission is
+  `material.emissive * texel.rgb` (§3.9.4). `occlusionTexture.strength` is
+  **not** carried yet and the shader applies the glTF default of one; the
+  importer half is next and `docs/backlog.md` has it.
+
+  **A row naming `NO_PAGE` on either column shades bit for bit as it did**, and
+  that is measured rather than argued: `crcbl/tests/mesh_e2e/mro_page.rs` and
+  `emissive_page.rs` compare an all-`0xFF` layer against no page at all, texel
+  for texel, on radv and on lavapipe. No golden in the tree moved. The importer
+  still fills only the base-colour and normal columns, so no document reaches
+  either new page yet.
+
+  **What it costs**, on
+  `apps/lantern --headless --frames 400 --size 1920x1080 --backend vk`, medians
+  of three runs: the `forward` pass goes **0.345 → 0.350 ms** p50 on an RX 7900
+  XTX under radv and **32.655 → 33.630 ms** on lavapipe, and the sun's `rsm` —
+  the other stage that now samples the packed page — **0.061 → 0.061 ms** and
+  **1.123 → 1.168 ms**. Lantern names neither page, so what those two fetches
+  cost is a tap of the 1×1 placeholder apiece: a per cent and a half of the
+  forward pass on the raster tier and three per cent on the software one, both
+  outside the run-to-run spread (0.344–0.347 against 0.349–0.351, and
+  32.651–32.703 against 33.575–33.912). A scene that _names_ the pages pays two
+  real anisotropic fetches instead, which is the normal page's own measured
+  price. The browser tier is **estimated** at the same arithmetic and more
+  bytes, on the normal page's terms — two more `RGBA8` array pages, uncompressed
+  until the KTX2/BC rung; no browser measurement was taken. `crcbl_render::mip`
+  grows `linear_resample`/`linear_chain`, a plain box mean with neither the
+  colour filter's transfer curve and alpha weight nor the normal filter's
+  renormalise, because the packed page's three channels are unrelated numbers.
+
 - **`--scene gradient_mirror`**, a mirror floor under an authored gradient sky
   and no atmosphere. `crcbl::screenshot::Scene::GradientMirror` reuses
   `Scene::AtmosphereMirror`'s plate, camera and light and calls

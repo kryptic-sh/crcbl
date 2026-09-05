@@ -244,8 +244,8 @@ pub const SHADOW_CASTER_REACH: f32 = 40.0;
 /// The test below holds this constant to the shader, and the probe holds its
 /// own table to this constant. So a binding added to `mesh.slang` and nowhere
 /// else fails here first, under a plain `cargo test`, on a machine with no GPU.
-pub const DECLARED_BINDINGS: [u32; 20] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 20, 21, 22, 23, 25, 26, 27, 28, 29,
+pub const DECLARED_BINDINGS: [u32; 22] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 20, 21, 22, 23, 25, 26, 27, 28, 29, 30, 31,
 ];
 
 const _: () = assert!(
@@ -1753,6 +1753,11 @@ pub struct GpuMaterial {
     /// what scales the diffuse albedo *down* — a conductor has no diffuse
     /// lobe at all.
     ///
+    /// **A factor over the page, not instead of it**: where
+    /// [`metallic_roughness_occlusion_texture`](Self::metallic_roughness_occlusion_texture)
+    /// names a layer, `mesh.slang`'s `metallic_of` multiplies this by that
+    /// texel's `b`, which is glTF 2.0 §3.9.2's own product.
+    ///
     /// **A metal has no ambient term either**, because ambient scales that same
     /// diffuse albedo. What it gets instead is a reflection: `ssr.slang` marches
     /// for one, and a march that finds nothing returns the irradiance probes as
@@ -1765,10 +1770,11 @@ pub struct GpuMaterial {
     /// How rough the surface is: `0.0` a mirror, `1.0` fully diffuse.
     ///
     /// glTF's `pbrMetallicRoughness.roughnessFactor`, on
-    /// [`metallic`](Self::metallic)'s terms. `mesh.slang` squares it into the
-    /// GGX `alpha` — the usual perceptual parameterisation, so equal steps here
-    /// are roughly equal steps in the look — and clamps it away from zero,
-    /// which a normal distribution divides by.
+    /// [`metallic`](Self::metallic)'s terms, the packed page's `g` included:
+    /// `mesh.slang` squares the product into the GGX `alpha` — the usual
+    /// perceptual parameterisation, so equal steps here are roughly equal steps
+    /// in the look — and clamps it away from zero, which a normal distribution
+    /// divides by.
     pub roughness: f32,
     /// How the base-colour texture's sampling UV is derived: which of
     /// [`GpuMaterial::TILING_AUTHORED`] or [`GpuMaterial::TILING_PHYSICAL`] the
@@ -1811,6 +1817,10 @@ pub struct GpuMaterial {
     /// target is `Rgba16Float`, so a value above one is representable and is
     /// what the bloom chain reads as a glow.
     ///
+    /// **And a factor over the emissive page**, where
+    /// [`emissive_texture`](Self::emissive_texture) names a layer: glTF 2.0
+    /// §3.9.4 multiplies the two, and a row naming no page emits this alone.
+    ///
     /// Three scalars on the shader side rather than a `float3`, for the reason
     /// `shaders/mesh.slang` gives on `GpuMaterial::emissive_r`: `std430` aligns
     /// a `float3` to sixteen and would have taken the row to 64 bytes.
@@ -1846,21 +1856,36 @@ pub struct GpuMaterial {
     ///
     /// Read only where [`normal_texture`](Self::normal_texture) is non-zero.
     pub normal_scale: f32,
-    /// Which layer of the metallic-roughness-occlusion page this material
-    /// samples.
+    /// Which layer of the packed metallic-roughness-occlusion page this material
+    /// samples, on [`base_color_texture`](Self::base_color_texture)'s terms
+    /// exactly.
     ///
-    /// **Laid out and read by nothing.** `docs/plan/43-render-standards.md`
-    /// §2's table sizes the row for four page rows at once, and this slice wires
-    /// the normal row alone; the shaders declare this field, no shader reads it,
-    /// and every producer writes zero. The rung that spends it is the same
-    /// section's — the packed ORM texture that turns
-    /// [`metallic`](Self::metallic) and [`roughness`](Self::roughness) into
-    /// per-texel numbers.
+    /// **glTF's own channel assignment**: occlusion in `r`, roughness in `g`,
+    /// metallic in `b`, `a` unread. `mesh.slang`'s `mro_texel` is the one
+    /// reader and it multiplies rather than replaces —
+    /// [`roughness`](Self::roughness) times `g` and [`metallic`](Self::metallic)
+    /// times `b`, which is glTF 2.0 §3.9.2, and `r` onto the *indirect* terms
+    /// alone, which is §3.9.5.
+    ///
+    /// **[`NO_PAGE`](Self::NO_PAGE) means no packed texture**, and the fragment
+    /// stage multiplies by the literal `float4(1, 1, 1, 1)` — so a row naming no
+    /// page shades bit for bit as it did before this page existed.
+    ///
+    /// **`occlusionTexture.strength` is not carried**, and the shader applies
+    /// this channel at the glTF default strength of one. The factor has no field
+    /// here and the importer that would fill it is §2's next half; see
+    /// `docs/backlog.md`.
     pub metallic_roughness_occlusion_texture: u32,
     /// Which layer of the emissive page this material samples, on
     /// [`metallic_roughness_occlusion_texture`](Self::metallic_roughness_occlusion_texture)'s
-    /// terms: **laid out and read by nothing** until §2's emissive-page rung.
-    /// [`emissive`](Self::emissive) is the factor half, and it has shipped.
+    /// terms.
+    ///
+    /// [`emissive`](Self::emissive) is the factor half and this is the texture
+    /// half; `mesh.slang`'s `emissive_texel` multiplies them, which is glTF 2.0
+    /// §3.9.4. The page is **sRGB-encoded**, unlike the packed one beside it,
+    /// because an emissive texel is a colour — see
+    /// `crcbl_render::forward::EMISSIVE_PAGE_FORMAT`. A row carrying
+    /// [`NO_PAGE`](Self::NO_PAGE) emits its factor exactly as it always did.
     pub emissive_texture: u32,
     /// The alpha below which a masked material discards, glTF's
     /// `alphaCutoff`.
@@ -5135,6 +5160,78 @@ mod tests {
              shader's have drifted, and every material naming no texture reads the wrong \
              page"
         );
+    }
+
+    /// The shader reads each page layer out of the half
+    /// [`GpuMaterial::page_words`] packs it into.
+    ///
+    /// **The one thing about the row that is invisible on both sides.** The four
+    /// layer indices ride two to a word, and nothing about a field declaration
+    /// says which half is which: a shader that read the halves the other way
+    /// round would shade every surface through a page the author named for
+    /// something else, and every host test here would still pass. The host end
+    /// is pinned against the bytes by
+    /// [`the_material_layout_matches_the_offsets_slangc_emits`]; this is the
+    /// shader end.
+    ///
+    /// Matched against the source text rather than the compiled artifact, on
+    /// [`the_shader_declares_the_same_no_page_the_host_does`]'s terms: the
+    /// artifacts are generated from this file and `build.rs` refuses a mismatch
+    /// between them, so the source is the thing to pin.
+    ///
+    /// # Sabotage
+    ///
+    /// `mro_layer` returning `material.mro_emissive_pages >> 16` and
+    /// `emissive_layer` returning the masked half — the two swapped, which is
+    /// the mistake this exists for — with the artifacts regenerated so the
+    /// build accepts the source. Red on 2026-09-06 with `"mesh.slang does not
+    /// declare `uint mro_layer(GpuMaterial material)\n{\n    return
+    /// material.mro_emissive_pages & 0xffffu;\n}`, so its mro_layer does not
+    /// read the low half of mro_emissive_pages; the host packs the
+    /// metallic-roughness-occlusion layer there and the shader would sample
+    /// another page's layer number instead"`.
+    ///
+    /// **The first draft of this test could not fail that sabotage**, and it is
+    /// worth writing down why: it matched each reader's *body* alone, and two
+    /// readers with their bodies swapped leave both strings in the file. Whole
+    /// functions is what makes the check a check.
+    #[test]
+    fn the_shader_reads_the_page_halves_the_host_packs() {
+        let source = include_str!("../shaders/mesh.slang");
+        // **The whole function, signature and body together.** Matching the
+        // body alone would be a check that cannot fail for the one mistake this
+        // exists to catch: two readers with their bodies swapped leave both
+        // strings in the file, each in the other's function.
+        //
+        // The low half of each word, and the high half above it — the order
+        // `page_words` writes and `from_bytes` reads back.
+        for (reader, word, shift, packed) in [
+            (
+                "base_color_layer",
+                "color_normal_pages",
+                "& 0xffffu",
+                "base-colour",
+            ),
+            ("normal_layer", "color_normal_pages", ">> 16", "normal"),
+            (
+                "mro_layer",
+                "mro_emissive_pages",
+                "& 0xffffu",
+                "metallic-roughness-occlusion",
+            ),
+            ("emissive_layer", "mro_emissive_pages", ">> 16", "emissive"),
+        ] {
+            let declared = format!(
+                "uint {reader}(GpuMaterial material)\n{{\n    return material.{word} {shift};\n}}"
+            );
+            let half = if shift == ">> 16" { "high" } else { "low" };
+            assert!(
+                source.contains(&declared),
+                "mesh.slang does not declare `{declared}`, so its {reader} does not read the \
+                 {half} half of {word}; the host packs the {packed} layer there and the \
+                 shader would sample another page's layer number instead"
+            );
+        }
     }
 
     /// The neutral normal texel is **not** exactly flat, which is why

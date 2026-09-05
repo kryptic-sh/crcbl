@@ -23,6 +23,13 @@
 //! normal texel is not a colour: no transfer curve, no alpha weighting, and a
 //! renormalise after the average. `docs/plan/44-lighting.md`'s rung 2 is where
 //! that is argued.
+//!
+//! [`linear_resample`] and [`linear_chain`] are the third pair, for the
+//! **metallic-roughness-occlusion** page: a plain box mean of four independent
+//! linear channels, with neither the colour filter's transfer curve and alpha
+//! weight nor the normal filter's renormalise. A roughness is a number and the
+//! channels beside it are different numbers, so nothing about them may be
+//! coupled by the mipper.
 
 /// Resample `pixels`, a tightly packed `width × height` RGBA8 sRGB image, onto
 /// a square `extent`, alpha-weighted and in linear light.
@@ -241,6 +248,95 @@ pub fn normal_chain(level0: &[u8], extent: u32) -> Vec<Vec<u8>> {
         let level = {
             let above = levels.last().map_or(level0, Vec::as_slice);
             normal_resample(above, wide, wide, below)
+        };
+        levels.push(level);
+        wide = below;
+    }
+    levels
+}
+
+/// Resample `pixels`, a tightly packed `width × height` RGBA8 image of
+/// **independent linear channels**, onto a square `extent`.
+///
+/// [`resample`]'s box filter with both of its colour steps removed, because
+/// neither applies to a channel that is a number rather than a colour: no sRGB
+/// decode, since the bytes are already linear, and no alpha weighting, since
+/// the four channels are unrelated quantities and one of them is not an
+/// opacity. Every channel — the fourth included — is the plain mean of the
+/// source texels its cell covers.
+///
+/// **This is the metallic-roughness-occlusion page's filter**, and averaging
+/// glTF's packed occlusion, roughness and metallic is exactly what a box mip of
+/// them means: a minified texel is the area's mean roughness, not its mean
+/// through a transfer curve. [`normal_resample`] cannot serve, because it
+/// renormalises the first three channels as one vector — which would couple a
+/// surface's roughness to its metalness.
+///
+/// **A cell covering exactly one source texel is copied**, on
+/// [`normal_resample`]'s terms and for a weaker version of its reason: the
+/// average of one value is that value, and the copy makes an unresized layer
+/// arrive byte for byte without depending on this module's own rounding.
+///
+/// # Panics
+///
+/// [`resample`]'s conditions exactly.
+#[must_use]
+pub fn linear_resample(pixels: &[u8], width: u32, height: u32, extent: u32) -> Vec<u8> {
+    assert!(
+        width > 0 && height > 0 && extent > 0,
+        "a {width}×{height} image resampled onto {extent}² has no texels"
+    );
+    assert!(
+        pixels.len() >= width as usize * height as usize * 4,
+        "a {width}×{height} RGBA8 image is {} bytes, not {}",
+        width as usize * height as usize * 4,
+        pixels.len()
+    );
+    let mut out = vec![0u8; extent as usize * extent as usize * 4];
+    for y in 0..extent {
+        let (y0, y1) = source_span(y, extent, height);
+        for x in 0..extent {
+            let (x0, x1) = source_span(x, extent, width);
+            let at = (y as usize * extent as usize + x as usize) * 4;
+            if y1 - y0 == 1 && x1 - x0 == 1 {
+                let from = (y0 as usize * width as usize + x0 as usize) * 4;
+                out[at..at + 4].copy_from_slice(&pixels[from..from + 4]);
+                continue;
+            }
+            let mut sum = [0.0f32; 4];
+            let mut texels = 0.0f32;
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let from = (sy as usize * width as usize + sx as usize) * 4;
+                    for (channel, total) in sum.iter_mut().enumerate() {
+                        *total += f32::from(pixels[from + channel]) / 255.0;
+                    }
+                    texels += 1.0;
+                }
+            }
+            for (channel, total) in sum.iter().enumerate() {
+                out[at + channel] = quantise(total / texels);
+            }
+        }
+    }
+    out
+}
+
+/// The levels below a square `extent`-wide RGBA8 layer of independent linear
+/// channels, on [`chain`]'s terms and through [`linear_resample`].
+///
+/// # Panics
+///
+/// [`linear_resample`]'s conditions on `level0` and `extent`.
+#[must_use]
+pub fn linear_chain(level0: &[u8], extent: u32) -> Vec<Vec<u8>> {
+    let mut levels: Vec<Vec<u8>> = Vec::new();
+    let mut wide = extent;
+    while wide > 1 {
+        let below = level_extent(wide, 1);
+        let level = {
+            let above = levels.last().map_or(level0, Vec::as_slice);
+            linear_resample(above, wide, wide, below)
         };
         levels.push(level);
         wide = below;

@@ -96,10 +96,12 @@ them got.
 to that depth: the tangent frame is real, the normal page is bound, and a glTF
 material's `normalTexture` reaches the fragment stage. The alpha modes followed
 on 2026-09-05 — `MASK`, the whole of what this renderer can honour, in rung 4
-below. What is still missing from the list above is the rest of the texture set
-— the packed metallic-roughness-occlusion page and the emissive page, whose
-columns in the row exist and are read by nothing — and the "Landed" paragraph
-below says exactly what shipped.
+below. **The device half of rung 3 landed 2026-09-06**: the packed
+metallic-roughness-occlusion page and the emissive page are bound and
+`mesh.slang` shades through them, so all four columns of the row reach a page.
+What is still missing from the list above is the **importer**, which fills only
+the base-colour and normal columns — so no document in this tree reaches either
+new page yet. Each rung's own "landed" paragraph says exactly what shipped.
 
 **What it would take**, in the order the dependencies fall:
 
@@ -113,23 +115,28 @@ below says exactly what shipped.
    argument was wrong on its face: `shaders/mesh.slang`'s `geometric_normal_of`
    already takes `ddx`/`ddy` in the fragment stage, its result drives the shadow
    slope bias, and the cross-backend goldens hold over it.
-2. **A second and third texture page**, on the base-colour page's own pattern —
-   `crcbl_render::scene::PageDesc` is a table over `PageKind` since row (d)
-   landed, so each is one variant, one `format` arm and one `chain` arm, and
-   nothing has to burn a neutral layer for a material that names no page.
-   **Linear, not sRGB**: `crcbl_render::forward`'s `BASE_COLOR_PAGE_FORMAT` is
-   `Rgba8UnormSrgb` because a base-colour texel is a colour, and a normal,
-   roughness, metalness or occlusion texel is a number. Decoding one through the
-   sRGB curve is wrong by a gamma and looks merely "shinier than intended",
-   which is why it survives review — see [44-lighting.md](44-lighting.md)'s
-   rung 2.
+2. **A second and third texture page** — **built**, and the normal one landed
+   2026-08-30 with the third and fourth on 2026-09-06. Each is one `PageKind`
+   variant, one `format` arm, one `chain` arm and one binding appended past the
+   top of the mesh layout, because `crcbl_render::scene::PageDesc` is a table
+   over the kind since row (d) landed and nothing has to burn a neutral layer
+   for a material that names no page. **Linear, not sRGB, for three of the
+   four**: `crcbl_render::forward`'s `BASE_COLOR_PAGE_FORMAT` and
+   `EMISSIVE_PAGE_FORMAT` are `Rgba8UnormSrgb` because those two texels are
+   colours, and `NORMAL_PAGE_FORMAT` and `MRO_PAGE_FORMAT` are `Rgba8Unorm`
+   because a normal, a roughness, a metalness and an occlusion are numbers.
+   Decoding one through the sRGB curve is wrong by a gamma and looks merely
+   "shinier than intended", which is why it survives review — see
+   [44-lighting.md](44-lighting.md)'s rung 2, and
+   `forward::the_page_formats_split_colour_from_number`, which is the guard.
 3. **Emissive**, which is a factor and a page and one add before the tonemap —
    and which the bloom chain already existing makes worth more than it costs.
-   **The factor half is built (2026-08-27)**: `GpuMaterial::emissive` is a
-   linear radiance in the three words the row already padded with, glTF's factor
-   times `KHR_materials_emissive_strength` fills it on import, and `mesh.slang`
-   adds it last and unclamped. The emissive _page_ is not, and waits on the
-   second texture page rung above it.
+   **Both halves are built**: the factor on 2026-08-27 — `GpuMaterial::emissive`
+   is a linear radiance in the three words the row already padded with, glTF's
+   factor times `KHR_materials_emissive_strength` fills it on import, and
+   `mesh.slang` adds it last and unclamped — and the page on 2026-09-06, which
+   multiplies it. What is left is the importer, which does not yet read
+   `emissiveTexture`.
 4. **Alpha modes. `MASK` landed 2026-09-05**, and §3 below is where what it cost
    is written down. `GpuMaterial::ALPHA_MODE_MASK` is the mode bit beside the
    cutoff the row already carried, glTF's `alphaMode` and `alphaCutoff` fill
@@ -259,6 +266,78 @@ them. The importer sizes each kind from its own images, so a document with a
 the albedo's extent. What it sold is written on `PageDesc` itself: the layer-0
 invariant is no longer checkable on the host, and the placeholder is magenta so
 that a page read which should have early-outed says so in the frame.
+
+**The packed page and the emissive page — the device half of rung 3, LANDED
+2026-09-06.** `PageKind` has four variants now: `MetallicRoughnessOcclusion` in
+linear `Rgba8Unorm` and `Emissive` in `Rgba8UnormSrgb`, because an emissive
+texel is a colour and a packed occlusion-roughness-metallic one is three
+numbers. `mesh.slang` declares `mro_textures` at binding 30 and
+`emissive_textures` at 31 — appended past `probe_visibility` on
+`NORMAL_PAGE_BINDING`'s rule, sharing `base_color_sampler`, landing at `t16` and
+`t17` on D3D12 and `texture(8)` and `texture(9)` in MSL — and reads them through
+`mro_texel` and `emissive_texel`, which are `base_color_texel`'s shape exactly:
+an unconditional `Sample` with the select below it, which is the form WGSL's
+uniformity analysis accepts.
+
+**What each channel does is glTF's own arithmetic**, term for term. Roughness is
+`material.roughness * texel.g` and metalness `material.metallic * texel.b`
+(§3.9.2), resolved once for the fragment and taken by the direct lobe, by the
+reflectivity attachment `ssr.slang` reloads and by the reflective shadow map's
+`metallic_of` — so a per-texel metalness cannot be honoured in the shaded frame
+and dropped in the map that refills the probes. Occlusion is `texel.r` and
+multiplies the **indirect** terms alone — the flat ambient, the sky and the
+probe grid, beside the screen-space channel's own factor — and never the direct
+lobe (§3.9.5). Emission is `material.emissive * texel.rgb` (§3.9.4).
+`occlusionTexture.strength` is not carried and the shader applies the glTF
+default of one; that is the importer half's, and `docs/backlog.md` holds it.
+
+**The fixtures are `crcbl/tests/mesh_e2e/mro_page.rs` and `emissive_page.rs`**,
+each a two-texel-wide split layer read at both column centres of one quad:
+`the_packed_pages_green_channel_widens_the_lobe`,
+`the_packed_pages_blue_channel_removes_the_diffuse_lobe`,
+`the_packed_pages_red_channel_occludes_the_indirect_terms_alone`,
+`a_black_emissive_texel_emits_nothing_and_a_white_one_emits_the_factor` and
+`an_all_white_emissive_layer_emits_exactly_what_no_page_does`. Two of them are
+bit-for-bit comparisons of a row naming no page against a row naming an
+all-`0xFF` layer, which is the claim that no golden moves — and none did, on
+radv or on lavapipe.
+
+**What it costs.** Measured on
+`apps/lantern --headless --frames 400 --size 1920x1080 --backend vk`, medians of
+the p50s three runs reported for their own passes, on an RX 7900 XTX under radv
+and on lavapipe, against a pristine build of `e17f0df`. The `forward` pass goes
+**0.345 → 0.350 ms** on radv and **32.655 → 33.630 ms** on lavapipe; the sun's
+`rsm`, the other stage that samples the packed page, goes **0.061 → 0.061 ms**
+and **1.123 → 1.168 ms**. Both forward figures are outside the run-to-run spread
+— 0.344–0.347 against 0.349–0.351, and 32.651–32.703 against 33.575–33.912 — so
+the raster tier pays about **one and a half per cent of that pass** and the
+software tier **three per cent**. Lantern names neither page, so that is what
+two unconditional `Sample`s of a 1×1 placeholder cost: the fetch is at the
+function's top level and the select discards it, which is the price WGSL's
+uniformity rule sets and the same trade `base_color_texel` already made. A scene
+that _names_ the pages pays two real anisotropic fetches instead, which is the
+normal page's own measured price one rung up.
+
+**Two rows moved the wrong way on radv and are said so rather than dropped.**
+`shadow` reads 0.136 ms before and 0.132 after, and `rsm-punctual` 0.125 against
+0.122 — each three runs deep with no overlap between the two sets. Neither can
+be this change: the shadow pass binds a depth-only pipeline with no fragment
+stage to read a page at all, and `rsm-punctual` _gained_ a fetch, so a real
+effect would push it up. Code layout is what is left, and it is the same size as
+the forward pass's own move, which is why the forward figure is quoted with its
+spread rather than on its own. On lavapipe both stay inside their spreads
+(`shadow` 9.313 → 9.344 against a before-spread of 9.191–9.545, `depth-prepass`
+1.380 → 1.375 against 1.372–1.421), and `rsm-punctual` goes 4.865 → 4.926.
+
+**The browser tier is estimated** — the same arithmetic and two more
+uncompressed `RGBA8` array pages, on the normal page's terms; no browser
+measurement was taken. **Metal and D3D12 are unmeasured**, for the reason every
+rung above gives: this machine has no Apple or Windows hardware.
+
+**The importer half is next**, and it is what the delivery table's viewer and
+emissive rows wait on: `crcbl_scene::gltf_import` reads only `baseColorTexture`
+and `normalTexture` today, so no document in this tree reaches either new page
+and the two rows below stay open.
 
 Decal atlases are the container's next caller and are not built.
 

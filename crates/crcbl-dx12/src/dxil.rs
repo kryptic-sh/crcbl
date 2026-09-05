@@ -997,15 +997,22 @@ mod tests {
                 // either — the occlusion channel's shape at the top of the list
                 // rather than a new one.
                 //
-                // Last is `docs/plan/50-irradiance-probes.md`'s per-probe
+                // Then `docs/plan/50-irradiance-probes.md`'s per-probe
                 // visibility maps at binding 29, and therefore `t15`: an
                 // `Rg32Float` `Texture2DArray<float4>` read by `Load`, which is
                 // a second `Texture2DArray` taking no sampler — the normal
                 // page's shape without that row's shared sampler, because an
                 // unfilterable format has none to share.
+                //
+                // Last are §2's packed metallic-roughness-occlusion page at
+                // binding 30 and its emissive page at 31, and therefore `t16`
+                // and `t17`: two more `Texture2DArray`s beside the normal one,
+                // both read through the **same** sampler the base-colour page
+                // uses — which is why they add two `Srv`s here and no
+                // `Sampler`.
                 &[
                     Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv, Srv,
-                    Srv, Srv, Srv, Srv, Srv, Srv,
+                    Srv, Srv, Srv, Srv, Srv, Srv, Srv, Srv,
                 ],
             ),
             (

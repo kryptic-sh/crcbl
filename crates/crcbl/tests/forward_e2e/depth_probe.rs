@@ -959,6 +959,36 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl::hal::BindingFlags::empty(),
             },
+            // §2's packed metallic-roughness-occlusion page at 30 and its
+            // emissive page at 31, on binding 26's terms exactly: this probe's
+            // one material row names neither, so `mro_texel` and
+            // `emissive_texel` discard their fetches with a select — but the
+            // module declares both globals, and a pipeline layout that does not
+            // cover a declared descriptor is refused. Both share the
+            // base-colour sampler at binding 8, so there is no second sampler
+            // entry to add.
+            crcbl::hal::BindGroupLayoutEntry {
+                binding: 30,
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::SampledImage {
+                    view_type: crcbl::hal::ImageViewType::D2Array,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: crcbl::hal::BindingFlags::empty(),
+            },
+            crcbl::hal::BindGroupLayoutEntry {
+                binding: 31,
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::SampledImage {
+                    view_type: crcbl::hal::ImageViewType::D2Array,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: crcbl::hal::BindingFlags::empty(),
+            },
         ];
 
         // **This table is a hand-written copy of `mesh.slang`'s, and this is
@@ -1100,6 +1130,21 @@ impl DepthProbe {
                 binding: 29,
                 array_index: 0,
                 resource: crcbl::hal::BindingResource::ImageView(probe_visibility.view),
+            },
+            // The base-colour page's own view twice more, on binding 26's terms:
+            // a descriptor has to point at something the backend can validate,
+            // and nothing here samples either page for its value — every
+            // material row this probe draws with is `NO_PAGE` on all four
+            // columns, which the shader tests before it reads a texel.
+            crcbl::hal::BindGroupEntry {
+                binding: 30,
+                array_index: 0,
+                resource: crcbl::hal::BindingResource::ImageView(base_color_page.view),
+            },
+            crcbl::hal::BindGroupEntry {
+                binding: 31,
+                array_index: 0,
+                resource: crcbl::hal::BindingResource::ImageView(base_color_page.view),
             },
         ];
         let group = device

@@ -242,9 +242,9 @@ impl Default for Capacities {
 /// without the kind beside it, and this enum is what makes a caller write the
 /// kind down.
 ///
-/// `docs/plan/43-render-standards.md` §2's rung 3 appends the
-/// metallic-roughness and emissive pages here; every arm below is what it has to
-/// fill in.
+/// `docs/plan/43-render-standards.md` §2's rung 3 landed the other two kinds on
+/// 2026-09-06; the four here are the four page columns `mesh::GpuMaterial`
+/// carries and there is no fifth waiting.
 ///
 /// [`base_color_texture`]: mesh::GpuMaterial::base_color_texture
 /// [`normal_texture`]: mesh::GpuMaterial::normal_texture
@@ -260,11 +260,36 @@ pub enum PageKind {
     /// through a transfer curve and mipped through the filter that averages the
     /// decoded vectors and renormalises.
     Normal,
+    /// The packed metallic-roughness-occlusion page, glTF 2.0's own channel
+    /// assignment: occlusion in `r`, roughness in `g`, metallic in `b`, and `a`
+    /// unread.
+    ///
+    /// **Linear**, created `Rgba8Unorm` for the normal page's reason exactly —
+    /// a roughness, a metalness and an occlusion are *numbers*, and an sRGB
+    /// decode over them is wrong by a gamma. glTF splits the same three across
+    /// `pbrMetallicRoughness.metallicRoughnessTexture` (`g` and `b`) and
+    /// `occlusionTexture` (`r`); one image carrying all three is what the two
+    /// share when an author packs them, which is what makes one page enough.
+    MetallicRoughnessOcclusion,
+    /// The emissive page: the radiance a surface emits, multiplied by
+    /// [`emissive`](mesh::GpuMaterial::emissive).
+    ///
+    /// **sRGB-encoded**, created `Rgba8UnormSrgb` — the one of the three new
+    /// halves that is a *colour* rather than a number, and glTF 2.0 §3.9.4
+    /// defines `emissiveTexture` as sRGB exactly as it defines the base-colour
+    /// one. The factor beside it is linear, and the two meeting in one product
+    /// is the trap the format removes.
+    Emissive,
 }
 
 impl PageKind {
     /// Every kind, in the order a [`PageDesc`] stores them.
-    pub const ALL: [Self; 2] = [Self::BaseColor, Self::Normal];
+    pub const ALL: [Self; 4] = [
+        Self::BaseColor,
+        Self::Normal,
+        Self::MetallicRoughnessOcclusion,
+        Self::Emissive,
+    ];
 
     /// This kind's slot in [`PageDesc`]'s table.
     #[must_use]
@@ -272,6 +297,8 @@ impl PageKind {
         match self {
             Self::BaseColor => 0,
             Self::Normal => 1,
+            Self::MetallicRoughnessOcclusion => 2,
+            Self::Emissive => 3,
         }
     }
 
@@ -282,6 +309,8 @@ impl PageKind {
         match self {
             Self::BaseColor => "base-colour",
             Self::Normal => "normal",
+            Self::MetallicRoughnessOcclusion => "metallic-roughness-occlusion",
+            Self::Emissive => "emissive",
         }
     }
 }
@@ -434,14 +463,17 @@ impl<'a> PageDesc<'a> {
     /// `texels` is RGBA8, row-major, and exactly `extent² × 4` bytes, which
     /// [`ForwardRenderer::with_scene`](crate::forward::ForwardRenderer::with_scene)
     /// checks before it uploads anything. What the bytes *mean* is the kind's,
-    /// and the two differ: a [`BaseColor`](PageKind::BaseColor) layer is
-    /// sRGB-encoded, because that is what glTF defines a base-colour texture to
-    /// be and the renderer creates that image as `Rgba8UnormSrgb` so the sampler
-    /// decodes it; a [`Normal`](PageKind::Normal) layer is **linear**, a
-    /// tangent-space normal encoded as `n * 0.5 + 0.5` per channel, and its
-    /// image is `Rgba8Unorm` so nothing decodes it at all — see
-    /// `crcbl_render::forward::NORMAL_PAGE_FORMAT` and
-    /// `docs/plan/44-lighting.md`'s rung 2.
+    /// and the four differ: a [`BaseColor`](PageKind::BaseColor) layer and an
+    /// [`Emissive`](PageKind::Emissive) one are sRGB-encoded, because both are
+    /// *colours* and that is what glTF defines those two textures to be, and
+    /// the renderer creates their images as `Rgba8UnormSrgb` so the sampler
+    /// decodes them; a [`Normal`](PageKind::Normal) layer and a
+    /// [`MetallicRoughnessOcclusion`](PageKind::MetallicRoughnessOcclusion) one
+    /// are **linear** numbers — a tangent-space normal encoded as
+    /// `n * 0.5 + 0.5` per channel, and glTF's packed occlusion, roughness and
+    /// metallic in `r`, `g` and `b` — and their images are `Rgba8Unorm` so
+    /// nothing decodes them at all. See each kind's own arm of `PageKind::format`
+    /// and `docs/plan/44-lighting.md`'s rung 2.
     ///
     /// # Panics
     ///
@@ -1157,8 +1189,9 @@ mod tests {
         // everything could not pass this test.
         let good = || {
             let mut page = PageDesc::empty();
-            page.set_extent(PageKind::BaseColor, 2);
-            page.set_extent(PageKind::Normal, 2);
+            for kind in PageKind::ALL {
+                page.set_extent(kind, 2);
+            }
             page
         };
 
@@ -1198,9 +1231,9 @@ mod tests {
             );
         }
 
-        // Every layer is unconstrained but for its length, on both kinds, so the
-        // accepted shape carries two of each and nothing white or neutral about
-        // any of them.
+        // Every layer is unconstrained but for its length, on every kind, so
+        // the accepted shape carries two of each and nothing white or neutral
+        // about any of them.
         let mut whole = good();
         for kind in PageKind::ALL {
             whole.push_layer(kind, vec![0x00; 2 * 2 * 4]);

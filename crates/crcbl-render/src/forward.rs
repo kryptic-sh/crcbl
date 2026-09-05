@@ -280,11 +280,42 @@ const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 /// a surface that leans further off vertical than the author drew, which is why
 /// the mistake survives review everywhere it is made.
 ///
-/// `the_two_page_formats_differ` is the whole guard, and it is worth having
-/// because the two constants sit four lines apart and the wrong one compiles.
+/// `the_page_formats_split_colour_from_number` is the whole guard, and it is
+/// worth having because the four constants sit a few lines apart and the wrong
+/// one compiles.
 ///
 /// [`docs/plan/44-lighting.md`]: https://docs.rs/crcbl-render
 const NORMAL_PAGE_FORMAT: Format = Format::Rgba8Unorm;
+
+/// The format `docs/plan/43-render-standards.md` §2's **metallic-roughness-
+/// occlusion** page is created with.
+///
+/// **`Rgba8Unorm`, and the missing `Srgb` is the same decision
+/// [`NORMAL_PAGE_FORMAT`] argues.** An occlusion, a roughness and a metalness
+/// are numbers rather than colours — glTF 2.0 §3.9.2 and §3.9.5 define them as
+/// linear factors — and a surface shaded through an sRGB decode of them is
+/// smoother and shinier than the author drew, which is a failure that survives
+/// review because it looks like a choice.
+///
+/// A separate constant from [`NORMAL_PAGE_FORMAT`] rather than a reuse of it,
+/// for [`LTC_SIZE_U32`]'s reason: the two stand for different facts, and a day
+/// one of them wanted a different format should be an edit here rather than a
+/// search for which callers of a shared name meant which page.
+const MRO_PAGE_FORMAT: Format = Format::Rgba8Unorm;
+
+/// The format `docs/plan/43-render-standards.md` §2's **emissive** page is
+/// created with.
+///
+/// **`Rgba8UnormSrgb`, and it is the base-colour page's decision rather than
+/// the normal page's.** An emissive texel is a colour: glTF 2.0 §3.9.4 defines
+/// `emissiveTexture` as sRGB-encoded exactly as it defines `baseColorTexture`,
+/// and `GpuMaterial::emissive` beside it is a linear radiance, so the format is
+/// what puts the two in one space before they are multiplied.
+///
+/// A separate constant from [`BASE_COLOR_PAGE_FORMAT`] for the reason above it,
+/// and `the_page_formats_split_colour_from_number` is the guard that the four
+/// do not drift into one another.
+const EMISSIVE_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 
 /// What the renderer needs of a [`PageKind`] to create and fill its image.
 ///
@@ -306,6 +337,8 @@ impl PageKind {
         match self {
             Self::BaseColor => BASE_COLOR_PAGE_FORMAT,
             Self::Normal => NORMAL_PAGE_FORMAT,
+            Self::MetallicRoughnessOcclusion => MRO_PAGE_FORMAT,
+            Self::Emissive => EMISSIVE_PAGE_FORMAT,
         }
     }
 
@@ -319,8 +352,9 @@ impl PageKind {
     /// nothing in a frame reports it.
     fn chain(self, level0: &[u8], extent: u32) -> Vec<Vec<u8>> {
         match self {
-            Self::BaseColor => crate::mip::chain(level0, extent),
+            Self::BaseColor | Self::Emissive => crate::mip::chain(level0, extent),
             Self::Normal => crate::mip::normal_chain(level0, extent),
+            Self::MetallicRoughnessOcclusion => crate::mip::linear_chain(level0, extent),
         }
     }
 
@@ -329,6 +363,8 @@ impl PageKind {
         match self {
             Self::BaseColor => "material base colour",
             Self::Normal => "material normals",
+            Self::MetallicRoughnessOcclusion => "material metallic-roughness-occlusion",
+            Self::Emissive => "material emissive",
         }
     }
 }
@@ -643,6 +679,32 @@ const CONTACT_SHADOW_BINDING: u32 = 28;
 /// rasterisers compute independently — and because `Rg32Float` is not a
 /// filterable format on WebGPU without an optional feature.
 const PROBE_VISIBILITY_BINDING: u32 = 29;
+
+/// The bind-group slot `docs/plan/43-render-standards.md` §2's packed
+/// **metallic-roughness-occlusion** page is sampled through.
+///
+/// **Appended past [`PROBE_VISIBILITY_BINDING`], never inserted**, for
+/// [`NORMAL_PAGE_BINDING`]'s reason exactly: `crcbl-mtl` gives a resource the
+/// next index in its Metal argument table by counting the same-table entries of
+/// this layout, and Slang numbers a stage's arguments by declaration order, so
+/// the two agree only while both ascend. 30 is past everything
+/// `mesh_cluster.slang` declares — that file reaches 24 — so it needs no mirror
+/// there and no index anything already owns moves.
+///
+/// **No sampler of its own**, for [`NORMAL_PAGE_BINDING`]'s reason: the page is
+/// read at the same UV over an image of the same shape as the base-colour one,
+/// so it goes through [`PAGE_SAMPLER_BINDING`]'s sampler and adds no entry to
+/// Metal's sampler argument table.
+const MRO_PAGE_BINDING: u32 = 30;
+
+/// The bind-group slot `docs/plan/43-render-standards.md` §2's **emissive**
+/// page is sampled through.
+///
+/// **Appended past [`MRO_PAGE_BINDING`], never inserted**, for that constant's
+/// reason exactly, and it shares [`PAGE_SAMPLER_BINDING`]'s sampler on the same
+/// terms. 31 is past everything `mesh_cluster.slang` declares, so it needs no
+/// mirror there and no index anything already owns moves.
+const EMISSIVE_PAGE_BINDING: u32 = 31;
 
 /// [`crcbl_shaders::dfg::DFG_SIZE`] as an image extent.
 ///
@@ -1482,6 +1544,22 @@ pub struct ForwardRenderer {
     /// [`PageKind`] separately, so a 512² normal page beside a 2048²
     /// base-colour one is what the caller wrote and what this holds.
     normal_page: UploadedTexture,
+    /// §2's third page: one `D2Array` image of glTF's packed occlusion,
+    /// roughness and metallic, whose layers
+    /// [`metallic_roughness_occlusion_texture`](mesh::GpuMaterial::metallic_roughness_occlusion_texture)
+    /// indexes.
+    ///
+    /// The normal page's own shape at [`MRO_PAGE_BINDING`], sampled through the
+    /// same UV and the same sampler, and **created linear** — see
+    /// [`MRO_PAGE_FORMAT`].
+    mro_page: UploadedTexture,
+    /// §2's fourth page: one `D2Array` image of emitted radiance, whose layers
+    /// [`emissive_texture`](mesh::GpuMaterial::emissive_texture) indexes.
+    ///
+    /// The base-colour page's own shape at [`EMISSIVE_PAGE_BINDING`], and
+    /// **created sRGB** rather than linear, because an emissive texel is a
+    /// colour — see [`EMISSIVE_PAGE_FORMAT`].
+    emissive_page: UploadedTexture,
     /// Each [`PageKind`]'s image size in texels, as a width and a height,
     /// indexed by [`PageKind::index`].
     ///
@@ -2611,6 +2689,12 @@ struct SharedBindings<'a> {
     /// base-colour page's reason exactly, and read through the same sampler
     /// beside it.
     normal_page: ImageViewHandle,
+    /// Binding [`MRO_PAGE_BINDING`], §2's packed metallic-roughness-occlusion
+    /// page — shared and sampled on the normal page's terms exactly.
+    mro_page: ImageViewHandle,
+    /// Binding [`EMISSIVE_PAGE_BINDING`], §2's emissive page — shared and
+    /// sampled on the normal page's terms exactly.
+    emissive_page: ImageViewHandle,
     page_sampler: SamplerHandle,
     /// `Some` on [`GeometryPath::MeshShader`] and on no other path, which is
     /// what decides whether bindings 9 to 12 and 17 exist at all.
@@ -2958,12 +3042,27 @@ impl MeshGroup {
             array_index: 0,
             resource: BindingResource::ImageView(self.contact_shadow),
         });
-        // And the probe visibility maps above that, last of the set and on the
-        // same ascending terms — see [`PROBE_VISIBILITY_BINDING`].
+        // And the probe visibility maps above that, on the same ascending terms
+        // — see [`PROBE_VISIBILITY_BINDING`].
         entries.push(BindGroupEntry {
             binding: PROBE_VISIBILITY_BINDING,
             array_index: 0,
             resource: BindingResource::ImageView(self.probe_visibility),
+        });
+        // And §2's other two pages above that, last of the set and on the same
+        // ascending terms — see [`MRO_PAGE_BINDING`] and
+        // [`EMISSIVE_PAGE_BINDING`]. Unconditional and `array_index: 0` for the
+        // normal page's reason: one image apiece, and the layer is chosen in
+        // the shader.
+        entries.push(BindGroupEntry {
+            binding: MRO_PAGE_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(shared.mro_page),
+        });
+        entries.push(BindGroupEntry {
+            binding: EMISSIVE_PAGE_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(shared.emissive_page),
         });
         entries
     }
@@ -2983,6 +3082,11 @@ struct MaterialPages {
     base_color: ImageId,
     /// §2's normal page — [`ForwardRenderer::normal_page_import`].
     normal: ImageId,
+    /// §2's metallic-roughness-occlusion page —
+    /// [`ForwardRenderer::mro_page_import`].
+    mro: ImageId,
+    /// §2's emissive page — [`ForwardRenderer::emissive_page_import`].
+    emissive: ImageId,
 }
 
 /// Everything [`ForwardRenderer::add_shadow_pass`] declares and does not write,
@@ -3427,6 +3531,10 @@ impl ForwardRenderer {
                 let names = match kind {
                     PageKind::BaseColor => material.base_color_texture,
                     PageKind::Normal => material.normal_texture,
+                    PageKind::MetallicRoughnessOcclusion => {
+                        material.metallic_roughness_occlusion_texture
+                    }
+                    PageKind::Emissive => material.emissive_texture,
                 };
                 if names == mesh::GpuMaterial::NO_PAGE {
                     continue;
@@ -3694,7 +3802,13 @@ impl ForwardRenderer {
             page_extents[kind.index()] = (extent, extent);
             pages[kind.index()] = Some(page);
         }
-        let [Some(base_color_page), Some(normal_page)] = pages else {
+        let [
+            Some(base_color_page),
+            Some(normal_page),
+            Some(mro_page),
+            Some(emissive_page),
+        ] = pages
+        else {
             unreachable!("the loop above fills a slot for every PageKind::ALL entry");
         };
 
@@ -4623,6 +4737,27 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
+        // §2's other two pages, last of the set — see [`MRO_PAGE_BINDING`] and
+        // [`EMISSIVE_PAGE_BINDING`] on why last is structural rather than tidy.
+        //
+        // `geometry` beside `FRAGMENT`, `D2Array` and `Float` are the normal
+        // page's three answers exactly, and for its reasons: Slang's Metal
+        // backend materialises every global into every entry point, WebGPU
+        // compares the declared dimension against the bound view, and both
+        // images are `Rgba8Unorm`-family formats that decode to filterable
+        // floats.
+        for binding in [MRO_PAGE_BINDING, EMISSIVE_PAGE_BINDING] {
+            mesh_entries.push(BindGroupLayoutEntry {
+                binding,
+                visibility: geometry.union(ShaderStages::FRAGMENT),
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2Array,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            });
+        }
         let mesh_desc = BindGroupLayoutDesc {
             label: Some(MESH_LAYOUT_LABEL),
             entries: &mesh_entries,
@@ -4996,6 +5131,8 @@ impl ForwardRenderer {
                 materials: material_buffer,
                 page: base_color_page.view,
                 normal_page: normal_page.view,
+                mro_page: mro_page.view,
+                emissive_page: emissive_page.view,
                 page_sampler: base_color_sampler,
                 clusters: rollback.clusters.as_ref(),
                 shadow_sampler,
@@ -5563,6 +5700,8 @@ impl ForwardRenderer {
             probe_volume: scene.probes.volume,
             base_color_page,
             normal_page,
+            mro_page,
+            emissive_page,
             page_extents,
             base_color_sampler,
             anisotropy,
@@ -8726,6 +8865,12 @@ impl ForwardRenderer {
         // is in every group of `mesh_layout` too, so a caller copying into one
         // of its layers needs the same edge against these draws.
         let normal_page = graph.import_image(Self::NORMAL_PAGE_LABEL, self.normal_page_import());
+        // §2's other two pages beside them, declared for exactly the same
+        // reason: both are in every group of `mesh_layout`, so a caller copying
+        // into one of their layers needs the same edge against these draws.
+        let mro_page = graph.import_image(Self::MRO_PAGE_LABEL, self.mro_page_import());
+        let emissive_page =
+            graph.import_image(Self::EMISSIVE_PAGE_LABEL, self.emissive_page_import());
 
         // What this frame draws, resolved by the `begin_frame` that opened it —
         // see [`crate::effects`]. Read once here so every conditional below is
@@ -8744,6 +8889,8 @@ impl ForwardRenderer {
         let pages = MaterialPages {
             base_color: base_color_page,
             normal: normal_page,
+            mro: mro_page,
+            emissive: emissive_page,
         };
         let (shadow_atlas, shadow_draws, shadow_tile_clears, rsm_images) = self.add_shadow_pass(
             graph,
@@ -9158,9 +9305,11 @@ impl ForwardRenderer {
             // the graph order a copy into a page layer against this pass — see
             // `base_color_page_import`.
             .read_image(base_color_page)
-            // And §2's normal page, which is in the same groups for the same
-            // reason and is sampled here just as little.
+            // And §2's other three pages, which are in the same groups for the
+            // same reason and are sampled here just as little.
             .read_image(normal_page)
+            .read_image(mro_page)
+            .read_image(emissive_page)
             // And the probe rows, which `mesh_layout` names in this group too
             // and which the depth-only pipeline reads not at all — declared for
             // the colour pass's reason exactly: they are device-local and
@@ -9323,10 +9472,13 @@ impl ForwardRenderer {
             // graph can order a caller's copy into a page layer against these
             // draws — see `base_color_page_import`.
             .read_image(base_color_page)
-            // **And the normal page this pass's materials perturb through**,
-            // which is the other of the two pages that is literally sampled
-            // here — see `normal_page_import`.
+            // **And §2's other three pages, every one of which this pass's
+            // fragment stage literally samples** — the normal map it perturbs
+            // through, the packed roughness and metalness its lobe takes, and
+            // the emissive radiance it adds. See `normal_page_import`.
             .read_image(normal_page)
+            .read_image(mro_page)
+            .read_image(emissive_page)
             // **The barrier out of the shadow pass's depth attachment.** The
             // atlas is in this pass's bind group at `SHADOW_ATLAS_BINDING`, and
             // without this declaration the graph leaves it in
@@ -10038,9 +10190,12 @@ impl ForwardRenderer {
             // cascade's included. See `ForwardRenderer::base_color_page_import`
             // for what the declaration buys a caller that writes the page.
             .read_image(reads.pages.base_color)
-            // And §2's normal page beside it, in those same groups and sampled
-            // by no cascade — see `ForwardRenderer::normal_page_import`.
+            // And §2's other three pages beside it, in those same groups and
+            // sampled by no cascade — see
+            // `ForwardRenderer::normal_page_import`.
             .read_image(reads.pages.normal)
+            .read_image(reads.pages.mro)
+            .read_image(reads.pages.emissive)
             // And the probe rows, which are in those groups too and which no
             // cascade reads — declared on the placeholder's and the pages'
             // terms, plus one of their own: the rows are device-local and a copy
@@ -10264,6 +10419,8 @@ impl ForwardRenderer {
             .read_image(reads.occlusion_placeholder)
             .read_image(reads.pages.base_color)
             .read_image(reads.pages.normal)
+            .read_image(reads.pages.mro)
+            .read_image(reads.pages.emissive)
             .read_buffer(reads.probes);
         if let Some(vertices) = reads.skinned {
             rsm = rsm.read_buffer(vertices);
@@ -10329,6 +10486,8 @@ impl ForwardRenderer {
             .read_image(reads.occlusion_placeholder)
             .read_image(reads.pages.base_color)
             .read_image(reads.pages.normal)
+            .read_image(reads.pages.mro)
+            .read_image(reads.pages.emissive)
             .read_buffer(reads.probes);
         if let Some(vertices) = reads.skinned {
             punctual_pass = punctual_pass.read_buffer(vertices);
@@ -10623,6 +10782,70 @@ impl ForwardRenderer {
             view: self.normal_page.view,
             format: NORMAL_PAGE_FORMAT,
             extent: self.page_extents[PageKind::Normal.index()],
+            initial: ResourceState::ShaderRead,
+            claim: InitialClaim::Tracked,
+            final_state: ResourceState::ShaderRead,
+        }
+    }
+
+    /// `docs/plan/43-render-standards.md` §2's packed
+    /// **metallic-roughness-occlusion** page, the raw handles.
+    ///
+    /// [`normal_page`](Self::normal_page)'s counterpart, on every one of its
+    /// terms and at the same `Rgba8Unorm` format: a layer of it is glTF's
+    /// occlusion, roughness and metallic in `r`, `g` and `b`, which are numbers
+    /// rather than a colour — see this module's `MRO_PAGE_FORMAT`.
+    #[must_use]
+    pub const fn mro_page(&self) -> UploadedTexture {
+        self.mro_page
+    }
+
+    /// What [`add_passes`](Self::add_passes) names the
+    /// metallic-roughness-occlusion page in the graph, on
+    /// [`BASE_COLOR_PAGE_LABEL`](Self::BASE_COLOR_PAGE_LABEL)'s terms.
+    pub const MRO_PAGE_LABEL: &'static str = "metallic-roughness-occlusion-page";
+
+    /// The metallic-roughness-occlusion page **as this renderer declares it to a
+    /// graph**, on [`base_color_page_import`](Self::base_color_page_import)'s
+    /// terms exactly.
+    #[must_use]
+    pub const fn mro_page_import(&self) -> ImportedImage {
+        ImportedImage {
+            image: self.mro_page.image,
+            view: self.mro_page.view,
+            format: MRO_PAGE_FORMAT,
+            extent: self.page_extents[PageKind::MetallicRoughnessOcclusion.index()],
+            initial: ResourceState::ShaderRead,
+            claim: InitialClaim::Tracked,
+            final_state: ResourceState::ShaderRead,
+        }
+    }
+
+    /// `docs/plan/43-render-standards.md` §2's **emissive** page, the raw
+    /// handles.
+    ///
+    /// [`base_color_page`](Self::base_color_page)'s counterpart down to the
+    /// format: an emissive texel is a colour, so this image is
+    /// `Rgba8UnormSrgb` and the sampler decodes it — see this module's
+    /// `EMISSIVE_PAGE_FORMAT`.
+    #[must_use]
+    pub const fn emissive_page(&self) -> UploadedTexture {
+        self.emissive_page
+    }
+
+    /// What [`add_passes`](Self::add_passes) names the emissive page in the
+    /// graph, on [`BASE_COLOR_PAGE_LABEL`](Self::BASE_COLOR_PAGE_LABEL)'s terms.
+    pub const EMISSIVE_PAGE_LABEL: &'static str = "emissive-page";
+
+    /// The emissive page **as this renderer declares it to a graph**, on
+    /// [`base_color_page_import`](Self::base_color_page_import)'s terms exactly.
+    #[must_use]
+    pub const fn emissive_page_import(&self) -> ImportedImage {
+        ImportedImage {
+            image: self.emissive_page.image,
+            view: self.emissive_page.view,
+            format: EMISSIVE_PAGE_FORMAT,
+            extent: self.page_extents[PageKind::Emissive.index()],
             initial: ResourceState::ShaderRead,
             claim: InitialClaim::Tracked,
             final_state: ResourceState::ShaderRead,
@@ -12323,6 +12546,8 @@ impl ForwardRenderer {
         self.specular_dfg.destroy(device);
         self.ltc_table.destroy(device);
         self.normal_page.destroy(device);
+        self.mro_page.destroy(device);
+        self.emissive_page.destroy(device);
 
         device.destroy_graphics_pipeline(self.mesh_pipeline.single);
         device.destroy_graphics_pipeline(self.mesh_pipeline.double);
@@ -16321,35 +16546,48 @@ mod tests {
     /// on any other backend can see that: Vulkan and D3D12 read the binding
     /// number, and WebGPU never takes this path.
     ///
-    /// **The two material pages are created with different formats, and the
-    /// base-colour one is the sRGB one.**
+    /// **The four material pages are created with the format their contents
+    /// call for, and it is only a *colour* that is sRGB.**
     ///
     /// `docs/plan/44-lighting.md`'s rung 2 calls this the classic PBR bug and
-    /// says why it survives review: a base-colour texel is an sRGB-encoded
-    /// *colour*, which is what glTF defines it as, and a normal texel is a
-    /// *number* — so decoding a normal through the sRGB curve is wrong by a
-    /// gamma and looks merely like a surface bumpier than the author drew.
+    /// says why it survives review: a base-colour texel and an emissive one are
+    /// sRGB-encoded *colours*, which is what glTF defines them as, and a normal
+    /// texel and a packed occlusion-roughness-metallic one are *numbers* — so
+    /// decoding either of those through the sRGB curve is wrong by a gamma and
+    /// looks merely like a surface bumpier or shinier than the author drew.
     /// Nothing in a frame reports it, no golden comparison can name it, and the
-    /// two constants sit a dozen lines apart with the wrong one compiling.
+    /// four constants sit a few lines apart with the wrong one compiling.
     ///
-    /// So this is the whole guard, and it is three assertions rather than one:
-    /// that the pair differ, that each is the one it should be, and — the half
-    /// that would otherwise be a check that cannot fail — that the format each
-    /// page is *created* with is the format its `ImportedImage` declares. A
-    /// declaration naming a format the image is not in picks the wrong aspects
-    /// in a barrier.
+    /// So this is the whole guard, and it is three claims rather than one: that
+    /// each constant is the one it should be, that
+    /// [`PageKind::format`] — which is what the upload loop actually calls —
+    /// answers with it, and, the half that would otherwise be a check that
+    /// cannot fail, that the format each page is *created* with is the format
+    /// its `ImportedImage` declares. A declaration naming a format the image is
+    /// not in picks the wrong aspects in a barrier.
     #[test]
-    fn the_two_page_formats_differ() {
+    fn the_page_formats_split_colour_from_number() {
         assert_eq!(BASE_COLOR_PAGE_FORMAT, Format::Rgba8UnormSrgb);
+        assert_eq!(EMISSIVE_PAGE_FORMAT, Format::Rgba8UnormSrgb);
         assert_eq!(NORMAL_PAGE_FORMAT, Format::Rgba8Unorm);
+        assert_eq!(MRO_PAGE_FORMAT, Format::Rgba8Unorm);
         // Through the dispatch the upload loop actually calls, rather than the
-        // constants alone: one loop creates both images now, and a `format` arm
+        // constants alone: one loop creates every image now, and a `format` arm
         // pointed at the wrong constant is the way that loop gets it wrong.
         assert_eq!(PageKind::BaseColor.format(), BASE_COLOR_PAGE_FORMAT);
         assert_eq!(PageKind::Normal.format(), NORMAL_PAGE_FORMAT);
+        assert_eq!(
+            PageKind::MetallicRoughnessOcclusion.format(),
+            MRO_PAGE_FORMAT
+        );
+        assert_eq!(PageKind::Emissive.format(), EMISSIVE_PAGE_FORMAT);
         assert_ne!(
             BASE_COLOR_PAGE_FORMAT, NORMAL_PAGE_FORMAT,
             "a normal page created sRGB decodes every texel through a gamma it never had"
+        );
+        assert_ne!(
+            EMISSIVE_PAGE_FORMAT, MRO_PAGE_FORMAT,
+            "a packed roughness page created sRGB shades every surface smoother than authored"
         );
 
         let (recorder, device, queue) = open();
@@ -16360,16 +16598,25 @@ mod tests {
             BASE_COLOR_PAGE_FORMAT
         );
         assert_eq!(renderer.normal_page_import().format, NORMAL_PAGE_FORMAT);
-        // And the two really are two images, not one bound twice — which is the
-        // other way a page could be "linear" and still be sampled through the
-        // sRGB one. The labels come off the recorder rather than off the
-        // handles, so this is evidence about what the device was asked to
-        // create.
-        assert_ne!(
-            renderer.normal_page().image,
-            renderer.base_color_page().image
-        );
-        assert_ne!(renderer.normal_page().view, renderer.base_color_page().view);
+        assert_eq!(renderer.mro_page_import().format, MRO_PAGE_FORMAT);
+        assert_eq!(renderer.emissive_page_import().format, EMISSIVE_PAGE_FORMAT);
+        // And they really are four images, not one bound four times — which is
+        // the other way a page could be "linear" and still be sampled through
+        // the sRGB one.
+        let created = [
+            renderer.base_color_page(),
+            renderer.normal_page(),
+            renderer.mro_page(),
+            renderer.emissive_page(),
+        ];
+        for (at, page) in created.iter().enumerate() {
+            for other in &created[at + 1..] {
+                assert_ne!(page.image, other.image, "two page kinds share one image");
+                assert_ne!(page.view, other.view, "two page kinds share one view");
+            }
+        }
+        // The labels come off the recorder rather than off the handles, so this
+        // is evidence about what the device was asked to create.
         let images: Vec<String> = recorder
             .events()
             .into_iter()
@@ -16381,7 +16628,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for page in ["material base colour", "material normals"] {
+        for kind in PageKind::ALL {
+            let page = kind.upload_label();
             assert!(
                 images.iter().any(|label| label == page),
                 "no image was created for the {page} page, and it is {images:?} that were"

@@ -292,13 +292,16 @@ rather than of the material asset:
   **not a colour** — it is a number — and decoding it through an sRGB curve is
   wrong by a gamma. This is the classic PBR bug and it survives review because
   it looks plausible: roughness read through the decode is too smooth in the
-  mid-range and the surface merely reads as "shinier than intended". A second
-  page constant, `Rgba8Unorm`, and a test that asserts the two formats differ is
-  the whole guard. **Built 2026-08-30** with the normal page:
-  `crcbl_render::forward`'s `NORMAL_PAGE_FORMAT` is that constant and
-  `the_two_page_formats_differ` is that test — it reads both constants, checks
-  they differ, and checks each graph import declares its own, so a page that
-  quietly took the other one fails rather than looking shinier.
+  mid-range and the surface merely reads as "shinier than intended". A page
+  constant per kind and a test that asserts a _number_ page is never the sRGB
+  format is the whole guard. **Built 2026-08-30** with the normal page and
+  **extended 2026-09-06** with the packed metallic-roughness-occlusion page and
+  the emissive one: `crcbl_render::forward`'s `NORMAL_PAGE_FORMAT`,
+  `MRO_PAGE_FORMAT` and `EMISSIVE_PAGE_FORMAT` are those constants and
+  `the_page_formats_split_colour_from_number` is that test — it reads all four,
+  checks `PageKind::format` answers with each, and checks each graph import
+  declares its own, so a page that quietly took another kind's format fails
+  rather than looking shinier.
 - **Two channels, not three, for a normal page.** The tangent-space `z` is
   `sqrt(1 - x² - y²)`, which is a square root and therefore allowed where a
   transcendental would not be, and reconstructing it means a BC5-class two-

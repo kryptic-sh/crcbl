@@ -1024,14 +1024,16 @@ struct GpuMaterial
     float emissive_b;
     /// The metallic-roughness-occlusion page layer in the low sixteen bits and
     /// the emissive page layer in the high sixteen, on `color_normal_pages`'
-    /// terms.
+    /// terms — the halves `crcbl_shaders::mesh::GpuMaterial::page_words` packs
+    /// them into, which
+    /// `the_material_layout_matches_the_offsets_slangc_emits` pins against the
+    /// bytes and `the_shader_reads_the_page_halves_the_host_packs` pins against
+    /// this file.
     ///
-    /// **Declared and read by nothing.** §2's table lays four page rows out at
-    /// once and this slice wires the normal row alone; every producer writes
-    /// zero here, and the rungs that spend the two halves are the packed ORM
-    /// texture and the emissive page. They are in the layout now because the
-    /// row's stride is mirrored in five declarations and one pinned offsets
-    /// test, and widening it twice is that work twice.
+    /// `mro_layer` and `emissive_layer` below are the two readers, so no call
+    /// site does the shift by hand, and a half carrying `NO_PAGE` is a material
+    /// that names no page there — `mro_texel` and `emissive_texel` each return
+    /// the value a surface with no such texture is supposed to have.
     uint mro_emissive_pages;
     /// glTF's `normalTexture.scale`: the factor the decoded tangent-space
     /// normal's `x` and `y` are multiplied by before it is renormalised, with
@@ -1073,6 +1075,36 @@ uint base_color_layer(GpuMaterial material)
 uint normal_layer(GpuMaterial material)
 {
     return material.color_normal_pages >> 16;
+}
+
+/// The metallic-roughness-occlusion page layer a material row names — the
+/// **low** half of `GpuMaterial::mro_emissive_pages`.
+///
+/// The low half, matching the order
+/// `crcbl_shaders::mesh::GpuMaterial::page_words` packs the pair in: the
+/// metallic-roughness-occlusion column first, the emissive one above it. A
+/// reader that took the halves the other way round would shade every surface
+/// through the wrong page and fail nothing on the host.
+///
+/// **`NO_PAGE` means the material has no packed texture**, and `mro_texel`
+/// returns `float4(1, 1, 1, 1)` for it — the identity of all three multiplies
+/// the shading makes out of that texel, so the row's own factors reach the lobe
+/// untouched.
+uint mro_layer(GpuMaterial material)
+{
+    return material.mro_emissive_pages & 0xffffu;
+}
+
+/// The emissive page layer a material row names — the **high** half of
+/// `GpuMaterial::mro_emissive_pages`, on `mro_layer`'s terms.
+///
+/// **`NO_PAGE` means the material has no emissive texture**, and
+/// `emissive_texel` returns `float4(1, 1, 1, 1)` for it, so a row carrying an
+/// `emissive` factor and no page emits that factor exactly as it did before
+/// this page existed.
+uint emissive_layer(GpuMaterial material)
+{
+    return material.mro_emissive_pages >> 16;
 }
 
 /// The emissive radiance of a material row, as a vector.
@@ -1674,7 +1706,8 @@ Texture2D<float4> specular_dfg;
 /// survives review everywhere it happens: the decoded normal simply leans
 /// further from vertical than the author drew, and the surface reads as
 /// "bumpier than intended" rather than as broken.
-/// `crcbl_render::forward::the_two_page_formats_differ` is the guard.
+/// `crcbl_render::forward::the_page_formats_split_colour_from_number` is the
+/// guard.
 ///
 /// **Appended past `specular_dfg`, never inserted**, for
 /// `SHADOW_ATLAS_BINDING`'s reason exactly: `crcbl-mtl` gives a resource the
@@ -1800,6 +1833,111 @@ Texture2D<float> contact_shadow;
 /// index anything already owns moves.
 [[vk::binding(29, 0)]]
 Texture2DArray<float4> probe_visibility;
+
+/// §2's third texture page: glTF's packed **metallic-roughness-occlusion** map,
+/// one `Texture2DArray` indexed by `mro_layer(material)`.
+///
+/// The normal page's own shape, read through the same UV and the *same
+/// sampler* — `base_color_sampler` — for that binding's reasons exactly. No
+/// layer of it is special: a material with no packed map carries `NO_PAGE`, and
+/// `mro_texel` hands back the multiplicative identity instead of a texel.
+///
+/// # The channels are glTF's, and `a` is not read
+///
+/// Occlusion in `r`, roughness in `g`, metallic in `b` — glTF 2.0 §3.9.2's
+/// `metallicRoughnessTexture` (`g` and `b`) and §3.9.5's `occlusionTexture`
+/// (`r`) in one image, which is how an author packs them and why one page
+/// serves both. Each multiplies the row's own factor rather than replacing it,
+/// which is the specification's own product.
+///
+/// # `Rgba8Unorm`, and the missing `Srgb` is the whole point
+///
+/// The normal page's argument, term for term: a roughness, a metalness and an
+/// occlusion are *numbers*, and decoding them through the sRGB curve is wrong
+/// by a gamma. `crcbl_render::forward::MRO_PAGE_FORMAT` is the constant and
+/// `the_page_formats_split_colour_from_number` is the guard.
+///
+/// **Appended past `probe_visibility`, never inserted**, for the reason every
+/// binding above it gives: `crcbl-mtl` numbers a resource by counting the
+/// same-table entries of the layout list, and Slang numbers a stage's arguments
+/// by declaration order, so the two agree only while both ascend. 30 is past
+/// everything `mesh_cluster.slang` declares, so it needs no mirror there and no
+/// index anything already owns moves.
+[[vk::binding(30, 0)]]
+Texture2DArray<float4> mro_textures;
+
+/// §2's fourth texture page: the **emissive** map, one `Texture2DArray` indexed
+/// by `emissive_layer(material)`.
+///
+/// The page beside it, with one difference that matters: this one is
+/// `Rgba8UnormSrgb`, because an emissive texel is a *colour*. glTF 2.0 §3.9.4
+/// defines `emissiveTexture` as sRGB-encoded exactly as it defines
+/// `baseColorTexture`, and `emissive_of(material)` beside it is a linear
+/// radiance — so the format is what puts the two in one space before they are
+/// multiplied, and a `pow` in this file would mean the format was wrong.
+///
+/// **Appended past `mro_textures`, never inserted**, for that binding's reason
+/// exactly. 31 is past everything `mesh_cluster.slang` declares, so it needs no
+/// mirror there and no index anything already owns moves.
+[[vk::binding(31, 0)]]
+Texture2DArray<float4> emissive_textures;
+
+/// The packed occlusion, roughness and metallic a material row samples at `uv`,
+/// or the multiplicative identity when the row names no such page.
+///
+/// **`base_color_texel`'s shape exactly, and for its reason**: the branch is on
+/// the *index* and the `Sample` is unconditional at this function's top level,
+/// because WGSL's uniformity analysis reports the fragment's material id as
+/// possibly non-uniform and an implicit-LOD sample is legal only in uniform
+/// control flow. The *select* below the fetch is what discards the texel. A page
+/// always has at least one layer, so the substituted index is in range.
+///
+/// `float4(1, 1, 1, 1)` for the unnamed case, which is the identity of all three
+/// products the shading makes out of this texel — the occlusion on the indirect
+/// terms, the roughness factor and the metallic factor. So a row naming no page
+/// shades bit for bit as it did before this page existed.
+float4 mro_texel(GpuMaterial material, float2 uv)
+{
+    uint layer = mro_layer(material);
+    bool named = layer != NO_PAGE;
+    float4 texel = mro_textures.Sample(
+        base_color_sampler, float3(uv, float(named ? layer : 0u)));
+    return named ? texel : float4(1.0, 1.0, 1.0, 1.0);
+}
+
+/// The emissive texel a material row samples at `uv`, or the multiplicative
+/// identity when the row names no such page — `mro_texel`'s shape and reasons
+/// exactly.
+///
+/// The texel arrives **linear**, because the page is an sRGB-format image and
+/// the sampler decoded it, which is the space `emissive_of(material)` is in.
+float4 emissive_texel(GpuMaterial material, float2 uv)
+{
+    uint layer = emissive_layer(material);
+    bool named = layer != NO_PAGE;
+    float4 texel = emissive_textures.Sample(
+        base_color_sampler, float3(uv, float(named ? layer : 0u)));
+    return named ? texel : float4(1.0, 1.0, 1.0, 1.0);
+}
+
+/// This surface's metalness: the row's `metallic` factor times the packed
+/// page's **blue** channel, clamped to the unit range.
+///
+/// glTF 2.0 §3.9.2 multiplies the factor by the texel rather than letting either
+/// replace the other, so a document that ships a packed map and a factor of one
+/// gets the map and one that ships no map gets the factor — and `mro_texel`
+/// returning `1.0` for an unnamed page is what makes the second case the same
+/// arithmetic as the first.
+///
+/// **One resolved value for two fragment stages.** `fragmentMain` interpolates
+/// `F0` and scales the diffuse albedo on it, and `rsmFragmentMain` scales its
+/// recorded albedo by the same `1 - metallic`: a reflective shadow map that
+/// disagreed with the shaded frame about which surfaces are conductors would
+/// bounce light off a mirror into every probe near it.
+float metallic_of(GpuMaterial material, float4 mro)
+{
+    return saturate(material.metallic * mro.b);
+}
 
 /// The matrix that carries a mesh-space normal into `GpuInstance::transform`'s
 /// space, built out of that transform's own upper-left 3×3.
@@ -5374,12 +5512,37 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // normal's job. `geometric_normal_of` says why it cannot live inside them.
     float3 geometric_normal = geometric_normal_of(input.world_position, surface_normal);
 
-    // The row's two shading factors, clamped once for the fragment rather than
-    // once per light. `roughness` is squared into GGX's `alpha` — the
-    // perceptual parameterisation glTF authors in — and `alpha` is squared
-    // again inside the lobe, so this is the one place the chain starts.
-    float metallic = saturate(material.metallic);
-    float roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
+    // §2's packed page, sampled once for the fragment and read three ways
+    // below: `b` into the metalness, `g` into the roughness and `r` onto the
+    // indirect terms. Resolved here rather than beside the base colour above so
+    // that a fragment the cutout removed and every debug view that returned
+    // early pay no fetch for it — the control flow at this point is uniform,
+    // which is what `mro_texel`'s unconditional `Sample` needs, because every
+    // early return above is on `frame.ambient.w` and `discard` is not a branch
+    // the analysis follows.
+    //
+    // **A row naming no page gets `float4(1, 1, 1, 1)`** — see `mro_texel` —
+    // so every product below is the factor it was before this page existed.
+    float4 mro = mro_texel(material, uv);
+
+    // §2's emissive page, sampled here beside the packed one and read at the
+    // very bottom of this stage. **Here rather than there, and that is the
+    // uniformity rule again**: the light loop below runs a per-froxel count, so
+    // a `Sample` written after it would sit past a non-uniform loop and WGSL
+    // would refuse the module — the same analysis `mro_texel`'s own declaration
+    // carries the scar of. One `float4` held across the accumulation is what it
+    // costs.
+    float4 emitted = emissive_texel(material, uv);
+
+    // The row's two shading factors **times the page's own two channels**,
+    // clamped once for the fragment rather than once per light. glTF 2.0 §3.9.2
+    // is the product rather than a replacement, and `metallic_of` is where it
+    // is written down for the two stages that make it. `roughness` is squared
+    // into GGX's `alpha` — the perceptual parameterisation glTF authors in —
+    // and `alpha` is squared again inside the lobe, so this is the one place the
+    // chain starts.
+    float metallic = metallic_of(material, mro);
+    float roughness = clamp(material.roughness * mro.g, MIN_ROUGHNESS, 1.0);
     float alpha = roughness * roughness;
     float alpha2 = alpha * alpha;
 
@@ -5715,7 +5878,27 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // a quality knob to buy back, and `docs/plan/46-ambient-occlusion.md`'s tier
     // split is about the widened target bent normals want rather than about
     // this.
-    float3 ambient_visibility = multi_bounce_occlusion(occluded, diffuse_albedo);
+    // **And the material's own occlusion multiplies the same terms**, which is
+    // glTF 2.0 §3.9.5's own rule: `occlusionTexture`'s `r` scales the *indirect*
+    // light and nothing else. It sits here rather than anywhere else for the
+    // screen-space channel's reason exactly — the two are independent measures
+    // of how much of the room a surface can see, one baked by the author and one
+    // swept per frame, so they are a product. Applying it to `direct` would
+    // darken light with a measured path to the surface, and applying it to
+    // `gloss` would dim a highlight, which is a mirror image of the light rather
+    // than of the room.
+    //
+    // **Plainly, and not through `multi_bounce_occlusion`.** That fit turns a
+    // *screen-space* visibility into a coloured tint, and glTF defines this
+    // channel as a scalar factor on the indirect light. A row naming no page
+    // reads `1.0` here and the term is untouched.
+    //
+    // **`occlusionTexture.strength` is not honoured yet, and this shades at a
+    // strength of one** — the specification's `mix(colour, colour * r,
+    // strength)`, with `strength` fixed at the glTF default. The factor has no
+    // home in `GpuMaterial` and the importer that would fill it is §2's next
+    // half; `docs/backlog.md` carries it.
+    float3 ambient_visibility = multi_bounce_occlusion(occluded, diffuse_albedo) * mro.r;
 
     float3 lit = diffuse_albedo * (irradiance * ambient_visibility + direct) + gloss;
 
@@ -5729,7 +5912,13 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // Unclamped for `output.lit`'s reason below: a value above one is what the
     // bloom chain reads as a glow, and clamping here would throw exactly that
     // away.
-    lit += emissive_of(material);
+    // **Times the emissive page's texel**, which is glTF 2.0 §3.9.4's product:
+    // `emissiveFactor` (and `KHR_materials_emissive_strength` folded into it)
+    // times `emissiveTexture`. The texel arrives linear because the page is an
+    // sRGB-format image, which is the space the factor is in — see
+    // `emissive_textures`. A row naming no page reads `1.0` and emits its factor
+    // exactly as it did before the page existed.
+    lit += emissive_of(material) * emitted.rgb;
 
     // **Exponential height fog, and it is the last thing that touches the
     // radiance.** Everything above answers what left the surface; this answers
@@ -5944,7 +6133,13 @@ RsmOutput rsmFragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace
     // **A conductor bounces no diffuse light**, which is `fragmentMain`'s
     // `diffuse_albedo` and the same one interpolation: what a metal does with
     // light is reflect it into a lobe no probe row can represent.
-    written.albedo = float4(albedo.rgb * (1.0 - saturate(material.metallic)), 1.0);
+    //
+    // Through `metallic_of` and therefore through §2's packed page, so this map
+    // and the shaded frame agree about which surfaces are conductors — a
+    // per-texel metalness honoured in one and not the other would bounce light
+    // off a mirror into every probe near it.
+    written.albedo =
+        float4(albedo.rgb * (1.0 - metallic_of(material, mro_texel(material, uv))), 1.0);
     // glTF's back-face reversal, on `fragmentMain`'s terms and for a reason of
     // this pass's own: the gather measures a patch's solid angle at a probe and
     // its cosine against the sun off this vector, so a double-sided patch

@@ -4268,16 +4268,6 @@ pins) rather than by a golden.
 **Not measured:** where the threshold actually is. Nobody swept the darkening
 until a golden reddened; the one figure above is the one data point.
 
-### The emissive page is not built; the factor is (2026-08-27)
-
-`GpuMaterial::emissive` is a linear radiance added last in `mesh.slang`, filled
-on glTF import from `emissiveFactor` times `KHR_materials_emissive_strength`.
-The per-texel half — an emissive texture page — is not, and cannot be until the
-material row carries a second texture page at all, which is
-`43-render-standards.md` §2's own rung. Until then an emitter is uniform over
-its whole surface: a lamp is a glowing box, not a glowing filament in a dark
-housing.
-
 ### Code comments still cite `18-render-features.md` by a section it no longer holds (2026-08-27)
 
 That topic was split into one document per technique — `44-lighting.md` through
@@ -16187,14 +16177,18 @@ it. Also declined: refusing with `HalError::Unsupported` on a device without the
 capability. It was tried as a falsification and the engine's frame loop fails
 every frame under it, which is the argument against it in one line.
 
-## The viewer's material set waits on the metallic-roughness rung (2026-08-30)
+## The viewer's material set waits on the glTF importer (2026-08-30, re-scoped 2026-09-06)
 
 `docs/plan/sample/05-viewer.md` milestone 4: the native drop and the shelf are
-built, and the normal-map rung has since landed — `mesh.slang`'s
-`normal_textures` page and `crcbl-scene`'s `normalTexture` import. What is still
-owed is the full metallic-roughness set drawn, which lands with foundation (a)
-in `docs/plan/43-render-standards.md`'s lighting order. What the shelf slice
-left behind:
+built, the normal-map rung landed 2026-08-30, and on 2026-09-06 the **device**
+half of `43-render-standards.md` §2's rung 3 landed with it — `mesh.slang`
+samples `mro_textures` and `emissive_textures` and shades through both. What is
+still owed is the **importer**: `crcbl_scene::gltf_import` reads only
+`baseColorTexture` and `normalTexture`, so a shelf model's
+`metallicRoughnessTexture`, `occlusionTexture` and `emissiveTexture` are dropped
+and every row it writes carries `NO_PAGE` on the two new columns. Until that
+lands the viewer draws two of the four maps a document ships. What the shelf
+slice left behind:
 
 - **The browser gate's `playing` and `deforming` checks read the _dropped_
   document.** The page opens on Suzanne, which has no skin, so
@@ -16281,11 +16275,13 @@ and a layer list per kind. What it left:
 - **`pack_page` still returns one `Vec<Option<u32>>` per kind by hand.**
   `crcbl_scene::gltf_render::pack_page` returns
   `(PageDesc, base_layers, normal_layers)` and `material_rows` takes the two
-  separately. Rung 3 adds two more kinds, at which point those become four
-  positional arguments and want a `[Vec<Option<u32>>; PageKind::ALL.len()]`
-  table on `PageKind::index`'s terms — the same shape `PageDesc` itself took.
-  Left alone here because two is not four and this slice's obligation was not to
-  build the abstraction ahead of its second caller.
+  separately. **Still open after rung 3's device half landed 2026-09-06**, and
+  the reason it is: that slice added the two `PageKind` variants and the shader
+  that reads them, and touched the importer not at all, so `pack_page` still
+  packs two kinds. The importer half is what turns those into four positional
+  arguments, and it is the moment to give them a
+  `[Vec<Option<u32>>; PageKind::ALL.len()]` table on `PageKind::index`'s terms —
+  the same shape `PageDesc` itself took.
 - **No caller sizes a page after pushing into it, and `set_extent` panics if one
   tries.** The alternative — an extent inferred from the first layer's length —
   was considered and declined: a layer's byte count does not determine a square
@@ -16299,6 +16295,54 @@ and a layer list per kind. What it left:
   gap, which row (d) did not close). So the two-extent path reaches a device
   only through `crcbl_render::forward`'s
   `an_app_page_and_table_reach_the_device_whole`, on the null recorder.
+
+## The packed and emissive pages: what rung 3's device half left (2026-09-06)
+
+`docs/plan/43-render-standards.md` §2's rung 3 landed on the device:
+`crcbl_render::scene::PageKind` has `MetallicRoughnessOcclusion` and `Emissive`,
+`mesh.slang` binds `mro_textures` at 30 and `emissive_textures` at 31 and reads
+them through `mro_texel` and `emissive_texel`, and the fragment stage applies
+glTF's three products. What it left:
+
+- **`occlusionTexture.strength` is not carried anywhere, and the shader shades
+  at a strength of one.** glTF 2.0 §3.9.5 is
+  `mix(colour, colour * texel.r, strength)`; `GpuMaterial` has no field for the
+  factor and `mesh.slang` multiplies the indirect terms by `mro.r` outright. The
+  glTF default is `1.0`, so a document that never sets it is already correct —
+  what is dropped is a document that dials the channel back. Filling it wants a
+  `f32` on `GpuMaterial` (the row is 64 bytes with no spare word, so it would
+  have to share one, the way the page columns do) and an importer that reads
+  `occlusionTexture.strength`. **Deliberately deferred to the importer half**,
+  which is the slice that can test it against a real document.
+- **The environment specular is not occluded by this channel, and neither is the
+  screen-space one.** `mesh.slang` applies `mro.r` to the flat ambient, the sky
+  and the probe grid — the terms `ssao`'s own factor already scales — and the
+  reflection arrives later, from `ssr.slang` through `ssr_blur.slang`, which
+  reads neither occlusion channel. So a fully occluded metal still reflects the
+  room. That is the _existing_ arrangement rather than a new gap: the
+  screen-space channel has never reached the reflection either, and closing it
+  would mean a channel in the reflectivity attachment for the reflection pass to
+  reload. Considered and declined for this slice: it changes what a reflection
+  is worth on every scene in the tree, which is a rung with its own goldens.
+- **No document reaches either page.** `crcbl_scene::gltf_import` reads only
+  `baseColorTexture` and `normalTexture`, so `gltf_e2e` draws neither new page
+  and the only device evidence is `crcbl/tests/mesh_e2e/mro_page.rs` and
+  `emissive_page.rs`, whose layers are authored by hand. The importer half is
+  what closes that.
+- **The packed page's mip filter has no fixture of its own.**
+  `crcbl_render::mip::linear_chain` is a third filter beside `chain` and
+  `normal_chain` — a plain box mean, no transfer curve, no alpha weight, no
+  renormalise — and `mip.rs`'s own unit tests cover `resample` and
+  `normal_resample`'s behaviour. Nothing draws a _minified_ packed page on a
+  device the way `normal_map.rs`'s
+  `a_minified_normal_page_lights_by_the_renormalised_average` does for the
+  normal one. The arithmetic is the simplest of the three, which is why it was
+  not worth a tiled quad here; if the filter ever grows a case, that fixture is
+  what it wants.
+- **Not verified anywhere but Vulkan.** The two new bindings are `t16`/`t17` on
+  D3D12 and `texture(8)`/`texture(9)` in MSL by inspection of the committed
+  artifacts and by `crcbl-dx12`'s transcribed register table; no Metal or D3D12
+  device ran the shader. This machine has neither.
 
 ## Normal maps: what the tangent and page rungs left (2026-08-30)
 
@@ -21165,14 +21209,13 @@ binding 6 is where the fragment stage reads one, and binding 7 is the
 texture-indices half of this entry is done and has been deleted. What is still
 deliberately not there, and what it would take:
 
-**A base-colour texture and a normal map, and no other slot.** A row has a
-factor and a page layer for each. The second page landed with `mesh.slang`'s
-`normal_textures` binding — an `Rgba8Unorm` page beside the `Rgba8UnormSrgb`
-base-colour one, selected by `normal_layer(material)`, with
-`forward::the_two_page_formats_differ` as the guard on the colour-space half.
-Metallic-roughness and emissive maps are each another `u32` in `GpuMaterial`,
-another sample in `fragmentMain` and another _page_, because an `ArrayPages`
-page is one image and one format. A generic page manager still has not arrived.
+**All four page slots are wired on the device since 2026-09-06.** A row has a
+factor and a page layer for each: `base_color_textures`, `normal_textures`,
+`mro_textures` and `emissive_textures` in `mesh.slang`, one `PageKind` apiece,
+with `forward::the_page_formats_split_colour_from_number` as the guard on the
+colour-space half. What is _not_ wired is the importer: `crcbl_scene`'s glTF
+reader still fills only the base-colour and normal columns, so no document in
+the tree reaches the two new pages. That half is §2's next slice.
 
 **A page is one image, which is the limit `Bindless` exists to lift.** Every
 layer of a kind shares that kind's extent, format and mip count, so two textures
