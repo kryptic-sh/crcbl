@@ -486,6 +486,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The browser gate's heartbeat calibration no longer times out on a slow
+  runner.** `web/tools/browser-e2e.mjs` waited a flat `--timeout` for each of
+  the two HUD lines it measures the machine's pace from, and the Pages pool now
+  reaches lantern's first line at about 90 s, which is that budget. The first
+  line is given twice the budget and the second twice the first's own arrival
+  (`HEARTBEAT_LINE_SCALE`), both bounded by the poll wall cap, and a miss says
+  which line and how long it had.
+
 - **`web/run-browser-e2e.sh` accepted flags it then ignored.** The script
   forwards anything it does not recognise itself to `web/tools/browser-e2e.mjs`,
   whose argument parser recorded any `--flag` and never complained — so

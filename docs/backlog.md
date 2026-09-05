@@ -24095,6 +24095,24 @@ and `web/pages/lantern.html`'s "This one wants a real GPU" note, which said the
 canvas stays black on a software adapter and had been false since the pass was
 packed.
 
+**The calibration's own two lines outgrew the flat budget (2026-09-05).** The
+beat above was 19.3 s for lantern; on the pool the Pages workflow has drawn
+since late August it is 78–81 s, and the first HUD line arrives 87–91 s after
+the page configures — against a flat `TIMEOUT_MS` of 90 s per line. The run of
+`206102b` reached the first line at 90.9 s and the second past the cap, and
+every later check in the job failed for want of a beat to scale by. A
+SwiftShader A/B of that commit against its parent, three runs a side on this
+machine, put the change at about 4 % on the first line and level on the beat, so
+the red was the cap and not the frame. `HEARTBEAT_LINE_SCALE` in
+`web/tools/browser-e2e.mjs` now gives the first line twice `TIMEOUT_MS` and the
+second twice the first's own arrival, both under `POLL_WALL_CAP_MS`, and the
+failure names which line and what it was given. **What is verified**: the gate
+still passes on this machine and prints the pace; a 3 s `--timeout` reds it on
+the first line with the budget in the message. **What is not**: no local run can
+make the second line late while the first is on time, so the scaled second wait
+is shown right by the fourteen-run table it was sized from and by arithmetic,
+not by a red run.
+
 ## The pinned shader compilers ARE installed here (2026-08-14)
 
 **A previous entry in this file said they were not, and that claim blocked a

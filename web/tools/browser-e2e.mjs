@@ -2474,12 +2474,33 @@ const NOMINAL_BEAT_MS = 1_000;
  * costs time on a broken run and never turns a red one green. Scaled and then
  * bounded by `pollCeiling`, so `--timeout` still governs the run.
  *
- * **Group B's calibration does not use it** and waits `TIMEOUT_MS` per line
- * instead: that measurement is the one thing that cannot be scaled by its own
- * answer, and shard's 27.8 s beat leaves this deadline one doubling from
- * reporting a slow demo as a dead one.
+ * **Group B's calibration does not use it** and waits on `TIMEOUT_MS` scaled
+ * by `HEARTBEAT_LINE_SCALE` instead: that measurement is the one thing that
+ * cannot be scaled by its own answer, and shard's 27.8 s beat leaves this
+ * deadline one doubling from reporting a slow demo as a dead one.
  */
 const HEARTBEAT_DEADLINE_MS = 60_000;
+
+/**
+ * How many times the start-up budget group B's calibration gives the **first**
+ * HUD line, and how many times that line's own arrival it then gives the
+ * second.
+ *
+ * Two, from the Pages history rather than from a guess. Over the fourteen runs
+ * ending 2026-09-05 lantern's first line arrived between 37 s and 91 s after
+ * the page configured, and the second between 0.82 and 0.94 of that again —
+ * one beat plus whatever phase the run started in, then one beat. A flat
+ * `TIMEOUT_MS` per line held both only while the slow pool stayed under it:
+ * on 2026-09-05 a runner reached the first line at 90.9 s and the second past
+ * the 90 s cap, and every later check in the run failed with no beat to scale
+ * by. The first line's arrival is itself a measurement of the machine, so the
+ * second line's wait is scaled by it — the one wait that cannot be scaled by
+ * the beat can still be scaled by the wait before it — and the first line
+ * gets twice the start-up budget, which returns the moment the line appears
+ * and costs a dead demo ninety seconds more before it is called dead.
+ * `POLL_WALL_CAP_MS` still bounds both.
+ */
+const HEARTBEAT_LINE_SCALE = 2;
 
 /**
  * How far inside the canvas group E clicks to hand the keyboard back.
@@ -3738,18 +3759,28 @@ try {
   const heartbeatMs = async (deadline) => {
     const start = hud().length;
     const began = Date.now();
+    const firstBudget = Math.min(
+      deadline * HEARTBEAT_LINE_SCALE,
+      POLL_WALL_CAP_MS
+    );
     const first = await until(
       async () => (hud().length > start ? Date.now() : null),
-      deadline
+      firstBudget
     );
-    if (first === null) return null;
+    if (first === null) return { pace: null, budget: firstBudget, line: 1 };
+    // The first line's own arrival is the machine's pace, so it is what the
+    // second line's wait scales by — see `HEARTBEAT_LINE_SCALE`.
+    const secondBudget = Math.min(
+      Math.max(deadline, (first - began) * HEARTBEAT_LINE_SCALE),
+      POLL_WALL_CAP_MS
+    );
     const second = await until(
       async () => (hud().length > start + 1 ? Date.now() : null),
-      deadline
+      secondBudget
     );
     return second === null
-      ? null
-      : { beat: second - first, waited: second - began };
+      ? { pace: null, budget: secondBudget, line: 2 }
+      : { pace: { beat: second - first, waited: second - began } };
   };
 
   // **MEASURED HERE AND NOT WHERE IT USED TO BE.** This lived in group E, which
@@ -3766,8 +3797,10 @@ try {
   // one wait that cannot be scaled by the answer it is going to produce: a demo
   // whose beat is slower than the deadline reports no beat at all, and the
   // scaling that follows would then be the fast desktop's again. shard's beat
-  // was 27.8 s, so 60 s left it one doubling from unmeasurable.
-  const pace = await heartbeatMs(TIMEOUT_MS);
+  // was 27.8 s, so 60 s left it one doubling from unmeasurable. What it *can*
+  // be scaled by is the wait before it — `HEARTBEAT_LINE_SCALE` is that.
+  const heartbeat = await heartbeatMs(TIMEOUT_MS);
+  const pace = heartbeat.pace;
   const nominalBeat = EXPECTED.beatMs ?? NOMINAL_BEAT_MS;
   slowdown = pace ? Math.max(1, pace.beat / nominalBeat) : 1;
 
@@ -3782,7 +3815,8 @@ try {
     'the demo ticks, and says how far behind the wall clock it is',
     pace !== null,
     pace === null
-      ? `no second HUD line in ${TIMEOUT_MS} ms`
+      ? `no ${heartbeat.line === 1 ? 'first' : 'second'} HUD line in ` +
+          `${heartbeat.budget} ms`
       : `two HUD lines ${pace.beat} ms apart against a nominal ` +
           `${nominalBeat} ms, in ${pace.waited} ms — every later budget ` +
           `scaled ${slowdown.toFixed(1)}x, and a poll now ceilings at ` +
@@ -8059,16 +8093,18 @@ try {
   // clicked, dragged and held keys at the demo, and a tick loop that stopped
   // somewhere in there is exactly what would make the pause check below pass
   // for nothing. Group B's answer is a calibration; this one is a heartbeat.
-  const beat = await heartbeatMs(
+  const control = await heartbeatMs(
     Math.min(budget(HEARTBEAT_DEADLINE_MS), pollCeiling())
   );
+  const beat = control.pace;
 
   check(
     'E',
     'a running demo logs its HUD from inside the tick',
     beat !== null,
     beat === null
-      ? `no second HUD line in ${Math.min(budget(HEARTBEAT_DEADLINE_MS), pollCeiling())} ms`
+      ? `no ${control.line === 1 ? 'first' : 'second'} HUD line in ` +
+          `${control.budget} ms`
       : `two HUD lines ${beat.beat} ms apart, in ${beat.waited} ms, with ` +
           `every budget here scaled ${slowdown.toFixed(1)}x`
   );
