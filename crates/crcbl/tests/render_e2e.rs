@@ -2761,53 +2761,93 @@ const fn atmosphere_mirror_columns() -> (u32, u32) {
     (EXTENT.0 - ATMOSPHERE_MIRROR_ASIDE, ATMOSPHERE_MIRROR_ASIDE)
 }
 
-/// What the host says a mirror-floor block at `centre` should read on
-/// `channel`, and what the **three-band gradient alone** would have said.
+/// The roughness `ssr.slang` reloads the mirror plate at.
 ///
-/// Per pixel and then averaged, in that order, for
-/// [`predicted_atmosphere_channel`]'s reason: the sRGB encode is not linear.
+/// `crcbl::screenshot::ATMOSPHERE_MIRROR_ROUGHNESS` through the reflectivity
+/// attachment's own store, which is the whole of what that attachment does to
+/// the authored value — see that constant, which is authored above
+/// `mesh.slang`'s `MIN_ROUGHNESS` so the reload is this function and not a
+/// shader constant with no Rust mirror.
+///
+/// Every fixture that stands on the plate reads it, which is why it is here
+/// rather than spelled at each of them.
+fn mirror_roughness() -> f32 {
+    crcbl::shaders::ssr::stored_roughness(crcbl::screenshot::ATMOSPHERE_MIRROR_ROUGHNESS)
+}
+
+/// What the host says a mirror-floor block at `centre` reads on `channel` when
+/// the environment its rays gather is `radiance`, in the frame's own levels.
 ///
 /// The chain is short because [`Scene::AtmosphereMirror`] made it short — that
-/// variant lists what it left out. What is left is one reflected direction, the
-/// blend `ssr.slang`'s `sky_environment` makes of the LUT and the three bands,
-/// the split-sum's `f0 · scale + bias` at `f0 = 1`, and the tonemap's identity
-/// and encode.
+/// variant lists what it left out — and it is a function of its own because the
+/// plate is no longer one fixture's. What is left is one reflected direction, the
+/// split-sum's `f0 · scale + bias` at `f0 = 1`, and the tonemap's identity and
+/// encode. Per pixel and then averaged, in that order, for
+/// [`predicted_atmosphere_channel`]'s reason: the encode is not linear.
 ///
 /// **The reflected direction is the view ray with its `y` turned over**, which
 /// is `reflect` about a `+Y` normal written out: the floor is one plane at
 /// `y = 0` and the march reconstructs exactly that normal from its depth taps.
+///
+/// `radiance` is the one thing a frame with an atmosphere and a frame without
+/// one disagree about, because it is the one thing `ssr.slang`'s
+/// `sky_environment` does differently between them: under an atmosphere it
+/// blends the sky-view LUT over the three bands, and without one it returns the
+/// bands before it touches the LUT at all.
+fn mirror_block_levels(
+    camera: &crcbl::render::Camera,
+    centre: (u32, u32),
+    channel: usize,
+    radiance: impl Fn([f32; 3]) -> [f32; 3],
+) -> f32 {
+    let roughness = mirror_roughness();
+    let mut total = 0.0f32;
+    let mut count = 0u32;
+    for (x, y) in block_pixels(centre, ATMOSPHERE_MIRROR_BAND) {
+        let towards = atmosphere_ray(camera, x, y);
+        let reflected = [towards[0], -towards[1], towards[2]];
+        // `f0` is one in every channel — the floor is a white conductor — so
+        // the split-sum's second half is the table's own pair summed.
+        let pair = crcbl::shaders::dfg::sample(-towards[1], roughness);
+        let brdf = pair[0] + pair[1];
+        total += srgb_encode((radiance(reflected)[channel] * brdf).min(1.0)) * 255.0;
+        count += 1;
+    }
+    assert!(count > 0, "an empty block predicts nothing");
+    total / count as f32
+}
+
+/// What the host says a [`Scene::AtmosphereMirror`] block at `centre` should
+/// read on `channel`, and what the **three-band gradient alone** would have
+/// said.
+///
+/// [`mirror_block_levels`] twice over the two environments `sky_environment`
+/// chooses between: its blend of the LUT and the bands, which is the frame, and
+/// the bands on their own, which is what the pass answered before the LUT
+/// reached it.
 fn predicted_mirror_channels(
     sky: &crcbl::shaders::atmosphere::SkyView,
     camera: &crcbl::render::Camera,
     centre: (u32, u32),
     channel: usize,
 ) -> (f32, f32) {
-    let roughness =
-        crcbl::shaders::ssr::stored_roughness(crcbl::screenshot::ATMOSPHERE_MIRROR_ROUGHNESS);
     // `ssr.slang`'s `sharpness_of`, which is also the share of the environment
     // the LUT speaks for — see that shader's `sky_environment`.
-    let share = (1.0 - roughness / crcbl::shaders::ssr::ROUGHNESS_CUTOFF).clamp(0.0, 1.0);
+    let share = (1.0 - mirror_roughness() / crcbl::shaders::ssr::ROUGHNESS_CUTOFF).clamp(0.0, 1.0);
     let gradient = sky.gradient_fit();
-    let mut total = 0.0f32;
-    let mut gradient_total = 0.0f32;
-    let mut count = 0u32;
-    for (x, y) in block_pixels(centre, ATMOSPHERE_MIRROR_BAND) {
-        let towards = atmosphere_ray(camera, x, y);
-        let reflected = [towards[0], -towards[1], towards[2]];
-        let bands =
-            crcbl::shaders::sky_prefilter::prefiltered_radiance(&gradient, reflected, roughness);
+    let bands = |reflected| {
+        crcbl::shaders::sky_prefilter::prefiltered_radiance(
+            &gradient,
+            reflected,
+            mirror_roughness(),
+        )
+    };
+    let blended = mirror_block_levels(camera, centre, channel, |reflected| {
+        let bands = bands(reflected);
         let lut = sky.radiance(reflected);
-        // `f0` is one in every channel — the floor is a white conductor — so
-        // the split-sum's second half is the table's own pair summed.
-        let pair = crcbl::shaders::dfg::sample(-towards[1], roughness);
-        let brdf = pair[0] + pair[1];
-        let environment = bands[channel] * (1.0 - share) + lut[channel] * share;
-        total += srgb_encode((environment * brdf).min(1.0)) * 255.0;
-        gradient_total += srgb_encode((bands[channel] * brdf).min(1.0)) * 255.0;
-        count += 1;
-    }
-    assert!(count > 0, "an empty block predicts nothing");
-    (total / count as f32, gradient_total / count as f32)
+        [0, 1, 2].map(|index| bands[index] * (1.0 - share) + lut[index] * share)
+    });
+    (blended, mirror_block_levels(camera, centre, channel, bands))
 }
 
 /// The anti-vacuity floor for [`Scene::Ssr`].
@@ -6954,6 +6994,226 @@ fn the_atmosphere_mirror_scene_reflects_its_sky_and_matches_its_golden() {
     );
 }
 
+/// The anti-vacuity colour count for [`Scene::GradientMirror`].
+///
+/// [`MIN_COLORS_ATMOSPHERE_MIRROR`]'s job on a frame of the same shape: two
+/// smooth gradients meeting at the horizon, so a frame that drew neither is far
+/// under this and a frame of one flat colour is at one.
+const MIN_COLORS_GRADIENT_MIRROR: usize = 32;
+
+/// The column every [`Scene::GradientMirror`] band sits on: the frame's centre.
+///
+/// A gradient has no azimuth in it, so unlike [`Scene::AtmosphereMirror`] this
+/// fixture has nothing to say about a column — the centre is simply the one
+/// furthest from the edges and from `ssr_blur.slang`'s kernel reaching past
+/// them.
+const GRADIENT_MIRROR_COLUMN: u32 = EXTENT.0 / 2;
+
+/// The rows [`Scene::GradientMirror`]'s floor bands sit on.
+///
+/// **The spread between them is the claim.** What a gradient sky puts in this
+/// frame is a slope: the reflected elevation rises with the row,
+/// so these read three different points of
+/// `crcbl_shaders::sky_prefilter`'s convolution, and a pass that answered the
+/// whole environment with one colour would satisfy a single band. That the
+/// three really are three measurements is asserted rather than described —
+/// see [`GRADIENT_MIRROR_SLOPE`].
+///
+/// All well below the horizon, which is the middle row of [`EXTENT`] because
+/// the camera is level, so each block is floor with margin; and the deepest is
+/// clear of the frame's bottom edge and of the blur kernel around it.
+const GRADIENT_MIRROR_ROWS: [u32; 3] = [110, 140, 170];
+
+/// The least the bands at [`GRADIENT_MIRROR_ROWS`]' ends must predict apart,
+/// in levels of 255.
+///
+/// **The premise that makes three bands three measurements**, and it is
+/// checked on the host before the frame is read, on
+/// [`an_atmosphere_mirror_reflects_the_luts_limb`]'s terms: every claim about
+/// this plate would hold just as well over one band if the three were the same
+/// number.
+///
+/// It is asserted in **two channels running opposite ways** — red falls down
+/// the plate as the reflected ray leaves the warm horizon, blue rises as it
+/// climbs towards the zenith — because that is the shape no exposure, no
+/// tonemap and no uniform scale of the environment can produce. A floor of five
+/// levels sits well under both: the run that landed this reads a fall of 24.33
+/// in red and a rise of 6.97 in blue.
+const GRADIENT_MIRROR_SLOPE: f32 = 5.0;
+
+/// How far a [`Scene::GradientMirror`] band may sit from the host's own
+/// prediction of it, in levels of 255.
+///
+/// [`ATMOSPHERE_MIRROR_BAND_LEVELS`]' budget for the same plate, the same
+/// camera and the same reflected direction — what differs is only which sky
+/// `sky_environment` returned — so the chain this covers is that constant's
+/// exactly, and so is the headroom it carries for the rasterisers this fixture
+/// has not been run on. Measured over three bands × three channels at
+/// **0.21 levels at worst on radv** and **0.22 on lavapipe**.
+///
+/// It costs the assertion nothing: removing `sky_environment`'s early return
+/// misses by tens of levels, because a near-mirror's share of a zeroed LUT is
+/// nearly all of the environment.
+const GRADIENT_MIRROR_BAND_LEVELS: f32 = 2.0;
+
+/// How far the deepest [`Scene::GradientMirror`] band's prediction must sit
+/// from what the **background** would have drawn at the same pixels, in levels
+/// of blue.
+///
+/// **The anti-vacuity clause, and it is a premise rather than a reading.** A
+/// frame whose floor never drew is one the sky pass filled instead, and below
+/// the horizon that pass draws the gradient blended towards its ground band. In
+/// red and green the two are within a level or two of each other — the picture
+/// is very nearly symmetric about the horizon, which is what a mirror under a
+/// gradient looks like — so the channel that separates them is blue, where the
+/// reflection climbs towards the zenith while the background falls away from
+/// it: 96.43 against 77.25 at [`GRADIENT_MIRROR_ROWS`]' deepest.
+///
+/// Asserting it on the host rather than reading a second block is what makes
+/// the absolute comparison above the anti-vacuity check as well: an unpainted
+/// floor is not merely dark here, it is a *different* number, and the budget is
+/// [`GRADIENT_MIRROR_BAND_LEVELS`].
+const GRADIENT_MIRROR_BACKGROUND_APART: f32 = 12.0;
+
+/// [`Scene::GradientMirror`]'s claim: **a mirror under a gradient sky reflects
+/// that gradient, and `ssr.slang` never reaches the sky-view LUT to get it.**
+///
+/// `sky_environment` returns `sky_prefiltered`'s three bands before it touches
+/// the LUT whenever `camera.atmosphere.w` is
+/// `crcbl_shaders::sky::ATMOSPHERE_OFF`, and until this fixture that return was
+/// held by reading alone. Nothing could measure it: the tree's only other
+/// reflective scene without an atmosphere is [`Scene::Ssr`], whose sky is
+/// `Sky::NONE` — its bands are zero, the unwritten LUT buffer is zero, and the
+/// blend of two zeroes is the same zero whichever branch runs. Removing the
+/// return and regenerating the artifacts left
+/// [`the_ssr_scene_reflects_its_pyramid_and_matches_its_golden`] at zero pixels
+/// differing, which is what put this fixture in `docs/backlog.md` as owed.
+///
+/// This scene is the one that separates the branches: bands worth reflecting
+/// and no atmosphere to reflect. The plate is a near-mirror, so `sharpness_of`
+/// leaves the bands only a sliver of the environment — a `sky_environment` that
+/// read the LUT anyway keeps that sliver and drops the rest.
+///
+/// **The golden cannot make the claim and this is what does.** Three bands down
+/// the plate, each predicted absolutely from
+/// [`GRADIENT_MIRROR_SKY`](crcbl::screenshot::GRADIENT_MIRROR_SKY) through the
+/// host's own convolution and the split-sum's pair, on all three channels; then
+/// [`GRADIENT_MIRROR_BACKGROUND_APART`], which is what says a floor that never
+/// drew fails them.
+///
+/// **Shown red by sabotage** (2026-09-06, radv). `sky_environment`'s
+/// `if (camera.atmosphere.w <= 0.0) return bands;` was deleted, the artifacts
+/// recompiled, and the file restored and recompiled afterwards. This reported
+/// `the band at (128, 110) measures 48.17 on red and the host predicts 147.54,
+/// a miss of 99.38 level(s) against a budget of 2`; with this inspector held
+/// open so the comparison after it could be reached, the golden failed at
+/// 24320 pixels differing (49.4792%) and an ssim of 0.763488 — half the frame,
+/// which is the plate. The same run left
+/// [`the_ssr_scene_reflects_its_pyramid_and_matches_its_golden`] at zero pixels
+/// differing, which is the whole reason this fixture exists.
+///
+/// [`the_ssr_scene_reflects_its_pyramid_and_matches_its_golden`]: fn@the_ssr_scene_reflects_its_pyramid_and_matches_its_golden
+fn the_mirror_reflects_its_gradients_own_bands(image: &Image) {
+    let camera = crcbl::screenshot::atmosphere_mirror_camera();
+    let sky = &crcbl::screenshot::GRADIENT_MIRROR_SKY;
+    let bands = |reflected| {
+        crcbl::shaders::sky_prefilter::prefiltered_radiance(sky, reflected, mirror_roughness())
+    };
+
+    // The premise, before a pixel is read: the three rows are three different
+    // points of the convolution, and the two channels that say so run opposite
+    // ways.
+    let at_row = |row| (GRADIENT_MIRROR_COLUMN, row);
+    let predict = |row, channel| mirror_block_levels(&camera, at_row(row), channel, bands);
+    let (first, last) = (
+        GRADIENT_MIRROR_ROWS[0],
+        GRADIENT_MIRROR_ROWS[GRADIENT_MIRROR_ROWS.len() - 1],
+    );
+    let red_falls = predict(first, 0) - predict(last, 0);
+    let blue_rises = predict(last, 2) - predict(first, 2);
+    assert!(
+        red_falls > GRADIENT_MIRROR_SLOPE && blue_rises > GRADIENT_MIRROR_SLOPE,
+        "down the plate the host predicts red to fall by {red_falls:.2} and blue to rise by \
+         {blue_rises:.2}, against a floor of {GRADIENT_MIRROR_SLOPE} for each — the three rows \
+         are supposed to reflect three different elevations of this sky, and if they do not \
+         then the comparisons below are one measurement made three times"
+    );
+
+    let mut worst = 0.0f32;
+    for row in GRADIENT_MIRROR_ROWS {
+        let at = at_row(row);
+        for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
+            let measured = block_channel(image, at, ATMOSPHERE_MIRROR_BAND, channel);
+            let predicted = predict(row, channel);
+            let miss = (measured - predicted).abs();
+            worst = worst.max(miss);
+            assert!(
+                miss <= GRADIENT_MIRROR_BAND_LEVELS,
+                "the band at {at:?} measures {measured:.2} on {name} and the host predicts \
+                 {predicted:.2}, a miss of {miss:.2} level(s) against a budget of \
+                 {GRADIENT_MIRROR_BAND_LEVELS} — `sky_environment` is not returning \
+                 `sky_prefiltered`'s bands on a frame with no atmosphere, or it is reflecting \
+                 them along a direction the host does not agree about"
+            );
+        }
+    }
+
+    // The anti-vacuity premise: at the deepest band the background's own answer
+    // is a different number in blue, so the comparison above is a claim about a
+    // floor rather than about whatever filled the pixels.
+    let deepest = at_row(last);
+    let blue = 2;
+    let reflected = predict(last, blue);
+    let background = {
+        let mut total = 0.0f32;
+        let mut count = 0u32;
+        for (x, y) in block_pixels(deepest, ATMOSPHERE_MIRROR_BAND) {
+            let towards = atmosphere_ray(&camera, x, y);
+            total += srgb_encode(sky.radiance(towards)[blue].min(1.0)) * 255.0;
+            count += 1;
+        }
+        assert!(count > 0, "an empty block predicts nothing");
+        total / count as f32
+    };
+    let apart = (reflected - background).abs();
+    assert!(
+        apart > GRADIENT_MIRROR_BACKGROUND_APART,
+        "the reflection at {deepest:?} predicts {reflected:.2} in blue and the background this \
+         fixture's own sky would draw there {background:.2}, {apart:.2} level(s) apart against \
+         {GRADIENT_MIRROR_BACKGROUND_APART} — these two have to differ by more than the band \
+         budget or a frame whose floor never drew would satisfy the comparison above"
+    );
+
+    eprintln!(
+        "crcbl render e2e: gradient mirror — the frame and the host's own three bands agree to \
+         {worst:.2} level(s) at worst over {} rows × 3 channels; down the plate red falls by \
+         {red_falls:.2} and blue rises by {blue_rises:.2}; at row {last} the reflection \
+         predicts {reflected:.2} in blue where the background would draw {background:.2}",
+        GRADIENT_MIRROR_ROWS.len(),
+    );
+}
+
+/// [`Scene::GradientMirror`] drawn, against the reference in `tests/golden/`.
+///
+/// The golden is the picture that was reviewed, and here it is evidence as well
+/// as a review aid: this scene's whole subject is that a frame with no
+/// atmosphere draws exactly what it drew before the sky-view LUT existed, and a
+/// byte comparison is the shape of that claim. What it cannot say is *which*
+/// sky the reflection carries, because a plate reflecting a gradient and a
+/// plate reflecting anything else of the same brightness are both a bright
+/// plate — [`the_mirror_reflects_its_gradients_own_bands`] is what says.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_gradient_mirror_scene_reflects_its_bands_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::GradientMirror,
+        "gradient_mirror",
+        EXTENT,
+        MIN_COLORS_GRADIENT_MIRROR,
+        the_mirror_reflects_its_gradients_own_bands,
+    );
+}
+
 /// The frame drawn under an atmosphere is the sky-view LUT the host marched.
 ///
 /// `docs/plan/43-render-standards.md` §8's device half. The fixture puts no
@@ -7079,5 +7339,198 @@ fn an_atmosphere_frame_is_the_host_lut() {
         worst_at.2,
         crcbl::screenshot::ATMOSPHERE_SUNS.len(),
         ATMOSPHERE_BANDS.len(),
+    );
+}
+
+/// Which of `crcbl::screenshot::ATMOSPHERE_SUNS` the sky-ambient fixture is
+/// drawn under: the first, straight overhead.
+///
+/// **Chosen for the gap between the two projections, which is what makes the
+/// comparison below a claim about *which* one reached the block.** Over the
+/// three suns the fixture could have used, this is the one whose L1 rows and
+/// whose three-band fit's rows are furthest apart in *every* channel: the
+/// predicted floor levels are 62.7, 79.9 and 103.9 against the fit's 94.4,
+/// 104.4 and 115.8, so the smallest separation is 12.0 levels of blue. The low
+/// suns beat it on red and collapse on blue — the sun at
+/// `ATMOSPHERE_SUNS[2]` separates by only 2.2 there — and a channel that cannot
+/// tell the two apart is a channel the swap would pass.
+const SKY_AMBIENT_SUN: usize = 0;
+
+/// How far a sky-lit floor band may sit from the host's own prediction of it,
+/// in levels of 255.
+///
+/// [`PROBE_MIRROR_LEVELS`]' forward model with the probe grid's term replaced
+/// by the sky's, and every step between the two is the same one it names: the
+/// sun is horizontal and colourless so `direct` and `gloss` are exactly zero,
+/// the bands are far enough from every wall that `occluded` is exactly one, the
+/// albedo is the floor face's own, `tonemap.slang` is the identity below one
+/// and the swapchain applies the sRGB encode. What is left for this to cover is
+/// 8-bit rounding and the encode's own precision — there is no interpolation
+/// here at all, because `sky_irradiance` reads the normal and this floor has
+/// one.
+///
+/// **Swept on both local adapters before it was fixed**, over three bands ×
+/// three channels: the worst miss measured 0.27 levels on radv and 0.27 on
+/// lavapipe.
+const SKY_AMBIENT_LEVELS: f32 = 1.0;
+
+/// The least the LUT's own L1 projection and the three-band fit's may predict
+/// apart, in levels.
+///
+/// **The premise the whole test rests on**, and the same one
+/// `crcbl-render`'s `an_atmosphere_writes_the_luts_own_ambient_term` asserts
+/// on the block's bytes: `PresentedSky::new` handing
+/// `view.gradient_fit().irradiance()` in place of `view.irradiance()` is the
+/// swap that passed every suite in the tree, and a comparison against a
+/// prediction the fit also satisfies would go on passing it. See
+/// [`SKY_AMBIENT_SUN`] for the measured separations; this is a floor well under
+/// the smallest of them and a long way over [`SKY_AMBIENT_LEVELS`].
+const SKY_AMBIENT_FIT_APART: f32 = 8.0;
+
+/// The most a band of the control frame — the same room with no atmosphere —
+/// may measure, in levels of 255.
+///
+/// Nothing lights that frame at all: no sky, an ambient of zero, a sun of zero
+/// and no probes, so every floor pixel is a linear zero and the encode of zero
+/// is zero. One level is 8-bit rounding and nothing else.
+const SKY_AMBIENT_DARK: f32 = 1.0;
+
+/// What the host says a sky-lit floor block should measure on `channel`, in the
+/// frame's own levels.
+///
+/// `mesh.slang`'s `sky_irradiance` is
+/// [`crcbl_shaders::probe::GpuProbe::irradiance`](crcbl::shaders::probe::GpuProbe::irradiance)
+/// — the same three dot products against `float4(N, 1)` and the same clamp at
+/// zero — so the mirror is that function of the rows the frame block carries,
+/// times the floor's own albedo, through the sRGB encode.
+///
+/// **One number for the whole block**, unlike [`predicted_block_channel`], and
+/// that is a property of the field rather than a shortcut: this term reads the
+/// normal and nothing else, and every pixel of this floor faces `+Y`. So there
+/// is no gradient across a block for the encode's non-linearity to bite on, and
+/// the three bands the test reads all predict the same number — which is itself
+/// the claim that the sky lights a plane flatly.
+fn predicted_sky_ambient_channel(rows: &crcbl::shaders::probe::GpuProbe, channel: usize) -> f32 {
+    let albedo = probe_floor_albedo();
+    let irradiance = rows.irradiance([0.0, 1.0, 0.0]);
+    srgb_encode((albedo[channel] * irradiance[channel]).min(1.0)) * 255.0
+}
+
+/// **The sky's ambient term lights a surface on a device, and what it lights it
+/// with is `SkyView::irradiance` of the LUT this frame marched.**
+///
+/// `docs/plan/43-render-standards.md` §8's third half. The projection reaching
+/// the frame block is held by `crcbl-render`'s
+/// `an_atmosphere_writes_the_luts_own_ambient_term`, which reads the rows back
+/// out of the bytes `begin_frame` wrote; what those rows are *for* was held by
+/// nothing, because no frame in the tree shaded a surface through them:
+/// `crcbl::screenshot::atmosphere_forward`'s scene has no geometry in it at
+/// all, and `Scene::AtmosphereMirror`'s floor is a conductor, whose diffuse
+/// albedo is exactly zero.
+///
+/// `crcbl::screenshot::sky_ambient_forward` is the fixture: `Scene::Probes`'
+/// room with no probes in it, a sun with no colour and no ambient, and the
+/// reflection pair refused — so `mesh.slang`'s ambient sum is
+/// `0 + sky_irradiance(N) + 0` and a floor pixel is the sky's L1 rows evaluated
+/// at `+Y`, times the floor's albedo, and nothing else.
+///
+/// Three claims, in the order they are asserted:
+///
+/// 1. **The two projections disagree**, by [`SKY_AMBIENT_FIT_APART`] at least,
+///    on the host and before a frame is drawn. Without it the comparison below
+///    would pass under the swap it exists to catch.
+/// 2. **The frame is the LUT's projection**, absolutely, at three bands on
+///    three channels. An absolute comparison is also the anti-vacuity claim,
+///    and a stronger one than a floor: a frame that drew no floor misses it by
+///    the whole of the value.
+/// 3. **And the same room with no atmosphere is black.** The control is what
+///    says the term arrived from the sky rather than from anything else the
+///    fixture happens to have in it.
+///
+/// **Shown red by sabotage** (2026-09-06, radv). `crcbl_render::forward`'s
+/// `PresentedSky::new` was changed to take `view.gradient_fit().irradiance()`
+/// in place of `view.irradiance()` — the swap `docs/backlog.md` recorded
+/// passing every suite in the tree — and this reported `the band at (173, 96)
+/// measures 94.00 on red and the host's own SkyView::irradiance predicts 62.73,
+/// a miss of 31.27 level(s) against a budget of 1`. Restored, and the re-run
+/// agreed to 0.27 levels.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn an_atmospheres_ambient_rows_light_a_floor() {
+    crcbl_core::log::init_logging();
+
+    let view = crcbl::screenshot::atmosphere_view(SKY_AMBIENT_SUN);
+    let marched = view.irradiance();
+    let fitted = view.gradient_fit().irradiance();
+    for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
+        let predicted = predicted_sky_ambient_channel(&marched, channel);
+        let alternative = predicted_sky_ambient_channel(&fitted, channel);
+        let apart = (predicted - alternative).abs();
+        assert!(
+            apart > SKY_AMBIENT_FIT_APART,
+            "this sun's LUT predicts {predicted:.2} on {name} and its three-band fit \
+             {alternative:.2}, {apart:.2} level(s) apart against {SKY_AMBIENT_FIT_APART} — a \
+             frame carrying either would satisfy the comparison below, and the projection the \
+             block carries is exactly what it is meant to be about"
+        );
+    }
+
+    let frame = |atmosphere| {
+        let setup =
+            OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, move |device, queue, format| {
+                crcbl::screenshot::sky_ambient_forward(device, queue, format, atmosphere)
+            })
+            .unwrap_or_else(|why| panic!("a GPU backend opens for the sky-ambient scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format))
+            .expect("the readback is exactly one image")
+    };
+
+    let lit = frame(Some(crcbl::screenshot::atmosphere_sky(SKY_AMBIENT_SUN)));
+    let unlit = frame(None);
+
+    let mut worst = 0.0f32;
+    let mut darkest = 0.0f32;
+    for x in [-PROBE_BAND_AT, 0.0, PROBE_BAND_AT] {
+        let at = probe_pixel(x, 0.0);
+        for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
+            let measured = block_channel(&lit, at, PROBE_BAND, channel);
+            let predicted = predicted_sky_ambient_channel(&marched, channel);
+            let miss = (measured - predicted).abs();
+            worst = worst.max(miss);
+            assert!(
+                miss <= SKY_AMBIENT_LEVELS,
+                "the band at {at:?} measures {measured:.2} on {name} and the host's own \
+                 `SkyView::irradiance` predicts {predicted:.2}, a miss of {miss:.2} level(s) \
+                 against a budget of {SKY_AMBIENT_LEVELS} — `mesh.slang`'s `sky_irradiance` and \
+                 the rows it evaluates are not this LUT's projection, or this frame did not \
+                 reach the swapchain through the sRGB encode this model assumes"
+            );
+
+            let dark = block_channel(&unlit, at, PROBE_BAND, channel);
+            darkest = darkest.max(dark);
+            assert!(
+                dark <= SKY_AMBIENT_DARK,
+                "the same band of the same room with no atmosphere measures {dark:.2} on \
+                 {name} against {SKY_AMBIENT_DARK} — something other than the sky is lighting \
+                 this floor, and the agreement above is not about the sky's rows at all"
+            );
+        }
+    }
+
+    eprintln!(
+        "crcbl render e2e: sky ambient — the frame and `SkyView::irradiance` agree to \
+         {worst:.2} level(s) at worst over three bands and all three channels, where the \
+         three-band fit would predict {:.2}, {:.2} and {:.2} against the LUT's {:.2}, {:.2} \
+         and {:.2}; with no atmosphere the brightest of the same bands reads {darkest:.2}",
+        predicted_sky_ambient_channel(&fitted, 0),
+        predicted_sky_ambient_channel(&fitted, 1),
+        predicted_sky_ambient_channel(&fitted, 2),
+        predicted_sky_ambient_channel(&marched, 0),
+        predicted_sky_ambient_channel(&marched, 1),
+        predicted_sky_ambient_channel(&marched, 2),
     );
 }

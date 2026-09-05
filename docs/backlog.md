@@ -345,18 +345,6 @@ landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
   lobe widens, which is the direction that matters: the widest lobes are the
   ones the azimuthal mean is closest to.
 
-- **`sky_environment`'s early return is byte-identity by reading, not by any
-  golden.** The claim that a frame with no atmosphere is unchanged rests on
-  `ssr.slang` returning `sky_prefiltered`'s bands before it touches the LUT.
-  Removing that return and regenerating the artifacts left
-  `the_ssr_scene_reflects_its_pyramid_and_matches_its_golden` at zero pixels
-  differing on radv (2026-09-06): every golden without an atmosphere also has no
-  sky, so its bands are zero and the zeroed LUT blends to the same zero. Nothing
-  in the tree combines a gradient sky (`set_sky`) with a reflective surface,
-  which is the frame that would move. A fixture that does is what would guard
-  the return; until one exists the return is a cost saving whose correctness is
-  read, not measured.
-
 - **The share between the LUT and the bands is argued, not measured.**
   `sky_environment` takes `sharpness_of`'s ramp because that ramp is already
   this pass's statement that one screen-space ray stands for the lobe, and the
@@ -379,15 +367,17 @@ landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
   There is no Apple or Windows hardware here, so CI's software adapters are the
   only verdict, and `ATMOSPHERE_MIRROR_BAND_LEVELS` carries headroom for them.
 
-- **`Scene::AtmosphereMirror` is NOT on the browser gate's excuse list, and that
-  is a measurement.** `./web/run-render-harness-e2e.sh --expect-fail ssr,ui` was
-  run locally on 2026-09-06 — headless Chromium on SwiftShader, which is CI's
-  linux leg — and reported `atmosphere_mirror  pass` with 17/19 matching. It
-  behaves unlike `ssr`, which is excused, because every ray in this fixture
-  _misses_: there is no crossing for two rasterisers to land on different taps
-  at, only a smooth environment term. If it ever starts failing there, the
-  excuse belongs in `.github/workflows/pages.yml`'s `render-harness` matrix
-  beside `ssr` and `ui`, not in a wider tolerance.
+- **Neither mirror scene is on the browser gate's excuse list, and that is a
+  measurement.** `./web/run-render-harness-e2e.sh --expect-fail ssr,ui` was run
+  locally on 2026-09-06 — headless Chromium on SwiftShader, which is CI's linux
+  leg — and reported `atmosphere_mirror  pass` and `gradient_mirror  pass`, both
+  at a max channel delta of 1, in a run where 18 of 20 scenes matched and only
+  `ssr` and `ui` were excused. They behave unlike `ssr`, which is excused,
+  because every ray in these fixtures _misses_: there is no crossing for two
+  rasterisers to land on different taps at, only a smooth environment term. If
+  either ever starts failing there, the excuse belongs in
+  `.github/workflows/pages.yml`'s `render-harness` matrix beside `ssr` and `ui`,
+  not in a wider tolerance.
 
 - **The demo cube's faces carry vertex colours, and `mesh.slang` multiplies them
   into the albedo.** `crcbl_shaders::mesh::FACES` gives the `+Y` face
@@ -424,27 +414,44 @@ landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
   is the shape of the demo that would answer it. The same gap as the demo switch
   at the top of this section.
 
-- **The sky's ambient term has never lit a surface on a device.**
-  `an_atmosphere_writes_the_luts_own_ambient_term` reads the `sky_sh_*` rows
-  back out of the block `begin_frame` wrote and pins them to
-  `SkyView::irradiance` of the marched LUT, so the wiring from the projection to
-  the block is held. What the rows are _for_ is not: `mesh.slang`'s
-  `sky_irradiance` is three dot products held by
-  `the_fragment_stage_still_adds_the_sky_it_declares` as text, and the only GPU
-  frame in the tree with an atmosphere in it is
-  `an_atmosphere_frame_is_the_host_lut`, whose scene has no geometry at all — so
-  every pixel of it is `sky.slang`'s background arm and none of them is a
-  surface shaded through those rows. The fixture would be `Scene::Probes`' room
-  with an atmosphere set and its authored probe rows zeroed, which leaves the
-  sky's L1 term as the only thing lighting the floor.
+- **The sky's ambient rows are held at one normal.**
+  `crcbl::screenshot::sky_ambient_forward` shades `Scene::Probes`' room under an
+  atmosphere with the sun, the flat ambient, the probes and the reflection pair
+  all zero or refused, so `render_e2e`'s
+  `an_atmospheres_ambient_rows_light_a_floor` pins `mesh.slang`'s
+  `sky_irradiance` against `SkyView::irradiance` absolutely. Every measured
+  pixel faces `+Y`, though, so the L1 row's `x` and `z` lanes are multiplied by
+  zero and only `y` and the constant band are observed — `Scene::Probes`' gap
+  exactly, and for its reason. `crcbl_shaders::probe`'s own literature tests
+  cover those lanes on the host; closing it on a device wants a second band on a
+  surface whose normal is not the floor's, and the room's own wall is the
+  cheapest one.
 
-- **Not measured on Metal, D3D12 or in the browser.** The device path was run on
-  `vk` only, on radv and on lavapipe. The `msl`, `dxil` and `wgsl` artifacts are
-  committed and compile, and the WGSL validation test passes, but no frame has
-  been drawn through them: the machine has no Apple or Windows hardware, and the
-  browser gate has no atmosphere fixture because no demo sets one. The two are
-  the same gap as the demo switch above — a demo with an atmosphere is what
-  gives the browser and cross-backend gates something to draw.
+- **`sky_ambient_forward` is a builder and not a `Scene`.** It is reached only
+  from `render_e2e`, so it has no golden, is absent from `crcbl-cli`'s scene
+  list and never reaches the render-harness browser gate. Deliberate on two
+  counts: the picture is a flat lit floor, which a golden could not tell from
+  any other flat lit floor, and the fixture needs the same room drawn twice —
+  with an atmosphere and without — which the `Scene` enum has no way to ask for.
+  If the browser leg or the Metal and D3D12 legs ever need a sky-lit _surface_
+  rather than a sky-lit background, this becomes a variant and gains a golden.
+
+- **Nothing reflects a ray downward, `Scene::GradientMirror` included.** Every
+  ray in that fixture leaves the plate upward, so
+  `crcbl_shaders::sky_prefilter`'s ground band reaches the frame only through
+  the tail of the kernel — the gap
+  `a_missed_reflection_falls_back_to_the_sky_along_its_own_ray` already names
+  for `Scene::Ssr`, now with a second fixture that does not close it. What would
+  is a reflector facing down: a ceiling, or a camera under the plate.
+
+- **Not measured on Metal or D3D12.** The device path was run on `vk` only, on
+  radv and on lavapipe. The `msl` and `dxil` artifacts are committed and
+  compile, but no frame has been drawn through either: the machine has no Apple
+  or Windows hardware, so CI's software adapters are the only verdict there. The
+  `wgsl` half is no longer in that state — `Scene::AtmosphereMirror` and
+  `Scene::GradientMirror` both draw through `crcbl-webgpu` in the render-harness
+  gate and match their goldens, which is the browser leg the demo switch above
+  was going to buy.
 
 - **The LUT parameterisation is this tree's, not the paper's.** Hillaire indexes
   the sky-view LUT by angles; this one indexes it by the direction's `y` through

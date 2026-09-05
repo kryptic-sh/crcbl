@@ -35,6 +35,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`--scene gradient_mirror`**, a mirror floor under an authored gradient sky
+  and no atmosphere. `crcbl::screenshot::Scene::GradientMirror` reuses
+  `Scene::AtmosphereMirror`'s plate, camera and light and calls
+  `ForwardRenderer::set_sky` where that scene calls `set_atmosphere`, so the two
+  frames differ in which sky `shaders/ssr.slang`'s `sky_environment` returned
+  and in nothing else. It is reachable from `crcbl-cli` and from the
+  render-harness browser gate alongside every other scene.
+
 - **A mirror reflects the atmosphere's aureole, not its azimuthal mean.**
   `shaders/ssr.slang` binds the sky-view LUT — `SKY_VIEW_BINDING` in
   `crcbl_render::ssr`'s layout, appended past `PROBE_VISIBILITY_BINDING` — and

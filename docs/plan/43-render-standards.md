@@ -975,7 +975,10 @@ rule holds and the same bytes reach every backend. `sky.slang` reads it as a
 storage buffer with a bilinear blend it spells out itself, which is one fetch
 and the arithmetic around it; `SkyView::irradiance` projects the same LUT to the
 L1 `GpuProbe` `frame.sky_sh_*` already carries, so the ambient term costs
-nothing new at all.
+nothing new at all. `render_e2e`'s `an_atmospheres_ambient_rows_light_a_floor`
+is what shades a surface through those rows on a device — the probe room with no
+probes, no sun and no flat ambient — and holds it to that projection rather than
+to the three-band fit's.
 
 **The parameterisation is not the paper's, and that is the one deliberate
 departure.** Hillaire indexes the sky-view LUT by a view zenith _angle_ and an
@@ -1046,7 +1049,9 @@ statement that a single screen-space ray stands for the lobe, and the same
 statement decides whether a single LUT tap does — so a mirror is almost all LUT,
 a surface at `ROUGHNESS_CUTOFF` is all three bands, and nothing in between
 steps. A frame with no atmosphere returns the bands before any of it, which is
-what leaves every golden blessed before this byte-identical.
+what leaves every golden blessed before this byte-identical;
+`Scene::GradientMirror` — the same plate under an authored gradient and no
+atmosphere — is what measures that return rather than reading it.
 
 It costs `crcbl_render::ssr`'s layout one binding, appended past
 `PROBE_VISIBILITY_BINDING`, and that is the pass's **second** storage buffer

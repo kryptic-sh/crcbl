@@ -549,6 +549,34 @@ pub enum Scene {
     /// Nothing else stands on the floor: an object would be something a ray
     /// could hit, and what these bands are evidence about is the miss.
     AtmosphereMirror,
+    /// [`Scene::AtmosphereMirror`]'s plate under a **gradient sky and no
+    /// atmosphere**: the same white conductor to the horizon, the same level
+    /// camera, the same light, and `crcbl_render::ForwardRenderer::set_sky`'s
+    /// three authored bands where that scene has a marched LUT.
+    ///
+    /// **The frame `ssr.slang`'s early return had never been drawn in.**
+    /// `sky_environment` returns `sky_prefiltered`'s bands before it reads the
+    /// sky-view LUT whenever `camera.atmosphere.w` is
+    /// [`crcbl_shaders::sky::ATMOSPHERE_OFF`](crate::shaders::sky::ATMOSPHERE_OFF),
+    /// and that return is what makes a frame with no atmosphere byte-identical
+    /// to the one it drew before the LUT existed rather than merely close.
+    /// Nothing in the tree could see it: the only other reflective fixture
+    /// without an atmosphere is [`Scene::Ssr`], whose sky is
+    /// `crcbl_render::Sky::NONE`, so its bands are zero and a LUT that is also
+    /// zero blends to the same zero whichever way the shader is written. This
+    /// scene is the one that separates them — bands worth reflecting, and no
+    /// atmosphere to reflect — so a `sky_environment` that read the LUT anyway
+    /// darkens this floor by the share `sharpness_of` gives a near-mirror.
+    ///
+    /// # Every measured pixel is the reflection and nothing else
+    ///
+    /// [`Scene::AtmosphereMirror`]'s three reasons, unchanged and for the same
+    /// arithmetic: the floor is fully metallic so no diffuse term reaches it,
+    /// its light has no colour and no ambient so the specular lobe is zero, and
+    /// the demo scene authors no probes so the environment is the sky alone.
+    /// What is left in a floor pixel is `sky_prefiltered × (f0·scale + bias)`,
+    /// which `tests/render_e2e.rs` predicts absolutely.
+    GradientMirror,
     /// `docs/plan/18-render-features.md`'s **bloom chain**: a flat floor with
     /// one small, very bright patch on it, looked straight down at.
     ///
@@ -1774,6 +1802,107 @@ fn atmosphere_mirror_scene() -> crate::render::scene::SceneDesc<'static> {
         "the conductor is the row past the demo scene's three"
     );
     scene
+}
+
+/// The three bands [`Scene::GradientMirror`]'s sky is authored as.
+///
+/// **Public because the test predicts the frame from it**, on
+/// [`atmosphere_mirror_sky`]'s terms exactly: the claim is that the floor
+/// reflects `crcbl_shaders::sky_prefilter`'s convolution of these three bands,
+/// and a test that authored its own sky would be comparing two guesses. It is
+/// the shader crate's record rather than [`crcbl_render::Sky`] so that the one
+/// value serves both sides — `gradient_mirror_sky` is the renderer's view of
+/// it, and the prediction reads the bands themselves.
+///
+/// Warm at the horizon and deep blue at the zenith, so the bands are three
+/// different colours and the elevations this frame reflects — the horizon at
+/// the middle row, steepening towards the bottom — read as a gradient in every
+/// channel rather than as one number. A convolution that collapsed the bands
+/// to their mean would draw a flat plate.
+///
+/// The ground band is what a ray below the horizon would see, and no ray in
+/// this frame looks there — `docs/backlog.md` carries that as a gap in the
+/// tree rather than as this fixture's job. It is well under the horizon's, so
+/// the little a near-mirror lobe reaches down for is a rounding step rather
+/// than a second bright band, and so the *background* under the horizon is
+/// unmistakably darker than the floor drawn over it.
+///
+/// Every band is far under one, so `tonemap.slang`'s `saturate` is the
+/// identity on this frame and the host's prediction has no clamp to model.
+pub const GRADIENT_MIRROR_SKY: crate::shaders::sky::SkyGradient =
+    crate::shaders::sky::SkyGradient {
+        zenith: [0.02, 0.05, 0.15],
+        horizon: [0.30, 0.20, 0.10],
+        ground: [0.05, 0.04, 0.03],
+    };
+
+/// [`GRADIENT_MIRROR_SKY`] in the form [`ForwardRenderer::set_sky`] takes.
+///
+/// [`ForwardRenderer::set_sky`]: crcbl_render::ForwardRenderer::set_sky
+fn gradient_mirror_sky() -> crcbl_render::Sky {
+    crcbl_render::Sky {
+        zenith: glam::Vec3::from_array(GRADIENT_MIRROR_SKY.zenith),
+        horizon: glam::Vec3::from_array(GRADIENT_MIRROR_SKY.horizon),
+        ground: glam::Vec3::from_array(GRADIENT_MIRROR_SKY.ground),
+    }
+}
+
+/// [`Scene::Probes`]' room under an atmosphere and nothing else: **the frame
+/// whose floor is lit by the sky's L1 rows alone.**
+///
+/// **What `frame.sky_sh_*` is for, on a device.**
+/// `crcbl_render::ForwardRenderer`'s frame block carries
+/// `crcbl_shaders::atmosphere::SkyView::irradiance` of the marched LUT and
+/// `mesh.slang`'s `sky_irradiance` evaluates it as three dot products — and
+/// until this fixture no frame in the tree shaded a surface through those
+/// rows. [`atmosphere_forward`] puts no geometry in its scene at all, and
+/// [`Scene::AtmosphereMirror`]'s floor is a conductor, whose diffuse albedo is
+/// exactly zero and so has nothing for an ambient term to reach.
+///
+/// **The floor is left with exactly one term.** `probe_sun`'s light has no
+/// colour and no ambient, the demo scene authors no probes, and the reflection
+/// pair is refused on [`Scene::Probes`]' terms — so `mesh.slang`'s ambient sum
+/// is `0 + sky_irradiance(N) + 0`, and a floor pixel is that times the floor's
+/// own albedo through the tonemap's identity and the sRGB encode. Every band
+/// `tests/render_e2e.rs` reads is therefore an absolute prediction rather than
+/// a ratio.
+///
+/// **The atmosphere is a parameter**, on [`ssr_forward`]'s terms: a floor lit
+/// by a sky and a floor lit by anything else look alike, so the fixture is
+/// drawn with an atmosphere and without one and the second frame is what says
+/// the term arrived from the sky rather than from the fixture.
+///
+/// The room and the camera are [`Scene::Probes`]', so the eye looks straight
+/// down at the plane `y = 0` and every measured pixel is floor facing `+Y`.
+/// One normal is one prediction: `sky_irradiance` reads the normal and nothing
+/// else, so this floor is uniform and a band may be read anywhere on it.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built.
+pub fn sky_ambient_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    atmosphere: Option<crcbl_render::Atmosphere>,
+) -> Result<ForwardScene, OffscreenError> {
+    let mut renderer =
+        ForwardRenderer::with_scene(device, queue, format, &crate::render::scene::demo())?;
+    // `Scene::Probes`' refusal and its reason: the measured pixels are a
+    // diffuse ambient term predicted absolutely, and a rough surface's
+    // environment specular would be an unmodelled second term in every one of
+    // them.
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none().force(RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    renderer.set_atmosphere(atmosphere);
+    place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, probe_room());
+    Ok(ForwardScene {
+        camera: probe_camera(),
+        sun: probe_sun(),
+        renderer: Box::new(renderer),
+    })
 }
 
 /// [`ssr_forward`] with its floor **fully rough**: the same scene through a
@@ -5904,6 +6033,36 @@ impl SceneState {
                     renderer: Box::new(renderer),
                 }
             }
+            Scene::GradientMirror => {
+                // The arm above with `set_sky` in place of `set_atmosphere`,
+                // and everything else shared: the same plate, the same camera,
+                // the same effect request. What differs between the two
+                // goldens is therefore which sky the reflection pass read, and
+                // that is the whole of what this fixture is for.
+                //
+                // `atmosphere_mirror_sun` is reused because it contributes
+                // nothing to either frame — its colour and its ambient are
+                // both zero — so the direction it names is the only thing it
+                // carries, and no pixel here can observe it.
+                let mut renderer =
+                    ForwardRenderer::with_scene(device, queue, format, &atmosphere_mirror_scene())?;
+                renderer.set_effect_request(EffectRequest {
+                    camera: RenderEffects::REFLECTIONS,
+                    ..EffectRequest::default()
+                });
+                renderer.set_sky(gradient_mirror_sky());
+                place(
+                    &mut renderer,
+                    ATMOSPHERE_MIRROR_MESH,
+                    ATMOSPHERE_MIRROR_MATERIAL,
+                    glam::Mat4::IDENTITY,
+                );
+                Self::Forward {
+                    camera: atmosphere_mirror_camera(),
+                    light: atmosphere_mirror_sun(),
+                    renderer: Box::new(renderer),
+                }
+            }
             Scene::Bloom => {
                 // The floor every other overhead fixture stands on, and the
                 // emitter laid on it — see `bloom_emitter`. Nothing else is in
@@ -7773,7 +7932,7 @@ mod tests {
             ("render", "ssr-blur"),
             ("render", "tonemap"),
         ];
-        let expected: [(Scene, &[(&str, &str)]); 13] = [
+        let expected: [(Scene, &[(&str, &str)]); 14] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -7825,6 +7984,12 @@ mod tests {
             // composited after the reflection would be a background the mirror
             // never saw.
             (Scene::AtmosphereMirror, mirror_passes),
+            // The same list, and that is a claim rather than a coincidence:
+            // `Scene::GradientMirror` is the row above with a gradient in
+            // place of the atmosphere, and a sky is data the same passes read
+            // rather than a pass of its own. The `sky` row is still here
+            // because a frame with either kind of sky draws a background.
+            (Scene::GradientMirror, mirror_passes),
             // The only row that is not one of the two lists above: every other
             // fixture draws `RenderEffects::DEFAULT_STACK`, which leaves the
             // lens effect out — see that constant, and see `Scene::Bloom` for
