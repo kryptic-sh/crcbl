@@ -299,19 +299,34 @@ a second unmeasured quality-for-speed trade should not land before the timers
 had been pointed at the first — expired when half-resolution AO landed
 2026-09-02 and was swept on both drivers. **The reason that replaces it is a
 measurement: on this tier the march is not where the frame goes.** Headless
-`apps/lantern` runs at 960×720 on an RX 7900 XTX (radv), p50 over 37 frames, put
-`ssr` at 8.2% of a 1.27 ms frame and `ssr-blur` at 1.0%, with the five `hiz`
-levels adding 1.8% — against `shadow` at 27.1% and `forward` at 21.9%. Halving
-the march's extent could return about four per cent of a frame, and it would
-spend the depth-aware upsample `46-ambient-occlusion.md` built for a single
-channel on a colour one, which that document's own backlog entry calls a rung
-rather than a binding.
+`apps/lantern` at 960×720 on an RX 7900 XTX (radv), p50 over 117 frames and the
+median of three runs, puts `ssr` at 6.3% of a 2.165 ms frame and `ssr-blur` at
+0.6%, with the five `hiz` levels adding 1.0% — against `shadow` at 15.6% and
+`forward` at 18.1%. Halving the march's extent could return about three and a
+half per cent of a frame, and it would spend the depth-aware upsample
+`46-ambient-occlusion.md` built for a single channel on a colour one, which that
+document's own backlog entry calls a rung rather than a binding.
 
-(These were first taken hours earlier and re-taken after `38b2688` and
-`b36be08`, which changed `ssr.slang` and the forward pass this measurement is a
-share **of**. The frame fell from 1.32 ms to 1.27 ms, so the march's absolute
-cost barely moved while its share rose slightly — which is the reason to quote a
-share and an absolute together rather than either alone.)
+**`forward`'s share carries its attachment clears, and they are a twenty-fifth
+of it.** The pass opens by clearing scene colour, reflectivity and motion over
+the whole extent — `LoadOp::Clear`s fused into its begin, created and stored
+whatever the effect stack is doing — and `PassStats` sums the two forward passes
+a lantern frame records, the room's and the monitor view's at
+`room::MONITOR_EXTENT`. Priced as `mesh_e2e/depth_only.rs`'s empty-draw-list row
+at each of those extents, medians of three runs on 2026-09-05, the floor is
+0.011 ms plus 0.005 ms on radv and 0.463 plus 0.098 on lavapipe. So what
+`forward` spends on drawing is 0.376 ms, **17.4% of the frame** rather than the
+18.1% the row prints; on lavapipe 13.574 ms of a 47.174 ms frame, 28.8% against
+30.0%.
+
+(Re-taken 2026-09-05, and the frame is not the 1.27 ms this paragraph used to
+quote: it carries 27 labels where the browser note below counts twenty-three,
+because `rsm`, `rsm-punctual`, `probe-gather` and the three `volumetric-*`
+passes — 31.5% of the frame between them — landed after the first reading. The
+march itself went the other way in absolute terms, 0.104 ms then against 0.137
+ms now, so its share fell while its cost rose. That is the reason to quote a
+share and an absolute together rather than either alone, and the reason a share
+quoted six months from now is a claim about a frame nobody re-measured.)
 
 **What would change the answer is the browser tier, and half of that number is
 now in hand.** A software rasteriser spends two thirds of a frame in `forward`,

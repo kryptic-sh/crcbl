@@ -750,10 +750,36 @@ What is left:
   frames on 2026-09-05 the empty row came out dearer in three of three radv runs
   (by 40–80 ns) and in two of three lavapipe runs (−23 µs to +101 µs), so
   asserting it would be asserting which way a coin landed.
-- **`docs/plan/47-reflections.md`'s shares are still unsplit**: `shadow` at
-  27.1% and `forward` at 21.9% of a headless lantern frame, with the clears
-  inside the `forward` number. Restating them needs a lantern-frame floor rather
-  than a mesh-e2e one, and nothing measures that yet.
+- **`docs/plan/47-reflections.md`'s shares are split now, and no lantern-side
+  floor row was added, because one would measure nothing new.** There is no
+  lantern price fixture to add a row to: those figures come from headless runs
+  of the `lantern` **binary** (`c0917d6`, `b87a1ab`) reading the engine's
+  `PassStats` report, and the only fixtures in the tree that read `PassStats`
+  are `mesh_e2e`'s four. A lantern-side row would take the same number as
+  `depth_only.rs`'s: `PassBuilder::clear_color` is `LoadOp::Clear` plus
+  `StoreOp::Store` unconditionally, `ForwardRenderer::add_passes` creates
+  `reflectivity` and `motion` whatever the effect stack is doing, and
+  `RenderGraph::execute` emits a pass's barriers outside its timestamp bracket —
+  so an empty-draw-list `forward` is the same quantity at a given extent
+  whatever else the frame draws, and `price_frame`'s `CRCBL_PRICE_SIZE` already
+  takes it at any extent. What lantern adds is only that its `forward` line is
+  two passes summed, the room's and the monitor's, which `pass_stats.rs`
+  documents and the report's occurrence column shows. Measured 2026-09-05 with
+  `CRCBL_GPU=vk CRCBL_PRICE_SIZE=<extent> crates/crcbl/tests/run-mesh-e2e.sh the_price_of_the_depth_only_passes`,
+  medians of three runs: 0.011 ms at 960×720 plus 0.005 ms at
+  `room::MONITOR_EXTENT` on an RX 7900 XTX, 0.463 plus 0.098 on lavapipe — about
+  a twenty-fifth of the `forward` row on both drivers.
+- **Nothing re-takes the lantern frame's own numbers, and they went stale
+  without anything going red.** The 2026-09-02 reading in `47-reflections.md`
+  described a 1.27 ms frame of twenty-three labels; on 2026-09-05 the same
+  adapter draws 2.165 ms over 27, because `rsm`, `rsm-punctual`, `probe-gather`
+  and the `volumetric-*` passes landed in between and now hold 31.5% of it.
+  Every share quoted off that frame moved, and the only thing that noticed was a
+  session that re-ran the binary by hand. A fixture that asserted a _shape_
+  rather than a duration — say, that `ssr` stays under some fraction of the
+  frame — is the shape of the fix; nothing here proposes the threshold, because
+  `43-render-standards.md` refuses to assert durations and this would be one at
+  one remove.
 
 ## The multi-bounce tint narrowed AO's contrast, and two claims lost margin (2026-09-01)
 
