@@ -759,9 +759,9 @@ dependencies = [
 
 [[package]]
 name = "glam"
-version = "0.33.5"
+version = "0.33.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c426daf70099baff33fac0ba85151c42424861c56828cef9ba02dacb78eb6b26"
+checksum = "21fef0953c54fd3de2f44b743fbf77e044c81a25faee03636dfccc0d35135e23"
 
 [[package]]
 name = "gltf"
@@ -981,9 +981,9 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "log"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "mach2"
@@ -1009,9 +1009,9 @@ dependencies = [
 
 [[package]]
 name = "naga"
-version = "30.0.0"
+version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23bf0a141a9ab6f07dbb492db53245e464bc9db42f407772d9ae03d83a2c1033"
+checksum = "a616d2fb8c89516ac2723a581f69d6c18576046bed761bd6b305e5618e6ae130"
 dependencies = [
  "arrayvec",
  "bit-set 0.10.0",
