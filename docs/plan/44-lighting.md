@@ -357,6 +357,17 @@ read in the reflection pass and not in `mesh.slang`'s ambient sum, because that
 is where the gradient's rows already are and where metals take their ambient
 specular, and a term in both would count the sky twice.
 
+**An atmosphere reaches this table through its own three bands (2026-09-05).**
+[43-render-standards.md](43-render-standards.md) §8's sky is built, and it is a
+LUT rather than a gradient — but `sky_prefilter.bin` convolves a _gradient_,
+which is what makes it two channels instead of a cubemap chain. So a frame with
+an atmosphere fills `SsrParams::sky` from
+`crcbl_shaders::atmosphere::SkyView::gradient_fit`: the LUT's own poles and its
+azimuthal mean at the horizon. Nothing in this rung changed, and what the
+substitution cannot carry — the bright limb beside the sun, which a gradient has
+no azimuth to hold — is §8's paragraph and `docs/backlog.md`'s entry rather than
+this one's.
+
 ### Rung 4 — Specular antialiasing, once normal maps exist
 
 A high-frequency normal map under a low roughness aliases: the shading signal

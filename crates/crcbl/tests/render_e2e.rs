@@ -5313,3 +5313,250 @@ fn the_culling_counters_come_back_off_the_gpu_on_this_backend() {
 
     setup.finish();
 }
+
+/// Half-extents of the block each atmosphere band is read over, in pixels.
+///
+/// Small, where the probe bands are five square: the sky is a gradient with a
+/// real slope across it, so a wide block averages a curve and the prediction
+/// has to average the same curve back. Three square is nine pixels, enough to
+/// take the readback's own noise out and narrow enough that the curve inside it
+/// is nearly a plane.
+const ATMOSPHERE_BAND: (u32, u32) = (3, 3);
+
+/// Where in the frame the atmosphere bands are read, in fractions of the
+/// extent.
+///
+/// Spread across both axes on purpose. The rows walk from just under the
+/// horizon at the bottom to the deep sky at the top, which is the LUT's `v`
+/// axis; the columns walk left to right, which is its `u` axis whenever the sun
+/// is not straight overhead. A band at the exact centre of a frame would
+/// exercise one texel of each.
+const ATMOSPHERE_BANDS: [(f32, f32); 9] = [
+    (0.15, 0.12),
+    (0.50, 0.12),
+    (0.85, 0.12),
+    (0.15, 0.45),
+    (0.50, 0.45),
+    (0.85, 0.45),
+    (0.15, 0.85),
+    (0.50, 0.85),
+    (0.85, 0.85),
+];
+
+/// Levels of 255 the device's atmosphere may sit from the host's.
+///
+/// **Swept on both local adapters before it was fixed**, the way
+/// [`PROBE_MIRROR_LEVELS`] was. Over three suns × nine bands × three channels
+/// the worst miss measured 0.29 levels on the discrete adapter (radv, an
+/// RX 7900 XTX) and the same 0.29 on the software one (lavapipe) — the same
+/// number to four figures, which is itself the finding: what is left between
+/// the two sides is the frame's own eight-bit quantisation against a
+/// prediction that has none, and not anything either rasteriser did. This is
+/// three times it.
+///
+/// The rest of the gap could only be arithmetic. The host and the shader read
+/// the *same* LUT rows — the buffer holds the `f32`s the march produced, so
+/// there is no texel format between them — through the same clamped bilinear,
+/// and the only floats the two do not agree about bit for bit are the ray,
+/// which comes out of two matrix products the GPU is free to contract into
+/// fused multiply-adds, and the blend weights derived from it.
+///
+/// **What this budget is worth in physical terms** is what
+/// [`ATMOSPHERE_SENSITIVITY_SCALE`] says, and it is not flattering to sRGB: an
+/// encoded level is a compressed view of a radiance, so a band this dark moves
+/// by well under a level for a per-cent change in the sky. The test prints
+/// both figures side by side rather than letting the budget read as tighter
+/// than it is.
+const ATMOSPHERE_MIRROR_LEVELS: f32 = 0.9;
+
+/// How much brighter the sky is made in
+/// [`an_atmosphere_frame_is_the_host_lut`]'s anti-vacuity check.
+///
+/// Ten per cent, which is the smallest round figure whose level shift clears
+/// [`ATMOSPHERE_MIRROR_LEVELS`] by the margin that check asserts. It is a
+/// statement about the sRGB encode rather than about this test: at the
+/// radiances an atmosphere puts on a frame, one per cent of sky is a third of
+/// a level.
+const ATMOSPHERE_SENSITIVITY_SCALE: f32 = 1.10;
+
+/// The world direction `sky.slang` shades pixel `(column, row)` along.
+///
+/// The shader's own unprojection, restated through `glam`: unproject two points
+/// at different depths, take their difference, and rotate it into world space.
+/// The **difference** rather than the near point normalised, for the reason
+/// `sky.slang` gives — it is the direction under an orthographic projection
+/// too — and `NDC_NEAR`/`NDC_MID` are that file's two depths.
+fn atmosphere_ray(camera: &crcbl::render::Camera, column: u32, row: u32) -> [f32; 3] {
+    let aspect = EXTENT.0 as f32 / EXTENT.1 as f32;
+    let inv_proj = camera.projection.matrix(aspect).inverse();
+    let inv_view = camera.view().inverse();
+    // The centre of the pixel, then `sky.slang`'s own `uv` → NDC line.
+    let u = (column as f32 + 0.5) / EXTENT.0 as f32;
+    let v = (row as f32 + 0.5) / EXTENT.1 as f32;
+    let ndc = glam::Vec2::new(u * 2.0 - 1.0, 1.0 - v * 2.0);
+    let unproject = |depth: f32| {
+        let point = inv_proj * glam::Vec4::new(ndc.x, ndc.y, depth, 1.0);
+        point.truncate() / point.w
+    };
+    let along = unproject(0.5) - unproject(1.0);
+    (inv_view * along.extend(0.0))
+        .truncate()
+        .normalize()
+        .to_array()
+}
+
+/// What the host says the block at `centre` should read on `channel`.
+///
+/// Per pixel and then averaged, in that order, for
+/// [`predicted_block_channel`]'s reason: the encode below is not linear and the
+/// sky has a slope across the block, so averaging the radiances first and
+/// encoding once would predict a different number than the frame contains.
+///
+/// The chain is short because the fixture made it short. Nothing is lit, so
+/// there is no shading; the tonemap is
+/// `crcbl_shaders::tonemap::DEFAULT_EXPOSURE` and a clamp, which is the
+/// identity below one; the target is sRGB, so the encode is the last step.
+fn predicted_atmosphere_channel(
+    sky: &crcbl::shaders::atmosphere::SkyView,
+    camera: &crcbl::render::Camera,
+    centre: (u32, u32),
+    channel: usize,
+) -> f32 {
+    let mut total = 0.0f32;
+    let mut count = 0u32;
+    for (x, y) in block_pixels(centre, ATMOSPHERE_BAND) {
+        let radiance = sky.radiance(atmosphere_ray(camera, x, y));
+        total += srgb_encode(radiance[channel].min(1.0)) * 255.0;
+        count += 1;
+    }
+    assert!(count > 0, "an empty block predicts nothing");
+    total / count as f32
+}
+
+/// The frame drawn under an atmosphere is the sky-view LUT the host marched.
+///
+/// `docs/plan/43-render-standards.md` §8's device half. The fixture puts no
+/// geometry in the frame, so every pixel is `sky.slang`'s background arm; this
+/// unprojects each band's pixels into world rays, reads the same LUT through
+/// `crcbl_shaders::atmosphere::SkyView::radiance`, and holds the two together.
+///
+/// **What makes it a test of the shader rather than of the host**: the host
+/// spelling and the shader spelling of the LUT read are separate source — Slang
+/// has no `#include` — and the sun's frame, the azimuth cosine, both
+/// coordinate maps and the clamped bilinear are each written twice. A
+/// disagreement in any of them lands here as a band that is the wrong colour.
+///
+/// **Shown red by sabotage** (2026-09-05, radv): `sky.slang`'s
+/// `atmosphere_radiance` was changed to read its row from `-direction.y`,
+/// which turns the sky upside down, the artifacts were recompiled, and this
+/// reported `sun 0, band (38, 23), red measures 76.47 and the host LUT
+/// predicts 26.65, a miss of 49.82 level(s) against a budget of 0.9`. Restored,
+/// recompiled, and the re-run agreed to 0.29 levels.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn an_atmosphere_frame_is_the_host_lut() {
+    crcbl_core::log::init_logging();
+
+    let camera = crcbl::screenshot::atmosphere_camera();
+    let mut worst = 0.0f32;
+    let mut worst_at = (0usize, (0u32, 0u32), 0usize);
+    for sun in 0..crcbl::screenshot::ATMOSPHERE_SUNS.len() {
+        let setup = OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, |device, queue, format| {
+            crcbl::screenshot::atmosphere_forward(device, queue, format, sun)
+        })
+        .unwrap_or_else(|why| panic!("a GPU backend opens for the atmosphere scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        let image =
+            Image::from_readback(width, height, &pixels, channel_order(format)).expect("one image");
+
+        let sky = crcbl::screenshot::atmosphere_view(sun);
+        for (across, down) in ATMOSPHERE_BANDS {
+            let at = (
+                (across * EXTENT.0 as f32) as u32,
+                (down * EXTENT.1 as f32) as u32,
+            );
+            for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
+                let measured = block_channel(&image, at, ATMOSPHERE_BAND, channel);
+                let predicted = predicted_atmosphere_channel(&sky, &camera, at, channel);
+                let miss = (measured - predicted).abs();
+                if miss > worst {
+                    worst = miss;
+                    worst_at = (sun, at, channel);
+                }
+                assert!(
+                    miss <= ATMOSPHERE_MIRROR_LEVELS,
+                    "sun {sun}, band {at:?}, {name} measures {measured:.2} and the host LUT \
+                     predicts {predicted:.2}, a miss of {miss:.2} level(s) against a budget of \
+                     {ATMOSPHERE_MIRROR_LEVELS} — the shader and the host are reading the LUT \
+                     differently, or this frame did not reach the swapchain through the sRGB \
+                     encode this model assumes"
+                );
+            }
+        }
+    }
+
+    // Anti-vacuity in two parts. The first is that this fixture draws a sky
+    // with structure in it rather than a flat field, which is what makes nine
+    // bands nine measurements; the second is that a brighter sky is a frame
+    // this comparison rejects, so the agreement is about the sky rather than
+    // about both sides being dark.
+    let spread = {
+        let sky = crcbl::screenshot::atmosphere_view(1);
+        let mut lowest = f32::INFINITY;
+        let mut highest = f32::NEG_INFINITY;
+        for (across, down) in ATMOSPHERE_BANDS {
+            let at = (
+                (across * EXTENT.0 as f32) as u32,
+                (down * EXTENT.1 as f32) as u32,
+            );
+            for channel in 0..3 {
+                let level = predicted_atmosphere_channel(&sky, &camera, at, channel);
+                lowest = lowest.min(level);
+                highest = highest.max(level);
+            }
+        }
+        highest - lowest
+    };
+    assert!(
+        spread > 20.0 * ATMOSPHERE_MIRROR_LEVELS,
+        "the brightest and dimmest of this fixture's bands are {spread:.2} level(s) apart, which \
+         is not a sky with anything in it to agree about"
+    );
+    let sensitivity = {
+        let sky = crcbl::screenshot::atmosphere_view(1);
+        let mut apart = 0.0f32;
+        for (across, down) in ATMOSPHERE_BANDS {
+            let at = (
+                (across * EXTENT.0 as f32) as u32,
+                (down * EXTENT.1 as f32) as u32,
+            );
+            for channel in 0..3 {
+                let level = predicted_atmosphere_channel(&sky, &camera, at, channel);
+                let scaled = srgb_encode(
+                    (srgb_decode(level / 255.0) * ATMOSPHERE_SENSITIVITY_SCALE).min(1.0),
+                ) * 255.0;
+                apart = apart.max((scaled - level).abs());
+            }
+        }
+        apart
+    };
+    assert!(
+        sensitivity > 3.0 * ATMOSPHERE_MIRROR_LEVELS,
+        "a sky {ATMOSPHERE_SENSITIVITY_SCALE}× as bright moves a band by {sensitivity:.2} \
+         level(s), which is not enough for the agreement above to be a claim about the sky at all"
+    );
+    eprintln!(
+        "crcbl render e2e: atmosphere — the shader and the host LUT agree to {worst:.2} level(s) \
+         at worst, at sun {} band {:?} channel {}, over {} suns × {} bands × 3 channels; the \
+         bands span {spread:.2} level(s) and a {ATMOSPHERE_SENSITIVITY_SCALE}× sky would move \
+         one by {sensitivity:.2}",
+        worst_at.0,
+        worst_at.1,
+        worst_at.2,
+        crcbl::screenshot::ATMOSPHERE_SUNS.len(),
+        ATMOSPHERE_BANDS.len(),
+    );
+}

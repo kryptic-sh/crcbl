@@ -662,6 +662,17 @@ jobs:
       # a job that has already built everything it links.
       - name: Check the committed LTC table against its fit
         run: cargo run --locked -p crcbl-shaders --example cook-ltc -- --check
+      # The atmosphere's transmittance and multiple-scattering LUTs, in one
+      # artifact because the second integrator reads the first table — Linux-only
+      # for the DFG table's reason, and with a tolerance of its own: these two
+      # sum tens of `exp` calls along a march rather than averaging a thousand
+      # bounded samples, so what a platform's `libm` moves accumulates instead of
+      # cancelling. `crates/crcbl-shaders/tools/cook-atmosphere.rs` carries the
+      # number.
+      - name: Check the committed atmosphere tables against their integrators
+        run:
+          cargo run --locked -p crcbl-shaders --example cook-atmosphere --
+          --check
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v7

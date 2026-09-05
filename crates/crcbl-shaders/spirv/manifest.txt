@@ -363,16 +363,16 @@ entry-points = computeMain:glcompute
 
 [sky]
 source = shaders/sky.slang
-source-sha256 = 2920f545377f4a65d36edfc48b5aab3af6d8a54a5da46a7c07f5133c9277d278
+source-sha256 = f0ae5e443728256db29b1d66f794b8a91bc55642e560f961eda33d2f11eba8fc
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/sky.spv
-spirv-sha256 = 0ae814f365279bf11231c2b87eda591cc4b7b26ffad89f2531c233792451f8b7
+spirv-sha256 = 7470ecd4aebdc713ec64205680597a562cc8358f1bd1c314f5fd8f25fb7ac068
 wgsl = wgsl/sky.wgsl
-wgsl-sha256 = cbd896ec3dc288a2c46510add26eed51482ba95cc12035e811cd626b7c688206
+wgsl-sha256 = 81460aa9a951e9978541633dd72f82acb98bb8afc6f7d0e5ce8b6f572b343f11
 msl = msl/sky.metal
-msl-sha256 = df016afbcab5a49e2aae77dcf94c9eec952a62aa12b2c76ecc60c215e47370df
+msl-sha256 = bbafa1a79c251adaebb19473f7d4dde931c46b0bf7bb8e587fc55abb311ad2e9
 dxil = vertexMain:dxil/sky.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/sky.fragment.dxil:d89cccadceed8183c0f7e38580e4f53b15dbf327c95a1dcbb1127cbf056a1ebf
+dxil = fragmentMain:dxil/sky.fragment.dxil:c9ba21a38dfcf0842802b55ba314d438b08442fab1e275797c8befc76d6dcb66
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [smaa_blend]

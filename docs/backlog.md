@@ -3,6 +3,98 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## What the atmosphere shipped without (2026-09-05)
+
+`crcbl_shaders::atmosphere` and `crcbl_render::ForwardRenderer::set_atmosphere`
+landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
+
+- **No demo has been switched to it, and that re-bless is owed.** Every shipped
+  demo still draws no sky at all — nothing in `apps/` calls `set_sky` or
+  `set_atmosphere` — so the whole rung is exercised by
+  `crcbl::screenshot::atmosphere_forward` and `render_e2e`'s
+  `an_atmosphere_frame_is_the_host_lut` and by nothing else. Giving `lantern`,
+  `sundial` or `alcove` an atmosphere moves that demo's golden images, which is
+  its own slice: pick the demo, set the sun to the one its `DirectionalLight`
+  already uses, re-bless on both local adapters, and check the browser gate,
+  which has its own copies.
+
+- **The sun disc is not drawn.** The sky-view LUT holds the scattered sky, as
+  Hillaire's does; the disc is whatever `DirectionalLight` the scene set. A
+  camera pointed at the sun sees a bright aureole and no sun in it. Adding one
+  is a screen-space term in `sky.slang` — the angle between the ray and
+  `SkyParams::atmosphere.xyz` against a limb-darkened disc — and it needs a
+  decision about how bright, because the real value blows out an `Rgba16Float`
+  target on purpose.
+
+- **No aerial perspective.** The paper's third LUT — the froxel volume that puts
+  the air in _front_ of a surface — is not built. `crcbl_render::volumetric`'s
+  column is the tree's froxel pass and does not read the atmosphere's medium.
+  Doing it means the medium's extinction and in-scattering per froxel, which is
+  the same march this module already has, and a decision about whether the two
+  passes merge or compose.
+
+- **The ground below the horizon is black, deliberately.** A view ray that meets
+  the planet returns only the air in front of it, so the atmosphere's own lower
+  hemisphere adds nothing to `SkyView::irradiance`. What bounces off a scene's
+  floor is `docs/plan/50-irradiance-probes.md`'s volume, and an idealised
+  sphere's albedo here would count it twice. `GROUND_ALBEDO` is still used by
+  the multiple-scattering cook, where it belongs. Revisit only if a scene wants
+  a sky with no floor under it.
+
+- **SSR reflects the atmosphere as three bands, not as the LUT.** `ssr.slang`'s
+  `sky_prefiltered` convolves a gradient, so an atmosphere frame hands it
+  `SkyView::gradient_fit` — the LUT's poles and its azimuthal mean at the
+  horizon. A mirror agrees with the background at those three directions and a
+  rough lobe blends between them, but the bright limb beside the sun does not
+  reflect. **The upgrade** is binding the sky-view LUT into the reflection pass
+  as a second storage buffer and reading it along the mirror direction at
+  roughness zero, with the three bands still carrying the rougher lobes; it
+  costs one more binding in `crcbl_render::ssr`'s layout (appended past
+  `PROBE_VISIBILITY_BINDING`) and the `msl`/`dxil`/`wgsl` regeneration that
+  comes with it. Not done here because the slice was already the sky, and
+  because the gradient substitution is right at every roughness a rough surface
+  actually has.
+
+- **Moving the sun costs a full rebuild, unamortised.** `SkyView::build` is 25.3
+  ms of CPU on this machine at the shipped
+  `SKY_VIEW_WIDTH`/`SKY_VIEW_HEIGHT`/`SKY_VIEW_STEPS`, and
+  `ForwardRenderer::refresh_sky_view` rebuilds the whole LUT whenever the
+  normalised sun changes. A scene sweeping the sun continuously — `sundial` is
+  the shape of one — would pay that every frame. §8's own decision text says the
+  rebuild "is amortised over frames when the sun moves continuously" and **that
+  amortisation is not built**: the options are a row-striped rebuild across N
+  frames with the previous LUT still bound, a coarser LUT while the sun is
+  moving, or moving the march to a compute pass and giving up the "no
+  transcendental reaches a colour" guarantee for it. The first is the cheapest
+  and keeps the guarantee; it needs a second LUT buffer and a swap.
+
+- **Not measured on Metal, D3D12 or in the browser.** The device path was run on
+  `vk` only, on radv and on lavapipe. The `msl`, `dxil` and `wgsl` artifacts are
+  committed and compile, and the WGSL validation test passes, but no frame has
+  been drawn through them: the machine has no Apple or Windows hardware, and the
+  browser gate has no atmosphere fixture because no demo sets one. The two are
+  the same gap as the demo switch above — a demo with an atmosphere is what
+  gives the browser and cross-backend gates something to draw.
+
+- **The LUT parameterisation is this tree's, not the paper's.** Hillaire indexes
+  the sky-view LUT by angles; this one indexes it by the direction's `y` through
+  `sign(s)·s²` and by the cosine of the azimuth away from the sun through
+  `1 − 2u²`, because both of those and both inverses are algebraic and the
+  paper's are not. The consequence to watch is resolution on the anti-solar
+  side, where `sky_view_cosine_of` coarsens: the field is smooth there, and no
+  artefact has been seen, but nothing measures it. `SKY_VIEW_WIDTH` is where to
+  spend if one appears.
+
+- **`SkyView::irradiance` is a quadrature where `SkyGradient::irradiance` is
+  closed form**, and it is checked against a brute-force integral rather than
+  against an analytic answer, because the field it integrates is a march's
+  output and has no analytic answer. What that leaves is the shared error: both
+  the projection and its oracle read the same LUT, so an error _in the LUT_
+  cancels between them. `the_vertical_transmittance_matches_its_closed_form` is
+  the one test in the module that reaches outside it, and it covers the
+  transmittance integrator alone — the multiple-scattering cook and the sky-view
+  march are checked structurally and against themselves.
+
 ## 277 published commits carry a `Claude-Session:` trailer — declined to rewrite (2026-09-02)
 
 **Decided by the user; do not re-propose.** Commit messages must carry no

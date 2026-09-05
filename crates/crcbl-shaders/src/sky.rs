@@ -203,10 +203,11 @@ pub(crate) fn smoothstep(u: f32) -> f32 {
 
 /// Bytes of the uniform block `shaders/sky.slang` reads.
 ///
-/// Two `float4x4`s and three `float4`s, which is the whole of what a pass that
-/// samples nothing needs: the two matrices turn a pixel into a world-space ray
-/// and the three rows are the gradient that ray is evaluated against.
-pub const PARAMS_SIZE: usize = 64 + 64 + 48;
+/// Two `float4x4`s and four `float4`s: the two matrices turn a pixel into a
+/// world-space ray, three rows are the gradient that ray is evaluated against,
+/// and the fourth row is [`SkyParams::atmosphere`] — the sun the sky-view LUT
+/// was built around, and the switch between the two skies.
+pub const PARAMS_SIZE: usize = 64 + 64 + 48 + 16;
 
 /// The uniform block, matching `struct SkyParams` in `shaders/sky.slang`.
 ///
@@ -225,7 +226,30 @@ pub struct SkyParams {
     /// them get their contents from, so the two blocks cannot disagree about
     /// which end is up.
     pub sky: [[f32; 4]; 3],
+    /// The atmosphere arm: the unit direction towards the sun in `xyz`, and in
+    /// `w` whether this frame's sky is [`crate::atmosphere::SkyView`]'s LUT
+    /// rather than the gradient above.
+    ///
+    /// **Last in the block**, so no member above it moves and every frame
+    /// blessed before an atmosphere existed writes the same bytes it did — the
+    /// `w` is [`ATMOSPHERE_OFF`] for those, which is exactly zero.
+    ///
+    /// The direction is the sun's, not the LUT's: `sky.slang` turns a view ray
+    /// into the LUT's own coordinates with it, which is a pair of dot products
+    /// and two square roots. [`crate::atmosphere::SkyView::radiance`] is the
+    /// same arithmetic on the host.
+    pub atmosphere: [f32; 4],
 }
+
+/// [`SkyParams::atmosphere`]'s `w` on a frame whose sky is the gradient.
+///
+/// Zero, and exactly zero, because that is what a `SkyParams` built by
+/// [`Default`] already carries — so the arm a frame takes is decided by a
+/// comparison against a value nothing has to round.
+pub const ATMOSPHERE_OFF: f32 = 0.0;
+
+/// [`SkyParams::atmosphere`]'s `w` on a frame whose sky is the LUT.
+pub const ATMOSPHERE_ON: f32 = 1.0;
 
 impl SkyParams {
     /// The block, in the byte layout the shader declares.
@@ -238,13 +262,14 @@ impl SkyParams {
             .into_iter()
             .chain(self.inv_view)
             .chain(self.sky.into_iter().flatten())
+            .chain(self.atmosphere)
         {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
         debug_assert_eq!(
             at, PARAMS_SIZE,
-            "the two matrices and the three gradient rows fill the block exactly"
+            "the two matrices, the three gradient rows and the sun row fill the block exactly"
         );
         bytes
     }
@@ -558,8 +583,11 @@ mod tests {
         let sky = source
             .find("float4 sky[3];")
             .expect("sky.slang declares `float4 sky[3];`");
+        let atmosphere = source
+            .find("float4 atmosphere;")
+            .expect("sky.slang declares `float4 atmosphere;`");
         assert!(
-            inv_proj < inv_view && inv_view < sky,
+            inv_proj < inv_view && inv_view < sky && sky < atmosphere,
             "sky.slang declares the block in a different order than `to_bytes` writes it"
         );
     }
@@ -576,6 +604,7 @@ mod tests {
             inv_proj,
             inv_view,
             sky: DAYLIGHT.rows(),
+            atmosphere: [0.25, 0.5, -0.75, ATMOSPHERE_ON],
         }
         .to_bytes();
 
@@ -592,6 +621,44 @@ mod tests {
             }
             assert_eq!(lane(base + 12), 0.0, "the row's `w` is unread padding");
         }
+        for (lane_at, expected) in [(176, 0.25), (180, 0.5), (184, -0.75), (188, ATMOSPHERE_ON)] {
+            assert_eq!(lane(lane_at), expected, "the sun row closes the block");
+        }
+    }
+
+    /// The two arm values are the two the shader compares against, and the off
+    /// one is what [`Default`] already writes.
+    #[test]
+    fn the_gradient_arm_is_the_block_a_default_writes() {
+        // Read back out of the serialized block rather than compared as
+        // constants, which is both the stronger claim — the lane really is the
+        // one the shader reads — and the only one that is not folded away
+        // before it runs.
+        let off = SkyParams::default().to_bytes();
+        let on = SkyParams {
+            atmosphere: [0.0, 0.0, 0.0, ATMOSPHERE_ON],
+            ..SkyParams::default()
+        }
+        .to_bytes();
+        let arm = |bytes: &[u8; PARAMS_SIZE]| {
+            f32::from_le_bytes(bytes[PARAMS_SIZE - 4..].try_into().expect("four"))
+        };
+        assert_eq!(
+            arm(&off),
+            ATMOSPHERE_OFF,
+            "a default block takes the gradient"
+        );
+        assert!(
+            arm(&on) > 0.0,
+            "the atmosphere arm's lane is {}, which `sky.slang` reads as the gradient",
+            arm(&on)
+        );
+        let source = include_str!("../shaders/sky.slang");
+        assert!(
+            source.contains("camera.atmosphere.w > 0.0"),
+            "sky.slang no longer takes the atmosphere arm on a positive `w`, so ATMOSPHERE_ON \
+             and ATMOSPHERE_OFF no longer say which sky a frame draws"
+        );
     }
 
     #[test]

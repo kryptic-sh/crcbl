@@ -35,6 +35,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A physically based sky.** `crcbl_shaders::atmosphere` is Hillaire's "A
+  Scalable and Production Ready Sky and Atmosphere Rendering Technique"
+  (EGSR 2020) over Bruneton's Earth: a transmittance LUT and a
+  multiple-scattering LUT cooked once into `tables/atmosphere.bin` —
+  `cook-atmosphere` regenerates them and `cook-atmosphere --check` holds them to
+  their integrators in CI beside `cook-dfg`'s — and a sun-dependent sky-view LUT
+  that `SkyView::build` marches **on the host**, out of multiplies, square roots
+  and `crcbl_shaders::fog`'s `exp_neg`, so no transcendental reaches a colour
+  and the same bytes reach every backend. `crcbl_render::Atmosphere` is what a
+  scene sets and `ForwardRenderer::set_atmosphere` is what takes it; when one is
+  set it replaces the gradient for all three of the things a sky is — the
+  background `sky.slang` draws, the L1 ambient term `mesh.slang` adds through
+  `frame.sky_sh_*`, and the environment `ssr.slang` falls back to on a missed
+  ray. `crcbl_render::Sky` is unchanged and is still the flat-sky constructor.
+  The device cost is four buffer loads and a blend: 0.004 ms p50 at 1920×1080 on
+  an RX 7900 XTX and 0.419 ms on lavapipe.
+
 - The irradiance probe clipmap **scrolls**. `ProbeVolume` carries a per-level
   whole-probe-step offset (`steps`), `ProbeVolume::follow` re-centres every
   level on a tracked point by whole steps and reports the rows the move

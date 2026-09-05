@@ -327,6 +327,9 @@ pub mod volumetric;
 // `sky` carries its own `//!` header, for `fog`'s reason above.
 pub mod sky;
 
+// `atmosphere` carries its own `//!` header, for `fog`'s reason above.
+pub mod atmosphere;
+
 /// The uniform block `tonemap.slang` reads, in the layout that shader declares.
 pub mod tonemap;
 

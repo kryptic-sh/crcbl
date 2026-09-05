@@ -562,6 +562,102 @@ impl Default for Sky {
     }
 }
 
+/// Hillaire's atmosphere: a sun, an exposure and a viewpoint, over the planet
+/// `crcbl_shaders::atmosphere`'s committed tables describe.
+///
+/// `docs/plan/43-render-standards.md` §8. Where [`Sky`] is three authored
+/// colours, this is the light a real planet's air scatters — so the sky is blue
+/// overhead because Rayleigh scattering is, and red at a low sun because the
+/// slant path has already taken the blue out, rather than because somebody
+/// picked those colours.
+///
+/// **It replaces the gradient rather than adding to it.** A renderer given an
+/// atmosphere draws it, lights with its L1 projection and reflects with its
+/// three bands; the [`Sky`] it also holds is not read on those frames.
+/// [`ForwardRenderer::set_atmosphere`] is what a caller hands this to, and
+/// `None` is what puts the gradient back.
+///
+/// # What it costs
+///
+/// The sky-view LUT is marched on the **host** — see
+/// [`crcbl_shaders::atmosphere::SkyView::build`] — so a frame's device cost is
+/// four buffer loads and a blend, the same as the gradient's. What is not free
+/// is changing this value: the renderer rebuilds the LUT on the next
+/// [`ForwardRenderer::begin_frame`] after it moves, which is tens of
+/// milliseconds of CPU. A scene sweeping the sun continuously pays that every
+/// frame it moves it, and `docs/backlog.md` carries the amortisation that is
+/// owed.
+///
+/// [`ForwardRenderer::set_atmosphere`]: crate::forward::ForwardRenderer::set_atmosphere
+/// [`ForwardRenderer::begin_frame`]: crate::forward::ForwardRenderer::begin_frame
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Atmosphere {
+    /// The direction **towards** the sun, in world space.
+    ///
+    /// Normalised on the way in, so a caller may hand over the same unnormalised
+    /// vector it built a [`DirectionalLight`] from. A zero vector is taken as
+    /// straight up, which is the one direction that leaves the sky azimuthally
+    /// symmetric and therefore the one a degenerate input cannot make look
+    /// wrong.
+    pub sun_direction: Vec3,
+    /// The sun's illuminance above the atmosphere, in linear RGB.
+    ///
+    /// **May exceed 1.0**, like [`DirectionalLight::color`] and for its reason:
+    /// the scene target is `Rgba16Float` and this is a radiance rather than a
+    /// display colour. The whole sky is linear in it, so it is an exposure knob
+    /// as much as a colour one.
+    pub sun_illuminance: Vec3,
+    /// The viewpoint's height above sea level, in **kilometres**.
+    ///
+    /// Kilometres because that is the unit the planet's coefficients are quoted
+    /// in and the one number in this type that is not in the engine's own
+    /// units. A scene at ground level passes zero; the LUT is built for one
+    /// height per sun, which is Hillaire's own approximation.
+    pub altitude_km: f32,
+}
+
+impl Atmosphere {
+    /// A sun overhead at sea level, normalised so its illuminance is one in
+    /// every channel.
+    ///
+    /// The fixture the render tests build from, and the value a caller starts
+    /// from before pointing the sun somewhere and scaling it.
+    pub const NOON: Self = Self {
+        sun_direction: Vec3::Y,
+        sun_illuminance: Vec3::ONE,
+        altitude_km: 0.0,
+    };
+
+    /// This atmosphere in the form [`crcbl_shaders::atmosphere`] marches.
+    ///
+    /// The normalisation lives here rather than in the shader crate for the
+    /// reason `Sky`'s own conversion does: that crate names no vector type but
+    /// its own arrays, and `glam` is where a normalise belongs.
+    ///
+    /// **Public where that conversion is not**, and for a reason rather than
+    /// an inconsistency: a test that predicts a frame drawn under this
+    /// atmosphere has to march the same sky-view LUT the renderer marched, and
+    /// building one from the caller's own spelling of the sun would put the
+    /// normalisation on only one side of that comparison.
+    /// `crcbl::screenshot::atmosphere_view` is the consumer.
+    #[must_use]
+    pub fn parameters(self) -> crcbl_shaders::atmosphere::Atmosphere {
+        let direction = self.sun_direction.normalize_or(Vec3::Y);
+        crcbl_shaders::atmosphere::Atmosphere {
+            sun_direction: direction.to_array(),
+            sun_illuminance: self.sun_illuminance.to_array(),
+            altitude_km: self.altitude_km,
+        }
+    }
+}
+
+impl Default for Atmosphere {
+    /// [`Atmosphere::NOON`].
+    fn default() -> Self {
+        Self::NOON
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

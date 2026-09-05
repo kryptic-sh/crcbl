@@ -1,5 +1,5 @@
 //! `docs/plan/43-render-standards.md` §8's second half: the pass that **draws**
-//! the gradient sky, where §8's first half only lit and reflected with it.
+//! the sky, where §8's first half only lit and reflected with it.
 //!
 //! [`crcbl_shaders::sky`] projects a [`crate::Sky`] into an L1 probe for the
 //! forward pass's ambient term and hands the raw gradient to `ssr.slang` for a
@@ -23,10 +23,33 @@
 //! this pass writes the background alone and has to leave every shaded pixel
 //! exactly as the forward pass left it.
 //!
+//! # Two skies, one pass and one pipeline
+//!
+//! [`crate::Sky`] is the gradient and [`crate::Atmosphere`] is Hillaire's, and
+//! `sky.slang` picks between them on one lane of its block. The atmosphere is
+//! **not evaluated on the device at all**: the scattering integral is marched
+//! on the host into a [`crcbl_shaders::atmosphere::SkyView`], which arrives
+//! here as a storage buffer, and the fragment stage reads one bilinear tap out
+//! of it. So the two skies cost the same four loads and a blend, and no
+//! transcendental reaches a colour on either arm.
+//!
+//! **A storage buffer rather than a sampled image**, which is the one design
+//! choice in this file worth stating: the LUT is rebuilt whenever the sun
+//! moves, and an image would have to be uploaded through a staging copy and a
+//! device idle to change, where a mapped buffer is a `write_buffer` into the
+//! ring this pass already keeps. It also settles the filter the way
+//! [`crate::forward`] settles the `DFG` table's — spelled out in the shader
+//! rather than asked of a sampler, because a hardware filter's weights are
+//! fixed-function arithmetic four rasterisers compute independently.
+//!
+//! The buffer is bound on **every** frame, holding zeroes on the frames whose
+//! sky is a gradient or which have none: a binding that came and went with the
+//! arm would be two pipeline layouts and two pipelines.
+//!
 //! # It is a caller's opt-in and not a [`RenderEffects`](crate::RenderEffects)
 //! bit
 //!
-//! A frame whose sky is [`crate::Sky::NONE`] adds no pass at all, on
+//! A frame with neither a sky nor an atmosphere adds no pass at all, on
 //! [`crate::grid`]'s terms: no pipeline bound, no block written, and the
 //! background is the clear colour every frame drawn before this module existed
 //! had. That is what makes the off position bit-identical, and it is also the
@@ -40,13 +63,22 @@ use crcbl_hal::{
     PipelineLayoutDesc, PipelineLayoutHandle, ShaderStages, StoreOp,
     check_portable_storage_buffers,
 };
-use crcbl_shaders::{SKY, sky};
+use crcbl_shaders::{SKY, atmosphere, sky};
 
 use crate::graph::{ImageId, RenderGraph};
 
 /// Vertices in the over-sized full-screen triangle `sky.slang` generates from
 /// `SV_VertexID`. No geometry is bound anywhere.
 const FULLSCREEN_VERTICES: u32 = 3;
+
+/// The binding `sky.slang` reads the sky-view LUT through.
+///
+/// **Appended past the block, never inserted**, on [`crate::forward`]'s binding
+/// constants' reason: `crcbl-mtl` numbers a resource by counting the
+/// same-table entries of the layout list and Slang numbers a stage's arguments
+/// by declaration order, so the two agree only while both ascend.
+/// `msl/sky.metal` puts it at `buffer(1)`, the next free index of that table.
+const SKY_VIEW_BINDING: u32 = 1;
 
 /// Everything the sky pass owns.
 ///
@@ -60,7 +92,15 @@ pub(crate) struct SkyPass {
     /// frame uniforms' reason — the previous frame may still be reading last
     /// frame's while this one is written.
     uniforms: Vec<BufferHandle>,
-    /// `[frame]`: the group naming [`SkyPass::uniforms`] at the same index.
+    /// `[frame]`: `sky.slang`'s sky-view LUT, one per frame in flight for
+    /// [`SkyPass::uniforms`]' reason exactly.
+    ///
+    /// Written whole on every frame that has an atmosphere and left holding
+    /// zeroes otherwise — `crcbl_shaders::atmosphere::SKY_VIEW_BUFFER_BYTES` is
+    /// under a hundred kilobytes, which is a memory copy rather than a cost.
+    luts: Vec<BufferHandle>,
+    /// `[frame]`: the group naming [`SkyPass::uniforms`] and [`SkyPass::luts`]
+    /// at the same index.
     groups: Vec<BindGroupHandle>,
     layout: crcbl_hal::BindGroupLayoutHandle,
     pipeline_layout: PipelineLayoutHandle,
@@ -102,13 +142,30 @@ impl SkyPass {
         // post pass in this crate gives: WebGPU has no push constants, and one
         // Slang entry point cannot read both a push-constant block and a bound
         // one, so a range here would fork the shader.
-        let entries = [BindGroupLayoutEntry {
-            binding: 0,
-            visibility: ShaderStages::FRAGMENT,
-            kind: BindingKind::UniformBuffer { dynamic: false },
-            count: 1,
-            flags: BindingFlags::empty(),
-        }];
+        let entries = [
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: SKY_VIEW_BINDING,
+                // **`VERTEX` beside `FRAGMENT`**, on [`crate::forward`]'s
+                // `SPECULAR_DFG_BINDING`'s reason: Slang's Metal backend
+                // materialises every global into every entry point, so
+                // `msl/sky.metal`'s `vertexMain` takes `sky_view [[buffer(1)]]`
+                // whether it reads it or not.
+                visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+                kind: BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+        ];
         let desc = BindGroupLayoutDesc {
             label: Some("sky"),
             entries: &entries,
@@ -130,6 +187,7 @@ impl SkyPass {
         )?;
 
         let mut uniforms = Vec::with_capacity(frames);
+        let mut luts = Vec::with_capacity(frames);
         let mut groups = Vec::with_capacity(frames);
         for _ in 0..frames {
             let buffer = device.create_buffer(&BufferDesc {
@@ -139,20 +197,41 @@ impl SkyPass {
                 memory: MemoryLocation::HostUpload,
             })?;
             uniforms.push(buffer);
+            let lut = device.create_buffer(&BufferDesc {
+                label: Some("sky view lut"),
+                size: atmosphere::SKY_VIEW_BUFFER_BYTES as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })?;
+            // Zeroed once here rather than left as whatever the allocation
+            // held. Nothing reads it on a gradient frame — the shader branches
+            // before the first load — but a buffer whose contents depend on
+            // what was in that memory is one a debugger and a validation layer
+            // both have something to say about.
+            device.write_buffer(lut, 0, &vec![0u8; atmosphere::SKY_VIEW_BUFFER_BYTES])?;
+            luts.push(lut);
             groups.push(device.create_bind_group(&BindGroupDesc {
                 label: Some("sky"),
                 layout,
-                entries: &[BindGroupEntry {
-                    binding: 0,
-                    array_index: 0,
-                    resource: BindingResource::whole_buffer(buffer),
-                }],
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(buffer),
+                    },
+                    BindGroupEntry {
+                        binding: SKY_VIEW_BINDING,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(lut),
+                    },
+                ],
                 variable_count: None,
             })?);
         }
 
         Ok(Self {
             uniforms,
+            luts,
             groups,
             layout,
             pipeline_layout,
@@ -161,15 +240,28 @@ impl SkyPass {
     }
 
     /// Writes this frame's block: the two inverses that turn a pixel into a
-    /// world-space ray, and the gradient that ray is evaluated against.
+    /// world-space ray, the gradient that ray is evaluated against, and — when
+    /// the frame has one — the sky-view LUT and the sun it was built around.
     ///
     /// The matrices are the ones [`crate::ssr`]'s block already carries, and
     /// they arrive already inverted for that reason — one inversion per frame
     /// feeds both passes.
     ///
+    /// `sky_view` is `None` on a gradient frame, and then the block's sun row
+    /// is [`sky::ATMOSPHERE_OFF`] and the LUT buffer is left alone — so a frame
+    /// blessed before an atmosphere existed writes exactly the bytes it used
+    /// to.
+    ///
+    /// **The LUT is written on every atmosphere frame** rather than only when
+    /// it changes, which is a memory copy of
+    /// [`atmosphere::SKY_VIEW_BUFFER_BYTES`] against a per-frame slot ring
+    /// whose slots would otherwise have to be tracked for staleness
+    /// individually. The march that produced it is orders of magnitude dearer
+    /// and is what [`crate::forward`] caches.
+    ///
     /// # Errors
     ///
-    /// [`HalError`] from the mapped write.
+    /// [`HalError`] from either mapped write.
     ///
     /// # Panics
     ///
@@ -181,13 +273,25 @@ impl SkyPass {
         inv_proj: [f32; 16],
         inv_view: [f32; 16],
         gradient: &crcbl_shaders::sky::SkyGradient,
+        sky_view: Option<&atmosphere::SkyView>,
     ) -> Result<(), HalError> {
         let params = sky::SkyParams {
             inv_proj,
             inv_view,
             sky: gradient.rows(),
+            atmosphere: match sky_view {
+                Some(view) => {
+                    let sun = view.sun_direction();
+                    [sun[0], sun[1], sun[2], sky::ATMOSPHERE_ON]
+                }
+                None => [0.0, 0.0, 0.0, sky::ATMOSPHERE_OFF],
+            },
         };
-        device.write_buffer(self.uniforms[frame], 0, &params.to_bytes())
+        device.write_buffer(self.uniforms[frame], 0, &params.to_bytes())?;
+        if let Some(view) = sky_view {
+            device.write_buffer(self.luts[frame], 0, &view.rows())?;
+        }
+        Ok(())
     }
 
     /// Adds the `sky` pass, drawing into `color` where `depth` is still the far
@@ -233,7 +337,7 @@ impl SkyPass {
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.layout);
-        for buffer in self.uniforms {
+        for buffer in self.uniforms.into_iter().chain(self.luts) {
             device.destroy_buffer(buffer);
         }
     }

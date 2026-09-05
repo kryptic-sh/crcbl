@@ -159,7 +159,7 @@ use glam::{Mat4, Quat, Vec3};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::camera::{Camera, DirectionalLight, Fog, Sky};
+use crate::camera::{Atmosphere, Camera, DirectionalLight, Fog, Sky};
 use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
 use crate::contact_shadows::ContactShadows;
 use crate::counters::FrameCounters;
@@ -201,6 +201,7 @@ use crate::texture::{
 use crate::transient::{TransientImageDesc, TransientPool};
 use crate::upscale::Upscale;
 use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages};
+use crcbl_shaders::atmosphere::SkyView;
 
 /// The clear behind the mesh, in **linear** light.
 ///
@@ -1478,6 +1479,21 @@ pub struct ForwardRenderer {
     /// products the fragment stage adds are zero and no frame drawn before a
     /// sky existed moves.
     sky: Sky,
+    /// The atmosphere that **replaces** [`Self::sky`] when a caller sets one —
+    /// see [`set_atmosphere`](ForwardRenderer::set_atmosphere).
+    ///
+    /// `None` by default, so a renderer nobody calls that on is the renderer it
+    /// was.
+    atmosphere: Option<Atmosphere>,
+    /// [`Self::atmosphere`]'s marched sky-view LUT, and the parameters it was
+    /// marched for.
+    ///
+    /// **Cached against the parameters rather than rebuilt per frame**, because
+    /// the march is tens of milliseconds of CPU and the sun in most frames has
+    /// not moved. The stored parameters are the *normalised* ones the shader
+    /// crate takes, so a caller handing over the same sun spelled two lengths
+    /// does not force a rebuild.
+    sky_view: Option<(crcbl_shaders::atmosphere::Atmosphere, SkyView)>,
 
     /// Whether the colour pass tints each cluster by its DAG level instead of
     /// shading — see [`set_lod_view`](ForwardRenderer::set_lod_view).
@@ -5344,6 +5360,8 @@ impl ForwardRenderer {
             // never calls `set_fog` gets the frame byte for byte.
             fog: Fog::NONE,
             sky: Sky::NONE,
+            atmosphere: None,
+            sky_view: None,
             lod_view: false,
             heatmap: false,
             occlusion_view: false,
@@ -6238,11 +6256,25 @@ impl ForwardRenderer {
         // draws the background. One `SkyGradient` rather than three readings of
         // the field, so the sky a surface is lit by cannot differ from the one
         // behind it.
-        let gradient = self.sky.gradient();
+        // An atmosphere replaces the gradient outright — see
+        // `set_atmosphere`. Its LUT is marched here rather than in the pass,
+        // because all three consumers below want it and the march is the
+        // expensive part: `gradient_fit` is what the reflection pass and the
+        // background's own gradient rows take, `irradiance` is the ambient
+        // term, and the LUT itself is what the background samples.
+        self.refresh_sky_view();
+        let sky_view = self.sky_view.as_ref().map(|(_, view)| view);
+        let gradient = match sky_view {
+            Some(view) => view.gradient_fit(),
+            None => self.sky.gradient(),
+        };
         // Projected once per frame on the host, which is also why the shading
         // rule that governs `mesh.slang` has nothing to say about it: these
         // coefficients reach every backend as uploaded numbers.
-        let sky = gradient.irradiance();
+        let sky = match sky_view {
+            Some(view) => view.irradiance(),
+            None => gradient.irradiance(),
+        };
         let uniforms = mesh::FrameUniforms {
             view_proj: view_projection.to_cols_array(),
             camera_position: camera.eye.extend(1.0).to_array(),
@@ -6469,6 +6501,7 @@ impl ForwardRenderer {
             inv_projection.to_cols_array(),
             camera.view().inverse().to_cols_array(),
             &gradient,
+            sky_view,
         )?;
         // The bloom chain's blocks, one row per step: each step needs the texel
         // size of the image it reads, and the chain's shape is a function of the
@@ -10211,13 +10244,38 @@ impl ForwardRenderer {
 
     /// Whether this frame adds [`crate::sky_pass`]'s background pass.
     ///
-    /// [`Sky::NONE`] is the value a renderer nobody called
-    /// [`set_sky`](Self::set_sky) on holds, and it is checked here rather than
-    /// left to the shader for the reason [`crate::sky_pass`] gives: a black
-    /// gradient drawn over [`SCENE_CLEAR`] would *change* those frames, where
-    /// adding no pass leaves them exactly as they were.
+    /// [`Sky::NONE`] with no atmosphere is the value a renderer nobody called
+    /// [`set_sky`](Self::set_sky) or
+    /// [`set_atmosphere`](Self::set_atmosphere) on holds, and it is checked
+    /// here rather than left to the shader for the reason [`crate::sky_pass`]
+    /// gives: a black gradient drawn over [`SCENE_CLEAR`] would *change* those
+    /// frames, where adding no pass leaves them exactly as they were.
     fn draws_sky(&self) -> bool {
-        self.sky != Sky::NONE
+        self.sky != Sky::NONE || self.atmosphere.is_some()
+    }
+
+    /// Marches [`Self::atmosphere`]'s sky-view LUT if the sun it was marched
+    /// for is not the sun this frame has.
+    ///
+    /// Called once per [`Self::begin_frame`]. The comparison is on the
+    /// normalised parameters rather than on the [`Atmosphere`] a caller handed
+    /// over, so re-setting the same sun spelled a different length is not a
+    /// rebuild — and a caller that sets the same value every frame, which is
+    /// the ordinary shape of a scene's update, pays the march once.
+    fn refresh_sky_view(&mut self) {
+        let Some(atmosphere) = self.atmosphere else {
+            self.sky_view = None;
+            return;
+        };
+        let parameters = atmosphere.parameters();
+        if self
+            .sky_view
+            .as_ref()
+            .is_some_and(|(built, _)| *built == parameters)
+        {
+            return;
+        }
+        self.sky_view = Some((parameters, SkyView::build(&parameters)));
     }
 
     /// Sets the multiplier the tonemap pass applies before its clamp, clamped
@@ -10773,6 +10831,54 @@ impl ForwardRenderer {
     /// a mirror under a sky still reflects whatever the probes hold.
     pub const fn set_sky(&mut self, sky: Sky) {
         self.sky = sky;
+    }
+
+    /// Replaces the gradient with Hillaire's atmosphere, or `None` to put the
+    /// gradient back.
+    ///
+    /// `docs/plan/43-render-standards.md` §8. A frame with an atmosphere takes
+    /// it for all three of the things a sky is: the background the sky pass
+    /// draws, the L1 ambient term `mesh.slang` adds, and the environment
+    /// `ssr.slang` falls back to when a ray hits nothing. The
+    /// [`Sky`] a caller may also have set is not read on those frames.
+    ///
+    /// # What it costs
+    ///
+    /// **A march on the host, not on the device.** The next
+    /// [`begin_frame`](Self::begin_frame) after the sun moves rebuilds
+    /// [`crcbl_shaders::atmosphere::SkyView`], which is tens of milliseconds of
+    /// CPU; every frame after it, with the same sun, costs the comparison that
+    /// finds nothing to do. The device pays four buffer loads and a blend,
+    /// which is what the gradient pays.
+    ///
+    /// So a scene that sweeps its sun continuously pays that march every frame,
+    /// and `docs/backlog.md` carries the amortisation that is owed. A scene
+    /// that sets a sun and leaves it pays it once.
+    ///
+    /// # Off is exactly off
+    ///
+    /// `None` is the default, and a renderer nobody calls this on writes the
+    /// same block, adds the same passes and draws the same frame it did before
+    /// this existed — `sky.slang`'s arm is
+    /// [`crcbl_shaders::sky::ATMOSPHERE_OFF`], which is exactly zero.
+    ///
+    /// # What it does not do
+    ///
+    /// **Draw the sun.** The LUT holds the scattered sky and not the disc, as
+    /// the paper's does; the sun itself is the [`DirectionalLight`] the forward
+    /// pass already shades with, and pointing the two the same way is the
+    /// caller's job.
+    ///
+    /// **Put the air in front of a surface.** That is the paper's third LUT and
+    /// this engine's froxel column, and neither reads this.
+    pub fn set_atmosphere(&mut self, atmosphere: Option<Atmosphere>) {
+        self.atmosphere = atmosphere;
+    }
+
+    /// The atmosphere this renderer draws, if it has one.
+    #[must_use]
+    pub const fn atmosphere(&self) -> Option<Atmosphere> {
+        self.atmosphere
     }
 
     /// Draws each cluster tinted by the DAG level it was decimated to, instead

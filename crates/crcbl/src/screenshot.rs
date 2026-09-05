@@ -1218,6 +1218,132 @@ pub fn ssr_forward(
     )
 }
 
+/// The three suns [`atmosphere_forward`] draws its sky under.
+///
+/// Not normalised, deliberately: `crcbl_render::Atmosphere` normalises on the
+/// way in, and handing it a vector that is already unit would leave that
+/// untested. The three are chosen to bracket what the sky-view LUT's two axes
+/// have to get right — a sun overhead, where the field is azimuthally symmetric
+/// and the column map cannot be observed at all; a sun low and **across** the
+/// camera's forward, where the bright limb is at the frame's edge; and a sun
+/// low and **behind** the frame's centre, where it is not on screen and the
+/// aureole is only its glow.
+pub const ATMOSPHERE_SUNS: [[f32; 3]; 3] = [[0.0, 4.0, 0.0], [3.0, 1.0, 0.0], [0.0, 0.35, -2.0]];
+
+/// How bright the sun is above the atmosphere in [`atmosphere_forward`].
+///
+/// One in every channel, so what the frame shows is the atmosphere's own
+/// transfer and not an exposure — and so a test predicting a pixel has one
+/// fewer number to be wrong about. `crcbl_shaders::atmosphere`'s
+/// `the_sky_is_linear_in_the_suns_illuminance` is what says the rest of the
+/// range is this one scaled.
+const ATMOSPHERE_ILLUMINANCE: f32 = 1.0;
+
+/// The atmosphere [`atmosphere_forward`] draws under sun `index`.
+///
+/// **Public because the test predicts the frame from it**, on
+/// [`probe_grid`]'s terms: the claim is that the device's sky and
+/// `crcbl_shaders::atmosphere::SkyView`'s are the same sky, and a test that
+/// built its own atmosphere would be comparing two guesses.
+///
+/// # Panics
+///
+/// If `index` is not one of [`ATMOSPHERE_SUNS`].
+#[must_use]
+pub fn atmosphere_sky(index: usize) -> crcbl_render::Atmosphere {
+    let sun = ATMOSPHERE_SUNS[index];
+    crcbl_render::Atmosphere {
+        sun_direction: glam::Vec3::from_array(sun),
+        sun_illuminance: glam::Vec3::splat(ATMOSPHERE_ILLUMINANCE),
+        altitude_km: 0.0,
+    }
+}
+
+/// The sky-view LUT [`atmosphere_sky`] resolves to, marched on the host.
+///
+/// The mirror the device frame is read against. It goes through
+/// `crcbl_render::Atmosphere` rather than being built from
+/// `ATMOSPHERE_SUNS` directly, so the normalisation the renderer applies is on
+/// this side of the comparison too.
+///
+/// # Panics
+///
+/// If `index` is not one of [`ATMOSPHERE_SUNS`].
+#[must_use]
+pub fn atmosphere_view(index: usize) -> crate::shaders::atmosphere::SkyView {
+    crate::shaders::atmosphere::SkyView::build(&atmosphere_sky(index).parameters())
+}
+
+/// Where [`atmosphere_forward`] is seen from.
+///
+/// Public so the test can unproject a pixel into the same world ray
+/// `sky.slang` does — the two matrices are this camera's, and reproducing them
+/// from a second spelling is how a test ends up measuring its own arithmetic.
+///
+/// It looks a little above the horizon along `−Z`, so the frame spans the band
+/// where an atmosphere actually changes: the horizon's own bright rim at the
+/// bottom, the zenith's blue at the top.
+#[must_use]
+pub fn atmosphere_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::ZERO,
+        target: glam::Vec3::new(0.0, 0.25, -1.0),
+        up: glam::Vec3::Y,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.05,
+        },
+    }
+}
+
+/// An empty scene under [`atmosphere_sky`]: every pixel of the frame is the
+/// atmosphere.
+///
+/// **No instances at all**, which is the point rather than a shortcut. The sky
+/// pass draws where the depth attachment is still the reversed-Z far plane, so
+/// a frame with nothing in it is a frame that is entirely the sky pass's
+/// output — and a band read anywhere in it is the LUT along one ray, with no
+/// surface's shading between the two.
+///
+/// **Every effect refused**, on `Scene::Probes`' terms and more of them: bloom
+/// would bleed the bright limb across the frame, the reflection pass and the
+/// occlusion pass would both read the background they are not about, and the
+/// antialiasing passes would filter the very gradient this measures.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built.
+///
+/// # Panics
+///
+/// If `index` is not one of [`ATMOSPHERE_SUNS`].
+pub fn atmosphere_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    index: usize,
+) -> Result<ForwardScene, OffscreenError> {
+    let mut renderer =
+        ForwardRenderer::with_scene(device, queue, format, &crate::render::scene::demo())?;
+    renderer.set_effect_request(EffectRequest {
+        camera: crcbl_render::RenderEffects::empty(),
+        ..EffectRequest::default()
+    });
+    renderer.set_atmosphere(Some(atmosphere_sky(index)));
+    Ok(ForwardScene {
+        camera: atmosphere_camera(),
+        // A sun that lights nothing, since there is nothing to light: the
+        // frame's whole content is the background, and a directional light
+        // would only put an ambient term where no surface is.
+        sun: crcbl_render::DirectionalLight {
+            color: glam::Vec3::ZERO,
+            ambient: glam::Vec3::ZERO,
+            ..crcbl_render::DirectionalLight::default()
+        },
+        renderer: Box::new(renderer),
+    })
+}
+
 /// [`ssr_forward`] with its floor **fully rough**: the same scene through a
 /// fourth material row, `DEMO_TINTED` at a roughness of one.
 ///

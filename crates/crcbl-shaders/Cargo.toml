@@ -91,3 +91,10 @@ path = "tools/cook-smaa.rs"
 [[example]]
 name = "cook-ltc"
 path = "tools/cook-ltc.rs"
+
+# The atmosphere's two planet LUTs, on `cook-dfg`'s terms and in one artifact:
+# the multiple-scattering integrator reads the transmittance table it was just
+# handed, so a tree with one regenerated and the other not has no meaning.
+[[example]]
+name = "cook-atmosphere"
+path = "tools/cook-atmosphere.rs"

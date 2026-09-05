@@ -29,13 +29,24 @@
 // pass writes the background alone and must leave every shaded pixel exactly as
 // the forward pass left it.
 //
+// # Two skies, one pass
+//
+// `SkyParams::atmosphere.w` picks between them. The gradient is
+// `crcbl_shaders::sky::SkyGradient`, evaluated here from three uniform rows.
+// The atmosphere is Hillaire's, and it is **not** evaluated here at all: the
+// whole scattering integral was marched on the host into
+// `crcbl_shaders::atmosphere::SkyView`, which arrives as the storage buffer
+// below, and this pass reads one bilinear tap out of it. So the expensive sky
+// and the cheap one cost the same four loads and a blend.
+//
 // # No transcendental reaches the colour
 //
-// `docs/plan/44-lighting.md`'s rule, and this file needs no escape from it: the
-// gradient is a smoothstep, which is a cubic — multiplies and adds, IEEE-exact
-// on every target. The one place floats are not bit-identical across backends is
-// the ray, which comes out of two matrix products; the gradient is continuous in
-// the ray, so a last-place difference there moves the colour by a last place too
+// `docs/plan/44-lighting.md`'s rule, and this file needs no escape from it on
+// either arm: the gradient is a smoothstep, which is a cubic, and the LUT read
+// is `sqrt`, `floor` and a blend — multiplies and adds, IEEE-exact on every
+// target. The one place floats are not bit-identical across backends is the
+// ray, which comes out of two matrix products; both skies are continuous in the
+// ray, so a last-place difference there moves the colour by a last place too
 // rather than flipping a decision.
 
 /// The uniform block this pass reads. `crcbl_shaders::sky::SkyParams` is the
@@ -58,11 +69,48 @@ struct SkyParams
     /// The same three rows `SsrParams::sky` carries and in the same order —
     /// both passes want the radiance along one direction, so both take the
     /// gradient rather than the L1 projection `mesh.slang` is given.
+    ///
+    /// On an atmosphere frame these are still filled, with
+    /// `crcbl_shaders::atmosphere::SkyView::gradient_fit`'s three bands, so the
+    /// reflection pass and this one agree about what a mirror facing the
+    /// zenith, the horizon or the ground sees.
     float4 sky[3];
+    /// The unit direction **towards** the sun in `xyz`, and in `w` whether this
+    /// frame's sky is the LUT below rather than the gradient above.
+    ///
+    /// **Last in the block**, so no member above it moves and a frame drawn
+    /// before the atmosphere existed writes exactly the bytes it used to with a
+    /// `w` of zero.
+    float4 atmosphere;
 };
 
 [[vk::binding(0, 0)]]
 ConstantBuffer<SkyParams> camera;
+
+/// `crcbl_shaders::atmosphere::SkyView::rows` — the sky's radiance for this
+/// frame's sun, one `float4` per texel with the direction's `y` slow.
+///
+/// **A storage buffer and not a sampled image**, for two reasons this file has
+/// to state together: a sun that moved reaches the device as a mapped write
+/// rather than as an image upload and the device idle one takes, and the filter
+/// below is written out rather than asked of a sampler — which is the same
+/// choice `mesh.slang` makes about the `DFG` and LTC tables, for the same
+/// reason. A hardware filter's weights are fixed-function arithmetic four
+/// rasterisers compute independently, and these goldens are compared across all
+/// four.
+///
+/// It is bound on **every** frame, including the ones whose sky is a gradient
+/// or which have no sky at all, and holds zeroes there. A binding that came and
+/// went with the arm would be two pipeline layouts.
+[[vk::binding(1, 0)]]
+StructuredBuffer<float4> sky_view;
+
+/// `crcbl_shaders::atmosphere::SKY_VIEW_WIDTH`, which is the azimuth away from
+/// the sun.
+static const uint SKY_VIEW_WIDTH = 96;
+
+/// `crcbl_shaders::atmosphere::SKY_VIEW_HEIGHT`, which is the direction's `y`.
+static const uint SKY_VIEW_HEIGHT = 64;
 
 /// The reversed-Z **near** plane, which is where the ray is unprojected from.
 static const float NDC_NEAR = 1.0;
@@ -96,6 +144,60 @@ float3 sky_radiance(float3 direction)
     return camera.sky[1].rgb * (1.0 - blend) + far * blend;
 }
 
+/// `crcbl_shaders::atmosphere::SkyView::sample`: the LUT read bilinearly at an
+/// azimuth cosine and a direction's `y`, clamped at every edge.
+///
+/// The two coordinate maps are `atmosphere::sky_view_u_of` and
+/// `sky_view_v_of`, and the tap arithmetic is `atmosphere::axis_taps` — spelled
+/// here a second time because Slang has no `#include`, and held to the host's
+/// spelling by `crcbl_shaders::atmosphere`'s
+/// `the_shader_reads_the_lut_the_way_the_host_does`.
+float3 sky_view_at(float up, float azimuth_cosine)
+{
+    float u = sqrt(max(0.0, (1.0 - clamp(azimuth_cosine, -1.0, 1.0)) * 0.5));
+    float clamped = clamp(up, -1.0, 1.0);
+    float root = sqrt(abs(clamped));
+    float v = 0.5 + 0.5 * (clamped >= 0.0 ? root : -root);
+
+    float across = clamp(u, 0.0, 1.0) * float(SKY_VIEW_WIDTH) - 0.5;
+    float x0 = clamp(floor(across), 0.0, float(SKY_VIEW_WIDTH - 1));
+    float x1 = min(x0 + 1.0, float(SKY_VIEW_WIDTH - 1));
+    float fx = clamp(across - x0, 0.0, 1.0);
+
+    float down = clamp(v, 0.0, 1.0) * float(SKY_VIEW_HEIGHT) - 0.5;
+    float y0 = clamp(floor(down), 0.0, float(SKY_VIEW_HEIGHT - 1));
+    float y1 = min(y0 + 1.0, float(SKY_VIEW_HEIGHT - 1));
+    float fy = clamp(down - y0, 0.0, 1.0);
+
+    uint row0 = uint(y0) * SKY_VIEW_WIDTH;
+    uint row1 = uint(y1) * SKY_VIEW_WIDTH;
+    float3 top = sky_view[row0 + uint(x0)].rgb * (1.0 - fx)
+               + sky_view[row0 + uint(x1)].rgb * fx;
+    float3 bottom = sky_view[row1 + uint(x0)].rgb * (1.0 - fx)
+                  + sky_view[row1 + uint(x1)].rgb * fx;
+    return top * (1.0 - fy) + bottom * fy;
+}
+
+/// `crcbl_shaders::atmosphere::SkyView::radiance`: the LUT read along a world
+/// direction, by turning it into the LUT's sun-relative coordinates.
+///
+/// The row is the direction's own `y`; the column is the cosine between the two
+/// horizontal projections, the view's and the sun's. A sun straight overhead
+/// leaves that cosine undefined and the sky azimuthally symmetric exactly then,
+/// so the column falls back to the one facing the sun's azimuth.
+float3 atmosphere_radiance(float3 direction)
+{
+    float3 sun = camera.atmosphere.xyz;
+    float view_flat = sqrt(direction.x * direction.x + direction.z * direction.z);
+    float sun_flat = sqrt(sun.x * sun.x + sun.z * sun.z);
+    float cosine = 1.0;
+    if (view_flat > 0.0 && sun_flat > 0.0)
+    {
+        cosine = (direction.x * sun.x + direction.z * sun.z) / (view_flat * sun_flat);
+    }
+    return sky_view_at(direction.y, cosine);
+}
+
 [shader("vertex")]
 FullscreenOutput vertexMain(uint index: SV_VertexID)
 {
@@ -126,5 +228,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float3 direction = normalize(mul(camera.inv_view, float4(along, 0.0)).xyz);
 
     // Opaque: this is the furthest thing in the frame and nothing is behind it.
-    return float4(sky_radiance(direction), 1.0);
+    float3 radiance = camera.atmosphere.w > 0.0 ? atmosphere_radiance(direction)
+                                                : sky_radiance(direction);
+    return float4(radiance, 1.0);
 }
