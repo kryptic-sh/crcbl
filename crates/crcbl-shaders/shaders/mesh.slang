@@ -500,6 +500,21 @@ struct FrameUniforms
     /// axis whose reciprocal is zero collapses onto probe 0, which is what the
     /// grid of a scene with no probes carries.
     float4 probe_level_inv_spacing[PROBE_LEVELS];
+    /// How far each level has scrolled, as whole probe steps already reduced
+    /// into `0..probe_counts`; `w` unused.
+    ///
+    /// `docs/plan/50-irradiance-probes.md`'s scrolling: a level re-centres on
+    /// the camera by whole probe steps, `probe_level_origin` above has already
+    /// moved with it, and this is the wrap that leaves the probes which stayed
+    /// naming the rows they already had. `probe_wrap` is the one place it is
+    /// applied.
+    ///
+    /// **Reduced on the host**, by
+    /// `crcbl_shaders::probe::ProbeVolume::level_offset`, so a cell and an
+    /// offset both sit below the count and the wrap here is one compare and one
+    /// subtract rather than a signed remainder. All zero for a volume that has
+    /// never scrolled, which is every volume before this row existed.
+    uint4 probe_level_offset[PROBE_LEVELS];
     /// `docs/plan/25-lod.md`'s selection numbers, as `draw_gen.slang`'s
     /// `DrawGenParams::lod_params` carries them: `x` pixels per unit of length
     /// one unit from the eye, `y` the budget a group's projected error must
@@ -4146,6 +4161,23 @@ float probe_weight(uint index, float3 probe_position, float3 world_position, flo
                PROBE_OCCLUDED_WEIGHT);
 }
 
+/// One axis of the toroidal wrap: cell `cell` of a level whose scroll offset on
+/// this axis is `offset` stands in row `cell + offset`, brought back inside
+/// `0..count`.
+///
+/// `crcbl_shaders::probe::wrap` is the host mirror, and the two are held
+/// together by `the_shaders_wrap_a_scrolled_cell_the_way_this_module_does`.
+///
+/// **One compare and one subtract is the whole modulo, exactly.** The host has
+/// already reduced the offset below the count and a cell is below it by
+/// construction, so the sum is under twice the count. An axis with no probes has
+/// a count, a cell and an offset of zero and answers zero.
+uint probe_wrap(uint cell, uint offset, uint count)
+{
+    uint at = cell + offset;
+    return at >= count ? at - count : at;
+}
+
 /// Which row of the probe table a grid cell is, clamped into the buffer.
 ///
 /// The clamp is against `probe_counts.w` — the product the host wrote — for the
@@ -4159,10 +4191,22 @@ float probe_weight(uint index, float3 probe_position, float3 world_position, flo
 /// same order the table's rows are in — `x`-fastest within a level, and the
 /// levels one after another finest first, which is what `probe_levels.y` steps
 /// over here.
+///
+/// **The cell is wrapped by the level's scroll offset first**, which is the
+/// whole of the toroidal addressing: a level that stepped `k` probes along an
+/// axis moved `k` of its slabs to the far side and left the rest naming the
+/// probes they already held, so a scroll re-captures those `k` slabs instead of
+/// the level. `crcbl_shaders::probe::ProbeVolume::row` is the host mirror and
+/// `exposed` beside it is which slabs those are.
 uint probe_row(uint level, uint3 cell)
 {
+    uint3 counts = frame.probe_counts.xyz;
+    uint3 offset = frame.probe_level_offset[level].xyz;
+    uint3 at = uint3(probe_wrap(cell.x, offset.x, counts.x),
+                     probe_wrap(cell.y, offset.y, counts.y),
+                     probe_wrap(cell.z, offset.z, counts.z));
     uint index = frame.probe_levels.y * level
-               + (cell.z * frame.probe_counts.y + cell.y) * frame.probe_counts.x + cell.x;
+               + (at.z * counts.y + at.y) * counts.x + at.x;
     return min(index, max(frame.probe_counts.w, 1u) - 1u);
 }
 

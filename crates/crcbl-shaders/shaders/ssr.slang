@@ -122,6 +122,10 @@ struct SsrParams
     uint4 probe_levels;
     float4 probe_level_origin[PROBE_LEVELS];
     float4 probe_level_inv_spacing[PROBE_LEVELS];
+    /// How far each level has scrolled, as whole probe steps already reduced
+    /// into `0..probe_counts` — `mesh.slang`'s `probe_level_offset`, on this
+    /// pass's own block. `probe_wrap` is where it is applied.
+    uint4 probe_level_offset[PROBE_LEVELS];
     /// `x` is how many levels of the Hi-Z pyramid this frame built, which is the
     /// deepest level the march may climb to; the other three lanes are the
     /// sixteen-byte row's padding.
@@ -910,16 +914,34 @@ float probe_weight(uint index, float3 probe_position, float3 world_position, flo
                PROBE_OCCLUDED_WEIGHT);
 }
 
+/// One axis of the toroidal wrap — `mesh.slang`'s `probe_wrap`, character for
+/// character, and `crcbl_shaders::probe::wrap` is the host mirror both are held
+/// to.
+uint probe_wrap(uint cell, uint offset, uint count)
+{
+    uint at = cell + offset;
+    return at >= count ? at - count : at;
+}
+
 /// Which row of the probe table a grid cell of clipmap level `level` is, clamped
 /// into the buffer — `mesh.slang`'s `probe_row` against this pass's own block.
 ///
 /// **It is also the layer of [`probe_visibility`]**, which is what makes the row
 /// and the map one probe: `crcbl_render::probe_capture` writes its layers in the
 /// order the table's rows are in.
+///
+/// **The cell is wrapped by the level's scroll offset first**, which is the
+/// toroidal addressing `mesh.slang` describes: a level that stepped `k` probes
+/// along an axis left the other slabs naming the probes they already held.
 uint probe_row(uint level, uint3 cell)
 {
+    uint3 counts = camera.probe_counts.xyz;
+    uint3 offset = camera.probe_level_offset[level].xyz;
+    uint3 at = uint3(probe_wrap(cell.x, offset.x, counts.x),
+                     probe_wrap(cell.y, offset.y, counts.y),
+                     probe_wrap(cell.z, offset.z, counts.z));
     uint index = camera.probe_levels.y * level
-               + (cell.z * camera.probe_counts.y + cell.y) * camera.probe_counts.x + cell.x;
+               + (at.z * counts.y + at.y) * counts.x + at.x;
     return min(index, max(camera.probe_counts.w, 1u) - 1u);
 }
 

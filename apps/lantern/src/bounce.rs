@@ -33,7 +33,7 @@
 
 use crcbl::math::Vec3;
 use crcbl::render::{ProbeGrid, ProbeUpdate};
-use crcbl::shaders::probe::{GpuProbe, ProbeVolume};
+use crcbl::shaders::probe::{GpuProbe, ProbeSteps, ProbeVolume};
 
 use crate::room::{HALF_DEPTH, HALF_WIDTH, HEIGHT};
 
@@ -121,6 +121,7 @@ pub fn probes() -> ProbeGrid {
             // than this room, and the updater covers the sun's near cascade —
             // which already reaches past every wall of it.
             levels: 1,
+            steps: ProbeSteps::default(),
         },
         // **Zeroes, and the updater overwrites them on the first frame it
         // records.** See the module docs: the rows are the volume's size here,
@@ -128,6 +129,69 @@ pub fn probes() -> ProbeGrid {
         probes: vec![GpuProbe::ZERO; PROBE_TOTAL as usize],
         update: ProbeUpdate::EveryFrame,
     }
+}
+
+/// How many **whole probe steps** the volume may take from where it was
+/// authored, on each axis, without standing a probe inside a wall.
+///
+/// `docs/plan/50-irradiance-probes.md`'s scrolling is by whole steps of a
+/// level's own spacing, so the budget is in steps rather than in metres: the
+/// room has [`spacing`] to spare over the level's own extent — half a cell at
+/// each end, which is exactly where [`grid_origin`] put the outermost probes —
+/// and half a cell is less than one step. **So this room's volume has nowhere to
+/// scroll to, and the number is zero.**
+///
+/// It is computed rather than written down because the computation is the rule:
+/// a room made larger, or a level made finer, gives the volume room to move and
+/// this starts answering something else. `the_volume_has_nowhere_to_scroll_in_this_room`
+/// is what says which answer it gives today, and why.
+fn travel() -> Vec3 {
+    let step = spacing();
+    // Half of what the room has over the level, which is how far either way the
+    // level may travel and still stand wholly inside — then floored to whole
+    // steps, because a fraction of a step is not a move this volume can make.
+    let slack = 0.5 * ((INTERIOR_MAX - INTERIOR_MIN) - grid_extent()).max(Vec3::ZERO);
+    (slack / step).floor()
+}
+
+/// How far the outermost probes stand from one another on each axis: the
+/// spacing times one less than the count, which is a cell short of the room.
+fn grid_extent() -> Vec3 {
+    #[allow(clippy::cast_precision_loss)]
+    let last = Vec3::new(
+        (PROBE_COUNTS[0] - 1) as f32,
+        (PROBE_COUNTS[1] - 1) as f32,
+        (PROBE_COUNTS[2] - 1) as f32,
+    );
+    spacing() * last
+}
+
+/// The point the level is centred on before anything scrolls it — the host-side
+/// twin of `ProbeVolume::centre`, on `probe_position`'s terms, and held to it by
+/// `the_volume_has_nowhere_to_scroll_in_this_room`.
+fn grid_centre() -> Vec3 {
+    grid_origin() + 0.5 * grid_extent()
+}
+
+/// Where the room's irradiance volume should be centred for an eye at `eye`.
+///
+/// `docs/plan/50-irradiance-probes.md`'s camera follow, **held inside the
+/// room**: the engine re-centres each level on the point it is handed, and a
+/// point this room's volume cannot reach without putting a probe in a wall is
+/// not one to hand it. `travel` is that budget, and in this room it is zero on
+/// every axis — so what this answers is the volume's own centre, whatever the
+/// camera does, and `crate::gpu`'s per-frame call is then a comparison and no
+/// device work at all.
+///
+/// **It is a clamp rather than that constant** because the clamp is the rule and
+/// the constant is only today's answer to it. A room whose walls moved out, or a
+/// volume with a finer level in it, has somewhere to scroll to and this hands
+/// the engine the camera instead.
+#[must_use]
+pub fn follow_point(eye: Vec3) -> Vec3 {
+    let centre = grid_centre();
+    let reach = travel() * spacing();
+    eye.clamp(centre - reach, centre + reach)
 }
 
 #[cfg(test)]
@@ -178,6 +242,67 @@ mod tests {
             spacing() * Vec3::new(4.0, 3.0, 5.0),
             INTERIOR_MAX - INTERIOR_MIN,
             "the cells must partition the room exactly"
+        );
+    }
+
+    /// **This room's volume has nowhere to scroll to, and that is arithmetic
+    /// rather than a decision.**
+    ///
+    /// The level's probes span `spacing · (count - 1)` and the interior is
+    /// `spacing · count`, so the room has exactly one cell to spare — half of it
+    /// at each end, which is where [`grid_origin`] stands the outermost probes.
+    /// Half a cell is less than one whole probe step, so the follow can take
+    /// none: [`follow_point`] answers the volume's centre for every eye, and the
+    /// engine's `follow_probe_volume` then re-captures nothing and re-addresses
+    /// nothing.
+    ///
+    /// **Asserted through the extents rather than as a bare zero**, so a room
+    /// that gained a wall's worth of width, or a volume that gained a level,
+    /// reds this instead of silently starting to scroll.
+    #[test]
+    fn the_volume_has_nowhere_to_scroll_in_this_room() {
+        let step = spacing();
+        let extent = grid_extent();
+        let spare = (INTERIOR_MAX - INTERIOR_MIN) - extent;
+        for axis in 0..3 {
+            assert!(
+                spare[axis] < 2.0 * step[axis],
+                "axis {axis} has {} to spare over the level's {}, which is a whole probe \
+                 step either way — this room can scroll and nothing here says where to",
+                spare[axis],
+                extent[axis]
+            );
+        }
+        assert_eq!(travel(), Vec3::ZERO);
+
+        // So every eye, inside the room and outside it, asks for the centre —
+        // and the centre this module computes is the one the header carries,
+        // which is the same pairing `every_probe_stands_in_open_air` holds
+        // `probe_position` to.
+        let centre = grid_centre();
+        assert_eq!(centre.to_array(), probes().volume.centre());
+        assert_eq!(centre, Vec3::new(0.0, 0.5 * HEIGHT, 0.0));
+        for eye in [
+            centre,
+            Vec3::new(0.0, 1.6, 3.3),
+            Vec3::new(-HALF_WIDTH, 0.1, -HALF_DEPTH),
+            Vec3::new(50.0, -20.0, 100.0),
+        ] {
+            assert_eq!(
+                follow_point(eye),
+                centre,
+                "an eye at {eye:?} moved a volume that covers its whole room"
+            );
+        }
+
+        // And the follow really is the thing being pinned: a volume handed the
+        // camera outright *would* step, which is what makes the clamp load
+        // bearing rather than decoration.
+        let mut loose = probes().volume;
+        assert!(
+            !loose.follow(Vec3::new(0.0, 1.6, 3.3).to_array()).is_empty(),
+            "the fixed camera is inside the level's own extent, so the clamp above is \
+             holding nothing back"
         );
     }
 

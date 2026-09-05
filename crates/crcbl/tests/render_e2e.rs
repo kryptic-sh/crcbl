@@ -3249,6 +3249,335 @@ fn a_fragment_crossing_a_clipmap_level_fades_into_it() {
     );
 }
 
+/// The whole-probe steps `a_scrolled_volume_reads_the_rows_the_mirror_does`
+/// sweeps the level through.
+///
+/// **Every residue of [`crcbl::screenshot::SCROLL_COUNT`] exactly once**, from
+/// inputs that are negative, zero and past a whole level in turn — so what the
+/// sweep covers is the wrap itself and not one convenient offset of it. A
+/// shader that dropped the wrap draws the authored order at every one of them
+/// except the offset of zero.
+const SCROLL_STEPS: [i32; 4] = [-1, 0, 1, 2];
+
+/// Where along the floor that sweep is measured, in world units on `x`.
+///
+/// Spread across the level rather than gathered at its centre, and each of them
+/// clear of the room's `±X` walls by more than
+/// `crcbl_render::ForwardRenderer`'s occlusion radius — the same clearance
+/// [`PROBE_BAND_AT`] is chosen under, so the forward model
+/// [`predicted_block_channel`] applies is the one this measures.
+const SCROLL_BANDS: [f32; 5] = [-1.2, -0.6, 0.0, 0.6, 1.2];
+
+/// How far a scrolled band may sit from the Rust mirror's prediction, in levels
+/// of 255.
+///
+/// [`PROBE_MIRROR_LEVELS`]' forward model exactly — the same room, camera, sun
+/// and reflection refusal — so what is left to cover is 8-bit rounding, the
+/// sRGB encode's precision and half a pixel of disagreement about where a
+/// fragment centre is. **Measured rather than chosen**: over the four offsets
+/// and five bands of this sweep the run of 2026-09-05 reads a worst miss of
+/// 0.30 levels on radv and 0.40 on lavapipe, and this is set with room over
+/// both and far under the level at which a misread row would show — the rows
+/// differ from one another by tens of levels, which is what makes a wrap that
+/// is off by one a miss of that size rather than of this one.
+const SCROLL_MIRROR_LEVELS: f32 = 2.0;
+
+/// **A scrolled level reads the rows the host says it does, at every offset of
+/// the wrap.**
+///
+/// `docs/plan/50-irradiance-probes.md`'s toroidal addressing on the device.
+/// `crcbl_shaders::probe::ProbeVolume::row` and `mesh.slang`'s `probe_row` are
+/// two spellings of one rule — add the level's scroll offset to the cell and
+/// bring it back inside the counts — and nothing about a compile, a golden or
+/// any other test in this suite says they agree: an unscrolled volume has an
+/// offset of zero and the wrap is the identity, which is every scene this engine
+/// ships.
+///
+/// So the fixture's four rows hold four *different* constant environments and
+/// the level is swept through every offset it has. At each of them the floor is
+/// measured at five places and compared against
+/// `crcbl_shaders::probe::irradiance_at` over the same header — absolutely
+/// rather than in proportion, on
+/// [`the_shader_and_the_rust_mirror_agree_about_the_irradiance`]'s terms.
+///
+/// **The failure names the offset and the band**, because that is the thing a
+/// wrap gets wrong: a shader that dropped the modulo agrees at the offset of
+/// zero and disagrees at every other, and one that is off by one disagrees at
+/// the band nearest the level's far face.
+///
+/// # How it was shown to fail
+///
+/// By deleting the compare from `mesh.slang`'s `probe_wrap` — `return at;` —
+/// regenerating the artifacts and running this on radv, which reported
+///
+/// > at a step of -1 the band at x = -1.2 measures 230.00 on green and the Rust
+/// > mirror of `probe_irradiance` predicts 166.08, a miss of 63.92 level(s)
+/// > against a budget of 2 — the shader wraps a scrolled cell onto a different
+/// > row than `ProbeVolume::row` does
+///
+/// and by weakening it to `at > count`, the off-by-one that leaves one cell of
+/// every axis reading its neighbour's row, which reported the same band and the
+/// same miss. Both were restored and the artifacts regenerated.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_scrolled_volume_reads_the_rows_the_mirror_does() {
+    crcbl_core::log::init_logging();
+
+    let mut worst = 0.0f32;
+    let mut worst_at = (0, 0.0f32);
+    for steps in SCROLL_STEPS {
+        let setup = OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, |device, queue, format| {
+            crcbl::screenshot::probe_scroll_forward(device, queue, format, steps)
+        })
+        .unwrap_or_else(|why| panic!("a GPU backend opens for the probe scroll scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        let image =
+            Image::from_readback(width, height, &pixels, channel_order(format)).expect("one image");
+
+        let grid = crcbl::screenshot::probe_scroll_grid(steps);
+        assert_eq!(
+            grid.volume.level_offset(0)[0],
+            steps.rem_euclid(crcbl::screenshot::SCROLL_COUNT as i32) as u32,
+            "the fixture must carry the offset this sweep is about"
+        );
+        for x in SCROLL_BANDS {
+            let at = probe_pixel(x, 0.0);
+            for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
+                let measured = block_channel(&image, at, PROBE_BAND, channel);
+                let predicted = predicted_block_channel(&grid, at, PROBE_BAND, channel);
+                let miss = (measured - predicted).abs();
+                if miss > worst {
+                    worst = miss;
+                    worst_at = (steps, x);
+                }
+                assert!(
+                    miss <= SCROLL_MIRROR_LEVELS,
+                    "at a step of {steps} the band at x = {x} measures {measured:.2} on {name} \
+                     and the Rust mirror of `probe_irradiance` predicts {predicted:.2}, a miss of \
+                     {miss:.2} level(s) against a budget of {SCROLL_MIRROR_LEVELS} — the shader \
+                     wraps a scrolled cell onto a different row than `ProbeVolume::row` does"
+                );
+            }
+        }
+    }
+    // Anti-vacuity: the offsets really do draw different frames, so the
+    // agreement above is not four readings of one picture. The rows differ from
+    // one another by tens of levels and the mirror tracks the device through
+    // every one of them.
+    let spread = {
+        let flat = crcbl::screenshot::probe_scroll_grid(0);
+        let rolled = crcbl::screenshot::probe_scroll_grid(1);
+        let mut apart = 0.0f32;
+        for x in SCROLL_BANDS {
+            let at = probe_pixel(x, 0.0);
+            for channel in 0..3 {
+                let a = predicted_block_channel(&flat, at, PROBE_BAND, channel);
+                let b = predicted_block_channel(&rolled, at, PROBE_BAND, channel);
+                apart = apart.max((a - b).abs());
+            }
+        }
+        apart
+    };
+    assert!(
+        spread > 10.0 * SCROLL_MIRROR_LEVELS,
+        "one step of this fixture's level moves a band by {spread:.2} level(s), which is not \
+         enough for the agreement above to be about the wrap at all"
+    );
+    eprintln!(
+        "crcbl render e2e: probe scroll — the shader and the Rust mirror agree to {worst:.2} \
+         level(s) at worst, at a step of {} and x = {}, over {} offsets × {} bands × 3 channels, \
+         where one step moves a band by {spread:.2}",
+        worst_at.0,
+        worst_at.1,
+        SCROLL_STEPS.len(),
+        SCROLL_BANDS.len()
+    );
+}
+
+/// How many pixels of the frame one world unit of
+/// [`crcbl::screenshot::probe_slab_forward`]'s floor is.
+///
+/// [`PROBE_PIXELS_PER_UNIT`]'s arithmetic against that fixture's own higher
+/// camera, read from the constant rather than written out again.
+const SLAB_PIXELS_PER_UNIT: f32 =
+    (EXTENT.1 as f32 / 2.0) / (crcbl::screenshot::SLAB_CAMERA_UP * 0.577_350_3);
+
+/// Where a point on that fixture's floor lands in the frame — [`probe_pixel`]'s
+/// mapping at [`SLAB_PIXELS_PER_UNIT`].
+fn slab_pixel(x: f32, z: f32) -> (u32, u32) {
+    let column = EXTENT.0 as f32 / 2.0 - x * SLAB_PIXELS_PER_UNIT;
+    let row = EXTENT.1 as f32 / 2.0 - z * SLAB_PIXELS_PER_UNIT;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "every band below is inside the frame, which the block reader asserts"
+    )]
+    (column as u32, row as u32)
+}
+
+/// Where the `+X` band of the slab fixture is measured, in world units.
+///
+/// Past the divider by more than `crcbl_render::ForwardRenderer`'s occlusion
+/// radius, so the ambient-occlusion pass is not what darkens it — and inside the
+/// cell the arrived probe is a corner of, so most of its blend is that probe's.
+const SLAB_BAND_AT: f32 = 0.6;
+
+/// The most red the `+X` band may carry once the arrived probe's map has been
+/// re-captured, in levels of 255.
+///
+/// The arrived probe is the only red in the room and the divider stands between
+/// it and this band, so the honest answer is zero and what this covers is 8-bit
+/// rounding and the floor `crcbl_shaders::probe_visibility::OCCLUDED_WEIGHT`
+/// leaves. **Measured**: the run of 2026-09-05 reads 1.00 levels on radv and
+/// 1.00 on lavapipe with the recapture, against 199.50 with the recapture made
+/// a no-op — so this sits four levels over what the fixture measures and two
+/// hundred under what a missing recapture reads.
+const SLAB_LEAK_LEVELS: f32 = 8.0;
+
+/// The least red the band under the arrived probe must carry, in levels of 255.
+///
+/// The anti-vacuity half: without it a frame with no red anywhere satisfies the
+/// leak bound perfectly. **Measured**: the same run reads 234.00 on radv and
+/// 234.00 on lavapipe, and this is a floor well under that and far over
+/// [`SLAB_LEAK_LEVELS`].
+const SLAB_MIN_LEVELS: f32 = 60.0;
+
+/// Where the band over the probe that **stayed** is read, in world units on `x`.
+///
+/// Just inside that probe rather than over it, and the level's own edges are
+/// what decide the difference: the retained probe is the level's *near* corner
+/// before the step and its *far* corner after, so the floor beyond it reads the
+/// other probe on one side of the step and clamps on the other. Inside it both
+/// arms take their whole blend from the retained row — before the step by
+/// clamping onto it, after the step because the only other corner is the
+/// arrived probe with the divider in the way — which is the comparison this
+/// band is for.
+const SLAB_KEPT_AT: f32 = 2.4;
+
+/// How far the band over the probe that **stayed** may move across the step, in
+/// levels of 255.
+///
+/// It should not move at all: that probe stands at the same world position
+/// before and after, in the same row, with the same map, and the band over it
+/// takes its whole blend from that one corner either way — which is the claim
+/// that makes a scroll a slab rather than a level. **Measured**: the run of
+/// 2026-09-05 reads a worst channel move of 0.00 levels on radv and 0.00 on
+/// lavapipe, the recapture sabotage included. Two is `crcbl_golden::Tolerance::RASTERISER`'s allowance, which is
+/// the least this may be without asserting bit-equality across a re-capture.
+const SLAB_KEPT_LEVELS: f32 = 2.0;
+
+/// **The slab a scroll exposes is re-captured, and the probes it did not expose
+/// are left where they were.**
+///
+/// `docs/plan/50-irradiance-probes.md`'s recapture on the device. The fixture
+/// captures two probes on the `+X` side of a divider and then takes one whole
+/// probe step back, which stands the red probe a quarter unit from the divider's
+/// far face and leaves the green one exactly where it was.
+///
+/// Three readings, and no two of them can be satisfied by the same mistake:
+///
+/// * The floor **under** the arrived probe carries its red, which says the step
+///   happened and that row's map is one the fragment can be lit through.
+/// * The band **past the divider** carries none of that red, which says the map
+///   was taken again where the probe now stands. The map it held until then was
+///   captured three units further out with nothing in the way, and reports open
+///   space in exactly this direction — so a scroll that did not re-capture
+///   lights this band through a wall.
+/// * The band over the probe that **stayed** reads the same as it did before the
+///   step, which says the step moved one slab rather than the level.
+///
+/// # How it was shown to fail
+///
+/// By making `crcbl_render::probe_capture::recapture` return `Ok(())` before it
+/// records anything — the scroll without its slab — and running this on radv,
+/// which reported
+///
+/// > the band past the divider carries 199.50 level(s) of the arrived probe's
+/// > red, past the 8 this allows — the row the step exposed is holding the map
+/// > it was captured with three units further out, which sees no wall in this
+/// > direction
+///
+/// with the other two readings still green, since the arrived probe lights the
+/// floor beneath it either way and the probe that stayed was never touched.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_scroll_recaptures_the_slab_it_exposed_and_nothing_else() {
+    crcbl_core::log::init_logging();
+
+    // What the step is about, asserted on the host first: one row exposed out of
+    // two, and the other standing where it stood. A fixture whose follow moved
+    // the level whole would satisfy every reading below for the wrong reason.
+    let volume = crcbl::screenshot::probe_slab_grid().volume;
+    let mut moved = volume;
+    let exposed = moved.follow(crcbl::screenshot::slab_follow_point());
+    assert_eq!(
+        exposed,
+        vec![1],
+        "the fixture's step must expose row 1 alone, which is the red probe"
+    );
+    assert_eq!(
+        moved.position(0, [1, 0, 0]),
+        volume.position(0, [0, 0, 0]),
+        "the probe that stayed must stand where it stood"
+    );
+    assert_eq!(moved.row(0, [1, 0, 0]), volume.row(0, [0, 0, 0]));
+
+    let draw = |follow: bool| {
+        let setup = OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, |device, queue, format| {
+            crcbl::screenshot::probe_slab_forward(device, queue, format, follow)
+        })
+        .unwrap_or_else(|why| panic!("a GPU backend opens for the probe slab scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format)).expect("one image")
+    };
+    let before = draw(false);
+    let after = draw(true);
+
+    let arrived = slab_pixel(crcbl::screenshot::SLAB_ARRIVED_AT, 0.0);
+    let across = slab_pixel(SLAB_BAND_AT, 0.0);
+    let stayed = slab_pixel(SLAB_KEPT_AT, 0.0);
+
+    let lit = block_channel(&after, arrived, PROBE_BAND, 0);
+    let leaked = block_channel(&after, across, PROBE_BAND, 0);
+    let kept = (0..3).fold(0.0f32, |worst, channel| {
+        worst.max(
+            (block_channel(&after, stayed, PROBE_BAND, channel)
+                - block_channel(&before, stayed, PROBE_BAND, channel))
+            .abs(),
+        )
+    });
+    eprintln!(
+        "crcbl render e2e: probe slab — the floor under the arrived probe carries {lit:.2} \
+         level(s) of its red, the band past the divider carries {leaked:.2}, and the band over \
+         the probe that stayed moved {kept:.2}"
+    );
+
+    assert!(
+        lit >= SLAB_MIN_LEVELS,
+        "the floor under the arrived probe carries {lit:.2} level(s) of red, under the \
+         {SLAB_MIN_LEVELS} this fixture is built to reach — the step did not happen, or the row \
+         it exposed was captured somewhere it cannot light this floor from"
+    );
+    assert!(
+        leaked <= SLAB_LEAK_LEVELS,
+        "the band past the divider carries {leaked:.2} level(s) of the arrived probe's red, past \
+         the {SLAB_LEAK_LEVELS} this allows — the row the step exposed is holding the map it was \
+         captured with three units further out, which sees no wall in this direction"
+    );
+    assert!(
+        kept <= SLAB_KEPT_LEVELS,
+        "the band over the probe that stayed moved {kept:.2} level(s) across the step, past the \
+         {SLAB_KEPT_LEVELS} this allows — a scroll re-captured or re-addressed a probe it was \
+         supposed to leave alone"
+    );
+}
+
 /// How far the sealed band may sit from the plain trilinear read, in levels of
 /// 255.
 ///

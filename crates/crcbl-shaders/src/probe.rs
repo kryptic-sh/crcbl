@@ -128,18 +128,21 @@ const _: () = assert!(
 /// Bytes the grid header occupies inside
 /// [`FrameUniforms`](crate::mesh::FrameUniforms).
 ///
-/// Two `uint4` — the counts and the level row — and then a `float4` origin and
-/// a `float4` reciprocal spacing for each of [`PROBE_LEVELS`]. `std140` gives
-/// each of them one sixteen-byte row, and the total is already a multiple of
-/// sixteen, so there is no tail padding to write.
+/// Two `uint4` — the counts and the level row — and then a `float4` origin, a
+/// `float4` reciprocal spacing and a `uint4` scroll offset for each of
+/// [`PROBE_LEVELS`]. `std140` gives each of them one sixteen-byte row, and the
+/// total is already a multiple of sixteen, so there is no tail padding to write.
 ///
 /// **The per-level rows are uploaded rather than derived in the shader**, which
 /// is the whole of why they are here: where each level stands and how far apart
 /// its probes are is one rule, [`ProbeVolume::level_origin`] and
 /// [`ProbeVolume::level_inv_spacing`] are where it is written, and a fragment
 /// reads the answer instead of recomputing it. `probe_capture`'s octahedral
-/// direction table is the precedent.
-pub const PROBE_VOLUME_SIZE: usize = 32 + 2 * 16 * PROBE_LEVELS;
+/// direction table is the precedent. The scroll offset is there on the same
+/// terms and one more: [`ProbeVolume::level_offset`] has already reduced it into
+/// `0..count`, so the shader's wrap is one compare and one subtract rather than
+/// a signed remainder.
+pub const PROBE_VOLUME_SIZE: usize = 32 + 3 * 16 * PROBE_LEVELS;
 
 /// The irradiance transfer coefficient of the constant band — Ramamoorthi &
 /// Hanrahan 2001's `Â₀`, which is `π`.
@@ -361,6 +364,30 @@ impl GpuProbe {
     }
 }
 
+/// One axis of the toroidal wrap: cell `cell` of a level whose scroll offset on
+/// this axis is `offset` stands in row `cell + offset`, brought back inside
+/// `0..count` — **the mirror of `probe_wrap` in `shaders/mesh.slang`**.
+///
+/// One compare and one subtract rather than a remainder, and that is exact
+/// rather than cheap: [`ProbeVolume::level_offset`] has already reduced the
+/// offset below the count and a cell is below it by construction, so the sum is
+/// under twice the count and one subtraction is the whole modulo. An axis with
+/// no probes has a count of zero, a cell of zero and an offset of zero, and
+/// answers zero.
+fn wrap(cell: u32, offset: u32, count: u32) -> u32 {
+    let at = cell.saturating_add(offset);
+    if at >= count { at - count } else { at }
+}
+
+/// How many whole probe steps each clipmap level has scrolled, on each axis —
+/// [`ProbeVolume::steps`]'s type.
+///
+/// One row per level the header has room for rather than per level a volume
+/// actually has, so the array is the same shape whatever
+/// [`ProbeVolume::level_count`] answers and a level that gained a row does not
+/// change this type. The rows past the live levels are read by nothing.
+pub type ProbeSteps = [[i32; 3]; PROBE_LEVELS];
+
 /// The clipmap the probes are laid out on, matching the `probe_*` members of
 /// `struct FrameUniforms` in `shaders/mesh.slang`.
 ///
@@ -387,6 +414,17 @@ impl GpuProbe {
 /// keeps one layer per row across every level, so a capture covers the whole
 /// clipmap in the call it always made.
 ///
+/// # It scrolls, and a scroll moves as few rows as it can
+///
+/// A level re-centres on a tracked point by whole probe steps —
+/// [`follow`](Self::follow) — and the addressing wraps around it rather than
+/// moving anything: [`row`](Self::row) adds that level's
+/// [`level_offset`](Self::level_offset) to a cell and brings it back inside the
+/// counts, so a level that stepped `k` probes along an axis has `k` slabs
+/// holding a probe that is somewhere new and the rest still naming the probes
+/// they held. [`exposed`](Self::exposed) is which, and it is what
+/// `crcbl_render::probe_capture` re-captures.
+///
 /// # One level is the uniform grid this used to be
 ///
 /// A volume of one level has nothing coarser to blend towards, so it clamps at
@@ -401,7 +439,9 @@ impl GpuProbe {
 /// anywhere selecting it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ProbeVolume {
-    /// Where probe `(0, 0, 0)` of **level 0**, the finest, is in world space.
+    /// Where probe `(0, 0, 0)` of **level 0**, the finest, would be in world
+    /// space with the volume where it was authored — see
+    /// [`steps`](Self::steps), which moves it.
     pub origin: [f32; 3],
     /// One over **level 0**'s grid spacing on each axis, in world units.
     ///
@@ -427,6 +467,25 @@ pub struct ProbeVolume {
     /// reserving rows the header has no room to name —
     /// [`level_count`](Self::level_count) is the one place that is decided.
     pub levels: u32,
+    /// How many **whole probe steps** each level has scrolled from where
+    /// [`origin`](Self::origin) authored it, on each axis.
+    ///
+    /// `docs/plan/50-irradiance-probes.md`'s scrolling: a level re-centres on a
+    /// tracked point by moving a whole number of its own probe spacings, so the
+    /// probes that stay inside it stand at exactly the world positions they
+    /// stood at before — the arithmetic is `origin + step · spacing` and a step
+    /// is an integer, so nothing rounds. [`level_origin`](Self::level_origin) is
+    /// where it moves the level and [`row`](Self::row) is where it wraps the
+    /// rows around it.
+    ///
+    /// **Whole steps are what make it toroidal.** A level that moved by a
+    /// fraction of a spacing would put every probe somewhere new and invalidate
+    /// the whole level; moving by `k` steps leaves `count - k` of them exactly
+    /// where they were, addressable at the rows they already occupy.
+    ///
+    /// [`Default`]'s zeroes are the volume that has never scrolled, and its
+    /// every row is where it was before this field existed.
+    pub steps: ProbeSteps,
 }
 
 impl ProbeVolume {
@@ -499,17 +558,76 @@ impl ProbeVolume {
             .map(|inv| if inv == 0.0 { 0.0 } else { 1.0 / inv })
     }
 
+    /// How many whole probe steps `level` has scrolled on each axis —
+    /// [`steps`](Self::steps)' row for it, held to the levels the volume has.
+    #[must_use]
+    pub fn level_steps(&self, level: u32) -> [i32; 3] {
+        self.steps[level.min(self.level_count() - 1) as usize]
+    }
+
+    /// The same steps reduced into `0..count`, which is what the header carries
+    /// and what [`row`](Self::row) wraps a cell by.
+    ///
+    /// **Reduced here rather than in the shader**, because `(c + s) mod n` is
+    /// `(c + (s mod n)) mod n` and a cell is already inside `0..count`: with the
+    /// offset reduced too, the sum is under `2·count` and the wrap the shader
+    /// runs is one compare and one subtract instead of a signed remainder. An
+    /// axis with no probes has nothing to reduce against and answers zero.
+    #[must_use]
+    pub fn level_offset(&self, level: u32) -> [u32; 3] {
+        let steps = self.level_steps(level);
+        let mut offset = [0u32; 3];
+        for axis in 0..3 {
+            let count = self.counts[axis];
+            if count == 0 {
+                continue;
+            }
+            // `rem_euclid` rather than `%`, because a level that scrolled
+            // backwards has a negative step and a negative row is not a row.
+            offset[axis] = (steps[axis].rem_euclid(count as i32)) as u32;
+        }
+        offset
+    }
+
+    /// Which row of the probe table the probe at cell `cell` of `level` stands
+    /// in — **the host mirror of `probe_row` in `shaders/mesh.slang`**.
+    ///
+    /// The level's own range of the table, and within it the cell wrapped by
+    /// [`level_offset`](Self::level_offset): that wrap is the whole of the
+    /// toroidal addressing. A level that has scrolled `k` steps along an axis
+    /// has moved `k` of its rows to the far side and left the others naming the
+    /// probes they already held, so a scroll rewrites `k` slabs rather than the
+    /// level — see [`exposed`](Self::exposed), which is that rule.
+    ///
+    /// The row is **not** clamped against [`total`](Self::total) here; the
+    /// shader clamps its own fetch, and a caller filling the table wants to know
+    /// that it asked about a row that is not there rather than to be handed the
+    /// last one.
+    #[must_use]
+    pub fn row(&self, level: u32, cell: [u32; 3]) -> u32 {
+        let offset = self.level_offset(level);
+        let mut wrapped = [0u32; 3];
+        for axis in 0..3 {
+            wrapped[axis] = wrap(cell[axis], offset[axis], self.counts[axis]);
+        }
+        self.level_row(level).saturating_add(
+            (wrapped[2] * self.counts[1] + wrapped[1]) * self.counts[0] + wrapped[0],
+        )
+    }
+
     /// Where probe `(0, 0, 0)` of `level` is, in world space.
     ///
     /// Every level is centred on level 0's centre and level `k` spans `2^k`
     /// times as much of the world, so a coarser level's first probe stands
-    /// further out by half of the extent it gained.
+    /// further out by half of the extent it gained — and then
+    /// [`steps`](Self::steps) moves the whole level by a whole number of its own
+    /// spacings.
     ///
     /// **Written as an offset from [`origin`](Self::origin) rather than as a
-    /// centre minus a half-extent**, so that level 0 returns that field
-    /// *exactly*: the offset it adds is a multiplication by zero, where naming
-    /// the centre and subtracting it back would round twice. That exactness is
-    /// what makes a one-level volume the grid it was.
+    /// centre minus a half-extent**, so that an unscrolled level 0 returns that
+    /// field *exactly*: both offsets it adds are a multiplication by zero, where
+    /// naming the centre and subtracting it back would round twice. That
+    /// exactness is what makes a one-level volume the grid it was.
     #[must_use]
     pub fn level_origin(&self, level: u32) -> [f32; 3] {
         let level = level.min(self.level_count() - 1);
@@ -517,12 +635,146 @@ impl ProbeVolume {
         // of level 0's, and negative because a wider level starts further back.
         let gained = 1.0 - (level as f32).exp2();
         let spacing = self.level_spacing(0);
+        let scrolled = self.level_spacing(level);
+        let steps = self.level_steps(level);
         let mut at = [0.0f32; 3];
         for axis in 0..3 {
             let last = self.counts[axis].saturating_sub(1) as f32;
-            at[axis] = self.origin[axis] + 0.5 * last * spacing[axis] * gained;
+            at[axis] = self.origin[axis]
+                + 0.5 * last * spacing[axis] * gained
+                + steps[axis] as f32 * scrolled[axis];
         }
         at
+    }
+
+    /// The point every level is centred on when nothing has scrolled — the
+    /// place [`steps_towards`](Self::steps_towards) measures a tracked point
+    /// against.
+    ///
+    /// One point for the whole clipmap rather than one per level: a level's
+    /// authored origin stands back by half the extent it gained and its own
+    /// half-extent brings it forward by exactly as much, so every level's
+    /// authored centre is this.
+    #[must_use]
+    pub fn centre(&self) -> [f32; 3] {
+        let spacing = self.level_spacing(0);
+        let mut at = [0.0f32; 3];
+        for axis in 0..3 {
+            let last = self.counts[axis].saturating_sub(1) as f32;
+            at[axis] = self.origin[axis] + 0.5 * last * spacing[axis];
+        }
+        at
+    }
+
+    /// The [`steps`](Self::steps) that put every level's centre as near
+    /// `point` as a whole probe step of that level allows.
+    ///
+    /// **The nearest whole step, not the one that merely contains the point.**
+    /// Rounding is what makes the follow settle: a rule that stepped only when
+    /// the point left the level would leave it hard against one face, and the
+    /// next step back would be a scroll for a hand's width of movement.
+    ///
+    /// An axis a level cannot step along — no probes on it, or no spacing —
+    /// keeps its zero rather than dividing by nothing, which is the same axis
+    /// [`level_reach`](Self::level_reach) declines to measure. A `point` that is
+    /// not finite steps nowhere, for the same reason: a `NaN` compared against a
+    /// bound is neither inside nor outside it.
+    #[must_use]
+    pub fn steps_towards(&self, point: [f32; 3]) -> ProbeSteps {
+        let centre = self.centre();
+        let mut steps = ProbeSteps::default();
+        for level in 0..self.level_count() {
+            let spacing = self.level_spacing(level);
+            for axis in 0..3 {
+                if self.counts[axis] == 0 || spacing[axis] == 0.0 {
+                    continue;
+                }
+                let want = (point[axis] - centre[axis]) / spacing[axis];
+                if !want.is_finite() {
+                    continue;
+                }
+                // `as` saturates at the ends of `i32`, which is the honest
+                // answer for a point a billion spacings away: the level is
+                // wholly new either way, and `exposed` says so.
+                steps[level as usize][axis] = want.round() as i32;
+            }
+        }
+        steps
+    }
+
+    /// The rows a move from this volume's [`steps`](Self::steps) to `steps`
+    /// leaves holding a probe that is not where that row's probe used to be.
+    ///
+    /// **The invalidation rule, and the one place it is written.** A level that
+    /// steps `k` probes along one axis covers `k` world positions it did not
+    /// cover before; each of them wraps onto a row that held the probe `count`
+    /// steps behind it, so exactly `k` **slabs** — `k · counts.y · counts.z`
+    /// rows for a step along `x` — carry a probe whose visibility map is about
+    /// somewhere else, and the other `count - k` slabs are addressable at the
+    /// rows they already had. A step on more than one axis exposes the union of
+    /// its axes' slabs, because a probe is new if any one of its axes is.
+    ///
+    /// A step of `count` or more along an axis exposes that level whole, which
+    /// is the same arithmetic rather than a special case: no world index of the
+    /// new box is in the old one.
+    ///
+    /// The rows come back in the new box's own cell order, level by level, and
+    /// no row appears twice — a cell is one row.
+    #[must_use]
+    pub fn exposed(&self, steps: &ProbeSteps) -> Vec<u32> {
+        let mut rows = Vec::new();
+        let moved = Self {
+            steps: *steps,
+            ..*self
+        };
+        for level in 0..self.level_count() {
+            let before = self.level_steps(level);
+            let after = moved.level_steps(level);
+            let mut delta = [0i32; 3];
+            for axis in 0..3 {
+                delta[axis] = after[axis].saturating_sub(before[axis]);
+            }
+            if delta == [0, 0, 0] {
+                continue;
+            }
+            for z in 0..self.counts[2] {
+                for y in 0..self.counts[1] {
+                    for x in 0..self.counts[0] {
+                        let cell = [x, y, z];
+                        // The cell this probe would have been in before the
+                        // move. Outside the old box on any axis is a probe the
+                        // level did not have, whatever the other two say.
+                        let kept = (0..3).all(|axis| {
+                            let was = i64::from(cell[axis]) + i64::from(delta[axis]);
+                            was >= 0 && was < i64::from(self.counts[axis])
+                        });
+                        if !kept {
+                            rows.push(moved.row(level, cell));
+                        }
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    /// Re-centres every level on `point` by whole probe steps, and answers the
+    /// rows that move — [`steps_towards`](Self::steps_towards) and
+    /// [`exposed`](Self::exposed) applied together.
+    ///
+    /// An empty answer is a volume that did not move, which is the ordinary
+    /// frame: the tracked point has to travel half a probe spacing before the
+    /// nearest whole step changes at all.
+    ///
+    /// **It moves the header and nothing else.** The rows the answer names hold
+    /// a visibility map about where their probe used to stand until something
+    /// captures them again; `crcbl_render::probe_capture` is what does that, and
+    /// this returning the list is what tells it which.
+    pub fn follow(&mut self, point: [f32; 3]) -> Vec<u32> {
+        let steps = self.steps_towards(point);
+        let rows = self.exposed(&steps);
+        self.steps = steps;
+        rows
     }
 
     /// Where probe `cell` of `level` stands, in world space.
@@ -622,10 +874,11 @@ impl ProbeVolume {
     /// order.
     ///
     /// The counts and their total, the level count and the rows one level
-    /// holds, and then an origin and a reciprocal spacing per level — every
-    /// three-component row leaving its fourth lane as the zero the block starts
-    /// as. The rows past [`level_count`](Self::level_count) stay zeroed; the
-    /// shader clamps its level against the count and never reads them.
+    /// holds, and then an origin, a reciprocal spacing and a scroll offset per
+    /// level — every three-component row leaving its fourth lane as the zero the
+    /// block starts as. The rows past [`level_count`](Self::level_count) stay
+    /// zeroed; the shader clamps its level against the count and never reads
+    /// them.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; PROBE_VOLUME_SIZE] {
         let mut bytes = [0u8; PROBE_VOLUME_SIZE];
@@ -666,6 +919,22 @@ impl ProbeVolume {
                 self.level_inv_spacing(level)
             } else {
                 [0.0; 3]
+            };
+            for value in row {
+                bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                at += 4;
+            }
+            at += 4;
+        }
+        // The scroll offsets, already reduced into `0..count` — see
+        // [`level_offset`](Self::level_offset), which is why the shader's wrap
+        // is a compare and a subtract.
+        for level in 0..PROBE_LEVELS as u32 {
+            let live = level < self.level_count();
+            let row = if live {
+                self.level_offset(level)
+            } else {
+                [0; 3]
             };
             for value in row {
                 bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
@@ -724,7 +993,8 @@ impl WeightedProbe {
 /// that clamp invisible where a finer level ends and a coarser one goes on.
 ///
 /// `probes` is the table in `x`-fastest order within a level and finest level
-/// first — index `level_row(level) + (z · counts.y + y) · counts.x + x`. A row
+/// first, each level's cells wrapped by its own scroll offset —
+/// [`ProbeVolume::row`] is the index. A row
 /// past its end reads as [`GpuProbe::ZERO`], which is what the device sees too:
 /// the table is created with at least one zeroed row, so the degenerate
 /// volume's fetch of row 0 is in bounds there and a scene whose probe count
@@ -765,7 +1035,6 @@ pub fn level_irradiance_at(
     // the shader is reading the answer this is computing.
     let origin = volume.level_origin(level);
     let inv_spacing = volume.level_inv_spacing(level);
-    let first_row = volume.level_row(level);
     let mut cell = [0u32; 3];
     let mut fraction = [0.0f32; 3];
     for axis in 0..3 {
@@ -777,21 +1046,15 @@ pub fn level_irradiance_at(
     }
 
     let corner = |x: u32, y: u32, z: u32| -> WeightedProbe {
-        // In `u64` because the shader's `uint` arithmetic wraps where this
-        // would panic, and a wrapped index is then clamped into the table
-        // below either way.
-        let index = u64::from(first_row)
-            + (u64::from(z) * u64::from(volume.counts[1]) + u64::from(y))
-                * u64::from(volume.counts[0])
-            + u64::from(x);
-        let bound = u64::from(volume.total().saturating_sub(1));
-        let row = index.min(bound);
-        let sh = probes
-            .get(usize::try_from(row).unwrap_or(usize::MAX))
-            .copied()
-            .unwrap_or(GpuProbe::ZERO);
+        // `ProbeVolume::row` is the addressing — the level's range of the table
+        // and the cell wrapped by that level's scroll offset — and the clamp
+        // after it is the shader's own, which makes the fetch a fact about the
+        // table rather than a promise about the header.
+        let bound = volume.total().saturating_sub(1);
+        let row = volume.row(level, [x, y, z]).min(bound);
+        let sh = probes.get(row as usize).copied().unwrap_or(GpuProbe::ZERO);
         let weight = visibility.weight(
-            u32::try_from(row).unwrap_or(u32::MAX),
+            row,
             volume.position(level, [x, y, z]),
             world_position,
             normal,
@@ -915,6 +1178,36 @@ mod tests {
             }
         }
         samples
+    }
+
+    /// The body of the Slang function `signature` declares in `source`, braces
+    /// included — what the two verbatim-copy tests below compare.
+    ///
+    /// # Panics
+    ///
+    /// If `source` does not declare `signature`, or the body never closes.
+    fn slang_body(name: &str, source: &str, signature: &str) -> String {
+        let at = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("{name} does not declare `{signature}`"));
+        let open = source[at..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{name}'s `{signature}` has no body"))
+            + at;
+        let mut depth = 0usize;
+        for (offset, byte) in source[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[open..open + offset + 1].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{name}'s `{signature}` never closes its body")
     }
 
     /// Unit vectors that are not axis-aligned, so a coefficient permuted
@@ -1150,6 +1443,7 @@ mod tests {
             inv_spacing: [1.0; 3],
             counts: [3, 1, 1],
             levels: 1,
+            steps: ProbeSteps::default(),
         };
         let probes: Vec<GpuProbe> = (0..3)
             .map(|n| {
@@ -1231,6 +1525,7 @@ mod tests {
             inv_spacing: [1.0; 3],
             counts: [2, 3, 4],
             levels: 1,
+            steps: ProbeSteps::default(),
         };
         assert_eq!(volume.total(), 24);
         let probes: Vec<GpuProbe> = (0..24)
@@ -1290,13 +1585,22 @@ mod tests {
     /// The clipmap header's rows, at the offsets the shader's block puts them —
     /// including the count lane the shader clamps its fetches against and the
     /// per-level rows it reads instead of deriving.
+    ///
+    /// **Scrolled, and by a different number of steps per level**, so a header
+    /// that wrote one level's offset into another's row, or wrote the signed
+    /// step where the reduced one belongs, is a different byte string rather
+    /// than the same one.
     #[test]
-    fn the_clipmap_header_is_the_counts_the_level_row_and_a_pair_per_level() {
+    fn the_clipmap_header_is_the_counts_the_level_row_and_a_trio_per_level() {
+        let mut steps = ProbeSteps::default();
+        steps[0] = [1, -1, 4];
+        steps[1] = [0, 2, -5];
         let volume = ProbeVolume {
             origin: [1.0, 2.0, 3.0],
             inv_spacing: [0.25, 0.5, 0.75],
             counts: [3, 3, 3],
             levels: 2,
+            steps,
         };
         let bytes = volume.to_bytes();
         assert_eq!(bytes.len(), PROBE_VOLUME_SIZE);
@@ -1360,13 +1664,54 @@ mod tests {
             );
         }
 
-        // **Level 0 is the fields it was given, bit for bit**, which is what
-        // makes a one-level volume the uniform grid this type used to be.
+        // The scroll offsets, reduced into `0..count` — a level that stepped
+        // backwards writes the row it wrapped onto rather than a negative one,
+        // which is the whole reason the reduction is on this side.
+        let offsets = inv_spacings + 16 * PROBE_LEVELS;
+        assert_eq!(
+            [word_at(offsets), word_at(offsets + 4), word_at(offsets + 8)],
+            [1, 2, 1],
+            "level 0 stepped [1, -1, 4] over counts of three"
+        );
         assert_eq!(
             [
-                float_at(origins),
-                float_at(origins + 4),
-                float_at(origins + 8)
+                word_at(offsets + 16),
+                word_at(offsets + 20),
+                word_at(offsets + 24)
+            ],
+            [0, 2, 1],
+            "level 1 stepped [0, 2, -5] over counts of three"
+        );
+        for level in 0..PROBE_LEVELS as u32 {
+            let row = offsets + 16 * level as usize;
+            let live = level < volume.level_count();
+            assert_eq!(
+                [word_at(row), word_at(row + 4), word_at(row + 8)],
+                if live {
+                    volume.level_offset(level)
+                } else {
+                    [0; 3]
+                },
+                "level {level}'s scroll offset"
+            );
+            assert_eq!(word_at(row + 12), 0, "an offset's fourth lane is padding");
+        }
+
+        // **Level 0 is the fields it was given, bit for bit**, once the scroll
+        // is taken back out — which is what makes an unscrolled one-level volume
+        // the uniform grid this type used to be.
+        let still = ProbeVolume {
+            steps: ProbeSteps::default(),
+            ..volume
+        };
+        let unscrolled = still.to_bytes();
+        let float_of =
+            |at: usize| f32::from_le_bytes(unscrolled[at..at + 4].try_into().expect("4"));
+        assert_eq!(
+            [
+                float_of(origins),
+                float_of(origins + 4),
+                float_of(origins + 8)
             ],
             volume.origin
         );
@@ -1376,7 +1721,8 @@ mod tests {
                 float_at(inv_spacings + 4),
                 float_at(inv_spacings + 8)
             ],
-            volume.inv_spacing
+            volume.inv_spacing,
+            "a scroll moves a level's origin and never its spacing"
         );
 
         assert_eq!(
@@ -1418,6 +1764,7 @@ mod tests {
             inv_spacing: [1.0, 0.0, 0.0],
             counts: [counts, 1, 1],
             levels,
+            steps: ProbeSteps::default(),
         };
         let mut rows = Vec::with_capacity(volume.total() as usize);
         for level in 0..volume.level_count() {
@@ -1443,6 +1790,7 @@ mod tests {
             inv_spacing: [0.5, 0.25, 2.0],
             counts: [5, 3, 9],
             levels: 4,
+            steps: ProbeSteps::default(),
         };
         assert_eq!(volume.level_origin(0), volume.origin);
         assert_eq!(volume.level_inv_spacing(0), volume.inv_spacing);
@@ -1659,6 +2007,7 @@ mod tests {
             "uint4 probe_levels;",
             "float4 probe_level_origin[PROBE_LEVELS];",
             "float4 probe_level_inv_spacing[PROBE_LEVELS];",
+            "uint4 probe_level_offset[PROBE_LEVELS];",
         ];
         for (name, source) in [
             ("mesh.slang", include_str!("../shaders/mesh.slang")),
@@ -1748,29 +2097,7 @@ mod tests {
         ] {
             let bodies: Vec<(&str, String)> = [("mesh.slang", mesh), ("ssr.slang", ssr)]
                 .into_iter()
-                .map(|(name, source)| {
-                    let at = source
-                        .find(signature)
-                        .unwrap_or_else(|| panic!("{name} does not declare `{signature}`"));
-                    let open = source[at..]
-                        .find('{')
-                        .unwrap_or_else(|| panic!("{name}'s `{signature}` has no body"))
-                        + at;
-                    let mut depth = 0usize;
-                    for (offset, byte) in source[open..].bytes().enumerate() {
-                        match byte {
-                            b'{' => depth += 1,
-                            b'}' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    return (name, source[open..open + offset + 1].to_string());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    panic!("{name}'s `{signature}` never closes its body")
-                })
+                .map(|(name, source)| (name, slang_body(name, source, signature)))
                 .collect();
             assert_eq!(
                 bodies[0].1, bodies[1].1,
@@ -1779,5 +2106,372 @@ mod tests {
                 bodies[0].0, bodies[1].0
             );
         }
+    }
+
+    /// **Both shaders wrap a scrolled cell with the body [`wrap`] mirrors**, to
+    /// the character.
+    ///
+    /// The wrap is the whole of the toroidal addressing: drop it and every
+    /// fragment of a scrolled level reads the row of the probe that *used* to
+    /// stand there, which is a picture rather than an error. Nothing about the
+    /// compile catches that, and neither does a golden of an unscrolled scene,
+    /// so what pins it is this text and the device sweep
+    /// `crates/crcbl/tests/render_e2e.rs`'s
+    /// `a_scrolled_volume_reads_the_rows_the_mirror_does` runs beside it.
+    ///
+    /// # How it was shown to fail
+    ///
+    /// By deleting the compare from `mesh.slang`'s body — `return at;` — and
+    /// running this, which reported
+    ///
+    /// > mesh.slang's `uint probe_wrap(uint cell, uint offset, uint count)` is
+    /// > not the body `crcbl_shaders::probe::wrap` mirrors; the clipmap's
+    /// > toroidal addressing has drifted
+    ///
+    /// with the two bodies printed beside it; and by weakening it to
+    /// `at > count`, the off-by-one that leaves one cell of every axis reading
+    /// its neighbour's row, which this reported against the mirrored body in the
+    /// same words.
+    #[test]
+    fn the_shaders_wrap_a_scrolled_cell_the_way_this_module_does() {
+        let signature = "uint probe_wrap(uint cell, uint offset, uint count)";
+        // The body [`wrap`] is the mirror of, written here rather than read out
+        // of either file: a drift the two shaders shared would otherwise agree
+        // with itself.
+        let mirrored =
+            "{\n    uint at = cell + offset;\n    return at >= count ? at - count : at;\n}";
+        for (name, source) in [
+            ("mesh.slang", include_str!("../shaders/mesh.slang")),
+            ("ssr.slang", include_str!("../shaders/ssr.slang")),
+        ] {
+            assert_eq!(
+                slang_body(name, source, signature),
+                mirrored,
+                "{name}'s `{signature}` is not the body `crcbl_shaders::probe::wrap` \
+                 mirrors; the clipmap's toroidal addressing has drifted"
+            );
+        }
+    }
+
+    /// **A row is the cell plus the level's scroll offset, modulo the counts**
+    /// — swept over every cell of a small level and over offsets that reach
+    /// well past the counts in both directions.
+    ///
+    /// [`ProbeVolume::row`] spends one compare where a remainder would do, and
+    /// this is what says the two are the same function: the expected value here
+    /// is `rem_euclid` of the *unreduced* step, so a reduction that dropped a
+    /// sign or a wrap that fired one cell early is a different row.
+    #[test]
+    fn a_scrolled_cell_lands_at_its_index_modulo_the_counts() {
+        let counts = [3u32, 4, 5];
+        for step in [-13i32, -7, -5, -4, -1, 0, 1, 3, 4, 5, 9, 20] {
+            let mut steps = ProbeSteps::default();
+            // A different step per axis off one sweep value, so a `row` that
+            // used the `x` offset on every axis is a different answer.
+            steps[0] = [step, step + 2, step - 3];
+            let volume = ProbeVolume {
+                origin: [0.0; 3],
+                inv_spacing: [1.0; 3],
+                counts,
+                levels: 1,
+                steps,
+            };
+            for z in 0..counts[2] {
+                for y in 0..counts[1] {
+                    for x in 0..counts[0] {
+                        let cell = [x, y, z];
+                        let mut wrapped = [0u32; 3];
+                        for axis in 0..3 {
+                            let index = i64::from(cell[axis]) + i64::from(steps[0][axis]);
+                            wrapped[axis] = index.rem_euclid(i64::from(counts[axis])) as u32;
+                        }
+                        let expected =
+                            (wrapped[2] * counts[1] + wrapped[1]) * counts[0] + wrapped[0];
+                        assert_eq!(
+                            volume.row(0, cell),
+                            expected,
+                            "cell {cell:?} of a level stepped {:?} landed in the wrong row",
+                            steps[0]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A step of `k` probes along one axis exposes exactly `k` slabs, and
+    /// every other probe is still addressable at the row it already had.**
+    ///
+    /// The invalidation rule, both halves, because either alone passes for the
+    /// wrong reason: a rule that named every row would satisfy the first half
+    /// and re-capture the level, and a rule that named none would satisfy the
+    /// second and light the room with maps about somewhere else.
+    ///
+    /// The retained half is checked against the volume *before* the step: the
+    /// probe now at cell `c` is the probe that was at cell `c + k`, and the
+    /// claim is that it stands in the same place and in the same row. That is
+    /// what makes the recapture a slab rather than a level.
+    ///
+    /// # How it was shown to fail
+    ///
+    /// By widening [`ProbeVolume::exposed`]'s retained test to `was >= -1` — one
+    /// slab too few, the departing slab counted as one that stayed — and running
+    /// this, which reported
+    ///
+    /// > a step of -2 along axis 0 exposed 20 row(s), and the 2 slab(s) it moves
+    /// > are 40 probe(s) of this level
+    ///
+    /// and, with the widening in the other direction (`was > 0`), the same
+    /// assertion the other way round — 60 row(s) against 40. The retained half
+    /// was shown by taking the world position check to the unscrolled volume,
+    /// which reported the probe that stayed standing a spacing from where it had
+    /// been.
+    #[test]
+    fn a_step_exposes_its_own_slabs_and_leaves_the_rest_where_they_were() {
+        let counts = [3u32, 4, 5];
+        let before = ProbeVolume {
+            origin: [10.0, 20.0, 30.0],
+            inv_spacing: [1.0 / 2.0, 1.0 / 4.0, 1.0 / 8.0],
+            counts,
+            levels: 1,
+            steps: ProbeSteps::default(),
+        };
+        let slab = [
+            counts[1] * counts[2],
+            counts[0] * counts[2],
+            counts[0] * counts[1],
+        ];
+        for axis in 0..3usize {
+            for step in [-9i32, -2, -1, 1, 2, 9] {
+                let mut steps = ProbeSteps::default();
+                steps[0][axis] = step;
+                let rows = before.exposed(&steps);
+                let slabs = step.unsigned_abs().min(counts[axis]);
+                assert_eq!(
+                    rows.len() as u32,
+                    slabs * slab[axis],
+                    "a step of {step} along axis {axis} exposed {} row(s), and the {slabs} \
+                     slab(s) it moves are {} probe(s) of this level",
+                    rows.len(),
+                    slabs * slab[axis]
+                );
+                // No row twice, so the count above is a count of probes.
+                let mut seen = rows.clone();
+                seen.sort_unstable();
+                seen.dedup();
+                assert_eq!(seen.len(), rows.len(), "a row was exposed twice");
+
+                let after = ProbeVolume { steps, ..before };
+                let exposed: std::collections::BTreeSet<u32> = rows.into_iter().collect();
+                for z in 0..counts[2] {
+                    for y in 0..counts[1] {
+                        for x in 0..counts[0] {
+                            let cell = [x, y, z];
+                            let row = after.row(0, cell);
+                            if exposed.contains(&row) {
+                                continue;
+                            }
+                            // The cell this probe stood in before the step.
+                            let mut was = cell;
+                            was[axis] = u32::try_from(i64::from(cell[axis]) + i64::from(step))
+                                .expect("a retained cell is inside the old level");
+                            assert!(
+                                was[axis] < counts[axis],
+                                "cell {cell:?} was kept and its old cell {was:?} is outside \
+                                 the level it was in"
+                            );
+                            assert_eq!(
+                                before.row(0, was),
+                                row,
+                                "the probe now at {cell:?} was at {was:?} and its row moved"
+                            );
+                            assert_eq!(
+                                before.position(0, was),
+                                after.position(0, cell),
+                                "the probe now at {cell:?} was at {was:?} and it moved in world \
+                                 space, so its captured map is about somewhere else"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A step on more than one axis exposes the union of its axes' slabs**,
+    /// which is fewer rows than the sum of them.
+    ///
+    /// The corner probes are in two slabs at once, and a rule that added the
+    /// axes rather than taking their union would name them twice — which the
+    /// device would then capture twice, and which the `dedup` above would hide
+    /// if this case were never asked.
+    #[test]
+    fn a_step_on_two_axes_exposes_their_union() {
+        let counts = [4u32, 4, 4];
+        let volume = ProbeVolume {
+            origin: [0.0; 3],
+            inv_spacing: [1.0; 3],
+            counts,
+            levels: 1,
+            steps: ProbeSteps::default(),
+        };
+        let mut steps = ProbeSteps::default();
+        steps[0] = [1, 2, 0];
+        let rows = volume.exposed(&steps);
+        // The complement is the box of probes inside the old level on both
+        // moved axes: 3 × 2 × 4.
+        let kept = (counts[0] - 1) * (counts[1] - 2) * counts[2];
+        assert_eq!(
+            rows.len() as u32,
+            counts[0] * counts[1] * counts[2] - kept,
+            "a step of [1, 2, 0] over a 4×4×4 level keeps a 3×2×4 box"
+        );
+        let summed = counts[1] * counts[2] + 2 * counts[0] * counts[2];
+        assert!(
+            (rows.len() as u32) < summed,
+            "a step of [1, 2, 0] exposed {} row(s), which is the {summed} its two axes' \
+             slabs come to when the corners they share are counted twice",
+            rows.len()
+        );
+    }
+
+    /// **A whole level's worth of steps exposes the whole level**, and so does
+    /// any step past it — the same arithmetic rather than a special case.
+    #[test]
+    fn a_step_past_the_level_exposes_all_of_it() {
+        let counts = [3u32, 3, 3];
+        let volume = ProbeVolume {
+            origin: [0.0; 3],
+            inv_spacing: [1.0; 3],
+            counts,
+            levels: 2,
+            steps: ProbeSteps::default(),
+        };
+        for step in [3i32, 4, 100, -3, -50] {
+            let mut steps = ProbeSteps::default();
+            steps[0][0] = step;
+            assert_eq!(
+                volume.exposed(&steps).len() as u32,
+                volume.per_level(),
+                "a step of {step} over three probes left something addressable"
+            );
+        }
+    }
+
+    /// **The follow re-centres every level on the point, by whole steps of that
+    /// level's own spacing** — and a level twice as coarse takes half as many.
+    ///
+    /// The claim that makes the scroll toroidal at all: the centre lands within
+    /// half a spacing of the point, which is the nearest a whole step can get,
+    /// and a coarser level is coarser rather than merely further.
+    #[test]
+    fn a_follow_centres_each_level_within_half_a_step_of_the_point() {
+        let mut volume = ProbeVolume {
+            origin: [0.0; 3],
+            inv_spacing: [1.0 / 2.0, 1.0, 1.0 / 4.0],
+            counts: [5, 5, 5],
+            levels: 3,
+            steps: ProbeSteps::default(),
+        };
+        let authored = volume.centre();
+        for point in [
+            [0.0f32, 0.0, 0.0],
+            [1.0, -3.0, 17.0],
+            [-40.0, 8.5, -0.75],
+            [123.0, -64.0, 250.0],
+        ] {
+            volume.follow(point);
+            for level in 0..volume.level_count() {
+                let spacing = volume.level_spacing(level);
+                // The level's own centre, which is its origin plus half its
+                // extent — the same point `centre` names before any scroll.
+                let mut at = [0.0f32; 3];
+                let origin = volume.level_origin(level);
+                for axis in 0..3 {
+                    at[axis] = origin[axis]
+                        + 0.5 * (volume.counts[axis].saturating_sub(1) as f32) * spacing[axis];
+                }
+                for axis in 0..3 {
+                    assert!(
+                        (at[axis] - point[axis]).abs() <= 0.5 * spacing[axis] + 1e-4,
+                        "level {level} centred at {at:?} for a point of {point:?}, which is \
+                         further than half its spacing of {spacing:?}"
+                    );
+                    // And the move is a whole number of steps off the authored
+                    // centre, which is what leaves the rows that stayed alone.
+                    let moved = (at[axis] - authored[axis]) / spacing[axis];
+                    assert!(
+                        (moved - moved.round()).abs() < 1e-3,
+                        "level {level} moved {moved} steps along axis {axis}, which is not whole"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A volume that has not moved exposes nothing**, which is the ordinary
+    /// frame — and the reason a follow every frame costs a comparison rather
+    /// than a capture.
+    #[test]
+    fn a_follow_that_does_not_move_exposes_nothing() {
+        let mut volume = ProbeVolume {
+            origin: [0.0; 3],
+            inv_spacing: [1.0; 3],
+            counts: [4, 4, 4],
+            levels: 2,
+            steps: ProbeSteps::default(),
+        };
+        let point = [1.7f32, -0.2, 0.9];
+        assert!(
+            !volume.follow(point).is_empty(),
+            "the first follow moves it"
+        );
+        let settled = volume.steps;
+        assert!(
+            volume.follow(point).is_empty(),
+            "following the same point twice re-captured the level"
+        );
+        assert_eq!(volume.steps, settled);
+        // And a point a fifth of a spacing further along does not move it
+        // either, which is what stops a walking camera scrolling every frame:
+        // the level's centre sits 0.2 of a spacing from the point and this
+        // takes it to 0.4, still the same nearest whole step.
+        assert!(
+            volume
+                .follow([point[0] + 0.2, point[1], point[2]])
+                .is_empty(),
+            "a fifth of a spacing re-captured the level"
+        );
+    }
+
+    /// **An unscrolled volume is the volume it was**, row for row and place for
+    /// place — the claim every golden blessed before the scroll existed rests
+    /// on.
+    #[test]
+    fn an_unscrolled_volume_addresses_what_it_always_did() {
+        let volume = ProbeVolume {
+            origin: [1.5, -2.25, 4.0],
+            inv_spacing: [0.5, 0.25, 2.0],
+            counts: [5, 3, 9],
+            levels: 4,
+            steps: ProbeSteps::default(),
+        };
+        for level in 0..volume.level_count() {
+            assert_eq!(volume.level_offset(level), [0; 3]);
+            for z in 0..volume.counts[2] {
+                for y in 0..volume.counts[1] {
+                    for x in 0..volume.counts[0] {
+                        assert_eq!(
+                            volume.row(level, [x, y, z]),
+                            volume.level_row(level)
+                                + (z * volume.counts[1] + y) * volume.counts[0]
+                                + x,
+                            "level {level} cell ({x}, {y}, {z})"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(volume.level_origin(0), volume.origin);
     }
 }

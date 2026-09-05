@@ -266,6 +266,7 @@ struct FrameUniforms
     uint4 probe_levels;
     float4 probe_level_origin[PROBE_LEVELS];
     float4 probe_level_inv_spacing[PROBE_LEVELS];
+    uint4 probe_level_offset[PROBE_LEVELS];
     /// `docs/plan/25-lod.md`'s selection numbers, as `draw_gen.slang`'s
     /// `DrawGenParams::lod_params` carries them: `x` is how many pixels one unit
     /// of length subtends one unit from the eye, `y` is the budget an unexpanded

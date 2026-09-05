@@ -3523,20 +3523,21 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 1776,
+            FRAME_UNIFORMS_SIZE, 1840,
             "at two cascades, fourteen light tiles, four probe levels and \
              sixteen atlas rectangles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
-        // 224, 240, 256, 272, 1168, 1184, 1200, 1264, 1328, 1344, 1360, 1376,
-        // 1392, 1408, 1424, 1488, 1504, 1760 — and
+        // 224, 240, 256, 272, 1168, 1184, 1200, 1264, 1328, 1392, 1408, 1424,
+        // 1440, 1456, 1472, 1488, 1552, 1568, 1824 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64` beside
         // `%_arr_mat4v4float_int_14`, which is the light array's own length,
-        // `%_arr_v4float_int_4 ArrayStride 16`, which is a probe level array's,
-        // and `%_arr_v4float_int_16 ArrayStride 16`, which is the atlas
-        // rectangles'. Four of the middle rows are the clipmap header's — the
-        // counts, the level row and the two per-level arrays — which this side
-        // writes as one group; then the fog's two and the sky's three.
+        // `%_arr_v4float_int_4 ArrayStride 16` beside `%_arr_v4uint_int_4`,
+        // which are a probe level array's, and `%_arr_v4float_int_16
+        // ArrayStride 16`, which is the atlas rectangles'. Five of the middle
+        // rows are the clipmap header's — the counts, the level row and the
+        // three per-level arrays — which this side writes as one group; then
+        // the fog's two and the sky's three.
         // Read out of `spirv/mesh.spv` with `spirv-dis`, not derived from the
         // arithmetic below — that is the point of them.
         let cascades = 64 * SHADOW_CASCADES;
@@ -3624,6 +3625,7 @@ mod tests {
                 inv_spacing: [63.0, 64.0, 65.0],
                 counts: [2, 3, 4],
                 levels: 1,
+                steps: crate::probe::ProbeSteps::default(),
             },
             lod_params: [70.0, 71.0, 72.0, 73.0],
             fog_params: [80.0, 81.0, 82.0, 83.0],

@@ -35,6 +35,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- The irradiance probe clipmap **scrolls**. `ProbeVolume` carries a per-level
+  whole-probe-step offset (`steps`), `ProbeVolume::follow` re-centres every
+  level on a tracked point by whole steps and reports the rows the move
+  invalidated, and `ForwardRenderer::follow_probe_volume` re-captures exactly
+  those probes' visibility maps and moves the gather's position table with them
+  — a step of `k` probes along an axis rewrites `k` slabs and leaves the rest
+  addressed where they already were. `apps/lantern` follows its camera through
+  `bounce::follow_point`, which holds the volume inside the room. The frame
+  uniform block grows by one `uint4` per clipmap level (`FRAME_UNIFORMS_SIZE`
+  1776 → 1840); an unscrolled volume addresses exactly what it did before, so no
+  golden moved.
 - `sundial`: a coarse pair of keys for each of the sun's two bias counts — `9`
   and `0` for `r_shadow_bias`, `7` and `8` for `r_shadow_normal_offset` —
   stepping 8 cascade texels a press against the existing `[`/`]` and `;`/`'`

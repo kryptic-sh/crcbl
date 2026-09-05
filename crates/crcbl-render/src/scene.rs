@@ -513,9 +513,14 @@ pub enum ProbeUpdate {
     /// it.
     ///
     /// **Probes outside the near cascade gather nothing.** The map covers
-    /// cascade 0's camera-following sphere and the volume is authored where the
-    /// scene put it, so a volume larger than that sphere has rows the updater
-    /// never reaches. Scrolling is what would close it and does not exist.
+    /// cascade 0's camera-following sphere, so a volume larger than that sphere
+    /// has rows the updater never reaches.
+    /// [`ForwardRenderer::follow_probe_volume`](crate::forward::ForwardRenderer::follow_probe_volume)
+    /// is what closes that for a volume small enough to follow the camera: it
+    /// re-centres each level on a tracked point by whole probe steps and moves
+    /// the position table the gather reads with it. A volume authored to cover
+    /// its whole scene has nowhere to step to and keeps the rows the cascade
+    /// cannot reach.
     EveryFrame,
 }
 
@@ -555,8 +560,11 @@ pub struct ProbeGrid {
     /// before the updater landed.
     pub update: ProbeUpdate,
     /// One row per probe, the clipmap's levels one after another finest first
-    /// and **`x`-fastest** within each: index
-    /// `level_row(level) + (z · counts.y + y) · counts.x + x`.
+    /// and **`x`-fastest** within each, each level's cells wrapped by its own
+    /// scroll offset:
+    /// [`ProbeVolume::row`](probe::ProbeVolume::row) is the index, and it is
+    /// `level_row(level) + (z · counts.y + y) · counts.x + x` for the volume as
+    /// authored, before anything has scrolled.
     ///
     /// Its length must be [`volume`](Self::volume)'s
     /// [`total`](probe::ProbeVolume::total) — one level's worth *per level* —
@@ -1321,6 +1329,7 @@ mod tests {
                 inv_spacing: [1.0; 3],
                 origin: [0.0; 3],
                 levels: 1,
+                steps: probe::ProbeSteps::default(),
             },
             probes: two.clone(),
         }
@@ -1335,6 +1344,7 @@ mod tests {
             inv_spacing: [1.0; 3],
             origin: [0.0; 3],
             levels: 2,
+            steps: probe::ProbeSteps::default(),
         };
         ProbeGrid {
             update: ProbeUpdate::Authored,

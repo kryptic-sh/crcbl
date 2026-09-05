@@ -554,6 +554,9 @@ mod tests {
         let probe_inv_spacing = source
             .find("float4 probe_level_inv_spacing[PROBE_LEVELS];")
             .expect("ssr.slang declares `float4 probe_level_inv_spacing[PROBE_LEVELS];`");
+        let probe_offset = source
+            .find("uint4 probe_level_offset[PROBE_LEVELS];")
+            .expect("ssr.slang declares `uint4 probe_level_offset[PROBE_LEVELS];`");
         let hiz = source
             .find("uint4 hiz;")
             .expect("ssr.slang declares `uint4 hiz;`");
@@ -565,7 +568,8 @@ mod tests {
                 && proj < inv_view
                 && inv_view < probe_counts
                 && probe_counts < probe_inv_spacing
-                && probe_inv_spacing < hiz
+                && probe_inv_spacing < probe_offset
+                && probe_offset < hiz
                 && hiz < sky,
             "ssr.slang declares the block in a different order than `to_bytes` writes it"
         );
@@ -584,6 +588,7 @@ mod tests {
             inv_spacing: [7.0, 8.0, 9.0],
             counts: [10, 11, 12],
             levels: 1,
+            steps: crate::probe::ProbeSteps::default(),
         };
         let bytes = SsrParams {
             inv_proj,

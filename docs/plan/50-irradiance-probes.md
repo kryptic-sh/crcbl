@@ -48,7 +48,7 @@ day.** The grid below stays, and everything that _fills_ it changes:
   differs. That is what "the diffuse GI twin" in this file's title now means.
 
 **Layered density, camera-centred (the user's addition, 2026-08-30) — the levels
-have landed; the scrolling has not.** One uniform grid over a whole scene is
+and the scrolling have both landed.** One uniform grid over a whole scene is
 either too coarse near the camera or too large far from it. The volume is a
 **clipmap**: a small number of levels (three or four), each a fixed probe count
 centred on one point, level `k` spaced `2^k` times level 0 — dense probes in the
@@ -59,27 +59,64 @@ is the trilinear gather and the Chebyshev weighting above. Rows are per level,
 so `docs/backlog.md`'s survey constraint C1 (no ninth storage buffer) holds with
 an offset per level.
 
-What the levels do **not** include, and what each would take:
+**Scrolling, and the slab it exposes (2026-09-05).** `ProbeVolume::steps` is a
+per-level whole-probe-step offset, `level_origin` moves the level by it and
+`probe_row` wraps a cell around it — `(cell + offset) mod counts`, with the
+offset reduced into `0..count` on the host so the shader's wrap is one compare
+and one subtract. `ProbeVolume::follow` re-centres every level on a tracked
+point by the nearest whole step of that level's own spacing and answers the rows
+the move invalidated; `ProbeVolume::exposed` is that rule — a step of `k` probes
+along one axis exposes exactly `k` slabs and leaves the other `count − k`
+addressable at the rows they already had, and a step on several axes exposes the
+union. `ForwardRenderer::follow_probe_volume` is the two of them plus the device
+work they imply: `probe_capture::recapture` draws only the exposed rows and
+copies each into the layer its row names, and the reflective-shadow-map gather's
+position table is rewritten beside it. `apps/lantern` calls it every frame with
+`bounce::follow_point`; that room's volume covers its interior with less than
+one whole step to spare, so it never moves — which is what let every lantern
+golden stay byte-identical.
 
-- **Scrolling.** There is no toroidal addressing, no camera-follow and no
-  per-frame re-centring: the volume is centred once, where the scene places it,
-  and `ProbeVolume::origin` is authored rather than tracked. Adding it means a
-  per-level whole-probe-step offset in the header, a modulo in `probe_row`, and
-  a rule for which probes a step invalidates.
-- **Recapture.** `capture_probe_visibility` is still the load-time call; the
-  slab a scroll would expose is not captured, and a probe whose static geometry
-  changed is not re-captured on demand. Neither can exist before scrolling does.
+**What it costs.** `apps/lantern --headless --frames 400 --size 1920x1080`,
+median of three, on radv (RX 7900 XTX, Mesa 26.2.2) and lavapipe. A frame that
+does not step is free: the GPU-pass p50 reads **1.476 ms with the follow against
+1.475 ms without**, `forward` **0.345 ms against 0.345 ms**, on radv; **96.99 ms
+against 96.49 ms** with `forward` at **35.30 ms against 35.50 ms** on lavapipe —
+every pair inside the spread of its own three runs, because a frame that steps
+nothing is a rounding per level per axis and no device work. A step costs, on
+radv, **0.578 ms for the twelve rows one `z` step of that volume exposes**,
+against **0.843 ms for all sixty** and **1.19 ms for the whole-volume capture at
+load**, after a **1.87 ms drain** of the frame in flight; on lavapipe **3.21 ms
+for twelve rows** after a **107.6 ms** drain, against **15.22 ms** for the load
+capture. So the slab saves what it draws and not what it builds.
+
+What the clipmap still does **not** include, and what each would take:
+
+- **Recapture on demand.** A probe whose static geometry changed is not
+  re-captured; `capture_probe_visibility` over the whole volume is still the
+  only answer to a wall that moved. The pass now takes a row list, so what is
+  missing is a caller that knows which rows a moved instance touches.
+- **The transients stay transient.** A step rebuilds `probe_capture`'s
+  pipelines, atlas and buffers, which is why a twelve-row step costs two thirds
+  of a sixty-row one; hoisting them into the renderer is what a volume that
+  scrolls often would want.
+- **The stall.** A step drains the device before it rewrites a layer, because
+  the visibility image and the gather's position table are single copies read by
+  every frame in flight. A ring of either, or recording the recapture into the
+  frame graph, is what would remove it.
+- **A scroll moves the geometry and not the light.** Under
+  `ProbeUpdate::Authored` a row a step brings in keeps the irradiance the probe
+  that left had. `ProbeUpdate::EveryFrame` has no such gap, since the gather
+  refills every row each frame; a scrolling volume therefore wants the updater.
 
 **Captured on load, then on scroll — never baked.** The visibility maps for the
 whole volume are captured when a scene loads — that much runs, and since the
 levels landed it covers every level of the clipmap in the one call; after that
-only the slab a scroll exposes should be captured, in the frame it appears, and
-a probe whose static geometry changed re-captured on demand. Neither of the last
-two exists yet, and neither can until the volume scrolls. The lighting rows are
-never stored across a load: they are recomputed every frame by the updater,
-which is what keeps the sun and every lamp dynamic. "Baked on load" in
-conversation means this capture, and the word the plan uses for it is
-_captured_, because what is stored is geometry.
+the slab a scroll exposes is captured in the frame it appears, by
+`probe_capture::recapture`, and a probe whose static geometry changed is still
+not re-captured on demand. The lighting rows are never stored across a load:
+they are recomputed every frame by the updater, which is what keeps the sun and
+every lamp dynamic. "Baked on load" in conversation means this capture, and the
+word the plan uses for it is _captured_, because what is stored is geometry.
 
 **One base, two sample producers — nothing else is bespoke.** The pipeline is
 the same on every tier, and the two tiers differ in exactly one stage:
@@ -149,9 +186,10 @@ candidate that would pay for it.
 
 **Pricing for the half not built.** A clipmap of a few thousand probes is a
 capture of tens of milliseconds rather than seconds, which is a load path rather
-than a redesign; what it still needs is the slab recapture, so that a scroll
-pays for the probes it exposed and not for the level. Each figure is measured on
-the three tiers before the rung counts, per the standing rule.
+than a redesign; the slab recapture exists and is priced above, and what a
+clipmap of thousands still needs is a capture whose pipelines are not rebuilt
+per step. Each figure is measured on the three tiers before the rung counts, per
+the standing rule.
 
 **Order.** Among the raster lighting items this rebuild comes after LTC area
 lights, the shadow atlas and the AO tint, and **ahead of the atmosphere** — the

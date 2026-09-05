@@ -80,7 +80,7 @@
 use crcbl::math::{DVec3, Vec3};
 use crcbl::render::scene::ProbeGrid;
 use crcbl::render::{Light, PointLight, ProbeUpdate, SpotLight};
-use crcbl::shaders::probe::{GpuProbe, ProbeVolume};
+use crcbl::shaders::probe::{GpuProbe, ProbeSteps, ProbeVolume};
 
 use crate::zone::{BRAZIER_HEIGHT, COLS, Cell, ROWS, TILE_M, WALL_TOP_Y, tile_centre, tiles};
 
@@ -390,6 +390,16 @@ pub fn probes() -> ProbeGrid {
             // the extent the updater's near cascade covers, and a clipmap's
             // coarser levels are for a world larger than this one.
             levels: 1,
+            // **Never scrolled.** `docs/plan/50-irradiance-probes.md`'s follow
+            // re-centres a level on a tracked point and re-captures the slabs
+            // the step exposes, and neither half applies here: this level's
+            // probes already partition the whole zone — half a cell in from each
+            // wall, which is less than one whole probe step of slack — and this
+            // zone never calls `ForwardRenderer::capture_probe_visibility`, so
+            // there are no visibility maps for a slab recapture to write into.
+            // A volume finer than the zone would want both, and that is a change
+            // to where this zone's probes stand rather than to this row.
+            steps: ProbeSteps::default(),
         },
         // **Zeroes.** The rows are the volume's size here, not its contents —
         // see above.

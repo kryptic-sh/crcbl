@@ -1571,6 +1571,7 @@ pub fn probe_grid() -> crate::render::scene::ProbeGrid {
             // grid they were before the clipmap: a single level clamps at its
             // own edge and blends towards nothing.
             levels: 1,
+            steps: crate::shaders::probe::ProbeSteps::default(),
         },
         probes: vec![end(red, blue), end(blue, red)],
     }
@@ -1716,6 +1717,7 @@ fn leak_volume() -> crate::shaders::probe::ProbeVolume {
         inv_spacing: [1.0 / (2.0 * LEAK_PROBE_REACH), 0.0, 0.0],
         counts: [2, 1, 1],
         levels: 1,
+        steps: crate::shaders::probe::ProbeSteps::default(),
     }
 }
 
@@ -2153,6 +2155,7 @@ pub fn probe_clipmap_grid() -> crate::render::scene::ProbeGrid {
         inv_spacing: [1.0 / PROBE_CLIPMAP_SPACING, 0.0, 0.0],
         counts: [PROBE_CLIPMAP_COUNT, 1, 1],
         levels: 2,
+        steps: crate::shaders::probe::ProbeSteps::default(),
     };
     // The levels one after another, finest first — `ProbeGrid::probes` says so
     // and `ProbeVolume::level_row` is what indexes it.
@@ -2214,6 +2217,329 @@ pub fn probe_clipmap_forward(
     renderer.capture_probe_visibility(device, queue)?;
     Ok(ForwardScene {
         camera: probe_camera(),
+        sun: probe_sun(),
+        renderer: Box::new(renderer),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The scrolling fixtures
+// ---------------------------------------------------------------------------
+
+/// How many probes [`probe_scroll_grid`]'s one level holds along `x`.
+///
+/// Four, which is the least that makes a wrap something other than a swap: a
+/// level of two rotates onto itself after one step and a shader that dropped the
+/// wrap entirely would read the same two rows in the same two places half the
+/// time.
+pub const SCROLL_COUNT: u32 = 4;
+
+/// How far apart those probes stand, in world units.
+///
+/// Chosen so the whole level is inside the frame at [`PROBE_CAMERA_UP`] — the
+/// four probes span `3 · SCROLL_SPACING` and the visible floor is about `3.4`
+/// wide — and so a step is a distance the trilinear blend resolves rather than a
+/// nudge.
+pub const SCROLL_SPACING: f32 = 0.6;
+
+/// The radiance each of [`probe_scroll_grid`]'s constant environments is built
+/// at.
+///
+/// [`PROBE_CLIPMAP_RADIANCE`]'s value and its reason: the brightest band a
+/// blend of these can reach stays inside what the swapchain holds, so no
+/// measurement is taken through `tonemap.slang`'s `saturate`.
+const SCROLL_RADIANCE: f32 = 0.35;
+
+/// **The scrolling fixture's volume**: one level of [`SCROLL_COUNT`] probes
+/// along `x`, each holding a *different* constant environment, scrolled by
+/// `steps` whole probe steps.
+///
+/// `docs/plan/50-irradiance-probes.md`'s toroidal addressing, as something a
+/// frame can be wrong about. A level that has stepped `k` probes wraps cell `c`
+/// onto row `(c + k) mod count`, and the only way to see that happen is for the
+/// rows to differ from one another: these four hold red, green, blue and yellow,
+/// so a step rotates the floor's colours along `x` and a shader that dropped the
+/// wrap draws them in the order they were authored in.
+///
+/// Every row is a *constant* environment and therefore has no linear band at
+/// all, which is deliberate on [`probe_clipmap_grid`]'s terms: what this fixture
+/// is about is which row a fragment reads, and a directional row would put a
+/// second thing in the answer.
+///
+/// Public so `tests/render_e2e.rs` predicts the frame from the rows and the
+/// header the device was actually given, on [`probe_grid`]'s terms.
+#[must_use]
+pub fn probe_scroll_grid(steps: i32) -> crate::render::scene::ProbeGrid {
+    let solid_angle = 4.0 * std::f32::consts::PI / 6.0;
+    let constant = |radiance: [f32; 3]| {
+        let mut probe = crate::shaders::probe::GpuProbe::ZERO;
+        for direction in [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ] {
+            probe.accumulate(direction, radiance, solid_angle);
+        }
+        probe
+    };
+    let mut scrolled = crate::shaders::probe::ProbeSteps::default();
+    scrolled[0] = [steps, 0, 0];
+    let volume = crate::shaders::probe::ProbeVolume {
+        // Centred on the room, so the level is symmetric about the frame before
+        // it is scrolled and the measured bands are as far from either `±X`
+        // wall as each other.
+        origin: [
+            -0.5 * (SCROLL_COUNT - 1) as f32 * SCROLL_SPACING,
+            0.5 * PROBE_ROOM_HEIGHT,
+            0.0,
+        ],
+        inv_spacing: [1.0 / SCROLL_SPACING, 0.0, 0.0],
+        counts: [SCROLL_COUNT, 1, 1],
+        levels: 1,
+        steps: scrolled,
+    };
+    let rows = [
+        [SCROLL_RADIANCE, 0.0, 0.0],
+        [0.0, SCROLL_RADIANCE, 0.0],
+        [0.0, 0.0, SCROLL_RADIANCE],
+        [SCROLL_RADIANCE, SCROLL_RADIANCE, 0.0],
+    ];
+    crate::render::scene::ProbeGrid {
+        volume,
+        probes: rows.into_iter().map(constant).collect(),
+        update: ProbeUpdate::Authored,
+    }
+}
+
+/// **The scrolling fixture**: [`Scene::Probes`]' room and camera over
+/// [`probe_scroll_grid`] at `steps`.
+///
+/// Public rather than a [`Scene`] for [`probe_clipmap_forward`]'s reason: what
+/// it measures is a *profile across one frame* at a scroll offset, which no
+/// golden of a single image says anything about, and which `tests/render_e2e.rs`
+/// reads pixel by pixel against `crcbl_shaders::probe::irradiance_at` over the
+/// same header.
+///
+/// Every pixel it measures is the probe term and nothing else, on
+/// [`probe_leak_forward`]'s terms exactly.
+///
+/// **The volume is scrolled before the capture**, so the maps are about where
+/// the probes actually stand. That is the addressing question by itself; what
+/// happens when a volume scrolls *after* a capture is
+/// [`probe_slab_forward`]'s.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built or the capture cannot
+/// be uploaded.
+pub fn probe_scroll_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    steps: i32,
+) -> Result<ForwardScene, OffscreenError> {
+    let probes = probe_scroll_grid(steps);
+    let mut scene = crate::render::scene::demo();
+    scene.capacities.probes = probes.volume.total();
+    scene.probes = probes;
+    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(crcbl_render::RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, probe_room());
+    renderer.capture_probe_visibility(device, queue)?;
+    Ok(ForwardScene {
+        camera: probe_camera(),
+        sun: probe_sun(),
+        renderer: Box::new(renderer),
+    })
+}
+
+/// How wide [`probe_slab_forward`]'s room is, in world units.
+///
+/// Wide enough that the level stands wholly inside it **before** the step —
+/// its far probe is at `SLAB_ORIGIN + SLAB_SPACING`, and a probe outside the
+/// room would capture the room's outer shell and occlude everything, which is
+/// not the stale reading this fixture is about. The `±X` walls stay far outside
+/// the frame at [`SLAB_CAMERA_UP`].
+const SLAB_ROOM_WIDTH: f32 = 14.0;
+
+/// How deep it is, and how tall: [`LEAK_ROOM_DEPTH`] and [`LEAK_ROOM_HEIGHT`],
+/// so the divider is the room's full height and a probe cannot see over it.
+const SLAB_ROOM_DEPTH: f32 = LEAK_ROOM_DEPTH;
+
+/// How tall it is. See [`SLAB_ROOM_DEPTH`].
+const SLAB_ROOM_HEIGHT: f32 = LEAK_ROOM_HEIGHT;
+
+/// How far above the floor [`probe_slab_forward`]'s camera stands.
+///
+/// Higher than [`PROBE_CAMERA_UP`], because this fixture measures a band out at
+/// the retained probe as well as two either side of the divider, and the
+/// retained probe stands a whole spacing out. `tests/render_e2e.rs` derives its
+/// own world-to-pixel mapping from this constant rather than reusing the probe
+/// room's.
+pub const SLAB_CAMERA_UP: f32 = 4.0;
+
+/// How far apart [`probe_slab_grid`]'s two probes stand, in world units — and
+/// therefore how far one whole probe step moves the level.
+///
+/// **Wide, and the divider is what makes it so.** The band that reads the
+/// arrived probe *through* the wall has to clear the wall by more than
+/// `crcbl_render::ForwardRenderer`'s occlusion radius, or the ambient-occlusion
+/// pass rather than the visibility map would be what darkens it — so the two
+/// probes have to be far enough apart that such a band still takes most of its
+/// blend from the arrived one.
+pub const SLAB_SPACING: f32 = 3.0;
+
+/// Where probe `(0, 0, 0)` stands before the step, on `x`.
+///
+/// Both probes are on the `+X` side of the divider to begin with, which is the
+/// whole setup: the step is what brings one of them across, and the map that row
+/// is holding until it is re-captured is one taken from over there.
+///
+/// It is also where the probe that **stays** ends up standing, which is what
+/// `tests/render_e2e.rs` reads the floor over.
+pub const SLAB_ORIGIN: f32 = 2.7;
+
+/// Where the level's near probe lands after one step back — [`SLAB_ORIGIN`] a
+/// spacing nearer.
+///
+/// A quarter of a unit from the divider's face, so the map that probe *should*
+/// have puts the wall well inside the distance to the `+X` band and well outside
+/// the distance to the floor beneath it.
+pub const SLAB_ARRIVED_AT: f32 = SLAB_ORIGIN - SLAB_SPACING;
+
+/// The radiance of each of [`probe_slab_grid`]'s two constant environments.
+///
+/// [`LEAK_RADIANCE`]'s value and its reason: the brightest band stays inside
+/// what the swapchain holds, so the measurement is not taken through
+/// `tonemap.slang`'s `saturate`.
+const SLAB_RADIANCE: f32 = 0.35;
+
+/// **The slab fixture's volume**: two probes a [`SLAB_SPACING`] apart on `x`,
+/// both starting on the `+X` side of the divider.
+///
+/// **Row 1 is red and row 0 is green**, and which is which is the fixture. One
+/// step back wraps cell 0 onto row 1, so the probe that *arrives* on the `-X`
+/// side is the red one and the probe that *stays* — at [`SLAB_ORIGIN`], where it
+/// already was — is the green one. A band beyond the divider may then carry
+/// green and must carry no red.
+///
+/// Public so `tests/render_e2e.rs` reads the rows the device was given.
+#[must_use]
+pub fn probe_slab_grid() -> crate::render::scene::ProbeGrid {
+    let solid_angle = 4.0 * std::f32::consts::PI / 6.0;
+    let constant = |radiance: [f32; 3]| {
+        let mut probe = crate::shaders::probe::GpuProbe::ZERO;
+        for direction in [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ] {
+            probe.accumulate(direction, radiance, solid_angle);
+        }
+        probe
+    };
+    crate::render::scene::ProbeGrid {
+        volume: crate::shaders::probe::ProbeVolume {
+            origin: [SLAB_ORIGIN, 0.5 * SLAB_ROOM_HEIGHT, 0.0],
+            inv_spacing: [1.0 / SLAB_SPACING, 0.0, 0.0],
+            counts: [2, 1, 1],
+            levels: 1,
+            steps: crate::shaders::probe::ProbeSteps::default(),
+        },
+        probes: vec![
+            constant([0.0, SLAB_RADIANCE, 0.0]),
+            constant([SLAB_RADIANCE, 0.0, 0.0]),
+        ],
+        update: ProbeUpdate::Authored,
+    }
+}
+
+/// The point [`probe_slab_forward`] follows to, which is one whole probe step
+/// back from where the level was authored.
+///
+/// Named rather than written into the fixture because `tests/render_e2e.rs`
+/// asserts the step it produces: the level's authored centre is a probe step
+/// past this, so the nearest whole step is exactly one back.
+#[must_use]
+pub fn slab_follow_point() -> [f32; 3] {
+    let centre = probe_slab_grid().volume.centre();
+    [centre[0] - SLAB_SPACING, centre[1], centre[2]]
+}
+
+/// **The slab fixture**: a room with a divider, a volume captured on one side of
+/// it, and one whole probe step that brings a probe across.
+///
+/// `docs/plan/50-irradiance-probes.md`'s recapture: the slab a scroll exposes is
+/// captured in the frame it appears, and this is the claim as something a frame
+/// can be wrong about. The red probe is captured at [`SLAB_ORIGIN`] `+`
+/// [`SLAB_SPACING`], where the divider is nowhere near it; one step back stands
+/// it at [`SLAB_ARRIVED_AT`], a quarter unit from the divider's face — and until
+/// its map is taken again it reports open space in the direction of the `+X`
+/// band, which is light through a wall.
+///
+/// `follow` is a parameter rather than a second fixture because the claim is a
+/// comparison of one scene against itself: with it the level scrolls and the
+/// exposed row is re-captured, without it the level stands where it was
+/// authored.
+///
+/// Every band it measures is the probe term and nothing else, on
+/// [`probe_leak_forward`]'s terms exactly.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built, the capture cannot
+/// be uploaded, or the follow's recapture fails.
+pub fn probe_slab_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    follow: bool,
+) -> Result<ForwardScene, OffscreenError> {
+    let probes = probe_slab_grid();
+    let mut scene = crate::render::scene::demo();
+    scene.capacities.probes = probes.volume.total();
+    scene.probes = probes;
+    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(crcbl_render::RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    let room = glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5 * SLAB_ROOM_HEIGHT, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::new(
+            SLAB_ROOM_WIDTH,
+            SLAB_ROOM_HEIGHT,
+            SLAB_ROOM_DEPTH,
+        ));
+    place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, room);
+    place(&mut renderer, DEMO_CUBE, DEMO_UNTINTED, leak_wall());
+    renderer.capture_probe_visibility(device, queue)?;
+    if follow {
+        // **After the capture**, which is the whole point: the maps this moves
+        // are ones that already exist, and the row the step exposes is
+        // re-captured here and nowhere else.
+        renderer.follow_probe_volume(device, queue, slab_follow_point())?;
+    }
+    Ok(ForwardScene {
+        camera: Camera {
+            eye: glam::Vec3::new(0.0, SLAB_CAMERA_UP, 0.0),
+            target: glam::Vec3::ZERO,
+            up: glam::Vec3::Z,
+            projection: Projection::Perspective {
+                fov_y: std::f32::consts::FRAC_PI_3,
+                near: 0.01,
+            },
+        },
         sun: probe_sun(),
         renderer: Box::new(renderer),
     })
@@ -2355,6 +2681,7 @@ pub fn probe_sealed_grid() -> crate::render::scene::ProbeGrid {
             // eight corners, and a second level would put a second read between
             // them and the band.
             levels: 1,
+            steps: crate::shaders::probe::ProbeSteps::default(),
         },
         ..probe_leak_grid()
     }

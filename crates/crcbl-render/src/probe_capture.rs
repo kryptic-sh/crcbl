@@ -36,11 +36,18 @@
 //! # It is transient, and it is a one-off
 //!
 //! Every object here — the pipelines, the atlas, the buffers — is created, used
-//! and destroyed inside [`capture`](crate::probe_capture::capture). It runs once
-//! when a scene's static geometry is placed, so holding a pipeline for the rest
-//! of the process's life would be paying storage for something with one caller
-//! and no second use yet. The clipmap's recapture-on-scroll is what would want them
-//! hoisted, and it does not exist.
+//! and destroyed inside [`capture`](crate::probe_capture::capture) and
+//! [`recapture`](crate::probe_capture::recapture). The first runs once when a
+//! scene's static geometry is placed; the second runs when a level scrolls, over
+//! the slabs the step exposed.
+//!
+//! **They are still transient, and a scroll is what will decide otherwise.** A
+//! step pays for the pipelines and the atlas over again, which is nothing beside
+//! a load and is measurable beside a frame — `docs/backlog.md` carries the
+//! measurement and what hoisting them into the renderer would buy. Until a
+//! caller scrolls often enough for that to show, holding a pipeline for the rest
+//! of the process's life is storage for something that runs when a camera
+//! crosses a probe.
 
 use crcbl_hal::{
     Barriers, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
@@ -238,21 +245,31 @@ fn scene_far(triangles: &[[[f32; 3]; 3]], probes: &[Vec3]) -> f32 {
     far * 1.01
 }
 
-/// Every probe of `volume`, in the table's own order — layer `i` of the image
-/// is probe row `i`.
+/// Where the probe in each row of `volume`'s table stands — entry `i` is row
+/// `i`, which is also layer `i` of the image.
 ///
 /// **The clipmap's levels one after another, finest first**, each of them
-/// `x`-fastest within itself. That is
-/// [`ProbeVolume::level_row`](crcbl_shaders::probe::ProbeVolume::level_row)'s
-/// order and `mesh.slang`'s `probe_row` reads it, which is what makes a row and
-/// a layer one probe across the whole volume rather than only within a level.
+/// `x`-fastest within itself and **wrapped by that level's scroll offset**.
+/// That is
+/// [`ProbeVolume::row`](crcbl_shaders::probe::ProbeVolume::row)'s order and
+/// `mesh.slang`'s `probe_row` reads it, which is what makes a row and a layer
+/// one probe across the whole volume rather than only within a level — and what
+/// makes a scrolled level's rows still name the probes they held.
+///
+/// Indexed by row rather than pushed in cell order, because a scrolled level's
+/// cell order is not its row order: cell `(0, 0, 0)` of a level that has stepped
+/// once along `x` stands in the row cell `(1, 0, 0)` had.
 fn probe_positions(volume: &ProbeVolume) -> Vec<Vec3> {
-    let mut positions = Vec::with_capacity(volume.total() as usize);
+    let mut positions = vec![Vec3::ZERO; volume.total() as usize];
     for level in 0..volume.level_count() {
         for z in 0..volume.counts[2].max(1) {
             for y in 0..volume.counts[1].max(1) {
                 for x in 0..volume.counts[0].max(1) {
-                    positions.push(Vec3::from_array(volume.position(level, [x, y, z])));
+                    let cell = [x, y, z];
+                    let row = volume.row(level, cell) as usize;
+                    if let Some(slot) = positions.get_mut(row) {
+                        *slot = Vec3::from_array(volume.position(level, cell));
+                    }
                 }
             }
         }
@@ -445,22 +462,106 @@ pub(crate) fn capture(
     occluders: &[Occluder],
 ) -> Result<Option<UploadedTexture>, HalError> {
     let probes = volume.total();
-    if probes == 0 || geometry.is_empty() {
+    if probes == 0 {
         return Ok(None);
+    }
+    let rows: Vec<u32> = (0..probes).collect();
+    let Some(triangles) = capture_triangles(geometry, occluders) else {
+        return Ok(None);
+    };
+
+    let mut transients = Transients::default();
+    let result = record(
+        device,
+        queue,
+        volume,
+        &triangles,
+        &rows,
+        None,
+        &mut transients,
+    );
+    transients.run(device);
+    // `record` created an image because this call passed no destination to
+    // write into.
+    result
+}
+
+/// Captures the maps of **only** `rows` and writes them into the layers of
+/// `image` those rows name.
+///
+/// `docs/plan/50-irradiance-probes.md`'s slab recapture: a level that scrolled
+/// `k` probes along an axis has `k` slabs holding a map about where their probe
+/// used to stand, and
+/// [`ProbeVolume::exposed`](crcbl_shaders::probe::ProbeVolume::exposed) is which
+/// — so what this pays for is the probes the step exposed and not the level.
+/// Every other row of `image` is left exactly as it was, which is what makes the
+/// addressing toroidal rather than merely wrapped.
+///
+/// `image` must be the one a [`capture`] of this volume's row count returned:
+/// the copy names its layers by row, and a row past its layers is a copy no
+/// backend accepts. Nothing to capture — no rows, or no geometry for a map to be
+/// about — leaves it untouched.
+///
+/// **The device must be idle and stays idle**, on [`capture`]'s terms exactly.
+///
+/// # Errors
+///
+/// [`HalError`] from any seam call. Everything created is released on every path
+/// out, including the failing ones; `image` is the caller's and is never
+/// destroyed here.
+pub(crate) fn recapture(
+    device: &dyn Device,
+    queue: QueueHandle,
+    volume: &ProbeVolume,
+    geometry: &Occluders,
+    occluders: &[Occluder],
+    rows: &[u32],
+    image: ImageHandle,
+) -> Result<(), HalError> {
+    if rows.is_empty() || volume.total() == 0 {
+        return Ok(());
+    }
+    let Some(triangles) = capture_triangles(geometry, occluders) else {
+        return Ok(());
+    };
+
+    let mut transients = Transients::default();
+    let result = record(
+        device,
+        queue,
+        volume,
+        &triangles,
+        rows,
+        Some(image),
+        &mut transients,
+    );
+    transients.run(device);
+    result.map(|_| ())
+}
+
+/// The world-space triangle soup a capture draws, or [`None`] when there is
+/// nothing for a map to be about.
+///
+/// One place rather than two, because "a scene with nothing placed leaves the
+/// maps alone" has to mean the same thing on both entry points.
+fn capture_triangles(geometry: &Occluders, occluders: &[Occluder]) -> Option<Vec<[[f32; 3]; 3]>> {
+    if geometry.is_empty() {
+        return None;
     }
     let triangles = world_triangles(geometry, occluders);
     if triangles.is_empty() {
-        return Ok(None);
+        return None;
     }
-
-    let mut transients = Transients::default();
-    let result = record(device, queue, volume, &triangles, probes, &mut transients);
-    transients.run(device);
-    result.map(Some)
+    Some(triangles)
 }
 
-/// [`capture`]'s body, recording what it creates into `transients` as it
-/// goes.
+/// [`capture`]'s and [`recapture`]'s shared body, recording what it creates into
+/// `transients` as it goes.
+///
+/// `rows` are the table rows to fill, in the order the atlas draws them; `into`
+/// is the image whose layers they name, or [`None`] to create one of
+/// `volume.total()` layers and hand it back — which is what makes the answer an
+/// [`Option`]: a call that was given a destination has nothing to give back.
 ///
 /// The image it returns is deliberately **not** in `transients`: it is the one
 /// object that outlives the call.
@@ -469,11 +570,23 @@ fn record(
     queue: QueueHandle,
     volume: &ProbeVolume,
     triangles: &[[[f32; 3]; 3]],
-    probes: u32,
+    rows: &[u32],
+    into: Option<ImageHandle>,
     transients: &mut Transients,
-) -> Result<UploadedTexture, HalError> {
-    let layout = Layout::new(device, probes);
-    let positions = probe_positions(volume);
+) -> Result<Option<UploadedTexture>, HalError> {
+    let captured = u32::try_from(rows.len()).map_err(|_| {
+        HalError::InvalidDescriptor(format!(
+            "a probe visibility capture of {} rows is past what one image can hold",
+            rows.len()
+        ))
+    })?;
+    let layout = Layout::new(device, captured);
+    // Where the probe in each row stands, then the rows this call is about.
+    let table = probe_positions(volume);
+    let positions: Vec<Vec3> = rows
+        .iter()
+        .map(|&row| table.get(row as usize).copied().unwrap_or(Vec3::ZERO))
+        .collect();
     let far = scene_far(triangles, &positions);
     let inputs = upload_inputs(device, transients, &layout, &positions, triangles, far)?;
     let atlas = build_atlas(device, transients, &layout)?;
@@ -491,7 +604,15 @@ fn record(
 
     let raster = build_raster(device, transients, &inputs)?;
     let resolve = build_resolve(device, transients, &inputs, atlas.colour_view, moments)?;
-    let captured = build_target(device, &layout)?;
+    let fresh = match into {
+        Some(_) => None,
+        None => Some(build_target(device, volume.total())?),
+    };
+    let image = match (into, &fresh) {
+        (Some(image), _) => image,
+        (None, Some(texture)) => texture.image,
+        (None, None) => unreachable!("a call with no destination built one"),
+    };
 
     let plan = Recording {
         layout,
@@ -500,12 +621,26 @@ fn record(
         raster,
         resolve,
         moments,
-        image: captured.image,
+        image,
+        image_layers: volume.total(),
+        // **`Undefined` only for an image created a moment ago**, which is the
+        // one place it is right: there is no earlier access to order against and
+        // nothing in it worth preserving. A recapture's destination is a
+        // fragment stage's, and a barrier naming `Undefined` there would carry
+        // no source scope and discard every layer the step did not expose.
+        from: if into.is_some() {
+            ResourceState::ShaderRead
+        } else {
+            ResourceState::Undefined
+        },
+        rows,
     };
     match encode(device, queue, &plan) {
-        Ok(()) => Ok(captured),
+        Ok(()) => Ok(fresh),
         Err(error) => {
-            captured.destroy(device);
+            if let Some(texture) = fresh {
+                texture.destroy(device);
+            }
             Err(error)
         }
     }
@@ -972,7 +1107,11 @@ fn build_resolve(
 
 /// The `Rg32Float` array image the frame binds — the one object a capture
 /// leaves behind.
-fn build_target(device: &dyn Device, layout: &Layout) -> Result<UploadedTexture, HalError> {
+///
+/// `layers` is the **volume's** row count rather than the rows this call draws:
+/// a recapture writes into an image of every row and a first capture creates
+/// one, and the two have to be the same image.
+fn build_target(device: &dyn Device, layers: u32) -> Result<UploadedTexture, HalError> {
     let image = device.create_image(&ImageDesc {
         label: Some("probe visibility"),
         image_type: ImageType::D2,
@@ -981,7 +1120,7 @@ fn build_target(device: &dyn Device, layout: &Layout) -> Result<UploadedTexture,
             width: EXTENT,
             height: EXTENT,
             // A `D2` image's `depth_or_layers` is its array length.
-            depth_or_layers: layout.probes,
+            depth_or_layers: layers,
         },
         mip_levels: 1,
         samples: 1,
@@ -992,7 +1131,7 @@ fn build_target(device: &dyn Device, layout: &Layout) -> Result<UploadedTexture,
         image,
         view_type: ImageViewType::D2Array,
         format: Format::Rg32Float,
-        range: color_range(layout.probes),
+        range: color_range(layers),
     }) {
         Ok(view) => Ok(UploadedTexture { image, view }),
         Err(error) => {
@@ -1004,7 +1143,7 @@ fn build_target(device: &dyn Device, layout: &Layout) -> Result<UploadedTexture,
 
 /// Everything [`encode`] needs, which is more than an argument list should
 /// be.
-struct Recording {
+struct Recording<'a> {
     layout: Layout,
     inputs: Inputs,
     atlas: Atlas,
@@ -1014,11 +1153,21 @@ struct Recording {
     /// The image the copy fills. Not the whole [`UploadedTexture`], because a
     /// copy names an image and this function has no business with the view.
     image: ImageHandle,
+    /// Layers that image has, which is every row of the volume — the range the
+    /// barriers around the copy cover, whether or not this call fills them all.
+    image_layers: u32,
+    /// The state [`Recording::image`] is already in, which decides what the
+    /// barrier before the copy has to order against.
+    from: ResourceState,
+    /// Which layer of [`Recording::image`] each of the moments buffer's layers
+    /// belongs in — the table rows this call captured, in the order it drew
+    /// them.
+    rows: &'a [u32],
 }
 
 /// Records every chunk's cube pass and resolve, copies the moments into the
 /// image, submits, and waits.
-fn encode(device: &dyn Device, queue: QueueHandle, plan: &Recording) -> Result<(), HalError> {
+fn encode(device: &dyn Device, queue: QueueHandle, plan: &Recording<'_>) -> Result<(), HalError> {
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
         label: Some("probe visibility capture"),
         queue,
@@ -1097,7 +1246,7 @@ fn encode(device: &dyn Device, queue: QueueHandle, plan: &Recording) -> Result<(
 /// leave each face's triangles clipped against the whole atlas rather than
 /// against its own tile, so a wall running off the edge of one face would be
 /// drawn across its neighbour.
-fn draw_cubes(encoder: &mut Box<dyn CommandEncoder>, plan: &Recording, base: u32, count: u32) {
+fn draw_cubes(encoder: &mut Box<dyn CommandEncoder>, plan: &Recording<'_>, base: u32, count: u32) {
     encoder.begin_render_pass(&RenderPassDesc {
         label: Some("probe capture cube"),
         color_attachments: &[ColorAttachment {
@@ -1151,8 +1300,13 @@ fn draw_cubes(encoder: &mut Box<dyn CommandEncoder>, plan: &Recording, base: u32
 /// Moves the finished moments out of the buffer the resolve wrote and into the
 /// layers of the image the frame binds — one copy per layer, because a copy
 /// region's extent is a 2D extent on every backend here.
-fn copy_moments(encoder: &mut Box<dyn CommandEncoder>, plan: &Recording) {
-    let every_layer = color_range(plan.layout.probes);
+///
+/// **A copy per captured row, into the layer that row names.** A first capture
+/// draws every row in order and this is the identity; a recapture draws the rows
+/// a scroll exposed and this is what puts each of them back where the table
+/// addresses it.
+fn copy_moments(encoder: &mut Box<dyn CommandEncoder>, plan: &Recording<'_>) {
+    let every_layer = color_range(plan.image_layers);
     encoder.pipeline_barrier(&Barriers {
         buffers: &[BufferBarrier::new(
             plan.moments,
@@ -1162,22 +1316,22 @@ fn copy_moments(encoder: &mut Box<dyn CommandEncoder>, plan: &Recording) {
         images: &[ImageBarrier::new(
             plan.image,
             every_layer,
-            ResourceState::Undefined,
+            plan.from,
             ResourceState::TransferDst,
         )],
         ..Default::default()
     });
-    for layer in 0..plan.layout.probes {
+    for (layer, &row) in plan.rows.iter().enumerate() {
         encoder.copy_buffer_to_image(&BufferImageCopy {
             buffer: plan.moments,
-            buffer_offset: u64::from(layer) * plan.layout.layer_pitch,
+            buffer_offset: layer as u64 * plan.layout.layer_pitch,
             buffer_row_length: plan.layout.row_texels(),
             buffer_image_height: EXTENT,
             image: plan.image,
             image_subresource: ImageSubresourceLayers {
                 aspect: ImageAspect::COLOR,
                 mip: 0,
-                base_layer: layer,
+                base_layer: row,
                 layer_count: 1,
             },
             image_offset: Offset3d { x: 0, y: 0, z: 0 },
@@ -1409,6 +1563,7 @@ mod tests {
             inv_spacing: [0.5, 1.0, 0.25],
             counts: [3, 2, 2],
             levels: 3,
+            steps: crcbl_shaders::probe::ProbeSteps::default(),
         };
         let positions = probe_positions(&volume);
         assert_eq!(
@@ -1498,6 +1653,7 @@ mod tests {
             inv_spacing: [1.0; 3],
             counts: [6, 6, 5],
             levels: 1,
+            steps: crcbl_shaders::probe::ProbeSteps::default(),
         };
         let probes = volume.total();
         let layout = Layout::new(device.as_ref(), probes);
@@ -1559,5 +1715,173 @@ mod tests {
             "the fixture's last chunk must be a partial one, or nothing here reads the \
              count the loop passes"
         );
+    }
+
+    /// **A scrolled level's layers follow its rows rather than its cells**, so
+    /// the map in layer `i` is about the probe row `i` addresses.
+    ///
+    /// The capture and `mesh.slang` agree on a row through
+    /// [`ProbeVolume::row`], and a walk that pushed positions in cell order
+    /// would put every one of a scrolled level's maps a slab away from the probe
+    /// that reads it — a room lit through the wrong wall, and no assertion
+    /// anywhere else says which.
+    #[test]
+    fn a_scrolled_capture_puts_each_row_where_the_volume_addresses_it() {
+        let mut volume = ProbeVolume {
+            origin: [-2.0, 1.0, -3.0],
+            inv_spacing: [0.5, 1.0, 0.25],
+            counts: [3, 2, 4],
+            levels: 2,
+            steps: crcbl_shaders::probe::ProbeSteps::default(),
+        };
+        volume.steps[0] = [1, -1, 5];
+        volume.steps[1] = [-2, 0, 1];
+        let positions = probe_positions(&volume);
+        assert_eq!(positions.len(), volume.total() as usize);
+        for level in 0..volume.level_count() {
+            for z in 0..volume.counts[2] {
+                for y in 0..volume.counts[1] {
+                    for x in 0..volume.counts[0] {
+                        let row = volume.row(level, [x, y, z]);
+                        assert_eq!(
+                            positions[row as usize],
+                            Vec3::from_array(volume.position(level, [x, y, z])),
+                            "row {row} is not level {level}'s cell ({x}, {y}, {z})"
+                        );
+                    }
+                }
+            }
+        }
+        // Anti-vacuity: the scroll really did permute the rows, so the walk
+        // above is not the unscrolled one under another name.
+        let still = ProbeVolume {
+            steps: crcbl_shaders::probe::ProbeSteps::default(),
+            ..volume
+        };
+        assert_ne!(
+            positions,
+            probe_positions(&still),
+            "the fixture's scroll moved no row, so this holds with the wrap deleted"
+        );
+    }
+
+    /// **A recapture draws the rows it was given and copies into their layers,
+    /// and nothing else** — the whole of what makes a scroll cost a slab rather
+    /// than a level.
+    ///
+    /// Read off the recorded stream rather than off the arguments: the count of
+    /// draws is what says only those probes were rasterised, and the set of
+    /// destination layers is what says each of their maps landed where the table
+    /// addresses it. A recapture that copied layer `i` to layer `i` would pass
+    /// every other check here and light the wrong probes.
+    ///
+    /// **And its barrier names [`ResourceState::ShaderRead`]**, not
+    /// `Undefined`: the layers the step did not expose are the ones a scroll
+    /// exists to keep, and a barrier discarding the image would throw them away
+    /// on every backend allowed to.
+    #[test]
+    fn a_recapture_writes_only_the_layers_the_step_exposed() {
+        use crcbl_hal::null::{Command, NullInstance, Recorder};
+        use crcbl_hal::{DeviceDesc, Features, Instance, QueueKind};
+
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: Some("probe recapture"),
+                adapter: adapter.id,
+                required_features: Features::GPU_DRIVEN,
+                optional_features: Features::empty(),
+                compatible_surface: None,
+            })
+            .expect("the null backend always opens");
+        let queue = device.queue(QueueKind::Graphics).expect("always present");
+
+        let mut scene = crate::scene::demo();
+        scene.capacities.probes = 1;
+        let ids: Vec<u32> = (0..scene.meshes.len() as u32).collect();
+        let geometry = Occluders::from_scene(&scene, &ids);
+        let placed = [Occluder {
+            mesh: ids[0],
+            transform: glam::Mat4::IDENTITY,
+        }];
+
+        let mut volume = ProbeVolume {
+            origin: [-2.0, -1.0, -2.0],
+            inv_spacing: [1.0; 3],
+            counts: [4, 3, 2],
+            levels: 1,
+            steps: crcbl_shaders::probe::ProbeSteps::default(),
+        };
+        let captured = capture(device.as_ref(), queue, &volume, &geometry, &placed)
+            .expect("the null backend accepts every descriptor")
+            .expect("a volume with probes and a scene with triangles has a map to capture");
+
+        let mut steps = volume.steps;
+        steps[0][0] = 1;
+        let rows = volume.exposed(&steps);
+        assert_eq!(
+            rows.len() as u32,
+            volume.counts[1] * volume.counts[2],
+            "a step of one along x exposes one slab"
+        );
+        assert!(
+            (rows.len() as u32) < volume.total(),
+            "the fixture must keep some rows, or this holds for a recapture of the level"
+        );
+        volume.steps = steps;
+
+        recorder.clear();
+        recapture(
+            device.as_ref(),
+            queue,
+            &volume,
+            &geometry,
+            &placed,
+            &rows,
+            captured.image,
+        )
+        .expect("the null backend accepts every descriptor");
+
+        let commands = recorder.commands();
+        let draws = commands
+            .iter()
+            .filter(|command| matches!(command, Command::Draw { .. }))
+            .count();
+        assert_eq!(
+            draws as u32,
+            rows.len() as u32 * FACES,
+            "a recapture drew {draws} faces for {} exposed rows",
+            rows.len()
+        );
+
+        let layers: Vec<u32> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::CopyBufferToImage(copy) if copy.image == captured.image => {
+                    Some(copy.image_subresource.base_layer)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            layers, rows,
+            "the recapture copied into layers that are not the rows the step exposed"
+        );
+
+        let discarded = commands.iter().any(|command| match command {
+            Command::Barrier { images, .. } => images.iter().any(|barrier| {
+                barrier.image == captured.image && barrier.from == ResourceState::Undefined
+            }),
+            _ => false,
+        });
+        assert!(
+            !discarded,
+            "the recapture discarded the image it was supposed to be writing a slab of"
+        );
+
+        captured.destroy(device.as_ref());
+        recorder.assert_valid();
     }
 }

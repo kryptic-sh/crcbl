@@ -744,6 +744,24 @@ impl Gpu {
         // once and never rewritten, so a still frame uploads no instance bytes
         // at all, because a light is a row of the light list and not an
         // instance.
+        // **The irradiance volume follows the eye, and in this room it never
+        // moves.** `docs/plan/50-irradiance-probes.md`'s scrolling re-centres
+        // each level on a tracked point by whole probe steps and re-captures the
+        // slabs the step exposed; `bounce::follow_point` is what this room hands
+        // it, and that is the volume's own centre whatever the camera does,
+        // because the level already covers the interior and has no whole step to
+        // spare — `bounce`'s `the_volume_has_nowhere_to_scroll_in_this_room` is
+        // that arithmetic. So this costs a rounding per axis and no device work,
+        // and it is here rather than absent so that a room whose walls move out
+        // scrolls without a second edit.
+        //
+        // **Before `begin_frame`**, which is where the header it moves is
+        // written into the frame's uniform block.
+        self.renderer.follow_probe_volume(
+            self.ctx.device(),
+            self.ctx.queue(),
+            crate::bounce::follow_point(self.camera.eye).to_array(),
+        )?;
         self.renderer.set_lights(&room::lights(self.elapsed));
         self.renderer
             .begin_frame(self.ctx.device(), &self.camera, &room::sun(), extent)?;

@@ -767,6 +767,43 @@ per frame into that frame's own buffer were the only guard. A scene at
 it. A scene at `Authored` still does not, and that is every scene but lantern
 and shard.
 
+## What the probe clipmap's scrolling shipped without (2026-09-05)
+
+`ProbeVolume::steps`/`follow`/`exposed`, `probe_row`'s wrap in `mesh.slang` and
+`ssr.slang`, `probe_capture::recapture` and
+`ForwardRenderer::follow_probe_volume` ship. Owed, in order:
+
+1. **The step stalls.** `follow_probe_volume` drains the device before it
+   rewrites anything, because the visibility image and `ProbeGather`'s position
+   buffer are single copies every frame in flight reads. Measured on radv at
+   1.87 ms of drain against 0.578 ms of actual recapture (12 of 60 rows,
+   `apps/lantern --headless --frames 400 --size 1920x1080`, median of three); on
+   lavapipe 107.6 ms against 3.21 ms. Removing it means a ring of either, or
+   recording the recapture into the frame graph.
+2. **`probe_capture`'s transients are still built per call.** A 12-row step
+   costs 0.578 ms against 0.843 ms for all 60 on radv, so roughly half a small
+   step is the pipelines, the atlas and the buffers. Hoisting them into the
+   renderer was not done because nothing in the tree scrolls often enough for it
+   to show.
+3. **Recapture on demand does not exist.** `probe_capture::record` now takes a
+   row list, so what is missing is the caller that knows which rows a moved
+   instance touches.
+4. **Nothing scrolls in anger.** `apps/lantern`'s and `apps/shard`'s volumes
+   each partition their whole world with less than one whole probe step of slack
+   (`bounce::travel` is the arithmetic), so lantern's follow is a comparison and
+   no device work and shard is not wired at all — that zone never calls
+   `capture_probe_visibility`, so it has no maps for a slab to be written into.
+   Giving one of them a finer level 0 inside a coarser one is what would
+   exercise the scroll; it moves that app's lighting, so it is a re-bless with a
+   reason and the user's call.
+5. **A scroll moves the geometry and not the light.** Under
+   `ProbeUpdate::Authored` a row a step brings in keeps the irradiance the probe
+   that left had, because nothing rewrites the table on a scroll.
+   `ProbeUpdate::EveryFrame` has no such gap. An authored volume that scrolls
+   wants a rule nobody has written.
+6. **Not measured:** Metal, D3D12, the browser tier, any windowed run, and the
+   60-row recapture on lavapipe. The figures above are radv and lavapipe only.
+
 ## What the RSM probe updater shipped without (2026-09-04)
 
 `docs/plan/50-irradiance-probes.md`'s raster updater is built and so is its
@@ -1013,11 +1050,11 @@ than removing the tint.
 The maps and the Chebyshev weighting ship — `docs/plan/50-irradiance-probes.md`
 records what is now true. What is owed:
 
-- **Recapture is not written.** `ForwardRenderer::capture_probe_visibility`
-  captures once, from whatever `InstancePool` holds when it is called. Nothing
-  re-captures when static geometry changes and there is no scroll path — that
-  waits on the clipmap, the next slice of the same plan. A scene that moves a
-  wall after load keeps the visibility of the wall's old position.
+- **Recapture on demand is not written.** The scroll path exists since
+  2026-09-05 (`probe_capture::recapture`, driven by
+  `ForwardRenderer::follow_probe_volume`), but nothing re-captures when static
+  geometry changes: a scene that moves a wall after load keeps the visibility of
+  the wall's old position.
 - **The capture's cube faces are point-sampled, and the resolution was argued
   rather than swept.** `crcbl_render::probe_capture::FACE` is 64 texels because
   half a face texel is under a degree, a twentieth of the octahedral texel it
@@ -1025,11 +1062,6 @@ records what is now true. What is owed:
   measurement: nobody has compared a GPU-captured layer against the ray-cast one
   texel by texel. What is measured is that no golden moved and that the leak
   test's bands are the numbers the host cast produced, on radv and lavapipe.
-- **The pipelines are built and destroyed inside every
-  `capture_probe_visibility` call.** Right for a load-time one-off — the 0.93 ms
-  figure includes them — but the clipmap's recapture-on-scroll runs this per
-  frame, and hoisting `probe_capture`'s `Transients` into the renderer is the
-  first thing that slice will want.
 - **The multi-chunk path is recorded, not run.** `crcbl_render::probe_capture`'s
   `a_capture_of_more_probes_than_one_chunk_records_every_chunk` captures a
   180-probe volume — ten past the 170 one atlas holds — on `crcbl_hal::null` and
@@ -1058,10 +1090,6 @@ records what is now true. What is owed:
   _content_ claims are now GPU-only.
 - **Dynamic objects are not in the maps** and do not occlude the bounce — the
   accepted limit of the raster tier, per the plan's own decision.
-- **The old bakes still stand.** `apps/lantern`'s `bounce` module and
-  `apps/shard`'s `light::probes` compute their probe rows once at load and were
-  deliberately left alone; the 2026-08-30 decision replaces them with the RSM
-  updater, which is a later slice.
 - **The probes mirror comparison spent most of its lavapipe headroom.**
   `PROBE_MIRROR_LEVELS` is 1.0 and the shader-against-mirror disagreement now
   measures 0.20 levels on radv and **0.80 on lavapipe**, against 0.13 and 0.18

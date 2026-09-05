@@ -440,6 +440,25 @@ impl ProbeGather {
             });
     }
 
+    /// Rewrites the position table for a volume that has scrolled.
+    ///
+    /// **The device must be idle**, which is why this is not a per-frame call:
+    /// one buffer serves every frame in flight, so a write while a frame is
+    /// reading it is the hazard the ring exists to avoid elsewhere.
+    /// `ForwardRenderer::follow_probe_volume` is the caller and it has just
+    /// waited, on the recapture's own `wait_idle`.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the write.
+    pub(crate) fn rewrite_positions(
+        &self,
+        device: &dyn Device,
+        volume: &ProbeVolume,
+    ) -> Result<(), HalError> {
+        device.write_buffer(self.positions, 0, &position_table(volume))
+    }
+
     /// Releases everything. The device must be idle.
     pub(crate) fn destroy(self, device: &dyn Device) {
         device.destroy_compute_pipeline(self.pipeline);
@@ -456,28 +475,40 @@ impl ProbeGather {
 }
 
 /// Where every probe of `volume` stands, one `float4` a row in the table's own
-/// order: `x`-fastest within a level, and the levels one after another finest
-/// first.
+/// order: `x`-fastest within a level wrapped by that level's scroll offset, and
+/// the levels one after another finest first.
 ///
 /// [`ProbeVolume::position`](crcbl_shaders::probe::ProbeVolume::position) is the
-/// one place that arithmetic is written — see the [module docs](self).
+/// one place that arithmetic is written and
+/// [`ProbeVolume::row`](crcbl_shaders::probe::ProbeVolume::row) the one place
+/// the addressing is — see the [module docs](self).
+///
+/// **Written by row rather than pushed in cell order**, because a scrolled
+/// level's cell order is not its row order: `crcbl_render::probe_capture`'s
+/// `probe_positions` is the same walk for the same reason, and the two have to
+/// agree or the gather would light a probe whose visibility map is another
+/// probe's.
 fn position_table(volume: &ProbeVolume) -> Vec<u8> {
     let rows = volume.total() as usize;
-    let mut bytes = Vec::with_capacity(rows * POSITION_STRIDE as usize);
+    let mut bytes = vec![0u8; rows * POSITION_STRIDE as usize];
     for level in 0..volume.level_count() {
         for z in 0..volume.counts[2] {
             for y in 0..volume.counts[1] {
                 for x in 0..volume.counts[0] {
-                    for value in volume.position(level, [x, y, z]) {
-                        bytes.extend_from_slice(&value.to_le_bytes());
+                    let cell = [x, y, z];
+                    let at = volume.row(level, cell) as usize * POSITION_STRIDE as usize;
+                    let Some(slot) = bytes.get_mut(at..at + 3 * size_of::<f32>()) else {
+                        continue;
+                    };
+                    for (lane, value) in volume.position(level, cell).into_iter().enumerate() {
+                        slot[lane * 4..lane * 4 + 4].copy_from_slice(&value.to_le_bytes());
                     }
-                    // The `w` lane a `float4` element carries; unread.
-                    bytes.extend_from_slice(&0f32.to_le_bytes());
+                    // The `w` lane a `float4` element carries stays the zero
+                    // this started as; unread.
                 }
             }
         }
     }
-    debug_assert_eq!(bytes.len(), rows * POSITION_STRIDE as usize);
     bytes
 }
 
@@ -522,6 +553,7 @@ mod tests {
             inv_spacing: [0.5, 0.25, 1.0],
             counts: [2, 3, 4],
             levels: 2,
+            steps: crcbl_shaders::probe::ProbeSteps::default(),
         }
     }
 
@@ -561,32 +593,40 @@ mod tests {
     ///
     /// Compared against the module the volume is defined by, not against
     /// written-out numbers: what could go wrong here is the *order* — a level
-    /// stride, a `z`-fastest walk — and a hand-written expectation would have to
-    /// re-derive the same positions to catch it.
+    /// stride, a `z`-fastest walk, a scroll offset dropped — and a hand-written
+    /// expectation would have to re-derive the same positions to catch it.
+    ///
+    /// **Swept over a scrolled volume too**, because that is where cell order
+    /// and row order part company: a table written in cell order lights the
+    /// probe that used to stand in each row.
     #[test]
     fn a_position_table_walks_the_volume_in_row_order() {
-        let volume = volume();
-        let bytes = position_table(&volume);
-        assert_eq!(
-            bytes.len(),
-            volume.total() as usize * POSITION_STRIDE as usize
-        );
-        for level in 0..volume.level_count() {
-            for z in 0..volume.counts[2] {
-                for y in 0..volume.counts[1] {
-                    for x in 0..volume.counts[0] {
-                        let row = (volume.level_row(level)
-                            + (z * volume.counts[1] + y) * volume.counts[0]
-                            + x) as usize;
-                        assert_eq!(
-                            read(&bytes, row),
-                            volume.position(level, [x, y, z]),
-                            "row {row} is not probe ({x}, {y}, {z}) of level {level}"
-                        );
+        let mut scrolled = volume();
+        scrolled.steps[0] = [1, -1, 2];
+        scrolled.steps[1] = [0, 1, -3];
+        for volume in [volume(), scrolled] {
+            let bytes = position_table(&volume);
+            assert_eq!(
+                bytes.len(),
+                volume.total() as usize * POSITION_STRIDE as usize
+            );
+            for level in 0..volume.level_count() {
+                for z in 0..volume.counts[2] {
+                    for y in 0..volume.counts[1] {
+                        for x in 0..volume.counts[0] {
+                            let row = volume.row(level, [x, y, z]) as usize;
+                            assert_eq!(
+                                read(&bytes, row),
+                                volume.position(level, [x, y, z]),
+                                "row {row} is not probe ({x}, {y}, {z}) of level {level}"
+                            );
+                        }
                     }
                 }
             }
         }
+        let volume = volume();
+        let bytes = position_table(&volume);
         // And the padding lane really is a lane rather than a fourth component
         // of the position — a table written as `float3`s would be shorter and
         // every row past the first would be wrong.

@@ -7383,6 +7383,121 @@ impl ForwardRenderer {
         Ok(())
     }
 
+    /// Re-centres the irradiance clipmap on `point` by whole probe steps, and
+    /// captures the probes the step exposed.
+    ///
+    /// `docs/plan/50-irradiance-probes.md`'s scrolling: each level moves a whole
+    /// number of its own probe spacings towards `point`, so the probes that stay
+    /// inside it stand exactly where they stood and go on being addressed at the
+    /// rows they already had — and only the slabs the step brought in are
+    /// captured. Answers how many rows that was, which is **zero for the
+    /// ordinary frame**: the point has to travel half a probe spacing before the
+    /// nearest whole step changes at all.
+    ///
+    /// [`ProbeVolume::follow`](crcbl_shaders::probe::ProbeVolume::follow) is the
+    /// rule and `exposed` beside it is the invalidation; this is the two of them
+    /// plus the device work they imply — the visibility maps of the exposed
+    /// rows, and the position table the reflective-shadow-map gather reads.
+    ///
+    /// # A volume authored to cover its whole world does not move
+    ///
+    /// The steps are the ones that centre a level on `point`, and a caller whose
+    /// volume is already the world it is in wants none of them — so a caller
+    /// passes the point it wants the *centre* at rather than the camera outright
+    /// when the two differ. `apps/lantern` and `apps/shard` are that case and
+    /// their own modules say so.
+    ///
+    /// # A step stalls, and a frame that does not step costs a comparison
+    ///
+    /// The recapture is [`ForwardRenderer::capture_probe_visibility`]'s pass
+    /// over fewer rows, and it waits on [`Device::wait_idle`] exactly as that
+    /// one does — so a step drains the device before it rewrites anything and
+    /// leaves it drained. That is a stall, and it is why the plan prices a step
+    /// separately from a frame. A call that steps nothing returns before the
+    /// wait, so the ordinary frame pays a rounding per level and per axis and
+    /// nothing else.
+    ///
+    /// It may therefore be called from a frame loop, but **not after**
+    /// [`ForwardRenderer::begin_frame`] has been called for the frame being
+    /// recorded: the header it moves is the one that frame's uniform block has
+    /// already been written from.
+    ///
+    /// A renderer that has never captured re-centres the header and captures
+    /// nothing: there is no image to write slabs into, every group still names
+    /// the placeholder, and the first
+    /// [`ForwardRenderer::capture_probe_visibility`] covers the scrolled volume
+    /// whole.
+    ///
+    /// # It moves the geometry and not the light
+    ///
+    /// What a step re-captures is the *visibility* of the probes it exposed,
+    /// which is what the maps are about. The **rows** are not touched, so under
+    /// [`ProbeUpdate::Authored`] a probe
+    /// that a step brought in keeps the irradiance the probe that left had —
+    /// authored for somewhere else. A volume that scrolls therefore wants
+    /// [`ProbeUpdate::EveryFrame`], whose
+    /// gather refills every row from the scene each frame and has no such gap;
+    /// `docs/backlog.md` carries what an authored one would need instead.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the recapture or from the position rewrite. The volume
+    /// keeps the steps it had on either failing path, so a renderer that could
+    /// not capture a slab does not go on drawing with rows about somewhere else.
+    pub fn follow_probe_volume(
+        &mut self,
+        device: &dyn Device,
+        queue: QueueHandle,
+        point: [f32; 3],
+    ) -> Result<u32, HalError> {
+        let mut moved = self.probe_volume;
+        let rows = moved.follow(point);
+        if rows.is_empty() && moved.steps == self.probe_volume.steps {
+            return Ok(0);
+        }
+        // **Before anything is written**, so a caller may make this call from
+        // its frame loop: the layers the recapture rewrites and the position
+        // table beside them are read by whatever frames are still in flight, and
+        // neither is a ring. A frame that does not step never reaches this line,
+        // which is what keeps the ordinary frame free of it.
+        device.wait_idle()?;
+        if let Some(captured) = &self.probe_visibility {
+            let placed: Vec<crate::probe_visibility::Occluder> = self
+                .instances
+                .live()
+                .into_iter()
+                .map(|record| crate::probe_visibility::Occluder {
+                    mesh: record.mesh,
+                    transform: Mat4::from_cols_array(&record.transform),
+                })
+                .collect();
+            crate::probe_capture::recapture(
+                device,
+                queue,
+                &moved,
+                &self.probe_occluders,
+                &placed,
+                &rows,
+                captured.image,
+            )?;
+        }
+        // After the capture, so a volume whose slabs could not be drawn keeps
+        // the header its maps are about.
+        if let Some(gather) = &self.probe_gather {
+            gather.rewrite_positions(device, &moved)?;
+        }
+        self.probe_volume = moved;
+        Ok(u32::try_from(rows.len()).unwrap_or(u32::MAX))
+    }
+
+    /// Where the irradiance clipmap stands right now — the header the frame
+    /// block carries, [`ForwardRenderer::follow_probe_volume`]'s scroll
+    /// included.
+    #[must_use]
+    pub const fn probe_volume(&self) -> crcbl_shaders::probe::ProbeVolume {
+        self.probe_volume
+    }
+
     /// Resolves a description's mesh and material indices into the table ids the
     /// GPU reads.
     ///
@@ -17540,6 +17655,7 @@ mod tests {
                 inv_spacing: [1.0; 3],
                 counts: [1, 1, 1],
                 levels: 1,
+                steps: crcbl_shaders::probe::ProbeSteps::default(),
             },
             probes: vec![crcbl_shaders::probe::GpuProbe::ZERO],
             update: ProbeUpdate::EveryFrame,
