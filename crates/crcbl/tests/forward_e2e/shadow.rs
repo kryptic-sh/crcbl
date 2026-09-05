@@ -1471,7 +1471,11 @@ const ATLAS_LEVEL_TOLERANCE: f32 = 2.0;
 /// quarter-cell's edges through this same constant and measured the same pair on
 /// both adapters — `147.0` on the border it asserts and `0.0` at every pixel it
 /// asserts clear of one — so the two frames put the same distance between the
-/// tint and the greys whatever size the tile is.
+/// tint and the greys whatever size the tile is. So does
+/// [`the_atlas_view_borders_two_maps_of_one_root_cell_at_their_own_rungs`], with
+/// two tiles of different sizes inside one cell: the same pair again on both
+/// adapters, which says the distance is a fact about the tint rather than about
+/// how much of the picture one map takes.
 const ATLAS_BORDER_LEVELS: f32 = 70.0;
 
 /// **The atlas viewer draws each atlas texel's stored depth, borders the slots
@@ -2113,6 +2117,407 @@ fn the_atlas_view_borders_a_subdivided_slot_at_its_own_size() {
                      cell must not produce"
                 ));
             }
+        }
+    }
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// The atlas viewer over two rungs of one root cell
+// ---------------------------------------------------------------------------
+//
+// Every frame the ladder above draws lights one shadowable light, so the map it
+// borders is the only one inside its root cell and the neighbours
+// `slot_covering` rules out are the cascades and empty space.
+// `AtlasAllocator::free_node` hands out an arrangement that picture never
+// contains: a level-1 request against an empty atlas splits the lowest free
+// root and takes its first quarter, and a level-2 request behind it finds the
+// lowest free *quarter* — that same root's second one — and splits it in turn.
+// Two maps of two rungs then sit in one cell with their borders a pixel apart,
+// and which of the two a border belongs to is exactly what
+// `atlas_view.slang`'s per-slot containment test decides.
+
+/// The rung the paired frame's first cone lands on.
+///
+/// [`subdivided_spot`] under [`subdivided_camera`] of this level, which is the
+/// height [`SUBDIVIDED_CAMERA_UP`]'s sweep measured — so the coarse half of the
+/// pair is the same light on the same rung the ladder above already reads, and
+/// what is new here is only what stands beside it.
+const PAIRED_COARSE_LEVEL: usize = 1;
+
+/// The rung its second cone lands on: one halving finer, which is the smallest
+/// difference between two maps a root cell can hold at once.
+///
+/// One rung apart rather than two, deliberately. The containment test the frame
+/// is for runs over slots in order and a border belongs to the first slot whose
+/// rectangle covers it, so the arrangement that can catch it out is the one
+/// where the two rectangles are closest together — a finer map cut out of the
+/// quarter next to the coarse one, its own border abutting that map's.
+const PAIRED_FINE_LEVEL: usize = PAIRED_COARSE_LEVEL + 1;
+
+/// What share of [`subdivided_spot`]'s radius the paired frame's second cone
+/// carries.
+///
+/// **A halving, because that is one rung**, and it is the same halving
+/// [`subdivided_camera_up`] gets by doubling the eye's distance: `shadow`'s
+/// `coverage` is a light's `map_extent` over that distance, and a spot's
+/// `map_extent` is `2 * radius * tan(outer_angle)` — linear in the radius. So a
+/// cone of half the radius beside the anchor's cone, under the anchor's camera,
+/// has half its coverage, and [`SUBDIVIDED_CAMERA_UP`]'s sweep is the evidence:
+/// that constant sits at the geometric middle of level 1's band and the bands
+/// are halvings, so half of it sits at the middle of level 2's.
+///
+/// A radius rather than a second camera because there is one camera here. The
+/// two lights are in one frame, so the only terms left to separate their
+/// coverage are the ones the lights carry themselves.
+const PAIRED_FINE_RADIUS_SHARE: f32 = 0.5;
+
+/// How far beside [`SUBDIVIDED_SPOT_AT`] that second cone hangs, in world units.
+///
+/// Far enough that the two are distinct lights over distinct floor and near
+/// enough that the offset is not a term in the coverage: the eye is more than
+/// ten units up, so moving a light this far across it changes its distance by
+/// well under a percent against bands that are a factor of two wide.
+const PAIRED_FINE_SPOT_ACROSS: f32 = 0.6;
+
+/// [`subdivided_spot`]'s cone at [`PAIRED_FINE_RADIUS_SHARE`] of its radius,
+/// hung [`PAIRED_FINE_SPOT_ACROSS`] beside it.
+///
+/// Built from that light rather than written out again, so a re-aim of the
+/// anchor moves both halves of the pair together and the rung between them
+/// stays one halving.
+fn paired_fine_spot() -> crcbl::render::Light {
+    let crcbl::render::Light::Spot(spot) = subdivided_spot() else {
+        unreachable!("subdivided_spot builds a spot light")
+    };
+    crcbl::render::Light::Spot(crcbl::render::SpotLight {
+        position: spot.position + crcbl::math::Vec3::X * PAIRED_FINE_SPOT_ACROSS,
+        radius: spot.radius * PAIRED_FINE_RADIUS_SHARE,
+        ..spot
+    })
+}
+
+/// The atlas viewer over a frame whose two shadowed lights earn two different
+/// rungs of the ladder.
+///
+/// [`render_subdivided_atlas_view`]'s scene with a second cone in it, and the
+/// camera left at [`PAIRED_COARSE_LEVEL`]'s height: what moves the second light
+/// down a rung is its own radius, not a second eye.
+fn render_paired_atlas_view() -> ShadowFrame {
+    let prepare = |renderer: &mut crcbl::render::ForwardRenderer| {
+        crate::mesh_scene::place(
+            renderer,
+            crcbl::render::scene::DEMO_OPEN_BOX,
+            crcbl::render::scene::DEMO_UNTINTED,
+            crcbl::math::Mat4::from_translation(BOX_AT),
+        );
+        renderer.set_lights(&[subdivided_spot(), paired_fine_spot()]);
+        renderer.set_atlas_view(true);
+    };
+    render_scene(&ShadowScene {
+        prepare: &prepare,
+        camera: subdivided_camera(PAIRED_COARSE_LEVEL),
+        sun: crcbl::render::DirectionalLight {
+            direction: sun(1.0),
+            ..crcbl::render::DirectionalLight::default()
+        },
+        model: crcbl::math::Mat4::from_translation(CUBE_AT),
+    })
+}
+
+/// **The viewer borders each of two maps the allocator cut out of one root cell
+/// at that map's own rung**, and leaves the cell around them alone.
+///
+/// [`the_atlas_view_borders_a_subdivided_slot_at_its_own_size`] reads a rung at
+/// a time with one map in the frame, so `atlas_view.slang`'s per-slot
+/// containment test is exercised there against empty slots and the cascades and
+/// never against a second subdivided map a few pixels away. This is the frame
+/// that puts one there: two shadowable spots, one on [`PAIRED_COARSE_LEVEL`]
+/// and one on [`PAIRED_FINE_LEVEL`], which `AtlasAllocator::free_node` lays out
+/// inside a single root — the coarse request splits the lowest free root and
+/// takes its first quarter, and the finer one behind it splits the quarter next
+/// to it.
+///
+/// Every reading is placed off the rectangle [`ShadowFrame::rects`] carries for
+/// the map it names:
+///
+/// * each map's far edges, which lie *inside* the root cell, must be the border
+///   tint — the finer map's twice over, since both of its far edges are in the
+///   middle of a quarter that is itself in the middle of a cell;
+/// * each map's own centre must not be, or a viewer that filled a tile amber
+///   would answer the readings above;
+/// * a pixel just past each map's far edges must not be, which is what says a
+///   border stops where its own rectangle does rather than running on into its
+///   neighbour;
+/// * the quarter of the root cell neither map was cut from, and the sixteenth
+///   beside the finer map, must not be — those are pixels *inside* the cell
+///   that belong to no map at all, which is the case a single-map frame has
+///   none of;
+/// * and the root cell's own far edges must not be, which is the reading a
+///   viewer bordering whole cells draws.
+///
+/// **Anti-vacuity.** The frame is refused unless it actually got what the check
+/// is about: exactly two occupied light slots, one map whose side in atlas
+/// texels is [`PAIRED_COARSE_LEVEL`]'s and one whose side is
+/// [`PAIRED_FINE_LEVEL`]'s — so a pair that landed on one rung, or on a rung
+/// either side of the one it was built for, panics naming what it wanted rather
+/// than reading a border under the wrong name — and both of them in the *same*
+/// root cell, without which every reading below would be about two ordinary
+/// neighbours. Each map is asserted wider than the border drawn on both of its
+/// sides before its centre is read, and every pixel asserted clear of the tint
+/// is asserted first to lie in no slot's rectangle at all, so "no border here"
+/// cannot be a claim about the fixture.
+///
+/// **Where a reading is deliberately not taken.** There is no pixel just past
+/// the coarse map's right edge at the *middle* of that edge which could be
+/// clear: the finer map's left edge is against it, and
+/// [`crcbl::shaders::atlas_view::BORDER_PIXELS`] of that map's own border with
+/// it. That is the arrangement this whole check exists for, so the reading is
+/// taken three quarters of the way down the coarse map's right edge instead,
+/// below the finer map entirely — and the containment guard is what says so
+/// rather than this paragraph.
+///
+/// **No atlas readback.** Like the ladder above, what this reads is the
+/// rectangles the block carries and the pixels the pass drew, so it also runs
+/// on a backend that declares [`Capability::DepthImageCopy`] absent.
+///
+/// # How it was shown to fail
+///
+/// Four sabotages, each on a different axis and each run on radv with
+/// everything else in place. **The fixture's own two halves first.** The second
+/// cone dropped from `render_paired_atlas_view`'s light list:
+///
+/// > 1 slots of the light region hold a map, and this check is written for the
+/// > two this scene's spots earn — one on level 1 of the ladder and one on
+/// > level 2
+///
+/// and [`PAIRED_FINE_RADIUS_SHARE`] raised to `1.0`, which lands both cones on
+/// the same rung:
+///
+/// > 2 of the frame's maps are 384 texels a side, where this check wants the
+/// > one light whose coverage puts it on level 1 of the ladder — the sides it
+/// > got are [(384, 384), (384, 384)] in slots [2, 3], so the pair was not
+/// > demoted the way PAIRED_FINE_RADIUS_SHARE derives
+///
+/// So a frame that lost the second map, or that never split the rungs, is
+/// refused rather than read.
+///
+/// **Then the readings, taken through the wrong rectangle.** The two maps'
+/// rectangles swapped after the rungs were identified, so each map's pixels are
+/// placed off the other's:
+///
+/// > the level-1 map's centre reading at (158, 6) is not inside slot 2's own
+/// > rectangle, so it cannot say whether the viewer filled that tile
+///
+/// with the same line for the level-2 map at (140, 12) and slot 3 — both in one
+/// panic, which is what says the faults are collected rather than the first of
+/// them ending the run. The border readings alone cannot red under that swap,
+/// and deliberately so: both maps' far edges *are* tinted, which is the whole
+/// point of the frame. What separates them is which rectangle each pixel came
+/// from, and that is what the containment guard reads.
+///
+/// And both maps' far edges moved onto the root cell's rectangle, which is the
+/// picture a viewer that borders whole cells draws:
+///
+/// > the level-1 map's right edge at (175, 24) is not the border tint, so the
+/// > viewer is not bordering the rectangle the block carries — this pixel is in
+/// > the middle of root cell 2, which a grid drawn on whole cells leaves grey
+///
+/// again on both maps and on both of their edges, four lines in one panic.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_atlas_view_borders_two_maps_of_one_root_cell_at_their_own_rungs() {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the border is a couple of pixels wide"
+    )]
+    let border = crcbl::shaders::atlas_view::BORDER_PIXELS as u32;
+
+    let viewed = render_paired_atlas_view();
+
+    let held: Vec<usize> = (crcbl::render::shadow::CASCADES..crcbl::render::shadow::TILES)
+        .filter(|slot| viewed.rects[*slot][0] > 0.0)
+        .collect();
+    let sides: Vec<(u32, u32)> = held
+        .iter()
+        .map(|slot| tile_side(viewed.rects[*slot]))
+        .collect();
+    assert_eq!(
+        held.len(),
+        2,
+        "{count} slots of the light region hold a map, and this check is written for the two \
+         this scene's spots earn — one on level {PAIRED_COARSE_LEVEL} of the ladder and one on \
+         level {PAIRED_FINE_LEVEL}: {rects:?}",
+        count = held.len(),
+        rects = viewed.rects,
+    );
+
+    // Which slot holds which rung, found by the side the allocator actually
+    // gave rather than by slot order: a level names a texel count, so a map
+    // that landed a rung either side of the one this fixture derives is a slot
+    // this loop cannot find at all.
+    let maps = [PAIRED_COARSE_LEVEL, PAIRED_FINE_LEVEL].map(|level| {
+        let wanted = crcbl::render::shadow::TILE >> level;
+        let found: Vec<usize> = held
+            .iter()
+            .copied()
+            .filter(|slot| tile_side(viewed.rects[*slot]) == (wanted, wanted))
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "{count} of the frame's maps are {wanted} texels a side, where this check wants the \
+             one light whose coverage puts it on level {level} of the ladder — the sides it got \
+             are {sides:?} in slots {held:?}, so the pair was not demoted the way \
+             PAIRED_FINE_RADIUS_SHARE derives",
+            count = found.len(),
+        );
+        (level, found[0], viewed.rects[found[0]])
+    });
+
+    let root = root_cell_of(maps[0].2);
+    assert_eq!(
+        root,
+        root_cell_of(maps[1].2),
+        "the level-{coarse} map is in root cell {root} and the level-{fine} map in root cell \
+         {other} — this check is written for two rungs the allocator cut out of ONE cell, and \
+         two maps in two cells are the neighbours the ladder above already reads",
+        coarse = maps[0].0,
+        fine = maps[1].0,
+        other = root_cell_of(maps[1].2),
+    );
+    let (cell_x, cell_y, cell_width, cell_height) = cell_on_screen(root);
+
+    let mut faults = Vec::new();
+    // The pixels asserted clear of the tint, gathered as the maps are read and
+    // spent once below, so each of them goes through the same containment
+    // guard whether it came from a map's own edge or from the cell around them.
+    let mut clear: Vec<(String, (u32, u32))> = Vec::new();
+
+    for &(level, slot, rect) in &maps {
+        let (x, y, width, height) = slot_on_screen(rect);
+        if width <= 2 * border || height <= 2 * border {
+            faults.push(format!(
+                "the level-{level} map is {width}x{height} pixels of the frame, which the border \
+                 drawn on both of its sides covers entirely — its centre reading would be a \
+                 border pixel and could not say the tile is not simply filled"
+            ));
+            continue;
+        }
+
+        let bordered = [
+            (
+                format!("the level-{level} map's right edge"),
+                (x + width - 1, y + height / 2),
+            ),
+            (
+                format!("the level-{level} map's bottom edge"),
+                (x + width / 2, y + height - 1),
+            ),
+        ];
+        let centre = (x + width / 2, y + height / 2);
+        eprintln!(
+            "{suite}: shadow — the atlas is drawn at {view:?}; the level-{level} map is slot \
+             {slot}'s {rect:?}, which is {width}x{height} pixels at ({x}, {y}) inside root cell \
+             {root}'s {cell:?}. Its edges lead red over blue by {right:.1} at {right_at:?} and \
+             {bottom:.1} at {bottom_at:?}, and its centre {centre:?} by {middle:.1}",
+            suite = crate::SUITE,
+            view = atlas_on_screen(),
+            cell = (cell_x, cell_y, cell_width, cell_height),
+            right = tint_at(&viewed.image, bordered[0].1),
+            right_at = bordered[0].1,
+            bottom = tint_at(&viewed.image, bordered[1].1),
+            bottom_at = bordered[1].1,
+            middle = tint_at(&viewed.image, centre),
+        );
+
+        for (name, at) in bordered {
+            if tint_at(&viewed.image, at) <= ATLAS_BORDER_LEVELS {
+                faults.push(format!(
+                    "{name} at {at:?} is not the border tint, so the viewer is not bordering the \
+                     rectangle the block carries — this pixel is in the middle of root cell \
+                     {root}, which a grid drawn on whole cells leaves grey"
+                ));
+            }
+        }
+        if slot_covering(&viewed.rects, centre) == Some(slot) {
+            if tint_at(&viewed.image, centre).abs() >= ATLAS_BORDER_LEVELS {
+                faults.push(format!(
+                    "the middle of the level-{level} map at {centre:?} carries the border tint, \
+                     so the viewer filled that tile rather than bordering it and its edge \
+                     readings say nothing"
+                ));
+            }
+        } else {
+            faults.push(format!(
+                "the level-{level} map's centre reading at {centre:?} is not inside slot \
+                 {slot}'s own rectangle, so it cannot say whether the viewer filled that tile"
+            ));
+        }
+
+        clear.push((
+            format!("just past the level-{level} map's bottom edge"),
+            (x + width / 2, y + height + border),
+        ));
+        // Three quarters down that edge rather than the middle of it: the
+        // coarse map's right edge has the finer map against it, and the whole
+        // point of this frame is that it does.
+        clear.push((
+            format!("just past the level-{level} map's right edge"),
+            (x + width + border, y + height * 3 / 4),
+        ));
+    }
+
+    let (fine_x, fine_y, fine_width, fine_height) = slot_on_screen(maps[1].2);
+    clear.extend([
+        (
+            "the quarter of the root cell neither map was cut from".to_owned(),
+            (
+                cell_x + cell_width / 4,
+                cell_y + cell_height - cell_height / 4,
+            ),
+        ),
+        (
+            "the sixteenth beside the finer map".to_owned(),
+            (
+                fine_x + fine_width + fine_width / 2,
+                fine_y + fine_height / 2,
+            ),
+        ),
+        (
+            "the root cell's right edge".to_owned(),
+            (cell_x + cell_width - 1, cell_y + cell_height / 2),
+        ),
+        (
+            "the root cell's bottom edge".to_owned(),
+            (cell_x + cell_width / 2, cell_y + cell_height - 1),
+        ),
+    ]);
+
+    eprintln!(
+        "{suite}: shadow — the pixels held clear of a border read {clear:?}",
+        suite = crate::SUITE,
+        clear = clear
+            .iter()
+            .map(|(name, at)| (name, at, tint_at(&viewed.image, *at)))
+            .collect::<Vec<_>>(),
+    );
+    for (name, at) in &clear {
+        if let Some(covering) = slot_covering(&viewed.rects, *at) {
+            faults.push(format!(
+                "{name} at {at:?} is inside slot {covering}'s rectangle, so this scene is not \
+                 the fixture the reading below needs: {rects:?}",
+                rects = viewed.rects,
+            ));
+            continue;
+        }
+        if tint_at(&viewed.image, *at).abs() >= ATLAS_BORDER_LEVELS {
+            faults.push(format!(
+                "{name} at {at:?} carries the border tint, and no map was laid out there — so \
+                 the viewer is bordering something other than the rectangles the block carries, \
+                 which inside a cell holding two of them is the whole question"
+            ));
         }
     }
     assert!(faults.is_empty(), "{}", faults.join("\n"));

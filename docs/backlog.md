@@ -218,14 +218,44 @@ golden of their own and a button on the page. What is still **not** done:
     refuses the level rather than the level loosening the guard. `MESH_EXTENT`
     is one constant shared by every check in the suite rather than a per-test
     parameter, so drawing a rung larger would move every other frame in it.
-  - **Still one map per frame.** Every rung's scene lights one shadowable light
-    and the check asserts exactly one occupied light slot, so the case nobody
-    reads is **two maps of different levels inside the same root cell** — which
-    `AtlasAllocator` can hand out. The border loop's per-slot containment test
-    is therefore exercised against empty slots and the cascades, never against a
-    second subdivided neighbour whose own border sits a few pixels away. Closing
-    it wants a second shadowable light whose coverage lands on a different rung
-    of the same root: a fixture change, not another arm of this loop.
+  - **Two rungs of one root cell are read now, and the pair is asserted rather
+    than hoped for.**
+    `the_atlas_view_borders_two_maps_of_one_root_cell_at_their_own_rungs` lights
+    the ladder's own `subdivided_spot` beside `paired_fine_spot` — the same cone
+    at `PAIRED_FINE_RADIUS_SHARE` of its radius, which halves `shadow`'s
+    `map_extent` and so its `coverage`, the same halving `subdivided_camera_up`
+    gets from doubling the eye's distance — under one camera at
+    `PAIRED_COARSE_LEVEL`'s height. `AtlasAllocator::free_node` puts both in one
+    cell by its own rule and not by luck: `Selection::lay_out` spends the
+    coarsest request first, which splits the lowest free root and takes its
+    first quarter, and the finer request behind it splits the quarter beside it.
+    The check refuses the frame unless it actually got that — exactly two
+    occupied light slots, one map of `TILE >> 1` texels and one of `TILE >> 2`
+    found **by side** so a rung either side is a slot the search cannot find,
+    and `root_cell_of` equal for the two — and every pixel it holds clear of the
+    tint is asserted to lie in no slot's rectangle first. Measured identical on
+    radv and lavapipe, three runs each: root cell 2 at `(128, 0, 48, 48)`, a
+    `24`-pixel map at `(128, 0)` and a `12`-pixel one at `(152, 0)`, the border
+    tint at `147.0` on all four of their far edges and `0.0` at the eight pixels
+    held clear — including the quarter of the cell neither map was cut from, the
+    sixteenth beside the finer map, and the root cell's own edges. `MESH_EXTENT`
+    and every shared constant are untouched.
+    - **The middle of the coarse map's right edge has no clear pixel past it**,
+      because the finer map's left edge is against it with
+      `crcbl::shaders::atlas_view::BORDER_PIXELS` of its own border there. That
+      reading is taken three quarters down the edge instead, below the finer map
+      entirely, and the containment guard is what says so. Verified, not
+      guessed: swapping the two maps' rectangles reds on the containment guard
+      and **not** on the border readings, because both maps' far edges really
+      are tinted — what the frame separates is which rectangle a pixel came
+      from.
+    - **Still nobody's claim: a released tile's neighbour.** Every frame in this
+      module starts on an empty `AtlasAllocator`, so the coalescing half of
+      `AtlasAllocator::release` — a slot that gives a tile back mid-frame and
+      the merge that follows — is read only by that module's own unit tests and
+      never through a picture. Reaching it from here wants a fixture that draws
+      two frames and moves a light between them, which `render_scene` opens a
+      fresh device for and cannot express as written.
 - **Subdivision is the coverage ladder's doing, not the allocator running out.**
   Recorded because the entry this replaces said the opposite: a scene with more
   shadowed lights than the atlas has root cells subdivides nothing.
