@@ -267,11 +267,31 @@ golden of their own and a button on the page. What is still **not** done:
     station up, 44 texels, moves the contact itself to `31.29` and `31.13`, so
     there is no station between the two. Its peter-panning half is fine — `0.00`
     at the contact against `68.08` beyond it at `PETER_PAN_BIAS` — so this is a
-    rung the readings cannot carry rather than a rung with a defect. **Why the
-    narrowest kernel on the ladder is the one that leaves no acne behind at zero
-    constant bias was not established**; that is its own investigation. Closing
-    this wants an acne rise that does not depend on which kernel drew it, and an
-    offset station between 40 and 44 texels.
+    rung the readings cannot carry rather than a rung with a defect. **Why**:
+    the normal offset walks the lookup exactly `r_shadow_normal_offset` texels
+    along the shadow map's lateral axis — `shadow_normal_offset`'s
+    `sqrt(1 − cos²)` scaling is what cancels the receiver's incidence out of
+    that walk — so a kernel reads its own quantised depth back only where it
+    reaches further _back_ than the walk, and a tap does so when its lateral
+    offset exceeds `r_shadow_normal_offset` plus `r_shadow_bias` times the
+    cotangent of the light's angle to the receiver. Swept at `r_shadow_bias 0`
+    on both adapters (2026-09-05), countable dots vanish above **1.85** texels
+    of offset under `box` and above **2.20** under `disc` and the shipped rung —
+    `tile_box_pcf` reaches one texel and `tile_pcf` reaches
+    `SHADOW_FILTER_TEXELS`, plus the comparison sampler's bilinear footprint
+    either way — and `NORMAL_OFFSET_TEXELS` ships at **2.0**, between the two.
+    Under `box` the constant bias is then a no-op over this block: its mean is
+    `185.73` on radv and `185.60` on lavapipe at `r_shadow_bias` 0, 0.5, 1.5 and
+    96 alike, where the shipped rung's own mean is `185.29`/`185.15` at the bias
+    it ships against `185.73`/`185.60` fully biased — the acne that bias is
+    still covering. The same cutoffs hold at `sun` tick 90 (30.4° up) on both
+    adapters, so this is a property of the kernels rather than of this block or
+    this sun. So the acne half is unreadable on `box` **by construction at the
+    shipped normal offset**, and no receiver or sun rescues it; what would make
+    it readable is an arm at a _reduced_ offset, where the two counts do trade —
+    `box` at 1.5 texels of offset reads `29.1737%` dots (radv) / `29.5090%`
+    (lavapipe) at zero bias against `4.6467%` at the shipped bias. The
+    `HELD_OFFSET` half still wants an offset station between 40 and 44 texels.
   - **The top of the sun's arc, `sun::NOON_TICK`.** The same two claims fail,
     and for one reason: a sun at `sun::MAX_ELEVATION` throws a plinth shadow a
     fraction of the block's own height long. Zeroing `r_shadow_normal_offset`
