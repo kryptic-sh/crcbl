@@ -291,6 +291,23 @@ pub const FRAME_UNIFORMS_SIZE: usize = 96
     + 16 * SHADOW_ATLAS_TILES
     + 16;
 
+/// Where [`FrameUniforms::sky_sh_r`] starts in the block
+/// [`FrameUniforms::to_bytes`] writes, in bytes.
+///
+/// [`FRAME_UNIFORMS_SIZE`]'s own running sum, stopped at the sky's first row —
+/// every member [`FrameUniforms::to_bytes`] writes ahead of `sky_sh_r`, in the
+/// `std140` order that function walks.
+///
+/// Named because a second consumer arrived — `crcbl_render`'s
+/// `an_atmosphere_writes_the_luts_own_ambient_term` reads these rows back out of
+/// a frame block the renderer wrote — and a copy of the arithmetic in that
+/// crate would be a second place for the layout to drift. Pinned against the
+/// `Offset` decorations `slangc` emits by
+/// `the_uniform_block_matches_the_offsets_slangc_emits`, which walks the whole
+/// block and would report a gap either side of this row.
+pub const SKY_SH_R_OFFSET: usize =
+    192 + 64 * SHADOW_CASCADES + 64 * SHADOW_LIGHT_TILES + PROBE_VOLUME_SIZE;
+
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
 /// Two `float4x4` (64 each) then six `uint` (4 each) and two `uint` of
@@ -3696,7 +3713,11 @@ mod tests {
             144 + cascades + lights + PROBE_VOLUME_SIZE,
             160 + cascades + lights + PROBE_VOLUME_SIZE,
             176 + cascades + lights + PROBE_VOLUME_SIZE,
-            192 + cascades + lights + PROBE_VOLUME_SIZE,
+            // The sky's first row, spelled through the constant a second crate
+            // reads it at rather than as a number here: the gap check below
+            // pins it against the two rows either side, which are read out of
+            // the disassembly like every other entry.
+            SKY_SH_R_OFFSET,
             208 + cascades + lights + PROBE_VOLUME_SIZE,
             224 + cascades + lights + PROBE_VOLUME_SIZE,
             240 + cascades + lights + PROBE_VOLUME_SIZE,

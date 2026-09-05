@@ -4266,6 +4266,153 @@ fn double_sided_scene() -> crate::render::scene::SceneDesc<'static> {
     scene
 }
 
+// ---------------------------------------------------------------------------
+// The double-sided updater fixture
+// ---------------------------------------------------------------------------
+
+/// How much [`double_bounce_quad`] scales [`double_sided_quad_mesh`] by, so the
+/// square stands nine tenths of the room's height along each of its own axes.
+///
+/// **Uniform**, which is what lets the fixture turn the quad over with a
+/// rotation and leave the authored normal a unit vector on both arms — a
+/// non-uniform scale would need the cofactor matrix to carry the normal and the
+/// fixture would be measuring that instead of the reflective shadow map.
+///
+/// Nine tenths rather than the whole: the quad hangs clear of the floor, the
+/// ceiling's opening and both `±Z` walls, so no edge of it is coincident with a
+/// wall the depth buffer would then have to separate it from.
+const DOUBLE_BOUNCE_SCALE: f32 = 0.9 * LEAK_ROOM_HEIGHT / (2.0 * DOUBLE_PLATE_HALF_X);
+
+/// How far in from the `+X` wall's inner face [`double_bounce_quad`] stands, in
+/// world units.
+///
+/// The quad has no thickness, so it needs a gap the depth buffer can resolve
+/// against the wall behind it — [`BOUNCE_PANEL_THICKNESS`]'s reasoning for a
+/// surface that has none of its own — and small enough that the sun reaching
+/// the wall past its edges is the same sliver on both arms.
+const DOUBLE_BOUNCE_GAP: f32 = 0.05;
+
+/// The base-colour factor [`double_bounce_forward`]'s quad reflects the sun
+/// with — [`BOUNCE_PANEL_GAIN`]'s red, and for its reasons.
+const DOUBLE_BOUNCE_GAIN: f32 = BOUNCE_PANEL_GAIN;
+
+/// Where [`double_bounce_forward`] stands its quad, and which way round.
+///
+/// **One square in one place, turned two ways.** [`double_sided_quad_mesh`]'s
+/// authored normal is `-Y`, so a quarter turn about `z` points it at `+X` — into
+/// the `+X` wall, away from [`bounce_sun`] — and the opposite quarter turn
+/// points it at `-X`, into the sun. The quad is square and centred on its own
+/// origin, so the two turns put its four corners on exactly the same four
+/// points: what differs between the arms is the normal the lighting reads, the
+/// winding the rasteriser reads, and nothing else.
+///
+/// Both turns are rotations rather than mirrors — determinant `+1` — so the
+/// face still faces along its own normal on both arms, which is
+/// [`double_sided_mirror`]'s argument at this fixture's scale.
+fn double_bounce_quad(mirror: bool) -> glam::Mat4 {
+    let turn = if mirror {
+        -std::f32::consts::FRAC_PI_2
+    } else {
+        std::f32::consts::FRAC_PI_2
+    };
+    glam::Mat4::from_translation(glam::Vec3::new(
+        0.5 * LEAK_ROOM_WIDTH - DOUBLE_BOUNCE_GAP,
+        0.5 * LEAK_ROOM_HEIGHT,
+        0.0,
+    )) * glam::Mat4::from_rotation_z(turn)
+        * glam::Mat4::from_scale(glam::Vec3::splat(DOUBLE_BOUNCE_SCALE))
+}
+
+/// **The double-sided updater fixture**: one sunlit red quad against the `+X`
+/// wall of [`probe_bounce_forward`]'s room, standing either back to the sun with
+/// [`GpuMaterial::DOUBLE_SIDED`] set or face to it as an ordinary single-sided
+/// surface, and two probes the reflective shadow map fills every frame.
+///
+/// **What it is for.** `mesh.slang`'s `rsmFragmentMain` calls
+/// `double_sided_normal` before it records a patch's normal, and
+/// `probe_gather.slang`'s `gather_patch` drops any patch whose recorded normal
+/// faces away from the probe — `facing = dot(sample_normal, -direction)`, and a
+/// patch with `facing <= 0` returns before it is weighed. So a build whose
+/// reflective shadow map wrote the *unreversed* normal records this quad facing
+/// into the wall, every probe in the room drops it, and the room loses the only
+/// red in it. Nothing in the tree drew that: `Scene::DoubleSided` has no probe
+/// volume, and `probe_bounce_forward`'s panel is a closed slab whose sunlit face
+/// is front-facing whatever the cull mode is.
+///
+/// **The two arms are the same square in the same place**, which is what makes
+/// the comparison a claim about the reversal rather than about two scenes: see
+/// `double_bounce_quad`. The single-sided arm's quad faces the sun and needs no
+/// reversal at all, so it is the reading the double-sided arm has to match.
+///
+/// **What is measured is the probe term alone** — `bounce_camera`'s frame, for
+/// its reasons: the camera looks straight at the `-X` wall's inner face, which
+/// `bounce_sun` never touches, the sun carries no ambient and the sky is
+/// off. There is no divider here, because visibility is not what this fixture is
+/// about and a wall between the quad and the measured face would take the whole
+/// of the reading on both arms.
+///
+/// [`GpuMaterial::DOUBLE_SIDED`]: crate::shaders::mesh::GpuMaterial::DOUBLE_SIDED
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built or the capture cannot
+/// be uploaded.
+pub fn double_bounce_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    mirror: bool,
+) -> Result<ForwardScene, OffscreenError> {
+    use crate::shaders::mesh::GpuMaterial;
+
+    let probes = probe_bounce_grid();
+    let mut scene = crate::render::scene::demo();
+    scene.capacities.probes = probes.volume.total();
+    scene.probes = probes;
+    scene.meshes.push(double_sided_quad_mesh());
+    let quad_mesh = scene.meshes.len() - 1;
+    // Appended rather than edited in place, on `probe_bounce_forward`'s terms.
+    // Two rows differing in one flags word, on `double_sided_scene`'s: the same
+    // colour and the same roughness, so the two arms cannot differ in what the
+    // quad reflects.
+    let lit = GpuMaterial {
+        base_color: [DOUBLE_BOUNCE_GAIN, 0.0, 0.0, 1.0],
+        ..GpuMaterial::UNTINTED
+    };
+    scene.materials.push(lit);
+    let single = scene.materials.len() - 1;
+    scene.materials.push(GpuMaterial {
+        flags: GpuMaterial::DOUBLE_SIDED,
+        ..lit
+    });
+    let double = scene.materials.len() - 1;
+
+    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
+    // On `probe_bounce_forward`'s terms: the measured pixels are the diffuse
+    // probe term, and a rough surface's reflection would put specular into them.
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(crcbl_render::RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    renderer.set_sky(crcbl_render::Sky::NONE);
+    place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, leak_room());
+    place(
+        &mut renderer,
+        quad_mesh,
+        if mirror { single } else { double },
+        double_bounce_quad(mirror),
+    );
+    // After the geometry and before the frame, on `probe_bounce_forward`'s
+    // terms: the gather weighs every map texel by the visibility this records.
+    renderer.capture_probe_visibility(device, queue)?;
+    Ok(ForwardScene {
+        camera: bounce_camera(),
+        sun: bounce_sun(),
+        renderer: Box::new(renderer),
+    })
+}
+
 /// How many quad strips [`Scene::SpecularAa`] cuts the corrugated half of its
 /// plate into.
 ///

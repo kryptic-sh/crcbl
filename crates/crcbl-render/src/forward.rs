@@ -22677,4 +22677,72 @@ mod tests {
              the cache at all"
         );
     }
+
+    /// **The frame block's ambient rows carry the marched LUT's own L1
+    /// projection**, and not the three-band fit's.
+    ///
+    /// `begin_frame` writes [`PresentedSky::irradiance`] into
+    /// [`FrameUniforms::sky_sh_r`] and the two rows beside it, and until this
+    /// test nothing read them back. The only reader of those rows is arithmetic
+    /// in `mesh.slang`'s fragment stage, and no frame in the tree draws a
+    /// surface under an atmosphere — `crcbl`'s
+    /// `an_atmosphere_frame_is_the_host_lut` puts no geometry in its scene at
+    /// all — so `PresentedSky::new` handed `view.gradient_fit().irradiance()`
+    /// instead, the three-band fit's projection rather than the LUT's, was a
+    /// swap `docs/backlog.md` recorded passing every suite in the tree on
+    /// 2026-09-06.
+    ///
+    /// **Both halves are needed and the second is the sabotage's.** The rows
+    /// equalling the LUT's projection is the wiring; the rows *differing* from
+    /// the fit's is what makes the equality a claim about which projection
+    /// arrived rather than about two numbers that happen to agree. The
+    /// `assert_ne` above them is the anti-vacuity: a sun for which the two
+    /// projections coincide would make this test pass under the swap.
+    ///
+    /// [`FrameUniforms::sky_sh_r`]: crcbl_shaders::mesh::FrameUniforms::sky_sh_r
+    #[test]
+    fn an_atmosphere_writes_the_luts_own_ambient_term() {
+        /// The three rows, as the little-endian bytes `FrameUniforms::to_bytes`
+        /// puts in the block.
+        fn rows(probe: &crcbl_shaders::probe::GpuProbe) -> Vec<u8> {
+            [probe.sh_r, probe.sh_g, probe.sh_b]
+                .iter()
+                .flatten()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        let (recorder, device, queue) = open();
+        let (renderer, _luts) = with_marched_atmosphere(device.as_ref(), queue, MOVED_SUN);
+
+        let view = SkyView::build(&MOVED_SUN.parameters());
+        let marched = rows(&view.irradiance());
+        let fitted = rows(&view.gradient_fit().irradiance());
+        assert_ne!(
+            marched, fitted,
+            "this sun's LUT and its three-band fit project to the same rows, so a block \
+             carrying either would satisfy the check below and the swap it exists for would \
+             pass"
+        );
+
+        let block = recorder
+            .buffer_bytes(renderer.uniforms[renderer.frame])
+            .expect("a frame with an atmosphere writes its uniform block");
+        let at = mesh::SKY_SH_R_OFFSET;
+        assert_eq!(
+            &block[at..at + marched.len()],
+            marched.as_slice(),
+            "the frame block's sky rows are not `SkyView::irradiance` of the LUT this frame \
+             marched, so the ambient term the fragment stage evaluates comes from somewhere \
+             else"
+        );
+        assert_ne!(
+            &block[at..at + fitted.len()],
+            fitted.as_slice(),
+            "the frame block's sky rows are the gradient fit's projection — the LUT was \
+             marched and then thrown away for the three-band approximation of it"
+        );
+
+        renderer.destroy(device.as_ref());
+    }
 }

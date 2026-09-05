@@ -207,18 +207,28 @@ landed after it, and `GpuMaterial::DOUBLE_SIDED` with
   rather than a mirrored one. No scene in the tree pairs physical tiling with
   `DOUBLE_SIDED`, so this is a decision recorded rather than a measurement.
 
-- **`rsmFragmentMain`'s reversal is held by a text test and no picture.**
-  `both_shaded_stages_reverse_a_double_sided_back_face` asserts the reflective
-  shadow map's stage calls `double_sided_normal` and reads `SV_IsFrontFace`;
-  nothing draws a double-sided surface into a probe volume that is updated every
-  frame and reads a probe row back. `Scene::DoubleSided` has the demo's empty
-  grid, so a build whose RSM wrote the unreversed normal — a patch recorded
-  facing away from the probe that sees it, contributing nothing — would pass
-  every golden and every reader in the tree. Closing it is a fourth quad under a
-  `ProbeUpdate::EveryFrame` volume of one probe and a reader on that probe's row
-  against the mirror's, on
-  `the_updater_gathers_what_a_probe_can_see_and_nothing_through_a_wall`'s terms
-  in `tests/render_e2e.rs`.
+- **The reversal is measured on the sun's cascade and on a flat quad.**
+  `a_double_sided_back_face_bounces_what_its_mirror_bounces` draws
+  `crcbl::screenshot::double_bounce_forward` — one red square against the
+  updater room's `+X` wall, standing either back to the sun with `DOUBLE_SIDED`
+  set or face to it as an ordinary single-sided row — and reads the `-X` wall
+  face both arms' probes light. What it does not cover is the punctual
+  producers' half of the same map, because no punctual light in the tree lights
+  a double-sided surface, or a curved shell, where the reversal changes across
+  one cluster rather than across a whole instance. Both are the same fragment
+  stage by construction — `rsmFragmentMain` is one stage and the `rsm-punctual`
+  pass binds the same `SidedPipelines` — so this is a scope note rather than a
+  suspected bug.
+
+- **The updater's double-sided fixture borrows `Scene::DoubleSided`'s mesh.**
+  `double_bounce_forward` places `double_sided_quad_mesh` at
+  `DOUBLE_BOUNCE_SCALE`, which is written against `DOUBLE_PLATE_HALF_X` — the
+  golden fixture's own pixel-alignment constant. Retuning that constant changes
+  this fixture's quad and therefore its levels; the comparison is arm against
+  arm so it stays valid, but `DOUBLE_BOUNCE_MIN_LEVELS` would have to be
+  re-measured. Deliberate: the alternative was a second hand-authored quad with
+  its own winding, normal and cluster cone, which is the half of this fixture
+  that is easy to get silently wrong.
 
 - **No masked material reaches the mesh-shader path's own goldens.** The cutout
   fragment stage is shared by both geometry paths by construction — it reads
@@ -338,19 +348,19 @@ landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
   is the shape of the demo that would answer it. The same gap as the demo switch
   at the top of this section.
 
-- **The atmosphere's ambient term reaches the frame block unobserved.**
-  `SkyView::irradiance` is the L1 projection `ForwardRenderer::begin_frame`
-  writes into `mesh::FrameUniforms`' `sky_sh_*` rows, and nothing reads it back:
-  with `PresentedSky::new` handed `view.gradient_fit().irradiance()` instead —
-  the three-band fit's projection rather than the LUT's — every crcbl-render
-  null test, the whole radv render suite (`an_atmosphere_frame_is_the_host_lut`
-  reads sky pixels only) and the browser gate stay green (verified 2026-09-06).
-  The projection itself is held by
-  `the_l1_projection_matches_a_brute_force_integral` in the shader crate; what
-  is unheld is the wiring from it to the block. A null-backend test on
-  `sky_sh_r` in the written frame block against `SkyView::irradiance` of the
-  same sun would close it, on
-  `a_still_sun_marches_nothing_and_reprojects_nothing`'s sentinel pattern.
+- **The sky's ambient term has never lit a surface on a device.**
+  `an_atmosphere_writes_the_luts_own_ambient_term` reads the `sky_sh_*` rows
+  back out of the block `begin_frame` wrote and pins them to
+  `SkyView::irradiance` of the marched LUT, so the wiring from the projection to
+  the block is held. What the rows are _for_ is not: `mesh.slang`'s
+  `sky_irradiance` is three dot products held by
+  `the_fragment_stage_still_adds_the_sky_it_declares` as text, and the only GPU
+  frame in the tree with an atmosphere in it is
+  `an_atmosphere_frame_is_the_host_lut`, whose scene has no geometry at all — so
+  every pixel of it is `sky.slang`'s background arm and none of them is a
+  surface shaded through those rows. The fixture would be `Scene::Probes`' room
+  with an atmosphere set and its authored probe rows zeroed, which leaves the
+  sky's L1 term as the only thing lighting the floor.
 
 - **Not measured on Metal, D3D12 or in the browser.** The device path was run on
   `vk` only, on radv and on lavapipe. The `msl`, `dxil` and `wgsl` artifacts are

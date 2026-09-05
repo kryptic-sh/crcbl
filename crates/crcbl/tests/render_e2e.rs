@@ -4082,6 +4082,140 @@ fn the_updater_gathers_what_a_probe_can_see_and_nothing_through_a_wall() {
     );
 }
 
+/// The least the mirror arm's wall face must measure in red, in levels of 255.
+///
+/// **The anti-vacuity half.** Nothing but the updater lights this face — the sun
+/// is turned away from it, the fixture's sun carries no ambient and its sky is
+/// off — so a gather that never ran leaves both arms black and the comparison
+/// below passes on two dark frames. Measured at **175.00 levels on radv and
+/// 175.00 on lavapipe**; a frame that gathered the room's white walls and not
+/// the red quad reads 65.00 on both, which is what the reversal sabotage leaves
+/// the double-sided arm at. This sits between the two, so it separates "the
+/// quad's bounce arrived" from "some light arrived" rather than from nothing at
+/// all.
+const DOUBLE_BOUNCE_MIN_LEVELS: f32 = 120.0;
+
+/// The least red-to-blue the mirror arm's wall face must read.
+///
+/// **The second anti-vacuity half, and it is the one that makes the comparison
+/// about the quad.** The room's own walls are white and sunlit, so a face that
+/// gathered them and nothing else still measures tens of levels of red; the quad
+/// is the only red surface in the room, and a ratio is what separates the two
+/// without depending on how bright the room is. Measured at **5.210 on radv and
+/// 5.269 on lavapipe**, against **1.935 and 1.957** for a face with no quad in
+/// its rows — set between the two and clear of both.
+const DOUBLE_BOUNCE_MIN_REDNESS: f32 = 3.0;
+
+/// How far apart, in levels of 255, the two arms' channels may read.
+///
+/// **Measured at exactly 0.00 on both drivers**, and not by luck: the two arms
+/// are the same square in the same place under the same sun, so once the
+/// reversal has put the recorded normal the same way round the reflective shadow
+/// map's texels are the same numbers and the gather sums them in the same order.
+/// The sweep behind this figure moved the measured block ±5 pixels in both axes
+/// — twenty-five positions — and every one of them read the two arms equal, with
+/// the blocks themselves ranging over 33.00–34.00 levels of blue on radv and
+/// 33.00–33.84 on lavapipe as the block slid across the wall's gradient.
+///
+/// The budget is not zero because the two arms wind their quad opposite ways,
+/// and a rasteriser's fill rule may one day disagree about a map texel on the
+/// silhouette. It is four levels against a sabotage that misses by **110** —
+/// red 65.00 against 175.00 on both drivers with `rsmFragmentMain` writing
+/// `vertex_normal` — so the margin is more than a factor of twenty-five.
+const DOUBLE_BOUNCE_LEVELS: f32 = 4.0;
+
+/// **`rsmFragmentMain`'s back-face reversal, as a picture.**
+///
+/// `crcbl::screenshot::double_bounce_forward` is the fixture: one red square
+/// against the `+X` wall of the updater's room, standing either back to the sun
+/// with `GpuMaterial::DOUBLE_SIDED` set or face to it as an ordinary
+/// single-sided surface, and two probes the reflective shadow map fills every
+/// frame. The camera reads the `-X` wall's inner face, which nothing but a probe
+/// row lights.
+///
+/// **What it holds.** `mesh.slang`'s reflective shadow map stage records
+/// `double_sided_normal(material, vertex_normal, front_facing)`, and
+/// `probe_gather.slang`'s `gather_patch` drops a patch whose recorded normal
+/// faces away from the probe before it weighs it at all. So a build that wrote
+/// the unreversed normal records this quad facing into the wall, every probe
+/// drops it, and the only red in the room never reaches the measured face —
+/// while the mirror arm, whose quad faces the sun and needs no reversal, is
+/// untouched. `crcbl_shaders::mesh::both_shaded_stages_reverse_a_double_sided_back_face`
+/// holds the call as text; this is the frame it makes.
+///
+/// **The comparison is arm against arm and not against a number**, which is what
+/// makes it a claim about the reversal rather than about a driver's arithmetic:
+/// the two arms are the same square in the same place under the same sun, so
+/// every term of the gather is the same number on both sides once the normal
+/// agrees.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_double_sided_back_face_bounces_what_its_mirror_bounces() {
+    crcbl_core::log::init_logging();
+
+    let frame = |mirror: bool| {
+        let setup =
+            OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, move |device, queue, format| {
+                crcbl::screenshot::double_bounce_forward(device, queue, format, mirror)
+            })
+            .unwrap_or_else(|why| {
+                panic!("a GPU backend opens for the double-sided updater scene: {why}")
+            });
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        // The second frame, on the updater test's terms exactly: the visibility
+        // capture and the instance uploads land on the first one.
+        let _build = setup.draw_and_readback().expect("the frame renders");
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format))
+            .expect("the readback is exactly one image")
+    };
+
+    let double = frame(false);
+    let mirror = frame(true);
+    // The frame's middle, which is the `-X` wall's inner face and nothing else:
+    // `crcbl::screenshot::double_bounce_forward` aims the camera straight at it,
+    // so this measurement inverts no projection.
+    let middle = (EXTENT.0 / 2, EXTENT.1 / 2);
+    let band = |image: &Image, channel| block_channel(image, middle, PROBE_BAND, channel);
+    let (red_double, red_mirror) = (band(&double, 0), band(&mirror, 0));
+    let (blue_double, blue_mirror) = (band(&double, 2), band(&mirror, 2));
+    let mirror_redness = red_mirror / blue_mirror;
+    let double_redness = red_double / blue_double;
+    eprintln!(
+        "crcbl render e2e: double-sided bounce — wall face red {red_double:.2} double-sided \
+         against {red_mirror:.2} mirrored, blue {blue_double:.2} against {blue_mirror:.2}, \
+         red-to-blue {double_redness:.3} against {mirror_redness:.3}"
+    );
+
+    assert!(
+        red_mirror >= DOUBLE_BOUNCE_MIN_LEVELS,
+        "the mirror arm's wall face must carry the quad's bounce, and it measures \
+         {red_mirror:.2} of the {DOUBLE_BOUNCE_MIN_LEVELS} this fixture is built to reach — \
+         nothing but the updater lights this face, so a face this dark is a row the gather \
+         never wrote and the comparison below would pass on two dark frames"
+    );
+    assert!(
+        mirror_redness >= DOUBLE_BOUNCE_MIN_REDNESS,
+        "and it must read {DOUBLE_BOUNCE_MIN_REDNESS} red-to-blue, not {mirror_redness:.3} — \
+         the room's own walls are white, so a face this neutral gathered them and not the \
+         only red surface in the room"
+    );
+    for (channel, back, front) in [
+        ("red", red_double, red_mirror),
+        ("blue", blue_double, blue_mirror),
+    ] {
+        assert!(
+            (back - front).abs() <= DOUBLE_BOUNCE_LEVELS,
+            "the double-sided quad's back face must bounce what its mirror's front face \
+             bounces: {channel} reads {back:.2} against {front:.2}, which is past the \
+             {DOUBLE_BOUNCE_LEVELS} levels this fixture allows — the reflective shadow map \
+             recorded the quad facing away from the probes that can see it"
+        );
+    }
+}
+
 /// How far along `x` the clipmap profile is read, in world units.
 ///
 /// Level 0's boundary is one [`crcbl::screenshot::probe_clipmap_grid`] spacing
