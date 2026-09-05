@@ -167,203 +167,294 @@ struct ShadowScene<'a> {
     model: crcbl::math::Mat4,
 }
 
+/// The device this module's frames are drawn on, opened once and kept.
+///
+/// A fixture rather than a local, for `tests/mesh_e2e/skinned_motion.rs`'s
+/// reason: the shadow atlas is state the renderer carries **between** frames —
+/// `Selection::lay_out` keeps every slot's rectangle and hands one back to
+/// `AtlasAllocator::release` only when that slot's map is gone or has changed
+/// size — so a helper that opened a device per frame draws every frame against
+/// an allocator that has never handed anything out. [`render_scene`] is the
+/// one-frame caller and [`render_scenes`] the two-frame one.
+struct ShadowFixture {
+    headless: Headless,
+    renderer: crcbl::render::ForwardRenderer,
+    pool: crcbl::render::TransientPool,
+}
+
+impl ShadowFixture {
+    /// Opens the device and puts `scene`'s objects in the frame.
+    fn open(scene: &ShadowScene<'_>) -> Self {
+        // The mesh suite's own harness, so this frame is drawn at the extent and
+        // on the device every other mesh assertion is made against.
+        let headless = Headless::open_for_mesh_with(
+            Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+        );
+        let mut renderer = crcbl::render::ForwardRenderer::new(
+            headless.device.as_ref(),
+            headless.queue,
+            headless.format,
+        )
+        .expect("the forward renderer builds");
+        // The cube first and whatever else the scene wants above it, which is the
+        // order the pool has always been filled in.
+        crate::mesh_scene::place_cube_at(&mut renderer, scene.model);
+        (scene.prepare)(&mut renderer);
+        Self {
+            headless,
+            renderer,
+            pool: crcbl::render::TransientPool::new(),
+        }
+    }
+
+    /// Draws one frame of `scene`'s camera and sun, and reads back both the
+    /// tonemapped frame and the shadow atlas.
+    fn draw(&mut self, scene: &ShadowScene<'_>) -> ShadowFrame {
+        let device = self.headless.device.as_ref();
+        let (width, height) = MESH_EXTENT;
+
+        let acquired = device
+            .acquire_next_frame(self.headless.swapchain)
+            .expect("the ring always has an image");
+        assert_eq!(acquired.extent, MESH_EXTENT);
+
+        let (atlas_width, atlas_height) = crcbl::render::shadow::atlas_extent();
+        let color_bytes = u64::from(width) * u64::from(height) * 4;
+        // `D32Float`: one channel of four bytes.
+        let atlas_bytes = u64::from(atlas_width) * u64::from(atlas_height) * 4;
+        let staging = |label, size| {
+            device
+                .create_buffer(&BufferDesc {
+                    label: Some(label),
+                    size,
+                    usage: BufferUsage::TRANSFER_DST,
+                    memory: MemoryLocation::HostReadback,
+                })
+                .expect("a readback buffer")
+        };
+        let color_staging = staging("shadow readback", color_bytes);
+        let atlas_staging = staging("shadow atlas readback", atlas_bytes);
+
+        self.renderer
+            .begin_frame(device, &scene.camera, &scene.sun, MESH_EXTENT)
+            .expect("the uniform buffer is writable");
+        // The layout that call just spent, taken before the renderer is released:
+        // these are the rectangles this frame's blocks carry, and every slot's map
+        // is rendered into the one that names it.
+        let rects = self.renderer.shadow_lights().atlas_rects();
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("shadow frame"),
+            queue: self.headless.queue,
+        });
+        let compiled = {
+            let mut graph = crcbl::render::RenderGraph::new(self.headless.queue);
+            let target = graph.import_image(
+                "swapchain",
+                crcbl::render::ImportedImage {
+                    image: acquired.image,
+                    view: acquired.view,
+                    format: self.headless.format,
+                    extent: MESH_EXTENT,
+                    initial: ResourceState::Undefined,
+                    claim: crcbl::render::InitialClaim::Acquired,
+                    final_state: ResourceState::TransferSrc,
+                },
+            );
+            let _ = self
+                .renderer
+                .add_passes(&mut graph, &self.pool, target, MESH_EXTENT);
+            graph.compile(&self.pool).expect("a legal frame")
+        };
+        compiled
+            .execute(device, &mut self.pool, encoder.as_mut(), None)
+            .expect("the graph executed");
+
+        encoder.copy_image_to_buffer(&BufferImageCopy {
+            buffer: color_staging,
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image: acquired.image,
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: 0,
+                base_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: crcbl::hal::Offset3d::default(),
+            image_extent: Extent3d::d2(width, height),
+        });
+
+        // **Reading the atlas is a declared capability, not a given.** The atlas is
+        // `D32Float`, and copying a depth image into a buffer is
+        // `Capability::DepthImageCopy` — which D3D12 and the browser replayer both
+        // declare absent, each for a reason `crcbl_hal::DIVERGENCES` carries. So the
+        // copy is recorded where the backend says it works and *probed on an
+        // encoder of its own* where it says it does not: recording it into this one
+        // would fail `finish` and take the colour readback down with it, leaving
+        // every assertion in this module — including the several that never look at
+        // a depth at all — unable to run.
+        let atlas_copy = BufferImageCopy {
+            buffer: atlas_staging,
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image: self.renderer.shadow_atlas(),
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::DEPTH,
+                mip: 0,
+                base_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: crcbl::hal::Offset3d::default(),
+            image_extent: Extent3d::d2(atlas_width, atlas_height),
+        };
+        let depth_copy = device.supports(Capability::DepthImageCopy);
+        if depth_copy.is_yes() {
+            // **The one hand-written barrier in this module.** The atlas belongs to
+            // the renderer, not to the graph, and the graph left it in `ShaderRead`
+            // because that is what the colour pass wanted — so a reader outside the
+            // frame has to ask for it. Every barrier *inside* the frame is still
+            // the graph's.
+            let range = ImageSubresourceRange::all(Format::D32Float);
+            let to_source = [ImageBarrier::new(
+                self.renderer.shadow_atlas(),
+                range,
+                ResourceState::ShaderRead,
+                ResourceState::TransferSrc,
+            )];
+            encoder.pipeline_barrier(&Barriers {
+                images: &to_source,
+                ..Barriers::default()
+            });
+            encoder.copy_image_to_buffer(&atlas_copy);
+            // **And handed straight back**, because there may be another frame
+            // after this one: the graph starts each frame from the state it
+            // left the atlas in, so a reader outside the frame that borrowed
+            // the image owes it in that state. Skip this and the *second*
+            // frame's colour pass samples a `TransferSrc` image — which
+            // `run-forward-e2e.sh` reports as a `VUID-vkCmdDraw-None-09600`
+            // beside a green suite rather than as a failed test.
+            let to_read = [ImageBarrier::new(
+                self.renderer.shadow_atlas(),
+                range,
+                ResourceState::TransferSrc,
+                ResourceState::ShaderRead,
+            )];
+            encoder.pipeline_barrier(&Barriers {
+                images: &to_read,
+                ..Barriers::default()
+            });
+        }
+
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(self.headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device
+            .present(
+                self.headless.queue,
+                &PresentInfo {
+                    swapchain: self.headless.swapchain,
+                    waits: acquired.present_semaphore.as_slice(),
+                    present_id: None,
+                },
+            )
+            .expect("present");
+        device.wait_idle().expect("idle");
+
+        let mut color = poisoned(color_bytes as usize);
+        self.headless
+            .readback(color_staging, color_bytes, &mut color);
+        let atlas = match depth_copy {
+            Support::Yes => {
+                let mut atlas_raw = poisoned(atlas_bytes as usize);
+                self.headless
+                    .readback(atlas_staging, atlas_bytes, &mut atlas_raw);
+                Ok(atlas_raw
+                    .chunks_exact(4)
+                    .map(|word| f32::from_le_bytes(word.try_into().expect("a four-byte chunk")))
+                    .collect())
+            }
+            // Either refusal means the same thing here — no atlas to read. The
+            // second arm is unreachable in practice, because `DepthImageCopy` has no
+            // `gating_feature` and `Support::granted` is the only source of it; it
+            // is written out rather than wildcarded so a gate arriving later is a
+            // decision somebody makes instead of one this `_` makes for them.
+            Support::No(why) | Support::NotOnThisDevice(why) => {
+                Err(refused_atlas_copy(&self.headless, &atlas_copy, why))
+            }
+        };
+
+        // Through the ring's own channel order rather than as raw RGBA. The Vulkan
+        // original could assume the latter because its fixture only ever opened one
+        // format; this fixture takes whatever the surface prefers, and wgpu prefers
+        // BGRA. Every measurement below is a mean over the three colour channels, so
+        // the order does not change a number — it is here so the pixels a future
+        // assertion reads are the pixels it names.
+        let order = match self.headless.format {
+            Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
+            _ => crcbl_golden::ChannelOrder::Rgba,
+        };
+        let image = crcbl_golden::Image::from_readback(width, height, &color, order)
+            .expect("the readback is exactly one image");
+
+        let format = self.headless.format;
+        device.destroy_command_buffer(commands);
+        device.destroy_buffer(color_staging);
+        device.destroy_buffer(atlas_staging);
+        ShadowFrame {
+            image,
+            format,
+            atlas,
+            rects,
+        }
+    }
+
+    /// Releases everything in dependency order and asks the fixture what the
+    /// device saw.
+    fn finish(self) {
+        let Self {
+            headless,
+            renderer,
+            mut pool,
+        } = self;
+        let device = headless.device.as_ref();
+        renderer.destroy(device);
+        pool.destroy(device);
+        headless.finish();
+    }
+}
+
 /// Opens a device, draws `scene`, and reads back both the tonemapped frame and
 /// the shadow atlas.
 fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
-    // The mesh suite's own harness, so this frame is drawn at the extent and on
-    // the device every other mesh assertion is made against.
-    let headless = Headless::open_for_mesh_with(
-        Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
-    );
-    let device = headless.device.as_ref();
-    let (width, height) = MESH_EXTENT;
-    let mut pool = crcbl::render::TransientPool::new();
-    let mut renderer = crcbl::render::ForwardRenderer::new(device, headless.queue, headless.format)
-        .expect("the forward renderer builds");
-    // The cube first and whatever else the scene wants above it, which is the
-    // order the pool has always been filled in.
-    crate::mesh_scene::place_cube_at(&mut renderer, scene.model);
-    (scene.prepare)(&mut renderer);
+    let mut fixture = ShadowFixture::open(scene);
+    let frame = fixture.draw(scene);
+    fixture.finish();
+    frame
+}
 
-    let acquired = device
-        .acquire_next_frame(headless.swapchain)
-        .expect("the ring always has an image");
-    assert_eq!(acquired.extent, MESH_EXTENT);
-
-    let (atlas_width, atlas_height) = crcbl::render::shadow::atlas_extent();
-    let color_bytes = u64::from(width) * u64::from(height) * 4;
-    // `D32Float`: one channel of four bytes.
-    let atlas_bytes = u64::from(atlas_width) * u64::from(atlas_height) * 4;
-    let staging = |label, size| {
-        device
-            .create_buffer(&BufferDesc {
-                label: Some(label),
-                size,
-                usage: BufferUsage::TRANSFER_DST,
-                memory: MemoryLocation::HostReadback,
-            })
-            .expect("a readback buffer")
-    };
-    let color_staging = staging("shadow readback", color_bytes);
-    let atlas_staging = staging("shadow atlas readback", atlas_bytes);
-
-    renderer
-        .begin_frame(device, &scene.camera, &scene.sun, MESH_EXTENT)
-        .expect("the uniform buffer is writable");
-    // The layout that call just spent, taken before the renderer is released:
-    // these are the rectangles this frame's blocks carry, and every slot's map
-    // is rendered into the one that names it.
-    let rects = renderer.shadow_lights().atlas_rects();
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some("shadow frame"),
-        queue: headless.queue,
-    });
-    let compiled = {
-        let mut graph = crcbl::render::RenderGraph::new(headless.queue);
-        let target = graph.import_image(
-            "swapchain",
-            crcbl::render::ImportedImage {
-                image: acquired.image,
-                view: acquired.view,
-                format: headless.format,
-                extent: MESH_EXTENT,
-                initial: ResourceState::Undefined,
-                claim: crcbl::render::InitialClaim::Acquired,
-                final_state: ResourceState::TransferSrc,
-            },
-        );
-        let _ = renderer.add_passes(&mut graph, &pool, target, MESH_EXTENT);
-        graph.compile(&pool).expect("a legal frame")
-    };
-    compiled
-        .execute(device, &mut pool, encoder.as_mut(), None)
-        .expect("the graph executed");
-
-    encoder.copy_image_to_buffer(&BufferImageCopy {
-        buffer: color_staging,
-        buffer_offset: 0,
-        buffer_row_length: 0,
-        buffer_image_height: 0,
-        image: acquired.image,
-        image_subresource: ImageSubresourceLayers {
-            aspect: ImageAspect::COLOR,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
-        image_offset: crcbl::hal::Offset3d::default(),
-        image_extent: Extent3d::d2(width, height),
-    });
-
-    // **Reading the atlas is a declared capability, not a given.** The atlas is
-    // `D32Float`, and copying a depth image into a buffer is
-    // `Capability::DepthImageCopy` — which D3D12 and the browser replayer both
-    // declare absent, each for a reason `crcbl_hal::DIVERGENCES` carries. So the
-    // copy is recorded where the backend says it works and *probed on an
-    // encoder of its own* where it says it does not: recording it into this one
-    // would fail `finish` and take the colour readback down with it, leaving
-    // every assertion in this module — including the several that never look at
-    // a depth at all — unable to run.
-    let atlas_copy = BufferImageCopy {
-        buffer: atlas_staging,
-        buffer_offset: 0,
-        buffer_row_length: 0,
-        buffer_image_height: 0,
-        image: renderer.shadow_atlas(),
-        image_subresource: ImageSubresourceLayers {
-            aspect: ImageAspect::DEPTH,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
-        image_offset: crcbl::hal::Offset3d::default(),
-        image_extent: Extent3d::d2(atlas_width, atlas_height),
-    };
-    let depth_copy = device.supports(Capability::DepthImageCopy);
-    if depth_copy.is_yes() {
-        // **The one hand-written barrier in this module.** The atlas belongs to
-        // the renderer, not to the graph, and the graph left it in `ShaderRead`
-        // because that is what the colour pass wanted — so a reader outside the
-        // frame has to ask for it. Every barrier *inside* the frame is still
-        // the graph's.
-        let range = ImageSubresourceRange::all(Format::D32Float);
-        let to_source = [ImageBarrier::new(
-            renderer.shadow_atlas(),
-            range,
-            ResourceState::ShaderRead,
-            ResourceState::TransferSrc,
-        )];
-        encoder.pipeline_barrier(&Barriers {
-            images: &to_source,
-            ..Barriers::default()
-        });
-        encoder.copy_image_to_buffer(&atlas_copy);
-    }
-
-    let commands = encoder.finish().expect("recording succeeded");
-    device
-        .submit(headless.queue, &SubmitInfo::new(&[commands]))
-        .expect("submit");
-    device
-        .present(
-            headless.queue,
-            &PresentInfo {
-                swapchain: headless.swapchain,
-                waits: acquired.present_semaphore.as_slice(),
-                present_id: None,
-            },
-        )
-        .expect("present");
-    device.wait_idle().expect("idle");
-
-    let mut color = poisoned(color_bytes as usize);
-    headless.readback(color_staging, color_bytes, &mut color);
-    let atlas = match depth_copy {
-        Support::Yes => {
-            let mut atlas_raw = poisoned(atlas_bytes as usize);
-            headless.readback(atlas_staging, atlas_bytes, &mut atlas_raw);
-            Ok(atlas_raw
-                .chunks_exact(4)
-                .map(|word| f32::from_le_bytes(word.try_into().expect("a four-byte chunk")))
-                .collect())
-        }
-        // Either refusal means the same thing here — no atlas to read. The
-        // second arm is unreachable in practice, because `DepthImageCopy` has no
-        // `gating_feature` and `Support::granted` is the only source of it; it
-        // is written out rather than wildcarded so a gate arriving later is a
-        // decision somebody makes instead of one this `_` makes for them.
-        Support::No(why) | Support::NotOnThisDevice(why) => {
-            Err(refused_atlas_copy(&headless, &atlas_copy, why))
-        }
-    };
-
-    // Through the ring's own channel order rather than as raw RGBA. The Vulkan
-    // original could assume the latter because its fixture only ever opened one
-    // format; this fixture takes whatever the surface prefers, and wgpu prefers
-    // BGRA. Every measurement below is a mean over the three colour channels, so
-    // the order does not change a number — it is here so the pixels a future
-    // assertion reads are the pixels it names.
-    let order = match headless.format {
-        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
-        _ => crcbl_golden::ChannelOrder::Rgba,
-    };
-    let image = crcbl_golden::Image::from_readback(width, height, &color, order)
-        .expect("the readback is exactly one image");
-
-    let format = headless.format;
-    device.destroy_command_buffer(commands);
-    device.destroy_buffer(color_staging);
-    device.destroy_buffer(atlas_staging);
-    renderer.destroy(device);
-    pool.destroy(device);
-    headless.finish();
-    ShadowFrame {
-        image,
-        format,
-        atlas,
-        rects,
-    }
+/// Draws `scene`, runs `between` over the renderer that drew it, and draws it
+/// again — **two frames on one device**.
+///
+/// The arrangement [`render_scene`] cannot express, and the one an assertion
+/// about a *released* atlas tile needs: every frame that opens its own device
+/// lays its atlas out against an empty allocator, so nothing is ever given back
+/// and `AtlasAllocator::release`'s merge never runs under a picture. `between`
+/// is what moves the scene — a light re-lit, re-sized or dropped — and the
+/// second frame is the one the release happened in.
+fn render_scenes(
+    scene: &ShadowScene<'_>,
+    between: &dyn Fn(&mut crcbl::render::ForwardRenderer),
+) -> [ShadowFrame; 2] {
+    let mut fixture = ShadowFixture::open(scene);
+    let first = fixture.draw(scene);
+    between(&mut fixture.renderer);
+    let second = fixture.draw(scene);
+    fixture.finish();
+    [first, second]
 }
 
 /// **Holds a backend to a declared missing depth-image copy**, and hands back
@@ -1475,7 +1566,11 @@ const ATLAS_LEVEL_TOLERANCE: f32 = 2.0;
 /// [`the_atlas_view_borders_two_maps_of_one_root_cell_at_their_own_rungs`], with
 /// two tiles of different sizes inside one cell: the same pair again on both
 /// adapters, which says the distance is a fact about the tint rather than about
-/// how much of the picture one map takes.
+/// how much of the picture one map takes. And so does
+/// [`the_atlas_view_borders_the_quarter_a_released_tile_merged_back_into`] with
+/// one *pixel* read in two frames — `147.0` where a released map's edge was and
+/// `0.0` at that same pixel once the tile came back, on both adapters and three
+/// runs each.
 const ATLAS_BORDER_LEVELS: f32 = 70.0;
 
 /// **The atlas viewer draws each atlas texel's stored depth, borders the slots
@@ -2197,32 +2292,45 @@ fn paired_fine_spot() -> crcbl::render::Light {
     })
 }
 
-/// The atlas viewer over a frame whose two shadowed lights earn two different
-/// rungs of the ladder.
+/// What [`paired_scene`] puts in the frame: the box, the two cones, and the
+/// atlas viewer on.
+fn paired_prepare(renderer: &mut crcbl::render::ForwardRenderer) {
+    crate::mesh_scene::place(
+        renderer,
+        crcbl::render::scene::DEMO_OPEN_BOX,
+        crcbl::render::scene::DEMO_UNTINTED,
+        crcbl::math::Mat4::from_translation(BOX_AT),
+    );
+    renderer.set_lights(&[subdivided_spot(), paired_fine_spot()]);
+    renderer.set_atlas_view(true);
+}
+
+/// The frame whose two shadowed lights earn two different rungs of the ladder.
 ///
 /// [`render_subdivided_atlas_view`]'s scene with a second cone in it, and the
 /// camera left at [`PAIRED_COARSE_LEVEL`]'s height: what moves the second light
 /// down a rung is its own radius, not a second eye.
-fn render_paired_atlas_view() -> ShadowFrame {
-    let prepare = |renderer: &mut crcbl::render::ForwardRenderer| {
-        crate::mesh_scene::place(
-            renderer,
-            crcbl::render::scene::DEMO_OPEN_BOX,
-            crcbl::render::scene::DEMO_UNTINTED,
-            crcbl::math::Mat4::from_translation(BOX_AT),
-        );
-        renderer.set_lights(&[subdivided_spot(), paired_fine_spot()]);
-        renderer.set_atlas_view(true);
-    };
-    render_scene(&ShadowScene {
-        prepare: &prepare,
+///
+/// A scene of its own rather than a literal inside the one caller it had,
+/// because there are two now: [`render_released_atlas_views`] draws this very
+/// frame and then a second one through the same renderer, and a scene written
+/// out twice is two frames that drift apart while both go on calling themselves
+/// the paired one.
+fn paired_scene() -> ShadowScene<'static> {
+    ShadowScene {
+        prepare: &paired_prepare,
         camera: subdivided_camera(PAIRED_COARSE_LEVEL),
         sun: crcbl::render::DirectionalLight {
             direction: sun(1.0),
             ..crcbl::render::DirectionalLight::default()
         },
         model: crcbl::math::Mat4::from_translation(CUBE_AT),
-    })
+    }
+}
+
+/// The atlas viewer over [`paired_scene`].
+fn render_paired_atlas_view() -> ShadowFrame {
+    render_scene(&paired_scene())
 }
 
 /// **The viewer borders each of two maps the allocator cut out of one root cell
@@ -2517,6 +2625,499 @@ fn the_atlas_view_borders_two_maps_of_one_root_cell_at_their_own_rungs() {
                 "{name} at {at:?} carries the border tint, and no map was laid out there — so \
                  the viewer is bordering something other than the rectangles the block carries, \
                  which inside a cell holding two of them is the whole question"
+            ));
+        }
+    }
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// The atlas viewer over a tile that was given back
+// ---------------------------------------------------------------------------
+//
+// Every frame above is drawn on a device of its own, so each one lays its atlas
+// out against an allocator that has never handed anything out and
+// `Selection::lay_out`'s release loop has nothing to release. What that leaves
+// unread is the half of `AtlasAllocator::release` a picture can show: a slot
+// whose map has changed size gives its tile back, the four quarters of the node
+// that tile came from merge into their parent, and the next request of the
+// parent's size is answered with that parent rather than with the next free
+// quarter of the cell. `render_scenes` is what puts two frames on one device,
+// and the pair below is the smallest scene in which the merge decides where a
+// border is drawn.
+
+/// [`paired_fine_spot`]'s cone at [`subdivided_spot`]'s own radius, still hung
+/// [`PAIRED_FINE_SPOT_ACROSS`] beside it.
+///
+/// The second frame lights this in the finer cone's place, and the radius is the
+/// only term that moves — [`PAIRED_FINE_RADIUS_SHARE`]'s argument run backwards:
+/// `shadow`'s `coverage` is linear in a spot's radius, so the light that earned
+/// [`PAIRED_FINE_LEVEL`] earns [`PAIRED_COARSE_LEVEL`] under the camera and at
+/// the position where they were. A slot whose map wants a size other than the
+/// one it holds is what `Selection::lay_out` gives a tile back for, and re-sizing
+/// one cone is the smallest change to a scene that can ask for it.
+fn paired_regrown_spot() -> crcbl::render::Light {
+    let crcbl::render::Light::Spot(fine) = paired_fine_spot() else {
+        unreachable!("paired_fine_spot builds a spot light")
+    };
+    let crcbl::render::Light::Spot(coarse) = subdivided_spot() else {
+        unreachable!("subdivided_spot builds a spot light")
+    };
+    crcbl::render::Light::Spot(crcbl::render::SpotLight {
+        radius: coarse.radius,
+        ..fine
+    })
+}
+
+/// [`render_paired_atlas_view`]'s frame, and then a second frame through the
+/// same renderer with [`paired_regrown_spot`] in the finer cone's place.
+///
+/// The scene is [`paired_scene`] in both, so the first of the two is the frame
+/// [`the_atlas_view_borders_two_maps_of_one_root_cell_at_their_own_rungs`]
+/// already reads and the only thing this fixture adds is what happens to it.
+fn render_released_atlas_views() -> [ShadowFrame; 2] {
+    let regrow = |renderer: &mut crcbl::render::ForwardRenderer| {
+        renderer.set_lights(&[subdivided_spot(), paired_regrown_spot()]);
+    };
+    render_scenes(&paired_scene(), &regrow)
+}
+
+/// The map at `rect` back in atlas texels: where its corner is.
+///
+/// [`tile_side`]'s other half, on the `zw` of the same rectangle and for the
+/// same reason — a corner in texels **names a node** of the quadtree, where the
+/// fraction the block carries is one more small number. A node's corner and its
+/// side are together the whole of what the allocator decided, which is what the
+/// check below compares against the node it says the merge must free.
+fn tile_at(rect: [f32; 4]) -> (u32, u32) {
+    let (width, height) = crcbl::render::shadow::atlas_extent();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "an atlas extent is a few thousand texels"
+    )]
+    let extent = (width as f32, height as f32);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a fraction of the atlas back in texels is a count inside that extent"
+    )]
+    let at = (
+        (rect[2] * extent.0).round() as u32,
+        (rect[3] * extent.1).round() as u32,
+    );
+    at
+}
+
+/// **A tile given back is a tile the next request of its parent's size is
+/// answered with, and the viewer's border moves onto that parent.**
+///
+/// The claim every frame above is structurally unable to make. Each of them
+/// opens a device of its own, so its `AtlasAllocator` starts empty and
+/// `Selection::lay_out` releases nothing — the coalescing half of
+/// `AtlasAllocator::release` is read by `crcbl_render::shadow`'s own unit tests
+/// and by no picture at all. This check draws **two frames on one device** through
+/// [`render_scenes`] and moves one light between them.
+///
+/// # The two layouts, and why the second one is the merge
+///
+/// The first frame is [`render_paired_atlas_view`]'s, whole: the coarse cone on
+/// [`PAIRED_COARSE_LEVEL`] takes the first quarter of the lowest free root, and
+/// [`paired_fine_spot`] on [`PAIRED_FINE_LEVEL`] splits the quarter beside it
+/// and takes that quarter's first sixteenth. The second frame lights
+/// [`paired_regrown_spot`] in the finer cone's place, which wants a quarter
+/// where it holds a sixteenth — so `Selection::lay_out` hands the sixteenth back
+/// before it spends the frame's requests, its three siblings are free, and they
+/// merge into the quarter they were cut from. The re-issued request is then
+/// answered with **that quarter**, because `AtlasAllocator::free_node` takes the
+/// lowest free node of the level it is asked for and the merge is what put this
+/// one back on that list.
+///
+/// That is the assertion the picture is read through, and it is the one a
+/// release without a merge fails: a release that freed the node and stopped
+/// leaves the parent `Split`, and the lowest free quarter of the cell is then
+/// the one *below* the coarse map rather than the one beside it. Both are legal
+/// rectangles, both would be bordered, and they are different pixels.
+///
+/// # What the second frame's picture has to show
+///
+/// * the released map's own far edges, which carried the border tint in the
+///   first frame, must not carry it in the second — and must lie **inside** the
+///   re-issued map's rectangle there, so "the border is gone" cannot be "the map
+///   went away";
+/// * the re-issued map's far edges must carry it, at the quarter's size rather
+///   than the sixteenth's, and its centre must not;
+/// * the neighbour that was never released — the coarse map — must still carry
+///   it on its own far edges, from the *same texels*: `Selection::lay_out` keeps
+///   a slot that wants the size it holds, and the check refuses the frame if
+///   that rectangle moved at all;
+/// * and the half of the root cell neither map is in, and the cell's own far
+///   edges, must not.
+///
+/// **Anti-vacuity.** Every layout the readings depend on is asserted before a
+/// pixel is read: the first frame's two rungs in one root cell, the second
+/// frame's two maps in the *same slots* at the coarse rung, the neighbour's
+/// rectangle unmoved, and the re-issued rectangle equal to the released tile's
+/// parent node. Each pixel asserted clear of the tint is asserted first to lie
+/// in no slot's rectangle at all, and each "the border is gone" pixel is
+/// asserted to have carried the tint in the first frame — a reading that was
+/// never tinted says nothing about a release.
+///
+/// **Where a reading is deliberately not taken.** Nothing just past the coarse
+/// map's right edge can be clear in the second frame: the re-issued map is a
+/// quarter of the same size directly beside it, with
+/// [`crcbl::shaders::atlas_view::BORDER_PIXELS`] of its own border there. That
+/// abutment is what the merge produced, so the pixels past that edge are read
+/// only as the re-issued map's own border, and the containment guard is what
+/// says which rectangle they came from.
+///
+/// **No atlas readback.** Like the two checks above, what this reads is the
+/// rectangles the blocks carry and the pixels the pass drew, so it also runs on
+/// a backend that declares [`Capability::DepthImageCopy`] absent.
+///
+/// # How it was shown to fail
+///
+/// Four sabotages, each on a different axis and each run on radv with
+/// everything else in place. **The release first**, which the whole check is
+/// about: the second frame given [`paired_fine_spot`] again in place of
+/// [`paired_regrown_spot`], so the slot wants the size it already holds and
+/// keeps its tile:
+///
+/// > slot 3 holds a map (192, 192) texels a side in the second frame, where the
+/// > regrown cone's coverage puts it on level 1 at 384. A slot that wants the
+/// > size it already holds keeps its tile, so nothing was given back and there
+/// > is no merge to read
+///
+/// **Then the merge**, with the expectation pointed at the rectangle a release
+/// that freed the node and stopped hands out — the next free quarter of the
+/// cell, which is a legal allocation, is bordered exactly as well, and is
+/// different pixels:
+///
+/// > the released sixteenth was at (1920, 0) in atlas texels, so the quarter it
+/// > was cut from is at (1536, 384) — and the second frame's re-issued map is at
+/// > (1920, 0) instead
+///
+/// The two answers really are two, and the allocator gives the merged one.
+///
+/// **Then the border that has to be gone**, read out of the *first* frame's
+/// picture rather than the second's, which is that pixel as it would be if the
+/// map were still there:
+///
+/// > the released map's right edge at (163, 6) still carries the border tint in
+/// > the second frame, where slot 3's rectangle now has its edges elsewhere — so
+/// > the viewer is bordering a map the allocator took back
+///
+/// with the same line for the bottom edge at (158, 11), both in one panic, which
+/// is what says the faults are collected rather than the first of them ending
+/// the run.
+///
+/// **And the containment guard**, with the reading held clear of the tint below
+/// the merged quarter moved up into it:
+///
+/// > the quarter of the root cell under the merged one at (164, 12) is inside
+/// > slot 3's rectangle in the second frame, so this scene is not the fixture
+/// > the reading below needs
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn the_atlas_view_borders_the_quarter_a_released_tile_merged_back_into() {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the border is a couple of pixels wide"
+    )]
+    let border = crcbl::shaders::atlas_view::BORDER_PIXELS as u32;
+
+    let [before, after] = render_released_atlas_views();
+    let held = |frame: &ShadowFrame| -> Vec<usize> {
+        (crcbl::render::shadow::CASCADES..crcbl::render::shadow::TILES)
+            .filter(|slot| frame.rects[*slot][0] > 0.0)
+            .collect()
+    };
+
+    // The first frame is the paired layout, identified the way that check
+    // identifies it — by the side the allocator actually gave, so a pair that
+    // landed on one rung is a slot this search cannot find at all.
+    let occupied = held(&before);
+    assert_eq!(
+        occupied.len(),
+        2,
+        "{count} slots of the light region hold a map in the first frame, and the release below \
+         is written for the two this scene's spots earn — one on level {PAIRED_COARSE_LEVEL} of \
+         the ladder and one on level {PAIRED_FINE_LEVEL}: {rects:?}",
+        count = occupied.len(),
+        rects = before.rects,
+    );
+    let [coarse_slot, fine_slot] = [PAIRED_COARSE_LEVEL, PAIRED_FINE_LEVEL].map(|level| {
+        let wanted = crcbl::render::shadow::TILE >> level;
+        let found: Vec<usize> = occupied
+            .iter()
+            .copied()
+            .filter(|slot| tile_side(before.rects[*slot]) == (wanted, wanted))
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "{count} of the first frame's maps are {wanted} texels a side, where this check wants \
+             the one light whose coverage puts it on level {level} of the ladder — the sides it \
+             got are {sides:?} in slots {occupied:?}, so the pair was not demoted the way \
+             PAIRED_FINE_RADIUS_SHARE derives and there is no sixteenth to release",
+            count = found.len(),
+            sides = occupied
+                .iter()
+                .map(|slot| tile_side(before.rects[*slot]))
+                .collect::<Vec<_>>(),
+        );
+        found[0]
+    });
+    let root = root_cell_of(before.rects[coarse_slot]);
+    assert_eq!(
+        root,
+        root_cell_of(before.rects[fine_slot]),
+        "the level-{PAIRED_COARSE_LEVEL} map is in root cell {root} and the \
+         level-{PAIRED_FINE_LEVEL} map in root cell {other} — the merge below is a quarter of ONE \
+         cell coming back, and two maps in two cells never shared a parent to merge into",
+        other = root_cell_of(before.rects[fine_slot]),
+    );
+
+    // What the second frame has to have done with the tile the first one held:
+    // released it, merged its three free siblings into the quarter they were cut
+    // from, and answered the regrown cone's request with that quarter.
+    let quarter = crcbl::render::shadow::TILE >> PAIRED_COARSE_LEVEL;
+    assert_eq!(
+        held(&after),
+        occupied,
+        "the second frame's occupied light slots are {after_held:?} where the first frame's are \
+         {occupied:?}. Both frames light the same two spots, so a slot that changed hands is a \
+         selection this check has not accounted for and every reading below would be about \
+         another light's map: {rects:?}",
+        after_held = held(&after),
+        rects = after.rects,
+    );
+    assert_eq!(
+        tile_side(after.rects[fine_slot]),
+        (quarter, quarter),
+        "slot {fine_slot} holds a map {side:?} texels a side in the second frame, where the \
+         regrown cone's coverage puts it on level {PAIRED_COARSE_LEVEL} at {quarter}. A slot that \
+         wants the size it already holds keeps its tile, so nothing was given back and there is \
+         no merge to read",
+        side = tile_side(after.rects[fine_slot]),
+    );
+    assert_eq!(
+        after.rects[coarse_slot],
+        before.rects[coarse_slot],
+        "the level-{PAIRED_COARSE_LEVEL} map is {before_rect:?} in the first frame and \
+         {after_rect:?} in the second. It wants the size it holds in both, which is exactly what \
+         Selection::lay_out keeps a tile for — a neighbour that moved is a different map, and \
+         'its border is still where it was' would be a claim about that one",
+        before_rect = before.rects[coarse_slot],
+        after_rect = after.rects[coarse_slot],
+    );
+
+    // A node of the quadtree sits on a grid of its own side and its parent on a
+    // grid of twice it, so the parent's corner is this one's rounded down. The
+    // merge is what puts that parent back on the free list; without it the
+    // parent stays split and the lowest free quarter of the cell is a different
+    // rectangle entirely.
+    let released = tile_at(before.rects[fine_slot]);
+    let merged = (
+        released.0 - released.0 % quarter,
+        released.1 - released.1 % quarter,
+    );
+    assert_eq!(
+        tile_at(after.rects[fine_slot]),
+        merged,
+        "the released sixteenth was at {released:?} in atlas texels, so the quarter it was cut \
+         from is at {merged:?} — and the second frame's re-issued map is at {reissued:?} instead. \
+         That is the rectangle a release which freed the node and stopped hands out: the parent \
+         is still Split, and AtlasAllocator::free_node answers with the next free quarter of root \
+         cell {root} rather than with the one that came back",
+        reissued = tile_at(after.rects[fine_slot]),
+    );
+
+    let (cell_x, cell_y, cell_width, cell_height) = cell_on_screen(root);
+    let (released_x, released_y, released_width, released_height) =
+        slot_on_screen(before.rects[fine_slot]);
+    let mut faults = Vec::new();
+    // The pixels asserted clear of the tint in the second frame, gathered as the
+    // maps are read and spent once below so each goes through the same
+    // containment guard.
+    let mut clear: Vec<(String, (u32, u32))> = Vec::new();
+
+    // The border that has to be gone: the released map's own far edges, which
+    // the first frame drew the tint on.
+    let gone = [
+        (
+            "the released map's right edge",
+            (
+                released_x + released_width - 1,
+                released_y + released_height / 2,
+            ),
+        ),
+        (
+            "the released map's bottom edge",
+            (
+                released_x + released_width / 2,
+                released_y + released_height - 1,
+            ),
+        ),
+    ];
+    eprintln!(
+        "{suite}: shadow — the atlas is drawn at {view:?}; the released map was slot {fine_slot}'s \
+         {rect:?}, {released_width}x{released_height} pixels at ({released_x}, {released_y}) \
+         inside root cell {root}'s {cell:?}. Its edges lead red over blue by {gone:?} in the \
+         first frame and {after_gone:?} in the second",
+        suite = crate::SUITE,
+        view = atlas_on_screen(),
+        rect = before.rects[fine_slot],
+        cell = (cell_x, cell_y, cell_width, cell_height),
+        gone = gone.map(|(name, at)| (name, at, tint_at(&before.image, at))),
+        after_gone = gone.map(|(name, at)| (name, at, tint_at(&after.image, at))),
+    );
+    for (name, at) in gone {
+        if tint_at(&before.image, at) <= ATLAS_BORDER_LEVELS {
+            faults.push(format!(
+                "{name} at {at:?} did not carry the border tint in the FIRST frame either, so \
+                 whatever the second frame draws there says nothing about a tile being given \
+                 back"
+            ));
+            continue;
+        }
+        match slot_covering(&after.rects, at) {
+            Some(slot) if slot == fine_slot => {}
+            covering => {
+                faults.push(format!(
+                    "{name} at {at:?} is inside {covering:?} in the second frame, where this \
+                     reading needs it inside slot {fine_slot}'s re-issued rectangle — a pixel \
+                     that fell outside every map would be clear because nothing is there rather \
+                     than because the released tile's border is gone"
+                ));
+                continue;
+            }
+        }
+        if tint_at(&after.image, at).abs() >= ATLAS_BORDER_LEVELS {
+            faults.push(format!(
+                "{name} at {at:?} still carries the border tint in the second frame, where slot \
+                 {fine_slot}'s rectangle now has its edges elsewhere — so the viewer is bordering \
+                 a map the allocator took back"
+            ));
+        }
+    }
+
+    // The two maps of the second frame: the neighbour that kept its tile and the
+    // one that was handed the merged quarter.
+    for (what, slot) in [
+        (
+            format!("the level-{PAIRED_COARSE_LEVEL} neighbour"),
+            coarse_slot,
+        ),
+        ("the re-issued map".to_owned(), fine_slot),
+    ] {
+        let rect = after.rects[slot];
+        let (x, y, width, height) = slot_on_screen(rect);
+        if width <= 2 * border || height <= 2 * border {
+            faults.push(format!(
+                "{what} is {width}x{height} pixels of the frame, which the border drawn on both \
+                 of its sides covers entirely — its centre reading would be a border pixel and \
+                 could not say the tile is not simply filled"
+            ));
+            continue;
+        }
+        let bordered = [
+            (
+                format!("{what}'s right edge"),
+                (x + width - 1, y + height / 2),
+            ),
+            (
+                format!("{what}'s bottom edge"),
+                (x + width / 2, y + height - 1),
+            ),
+        ];
+        let centre = (x + width / 2, y + height / 2);
+        eprintln!(
+            "{suite}: shadow — in the second frame {what} is slot {slot}'s {rect:?}, which is \
+             {width}x{height} pixels at ({x}, {y}). Its edges lead red over blue by {right:.1} at \
+             {right_at:?} and {bottom:.1} at {bottom_at:?}, and its centre {centre:?} by \
+             {middle:.1}",
+            suite = crate::SUITE,
+            right = tint_at(&after.image, bordered[0].1),
+            right_at = bordered[0].1,
+            bottom = tint_at(&after.image, bordered[1].1),
+            bottom_at = bordered[1].1,
+            middle = tint_at(&after.image, centre),
+        );
+        for (name, at) in bordered {
+            if tint_at(&after.image, at) <= ATLAS_BORDER_LEVELS {
+                faults.push(format!(
+                    "{name} at {at:?} is not the border tint, so the viewer is not bordering the \
+                     rectangle the second frame's block carries — this pixel is in the middle of \
+                     root cell {root}, which a grid drawn on whole cells leaves grey"
+                ));
+            }
+        }
+        if slot_covering(&after.rects, centre) == Some(slot) {
+            if tint_at(&after.image, centre).abs() >= ATLAS_BORDER_LEVELS {
+                faults.push(format!(
+                    "the middle of {what} at {centre:?} carries the border tint, so the viewer \
+                     filled that tile rather than bordering it and its edge readings say nothing"
+                ));
+            }
+        } else {
+            faults.push(format!(
+                "{what}'s centre reading at {centre:?} is not inside slot {slot}'s own \
+                 rectangle, so it cannot say whether the viewer filled that tile"
+            ));
+        }
+        clear.push((
+            format!("just past {what}'s bottom edge"),
+            (x + width / 2, y + height + border),
+        ));
+    }
+
+    clear.extend([
+        (
+            "the quarter of the root cell under the neighbour".to_owned(),
+            (
+                cell_x + cell_width / 4,
+                cell_y + cell_height - cell_height / 4,
+            ),
+        ),
+        (
+            "the quarter of the root cell under the merged one".to_owned(),
+            (
+                cell_x + cell_width - cell_width / 4,
+                cell_y + cell_height - cell_height / 4,
+            ),
+        ),
+        (
+            "the root cell's right edge".to_owned(),
+            (cell_x + cell_width - 1, cell_y + cell_height / 2),
+        ),
+        (
+            "the root cell's bottom edge".to_owned(),
+            (cell_x + cell_width / 2, cell_y + cell_height - 1),
+        ),
+    ]);
+    eprintln!(
+        "{suite}: shadow — the second frame's pixels held clear of a border read {clear:?}",
+        suite = crate::SUITE,
+        clear = clear
+            .iter()
+            .map(|(name, at)| (name, at, tint_at(&after.image, *at)))
+            .collect::<Vec<_>>(),
+    );
+    for (name, at) in &clear {
+        if let Some(covering) = slot_covering(&after.rects, *at) {
+            faults.push(format!(
+                "{name} at {at:?} is inside slot {covering}'s rectangle in the second frame, so \
+                 this scene is not the fixture the reading below needs: {rects:?}",
+                rects = after.rects,
+            ));
+            continue;
+        }
+        if tint_at(&after.image, *at).abs() >= ATLAS_BORDER_LEVELS {
+            faults.push(format!(
+                "{name} at {at:?} carries the border tint, and no map was laid out there — so \
+                 the viewer is bordering something other than the rectangles the block carries, \
+                 which in a cell one of whose quarters has just come back is the whole question"
             ));
         }
     }

@@ -249,13 +249,43 @@ golden of their own and a button on the page. What is still **not** done:
       and **not** on the border readings, because both maps' far edges really
       are tinted — what the frame separates is which rectangle a pixel came
       from.
-    - **Still nobody's claim: a released tile's neighbour.** Every frame in this
-      module starts on an empty `AtlasAllocator`, so the coalescing half of
-      `AtlasAllocator::release` — a slot that gives a tile back mid-frame and
-      the merge that follows — is read only by that module's own unit tests and
-      never through a picture. Reaching it from here wants a fixture that draws
-      two frames and moves a light between them, which `render_scene` opens a
-      fresh device for and cannot express as written.
+    - **Still nobody's claim: a released tile whose map is simply gone, and a
+      merge past one level.**
+      `the_atlas_view_borders_the_quarter_a_released_tile_merged_back_into`
+      draws two frames on one device through `render_scenes` and grows
+      `paired_fine_spot` back to `subdivided_spot`'s radius between them, so the
+      slot wants a quarter where it holds a sixteenth, `Selection::lay_out`
+      hands the sixteenth back before it spends the frame's requests, and the
+      re-issued map is bordered on the quarter that came back. The frame is
+      refused unless the allocator did exactly that — the neighbour's rectangle
+      identical across the two frames, the released slot's side risen to
+      `TILE >> PAIRED_COARSE_LEVEL`, and its origin equal to the released node's
+      _parent_, which is the rectangle a release that freed the node and stopped
+      could not produce: that one hands out the next free quarter, which is
+      bordered exactly as well and is different pixels. Measured identical on
+      radv and lavapipe, three runs each: the released map at atlas texels
+      `(1920, 0)` with a `192`-texel side, `12x12` frame pixels at `(152, 0)`;
+      the re-issued one at `(1920, 0)` with a `384`-texel side, `24x24` pixels
+      at the same corner; the tint `147.0` at `(163, 6)` and `(158, 11)` in the
+      first frame and `0.0` at both in the second. What it leaves: `lay_out`'s
+      _other_ release trigger, a slot whose `wanted` is `None` because the light
+      went away or lost its slot, which
+      `a_light_that_leaves_hands_every_tile_it_held_back` reads on the host and
+      no picture reads; `AtlasAllocator::release` climbing more than one level,
+      which `a_demoted_light_gives_its_cell_back_and_can_take_it_again` reads on
+      the host and which this frame cannot reach because the coarse map holds
+      the sibling quarter; and a point light's run of `POINT_FACES` tiles
+      released together, which nothing in `forward_e2e/shadow.rs` draws through
+      the viewer at all.
+    - **A fixture that copies a renderer-owned image back must hand it back
+      too.** Found while building the check above: `ShadowFixture::draw`
+      barriers the atlas `ShaderRead → TransferSrc` for its readback copy, and
+      before 2026-09-05 nothing put it back — harmless with one frame per
+      device, but the _second_ frame's colour pass then sampled a `TransferSrc`
+      image, which `run-forward-e2e.sh`'s validation gate reported as
+      `VUID-vkCmdDraw-None-09600` beside four PASSing tests rather than as a
+      failed one. Any future multi-frame reader of a renderer-owned image owes
+      the same barrier back.
 - **Subdivision is the coverage ladder's doing, not the allocator running out.**
   Recorded because the entry this replaces said the opposite: a scene with more
   shadowed lights than the atlas has root cells subdivides nothing.
