@@ -49,7 +49,7 @@ use crcbl::shell::{DisplayMode, PointerMode, ShellBackend as Backend, WindowDesc
 use crcbl::ui::draw_list::DrawList;
 
 use crate::args::Options;
-use crate::filter::{self, Knobs};
+use crate::filter::{self, Knobs, Step};
 use crate::gpu::{Gpu, Paths, ShadowCost};
 use crate::menu::{self, CameraMode, Menus, SundialAction};
 use crate::plaza;
@@ -291,24 +291,50 @@ pub(crate) const KEYS: [KeyBinding; 5] = [
 pub(crate) const SEAM_KEYS: [(KeyCode, bool, &str); 2] =
     [(KeyCode::Comma, false, ","), (KeyCode::Period, true, ".")];
 
-/// The two pairs that walk the sun's bias counts: `[` and `]` for the constant
-/// bias, `;` and `'` for the normal offset.
+/// The pairs that walk the sun's bias counts: `[` and `]` for the constant bias,
+/// `;` and `'` for the normal offset, and a coarse pair each beside them.
 ///
 /// Not in [`KEYS`] for [`SEAM_KEYS`]' reason — an entry there is a bare `fn()`
-/// and these carry which cell they write and which way — and **a pair each**,
-/// because the whole of `docs/plan/sample/18-sundial.md`'s milestone 2 is the two
-/// counts moving against each other: a single key that cycled through presets
-/// could not put one at zero while the other stands where it ships.
+/// and these carry which cell they write, which way and how far — and **a pair
+/// each**, because the whole of `docs/plan/sample/18-sundial.md`'s milestone 2 is
+/// the two counts moving against each other: a single key that cycled through
+/// presets could not put one at zero while the other stands where it ships.
 ///
 /// **Bracket for the light-ward one and quote for the sideways one**, which is
 /// as much mnemonic as this fixture claims: the letters that would be better are
 /// taken. `A` and `S` are the flyer's, and the flyer is offered every key before
 /// this table is walked.
-pub(crate) const BIAS_KEYS: [(KeyCode, &str, bool, &str); 4] = [
-    (KeyCode::BracketLeft, filter::BIAS, false, "["),
-    (KeyCode::BracketRight, filter::BIAS, true, "]"),
-    (KeyCode::Semicolon, filter::OFFSET, false, ";"),
-    (KeyCode::Quote, filter::OFFSET, true, "'"),
+///
+/// # Why a second pair each, and not `Shift` on the first
+///
+/// [`filter::Step::Fine`] cannot reach the far end of either count's range in a
+/// walk anybody would make, and that end — the plinth with no shadow under it at
+/// all — is half of what milestone 2 is about. A modifier is the usual way to
+/// hang a coarser step off the same keys, and neither half of one is available
+/// here:
+///
+/// * **Nothing delivers a modifier to a game.** `crcbl-shell` stamps
+///   [`crcbl::core::input::Modifiers`] onto every key event it produces, and
+///   [`crcbl::engine::HostedGame::key_event`] takes a key and an edge; the loop
+///   drops the rest at that boundary. Widening the trait is engine work, and
+///   every sample implements it.
+/// * **`Shift` is the free camera's.** [`Flyer::key`] binds it to descend, and
+///   the flyer is offered every key before this table is walked — so a chord
+///   would sink the camera out of the pose the goldens are taken from while the
+///   count moved, which is the one thing a comparison fixture cannot afford.
+///
+/// So a second pair each, on the digit row, which is where this fixture still
+/// had adjacent pairs free — outer pair to the outer count, so the coarse pairs
+/// sit in the same order as the fine ones above them.
+pub(crate) const BIAS_KEYS: [(KeyCode, &str, bool, Step, &str); 8] = [
+    (KeyCode::BracketLeft, filter::BIAS, false, Step::Fine, "["),
+    (KeyCode::BracketRight, filter::BIAS, true, Step::Fine, "]"),
+    (KeyCode::Semicolon, filter::OFFSET, false, Step::Fine, ";"),
+    (KeyCode::Quote, filter::OFFSET, true, Step::Fine, "'"),
+    (KeyCode::Digit9, filter::BIAS, false, Step::Coarse, "9"),
+    (KeyCode::Digit0, filter::BIAS, true, Step::Coarse, "0"),
+    (KeyCode::Digit7, filter::OFFSET, false, Step::Coarse, "7"),
+    (KeyCode::Digit8, filter::OFFSET, true, Step::Coarse, "8"),
 ];
 
 /// What one of [`CLOCK_KEYS`] does to the clock.
@@ -557,9 +583,9 @@ impl HostedGame for Sundial {
                 return;
             }
         }
-        for (bound, cell, up, _) in BIAS_KEYS {
+        for (bound, cell, up, step, _) in BIAS_KEYS {
             if bound == key {
-                filter::nudge_bias(cell, up);
+                filter::nudge_bias(cell, up, step);
                 return;
             }
         }
@@ -863,7 +889,7 @@ mod tests {
             bound.push(key);
             named.push(name);
         }
-        for (key, _, _, name) in BIAS_KEYS {
+        for (key, _, _, _, name) in BIAS_KEYS {
             bound.push(key);
             named.push(name);
         }
@@ -905,14 +931,152 @@ mod tests {
         );
     }
 
+    /// **Each bias key walks the count the pause panel says it does**, the way
+    /// that panel's own row says it walks it, and leaves the other count alone.
+    ///
+    /// **Checked against `crate::menu`'s hint strings rather than against
+    /// [`BIAS_KEYS`] itself.** A check that read which cell a row names and then
+    /// asserted that row moved it would agree with any swap of the two: the
+    /// table would be its own answer key, which is a green light wired to
+    /// nothing. The panel is the independent statement — it is what a reviewer
+    /// reads before pressing anything — so a row filed under the wrong count,
+    /// walking the wrong way, or spending the wrong step is a disagreement
+    /// between two files rather than one file agreeing with itself. The hint
+    /// prints each count's keys in order: down then up, fine pair then coarse.
+    ///
+    /// **Driven from the middle of each range**, so a press is the step rather
+    /// than the step clamped; `crate::filter`'s own
+    /// `the_coarse_pair_reaches_the_far_end_of_a_range_and_lands_on_the_fine_step`
+    /// is where the ends are walked.
+    #[test]
+    fn each_bias_key_walks_the_count_the_panel_says_it_does() {
+        /// A pair is two keys, one down and one up, and the panel prints them in
+        /// that order.
+        const PAIR: usize = 2;
+
+        let _held = filter::held();
+        let mut fixture = Sundial::new(
+            CameraMode::Fixed,
+            Clock::default(),
+            Paths {
+                geometry: crcbl::hal::GeometryPath::MeshShader,
+                binding: crcbl::hal::BindingModel::Bindless,
+                lighting: crcbl::hal::LightingPath::Rasterised,
+                forced: crate::gpu::Forced::default(),
+                effects: RenderEffects::DEFAULT_STACK,
+            },
+            EffectRequest::default(),
+            RenderEffects::all(),
+        );
+
+        // What the pause panel's row for one count prints, as the keys it names
+        // in the order it names them.
+        let printed = |cell: &str| -> Vec<&'static str> {
+            let hint = if cell == filter::BIAS {
+                menu::BIAS_KEYS
+            } else {
+                menu::OFFSET_KEYS
+            };
+            hint.split_whitespace()
+                .filter(|token| *token != "/")
+                .collect()
+        };
+
+        // The cell each key wrote, where the panel spells that key, and how far
+        // one press took the count.
+        let mut walked: Vec<(&str, usize, f32)> = Vec::new();
+        for (key, cell, _, _, name) in BIAS_KEYS {
+            let other = if cell == filter::BIAS {
+                filter::OFFSET
+            } else {
+                filter::BIAS
+            };
+            let keys = printed(cell);
+            let at = keys
+                .iter()
+                .position(|spelt| *spelt == name)
+                .unwrap_or_else(|| {
+                    panic!("{name} writes {cell}, whose panel row names {keys:?} instead")
+                });
+
+            filter::reset();
+            let start = filter::set_bias(cell, filter::ceiling(cell) / 2.0);
+            let untouched = filter::var(other).get_f32();
+
+            fixture.key_event(key, true);
+            let moved = filter::var(cell).get_f32() - start;
+            assert!(
+                (filter::var(other).get_f32() - untouched).abs() < 1e-5,
+                "{name} moved {other} as well as {cell}"
+            );
+            assert_eq!(
+                moved < 0.0,
+                at % PAIR == 0,
+                "{name} took {cell} from {start} to {}, and its panel row prints it as the \
+                 {} of its pair",
+                filter::var(cell).get_f32(),
+                if at % PAIR == 0 { "down key" } else { "up key" }
+            );
+
+            // A release is not a press, on the clock keys' check's terms: a
+            // fixture that acted on both edges would walk every count twice as
+            // far as the finger asked for.
+            fixture.key_event(key, false);
+            assert!(
+                (filter::var(cell).get_f32() - (start + moved)).abs() < 1e-5,
+                "{name} acted on its release as well as on its press"
+            );
+            walked.push((cell, at, moved.abs()));
+        }
+
+        for cell in [filter::BIAS, filter::OFFSET] {
+            let keys = printed(cell);
+            let mut pairs: Vec<f32> = Vec::new();
+            for (at, spelt) in keys.iter().enumerate() {
+                let (_, _, far) = walked
+                    .iter()
+                    .find(|(wrote, spot, _)| *wrote == cell && *spot == at)
+                    .unwrap_or_else(|| {
+                        panic!("{cell}'s panel row names {spelt}, which no key is bound to")
+                    });
+                if at % PAIR == 0 {
+                    pairs.push(*far);
+                } else {
+                    assert!(
+                        (*far - pairs[at / PAIR]).abs() < 1e-5,
+                        "{cell}'s {spelt} walks {far} texels and its own pair walks {}",
+                        pairs[at / PAIR]
+                    );
+                }
+            }
+            assert!(
+                pairs.len() > 1,
+                "{cell} has one pair, so no press reaches the end of its range"
+            );
+            for (at, far) in pairs.iter().enumerate().skip(1) {
+                assert!(
+                    *far > pairs[at - 1],
+                    "{cell}'s pairs walk {:?} texels a press, so a later pair is no coarser \
+                     than the one the panel prints before it",
+                    pairs
+                );
+            }
+        }
+    }
+
     /// **`R` puts the clock back as well as the knobs**, and so does the panel's
     /// RESET row.
     ///
     /// The two halves live in different places — `reset_all` writes the console
     /// and `key_event` writes the clock — which is exactly the shape that drifts,
     /// so both routes are driven here rather than one.
+    ///
+    /// [`crate::filter::held`] because the console half of `R` writes every cell
+    /// the other checks of them are reading: a reset landing in the middle of one
+    /// of those is a knob it did not ask for.
     #[test]
     fn reset_puts_the_clock_back_by_key_and_by_row() {
+        let _held = filter::held();
         let mut fixture = Sundial::new(
             CameraMode::Fixed,
             Clock::at(FIXTURE_TICK + 3 * SCRUB_STEP, false),

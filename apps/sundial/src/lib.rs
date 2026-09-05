@@ -32,11 +32,12 @@
 //!   neither.
 //! * **The sun's two bias counts**, which the same plan's seventh decision
 //!   landed and which are `r_shadow_bias` and `r_shadow_normal_offset` here:
-//!   `[` and `]` walk one, `;` and `'` walk the other, and the panel's `BIAS`
-//!   and `NORMAL OFFSET` rows say where they stand. Milestone 2 is the pair of
-//!   artefacts they trade against each other — acne where a count is too small,
-//!   a shadow off its caster where one is too large — and neither is a thing a
-//!   still frame shows.
+//!   `[` and `]` walk one, `;` and `'` walk the other, `9`/`0` and `7`/`8` walk
+//!   the same two in coarse steps that reach the far end of either range, and
+//!   the panel's `BIAS` and `NORMAL OFFSET` rows say where they stand. Milestone
+//!   2 is the pair of artefacts they trade against each other — acne where a
+//!   count is too small, a shadow off its caster where one is too large — and
+//!   neither is a thing a still frame shows.
 //! * **The sun on its clock**: [`sun::Clock`] is tick-driven and never reads a
 //!   wall clock, so tick `k` is the same sun in every process. `P` stops and
 //!   starts it, `-` and `=` scrub it, `R` puts it back, and the panel and the

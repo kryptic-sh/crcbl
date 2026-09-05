@@ -74,7 +74,8 @@ pub const SEAM_CENTRE: f32 = 0.5;
 /// How far one press moves the seam.
 const SEAM_STEP: f32 = 0.02;
 
-/// How far one press moves either bias count, in cascade texels.
+/// How far one press of the fine pair moves either bias count, in cascade
+/// texels.
 ///
 /// **One step for both**, because both are denominated in the same texel: a
 /// press means the same amount of bias whichever of the two it is spent on,
@@ -83,13 +84,52 @@ const SEAM_STEP: f32 = 0.02;
 /// **Half a texel, which is the step the two constants' own sweeps are written
 /// in** — `crcbl_render::shadow`'s `DEPTH_BIAS_TEXELS` and `NORMAL_OFFSET_TEXELS`
 /// each carry a table walked in halves — and both shipped values are multiples
-/// of it, so a walk comes back to what ships rather than past it. It does **not**
-/// reach the far end of either range in any reasonable number of presses; that
-/// end is where `apps/sundial`'s plinth loses its shadow, it is dozens of texels
-/// out, and a console line is how a person goes there. A step coarse enough to
-/// walk that far would be too coarse to stand on the shipped count, which is
-/// where a comparison starts.
+/// of it, so a walk comes back to what ships rather than past it. A step coarse
+/// enough to also reach the far end of either range would be too coarse to stand
+/// on the shipped count, which is where a comparison starts; that end is
+/// `COARSE_BIAS_STEP`'s.
 const BIAS_STEP: f32 = 0.5;
+
+/// How far one press of the coarse pair moves either bias count, in the same
+/// texels.
+///
+/// **A whole number of `BIAS_STEP`s**, so the coarse pair walks the fine pair's
+/// own lattice: a count taken out to the end of its range and walked back
+/// arrives on what ships rather than a fraction of a step either side of it.
+///
+/// **Coarse enough to reach the top of the wider of the two ranges in a walk a
+/// finger will actually make**, which is what the fine step cannot do. That end
+/// is where `apps/sundial`'s plinth loses its shadow altogether — the far half
+/// of the artefact pair the whole fixture is about — and before this pair
+/// existed a typed console line was the only way to see it.
+/// `the_coarse_pair_reaches_the_far_end_of_a_range_and_lands_on_the_fine_step`
+/// is where both claims are counted, rather than written into this comment where
+/// nothing can check them.
+const COARSE_BIAS_STEP: f32 = 8.0;
+
+/// Which of the two steps a press of a bias key spends.
+///
+/// **A pair of keys each rather than a modifier on one pair**, which is
+/// `crate::app`'s `BIAS_KEYS` decision and argued there: nothing delivers a
+/// modifier to a game, and `Shift` is the free camera's already.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// The half-texel the shipped counts sit on: `BIAS_STEP`.
+    Fine,
+    /// Far enough to walk a count to the end of its range: `COARSE_BIAS_STEP`.
+    Coarse,
+}
+
+impl Step {
+    /// How far one press of this step moves a count, in cascade texels.
+    #[must_use]
+    pub const fn texels(self) -> f32 {
+        match self {
+            Self::Fine => BIAS_STEP,
+            Self::Coarse => COARSE_BIAS_STEP,
+        }
+    }
+}
 
 /// The variable `name` names, out of `crcbl-render`'s own console table.
 ///
@@ -176,16 +216,18 @@ pub fn nudge_seam(right: bool) {
     set(SPLIT, &Value::Float((at + step).clamp(min, max)));
 }
 
-/// Moves one bias count a `BIAS_STEP` up or down, inside its own range.
+/// Moves one bias count a [`Step`] up or down, inside its own range.
 ///
 /// **[`BIAS`] and [`OFFSET`] through one function**, because a count walked by a
 /// key is one fact about a control and the two cells differ only in which is
-/// written. Clamped into the variable's own declared range, on [`nudge_seam`]'s
-/// terms: a press at either end leaves the count there rather than being refused
-/// by the console.
-pub fn nudge_bias(name: &str, up: bool) {
-    let step = if up { BIAS_STEP } else { -BIAS_STEP };
-    set_bias(name, var(name).get_f32() + step);
+/// written — and the same for the two steps, which differ only in how far.
+/// Clamped into the variable's own declared range, on [`nudge_seam`]'s terms: a
+/// press at either end leaves the count there rather than being refused by the
+/// console.
+pub fn nudge_bias(name: &str, up: bool, step: Step) {
+    let texels = step.texels();
+    let moved = if up { texels } else { -texels };
+    set_bias(name, var(name).get_f32() + moved);
 }
 
 /// Puts one bias count at `texels`, clamped into the variable's own range, and
@@ -430,37 +472,47 @@ pub fn seam_from_name(name: &str) -> Option<f32> {
     }
 }
 
+/// Serialises every check that moves a knob, and puts them all back.
+///
+/// **Every check that touches one takes it, and that is the point.** A
+/// [`ConVar`] is process-global by design and `cargo test` runs a crate's tests
+/// as threads of one process, so two checks that move the filter are two writers
+/// to one cell — which shows up as a flake rather than as a failure anybody can
+/// read.
+///
+/// **Here rather than beside the tests that take it**, on
+/// `crcbl_render::shadow`'s `FILTER_SWITCH`'s terms: `crate::app`'s key checks
+/// walk the same cells this module's own do, and a lock private to one file
+/// would leave the other racing it.
+#[cfg(test)]
+pub(crate) struct Held {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for Held {
+    fn drop(&mut self) {
+        reset();
+    }
+}
+
+/// The lock [`Held`] takes.
+#[cfg(test)]
+static KNOB_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes [`KNOB_SWITCH`], and hands back knobs nobody has moved.
+#[cfg(test)]
+pub(crate) fn held() -> Held {
+    let guard = KNOB_SWITCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset();
+    Held { _guard: guard }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Serialises every check that moves a knob, and puts them all back.
-    ///
-    /// **Every check here takes it, and that is the point.** A [`ConVar`] is
-    /// process-global by design and `cargo test` runs a crate's tests as threads
-    /// of one process, so two checks that move the filter are two writers to one
-    /// cell — which shows up as a flake rather than as a failure anybody can
-    /// read.
-    struct Held {
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl Drop for Held {
-        fn drop(&mut self) {
-            reset();
-        }
-    }
-
-    /// The lock [`Held`] takes.
-    static KNOB_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn held() -> Held {
-        let guard = KNOB_SWITCH
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset();
-        Held { _guard: guard }
-    }
 
     /// **Every name this sample drives is one the engine declares**, and each is
     /// the kind the code above assumes.
@@ -589,8 +641,8 @@ mod tests {
         assert_eq!(seam(), None, "a second press takes the comparison away");
     }
 
-    /// **Each bias count walks a step at a time and stops at its own ends**, and
-    /// walking one leaves the other where it was.
+    /// **Each bias count walks a fine step at a time and stops at its own
+    /// ends**, and walking one leaves the other where it was.
     ///
     /// The last clause is the half worth guarding: [`nudge_bias`] takes the cell
     /// by name, so a key table that handed it the wrong one would move a knob
@@ -604,13 +656,13 @@ mod tests {
             let start = var(name).get_f32();
             let untouched = var(other).get_f32();
 
-            nudge_bias(name, true);
+            nudge_bias(name, true, Step::Fine);
             assert!(
                 (var(name).get_f32() - (start + BIAS_STEP)).abs() < 1e-5,
                 "{name} went to {} rather than a step up from {start}",
                 var(name).get_f32()
             );
-            nudge_bias(name, false);
+            nudge_bias(name, false, Step::Fine);
             assert!((var(name).get_f32() - start).abs() < 1e-5);
             assert!(
                 (var(other).get_f32() - untouched).abs() < 1e-5,
@@ -626,7 +678,7 @@ mod tests {
             )]
             let presses = ((max - min) / BIAS_STEP) as u32 + 2;
             for _ in 0..presses {
-                nudge_bias(name, false);
+                nudge_bias(name, false, Step::Fine);
             }
             assert!(
                 (var(name).get_f32() - min).abs() < 1e-5,
@@ -634,11 +686,85 @@ mod tests {
                 var(name).get_f32()
             );
             for _ in 0..presses {
-                nudge_bias(name, true);
+                nudge_bias(name, true, Step::Fine);
             }
             assert!(
                 (var(name).get_f32() - max).abs() < 1e-5,
                 "{name} stopped at {} rather than at its own ceiling {max}",
+                var(name).get_f32()
+            );
+            reset();
+        }
+    }
+
+    /// **The coarse pair reaches the far end of a range in a walk**, stops
+    /// there, and leaves the count on the fine pair's own lattice.
+    ///
+    /// Every claim `COARSE_BIAS_STEP`'s doc makes, counted here rather than
+    /// written into it where nothing could check it: a press is a whole number
+    /// of fine steps, the walk from what ships to the top of the wider range is
+    /// short enough for a finger, and the fine pair walks back onto the shipped
+    /// count exactly — which is what makes the two pairs one control rather than
+    /// two that cannot meet.
+    #[test]
+    fn the_coarse_pair_reaches_the_far_end_of_a_range_and_lands_on_the_fine_step() {
+        /// The most coarse presses a walk from the shipped count to the top of a
+        /// range may take before it stops being a walk: a reviewer reaching for
+        /// the end of the range, not a person counting to a hundred.
+        const PATIENCE: u32 = 20;
+
+        let _held = held();
+        let lattice = COARSE_BIAS_STEP / BIAS_STEP;
+        assert!(
+            lattice > 1.0 && (lattice - lattice.round()).abs() < 1e-6,
+            "a coarse press of {COARSE_BIAS_STEP} texels is not a whole number of \
+             {BIAS_STEP}-texel steps, so a coarse walk leaves the fine pair's lattice"
+        );
+
+        for name in [BIAS, OFFSET] {
+            let max = ceiling(name);
+            let shipped = var(name).get_f32();
+            assert!(shipped < max, "{name} ships at the top of its own range");
+
+            let mut coarse = 0;
+            while var(name).get_f32() < max {
+                nudge_bias(name, true, Step::Coarse);
+                coarse += 1;
+                assert!(
+                    coarse <= PATIENCE,
+                    "{name} is only at {} after {coarse} coarse presses, so the far end of its \
+                     range is not somewhere a person walks to",
+                    var(name).get_f32()
+                );
+            }
+            nudge_bias(name, true, Step::Coarse);
+            assert!(
+                (var(name).get_f32() - max).abs() < 1e-5,
+                "{name} went to {} rather than stopping at its own ceiling {max}",
+                var(name).get_f32()
+            );
+
+            // …and the fine pair walks back onto the count that ships, which is
+            // only true while a coarse press is whole fine steps.
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a range of a few hundred texels over a half-texel step is a small count"
+            )]
+            let most = ((max - shipped) / BIAS_STEP) as u32 + 1;
+            let mut fine = 0;
+            while var(name).get_f32() > shipped {
+                nudge_bias(name, false, Step::Fine);
+                fine += 1;
+                assert!(
+                    fine <= most,
+                    "{name} walked past {shipped} to {} rather than landing on it",
+                    var(name).get_f32()
+                );
+            }
+            assert!(
+                (var(name).get_f32() - shipped).abs() < 1e-5,
+                "{name} came back to {} rather than to the count it ships at, {shipped}",
                 var(name).get_f32()
             );
             reset();
@@ -710,8 +836,8 @@ mod tests {
         let before: Vec<Value> = KNOBS.iter().map(|name| var(name).get()).collect();
         cycle(FILTER);
         toggle_seam();
-        nudge_bias(BIAS, true);
-        nudge_bias(OFFSET, false);
+        nudge_bias(BIAS, true, Step::Fine);
+        nudge_bias(OFFSET, false, Step::Fine);
         let moved: Vec<Value> = KNOBS.iter().map(|name| var(name).get()).collect();
         assert_ne!(before, moved, "nothing moved, so there is nothing to reset");
 

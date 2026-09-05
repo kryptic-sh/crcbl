@@ -35,6 +35,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- `sundial`: a coarse pair of keys for each of the sun's two bias counts — `9`
+  and `0` for `r_shadow_bias`, `7` and `8` for `r_shadow_normal_offset` —
+  stepping 8 cascade texels a press against the existing `[`/`]` and `;`/`'`
+  pairs' half a texel. The far end of either range, where the plaza's plinth
+  loses its shadow altogether, is now 16 presses from the shipped constant bias
+  and 8 from the shipped normal offset rather than a typed console line, and a
+  coarse press is whole fine steps so a walk back lands on what ships. The pause
+  panel's `BIAS` and `NORMAL OFFSET` rows, `--help`'s `KEYS:` block and
+  `/demos/sundial/`'s key list print both pairs.
+
 - **The jobs gate drives both backends, and each run names the one it reached.**
   `web/run-jobs-e2e.sh` runs `web/jobs/`'s page a second time behind
   `web/tools/serve.mjs --no-isolation`, which withholds the COOP/COEP pair and

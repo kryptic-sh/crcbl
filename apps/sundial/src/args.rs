@@ -194,6 +194,8 @@ KEYS:
     , .                  Walk the seam a step left or right
     [ ]                  Walk the sun's constant shadow bias down or up
     ; '                  Walk its normal offset the same way, in the same texels
+    9 0                  Walk the constant bias in coarse steps, to its far end
+    7 8                  Walk the normal offset in the same coarse steps
     C                    Tint the picture by the cascade each shadow was read from
     T                    Draw the shadow atlas over the frame, tile by tile
     P                    Stop and start the sun

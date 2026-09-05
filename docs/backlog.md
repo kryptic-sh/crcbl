@@ -277,16 +277,17 @@ golden of their own and a button on the page. What is still **not** done:
     of them. So what that pose is short of is the contact, and reaching it wants
     a **third pose**, one framing a contact and a stretch of the shadow past it,
     rather than another arm.
-- **The keys walk the counts' neighbourhood and cannot reach the far end of
-  either range.** `filter::BIAS_STEP` is half a texel and the ranges run to 128
-  and 64, so the count at which `apps/sundial`'s plinth loses its shadow is 189
-  presses away. That is deliberate — a step coarse enough to walk the whole
-  range would be too coarse to sit on the shipped 1.5 — and it means the
-  artefact end of the comparison is reached by typing `r_shadow_bias 96` at the
-  console rather than by holding a key. A second, coarser step on a modifier
-  would close it; `apps/sundial/src/app.rs`'s key tables carry no modifier state
-  today. **What surprised us, and is not a bug (2026-09-05).** Peter-panning at
-  the plinth's contact needs a very large bias — 88 texels of `r_shadow_bias`,
+- **A game cannot see a modifier, so a chord is not available to any sample
+  (2026-09-05).** `crcbl-shell` stamps `crcbl_core::input::Modifiers` onto every
+  `ShellEvent::Key` it produces and `HostedGame::key_event` takes a `KeyCode`
+  and an edge, so the loop drops them at the game boundary. `apps/sundial`'s
+  coarse bias step went to a second pair of keys each because of it. Closing
+  this wants either a widened `key_event` — every sample implements the trait —
+  or a modifier reading a game can ask the loop for; and note that `Shift`
+  specifically is already `Flyer::key`'s descend key in every sample that flies,
+  so it is not free for a chord even once the state is deliverable.
+- **What surprised us, and is not a bug (2026-09-05).** Peter-panning at the
+  plinth's contact needs a very large bias — 88 texels of `r_shadow_bias`,
   against the 1.5 that ships — and the plinth's own thickness is why. The depth
   pass keeps front faces, so what the shadow map stores along the ray from
   `PLINTH_CONTACT` to the sun is the plinth's _far_ face, and a bias towards the

@@ -215,12 +215,16 @@ pub fn action_for(id: crcbl::ui::WidgetId) -> Option<SundialAction> {
 /// What the seam's readings' hint column prints: the pair that moves the seam.
 pub const SEAM_KEYS: &str = ", / .";
 
-/// What the constant bias's row prints in its hint column: the pair that walks
-/// it.
-pub const BIAS_KEYS: &str = "[ / ]";
+/// What the constant bias's row prints in its hint column: the fine pair that
+/// walks it, and the coarse pair beside it.
+///
+/// **Both pairs on the row**, because a reviewer who cannot see the coarse pair
+/// has no way to reach the end of the range at all — `crate::app`'s `BIAS_KEYS`
+/// is where the second pair's own argument is.
+pub const BIAS_KEYS: &str = "[ / ]  9 / 0";
 
 /// The same for the normal offset's row.
-pub const OFFSET_KEYS: &str = "; / '";
+pub const OFFSET_KEYS: &str = "; / '  7 / 8";
 
 /// What the sun reading's hint column prints: the pair that scrubs the clock.
 pub const SUN_KEYS: &str = "- / =";
