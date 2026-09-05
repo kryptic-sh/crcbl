@@ -4341,6 +4341,24 @@ duplicated shape.
 
 ## Surprises worth keeping — not bugs
 
+### A Pages run whose browser jobs never end is a lost runner, and the next push is the remedy (2026-09-05)
+
+`31dec1f`'s Pages run (33932758980) sat `in_progress` for eight and a half hours
+with `render shard`, `render breach` and `render alcove in a real browser` each
+stuck in their render step and no log blob uploaded for any of the three — the
+job-level `timeout-minutes` in `pages.yml` never fired, so the runners had gone
+rather than the step hanging. The siblings that did finish say what the pool was
+doing: quarry's render step took 21 minutes and passed, its log reading "two HUD
+lines 36699 ms apart against a nominal 1000 ms" and "every budget here scaled
+36.7x", and lantern, puppet and sundial took 25 to 32 minutes each where a
+minute is usual. githubstatus.com reported all systems operational. Nothing here
+was a defect in the tree — CI on the same SHA was green after its own lavapipe
+rerun — and nothing waited on: `pages.yml`'s `cancel-in-progress` is true for
+branch pushes, so the next push cancelled the dead run and started a fresh
+deploy, which is the remedy. Worth keeping because the standing rule is to hold
+a push until the previous Pages run completes, and a run like this one never
+will.
+
 ### The Windows lavapipe leg draws runners three times apart, and a readback deadline sat inside the spread (2026-09-05)
 
 `vk e2e (lavapipe, windows)` went red twice in a day in `Headless::readback` —
@@ -12317,7 +12335,25 @@ So the browser was still starting and the gate gave up on it.
 failed. **Whether that is enough is not yet known** — the next occurrence is the
 measurement, and it will say a longer time rather than the same one.
 
-### The viewer's suite has now segfaulted twice on lavapipe, nine days apart
+### The viewer's suite has segfaulted three times on lavapipe (2026-08-19, 08-28, 09-05)
+
+**2026-09-05**, run 33932759011 on `31dec1f`: the same step, the same
+`signal: 11, SIGSEGV` from `crcbl_viewer-… --quiet`, every other step green, on
+a push that touched `apps/alcove`, `apps/sundial`, `web/` and docs — nothing
+`viewer` links. A rerun of the failed job alone was green, as it was the two
+times before. **This was the third occurrence the entry below said should stop
+being treated as a flake, so the cheap half of "what would settle it" was run**:
+the same command with the same env as the CI step, on this machine's lavapipe
+(LLVM 22.1.8) pinned to four cores with `taskset -c 0-3` to match the runner,
+both validation layers and the fatal gate on, **150 consecutive runs, all
+green** (2026-09-05, 09:01 to 11:10, about 50 s a run under a shared `target/`).
+So the crash is not reproduced at the runner's core count either, and the local
+runs now stand at 175 green against three CI failures in forty-odd. What is
+different on CI and not here is the driver build (Mesa 25.2.8 / LLVM 20.1.2
+there against 26.x / 22.1.8 here) and the machine's memory, which narrows the
+candidate to the older llvmpipe under contention rather than to this tree; the
+other half — looping the step in CI until it fires, which is the only thing that
+would produce a stack — is still not done, and CI's lavapipe is still unpinned.
 
 **2026-08-19**, `running 71 tests`, and **2026-08-28** on `db25eca`,
 `running 115 tests` — both the `vk e2e (lavapipe)` job's "Run the viewer's suite
