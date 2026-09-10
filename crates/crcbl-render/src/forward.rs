@@ -1358,13 +1358,13 @@ enum EmitTail {
 }
 
 impl EmitTail {
-    /// What `caps` selects.
+    /// What the device prefers within its supported geometry paths.
     ///
     /// One value per [`GeometryPath`] since 2026-08: the mesh-shader path used
     /// to degrade to an indirect tail and log that it had, because there was no
     /// mesh pipeline to select.
-    const fn from_caps(caps: &crcbl_hal::DeviceCaps) -> Self {
-        match caps.geometry_path() {
+    const fn from_path(path: GeometryPath) -> Self {
+        match path {
             GeometryPath::MeshShader => Self::Mesh,
             GeometryPath::IndirectCount => Self::Count,
             GeometryPath::IndirectPerBatch => Self::PerBatch,
@@ -3703,7 +3703,7 @@ impl ForwardRenderer {
         // indirect tail never builds the mesh one, which is what makes "the
         // frame came out of the mesh stage" a fact about the object graph
         // rather than a claim about a branch.
-        let emit = EmitTail::from_caps(&device.caps());
+        let emit = EmitTail::from_path(device.preferred_geometry_path());
         // **A second capability, asked separately.** `Features::TASK_SHADER` is
         // not implied by `MESH_SHADER`, so §3.5's per-cluster cull is an
         // amplification stage this renderer builds where the device has one and
@@ -12341,8 +12341,9 @@ impl ForwardRenderer {
     /// Which [`GeometryPath`] this renderer was **built for** — not what the
     /// device reports, but what it actually built.
     ///
-    /// The two are the same by construction and that is the point of asking the
-    /// renderer rather than the device: [`GeometryPath::MeshShader`] here means
+    /// The device may prefer a path below its capability ceiling when a higher
+    /// one uses emulation. This reports the preference actually built, rather
+    /// than the ceiling: [`GeometryPath::MeshShader`] here means
     /// `build` created a mesh pipeline out of `mesh_cluster.slang` and its
     /// cluster buffers, and created **no** raster pipeline for the pass to fall
     /// back to. So a frame this renderer drew came out of a mesh stage, and a
@@ -17170,6 +17171,7 @@ mod tests {
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        place_cube(&mut renderer, Mat4::IDENTITY);
         let imported = swapchain_image(device.as_ref());
         // Twice round the ring, because a slot cleared only on its first use is
         // exactly the failure this is about.
@@ -17278,6 +17280,7 @@ mod tests {
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        place_cube(&mut renderer, Mat4::IDENTITY);
         renderer
             .begin_frame(
                 device.as_ref(),
@@ -19216,6 +19219,8 @@ mod tests {
         let mut renderer =
             ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, &scene)
                 .expect("built");
+        // A maximum-width graph must include actual instances to cull.
+        place_cube(&mut renderer, Mat4::IDENTITY);
         renderer
             .set_ground_grid(device, Some(GridStyle::default()))
             .expect("the null backend builds every pipeline");
@@ -19342,6 +19347,7 @@ mod tests {
         let device = device.as_ref();
         let mut renderer =
             ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        place_cube(&mut renderer, Mat4::IDENTITY);
         // One shadowed light beside the cascades, so the shadow arm below covers
         // a light slot's cull as well as a cascade's.
         renderer.set_lights(&[shadowable_spot(-1.0)]);

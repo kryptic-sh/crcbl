@@ -452,6 +452,9 @@ pub(crate) struct DeviceState {
     /// next call tries again and reports again rather than silently doing
     /// nothing.
     pack_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    /// A timed empty compute pass needs a dispatch or Metal drops its samples.
+    /// Compiled only when such a pass is actually closed.
+    timestamp_noop: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
 impl DeviceState {
@@ -900,14 +903,16 @@ impl MetalDevice {
             tag: device_tag(id),
             state: Mutex::new(DeviceState::default()),
         });
+        let device = Self { inner };
         crcbl_core::log::info!(
-            "crcbl-mtl: opened {:?} (geometry {:?}, binding {:?}, lighting {:?})",
+            "crcbl-mtl: opened {:?} (geometry {:?}, ceiling {:?}, binding {:?}, lighting {:?})",
             record.info.name,
+            device.preferred_geometry_path(),
             caps.geometry_path(),
             caps.binding_model(),
             caps.lighting_path()
         );
-        Ok(Self { inner })
+        Ok(device)
     }
 
     pub(crate) fn state(&self) -> MutexGuard<'_, DeviceState> {
@@ -1175,6 +1180,39 @@ impl MetalDevice {
 }
 
 impl DeviceInner {
+    /// Makes an otherwise empty timed compute encoder execute its timestamps.
+    pub(crate) fn timestamp_noop(
+        &self,
+    ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, HalError> {
+        let mut state = self.state();
+        if let Some(pipeline) = &state.timestamp_noop {
+            return Ok(pipeline.clone());
+        }
+        // Backend-internal work with no resources or externally visible output.
+        // Metal elides an encoder with no dispatch, even if it has timestamp
+        // attachments or memory barriers. One thread preserves those writes.
+        let source = NSString::from_str("kernel void crcbl_timestamp_noop() {}");
+        let library = self
+            .raw
+            .newLibraryWithSource_options_error(&source, None)
+            .map_err(|error| HalError::ShaderCompilation(error.to_string()))?;
+        let function = library
+            .newFunctionWithName(&NSString::from_str("crcbl_timestamp_noop"))
+            .ok_or_else(|| HalError::ShaderCompilation("timestamp no-op entry missing".into()))?;
+        let descriptor = MTLComputePipelineDescriptor::new();
+        descriptor.setComputeFunction(Some(&function));
+        descriptor.setLabel(Some(&NSString::from_str("crcbl timestamp no-op")));
+        let pipeline = self
+            .raw
+            .newComputePipelineStateWithDescriptor_options_reflection_error(
+                &descriptor,
+                MTLPipelineOption::None,
+                None,
+            )
+            .map_err(|error| HalError::PipelineCreation(error.to_string()))?;
+        Ok(state.timestamp_noop.insert(pipeline).clone())
+    }
+
     pub(crate) fn state(&self) -> MutexGuard<'_, DeviceState> {
         self.state
             .lock()
@@ -1528,6 +1566,16 @@ impl Device for MetalDevice {
 
     fn caps(&self) -> DeviceCaps {
         self.inner.caps
+    }
+
+    fn preferred_geometry_path(&self) -> crcbl_hal::GeometryPath {
+        match self.inner.caps.geometry_path() {
+            // Count draws are supported, but emulated by a packing dispatch.
+            // The per-bucket renderer already writes zero instances for empty
+            // buckets, so ordinary indirect draws avoid that extra GPU work.
+            crcbl_hal::GeometryPath::IndirectCount => crcbl_hal::GeometryPath::IndirectPerBatch,
+            path => path,
+        }
     }
 
     /// What this backend does with each seam behaviour.
@@ -3368,6 +3416,25 @@ pub(crate) mod tests {
             .expect("a Metal device opens with no required features");
         let validated = crate::fault::Validated::new(instance, &device);
         (validated, device)
+    }
+
+    #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn a_count_capable_device_prefers_unpacked_bucket_draws() {
+        let (_validated, device) = open_device();
+        assert!(
+            device
+                .caps()
+                .features
+                .contains(Features::DRAW_INDIRECT_COUNT)
+        );
+        if device.caps().geometry_path() == crcbl_hal::GeometryPath::IndirectCount {
+            assert_eq!(
+                device.preferred_geometry_path(),
+                crcbl_hal::GeometryPath::IndirectPerBatch,
+                "per-bucket zero-instance arguments need no count-emulation packing pass"
+            );
+        }
     }
 
     fn buffer(size: u64, memory: MemoryLocation) -> BufferDesc<'static> {

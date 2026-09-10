@@ -333,7 +333,7 @@ pub(crate) struct Correlation {
 /// taken. Both report `0`, which is what the seam's degrading rule asks for: the
 /// HUD shows blanks, the frame still renders.
 pub(crate) fn timestamp_nanos(ticks: u64, base: Correlation, now: Correlation) -> u64 {
-    if ticks == COUNTER_ERROR {
+    if ticks == 0 || ticks == COUNTER_ERROR {
         return 0;
     }
     let gpu_span = now.gpu.saturating_sub(base.gpu);
@@ -587,6 +587,8 @@ mod tests {
             gpu: 11 + 1_000_000,
         };
         assert_eq!(timestamp_nanos(COUNTER_ERROR, base, moving), 0);
+        // A fresh sample buffer's unexecuted stage reads zero on Apple silicon.
+        assert_eq!(timestamp_nanos(0, base, moving), 0);
 
         // `cpu_delta=0 gpu_delta=0` across a real 53 ms of wall clock is what
         // the Mac in CI answered; see `crate::adapter`'s counter probe.

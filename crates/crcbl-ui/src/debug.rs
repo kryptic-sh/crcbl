@@ -917,7 +917,7 @@ mod tests {
                 "budget",
                 "cpu p50/p95",
                 "4.00 / 4.00 ms",
-                "gpu p50/p95",
+                "gpu elapsed p50/p95",
                 "11.00 / 11.00 ms",
                 "bound",
                 "gpu",

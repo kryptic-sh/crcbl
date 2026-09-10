@@ -1,5 +1,6 @@
-//! The frame's budget row: CPU frame time against GPU frame time, and which of
-//! the two the frame is actually costing.
+//! The budget row compares CPU active time with the measured GPU elapsed span.
+//! GPU elapsed includes scheduling gaps and contention, not just active work;
+//! the larger-span classification is a diagnostic, not a throughput guarantee.
 //!
 //! `docs/plan/40-profiling.md`'s first debug-panel row, and the reason it is
 //! first: "'GPU-bound' is the first question and nothing answers it today". The
@@ -85,10 +86,10 @@ impl fmt::Display for Bound {
 /// knowledge and this row is not the only reader of it.
 type Window = crcbl_core::stats::Window<DEFAULT_FRAME_WINDOW>;
 
-/// CPU against GPU frame time, over a rolling window of each.
+/// CPU active time against measured GPU elapsed time, over rolling windows.
 ///
 /// Fed once a frame from both ends — [`BudgetStats::record_cpu`] with the frame
-/// span's duration, [`BudgetStats::record_gpu`] with the pass total the timers
+/// span's active duration, [`BudgetStats::record_gpu`] with the outer interval the timers
 /// resolved — and read by the debug panel. See the [module docs](self) for why
 /// the two are shown as distributions rather than paired frame by frame.
 #[derive(Clone, Debug, Default)]
@@ -221,7 +222,7 @@ impl DebugModule for BudgetStats {
     fn debug_section(&self, out: &mut DebugSection) {
         out.set_title("budget");
         write_window(out, "cpu p50/p95", &self.cpu);
-        write_window(out, "gpu p50/p95", &self.gpu);
+        write_window(out, "gpu elapsed p50/p95", &self.gpu);
         out.row_str("bound", self.bound().as_str());
         match self.gpu_frame {
             Some(frame) => out.row("gpu frame", format_args!("{frame}")),
@@ -349,7 +350,7 @@ mod tests {
         stats.debug_section(&mut section);
         assert_eq!(section.title(), "budget");
         assert_eq!(rendered(&stats, "cpu p50/p95"), "4.00 / 4.00 ms");
-        assert_eq!(rendered(&stats, "gpu p50/p95"), "9.00 / 9.00 ms");
+        assert_eq!(rendered(&stats, "gpu elapsed p50/p95"), "9.00 / 9.00 ms");
         assert_eq!(rendered(&stats, "bound"), "gpu");
         assert_eq!(
             rendered(&stats, "gpu frame"),
@@ -363,7 +364,7 @@ mod tests {
             other.record_gpu(frame as u64, ms(1));
         }
         assert_eq!(rendered(&other, "cpu p50/p95"), "20.00 / 20.00 ms");
-        assert_eq!(rendered(&other, "gpu p50/p95"), "1.00 / 1.00 ms");
+        assert_eq!(rendered(&other, "gpu elapsed p50/p95"), "1.00 / 1.00 ms");
         assert_eq!(rendered(&other, "bound"), "cpu");
     }
 
@@ -392,7 +393,10 @@ mod tests {
             .iter()
             .map(|row| row.label.as_str())
             .collect();
-        assert_eq!(labels, ["cpu p50/p95", "gpu p50/p95", "bound", "gpu frame"],);
+        assert_eq!(
+            labels,
+            ["cpu p50/p95", "gpu elapsed p50/p95", "bound", "gpu frame"],
+        );
     }
 
     /// One row's value, by label, off a section written from scratch — the way

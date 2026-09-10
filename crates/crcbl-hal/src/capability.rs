@@ -1009,41 +1009,10 @@ pub const DIVERGENCES: &[Divergence] = &[
         kind: DivergenceKind::Unwritten,
         why: NO_OCCLUSION_QUERY_VERB,
     },
-    Divergence {
-        capability: Capability::TimestampQuery,
-        backend: BackendKind::Metal,
-        // Unclassified until 2026-08-19, when the probe adapter.rs was written
-        // to answer it with ran on CI's Apple Paravirtual device:
-        // supportsCounterSampling AtStageBoundary=false, AtDrawBoundary=true,
-        // AtDispatchBoundary=true, AtBlitBoundary=true, counterSets=0, and
-        // sampleTimestamps:gpuTimestamp: not moving across a 50ms sleep. Metal
-        // expresses the feature, so this was never an ApiAbsence. The code was
-        // then written, and the row stays Unwritten for the reason the
-        // MeshShading entry above stays Unwritten: no device has executed it.
-        kind: DivergenceKind::Unrun,
-        why: "the calls exist — crcbl_mtl::device's create_query_set builds an \
-              MTLCounterSampleBuffer over MTLCommonCounterSetTimestamp, crcbl_mtl::command puts it \
-              in a render or compute pass descriptor's sampleBufferAttachments at the two indices \
-              PassTimestampWrites names, resolve_query_set reaches it through the blit encoder's \
-              resolveCounters:inRange:destinationBuffer:destinationOffset:, and query_results \
-              reads it with resolveCounterRange: and converts to nanoseconds — but no device has \
-              ever run them. crcbl_mtl::adapter reports Features::TIMESTAMP_QUERY only for a \
-              device that advertises MTLCommonCounterSetTimestamp in MTLDevice::counterSets and \
-              answers supportsCounterSampling: at MTLCounterSamplingPointAtStageBoundary, which is \
-              the point a pass descriptor samples at and therefore the question the code depends \
-              on — not supportsFamily:, which describes a feature set rather than a selector's \
-              availability. The Mac CI runs this backend on answers counterSets=0 and \
-              AtStageBoundary=false, measured by \
-              a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation, so it \
-              reports the flag clear and every query path degrades there — a device fact, reported \
-              per device, and the gate working rather than what leaves the row open. Metal states \
-              no tick period at all, so the conversion is two sampleTimestamps:gpuTimestamp: \
-              correlations — one at device open, one at the read — and crcbl_mtl::query's \
-              timestamp_nanos is the arithmetic, unit-tested off macOS because it is the only part \
-              of the path a machine without Metal can check. Nothing has ever checked it against a \
-              real GPU clock. Retiring this row takes a Mac that reports the flag running \
-              crcbl_mtl's timestamp path and the numbers coming back ordered and non-zero",
-    },
+    // Metal timestamp queries were proved on an M3 Pro on 2026-09-10,
+    // including render/compute boundaries and GPU-side resolves. Clear-only
+    // render passes and empty compute passes needed fixes before that proof;
+    // docs/notes/metal-local-baseline.md records the hardware evidence.
     // The WebGPU TimestampQuery row that used to sit here is gone, and it left
     // the way `StorageImageBinding`'s did: the gap was the seam's own verb. It
     // had a free-standing `write_timestamp` naming an arbitrary point in the
@@ -1784,11 +1753,6 @@ mod tests {
         ),
         (
             Capability::TaskShaderStage,
-            BackendKind::Metal,
-            DivergenceKind::Unrun,
-        ),
-        (
-            Capability::TimestampQuery,
             BackendKind::Metal,
             DivergenceKind::Unrun,
         ),

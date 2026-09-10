@@ -5623,7 +5623,9 @@ fn the_cube_scene_draws_the_same_frame_on_every_pass_of_the_ring() {
     )
     .unwrap_or_else(|why| panic!("a GPU backend opens for the cube scene: {why}"));
     let mut setup = Offscreen::guard(SUITE, setup);
-    let path = setup.caps().geometry_path();
+    let path = setup
+        .geometry_path()
+        .unwrap_or_else(|| setup.caps().geometry_path());
     let amplifies = setup
         .adapter()
         .caps
@@ -5957,7 +5959,9 @@ fn draw_scene_and_match_its_golden_measuring(
     // captures this and it is otherwise invisible.
     eprintln!(
         "crcbl render e2e: {backend} selected {:?} / {:?} / {:?} for the {golden} scene",
-        caps.geometry_path(),
+        setup
+            .geometry_path()
+            .unwrap_or_else(|| caps.geometry_path()),
         caps.binding_model(),
         caps.lighting_path(),
     );
@@ -5994,6 +5998,13 @@ fn draw_scene_and_match_its_golden_measuring(
         adapter.caps.geometry_path(),
         caps.geometry_path(),
     );
+    if let Some(path) = setup.geometry_path() {
+        assert_eq!(
+            path,
+            setup.preferred_geometry_path(),
+            "the forward renderer must build the device's preferred supported path"
+        );
+    }
 
     // A pin the loader ignored is the failure this catches, and it is the same
     // class as a suite that runs no tests. Both names go through the mappings
@@ -6244,7 +6255,9 @@ fn draw_scene_on_every_geometry_path_measuring(
         let setup = OffscreenSetup::open_with(EXTENT.0, EXTENT.1, scene, optional)
             .unwrap_or_else(|why| panic!("a GPU backend opens for the {name} scene: {why}"));
         let mut setup = Offscreen::guard(SUITE, setup);
-        let path = setup.caps().geometry_path();
+        let path = setup
+            .geometry_path()
+            .unwrap_or_else(|| setup.caps().geometry_path());
         let offers_mesh = setup
             .adapter()
             .caps
@@ -6991,7 +7004,9 @@ fn the_culling_counters_come_back_off_the_gpu_on_this_backend() {
     eprintln!(
         "crcbl render e2e: culling counters on {backend}, {path:?}",
         backend = setup.backend(),
-        path = setup.caps().geometry_path(),
+        path = setup
+            .geometry_path()
+            .unwrap_or_else(|| setup.caps().geometry_path()),
     );
 
     // A frame records the copy and the next frame requests the readback for it,

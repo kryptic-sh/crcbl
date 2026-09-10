@@ -102,7 +102,8 @@ pub const MAX_TIMED_PASSES: u32 = ForwardRenderer::MAX_PASSES
 pub struct PassTiming {
     /// The pass's label, as it appears in the graph dump and in captures.
     pub label: String,
-    /// Nanoseconds between the timestamps bracketing it, barriers included.
+    /// Nanoseconds between pass boundaries, including inter-stage scheduling
+    /// gaps. These intervals can overlap on a pipelined GPU.
     pub gpu_nanos: u64,
 }
 
@@ -114,13 +115,19 @@ pub struct FrameTimings {
     /// Which frame these came from — a few frames behind the one being
     /// recorded; see the module docs.
     pub frame: u64,
+    /// Elapsed interval from the earliest measured pass start to the latest
+    /// measured pass end. Includes gaps/contention, but not untimed work before
+    /// or after those boundaries. `None` means the timestamps were incomplete
+    /// or invalid; it must not be replaced with a sum of overlapping spans.
+    pub elapsed_nanos: Option<u64>,
 }
 
 impl FrameTimings {
-    /// The sum of every pass's cost.
+    /// The sum of every pass's elapsed span.
     ///
-    /// Not the frame time: passes do not overlap in this graph, but the gaps
-    /// between them and the present are not measured here.
+    /// This double-counts overlapping stages and includes scheduling gaps.
+    /// It is neither frame duration nor active GPU time. See `elapsed_nanos`
+    /// for the outer measured interval.
     #[must_use]
     pub fn total_nanos(&self) -> u64 {
         self.passes.iter().map(|pass| pass.gpu_nanos).sum()
@@ -145,11 +152,18 @@ impl FrameTimings {
         let total = self.total_nanos();
         let _ = writeln!(
             out,
-            "frame timing (frame {}): {} pass(es), {:.3} ms total",
+            "frame timing (frame {}): {} pass(es), {:.3} ms sum of pass spans",
             self.frame,
             self.passes.len(),
             total as f64 / 1.0e6
         );
+        if let Some(elapsed) = self.elapsed_nanos {
+            let _ = writeln!(
+                out,
+                "  measured GPU elapsed: {:.3} ms",
+                elapsed as f64 / 1.0e6
+            );
+        }
         for pass in &self.passes {
             let share = if total == 0 {
                 0.0
@@ -198,9 +212,12 @@ impl DebugModule for FrameTimings {
             );
         }
         out.row(
-            "total",
+            "span sum",
             format_args!("{:.3} ms", self.total_nanos() as f64 / 1.0e6),
         );
+        if let Some(elapsed) = self.elapsed_nanos {
+            out.row("elapsed", format_args!("{:.3} ms", elapsed as f64 / 1.0e6));
+        }
         out.row("frame", format_args!("{}", self.frame));
     }
 }
@@ -415,6 +432,7 @@ impl PassTimers {
         self.latest = FrameTimings {
             passes,
             frame: slot.frame,
+            elapsed_nanos: measured_span(&nanos),
         };
     }
 
@@ -427,9 +445,48 @@ impl PassTimers {
     }
 }
 
+/// Reject incomplete pairs rather than manufacturing a plausible budget value.
+fn measured_span(nanos: &[u64]) -> Option<u64> {
+    if nanos.is_empty() || !nanos.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut first = u64::MAX;
+    let mut last = 0;
+    for pair in nanos.chunks_exact(2) {
+        let (start, end) = (pair[0], pair[1]);
+        if start == 0 || end < start {
+            return None;
+        }
+        first = first.min(start);
+        last = last.max(end);
+    }
+    Some(last - first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_passes_measure_the_outer_interval_not_their_sum() {
+        assert_eq!(measured_span(&[100, 500, 200, 900]), Some(800));
+        assert_eq!(measured_span(&[100, 200, 400, 700]), Some(600));
+        assert_eq!(measured_span(&[500, 500]), Some(0));
+    }
+
+    #[test]
+    fn a_missing_or_backwards_timestamp_cannot_supply_a_budget() {
+        for values in [
+            &[][..],
+            &[100][..],
+            &[0, 200][..],
+            &[100, 0][..],
+            &[200, 100][..],
+        ] {
+            assert_eq!(measured_span(values), None);
+        }
+        assert_eq!(measured_span(&[100, 200, 0, 400]), None);
+    }
 
     #[test]
     fn an_empty_report_says_so_rather_than_printing_nothing() {
@@ -442,6 +499,7 @@ mod tests {
     #[test]
     fn the_report_lists_every_pass_with_its_share() {
         let timings = FrameTimings {
+            elapsed_nanos: None,
             frame: 42,
             passes: vec![
                 PassTiming {
@@ -471,6 +529,7 @@ mod tests {
     #[test]
     fn a_zero_length_frame_reports_zero_shares_rather_than_nan() {
         let timings = FrameTimings {
+            elapsed_nanos: None,
             frame: 1,
             passes: vec![PassTiming {
                 label: "clear".to_string(),
@@ -494,6 +553,7 @@ mod tests {
         use glam::Vec2;
 
         let timings = FrameTimings {
+            elapsed_nanos: None,
             frame: 7,
             passes: vec![
                 PassTiming {
@@ -520,7 +580,7 @@ mod tests {
             [
                 ("sprites", "2.500 ms"),
                 ("ui", "0.250 ms"),
-                ("total", "2.750 ms"),
+                ("span sum", "2.750 ms"),
                 ("frame", "7"),
             ],
         );
@@ -550,7 +610,8 @@ mod tests {
         assert_eq!(
             &drawn[gpu..],
             [
-                "gpu", "sprites", "2.500 ms", "ui", "0.250 ms", "total", "2.750 ms", "frame", "7",
+                "gpu", "sprites", "2.500 ms", "ui", "0.250 ms", "span sum", "2.750 ms", "frame",
+                "7",
             ],
         );
     }

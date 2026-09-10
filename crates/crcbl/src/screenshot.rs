@@ -7108,15 +7108,28 @@ impl OffscreenSetup {
 
     /// What the opened device reported it can do.
     ///
-    /// The selector this exists for is
-    /// [`geometry_path`](crate::hal::DeviceCaps::geometry_path): the forward
-    /// pass's indirect tail is chosen from it once, at build, and is otherwise
-    /// invisible from outside — so this is how a caller learns which arm a
-    /// frame was actually drawn through rather than assuming the one its
-    /// developer's GPU happens to select.
+    /// These are capabilities, not a claim about the selected renderer path.
+    /// Use [`Self::geometry_path`] to inspect the forward renderer's choice.
     #[must_use]
     pub fn caps(&self) -> crate::hal::DeviceCaps {
         self.device.caps()
+    }
+
+    /// The device's recommended geometry path, which may be below its
+    /// capability ceiling when the higher path requires emulation.
+    #[must_use]
+    pub fn preferred_geometry_path(&self) -> crate::hal::GeometryPath {
+        self.device.preferred_geometry_path()
+    }
+
+    /// The path the forward renderer actually built, or `None` for sprite/UI
+    /// scenes, which do not use the geometry-path selector.
+    #[must_use]
+    pub fn geometry_path(&self) -> Option<crate::hal::GeometryPath> {
+        match &self.scene {
+            SceneState::Forward { renderer, .. } => Some(renderer.geometry_path()),
+            SceneState::Sprite { .. } | SceneState::Ui { .. } => None,
+        }
     }
 
     /// What the last `draw_and_readback` (or [`begin_readback`](Self::begin_readback)) recorded,

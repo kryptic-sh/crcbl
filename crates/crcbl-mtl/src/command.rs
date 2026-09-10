@@ -267,17 +267,18 @@ struct PassSamples {
 impl PassSamples {
     /// Fills a render pass descriptor's first sample-buffer attachment.
     ///
-    /// **`startOfVertexSampleIndex` and `endOfFragmentSampleIndex` are the two
-    /// the seam means**, and the other two indices are explicitly told not to
-    /// sample. Metal offers four stage boundaries per attachment — the start and
-    /// end of vertex processing and of fragment processing — while
-    /// [`PassTimestampWrites`] carries exactly two, "when the pass begins" and
-    /// "when the pass ends". The vertex stage runs first and the fragment stage
-    /// last, so those two boundaries are the outermost pair Metal has and the
-    /// closest thing it offers to Vulkan's `ALL_COMMANDS` pair.
-    /// `MTLCounterDontSample` on the inner two is what keeps them from
-    /// overwriting somebody else's queries: an index left at its default is a
-    /// real index, not an absence.
+    /// The vertex start opens the pair. **Both stage ends write the closing
+    /// slot**: a clear-only pass on Apple silicon runs no fragment stage, so
+    /// sampling only its end leaves zero in a fresh buffer or an older pass's
+    /// timestamp in a reused one. Vertex completion supplies the end in that
+    /// case; fragment completion overwrites it when that later stage runs.
+    ///
+    /// This preserves fragment work in the measured interval without changing
+    /// the seam's two-query representation or its GPU-side resolve path. The
+    /// M3 Pro probe in `docs/notes/metal-local-baseline.md` reproduces both the
+    /// missing stage and the reused-buffer case under strict Metal validation.
+    /// Fragment start is not sampled: leaving its index at a default would
+    /// overwrite a query the pass did not ask to write.
     ///
     /// Attachment `0` because the seam names one set per pass. Metal's array has
     /// several slots so that a pass can sample several counter sets at once,
@@ -300,7 +301,7 @@ impl PassSamples {
         // is the API's own sentinel and is exempt from the bound by definition.
         unsafe {
             slot.setStartOfVertexSampleIndex(self.beginning_of_pass);
-            slot.setEndOfVertexSampleIndex(MTLCounterDontSample);
+            slot.setEndOfVertexSampleIndex(self.end_of_pass);
             slot.setStartOfFragmentSampleIndex(MTLCounterDontSample);
             slot.setEndOfFragmentSampleIndex(self.end_of_pass);
         }
@@ -479,8 +480,18 @@ enum RenderCommand {
 /// seam passed travels in the uniform block as a word index instead, which is
 /// what keeps this free of any question about what offset alignment a `device`
 /// buffer binding requires on the device it is running on.
-fn encode_pack(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, dispatch: &PackDispatch) {
-    encoder.setComputePipelineState(&dispatch.pipeline);
+fn encode_pack(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    dispatch: &PackDispatch,
+    previous: Option<&PackDispatch>,
+) {
+    // Every packing dispatch uses these same four slots. The previous dispatch
+    // is therefore the encoder's complete binding state, and the recording
+    // retains all of its objects until replay ends. Start with None on each
+    // new encoder; no state survives endEncoding.
+    if previous.is_none_or(|held| !core::ptr::eq(&*held.pipeline, &*dispatch.pipeline)) {
+        encoder.setComputePipelineState(&dispatch.pipeline);
+    }
     // SAFETY: `objc2` marks these unsafe because Metal bounds-checks neither
     // the argument-table index nor the offset. The indices are the ones the
     // compiled MSL declares — `crcbl_mtl::indirect_count`'s embedded artifact
@@ -492,9 +503,15 @@ fn encode_pack(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, dispatch:
     // `plan_indirect_count` bounded each of those against the buffer it indexes.
     // Every buffer is kept alive by the `Retained` this dispatch holds.
     unsafe {
-        encoder.setBuffer_offset_atIndex(Some(&dispatch.count), 0, 1);
-        encoder.setBuffer_offset_atIndex(Some(&dispatch.source), 0, 2);
-        encoder.setBuffer_offset_atIndex(Some(&dispatch.packed), 0, 3);
+        if previous.is_none_or(|held| !core::ptr::eq(&*held.count, &*dispatch.count)) {
+            encoder.setBuffer_offset_atIndex(Some(&dispatch.count), 0, 1);
+        }
+        if previous.is_none_or(|held| !core::ptr::eq(&*held.source, &*dispatch.source)) {
+            encoder.setBuffer_offset_atIndex(Some(&dispatch.source), 0, 2);
+        }
+        if previous.is_none_or(|held| !core::ptr::eq(&*held.packed, &*dispatch.packed)) {
+            encoder.setBuffer_offset_atIndex(Some(&dispatch.packed), 0, 3);
+        }
     }
     let length = to_ns(dispatch.params.len() as u64);
     let source = NonNull::from(&dispatch.params).cast::<core::ffi::c_void>();
@@ -504,7 +521,9 @@ fn encode_pack(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, dispatch:
     // the duration of the call, and Metal copies them before returning. Index
     // `0` is the slot the compiled MSL puts the uniform block at, which
     // `crcbl_mtl::indirect_count`'s embedded artifact is the record of.
-    unsafe { encoder.setBytes_length_atIndex(source, length, 0) };
+    if previous.is_none_or(|held| held.params != dispatch.params) {
+        unsafe { encoder.setBytes_length_atIndex(source, length, 0) };
+    }
     // `groups` is at least one: `plan_indirect_count` answers `None` for a draw
     // of nothing, so a recorded dispatch always has a structure to pack. Metal
     // raises on a zero threadgroup count, and a raise aborts the process.
@@ -554,6 +573,16 @@ fn remember<T>(groups: &mut Vec<(u32, T, BindingMask)>, slot: u32, bindings: T, 
 /// is refused (see [`bound_primitive`](MetalCommandEncoder::bound_primitive)).
 /// Two pipelines sharing one mask re-apply nothing at all.
 struct RenderReplay<'a> {
+    /// State is applied at the draw that consumes it. A setter overwritten
+    /// before a draw needs no Metal call at all.
+    pipeline: Option<&'a crate::pipeline::BoundPipeline>,
+    applied_pipeline: Option<&'a crate::pipeline::BoundPipeline>,
+    viewport: Option<MTLViewport>,
+    applied_viewport: Option<MTLViewport>,
+    scissor: Option<MTLScissorRect>,
+    applied_scissor: Option<MTLScissorRect>,
+    stencil_reference: u32,
+    applied_stencil_reference: Option<u32>,
     /// What this encoder's argument tables already hold. See
     /// [`crate::bind_cache`].
     binds: BindCache,
@@ -567,9 +596,67 @@ struct RenderReplay<'a> {
 impl<'a> RenderReplay<'a> {
     fn new() -> Self {
         Self {
+            pipeline: None,
+            applied_pipeline: None,
+            viewport: None,
+            applied_viewport: None,
+            scissor: None,
+            applied_scissor: None,
+            stencil_reference: crcbl_hal::stencil::INITIAL_REFERENCE,
+            applied_stencil_reference: None,
             binds: BindCache::default(),
             groups: Vec::new(),
             mask: BindingMask::none(),
+        }
+    }
+
+    /// Materializes only state that differs from the preceding draw. The
+    /// recording retains pipelines, and this cache lives for one encoder only.
+    fn apply_draw_state(&mut self, encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>) {
+        if let Some(bound) = self.pipeline {
+            let previous = self.applied_pipeline;
+            if previous.is_none_or(|held| !core::ptr::eq(&*held.raw, &*bound.raw)) {
+                encoder.setRenderPipelineState(&bound.raw);
+            }
+            if previous.is_none_or(|held| held.raster.cull != bound.raster.cull) {
+                encoder.setCullMode(bound.raster.cull);
+            }
+            if previous.is_none_or(|held| held.raster.winding != bound.raster.winding) {
+                encoder.setFrontFacingWinding(bound.raster.winding);
+            }
+            if previous.is_none_or(|held| held.raster.fill != bound.raster.fill) {
+                encoder.setTriangleFillMode(bound.raster.fill);
+            }
+            if previous.is_none_or(|held| held.raster.clip != bound.raster.clip) {
+                encoder.setDepthClipMode(bound.raster.clip);
+            }
+            if previous.is_none_or(|held| held.raster.bias != bound.raster.bias) {
+                let [constant, slope_scale, clamp] = bound.raster.bias;
+                encoder.setDepthBias_slopeScale_clamp(constant, slope_scale, clamp);
+            }
+            if previous
+                .is_none_or(|held| !core::ptr::eq(&*held.depth_stencil, &*bound.depth_stencil))
+            {
+                // Always an object: nil hangs Apple's paravirtual GPU.
+                encoder.setDepthStencilState(Some(&bound.depth_stencil));
+            }
+            self.applied_pipeline = Some(bound);
+        }
+        if self.viewport != self.applied_viewport {
+            if let Some(viewport) = self.viewport {
+                encoder.setViewport(viewport);
+            }
+            self.applied_viewport = self.viewport;
+        }
+        if self.scissor != self.applied_scissor {
+            if let Some(scissor) = self.scissor {
+                encoder.setScissorRect(scissor);
+            }
+            self.applied_scissor = self.scissor;
+        }
+        if self.applied_stencil_reference != Some(self.stencil_reference) {
+            encoder.setStencilReferenceValue(self.stencil_reference);
+            self.applied_stencil_reference = Some(self.stencil_reference);
         }
     }
 
@@ -591,7 +678,7 @@ impl<'a> RenderReplay<'a> {
 ///
 /// Every value here was checked when the seam call arrived — a handle resolved,
 /// a range bounded, a stage mask read off the pipeline layout — so this makes
-/// calls and decides nothing. That is deliberate: a check moved down here would
+/// materializes validated state when a draw consumes it. A check moved here would
 /// report its failure at `end_render_pass` rather than at the call the caller
 /// made, and `crcbl_hal`'s own recorder tests assert on which call failed.
 fn replay<'a>(
@@ -599,34 +686,33 @@ fn replay<'a>(
     command: &'a RenderCommand,
     replay: &mut RenderReplay<'a>,
 ) {
+    if matches!(
+        command,
+        RenderCommand::Draw { .. }
+            | RenderCommand::DrawIndexed { .. }
+            | RenderCommand::DrawIndirect { .. }
+            | RenderCommand::DrawIndexedIndirect { .. }
+            | RenderCommand::DrawMeshTasks { .. }
+            | RenderCommand::DrawMeshTasksIndirect { .. }
+    ) {
+        replay.apply_draw_state(encoder);
+    }
     match command {
         RenderCommand::PushDebugGroup(name) => encoder.pushDebugGroup(name),
         RenderCommand::PopDebugGroup => encoder.popDebugGroup(),
         RenderCommand::InsertDebugSignpost(name) => encoder.insertDebugSignpost(name),
-        RenderCommand::SetViewport(viewport) => encoder.setViewport(*viewport),
-        RenderCommand::SetScissor(rect) => encoder.setScissorRect(*rect),
+        RenderCommand::SetViewport(viewport) => replay.viewport = Some(*viewport),
+        RenderCommand::SetScissor(rect) => replay.scissor = Some(*rect),
         RenderCommand::SetStencilReference(reference) => {
-            encoder.setStencilReferenceValue(*reference);
+            replay.stencil_reference = *reference;
         }
         RenderCommand::BindPipeline(bound) => {
-            encoder.setRenderPipelineState(&bound.raw);
-            encoder.setCullMode(bound.raster.cull);
-            encoder.setFrontFacingWinding(bound.raster.winding);
-            encoder.setTriangleFillMode(bound.raster.fill);
-            encoder.setDepthClipMode(bound.raster.clip);
-            let [constant, slope_scale, clamp] = bound.raster.bias;
-            encoder.setDepthBias_slopeScale_clamp(constant, slope_scale, clamp);
-            // Always an object, never nil: a pipeline with no depth/stencil
-            // state carries the device's always-pass one instead, because nil
-            // hangs Apple's paravirtual GPU. `crcbl_mtl::pipeline`'s
-            // `default_depth_stencil_state` has the bisect and the no-op
-            // argument.
-            encoder.setDepthStencilState(Some(&bound.depth_stencil));
+            replay.pipeline = Some(bound);
             // **No `setStencilReferenceValue:` here.** The reference is pass
             // state on the seam and a pipeline carries none, so a bind leaves
             // whatever `set_stencil_reference` last set — see
-            // `crcbl_hal::StencilState`. `encode_render_pass` sets the seam's
-            // initial value once, as the encoder opens.
+            // `crcbl_hal::StencilState`. `RenderReplay` starts at the seam's
+            // initial value and materializes it when a draw consumes it.
             //
             // What a bind *does* change is which of the groups in force reach
             // the argument tables: `setRenderPipelineState:` changes what those
@@ -845,6 +931,8 @@ pub(crate) struct MetalCommandEncoder {
     /// loses its pipeline state at `endEncoding`, so a dispatch in the next
     /// pass must not inherit the previous pass's number.
     bound_threads: Option<objc2_metal::MTLSize>,
+    /// Metal drops timestamp writes if no dispatch executes on the encoder.
+    timed_compute_empty: bool,
     /// The index buffer an indexed draw will read, which Metal takes at the
     /// draw call rather than as encoder state.
     ///
@@ -942,6 +1030,7 @@ impl MetalCommandEncoder {
             bound_primitive: None,
             bound_mesh: None,
             bound_threads: None,
+            timed_compute_empty: false,
             index: None,
             push_constants: None,
             binds: BindCache::default(),
@@ -1065,7 +1154,23 @@ impl MetalCommandEncoder {
         match core::mem::replace(&mut self.open, Open::None) {
             Open::None => {}
             Open::Blit(encoder) => encoder.endEncoding(),
-            Open::Compute(encoder) => encoder.endEncoding(),
+            Open::Compute(encoder) => {
+                if self.timed_compute_empty && self.ok() {
+                    match self.device.timestamp_noop() {
+                        Ok(pipeline) => {
+                            encoder.setComputePipelineState(&pipeline);
+                            let one = objc2_metal::MTLSize {
+                                width: 1,
+                                height: 1,
+                                depth: 1,
+                            };
+                            encoder.dispatchThreadgroups_threadsPerThreadgroup(one, one);
+                        }
+                        Err(error) => self.fail(error),
+                    }
+                }
+                encoder.endEncoding();
+            }
             Open::Render(recording) => self.encode_render_pass(&recording),
         }
         // Pipeline state and argument tables belong to the encoder that is
@@ -1074,6 +1179,7 @@ impl MetalCommandEncoder {
         self.bound_primitive = None;
         self.bound_mesh = None;
         self.bound_threads = None;
+        self.timed_compute_empty = false;
         self.push_constants = None;
         self.binds.reset();
         // The pipeline state and the bind groups in force go with the encoder
@@ -1121,8 +1227,10 @@ impl MetalCommandEncoder {
                 return;
             };
             encoder.setLabel(Some(&NSString::from_str(PACK_PASS)));
+            let mut previous = None;
             for dispatch in &recording.prologue {
-                encode_pack(&encoder, dispatch);
+                encode_pack(&encoder, dispatch, previous);
+                previous = Some(dispatch);
             }
             encoder.endEncoding();
         }
@@ -1134,15 +1242,6 @@ impl MetalCommandEncoder {
             return;
         };
         encoder.setLabel(Some(&recording.label));
-        if let Some(scissor) = recording.scissor {
-            encoder.setScissorRect(scissor);
-        }
-        // The seam promises every pass opens at `stencil::INITIAL_REFERENCE`.
-        // A fresh `MTLRenderCommandEncoder` already starts there, so this is
-        // belt and braces rather than a fix — but the promise is the seam's,
-        // and stating it in code is what keeps it from resting on a default
-        // documented somewhere else.
-        encoder.setStencilReferenceValue(crcbl_hal::stencil::INITIAL_REFERENCE);
         // Opened empty with the encoder and dropped with it, which is what
         // `crate::bind_cache` requires of a mirror of Metal's argument tables:
         // they belong to the `MTLRenderCommandEncoder` and `endEncoding` takes
@@ -1152,6 +1251,7 @@ impl MetalCommandEncoder {
         // pipeline's mask are the encoder's for the same reason; see
         // `RenderReplay`.
         let mut state = RenderReplay::new();
+        state.scissor = recording.scissor;
         for command in &recording.commands {
             replay(&encoder, command, &mut state);
         }
@@ -2395,6 +2495,7 @@ impl CommandEncoder for MetalCommandEncoder {
         )));
         self.open = Open::Compute(encoder);
         self.in_compute_pass = true;
+        self.timed_compute_empty = samples.is_some();
         if let Some(label) = desc.label {
             self.begin_debug_label(label);
             self.compute_pass_label = true;
@@ -2473,6 +2574,7 @@ impl CommandEncoder for MetalCommandEncoder {
         if x == 0 || y == 0 || z == 0 {
             return;
         }
+        self.timed_compute_empty = false;
         encoder.dispatchThreadgroups_threadsPerThreadgroup(
             objc2_metal::MTLSize {
                 width: to_ns(u64::from(x)),
@@ -2511,6 +2613,7 @@ impl CommandEncoder for MetalCommandEncoder {
             )));
             return;
         }
+        self.timed_compute_empty = false;
         // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
         // the offset nor the argument structure it reads. The span was checked
         // against this buffer's own length just above, the buffer is kept alive
@@ -3229,5 +3332,137 @@ impl Drop for MetalCommandEncoder {
         // `close_open` for why that is unconditional rather than skipped on a
         // buffer nothing will run.
         self.close_open();
+    }
+}
+
+#[cfg(all(test, feature = "mtl-e2e"))]
+mod timestamp_tests {
+    use super::*;
+    use objc2_metal::{
+        MTLCommandBufferStatus, MTLCommandQueue as _, MTLCounterSampleBufferDescriptor,
+        MTLLibrary as _, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType,
+        MTLRenderPipelineDescriptor, MTLStorageMode, MTLStoreAction, MTLTextureDescriptor,
+        MTLTextureUsage,
+    };
+
+    /// Removing either closing sample loses fragment work or leaves stale data
+    /// after a clear-only pass. Independent stage samples check both cases.
+    #[test]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn render_timestamps_include_fragments_and_refresh_after_a_clear_only_pass() {
+        let (_validated, device) = crate::device::tests::open_device();
+        let raw = &device.inner.raw;
+        if !raw.supportsCounterSampling(crate::adapter::TIMESTAMP_SAMPLING_POINT) {
+            eprintln!("timestamp regression: this device cannot sample at stage boundaries");
+            return;
+        }
+        let Some(set) = crate::adapter::counter_set(raw, crcbl_hal::QueryKind::Timestamp) else {
+            eprintln!("timestamp regression: this device has no timestamp counter set");
+            return;
+        };
+        let desc = MTLCounterSampleBufferDescriptor::new();
+        desc.setCounterSet(Some(&set));
+        desc.setStorageMode(MTLStorageMode::Shared);
+        // SAFETY: three sample slots, with every index below bounded to 0..3.
+        unsafe { desc.setSampleCount(3) };
+        let samples = raw
+            .newCounterSampleBufferWithDescriptor_error(&desc)
+            .expect("six shared timestamp samples");
+        let writes = PassSamples {
+            raw: samples.clone(),
+            beginning_of_pass: 0,
+            end_of_pass: 1,
+        };
+        let texture_desc = MTLTextureDescriptor::new();
+        // SAFETY: 256 is nonzero and within every Metal device's texture limit.
+        unsafe {
+            texture_desc.setWidth(256);
+            texture_desc.setHeight(256);
+        }
+        texture_desc.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
+        texture_desc.setUsage(MTLTextureUsage::RenderTarget);
+        let texture = raw.newTextureWithDescriptor(&texture_desc).expect("target");
+        let source = NSString::from_str(
+            "#include <metal_stdlib>\nusing namespace metal;\n\
+             vertex float4 vs(uint id [[vertex_id]]) {\
+             float2 p[3] = {float2(-1,-1),float2(1,-1),float2(0,1)};\
+             return float4(p[id],0,1); }\n\
+             fragment float4 fs() { return float4(1,0,0,1); }",
+        );
+        let library = raw
+            .newLibraryWithSource_options_error(&source, None)
+            .expect("timestamp workload shaders");
+        let pipeline_desc = MTLRenderPipelineDescriptor::new();
+        pipeline_desc.setVertexFunction(
+            library
+                .newFunctionWithName(&NSString::from_str("vs"))
+                .as_deref(),
+        );
+        pipeline_desc.setFragmentFunction(
+            library
+                .newFunctionWithName(&NSString::from_str("fs"))
+                .as_deref(),
+        );
+        // SAFETY: attachment zero exists on every render pipeline descriptor.
+        unsafe { pipeline_desc.colorAttachments().objectAtIndexedSubscript(0) }
+            .setPixelFormat(MTLPixelFormat::RGBA8Unorm);
+        let pipeline = raw
+            .newRenderPipelineStateWithDescriptor_error(&pipeline_desc)
+            .expect("timestamp workload pipeline");
+        for draw in [true, false, true, false] {
+            let pass = MTLRenderPassDescriptor::renderPassDescriptor();
+            // SAFETY: attachment zero exists.
+            unsafe {
+                let color = pass.colorAttachments().objectAtIndexedSubscript(0);
+                color.setTexture(Some(&texture));
+                color.setLoadAction(MTLLoadAction::Clear);
+                color.setStoreAction(MTLStoreAction::Store);
+            }
+            writes.attach_render(&pass);
+            // SAFETY: sample 2 is inside the three-slot buffer. This independent
+            // fragment-start sample must precede the closing query when drawing,
+            // so dropping the fragment-end write cannot pass on vertex time alone.
+            unsafe {
+                pass.sampleBufferAttachments()
+                    .objectAtIndexedSubscript(0)
+                    .setStartOfFragmentSampleIndex(2);
+            }
+            let commands = device.inner.queue.commandBuffer().expect("command buffer");
+            let encoder = commands
+                .renderCommandEncoderWithDescriptor(&pass)
+                .expect("render encoder");
+            if draw {
+                encoder.setRenderPipelineState(&pipeline);
+                // SAFETY: the shader indexes three literal vertices and no resources.
+                unsafe {
+                    encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3)
+                };
+            }
+            encoder.endEncoding();
+            commands.commit();
+            commands.waitUntilCompleted();
+            assert_eq!(commands.status(), MTLCommandBufferStatus::Completed);
+            // SAFETY: the GPU completed and the range covers exactly three slots.
+            let data = unsafe { samples.resolveCounterRange(NSRange::new(0, 3)) }
+                .expect("resolved samples");
+            let bytes = data.to_vec();
+            let values: Vec<u64> = bytes
+                .chunks_exact(8)
+                .map(|word| u64::from_ne_bytes(word.try_into().expect("one timestamp")))
+                .collect();
+            assert_eq!(values.len(), 3);
+            assert!(values[1] > values[0], "draw={draw}: {values:?}");
+            if draw {
+                assert!(
+                    values[2] > values[0] && values[1] > values[2],
+                    "closing query must include fragment completion: {values:?}"
+                );
+            } else {
+                assert!(
+                    values[0] > values[2],
+                    "clear completion must refresh the reused query: {values:?}"
+                );
+            }
+        }
     }
 }

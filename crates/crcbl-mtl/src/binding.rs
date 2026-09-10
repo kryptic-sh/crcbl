@@ -1528,6 +1528,7 @@ mod tests {
     /// `create_bind_group_layout_impl`: the mesh case is then accepted, because
     /// nothing else in this backend looks at visibility at all.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_seams_own_rules_arrive_through_create_bind_group_layout() {
         let (_instance, device) = open_device();
         assert!(

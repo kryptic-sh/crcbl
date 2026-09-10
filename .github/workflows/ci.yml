@@ -2443,9 +2443,39 @@ jobs:
           path: target/golden-diff/
           if-no-files-found: ignore
 
+  mtl-hardware-e2e:
+    name: mtl hardware e2e (macos-26)
+    # macOS 15's hosted driver aborts on native indirect command buffers.
+    # Keep all hardware probes on macOS 26, where the full suite passes;
+    # the renderer below uses macOS 15 for working texture shader validation.
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      # The offscreen runner cannot vend a live CAMetalLayer drawable.
+      # API logging accommodates intentional empty-encoder probes; shader
+      # validation remains enabled by the hardware harness.
+      - name: Run the Metal hardware suite without a window
+        run: >-
+          crates/crcbl-mtl/tests/run-mtl-e2e.sh --no-fail-fast -E 'not
+          test(a_layer_swapchain_acquires_a_drawable_and_presents_it)'
+
   mtl-e2e:
-    name: mtl e2e (macos-latest)
-    runs-on: macos-latest
+    name: mtl e2e (macos-15)
+    # macOS 26's hosted paravirtual driver reports false texture-usage faults
+    # under shader validation, including in a standalone native Metal draw.
+    # macOS 15 passes that control and all 59 strict renderer goldens.
+    # Keep shader validation enabled; see docs/notes/metal-local-baseline.md.
+    runs-on: macos-15
     # macOS runners are roughly 2x slower than Linux; see `build + test` — but
     # this job's clock is the debug layer's, not the runner's. With
     # `MTL_DEBUG_LAYER_WARNING_MODE=nslog` every finding prints a descriptor
@@ -2506,117 +2536,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
-      # Nothing to install: Metal ships with the OS, and the crate links it
-      # through `objc2` rather than `dlopen`ing anything.
-      #
-      # **One test is held out, and it is not a claim about this backend.**
-      # `a_layer_swapchain_acquires_a_drawable_and_presents_it` is `#[ignore]`d
-      # because a detached `CAMetalLayer` in a headless container has no
-      # surface to vend a drawable from, so `nextDrawable` returns nil or
-      # blocks. The script's `--run-ignored only` sweeps it up with every other
-      # device test and a block would burn the timeout, so the filter below
-      # names it. Every other `#[ignore]` in the crate marks a test that opens a
-      # Metal device, and every one of them runs here. The filter lives here
-      # rather than in the script because a person on a real Mac, with a real
-      # window server, should run that test.
-      #
-      # **`--no-fail-fast`, because the first run found a hang and then hid the
-      # rest of the answer.** Run 31040839716 stopped at test 45 of 106 and
-      # cancelled the remaining 59 — including three of the four draw tests,
-      # which is exactly the set this job exists to report on. A GPU hang here
-      # surfaces as a `DeviceLost` error rather than a block, so letting the
-      # suite finish costs under a second per faulting test.
-      #
-      # # The draw hang was ours, and the call was `setDepthStencilState:nil`
-      #
-      # Six draw tests were quarantined here across three rounds. Every draw
-      # this backend recorded faulted on this runner with
-      # `kIOGPUCommandBufferCallbackErrorHang`, every encoder reporting
-      # `completed` and none faulted — while the crate's own render-pass clear
-      # test, which was never filtered, passed in the same runs. (That test has
-      # since been deleted; `crates/crcbl/tests/hal_seam_e2e.rs` owns the clear
-      # for every backend.) The device was never the limitation: run 31037470086 ran
-      # a compute dispatch and two triangle draws on this same image from a
-      # standalone Swift script.
-      #
-      # A ten-probe bisect on `6a59e89` named the call. Each probe was a
-      # hand-encoded pass — this crate's own `MTLDevice`, queue, texture,
-      # `MTLRenderPipelineState` and `crcbl_mtl::fault` command-buffer
-      # descriptor, a combination already shown to pass — plus exactly one of
-      # the calls `crcbl_mtl::command`'s `bind_graphics_pipeline` emits beside
-      # `setRenderPipelineState:`. **Seven passed, three failed**, and one call
-      # is in all three failures:
-      #
-      # * `setDepthStencilState:` with **nil** hung. The same call with a
-      #   default `MTLDepthStencilState` object passed, which is what splits
-      #   the selector from its argument.
-      # * `setCullMode:`, `setFrontFacingWinding:`, `setTriangleFillMode:`,
-      #   `setDepthClipMode:` and `setDepthBias:slopeScale:clamp:` each passed
-      #   on its own, so none of them is the fault.
-      # * The other two failures were the whole-replay probe and the positive
-      #   control — this backend's own path with a pipeline bound and no draw
-      #   at all. Both make the nil call, and the singles cleared everything
-      #   else either of them adds.
-      #
-      # Metal documents nil as "restore the default depth/stencil state", so
-      # this is a driver bug on the paravirtual GPU rather than misuse. It is
-      # fixed on our side regardless, because it costs one object per device:
-      # `crcbl_mtl::pipeline`'s `default_depth_stencil_state` builds an
-      # always-pass, never-write state at device open, every pipeline that
-      # declares no depth/stencil state carries that instead, and the `Option`
-      # that could reach Metal as nil no longer exists in the crate. The
-      # substitution cannot change an image — the state tests nothing and
-      # writes nothing — and `crcbl_mtl::device`'s
-      # `a_pipeline_without_depth_state_binds_the_devices_default_rather_than_nil`
-      # asserts both halves without a draw, so it runs on this device too.
-      #
-      # **Five of the six come out of the filter on that fix**, and they are
-      # every quarantined test that draws:
-      # `a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`,
-      # `a_triangle_draw_into_a_bgra_target_paints_the_same_image`,
-      # `the_engines_own_triangle_draws_through_a_bind_group`,
-      # `a_metal_indexed_draw_reads_the_bound_index_range` and
-      # `a_multi_draw_indirect_emits_every_argument_structure`. Every one of
-      # them draws into a colour-only pass, which is exactly the case whose
-      # pipeline bound nil. The sixth is the layer swapchain above, which is
-      # unrelated and stays out.
-      #
-      # **The probes are gone with the answer.** A probe set that keeps running
-      # after it has answered is noise, and its positive control was expected
-      # to fault, which would keep this job red forever.
-      #
-      # **Nothing here has been verified.** There is no Metal device on this
-      # team's machines; `cargo clippy --target aarch64-apple-darwin` compiles
-      # this crate and runs none of it. This job is the first thing that runs
-      # the fix. Two earlier hypotheses released these same tests and were
-      # wrong — the render-target format (settled by the BGRA twin faulting
-      # byte-identically to its RGBA one, run 31080128007) and the long draw
-      # argument forms (settled by `025cf90`, whose short selectors hung
-      # identically). This one differs in that a probe reproduced the hang from
-      # a single call and its twin did not, rather than being inferred from
-      # what was left.
-      #
-      # # This is the first Metal run under validation
-      #
-      # The harness exports `MTL_DEBUG_LAYER=1`, both of its violation modes as
-      # `abort`, and `MTL_SHADER_VALIDATION=1`, and prints what it set — so a
-      # green run states what it checked instead of inheriting it. None of the
-      # seventy-odd device tests has ever run under any of that.
-      #
-      # **Metal reports differently from the other two backends and the gate is
-      # honestly weaker.** There is no message list to count: an API misuse is
-      # printed and then aborts, so it arrives here as a killed test process
-      # rather than as a failed assertion. What `crcbl_mtl::fault` asserts at
-      # every device test's teardown is that Metal really interposed its
-      # validation layer, and that no command buffer the device submitted ended
-      # in `MTLCommandBufferStatus::Error` — which is where shader validation's
-      # findings and every GPU fault arrive. That crate's `fault` module argues
-      # all of it; `run-mtl-e2e.sh`'s header repeats the summary.
-      - name: Run the Metal suite, minus the one test with no window server
-        run: >-
-          crates/crcbl-mtl/tests/run-mtl-e2e.sh --no-fail-fast -E 'not
-          test(a_layer_swapchain_acquires_a_drawable_and_presents_it)'
-
       # # The renderer on Metal
       #
       # `crates/crcbl/tests/render_e2e.rs` draws one frame of each of the cube,
@@ -2644,28 +2563,22 @@ jobs:
       # the matrix with no checking at all — the same reason the D3D12 twin of
       # this step sets `CRCBL_DX12_VALIDATION`.
       #
-      # **API validation only. `MTL_SHADER_VALIDATION` is deliberately absent,
-      # and that is a finding rather than a preference.** With it on — Metal
-      # logs it as "Metal GPU Validation Enabled" — this step's UI scene came
-      # back with five distinct colours against a floor of six, so something
-      # that draws stopped drawing. GPU validation traps an out-of-bounds
-      # shader access instead of letting it return whatever was in memory, so
-      # the frame changing under it points at a real out-of-bounds read in the
-      # UI path rather than at the switch. The HAL suite above runs *with* it
-      # and is clean, which narrows it further: whatever it is, it is in the
-      # renderer's path and not the backend's.
-      #
-      # Left off here so this step keeps gating the picture, and recorded in
-      # `docs/backlog.md` for somebody with a Mac. Turning it back on is how
-      # that investigation starts.
+      # Verified on an M3 Pro on 2026-09-10: all 59 renderer goldens pass
+      # with API errors/warnings set to assert and shader validation enabled.
+      # The historical UI failure did not reproduce. Redundant state replay
+      # and empty culling encoders were fixed before enabling the strict gate.
+      # docs/notes/metal-local-baseline.md records the local hardware evidence;
+      # this job independently checks the hosted runner's device.
       - name: Draw a frame through ForwardRenderer on Metal
         env:
           CRCBL_GPU: mtl
           MTL_DEBUG_LAYER: '1'
-          # `nslog`, not `abort`: Metal asserts on an env value it does not
-          # recognise rather than ignoring it, and `abort` is not one it takes.
-          MTL_DEBUG_LAYER_ERROR_MODE: nslog
-          MTL_DEBUG_LAYER_WARNING_MODE: nslog
+          MTL_SHADER_VALIDATION: '1'
+          MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING: '1'
+          MTL_SHADER_VALIDATION_REPORT_TO_STDERR: '1'
+          MTL_SHADER_VALIDATION_ABORT_ON_FAULT: '1'
+          MTL_DEBUG_LAYER_ERROR_MODE: assert
+          MTL_DEBUG_LAYER_WARNING_MODE: assert
         run: crates/crcbl/tests/run-render-e2e.sh
 
       # The same HAL-seam behaviours on this backend, from the one agnostic
