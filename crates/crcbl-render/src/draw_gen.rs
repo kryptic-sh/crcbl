@@ -1123,11 +1123,10 @@ impl DrawGen {
         )
     }
 
-    /// How many passes [`add_passes`](Self::add_passes) adds to a frame.
+    /// The maximum number of passes [`add_passes`](Self::add_passes) adds.
     ///
-    /// Exact rather than a ceiling: all three are recorded unconditionally, and
-    /// the dispatch a frame has nothing for is a dispatch of no workgroups
-    /// rather than a pass that drops out. What a caller sizing
+    /// A frame with no instances omits culling and adds only the clear and
+    /// argument-generation passes. This upper bound is what a caller sizing
     /// [`PassTimers`](crate::timing::PassTimers) adds up — see
     /// [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES).
     pub const MAX_PASSES: u32 = 3;
@@ -1237,25 +1236,25 @@ impl DrawGen {
         let cull_layout = self.cull_pipeline_layout;
         let cull_group = self.cull_groups[frame];
         let cull_groups = instance_count.div_ceil(cull_shader::WORKGROUP_SIZE);
-        graph
-            .add_compute_pass("cull")
-            // `ShaderReadWrite` rather than a write-only state for both: a
-            // storage-buffer descriptor permits reads whatever the shader does
-            // with it, and the counter is genuinely read-modify-written.
-            .use_buffer(runs, ResourceState::ShaderReadWrite)
-            .use_buffer(visible_count, ResourceState::ShaderReadWrite)
-            .execute(move |ctx| {
-                // An empty instance array is a dispatch of no workgroups, which
-                // Metal rejects outright rather than treating as a no-op. There
-                // is nothing to cull, so there is nothing to record.
-                if cull_groups == 0 {
-                    return;
-                }
-                let encoder = ctx.encoder();
-                encoder.bind_compute_pipeline(cull_pipeline);
-                encoder.bind_group(0, cull_group, &[], cull_layout);
-                encoder.dispatch(cull_groups, 1, 1);
-            });
+        // Omit an empty pass, not just its dispatch: Metal still creates an
+        // encoder for a graph pass, and strict validation rejects ending one
+        // without work. The clear and argument-generation passes remain needed
+        // to erase the preceding frame's counts and populate zero draws.
+        if cull_groups != 0 {
+            graph
+                .add_compute_pass("cull")
+                // `ShaderReadWrite` rather than a write-only state for both: a
+                // storage-buffer descriptor permits reads whatever the shader does
+                // with it, and the counter is genuinely read-modify-written.
+                .use_buffer(runs, ResourceState::ShaderReadWrite)
+                .use_buffer(visible_count, ResourceState::ShaderReadWrite)
+                .execute(move |ctx| {
+                    let encoder = ctx.encoder();
+                    encoder.bind_compute_pipeline(cull_pipeline);
+                    encoder.bind_group(0, cull_group, &[], cull_layout);
+                    encoder.dispatch(cull_groups, 1, 1);
+                });
+        }
 
         let gen_pipeline = self.gen_pipeline;
         let gen_layout = self.gen_pipeline_layout;

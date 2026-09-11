@@ -187,41 +187,24 @@ impl Quarry {
         Self::open_on(levels, budget, GeometryPath::MeshShader)
     }
 
-    /// The same, on the geometry path `path` names — **by subtracting features
-    /// from one capable adapter**, which is how the engine's own suites reach a
-    /// path no device would select for itself.
-    ///
-    /// `GeometryPath::from_features` reads `MESH_SHADER` then
-    /// `DRAW_INDIRECT_COUNT` and falls through to `IndirectPerBatch`, so
-    /// withholding one feature at a time walks down the three. A device that
-    /// never had the feature lands on the same path by the same rule, which is
-    /// what makes the forced path evidence about the path rather than about this
-    /// adapter.
+    /// Uses the exact render tail requested, independently of device preference.
+    /// Null keeps its recording-only preferred path; it supplies no pixel proof.
     pub(crate) fn open_on(levels: Levels, budget: f32, path: GeometryPath) -> Self {
-        let wanted = match path {
-            GeometryPath::MeshShader => {
-                Features::MESH_SHADER | Features::TASK_SHADER | Features::GPU_DRIVEN
-            }
-            GeometryPath::IndirectCount => Features::GPU_DRIVEN,
-            GeometryPath::IndirectPerBatch => {
-                Features::GPU_DRIVEN.difference(Features::DRAW_INDIRECT_COUNT)
-            }
-        };
-        Self::open_with(levels, budget, wanted, path)
+        Self::open_with(levels, budget, path)
     }
 
-    fn open_with(levels: Levels, budget: f32, wanted: Features, path: GeometryPath) -> Self {
+    fn open_with(levels: Levels, budget: f32, path: GeometryPath) -> Self {
         crcbl::core::log::init_logging();
         let ctx = GpuContext::open_offscreen(
             EXTENT,
             &GpuContextDesc {
                 label: "quarry",
                 backend: Some(backend()),
-                // The mesh path is this sample's subject so it is asked for, and
-                // not *required*, because neither assertion here is about which
-                // path draws: `GeometryPath::from_features` resolves downward on
-                // a device without it.
-                optional_features: wanted,
+                // Ask for the same available capabilities for every path. The
+                // renderer constructor selects the actual tail explicitly.
+                optional_features: Features::GPU_DRIVEN
+                    | Features::MESH_SHADER
+                    | Features::TASK_SHADER,
                 // Hermetic: the default reads the player's own
                 // `~/.config/quarry/settings.toml`, so a developer who has
                 // turned an effect off in the sample would render different
@@ -237,9 +220,19 @@ impl Quarry {
             Levels::Flat => scene::quarry_scene(&face).expect("the face partitions into meshlets"),
             Levels::Dag => dag::dag_scene(&face).expect("the face coarsens"),
         };
-        let mut renderer =
-            ForwardRenderer::with_scene(ctx.device(), ctx.queue(), ctx.format(), &desc)
-                .expect("the renderer makes the quarry scene resident");
+        let exact = if backend() == GpuBackend::Null {
+            ctx.device().preferred_geometry_path()
+        } else {
+            path
+        };
+        let mut renderer = ForwardRenderer::with_scene_on_path(
+            ctx.device(),
+            ctx.queue(),
+            ctx.format(),
+            &desc,
+            exact,
+        )
+        .expect("the renderer makes the quarry scene resident on the selected path");
         renderer
             .add_instance(&InstanceDesc {
                 mesh: 0,
@@ -248,7 +241,7 @@ impl Quarry {
             })
             .expect("one instance fits the reservation this scene asked for");
         renderer.set_lod_error_budget(budget);
-        let selected = ctx.device().caps().geometry_path();
+        let selected = renderer.geometry_path();
         // **Which device drew, named once per fixture.** `tests/run-quarry-e2e.sh`
         // greps this prefix: a green run that never said what it ran on is
         // evidence about nothing, and on a machine with three adapters the
@@ -266,15 +259,11 @@ impl Quarry {
             face.triangles(),
             ctx.format(),
         );
-        // **The path asked for is the path that opened.** Subtracting a feature
-        // is a request, and a device that never offered it lands one rung lower
-        // than intended — so a run that silently drew through `IndirectPerBatch`
-        // while claiming `IndirectCount` would be a green comparison between one
-        // path and itself. `Null` selects its own path and is exempt: it draws
-        // nothing to compare.
+        // Check the renderer's actual tail, not the adapter's strongest path.
+        // Null records without supplying the coverage matrix's pixel evidence.
         assert!(
             selected == path || backend() == GpuBackend::Null,
-            "{path:?} was asked for by withholding features and {selected:?} opened"
+            "{path:?} was explicitly requested and the renderer selected {selected:?}"
         );
         Self {
             ctx,

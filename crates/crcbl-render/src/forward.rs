@@ -503,13 +503,22 @@ impl DebugView {
     }
 }
 
-/// The bind-group slot the sun's shadow atlas is read through.
-///
-/// **15, not 9**, and the gap is `mesh_cluster.slang`'s: bindings 9 to 14 belong
-/// to the mesh-shader path, and `mesh.slang`'s `fragmentMain` — which declares
-/// this one — is the fragment stage of *that* pipeline too. A binding number is
-/// a property of the shader source, so the two files have to agree even where
-/// only one of them uses the slot.
+// Mesh-only resources follow the complete common fragment binding range.
+// Metal assigns dense native indices by resource-table order, so inserting a
+// mesh-only buffer before lights/probes would shift the layout away from the
+// independently compiled fragment stage. Sparse logical bindings cost no slots.
+const CLUSTERS_BINDING: u32 = 32;
+const CLUSTER_VERTICES_BINDING: u32 = 33;
+const CLUSTER_CORNERS_BINDING: u32 = 34;
+const CLUSTER_DRAW_ARGS_BINDING: u32 = 35;
+const CLUSTER_CULL_BINDING: u32 = 36;
+const CLUSTER_CULL_STATS_BINDING: u32 = 37;
+const CLUSTER_SELECT_BINDING: u32 = 38;
+const CLUSTER_SELECTION_BINDING: u32 = 39;
+const CLUSTER_GROUP_STATE_BINDING: u32 = 40;
+
+/// The shared fragment shader's shadow atlas slot. Historical logical gaps
+/// remain reserved so the raster shader bindings stay unchanged.
 const SHADOW_ATLAS_BINDING: u32 = 15;
 
 /// The bind-group slot the shadow atlas's **comparison** sampler is bound to.
@@ -523,83 +532,32 @@ const SHADOW_SAMPLER_BINDING: u32 = 16;
 /// entry by this number.
 const PAGE_SAMPLER_BINDING: u32 = 8;
 
-/// The bind-group slot topic 18's light list is read through.
-///
-/// **20, and the gap below it is `mesh_cluster.slang`'s** on
-/// [`SHADOW_ATLAS_BINDING`]'s terms exactly: 17 to 19 are that file's, declared
-/// by the mesh and amplification stages of a pipeline this file's fragment stage
-/// completes, so the light bindings resume above them. Both files declare both
-/// numbers, because a binding is a property of the source and Metal numbers a
-/// stage's resources by declaration order.
+/// The shared fragment shader's light list. Both shader modules declare it
+/// before mesh-only buffers so native buffer index 7 is common to both stages.
 const LIGHT_LIST_BINDING: u32 = 20;
 
 /// The bind-group slot the froxel grid is read through.
 const LIGHT_GRID_BINDING: u32 = 21;
 
-/// The bind-group slot `docs/plan/18-render-features.md`'s screen-space
-/// occlusion is fetched through.
-///
-/// **Last of the set, and that is what keeps `crcbl-mtl` honest.** That backend
-/// gives a resource the next index in its Metal argument table by counting the
-/// same-table entries of the layout list, and Slang numbers a stage's arguments
-/// by declaration order — so the two agree only while both lists ascend. 22 is
-/// past everything `mesh_cluster.slang` declares as well, which is why that file
-/// needs no mirror of this one: no index it already owns moves.
+/// The fragment shader's screen-space occlusion texture. Mesh-only additions
+/// are buffers, so this resource does not shift their native argument table.
 const AMBIENT_OCCLUSION_BINDING: u32 = 22;
 
-/// The bind-group slot `docs/plan/18-render-features.md`'s irradiance probes are
-/// read through.
-///
-/// **Appended past [`AMBIENT_OCCLUSION_BINDING`], never inserted**, for exactly
-/// the reason that constant gives: `crcbl-mtl` gives a resource the next index
-/// in its Metal argument table by counting the same-table entries of the layout
-/// list, and Slang numbers a stage's arguments by declaration order, so the two
-/// agree only while both ascend. Appending changes no index below it —
-/// `msl/mesh.metal` still takes `lights [[buffer(7)]]` and
-/// `cluster_lights [[buffer(8)]]`, and this one lands on `buffer(9)`.
-///
-/// **`mesh_cluster.slang` mirrors this one**, declared and read by nothing, and
-/// it did not have to until [`LEVEL_GROUP_TABLE_BINDING`] existed. That file's
-/// own bindings used to stop at 21, so every number here was past everything it
-/// declared and nothing of its could move; now it declares 24, and a source that
-/// skipped this row would put *that* buffer one Metal index below where
-/// `crcbl-mtl` binds it. It also mirrors the frame block's members, which is a
-/// different obligation: the two files read one uniform buffer.
+/// The shared irradiance probe table, native buffer 9 in both shader modules.
+/// `mesh_cluster.slang` mirrors it before its own buffers to preserve the prefix.
 const PROBE_TABLE_BINDING: u32 = 23;
 
-/// The bind-group slot the mesh path reads `docs/plan/25-lod.md`'s group records
-/// through — `DrawGen`'s packed table buffer, the same one the draw-argument
-/// pass judges the cut from.
-///
-/// **Appended past [`PROBE_TABLE_BINDING`], never inserted**, for that
-/// constant's reason exactly, and the committed artifact is the evidence rather
-/// than the argument: `msl/mesh_cluster.metal` takes `tables [[buffer(19)]]`,
-/// which is the number this backend computes for binding 24 by counting the
-/// buffer entries of the mesh path's layout.
-///
-/// Bound on [`GeometryPath::MeshShader`] and nowhere else, exactly as bindings 9
-/// to 12 and 17 are: the raster path's vertex stage never reads it, and that
-/// layout is already at the WebGPU storage-buffer ceiling with no headroom — see
-/// the check at the end of the layout below.
-///
-/// **What it is for is the screen-error heatmap**, and only that. The *cut* is
-/// still the draw-argument pass's decision and still arrives through the
-/// hysteresis state; what this adds is the number that decision was made on, so
-/// an overlay can shade a cluster by how close its producing group is to the
-/// budget.
+/// The mesh path's packed `DrawGen` table, read for the screen-error heatmap.
+/// Its logical binding stays 24; after the shared fragment buffer prefix it is
+/// native buffer 10. The raster path does not declare this storage buffer.
 const LEVEL_GROUP_TABLE_BINDING: u32 = 24;
 
 /// The bind-group slot the split-sum `DFG` table is fetched through — how much
 /// of the light arriving at a GGX lobe that lobe hands back.
 ///
-/// **Appended past [`LEVEL_GROUP_TABLE_BINDING`], never inserted**, for
-/// [`PROBE_TABLE_BINDING`]'s reason exactly, and 25 is past everything
-/// `mesh_cluster.slang` declares as well — that file reaches 24 — so it needs no
-/// mirror there and no index it already owns moves. The evidence rather than the
-/// argument: `msl/mesh.metal` takes `specular_albedo [[texture(3)]]` and
-/// `ambient_occlusion [[texture(2)]]`, which are the numbers this backend
-/// computes for bindings 25 and 22 by counting the sampled-image entries of this
-/// layout.
+/// No mirror is needed in `mesh_cluster.slang`: that module adds only buffers
+/// after the shared prefix. The fragment shader's `specular_dfg` remains at
+/// native texture 3, following `ambient_occlusion` at texture 2.
 ///
 /// **An image rather than a storage buffer, and that is forced.** The table is
 /// 4096 pairs and a buffer would carry it exactly; but the raster path's layout
@@ -616,9 +574,8 @@ const SPECULAR_DFG_BINDING: u32 = 25;
 /// [`PROBE_TABLE_BINDING`]'s reason exactly: `crcbl-mtl` gives a resource the
 /// next index in its Metal argument table by counting the same-table entries of
 /// this layout, and Slang numbers a stage's arguments by declaration order, so
-/// the two agree only while both ascend. 26 is past everything
-/// `mesh_cluster.slang` declares as well — that file reaches 24 — so it needs no
-/// mirror there and no index anything already owns moves.
+/// the two agree only while both ascend. No mirror is needed in
+/// `mesh_cluster.slang`, which adds only buffers after the shared prefix.
 ///
 /// **No sampler of its own.** The page is read through
 /// [`PAGE_SAMPLER_BINDING`]'s sampler, the same trilinear anisotropic one the
@@ -636,7 +593,7 @@ const NORMAL_PAGE_BINDING: u32 = 26;
 /// constant's reason exactly: `crcbl-mtl` gives a resource the next index in its
 /// Metal argument table by counting the same-table entries of this layout, and
 /// Slang numbers a stage's arguments by declaration order, so the two agree only
-/// while both ascend. 27 is past everything `mesh_cluster.slang` declares, so it
+/// while both ascend. `mesh_cluster.slang` adds only buffers after this texture, so it
 /// needs no mirror there and no index anything already owns moves.
 ///
 /// **No sampler**, like the table two rows below it: four `Load`s and a bilinear
@@ -652,7 +609,7 @@ const LTC_TABLE_BINDING: u32 = 27;
 /// reason exactly: `crcbl-mtl` gives a resource the next index in its Metal
 /// argument table by counting the same-table entries of this layout, and Slang
 /// numbers a stage's arguments by declaration order, so the two agree only while
-/// both ascend. 28 is past everything `mesh_cluster.slang` declares, so it needs
+/// both ascend. `mesh_cluster.slang` adds only buffers after this texture, so it needs
 /// no mirror there and no index anything already owns moves.
 ///
 /// **No sampler**, like the occlusion channel: `mesh.slang`'s `contact_at` is a
@@ -667,7 +624,7 @@ const CONTACT_SHADOW_BINDING: u32 = 28;
 /// constant's reason exactly: `crcbl-mtl` gives a resource the next index in its
 /// Metal argument table by counting the same-table entries of this layout, and
 /// Slang numbers a stage's arguments by declaration order, so the two agree only
-/// while both ascend. 29 is past everything `mesh_cluster.slang` declares, so it
+/// while both ascend. `mesh_cluster.slang` adds only buffers after this texture, so it
 /// needs no mirror there and no index anything already owns moves —
 /// `msl/mesh.metal` puts it at `texture(7)`, the next free index of that table.
 ///
@@ -689,9 +646,8 @@ const PROBE_VISIBILITY_BINDING: u32 = 29;
 /// [`NORMAL_PAGE_BINDING`]'s reason exactly: `crcbl-mtl` gives a resource the
 /// next index in its Metal argument table by counting the same-table entries of
 /// this layout, and Slang numbers a stage's arguments by declaration order, so
-/// the two agree only while both ascend. 30 is past everything
-/// `mesh_cluster.slang` declares — that file reaches 24 — so it needs no mirror
-/// there and no index anything already owns moves.
+/// the two agree only while both ascend. No mirror is needed in
+/// `mesh_cluster.slang`, which adds only buffers after the shared prefix.
 ///
 /// **No sampler of its own**, for [`NORMAL_PAGE_BINDING`]'s reason: the page is
 /// read at the same UV over an image of the same shape as the base-colour one,
@@ -704,7 +660,7 @@ const MRO_PAGE_BINDING: u32 = 30;
 ///
 /// **Appended past [`MRO_PAGE_BINDING`], never inserted**, for that constant's
 /// reason exactly, and it shares [`PAGE_SAMPLER_BINDING`]'s sampler on the same
-/// terms. 31 is past everything `mesh_cluster.slang` declares, so it needs no
+/// terms. `mesh_cluster.slang` adds only buffers after these textures, so it needs no
 /// mirror there and no index anything already owns moves.
 const EMISSIVE_PAGE_BINDING: u32 = 31;
 
@@ -1358,13 +1314,13 @@ enum EmitTail {
 }
 
 impl EmitTail {
-    /// What `caps` selects.
+    /// What the device prefers within its supported geometry paths.
     ///
     /// One value per [`GeometryPath`] since 2026-08: the mesh-shader path used
     /// to degrade to an indirect tail and log that it had, because there was no
     /// mesh pipeline to select.
-    const fn from_caps(caps: &crcbl_hal::DeviceCaps) -> Self {
-        match caps.geometry_path() {
+    const fn from_path(path: GeometryPath) -> Self {
+        match path {
             GeometryPath::MeshShader => Self::Mesh,
             GeometryPath::IndirectCount => Self::Count,
             GeometryPath::IndirectPerBatch => Self::PerBatch,
@@ -2318,7 +2274,7 @@ pub struct ForwardRenderer {
     /// The second half is the whole reason this is a group rather than
     /// [`ForwardRenderer::mesh_groups`] reused. On the mesh-shader path the
     /// prepass runs the same amplification stage the forward pass does, and that
-    /// stage counts every surviving cluster into the buffer bound at binding 14 —
+    /// stage counts every surviving cluster into the buffer bound at CLUSTER_CULL_STATS_BINDING —
     /// so sharing the camera's would make
     /// [`CullStats::clusters`](crate::cull_stats::CullStats::clusters) report
     /// every cluster of the frame twice, which is a plausible number and a wrong
@@ -2710,7 +2666,7 @@ struct SharedBindings<'a> {
     emissive_page: ImageViewHandle,
     page_sampler: SamplerHandle,
     /// `Some` on [`GeometryPath::MeshShader`] and on no other path, which is
-    /// what decides whether bindings 9 to 12 and 17 exist at all.
+    /// what decides whether the mesh-only bindings exist at all.
     clusters: Option<&'a ClusterPool>,
     shadow_sampler: SamplerHandle,
     /// Bindings [`LIGHT_LIST_BINDING`] and [`LIGHT_GRID_BINDING`], this frame's
@@ -2777,7 +2733,7 @@ struct MeshGroup {
     cull_stats: BufferHandle,
     /// Binding 18, likewise: the cut the descent chose, one word per resident
     /// cluster. `None` exactly where there is no amplification stage, which is
-    /// where the layout has no binding 18 either.
+    /// where the layout has no CLUSTER_SELECTION_BINDING either.
     ///
     /// **A buffer per pass**, not one shared: the colour pass is recorded last,
     /// so a cascade writing the camera's would leave nothing of its own to read.
@@ -2899,7 +2855,7 @@ impl MeshGroup {
         if let Some(clusters) = shared.clusters {
             entries.extend([
                 BindGroupEntry {
-                    binding: 9,
+                    binding: CLUSTERS_BINDING,
                     array_index: 0,
                     // The same three buffers in every group, on the mesh table's
                     // terms: clusters are written when the pool is built and
@@ -2907,17 +2863,17 @@ impl MeshGroup {
                     resource: BindingResource::whole_buffer(clusters.clusters()),
                 },
                 BindGroupEntry {
-                    binding: 10,
+                    binding: CLUSTER_VERTICES_BINDING,
                     array_index: 0,
                     resource: BindingResource::whole_buffer(clusters.vertices()),
                 },
                 BindGroupEntry {
-                    binding: 11,
+                    binding: CLUSTER_CORNERS_BINDING,
                     array_index: 0,
                     resource: BindingResource::whole_buffer(clusters.corners()),
                 },
                 BindGroupEntry {
-                    binding: 12,
+                    binding: CLUSTER_DRAW_ARGS_BINDING,
                     array_index: 0,
                     // **Arguments read as data.** The mesh path records no
                     // indirect draw at all; what it wants out of this buffer is
@@ -2927,23 +2883,17 @@ impl MeshGroup {
                 },
             ]);
         }
-        // **Keyed on the cluster pool, not on the amplification stage**, for
-        // the reason binding 17 and the layout give: `mesh_cluster.slang`
-        // declares 13 and 14 on every path, and Slang's Metal target numbers
-        // every buffer in that module's declaration order — so a group that
-        // omitted them would put 17 two buffer slots below where
-        // `msl/mesh_cluster.metal` reads it. On a device with the mesh stage
-        // and no task stage `meshMain` never dereferences either, and takes
-        // both as arguments regardless.
+        // Both mesh entry points retain these native buffer arguments even
+        // when no amplification stage reads them.
         if shared.clusters.is_some() {
             entries.extend([
                 BindGroupEntry {
-                    binding: 13,
+                    binding: CLUSTER_CULL_BINDING,
                     array_index: 0,
                     resource: BindingResource::whole_buffer(self.cull_params),
                 },
                 BindGroupEntry {
-                    binding: 14,
+                    binding: CLUSTER_CULL_STATS_BINDING,
                     array_index: 0,
                     resource: BindingResource::whole_buffer(self.cull_stats),
                 },
@@ -2959,14 +2909,10 @@ impl MeshGroup {
             array_index: 0,
             resource: BindingResource::Sampler(shared.shadow_sampler),
         });
-        // **After the shadow pair, because 15 and 16 are taken.** Those two are
-        // `mesh.slang`'s, declared by the fragment stage of this very pipeline,
-        // so `mesh_cluster.slang`'s own additions start at 17 — and the list
-        // stays ascending, which is the order `crcbl-mtl` counts a Metal
-        // argument table in.
+        // Mesh-only buffers are sorted after the common fragment prefix below.
         if let Some(clusters) = shared.clusters {
             entries.push(BindGroupEntry {
-                binding: 17,
+                binding: CLUSTER_SELECT_BINDING,
                 array_index: 0,
                 // Bound with the geometry rather than with the cull, because
                 // `vertex_base` *is* geometry: it is which level of a DAG a
@@ -2977,14 +2923,14 @@ impl MeshGroup {
         }
         if let Some(selection) = self.cluster_selection {
             entries.push(BindGroupEntry {
-                binding: 18,
+                binding: CLUSTER_SELECTION_BINDING,
                 array_index: 0,
                 resource: BindingResource::whole_buffer(selection),
             });
         }
         if let Some(state) = self.group_state {
             entries.push(BindGroupEntry {
-                binding: 19,
+                binding: CLUSTER_GROUP_STATE_BINDING,
                 array_index: 0,
                 resource: BindingResource::whole_buffer(state),
             });
@@ -3001,8 +2947,7 @@ impl MeshGroup {
             array_index: 0,
             resource: BindingResource::whole_buffer(shared.light_grid),
         });
-        // Last, on [`AMBIENT_OCCLUSION_BINDING`]'s terms: the list has to ascend
-        // or `crcbl-mtl`'s argument table and Slang's stop agreeing.
+        // Shared fragment textures and probes retain their raster bindings.
         entries.push(BindGroupEntry {
             binding: AMBIENT_OCCLUSION_BINDING,
             array_index: 0,
@@ -3014,10 +2959,7 @@ impl MeshGroup {
             array_index: 0,
             resource: BindingResource::whole_buffer(shared.probes),
         });
-        // The group records at the top of the list, on the mesh path alone,
-        // where the layout has the row — see [`LEVEL_GROUP_TABLE_BINDING`].
-        // Keyed on the cluster pool for binding 17's reason: it is what the
-        // layout keys the same rows on.
+        // Group records are present on both mesh paths, matching the layout.
         if shared.clusters.is_some() {
             entries.push(BindGroupEntry {
                 binding: LEVEL_GROUP_TABLE_BINDING,
@@ -3025,9 +2967,7 @@ impl MeshGroup {
                 resource: BindingResource::whole_buffer(shared.tables),
             });
         }
-        // The `DFG` table above all of them, on the same ascending terms — see
-        // [`SPECULAR_ALBEDO_BINDING`]. Unconditional, because unlike the row
-        // below it this one is read by the fragment stage of every path.
+        // The DFG texture is read by the fragment stage of every path.
         entries.push(BindGroupEntry {
             binding: SPECULAR_DFG_BINDING,
             array_index: 0,
@@ -3077,6 +3017,7 @@ impl MeshGroup {
             array_index: 0,
             resource: BindingResource::ImageView(shared.emissive_page),
         });
+        entries.sort_by_key(|entry| entry.binding);
         entries
     }
 }
@@ -3490,8 +3431,48 @@ impl ForwardRenderer {
         target_format: Format,
         scene: &SceneDesc<'_>,
     ) -> Result<Self, HalError> {
+        Self::with_scene_on_path(
+            device,
+            queue,
+            target_format,
+            scene,
+            device.preferred_geometry_path(),
+        )
+    }
+
+    /// Builds exactly the requested geometry tail, independently of the device's
+    /// performance preference. Capabilities remain available to other callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HalError::UnsupportedFeatures`] before creating device objects
+    /// when the requested tail lacks its required feature. Other failures follow
+    /// [`Self::with_scene`]'s rollback contract.
+    pub fn with_scene_on_path(
+        device: &dyn Device,
+        queue: QueueHandle,
+        target_format: Format,
+        scene: &SceneDesc<'_>,
+        geometry_path: GeometryPath,
+    ) -> Result<Self, HalError> {
+        let required = match geometry_path {
+            GeometryPath::MeshShader => crcbl_hal::Features::MESH_SHADER,
+            GeometryPath::IndirectCount => crcbl_hal::Features::DRAW_INDIRECT_COUNT,
+            GeometryPath::IndirectPerBatch => crcbl_hal::Features::empty(),
+        };
+        let missing = required.difference(device.caps().features);
+        if !missing.is_empty() {
+            return Err(HalError::UnsupportedFeatures { missing });
+        }
         let mut rollback = Rollback::default();
-        match Self::build(device, queue, target_format, scene, &mut rollback) {
+        match Self::build(
+            device,
+            queue,
+            target_format,
+            scene,
+            geometry_path,
+            &mut rollback,
+        ) {
             Ok(renderer) => Ok(renderer),
             Err(error) => {
                 rollback.run(device);
@@ -3690,6 +3671,7 @@ impl ForwardRenderer {
         queue: QueueHandle,
         target_format: Format,
         scene: &SceneDesc<'_>,
+        geometry_path: GeometryPath,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
         // Before anything exists, so a refused description leaks nothing — see
@@ -3703,7 +3685,7 @@ impl ForwardRenderer {
         // indirect tail never builds the mesh one, which is what makes "the
         // frame came out of the mesh stage" a fact about the object graph
         // rather than a claim about a branch.
-        let emit = EmitTail::from_caps(&device.caps());
+        let emit = EmitTail::from_path(geometry_path);
         // **A second capability, asked separately.** `Features::TASK_SHADER` is
         // not implied by `MESH_SHADER`, so §3.5's per-cluster cull is an
         // amplification stage this renderer builds where the device has one and
@@ -4170,7 +4152,7 @@ impl ForwardRenderer {
 
         // `docs/plan/25-lod.md`'s observable: one word per resident cluster,
         // holding the cut the descent chose. Empty where there is no
-        // amplification stage, which is the same condition binding 18 exists
+        // amplification stage, which is the same condition CLUSTER_SELECTION_BINDING exists
         // under — and the two cannot disagree, because this vector is what
         // decides whether the entry is written.
         //
@@ -4185,7 +4167,7 @@ impl ForwardRenderer {
         let mut tile_selection: Vec<Vec<BufferHandle>> = Vec::new();
         // Allocated on the whole mesh path rather than only where there is an
         // amplification stage to write them, because the layout declares
-        // binding 18 there — see the layout, which is where that is argued. On
+        // CLUSTER_SELECTION_BINDING there — see the layout, which is where that is argued. On
         // a device with no task stage nothing writes them and
         // `ForwardRenderer::cluster_selection` still answers `None`, so the
         // cost is the allocation and nothing else.
@@ -4412,37 +4394,28 @@ impl ForwardRenderer {
                 read_only: true,
                 dynamic: false,
             };
-            mesh_entries.extend((9..=12).map(|binding| BindGroupLayoutEntry {
-                binding,
-                // **Not the fragment stage.** These four are the geometry
-                // stage's alone, and `mesh_cluster.slang` has no fragment entry
-                // point of its own to materialise them into — its fragment
-                // stage is `mesh.slang`'s, which names bindings 0 to 8 and
-                // nothing above them.
-                visibility: geometry,
-                kind: cluster_read,
-                count: 1,
-                flags: BindingFlags::empty(),
-            }));
+            mesh_entries.extend(
+                (CLUSTERS_BINDING..=CLUSTER_DRAW_ARGS_BINDING).map(|binding| {
+                    BindGroupLayoutEntry {
+                        binding,
+                        // **Not the fragment stage.** These four are the geometry
+                        // stage's alone, and `mesh_cluster.slang` has no fragment entry
+                        // point of its own to materialise them into — its fragment
+                        // stage is `mesh.slang`'s, which does not declare mesh-only buffers.
+                        visibility: geometry,
+                        kind: cluster_read,
+                        count: 1,
+                        flags: BindingFlags::empty(),
+                    }
+                }),
+            );
         }
-        // **`emit.is_mesh()`, not `culls_clusters`, and that is a fix rather
-        // than a widening.** §3.5's per-cluster cull is the only thing that
-        // *reads* these two — the frustum, and somewhere to count what survived
-        // — so gating them on the amplification stage was the obvious shape.
-        // It was wrong on Metal: `mesh_cluster.slang` declares them
-        // unconditionally, Slang's Metal target ignores `[[vk::binding]]` and
-        // hands each resource the next index in its stage's flat table in
-        // declaration order, and `crcbl-mtl` derives that index by counting the
-        // same-table entries of *this list*. A layout that skipped 13 and 14
-        // therefore placed binding 17 at `buffer(11)` while
-        // `msl/mesh_cluster.metal` reads it at `buffer(13)`, and every binding
-        // above it was off by two — a wrong picture with a clean log, on the
-        // one backend nobody here can debug on. Bindings 6, 7, 8, 20, 21 and 23
-        // are declared by that shader for exactly this reason and this is the
-        // same rule applied to the layout side.
+        // Both mesh entry points retain these declarations. Omitting unused
+        // task buffers would shift later native buffer indices on the plain
+        // mesh path, so the layout includes them on both paths.
         if emit.is_mesh() {
             mesh_entries.push(BindGroupLayoutEntry {
-                binding: 13,
+                binding: CLUSTER_CULL_BINDING,
                 visibility: geometry,
                 // **The same block the instance cull reads**, not a copy: one
                 // camera, one frustum, and no way for the two rejections to
@@ -4453,7 +4426,7 @@ impl ForwardRenderer {
                 flags: BindingFlags::empty(),
             });
             mesh_entries.push(BindGroupLayoutEntry {
-                binding: 14,
+                binding: CLUSTER_CULL_STATS_BINDING,
                 visibility: geometry,
                 kind: BindingKind::StorageBuffer {
                     // **The one writable binding this pass has.** The stage adds
@@ -4504,15 +4477,10 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
-        // `docs/plan/25-lod.md`'s two, **after the shadow pair rather than
-        // beside their own kin**: 15 and 16 are taken by the fragment stage of
-        // this very pipeline, so `mesh_cluster.slang` resumes at 17. Ascending
-        // order matters here and not only for readability — `crcbl-mtl` gives a
-        // resource the next index in its Metal argument table by counting the
-        // same-table entries of this list.
+        // DAG geometry and selection state, in the mesh-only binding range.
         if emit.is_mesh() {
             mesh_entries.push(BindGroupLayoutEntry {
-                binding: 17,
+                binding: CLUSTER_SELECT_BINDING,
                 visibility: geometry,
                 // Read-only and read by **both** mesh entry points, unlike the
                 // pair below: a cluster's `vertex_base` is which level of a DAG
@@ -4532,7 +4500,7 @@ impl ForwardRenderer {
         // numbers.
         if emit.is_mesh() {
             mesh_entries.push(BindGroupLayoutEntry {
-                binding: 18,
+                binding: CLUSTER_SELECTION_BINDING,
                 visibility: geometry,
                 kind: BindingKind::StorageBuffer {
                     // The second writable binding: the amplification stage
@@ -4544,7 +4512,7 @@ impl ForwardRenderer {
                 flags: BindingFlags::empty(),
             });
             mesh_entries.push(BindGroupLayoutEntry {
-                binding: 19,
+                binding: CLUSTER_GROUP_STATE_BINDING,
                 visibility: geometry,
                 kind: BindingKind::StorageBuffer {
                     // `docs/plan/25-lod.md`'s hysteresis state, and read-only
@@ -4559,9 +4527,8 @@ impl ForwardRenderer {
             });
         }
 
-        // Topic 18's light list and froxel grid, next because
-        // `mesh_cluster.slang` reaches 19 and both files declare these two above
-        // it. Bound on **every** path and in every group, unlike the four
+        // The shared fragment light list and froxel grid are bound on every
+        // path and in every group, unlike the four
         // conditional ranges above: `mesh.slang`'s fragment stage reads them
         // whatever geometry produced the primitive, so there is no configuration
         // in which the layout can omit them.
@@ -4642,11 +4609,10 @@ impl ForwardRenderer {
             flags: BindingFlags::empty(),
         });
         if emit.is_mesh() {
-            // `docs/plan/25-lod.md`'s group records, and the top of the list —
-            // see [`LEVEL_GROUP_TABLE_BINDING`], which is where "the list only
-            // ever grows at its top" is argued.
+            // DAG group records follow the common buffer prefix; the
+            // remaining mesh-only buffers are sorted after them below.
             //
-            // **Conditional like bindings 9 to 12 and 17**, and not for tidiness:
+            // **Conditional like the mesh-only bindings**, and not for tidiness:
             // the raster path's layout is at the WebGPU storage-buffer ceiling
             // already, so a row bound unconditionally would be a renderer that
             // cannot be built in a browser. The mesh path's own reads sit outside
@@ -4654,14 +4620,14 @@ impl ForwardRenderer {
             // stages it sums.
             mesh_entries.push(BindGroupLayoutEntry {
                 binding: LEVEL_GROUP_TABLE_BINDING,
-                // **Not the fragment stage**, on bindings 9 to 12's terms: the
+                // Only the geometry stage reads this table: the
                 // heatmap's colour is chosen where the cluster is known, and
                 // `mesh.slang`'s fragment stage — which is this pipeline's —
-                // names nothing above 23.
+                // does not declare this buffer.
                 visibility: geometry,
                 kind: BindingKind::StorageBuffer {
                     // Read-only and read by **both** mesh entry points, like
-                    // binding 17: an un-amplified stage draws through the same
+                    // CLUSTER_SELECT_BINDING: an un-amplified stage draws through the same
                     // `emit_cluster`, so a row present for one and absent for the
                     // other is a descriptor read out of an empty slot.
                     read_only: true,
@@ -4794,6 +4760,7 @@ impl ForwardRenderer {
                 flags: BindingFlags::empty(),
             });
         }
+        mesh_entries.sort_by_key(|entry| entry.binding);
         let mesh_desc = BindGroupLayoutDesc {
             label: Some(MESH_LAYOUT_LABEL),
             entries: &mesh_entries,
@@ -5230,9 +5197,8 @@ impl ForwardRenderer {
             // The depth prepass's group: this one again, counting its clusters
             // somewhere the camera's counter cannot see. See
             // [`ForwardRenderer::prepass_groups`] for why that matters, and note
-            // that binding 14 exists at all only where there is an amplification
-            // stage — so on every other path this buffer is bound nowhere and the
-            // group is the camera's under another handle.
+            // that only the amplification stage writes this binding, although
+            // both mesh layouts retain it to preserve native argument indices.
             //
             // `DeviceLocal`, because a shader writes it: D3D12 has no unordered
             // access view of a host-visible resource, and `create_bind_group`
@@ -5398,29 +5364,30 @@ impl ForwardRenderer {
         let rsm_results =
             MeshModules::sided(|cull| modules.rsm_pipeline(device, mesh_pipeline_layout, cull));
         modules.destroy(device);
-        // Unwrapped in creation order and each handed to the rollback as it is,
-        // so a failure part way through releases everything already made — see
-        // [`MeshModules::sided`], which is why the pairs arrive as results.
-        //
-        // The **field** and not the whole rollback, because `rollback.lights` is
-        // already borrowed above and a helper taking the struct would conflict
-        // with it — the loose `push`es this replaces borrowed one field each.
-        let into_rollback = |results: [Result<GraphicsPipelineHandle, HalError>; 2],
-                             pipelines: &mut Vec<GraphicsPipelineHandle>|
+        // Register every successful creation before propagating any error.
+        // Results later in this batch may own pipelines even when the first
+        // result failed; dropping an unvisited Result does not release a HAL
+        // handle. The outer rollback owns all of them until build succeeds.
+        for pipeline in mesh_results
+            .iter()
+            .chain(&shadow_results)
+            .chain(&depth_masked_results)
+            .chain(std::iter::once(&shadow_clear_result))
+            .chain(&rsm_results)
+            .flatten()
+        {
+            rollback.pipelines.push(*pipeline);
+        }
+        let into_sided = |results: [Result<GraphicsPipelineHandle, HalError>; 2]|
          -> Result<SidedPipelines, HalError> {
             let [single, double] = results;
-            let single = single?;
-            pipelines.push(single);
-            let double = double?;
-            pipelines.push(double);
-            Ok(SidedPipelines { single, double })
+            Ok(SidedPipelines { single: single?, double: double? })
         };
-        let mesh_pipeline = into_rollback(mesh_results, &mut rollback.pipelines)?;
-        let shadow_pipeline = into_rollback(shadow_results, &mut rollback.pipelines)?;
-        let depth_masked_pipeline = into_rollback(depth_masked_results, &mut rollback.pipelines)?;
+        let mesh_pipeline = into_sided(mesh_results)?;
+        let shadow_pipeline = into_sided(shadow_results)?;
+        let depth_masked_pipeline = into_sided(depth_masked_results)?;
         let shadow_clear_pipeline = shadow_clear_result?;
-        rollback.pipelines.push(shadow_clear_pipeline);
-        let rsm_pipeline = into_rollback(rsm_results, &mut rollback.pipelines)?;
+        let rsm_pipeline = into_sided(rsm_results)?;
 
         // --- the tonemap pass ---
         let tonemap_entries = [
@@ -9778,126 +9745,129 @@ impl ForwardRenderer {
         self.debug_draw
             .add_pass(graph, frame, tonemapped, scene_depth);
 
-        // The tonemap group names a *graph-owned* view, so it can only be built
-        // once the graph has realised one. It is cached against the view handle
-        // and therefore rebuilt only on a resize.
-        let sampler = self.sampler;
-        let layout = self.tonemap_layout;
-        let pipeline_layout = self.tonemap_pipeline_layout;
-        let tonemap_pipeline = self.tonemap_pipeline;
-        let exposure_block = self.tonemap_uniforms[self.frame];
-        let cached = &mut self.tonemap_groups[self.frame];
+        // The atlas viewer fills every display pixel. Recording the tonemap
+        // or grid first would store a picture that the viewer immediately
+        // discards, wasting attachment bandwidth. Keep the HDR scene passes
+        // above intact: callers still receive their output from `add_pass`.
+        if !draws_atlas_view {
+            // The tonemap group names a *graph-owned* view, so it can only be built
+            // once the graph has realised one. It is cached against the view handle
+            // and therefore rebuilt only on a resize.
+            let sampler = self.sampler;
+            let layout = self.tonemap_layout;
+            let pipeline_layout = self.tonemap_pipeline_layout;
+            let tonemap_pipeline = self.tonemap_pipeline;
+            let exposure_block = self.tonemap_uniforms[self.frame];
+            let cached = &mut self.tonemap_groups[self.frame];
 
-        graph
-            .add_render_pass("tonemap")
-            // `DontCare`, not `Clear`: the full-screen triangle writes every
-            // pixel of the target, so loading or clearing it is pure bandwidth.
-            .color(
-                display,
-                LoadOp::DontCare,
-                StoreOp::Store,
-                crcbl_hal::ClearValue::default(),
-            )
-            // **The reflection pass's output where there is one, and the forward
-            // pass's where there is not.** The two are the same description and
-            // different images, and tonemapping the first one on a frame that
-            // reflected would compile, draw a picture, and silently be the frame
-            // without reflections in it.
-            .read_image(tonemapped)
-            .execute(move |ctx| {
-                let view = ctx.image_view(tonemapped);
-                let device = ctx.device();
-                let entries = vec![
-                    BindGroupEntry {
-                        binding: 0,
-                        array_index: 0,
-                        resource: BindingResource::ImageView(view),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        array_index: 0,
-                        resource: BindingResource::Sampler(sampler),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(exposure_block),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(measured),
-                    },
-                ];
-                let Some(group) = cached_group(
-                    cached,
-                    device,
-                    &[(0, view)],
-                    "tonemap scene",
-                    layout,
-                    entries,
-                ) else {
-                    return;
-                };
-                let encoder = ctx.encoder();
-                encoder.bind_graphics_pipeline(tonemap_pipeline);
-                encoder.bind_group(0, group, &[], pipeline_layout);
-                // Three vertices, no geometry bound, no vertex buffer anywhere.
-                encoder.draw(0..3, 0..1);
-            });
+            graph
+                .add_render_pass("tonemap")
+                // `DontCare`, not `Clear`: the full-screen triangle writes every
+                // pixel of the target, so loading or clearing it is pure bandwidth.
+                .color(
+                    display,
+                    LoadOp::DontCare,
+                    StoreOp::Store,
+                    crcbl_hal::ClearValue::default(),
+                )
+                // **The reflection pass's output where there is one, and the forward
+                // pass's where there is not.** The two are the same description and
+                // different images, and tonemapping the first one on a frame that
+                // reflected would compile, draw a picture, and silently be the frame
+                // without reflections in it.
+                .read_image(tonemapped)
+                .execute(move |ctx| {
+                    let view = ctx.image_view(tonemapped);
+                    let device = ctx.device();
+                    let entries = vec![
+                        BindGroupEntry {
+                            binding: 0,
+                            array_index: 0,
+                            resource: BindingResource::ImageView(view),
+                        },
+                        BindGroupEntry {
+                            binding: 1,
+                            array_index: 0,
+                            resource: BindingResource::Sampler(sampler),
+                        },
+                        BindGroupEntry {
+                            binding: 2,
+                            array_index: 0,
+                            resource: BindingResource::whole_buffer(exposure_block),
+                        },
+                        BindGroupEntry {
+                            binding: 3,
+                            array_index: 0,
+                            resource: BindingResource::whole_buffer(measured),
+                        },
+                    ];
+                    let Some(group) = cached_group(
+                        cached,
+                        device,
+                        &[(0, view)],
+                        "tonemap scene",
+                        layout,
+                        entries,
+                    ) else {
+                        return;
+                    };
+                    let encoder = ctx.encoder();
+                    encoder.bind_graphics_pipeline(tonemap_pipeline);
+                    encoder.bind_group(0, group, &[], pipeline_layout);
+                    // Three vertices, no geometry bound, no vertex buffer anywhere.
+                    encoder.draw(0..3, 0..1);
+                });
 
-        // --- the ground grid ---
-        //
-        // **After the tonemap, into the target the tonemap just wrote**, and
-        // that placement is the decision rather than an accident of ordering.
-        // The grid is reference chrome, not scene content: drawn into
-        // `scene_color` it would be exposed and tonemapped like geometry, so its
-        // colour would shift with how bright the scene happens to be — and a
-        // grid whose lines change with the exposure is no longer a reference.
-        // Blender draws its overlays the same way, in display space after the
-        // render.
-        //
-        // It still takes `scene_depth`, read-only, so geometry in front of the
-        // ground occludes it. That the depth survives this far is not luck: the
-        // forward pass stores it (`StoreOp::Store`) because the reflection march
-        // reads it, and the graph moves it from whatever state that left it in
-        // into `DepthStencilRead` for this pass.
-        //
-        // Nothing here is conditional on [`RenderEffects`]: the grid is a
-        // caller's opt-in, and a frame that never asked for one is the frame
-        // this renderer recorded before [`crate::grid`] existed — no pass, no
-        // pipeline, no block.
-        if let Some(grid) = self.ground_grid.as_ref()
-            && self.ground_grid_on
-        {
-            let view_proj = self.camera_view_proj;
-            grid.add_pass(
-                graph,
-                frame,
-                display,
-                scene_depth,
-                view_proj,
-                // The one inversion in the frame, and it is here rather than in
-                // the pass: `begin_frame` has no reason to compute it for a grid
-                // that is usually off.
-                view_proj.inverse(),
-            );
+            // --- the ground grid ---
+            //
+            // **After the tonemap, into the target the tonemap just wrote**, and
+            // that placement is the decision rather than an accident of ordering.
+            // The grid is reference chrome, not scene content: drawn into
+            // `scene_color` it would be exposed and tonemapped like geometry, so its
+            // colour would shift with how bright the scene happens to be — and a
+            // grid whose lines change with the exposure is no longer a reference.
+            // Blender draws its overlays the same way, in display space after the
+            // render.
+            //
+            // It still takes `scene_depth`, read-only, so geometry in front of the
+            // ground occludes it. That the depth survives this far is not luck: the
+            // forward pass stores it (`StoreOp::Store`) because the reflection march
+            // reads it, and the graph moves it from whatever state that left it in
+            // into `DepthStencilRead` for this pass.
+            //
+            // Nothing here is conditional on [`RenderEffects`]: the grid is a
+            // caller's opt-in, and a frame that never asked for one is the frame
+            // this renderer recorded before [`crate::grid`] existed — no pass, no
+            // pipeline, no block.
+            if let Some(grid) = self.ground_grid.as_ref()
+                && self.ground_grid_on
+            {
+                let view_proj = self.camera_view_proj;
+                grid.add_pass(
+                    graph,
+                    frame,
+                    display,
+                    scene_depth,
+                    view_proj,
+                    // The one inversion in the frame, and it is here rather than in
+                    // the pass: `begin_frame` has no reason to compute it for a grid
+                    // that is usually off.
+                    view_proj.inverse(),
+                );
+            }
         }
 
         // --- the shadow atlas viewer ---
         //
-        // **After the grid and before the resolve, and it replaces what both of
-        // them were about.** `docs/plan/sample/18-sundial.md`'s atlas viewer:
-        // the `D32Float` image the shadow pass filled, drawn over the finished
-        // frame so that which slot holds which map is something a reviewer can
-        // look at. [`crate::atlas_view`] carries why it draws here — in display
-        // space, after the operator — rather than into the scene colour.
+        // **Instead of the tonemap and grid, and before the resolve.**
+        // `docs/plan/sample/18-sundial.md`'s atlas viewer draws the `D32Float`
+        // image the shadow pass filled, so a reviewer can see which slot holds
+        // which map. [`crate::atlas_view`] carries why it draws in display
+        // space rather than into the scene colour.
         //
-        // After the grid because a grid over a readout is noise; before the
-        // resolve because there is nothing to resolve, and nothing to resolve
-        // *with*: [`Self::resolved_effects`] takes both antialiasing tiers off
-        // for every debug view, so `display` and `present` are one image on
-        // every frame this branch runs on.
+        // [`Self::resolved_effects`] takes both antialiasing tiers off for
+        // every debug view, so `display` and `present` are one image on every
+        // frame this branch runs on. Render-scale upscaling still follows.
         //
         // Nothing here is conditional on [`RenderEffects`], on the ground
         // grid's terms: a frame that resolved any other view is the frame this
@@ -12341,8 +12311,9 @@ impl ForwardRenderer {
     /// Which [`GeometryPath`] this renderer was **built for** — not what the
     /// device reports, but what it actually built.
     ///
-    /// The two are the same by construction and that is the point of asking the
-    /// renderer rather than the device: [`GeometryPath::MeshShader`] here means
+    /// The device may prefer a path below its capability ceiling when a higher
+    /// one uses emulation. This reports the preference actually built, rather
+    /// than the ceiling: [`GeometryPath::MeshShader`] here means
     /// `build` created a mesh pipeline out of `mesh_cluster.slang` and its
     /// cluster buffers, and created **no** raster pipeline for the pass to fall
     /// back to. So a frame this renderer drew came out of a mesh stage, and a
@@ -13013,7 +12984,7 @@ impl MeshModules {
     /// The results rather than the pair, because that is the discipline `build`
     /// keeps for every pipeline it makes: everything is created while the
     /// modules are alive, the modules are released once, and only then is each
-    /// result unwrapped and handed to the rollback that will release it. A
+    /// successful result handed to rollback before any error is propagated. A
     /// helper that unwrapped here would have to drop a handle it had already
     /// created when its twin failed, and nothing would ever destroy it.
     fn sided(
@@ -13477,6 +13448,155 @@ mod tests {
     };
     use crcbl_hal::null::{Event, NullInstance, ObjectKind, Recorder};
     use crcbl_hal::{DeviceDesc, Features, Instance, QueueKind};
+
+    #[test]
+    fn refused_mesh_color_pipelines_release_successful_depth_pipelines() {
+        let recorder = Recorder::new();
+        let mut limits = crcbl_hal::Limits::desktop();
+        limits.max_color_attachments = 2;
+        let features = Features::COMPUTE | Features::MESH_SHADER;
+        let instance = NullInstance::new(crcbl_hal::DeviceCaps { features, limits })
+            .with_recorder(recorder.clone());
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: None,
+                adapter: crcbl_hal::AdapterId(0),
+                required_features: features,
+                optional_features: Features::empty(),
+                compatible_surface: None,
+            })
+            .unwrap();
+        let queue = device.queue(QueueKind::Graphics).unwrap();
+        let before = recorder.total_live_objects();
+        let error = ForwardRenderer::with_scene_on_path(
+            device.as_ref(),
+            queue,
+            Format::Rgba8UnormSrgb,
+            &scene::demo(),
+            GeometryPath::MeshShader,
+        )
+        .expect_err("three-target color pipelines must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("3 colour targets exceeds max_color_attachments 2"),
+            "{error}"
+        );
+        assert!(
+            recorder.events().iter().any(|event| matches!(
+                event,
+                Event::Created {
+                    kind: ObjectKind::GraphicsPipeline,
+                    ..
+                }
+            )),
+            "the refusal must exercise cleanup of successful pipelines"
+        );
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "partial pipeline construction leaked resources"
+        );
+        recorder.assert_valid();
+    }
+
+    #[test]
+    fn exact_geometry_path_overrides_preference_and_default_keeps_it() {
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven()
+            .with_geometry_preference(GeometryPath::IndirectPerBatch)
+            .with_recorder(recorder.clone());
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(crcbl_hal::AdapterId(0)))
+            .unwrap();
+        let queue = device.queue(QueueKind::Graphics).unwrap();
+        assert_eq!(device.caps().geometry_path(), GeometryPath::IndirectCount);
+        let default = ForwardRenderer::with_scene(
+            device.as_ref(),
+            queue,
+            Format::Rgba8UnormSrgb,
+            &scene::demo(),
+        )
+        .unwrap();
+        assert_eq!(default.geometry_path(), GeometryPath::IndirectPerBatch);
+        default.destroy(device.as_ref());
+        recorder.clear();
+        let mut exact = ForwardRenderer::with_scene_on_path(
+            device.as_ref(),
+            queue,
+            Format::Rgba8UnormSrgb,
+            &scene::demo(),
+            GeometryPath::IndirectCount,
+        )
+        .unwrap();
+        assert_eq!(exact.geometry_path(), GeometryPath::IndirectCount);
+        let rendered = frame(device.as_ref(), &mut exact, queue);
+        let commands = commands_in_pass(&recorder, "forward");
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            crcbl_hal::null::Command::DrawIndexedIndirectCount(_)
+        )));
+        assert!(
+            !commands
+                .iter()
+                .any(|command| matches!(command, crcbl_hal::null::Command::DrawIndexedIndirect(_)))
+        );
+        rendered.finish(device.as_ref(), exact);
+    }
+
+    #[test]
+    fn exact_geometry_path_builds_supported_tails_and_refuses_missing_features_without_allocating()
+    {
+        for features in [
+            Features::GPU_DRIVEN,
+            Features::COMPUTE | Features::MESH_SHADER,
+        ] {
+            let recorder = Recorder::new();
+            let instance = NullInstance::new(crcbl_hal::DeviceCaps {
+                features,
+                limits: crcbl_hal::Limits::desktop(),
+            })
+            .with_recorder(recorder.clone());
+            let device = instance
+                .create_device(&DeviceDesc {
+                    label: None,
+                    adapter: crcbl_hal::AdapterId(0),
+                    required_features: Features::COMPUTE,
+                    optional_features: features,
+                    compatible_surface: None,
+                })
+                .expect("null device opens");
+            let queue = device.queue(QueueKind::Graphics).unwrap();
+            for (path, required) in [
+                (GeometryPath::IndirectPerBatch, Features::empty()),
+                (GeometryPath::IndirectCount, Features::DRAW_INDIRECT_COUNT),
+                (GeometryPath::MeshShader, Features::MESH_SHADER),
+            ] {
+                recorder.clear();
+                let result = ForwardRenderer::with_scene_on_path(
+                    device.as_ref(),
+                    queue,
+                    Format::Rgba8UnormSrgb,
+                    &scene::demo(),
+                    path,
+                );
+                if features.contains(required) {
+                    let renderer = result.expect("supported exact tail builds");
+                    assert_eq!(renderer.geometry_path(), path);
+                    renderer.destroy(device.as_ref());
+                } else {
+                    assert!(
+                        matches!(result, Err(HalError::UnsupportedFeatures { missing }) if missing == required)
+                    );
+                    assert!(
+                        recorder.events().is_empty(),
+                        "unsupported selection must not touch device objects"
+                    );
+                }
+                recorder.assert_valid();
+            }
+        }
+    }
 
     fn open() -> (Recorder, Box<dyn Device>, QueueHandle) {
         open_with(DeviceDesc::for_adapter(crcbl_hal::AdapterId(0)).optional_features)
@@ -16658,25 +16778,6 @@ mod tests {
         (device, queue)
     }
 
-    /// **The mesh layout declares the same binding numbers with and without a
-    /// task stage, and that is a correctness property on Metal.**
-    ///
-    /// Slang's Metal target ignores `[[vk::binding]]` and gives each resource
-    /// the next index in its stage's flat argument table, in the order
-    /// `mesh_cluster.slang` declares them — so `msl/mesh_cluster.metal` puts
-    /// `cluster_select` (binding 17) at `buffer(13)` and every buffer above it
-    /// at a fixed index. `crcbl-mtl` reaches the same numbers by counting the
-    /// same-table entries of the layout **below** each binding, which agrees
-    /// only while the layout declares everything the shader does.
-    ///
-    /// It did not. Bindings 13, 14, 18 and 19 were gated on
-    /// [`ForwardRenderer::culls_clusters`], so a device with
-    /// `Features::MESH_SHADER` and no `Features::TASK_SHADER` built a layout
-    /// missing four buffers below 17 — placing it at `buffer(11)` while the MSL
-    /// read `buffer(13)`, and shifting every binding above it by two. Nothing
-    /// on any other backend can see that: Vulkan and D3D12 read the binding
-    /// number, and WebGPU never takes this path.
-    ///
     /// **The four material pages are created with the format their contents
     /// call for, and it is only a *colour* that is sRGB.**
     ///
@@ -16769,10 +16870,99 @@ mod tests {
         renderer.destroy(device.as_ref());
     }
 
-    /// **What turns it red.** Putting either `if emit.is_mesh()` in the layout
-    /// back to `if culls_clusters`: the no-task arm then declares 17 fewer than
-    /// two buffers below where the amplified arm does, and the sets stop
-    /// matching.
+    /// Compare native argument indices from the shipped entry points with the
+    /// actual renderer layout. A shared fragment buffer must have the same index
+    /// even when geometry introduces additional resources in another module.
+    #[test]
+    fn mesh_pipeline_buffers_match_native_shader_arguments() {
+        for optional in [Features::TASK_SHADER, Features::empty()] {
+            let recorder = Recorder::new();
+            let (device, queue) = open_mesh_path(&recorder, optional);
+            let renderer = ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
+                .expect("the mesh renderer builds");
+            let (_, entries) = recorder
+                .bind_group_layouts_created()
+                .into_iter()
+                .find(|(label, _)| label.as_deref() == Some(MESH_LAYOUT_LABEL))
+                .expect("the actual mesh layout");
+            let mut buffers: Vec<_> = entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.kind,
+                        BindingKind::UniformBuffer { .. } | BindingKind::StorageBuffer { .. }
+                    )
+                })
+                .collect();
+            buffers.sort_by_key(|entry| entry.binding);
+            assert_eq!(buffers.len(), 20, "the native buffer budget is unchanged");
+            for (source, shader, names) in [
+                (
+                    include_str!("../../crcbl-shaders/shaders/mesh.slang"),
+                    &MESH,
+                    &["fragmentMain"][..],
+                ),
+                (
+                    include_str!("../../crcbl-shaders/shaders/mesh_cluster.slang"),
+                    &MESH_CLUSTER,
+                    &["meshMain", "taskMain", "amplifiedMeshMain"][..],
+                ),
+            ] {
+                let declarations: Vec<_> = source.lines().collect();
+                let bindings: Vec<_> = declarations
+                    .windows(2)
+                    .filter_map(|lines| {
+                        let binding = lines[0]
+                            .trim()
+                            .strip_prefix("[[vk::binding(")?
+                            .split(',')
+                            .next()?
+                            .parse::<u32>()
+                            .ok()?;
+                        let name = lines[1].split_whitespace().last()?.trim_end_matches(';');
+                        Some((name, binding))
+                    })
+                    .collect();
+                for name in names {
+                    let signature = shader
+                        .msl()
+                        .expect("committed native shader")
+                        .lines()
+                        .find(|line| line.starts_with("[[") && line.contains(&format!(" {name}(")))
+                        .expect("native entry signature");
+                    let mut checked = 0;
+                    for argument in signature.split(", ") {
+                        let Some((declaration, tail)) = argument.split_once(" [[buffer(") else {
+                            continue;
+                        };
+                        let native: usize = tail.split(')').next().unwrap().parse().unwrap();
+                        let variable = declaration.split_whitespace().last().unwrap();
+                        let variable = variable.rsplit_once('_').map_or(variable, |(base, _)| base);
+                        let binding = bindings
+                            .iter()
+                            .find(|(candidate, _)| *candidate == variable)
+                            .unwrap_or_else(|| panic!("unknown {name} buffer {variable}"))
+                            .1;
+                        let expected = buffers
+                            .iter()
+                            .position(|entry| entry.binding == binding)
+                            .expect("shader binding exists in the renderer layout");
+                        assert_eq!(
+                            native, expected,
+                            "{name}: {variable}, logical binding {binding}, native shader vs global layout"
+                        );
+                        checked += 1;
+                    }
+                    assert!(
+                        checked >= 10,
+                        "entry parsing must cover the complete buffer interface"
+                    );
+                }
+            }
+            renderer.destroy(device.as_ref());
+        }
+    }
+
     #[test]
     fn the_mesh_layout_declares_the_same_bindings_with_and_without_a_task_stage() {
         let mut declared: Vec<Vec<(u32, BindingKind)>> = Vec::new();
@@ -16808,27 +16998,26 @@ mod tests {
             "the mesh layout's bindings changed with the task stage, which moves every Metal \
              argument-table index above the difference"
         );
-        // Not a vacuous comparison: the four bindings the gate used to hide are
-        // the ones that have to be there, and 17 is the one whose index the
-        // committed MSL pins.
-        for binding in [13, 14, 17, 18, 19] {
+        // These mesh declarations remain present without a task stage.
+        for binding in [
+            CLUSTER_CULL_BINDING,
+            CLUSTER_CULL_STATS_BINDING,
+            CLUSTER_SELECT_BINDING,
+            CLUSTER_SELECTION_BINDING,
+            CLUSTER_GROUP_STATE_BINDING,
+        ] {
             assert!(
                 plain.iter().any(|(number, _)| *number == binding),
                 "binding {binding} is declared by mesh_cluster.slang and must be in the layout"
             );
         }
-        // **And no gaps**, which is the other half of what makes `crcbl-mtl`'s
-        // count agree with Slang's declaration order. Counting the same-table
-        // entries below a binding yields the index Slang assigned only while
-        // the layout is the shader's whole declaration set, contiguous from
-        // zero; a gap means some resource the module declares is missing, and
-        // every index above the gap is off by as many as are missing.
+        // Logical gaps consume no native slots. The complete shader union must
+        // remain sorted, and every mesh-only buffer follows the fragment prefix.
         let numbers: Vec<u32> = plain.iter().map(|(binding, _)| *binding).collect();
+        let expected: Vec<u32> = (0..=8).chain(15..=16).chain(20..=40).collect();
         assert_eq!(
-            numbers,
-            (0..numbers.len() as u32).collect::<Vec<u32>>(),
-            "the mesh layout must declare every binding mesh.slang and mesh_cluster.slang do, \
-             ascending from zero with no gaps"
+            numbers, expected,
+            "the complete sparse shader binding union"
         );
     }
 
@@ -17170,6 +17359,7 @@ mod tests {
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        place_cube(&mut renderer, Mat4::IDENTITY);
         let imported = swapchain_image(device.as_ref());
         // Twice round the ring, because a slot cleared only on its first use is
         // exactly the failure this is about.
@@ -17278,6 +17468,7 @@ mod tests {
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        place_cube(&mut renderer, Mat4::IDENTITY);
         renderer
             .begin_frame(
                 device.as_ref(),
@@ -19216,6 +19407,8 @@ mod tests {
         let mut renderer =
             ForwardRenderer::with_scene(device, queue, Format::Rgba8UnormSrgb, &scene)
                 .expect("built");
+        // A maximum-width graph must include actual instances to cull.
+        place_cube(&mut renderer, Mat4::IDENTITY);
         renderer
             .set_ground_grid(device, Some(GridStyle::default()))
             .expect("the null backend builds every pipeline");
@@ -19342,6 +19535,7 @@ mod tests {
         let device = device.as_ref();
         let mut renderer =
             ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        place_cube(&mut renderer, Mat4::IDENTITY);
         // One shadowed light beside the cascades, so the shadow arm below covers
         // a light slot's cull as well as a cascade's.
         renderer.set_lights(&[shadowable_spot(-1.0)]);

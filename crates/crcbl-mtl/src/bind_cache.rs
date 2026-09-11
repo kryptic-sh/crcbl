@@ -77,19 +77,22 @@ impl ResourceId {
 /// A render encoder has one set per raster stage and a separate selector for
 /// each — `setVertexBuffer:offset:atIndex:` and `setFragmentBuffer:…` — while a
 /// compute encoder has one unqualified set. They are three independent tables,
-/// so a slot number means nothing without one of these beside it.
+/// so a slot number means nothing without one of these beside it. Object and
+/// mesh stages each have another independent set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stage {
     Vertex,
     Fragment,
     Compute,
+    Object,
+    Mesh,
 }
 
 impl Stage {
     /// How many stages [`BindCache`] holds a table set for, and
     /// [`BindingMask`](crate::binding_mask::BindingMask) a set of used slots
     /// for.
-    pub(crate) const COUNT: usize = 3;
+    pub(crate) const COUNT: usize = 5;
 
     /// This stage's index into [`BindCache::stages`], and into the mask beside
     /// it.
@@ -272,9 +275,13 @@ mod tests {
         assert!(cache.texture_changed(Stage::Vertex, 5, FIRST));
         assert!(cache.texture_changed(Stage::Fragment, 5, FIRST));
         assert!(cache.texture_changed(Stage::Compute, 5, FIRST));
+        assert!(cache.texture_changed(Stage::Object, 5, FIRST));
+        assert!(cache.texture_changed(Stage::Mesh, 5, FIRST));
         assert!(!cache.texture_changed(Stage::Vertex, 5, FIRST));
         assert!(!cache.texture_changed(Stage::Fragment, 5, FIRST));
         assert!(!cache.texture_changed(Stage::Compute, 5, FIRST));
+        assert!(!cache.texture_changed(Stage::Object, 5, FIRST));
+        assert!(!cache.texture_changed(Stage::Mesh, 5, FIRST));
     }
 
     /// And neither does a slot number mean anything without its table: the

@@ -96,13 +96,11 @@ pub const SCREENSHOT_HELP: &str = "\
 /// that offered a name the parser did not take would be advertising a flag
 /// value that is rejected.
 pub const FORCED_PATH_HELP: &str = "\
-    --force-geometry <P> Hold the geometry path at 'mesh-shader',
-                         'indirect-count' or 'indirect-per-batch' by opening a
-                         device without the features that select a better one.
-                         Default: whatever this device selects.
-    --force-binding <B>  Hold the binding model at 'bindless' or 'array-pages',
-                         on --force-geometry's terms. 'array-pages' is what
-                         every browser and every Apple device runs.";
+    --force-geometry <P> Require 'mesh-shader', 'indirect-count' or
+                         'indirect-per-batch'; unsupported paths fail startup.
+                         Default: this device's preferred geometry path.
+    --force-binding <B>  Request a 'bindless' or 'array-pages' capability ceiling.
+                         This forward renderer always uses array-pages.";
 
 /// The tail of the shared block: the debug overlay pair and `--help`.
 ///

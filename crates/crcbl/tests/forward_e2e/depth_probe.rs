@@ -711,6 +711,12 @@ impl DepthProbe {
             .expect("a one-texel visibility placeholder")
         };
 
+        // The MSL fragment entry declares the geometry buffers too. Under
+        // shader validation Metal requires those bindings even where the
+        // uninstrumented fragment body does not read them. Match the complete
+        // interface, as the production mesh layout does.
+        let geometry_stages =
+            crcbl::hal::ShaderStages::VERTEX.union(crcbl::hal::ShaderStages::FRAGMENT);
         let entries = [
             crcbl::hal::BindGroupLayoutEntry {
                 binding: 0,
@@ -722,7 +728,7 @@ impl DepthProbe {
             },
             crcbl::hal::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: crcbl::hal::ShaderStages::VERTEX,
+                visibility: geometry_stages,
                 kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
@@ -732,7 +738,7 @@ impl DepthProbe {
             },
             crcbl::hal::BindGroupLayoutEntry {
                 binding: 2,
-                visibility: crcbl::hal::ShaderStages::VERTEX,
+                visibility: geometry_stages,
                 kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
@@ -742,7 +748,7 @@ impl DepthProbe {
             },
             crcbl::hal::BindGroupLayoutEntry {
                 binding: 3,
-                visibility: crcbl::hal::ShaderStages::VERTEX,
+                visibility: geometry_stages,
                 // Not dynamic, unlike `crcbl::render::ForwardRenderer`'s: the
                 // probe records one draw, so there is nothing for an offset to
                 // select between.
@@ -752,7 +758,7 @@ impl DepthProbe {
             },
             crcbl::hal::BindGroupLayoutEntry {
                 binding: 4,
-                visibility: crcbl::hal::ShaderStages::VERTEX,
+                visibility: geometry_stages,
                 kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
@@ -762,7 +768,7 @@ impl DepthProbe {
             },
             crcbl::hal::BindGroupLayoutEntry {
                 binding: 5,
-                visibility: crcbl::hal::ShaderStages::VERTEX,
+                visibility: geometry_stages,
                 kind: crcbl::hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,
@@ -1569,7 +1575,7 @@ fn render_probe(
         // one hand-written barrier in this file either.
         let sink = &reflectivity_handle;
         graph
-            .add_compute_pass("reflectivity probe")
+            .add_copy_pass("reflectivity probe")
             .use_image(reflectivity, ResourceState::TransferSrc)
             .execute(move |ctx| sink.set(Some(ctx.image(reflectivity))));
         graph.compile(&*pool).expect("a legal frame")

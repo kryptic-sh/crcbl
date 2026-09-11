@@ -126,9 +126,28 @@ enum ClaimFrame {
 /// One more frame of `scene`, drawn under the clamp — [`scene_referred`]'s
 /// argument for a [`Scene`] this fixture does not build itself.
 fn a_clamped_frame_of(scene: Scene, extent: (u32, u32), name: &str) -> Image {
-    let setup = OffscreenSetup::open(extent.0, extent.1, scene)
-        .unwrap_or_else(|why| panic!("a GPU backend opens for the {name} scene: {why}"));
+    a_clamped_frame_on_path(scene, extent, name, None)
+}
+
+fn a_clamped_frame_on_path(
+    scene: Scene,
+    extent: (u32, u32),
+    name: &str,
+    path: Option<GeometryPath>,
+) -> Image {
+    let setup = match path {
+        Some(path) => OffscreenSetup::open_on_path(extent.0, extent.1, scene, path),
+        None => OffscreenSetup::open(extent.0, extent.1, scene),
+    }
+    .unwrap_or_else(|why| panic!("a GPU backend opens for the {name} scene: {why}"));
     let mut setup = Offscreen::guard(SUITE, setup);
+    if let Some(path) = path {
+        assert_eq!(
+            setup.geometry_path(),
+            Some(path),
+            "the clamped claim must use the requested geometry tail"
+        );
+    }
     assert!(
         setup.set_tonemap_curve(TonemapCurve::Clamp),
         "the {name} scene draws through a forward renderer, so the pin has to reach one"
@@ -5614,43 +5633,41 @@ fn the_cube_scene_draws_the_same_frame_on_every_pass_of_the_ring() {
     /// Frames to draw, several passes of the frame ring.
     const FRAMES: usize = 32;
 
+    // **The device is asked what it has before the tail is chosen**, exactly as
+    // `draw_scene_on_every_geometry_path` asks it: `open_on_path` refuses a tail
+    // the device cannot run, and a device with no amplification stage has to
+    // decline rather than fail. It also keeps the run non-vacuous — the
+    // unforced preference is the cheaper indirect tail even on a mesh device
+    // (see `docs/notes/metal-geometry-preference.md`), so a run that took the
+    // preference would never reach the per-cluster stage this test is about.
     let mesh_stage = Features::MESH_SHADER.union(Features::TASK_SHADER);
-    let setup = OffscreenSetup::open_with(
-        EXTENT.0,
-        EXTENT.1,
-        Scene::Cube,
-        OffscreenSetup::OPTIONAL_FEATURES.union(mesh_stage),
-    )
-    .unwrap_or_else(|why| panic!("a GPU backend opens for the cube scene: {why}"));
+    let probe = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube)
+        .unwrap_or_else(|why| panic!("a GPU backend opens for the cube scene: {why}"));
+    let probe = Offscreen::guard(SUITE, probe);
+    let features = probe.caps().features;
+    probe.finish();
+    if !features.contains(mesh_stage) {
+        eprintln!(
+            "{SUITE}: no amplification stage on this device, so there is no per-cluster ring to \
+             watch — that is every device without TASK_SHADER and every non-mesh path"
+        );
+        return;
+    }
+
+    let setup =
+        OffscreenSetup::open_on_path(EXTENT.0, EXTENT.1, Scene::Cube, GeometryPath::MeshShader)
+            .unwrap_or_else(|why| panic!("the cube scene opens on the mesh tail: {why}"));
     let mut setup = Offscreen::guard(SUITE, setup);
-    let path = setup.caps().geometry_path();
-    let amplifies = setup
-        .adapter()
-        .caps
-        .features
-        .contains(Features::TASK_SHADER);
+    let path = setup
+        .geometry_path()
+        .unwrap_or_else(|| setup.caps().geometry_path());
+    let amplifies = features.contains(Features::TASK_SHADER);
     eprintln!(
         "crcbl render e2e: cube on {backend} adapter {adapter:?} — drew through {path:?}, \
          amplification stage: {amplifies}",
         backend = setup.backend(),
         adapter = setup.adapter().name,
     );
-
-    // **A device with no amplification stage cannot exercise this, and saying so
-    // is not the same as passing.** The defect lives in the per-cluster task
-    // stage; without [`Features::TASK_SHADER`] this scene draws through a path
-    // that selects and culls nothing, and thirty-two identical frames there
-    // would be a green light wired to code the hazard is not in. `crcbl-vk` on
-    // lavapipe is where CI actually runs it — `apps/quarry`'s `read_the_cut`
-    // declines on the same terms and in the same words.
-    if !amplifies {
-        eprintln!(
-            "{SUITE}: no amplification stage on this device, so there is no per-cluster ring to \
-             watch — that is every device without TASK_SHADER and every non-mesh path"
-        );
-        setup.finish();
-        return;
-    }
 
     let format = setup.format();
     let mut frames: Vec<Vec<u8>> = Vec::with_capacity(FRAMES);
@@ -5957,7 +5974,9 @@ fn draw_scene_and_match_its_golden_measuring(
     // captures this and it is otherwise invisible.
     eprintln!(
         "crcbl render e2e: {backend} selected {:?} / {:?} / {:?} for the {golden} scene",
-        caps.geometry_path(),
+        setup
+            .geometry_path()
+            .unwrap_or_else(|| caps.geometry_path()),
         caps.binding_model(),
         caps.lighting_path(),
     );
@@ -5994,6 +6013,13 @@ fn draw_scene_and_match_its_golden_measuring(
         adapter.caps.geometry_path(),
         caps.geometry_path(),
     );
+    if let Some(path) = setup.geometry_path() {
+        assert_eq!(
+            path,
+            setup.preferred_geometry_path(),
+            "the forward renderer must build the device's preferred supported path"
+        );
+    }
 
     // A pin the loader ignored is the failure this catches, and it is the same
     // class as a suite that runs no tests. Both names go through the mappings
@@ -6126,20 +6152,19 @@ fn the_dunes_scene_draws_the_same_frame_on_every_geometry_path() {
     );
 }
 
-/// The sprite scene on both geometry paths — see
-/// [`draw_scene_on_every_geometry_path`].
+/// The sprite scene under two optional device feature requests.
 ///
 /// `crcbl-render`'s sprite pass reads no
 /// [`GeometryPath`](crcbl::hal::GeometryPath), so the two arms here differ only in
-/// whether the *device* was opened with mesh shading enabled. That is the claim
-/// worth having and it is not the cube's: enabling an extension changes a Vulkan
+/// whether mesh shading was requested from the device. The test reports
+/// whether that request changed the granted features: enabling an extension changes a Vulkan
 /// device's pipeline cache, its enabled feature struct and, on some drivers, its
 /// shader compiler — and nothing else in this tree would notice if that moved a
 /// pass that never asked for it.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
-fn the_sprite_scene_draws_the_same_frame_on_every_geometry_path() {
-    draw_scene_on_every_geometry_path(
+fn the_sprite_scene_draws_the_same_frame_under_device_feature_requests() {
+    draw_scene_under_device_feature_requests(
         Scene::Sprite,
         "sprite",
         MIN_COLORS_SPRITE,
@@ -6147,14 +6172,12 @@ fn the_sprite_scene_draws_the_same_frame_on_every_geometry_path() {
     );
 }
 
-/// The UI scene on both geometry paths — see
-/// [`draw_scene_on_every_geometry_path`], and
-/// [`the_sprite_scene_draws_the_same_frame_on_every_geometry_path`] for what an
-/// arm proves about a pass that reads no geometry path.
+/// The UI scene under two optional device feature requests; like sprites,
+/// this renderer has no forward geometry tail.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
-fn the_ui_scene_draws_the_same_frame_on_every_geometry_path() {
-    draw_scene_on_every_geometry_path(
+fn the_ui_scene_draws_the_same_frame_under_device_feature_requests() {
+    draw_scene_under_device_feature_requests(
         Scene::Ui,
         "ui",
         MIN_COLORS_UI,
@@ -6162,42 +6185,10 @@ fn the_ui_scene_draws_the_same_frame_on_every_geometry_path() {
     );
 }
 
-/// Draws `scene` twice — once on the best [`GeometryPath`] this adapter reports
-/// and once on the path it selects without [`Features::MESH_SHADER`] — and
-/// asserts the two frames are **byte for byte the same picture**.
-///
-/// # Why this has to exist before the mesh path is selected by default
-///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.5 calls the mesh shader the primary
-/// geometry path and its design rule is that "the lesser path is a constraint on
-/// data layout, not a separate renderer". `crcbl-vk`'s
-/// `every_geometry_path_draws_the_same_frame` already checks that on the vk
-/// suite's own scene: one mesh, one pyramid, no material table. It says nothing
-/// about the scene this crate's goldens are blessed on, which has three instances
-/// across two buckets, a material table and a sampled base-colour page — every
-/// piece of per-draw data the mesh stage has to fetch for itself because there is
-/// no input assembler to hand it one.
-///
-/// So this is the check that lets `OffscreenSetup::OPTIONAL_FEATURES` ask for
-/// mesh shading at all. A second, per-path golden would have hidden exactly what
-/// it is for: a difference here is a **bug in the mesh path**, not two legitimate
-/// pictures.
-///
-/// # The arms are asked for by subtraction
-///
-/// An adapter reports what it reports, so the only way one machine reaches more
-/// than one path is to open a device *without* the flag that selects the better
-/// one — `crcbl-vk`'s `Headless::open_for_mesh_with` and this crate's
-/// [`OffscreenSetup::open_with`] exist for that and nothing else.
-///
-/// # On a device with no mesh shaders
-///
-/// Both arms land on the same path, and the test says so rather than passing
-/// quietly: the arms are asserted to differ **exactly when the adapter reports
-/// the flag**, so "this backend has no mesh shaders" is a checked claim instead
-/// of a skip. `crcbl-webgpu`, `crcbl-dx12` and `crcbl-mtl` all report none — see
-/// each backend's `caps` — so on those three this is a self-comparison and the
-/// printed line is what says so.
+/// Draws each supported forward geometry tail explicitly and compares every
+/// lesser tail with the highest supported one. Device feature negotiation and
+/// performance preferences cannot turn this into a same-path comparison.
+/// Every frame still has to hold the scene and obey the original image budget.
 fn draw_scene_on_every_geometry_path(
     scene: Scene,
     name: &str,
@@ -6215,8 +6206,8 @@ fn draw_scene_on_every_geometry_path(
 
 /// [`draw_scene_on_every_geometry_path`] saying which frame `inspect` reads.
 ///
-/// The two arms compared are always the frames the engine draws by default —
-/// that comparison is the test — and `claim` is only about the measurement that
+/// The arms use the default visual settings with an exact geometry selection;
+/// `claim` is only about the measurement that
 /// says either arm holds the scene at all. See [`ClaimFrame`].
 fn draw_scene_on_every_geometry_path_measuring(
     scene: Scene,
@@ -6226,17 +6217,132 @@ fn draw_scene_on_every_geometry_path_measuring(
     claim: ClaimFrame,
 ) {
     crcbl_core::log::init_logging();
+    assert!(!matches!(scene, Scene::Sprite | Scene::Ui));
+    let setup = OffscreenSetup::open(EXTENT.0, EXTENT.1, scene)
+        .unwrap_or_else(|why| panic!("a GPU backend opens for the {name} scene: {why}"));
+    let setup = Offscreen::guard(SUITE, setup);
+    let features = setup.caps().features;
+    let adapter = setup.adapter().name.clone();
+    let backend = setup.backend();
+    setup.finish();
 
-    let mut frames: Vec<(GeometryPath, Image)> = Vec::new();
-    let mut adapter_offers_mesh = None;
+    let paths: Vec<_> = [
+        GeometryPath::MeshShader,
+        GeometryPath::IndirectCount,
+        GeometryPath::IndirectPerBatch,
+    ]
+    .into_iter()
+    .filter(|path| match path {
+        GeometryPath::MeshShader => {
+            features.contains(Features::MESH_SHADER)
+                && (!matches!(scene, Scene::Dunes) || features.contains(Features::TASK_SHADER))
+        }
+        GeometryPath::IndirectCount => features.contains(Features::DRAW_INDIRECT_COUNT),
+        GeometryPath::IndirectPerBatch => true,
+    })
+    .collect();
+    if matches!(scene, Scene::Dunes)
+        && features.contains(Features::MESH_SHADER)
+        && !features.contains(Features::TASK_SHADER)
+    {
+        eprintln!(
+            "crcbl render e2e: dunes MeshShader tail cannot select DAG levels without TASK_SHADER"
+        );
+    }
+    let mut frames = Vec::new();
+    for requested in paths {
+        let setup = OffscreenSetup::open_on_path(EXTENT.0, EXTENT.1, scene, requested)
+            .unwrap_or_else(|why| panic!("the {name} scene opens on {requested:?}: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        assert_eq!(
+            setup.adapter().name,
+            adapter,
+            "the arms opened different adapters"
+        );
+        assert_eq!(
+            setup.backend(),
+            backend,
+            "the arms opened different backends"
+        );
+        assert_eq!(
+            setup.caps().features,
+            features,
+            "the arms have different device features"
+        );
+        assert_eq!(
+            setup.geometry_path(),
+            Some(requested),
+            "the {name} scene did not select its exact requested tail"
+        );
+        assert!(
+            !frames.iter().any(|(path, _)| *path == requested),
+            "duplicate geometry tail is not a cross-path comparison"
+        );
+        eprintln!(
+            "crcbl render e2e: {name} on {backend} adapter {adapter:?} — explicitly requested and drew through {requested:?}"
+        );
+        let format = setup.format();
+        let ((width, height), pixels) = setup
+            .draw_and_readback()
+            .unwrap_or_else(|why| panic!("the {name} frame renders on {requested:?}: {why}"));
+        setup.finish();
+        assert_eq!(
+            (width, height),
+            EXTENT,
+            "{requested:?} drew a different extent"
+        );
+        frames.push((
+            requested,
+            Image::from_readback(width, height, &pixels, channel_order(format))
+                .expect("the readback is exactly one image"),
+        ));
+    }
+    let (best_path, best) = &frames[0];
+    if frames.len() == 1 {
+        eprintln!(
+            "crcbl render e2e: {name} has only {best_path:?}; image checks run, no cross-path evidence available"
+        );
+        inspect_scene_frame(
+            scene,
+            name,
+            min_colors,
+            inspect,
+            claim,
+            best,
+            Some(*best_path),
+        );
+    }
+    for (lesser_path, lesser) in &frames[1..] {
+        assert_ne!(best_path, lesser_path);
+        compare_scene_frames(
+            scene,
+            name,
+            min_colors,
+            inspect,
+            claim,
+            &format!("{best_path:?}"),
+            best,
+            &format!("{lesser_path:?}"),
+            lesser,
+            Some((*best_path, *lesser_path)),
+        );
+    }
+}
 
-    // **Both mesh-stage flags come out of the lesser arm, not just the one that
-    // names the path.** `Features::TASK_SHADER` is an amplification stage in
-    // front of a mesh stage, so a backend asked for it enables the mesh stage
-    // too — and a device that ended up on `MeshShader` after `MESH_SHADER` was
-    // subtracted is a self-comparison wearing a cross-path label, which is the
-    // failure the assertion below reports.
+/// Sprite/UI do not consume the forward geometry selector. This preserves their
+/// image check under feature requests and reports whether the device negotiated
+/// any difference, including native backends that keep both requests identical.
+fn draw_scene_under_device_feature_requests(
+    scene: Scene,
+    name: &str,
+    min_colors: usize,
+    inspect: fn(&Image),
+) {
+    crcbl_core::log::init_logging();
+    assert!(matches!(scene, Scene::Sprite | Scene::Ui));
     let mesh_stage = Features::MESH_SHADER.union(Features::TASK_SHADER);
+    let mut frames = Vec::new();
+    let mut adapter = None;
     for optional in [
         OffscreenSetup::OPTIONAL_FEATURES.union(mesh_stage),
         OffscreenSetup::OPTIONAL_FEATURES.difference(mesh_stage),
@@ -6244,50 +6350,61 @@ fn draw_scene_on_every_geometry_path_measuring(
         let setup = OffscreenSetup::open_with(EXTENT.0, EXTENT.1, scene, optional)
             .unwrap_or_else(|why| panic!("a GPU backend opens for the {name} scene: {why}"));
         let mut setup = Offscreen::guard(SUITE, setup);
-        let path = setup.caps().geometry_path();
-        let offers_mesh = setup
-            .adapter()
-            .caps
-            .features
-            .contains(Features::MESH_SHADER);
-        eprintln!(
-            "crcbl render e2e: {name} on {backend} adapter {adapter:?} — asked for \
-             MESH_SHADER: {asked}, adapter has it: {offers_mesh}, drew through {path:?}",
-            backend = setup.backend(),
-            adapter = setup.adapter().name,
-            asked = optional.contains(Features::MESH_SHADER),
-        );
         assert_eq!(
-            *adapter_offers_mesh.get_or_insert(offers_mesh),
-            offers_mesh,
-            "the two arms opened different adapters, so they are not a comparison"
+            setup.geometry_path(),
+            None,
+            "{name} does not select a forward geometry tail"
         );
-
+        let identity = (setup.backend(), setup.adapter().name.clone());
+        assert_eq!(
+            adapter.get_or_insert(identity.clone()),
+            &identity,
+            "the feature requests opened different adapters"
+        );
+        let features = setup.caps().features;
         let format = setup.format();
         let ((width, height), pixels) = setup
             .draw_and_readback()
-            .unwrap_or_else(|why| panic!("the {name} frame renders on {path:?}: {why}"));
+            .unwrap_or_else(|why| panic!("the {name} frame renders: {why}"));
         setup.finish();
-
-        assert_eq!((width, height), EXTENT, "{path:?} drew a different extent");
+        assert_eq!((width, height), EXTENT);
         frames.push((
-            path,
+            features,
             Image::from_readback(width, height, &pixels, channel_order(format))
                 .expect("the readback is exactly one image"),
         ));
     }
+    eprintln!(
+        "crcbl render e2e: {name} device feature requests negotiated {} — no forward geometry-path comparison",
+        if frames[0].0 == frames[1].0 {
+            "identical features (no device variation)"
+        } else {
+            "different features"
+        }
+    );
+    compare_scene_frames(
+        scene,
+        name,
+        min_colors,
+        inspect,
+        ClaimFrame::TheOneTheGoldenIs,
+        "mesh features requested",
+        &frames[0].1,
+        "mesh features omitted",
+        &frames[1].1,
+        None,
+    );
+}
 
-    let adapter_offers_mesh = adapter_offers_mesh.expect("both arms opened a device");
-    let (best_path, best) = &frames[0];
-    let (lesser_path, lesser) = &frames[1];
-
-    // **The anti-vacuity claim, and it is two claims.** Two blank frames match
-    // perfectly, so the frame has to hold the scene before comparing it means
-    // anything — that is `min_colors` and `inspect`, the same pair the golden
-    // test uses. And two frames drawn by the same code match perfectly too, so
-    // the paths have to actually differ: derived from the adapter rather than
-    // written down, because a backend reporting no mesh shaders is a legitimate
-    // run of this test and a silent one is not.
+fn inspect_scene_frame(
+    scene: Scene,
+    name: &str,
+    min_colors: usize,
+    inspect: fn(&Image),
+    claim: ClaimFrame,
+    best: &Image,
+    path: Option<GeometryPath>,
+) -> usize {
     let colors = best.distinct_colors(min_colors);
     assert!(
         colors >= min_colors,
@@ -6297,20 +6414,42 @@ fn draw_scene_on_every_geometry_path_measuring(
     match claim {
         ClaimFrame::TheOneTheGoldenIs => inspect(best),
         ClaimFrame::ASecondOneUnderTheClamp => {
-            inspect(&a_clamped_frame_of(scene, EXTENT, name));
+            inspect(&a_clamped_frame_on_path(scene, EXTENT, name, path));
         }
     }
-    assert_eq!(
-        best_path != lesser_path,
-        adapter_offers_mesh,
-        "the adapter {} mesh shading and the two arms selected {best_path:?} and \
-         {lesser_path:?} — one of those two facts is wrong, and a self-comparison \
-         that reads as a cross-path one is worse than no test",
-        if adapter_offers_mesh {
-            "reports"
-        } else {
-            "reports no"
-        },
+    colors
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compare_scene_frames(
+    scene: Scene,
+    name: &str,
+    min_colors: usize,
+    inspect: fn(&Image),
+    claim: ClaimFrame,
+    best_path: &str,
+    best: &Image,
+    lesser_path: &str,
+    lesser: &Image,
+    paths: Option<(GeometryPath, GeometryPath)>,
+) {
+    let colors = inspect_scene_frame(
+        scene,
+        name,
+        min_colors,
+        inspect,
+        claim,
+        best,
+        paths.map(|p| p.0),
+    );
+    inspect_scene_frame(
+        scene,
+        name,
+        min_colors,
+        inspect,
+        claim,
+        lesser,
+        paths.map(|p| p.1),
     );
 
     // **Byte equality, except on the one scene that earns a budget.** This is one
@@ -6991,7 +7130,9 @@ fn the_culling_counters_come_back_off_the_gpu_on_this_backend() {
     eprintln!(
         "crcbl render e2e: culling counters on {backend}, {path:?}",
         backend = setup.backend(),
-        path = setup.caps().geometry_path(),
+        path = setup
+            .geometry_path()
+            .unwrap_or_else(|| setup.caps().geometry_path()),
     );
 
     // A frame records the copy and the next frame requests the readback for it,

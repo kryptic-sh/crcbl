@@ -533,6 +533,17 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// [`DeviceCaps::geometry_path`] and its siblings.
     fn caps(&self) -> DeviceCaps;
 
+    /// Preferred path for GPU-generated geometry, within this device's caps.
+    ///
+    /// The capability ceiling is the default. A backend may prefer a cheaper
+    /// supported path when the higher-ranked one requires emulation. This does
+    /// not disable capabilities: callers can still use every advertised verb.
+    /// An indirect-per-batch renderer must write zero instances for empty
+    /// buckets, as that path already requires.
+    fn preferred_geometry_path(&self) -> crate::GeometryPath {
+        self.caps().geometry_path()
+    }
+
     /// Whether this backend performs `capability` on this device, and why not
     /// when it does not.
     ///

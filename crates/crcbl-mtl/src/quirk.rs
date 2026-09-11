@@ -110,6 +110,15 @@ pub(crate) fn check_depth_clamp(
 /// different question from what a *device* can do.
 pub(crate) const MESH_MACOS_MAJOR: i64 = 13;
 
+/// Feature reporting uses the same device/OS gate as pipeline creation.
+pub(crate) fn mesh_features(metal3: bool, os_major: i64) -> Features {
+    if check_mesh_support(metal3, os_major).is_ok() {
+        Features::MESH_SHADER | Features::TASK_SHADER
+    } else {
+        Features::empty()
+    }
+}
+
 /// Whether this device and this OS can build a Metal mesh pipeline at all.
 ///
 /// Two questions, asked separately because they fail for different reasons and
@@ -183,6 +192,51 @@ mod tests {
                 what.contains(expected),
                 "the refusal must name the requirement that failed: {what}"
             );
+        }
+    }
+
+    #[test]
+    fn mesh_and_task_reporting_matches_the_pipeline_gate() {
+        let both = Features::MESH_SHADER | Features::TASK_SHADER;
+        for metal3 in [false, true] {
+            for os_major in [12, 13, 26] {
+                let features = mesh_features(metal3, os_major);
+                let expected = if metal3 && os_major >= 13 {
+                    both
+                } else {
+                    Features::empty()
+                };
+                assert_eq!(features, expected, "Metal3={metal3}, macOS={os_major}");
+                assert_eq!(
+                    features.contains(both),
+                    check_mesh_support(metal3, os_major).is_ok()
+                );
+                for (capability, feature) in [
+                    (crcbl_hal::Capability::MeshShading, Features::MESH_SHADER),
+                    (
+                        crcbl_hal::Capability::TaskShaderStage,
+                        Features::TASK_SHADER,
+                    ),
+                ] {
+                    assert!(crcbl_hal::divergence(capability, BackendKind::Metal).is_none());
+                    let support =
+                        crcbl_hal::Support::granted(features, feature, "hardware/OS gate");
+                    let verdict = crcbl_hal::parity_verdict(
+                        capability,
+                        BackendKind::Metal,
+                        support,
+                        features,
+                    );
+                    assert_eq!(
+                        verdict,
+                        if features.contains(feature) {
+                            crcbl_hal::ParityVerdict::Supported
+                        } else {
+                            crcbl_hal::ParityVerdict::UnprovableHere(feature)
+                        }
+                    );
+                }
+            }
         }
     }
 

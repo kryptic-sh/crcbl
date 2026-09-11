@@ -394,9 +394,9 @@ rasteriser, and quarry's frames here come off an RX 7900 XTX. The engine's own
 goldens are shared across backends with a tolerance, so the mechanism exists;
 whether this content passes it on lavapipe is unmeasured.
 
-**`MeshShading` being `Unwritten` on dx12 and Metal does not block the gate**,
-which is the thing worth writing down. The paths are not one-per-backend: they
-are reached by **subtracting features from a single capable adapter**.
+**`MeshShading` being `Unwritten` on dx12 does not block the gate**, which is
+the thing worth writing down. The paths are not one-per-backend: they are
+reached by **subtracting features from a single capable adapter**.
 `crates/crcbl/tests/render_e2e.rs` does exactly that, and it passes here on an
 RX 7900 XTX — eleven `..._draws_the_same_frame_on_every_geometry_path` tests,
 with the harness printing

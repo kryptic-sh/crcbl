@@ -1493,6 +1493,18 @@ SamplerState base_color_sampler;
 /// What that costs is one page fetch on a surface with no base-colour texture.
 /// What it buys is that the module parses at all in the browser, which is the
 /// same trade `shading_normal_of`'s derivatives make one step earlier.
+///
+/// # `mro_texel` and `emissive_texel` early-return, and this one does not
+///
+/// Those two helpers take their UV derivatives before the page test and sample
+/// through `SampleGrad` inside it, so a row naming no page costs no fetch. This
+/// helper cannot take that shape: **explicit gradients lose anisotropic
+/// filtering on lavapipe**, and the base-colour page is the one `tiling_e2e`'s
+/// grazing floor is measured through — its far-floor contrast reads 8.0 at 8×
+/// against 8.0 at 1× with `SampleGrad`, where the gate wants at least 30 and
+/// twice the control, while Metal is unaffected (70.0 against 7.0). So the
+/// base-colour fetch stays implicit and unconditional, and the *select* below
+/// discards the texel of a row that names no page.
 float4 base_color_texel(GpuMaterial material, float2 uv)
 {
     uint layer = base_color_layer(material);
@@ -1885,12 +1897,17 @@ Texture2DArray<float4> emissive_textures;
 /// The packed occlusion, roughness and metallic a material row samples at `uv`,
 /// or the multiplicative identity when the row names no such page.
 ///
-/// **`base_color_texel`'s shape exactly, and for its reason**: the branch is on
-/// the *index* and the `Sample` is unconditional at this function's top level,
-/// because WGSL's uniformity analysis reports the fragment's material id as
-/// possibly non-uniform and an implicit-LOD sample is legal only in uniform
-/// control flow. The *select* below the fetch is what discards the texel. A page
-/// always has at least one layer, so the substituted index is in range.
+/// # Derivatives before the branch, explicit gradients inside it
+///
+/// WGSL treats the fragment's material id as possibly non-uniform, so an
+/// implicit-LOD `Sample` inside the page test is invalid. Take `ddx` and `ddy`
+/// in uniform control flow before the early return, then pass them to
+/// `SampleGrad`, as `shading_normal_of` does. A row naming no page returns the
+/// identity without fetching layer zero.
+///
+/// **`base_color_texel` keeps the unconditional `Sample`** and this helper does
+/// not; the difference is the anisotropy that page is measured for, and its own
+/// header is where that is written down.
 ///
 /// `float4(1, 1, 1, 1)` for the unnamed case, which is the identity of all three
 /// products the shading makes out of this texel — the occlusion on the indirect
@@ -1898,11 +1915,15 @@ Texture2DArray<float4> emissive_textures;
 /// shades bit for bit as it did before this page existed.
 float4 mro_texel(GpuMaterial material, float2 uv)
 {
+    float2 duvdx = ddx(uv);
+    float2 duvdy = ddy(uv);
     uint layer = mro_layer(material);
-    bool named = layer != NO_PAGE;
-    float4 texel = mro_textures.Sample(
-        base_color_sampler, float3(uv, float(named ? layer : 0u)));
-    return named ? texel : float4(1.0, 1.0, 1.0, 1.0);
+    if (layer == NO_PAGE)
+    {
+        return float4(1.0, 1.0, 1.0, 1.0);
+    }
+    return mro_textures.SampleGrad(
+        base_color_sampler, float3(uv, float(layer)), duvdx, duvdy);
 }
 
 /// The emissive texel a material row samples at `uv`, or the multiplicative
@@ -1913,11 +1934,15 @@ float4 mro_texel(GpuMaterial material, float2 uv)
 /// the sampler decoded it, which is the space `emissive_of(material)` is in.
 float4 emissive_texel(GpuMaterial material, float2 uv)
 {
+    float2 duvdx = ddx(uv);
+    float2 duvdy = ddy(uv);
     uint layer = emissive_layer(material);
-    bool named = layer != NO_PAGE;
-    float4 texel = emissive_textures.Sample(
-        base_color_sampler, float3(uv, float(named ? layer : 0u)));
-    return named ? texel : float4(1.0, 1.0, 1.0, 1.0);
+    if (layer == NO_PAGE)
+    {
+        return float4(1.0, 1.0, 1.0, 1.0);
+    }
+    return emissive_textures.SampleGrad(
+        base_color_sampler, float3(uv, float(layer)), duvdx, duvdy);
 }
 
 /// This surface's metalness: the row's `metallic` factor times the packed
@@ -1988,12 +2013,22 @@ float3x3 normal_basis(float3x3 basis)
                     cross(basis[0], basis[1]));
 }
 
+// Slang 2026.14 splits numeric semantic indices in raster MSL, but keeps
+// them in mesh MSL. Unindexed names link both stages. Keep the original
+// semantics for SPIR-V, WGSL and DXIL. Match this definition and the names
+// in mesh.slang and mesh_cluster.slang; each manifest source is standalone.
+#if defined(CRCBL_TARGET_MSL)
+#define CRCBL_MESH_SEMANTIC(original, metal_name) metal_name
+#else
+#define CRCBL_MESH_SEMANTIC(original, metal_name) original
+#endif
+
 struct VertexOutput
 {
     float4 position : SV_Position;
-    float3 world_position : POSITION0;
-    float3 world_normal : NORMAL0;
-    float4 color : COLOR0;
+    float3 world_position : CRCBL_MESH_SEMANTIC(POSITION0, CRCBL_WORLD_POSITION);
+    float3 world_normal : CRCBL_MESH_SEMANTIC(NORMAL0, CRCBL_WORLD_NORMAL);
+    float4 color : CRCBL_MESH_SEMANTIC(COLOR0, CRCBL_COLOR);
     /// This primitive's material row, straight off `GpuInstance::material`.
     ///
     /// # `nointerpolation`, and why it is the whole of this varying's risk
@@ -2018,11 +2053,11 @@ struct VertexOutput
     /// subtle: `crates/crcbl/tests/golden/cube.png` draws its two instances in
     /// unlike colour families, so a fragment that resolved the wrong row is a
     /// smear between them and not a shade of the right answer.
-    nointerpolation uint material : TEXCOORD0;
+    nointerpolation uint material : CRCBL_MESH_SEMANTIC(TEXCOORD0, CRCBL_MATERIAL);
     /// This fragment's base-colour texture coordinates, straight off the
     /// vertex. Interpolated, unlike `material` above: a UV *is* a quantity, and
     /// the point of it is to vary across the primitive.
-    float2 uv : TEXCOORD1;
+    float2 uv : CRCBL_MESH_SEMANTIC(TEXCOORD1, CRCBL_UV);
     /// This vertex's clip position — the same value as `position` above,
     /// carried as an ordinary interpolant so the fragment stage can divide it
     /// itself.
@@ -2037,14 +2072,14 @@ struct VertexOutput
     /// performed at the corners and interpolated across the primitive names the
     /// screen position of a point that is not this fragment — and the
     /// subtraction below would then be wrong everywhere except at the corners.
-    float4 clip_position : TEXCOORD2;
+    float4 clip_position : CRCBL_MESH_SEMANTIC(TEXCOORD2, CRCBL_CLIP_POSITION);
     /// Where this vertex was last frame, in last frame's clip space:
     /// `FrameUniforms::previous_view_proj` applied to
     /// `GpuInstance::previous_transform`.
     ///
     /// Undivided, on `clip_position`'s terms. `motion_vector` below is what
     /// subtracts the two, and it is the only reader of either.
-    float4 previous_clip_position : TEXCOORD3;
+    float4 previous_clip_position : CRCBL_MESH_SEMANTIC(TEXCOORD3, CRCBL_PREVIOUS_CLIP_POSITION);
     /// This vertex's surface tangent in world space — the QTangent's tangent
     /// through the instance transform's **bare 3×3**.
     ///
@@ -2062,7 +2097,7 @@ struct VertexOutput
     /// applies for the same reason. Read only where `FRAME_AUTHORED_TANGENTS`
     /// is set; a mesh without it carries `orthonormal_basis`' stand-in here,
     /// which is a direction the UV parameterisation never agreed to.
-    float3 world_tangent : TEXCOORD4;
+    float3 world_tangent : CRCBL_MESH_SEMANTIC(TEXCOORD4, CRCBL_WORLD_TANGENT);
     /// Which frame this primitive's normal map is sampled in, and which way its
     /// bitangent points: `FRAME_AUTHORED_TANGENTS` and `FRAME_LEFT_HANDED`.
     ///
@@ -2074,7 +2109,7 @@ struct VertexOutput
     /// triangle that straddles it. The provoking vertex's frame is the one the
     /// whole primitive is shaded in, which is the same reading that makes the
     /// mesh flag meaningful at all: a mesh either shipped tangents or did not.
-    nointerpolation uint frame : TEXCOORD5;
+    nointerpolation uint frame : CRCBL_MESH_SEMANTIC(TEXCOORD5, CRCBL_FRAME);
 };
 
 /// `VertexOutput::frame` bit 0: this primitive's mesh carries authored
@@ -5517,9 +5552,9 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // indirect terms. Resolved here rather than beside the base colour above so
     // that a fragment the cutout removed and every debug view that returned
     // early pay no fetch for it — the control flow at this point is uniform,
-    // which is what `mro_texel`'s unconditional `Sample` needs, because every
-    // early return above is on `frame.ambient.w` and `discard` is not a branch
-    // the analysis follows.
+    // which is what `mro_texel`'s UV derivatives need, because every early
+    // return above is on `frame.ambient.w` and `discard` is not a branch the
+    // analysis follows.
     //
     // **A row naming no page gets `float4(1, 1, 1, 1)`** — see `mro_texel` —
     // so every product below is the factor it was before this page existed.
@@ -5528,10 +5563,9 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // §2's emissive page, sampled here beside the packed one and read at the
     // very bottom of this stage. **Here rather than there, and that is the
     // uniformity rule again**: the light loop below runs a per-froxel count, so
-    // a `Sample` written after it would sit past a non-uniform loop and WGSL
-    // would refuse the module — the same analysis `mro_texel`'s own declaration
-    // carries the scar of. One `float4` held across the accumulation is what it
-    // costs.
+    // the helper's UV derivatives must be taken before that non-uniform loop.
+    // The page fetch itself uses `SampleGrad` and can branch on the page index.
+    // One `float4` held across the accumulation is what it costs.
     float4 emitted = emissive_texel(material, uv);
 
     // The row's two shading factors **times the page's own two channels**,

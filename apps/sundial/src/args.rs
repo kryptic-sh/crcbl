@@ -156,13 +156,11 @@ OPTIONS:
                          penumbra ladder is read at) or 'free' (fly it with
                          WASD, Space/Shift and the arrow keys). Default: fixed.
                          ENTER on the pause menu's CAMERA row cycles them.
-    --force-geometry <P> Hold the geometry path at 'mesh-shader',
-                         'indirect-count' or 'indirect-per-batch' by opening a
-                         device without the features that select a better one.
-                         Default: whatever this device selects.
-    --force-binding <B>  Hold the binding model at 'bindless' or 'array-pages',
-                         on --force-geometry's terms. 'array-pages' is what
-                         every browser and every Apple device runs.
+    --force-geometry <P> Require 'mesh-shader', 'indirect-count' or
+                         'indirect-per-batch'; unsupported paths fail startup.
+                         Default: this device's preferred geometry path.
+    --force-binding <B>  Request a 'bindless' or 'array-pages' capability ceiling.
+                         This forward renderer always uses array-pages.
     --no-shadows         Draw with no shadows at all. Every surface is lit, which
                          is the control every claim this fixture makes is read
                          against.

@@ -3,6 +3,179 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## The Metal frame is CPU-bound, and the next perf target is the bind path (2026-09-11)
+
+A fresh profile on the M3 Pro,
+`lantern --headless --backend mtl --frames 400 --size 1280x720 --fps 0 --no-debug-overlay`,
+with validation off:
+
+- **Metal System Trace puts the whole-frame GPU interval at 463.13 ms across the
+  400-frame run — 1.16 ms a frame**, while the same workload's wall clock is
+  3.9-6.9 ms a frame. The run is not GPU-bound at 720p, and that is the
+  consistency check on the mro/emissive win: 0.7-1.8% of elapsed time bought by
+  a fifth of the frame is the right order of magnitude.
+- **`sample` over eight seconds** puts the CPU where the allocation is:
+  `libsystem_malloc` 33.1%, our own code 24.7%, `libobjc` 13.5%,
+  `libsystem_platform` (memmove/memset) 10.4%, the Metal driver 12.0%. The
+  largest single leaf is `_xzm_free`, and `RawVec::finish_grow` — `Vec` growth —
+  is ~5%.
+- **The hottest `crcbl-mtl` code is the bind path.**
+  `command::MetalCommandEncoder::close_open` is 76 samples, of which
+  `binding::apply` is 44 and the `BindCache` work under `BindingMask::issue` is
+  most of the rest, with a `reserve` → `finish_grow` → `realloc` underneath
+  `BindCache::buffer_changed`.
+
+Why it allocates: `BindCache` is **per encoder** — `RenderReplay` and the
+compute encoder each hold a `BindCache::default()` and `reset()` it (a `clear`,
+so the capacity survives) when the encoder ends. `entry` grows a table with
+`resize_with(slot + 1, …)` whenever `slot >= table.len()`, so after a reset the
+first bind at each slot refills the table it just cleared, and a fresh encoder
+allocates all of them again. Sizing the tables from the pipeline layout —
+`plan_layout` already refuses a layout whose sets overrun `Table::capacity` — or
+keeping them across encoders would take the `realloc` out of every pass.
+
+Nothing has been changed; this is the profile the next slice starts from.
+
+## F11 never reaches a macOS application, so no sample's mode key works here (2026-09-11)
+
+`appkit::keys` maps `0x67` to `KeyCode::F11` and every sample binds that to its
+display-mode toggle, but the key does not arrive. Posted at the window server
+through `CGEventPost` from `crates/crcbl-shell`'s session harness, F11 produced
+`PointerFocus` and no `Key` event on every attempt, while `A`, `ArrowUp` and
+`F1` — the last through the same function-key path — all arrived in the same
+run. That is macOS taking the key for its own shortcut (F11 is Show Desktop in
+Mission Control's defaults) **ahead of the application**, so a player's press
+goes the same way: on this platform the samples' mode key is reachable only with
+`Fn`, or after the system shortcut is turned off.
+
+Nothing in the tree can fix that from the seam's side, which is why the
+sample-level F11 pass is not merely unwritten —
+`crates/crcbl-shell/tests/appkit_session.rs` says so where a reader of the
+harness will meet it, and this entry is the record. The decision it needs is the
+samples': rebind the mode toggle on macOS, accept `Fn`+F11 and document it, or
+leave it and let the Linux suites carry the pass — the engine half, turning the
+key into a display-mode request, is shared code those suites already assert by
+pressing F11 at a running `sandbox`.
+
+## Presentation pacing cannot be measured offscreen, and that is now measured (2026-09-11)
+
+The drawable/present path runs on the detached `CAMetalLayer`, so "presentation
+needs a drawable" is answered — the test is in `ci.yml`'s `mtl hardware e2e` job
+now. **Pacing does not follow from it**, and that is measured rather than
+argued: `MTLDrawable::presentedTime` came back **0 for every present**, five of
+five, in `a_layer_swapchain_acquires_a_drawable_and_presents_it`. A layer that
+is never on screen has its drawables _skipped_; the handler still fires, which
+is the seam's guarantee that the numbered present is no longer waiting, but it
+carries no time. Apple documents the zero for a drawable that "has not been
+presented or has been skipped".
+
+So pacing needs a window on a real display, or a hosted window server, and then
+two things: `swapchain.rs`'s present handler reading `presentedTime`, which is
+`objc2-metal`'s `objc2-core-foundation` feature — one flag on a dependency
+`crcbl-mtl` already has for `CGSize`, and one line in the lockfile, both tried
+and reverted with this probe — and somewhere for the number to go, because the
+present ledger carries an id and no timestamp, so a caller asks by a HAL method
+that does not exist yet. Nothing in the tree wants one while every run is
+offscreen.
+
+## The viewer's shelf fetch can fail the whole Linux leg before a test runs (2026-09-11)
+
+`tools/fetch-shelf.sh` is step 7 of `ci.yml`'s `test (linux)`, and it is a 138
+MB download from `raw.githubusercontent.com`. On run 34589658129 it lost two
+files to `curl: (35) Recv failure: Connection reset by peer` —
+`Avocado/glTF/Avocado_roughnessMetallic.png` and
+`SciFiHelmet/glTF/SciFiHelmet.gltf` — reported "2 file(s) are missing or do not
+match", and failed the job 17 seconds in, before `cargo nextest` had run. So a
+network reset reads on a pull request as a red Linux leg with no failing test,
+and the step's own log is the only place that says so.
+
+The pin is not the problem: the same paths answered HTTP 200 minutes later, and
+the job passed on the preceding commit. What is worth knowing is that this
+failure mode is the fetch step's and nothing to do with the diff — and that
+`--check` cannot tell you locally, because a machine that has never fetched the
+shelf reports every file missing rather than the two.
+
+## The base-colour page fetch skip is still owed (2026-09-11)
+
+`3ecad8c4` made `mesh.slang`'s material helpers return before fetching a page a
+material does not have, taking `ddx`/`ddy` in uniform control flow and sampling
+with `SampleGrad` inside the branch. It measured 0.7-1.1% lower elapsed time at
+720p/1080p and was reverted in `16f48813`, because **explicit gradients lose
+anisotropic filtering on lavapipe**: `tiling_e2e`'s grazing floor draws contrast
+8.0 at 8x against 8.0 at 1x, where the gate wants at least 30 and twice the
+control. Metal is unaffected (70.0 against 7.0).
+
+**The packed and emissive halves of it shipped on 2026-09-11** — `mro_texel` and
+`emissive_texel` take their derivatives before the page test and sample with
+`SampleGrad` inside it, measured at 0.7-1.8% across sandbox, sundial and
+lantern; `docs/notes/metal-material-sampling.md` is the record. What remains is
+the **base-colour** page, which is the one that gate measures and therefore
+keeps the unconditional implicit `Sample`.
+
+It comes back only by showing the lavapipe loss is a driver defect rather than a
+consequence of the shader, or by a formulation that keeps an implicit `Sample`
+on that page while still skipping the fetch. Any `mesh.slang` edit needs every
+artifact regenerated (Slang 2026.14, DXC 1.9, SPIRV-Tools 2026.1); `dxc` is
+Linux-only, so a diagnostic Linux workflow is the route — the fork's
+`shader-regen` branch is the one this slice used.
+
+## The shard browser job can time out its own gameplay waits (2026-09-11)
+
+`pages.yml`'s `render shard in a real browser` failed once on PR #18 with two
+`until()` waits unanswered — a foe's ability never landed damage, and a reload
+did not match the save's beat — after 72 minutes, while its retry passed in 70
+and every browser pixel-golden job passed on all three platforms. The change
+under test touched nothing in `apps/shard` or `web/`, and the step carries no
+timeout of its own, so a slow runner is the likely shape.
+
+**Checked 2026-09-11: the waits do carry a per-check budget already.** `until`'s
+default deadline is `pollCeiling()` in `web/tools/browser-e2e.mjs`, which is
+`TIMEOUT_MS` of the demo's own time bounded by `POLL_WALL_CAP_MS` — five minutes
+of wall clock per poll, from `e7720a72` and scaled by `33d29a0a`, both predating
+this failure. Both failing checks are plain `until` calls, so each gave up after
+its own five minutes and failed with its own readings; the 72 minutes is the
+whole shard run on a slow runner, not one wait. What is unexplained is why a
+runner slow enough to miss them passed on retry, and that wants a reproduction
+on the runner rather than a change to the budgets — this entry's earlier
+suggestion of a per-check budget is already what the file does.
+
+## Native presentation is covered at the seam and not in the window (2026-09-11)
+
+The swapchain's drawable path now runs on every push. `ci.yml`'s
+`mtl hardware e2e` job was excluding
+`a_layer_swapchain_acquires_a_drawable_and_presents_it` on the claim that a
+hosted runner's detached `CAMetalLayer` vends no drawable; the layer is never in
+a window, so what it needs is a live window server, and the runner had one — the
+test passed the first time it was asked (run 34580854730). A second test drives
+a real drawable across three `reconfigure_swapchain` calls and an out-of-band
+`setDrawableSize:`, which is what a resize, a Retina scale change and a
+fullscreen-shaped extent are at this seam, and asserts the extent comes off the
+texture rather than the descriptor.
+
+What is still nobody's claim is the **window** half of the native-presentation
+item the Metal iteration left open: the sample-level F11 pass — which the entry
+at the top of this file now shows is blocked on macOS rather than unwritten —
+`injection_skipped`, drag and drop and the pasteboard prompt as the samples
+reach them. `Borderless { monitor: Some(..) }` closed on 2026-09-11 — the
+session creates a window naming an attached monitor and asserts it covers that
+screen, and asserts an unattached id is refused with `NoSuchMonitor` rather than
+landing on the primary. That refusal is what makes the lookup observable on a
+one-display machine, and the session runs locally in about a third of a second,
+so the window half is no longer CI-only. There is no fullscreen transition left
+to cover: `crates/crcbl-shell/src/appkit` drops Spaces fullscreen and makes
+borderless a frameless window at screen size. The rest lives in
+`crates/crcbl-shell/tests/appkit_session.rs`, which reads the first responder,
+the dragged types, the style mask, the frame, the screen and the backing scale
+off `NSWindow` and does a pasteboard round trip against `pbcopy`/`pbpaste`. That
+target is `harness = false`, activates the application and injects input, so a
+run holds the desktop for the length of the session.
+
+**Pacing is unmeasured against the engine's own loop.** `crcbl`'s `FramePacer`
+paces on presents and reports `elapsed_nanos`; the detached layer can supply a
+presented sequence, but no test drives the loop against one. Measuring it wants
+a frame loop over the seam's acquire/present/wait with a real clock, and this
+slice did not build one.
+
 ## What specular antialiasing shipped without (2026-09-05)
 
 The record behind this — the argument, the options and the measurements — is in
@@ -11742,13 +11915,6 @@ are in docs/notes/backends.md.
   construction and not by observation.** The runner has one display, so a
   backend that ignored the named monitor entirely would pass every assertion.
   Needs a two-display machine.
-- **A window created borderless is untested.** The session creates its window
-  windowed and flips; `create_native_window`'s borderless arm (placing the
-  window with `initWithContentRect:` rather than `setFrame:display:`) has never
-  run, and the presentation options are applied by `refresh_presentation` on the
-  first `set_mode`, not at creation — whether that ordering matters for a window
-  born borderless has not been measured. Re-read the ordering rule in
-  `appkit::window`'s module docs before adding a test here.
 - **`injection_skipped` is written and unrun**, because the runner granted
   activation. It stays for the case that produced it — a developer running this
   as a background process on their own machine — and prints the `Activation`

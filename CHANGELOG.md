@@ -1410,6 +1410,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A material that names no packed or emissive page no longer fetches one.**
+  `mesh.slang`'s `mro_texel` and `emissive_texel` take their UV derivatives
+  before the page test and return the identity without sampling when the row
+  names no page, so both the forward fragment stage and the reflective shadow
+  map skip a fetch on every untextured surface. The base-colour helper
+  deliberately keeps its unconditional implicit `Sample`, because explicit
+  gradients lose anisotropic filtering on lavapipe and `tiling_e2e`'s grazing
+  floor is measured through that page. Measured offscreen on an M3 Pro over four
+  order-alternating pairs per workload at 720p and 1080p: 24 pairs, the after
+  build faster in every one, median elapsed time 0.7-1.8% lower on sandbox,
+  sundial and lantern. This is the half of `3ecad8c4` — 0.7-1.1% as a whole —
+  that does not move the tiling gate; the full change stays reverted.
+
 - **towers' command frame is four bytes and its protocol version is 2.**
   `PlaceTower` now names the kind to build and `UpgradeTower` travels beside it,
   so the sealed intent grew from two bytes to four — a breaking wire change, and
@@ -13973,5 +13986,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   every platform. Parsing went through `std::path::Path`, whose separators are
   the host's, so `a\b` was refused on Linux and quietly rewritten to `a/b` on
   Windows.
+
+### Changed
+
+- **Metal reports mesh and task shading on Metal 3 devices.** `crcbl-mtl`'s
+  adapter now reports `Features::MESH_SHADER | Features::TASK_SHADER` off the
+  same `supportsFamily:MTLGPUFamilyMetal3` + macOS 13 gate that
+  `create_mesh_pipeline` applies, `Device::supports` answers `Yes` for both
+  capabilities on such a device, and the two `Unrun` parity rows for Metal are
+  retired. A device without them takes `NotOnThisDevice`, which is what hosted
+  Paravirtual CI still answers. The unforced geometry tail stays
+  `IndirectPerBatch`: paired 720p/1080p runs on an M3 Pro put the mesh tail no
+  faster than per-batch, and the samples' `--force-geometry mesh-shader` still
+  selects it exactly. See `docs/notes/metal-geometry-preference.md`.
+
+### Fixed
+
+- **A window created borderless keeps the client area it asked for when it goes
+  windowed.** `WindowDesc::size` is a client area and is handed to
+  `initWithContentRect:` at creation, but the return from borderless for a
+  window that had never been windowed used it as a `setFrame:` rectangle, so the
+  title bar came out of the content — a 640x448 client area where 640x480 was
+  asked for. The frame is now converted for the windowed mask with
+  `+[NSWindow frameRectForContentRect:styleMask:]`.
 
 [Unreleased]: https://github.com/kryptic-sh/crcbl/commits/main

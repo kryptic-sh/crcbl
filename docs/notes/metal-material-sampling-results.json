@@ -1,0 +1,211 @@
+{
+  "date": "2026-09-11",
+  "device": "Apple M3 Pro (18 GPU cores), macOS 26.5.2",
+  "rust": "1.97.0",
+  "profile": "release",
+  "backend": "mtl offscreen, IndirectPerBatch",
+  "validation": "disabled for timing (MTL_DEBUG_LAYER=0 MTL_SHADER_VALIDATION=0)",
+  "tracing": "CRCBL_TRACE=1",
+  "clock": "/usr/bin/time -p real, whole process",
+  "note": "One warmup run per workload precedes round 1; round 1 still shows a first-run effect on the before binary for three workloads, so medians are reported both with and without it.",
+  "binaries": {
+    "before": {
+      "sandbox": "7d4a7b7166f1cccbd4a5e2e7817407b3afb3403e5f897561606030af038a0901",
+      "lantern": "7caa26c1bbbaf7a896294aac5a46b317a63e9d1af88102fbd538a121940142f9",
+      "sundial": "788ba8c06e4bd062034b9b078b0452df742c90d63c67f68ce834056b7b058008"
+    },
+    "after": {
+      "sandbox": "0c061fe8d639fc2a5c1d2fa85c57c40e4be208fac51406dc66637ce5ee37e66a",
+      "lantern": "eeaf6019c4a1d756d776f9a82f5711b21476599189acd64d44d710a9a13272a7",
+      "sundial": "fe7e79350d86e86a5341aa2f6bea93473e4a0258946627d2b52f2716f0a65aeb"
+    }
+  },
+  "workloads": [
+    {
+      "app": "sandbox",
+      "viewport": "1280x720",
+      "frames": 2400,
+      "pairs": [
+        {
+          "round": 1,
+          "order": "before-first",
+          "before": 7.13,
+          "after": 4.77
+        },
+        {
+          "round": 2,
+          "order": "after-first",
+          "before": 4.8,
+          "after": 4.76
+        },
+        {
+          "round": 3,
+          "order": "before-first",
+          "before": 4.8,
+          "after": 4.77
+        },
+        {
+          "round": 4,
+          "order": "after-first",
+          "before": 4.8,
+          "after": 4.76
+        }
+      ]
+    },
+    {
+      "app": "sandbox",
+      "viewport": "1920x1080",
+      "frames": 2400,
+      "pairs": [
+        {
+          "round": 1,
+          "order": "before-first",
+          "before": 9.43,
+          "after": 9.34
+        },
+        {
+          "round": 2,
+          "order": "after-first",
+          "before": 9.43,
+          "after": 9.35
+        },
+        {
+          "round": 3,
+          "order": "before-first",
+          "before": 9.42,
+          "after": 9.35
+        },
+        {
+          "round": 4,
+          "order": "after-first",
+          "before": 9.42,
+          "after": 9.35
+        }
+      ]
+    },
+    {
+      "app": "sundial",
+      "viewport": "1280x720",
+      "frames": 2400,
+      "pairs": [
+        {
+          "round": 1,
+          "order": "before-first",
+          "before": 6.97,
+          "after": 6.34
+        },
+        {
+          "round": 2,
+          "order": "after-first",
+          "before": 6.4,
+          "after": 6.34
+        },
+        {
+          "round": 3,
+          "order": "before-first",
+          "before": 6.42,
+          "after": 6.34
+        },
+        {
+          "round": 4,
+          "order": "after-first",
+          "before": 6.61,
+          "after": 6.34
+        }
+      ]
+    },
+    {
+      "app": "sundial",
+      "viewport": "1920x1080",
+      "frames": 2400,
+      "pairs": [
+        {
+          "round": 1,
+          "order": "before-first",
+          "before": 13.7,
+          "after": 13.59
+        },
+        {
+          "round": 2,
+          "order": "after-first",
+          "before": 13.53,
+          "after": 13.37
+        },
+        {
+          "round": 3,
+          "order": "before-first",
+          "before": 13.53,
+          "after": 13.36
+        },
+        {
+          "round": 4,
+          "order": "after-first",
+          "before": 13.58,
+          "after": 13.38
+        }
+      ]
+    },
+    {
+      "app": "lantern",
+      "viewport": "1280x720",
+      "frames": 1200,
+      "pairs": [
+        {
+          "round": 1,
+          "order": "before-first",
+          "before": 5.51,
+          "after": 4.71
+        },
+        {
+          "round": 2,
+          "order": "after-first",
+          "before": 4.76,
+          "after": 4.71
+        },
+        {
+          "round": 3,
+          "order": "before-first",
+          "before": 4.77,
+          "after": 4.72
+        },
+        {
+          "round": 4,
+          "order": "after-first",
+          "before": 4.76,
+          "after": 4.72
+        }
+      ]
+    },
+    {
+      "app": "lantern",
+      "viewport": "1920x1080",
+      "frames": 1200,
+      "pairs": [
+        {
+          "round": 1,
+          "order": "before-first",
+          "before": 9.1,
+          "after": 8.97
+        },
+        {
+          "round": 2,
+          "order": "after-first",
+          "before": 9.11,
+          "after": 8.95
+        },
+        {
+          "round": 3,
+          "order": "before-first",
+          "before": 9.13,
+          "after": 8.95
+        },
+        {
+          "round": 4,
+          "order": "after-first",
+          "before": 9.1,
+          "after": 8.98
+        }
+      ]
+    }
+  ]
+}

@@ -248,30 +248,36 @@ pub(crate) fn selected_level(
     drew.first().copied()
 }
 
+/// Builds the uniform-cut renderer, including fresh renderers used by comparisons.
+fn uniform_renderer(headless: &Headless) -> ForwardRenderer {
+    let renderer = ForwardRenderer::with_scene_on_path(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+        &crcbl::render::scene::demo(),
+        GeometryPath::IndirectPerBatch,
+    )
+    .expect("the raster forward renderer builds");
+    assert_eq!(
+        renderer.geometry_path(),
+        GeometryPath::IndirectPerBatch,
+        "this suite needs the uniform cut, whose selected level a bucket reports"
+    );
+    renderer
+}
+
 /// Opens a device that takes the patch through a **uniform** cut, with the cube
 /// and the dunes patch already in the frame.
 ///
-/// The features asked for are `GPU_DRIVEN` and nothing more. On the three
-/// backends with no mesh stage that is simply what they have; on Vulkan it is a
-/// subtraction, and the assertion below is what says the subtraction landed —
-/// without it, an adapter reporting `VK_EXT_mesh_shader` would take the
-/// per-cluster path and every bucket here would stay at zero.
+/// The renderer explicitly selects the per-batch indirect path so each bucket
+/// reports a whole-instance level even when the device supports mesh stages.
 fn uniform_scene() -> (Headless, ForwardRenderer, TransientPool) {
     let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
-    assert_ne!(
-        headless.device.caps().geometry_path(),
-        GeometryPath::MeshShader,
-        "this suite needs the uniform cut, whose selected level a bucket reports. \
-         The mesh-stage features were withheld and this device selected the mesh path \
-         anyway"
-    );
-    let mut renderer =
-        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
-            .expect("the forward renderer builds");
+    let mut renderer = uniform_renderer(&headless);
     place_cube(&mut renderer);
     assert!(
         renderer.selects_levels(),
-        "a device with no mesh stage takes the patch through a uniform cut"
+        "the raster path takes the patch through a uniform cut"
     );
     place_dunes(&mut renderer);
     (headless, renderer, TransientPool::new())
@@ -419,13 +425,11 @@ fn a_scaled_instance_of_the_patch_selects_a_finer_level() {
     // The same scene one instance apart: the cube first, this suite's
     // insertion-order convention, then the patch at four times its authored
     // size.
-    let mut stretched =
-        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
-            .expect("the forward renderer builds");
+    let mut stretched = uniform_renderer(&headless);
     place_cube(&mut stretched);
     assert!(
         stretched.selects_levels(),
-        "a device with no mesh stage takes the patch through a uniform cut"
+        "the raster path takes the patch through a uniform cut"
     );
     place(
         &mut stretched,
@@ -599,9 +603,7 @@ fn a_camera_drifting_across_a_level_boundary_stops_flickering() {
         .collect();
 
     let mut walk = |hold_ratio: f32, path: &[f32]| -> (Vec<usize>, usize) {
-        let mut renderer =
-            ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
-                .expect("the forward renderer builds");
+        let mut renderer = uniform_renderer(&headless);
         place_cube(&mut renderer);
         assert!(renderer.selects_levels());
         place_dunes(&mut renderer);

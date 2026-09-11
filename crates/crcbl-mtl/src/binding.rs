@@ -712,6 +712,13 @@ pub(crate) struct BoundBinding {
     pub(crate) resource: BoundResource,
 }
 
+impl BoundBinding {
+    /// The physical Metal argument table this binding writes.
+    pub(crate) fn table(&self) -> Table {
+        self.resource.table()
+    }
+}
+
 impl DeviceInner {
     /// Everything `bind_group` has to tell the render encoder, with the
     /// per-table indices already absolute.
@@ -982,9 +989,8 @@ const fn table_usage(writable: bool) -> MTLResourceUsage {
 ///
 /// `useResource:usage:stages:` takes them because a render encoder declares
 /// residency per stage, where the compute encoder's twin has one stage to
-/// declare for. Only the two this backend's render pipelines have: a stage this
-/// device does not report is one no pipeline here can be built with, which
-/// `BindGroupLayoutDesc::check_entries` refuses at layout creation.
+/// declare for. Task visibility maps to Metal's object stage; mesh visibility
+/// maps to its mesh stage. Layout validation still gates both on device caps.
 const fn render_stages(visibility: ShaderStages) -> MTLRenderStages {
     let mut stages = MTLRenderStages::empty();
     if visibility.contains(ShaderStages::VERTEX) {
@@ -992,6 +998,12 @@ const fn render_stages(visibility: ShaderStages) -> MTLRenderStages {
     }
     if visibility.contains(ShaderStages::FRAGMENT) {
         stages = stages.union(MTLRenderStages::Fragment);
+    }
+    if visibility.contains(ShaderStages::TASK) {
+        stages = stages.union(MTLRenderStages::Object);
+    }
+    if visibility.contains(ShaderStages::MESH) {
+        stages = stages.union(MTLRenderStages::Mesh);
     }
     stages
 }
@@ -1037,6 +1049,8 @@ pub(crate) fn apply(
         let table = binding.resource.table();
         let vertex = binding.visibility.contains(ShaderStages::VERTEX);
         let fragment = binding.visibility.contains(ShaderStages::FRAGMENT);
+        let object = binding.visibility.contains(ShaderStages::TASK);
+        let mesh = binding.visibility.contains(ShaderStages::MESH);
         match &binding.resource {
             BoundResource::Buffer { raw, offset, .. } => {
                 let id = identity(raw);
@@ -1054,6 +1068,20 @@ pub(crate) fn apply(
                     })
                 {
                     unsafe { encoder.setVertexBuffer_offset_atIndex(Some(raw), ns_offset, index) };
+                }
+                if object
+                    && mask.issue(Stage::Object, table, slot, || {
+                        binds.buffer_changed(Stage::Object, slot, id, *offset)
+                    })
+                {
+                    unsafe { encoder.setObjectBuffer_offset_atIndex(Some(raw), ns_offset, index) };
+                }
+                if mesh
+                    && mask.issue(Stage::Mesh, table, slot, || {
+                        binds.buffer_changed(Stage::Mesh, slot, id, *offset)
+                    })
+                {
+                    unsafe { encoder.setMeshBuffer_offset_atIndex(Some(raw), ns_offset, index) };
                 }
                 if fragment
                     && mask.issue(Stage::Fragment, table, slot, || {
@@ -1077,6 +1105,20 @@ pub(crate) fn apply(
                 {
                     unsafe { encoder.setVertexTexture_atIndex(Some(raw), index) };
                 }
+                if object
+                    && mask.issue(Stage::Object, table, slot, || {
+                        binds.texture_changed(Stage::Object, slot, id)
+                    })
+                {
+                    unsafe { encoder.setObjectTexture_atIndex(Some(raw), index) };
+                }
+                if mesh
+                    && mask.issue(Stage::Mesh, table, slot, || {
+                        binds.texture_changed(Stage::Mesh, slot, id)
+                    })
+                {
+                    unsafe { encoder.setMeshTexture_atIndex(Some(raw), index) };
+                }
                 if fragment
                     && mask.issue(Stage::Fragment, table, slot, || {
                         binds.texture_changed(Stage::Fragment, slot, id)
@@ -1094,6 +1136,20 @@ pub(crate) fn apply(
                     })
                 {
                     unsafe { encoder.setVertexSamplerState_atIndex(Some(raw), index) };
+                }
+                if object
+                    && mask.issue(Stage::Object, table, slot, || {
+                        binds.sampler_changed(Stage::Object, slot, id)
+                    })
+                {
+                    unsafe { encoder.setObjectSamplerState_atIndex(Some(raw), index) };
+                }
+                if mesh
+                    && mask.issue(Stage::Mesh, table, slot, || {
+                        binds.sampler_changed(Stage::Mesh, slot, id)
+                    })
+                {
+                    unsafe { encoder.setMeshSamplerState_atIndex(Some(raw), index) };
                 }
                 if fragment
                     && mask.issue(Stage::Fragment, table, slot, || {
@@ -1132,6 +1188,20 @@ pub(crate) fn apply(
                 {
                     unsafe { encoder.setVertexBuffer_offset_atIndex(Some(raw), 0, index) };
                 }
+                if object
+                    && mask.issue(Stage::Object, table, slot, || {
+                        binds.buffer_changed(Stage::Object, slot, id, 0)
+                    })
+                {
+                    unsafe { encoder.setObjectBuffer_offset_atIndex(Some(raw), 0, index) };
+                }
+                if mesh
+                    && mask.issue(Stage::Mesh, table, slot, || {
+                        binds.buffer_changed(Stage::Mesh, slot, id, 0)
+                    })
+                {
+                    unsafe { encoder.setMeshBuffer_offset_atIndex(Some(raw), 0, index) };
+                }
                 if fragment
                     && mask.issue(Stage::Fragment, table, slot, || {
                         binds.buffer_changed(Stage::Fragment, slot, id, 0)
@@ -1150,8 +1220,8 @@ impl MetalDevice {
     /// The seam's own rules come first, from
     /// [`BindGroupLayoutDesc::check_entries`] — including the mesh-stage
     /// visibility check, which is the one rule in this path that reads the
-    /// *device* rather than the descriptor: this backend reports no
-    /// `Features::MESH_SHADER`, so a layout naming the mesh stage is refused
+    /// *device* rather than the descriptor: a device without
+    /// `Features::MESH_SHADER` refuses a layout naming the mesh stage
     /// rather than becoming a set of argument-table slots no pipeline on this
     /// backend could ever read. [`plan_set`] then adds what only Metal refuses.
     ///
@@ -1520,43 +1590,42 @@ mod tests {
     ///
     /// [`plan_set`] is a pure function with no caps to consult, so it cannot
     /// state the rules that read the device — and the mesh-stage refusal is
-    /// the one this backend has nothing else to make: it reports no
-    /// `Features::MESH_SHADER`, and a layout naming the stage would otherwise
-    /// become argument-table slots no pipeline here could ever read.
+    /// controlled by device caps. The test checks acceptance on mesh-capable
+    /// devices and refusal on unsupported devices, including Paravirtual CI.
     ///
     /// **What turns it red.** Deleting the `check_entries` call from
     /// `create_bind_group_layout_impl`: the mesh case is then accepted, because
     /// nothing else in this backend looks at visibility at all.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_seams_own_rules_arrive_through_create_bind_group_layout() {
         let (_instance, device) = open_device();
-        assert!(
-            !device
-                .inner
-                .caps
-                .features
-                .contains(crcbl_hal::Features::MESH_SHADER),
-            "this backend reports no mesh stage; the refusal below would prove nothing otherwise"
-        );
-
-        let mesh = [BindGroupLayoutEntry {
-            visibility: ShaderStages::MESH,
-            ..entry(0, STORAGE, 1)
-        }];
-        let error = device
-            .create_bind_group_layout_impl(&layout(&mesh))
-            .expect_err("a mesh-visible binding on a backend with no mesh stage");
-        assert!(
-            matches!(error, HalError::Unsupported { backend, .. }
-                if backend == crcbl_hal::BackendKind::Metal),
-            "{error:?}"
-        );
-
-        // The same binding visible to a stage this backend does report, so the
-        // refusal is about the stage and not about the entry.
-        device
+        for (stage, feature) in [
+            (ShaderStages::MESH, crcbl_hal::Features::MESH_SHADER),
+            (ShaderStages::TASK, crcbl_hal::Features::TASK_SHADER),
+        ] {
+            let entries = [BindGroupLayoutEntry {
+                visibility: stage,
+                ..entry(0, STORAGE, 1)
+            }];
+            let result = device.create_bind_group_layout_impl(&layout(&entries));
+            if device.inner.caps.features.contains(feature) {
+                device.destroy_bind_group_layout(
+                    result.expect("a reported stage accepts visibility"),
+                );
+            } else {
+                let error = result.expect_err("an unreported stage refuses visibility");
+                assert!(
+                    matches!(error, HalError::Unsupported { backend, .. }
+                    if backend == crcbl_hal::BackendKind::Metal),
+                    "{error:?}"
+                );
+            }
+        }
+        let graphics = device
             .create_bind_group_layout_impl(&layout(&[entry(0, STORAGE, 1)]))
-            .expect("one read-only storage buffer, visible to the graphics stages");
+            .expect("graphics-stage storage binding");
+        device.destroy_bind_group_layout(graphics);
     }
 
     /// The index of a binding in `plan`, by table and position.

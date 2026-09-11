@@ -8,15 +8,13 @@
 //! [`ForwardRenderer::new`]'s demo one, the capability report rule 12 asks for,
 //! and the occlusion chain's own per-pass cost.
 //!
-//! # Forcing a lesser path is done by not asking for a feature
+//! # Exact geometry requests
 //!
-//! `docs/plan/sample/00-samples-overview.md` rule 12: "every sample accepts a
-//! flag forcing a lesser path". There is no switch on the renderer to do it
-//! with, and there should not be — the selectors are computed from what the
-//! *device* has ([`crcbl::hal::DeviceCaps::geometry_path`] and its two
-//! siblings), so the honest way to reach a lesser one is to open a device
-//! without the feature that selects the better one. [`ForcedPaths`] is that, and
-//! [`Paths`] is what says which arm the frame actually took.
+//! Explicit geometry selects the renderer's exact tail and fails if unsupported.
+//! Unforced runs use the device performance preference. Feature subtraction
+//! still applies on backends that negotiate features. Binding forcing is a
+//! capability ceiling; this forward renderer always uses array pages.
+//! [`Paths`] reports the renderer's actual geometry and binding.
 //!
 //! # One view, and the cost of the two that matter
 //!
@@ -80,12 +78,17 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// What the device opened as, beside what the run asked for.
+    /// Actual renderer geometry and array-page binding, beside the request.
     #[must_use]
-    pub const fn of(caps: &DeviceCaps, forced: ForcedPaths, effects: RenderEffects) -> Self {
+    pub const fn of(
+        caps: &DeviceCaps,
+        geometry: GeometryPath,
+        forced: ForcedPaths,
+        effects: RenderEffects,
+    ) -> Self {
         Self {
-            geometry: caps.geometry_path(),
-            binding: caps.binding_model(),
+            geometry,
+            binding: BindingModel::ArrayPages,
             lighting: caps.lighting_path(),
             forced,
             effects,
@@ -297,8 +300,15 @@ impl Gpu {
             crcbl::log::info!("alcove: {report}");
         }
         let scene = court::court();
-        let mut renderer =
-            ForwardRenderer::with_scene(ctx.device(), ctx.queue(), ctx.format(), &scene)?;
+        let mut renderer = ForwardRenderer::with_scene_on_path(
+            ctx.device(),
+            ctx.queue(),
+            ctx.format(),
+            &scene,
+            forced
+                .geometry
+                .unwrap_or_else(|| ctx.device().preferred_geometry_path()),
+        )?;
         let placed = match court::place(&mut renderer) {
             Ok(placed) => placed,
             Err(error) => {
@@ -313,7 +323,12 @@ impl Gpu {
         renderer.set_effect_request(request_for(ctx.video_effects(), effects));
         // Resolved rather than requested: the device clamps last, so what the
         // panel and the summary report has to come back off the renderer.
-        let paths = Paths::of(&caps, forced, renderer.resolved_effects());
+        let paths = Paths::of(
+            &caps,
+            renderer.geometry_path(),
+            forced,
+            renderer.resolved_effects(),
+        );
         crcbl::log::info!(
             "alcove: {:?} / {:?} / {:?}, effects {}",
             paths.geometry,
@@ -690,6 +705,38 @@ impl crcbl::engine::PolledGpu for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_metadata_reports_execution_instead_of_capabilities() {
+        let caps = DeviceCaps {
+            features: crcbl::hal::Features::MESH_SHADER | crcbl::hal::Features::DESCRIPTOR_INDEXING,
+            limits: crcbl::hal::Limits::desktop(),
+        };
+        assert_eq!(caps.geometry_path(), GeometryPath::MeshShader);
+        assert_eq!(caps.binding_model(), BindingModel::Bindless);
+        let paths = Paths::of(
+            &caps,
+            GeometryPath::IndirectPerBatch,
+            ForcedPaths {
+                geometry: Some(GeometryPath::IndirectPerBatch),
+                binding: Some(BindingModel::Bindless),
+            },
+            RenderEffects::DEFAULT_STACK,
+        );
+        assert_eq!(paths.geometry, GeometryPath::IndirectPerBatch);
+        assert_eq!(paths.binding, BindingModel::ArrayPages);
+        use crcbl::ui::{DebugModule, DebugSection};
+        let mut section = DebugSection::new("");
+        paths.debug_section(&mut section);
+        assert_eq!(
+            section.rows()[0].value.to_string(),
+            "IndirectPerBatch (forced)"
+        );
+        assert_eq!(
+            section.rows()[1].value.to_string(),
+            "ArrayPages (requested ceiling: Bindless)"
+        );
+    }
     use crcbl::hal::Features;
 
     /// **An unforced run opens the engine's own bundle**, and forcing a path

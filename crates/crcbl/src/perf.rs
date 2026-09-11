@@ -82,7 +82,9 @@ pub const DRAW_SPAN: &str = "draw";
 pub const PRESENT_SPAN: &str = "present";
 
 /// The swapchain wait inside [`GpuContext::acquire`](crate::engine::GpuContext::acquire):
-/// the closed-loop present wait and the acquire itself.
+/// the closed-loop present wait and the acquire itself, plus waits for old
+/// submissions in `GpuContext::retire_to`. Resource destruction stays counted
+/// as CPU work.
 ///
 /// Waiting, not working: subtracted by [`frame_cpu_time`].
 pub const PRESENT_WAIT_SPAN: &str = "present-wait";

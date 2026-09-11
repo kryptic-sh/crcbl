@@ -6,7 +6,7 @@
 #
 # # Who runs this
 #
-# **CI runs it, on `macos-latest`.** The device that image exposes is an
+# **CI runs it, on `macos-26`.** The device that image exposes is an
 # `Apple Paravirtual device`, and a paravirtual device was long assumed unable
 # to execute a shader — but that was generalised from macos-14, the one hosted
 # image whose `MTLCreateSystemDefaultDevice()` returns nil. macos-15 and
@@ -72,16 +72,21 @@
 #   MTL_DEBUG_LAYER_ERROR_MODE
 #   MTL_DEBUG_LAYER_WARNING_MODE
 #                        What the layer does about a violation: `ignore`,
-#                        `assert`, `abort` or `nslog`. Both default to `abort`
-#                        here, and the warning one is not an oversight —
-#                        `crcbl-vk`'s line is zero errors **and** zero warnings,
-#                        and this backend is held to the same one.
+#                        `assert` or `nslog`. Both default to `nslog` here so
+#                        diagnostic hardware probes can finish. Use `assert`
+#                        for a strict run; the renderer CI step does so.
 #   MTL_SHADER_VALIDATION
 #                        GPU-side bounds checking inside a running kernel.
 #                        Defaulted to `1`. Whether the device supports it is not
 #                        knowable from inside the process — Metal says so on
 #                        stderr and carries on — so this is asked for and
 #                        reported, never asserted.
+#   MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING
+#   MTL_SHADER_VALIDATION_REPORT_TO_STDERR
+#   MTL_SHADER_VALIDATION_ABORT_ON_FAULT
+#                        Defaulted to `1` so shader findings are printed and
+#                        fail the process. Validation alone can zero-fill an
+#                        invalid read while the command buffer succeeds.
 #   CRCBL_MTL_VALIDATION Whether the suite *requires* the layer to have been
 #                        interposed. Defaulted to `1`; set it to `0` to run
 #                        against an unvalidated device and have the log say so.
@@ -89,7 +94,7 @@
 # # What Metal can and cannot report, and what this suite therefore asserts
 #
 # Neither Vulkan's messenger callback nor D3D12's info queue has a Metal
-# equivalent. An API misuse is **printed and then acted on** — at `abort`, the
+# equivalent. An API misuse is **printed and then acted on** — at `assert`, the
 # process dies — so there is no message list to count and no assertion this
 # suite can make about one. What `crcbl_mtl::fault` asserts at every device
 # test's teardown is the two things that *are* observable:
@@ -97,9 +102,9 @@
 #   * Metal really did interpose its validation layer on the device, read off
 #     the device object's Objective-C class, and
 #   * no command buffer the device submitted ended in `MTLCommandBufferStatus`
-#     `Error` — which is where shader validation's findings and every GPU fault
-#     arrive, and which nothing else in this backend noticed for a submission
-#     whose result no test waited on.
+#     `Error`, including faults from submissions whose result no test waited on.
+#     Shader validation can instead recover with zero-filled reads; the
+#     reporting and abort switches make those findings fail the test process.
 #
 # **That is weaker than the other two backends' gates and is not claimed to be
 # parity.** A violation caught by API validation reaches this script as a killed
@@ -150,6 +155,9 @@ export MTL_DEBUG_LAYER="${MTL_DEBUG_LAYER:-1}"
 export MTL_DEBUG_LAYER_ERROR_MODE="${MTL_DEBUG_LAYER_ERROR_MODE:-nslog}"
 export MTL_DEBUG_LAYER_WARNING_MODE="${MTL_DEBUG_LAYER_WARNING_MODE:-nslog}"
 export MTL_SHADER_VALIDATION="${MTL_SHADER_VALIDATION:-1}"
+export MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING="${MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING:-1}"
+export MTL_SHADER_VALIDATION_REPORT_TO_STDERR="${MTL_SHADER_VALIDATION_REPORT_TO_STDERR:-1}"
+export MTL_SHADER_VALIDATION_ABORT_ON_FAULT="${MTL_SHADER_VALIDATION_ABORT_ON_FAULT:-1}"
 # And this suite's own: whether a run that did not get the layer fails.
 export CRCBL_MTL_VALIDATION="${CRCBL_MTL_VALIDATION:-1}"
 echo "crcbl mtl e2e: MTL_DEBUG_LAYER=${MTL_DEBUG_LAYER}" \
@@ -157,6 +165,9 @@ echo "crcbl mtl e2e: MTL_DEBUG_LAYER=${MTL_DEBUG_LAYER}" \
     "MTL_DEBUG_LAYER_WARNING_MODE=${MTL_DEBUG_LAYER_WARNING_MODE}"
 echo "crcbl mtl e2e: MTL_SHADER_VALIDATION=${MTL_SHADER_VALIDATION}" \
     "CRCBL_MTL_VALIDATION=${CRCBL_MTL_VALIDATION}"
+echo "crcbl mtl e2e: MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING=${MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING}" \
+    "MTL_SHADER_VALIDATION_REPORT_TO_STDERR=${MTL_SHADER_VALIDATION_REPORT_TO_STDERR}" \
+    "MTL_SHADER_VALIDATION_ABORT_ON_FAULT=${MTL_SHADER_VALIDATION_ABORT_ON_FAULT}"
 
 # `--success-output immediate` publishes the validation report line, which
 # nextest would otherwise capture on exactly the run a reader wants to read it
@@ -184,7 +195,10 @@ crcbl_nextest_plain "$LOG" "${LOG}.plain"
 # Read **before** the failure gate, because when the layer is missing and
 # CRCBL_MTL_VALIDATION asked for it, this is the whole explanation for the wall
 # of failures that follows.
-VALIDATION="$(grep -F 'crcbl-mtl e2e: api validation=' "${LOG}.plain" | head -1 || true)"
+# Every device open reports validation, including when a nextest filter omits
+# the dedicated reporting test. Accept its ordinary log line too, so the
+# documented single-test invocation can pass while still proving validation.
+VALIDATION="$(grep -E 'crcbl-mtl( e2e)?: api validation=' "${LOG}.plain" | head -1 || true)"
 case "$VALIDATION" in
     *"api validation=false"*)
         echo "crcbl mtl e2e: ############################################################" >&2
@@ -225,12 +239,11 @@ fi
 # only means something on a run that got this far.
 if [ -z "$VALIDATION" ]; then
     echo "crcbl mtl e2e: the suite never said what validation it ran under." >&2
-    echo "               crcbl_mtl::fault's" >&2
-    echo "               a_fresh_device_says_what_validation_it_is_running_under" >&2
-    echo "               must print it and this script must be able to find it, or a green" >&2
+    echo "               Device creation must print its validation report and this" >&2
+    echo "               script must be able to find it, or a green" >&2
     echo "               run claims evidence it does not have." >&2
     exit 1
 fi
-echo "crcbl mtl e2e: ${VALIDATION#*crcbl-mtl e2e: }"
+echo "crcbl mtl e2e: api validation=${VALIDATION#*api validation=}"
 
 echo "crcbl mtl e2e: the hardware suite ran $CRCBL_NEXTEST_TESTS_RUN tests against a Metal device"

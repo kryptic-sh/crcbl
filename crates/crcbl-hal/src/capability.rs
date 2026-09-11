@@ -129,10 +129,10 @@
 //! assert_eq!(permanent.kind, DivergenceKind::ApiAbsence);
 //! assert!(!permanent.kind.blocks_parity());
 //!
-//! // Metal's mesh stage is owed rather than absent, so it is one of the rows
+//! // D3D12's mesh reporting is owed rather than absent, so it is one of the rows
 //! // standing between crcbl and its end state.
 //! assert!(parity_blockers().any(|entry| {
-//!     entry.capability == Capability::MeshShading && entry.backend == BackendKind::Metal
+//!     entry.capability == Capability::MeshShading && entry.backend == BackendKind::Dx12
 //! }));
 //!
 //! // And Metal's GPU-side draw count is not, because that work landed — the
@@ -866,21 +866,8 @@ pub const DIVERGENCES: &[Divergence] = &[
     // `ApiAbsence` that is only an absence in the API is how a row survives
     // review: the reason reads as checkable and the thing it describes is not
     // the thing being declared.
-    Divergence {
-        capability: Capability::MeshShading,
-        backend: BackendKind::Metal,
-        kind: DivergenceKind::Unrun,
-        why: "the calls exist — crcbl_mtl::pipeline fills an MTLMeshRenderPipelineDescriptor with \
-              the object, mesh and fragment functions and crcbl_mtl::command records \
-              drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup: and its \
-              indirect twin — but no device has ever run them, so crcbl_mtl::adapter reports no \
-              Features::MESH_SHADER and the capability cannot answer Yes. Mesh shading is a Metal \
-              3 feature gated on supportsFamily:MTLGPUFamilyMetal3, and the Mac CI runs this \
-              backend on answers false to Metal3 and to every Apple family above 5 — measured by \
-              a_device_reports_its_indirect_command_buffer_support_and_draw_indirect_count_ceiling. \
-              Retiring this row takes a Metal 3 Mac running crcbl_mtl's mesh path and the flag \
-              being reported off the back of it",
-    },
+    // Metal mesh/task rows were retired after native execution qualification;
+    // unsupported Metal devices use the shared hardware/OS capability gate.
     Divergence {
         capability: Capability::MeshShading,
         backend: BackendKind::Dx12,
@@ -899,14 +886,6 @@ pub const DIVERGENCES: &[Divergence] = &[
         why: "WebGPU has no mesh stage: GPUDevice creates render and compute pipelines only and \
               GPURenderPassEncoder has no draw for one. No proposal for it has reached the \
               specification, so this is the API rather than the slice",
-    },
-    Divergence {
-        capability: Capability::TaskShaderStage,
-        backend: BackendKind::Metal,
-        kind: DivergenceKind::Unrun,
-        why: "MeshPipelineDesc::task reaches Metal's object stage through the same descriptor the \
-              mesh one does — setObjectFunction: beside setMeshFunction: — and it is behind the \
-              same unreported flag and the same unrun code; see the MeshShading entry",
     },
     Divergence {
         capability: Capability::TaskShaderStage,
@@ -1009,41 +988,10 @@ pub const DIVERGENCES: &[Divergence] = &[
         kind: DivergenceKind::Unwritten,
         why: NO_OCCLUSION_QUERY_VERB,
     },
-    Divergence {
-        capability: Capability::TimestampQuery,
-        backend: BackendKind::Metal,
-        // Unclassified until 2026-08-19, when the probe adapter.rs was written
-        // to answer it with ran on CI's Apple Paravirtual device:
-        // supportsCounterSampling AtStageBoundary=false, AtDrawBoundary=true,
-        // AtDispatchBoundary=true, AtBlitBoundary=true, counterSets=0, and
-        // sampleTimestamps:gpuTimestamp: not moving across a 50ms sleep. Metal
-        // expresses the feature, so this was never an ApiAbsence. The code was
-        // then written, and the row stays Unwritten for the reason the
-        // MeshShading entry above stays Unwritten: no device has executed it.
-        kind: DivergenceKind::Unrun,
-        why: "the calls exist — crcbl_mtl::device's create_query_set builds an \
-              MTLCounterSampleBuffer over MTLCommonCounterSetTimestamp, crcbl_mtl::command puts it \
-              in a render or compute pass descriptor's sampleBufferAttachments at the two indices \
-              PassTimestampWrites names, resolve_query_set reaches it through the blit encoder's \
-              resolveCounters:inRange:destinationBuffer:destinationOffset:, and query_results \
-              reads it with resolveCounterRange: and converts to nanoseconds — but no device has \
-              ever run them. crcbl_mtl::adapter reports Features::TIMESTAMP_QUERY only for a \
-              device that advertises MTLCommonCounterSetTimestamp in MTLDevice::counterSets and \
-              answers supportsCounterSampling: at MTLCounterSamplingPointAtStageBoundary, which is \
-              the point a pass descriptor samples at and therefore the question the code depends \
-              on — not supportsFamily:, which describes a feature set rather than a selector's \
-              availability. The Mac CI runs this backend on answers counterSets=0 and \
-              AtStageBoundary=false, measured by \
-              a_device_reports_its_counter_sampling_gpu_families_and_timestamp_correlation, so it \
-              reports the flag clear and every query path degrades there — a device fact, reported \
-              per device, and the gate working rather than what leaves the row open. Metal states \
-              no tick period at all, so the conversion is two sampleTimestamps:gpuTimestamp: \
-              correlations — one at device open, one at the read — and crcbl_mtl::query's \
-              timestamp_nanos is the arithmetic, unit-tested off macOS because it is the only part \
-              of the path a machine without Metal can check. Nothing has ever checked it against a \
-              real GPU clock. Retiring this row takes a Mac that reports the flag running \
-              crcbl_mtl's timestamp path and the numbers coming back ordered and non-zero",
-    },
+    // Metal timestamp queries were proved on an M3 Pro on 2026-09-10,
+    // including render/compute boundaries and GPU-side resolves. Clear-only
+    // render passes and empty compute passes needed fixes before that proof;
+    // docs/notes/metal-local-baseline.md records the hardware evidence.
     // The WebGPU TimestampQuery row that used to sit here is gone, and it left
     // the way `StorageImageBinding`'s did: the gap was the seam's own verb. It
     // had a free-standing `write_timestamp` naming an arbitrary point in the
@@ -1777,21 +1725,6 @@ mod tests {
         // move** — an unanswered question and unwritten work both block parity,
         // and reclassifying one as the other is honesty about what is owed,
         // not progress against it.
-        (
-            Capability::MeshShading,
-            BackendKind::Metal,
-            DivergenceKind::Unrun,
-        ),
-        (
-            Capability::TaskShaderStage,
-            BackendKind::Metal,
-            DivergenceKind::Unrun,
-        ),
-        (
-            Capability::TimestampQuery,
-            BackendKind::Metal,
-            DivergenceKind::Unrun,
-        ),
         (
             Capability::PipelineStatisticsQuery,
             BackendKind::Metal,

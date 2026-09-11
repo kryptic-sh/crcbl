@@ -452,6 +452,9 @@ pub(crate) struct DeviceState {
     /// next call tries again and reports again rather than silently doing
     /// nothing.
     pack_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    /// A timed empty compute pass needs a dispatch or Metal drops its samples.
+    /// Compiled only when such a pass is actually closed.
+    timestamp_noop: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
 impl DeviceState {
@@ -900,14 +903,16 @@ impl MetalDevice {
             tag: device_tag(id),
             state: Mutex::new(DeviceState::default()),
         });
+        let device = Self { inner };
         crcbl_core::log::info!(
-            "crcbl-mtl: opened {:?} (geometry {:?}, binding {:?}, lighting {:?})",
+            "crcbl-mtl: opened {:?} (geometry {:?}, ceiling {:?}, binding {:?}, lighting {:?})",
             record.info.name,
+            device.preferred_geometry_path(),
             caps.geometry_path(),
             caps.binding_model(),
             caps.lighting_path()
         );
-        Ok(Self { inner })
+        Ok(device)
     }
 
     pub(crate) fn state(&self) -> MutexGuard<'_, DeviceState> {
@@ -1175,6 +1180,39 @@ impl MetalDevice {
 }
 
 impl DeviceInner {
+    /// Makes an otherwise empty timed compute encoder execute its timestamps.
+    pub(crate) fn timestamp_noop(
+        &self,
+    ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, HalError> {
+        let mut state = self.state();
+        if let Some(pipeline) = &state.timestamp_noop {
+            return Ok(pipeline.clone());
+        }
+        // Backend-internal work with no resources or externally visible output.
+        // Metal elides an encoder with no dispatch, even if it has timestamp
+        // attachments or memory barriers. One thread preserves those writes.
+        let source = NSString::from_str("kernel void crcbl_timestamp_noop() {}");
+        let library = self
+            .raw
+            .newLibraryWithSource_options_error(&source, None)
+            .map_err(|error| HalError::ShaderCompilation(error.to_string()))?;
+        let function = library
+            .newFunctionWithName(&NSString::from_str("crcbl_timestamp_noop"))
+            .ok_or_else(|| HalError::ShaderCompilation("timestamp no-op entry missing".into()))?;
+        let descriptor = MTLComputePipelineDescriptor::new();
+        descriptor.setComputeFunction(Some(&function));
+        descriptor.setLabel(Some(&NSString::from_str("crcbl timestamp no-op")));
+        let pipeline = self
+            .raw
+            .newComputePipelineStateWithDescriptor_options_reflection_error(
+                &descriptor,
+                MTLPipelineOption::None,
+                None,
+            )
+            .map_err(|error| HalError::PipelineCreation(error.to_string()))?;
+        Ok(state.timestamp_noop.insert(pipeline).clone())
+    }
+
     pub(crate) fn state(&self) -> MutexGuard<'_, DeviceState> {
         self.state
             .lock()
@@ -1530,6 +1568,23 @@ impl Device for MetalDevice {
         self.inner.caps
     }
 
+    fn preferred_geometry_path(&self) -> crcbl_hal::GeometryPath {
+        match self.inner.caps.geometry_path() {
+            // Count draws are supported, but emulated by a packing dispatch.
+            // The per-bucket renderer already writes zero instances for empty
+            // buckets, so ordinary indirect draws avoid that extra GPU work.
+            crcbl_hal::GeometryPath::IndirectCount => crcbl_hal::GeometryPath::IndirectPerBatch,
+            // The mesh tail is reported and provable, but measured no faster
+            // than per-batch at 720p and 1080p on an M3 Pro, so the preference
+            // stays on the cheaper tail. The capability is not withheld — a
+            // caller can still select it exactly (the samples' `--force-geometry
+            // mesh-shader`), and `docs/notes/metal-geometry-preference.md`
+            // carries the paired figures.
+            crcbl_hal::GeometryPath::MeshShader => crcbl_hal::GeometryPath::IndirectPerBatch,
+            path => path,
+        }
+    }
+
     /// What this backend does with each seam behaviour.
     ///
     /// Kinds of refusal live here and the reasons keep them apart, because the
@@ -1556,16 +1611,6 @@ impl Device for MetalDevice {
         let gated = |feature: Features, why: &'static str| -> Support {
             Support::granted(has, feature, why)
         };
-        // One sentence for both mesh rows, shared for `METAL_NO_DRAW_INDIRECT_COUNT`'s
-        // reason: the declaration a caller reads and the parity record a
-        // reviewer reads drifted apart last time they were written twice. The
-        // amplification stage is not separately missing — it is behind the same
-        // unrun code.
-        const NO_MESH_RUN: &str = "the object and mesh stages are built — crcbl_mtl::pipeline fills an \
-             MTLMeshRenderPipelineDescriptor and crcbl_mtl::command records \
-             drawMeshThreadgroups: — but no device has run them: mesh shading needs \
-             supportsFamily:MTLGPUFamilyMetal3 and the Mac CI runs this backend on answers false \
-             to it. This backend reports no Features::MESH_SHADER until one does";
 
         match capability {
             // `MTLBlitCommandEncoder fillBuffer:range:value:` takes a `uint8_t`,
@@ -1598,24 +1643,16 @@ impl Device for MetalDevice {
             // A multi-draw is a loop over the argument structures, so a stride
             // larger than one of them is exactly what the loop steps by.
             Capability::IndirectArgumentPaddedStride => Support::Yes,
-            // **The calls are written; the flag is not reported, and no device
-            // has run them.** `crate::pipeline`'s `create_mesh_pipeline_impl`
-            // fills an `MTLMeshRenderPipelineDescriptor` with the object, mesh
-            // and fragment functions, and `crate::command` records
-            // `drawMeshThreadgroups:` and its indirect twin. What is missing is
-            // an execution: mesh shading is gated on
-            // `supportsFamily:MTLGPUFamilyMetal3`, the Mac CI runs this backend
-            // on answers `false` to it, and no Mac in this workspace answers
-            // `true` — so the code below has been type-checked and never run.
-            //
-            // Until one runs it this stays `No`, for two reasons that both
-            // point the same way. `Support::Yes` is defined as "the backend
-            // performs it exactly as the seam documents it", which is a claim
-            // nothing here can back; and a `gated` arm would answer
-            // `NotOnThisDevice` off a flag `crate::adapter` never sets, which
-            // `parity_verdict` calls `FalseDeviceGate` and fails — rightly,
-            // because the device withheld nothing.
-            Capability::MeshShading | Capability::TaskShaderStage => Support::No(NO_MESH_RUN),
+            // Adapter reporting and pipeline creation share the Metal3/macOS13
+            // gate. Paravirtual devices remain NotOnThisDevice, not a backend gap.
+            Capability::MeshShading => gated(
+                Features::MESH_SHADER,
+                "mesh shading requires a Metal 3 device on macOS 13 or later",
+            ),
+            Capability::TaskShaderStage => gated(
+                Features::TASK_SHADER,
+                "the object/task stage requires a Metal 3 device on macOS 13 or later",
+            ),
             Capability::UpdateBindGroup => Support::Yes,
             // `create_pipeline_layout` places the block at the buffer index the
             // committed MSL puts it at — one past every binding, which
@@ -1687,9 +1724,7 @@ impl Device for MetalDevice {
             // device reporting the flag has answered both questions the code
             // depends on. The Mac in CI reports neither flag and takes
             // `NotOnThisDevice` through `gated`, which is the honest answer
-            // there — unlike the mesh rows, where the flag is withheld by this
-            // crate rather than by the device and `Support::No` is therefore
-            // the only truthful reply.
+            // there.
             Capability::TimestampQuery => gated(
                 Features::TIMESTAMP_QUERY,
                 "this device reports no TIMESTAMP_QUERY; crcbl_mtl::adapter reports it for a \
@@ -2482,23 +2517,9 @@ impl Device for MetalDevice {
 
     /// Builds an `MTLMeshRenderPipelineDescriptor`; see `crcbl_mtl::pipeline`.
     ///
-    /// **Deliberately not gated on `Features::MESH_SHADER`**, and this backend
-    /// deliberately still reports the flag clear — the same split
-    /// `crcbl-dx12`'s mesh path is in, for the same reason. The gate this call
-    /// does apply is the device's own: `crcbl_mtl::quirk`'s `check_mesh_support`
-    /// asks whether the OS has the selector and whether the device answers to
-    /// `supportsFamily:MTLGPUFamilyMetal3`, and refuses by name when either
-    /// says no.
-    ///
-    /// Reporting the flag is a separate change with a separate obligation:
-    /// `Features::MESH_SHADER` is what
-    /// [`GeometryPath::from_features`](crcbl_hal::GeometryPath::from_features)
-    /// reads, so it moves every Metal device onto the mesh path and re-keys
-    /// every golden image — and, more to the point, none of the code below has
-    /// ever been executed by a device. `Device::supports` therefore still
-    /// answers [`Support::No`] for both mesh capabilities and
-    /// `crcbl_hal::DIVERGENCES` still carries both rows; a Mac that runs this
-    /// is what retires them.
+    /// Reporting and creation use the same hardware/OS check in
+    /// `crcbl_mtl::quirk`: Metal3 plus macOS13. Creation retains the detailed
+    /// refusal naming the missing device or OS requirement.
     fn create_mesh_pipeline(
         &self,
         desc: &crcbl_hal::MeshPipelineDesc<'_>,
@@ -3297,6 +3318,10 @@ fn resolve_count(requested: u32, base: NSUInteger, total: NSUInteger) -> NSUInte
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[cfg(feature = "mtl-mesh-e2e")]
+    mod native_mesh_proof {
+        include!("mesh_proof.rs");
+    }
     use super::*;
     use std::time::Duration;
 
@@ -3368,6 +3393,30 @@ pub(crate) mod tests {
             .expect("a Metal device opens with no required features");
         let validated = crate::fault::Validated::new(instance, &device);
         (validated, device)
+    }
+
+    #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn a_count_capable_device_prefers_unpacked_bucket_draws() {
+        let (_validated, device) = open_device();
+        assert!(
+            device
+                .caps()
+                .features
+                .contains(Features::DRAW_INDIRECT_COUNT)
+        );
+        // Stated as the backend's rule rather than gated on one ceiling: the
+        // preference is the per-batch tail whether the device's strongest path
+        // is a count draw or the mesh one that now sits above it. Gating on
+        // `geometry_path() == IndirectCount` made this vacuous on exactly the
+        // Metal 3 hardware the mesh change concerns. `geometry_path()` is the
+        // ceiling and is deliberately not asserted here; see
+        // `docs/notes/metal-geometry-preference.md`.
+        assert_eq!(
+            device.preferred_geometry_path(),
+            crcbl_hal::GeometryPath::IndirectPerBatch,
+            "per-bucket zero-instance arguments need no packing pass, and the mesh tail measured no faster"
+        );
     }
 
     fn buffer(size: u64, memory: MemoryLocation) -> BufferDesc<'static> {

@@ -909,26 +909,29 @@ impl From<GpuOptions> for GpuContextDesc<'_> {
     }
 }
 
-/// A selector a run asked to be held **below** what the device offers.
+/// Geometry execution requests and binding capability ceilings for a run.
 ///
-/// Each field names a path, and what the type does is withhold the features
-/// that select anything better — so a run that forces one is a run on a device
-/// that genuinely does not have them, which is the only way a fallback gets
-/// executed on hardware that would otherwise never take it.
+/// Callers pass explicit geometry to `ForwardRenderer::with_scene_on_path`;
+/// unsupported paths fail construction. With no request, use the device's
+/// preferred geometry path. Binding only limits negotiated capabilities and
+/// does not select a binding implementation in the forward renderer.
 ///
 /// `docs/plan/sample/00-samples-overview.md` rule 12's "every sample accepts a
 /// flag forcing a lesser path" is what asks for this, and the flags themselves
 /// are [`crate::args::geometry_from_name`] and [`crate::args::binding_from_name`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ForcedPaths {
-    /// The geometry path to hold at, or `None` for whatever the device selects.
+    /// The exact geometry path, or `None` for the device performance preference.
     pub geometry: Option<GeometryPath>,
-    /// The binding model to hold at, on the same terms.
+    /// The binding capability ceiling; not a renderer implementation request.
     pub binding: Option<BindingModel>,
 }
 
 impl ForcedPaths {
-    /// What to ask a device for, given what a run wants held down.
+    /// Optional feature ceiling for backends that negotiate device features.
+    ///
+    /// This does not enforce geometry selection: callers must also pass the
+    /// exact geometry request to the renderer, including on native backends.
     ///
     /// Starts from [`GpuContextDesc::default`]'s optional set — the one every
     /// sample opens with — and removes the flags whose presence would select
@@ -1012,9 +1015,10 @@ impl DevicePathRows {
     }
 
     /// Writes `geometry`, `binding` and `lighting` into `section`, in that
-    /// order.
+    /// order. Binding requests name their capability ceiling separately from
+    /// actual binding; they do not promise a renderer implementation.
     ///
-    /// A forced selector is spelled `"MeshShader (forced)"` rather than
+    /// A forced geometry selector is spelled `"MeshShader (forced)"` rather than
     /// `"MeshShader"`, which is the difference between "this machine is like
     /// that" and "this run made it like that" — a report without it is one a
     /// reader cannot act on, and it is the distinction rule 12's flag exists to
@@ -1031,7 +1035,11 @@ impl DevicePathRows {
             "geometry",
             &row(self.geometry, self.forced.geometry.is_some()),
         );
-        section.row_str("binding", &row(self.binding, self.forced.binding.is_some()));
+        let binding = match self.forced.binding {
+            Some(ceiling) => format!("{:?} (requested ceiling: {ceiling:?})", self.binding),
+            None => format!("{:?}", self.binding),
+        };
+        section.row_str("binding", &binding);
         // No third field on [`ForcedPaths`]: nothing withholds a feature that
         // would select a lesser lighting path, so this row is never marked.
         section.row("lighting", format_args!("{:?}", self.lighting));
@@ -2397,9 +2405,11 @@ impl GpuContext {
                 .unwrap_or_else(|| unreachable!("the queue is non-empty above"));
             match self.timeline {
                 Some(semaphore) => {
-                    let satisfied = self
-                        .device
-                        .wait_semaphores(&[SemaphoreWait { semaphore, value }], u64::MAX)?;
+                    let satisfied = {
+                        let _waiting = crcbl_core::trace::span(crate::perf::PRESENT_WAIT_SPAN);
+                        self.device
+                            .wait_semaphores(&[SemaphoreWait { semaphore, value }], u64::MAX)?
+                    };
                     if !satisfied {
                         // Back where it came from, still owned and still
                         // undestroyed: the caller may retry, and a buffer
@@ -2414,7 +2424,10 @@ impl GpuContext {
                 }
                 // The Tier B fallback. Correct, and coarse enough that the log
                 // line in `open` exists to explain the frame rate.
-                None => self.device.wait_idle()?,
+                None => {
+                    let _waiting = crcbl_core::trace::span(crate::perf::PRESENT_WAIT_SPAN);
+                    self.device.wait_idle()?;
+                }
             }
             self.device.destroy_command_buffer(command_buffer);
         }
@@ -6913,9 +6926,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         if let Some(timings) = self.gpu.timings()
             && !timings.is_empty()
         {
-            self.debug
-                .budget
-                .record_gpu(timings.frame, Duration::from_nanos(timings.total_nanos()));
+            if let Some(elapsed) = timings.elapsed_nanos {
+                self.debug
+                    .budget
+                    .record_gpu(timings.frame, Duration::from_nanos(elapsed));
+            }
             self.passes.record(timings);
         }
     }
@@ -7718,6 +7733,17 @@ mod tests {
             plain[1..],
             forced[1..],
             "forcing the geometry axis relabelled another row",
+        );
+        let binding_request = DevicePathRows {
+            forced: ForcedPaths {
+                geometry: None,
+                binding: Some(BindingModel::Bindless),
+            },
+            ..device_chose
+        };
+        assert_eq!(
+            rows(&binding_request)[1].1,
+            "ArrayPages (requested ceiling: Bindless)"
         );
     }
 
@@ -13106,6 +13132,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn command_retirement_waits_are_excluded_from_cpu_work() {
+        in_a_traced_process(
+            "engine::tests::command_retirement_waits_are_excluded_from_cpu_work",
+            || {
+                use crcbl_core::trace::RecordKind::{SpanBegin, SpanEnd};
+                let (_shell, _window, _recorder, mut gpu) =
+                    null_context("retirement wait spans", Pacing::Vsync);
+                null_frame(&mut gpu).expect("first frame");
+                null_frame(&mut gpu).expect("second frame");
+                drop(crcbl_core::trace::drain());
+                gpu.retire_to(0).expect("retire both submissions");
+                assert_eq!(
+                    span_shapes(&crcbl_core::trace::drain()),
+                    vec![
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
+                    ],
+                    "each blocking wait needs its own CPU-idle exclusion"
+                );
+                gpu.destroy().expect("release resources");
+            },
+        );
+    }
+
     /// **A traced run fills the budget row's CPU window**, which is the whole
     /// chain: the span opens, the drain finds it, `frame_cpu_time` reads it and
     /// the row takes it.
@@ -13337,6 +13390,7 @@ mod tests {
     #[test]
     fn the_budget_rows_gpu_window_follows_the_timers_frame_number() {
         let timings = |frame: u64, nanos: u64| crcbl_render::FrameTimings {
+            elapsed_nanos: Some(nanos),
             frame,
             passes: vec![crcbl_render::PassTiming {
                 label: "forward".to_string(),
@@ -13368,6 +13422,37 @@ mod tests {
         assert!(pending.passes.is_empty(), "an empty report is not a frame");
     }
 
+    #[test]
+    fn the_gpu_budget_uses_elapsed_time_instead_of_overlapping_pass_sums() {
+        let mut engine = hosted(None);
+        for frame in 0..crcbl_core::stats::MIN_PERCENTILE_SAMPLES {
+            engine.gpu.timings = Some(crcbl_render::FrameTimings {
+                frame: frame as u64,
+                elapsed_nanos: Some(2_000_000),
+                passes: vec![
+                    crcbl_render::PassTiming {
+                        label: "a".into(),
+                        gpu_nanos: 2_000_000,
+                    },
+                    crcbl_render::PassTiming {
+                        label: "b".into(),
+                        gpu_nanos: 2_000_000,
+                    },
+                ],
+            });
+            engine.frame().expect("frame");
+        }
+        assert_eq!(
+            engine.debug.budget.gpu(),
+            Some((Duration::from_millis(2), Duration::from_millis(2)))
+        );
+        let previous = engine.debug.budget.gpu_frame();
+        engine.gpu.timings.as_mut().expect("timings").elapsed_nanos = None;
+        engine.gpu.timings.as_mut().expect("timings").frame += 1;
+        engine.frame().expect("frame without valid timestamps");
+        assert_eq!(engine.debug.budget.gpu_frame(), previous);
+    }
+
     /// **The per-pass windows follow the same frame number as the budget row.**
     ///
     /// `PassStats` has its own guard against the timers' latency and its own
@@ -13379,6 +13464,7 @@ mod tests {
     #[test]
     fn the_per_pass_windows_are_fed_the_frames_the_budget_row_is_fed() {
         let timings = |frame: u64, nanos: u64| crcbl_render::FrameTimings {
+            elapsed_nanos: Some(nanos),
             frame,
             passes: vec![crcbl_render::PassTiming {
                 label: "forward".to_string(),

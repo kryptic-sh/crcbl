@@ -1006,16 +1006,10 @@ StructuredBuffer<GpuMesh> meshes;
 [[vk::binding(5, 0)]]
 StructuredBuffer<uint> visible_instances;
 
-/// The material table. **Declared here and read by nothing**, and the reason is
-/// Metal: Slang's Metal target ignores `[[vk::binding]]` and hands each
-/// resource the next index in its stage's flat table, in declaration order,
-/// while `crcbl-mtl` computes an index by counting same-table descriptors in
-/// the *layout*. The layout this pipeline is built with carries bindings 6, 7
-/// and 8 because `mesh.slang`'s fragment stage reads them — so a source that
-/// skipped them would put `clusters` at buffer index 6 in the MSL and have the
-/// backend bind it at 9. `crcbl_shaders::declaration_order` is the lint that
-/// checks the ordering half of this rule; the completeness half is this
-/// comment.
+/// Shared fragment resources must precede every mesh-only buffer. Metal assigns
+/// buffer indices in declaration order, while the backend counts the global
+/// layout in binding order. These placeholders preserve the fragment stage's
+/// common buffer prefix (0 through 9) even when this module does not read them.
 [[vk::binding(6, 0)]]
 StructuredBuffer<GpuMaterial> materials;
 
@@ -1028,95 +1022,6 @@ Texture2DArray<float4> base_color_textures;
 /// The page's sampler, for the same reason.
 [[vk::binding(8, 0)]]
 SamplerState base_color_sampler;
-
-/// Every resident mesh's clusters, back to back, in mesh order. A bucket's
-/// mesh names its own run with `draw.cluster_base` and `draw.cluster_count`.
-[[vk::binding(9, 0)]]
-StructuredBuffer<Meshlet> clusters;
-
-/// Original vertex indices, one run per cluster. **Mesh-relative**, like the
-/// index buffer the raster path reads: `GpuMesh::base_vertex` is added here.
-[[vk::binding(10, 0)]]
-StructuredBuffer<uint> cluster_vertices;
-
-/// Triangle corners, packed four to a word, least significant byte first.
-///
-/// A storage buffer has no byte addressing, so corner `n` is byte `n & 3` of
-/// word `n >> 2` — which is exactly what a little-endian load of the host's
-/// `u8` array reads. `crcbl_shaders::meshlet::corner_words` is the other half
-/// of that statement. Packing by word rather than padding each cluster's run
-/// is what lets a cluster closed early by the vertex bound end on any corner.
-[[vk::binding(11, 0)]]
-StructuredBuffer<uint> cluster_corners;
-
-/// The per-bucket indirect arguments `draw_gen.slang` wrote. Read for
-/// `instance_count` and nothing else.
-[[vk::binding(12, 0)]]
-StructuredBuffer<DrawIndexedArgs> draw_args;
-
-/// This frame's frustum — the amplification stage's alone.
-///
-/// **Bound only when there is an amplification stage**: a device without
-/// `Features::TASK_SHADER` builds a pipeline whose layout stops at binding 12,
-/// and `meshMain` reads neither this nor `cull_stats` below.
-[[vk::binding(13, 0)]]
-ConstantBuffer<CullParams> cull;
-
-/// The frame's culling statistics, which this stage adds each cluster it tested
-/// into: `CLUSTER_SURVIVOR_WORD`, `CLUSTER_FRUSTUM_REJECT_WORD` or
-/// `CLUSTER_CONE_REJECT_WORD`, one of the three and never two.
-///
-/// The buffer `cull.slang` counts surviving instances into, one element along —
-/// topic 03 §3.6's delayed readback ring is this one buffer, and a second
-/// counter of its own would be a second readback. `Atomic<uint>` rather than
-/// `InterlockedAdd` for `cull.slang`'s reason: spelled as a type it lowers on
-/// every target.
-[[vk::binding(14, 0)]]
-RWStructuredBuffer<Atomic<uint> > cull_stats;
-
-/// Every resident cluster's half of the DAG descent, parallel to `clusters`.
-///
-/// **Bound whenever `clusters` is**, because `vertex_base` is geometry rather
-/// than selection: a DAG's levels are separate vertex ranges and both mesh entry
-/// points have to resolve the right one. Bindings 15 and 16 are `mesh.slang`'s
-/// shadow atlas and its sampler — declared by the fragment stage of this very
-/// pipeline, so the numbers are taken and this is 17.
-[[vk::binding(17, 0)]]
-StructuredBuffer<ClusterSelect> cluster_select;
-
-/// The cut this frame chose, one word per resident cluster: `1` where the
-/// descent selected the cluster and `0` where it did not.
-///
-/// `docs/plan/25-lod.md`'s observable, and the only thing that can show
-/// per-cluster selection happening — a frame whose every cluster came from one
-/// level looks entirely plausible and matches any golden blessed from it. Read
-/// back by `crcbl-vk`'s
-/// `the_gpu_descends_the_dag_to_the_cut_the_host_rule_says` and by nothing in
-/// the frame.
-///
-/// **Instance slot zero writes it and no other slot does**, so several instances
-/// of one mesh do not race for one entry and no atomic is needed: what it holds
-/// is the cut chosen for a bucket's first surviving instance. A bucket whose
-/// instances were all culled launches no task group and leaves the entry at
-/// whatever the last frame that drew it wrote, which is why a reader compares
-/// two cameras rather than trusting one.
-[[vk::binding(18, 0)]]
-RWStructuredBuffer<uint> cluster_selection;
-
-/// `docs/plan/25-lod.md`'s hysteresis state, as `draw_gen.slang` left it this
-/// frame: one word per (instance, group), `1` where that group is expanded.
-///
-/// **Read here and written nowhere**, which is what makes a stage running
-/// thousands of task groups per instance able to use a per-group decision at
-/// all: one invocation of the draw-argument pass owns an instance's whole run
-/// and every task group of that instance reads it. The graph orders the two —
-/// that pass writes, this one reads, and the barrier between them is the same
-/// one `visible_instances` already needs.
-///
-/// Bound whenever `cluster_select` is, because the two are one mechanism: the
-/// record names a group and this says what that group decided.
-[[vk::binding(19, 0)]]
-StructuredBuffer<uint> group_state;
 
 /// The frame's light list, on `materials`' terms exactly: the fragment stage
 /// reads it, this file does not, and the declaration is what keeps the Metal
@@ -1154,35 +1059,132 @@ StructuredBuffer<GpuProbe> probes;
 [[vk::binding(24, 0)]]
 StructuredBuffer<uint> tables;
 
+/// Every resident mesh's clusters, back to back, in mesh order. A bucket's
+/// mesh names its own run with `draw.cluster_base` and `draw.cluster_count`.
+[[vk::binding(32, 0)]]
+StructuredBuffer<Meshlet> clusters;
+
+/// Original vertex indices, one run per cluster. **Mesh-relative**, like the
+/// index buffer the raster path reads: `GpuMesh::base_vertex` is added here.
+[[vk::binding(33, 0)]]
+StructuredBuffer<uint> cluster_vertices;
+
+/// Triangle corners, packed four to a word, least significant byte first.
+///
+/// A storage buffer has no byte addressing, so corner `n` is byte `n & 3` of
+/// word `n >> 2` — which is exactly what a little-endian load of the host's
+/// `u8` array reads. `crcbl_shaders::meshlet::corner_words` is the other half
+/// of that statement. Packing by word rather than padding each cluster's run
+/// is what lets a cluster closed early by the vertex bound end on any corner.
+[[vk::binding(34, 0)]]
+StructuredBuffer<uint> cluster_corners;
+
+/// The per-bucket indirect arguments `draw_gen.slang` wrote. Read for
+/// `instance_count` and nothing else.
+[[vk::binding(35, 0)]]
+StructuredBuffer<DrawIndexedArgs> draw_args;
+
+/// This frame's frustum — the amplification stage's alone.
+///
+/// Bound on both mesh paths to preserve the native argument table, even though
+/// only the amplification stage reads this and writes `cull_stats` below.
+[[vk::binding(36, 0)]]
+ConstantBuffer<CullParams> cull;
+
+/// The frame's culling statistics, which this stage adds each cluster it tested
+/// into: `CLUSTER_SURVIVOR_WORD`, `CLUSTER_FRUSTUM_REJECT_WORD` or
+/// `CLUSTER_CONE_REJECT_WORD`, one of the three and never two.
+///
+/// The buffer `cull.slang` counts surviving instances into, one element along —
+/// topic 03 §3.6's delayed readback ring is this one buffer, and a second
+/// counter of its own would be a second readback. `Atomic<uint>` rather than
+/// `InterlockedAdd` for `cull.slang`'s reason: spelled as a type it lowers on
+/// every target.
+[[vk::binding(37, 0)]]
+RWStructuredBuffer<Atomic<uint> > cull_stats;
+
+/// Every resident cluster's half of the DAG descent, parallel to `clusters`.
+///
+/// **Bound whenever `clusters` is**, because `vertex_base` is geometry rather
+/// than selection: a DAG's levels are separate vertex ranges and both mesh entry
+/// points have to resolve the right one. Mesh-only bindings start at 32, after
+/// every common fragment resource, so they cannot shift fragment buffer indices.
+[[vk::binding(38, 0)]]
+StructuredBuffer<ClusterSelect> cluster_select;
+
+/// The cut this frame chose, one word per resident cluster: `1` where the
+/// descent selected the cluster and `0` where it did not.
+///
+/// `docs/plan/25-lod.md`'s observable, and the only thing that can show
+/// per-cluster selection happening — a frame whose every cluster came from one
+/// level looks entirely plausible and matches any golden blessed from it. Read
+/// back by `crcbl-vk`'s
+/// `the_gpu_descends_the_dag_to_the_cut_the_host_rule_says` and by nothing in
+/// the frame.
+///
+/// **Instance slot zero writes it and no other slot does**, so several instances
+/// of one mesh do not race for one entry and no atomic is needed: what it holds
+/// is the cut chosen for a bucket's first surviving instance. A bucket whose
+/// instances were all culled launches no task group and leaves the entry at
+/// whatever the last frame that drew it wrote, which is why a reader compares
+/// two cameras rather than trusting one.
+[[vk::binding(39, 0)]]
+RWStructuredBuffer<uint> cluster_selection;
+
+/// `docs/plan/25-lod.md`'s hysteresis state, as `draw_gen.slang` left it this
+/// frame: one word per (instance, group), `1` where that group is expanded.
+///
+/// **Read here and written nowhere**, which is what makes a stage running
+/// thousands of task groups per instance able to use a per-group decision at
+/// all: one invocation of the draw-argument pass owns an instance's whole run
+/// and every task group of that instance reads it. The graph orders the two —
+/// that pass writes, this one reads, and the barrier between them is the same
+/// one `visible_instances` already needs.
+///
+/// Bound whenever `cluster_select` is, because the two are one mechanism: the
+/// record names a group and this says what that group decided.
+[[vk::binding(40, 0)]]
+StructuredBuffer<uint> group_state;
+
 /// What the mesh stage emits and `mesh.slang`'s `fragmentMain` consumes.
 ///
 /// **Member order is the interface**, not just the layout: locations are
 /// assigned in declaration order and the consumer is the other file's fragment
 /// stage. See the header.
+// Slang 2026.14 splits numeric semantic indices in raster MSL, but keeps
+// them in mesh MSL. Unindexed names link both stages. Keep the original
+// semantics for SPIR-V, WGSL and DXIL. Match this definition and the names
+// in mesh.slang and mesh_cluster.slang; each manifest source is standalone.
+#if defined(CRCBL_TARGET_MSL)
+#define CRCBL_MESH_SEMANTIC(original, metal_name) metal_name
+#else
+#define CRCBL_MESH_SEMANTIC(original, metal_name) original
+#endif
+
 struct VertexOutput
 {
     float4 position : SV_Position;
-    float3 world_position : POSITION0;
-    float3 world_normal : NORMAL0;
-    float4 color : COLOR0;
+    float3 world_position : CRCBL_MESH_SEMANTIC(POSITION0, CRCBL_WORLD_POSITION);
+    float3 world_normal : CRCBL_MESH_SEMANTIC(NORMAL0, CRCBL_WORLD_NORMAL);
+    float4 color : CRCBL_MESH_SEMANTIC(COLOR0, CRCBL_COLOR);
     /// This primitive's material row. `nointerpolation` for the reason
     /// `mesh.slang` gives at length: an index is not a quantity, and
     /// interpolating one produces a fragment reading a row no vertex named.
-    nointerpolation uint material : TEXCOORD0;
-    float2 uv : TEXCOORD1;
+    nointerpolation uint material : CRCBL_MESH_SEMANTIC(TEXCOORD0, CRCBL_MATERIAL);
+    float2 uv : CRCBL_MESH_SEMANTIC(TEXCOORD1, CRCBL_UV);
     /// This vertex's clip position and where it was last frame, both undivided.
     /// `mesh.slang` declares them with the whole argument for why the
     /// perspective divide happens in the fragment stage rather than here.
-    float4 clip_position : TEXCOORD2;
-    float4 previous_clip_position : TEXCOORD3;
+    float4 clip_position : CRCBL_MESH_SEMANTIC(TEXCOORD2, CRCBL_CLIP_POSITION);
+    float4 previous_clip_position : CRCBL_MESH_SEMANTIC(TEXCOORD3, CRCBL_PREVIOUS_CLIP_POSITION);
     /// This vertex's surface tangent in world space, through the instance
     /// transform's **bare 3x3** — `mesh.slang` declares it with the whole
     /// account of why a tangent and a normal take different matrices.
-    float3 world_tangent : TEXCOORD4;
+    float3 world_tangent : CRCBL_MESH_SEMANTIC(TEXCOORD4, CRCBL_WORLD_TANGENT);
     /// Which frame the fragment stage perturbs this primitive's normal map in,
     /// and which way its bitangent points. `nointerpolation` for `material`'s
     /// reason: neither bit is a quantity.
-    nointerpolation uint frame : TEXCOORD5;
+    nointerpolation uint frame : CRCBL_MESH_SEMANTIC(TEXCOORD5, CRCBL_FRAME);
 };
 
 /// Matching `static const uint FRAME_AUTHORED_TANGENTS` in `mesh.slang`.

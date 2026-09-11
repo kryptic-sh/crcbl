@@ -1420,7 +1420,29 @@ pub fn aa_forward(
     format: Format,
     effects: crcbl_render::RenderEffects,
 ) -> Result<ForwardScene, OffscreenError> {
-    let mut renderer = ForwardRenderer::new(device, queue, format)?;
+    aa_forward_on_path(
+        device,
+        queue,
+        format,
+        effects,
+        device.preferred_geometry_path(),
+    )
+}
+
+fn aa_forward_on_path(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    effects: crcbl_render::RenderEffects,
+    path: crate::hal::GeometryPath,
+) -> Result<ForwardScene, OffscreenError> {
+    let mut renderer = ForwardRenderer::with_scene_on_path(
+        device,
+        queue,
+        format,
+        &crate::render::scene::demo(),
+        path,
+    )?;
     renderer.set_effect_request(EffectRequest {
         camera: effects,
         ..EffectRequest::default()
@@ -1486,6 +1508,7 @@ pub fn ssr_forward(
         effects,
         &crate::render::scene::demo(),
         DEMO_TINTED,
+        device.preferred_geometry_path(),
     )
 }
 
@@ -2163,12 +2186,22 @@ pub fn ssr_rough_floor_forward(
         roughness: 1.0,
         ..scene.materials[DEMO_TINTED]
     });
-    ssr_forward_on(device, queue, format, sky, effects, &scene, rough)
+    ssr_forward_on(
+        device,
+        queue,
+        format,
+        sky,
+        effects,
+        &scene,
+        rough,
+        device.preferred_geometry_path(),
+    )
 }
 
 /// The ssr scene over `scene`, with its floor shaded through material row
 /// `floor`: [`ssr_forward`] and [`ssr_rough_floor_forward`] differ in nothing
 /// else.
+#[allow(clippy::too_many_arguments)]
 fn ssr_forward_on(
     device: &dyn Device,
     queue: QueueHandle,
@@ -2177,8 +2210,9 @@ fn ssr_forward_on(
     effects: crcbl_render::RenderEffects,
     scene: &crate::render::scene::SceneDesc<'_>,
     floor: usize,
+    path: crate::hal::GeometryPath,
 ) -> Result<ForwardScene, OffscreenError> {
-    let mut renderer = ForwardRenderer::with_scene(device, queue, format, scene)?;
+    let mut renderer = ForwardRenderer::with_scene_on_path(device, queue, format, scene, path)?;
     renderer.set_effect_request(EffectRequest {
         camera: effects,
         ..EffectRequest::default()
@@ -5911,10 +5945,18 @@ impl SceneState {
         device: &dyn Device,
         queue: QueueHandle,
         format: Format,
+        path: Option<crate::hal::GeometryPath>,
     ) -> Result<Self, OffscreenError> {
+        let path = path.unwrap_or_else(|| device.preferred_geometry_path());
         Ok(match scene {
             Scene::Cube => {
-                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &crate::render::scene::demo(),
+                    path,
+                )?;
                 place_cube(&mut renderer, ForwardRenderer::spin(0.0));
                 place_pyramids(&mut renderer);
                 Self::Forward {
@@ -5929,7 +5971,13 @@ impl SceneState {
             Scene::Lights => {
                 // The cube scene's geometry exactly, so the two goldens differ
                 // in their light lists and in nothing else.
-                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &crate::render::scene::demo(),
+                    path,
+                )?;
                 place_cube(&mut renderer, ForwardRenderer::spin(0.0));
                 place_pyramids(&mut renderer);
                 renderer.set_lights(&scene_lights());
@@ -5947,7 +5995,13 @@ impl SceneState {
                 // stays off: a pyramid beside the pool would be a second lit
                 // shape in a frame whose whole content is meant to be one cone
                 // on one flat surface.
-                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &crate::render::scene::demo(),
+                    path,
+                )?;
                 place_cube(&mut renderer, spot_floor());
                 renderer.set_lights(&[spot_light()]);
                 Self::Forward {
@@ -5962,7 +6016,13 @@ impl SceneState {
                 // — the camera, the light's tilt — is what makes the shadow
                 // separable from its caster, and `Scene::SpotShadow` is where
                 // that is argued.
-                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &crate::render::scene::demo(),
+                    path,
+                )?;
                 place_cube(&mut renderer, spot_floor());
                 place(
                     &mut renderer,
@@ -5983,7 +6043,13 @@ impl SceneState {
                 // along `-Z`, so their shadows fall across two different faces
                 // of the light's map. One caster would prove a point light casts
                 // *a* shadow, which is what a single working face already does.
-                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &crate::render::scene::demo(),
+                    path,
+                )?;
                 place_cube(&mut renderer, spot_floor());
                 place(
                     &mut renderer,
@@ -6014,8 +6080,13 @@ impl SceneState {
                 // first insertion and still holds the pool slot every other
                 // forward scene gives it, and it is placed through the dark
                 // glossy row `area_scene` appends for it.
-                let mut renderer =
-                    ForwardRenderer::with_scene(device, queue, format, &area_scene())?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &area_scene(),
+                    path,
+                )?;
                 place(&mut renderer, DEMO_CUBE, AREA_FLOOR, spot_floor());
                 // **The reflection pair, refused**, on `Scene::Probes`' terms
                 // and with a sharper exposure: this floor carries
@@ -6045,8 +6116,13 @@ impl SceneState {
                 // would put a shadow on one half of the mirror and nothing on
                 // the other, and the difference the bands measure would be a
                 // shadow wearing the fill flag's name.
-                let mut renderer =
-                    ForwardRenderer::with_scene(device, queue, format, &area_scene())?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &area_scene(),
+                    path,
+                )?;
                 place(&mut renderer, DEMO_CUBE, AREA_FLOOR, spot_floor());
                 // **The reflection pair, refused**, on `Scene::AreaLight`'s
                 // terms exactly: this is that floor and it carries that
@@ -6080,8 +6156,13 @@ impl SceneState {
                 // through the hole, one in the shadow's hole — and any other
                 // object standing on that floor is something a band could be
                 // measuring instead.
-                let mut renderer =
-                    ForwardRenderer::with_scene(device, queue, format, &alpha_mask_scene())?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &alpha_mask_scene(),
+                    path,
+                )?;
                 place(&mut renderer, DEMO_CUBE, ALPHA_FLOOR, alpha_floor());
                 place(&mut renderer, DEMO_CUBE, ALPHA_PLATE, alpha_plate());
                 Self::Forward {
@@ -6102,8 +6183,13 @@ impl SceneState {
                 // lit floor, and two inside shadows — and any other object
                 // standing on that floor is something a band could be measuring
                 // instead.
-                let mut renderer =
-                    ForwardRenderer::with_scene(device, queue, format, &double_sided_scene())?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &double_sided_scene(),
+                    path,
+                )?;
                 place(&mut renderer, DEMO_CUBE, DOUBLE_FLOOR, double_floor());
                 for (material, model) in double_sided_quads() {
                     place(&mut renderer, DOUBLE_QUAD_MESH, material, model);
@@ -6115,8 +6201,13 @@ impl SceneState {
                 }
             }
             Scene::SpecularAa => {
-                let mut renderer =
-                    ForwardRenderer::with_scene(device, queue, format, &specular_aa_scene())?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &specular_aa_scene(),
+                    path,
+                )?;
                 // **Nothing marches over this frame.** The plate is smoother
                 // than `ssr.slang`'s cutoff, so a screen-space reflection pass
                 // would compose its own answer into both bands — and what the
@@ -6143,7 +6234,13 @@ impl SceneState {
                 }
             }
             Scene::Dunes => {
-                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &crate::render::scene::demo(),
+                    path,
+                )?;
                 place_cube(&mut renderer, ForwardRenderer::spin(0.0));
                 // **Refused rather than drawn empty.** `selects_levels` says no
                 // on a device that reports a mesh stage and no amplification
@@ -6208,7 +6305,13 @@ impl SceneState {
                 // `ao_parked_cube`. Every other resident stays off for
                 // `Scene::Spot`'s reason: what this frame is about is one
                 // concave corner and the flat floor beside it.
-                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &crate::render::scene::demo(),
+                    path,
+                )?;
                 place_cube(&mut renderer, ao_parked_cube());
                 place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, ao_box());
                 Self::Forward {
@@ -6223,12 +6326,15 @@ impl SceneState {
                 // that function under three different skies, because what the
                 // sky adds to a reflection is only recognisable against the
                 // same frame without it.
-                ssr_forward(
+                ssr_forward_on(
                     device,
                     queue,
                     format,
                     crcbl_render::Sky::NONE,
                     RenderEffects::DEFAULT_STACK,
+                    &crate::render::scene::demo(),
+                    DEMO_TINTED,
+                    path,
                 )?
                 .into()
             }
@@ -6238,8 +6344,13 @@ impl SceneState {
                 // reason `atmosphere_mirror_mesh` gives: that cube's faces
                 // carry vertex colours and a green mirror is not what this
                 // fixture is predicting.
-                let mut renderer =
-                    ForwardRenderer::with_scene(device, queue, format, &atmosphere_mirror_scene())?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &atmosphere_mirror_scene(),
+                    path,
+                )?;
                 // **The reflection pair and nothing else.** Shadows have no
                 // caster and no lit surface to fall on; the occlusion pass
                 // scales an ambient term a conductor does not have; the
@@ -6279,8 +6390,13 @@ impl SceneState {
                 // nothing to either frame — its colour and its ambient are
                 // both zero — so the direction it names is the only thing it
                 // carries, and no pixel here can observe it.
-                let mut renderer =
-                    ForwardRenderer::with_scene(device, queue, format, &atmosphere_mirror_scene())?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &atmosphere_mirror_scene(),
+                    path,
+                )?;
                 renderer.set_effect_request(EffectRequest {
                     camera: RenderEffects::REFLECTIONS,
                     ..EffectRequest::default()
@@ -6308,8 +6424,13 @@ impl SceneState {
                 // is why there is no `place_cube` call: it is still the first
                 // insertion and still holds the pool slot every other scene
                 // gives it.
-                let mut renderer =
-                    ForwardRenderer::with_scene(device, queue, format, &bloom_scene())?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &bloom_scene(),
+                    path,
+                )?;
                 // **The one fixture that asks for the lens**, and the one that
                 // asks for it from a file. `RenderEffects::DEFAULT_STACK` leaves
                 // bloom out — a view that has declared no render stack has
@@ -6335,7 +6456,8 @@ impl SceneState {
                 // `tests/render_e2e.rs` builds the same scene through that
                 // function with a different effect set — see its doc for why the
                 // comparison cannot be made against a golden.
-                aa_forward(device, queue, format, RenderEffects::DEFAULT_STACK)?.into()
+                aa_forward_on_path(device, queue, format, RenderEffects::DEFAULT_STACK, path)?
+                    .into()
             }
             Scene::Probes => {
                 // **The only scene here built from a description of its own**,
@@ -6344,8 +6466,13 @@ impl SceneState {
                 // nothing else: no cube, parked or otherwise, because a second
                 // object standing on this floor is a second thing occluding the
                 // bands that are the measurement.
-                let mut renderer =
-                    ForwardRenderer::with_scene(device, queue, format, &probe_scene())?;
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device,
+                    queue,
+                    format,
+                    &probe_scene(),
+                    path,
+                )?;
                 // The fixture's measured pixels are diffuse probe irradiance.
                 // Reflections now evaluate rough surfaces too, so refuse their
                 // pair here rather than letting specular contaminate the Rust
@@ -6478,6 +6605,21 @@ type ReadbackFrame = ((u32, u32), Vec<u8>);
 /// Where a [`PendingOffscreen`] has got to: opening the instance, then opening
 /// the device on it.
 ///
+/// Owns the builtin selection until the pending device is ready.
+fn builtin_scene_build(
+    scene: Scene,
+    path: Option<crate::hal::GeometryPath>,
+) -> Result<BuildScene<'static>, OffscreenError> {
+    if path.is_some() && matches!(scene, Scene::Sprite | Scene::Ui) {
+        return Err(OffscreenError::Unusable(
+            "sprite and UI scenes do not use a forward geometry path",
+        ));
+    }
+    Ok(Box::new(move |device, queue, format| {
+        SceneState::open(scene, device, queue, format, path)
+    }))
+}
+
 /// The two async steps of an open — [`crate::backend::request_open`] and
 /// [`Instance::request_device`] — with the synchronous surface/adapter/format
 /// work done at the transition between them.
@@ -6692,7 +6834,7 @@ impl OffscreenSetup {
     /// data-layout axis, and folding a second selector into it would make it a
     /// tier again — so it has to be named beside it. Every scene here draws
     /// identically on either path, which `tests/render_e2e.rs` checks by drawing
-    /// each one twice through [`Self::request_with`].
+    /// each supported tail through [`Self::request_on_path`].
     ///
     /// Optional, never required: a device without any of these opens and draws
     /// the same picture through a lesser tail.
@@ -6778,21 +6920,57 @@ impl OffscreenSetup {
             width,
             height,
             optional_features,
-            Box::new(move |device, queue, format| SceneState::open(scene, device, queue, format)),
+            builtin_scene_build(scene, None)?,
         )
+    }
+
+    /// Starts opening a builtin forward scene on exactly `path`.
+    ///
+    /// Requests [`Self::OPTIONAL_FEATURES`] and selects the renderer tail
+    /// independently of the device's preference. The selection stays owned by
+    /// the pending build until its device is ready.
+    ///
+    /// # Errors
+    ///
+    /// Sprite and UI scenes are rejected before opening a backend. An
+    /// unsupported tail is rejected when the device is ready, with the same
+    /// resource cleanup as any failed scene build. Other errors match
+    /// [`Self::request`].
+    pub fn request_on_path(
+        width: u32,
+        height: u32,
+        scene: Scene,
+        path: crate::hal::GeometryPath,
+    ) -> Result<PendingOffscreen<'static>, OffscreenError> {
+        Self::request_built(
+            width,
+            height,
+            Self::OPTIONAL_FEATURES,
+            builtin_scene_build(scene, Some(path))?,
+        )
+    }
+
+    /// Blocking counterpart of [`Self::request_on_path`].
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::request_on_path`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_on_path(
+        width: u32,
+        height: u32,
+        scene: Scene,
+        path: crate::hal::GeometryPath,
+    ) -> Result<Self, OffscreenError> {
+        Self::block_open(Self::request_on_path(width, height, scene, path)?)
     }
 
     /// [`Self::open`] asking the device for `optional_features` instead of
     /// [`Self::OPTIONAL_FEATURES`].
     ///
-    /// The features are optional here for the same reason they are there: a
-    /// device that lacks one still opens and still draws. What this adds is the
-    /// ability to open a device *without* something the adapter has, which is
-    /// the only way a caller on one machine can reach more than one
-    /// [`GeometryPath`](crate::hal::GeometryPath) — every path but the best one
-    /// the adapter reports is otherwise code no run here executes. `crcbl-vk`'s
-    /// `Headless::open_for_mesh_with` is the same knob one layer down, and
-    /// `tests/render_e2e.rs` uses this one to draw each scene twice and compare.
+    /// These are device feature requests, which a backend may leave
+    /// unnegotiated. They do not guarantee a particular geometry tail; use
+    /// [`Self::open_on_path`] for an exact builtin forward selection.
     ///
     /// # Errors
     ///
@@ -6818,10 +6996,9 @@ impl OffscreenSetup {
     /// passes, same barriers, same tightly packed bytes in [`Self::format`]'s
     /// channel order.
     ///
-    /// The device asks for [`Self::OPTIONAL_FEATURES`], so the room is drawn on
-    /// the best path the adapter offers — [`Self::caps`] is what says which that
-    /// was. [`Self::open_forward_with`] is the same frame on a path the caller
-    /// names instead.
+    /// The device asks for [`Self::OPTIONAL_FEATURES`]; `build` owns the
+    /// renderer selection. [`Self::geometry_path`] reports the actual tail.
+    /// [`Self::open_forward_with`] allows a different optional feature request.
     ///
     /// A `build` that fails hands its error back and **nothing is left behind**:
     /// the swapchain, the surface and the device are released before this
@@ -6841,15 +7018,10 @@ impl OffscreenSetup {
     /// [`Self::open_forward`] asking the device for `optional_features` instead
     /// of [`Self::OPTIONAL_FEATURES`].
     ///
-    /// [`Self::open_with`] is this knob one scene down, and it is here for the
-    /// same reason: an adapter reports what it reports, so the only way a caller
-    /// on one machine reaches more than one
-    /// [`GeometryPath`](crate::hal::GeometryPath) is to open a device *without*
-    /// a feature the adapter has. Without it every frame an application's scene
-    /// draws comes off the best tail this machine offers, and the lesser ones —
-    /// which is what browsers and Apple devices run — are code no run here
-    /// executes. `apps/lantern/tests/golden.rs` draws its room through both and
-    /// holds the two arms to one golden.
+    /// Like [`Self::open_with`], this changes the device request, which does
+    /// not guarantee different capabilities or a different geometry tail.
+    /// Callers requiring an exact tail can use
+    /// [`ForwardRenderer::with_scene_on_path`] inside `build`.
     ///
     /// # Errors
     ///
@@ -6900,9 +7072,7 @@ impl OffscreenSetup {
             width,
             height,
             optional_features,
-            build: Some(Box::new(move |device, queue, format| {
-                SceneState::open(scene, device, queue, format)
-            })),
+            build: Some(builtin_scene_build(scene, None)?),
             phase: Self::start_device(instance, optional_features)?,
         };
         Self::block_open(pending)
@@ -7108,15 +7278,28 @@ impl OffscreenSetup {
 
     /// What the opened device reported it can do.
     ///
-    /// The selector this exists for is
-    /// [`geometry_path`](crate::hal::DeviceCaps::geometry_path): the forward
-    /// pass's indirect tail is chosen from it once, at build, and is otherwise
-    /// invisible from outside — so this is how a caller learns which arm a
-    /// frame was actually drawn through rather than assuming the one its
-    /// developer's GPU happens to select.
+    /// These are capabilities, not a claim about the selected renderer path.
+    /// Use [`Self::geometry_path`] to inspect the forward renderer's choice.
     #[must_use]
     pub fn caps(&self) -> crate::hal::DeviceCaps {
         self.device.caps()
+    }
+
+    /// The device's recommended geometry path, which may be below its
+    /// capability ceiling when the higher path requires emulation.
+    #[must_use]
+    pub fn preferred_geometry_path(&self) -> crate::hal::GeometryPath {
+        self.device.preferred_geometry_path()
+    }
+
+    /// The path the forward renderer actually built, or `None` for sprite/UI
+    /// scenes, which do not use the geometry-path selector.
+    #[must_use]
+    pub fn geometry_path(&self) -> Option<crate::hal::GeometryPath> {
+        match &self.scene {
+            SceneState::Forward { renderer, .. } => Some(renderer.geometry_path()),
+            SceneState::Sprite { .. } | SceneState::Ui { .. } => None,
+        }
     }
 
     /// What the last `draw_and_readback` (or [`begin_readback`](Self::begin_readback)) recorded,
@@ -8046,6 +8229,107 @@ mod tests {
             per_lap[0], per_lap[1],
             "consecutive laps must take different ring images"
         );
+    }
+
+    #[test]
+    fn builtin_geometry_selection_survives_pending_open_and_preserves_preference() {
+        use crate::hal::GeometryPath;
+        use crate::hal::null::{NullInstance, Recorder};
+
+        let _process_video = crate::settings::process_video_test_guard();
+        // Include the two builtin arms that delegate to public scene fixtures.
+        for scene in [
+            Scene::Cube,
+            Scene::Aa,
+            Scene::Ssr,
+            Scene::Dunes,
+            Scene::PointShadow,
+        ] {
+            for requested in [
+                None,
+                Some(GeometryPath::IndirectCount),
+                Some(GeometryPath::IndirectPerBatch),
+            ] {
+                let recorder = Recorder::new();
+                let instance = NullInstance::gpu_driven()
+                    .with_geometry_preference(GeometryPath::IndirectPerBatch)
+                    .with_recorder(recorder.clone());
+                let optional_features = OffscreenSetup::OPTIONAL_FEATURES;
+                let mut pending = PendingOffscreen {
+                    width: 16,
+                    height: 16,
+                    optional_features,
+                    build: Some(builtin_scene_build(scene, requested).unwrap()),
+                    phase: OffscreenSetup::start_device(Box::new(instance), optional_features)
+                        .unwrap(),
+                };
+                let setup = loop {
+                    if let Some(setup) = pending.poll().unwrap() {
+                        break setup;
+                    }
+                };
+                assert_eq!(setup.caps().geometry_path(), GeometryPath::IndirectCount);
+                assert_eq!(
+                    setup.preferred_geometry_path(),
+                    GeometryPath::IndirectPerBatch
+                );
+                assert_eq!(
+                    setup.geometry_path(),
+                    Some(requested.unwrap_or(GeometryPath::IndirectPerBatch)),
+                    "{scene:?}"
+                );
+                setup.finish().unwrap();
+                assert_eq!(
+                    recorder.total_live_objects(),
+                    0,
+                    "{scene:?}: completed open leaked resources"
+                );
+                recorder.assert_valid();
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_geometry_selection_rejects_unsupported_tail_and_cleans_pending_open() {
+        use crate::hal::GeometryPath;
+        use crate::hal::null::{NullInstance, Recorder};
+
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let optional_features = OffscreenSetup::OPTIONAL_FEATURES;
+        let pending = PendingOffscreen {
+            width: 16,
+            height: 16,
+            optional_features,
+            build: Some(builtin_scene_build(Scene::Cube, Some(GeometryPath::MeshShader)).unwrap()),
+            phase: OffscreenSetup::start_device(Box::new(instance), optional_features).unwrap(),
+        };
+        assert!(
+            matches!(OffscreenSetup::block_open(pending), Err(OffscreenError::Hal(crate::hal::HalError::UnsupportedFeatures { missing })) if missing == Features::MESH_SHADER)
+        );
+        assert_eq!(
+            recorder.total_live_objects(),
+            0,
+            "rejected tail leaked offscreen resources"
+        );
+        recorder.assert_valid();
+    }
+
+    #[test]
+    fn builtin_geometry_selection_rejects_sprite_and_ui_before_backend_open() {
+        for scene in [Scene::Sprite, Scene::Ui] {
+            assert!(matches!(
+                OffscreenSetup::request_on_path(
+                    16,
+                    16,
+                    scene,
+                    crate::hal::GeometryPath::IndirectPerBatch
+                ),
+                Err(OffscreenError::Unusable(
+                    "sprite and UI scenes do not use a forward geometry path"
+                ))
+            ));
+        }
     }
 
     /// The frame the requested [`Scene`] promises, and nothing left behind.
