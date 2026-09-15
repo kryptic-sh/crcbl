@@ -526,41 +526,48 @@ impl Water {
             }),
         )?;
 
-        let fragment = ShaderStages::FRAGMENT;
+        // **Every binding is visible to both stages**, though the vertex stage
+        // reads only the frame block and the vertices and the fragment stage
+        // never reads the vertices. Slang's Metal backend materialises every
+        // global into every entry point — `msl/water.metal`'s `fragmentMain`
+        // takes `water_vertices [[buffer(4)]]` and its `vertexMain` takes every
+        // fragment resource — and Metal's draw validation refused the fragment
+        // function with "missing buffer binding at index 4 for water_vertices"
+        // on CI's macOS runner. `crate::forward`'s DFG binding and
+        // `crate::sky_pass`'s sky-view binding take both stages for the same
+        // reason; this layout takes it for every binding rather than learning
+        // them one CI run at a time, and the storage buffers it puts in the
+        // vertex stage stay within the browser's limit, which
+        // `check_portable_storage_buffers` below holds it to.
+        let both = ShaderStages::VERTEX.union(ShaderStages::FRAGMENT);
         let surface_entries = [
-            uniform(binding::PARAMS, fragment),
-            // **Both stages**: the vertex stage projects the grid with this
-            // block's `view_proj`, and the fragment stage reads the rest.
-            uniform(binding::FRAME, ShaderStages::VERTEX.union(fragment)),
-            uniform(binding::REFLECTION, fragment),
-            uniform(binding::FROXEL_BLOCK, fragment),
-            storage(
-                binding::VERTICES,
-                ShaderStages::VERTEX,
-                VERTEX_STRIDE as u32,
-            ),
-            storage(binding::MEDIA, fragment, MEDIUM_STRIDE as u32),
-            sampled(binding::COLOR, fragment, SampleType::Float),
-            sampled(binding::DEPTH, fragment, SampleType::Depth),
-            sampled(binding::SHADOW_ATLAS, fragment, SampleType::Depth),
+            uniform(binding::PARAMS, both),
+            uniform(binding::FRAME, both),
+            uniform(binding::REFLECTION, both),
+            uniform(binding::FROXEL_BLOCK, both),
+            storage(binding::VERTICES, both, VERTEX_STRIDE as u32),
+            storage(binding::MEDIA, both, MEDIUM_STRIDE as u32),
+            sampled(binding::COLOR, both, SampleType::Float),
+            sampled(binding::DEPTH, both, SampleType::Depth),
+            sampled(binding::SHADOW_ATLAS, both, SampleType::Depth),
             BindGroupLayoutEntry {
                 binding: binding::SHADOW_SAMPLER,
-                visibility: fragment,
+                visibility: both,
                 kind: BindingKind::Sampler { comparison: true },
                 count: 1,
                 flags: BindingFlags::empty(),
             },
             storage(
                 binding::PROBES,
-                fragment,
+                both,
                 crcbl_shaders::probe::PROBE_STRIDE as u32,
             ),
-            sampled(binding::SKY_PREFILTER, fragment, SampleType::Float),
+            sampled(binding::SKY_PREFILTER, both, SampleType::Float),
             // `D2Array` and `UnfilterableFloat`, for `crate::ssr`'s note on the
             // same image: WebGPU checks both against the `Rg32Float` view.
             BindGroupLayoutEntry {
                 binding: binding::PROBE_VISIBILITY,
-                visibility: fragment,
+                visibility: both,
                 kind: BindingKind::SampledImage {
                     view_type: ImageViewType::D2Array,
                     sample_type: SampleType::UnfilterableFloat,
@@ -570,17 +577,17 @@ impl Water {
             },
             storage(
                 binding::SKY_VIEW,
-                fragment,
+                both,
                 crcbl_shaders::atmosphere::SKY_VIEW_ROW_BYTES as u32,
             ),
             storage(
                 binding::FROXELS,
-                fragment,
+                both,
                 crcbl_shaders::volumetric::FROXEL_STRIDE as u32,
             ),
             storage(
                 binding::LIGHTING,
-                fragment,
+                both,
                 crcbl_shaders::volumetric::LIGHTING_STRIDE as u32,
             ),
         ];
