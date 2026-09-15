@@ -71,8 +71,14 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   their context and key repeat are in `crcbl_input::ui` (2026-09-16), and
   `crcbl::nav::nav_input` builds the tree's `NavInput` from them; nothing in
   `Loop` pushes that context yet, because no engine screen is on the tree. Not
-  built from that rung yet: gamepad bindings, a drawn focus-history log, and a
-  focus style in `default.css`.
+  built from that rung yet: gamepad bindings and a drawn focus-history log.
+- **`widgets`** (in `tree`) — **rung 7b is built** (2026-09-16): button,
+  checkbox, slider, drag-value, collapsing header, tree node, split pane and a
+  fixed-row-height virtualized list as `Ui` builders styled by `default.css`,
+  with `:checked`, `:open` and a focus ring, and a `ui_widgets` golden. Not
+  built from rung 7 yet: single-line text input with selection and clipboard
+  (7c), and `Menu`, `MenuSet`, `DebugPanel` and `ConsolePanel` on the tree with
+  the `ui` context pushed (7d).
 - **`widget`** — `Label`, `Button`, `ButtonSkin`, `Style`, `SkinInsets`,
   `PointerInput`, `UiState`, `WidgetId`. The rest of the MVP widget set below is
   unbuilt.

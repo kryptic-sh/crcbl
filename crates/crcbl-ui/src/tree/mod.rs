@@ -51,6 +51,13 @@
 //! behavior `:disabled`; `focus/mod.rs` has the rules, and
 //! [`Ui::set_nav_debug`] draws why a move went where it did.
 //!
+//! # Widgets
+//!
+//! [`Ui::button`], [`Ui::checkbox`], [`Ui::slider`], [`Ui::drag_value`],
+//! [`Ui::collapsing`], [`Ui::tree_node`], [`Ui::split`] and [`Ui::list`] are
+//! builders over blocks and spans, each styled by `default.css`; `widgets/mod.rs`
+//! has what each builds and the rules it keeps.
+//!
 //! # Identity
 //!
 //! Every node has a [`NodeKey`]: `hash(parent key, id)`, where the id is
@@ -74,7 +81,7 @@
 //! # What survives a rebuild, and what clears it
 //!
 //! The store keeps, per key, the pointer's hover and press, focus and
-//! engagement, a scope's remembered node, a scroll offset,
+//! engagement, a scope's remembered node, a scroll offset, a widget's state,
 //! last frame's rectangle, its resolved style, Taffy's layout cache, and three
 //! hashes: the node's resolved layout style ([`NodeStyle::layout_hash`], which
 //! no paint field reaches), its
@@ -140,6 +147,7 @@ mod style;
 mod style_tests;
 #[cfg(test)]
 mod tests;
+pub mod widgets;
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -171,6 +179,14 @@ pub use style::{
     Align, Display, Edges, FlexDirection, FlexWrap, Justify, Length, LengthAuto, LineHeight, NavId,
     NavTarget, NavWrap, NodeStyle, Overflow, Position,
 };
+pub use widgets::{LIST_OVERSCAN, SPLIT_NAV_STEP, SplitAxis};
+
+/// How far the pointer must move from where a press began, in pixels, before
+/// the press is a drag rather than a click: the default of Windows'
+/// `SM_CXDRAG`. A drag that ends over an engage widget focuses it without
+/// engaging it — dragging a slider is engage, adjust and commit in one
+/// gesture — and a drag-value moves only once its press is a drag.
+pub const DRAG_THRESHOLD: f32 = 4.0;
 
 /// The space a root is laid out in, on one axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -261,6 +277,9 @@ pub struct Response {
     pub engagement: Engagement,
     /// The navigation step the engaged node took instead of focus this frame.
     pub captured: Option<NavStep>,
+    /// A widget builder changed the value it edits, or the state it keeps,
+    /// this frame. Always false from [`Ui::block`] and its kin.
+    pub changed: bool,
 }
 
 /// What a frame node is.
@@ -351,6 +370,17 @@ pub struct Ui {
     capture: UiState,
     focus: FocusState,
     frame: u64,
+    /// This frame's pointer, for a widget a press drags.
+    pointer: PointerInput,
+    /// Where the press held now, or the last one, began.
+    press_origin: Vec2,
+    /// Whether that press has moved past [`DRAG_THRESHOLD`].
+    dragged: bool,
+    /// How many [`Ui::enabled`] scopes that disable are open.
+    disabled_depth: u32,
+    /// The rows of the tree nodes whose children are being built, innermost
+    /// last.
+    tree_rows: Vec<NodeKey>,
 }
 
 impl Ui {
@@ -381,13 +411,18 @@ impl Ui {
         self.live_text.clear();
         self.selectors.clear();
         self.styles.begin_frame();
+        self.disabled_depth = 0;
+        self.tree_rows.clear();
+        self.pointer = pointer;
         let clicked = self.resolve_pointer(pointer);
-        self.resolve_navigation(nav, clicked);
+        self.resolve_navigation(nav, clicked, self.dragged);
     }
 
     /// Hover, press capture and click for every stored node, from last frame's
-    /// rectangles. Returns the node clicked, unless it is disabled.
+    /// rectangles, recording where the press began and whether it is a drag.
+    /// Returns the node clicked, unless it is disabled.
     fn resolve_pointer(&mut self, pointer: PointerInput) -> Option<NodeKey> {
+        let held_before = self.capture.active().is_some();
         let over = self.store.hit_chain(pointer.pos);
         // A press goes to the innermost node with a role around the topmost
         // one, so a button's label does not take its button's click.
@@ -427,6 +462,18 @@ impl Ui {
             if click {
                 clicked = Some(target);
             }
+        }
+
+        // A press that began this frame starts a new gesture; one held since an
+        // earlier frame becomes a drag once it has moved far enough, and stays
+        // one until the next press.
+        if !held_before && (pressed.is_some() || clicked.is_some()) {
+            self.press_origin = pointer.pos;
+            self.dragged = false;
+        } else if held_before
+            && (pointer.pos - self.press_origin).length_squared() > DRAG_THRESHOLD * DRAG_THRESHOLD
+        {
+            self.dragged = true;
         }
 
         let clicked = clicked.filter(|&key| {
@@ -475,11 +522,8 @@ impl Ui {
         build: impl FnOnce(&mut Self),
     ) -> Response {
         let parsed = self.node_selector(selector);
-        let key = match parsed.id {
-            Some(id) => self.key(KeySource::Id(id)),
-            None => self.call_site_key(Location::caller()),
-        };
-        self.open_block(key, parsed, inline, behavior, build)
+        let key = self.selector_key(parsed, Location::caller());
+        self.open_block(key, parsed, inline, behavior, PseudoClasses::NONE, build)
     }
 
     /// A block keyed by `key`, for one row of a loop: its identity follows the
@@ -506,7 +550,7 @@ impl Ui {
     ) -> Response {
         let parsed = self.node_selector(selector);
         let key = self.key(KeySource::Keyed(hash_of(key)));
-        self.open_block(key, parsed, inline, behavior, build)
+        self.open_block(key, parsed, inline, behavior, PseudoClasses::NONE, build)
     }
 
     /// A span: text or a picture, keyed by its selector's `#id` or else by
@@ -520,10 +564,7 @@ impl Ui {
         inline: &[Declaration],
     ) -> Response {
         let parsed = self.node_selector(selector);
-        let key = match parsed.id {
-            Some(id) => self.key(KeySource::Id(id)),
-            None => self.call_site_key(Location::caller()),
-        };
+        let key = self.selector_key(parsed, Location::caller());
         let content = match content.into() {
             Span::Text(text) => {
                 let start = self.text.len();
@@ -535,7 +576,14 @@ impl Ui {
             }
             Span::Image(image) => Content::Image(image),
         };
-        let index = self.push(key, parsed, inline, Behavior::NONE, content);
+        let index = self.push(
+            key,
+            parsed,
+            inline,
+            Behavior::NONE,
+            PseudoClasses::NONE,
+            content,
+        );
         self.close(index);
         self.response(index)
     }
@@ -559,15 +607,25 @@ impl Ui {
         selector: NodeSelector<'_>,
         inline: &[Declaration],
         behavior: Behavior,
+        state: PseudoClasses,
         build: impl FnOnce(&mut Self),
     ) -> Response {
-        let index = self.push(key, selector, inline, behavior, Content::Block);
+        let index = self.push(key, selector, inline, behavior, state, Content::Block);
         let response = self.response(index);
         self.open.push(index);
         build(self);
         self.open.pop();
         self.close(index);
         response
+    }
+
+    /// The key a node built from `selector` at `location` gets: its `#id`, or
+    /// else the call site.
+    fn selector_key(&mut self, selector: NodeSelector<'_>, location: &Location<'_>) -> NodeKey {
+        match selector.id {
+            Some(id) => self.key(KeySource::Id(id)),
+            None => self.call_site_key(location),
+        }
     }
 
     /// The current parent's key folded with `source`.
@@ -604,9 +662,14 @@ impl Ui {
         selector: NodeSelector<'_>,
         inline: &[Declaration],
         behavior: Behavior,
+        state: PseudoClasses,
         content: Content,
     ) -> usize {
         let key = self.unique(key);
+        let behavior = Behavior {
+            disabled: behavior.disabled || self.disabled_depth > 0,
+            ..behavior
+        };
         let (slot, fresh) = match self.store.find(key) {
             Some(slot) => (slot, false),
             None => (self.store.insert(key, self.frame), true),
@@ -616,6 +679,7 @@ impl Ui {
         stored.last_touched_frame = self.frame;
         stored.parent = parent.map(|parent| self.nodes[parent].key);
         stored.behavior = behavior;
+        stored.state = state;
         stored.id = selector.id.map(NavId::new);
 
         let span = !matches!(content, Content::Block);
@@ -746,6 +810,7 @@ impl Ui {
             focused,
             engagement,
             captured,
+            changed: false,
         }
     }
 
@@ -893,6 +958,15 @@ impl Ui {
             stored.paint_order = index;
             stored.hittable = !hidden;
         }
+    }
+
+    /// How far `key`'s children are scrolled, as last frame left it; zero for a
+    /// node the store does not hold.
+    #[must_use]
+    pub fn scroll_offset_of(&self, key: NodeKey) -> Vec2 {
+        self.store
+            .by_key(key)
+            .map_or(Vec2::ZERO, |node| node.scroll_offset)
     }
 
     /// Last layout's border box for `key`, in screen pixels.

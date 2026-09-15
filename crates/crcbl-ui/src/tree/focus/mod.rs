@@ -71,6 +71,17 @@
 //! copy when engagement begins and writes it back on a cancel. A
 //! [`Role::Button`] has no engaged state: accept fires it through the same
 //! [`Response::clicked`] a click does.
+//!
+//! # Tree nodes take left and right
+//!
+//! The one exception to moves going where the layout says: a focused
+//! [`Ui::tree_node`] row answers left and right as the WAI-ARIA Authoring
+//! Practices' tree view pattern does — right opens a closed node and moves to
+//! an open one's first child, left closes an open node and moves from a child
+//! to its parent. Where the pattern says a key "does nothing" — right on an
+//! end node, left on a root that is closed or an end node, or right on an open
+//! node with no child built — the move goes where the layout says instead, so
+//! arrowing never stops dead on a tree.
 
 mod debug;
 pub mod spatial;
@@ -382,19 +393,19 @@ struct Events {
 
 impl Ui {
     /// Whether `key` is in last frame's tree, focusable, and drawn.
-    fn can_focus(&self, key: NodeKey) -> bool {
+    pub(super) fn can_focus(&self, key: NodeKey) -> bool {
         self.store
             .by_key(key)
             .is_some_and(|node| node.hittable && node.behavior.is_focusable())
     }
 
     /// Whether `key` is `region` or inside it; everything is inside no region.
-    fn inside(&self, key: NodeKey, region: Option<NodeKey>) -> bool {
+    pub(super) fn inside(&self, key: NodeKey, region: Option<NodeKey>) -> bool {
         region.is_none_or(|region| self.store.is_within(key, region))
     }
 
     /// The topmost modal scope in last frame's tree.
-    fn active_modal(&self) -> Option<NodeKey> {
+    pub(super) fn active_modal(&self) -> Option<NodeKey> {
         self.store
             .iter()
             .filter(|node| node.hittable && node.behavior.scope == Scope::Modal)
@@ -418,7 +429,15 @@ impl Ui {
     /// Resolves this frame's focus and engagement from `nav` and the click the
     /// pointer made, then writes the result into every stored node. Runs after
     /// the pointer is resolved, before anything is built.
-    pub(super) fn resolve_navigation(&mut self, nav: NavInput, clicked: Option<NodeKey>) {
+    ///
+    /// A click that ended a drag — `dragged` — focuses what it clicked without
+    /// engaging it: the drag already was the engagement.
+    pub(super) fn resolve_navigation(
+        &mut self,
+        nav: NavInput,
+        clicked: Option<NodeKey>,
+        dragged: bool,
+    ) {
         self.focus.mode = nav.mode;
         self.focus.back = false;
         self.focus.scores.clear();
@@ -477,7 +496,7 @@ impl Ui {
                 self.move_focus(target);
                 let engages =
                     self.store.by_key(target).map(|node| node.behavior.role) == Some(Role::Engage);
-                if engages && self.focus.engaged != Some(target) {
+                if engages && !dragged && self.focus.engaged != Some(target) {
                     self.focus.engaged = Some(target);
                     events.began = Some(target);
                 }
@@ -510,7 +529,9 @@ impl Ui {
             }
             if !spent {
                 if let Some(direction) = nav.direction {
-                    self.move_spatially(direction, modal);
+                    if !self.tree_item_step(direction) {
+                        self.move_spatially(direction, modal);
+                    }
                 } else if nav.next || nav.prev {
                     self.move_in_tree_order(nav.next, modal);
                 }
@@ -586,7 +607,7 @@ impl Ui {
 
     /// Focuses `key`: remembers it in every scope around it, records it in the
     /// history, and scrolls it into view.
-    fn move_focus(&mut self, key: NodeKey) {
+    pub(super) fn move_focus(&mut self, key: NodeKey) {
         if self.focus.focused == Some(key) {
             return;
         }
@@ -624,14 +645,7 @@ impl Ui {
             if container.resolved.overflow != Overflow::Scroll {
                 continue;
             }
-            // The content box: the border box less the border and the padding
-            // the layout resolved.
-            let (border, padding) = (container.unrounded.border, container.unrounded.padding);
-            let view = (
-                container.rect.0 + Vec2::new(border.left + padding.left, border.top + padding.top),
-                container.rect.1
-                    - Vec2::new(border.right + padding.right, border.bottom + padding.bottom),
-            );
+            let view = container.content_box();
             let mut delta = Vec2::ZERO;
             for axis in 0..2 {
                 if min[axis] < view.0[axis] {
@@ -882,19 +896,29 @@ impl Ui {
         response: &Response,
         value: &mut T,
     ) {
-        match response.engagement {
+        self.snapshot_for(response.key, response.engagement, value);
+    }
+
+    /// [`Ui::snapshot`] for the node `key`, engaged as `engagement` says: for a
+    /// widget that restores its value before it builds the node.
+    pub(super) fn snapshot_for<T: Clone + Send + Sync + 'static>(
+        &mut self,
+        key: NodeKey,
+        engagement: Engagement,
+        value: &mut T,
+    ) {
+        match engagement {
             Engagement::Began => {
                 self.focus.snapshot = Some(Snapshot {
-                    key: response.key,
+                    key,
                     value: Box::new(value.clone()),
                 });
             }
             Engagement::Cancelled | Engagement::Committed => {
-                let Some(held) = self.focus.snapshot.take_if(|held| held.key == response.key)
-                else {
+                let Some(held) = self.focus.snapshot.take_if(|held| held.key == key) else {
                     return;
                 };
-                if response.engagement == Engagement::Committed {
+                if engagement == Engagement::Committed {
                     return;
                 }
                 match held.value.downcast::<T>() {

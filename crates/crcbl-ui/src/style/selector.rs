@@ -6,7 +6,7 @@
 //! selector-list  = selector ("," selector)*
 //! selector       = compound ((" " | ">") compound)*
 //! compound       = (type | "*")? ("#" id | "." class | ":" pseudo-class)*
-//! pseudo-class   = hover | active | focus | disabled | engaged
+//! pseudo-class   = hover | active | focus | disabled | engaged | checked | open
 //! ```
 //!
 //! A type is `block`, `span` or a widget name a node declares; type names and
@@ -30,7 +30,7 @@
 //! the node, then each combinator walks up. Every pseudo-class matches against
 //! the [`PseudoClasses`] the tree resolved for the node; see
 //! [`crate::tree::focus`] for when `:focus`, `:engaged` and `:disabled` are
-//! set.
+//! set, and [`crate::tree::widgets`] for `:checked` and `:open`.
 
 use core::ops::{BitAnd, BitOr};
 
@@ -56,6 +56,12 @@ impl PseudoClasses {
     pub const DISABLED: Self = Self(1 << 3);
     /// `:engaged`: the focused widget is taking the navigation input.
     pub const ENGAGED: Self = Self(1 << 4);
+    /// `:checked`: a checkbox whose value is on — Selectors Level 4's input
+    /// value state.
+    pub const CHECKED: Self = Self(1 << 5);
+    /// `:open`: a collapsing header or a tree node showing its children —
+    /// Selectors Level 4's collapse state.
+    pub const OPEN: Self = Self(1 << 6);
 
     /// The pseudo-class `name` spells, ignoring ASCII case.
     #[must_use]
@@ -66,6 +72,8 @@ impl PseudoClasses {
             "focus" => Self::FOCUS,
             "disabled" => Self::DISABLED,
             "engaged" => Self::ENGAGED,
+            "checked" => Self::CHECKED,
+            "open" => Self::OPEN,
             _ => return None,
         })
     }
@@ -529,7 +537,7 @@ mod tests {
         Row {
             kind: "block",
             selector: "list.rows",
-            pseudo: PseudoClasses::HOVER,
+            pseudo: PseudoClasses(PseudoClasses::HOVER.0 | PseudoClasses::OPEN.0),
             parent: Some(0),
         },
         Row {
@@ -541,7 +549,7 @@ mod tests {
         Row {
             kind: "span",
             selector: ".label",
-            pseudo: PseudoClasses::NONE,
+            pseudo: PseudoClasses::CHECKED,
             parent: Some(2),
         },
         Row {
@@ -576,6 +584,12 @@ mod tests {
             (":focus", &[]),
             (":disabled", &[]),
             (":engaged", &[]),
+            (":checked", &[3]),
+            ("span:checked", &[3]),
+            (".row:checked", &[]),
+            (":open", &[1]),
+            ("list:open > .row", &[2]),
+            (":open:checked", &[]),
             ("#stats span", &[3, 4]),
             ("#stats > span", &[]),
             (".row > span", &[3, 4]),

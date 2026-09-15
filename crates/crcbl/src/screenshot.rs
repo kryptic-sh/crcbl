@@ -101,6 +101,7 @@ mod ui_primitives;
 mod ui_style;
 mod ui_text;
 mod ui_tree;
+mod ui_widgets;
 
 pub use still_pool::{
     STILL_POOL_DEEP_FLOOR, STILL_POOL_FAR_EDGE, STILL_POOL_HALF_WIDTH, STILL_POOL_LEVEL,
@@ -138,6 +139,13 @@ pub use ui_tree::{
     UI_TREE_BASE, UI_TREE_CELL, UI_TREE_CELLS, UI_TREE_CLIP_BORDER, UI_TREE_CLIP_BORDER_COLOR,
     UI_TREE_GAP, UI_TREE_OVERFLOW, UI_TREE_OVERLAY, UI_TREE_OVERLAY_OFFSET, UI_TREE_PANEL,
     UI_TREE_ROWS, UiTreeLayout, ui_tree_draw_list, ui_tree_layout,
+};
+pub use ui_widgets::{
+    UI_WIDGETS_ACCENT, UI_WIDGETS_AFTER, UI_WIDGETS_BODY, UI_WIDGETS_BODY_HEIGHT,
+    UI_WIDGETS_COLUMN_GAP, UI_WIDGETS_DIVIDER_DRAG, UI_WIDGETS_HEADER, UI_WIDGETS_LIST_TARGET,
+    UI_WIDGETS_PAGE, UI_WIDGETS_RING, UI_WIDGETS_ROW_HEIGHT, UI_WIDGETS_ROWS,
+    UI_WIDGETS_SLIDER_START, UI_WIDGETS_STRIPE_EVEN, UI_WIDGETS_STRIPE_ODD, UI_WIDGETS_STRIPE_STEP,
+    UI_WIDGETS_VOLUME, UiWidgetsLayout, ui_widgets_css, ui_widgets_draw_list, ui_widgets_layout,
 };
 
 // ---------------------------------------------------------------------------
@@ -765,6 +773,12 @@ pub enum Scene {
     /// inside it to a row that starts out of view, and a step toward the grid
     /// is refused. See [`ui_focus_layout`] for what each part is for.
     UiFocus,
+    /// `docs/plan/07-ui-debug.md` rung 7's widget set through [`UiRenderer`]:
+    /// a button, a checkbox, two sliders, a drag-value, two collapsing
+    /// headers, a tree, a split pane and a virtualized list, styled by
+    /// `default.css` and driven by a scripted pointer and pad. See
+    /// [`ui_widgets_layout`] for what each part is for.
+    UiWidgets,
 }
 
 /// How far from the cube's own column each pyramid sits, in world units.
@@ -5987,6 +6001,8 @@ enum UiContent {
     Text,
     /// [`Scene::UiFocus`]'s focused page.
     Focus,
+    /// [`Scene::UiWidgets`]'s widget set.
+    WidgetSet,
 }
 
 /// Puts one of the demo scene's meshes in the frame at `model`.
@@ -6659,6 +6675,11 @@ impl SceneState {
                 renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
                 content: UiContent::Focus,
+            },
+            Scene::UiWidgets => Self::Ui {
+                renderer: Box::new(UiRenderer::new(device, queue, format)?),
+                atlas: FontAtlas::built_in(),
+                content: UiContent::WidgetSet,
             },
             Scene::UiPrimitives => {
                 let mut renderer = Box::new(UiRenderer::new(device, queue, format)?);
@@ -7685,6 +7706,7 @@ impl OffscreenSetup {
                         UiContent::Style => ui_style_draw_list(extent),
                         UiContent::Text => ui_text_draw_list(extent),
                         UiContent::Focus => ui_focus_draw_list(extent),
+                        UiContent::WidgetSet => ui_widgets_draw_list(extent),
                     };
                     // `scale` is 1.0 because every size in the draw list is
                     // already this frame's pixels; a second multiplier is a
@@ -8764,7 +8786,7 @@ mod tests {
             .expect("every forward frame has a forward pass")
             + 1;
         still_pool_passes.insert(after_forward, ("render", "sky"));
-        let expected: [(Scene, &[(&str, &str)]); 20] = [
+        let expected: [(Scene, &[(&str, &str)]); 21] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8866,6 +8888,10 @@ mod tests {
             ),
             (
                 Scene::UiFocus,
+                &[("render", "scene background"), ("render", "ui-composite")],
+            ),
+            (
+                Scene::UiWidgets,
                 &[("render", "scene background"), ("render", "ui-composite")],
             ),
         ];

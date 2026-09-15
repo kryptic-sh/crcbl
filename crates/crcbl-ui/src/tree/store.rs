@@ -13,8 +13,9 @@ use taffy::{Cache, Layout};
 
 use super::focus::{Behavior, Engagement, NavStep};
 use super::style::{NavId, NodeStyle};
+use super::widgets::WidgetState;
 use crate::draw_list::ClipRect;
-use crate::style::{Candidates, Declaration, InheritedId};
+use crate::style::{Candidates, Declaration, InheritedId, PseudoClasses};
 
 /// A node's identity across rebuilds.
 ///
@@ -79,6 +80,12 @@ pub(crate) struct StoredNode {
     pub interaction: Interaction,
     /// How it takes part in focus, as its builder declared it last.
     pub behavior: Behavior,
+    /// The widget state its builder declared last — `:checked`, `:open` —
+    /// which the cascade matches beside the interaction's pseudo-classes.
+    pub state: PseudoClasses,
+    /// What a widget keeps on this node between frames; see
+    /// [`super::widgets`].
+    pub widget: WidgetState,
     /// Its selector's `#id`, hashed, for a `nav-*` property to find.
     pub id: Option<NavId>,
     /// The node focused inside it last, for a scope root.
@@ -129,6 +136,8 @@ impl StoredNode {
             hittable: false,
             interaction: Interaction::default(),
             behavior: Behavior::NONE,
+            state: PseudoClasses::NONE,
+            widget: WidgetState::None,
             id: None,
             remembered: None,
             scroll_offset: Vec2::ZERO,
@@ -139,6 +148,16 @@ impl StoredNode {
             resolved: NodeStyle::DEFAULT,
             inherited: InheritedId::ROOT,
         }
+    }
+
+    /// Last layout's content box, in screen pixels: the border box less the
+    /// border and the padding the layout resolved.
+    pub fn content_box(&self) -> (Vec2, Vec2) {
+        let (border, padding) = (self.unrounded.border, self.unrounded.padding);
+        (
+            self.rect.0 + Vec2::new(border.left + padding.left, border.top + padding.top),
+            self.rect.1 - Vec2::new(border.right + padding.right, border.bottom + padding.bottom),
+        )
     }
 
     /// Whether `pos` is inside the part of last frame's box its clip let

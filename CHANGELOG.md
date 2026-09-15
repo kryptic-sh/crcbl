@@ -177,6 +177,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A widget set on `crcbl_ui::tree`.** `Ui::button`, `checkbox`, `slider`,
+  `drag_value`, `collapsing`, `tree_node` and `tree_leaf`, `split`, and a
+  fixed-row-height virtualized `list` that builds only its view plus
+  `LIST_OVERSCAN` rows a side, so a 100 000-row list costs what a 100-row one
+  does. Widgets take `&mut` values, report edits through the new
+  `Response::changed`, and are styled only by `default.css`, which gains a focus
+  ring and the `:checked` and `:open` pseudo-classes. Sliders, drag-values and
+  split dividers follow the engaged rule, and a pointer drag past
+  `DRAG_THRESHOLD` adjusts them without leaving them engaged; tree rows answer
+  left and right as the WAI-ARIA tree view pattern does. `Ui::enabled` disables
+  a subtree, and the `ui_widgets` screenshot scene draws every widget.
 - **Input contexts, key repeat and the reserved `ui` actions in `crcbl-input`.**
   `ActionMap::declare_in` puts an action in a named context over the
   always-active `GAMEPLAY_CONTEXT`; `push_context` and `pop_context` stack

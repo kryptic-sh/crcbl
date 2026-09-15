@@ -132,7 +132,8 @@ impl Ui {
         // The mixed-input rule: hover shows while the pointer drives, focus
         // while the pad or the keyboard does.
         let pointing = self.input_mode() == InputMode::Pointer;
-        let mut pseudo = PseudoClasses::NONE;
+        // A widget's own state — `:checked`, `:open` — as its builder declared it.
+        let mut pseudo = stored.state;
         for (set, class) in [
             (interaction.hovered && pointing, PseudoClasses::HOVER),
             (interaction.pressed, PseudoClasses::ACTIVE),

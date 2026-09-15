@@ -194,6 +194,10 @@ mod ui_text;
 #[path = "render_e2e/ui_focus.rs"]
 mod ui_focus;
 
+// Rung 7's widget set, for the same reason.
+#[path = "render_e2e/ui_widgets.rs"]
+mod ui_widgets;
+
 /// The size the goldens were blessed at.
 ///
 /// The same 256x192 the cross-backend harness and `crcbl-vk`'s mesh suite use,

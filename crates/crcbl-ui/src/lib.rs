@@ -36,7 +36,8 @@
 //! [`tree`] is the element tree `docs/plan/07-ui-debug.md` builds the rest of
 //! the toolkit on: blocks and spans rebuilt every frame with identity that
 //! survives the rebuild, laid out by Taffy's flexbox and emitted into the same
-//! [`DrawList`]. [`readout`] is its first consumer.
+//! [`DrawList`]. [`readout`] is its first consumer, and [`tree::widgets`] is
+//! the widget set built on it.
 //!
 //! The draw list is the only interface between the UI and the renderer. The
 //! render backend takes a [`DrawList`] and emits GPU draw calls.

@@ -43,3 +43,250 @@ readout-surface {
 .readout-hint {
   flex-shrink: 0;
 }
+
+/*
+ * The widget set: crcbl_ui::tree::widgets, in one dark theme. A game restyles
+ * a widget by naming the same selectors in its own sheet.
+ *
+ * Each widget's look is its type (`button`, `slider`, ...) and the classes
+ * of its parts; its state is a pseudo-class — `:hover` and `:active` from
+ * the pointer, `:focus` from the pad or the keyboard, `:engaged`,
+ * `:disabled`, and `:checked` or `:open`. Rules for one widget run base,
+ * hover, active, engaged, then checked or open, then disabled, so the later
+ * state wins within a tier.
+ */
+
+/* The focus ring: one rule for every focusable part of the set. */
+button:focus,
+checkbox:focus,
+slider:focus,
+drag-value:focus,
+collapsing > .collapsing-header:focus,
+tree-node > .tree-row:focus,
+split > .split-divider:focus {
+  outline: 2px #f5c400;
+  outline-offset: 1px;
+}
+
+/* A row is clipped by its list, so its ring is drawn inside it. */
+list .list-row:focus {
+  outline: 2px #f5c400;
+  outline-offset: -2px;
+}
+
+/* Button. */
+button {
+  padding: 2px 6px;
+  border-width: 1px;
+  border-color: #4a5468;
+  background: #2a303c;
+  color: #e6e9ef;
+}
+
+button:hover {
+  background: #353d4c;
+}
+
+button:active {
+  background: #1f242d;
+}
+
+button:disabled {
+  background: #23272f;
+  color: #7a8190;
+}
+
+/* Checkbox: a box with a mark inside that shows while checked. */
+checkbox {
+  gap: 6px;
+  align-items: center;
+  color: #e6e9ef;
+}
+
+.checkbox-box {
+  width: 12px;
+  height: 12px;
+  padding: 2px;
+  border-width: 1px;
+  border-color: #4a5468;
+  background: #171a20;
+}
+
+.checkbox-mark {
+  flex-grow: 1;
+}
+
+checkbox:hover > .checkbox-box {
+  border-color: #e6e9ef;
+}
+
+checkbox:checked > .checkbox-box > .checkbox-mark {
+  background: #3d8bfd;
+}
+
+checkbox:disabled {
+  color: #7a8190;
+}
+
+checkbox:disabled > .checkbox-box > .checkbox-mark {
+  background: #7a8190;
+}
+
+/* Slider: a well with a fill as wide as the value's share. */
+slider {
+  width: 120px;
+  height: 12px;
+  padding: 2px;
+  border-width: 1px;
+  border-color: #4a5468;
+  background: #171a20;
+}
+
+.slider-fill {
+  background: #3d8bfd;
+}
+
+slider:hover {
+  border-color: #e6e9ef;
+}
+
+slider:engaged {
+  border-color: #3d8bfd;
+  background: #1d3557;
+}
+
+slider:disabled > .slider-fill {
+  background: #7a8190;
+}
+
+/* Drag-value: its number in a field. */
+drag-value {
+  min-width: 48px;
+  padding: 2px 6px;
+  border-width: 1px;
+  border-color: #4a5468;
+  background: #2a303c;
+  color: #e6e9ef;
+}
+
+drag-value:hover {
+  background: #353d4c;
+}
+
+drag-value:active {
+  background: #1f242d;
+}
+
+drag-value:engaged {
+  border-color: #3d8bfd;
+  background: #1d3557;
+}
+
+drag-value:disabled {
+  background: #23272f;
+  color: #7a8190;
+}
+
+/* Collapsing header: a full-width row, and its body under it while open. */
+collapsing {
+  flex-direction: column;
+  color: #e6e9ef;
+}
+
+.collapsing-header {
+  gap: 6px;
+  padding: 2px 6px;
+  background: #2a303c;
+}
+
+collapsing > .collapsing-header:hover {
+  background: #353d4c;
+}
+
+collapsing > .collapsing-header:open {
+  background: #353d4c;
+}
+
+.collapsing-body {
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 6px;
+}
+
+/* Tree node: a row, and its children indented under it while open. */
+tree-node {
+  flex-direction: column;
+  color: #e6e9ef;
+}
+
+.tree-row {
+  gap: 4px;
+  padding: 1px 4px;
+}
+
+tree-node > .tree-row:hover {
+  background: #353d4c;
+}
+
+.tree-toggle {
+  color: #7a8190;
+}
+
+tree-node > .tree-row:open > .tree-toggle {
+  color: #3d8bfd;
+}
+
+.tree-children {
+  flex-direction: column;
+  padding-left: 12px;
+}
+
+/*
+ * Split: it grows to fill its parent along the parent's axis, the panes clip
+ * what they hold, and the divider has a thickness.
+ */
+split {
+  flex-grow: 1;
+}
+
+.split-pane {
+  overflow: hidden;
+}
+
+.split-divider {
+  background: #4a5468;
+}
+
+.split-divider.split-row {
+  width: 4px;
+}
+
+.split-divider.split-column {
+  height: 4px;
+}
+
+split > .split-divider:hover {
+  background: #e6e9ef;
+}
+
+split > .split-divider:engaged {
+  background: #3d8bfd;
+}
+
+/* List: a well, and rows in it. */
+list {
+  flex-direction: column;
+  border-width: 1px;
+  border-color: #4a5468;
+  background: #171a20;
+  color: #e6e9ef;
+}
+
+.list-row {
+  padding: 0 4px;
+  align-items: center;
+}
+
+list .list-row:hover {
+  background: #353d4c;
+}

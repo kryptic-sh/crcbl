@@ -20,8 +20,6 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 - **No gamepad bindings on the `ui` actions**: `Binding` has no gamepad member
   and there is no backend, so the plan's dpad, stick, shoulder, South and East
   column is undeclared.
-- **`default.css` has no focus ring rule**, because no engine widget is on the
-  tree yet; it lands with the widgets.
 - **Focus history is kept and not drawn** by the overlay.
 - **A new modal or a newly built focusable node is seen a frame late**, because
   focus resolves against last frame's tree, as hover does.
@@ -33,6 +31,38 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
   and no GPU claim; D3D12 and Metal draw `ui_focus` only on CI.
 - **`Menu` is not on the tree**: stylesheets cannot express a nine-slice or
   image background yet, and its slider and cycler are widget-rung work.
+
+## What UI rung 7b shipped without (2026-09-16)
+
+`crcbl_ui::tree`'s widget set landed with the gaps below.
+
+- **Decision owed: tree rows take left and right while focused and not
+  engaged.** `07-ui-debug.md`'s LOCKED rule says focus never captures
+  navigation, and `Ui::tree_node` rows answer left and right as the WAI-ARIA
+  Authoring Practices tree view pattern does (open or step into children, close
+  or step to the parent). Where that pattern does nothing the move falls through
+  to spatial navigation, so arrowing never stops dead on a tree. Options: keep
+  the exception and amend the rule's text, or make tree rows engage-first like a
+  slider (an extra accept per expand, as no common tree view does).
+- **State inside a closed parent is dropped.** A closed header's or tree node's
+  body is not built, so nested open states and split positions inside it are
+  pruned with it. Keeping them needs retention of unbuilt descendants in the
+  store.
+- **List rows are keyed by index**, so focus follows the index when the data
+  reorders; there is no item-key variant and no scroll-to-index API.
+- **Nothing scrolls a list with a wheel**: `PointerInput` has no wheel, so a
+  list scrolls by focus or through the store only.
+- **A split position is pixels, not a fraction**, so it does not rescale with
+  its parent; the divider is one extra navigation stop; `split { flex-grow: 1 }`
+  in `default.css` assumes a split fills its parent.
+- **Drag-value has no snapping to `step` while dragged, no fine or coarse
+  modifier, and no click-to-type mode** — the last is 7c's, with text input.
+- **What 7d inherits**: `Menu`'s `Slider` and `Cycler` should map onto
+  `Ui::slider` and a cycler that does not exist yet, and pushing the `ui`
+  context waits on `Menu` moving onto the tree.
+- **Not tested**: a vertical split's pointer drag (only the `ui_widgets` scene
+  exercises it), a list inside nested scroll containers or a modal, and
+  `Ui::enabled` on the slider and split pointer paths.
 
 ## What UI rung 5 shipped without (2026-09-16)
 
