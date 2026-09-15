@@ -322,7 +322,7 @@ fn build(ui: &mut Ui, div: &Element, index: usize) -> Built {
         div.name
     );
     let mut children = Vec::new();
-    let response = ui.block_keyed(index, &style(div), |ui| {
+    let response = ui.block_keyed(index, "", &style(div).declarations(), |ui| {
         for (index, child) in div.children.iter().enumerate() {
             children.push(build(ui, child, index));
         }

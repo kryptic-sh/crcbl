@@ -97,6 +97,7 @@ use crate::ui::draw_list::DrawList;
 
 mod still_pool;
 mod ui_primitives;
+mod ui_style;
 mod ui_tree;
 
 pub use still_pool::{
@@ -111,6 +112,12 @@ pub use ui_primitives::{
     UI_PRIMITIVES_NINE_CENTRE, UI_PRIMITIVES_NINE_CORNERS, UI_PRIMITIVES_NINE_EDGE,
     UI_PRIMITIVES_NINE_INSET, UI_PRIMITIVES_NINE_TEXELS, UiPrimitivesImages, UiPrimitivesLayout,
     register_ui_primitives_images, ui_primitives_draw_list, ui_primitives_layout,
+};
+pub use ui_style::{
+    UI_STYLE_ACCENT, UI_STYLE_ACCEPT_BORDER, UI_STYLE_BUTTON, UI_STYLE_BUTTON_BORDER,
+    UI_STYLE_BUTTON_BORDER_WIDTH, UI_STYLE_BUTTON_HEIGHT, UI_STYLE_GAP, UI_STYLE_HOVER,
+    UI_STYLE_MUTED, UI_STYLE_PANEL, UI_STYLE_PANEL_BORDER_WIDTH, UI_STYLE_TEXT, UiStyleLayout,
+    ui_style_css, ui_style_draw_list, ui_style_layout,
 };
 pub use ui_tree::{
     UI_TREE_BASE, UI_TREE_CELL, UI_TREE_CELLS, UI_TREE_CLIP_BORDER, UI_TREE_CLIP_BORDER_COLOR,
@@ -726,6 +733,12 @@ pub enum Scene {
     /// absolutely positioned overlay and a clipped overflow, laid out by Taffy.
     /// See [`ui_tree_layout`] for what each part is for.
     UiTree,
+    /// `docs/plan/07-ui-debug.md` rung 4's stylesheets through [`UiRenderer`]:
+    /// a panel themed by custom properties, one of two buttons hovered by the
+    /// scene's pointer, an id rule beating a later class rule, and labels that
+    /// inherit their colour or fall back to one. See [`ui_style_layout`] for
+    /// what each part is for.
+    UiStyle,
 }
 
 /// How far from the cube's own column each pyramid sits, in world units.
@@ -5942,6 +5955,8 @@ enum UiContent {
     Primitives(UiPrimitivesImages),
     /// [`Scene::UiTree`]'s laid-out panel.
     Tree,
+    /// [`Scene::UiStyle`]'s styled panel.
+    Style,
 }
 
 /// Puts one of the demo scene's meshes in the frame at `model`.
@@ -6599,6 +6614,11 @@ impl SceneState {
                 renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
                 content: UiContent::Tree,
+            },
+            Scene::UiStyle => Self::Ui {
+                renderer: Box::new(UiRenderer::new(device, queue, format)?),
+                atlas: FontAtlas::built_in(),
+                content: UiContent::Style,
             },
             Scene::UiPrimitives => {
                 let mut renderer = Box::new(UiRenderer::new(device, queue, format)?);
@@ -7622,6 +7642,7 @@ impl OffscreenSetup {
                         UiContent::Widgets => ui_draw_list(extent),
                         UiContent::Primitives(images) => ui_primitives_draw_list(extent, images),
                         UiContent::Tree => ui_tree_draw_list(extent),
+                        UiContent::Style => ui_style_draw_list(extent),
                     };
                     // `scale` is 1.0 because every size in the draw list is
                     // already this frame's pixels; a second multiplier is a
@@ -8698,7 +8719,7 @@ mod tests {
             .expect("every forward frame has a forward pass")
             + 1;
         still_pool_passes.insert(after_forward, ("render", "sky"));
-        let expected: [(Scene, &[(&str, &str)]); 17] = [
+        let expected: [(Scene, &[(&str, &str)]); 18] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8785,6 +8806,10 @@ mod tests {
             ),
             (
                 Scene::UiTree,
+                &[("render", "scene background"), ("render", "ui-composite")],
+            ),
+            (
+                Scene::UiStyle,
                 &[("render", "scene background"), ("render", "ui-composite")],
             ),
         ];

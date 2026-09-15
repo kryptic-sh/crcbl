@@ -16,6 +16,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_ui::tree`'s builders take a selector and inline declarations.**
+  `Ui::block`, `block_keyed` and `span` take a `type#id.class` selector and a
+  `&[Declaration]` inline override where they took `Option<&str>` and
+  `&NodeStyle`, and `span` takes the selector first; `NodeStyle::declarations`
+  turns a whole style into an override. `ReadoutPanel`'s structure now comes
+  from `default.css`, with the same draw commands.
 - **The menu and the button skins are drawn by the UI pass, so the menu's own
   sprite pass is gone.** `crcbl_render::MenuRenderer`, `MenuArt`, `menu_camera`,
   `menu_view_projection`, `ButtonSkin` and `screen_rect_to_target` are removed;
@@ -160,6 +166,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_ui::style`: stylesheets for the element tree.** `Ui::add_stylesheet`,
+  `load_stylesheet`, `replace_stylesheet` and `poll_stylesheets` cascade the
+  engine's embedded `default.css`, then app sheets, then inline `Declaration`s.
+  Selectors cover type, `#id`, `.class`, `:hover`, `:active`, `:focus`,
+  `:disabled` and `:engaged`, descendant and child combinators and lists;
+  specificity is tiered (id over class over type, the later rule winning within
+  a tier) and an app rule always beats a `default.css` rule. Every `NodeStyle`
+  property is typed, with box and `flex` shorthands, sRGB colours decoded to
+  linear light, `--custom` properties and `var()` with fallback and cycle
+  detection, and `initial` and `unset`. A parse error is logged with its file,
+  line and column, and a reload that has one keeps the last good sheet; loaded
+  sheets are polled by modification time. Rules are indexed by their rightmost
+  compound and merged definitions are cached, a node whose rules test no changed
+  pseudo-class is not re-resolved, a paint-only change clears no layout cache,
+  and `Ui::style_stats` counts resolves per frame.
+  `crcbl screenshot --scene ui_style` draws the new golden. Adds the `cssparser`
+  dependency, with its default features off.
 - **`crcbl_ui::tree`: an immediate-mode tree of blocks and spans, laid out by
   flexbox.** Code rebuilds the tree every frame with `Ui::block`,
   `Ui::block_keyed` and `Ui::span`, and a node store keyed by parent key and id,

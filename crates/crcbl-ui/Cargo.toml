@@ -20,6 +20,12 @@ crcbl-core = { workspace = true }
 # swaps its vectors for fixed-capacity arrays (`util::sys`'s heapless fallback),
 # which cap a node at 16 children and a flex container at 256 items.
 taffy = { version = "0.14.0", default-features = false, features = ["flexbox", "std"] }
+# CSS tokenizing and rule-block parsing for `style` — `docs/plan/07-ui-debug.md`
+# section 3, the user's decision of 2026-09-15; selectors, values and the cascade
+# are this crate's. Default features off: `fast_match_byte` and
+# `fast_match_color` pull in two proc-macro crates (`cssparser-macros` and
+# `phf_macros`, with `syn`) for speed-ups to a parser that runs once per sheet.
+cssparser = { version = "0.38.0", default-features = false }
 
 [lints]
 workspace = true

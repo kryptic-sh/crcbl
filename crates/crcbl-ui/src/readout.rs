@@ -27,6 +27,12 @@
 //! hand-written arithmetic put it; the tests below hold the two to bit-for-bit
 //! equality.
 //!
+//! **The structure is styled by the engine's `default.css`**: the `readout`
+//! column, the `.readout-reading` pinned to its row's right edge, the
+//! `readout-surface` that centres a `.readout-hint`. What the fields hold — the
+//! width, row height, padding, border and colours — is each panel's own, and
+//! goes on its nodes as inline declarations.
+//!
 //! **One place it now differs.** Layout is rounded to whole pixels, so a hint
 //! whose centred position fell on a half pixel — an odd surface width — lands
 //! on the pixel to its right.
@@ -41,12 +47,12 @@
 use glam::Vec2;
 
 use crate::draw_list::DrawList;
+use crate::style::{Declaration, Sides};
 use crate::text::FontAtlas;
-use crate::tree::{
-    Align, AvailableSpace, Edges, FlexDirection, Justify, Length, LengthAuto, NodeStyle, Position,
-    Ui,
-};
-use crate::widget::{NATURAL_FONT_SIZE, PointerInput};
+use crate::tree::{AvailableSpace, Length, LengthAuto, Ui};
+#[cfg(any(doc, test))]
+use crate::widget::NATURAL_FONT_SIZE;
+use crate::widget::PointerInput;
 
 /// The scale [`FontAtlas::text_width`] is measured at, which is a multiplier on
 /// the baked glyph size rather than a size in pixels.
@@ -143,48 +149,30 @@ impl ReadoutPanel {
     ) {
         // The border is inside the panel's `pad`, as it always was: content
         // starts `pad` in from the outer edge whatever the border's width.
-        let panel = NodeStyle {
-            width: LengthAuto::Px(self.width),
-            flex_direction: FlexDirection::Column,
-            border: Edges::all(self.border_width),
-            padding: Edges::all(Length::Px((self.pad - self.border_width).max(0.0))),
-            background: self.background,
-            border_color: self.border,
-            ..NodeStyle::DEFAULT
-        };
-        let row = NodeStyle {
-            height: LengthAuto::Px(self.row_height),
-            ..NodeStyle::DEFAULT
-        };
-        let label = NodeStyle {
-            color: self.label,
-            font_size: NATURAL_FONT_SIZE,
-            ..NodeStyle::DEFAULT
-        };
-        // Out of the row's flow and against its right edge, so a reading ends
-        // on the margin however long the label beside it is.
-        let reading_at = NodeStyle {
-            position: Position::Absolute,
-            inset: Edges {
-                top: LengthAuto::Px(0.0),
-                right: LengthAuto::Px(0.0),
-                ..Edges::all(LengthAuto::Auto)
-            },
-            ..label
-        };
+        // Everything else about the panel's look is `default.css`'s.
+        let panel = [
+            Declaration::Width(LengthAuto::Px(self.width)),
+            Declaration::BorderWidth(Sides::All, self.border_width),
+            Declaration::Padding(
+                Sides::All,
+                Length::Px((self.pad - self.border_width).max(0.0)),
+            ),
+            Declaration::Background(self.background),
+            Declaration::BorderColor(self.border),
+        ];
+        let row = [Declaration::Height(LengthAuto::Px(self.row_height))];
+        let label = [Declaration::Color(self.label)];
 
         let mut ui = Ui::new();
         ui.begin_frame(PointerInput::default());
-        ui.block(None, &panel, |ui| {
+        ui.block("readout", &panel, |ui| {
             for (index, reading) in rows.iter().enumerate() {
-                ui.block_keyed(index, &row, |ui| {
-                    ui.span(reading.label.as_str(), &label);
+                ui.block_keyed(index, ".readout-row", &row, |ui| {
+                    ui.span(".readout-label", reading.label.as_str(), &label);
                     ui.span(
+                        ".readout-reading",
                         reading.value.as_str(),
-                        &NodeStyle {
-                            color: reading.colour,
-                            ..reading_at
-                        },
+                        &[Declaration::Color(reading.colour)],
                     );
                 });
             }
@@ -201,34 +189,22 @@ impl ReadoutPanel {
     /// so a page and its readout keep one margin between them.
     pub fn hint(&self, list: &mut DrawList, atlas: &FontAtlas, extent: (u32, u32), text: &str) {
         let size = Vec2::new(extent.0 as f32, extent.1 as f32);
-        let surface = NodeStyle {
-            width: LengthAuto::Px(size.x),
-            height: LengthAuto::Px(size.y),
-            flex_direction: FlexDirection::Column,
-            justify_content: Some(Justify::FlexEnd),
-            align_items: Some(Align::Center),
-            ..NodeStyle::DEFAULT
-        };
-        let hint = NodeStyle {
-            height: LengthAuto::Px(self.row_height),
+        let surface = [
+            Declaration::Width(LengthAuto::Px(size.x)),
+            Declaration::Height(LengthAuto::Px(size.y)),
+        ];
+        let hint = [
+            Declaration::Height(LengthAuto::Px(self.row_height)),
             // A margin rather than the surface's padding, so a surface shorter
             // than the inset still puts the hint the inset above its bottom edge.
-            margin: Edges {
-                bottom: LengthAuto::Px(self.inset),
-                ..Edges::all(LengthAuto::Px(0.0))
-            },
-            // A hint taller than the room above it overflows past the top
-            // rather than being squashed, as the arithmetic it replaced did.
-            flex_shrink: 0.0,
-            color: self.label,
-            font_size: NATURAL_FONT_SIZE,
-            ..NodeStyle::DEFAULT
-        };
+            Declaration::Margin(Sides::Bottom, LengthAuto::Px(self.inset)),
+            Declaration::Color(self.label),
+        ];
 
         let mut ui = Ui::new();
         ui.begin_frame(PointerInput::default());
-        ui.block(None, &surface, |ui| {
-            ui.span(text, &hint);
+        ui.block("readout-surface", &surface, |ui| {
+            ui.span(".readout-hint", text, &hint);
         });
         ui.layout(Vec2::ZERO, AvailableSpace::definite(size), atlas);
         ui.emit(list);

@@ -21,7 +21,7 @@ const fn sized(width: f32, height: f32) -> NodeStyle {
 
 /// One frame: begin at `pointer`, build, lay out at the origin with unbounded
 /// space.
-fn frame(ui: &mut Ui, pointer: PointerInput, build: impl FnOnce(&mut Ui)) {
+pub(super) fn frame(ui: &mut Ui, pointer: PointerInput, build: impl FnOnce(&mut Ui)) {
     ui.begin_frame(pointer);
     build(ui);
     ui.layout(
@@ -31,11 +31,11 @@ fn frame(ui: &mut Ui, pointer: PointerInput, build: impl FnOnce(&mut Ui)) {
     );
 }
 
-fn idle() -> PointerInput {
+pub(super) fn idle() -> PointerInput {
     PointerInput::hovering(Vec2::splat(-1.0))
 }
 
-fn cache_is_empty(ui: &Ui, key: NodeKey) -> bool {
+pub(super) fn cache_is_empty(ui: &Ui, key: NodeKey) -> bool {
     ui.store.by_key(key).expect("stored").cache.is_empty()
 }
 
@@ -46,12 +46,15 @@ fn cache_is_empty(ui: &Ui, key: NodeKey) -> bool {
 /// A page built by the same code, frame after frame.
 fn page(ui: &mut Ui) -> Vec<NodeKey> {
     let mut keys = Vec::new();
-    let root = ui.block(None, &NodeStyle::DEFAULT, |ui| {
+    let root = ui.block("", &[], |ui| {
         for _ in 0..3 {
-            keys.push(ui.block(None, &sized(10.0, 10.0), |_| {}).key);
+            keys.push(ui.block("", &sized(10.0, 10.0).declarations(), |_| {}).key);
         }
-        keys.push(ui.span("label", &NodeStyle::DEFAULT).key);
-        keys.push(ui.block(Some("#named"), &sized(5.0, 5.0), |_| {}).key);
+        keys.push(ui.span("", "label", &[]).key);
+        keys.push(
+            ui.block("#named", &sized(5.0, 5.0).declarations(), |_| {})
+                .key,
+        );
     });
     keys.insert(0, root.key);
     keys
@@ -85,7 +88,7 @@ fn a_rebuild_gives_every_node_the_key_it_had_last_frame() {
 /// back inside it.
 fn list(ui: &mut Ui, rows: &[&str], keyed: bool, scrolled: Option<&str>) -> Vec<(String, Vec2)> {
     let mut seen = Vec::new();
-    ui.block(None, &NodeStyle::DEFAULT, |ui| {
+    ui.block("", &[], |ui| {
         for &row in rows {
             let body = |ui: &mut Ui| {
                 if scrolled == Some(row) {
@@ -94,9 +97,9 @@ fn list(ui: &mut Ui, rows: &[&str], keyed: bool, scrolled: Option<&str>) -> Vec<
                 seen.push((row.to_owned(), ui.scroll_offset()));
             };
             if keyed {
-                ui.block_keyed(row, &sized(10.0, 10.0), body);
+                ui.block_keyed(row, "", &sized(10.0, 10.0).declarations(), body);
             } else {
-                ui.block(None, &sized(10.0, 10.0), body);
+                ui.block("", &sized(10.0, 10.0).declarations(), body);
             }
         }
     });
@@ -144,9 +147,12 @@ fn a_duplicate_key_warns_once_per_frame_and_every_node_still_lays_out() {
     for round in 0..2 {
         keys.clear();
         frame(&mut ui, idle(), |ui| {
-            ui.block(None, &NodeStyle::DEFAULT, |ui| {
+            ui.block("", &[], |ui| {
                 for _ in 0..3 {
-                    keys.push(ui.block(Some("#same"), &sized(10.0, 10.0), |_| {}).key);
+                    keys.push(
+                        ui.block("#same", &sized(10.0, 10.0).declarations(), |_| {})
+                            .key,
+                    );
                 }
             });
         });
@@ -180,11 +186,11 @@ fn a_node_no_frame_built_is_pruned_with_its_state() {
     let mut ui = Ui::new();
     let mut gone = None;
     let build = |ui: &mut Ui, both: bool, gone: &mut Option<NodeKey>, scroll: bool| {
-        ui.block(None, &NodeStyle::DEFAULT, |ui| {
-            ui.block(None, &sized(10.0, 10.0), |_| {});
+        ui.block("", &[], |ui| {
+            ui.block("", &sized(10.0, 10.0).declarations(), |_| {});
             if both {
                 *gone = Some(
-                    ui.block(Some("#b"), &sized(10.0, 10.0), |ui| {
+                    ui.block("#b", &sized(10.0, 10.0).declarations(), |ui| {
                         if scroll {
                             ui.set_scroll_offset(Vec2::ONE);
                         }
@@ -219,8 +225,8 @@ fn moving(ui: &mut Ui, left: f32) -> bool {
         ..sized(50.0, 50.0)
     };
     let mut hovered = false;
-    ui.block(None, &NodeStyle::DEFAULT, |ui| {
-        hovered = ui.block(None, &style, |_| {}).hovered;
+    ui.block("", &[], |ui| {
+        hovered = ui.block("", &style.declarations(), |_| {}).hovered;
     });
     hovered
 }
@@ -273,8 +279,8 @@ fn hover_is_resolved_against_last_frames_rectangle() {
 /// response.
 fn nested(ui: &mut Ui) -> (Response, Response) {
     let mut child = None;
-    let parent = ui.block(Some("#parent"), &sized(100.0, 100.0), |ui| {
-        child = Some(ui.block(Some("#child"), &sized(20.0, 20.0), |_| {}));
+    let parent = ui.block("#parent", &sized(100.0, 100.0).declarations(), |ui| {
+        child = Some(ui.block("#child", &sized(20.0, 20.0).declarations(), |_| {}));
     });
     (parent, child.expect("built"))
 }
@@ -319,9 +325,9 @@ fn a_press_captures_the_topmost_node_and_only_a_release_over_it_clicks() {
     // Pressed on one of two siblings, dragged onto the other, released there.
     let siblings = |ui: &mut Ui| {
         let mut pair = Vec::new();
-        ui.block(None, &NodeStyle::DEFAULT, |ui| {
-            pair.push(ui.block(Some("#a"), &sized(20.0, 20.0), |_| {}));
-            pair.push(ui.block(Some("#b"), &sized(20.0, 20.0), |_| {}));
+        ui.block("", &[], |ui| {
+            pair.push(ui.block("#a", &sized(20.0, 20.0).declarations(), |_| {}));
+            pair.push(ui.block("#b", &sized(20.0, 20.0).declarations(), |_| {}));
         });
         pair
     };
@@ -358,8 +364,8 @@ fn the_ui_queries_read_the_innermost_open_block() {
     });
     ui.begin_frame(press(Vec2::new(50.0, 50.0)));
     let mut inside = (false, false);
-    ui.block(Some("#parent"), &sized(100.0, 100.0), |ui| {
-        ui.block(Some("#child"), &sized(20.0, 20.0), |_| {});
+    ui.block("#parent", &sized(100.0, 100.0).declarations(), |ui| {
+        ui.block("#child", &sized(20.0, 20.0).declarations(), |_| {});
         inside = (ui.hovered(), ui.pressed());
     });
     assert_eq!(inside, (true, true));
@@ -383,11 +389,11 @@ fn invalidation_tree(ui: &mut Ui, leaf_width: f32, right_color: [f32; 4]) -> Key
     let mut left = None;
     let mut leaf = None;
     let mut right = None;
-    let root = ui.block(Some("#root"), &NodeStyle::DEFAULT, |ui| {
+    let root = ui.block("#root", &[], |ui| {
         left = Some(
-            ui.block(Some("#left"), &NodeStyle::DEFAULT, |ui| {
+            ui.block("#left", &[], |ui| {
                 leaf = Some(
-                    ui.block(Some("#leaf"), &sized(leaf_width, 10.0), |_| {})
+                    ui.block("#leaf", &sized(leaf_width, 10.0).declarations(), |_| {})
                         .key,
                 );
             })
@@ -397,7 +403,7 @@ fn invalidation_tree(ui: &mut Ui, leaf_width: f32, right_color: [f32; 4]) -> Key
             background: right_color,
             ..sized(30.0, 10.0)
         };
-        right = Some(ui.block(Some("#right"), &style, |_| {}).key);
+        right = Some(ui.block("#right", &style.declarations(), |_| {}).key);
     });
     Keys {
         root: root.key,
@@ -480,12 +486,12 @@ fn a_style_change_clears_the_node_and_its_ancestors_and_a_sibling_keeps_its_cach
 fn adding_a_child_clears_the_parent_and_its_ancestors() {
     let build = |ui: &mut Ui, extra: bool| {
         let mut inner = None;
-        let outer = ui.block(Some("#outer"), &NodeStyle::DEFAULT, |ui| {
+        let outer = ui.block("#outer", &[], |ui| {
             inner = Some(
-                ui.block(Some("#inner"), &NodeStyle::DEFAULT, |ui| {
-                    ui.block(Some("#one"), &sized(10.0, 10.0), |_| {});
+                ui.block("#inner", &[], |ui| {
+                    ui.block("#one", &sized(10.0, 10.0).declarations(), |_| {});
                     if extra {
-                        ui.block(Some("#two"), &sized(10.0, 10.0), |_| {});
+                        ui.block("#two", &sized(10.0, 10.0).declarations(), |_| {});
                     }
                 })
                 .key,
@@ -519,12 +525,12 @@ fn adding_a_child_clears_the_parent_and_its_ancestors() {
 fn text_is_measured_once_and_an_unchanged_frame_measures_nothing() {
     let atlas = FontAtlas::built_in();
     let build = |ui: &mut Ui, text: &str| {
-        ui.block(None, &NodeStyle::DEFAULT, |ui| {
-            ui.block(None, &NodeStyle::DEFAULT, |ui| {
-                ui.span(text, &NodeStyle::DEFAULT);
+        ui.block("", &[], |ui| {
+            ui.block("", &[], |ui| {
+                ui.span("", text, &[]);
             });
-            ui.block(None, &NodeStyle::DEFAULT, |ui| {
-                ui.span(text, &NodeStyle::DEFAULT);
+            ui.block("", &[], |ui| {
+                ui.span("", text, &[]);
             });
         })
     };
@@ -587,23 +593,25 @@ fn overflow_hidden_clips_the_children_to_the_padding_box() {
             background: [1.0; 4],
             ..sized(40.0, 40.0)
         };
-        ui.block(None, &NodeStyle::DEFAULT, |ui| {
-            ui.block(None, &clipper, |ui| {
+        ui.block("", &[], |ui| {
+            ui.block("", &clipper.declarations(), |ui| {
                 ui.block(
-                    None,
+                    "",
                     &NodeStyle {
                         background: [0.5; 4],
                         ..sized(100.0, 100.0)
-                    },
+                    }
+                    .declarations(),
                     |_| {},
                 );
             });
             ui.block(
-                None,
+                "",
                 &NodeStyle {
                     background: [0.25; 4],
                     ..sized(10.0, 10.0)
-                },
+                }
+                .declarations(),
                 |_| {},
             );
         });
@@ -673,7 +681,7 @@ fn a_block_paints_with_the_primitive_its_style_needs() {
     for (style, want) in cases {
         let mut ui = Ui::new();
         frame(&mut ui, idle(), |ui| {
-            ui.block(None, &style, |_| {});
+            ui.block("", &style.declarations(), |_| {});
         });
         let list = emitted(&ui);
         let got: Vec<&str> = list
@@ -703,18 +711,21 @@ fn display_none_draws_nothing_takes_no_space_and_is_never_hit() {
     };
     let build = |ui: &mut Ui| {
         let mut responses = Vec::new();
-        ui.block(None, &NodeStyle::DEFAULT, |ui| {
-            responses.push(ui.block(None, &hidden, |ui| {
-                ui.span("gone", &NodeStyle::DEFAULT);
+        ui.block("", &[], |ui| {
+            responses.push(ui.block("", &hidden.declarations(), |ui| {
+                ui.span("", "gone", &[]);
             }));
-            responses.push(ui.block(
-                None,
-                &NodeStyle {
-                    background: [1.0; 4],
-                    ..sized(10.0, 10.0)
-                },
-                |_| {},
-            ));
+            responses.push(
+                ui.block(
+                    "",
+                    &NodeStyle {
+                        background: [1.0; 4],
+                        ..sized(10.0, 10.0)
+                    }
+                    .declarations(),
+                    |_| {},
+                ),
+            );
         });
         responses
     };
@@ -740,19 +751,22 @@ fn a_scroll_offset_moves_the_children_for_drawing_and_hitting() {
             flex_direction: FlexDirection::Column,
             ..sized(50.0, 50.0)
         };
-        ui.block(None, &scroller, |ui| {
+        ui.block("", &scroller.declarations(), |ui| {
             if scroll {
                 ui.set_scroll_offset(Vec2::new(0.0, 20.0));
             }
-            ui.block(None, &sized(50.0, 20.0), |_| {});
-            child = Some(ui.block(
-                None,
-                &NodeStyle {
-                    background: [1.0; 4],
-                    ..sized(50.0, 20.0)
-                },
-                |_| {},
-            ));
+            ui.block("", &sized(50.0, 20.0).declarations(), |_| {});
+            child = Some(
+                ui.block(
+                    "",
+                    &NodeStyle {
+                        background: [1.0; 4],
+                        ..sized(50.0, 20.0)
+                    }
+                    .declarations(),
+                    |_| {},
+                ),
+            );
         });
         child.expect("built")
     };

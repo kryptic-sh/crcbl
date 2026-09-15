@@ -194,6 +194,8 @@ OPTIONS:
                                                and a nine-slice
                            ui_tree             a flex panel laid out by the
                                                element tree
+                           ui_style            a panel themed by a stylesheet,
+                                               one button hovered
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
                          be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
@@ -1273,6 +1275,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::Ui,
         Scene::UiPrimitives,
         Scene::UiTree,
+        Scene::UiStyle,
     ]
 };
 
@@ -1307,6 +1310,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::Ui => "ui",
         Scene::UiPrimitives => "ui_primitives",
         Scene::UiTree => "ui_tree",
+        Scene::UiStyle => "ui_style",
     }
 }
 

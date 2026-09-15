@@ -5,27 +5,26 @@
 //!
 //! ```text
 //! ui.begin_frame(pointer)      hover and press, from LAST frame's rectangles
-//! ui.block(..., |ui| { ... })  the tree, built from nothing
+//! ui.block(..., |ui| { ... })  the tree, built from nothing, each node styled
 //! ui.layout(origin, space, atlas)   flexbox on Taffy; untouched nodes pruned
 //! ui.emit(&mut list)           backgrounds, borders, clips, text, images
 //! ```
 //!
 //! ```
-//! use crcbl_ui::tree::{AvailableSpace, Length, NodeStyle, Ui};
+//! use crcbl_ui::style::Declaration;
+//! use crcbl_ui::tree::{AvailableSpace, LengthAuto, Ui};
 //! use crcbl_ui::{DrawList, FontAtlas, PointerInput};
 //!
 //! let atlas = FontAtlas::built_in();
 //! let mut ui = Ui::new();
-//! let panel = NodeStyle {
-//!     padding: crcbl_ui::tree::Edges::all(Length::Px(8.0)),
-//!     column_gap: Length::Px(4.0),
-//!     background: [0.1, 0.1, 0.1, 1.0],
-//!     ..NodeStyle::DEFAULT
-//! };
+//! ui.add_stylesheet(
+//!     "hud.css",
+//!     ".hud { padding: 8px; gap: 4px; background: #1a1a1a; color: gold }",
+//! );
 //! ui.begin_frame(PointerInput::default());
-//! ui.block(Some("#panel"), &panel, |ui| {
-//!     ui.span("SCORE", &NodeStyle::DEFAULT);
-//!     ui.span("120", &NodeStyle::DEFAULT);
+//! ui.block("#panel.hud", &[Declaration::MinWidth(LengthAuto::Px(120.0))], |ui| {
+//!     ui.span("", "SCORE", &[]);
+//!     ui.span("", "120", &[]);
 //! });
 //! ui.layout(glam::Vec2::ZERO, AvailableSpace::MAX_CONTENT, &atlas);
 //! let mut list = DrawList::new();
@@ -33,11 +32,22 @@
 //! assert_eq!(list.len(), 3, "a background and two strings");
 //! ```
 //!
+//! # Styles
+//!
+//! A node's style comes from the stylesheets — see [`crate::style`] — matched
+//! against the selector its builder was given, `type#id.class`, with the
+//! builder's inline [`Declaration`]s over the top. [`NodeStyle::declarations`]
+//! turns a whole style into an inline override that leaves the stylesheets no
+//! say. A stylesheet changes with [`Ui::add_stylesheet`],
+//! [`Ui::replace_stylesheet`] and, for one loaded from a file,
+//! [`Ui::poll_stylesheets`]; how resolution is cached is `resolve.rs`'s.
+//!
 //! # Identity
 //!
 //! Every node has a [`NodeKey`]: `hash(parent key, id)`, where the id is
 //!
-//! * the explicit id passed to [`Ui::block`] (`Some("#health")`), or
+//! * the `#id` in the selector passed to [`Ui::block`] or [`Ui::span`]
+//!   (`"#health.hud"`), or
 //! * the key passed to [`Ui::block_keyed`], for the rows of a loop, or
 //! * otherwise the **call site** and how many nodes that call site has already
 //!   built under the same parent this frame.
@@ -55,8 +65,9 @@
 //! # What survives a rebuild, and what clears it
 //!
 //! The store keeps, per key, the pointer's hover and press, a scroll offset,
-//! last frame's rectangle, Taffy's layout cache, and three hashes: the node's
-//! layout style ([`NodeStyle::layout_hash`], which no paint field reaches), its
+//! last frame's rectangle, its resolved style, Taffy's layout cache, and three
+//! hashes: the node's resolved layout style ([`NodeStyle::layout_hash`], which
+//! no paint field reaches), its
 //! children's keys in order, and its measured content. **When any of the three
 //! moves, that node's cache and every ancestor's is cleared; nothing else is.**
 //! A sibling keeps its cache, and so does everything under the changed node,
@@ -93,8 +104,11 @@
 
 mod emit;
 mod layout;
+mod resolve;
 mod store;
 mod style;
+#[cfg(test)]
+mod style_tests;
 #[cfg(test)]
 mod tests;
 
@@ -109,6 +123,7 @@ use crate::draw_list::ClipRect;
 #[cfg(doc)]
 use crate::draw_list::DrawList;
 use crate::image::AtlasImage;
+use crate::style::{Declaration, InheritedId, NodeSelector, PseudoClasses, Styles};
 use crate::text::FontAtlas;
 use crate::widget::{ButtonState, PointerInput, UiState};
 
@@ -223,6 +238,14 @@ struct FrameNode {
     /// Its slot in the store.
     slot: usize,
     parent: Option<usize>,
+    /// Its builder's selector: `Ui::selectors[start..end]`, empty when the
+    /// builder's was malformed.
+    selector: (usize, usize),
+    /// Its pseudo-class state this frame.
+    pseudo: PseudoClasses,
+    /// What it passes to its children.
+    inherited: InheritedId,
+    /// Its resolved style.
     style: NodeStyle,
     content: Content,
     content_hash: u64,
@@ -274,6 +297,13 @@ pub struct Ui {
     duplicates: Vec<NodeKey>,
     /// The content hash of every text span built this frame.
     live_text: HashSet<u64>,
+    /// Every node's selector this frame, run together.
+    selectors: String,
+    /// Its stylesheets and cascade state.
+    styles: Styles,
+    /// Builder selectors already reported as malformed, so each is reported
+    /// once.
+    malformed: HashSet<String>,
     measure: MeasureCache,
     capture: UiState,
     frame: u64,
@@ -297,6 +327,8 @@ impl Ui {
         self.call_sites.clear();
         self.duplicates.clear();
         self.live_text.clear();
+        self.selectors.clear();
+        self.styles.begin_frame();
         self.resolve_pointer(pointer);
     }
 
@@ -346,66 +378,93 @@ impl Ui {
 
     /// A block: a flex container whose children `build` adds.
     ///
-    /// `id` is an explicit identity (`Some("#health")`); `None` keys the block
-    /// by this call site. See the module docs.
+    /// `selector` is the node's own `type#id.class` — every part optional,
+    /// `""` for a plain block — which stylesheet rules match against; its
+    /// `#id` is also the node's explicit identity, and with none the block is
+    /// keyed by this call site. See the module docs. `inline` overrides every
+    /// rule; `&[]` for none.
     #[track_caller]
     pub fn block(
         &mut self,
-        id: Option<&str>,
-        style: &NodeStyle,
+        selector: &str,
+        inline: &[Declaration],
         build: impl FnOnce(&mut Self),
     ) -> Response {
-        let source = match id {
+        let parsed = self.node_selector(selector);
+        let key = match parsed.id {
             Some(id) => self.key(KeySource::Id(id)),
             None => self.call_site_key(Location::caller()),
         };
-        self.open_block(source, style, build)
+        self.open_block(key, parsed, inline, build)
     }
 
     /// A block keyed by `key`, for one row of a loop: its identity follows the
-    /// item rather than its position.
+    /// item rather than its position. `selector` and `inline` are
+    /// [`Ui::block`]'s, and an `#id` in the selector does not key it.
     pub fn block_keyed(
         &mut self,
         key: impl Hash,
-        style: &NodeStyle,
+        selector: &str,
+        inline: &[Declaration],
         build: impl FnOnce(&mut Self),
     ) -> Response {
-        let source = self.key(KeySource::Keyed(hash_of(key)));
-        self.open_block(source, style, build)
+        let parsed = self.node_selector(selector);
+        let key = self.key(KeySource::Keyed(hash_of(key)));
+        self.open_block(key, parsed, inline, build)
     }
 
-    /// A span: text or a picture, keyed by this call site.
+    /// A span: text or a picture, keyed by its selector's `#id` or else by
+    /// this call site. `selector` and `inline` are [`Ui::block`]'s; a span's
+    /// type is `span` unless the selector names one.
     #[track_caller]
-    pub fn span<'a>(&mut self, content: impl Into<Span<'a>>, style: &NodeStyle) -> Response {
-        let key = self.call_site_key(Location::caller());
-        let (content, content_hash) = match content.into() {
+    pub fn span<'a>(
+        &mut self,
+        selector: &str,
+        content: impl Into<Span<'a>>,
+        inline: &[Declaration],
+    ) -> Response {
+        let parsed = self.node_selector(selector);
+        let key = match parsed.id {
+            Some(id) => self.key(KeySource::Id(id)),
+            None => self.call_site_key(Location::caller()),
+        };
+        let content = match content.into() {
             Span::Text(text) => {
                 let start = self.text.len();
                 self.text.push_str(text);
-                let content_hash = hash_of((text, style.font_size.to_bits()));
-                self.live_text.insert(content_hash);
-                (
-                    Content::Text {
-                        start,
-                        end: self.text.len(),
-                    },
-                    content_hash,
-                )
+                Content::Text {
+                    start,
+                    end: self.text.len(),
+                }
             }
-            Span::Image(image) => (Content::Image(image), hash_of((image.width, image.height))),
+            Span::Image(image) => Content::Image(image),
         };
-        let index = self.push(key, style, content, content_hash);
+        let index = self.push(key, parsed, inline, content);
         self.close(index);
         self.response(index)
+    }
+
+    /// `selector` split into its parts, or — reported once — no parts at all.
+    fn node_selector<'s>(&mut self, selector: &'s str) -> NodeSelector<'s> {
+        NodeSelector::parse(selector).unwrap_or_else(|()| {
+            if self.malformed.insert(selector.to_owned()) {
+                crcbl_core::warn!(
+                    "ui tree: `{selector}` is not a node selector (`type#id.class`, names of \
+                     letters, digits, `-` and `_`); the node is built with none"
+                );
+            }
+            NodeSelector::EMPTY
+        })
     }
 
     fn open_block(
         &mut self,
         key: NodeKey,
-        style: &NodeStyle,
+        selector: NodeSelector<'_>,
+        inline: &[Declaration],
         build: impl FnOnce(&mut Self),
     ) -> Response {
-        let index = self.push(key, style, Content::Block, 0);
+        let index = self.push(key, selector, inline, Content::Block);
         let response = self.response(index);
         self.open.push(index);
         build(self);
@@ -440,13 +499,14 @@ impl Ui {
         ))
     }
 
-    /// Appends a node under the current parent and touches its slot.
+    /// Appends a node under the current parent, touches its slot and resolves
+    /// its style.
     fn push(
         &mut self,
         key: NodeKey,
-        style: &NodeStyle,
+        selector: NodeSelector<'_>,
+        inline: &[Declaration],
         content: Content,
-        content_hash: u64,
     ) -> usize {
         let key = self.unique(key);
         let (slot, fresh) = match self.store.find(key) {
@@ -458,12 +518,31 @@ impl Ui {
         stored.last_touched_frame = self.frame;
         stored.parent = parent.map(|parent| self.nodes[parent].key);
 
+        let span = !matches!(content, Content::Block);
+        let start = self.selectors.len();
+        self.selectors.push_str(selector.text());
+        let text = (start, self.selectors.len());
+        let resolved = self.resolve_style(slot, fresh, parent, selector, span, inline);
+
+        let content_hash = match content {
+            Content::Block => 0,
+            Content::Text { start, end } => {
+                let hash = hash_of((&self.text[start..end], resolved.style.font_size.to_bits()));
+                self.live_text.insert(hash);
+                hash
+            }
+            Content::Image(image) => hash_of((image.width, image.height)),
+        };
+
         let index = self.nodes.len();
         self.nodes.push(FrameNode {
             key,
             slot,
             parent,
-            style: *style,
+            selector: text,
+            pseudo: resolved.pseudo,
+            inherited: resolved.inherited,
+            style: resolved.style,
             content,
             content_hash,
             child_hash: 0,

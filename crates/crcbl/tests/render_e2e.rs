@@ -182,6 +182,10 @@ mod ui_primitives;
 #[path = "render_e2e/ui_tree.rs"]
 mod ui_tree;
 
+// Rung 4's stylesheets and cascade, for the same reason.
+#[path = "render_e2e/ui_style.rs"]
+mod ui_style;
+
 /// The size the goldens were blessed at.
 ///
 /// The same 256x192 the cross-backend harness and `crcbl-vk`'s mesh suite use,

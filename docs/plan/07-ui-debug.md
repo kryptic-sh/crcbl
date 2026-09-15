@@ -45,6 +45,14 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   first consumer; `Hud` and `HudPanel` are deleted. Not built from those rungs
   yet: `overflow: scroll` (the offset is stored and applied but not clamped),
   `z-index`, custom-draw spans, block layout and wrapped-text measurement.
+- **`style`** — **rung 4 is built** (2026-09-16): `cssparser` 0.38 tokenizing,
+  and this crate's selectors, typed values, cascade, rule index with a
+  definition cache and per-rule pseudo-class dependencies, resolve counters, and
+  polled reload that keeps the last good sheet. `ReadoutPanel` is styled by
+  `default.css`. Not built from that rung yet: `opacity`, `inherit`,
+  `!important`, the `border` shorthand, `font` and text alignment; nothing sets
+  `:focus`, `:disabled` or `:engaged` until the focus rung; and no application
+  loads or polls a sheet yet.
 - **`text`** — `FontAtlas`, a built-in **monospace bitmap** ASCII font with
   metrics and a simple layout. Not the `skrifa`-parsed rasteriser and the
   shelf/skyline atlas with LRU eviction the rendering section specifies: those

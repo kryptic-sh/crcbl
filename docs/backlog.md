@@ -3,6 +3,24 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## What UI rung 4 shipped without (2026-09-16)
+
+`crcbl_ui::style` landed with the gaps below.
+
+- **No application loads or polls a stylesheet**, and `Ui::style_stats` is shown
+  in neither the debug panel nor an inspector.
+- **The sRGB transfer function now exists twice** — in `crcbl-render`'s mip
+  generation and in `crcbl-ui`'s colour parsing — and belongs in one place.
+- **Untested**: trimming the definition cache at its cap, and a stylesheet write
+  caught half-finished that happens to parse.
+- **A block left open at the end of a file is not reported**: `cssparser` closes
+  it silently.
+- **An invalid `var()` warns again** every time its definition is recomputed
+  after a trim or a reload.
+- **Declined, with the reason**: the `notify` file watcher (an open owner
+  decision, so reload polls modification times), and `cssparser`'s default
+  features (they add two proc-macro crates).
+
 ## What UI rungs 2 and 3 shipped without (2026-09-15)
 
 `crcbl_ui::tree` landed with the gaps below.

@@ -191,27 +191,30 @@ fn build(extent: (u32, u32)) -> (Ui, Parts, f32) {
     let mut ui = Ui::new();
     ui.begin_frame(PointerInput::default());
     let mut keys = Vec::new();
-    ui.block(Some("#root"), &root, |ui| {
+    ui.block("#root", &root.declarations(), |ui| {
         let row_key = ui
-            .block(Some("#gap-row"), &gap_row, |ui| {
+            .block("#gap-row", &gap_row.declarations(), |ui| {
                 for (index, color) in UI_TREE_CELLS.into_iter().enumerate() {
-                    keys.push(ui.block_keyed(index, &cell(color), |_| {}).key);
+                    keys.push(
+                        ui.block_keyed(index, "", &cell(color).declarations(), |_| {})
+                            .key,
+                    );
                 }
             })
             .key;
         keys.push(row_key);
-        ui.block(Some("#lower"), &lower, |ui| {
+        ui.block("#lower", &lower.declarations(), |ui| {
             let column_key = ui
-                .block(Some("#column"), &column, |ui| {
-                    ui.block(Some("#first"), &row(UI_TREE_ROWS[0]), |_| {});
-                    ui.block(Some("#second"), &row(UI_TREE_ROWS[1]), |_| {});
-                    keys.push(ui.block(Some("#overlay"), &overlay, |_| {}).key);
+                .block("#column", &column.declarations(), |ui| {
+                    ui.block("#first", &row(UI_TREE_ROWS[0]).declarations(), |_| {});
+                    ui.block("#second", &row(UI_TREE_ROWS[1]).declarations(), |_| {});
+                    keys.push(ui.block("#overlay", &overlay.declarations(), |_| {}).key);
                 })
                 .key;
             keys.push(column_key);
             let clipper_key = ui
-                .block(Some("#clipper"), &clipper, |ui| {
-                    keys.push(ui.block(Some("#overflow"), &overflow, |_| {}).key);
+                .block("#clipper", &clipper.declarations(), |ui| {
+                    keys.push(ui.block("#overflow", &overflow.declarations(), |_| {}).key);
                 })
                 .key;
             keys.push(clipper_key);

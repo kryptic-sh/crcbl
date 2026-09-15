@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use glam::Vec2;
 use taffy::{Cache, Layout};
 
+use super::style::NodeStyle;
 use crate::draw_list::ClipRect;
+use crate::style::{Candidates, Declaration, InheritedId};
 
 /// A node's identity across rebuilds.
 ///
@@ -70,6 +72,26 @@ pub(crate) struct StoredNode {
     /// How far its children are scrolled, subtracted from where they are laid
     /// out. Set by the caller; nothing scrolls it by itself yet.
     pub scroll_offset: Vec2,
+    /// The candidate rules for its selector, and what they were gathered for.
+    pub candidates: Option<StoredCandidates>,
+    /// What its resolved style was keyed by last; see `resolve.rs`.
+    pub style_key: u64,
+    /// The inline declarations it was resolved with last.
+    pub inline: Vec<Declaration>,
+    /// Its resolved style as of `style_key`.
+    pub resolved: NodeStyle,
+    /// What it passed to its children as of `style_key`.
+    pub inherited: InheritedId,
+}
+
+/// A node's candidate rules, with the selector and stylesheet generation they
+/// were gathered for.
+#[derive(Clone, Debug)]
+pub(crate) struct StoredCandidates {
+    pub selector: String,
+    pub span: bool,
+    pub generation: u64,
+    pub candidates: Candidates,
 }
 
 impl StoredNode {
@@ -89,6 +111,11 @@ impl StoredNode {
             hittable: false,
             interaction: Interaction::default(),
             scroll_offset: Vec2::ZERO,
+            candidates: None,
+            style_key: 0,
+            inline: Vec::new(),
+            resolved: NodeStyle::DEFAULT,
+            inherited: InheritedId::ROOT,
         }
     }
 

@@ -1,0 +1,36 @@
+/*
+ * The engine's own look: crcbl-ui's widgets, below every stylesheet an app
+ * adds. An app restyles a widget by naming the same selectors in its own
+ * sheet, which wins over this one whatever the specificity.
+ *
+ * The tree's plain `block` and `span` have no rule here. Their look is CSS's
+ * initial values (`NodeStyle::DEFAULT`), and `color` and `font-size` inherit:
+ * a type rule for either would stop a span taking its panel's colour.
+ */
+
+/*
+ * ReadoutPanel: a column of fixed-height rows, each a label at the left and
+ * a reading against the right edge. Its width, row height, padding, border
+ * and colours are the panel's public fields, set inline per panel.
+ */
+readout {
+  flex-direction: column;
+}
+
+.readout-reading {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+/* ReadoutPanel::hint: one line centred along the bottom of the surface. */
+readout-surface {
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+/* A hint taller than the room above it overflows rather than squashing. */
+.readout-hint {
+  flex-shrink: 0;
+}

@@ -51,6 +51,7 @@ pub mod hud;
 pub mod image;
 pub mod menu;
 pub mod readout;
+pub mod style;
 pub mod text;
 pub mod touch;
 pub mod tree;
