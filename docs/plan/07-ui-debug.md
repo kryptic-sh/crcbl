@@ -37,6 +37,14 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   changed atlas copied inside the render graph. Not built from this section yet:
   batching by stacking context and texture (there is one page), a second page,
   eviction, and a smooth sampling mode for images.
+- **`tree`** — **rungs 2 and 3 are built** (2026-09-15): `Ui::block`,
+  `block_keyed` and `span` over a node store keyed by identity, pruned when a
+  frame does not touch a node, hit-tested against last frame's rects, and laid
+  out by Taffy 0.14's flexbox through its low-level traits, with 361 of Taffy's
+  Chrome-generated flex fixtures passing through the tree. `ReadoutPanel` is its
+  first consumer; `Hud` and `HudPanel` are deleted. Not built from those rungs
+  yet: `overflow: scroll` (the offset is stored and applied but not clamped),
+  `z-index`, custom-draw spans, block layout and wrapped-text measurement.
 - **`text`** — `FontAtlas`, a built-in **monospace bitmap** ASCII font with
   metrics and a simple layout. Not the `skrifa`-parsed rasteriser and the
   shelf/skyline atlas with LRU eviction the rendering section specifies: those

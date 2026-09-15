@@ -33,6 +33,11 @@
 //! samples put their own numbers in — a label and a right-aligned reading a
 //! row, sized and coloured by the page rather than by its contents.
 //!
+//! [`tree`] is the element tree `docs/plan/07-ui-debug.md` builds the rest of
+//! the toolkit on: blocks and spans rebuilt every frame with identity that
+//! survives the rebuild, laid out by Taffy's flexbox and emitted into the same
+//! [`DrawList`]. [`readout`] is its first consumer.
+//!
 //! The draw list is the only interface between the UI and the renderer. The
 //! render backend takes a [`DrawList`] and emits GPU draw calls.
 //!
@@ -48,6 +53,7 @@ pub mod menu;
 pub mod readout;
 pub mod text;
 pub mod touch;
+pub mod tree;
 pub mod widget;
 
 pub use budget::{Bound, BudgetStats, MIN_PERCENTILE_SAMPLES};
@@ -65,7 +71,7 @@ pub use draw_list::{
     Border, ClipRect, ClipUnderflow, CornerRadii, DrawCommand, DrawList, Primitive, Triangles,
     Vertex2d,
 };
-pub use hud::{Anchor, Hud, HudPanel};
+pub use hud::Anchor;
 pub use image::{AtlasError, AtlasImage, ImageAtlas, ImageId, NineSliceImage, TexelRect};
 pub use menu::{
     BUTTON_INSETS, Cycler, FIT_FRACTION, Menu, MenuItem, MenuItemKind, MenuItemLayout, MenuLayout,

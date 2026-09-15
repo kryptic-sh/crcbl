@@ -160,6 +160,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_ui::tree`: an immediate-mode tree of blocks and spans, laid out by
+  flexbox.** Code rebuilds the tree every frame with `Ui::block`,
+  `Ui::block_keyed` and `Ui::span`, and a node store keyed by parent key and id,
+  loop key or call site keeps each node's hover, press, scroll offset and layout
+  cache across rebuilds; a node whose style, children or content changed clears
+  its own cache and its ancestors' and nothing else, and a duplicate key warns
+  once a frame and is laid out apart. Layout is the `taffy` crate's flexbox
+  through its low-level traits — the store is the tree Taffy walks and
+  `NodeStyle` implements its style traits directly — and 361 of Taffy's
+  Chrome-generated flex fixtures pass through `Ui` itself, fresh and with warm
+  caches. `crcbl_ui::ReadoutPanel` now lays out on the tree with the same API
+  and the same draw commands, except that a hint centred on an odd-width surface
+  lands on a whole pixel. `crcbl screenshot --scene ui_tree` draws the golden
+  scene that holds gap, offset and clip.
 - **The draw list draws pictures, rounded rectangles and clipped content.**
   `crcbl_ui::image::ImageAtlas` packs caller-registered RGBA8 images into one
   1024-texel page with a one-texel edge gutter, refusing an image that does not
@@ -1410,6 +1424,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Removed
 
+- `crcbl_ui::Hud` and `crcbl_ui::HudPanel`, which nothing called; panel sizing
+  is the tree's flex layout now. `crcbl_ui::hud::Anchor` stays.
 - Every demo's `pub use crcbl::web::{ASSET_BASE, STATUS_*}`. It existed only so
   those modules' docs could link the names, and those docs now live in
   `crcbl::web`. `apps/breach` and `apps/horde` import `STATUS_PREPARED`

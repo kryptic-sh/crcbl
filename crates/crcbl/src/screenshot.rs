@@ -97,6 +97,7 @@ use crate::ui::draw_list::DrawList;
 
 mod still_pool;
 mod ui_primitives;
+mod ui_tree;
 
 pub use still_pool::{
     STILL_POOL_DEEP_FLOOR, STILL_POOL_FAR_EDGE, STILL_POOL_HALF_WIDTH, STILL_POOL_LEVEL,
@@ -110,6 +111,11 @@ pub use ui_primitives::{
     UI_PRIMITIVES_NINE_CENTRE, UI_PRIMITIVES_NINE_CORNERS, UI_PRIMITIVES_NINE_EDGE,
     UI_PRIMITIVES_NINE_INSET, UI_PRIMITIVES_NINE_TEXELS, UiPrimitivesImages, UiPrimitivesLayout,
     register_ui_primitives_images, ui_primitives_draw_list, ui_primitives_layout,
+};
+pub use ui_tree::{
+    UI_TREE_BASE, UI_TREE_CELL, UI_TREE_CELLS, UI_TREE_CLIP_BORDER, UI_TREE_CLIP_BORDER_COLOR,
+    UI_TREE_GAP, UI_TREE_OVERFLOW, UI_TREE_OVERLAY, UI_TREE_OVERLAY_OFFSET, UI_TREE_PANEL,
+    UI_TREE_ROWS, UiTreeLayout, ui_tree_draw_list, ui_tree_layout,
 };
 
 // ---------------------------------------------------------------------------
@@ -715,6 +721,11 @@ pub enum Scene {
     /// the frame carries the image atlas's in-frame upload too. See
     /// [`ui_primitives_layout`] for what each part is for.
     UiPrimitives,
+    /// `docs/plan/07-ui-debug.md` rungs 2 and 3's element tree through
+    /// [`UiRenderer`]: nested flex rows and columns with gaps and padding, an
+    /// absolutely positioned overlay and a clipped overflow, laid out by Taffy.
+    /// See [`ui_tree_layout`] for what each part is for.
+    UiTree,
 }
 
 /// How far from the cube's own column each pyramid sits, in world units.
@@ -5919,10 +5930,18 @@ enum SceneState {
         /// the menu skin and the image atlas it owns make it the next largest.
         renderer: Box<UiRenderer>,
         atlas: FontAtlas,
-        /// The primitives scene's registered pictures, or `None` for
-        /// [`Scene::Ui`]'s widgets.
-        primitives: Option<UiPrimitivesImages>,
+        content: UiContent,
     },
+}
+
+/// Which of the UI scenes a [`SceneState::Ui`] draws.
+enum UiContent {
+    /// [`Scene::Ui`]'s widgets.
+    Widgets,
+    /// [`Scene::UiPrimitives`], with its registered pictures.
+    Primitives(UiPrimitivesImages),
+    /// [`Scene::UiTree`]'s laid-out panel.
+    Tree,
 }
 
 /// Puts one of the demo scene's meshes in the frame at `model`.
@@ -6574,7 +6593,12 @@ impl SceneState {
             Scene::Ui => Self::Ui {
                 renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
-                primitives: None,
+                content: UiContent::Widgets,
+            },
+            Scene::UiTree => Self::Ui {
+                renderer: Box::new(UiRenderer::new(device, queue, format)?),
+                atlas: FontAtlas::built_in(),
+                content: UiContent::Tree,
             },
             Scene::UiPrimitives => {
                 let mut renderer = Box::new(UiRenderer::new(device, queue, format)?);
@@ -6593,7 +6617,7 @@ impl SceneState {
                 Self::Ui {
                     renderer,
                     atlas: FontAtlas::built_in(),
-                    primitives: Some(images),
+                    content: UiContent::Primitives(images),
                 }
             }
         })
@@ -7592,11 +7616,12 @@ impl OffscreenSetup {
                 SceneState::Ui {
                     renderer,
                     atlas,
-                    primitives,
+                    content,
                 } => {
-                    let list = match primitives {
-                        Some(images) => ui_primitives_draw_list(extent, images),
-                        None => ui_draw_list(extent),
+                    let list = match content {
+                        UiContent::Widgets => ui_draw_list(extent),
+                        UiContent::Primitives(images) => ui_primitives_draw_list(extent, images),
+                        UiContent::Tree => ui_tree_draw_list(extent),
                     };
                     // `scale` is 1.0 because every size in the draw list is
                     // already this frame's pixels; a second multiplier is a
@@ -8673,7 +8698,7 @@ mod tests {
             .expect("every forward frame has a forward pass")
             + 1;
         still_pool_passes.insert(after_forward, ("render", "sky"));
-        let expected: [(Scene, &[(&str, &str)]); 16] = [
+        let expected: [(Scene, &[(&str, &str)]); 17] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8756,6 +8781,10 @@ mod tests {
             // `crcbl_render::ui_pass`'s own tests hold the copy.
             (
                 Scene::UiPrimitives,
+                &[("render", "scene background"), ("render", "ui-composite")],
+            ),
+            (
+                Scene::UiTree,
                 &[("render", "scene background"), ("render", "ui-composite")],
             ),
         ];

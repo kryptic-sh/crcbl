@@ -13,6 +13,13 @@ bytemuck = { workspace = true }
 # vocabulary a finger arrives in belongs to the shell's seam, and a widget that
 # invented its own copy would be a second answer to "which finger is this".
 crcbl-core = { workspace = true }
+# Flexbox layout for `tree`, through Taffy's low-level traits rather than its
+# `TaffyTree` — `docs/plan/07-ui-debug.md` section 2, the user's decision of
+# 2026-09-15. `flexbox` is the one layout mode the subset has; `taffy_tree` and
+# `grid` stay off. `std` is load-bearing: with neither it nor `alloc`, Taffy
+# swaps its vectors for fixed-capacity arrays (`util::sys`'s heapless fallback),
+# which cap a node at 16 children and a flex container at 256 items.
+taffy = { version = "0.14.0", default-features = false, features = ["flexbox", "std"] }
 
 [lints]
 workspace = true

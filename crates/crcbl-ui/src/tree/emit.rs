@@ -1,0 +1,133 @@
+//! Emission: a laid-out tree into a [`DrawList`], in paint order.
+//!
+//! See the module docs of [`crate::tree`] for what each kind of node draws.
+
+use glam::Vec2;
+
+use super::style::{Display, NodeStyle, Overflow};
+use super::{Content, Ui, padding_box};
+use crate::draw_list::{Border, CornerRadii, DrawList};
+
+/// Whether a colour draws anything.
+fn visible(color: [f32; 4]) -> bool {
+    color[3] > 0.0
+}
+
+impl Ui {
+    /// Draws the tree [`Ui::layout`] last laid out into `list`: every root in
+    /// build order, each parent before its children.
+    ///
+    /// Clips are pushed and popped in pairs, so `list`'s own clip is what it
+    /// was when this returns.
+    pub fn emit(&self, list: &mut DrawList) {
+        for (index, node) in self.nodes.iter().enumerate() {
+            if node.parent.is_none() {
+                self.emit_node(index, list);
+            }
+        }
+    }
+
+    fn emit_node(&self, index: usize, list: &mut DrawList) {
+        let node = &self.nodes[index];
+        if node.style.display == Display::None {
+            return;
+        }
+        let (min, max) = self.store.get(node.slot).rect;
+        match node.content {
+            Content::Block => paint_box(list, &node.style, min, max),
+            Content::Text { start, end } => {
+                let (content_min, _) = content_box(min, &node.layout);
+                list.text(
+                    content_min,
+                    &self.text[start..end],
+                    node.style.color,
+                    node.style.font_size,
+                );
+            }
+            Content::Image(image) => {
+                let (content_min, content_max) = content_box(min, &node.layout);
+                list.image(content_min, content_max, &image, node.style.color);
+            }
+        }
+
+        let clipped = node.style.overflow == Overflow::Hidden;
+        if clipped {
+            let (clip_min, clip_max) = padding_box(min, &node.layout);
+            list.push_clip(clip_min, clip_max);
+        }
+        for child in &self.children[node.child_start..node.child_start + node.child_count] {
+            self.emit_node(usize::from(*child), list);
+        }
+        if clipped {
+            list.pop_clip()
+                .expect("the clip pushed above is still on the stack");
+        }
+    }
+}
+
+/// A block's background and border over its border box `min..max`.
+fn paint_box(list: &mut DrawList, style: &NodeStyle, min: Vec2, max: Vec2) {
+    let border = style.border;
+    let has_border = visible(style.border_color)
+        && [border.top, border.right, border.bottom, border.left]
+            .iter()
+            .any(|width| *width > 0.0);
+
+    if style.radii != CornerRadii::uniform(0.0) {
+        if visible(style.background) || has_border {
+            list.rounded_rect(
+                min,
+                max,
+                style.radii,
+                style.background,
+                Border {
+                    width: if has_border { border.top } else { 0.0 },
+                    color: style.border_color,
+                },
+            );
+        }
+        return;
+    }
+
+    if visible(style.background) {
+        list.rect(min, max, style.background);
+    }
+    if !has_border {
+        return;
+    }
+    let uniform =
+        border.top == border.right && border.top == border.bottom && border.top == border.left;
+    if uniform {
+        list.rect_outline(min, max, border.top, style.border_color);
+        return;
+    }
+    // Top and bottom across the whole width, left and right between them — the
+    // same four bands `DrawCommand::RectOutline` expands to.
+    let bands = [
+        (min, Vec2::new(max.x, min.y + border.top)),
+        (Vec2::new(min.x, max.y - border.bottom), max),
+        (
+            Vec2::new(min.x, min.y + border.top),
+            Vec2::new(min.x + border.left, max.y - border.bottom),
+        ),
+        (
+            Vec2::new(max.x - border.right, min.y + border.top),
+            Vec2::new(max.x, max.y - border.bottom),
+        ),
+    ];
+    for (band_min, band_max) in bands {
+        if band_max.x > band_min.x && band_max.y > band_min.y {
+            list.rect(band_min, band_max, style.border_color);
+        }
+    }
+}
+
+/// A node's content box, given its border box's top-left.
+fn content_box(min: Vec2, layout: &taffy::Layout) -> (Vec2, Vec2) {
+    let (padding_min, padding_max) = padding_box(min, layout);
+    let padding = layout.padding;
+    (
+        padding_min + Vec2::new(padding.left, padding.top),
+        padding_max - Vec2::new(padding.right, padding.bottom),
+    )
+}

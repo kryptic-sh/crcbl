@@ -29,6 +29,12 @@
 # comparison on a file nobody edited, the shader manifest's lesson again.
 *.ron text eol=lf
 
+# Taffy's Chrome-generated flex fixtures, read by `crates/crcbl-ui/tests/taffy_fixtures.rs`'s
+# own small XML reader, which panics on anything it does not expect. They are
+# copied byte for byte from Taffy's repository, and a Windows checkout should
+# read the same bytes the reader was written against.
+crates/crcbl-ui/tests/fixtures/taffy/** text eol=lf
+
 # Shell harnesses: LF regardless of platform, since they run under bash.
 *.sh text eol=lf
 

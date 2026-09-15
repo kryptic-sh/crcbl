@@ -178,6 +178,10 @@ mod still_pool;
 #[path = "render_e2e/ui_primitives.rs"]
 mod ui_primitives;
 
+// Rungs 2 and 3's element tree, laid out by Taffy, for the same reason.
+#[path = "render_e2e/ui_tree.rs"]
+mod ui_tree;
+
 /// The size the goldens were blessed at.
 ///
 /// The same 256x192 the cross-backend harness and `crcbl-vk`'s mesh suite use,

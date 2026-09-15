@@ -192,6 +192,8 @@ OPTIONS:
                            ui                  text, a rect and an outline
                            ui_primitives       rounded rects, a clipped image
                                                and a nine-slice
+                           ui_tree             a flex panel laid out by the
+                                               element tree
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
                          be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
@@ -1270,6 +1272,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::Sprite,
         Scene::Ui,
         Scene::UiPrimitives,
+        Scene::UiTree,
     ]
 };
 
@@ -1303,6 +1306,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",
         Scene::UiPrimitives => "ui_primitives",
+        Scene::UiTree => "ui_tree",
     }
 }
 

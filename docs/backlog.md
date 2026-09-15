@@ -3,6 +3,29 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## What UI rungs 2 and 3 shipped without (2026-09-15)
+
+`crcbl_ui::tree` landed with the gaps below.
+
+- **`ReadoutPanel` builds a fresh `Ui` on every call**, because its API is
+  `Copy` and `const` and has nowhere to keep one: about 17 µs a call against 289
+  ns for the arithmetic it replaced, and 4.3 µs for a persistent `Ui` with an
+  unchanged frame (release, median of seven runs, a six-row panel). An API that
+  owns its tree is what recovers it; the widget rung is where that lands.
+- **A rounded block with uneven border widths paints them all at the top side's
+  width**, because the rounded-rectangle primitive carries one border width.
+- **Scroll offsets are not clamped**: content size is not measured until Taffy's
+  `content_size` feature is enabled, which scroll views will need.
+- **Fixtures outside the corpus**: the four flex fixtures with `<text>` leaves
+  and the two unrounded ones.
+- **`builtin_scene_build` refuses a geometry path for the `Sprite` and `Ui`
+  scenes but not for `UiPrimitives` or `UiTree`** — a gap that predates this
+  work.
+- **No sample golden draws a readout panel**: five apps call it and the only one
+  with a golden script, shard, has no panel in its frame, so the move is held by
+  a unit test that compares the tree's draw list with the old arithmetic float
+  for float rather than by a picture.
+
 ## What UI rung 1 shipped without (2026-09-15)
 
 `docs/plan/07-ui-debug.md` rung 1 — `crcbl_ui::image`, `DrawList::image`,
