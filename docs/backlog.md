@@ -29,8 +29,54 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
   the content box, so the container's padding is the ring's margin.
 - **Rounded outlines and nested scroll containers** are covered by unit tests
   and no GPU claim; D3D12 and Metal draw `ui_focus` only on CI.
-- **`Menu` is not on the tree**: stylesheets cannot express a nine-slice or
-  image background yet, and its slider and cycler are widget-rung work.
+
+## What UI rung 7d1 shipped without (2026-09-16)
+
+`Menu` and `MenuSet` moved onto the tree with the gaps below.
+
+- **Decision owed: the reserved context's keyboard defaults are not pushed.**
+  `crcbl::engine::menu_actions` rebinds `ui_move` to the arrows and `ui_accept`
+  to Enter, and unbinds `ui_next`, `ui_prev` and `ui_back`, because breakout,
+  flappy, asteroids and horde start a run with Space — their gameplay binding,
+  printed on their start panel's `PLAY` row — horde walks with WASD under its
+  panels, and Escape is the loop's `PAUSE_KEY`, folded before any menu sees it.
+  Pushing the plan's full table means those panels firing `PLAY` on Space
+  identically (press versus release, and hover taking the highlight).
+- **Decision owed: a menu's slider and cycler take left and right while merely
+  selected**, never engaged — the LOCKED rule's other exception, kept because
+  the options browser gate walks a fader with four `ArrowLeft`s and `Menu`'s
+  semantics are the API contract. Either amend the rule or make menu value rows
+  engage-first, at the cost of an accept per fader. Same shape as the tree-row
+  exception in the 7b section.
+- **A 2D demo grew about 190 KB gzipped** (breakout, measured: 1 091 171 → 1 280
+  736 bytes): a menu now links Taffy, the cascade and `cssparser`, which a demo
+  that drew no tree did not link. shard, already a tree consumer, grew 14 548
+  bytes, and its peak wasm heap is unchanged to the byte at 18.6 MiB.
+- **The menus are a model with a tree view, not tree widgets.** Rows take no
+  part in focus, so `:focus` never applies to one, and a pad will drive menus
+  through `MenuPump` rather than the tree's spatial navigation until the
+  selection moves onto focus.
+- **`MenuStyle`'s colours are restated, not applied**: `default.css` draws them,
+  so `layout_with` with a style whose colours differ lays out the same menu and
+  draws the sheet's. A per-menu palette needs the sheet to reach the menu's
+  tree, which nothing can do yet.
+- **The menu tree is two thread-local `Ui`s**, one to measure in and one to
+  place in, rebuilt several times a frame: a 20-row panel costs about 206 µs a
+  frame against 14 µs for a three-row one (release, median of seven, this
+  machine). A `Menu` that owned its tree, or a `MenuLayout` that carried one,
+  would cut the rebuilds.
+- **`background-image` has no shipped consumer**: the scrim is an image span
+  tinted by `color`, because CSS does not tint a background image and the
+  shipped scrim art is flat white.
+- **Not in the CSS subset**: percentage `border-image-slice`, `auto` or
+  percentage `border-image-width`, `border-image-outset`, `repeat`, `round` and
+  `space`, `background-repeat`, `-size` and `-position`; a rounded corner clips
+  neither image.
+- **What 7d2 inherits**: `DebugPanel` and `ConsolePanel` on the tree with the
+  `ui` and `text` contexts pushed, `ConsolePanel` onto `Ui::text_input`,
+  `TextPump` wired into `Loop`, and the two clipboard paths merged. The console
+  claims both edges of every key while it is open, so the loop releases the menu
+  map's keys when it opens; that fold moves when the console joins the stack.
 
 ## What UI rung 7c shipped without (2026-09-16)
 

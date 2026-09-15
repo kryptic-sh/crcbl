@@ -33,11 +33,40 @@
 //! | `outline` | `none` \| a px width and a colour, in either order |
 //! | `nav-up` `nav-right` `nav-down` `nav-left` | `auto` \| `none` \| `#id` |
 //! | `nav-wrap` | `none` \| `horizontal` \| `vertical` \| `both` |
+//! | `background-image` | `none` \| an image |
+//! | `border-image-source` | `none` \| an image |
+//! | `border-image-slice` | 1–4 numbers, and `fill` before or after them |
+//! | `border-image-width` | 1–4 of px or number |
+//! | `border-image-repeat` | `stretch`, once or twice |
+//! | `border-image` | source, slice with an optional `/ width`, and repeat, in any order |
 //!
 //! A **length** is `<n>px`, `<n>%` or a unitless `0`. A **colour** is `#rgb`,
 //! `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`rgba()` in either the comma or the
-//! space syntax, `transparent`, or one of CSS's named colours (cssparser's
+//! space syntax, `color(srgb …)` or `color(srgb-linear …)` with an optional
+//! `/ alpha`, `transparent`, or one of CSS's named colours (cssparser's
 //! table). Every property also takes `initial` and `unset`.
+//!
+//! # Images are names, not files
+//!
+//! An **image** is `url(name)` or `url("name")`, and the name is looked up in
+//! what the application bound with
+//! [`Ui::set_image`](crate::tree::Ui::set_image) — a picture it registered in
+//! an [`ImageAtlas`](crate::image::ImageAtlas) — when the node is drawn. Nothing
+//! is ever loaded from a path, so a sheet cannot reach the file system, and a
+//! name nothing bound draws nothing. A `background-image` is stretched over the
+//! padding box, as `background-size: 100% 100%; background-repeat: no-repeat`
+//! would place it: the draw list has a stretched quad and no tiling, so those
+//! two properties are not in the subset.
+//!
+//! `border-image` is CSS Backgrounds 3's, cut down to what a nine-slice frame
+//! needs. **The slice is in texels** and takes no percentage; `fill` draws the
+//! middle. **The width** is a px length or a multiple of the side's
+//! `border-width`, whose initial `1` makes the frame's bands the border itself —
+//! so a frame drawn with `border-width` also lays its content out inside the
+//! bands. `border-image-repeat` takes only `stretch`, the one mode the draw
+//! list's nine-slice draws; `border-image-outset` and a percentage or `auto`
+//! width are not in the subset. While a source is set the border is the
+//! picture and `border-color` is not drawn, as CSS specifies.
 //!
 //! **Colours are sRGB, and the draw list is linear light**, so a colour is
 //! decoded through the sRGB transfer function on the way in — `#808080` is
@@ -65,8 +94,9 @@ use cssparser::{ParseError, Parser, Token, match_ignore_ascii_case};
 
 use super::value::{Corners, Declaration, Sides};
 use crate::tree::{
-    Align, Direction, Display, Edges, FlexDirection, FlexWrap, FontFamily, Justify, Length,
-    LengthAuto, LineHeight, NavId, NavTarget, NavWrap, NodeStyle, Overflow, Position, TextAlign,
+    Align, BorderImage, BorderImageWidth, Direction, Display, Edges, FlexDirection, FlexWrap,
+    FontFamily, ImageName, Justify, Length, LengthAuto, LineHeight, NavId, NavTarget, NavWrap,
+    NodeStyle, Overflow, Position, TextAlign,
 };
 
 /// A property a stylesheet can name, longhand or shorthand.
@@ -116,6 +146,12 @@ pub(crate) enum Property {
     OutlineOffset,
     Nav(Direction),
     NavWrap,
+    BackgroundImage,
+    BorderImage,
+    BorderImageSource,
+    BorderImageSlice,
+    BorderImageWidth,
+    BorderImageRepeat,
 }
 
 /// The failure a value parser reports; the caller words the diagnostic.
@@ -192,6 +228,12 @@ impl Property {
             "nav-down" => Self::Nav(Direction::Down),
             "nav-left" => Self::Nav(Direction::Left),
             "nav-wrap" => Self::NavWrap,
+            "background-image" => Self::BackgroundImage,
+            "border-image" => Self::BorderImage,
+            "border-image-source" => Self::BorderImageSource,
+            "border-image-slice" => Self::BorderImageSlice,
+            "border-image-width" => Self::BorderImageWidth,
+            "border-image-repeat" => Self::BorderImageRepeat,
             _ => return None,
         })
     }
@@ -366,6 +408,20 @@ impl Property {
                         _ => return None,
                     })
                 })?)),
+                Self::BackgroundImage => out.push(D::BackgroundImage(image_or_none(input)?)),
+                Self::BorderImageSource => out.push(D::BorderImageSource(image_or_none(input)?)),
+                Self::BorderImageSlice => border_image_slice(input, out)?,
+                Self::BorderImageWidth => {
+                    four(
+                        input,
+                        Sides::All,
+                        border_image_width,
+                        D::BorderImageWidth,
+                        out,
+                    )?;
+                }
+                Self::BorderImageRepeat => border_image_repeat(input)?,
+                Self::BorderImage => border_image(input, out)?,
             }
             Ok(())
         })
@@ -440,6 +496,16 @@ impl Property {
             Self::OutlineOffset => to.outline_offset = from.outline_offset,
             Self::Nav(direction) => *to.nav_mut(direction) = from.nav(direction),
             Self::NavWrap => to.nav_wrap = from.nav_wrap,
+            Self::BackgroundImage => to.background_image = from.background_image,
+            Self::BorderImage => to.border_image = from.border_image,
+            Self::BorderImageSource => to.border_image.source = from.border_image.source,
+            Self::BorderImageSlice => {
+                to.border_image.slice = from.border_image.slice;
+                to.border_image.fill = from.border_image.fill;
+            }
+            Self::BorderImageWidth => to.border_image.width = from.border_image.width,
+            // `stretch` is the only value, so there is no field to copy.
+            Self::BorderImageRepeat => {}
         }
     }
 }
@@ -723,6 +789,132 @@ fn line_height(input: &mut Parser<'_>) -> Result<LineHeight, Invalid> {
     }
 }
 
+/// An image: `url(name)` or `url("name")`; see the module docs.
+fn image(input: &mut Parser<'_>) -> Result<ImageName, Invalid> {
+    let token = input.next()?.clone();
+    match token {
+        Token::UnquotedUrl(ref name) => Ok(ImageName::new(name)),
+        Token::Function(ref name) if name.eq_ignore_ascii_case("url") => {
+            input.parse_nested_block(|input| Ok(ImageName::new(&input.expect_string()?.clone())))
+        }
+        _ => invalid(),
+    }
+}
+
+/// `none` or an image.
+fn image_or_none(input: &mut Parser<'_>) -> Result<Option<ImageName>, Invalid> {
+    if input
+        .try_parse(|input| input.expect_ident_matching("none"))
+        .is_ok()
+    {
+        return Ok(None);
+    }
+    image(input).map(Some)
+}
+
+/// `border-image-slice`: one to four numbers, with `fill` before or after.
+fn border_image_slice(input: &mut Parser<'_>, out: &mut Vec<Declaration>) -> Result<(), Invalid> {
+    let fill = |input: &mut Parser<'_>| {
+        input
+            .try_parse(|input| input.expect_ident_matching("fill"))
+            .is_ok()
+    };
+    let before = fill(input);
+    four(
+        input,
+        Sides::All,
+        number,
+        Declaration::BorderImageSlice,
+        out,
+    )?;
+    let after = !before && fill(input);
+    out.push(Declaration::BorderImageFill(before || after));
+    Ok(())
+}
+
+/// One side of `border-image-width`: a number is a multiple of the border's
+/// width — a unitless `0` included, as CSS reads it — and a px length is
+/// pixels.
+fn border_image_width(input: &mut Parser<'_>) -> Result<BorderImageWidth, Invalid> {
+    if let Ok(factor) = input.try_parse(number) {
+        return Ok(BorderImageWidth::Multiple(factor));
+    }
+    Ok(BorderImageWidth::Px(px(input, Sign::NonNegative)?))
+}
+
+/// The one `border-image-repeat` keyword the subset has.
+fn stretch(input: &mut Parser<'_>) -> Result<(), Invalid> {
+    Ok(input.expect_ident_matching("stretch")?)
+}
+
+/// `border-image-repeat`: `stretch` for one axis or both. It sets nothing,
+/// because nothing else is accepted.
+fn border_image_repeat(input: &mut Parser<'_>) -> Result<(), Invalid> {
+    stretch(input)?;
+    if !input.is_exhausted() {
+        stretch(input)?;
+    }
+    Ok(())
+}
+
+/// `border-image`: a source, a slice with an optional `/ width`, and a
+/// repeat, each at most once and in any order. What is left out goes back to
+/// its initial value, as a shorthand does.
+fn border_image(input: &mut Parser<'_>, out: &mut Vec<Declaration>) -> Result<(), Invalid> {
+    use Declaration as D;
+    let initial = BorderImage::NONE;
+    let mut source = None;
+    let mut slice = None;
+    let mut repeats = 0;
+    while !input.is_exhausted() {
+        if source.is_none()
+            && let Ok(found) = input.try_parse(image_or_none)
+        {
+            source = Some(found);
+            continue;
+        }
+        if slice.is_none() {
+            let mut parts = Vec::new();
+            if input
+                .try_parse(|input| border_image_slice(input, &mut parts))
+                .is_ok()
+            {
+                if input.try_parse(|input| input.expect_delim('/')).is_ok() {
+                    four(
+                        input,
+                        Sides::All,
+                        border_image_width,
+                        D::BorderImageWidth,
+                        &mut parts,
+                    )?;
+                }
+                slice = Some(parts);
+                continue;
+            }
+        }
+        if repeats == 0 && input.try_parse(stretch).is_ok() {
+            repeats = 1;
+            // A second `stretch`, straight after, names the other axis.
+            if input.try_parse(stretch).is_ok() {
+                repeats = 2;
+            }
+            continue;
+        }
+        return invalid();
+    }
+    if source.is_none() && slice.is_none() && repeats == 0 {
+        return invalid();
+    }
+    out.push(D::BorderImageSource(source.flatten()));
+    out.extend([
+        D::BorderImageSlice(Sides::All, initial.slice.top),
+        D::BorderImageFill(initial.fill),
+        D::BorderImageWidth(Sides::All, initial.width.top),
+    ]);
+    out.extend(slice.unwrap_or_default());
+    Ok(())
+}
+
 /// A colour, decoded to linear light; see the module docs.
 fn color(input: &mut Parser<'_>) -> Result<[f32; 4], Invalid> {
     let token = input.next()?.clone();
@@ -741,6 +933,9 @@ fn color(input: &mut Parser<'_>) -> Result<[f32; 4], Invalid> {
             if name.eq_ignore_ascii_case("rgb") || name.eq_ignore_ascii_case("rgba") =>
         {
             input.parse_nested_block(rgb)
+        }
+        Token::Function(ref name) if name.eq_ignore_ascii_case("color") => {
+            input.parse_nested_block(color_function)
         }
         _ => invalid(),
     }
@@ -794,6 +989,43 @@ fn rgb(input: &mut Parser<'_>) -> Result<[f32; 4], Invalid> {
         srgb_to_linear(blue),
         opacity,
     ])
+}
+
+/// The inside of `color(…)`: `srgb` or `srgb-linear`, three channels each a
+/// number in `0..=1` or a percentage, and an optional `/ alpha`.
+///
+/// `srgb-linear` is how a colour already in linear light — the draw list's
+/// own space — is written without a round trip through eight-bit sRGB.
+fn color_function(input: &mut Parser<'_>) -> Result<[f32; 4], Invalid> {
+    fn unit(input: &mut Parser<'_>) -> Result<f32, Invalid> {
+        Ok(match *input.next()? {
+            Token::Number { value, .. }
+            | Token::Percentage {
+                unit_value: value, ..
+            } if value.is_finite() => value.clamp(0.0, 1.0),
+            _ => return invalid(),
+        })
+    }
+    let linear = keyword(input, |name| {
+        Some(match_ignore_ascii_case! { name,
+            "srgb" => false,
+            "srgb-linear" => true,
+            _ => return None,
+        })
+    })?;
+    let channels = [unit(input)?, unit(input)?, unit(input)?];
+    let alpha = if input.is_exhausted() {
+        1.0
+    } else {
+        input.expect_delim('/')?;
+        unit(input)?
+    };
+    let [red, green, blue] = if linear {
+        channels
+    } else {
+        channels.map(srgb_to_linear)
+    };
+    Ok([red, green, blue, alpha])
 }
 
 fn from_srgb8(r: u8, g: u8, b: u8, alpha: f32) -> [f32; 4] {
@@ -1121,6 +1353,179 @@ mod tests {
         for (css, want) in cases {
             let got = style_of(&[("background", css)]).background;
             assert!(close(got, want), "{css}: {got:?} is not {want:?}");
+        }
+    }
+
+    /// **An image is a name in `url()`, quoted or not, and never a path that
+    /// is read**: `background-image` and `border-image-source` take it or
+    /// `none`, and every other form is refused.
+    #[test]
+    fn images_are_names_in_url_or_none() {
+        let sky = Some(ImageName::new("sky"));
+        for css in ["url(sky)", "url(\"sky\")", "URL('sky')"] {
+            assert_eq!(
+                style_of(&[("background-image", css)]).background_image,
+                sky,
+                "{css}"
+            );
+            assert_eq!(
+                style_of(&[("border-image-source", css)])
+                    .border_image
+                    .source,
+                sky,
+                "{css}"
+            );
+        }
+        assert_ne!(
+            style_of(&[("background-image", "url(Sky)")]).background_image,
+            sky,
+            "names are case-sensitive"
+        );
+        let cleared = style_of(&[
+            ("background-image", "url(sky)"),
+            ("background-image", "none"),
+        ]);
+        assert_eq!(cleared.background_image, None);
+        for (property, css) in [
+            ("background-image", "sky"),
+            ("background-image", "\"sky\""),
+            ("background-image", "url(sky) url(sea)"),
+            ("background-image", "linear-gradient(red, blue)"),
+            ("border-image-source", "url(a) none"),
+        ] {
+            assert!(
+                parse(property, css).is_err(),
+                "`{property}: {css}` was accepted"
+            );
+        }
+    }
+
+    /// **`border-image`'s longhands parse CSS's grammar for the subset**: a
+    /// slice of one to four numbers with `fill` on either side, a width of px
+    /// or multiples per side, and `stretch` as the only repeat — and the
+    /// shorthand resets what it leaves out, in any order.
+    #[test]
+    fn border_image_parses_its_longhands_and_its_shorthand() {
+        let style = style_of(&[
+            ("border-image-slice", "1 2 3 4"),
+            ("border-image-width", "2 5px 0 1.5"),
+            ("border-image-repeat", "stretch stretch"),
+        ]);
+        let frame = style.border_image;
+        assert_eq!(
+            [
+                frame.slice.top,
+                frame.slice.right,
+                frame.slice.bottom,
+                frame.slice.left
+            ],
+            [1.0, 2.0, 3.0, 4.0]
+        );
+        assert!(!frame.fill);
+        assert_eq!(
+            [
+                frame.width.top,
+                frame.width.right,
+                frame.width.bottom,
+                frame.width.left
+            ],
+            [
+                BorderImageWidth::Multiple(2.0),
+                BorderImageWidth::Px(5.0),
+                BorderImageWidth::Multiple(0.0),
+                BorderImageWidth::Multiple(1.5),
+            ]
+        );
+        for css in ["fill 4", "4 fill", "4 4 fill"] {
+            let frame = style_of(&[("border-image-slice", css)]).border_image;
+            assert!(frame.fill, "{css}");
+            assert_eq!(frame.slice.left, 4.0, "{css}");
+        }
+
+        let set = |css: &str| {
+            style_of(&[
+                ("border-image-source", "url(old)"),
+                ("border-image-slice", "9 fill"),
+                ("border-image-width", "7px"),
+                ("border-image", css),
+            ])
+            .border_image
+        };
+        let whole = set("url(frame) 4 fill / 12px stretch");
+        assert_eq!(whole.source, Some(ImageName::new("frame")));
+        assert_eq!((whole.slice.top, whole.fill), (4.0, true));
+        assert_eq!(whole.width.right, BorderImageWidth::Px(12.0));
+        let reordered = set("stretch 4 fill / 12px url(frame)");
+        assert_eq!(reordered, whole, "the shorthand's parts go in any order");
+        let source_only = set("url(frame)");
+        assert_eq!(
+            source_only,
+            BorderImage {
+                source: Some(ImageName::new("frame")),
+                ..BorderImage::NONE
+            },
+            "what the shorthand leaves out goes back to its initial value"
+        );
+        let slice_only = set("4");
+        assert_eq!(
+            (
+                slice_only.source,
+                slice_only.slice.top,
+                slice_only.width.top
+            ),
+            (None, 4.0, BorderImageWidth::Multiple(1.0))
+        );
+
+        for (property, css) in [
+            ("border-image-slice", "25%"),
+            ("border-image-slice", "-1"),
+            ("border-image-slice", "fill"),
+            ("border-image-slice", "fill 1 fill"),
+            ("border-image-slice", "1 2 3 4 5"),
+            ("border-image-width", "auto"),
+            ("border-image-width", "10%"),
+            ("border-image-width", "-1px"),
+            ("border-image-repeat", "repeat"),
+            ("border-image-repeat", "round"),
+            ("border-image-repeat", "stretch space"),
+            ("border-image", "url(a) 4 / 2 / 1"),
+            ("border-image", "url(a) url(b)"),
+            ("border-image", "4 5 6 7 8"),
+            ("border-image", "repeat"),
+        ] {
+            assert!(
+                parse(property, css).is_err(),
+                "`{property}: {css}` was accepted"
+            );
+        }
+    }
+
+    /// **`color()` takes `srgb` through the transfer function and
+    /// `srgb-linear` exactly as written** — the latter is how a linear-light
+    /// colour reaches a sheet without an eight-bit round trip.
+    #[test]
+    fn the_color_function_decodes_srgb_and_keeps_srgb_linear() {
+        assert_eq!(
+            style_of(&[("color", "color(srgb-linear 1 0.94 0.55)")]).color,
+            [1.0, 0.94, 0.55, 1.0]
+        );
+        assert_eq!(
+            style_of(&[("color", "color(SRGB-LINEAR 0 0 0 / 0.66)")]).color,
+            [0.0, 0.0, 0.0, 0.66]
+        );
+        assert_eq!(
+            style_of(&[("color", "color(srgb-linear 50% 0 0 / 25%)")]).color,
+            [0.5, 0.0, 0.0, 0.25]
+        );
+        let decoded = style_of(&[("color", "color(srgb 0.5 0.5 0.5)")]).color;
+        assert!((decoded[0] - 0.214_041).abs() < 1e-4, "{decoded:?}");
+        for css in [
+            "color(display-p3 1 0 0)",
+            "color(srgb-linear 1 0)",
+            "color(srgb-linear 1 0 0 0.5)",
+            "color(srgb-linear 1, 0, 0)",
+        ] {
+            assert!(parse("color", css).is_err(), "`color: {css}` was accepted");
         }
     }
 

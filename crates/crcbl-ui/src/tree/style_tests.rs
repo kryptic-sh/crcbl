@@ -8,6 +8,7 @@ use glam::Vec2;
 
 use super::tests::{cache_is_empty, frame, idle};
 use super::*;
+use crate::draw_list::DrawList;
 use crate::style::{Declaration, STYLESHEET_POLL_INTERVAL, Severity, StyleStats};
 
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
@@ -616,5 +617,186 @@ fn a_malformed_node_selector_warns_once_and_the_node_is_still_built() {
     assert_eq!(
         style_of(&ui, key.expect("built")).height,
         LengthAuto::Px(4.0)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------
+
+/// **`border-image` cascades like any paint property**: a state rule's
+/// longhand replaces only the source the base rule's shorthand set, keeping
+/// its slice and `fill`; `initial` clears it; and a child inherits none of it.
+#[test]
+fn border_image_cascades_by_state_and_is_not_inherited() {
+    let mut ui = Ui::new();
+    ui.add_stylesheet(
+        "frame.css",
+        ".frame { width: 40px; height: 20px; border-image: url(idle) 4 fill / 2; }
+         .frame:hover { border-image-source: url(lit); }
+         .cleared { border-image: url(idle) 4; border-image-source: initial; }",
+    );
+    let build = |ui: &mut Ui| {
+        let mut keys = Vec::new();
+        ui.block("", &[], |ui| {
+            let frame = ui.block(".frame", &[], |ui| {
+                keys.push(ui.block("", &[], |_| {}).key);
+            });
+            keys.insert(0, frame.key);
+            keys.push(ui.block(".cleared", &[], |_| {}).key);
+        });
+        keys
+    };
+    let mut keys = Vec::new();
+    frame(&mut ui, idle(), |ui| keys = build(ui));
+    let at_rest = style_of(&ui, keys[0]).border_image;
+    assert_eq!(at_rest.source, Some(ImageName::new("idle")));
+    assert_eq!(
+        (at_rest.slice.left, at_rest.fill, at_rest.width.top),
+        (4.0, true, BorderImageWidth::Multiple(2.0))
+    );
+
+    // Hit testing reads last frame's rectangles, so the hover lands a frame
+    // after the pointer does.
+    for _ in 0..2 {
+        frame(&mut ui, hover(Vec2::new(10.0, 10.0)), |ui| keys = build(ui));
+    }
+    let hovered = style_of(&ui, keys[0]).border_image;
+    assert_eq!(hovered.source, Some(ImageName::new("lit")));
+    assert_eq!(
+        BorderImage {
+            source: at_rest.source,
+            ..hovered
+        },
+        at_rest,
+        "the state rule moved more than the source"
+    );
+    assert_eq!(style_of(&ui, keys[1]).border_image, BorderImage::NONE);
+    assert_eq!(style_of(&ui, keys[2]).border_image.source, None);
+    assert_eq!(style_of(&ui, keys[2]).border_image.slice.top, 4.0);
+}
+
+/// Every `Image` command of `list`: its rectangle and its UV rectangle.
+fn quads(list: &DrawList) -> Vec<[Vec2; 4]> {
+    list.commands()
+        .iter()
+        .filter_map(|command| match *command {
+            crate::draw_list::DrawCommand::Image {
+                min,
+                max,
+                uv_min,
+                uv_max,
+                ..
+            } => Some([min, max, uv_min, uv_max]),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A block's `border-image` is a nine-slice over its border box, drawn in
+/// place of its border, with each band its side's width** — and its
+/// `background-image` is stretched over the padding box between the
+/// background and the frame.
+///
+/// The sides are deliberately uneven, so a band that took another side's
+/// width, or a slice read off the wrong edge, lands somewhere else.
+#[test]
+fn a_border_image_draws_a_nine_slice_over_the_border_box_in_place_of_the_border() {
+    let mut images = crate::image::ImageAtlas::new();
+    let frame_image = images.register(16, 16, &[200; 16 * 16 * 4]).expect("fits");
+    let sky = images.register(8, 8, &[90; 8 * 8 * 4]).expect("fits");
+    let sheet = |fill: &str| {
+        format!(
+            ".box {{ width: 40px; height: 24px; border-width: 2px 3px 4px 5px;
+                     border-color: red; background: blue; background-image: url(sky);
+                     border-image: url(frame) 1 2 3 4 {fill} / 2 1px 1 6px; }}"
+        )
+    };
+    let draw = |css: &str, bind_frame: bool| {
+        let mut ui = Ui::new();
+        ui.add_stylesheet("box.css", css);
+        ui.set_image("sky", sky);
+        if bind_frame {
+            ui.set_image("frame", frame_image);
+        }
+        frame(&mut ui, idle(), |ui| {
+            ui.block(".box", &[], |_| {});
+        });
+        let mut list = DrawList::new();
+        ui.emit(&mut list);
+        list
+    };
+
+    let list = draw(&sheet("fill"), true);
+    assert!(
+        matches!(list.commands()[0], crate::draw_list::DrawCommand::Rect { color, .. } if color == BLUE),
+        "the background is not drawn first: {:#?}",
+        list.commands()
+    );
+    assert!(
+        !list.commands().iter().any(|command| matches!(
+            command,
+            crate::draw_list::DrawCommand::RectOutline { .. }
+                | crate::draw_list::DrawCommand::Rect { color: RED, .. }
+        )),
+        "the border was drawn under its image"
+    );
+    let drawn = quads(&list);
+    assert_eq!(drawn.len(), 1 + 9, "{drawn:?}");
+    // The background image over the padding box: in by the border widths.
+    assert_eq!(
+        drawn[0],
+        [
+            Vec2::new(5.0, 2.0),
+            Vec2::new(37.0, 20.0),
+            sky.uv_min(),
+            sky.uv_max()
+        ]
+    );
+    // The frame's corners, each band its own side's width: top 2 × 2px,
+    // right 1px, bottom 1 × 4px, left 6px.
+    let (top, right, bottom, left) = (4.0, 1.0, 4.0, 6.0);
+    let corner = |at: usize| (drawn[1 + at][0], drawn[1 + at][1]);
+    assert_eq!(corner(0), (Vec2::ZERO, Vec2::new(left, top)));
+    assert_eq!(
+        corner(2),
+        (Vec2::new(40.0 - right, 0.0), Vec2::new(40.0, top))
+    );
+    assert_eq!(
+        corner(6),
+        (Vec2::new(0.0, 24.0 - bottom), Vec2::new(left, 24.0))
+    );
+    // Cut where the slice says, in texels: 4 from the left and 1 from the top.
+    assert_eq!(
+        (drawn[1][2], drawn[1][3]),
+        (
+            frame_image.uv(Vec2::ZERO),
+            frame_image.uv(Vec2::new(4.0, 1.0))
+        )
+    );
+    assert_eq!(
+        drawn[1 + 8][3],
+        frame_image.uv(Vec2::new(16.0, 16.0)),
+        "the bottom-right quad does not reach the picture's corner"
+    );
+
+    // Without `fill` the middle is the one quad left out.
+    let hollow = quads(&draw(&sheet(""), true));
+    assert_eq!(hollow.len(), 1 + 8);
+    assert!(
+        !hollow.contains(&drawn[1 + 4]),
+        "the middle quad was drawn without `fill`"
+    );
+
+    // A name nothing bound draws no picture, and the border is drawn instead,
+    // as CSS draws a border whose image did not load.
+    let unbound = draw(&sheet("fill"), false);
+    assert_eq!(quads(&unbound).len(), 1, "only the background image");
+    assert!(
+        unbound.commands().iter().any(|command| matches!(
+            command,
+            crate::draw_list::DrawCommand::Rect { color: RED, .. }
+        )),
+        "the border was not drawn for an unbound frame"
     );
 }

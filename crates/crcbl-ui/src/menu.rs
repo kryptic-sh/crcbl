@@ -22,13 +22,25 @@
 //! corners do not move, the paused state does not also draw the start menu) be
 //! asserted as arithmetic.
 //!
-//! **The pictures come from a [`MenuSkin`].** The scrim, the window frame and
-//! the three button frames are registered images, and [`Menu::render`] draws
-//! all of them into the [`DrawList`] as textured quads before the text that sits
-//! on them — one list, in compositing order, drawn by one pass. The art itself
-//! is `crcbl-render`'s (`crcbl_render::menu::menu_skin` registers it), and the
-//! layout reaches it only through [`MenuStyle`]'s insets, which that crate's
-//! tests read back off the art so the layout and the picture cannot drift.
+//! **The menu is built on the element tree.** [`Menu::layout`] and
+//! [`Menu::render`] build the same [`crate::tree`] of blocks and spans — a
+//! screen, the scrim, the panel, the title and a row per item — lay it out on
+//! Taffy and read the rectangles back or emit it, so the arithmetic that used to
+//! place each label is flexbox now. The tree is a view: which row is selected,
+//! held or hovered stays in this module's model, and each row is built in the
+//! pseudo-class [`Menu::state`] derives, so the keyboard-first API below is
+//! unchanged.
+//!
+//! **The skin is `default.css`'s.** The window frame and the button frames are
+//! `border-image`s over the panel and the rows, which frame a row draws is its
+//! `:hover` or `:active` rule, and every colour is a rule too. The pictures are
+//! a [`MenuSkin`]'s registered images, which [`Menu::render`] binds under the
+//! names the sheet's `url()`s use; the art itself is `crcbl-render`'s
+//! (`crcbl_render::menu::menu_skin` registers it). The lengths stay
+//! [`MenuStyle`]'s, set on the nodes inline, because they are a pixel-art scale
+//! times a base metric and a stylesheet has no arithmetic to scale with; the
+//! frame's insets reach the layout through them, and `crcbl-render`'s tests
+//! read the insets back off the art so the layout and the picture cannot drift.
 //!
 //! # Why the whole menu is one type and not a `Vec<Button>`
 //!
@@ -65,9 +77,13 @@
 
 use glam::Vec2;
 
-use crate::draw_list::DrawList;
+use crate::draw_list::{DrawCommand, DrawList};
 use crate::image::{AtlasImage, NineSliceImage};
-use crate::text::{FontAtlas, LINE_HEIGHT};
+use crate::style::{Declaration, PseudoClasses, Sides};
+use crate::text::FontAtlas;
+#[cfg(test)]
+use crate::text::LINE_HEIGHT;
+use crate::tree::{AvailableSpace, Length, LengthAuto, NodeKey, Ui};
 use crate::widget::{
     ButtonSkin, ButtonState, NATURAL_FONT_SIZE, PointerInput, SkinInsets, UiState, WidgetId,
 };
@@ -81,15 +97,21 @@ use crate::widget::{
 ///
 /// Every sample's menus use the one `crcbl-render` ships; see
 /// `crcbl_render::menu` for why the art lives there.
+///
+/// [`Menu::render`] binds the panel and the three button images under the
+/// names `default.css`'s menu rules give them, and the sheet cuts each at its
+/// own `border-image-slice`: the insets a [`NineSliceImage`] carries are the
+/// art's, which [`PANEL_INSETS`] and [`BUTTON_INSETS`] restate for the layout
+/// and the sheet's slices are held to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MenuSkin {
     /// The window frame, nine-sliced round the panel.
     pub panel: NineSliceImage,
     /// The button frames.
     pub buttons: ButtonSkin,
-    /// Stretched over the whole framebuffer and multiplied by
-    /// [`MenuStyle::scrim_color`], so the art decides its texture and the style
-    /// how dark it gets.
+    /// Stretched over the whole framebuffer and tinted by the sheet's
+    /// `.menu-scrim` colour, so the art decides its texture and the sheet how
+    /// dark it gets.
     pub scrim: AtlasImage,
 }
 
@@ -139,18 +161,29 @@ pub struct MenuStyle {
     /// end, so the handle stays inside the groove at both extremes.
     pub handle_size: Vec2,
     /// The title's colour.
+    ///
+    /// **This and the other colours restate `default.css`'s menu rules, which
+    /// are what draw them**: a style with different colours lays out the same
+    /// menu and draws it in the sheet's. They are here for a caller measuring
+    /// what a menu drew — the scrim's alpha over a golden image, say — and
+    /// `the_sheet_draws_the_colours_and_the_slices_the_style_restates` holds
+    /// [`MenuStyle::pixel_art`]'s to the sheet's.
     pub title_color: [f32; 4],
-    /// An item label's colour.
+    /// An item label's colour. See [`MenuStyle::title_color`].
     pub label_color: [f32; 4],
-    /// A key hint's colour — dimmer than the label it belongs to.
+    /// A key hint's colour — dimmer than the label it belongs to. See
+    /// [`MenuStyle::title_color`].
     pub hint_color: [f32; 4],
-    /// A slider groove's colour, behind the part not filled in.
+    /// A slider groove's colour, behind the part not filled in. See
+    /// [`MenuStyle::title_color`].
     pub track_color: [f32; 4],
-    /// The colour of the groove up to the handle.
+    /// The colour of the groove up to the handle. See
+    /// [`MenuStyle::title_color`].
     pub fill_color: [f32; 4],
-    /// The handle's colour.
+    /// The handle's colour. See [`MenuStyle::title_color`].
     pub handle_color: [f32; 4],
-    /// What the frame behind the menu is dimmed with.
+    /// What the frame behind the menu is dimmed with. See
+    /// [`MenuStyle::title_color`].
     pub scrim_color: [f32; 4],
 }
 
@@ -972,20 +1005,27 @@ impl Menu {
     /// none of them do. Whole numbers because the art is pixel art; the fit
     /// because a menu that overflowed a 1440×400 canvas would have its buttons
     /// off the bottom of the screen, which is the failure this replaces.
+    ///
+    /// **The panel is measured once, at scale 1**, and each candidate is that
+    /// size times the scale: every length [`MenuStyle::pixel_art`] makes and
+    /// every glyph advance is a whole number times the scale, so the tree lays
+    /// the panel out exactly proportionally —
+    /// `the_panel_grows_exactly_with_the_scale` holds that — and one layout
+    /// answers every candidate.
     #[must_use]
     pub fn layout(&self, extent: (u32, u32), atlas: &FontAtlas) -> MenuLayout {
-        let mut chosen = MenuStyle::pixel_art(1);
+        let base = self.panel_size(atlas, &MenuStyle::pixel_art(1));
+        let mut chosen = 1;
         for scale in 2..=MenuStyle::MAX_SCALE {
-            let style = MenuStyle::pixel_art(scale);
-            let size = self.panel_size(atlas, &style);
+            let size = base * scale as f32;
             if size.x <= extent.0 as f32 * FIT_FRACTION && size.y <= extent.1 as f32 * FIT_FRACTION
             {
-                chosen = style;
+                chosen = scale;
             } else {
                 break;
             }
         }
-        self.layout_with(extent, atlas, &chosen)
+        self.layout_with(extent, atlas, &MenuStyle::pixel_art(chosen))
     }
 
     /// Lays this menu out centred, at a style the caller chose.
@@ -997,80 +1037,49 @@ impl Menu {
         style: &MenuStyle,
     ) -> MenuLayout {
         let screen = Vec2::new(extent.0 as f32, extent.1 as f32);
-        let size = self.panel_size(atlas, style);
-        // Rounded to whole pixels: a nine-slice corner starting on a half pixel
-        // is a blurred corner under `SampleMode::Pixel`, which is the whole
-        // reason the art is authored in texels. The centre is therefore within
-        // half a pixel of the framebuffer's, not exactly on it — see
-        // `the_panel_is_centred_at_every_aspect_ratio`.
-        let min = ((screen - size) * 0.5).round();
-        let panel = (min, min + size);
+        self.laid_out(Some(screen), style, None, atlas, |ui, built| {
+            Self::read_layout(ui, built, &self.items, screen, style)
+        })
+    }
 
+    /// Reads a [`MenuLayout`] back out of `ui`, which [`Menu::laid_out`] built
+    /// for `items` at `style` in `screen`.
+    fn read_layout(
+        ui: &Ui,
+        built: &BuiltMenu,
+        items: &[MenuItem],
+        screen: Vec2,
+        style: &MenuStyle,
+    ) -> MenuLayout {
+        let rect = |key| ui.rect(key).expect("laid out this frame");
+        let panel = rect(built.panel);
         let corners = style.panel_corners();
-        let content_left = min.x + corners.left + style.panel_padding.x;
-        let content_width = size.x - corners.left - corners.right - style.panel_padding.x * 2.0;
-        let mut y = min.y + corners.top + style.panel_padding.y;
-
-        let title_pos = Vec2::new(
-            content_left + (content_width - text_width(atlas, &self.title, style.title_size)) * 0.5,
-            y,
+        let content_min = panel.0 + corners.min_corner() + style.panel_padding;
+        let content_max = panel.1 - Vec2::new(corners.right, corners.bottom) - style.panel_padding;
+        // An empty title builds no span, and stands where a zero-width one
+        // would: centred on the content's top edge.
+        let title_pos = built.title.map_or(
+            Vec2::new((content_min.x + content_max.x) * 0.5, content_min.y),
+            |key| rect(key).0,
         );
-        if !self.title.is_empty() {
-            y += line_height(style.title_size) + style.title_gap;
-        }
-
-        let button_height = self.button_height(style);
-        let items = self
-            .items
+        let items = items
             .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                let top = y + index as f32 * (button_height + style.item_gap);
-                let item_min = Vec2::new(content_left, top);
-                let item_max = Vec2::new(content_left + content_width, top + button_height);
+            .zip(&built.rows)
+            .map(|(item, row)| {
+                let (min, max) = rect(row.row);
+                let label_pos = rect(row.label).0;
                 let inner = style.button_corners();
-                let label_x = item_min.x + inner.left + style.button_padding.x;
-                let label_y = item_min.y
-                    + (button_height - line_height(style.item_size)) * 0.5
-                    // Zero on the shipped art, whose cap and base are the same
-                    // depth. It is here for a skin whose base is deeper than its
-                    // cap: a label centred in the whole button would then sit low
-                    // in the face the art actually draws, and half the difference
-                    // puts it back in the middle of what is visible.
-                    + (inner.top - inner.bottom) * 0.5;
-                let caption = item.caption();
-                let hint_width = text_width(atlas, &caption, style.item_size);
-                let hint_x = item_max.x - inner.right - style.button_padding.x - hint_width;
-                // The groove takes everything between the label and the value,
-                // so the slider row of a panel widened by a longer label
-                // elsewhere is a longer slider rather than a short one adrift in
-                // the middle. `content_size` reserves `track_width` for it, so
-                // the span is never shorter than that on the row that sets the
-                // panel's width.
-                let track = match item.kind {
-                    MenuItemKind::Action | MenuItemKind::Cycler(_) => None,
-                    MenuItemKind::Slider(_) => {
-                        let label_end = label_x + text_width(atlas, &item.label, style.item_size);
-                        let right = if caption.is_empty() {
-                            hint_x
-                        } else {
-                            hint_x - style.hint_gap
-                        };
-                        let left = (label_end + style.hint_gap).min(right);
-                        let middle = item_min.y + button_height * 0.5;
-                        Some((
-                            Vec2::new(left, middle - style.track_height * 0.5),
-                            Vec2::new(right, middle + style.track_height * 0.5),
-                        ))
-                    }
-                };
+                let hint_pos = row.hint.map_or(
+                    Vec2::new(max.x - inner.right - style.button_padding.x, label_pos.y),
+                    |key| rect(key).0,
+                );
                 MenuItemLayout {
                     id: item.id,
-                    min: item_min,
-                    max: item_max,
-                    label_pos: Vec2::new(label_x, label_y),
-                    hint_pos: Vec2::new(hint_x, label_y),
-                    track,
+                    min,
+                    max,
+                    label_pos,
+                    hint_pos,
+                    track: row.groove.map(rect),
                 }
             })
             .collect();
@@ -1092,120 +1101,310 @@ impl Menu {
     /// not tell a menu that grew from one that moved.
     #[must_use]
     pub fn panel_size(&self, atlas: &FontAtlas, style: &MenuStyle) -> Vec2 {
-        let corners = style.panel_corners();
-        let content = self.content_size(atlas, style);
-        content + corners.minimum_size() + style.panel_padding * 2.0
+        self.laid_out(None, style, None, atlas, |ui, built| {
+            let (min, max) = ui.rect(built.panel).expect("laid out this frame");
+            max - min
+        })
     }
 
-    /// The box the title and the buttons occupy, inside the frame and the
-    /// padding.
-    fn content_size(&self, atlas: &FontAtlas, style: &MenuStyle) -> Vec2 {
-        let mut width = text_width(atlas, &self.title, style.title_size);
-        let inner = style.button_corners();
-        for item in &self.items {
-            let label = text_width(atlas, &item.label, style.item_size);
-            let caption = item.caption();
-            let hint = text_width(atlas, &caption, style.item_size);
-            let gap = if caption.is_empty() {
-                0.0
-            } else {
-                style.hint_gap
-            };
-            let track = match item.kind {
-                MenuItemKind::Action | MenuItemKind::Cycler(_) => 0.0,
-                MenuItemKind::Slider(_) => style.hint_gap + style.track_width,
-            };
-            width = width.max(
-                label + track + gap + hint + inner.minimum_size().x + style.button_padding.x * 2.0,
-            );
-        }
+    /// Builds this menu with [`Menu::build`] and lays it out, in the calling
+    /// thread's one menu tree, then hands the tree to `read`.
+    ///
+    /// **One tree per thread, rebuilt by every call** — two, one to measure
+    /// in and one to place in — rather than a fresh
+    /// [`Ui`] each time: a menu is laid out several times a frame — for its
+    /// fit, its hit test and its drawing — with the same selectors and the same
+    /// inline lengths, so a kept tree resolves each node's style from its own
+    /// last resolve and lays out from Taffy's cache instead of from nothing.
+    /// It holds no state a call can see: the pointer it begins each frame with
+    /// is off every rectangle, so no rule's `:hover` applies, and whatever the
+    /// last call built is replaced and pruned. `read` must not lay out a menu
+    /// itself, which would borrow the tree twice.
+    fn laid_out<R>(
+        &self,
+        screen: Option<Vec2>,
+        style: &MenuStyle,
+        skin: Option<&MenuSkin>,
+        atlas: &FontAtlas,
+        read: impl FnOnce(&Ui, &BuiltMenu) -> R,
+    ) -> R {
+        let tree = if screen.is_some() {
+            &PLACED_TREE
+        } else {
+            &MEASURED_TREE
+        };
+        tree.with(|tree| {
+            let mut ui = tree.borrow_mut();
+            ui.begin_frame(PointerInput::hovering(OFF_SCREEN));
+            let built = self.build(&mut ui, screen, style, skin);
+            let available = screen.map_or(AvailableSpace::MAX_CONTENT, AvailableSpace::definite);
+            ui.layout(Vec2::ZERO, available, atlas);
+            read(&ui, &built)
+        })
+    }
 
-        let mut height = 0.0;
-        if !self.title.is_empty() {
-            height += line_height(style.title_size) + style.title_gap;
+    /// Builds this menu into `ui` at `style`: the tree [`Menu::layout_with`]
+    /// measures and [`Menu::render`] draws, one for both.
+    ///
+    /// `screen` is the framebuffer the panel is centred in, or `None` for a
+    /// root that is only as big as the panel. `skin` is `Some` only when the
+    /// tree is to be drawn: it binds the frames `default.css` names and adds
+    /// the scrim, which is positioned out of the flow and moves nothing.
+    ///
+    /// **What comes from where.** Every length is `style`'s, set inline, because
+    /// it is the pixel-art scale times a base metric and a stylesheet has no
+    /// arithmetic to scale with. The frames, their slices, which frame each
+    /// state draws and every colour are `default.css`'s menu rules. Which state
+    /// a row is in is [`Menu::state`]'s: the tree is this menu's view, and the
+    /// selection, the press and the pointer's hover stay in the model.
+    fn build(
+        &self,
+        ui: &mut Ui,
+        screen: Option<Vec2>,
+        style: &MenuStyle,
+        skin: Option<&MenuSkin>,
+    ) -> BuiltMenu {
+        use Declaration as D;
+        if let Some(skin) = skin {
+            ui.set_image(PANEL_IMAGE, skin.panel.image);
+            ui.set_image(IDLE_IMAGE, skin.buttons.idle.image);
+            ui.set_image(HOVERED_IMAGE, skin.buttons.hovered.image);
+            ui.set_image(PRESSED_IMAGE, skin.buttons.pressed.image);
         }
-        if !self.items.is_empty() {
-            let button = self.button_height(style);
-            height +=
-                button * self.items.len() as f32 + style.item_gap * (self.items.len() - 1) as f32;
+        let px = LengthAuto::Px;
+        let root = screen.map_or_else(Vec::new, |screen| {
+            vec![D::Width(px(screen.x)), D::Height(px(screen.y))]
+        });
+        let panel_corners = style.panel_corners();
+        let panel = [
+            D::BorderWidth(Sides::Top, panel_corners.top),
+            D::BorderWidth(Sides::Right, panel_corners.right),
+            D::BorderWidth(Sides::Bottom, panel_corners.bottom),
+            D::BorderWidth(Sides::Left, panel_corners.left),
+            D::Padding(Sides::Top, Length::Px(style.panel_padding.y)),
+            D::Padding(Sides::Bottom, Length::Px(style.panel_padding.y)),
+            D::Padding(Sides::Left, Length::Px(style.panel_padding.x)),
+            D::Padding(Sides::Right, Length::Px(style.panel_padding.x)),
+            D::RowGap(Length::Px(style.title_gap)),
+        ];
+        let button_corners = style.button_corners();
+        let row = [
+            D::BorderWidth(Sides::Top, button_corners.top),
+            D::BorderWidth(Sides::Right, button_corners.right),
+            D::BorderWidth(Sides::Bottom, button_corners.bottom),
+            D::BorderWidth(Sides::Left, button_corners.left),
+            D::Padding(Sides::Top, Length::Px(style.button_padding.y)),
+            D::Padding(Sides::Bottom, Length::Px(style.button_padding.y)),
+            D::Padding(Sides::Left, Length::Px(style.button_padding.x)),
+            D::Padding(Sides::Right, Length::Px(style.button_padding.x)),
+        ];
+        let rows_style = RowStyle {
+            row,
+            label: [D::FontSize(style.item_size)],
+            hint: [
+                D::FontSize(style.item_size),
+                D::Margin(Sides::Left, px(style.hint_gap)),
+            ],
+            groove: [
+                D::Margin(Sides::Left, px(style.hint_gap)),
+                D::MinWidth(px(style.track_width)),
+                D::Height(px(style.track_height)),
+            ],
+            thumb: [
+                D::Width(px(style.handle_size.x)),
+                D::Height(px(style.handle_size.y)),
+            ],
+        };
+
+        let mut title = None;
+        let mut rows = Vec::with_capacity(self.items.len());
+        let mut panel_key = None;
+        ui.block("menu-screen", &root, |ui| {
+            if let Some(skin) = skin {
+                ui.span(".menu-scrim", skin.scrim, &[]);
+            }
+            panel_key = Some(
+                ui.block("menu", &panel, |ui| {
+                    if !self.title.is_empty() {
+                        title = Some(
+                            ui.span(
+                                ".menu-title",
+                                self.title.as_str(),
+                                &[D::FontSize(style.title_size)],
+                            )
+                            .key,
+                        );
+                    }
+                    ui.block(
+                        ".menu-items",
+                        &[D::RowGap(Length::Px(style.item_gap))],
+                        |ui| {
+                            for (index, item) in self.items.iter().enumerate() {
+                                rows.push(self.build_row(ui, index, item, &rows_style));
+                            }
+                        },
+                    );
+                })
+                .key,
+            );
+        });
+        BuiltMenu {
+            panel: panel_key.expect("the screen builds its panel"),
+            title,
+            rows,
         }
-        Vec2::new(width, height)
+    }
+
+    /// Builds item `index`: a row in the pseudo-class [`Menu::state`] gives it,
+    /// holding its label, then what the row carries — a groove and its handle
+    /// for a slider, a spacer for anything with a caption to push right — and
+    /// then the caption itself.
+    fn build_row(&self, ui: &mut Ui, index: usize, item: &MenuItem, style: &RowStyle) -> BuiltRow {
+        let state = match self.state(index) {
+            ButtonState::Idle => PseudoClasses::NONE,
+            ButtonState::Hovered => PseudoClasses::HOVER,
+            ButtonState::Pressed => PseudoClasses::ACTIVE,
+        };
+        let mut label = None;
+        let mut groove = None;
+        let mut hint = None;
+        let row = ui
+            .block_keyed_in_state(index, "menu-item", &style.row, state, |ui| {
+                label = Some(
+                    ui.span(".menu-label", item.label.as_str(), &style.label)
+                        .key,
+                );
+                let caption = item.caption();
+                match item.kind {
+                    MenuItemKind::Slider(slider) => {
+                        groove = Some(build_groove(ui, slider, style));
+                    }
+                    MenuItemKind::Action | MenuItemKind::Cycler(_) if !caption.is_empty() => {
+                        ui.block(".menu-spacer", &[], |_| {});
+                    }
+                    MenuItemKind::Action | MenuItemKind::Cycler(_) => {}
+                }
+                if !caption.is_empty() {
+                    hint = Some(ui.span(".menu-hint", caption.as_ref(), &style.hint).key);
+                }
+            })
+            .key;
+        BuiltRow {
+            row,
+            label: label.expect("every row builds its label"),
+            hint,
+            groove,
+        }
     }
 
     /// Emits the menu's **pictures** alone: the scrim over the framebuffer, the
     /// window frame, and each button's frame for its state.
     ///
-    /// The half of [`render`](Self::render) that is art. The frames are
-    /// nine-sliced at [`MenuStyle::scale`] pixels per texel, which is what keeps
-    /// the art's corners the layout's corners.
+    /// The half of [`render`](Self::render) that is art: the same tree, with
+    /// every command that is not a picture left out — the text, and a
+    /// slider's groove and handle. The frames are nine-sliced at
+    /// [`MenuStyle::scale`] pixels per texel, which is what keeps the art's
+    /// corners the layout's corners.
     pub fn render_art(&self, dl: &mut DrawList, layout: &MenuLayout, skin: &MenuSkin) {
-        let style = &layout.style;
-        let (scrim_min, scrim_max) = layout.scrim();
-        dl.image(scrim_min, scrim_max, &skin.scrim, style.scrim_color);
-        let (panel_min, panel_max) = layout.panel;
-        dl.nine_slice(panel_min, panel_max, &skin.panel, style.scale, [1.0; 4]);
-        for (index, placed) in layout.items.iter().enumerate() {
-            skin.buttons
-                .draw(dl, self.state(index), placed.min, placed.max, style.scale);
+        let mut whole = DrawList::new();
+        self.render(&mut whole, layout, skin);
+        for command in whole.commands() {
+            if matches!(command, DrawCommand::Image { .. }) {
+                dl.push_command(command.clone());
+            }
         }
     }
 
-    /// Every button is the same height: its label, its padding and its skin's
-    /// cap and base.
-    fn button_height(&self, style: &MenuStyle) -> f32 {
-        let inner = style.button_corners();
-        line_height(style.item_size) + style.button_padding.y * 2.0 + inner.minimum_size().y
-    }
-
-    /// Emits the whole menu, back to front: [`render_art`](Self::render_art),
-    /// then each slider's groove and handle and every string.
+    /// Emits the whole menu into `dl`: the tree [`Menu::layout_with`] measured
+    /// at `layout`'s style and framebuffer, drawn with `skin`. Its text is
+    /// measured in the built-in [`FontAtlas`], the one atlas there is, so it
+    /// lands where `layout` says.
     ///
-    /// **The order is the compositing order.** The draw list is drawn in the
-    /// order commands went in, so the scrim dims what was pushed before this
-    /// call, the frame covers the scrim, and the text stays legible on the
-    /// frame.
+    /// **The order is the tree's paint order**: the scrim first, then the
+    /// window frame and the title, then each row — its frame, then what sits
+    /// on it. The draw list is drawn in the order commands went in, so the
+    /// scrim dims what was pushed before this call, the frame covers the
+    /// scrim, and every label is drawn over its own row's frame; rows do not
+    /// overlap, so no frame covers another row's text.
     pub fn render(&self, dl: &mut DrawList, layout: &MenuLayout, skin: &MenuSkin) {
-        self.render_art(dl, layout, skin);
-        let style = &layout.style;
-        if !self.title.is_empty() {
-            dl.text(
-                layout.title_pos,
-                self.title.as_str(),
-                style.title_color,
-                style.title_size,
-            );
-        }
-        for (item, placed) in self.items.iter().zip(layout.items.iter()) {
-            if let (MenuItemKind::Slider(slider), Some(track)) = (item.kind, placed.track) {
-                dl.rect(track.0, track.1, style.track_color);
-                let (start, end) = handle_travel(track, style.handle_size.x);
-                let centre = start + (end - start) * slider.position();
-                dl.rect(track.0, Vec2::new(centre, track.1.y), style.fill_color);
-                let half = style.handle_size * 0.5;
-                let middle = (track.0.y + track.1.y) * 0.5;
-                dl.rect(
-                    Vec2::new(centre - half.x, middle - half.y),
-                    Vec2::new(centre + half.x, middle + half.y),
-                    style.handle_color,
-                );
-            }
-            dl.text(
-                placed.label_pos,
-                item.label.as_str(),
-                style.label_color,
-                style.item_size,
-            );
-            let caption = item.caption();
-            if !caption.is_empty() {
-                dl.text(
-                    placed.hint_pos,
-                    caption.into_owned(),
-                    style.hint_color,
-                    style.item_size,
-                );
-            }
-        }
+        self.laid_out(
+            Some(layout.screen),
+            &layout.style,
+            Some(skin),
+            &FontAtlas::built_in(),
+            |ui, _| ui.emit(dl),
+        );
     }
+}
+
+thread_local! {
+    /// The tree [`Menu::laid_out`] places and draws menus in; see there.
+    static PLACED_TREE: std::cell::RefCell<Ui> = std::cell::RefCell::new(Ui::new());
+    /// The tree [`Menu::panel_size`] measures in: apart from
+    /// [`PLACED_TREE`], because [`Menu::layout`] measures at scale 1 and
+    /// places at the scale it chose, and one tree alternating between the two
+    /// would resolve and lay out every node from nothing on every call.
+    static MEASURED_TREE: std::cell::RefCell<Ui> = std::cell::RefCell::new(Ui::new());
+}
+
+/// Where [`Menu::laid_out`]'s pointer is: above and left of every rectangle a
+/// menu lays out, which all start at the origin.
+const OFF_SCREEN: Vec2 = Vec2::splat(-1.0);
+
+/// The names `default.css`'s menu rules give the [`MenuSkin`]'s frames, which
+/// [`Menu::render`] binds with [`Ui::set_image`].
+const PANEL_IMAGE: &str = "menu-panel";
+/// See [`PANEL_IMAGE`].
+const IDLE_IMAGE: &str = "menu-button-idle";
+/// See [`PANEL_IMAGE`].
+const HOVERED_IMAGE: &str = "menu-button-hovered";
+/// See [`PANEL_IMAGE`].
+const PRESSED_IMAGE: &str = "menu-button-pressed";
+
+/// The nodes [`Menu::build`] made, for reading a layout back.
+struct BuiltMenu {
+    panel: NodeKey,
+    title: Option<NodeKey>,
+    rows: Vec<BuiltRow>,
+}
+
+/// A slider row's groove: the tree's own slider drawing the well and the fill,
+/// and a handle over it in a rail whose two spaces share out the free width by
+/// the value — so the handle travels from flush left to flush right and hangs
+/// over neither end. Returns the groove's key, which is the rectangle a
+/// pointer's drag is measured against.
+fn build_groove(ui: &mut Ui, slider: Slider, style: &RowStyle) -> NodeKey {
+    use Declaration as D;
+    let share = slider.position();
+    ui.block(".menu-groove", &style.groove, |ui| {
+        // The tree's slider reads its value and draws it; the menu's model is
+        // what moves it, so the copy it is handed goes nowhere.
+        let mut position = share;
+        ui.slider(".menu-slider", &mut position, 0.0..=1.0, Slider::KEY_STEP);
+        ui.block(".menu-thumb-rail", &[], |ui| {
+            ui.block(".menu-thumb-space", &[D::FlexGrow(share)], |_| {});
+            ui.block(".menu-thumb", &style.thumb, |_| {});
+            ui.block(".menu-thumb-space", &[D::FlexGrow(1.0 - share)], |_| {});
+        });
+    })
+    .key
+}
+
+/// The inline declarations every row of one menu is built with, at its style.
+struct RowStyle {
+    row: [Declaration; 8],
+    label: [Declaration; 1],
+    hint: [Declaration; 2],
+    groove: [Declaration; 3],
+    thumb: [Declaration; 2],
+}
+
+/// One row's nodes.
+struct BuiltRow {
+    row: NodeKey,
+    label: NodeKey,
+    hint: Option<NodeKey>,
+    groove: Option<NodeKey>,
 }
 
 /// The share of the framebuffer a menu is allowed to fill before
@@ -1216,6 +1415,7 @@ impl Menu {
 /// would have nothing to dim.
 pub const FIT_FRACTION: f32 = 0.9;
 
+#[cfg(test)]
 fn text_width(atlas: &FontAtlas, text: &str, size: f32) -> f32 {
     if text.is_empty() {
         return 0.0;
@@ -1223,6 +1423,7 @@ fn text_width(atlas: &FontAtlas, text: &str, size: f32) -> f32 {
     atlas.text_width(text, size / NATURAL_FONT_SIZE)
 }
 
+#[cfg(test)]
 fn line_height(size: f32) -> f32 {
     LINE_HEIGHT * (size / NATURAL_FONT_SIZE)
 }
@@ -2078,44 +2279,42 @@ mod tests {
     // Text
     // -----------------------------------------------------------------------
 
-    /// **The menu draws back to front: the scrim, the frame, the buttons, then
-    /// the text** — every picture before every string, so no frame paints over
+    /// **The menu draws back to front: the scrim, the frame and the title on
+    /// it, then each button's frame followed by the strings on that button** —
+    /// every picture before the text that sits on it, so no frame paints over
     /// a label — and the text is the title, every label and every hint.
     #[test]
-    fn render_emits_the_scrim_the_frame_the_buttons_then_the_text() {
+    fn render_draws_each_frame_before_the_text_on_it() {
         let atlas = atlas();
         let menu = pause_menu();
         let layout = menu.layout((960, 720), &atlas);
         let mut dl = DrawList::new();
         menu.render(&mut dl, &layout, &skin());
 
-        let pictures = dl
+        // `I` for a picture, the string itself for text: one scrim, nine panel
+        // quads (every band non-empty at this size), the title, then nine
+        // quads and two strings per button.
+        let shape: Vec<String> = dl
             .commands()
             .iter()
-            .take_while(|command| matches!(command, DrawCommand::Image { .. }))
-            .count();
-        // One scrim, nine panel quads (every band non-empty at this size) and
-        // nine per button.
-        assert_eq!(pictures, 1 + 9 + 9 * 3, "{:#?}", dl.commands());
-        let texts: Vec<&str> = dl.commands()[pictures..]
-            .iter()
             .map(|command| match command {
-                DrawCommand::Text { text, .. } => text.as_str(),
-                other => panic!("a menu drew {other:?} after its first string"),
+                DrawCommand::Image { .. } => "I".to_owned(),
+                DrawCommand::Text { text, .. } => text.clone(),
+                other => panic!("a menu of buttons drew {other:?}"),
             })
             .collect();
-        assert_eq!(
-            texts,
-            [
-                "PAUSED",
-                "RESUME",
-                "ESC",
-                "FULLSCREEN",
-                "F11",
-                "DEBUG OVERLAY",
-                "F3"
-            ],
-        );
+        let quads = |count: usize| std::iter::repeat_n("I".to_owned(), count);
+        let mut expected: Vec<String> = quads(1 + 9).collect();
+        expected.push("PAUSED".to_owned());
+        for (label, hint) in [
+            ("RESUME", "ESC"),
+            ("FULLSCREEN", "F11"),
+            ("DEBUG OVERLAY", "F3"),
+        ] {
+            expected.extend(quads(9));
+            expected.extend([label.to_owned(), hint.to_owned()]);
+        }
+        assert_eq!(shape, expected);
     }
 
     /// An item with no hint draws one string, not an empty second one.
@@ -3150,5 +3349,125 @@ mod tests {
         assert_eq!(round.chosen(), 2);
         assert!(!round.step(true, false));
         assert_eq!(round.chosen(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // The tree and the sheet
+    // -----------------------------------------------------------------------
+
+    /// **The panel's size is the scale-1 panel times the scale, exactly**, for
+    /// every kind of row — the property [`Menu::layout`]'s one-measurement fit
+    /// rests on. A length that stopped being a whole number times the scale,
+    /// or a rounding that stopped being exact, fails here rather than as a
+    /// menu that silently picks the wrong scale.
+    #[test]
+    fn the_panel_grows_exactly_with_the_scale() {
+        let atlas = atlas();
+        let mut mixed = slider_menu();
+        mixed
+            .items
+            .push(MenuItem::cycler(MODE, "DISPLAY", "windowed", 3, 1));
+        mixed.items.push(MenuItem::new(40, "NO HINT", ""));
+        for menu in [pause_menu(), mixed, Menu::new("", Vec::new())] {
+            let base = menu.panel_size(&atlas, &MenuStyle::pixel_art(1));
+            assert!(base.x > 0.0 && base.y > 0.0, "{base:?}");
+            for scale in 2..=MenuStyle::MAX_SCALE {
+                assert_eq!(
+                    menu.panel_size(&atlas, &MenuStyle::pixel_art(scale)),
+                    base * scale as f32,
+                    "{:?} at scale {scale}",
+                    menu.title,
+                );
+            }
+        }
+    }
+
+    /// **`default.css` draws the colours [`MenuStyle::pixel_art`] restates,
+    /// and cuts the frames at the insets the layout assumes** — the two
+    /// places a sheet and the style could drift apart without a layout test
+    /// noticing.
+    #[test]
+    fn the_sheet_draws_the_colours_and_the_slices_the_style_restates() {
+        let atlas = atlas();
+        let skin = skin();
+        let mut menu = slider_menu();
+        menu.items.push(MenuItem::new(11, "QUIT", "Q"));
+        let layout = menu.layout((960, 720), &atlas);
+        let style = layout.style();
+        let mut dl = DrawList::new();
+        menu.render(&mut dl, &layout, &skin);
+
+        let text_colour = |wanted: &str| {
+            dl.commands()
+                .iter()
+                .find_map(|command| match command {
+                    DrawCommand::Text { text, color, .. } if text == wanted => Some(*color),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{wanted} is not drawn"))
+        };
+        assert_eq!(text_colour("OPTIONS"), style.title_color);
+        assert_eq!(text_colour("BACK"), style.label_color);
+        assert_eq!(text_colour("ESC"), style.hint_color);
+        let rect_colours: Vec<[f32; 4]> = dl
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Rect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rect_colours,
+            [style.track_color, style.fill_color, style.handle_color],
+            "the groove, its fill and the handle, in that order"
+        );
+        let DrawCommand::Image { tint, .. } = dl.commands()[0] else {
+            panic!("the scrim is not first");
+        };
+        assert_eq!(tint, style.scrim_color);
+
+        let corner_uvs = |min: usize| {
+            let DrawCommand::Image { uv_min, uv_max, .. } = pictures_with_uv_max(&dl)[min] else {
+                unreachable!("filtered to images");
+            };
+            (uv_min, uv_max)
+        };
+        assert_eq!(
+            corner_uvs(1),
+            (
+                skin.panel.image.uv(Vec2::ZERO),
+                skin.panel
+                    .image
+                    .uv(Vec2::new(PANEL_INSETS.left, PANEL_INSETS.top))
+            ),
+            "the panel is not cut at PANEL_INSETS"
+        );
+        // Row 0 is selected, so it draws the hovered frame; row 1 is idle.
+        assert_eq!(
+            corner_uvs(10),
+            (
+                skin.buttons.hovered.image.uv(Vec2::ZERO),
+                skin.buttons
+                    .hovered
+                    .image
+                    .uv(Vec2::new(BUTTON_INSETS.left, BUTTON_INSETS.top))
+            ),
+            "the buttons are not cut at BUTTON_INSETS"
+        );
+        assert_eq!(
+            corner_uvs(19).0,
+            skin.buttons.idle.image.uv(Vec2::ZERO),
+            "an idle row does not draw the idle frame"
+        );
+    }
+
+    /// Every `Image` command of `dl`, whole.
+    fn pictures_with_uv_max(dl: &DrawList) -> Vec<DrawCommand> {
+        dl.commands()
+            .iter()
+            .filter(|command| matches!(command, DrawCommand::Image { .. }))
+            .cloned()
+            .collect()
     }
 }

@@ -108,7 +108,11 @@
 //! border — one [`DrawList::rect_outline`] when every side is one width, a rect
 //! per side otherwise. With any corner radius it is one
 //! [`DrawList::rounded_rect`], whose border is uniform, **drawn at the top
-//! side's width**. A block with `overflow: hidden` clips its children to its
+//! side's width**. A `background-image` is stretched over the padding box
+//! between the background and the border, and a `border-image` is a
+//! [`DrawList::nine_slice_bands`] over the border box in the border's place;
+//! both are pictures [`Ui::set_image`] bound by name, and a rounded corner
+//! clips neither. A block with `overflow: hidden` clips its children to its
 //! padding box, and so does `overflow: scroll`. A text span draws from its content box's top-left: in the
 //! bitmap font as one line per newline, or — when its `font-family` names a
 //! parsed font — as a [`crate::font::layout::TextLayout`] broken at the width
@@ -176,8 +180,9 @@ pub use focus::{
 };
 pub use store::NodeKey;
 pub use style::{
-    Align, Display, Edges, FlexDirection, FlexWrap, Justify, Length, LengthAuto, LineHeight, NavId,
-    NavTarget, NavWrap, NodeStyle, Overflow, Position,
+    Align, BorderImage, BorderImageWidth, Display, Edges, FlexDirection, FlexWrap, ImageName,
+    Justify, Length, LengthAuto, LineHeight, NavId, NavTarget, NavWrap, NodeStyle, Overflow,
+    Position,
 };
 pub use widgets::{
     ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, LIST_OVERSCAN, MASK,
@@ -394,6 +399,8 @@ pub struct Ui {
     fits: Vec<widgets::TextFit>,
     /// The clipboard requests this frame's text inputs made.
     clipboard_requests: Vec<ClipboardRequest>,
+    /// The pictures a stylesheet's `url()` names, from [`Ui::set_image`].
+    images: HashMap<ImageName, AtlasImage>,
 }
 
 impl Ui {
@@ -567,6 +574,22 @@ impl Ui {
         let parsed = self.node_selector(selector);
         let key = self.key(KeySource::Keyed(hash_of(key)));
         self.open_block(key, parsed, inline, behavior, PseudoClasses::NONE, build)
+    }
+
+    /// [`Ui::block_keyed`] drawn in pseudo-class `state` whatever the pointer
+    /// and focus say: for a view of a model that keeps its own interaction
+    /// state, as [`crate::menu::Menu`] keeps its selection and press.
+    pub(crate) fn block_keyed_in_state(
+        &mut self,
+        key: impl Hash,
+        selector: &str,
+        inline: &[Declaration],
+        state: PseudoClasses,
+        build: impl FnOnce(&mut Self),
+    ) -> Response {
+        let parsed = self.node_selector(selector);
+        let key = self.key(KeySource::Keyed(hash_of(key)));
+        self.open_block(key, parsed, inline, Behavior::NONE, state, build)
     }
 
     /// A span: text or a picture, keyed by its selector's `#id` or else by
@@ -1004,6 +1027,17 @@ impl Ui {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.store.len() == 0
+    }
+
+    /// Binds `name` — what a stylesheet's `url(name)` says — to `image`, a
+    /// picture registered in an [`ImageAtlas`](crate::image::ImageAtlas),
+    /// replacing whatever the name was bound to.
+    ///
+    /// Read when the tree is emitted, so a binding changes what the next
+    /// [`Ui::emit`] draws and never moves a box. A name no call bound draws
+    /// nothing; see [`crate::style`]'s image notes.
+    pub fn set_image(&mut self, name: &str, image: AtlasImage) {
+        self.images.insert(ImageName::new(name), image);
     }
 
     /// The keys two nodes shared this frame, each once.

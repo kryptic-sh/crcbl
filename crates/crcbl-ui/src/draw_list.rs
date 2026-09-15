@@ -30,6 +30,7 @@ use crate::font::layout::PositionedGlyph;
 use crate::image::{AtlasImage, NineSliceImage, slice_bands, slice_cuts};
 use crate::text::FontAtlas;
 use crate::text::GLYPH_HEIGHT;
+use crate::widget::SkinInsets;
 use core::fmt;
 use glam::Vec2;
 
@@ -436,6 +437,13 @@ impl DrawList {
     }
 
     /// Appends one command under the current clip.
+    /// Appends one command under the current clip: for a caller that took
+    /// commands out of another list, as [`crate::menu::Menu::render_art`]
+    /// keeps a tree's pictures.
+    pub(crate) fn push_command(&mut self, command: DrawCommand) {
+        self.push(command);
+    }
+
     fn push(&mut self, command: DrawCommand) {
         self.commands.push(command);
         self.clips.push(self.clip());
@@ -553,7 +561,44 @@ impl DrawList {
         scale: f32,
         tint: [f32; 4],
     ) {
-        if !(min.is_finite() && max.is_finite() && scale.is_finite() && scale > 0.0) {
+        if !(scale.is_finite() && scale > 0.0) {
+            return;
+        }
+        let insets = sliced.clamped_insets();
+        let bands = SkinInsets::new(
+            insets.left * scale,
+            insets.right * scale,
+            insets.top * scale,
+            insets.bottom * scale,
+        );
+        self.nine_slice_bands(min, max, sliced, bands, true, tint);
+    }
+
+    /// Push `sliced` drawn into `min..max` with each fixed band `bands` pixels
+    /// wide, rather than its insets at one scale: what a stylesheet's
+    /// `border-image-width` asks for, whose sides need not agree.
+    ///
+    /// Cut as [`nine_slice`](Self::nine_slice) cuts, which is this with the
+    /// insets times the scale; `fill` false leaves out the middle quad, as
+    /// CSS's `border-image-slice` does without its `fill` keyword. A band whose
+    /// inset is zero texels draws nothing whatever its width, and a non-finite
+    /// rectangle or a band that is negative or not finite draws nothing at all.
+    pub fn nine_slice_bands(
+        &mut self,
+        min: Vec2,
+        max: Vec2,
+        sliced: &NineSliceImage,
+        bands: SkinInsets,
+        fill: bool,
+        tint: [f32; 4],
+    ) {
+        let widths = [bands.left, bands.right, bands.top, bands.bottom];
+        if !(min.is_finite()
+            && max.is_finite()
+            && widths
+                .iter()
+                .all(|width| width.is_finite() && *width >= 0.0))
+        {
             return;
         }
         let insets = sliced.clamped_insets();
@@ -563,12 +608,12 @@ impl DrawList {
         let extent = max - min;
         let xs = slice_cuts(
             min.x,
-            slice_bands(insets.left * scale, insets.right * scale, extent.x),
+            slice_bands(bands.left, bands.right, extent.x),
             extent.x,
         );
         let ys = slice_cuts(
             min.y,
-            slice_bands(insets.top * scale, insets.bottom * scale, extent.y),
+            slice_bands(bands.top, bands.bottom, extent.y),
             extent.y,
         );
         for row in 0..3 {
@@ -576,7 +621,10 @@ impl DrawList {
                 continue;
             }
             for column in 0..3 {
-                if texel_x[column] == texel_x[column + 1] || xs[column + 1] <= xs[column] {
+                if texel_x[column] == texel_x[column + 1]
+                    || xs[column + 1] <= xs[column]
+                    || (!fill && row == 1 && column == 1)
+                {
                     continue;
                 }
                 self.push(DrawCommand::Image {

@@ -130,7 +130,7 @@ pub mod page;
 pub mod pause;
 
 pub use console_button::ConsoleButton;
-pub use menu::{PAUSE_TITLE, pause_items, pause_menu, pause_only};
+pub use menu::{PAUSE_TITLE, menu_actions, pause_items, pause_menu, pause_only};
 pub use page::PageBundle;
 pub use pause::PauseControl;
 
@@ -4154,6 +4154,27 @@ impl<G> MenuAction<G> {
 /// is to the menu: the sample's closure asks it about each event, and what comes
 /// back is the key the *game* should see — `None` for one the menu took.
 ///
+/// # Driven through the `ui` context
+///
+/// Every key goes into the loop's own [`menu_actions`] map, which has
+/// [`crate::input::ui::CONTEXT`] pushed while a menu is showing and popped
+/// otherwise, and the menu moves on what [`crate::nav::nav_input`] reads out
+/// of it: a step for the selection or a value row, accept for the press, and
+/// the accept action's release for the commit. So the context stack decides
+/// what the menu hears, which gives it two guarantees the raw keys never
+/// had:
+///
+/// * **A key held into a menu is withheld from it.** Holding Down to walk
+///   south as a level-up panel opens does not also walk the panel's
+///   selection, and an Enter held from the game does not commit a row when it
+///   comes up — the map withholds a held key whose owner the push changed.
+/// * **A held step repeats on [`crate::input::Repeat::UI`]'s schedule**, on the
+///   frame clock, rather than at whatever rate the platform repeats a key.
+///
+/// The map is ticked once a frame with the time since the last one, and its
+/// edges are also cleared before each key, so every press in a batch is a step
+/// of its own: a browser frame that carries two taps of Down moves two rows.
+///
 /// # Why the widget id and not the game's action
 ///
 /// [`Self::activated`] is a [`crcbl_ui::WidgetId`], because mapping one to a game's own
@@ -4163,6 +4184,7 @@ impl<G> MenuAction<G> {
 pub struct MenuPump<'a, K> {
     menus: &'a mut crcbl_ui::menu::MenuSet<K>,
     held: &'a mut Vec<crcbl_core::input::KeyCode>,
+    actions: &'a mut crate::input::ActionMap,
     showing: bool,
     /// The widget the commit key released over, if any.
     ///
@@ -4172,23 +4194,41 @@ pub struct MenuPump<'a, K> {
 }
 
 impl<'a, K: Copy + Eq> MenuPump<'a, K> {
-    /// Starts a batch.
+    /// Starts a batch: puts the `ui` context on `actions`' stack if a menu is
+    /// showing and takes it off if not, advances the map by `dt` seconds —
+    /// the frame that just ended — and applies any repeat that fell due.
     ///
     /// `showing` is whether a menu was on screen **before** this pump — last
     /// frame's, deliberately. The pump runs before this frame's state is known,
     /// and the menu the player is pressing keys at is the one that was on screen
-    /// when they pressed them.
+    /// when they pressed them. `actions` is the loop's [`menu_actions`] map,
+    /// kept between batches.
     pub fn new(
         menus: &'a mut crcbl_ui::menu::MenuSet<K>,
         held: &'a mut Vec<crcbl_core::input::KeyCode>,
+        actions: &'a mut crate::input::ActionMap,
         showing: bool,
+        dt: f32,
     ) -> Self {
-        Self {
+        let pushed = actions.is_context_active(crate::input::ui::CONTEXT);
+        let restacked = if showing && !pushed {
+            actions.push_context(crate::input::ui::CONTEXT)
+        } else if !showing && pushed {
+            actions.pop_context(crate::input::ui::CONTEXT)
+        } else {
+            Ok(())
+        };
+        restacked.expect("the loop's map declares the ui context and nothing pushes over it");
+        actions.begin_tick(dt);
+        let mut pump = Self {
             menus,
             held,
+            actions,
             showing,
             activated: None,
-        }
+        };
+        pump.navigate();
+        pump
     }
 
     /// Offers one event, and returns the key the game should be told about.
@@ -4213,6 +4253,7 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         let crcbl_shell::ShellEvent::Key {
             key_code: Some(code),
             state,
+            repeat,
             ..
         } = event
         else {
@@ -4221,42 +4262,38 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         let code = *code;
         let pressed = matches!(state, crcbl_shell::ButtonState::Pressed);
 
-        // The arrows are claimed only over a slider or a cycler row, where the
-        // other three are claimed whenever a panel is up. The asymmetry is what
-        // the games are already bound to: `apps/asteroids` turns with Left and
-        // Right, and a menu that took them from every panel would swallow the
-        // turn key of a game whose pause menu is a list of buttons — which is
-        // every menu in this workspace but one. A value row under the
-        // highlight is the case where the player is aiming at the panel.
+        // The sideways keys are claimed only over a slider or a cycler row,
+        // where the rest of the `ui` context's keys are claimed whenever a
+        // panel is up. The asymmetry is what the games are already bound to:
+        // `apps/asteroids` turns with Left and Right, and a menu that took them
+        // from every panel would swallow the turn key of a game whose pause
+        // menu is a list of buttons — which is every menu in this workspace
+        // but one. A value row under the highlight is the case where the
+        // player is aiming at the panel. Decided before the key moves anything.
         let claimed = self.showing
-            && (matches!(code, MENU_UP_KEY | MENU_DOWN_KEY | MENU_ACTIVATE_KEY)
-                || (matches!(code, MENU_LEFT_KEY | MENU_RIGHT_KEY)
-                    && (self.menus.slider_highlighted() || self.menus.cycler_highlighted())));
-        if claimed {
-            match (code, pressed) {
-                // Repeats move the selection, because holding Down to walk a
-                // list is what a player expects — and holding Right to run a
-                // volume up is the same expectation of the same keyboard.
-                (MENU_UP_KEY, true) => self.menus.select_previous(),
-                (MENU_DOWN_KEY, true) => self.menus.select_next(),
-                (MENU_ACTIVATE_KEY, true) => self.menus.press(true),
-                (MENU_ACTIVATE_KEY, false) => self.activated = self.menus.activate(),
-                // The return value is "a handle moved", which is a fact about
-                // the end of the groove rather than about the key: the key is
-                // claimed either way, or a player holding Right at the top of a
-                // slider would start driving the game behind the panel. One of
-                // the two nudges is always a no-op, since a row is one kind.
-                (MENU_LEFT_KEY, true) => {
-                    self.menus.nudge_slider(false);
-                    self.menus.nudge_cycler(false);
-                }
-                (MENU_RIGHT_KEY, true) => {
-                    self.menus.nudge_slider(true);
-                    self.menus.nudge_cycler(true);
-                }
-                _ => {}
-            }
+            && menu::menu_binds(self.actions, code)
+            && (!menu::moves_sideways(self.actions, code)
+                || self.menus.slider_highlighted()
+                || self.menus.cycler_highlighted());
+
+        // Fed whether or not the menu claims it, so the map knows every key
+        // that is down when the context is next pushed — which is what
+        // withholding one needs. A sideways key over a button row reaches the
+        // map and the game both, and moves nothing on the panel.
+        //
+        // A press the shell does not mark as a repeat is a new press even if
+        // the map still holds the key — a release it never delivered, or a
+        // scripted tap with no release between — so the map is told the key
+        // came up first, and a step or an accept fires for it as it always
+        // did. The release lands before the edges are cleared, so it commits
+        // nothing; and a key the platform really is holding arrives as
+        // repeats, which stay withheld.
+        if pressed && !repeat {
+            self.actions.key_event(code, false);
         }
+        self.actions.begin_tick(0.0);
+        self.actions.key_event(code, pressed);
+        self.navigate();
 
         if pressed {
             if claimed {
@@ -4271,6 +4308,36 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         let was_held = self.held.contains(&code);
         self.held.retain(|key| *key != code);
         (!claimed || was_held).then_some((code, false))
+    }
+
+    /// Moves the menu on what the map's `ui` actions did since its edges were
+    /// last cleared.
+    fn navigate(&mut self) {
+        let nav = crate::nav::nav_input(self.actions);
+        match nav.direction {
+            Some(crcbl_ui::tree::Direction::Up) => self.menus.select_previous(),
+            Some(crcbl_ui::tree::Direction::Down) => self.menus.select_next(),
+            // The return value is "a handle moved", which is a fact about the
+            // end of the groove rather than about the key: the key is claimed
+            // either way, or a player holding Right at the top of a slider
+            // would start driving the game behind the panel. One of the two
+            // nudges is always a no-op, since a row is one kind.
+            Some(crcbl_ui::tree::Direction::Left) => {
+                self.menus.nudge_slider(false);
+                self.menus.nudge_cycler(false);
+            }
+            Some(crcbl_ui::tree::Direction::Right) => {
+                self.menus.nudge_slider(true);
+                self.menus.nudge_cycler(true);
+            }
+            None => {}
+        }
+        if nav.accept {
+            self.menus.press(true);
+        }
+        if self.actions.just_released(crate::input::ui::ACCEPT) {
+            self.activated = self.menus.activate();
+        }
     }
 }
 
@@ -6082,6 +6149,9 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// draw list.
     draw_list: crcbl_ui::draw_list::DrawList,
     menus: crcbl_ui::menu::MenuSet<G::MenuKind>,
+    /// What drives [`Self::menus`] from the keyboard: [`menu_actions`], fed by
+    /// [`MenuPump`] and kept across frames for its held keys and repeats.
+    menu_actions: crate::input::ActionMap,
     /// Where the pointer was last seen and whether its button is down — both
     /// are needed across frames, see [`PointerCapture`].
     pointer: PointerCapture,
@@ -6302,6 +6372,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             frame_clock: crcbl_core::FrameClock::new(config.tick_hz),
             draw_list: crcbl_ui::draw_list::DrawList::new(),
             menus: G::menus(),
+            menu_actions: menu_actions(),
             pointer: PointerCapture::new(),
             debug: crcbl_ui::DebugOverlay::with_visible(config.debug_overlay),
             console,
@@ -6383,7 +6454,16 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // toggle this batch carries is applied below rather than mid-pump.
         let console_showing = self.console.is_open();
         let console = &mut self.console;
-        let mut menu = MenuPump::new(&mut self.menus, &mut self.held_keys, showing);
+        // Last frame's duration, which is the time since the last pump: this
+        // frame's clock is not advanced until after the input is read.
+        let since_last_pump = self.frame_clock.render_dt_secs();
+        let mut menu = MenuPump::new(
+            &mut self.menus,
+            &mut self.held_keys,
+            &mut self.menu_actions,
+            showing,
+            since_last_pump,
+        );
         // The character the toggling key produced, which must not be typed into
         // the field it just opened — plan decision 5. Set from the key event
         // itself rather than from `Pending::toggle_console`, because a *repeat*
@@ -6630,6 +6710,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 for key in std::mem::take(&mut self.held_keys) {
                     game.key_event(key, false);
                 }
+                // The console takes both edges of every key while it is open,
+                // so the menu's map would never hear these come up either.
+                menu::release_menu_keys(&mut self.menu_actions);
             }
             self.console.toggle();
         }
@@ -6655,6 +6738,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             lose_focus(&mut self.held_keys, &mut self.paused, |key| {
                 game.key_event(key, false);
             });
+            menu::release_menu_keys(&mut self.menu_actions);
             // The same obligation for the button: no platform sends the release
             // for a pointer that was down when focus left, and a game still
             // holding it sees no edge on the next tap.
@@ -8937,6 +9021,7 @@ mod tests {
         let (mut shell, window) = shell();
         let mut set = menus();
         let mut held = Vec::new();
+        let mut actions = menu_actions();
 
         for showing in [true, false] {
             shell.key_press(window, MENU_DOWN_KEY).expect("live");
@@ -8956,7 +9041,7 @@ mod tests {
             let before = selected(&set);
 
             let mut forwarded = Vec::new();
-            let mut pump = MenuPump::new(&mut set, &mut held, showing);
+            let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, showing, 0.0);
             shell.pump(&mut |event| {
                 if let Some(key) = pump.observe(&event) {
                     forwarded.push(key);
@@ -9012,6 +9097,7 @@ mod tests {
         );
         set.show(Panel::Shown);
         let mut held = Vec::new();
+        let mut actions = menu_actions();
 
         // The slider is the third row, so it takes two Downs to highlight —
         // and those go through the same pump, which is the point: this drives
@@ -9028,7 +9114,7 @@ mod tests {
                 .expect("the row is a slider");
 
             let mut forwarded = Vec::new();
-            let mut pump = MenuPump::new(&mut set, &mut held, showing);
+            let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, showing, 0.0);
             shell.pump(&mut |event| {
                 if let Some(key) = pump.observe(&event) {
                     forwarded.push(key);
@@ -9068,7 +9154,7 @@ mod tests {
         shell.key_press(window, MENU_RIGHT_KEY).expect("live");
         shell.key_release(window, MENU_RIGHT_KEY).expect("live");
         let mut forwarded = Vec::new();
-        let mut pump = MenuPump::new(&mut set, &mut held, true);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, 0.0);
         shell.pump(&mut |event| {
             if let Some(key) = pump.observe(&event) {
                 forwarded.push(key);
@@ -9104,6 +9190,7 @@ mod tests {
         );
         set.show(Panel::Shown);
         let mut held = Vec::new();
+        let mut actions = menu_actions();
 
         for showing in [true, false] {
             let before = set
@@ -9117,7 +9204,7 @@ mod tests {
             }
 
             let mut forwarded = Vec::new();
-            let mut pump = MenuPump::new(&mut set, &mut held, showing);
+            let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, showing, 0.0);
             shell.pump(&mut |event| {
                 if let Some(key) = pump.observe(&event) {
                     forwarded.push(key);
@@ -9142,6 +9229,40 @@ mod tests {
         }
     }
 
+    /// **Every press in a batch is a step of its own, and only one.** A
+    /// browser frame can carry two presses of Down, and the map's edges are one
+    /// frame's: read once after the batch the second would be lost, and read
+    /// after every key without clearing them, the key after it would step
+    /// again.
+    #[test]
+    fn two_taps_in_one_batch_move_the_selection_twice() {
+        let (mut shell, window) = shell();
+        let mut set = crcbl_ui::menu::MenuSet::new(
+            Panel::None,
+            vec![(Panel::Shown, crate::engine::pause_menu())],
+        );
+        set.show(Panel::Shown);
+        let mut held = Vec::new();
+        let mut actions = menu_actions();
+        shell.key_press(window, MENU_DOWN_KEY).expect("live");
+        shell.key_release(window, MENU_DOWN_KEY).expect("live");
+        shell.key_press(window, MENU_DOWN_KEY).expect("live");
+        // A key the panel does not bind, with Down still held: it must not read
+        // the second press's edge a second time.
+        shell
+            .key_press(window, crcbl_core::input::KeyCode::KeyW)
+            .expect("live");
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, 0.0);
+        shell.pump(&mut |event| {
+            pump.observe(&event);
+        });
+        assert_eq!(
+            set.current().map(crcbl_ui::menu::Menu::selected),
+            Some(2),
+            "two taps in one batch did not move two rows"
+        );
+    }
+
     /// **The commit key fires on release, not on press.**
     ///
     /// So the pressed frame of the skin is on screen for as long as the key is
@@ -9152,16 +9273,17 @@ mod tests {
         let (mut shell, window) = shell();
         let mut set = menus();
         let mut held = Vec::new();
+        let mut actions = menu_actions();
 
         shell.key_press(window, MENU_ACTIVATE_KEY).expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, true);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, 0.0);
         shell.pump(&mut |event| {
             pump.observe(&event);
         });
         assert_eq!(pump.activated, None, "pressing must not commit");
 
         shell.key_release(window, MENU_ACTIVATE_KEY).expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, true);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, 0.0);
         shell.pump(&mut |event| {
             pump.observe(&event);
         });
@@ -9181,11 +9303,12 @@ mod tests {
         let (mut shell, window) = shell();
         let mut set = menus();
         let mut held = Vec::new();
+        let mut actions = menu_actions();
 
         shell
             .key_press(window, crcbl_core::input::KeyCode::KeyW)
             .expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, false);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, false, 0.0);
         shell.pump(&mut |event| {
             pump.observe(&event);
         });
@@ -9194,7 +9317,7 @@ mod tests {
         shell
             .key_release(window, crcbl_core::input::KeyCode::KeyW)
             .expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, false);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, false, 0.0);
         shell.pump(&mut |event| {
             pump.observe(&event);
         });
@@ -9214,10 +9337,11 @@ mod tests {
         let (mut shell, window) = shell();
         let mut set = menus();
         let mut held = Vec::new();
+        let mut actions = menu_actions();
 
         // Pressed while no menu is up: forwarded, and tracked as held.
         shell.key_press(window, MENU_UP_KEY).expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, false);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, false, 0.0);
         let mut forwarded = Vec::new();
         shell.pump(&mut |event| {
             if let Some(key) = pump.observe(&event) {
@@ -9230,7 +9354,7 @@ mod tests {
         // Released while the menu is up: the menu is claiming that key, and the
         // release reaches the game anyway.
         shell.key_release(window, MENU_UP_KEY).expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, true);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, 0.0);
         let mut forwarded = Vec::new();
         shell.pump(&mut |event| {
             if let Some(key) = pump.observe(&event) {
@@ -12689,10 +12813,9 @@ mod tests {
                         FakeMenu::Start,
                         Menu::new("FAKE", vec![MenuItem::new(SERVE_ID, "PLAY", "SPACE")]),
                     ),
-                    (
-                        FakeMenu::Paused,
-                        Menu::new("PAUSED", vec![MenuItem::new(RESUME_ID, "RESUME", "ESC")]),
-                    ),
+                    // The loop's own panel, whose rows below RESUME are what
+                    // a selection move has somewhere to go to.
+                    (FakeMenu::Paused, crate::engine::pause_menu()),
                 ],
             )
         }
@@ -14629,6 +14752,176 @@ mod tests {
             keys_before,
             "the loop's own button reached the game: {:?}",
             engine.game().keys,
+        );
+    }
+
+    /// [`tap`]s `key` and runs the frame that reads it.
+    fn tap_and_frame(engine: &mut Hosted, key: crcbl_core::input::KeyCode) {
+        tap(engine, key);
+        engine.frame().expect("the fake never fails");
+    }
+
+    /// A served fixture with no menu on screen and its first frames run.
+    fn playing() -> Loop<crcbl_shell::HeadlessShell, FakeGame> {
+        let mut engine = with_a_menu();
+        tap_and_frame(&mut engine, MENU_ACTIVATE_KEY);
+        engine.frame().expect("the fake never fails");
+        assert!(engine.game().served, "PLAY did not serve");
+        assert_eq!(engine.menu_kind(), FakeMenu::None);
+        engine
+    }
+
+    /// Which row of the menu on screen is selected.
+    fn selected_row(engine: &Loop<crcbl_shell::HeadlessShell, FakeGame>) -> usize {
+        engine
+            .menus()
+            .current()
+            .expect("a menu is on screen")
+            .selected()
+    }
+
+    /// **The loop's menu map has the `ui` context pushed exactly while a menu
+    /// has input**: from the first pump after a panel is drawn to the first
+    /// pump after it is gone, for a panel the game shows and for the pause
+    /// panel the loop shows.
+    #[test]
+    fn the_ui_context_is_pushed_while_a_menu_has_input_and_popped_after() {
+        let context = crate::input::ui::CONTEXT;
+        let mut engine = with_a_menu();
+        assert!(
+            engine.menu_actions.is_context_active(context),
+            "the start menu is up and the context is not pushed"
+        );
+
+        tap_and_frame(&mut engine, MENU_ACTIVATE_KEY);
+        assert_eq!(engine.menu_kind(), FakeMenu::None, "PLAY did not close it");
+        engine.frame().expect("the fake never fails");
+        assert!(
+            !engine.menu_actions.is_context_active(context),
+            "the context outlived the menu"
+        );
+
+        pause_key(&mut engine);
+        assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+        engine.frame().expect("the fake never fails");
+        assert!(
+            engine.menu_actions.is_context_active(context),
+            "the pause panel has no context"
+        );
+        pause_key(&mut engine);
+        engine.frame().expect("the fake never fails");
+        assert!(!engine.menu_actions.is_context_active(context));
+    }
+
+    /// **A key held into a menu is withheld from it, and still comes up for
+    /// the game.**
+    ///
+    /// Down is held while playing, the pause panel opens over it, and the key
+    /// goes on repeating for longer than the repeat delay: the selection must
+    /// not move, from the platform's repeats or the map's. Its release is the
+    /// game's, which heard the press. A fresh Down afterwards is the menu's.
+    #[test]
+    fn a_key_held_into_a_menu_is_withheld_from_it() {
+        let mut engine = playing();
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, MENU_DOWN_KEY)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        assert_eq!(engine.game().keys.last(), Some(&(MENU_DOWN_KEY, true)));
+
+        pause_key(&mut engine);
+        assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+        // Twice the repeat delay at the fixture's frame rate, and never fewer
+        // than a second's worth of frames.
+        let frames =
+            (2.0 * crate::input::REPEAT_DELAY / engine.frame_clock.render_dt_secs()) as u32;
+        // Read every frame: the panel's rows wrap, so a selection that walked
+        // a whole number of laps would read as unmoved at the end.
+        for frame in 0..frames.max(60) {
+            engine
+                .shell_mut()
+                .key_repeat(window, MENU_DOWN_KEY)
+                .expect("the window is live");
+            engine.frame().expect("the fake never fails");
+            assert_eq!(
+                selected_row(&engine),
+                0,
+                "a key held since before the panel walked its selection by frame {frame}"
+            );
+        }
+
+        let before = engine.game().keys.len();
+        engine
+            .shell_mut()
+            .key_release(window, MENU_DOWN_KEY)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            engine.game().keys[before..],
+            [(MENU_DOWN_KEY, false)],
+            "the game was never told the held key came up"
+        );
+
+        tap_and_frame(&mut engine, MENU_DOWN_KEY);
+        assert_eq!(
+            selected_row(&engine),
+            1,
+            "a fresh press did not reach the menu"
+        );
+        assert_eq!(
+            engine.game().keys.len(),
+            before + 1,
+            "the fresh press reached the game as well"
+        );
+    }
+
+    /// **An Enter held into a menu does not commit a row when it comes up, and
+    /// the Escape that closes the panel reaches nothing but the loop.**
+    ///
+    /// Before the context, the release of an Enter pressed in play was the
+    /// commit key's release over RESUME, and un-paused a game the player had
+    /// only just paused.
+    #[test]
+    fn a_held_commit_key_does_not_commit_and_the_closing_escape_reaches_no_game() {
+        let mut engine = playing();
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        pause_key(&mut engine);
+        engine.frame().expect("the fake never fails");
+        engine
+            .shell_mut()
+            .key_release(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        assert!(
+            engine.is_paused(),
+            "the release of an Enter held into the panel fired RESUME"
+        );
+        assert_eq!(
+            engine.game().keys.last(),
+            Some(&(MENU_ACTIVATE_KEY, false)),
+            "the game heard the press and not the release"
+        );
+
+        pause_key(&mut engine);
+        engine.frame().expect("the fake never fails");
+        assert!(!engine.is_paused(), "Escape did not close the panel");
+        assert!(
+            !engine
+                .menu_actions
+                .is_context_active(crate::input::ui::CONTEXT),
+            "the panel is gone and its context is not"
+        );
+        assert!(
+            !engine.game().keys.iter().any(|(key, _)| *key == PAUSE_KEY),
+            "Escape reached the game: {:?}",
+            engine.game().keys
         );
     }
 

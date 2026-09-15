@@ -6,7 +6,7 @@
 //!                                                               │
 //!                                   crcbl_ui::MenuSkin ◀────────┘
 //!                                          │
-//!                         Menu::render ────┴──▶ DrawList (scrim, frame, buttons, text)
+//!          Menu::render (tree + default.css) ──▶ DrawList (scrim, frames, text)
 //! ```
 //!
 //! # Why the art is here and not in each sample
@@ -52,9 +52,10 @@
 //!
 //! The menu used to be a sprite pass of its own, with a screen-space camera,
 //! sandwiched between the two halves of the draw list, because the UI pass had
-//! no textured quad. It has one now: [`crcbl_ui::menu::Menu::render`] pushes
-//! the scrim, the frame and the buttons into the draw list ahead of the text on
-//! them, and the whole menu composites in the order it was pushed.
+//! no textured quad. It has one now: [`crcbl_ui::menu::Menu::render`] builds
+//! the menu on the element tree, binds these images under the names
+//! `crcbl-ui`'s `default.css` draws the frames with, and emits the scrim, each
+//! frame and the text on it in paint order.
 
 use crcbl_sprite::load::{Loaded, load_baked};
 use crcbl_ui::image::{AtlasError, AtlasImage, ImageAtlas, NineSliceImage};

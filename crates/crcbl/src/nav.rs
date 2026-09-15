@@ -16,11 +16,14 @@
 //! [`nav_input`] is what the frame passes to
 //! [`Ui::begin_frame_with`](crate::ui::tree::Ui::begin_frame_with).
 //!
-//! **Nothing in the engine loop calls this yet.** [`Loop`](crate::engine::Loop)
-//! hosts no tree: its menus are `crcbl_ui::menu`'s, which read raw keys through
-//! `MenuPump`, and a game's map is the game's. The tree reaches a frame only in
-//! the screenshot scenes, and `screenshot::ui_focus`'s tests are what hold its
-//! scripted pad to what the keyboard produces through this.
+//! **[`Loop`](crate::engine::Loop)'s menus are driven through it.**
+//! [`MenuPump`](crate::engine::MenuPump) feeds the loop's own
+//! [`menu_actions`](crate::engine::menu_actions) map, pushes the context while
+//! a menu is showing, and moves the menu on what this reads — clearing the
+//! map's edges before each key as well as once a frame, so a batch carrying two
+//! presses is two steps. A game's map is the game's, and hears nothing of the
+//! context. `screenshot::ui_focus`'s tests hold the tree's scripted pad to what
+//! the keyboard produces through this.
 
 use crate::input::ui::{ACCEPT, BACK, MOVE, NEXT, PREV};
 use crate::input::{ActionMap, Cardinal, Device};

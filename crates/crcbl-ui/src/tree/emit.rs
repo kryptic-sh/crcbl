@@ -2,12 +2,16 @@
 //!
 //! See the module docs of [`crate::tree`] for what each kind of node draws.
 
+use std::collections::HashMap;
+
 use glam::Vec2;
 
-use super::style::{Display, NodeStyle};
+use super::style::{Display, ImageName, NodeStyle};
 use super::{Content, Ui, padding_box};
 use crate::draw_list::{Border, CornerRadii, DrawList};
 use crate::font::layout::TextLayout;
+use crate::image::{AtlasImage, NineSliceImage};
+use crate::widget::SkinInsets;
 
 /// Whether a colour draws anything.
 fn visible(color: [f32; 4]) -> bool {
@@ -51,7 +55,10 @@ impl Ui {
         }
         let (min, max) = self.store.get(node.slot).rect;
         match node.content {
-            Content::Block => paint_box(list, &node.style, min, max),
+            Content::Block => {
+                let padding = padding_box(min, &node.layout);
+                paint_box(list, &node.style, (min, max), padding, &self.images);
+            }
             Content::Text { start, end } => {
                 let (content_min, content_max) = content_box(min, &node.layout);
                 let text = &self.text[start..end];
@@ -142,23 +149,59 @@ fn paint_outline(list: &mut DrawList, style: &NodeStyle, min: Vec2, max: Vec2) {
     );
 }
 
-/// A block's background and border over its border box `min..max`.
-fn paint_box(list: &mut DrawList, style: &NodeStyle, min: Vec2, max: Vec2) {
+/// A block's background, its background image and its border — or its
+/// border image in the border's place — over its border box `min..max`, in
+/// that order. `padding` is its padding box, which the background image is
+/// stretched over; `images` is what [`Ui::set_image`] bound.
+fn paint_box(
+    list: &mut DrawList,
+    style: &NodeStyle,
+    (min, max): (Vec2, Vec2),
+    padding: (Vec2, Vec2),
+    images: &HashMap<ImageName, AtlasImage>,
+) {
+    let resolve = |name: Option<ImageName>| name.and_then(|name| images.get(&name));
+    let background_image = resolve(style.background_image);
+    let border_image = resolve(style.border_image.source);
     let border = style.border;
-    let has_border = visible(style.border_color)
+    let has_border = border_image.is_none()
+        && visible(style.border_color)
         && [border.top, border.right, border.bottom, border.left]
             .iter()
             .any(|width| *width > 0.0);
 
     if style.radii != CornerRadii::uniform(0.0) {
-        if visible(style.background) || has_border {
+        // One command for the background and the border, unless a background
+        // image has to go between them.
+        let joined = background_image.is_none() && has_border;
+        if visible(style.background) || joined {
             list.rounded_rect(
                 min,
                 max,
                 style.radii,
                 style.background,
                 Border {
-                    width: if has_border { border.top } else { 0.0 },
+                    width: if joined { border.top } else { 0.0 },
+                    color: style.border_color,
+                },
+            );
+        }
+        paint_images(
+            list,
+            style,
+            (min, max),
+            padding,
+            background_image,
+            border_image,
+        );
+        if has_border && !joined {
+            list.rounded_rect(
+                min,
+                max,
+                style.radii,
+                [0.0; 4],
+                Border {
+                    width: border.top,
                     color: style.border_color,
                 },
             );
@@ -169,6 +212,14 @@ fn paint_box(list: &mut DrawList, style: &NodeStyle, min: Vec2, max: Vec2) {
     if visible(style.background) {
         list.rect(min, max, style.background);
     }
+    paint_images(
+        list,
+        style,
+        (min, max),
+        padding,
+        background_image,
+        border_image,
+    );
     if !has_border {
         return;
     }
@@ -196,6 +247,38 @@ fn paint_box(list: &mut DrawList, style: &NodeStyle, min: Vec2, max: Vec2) {
         if band_max.x > band_min.x && band_max.y > band_min.y {
             list.rect(band_min, band_max, style.border_color);
         }
+    }
+}
+
+/// A block's background image over its padding box, then its border image
+/// over its border box: stretched and untinted, as CSS draws both. A rounded
+/// box's corners do not clip either.
+fn paint_images(
+    list: &mut DrawList,
+    style: &NodeStyle,
+    (min, max): (Vec2, Vec2),
+    padding: (Vec2, Vec2),
+    background_image: Option<&AtlasImage>,
+    border_image: Option<&AtlasImage>,
+) {
+    if let Some(image) = background_image {
+        list.image(padding.0, padding.1, image, [1.0; 4]);
+    }
+    if let Some(image) = border_image {
+        let frame = style.border_image;
+        let slice = frame.slice;
+        let sliced = NineSliceImage {
+            image: *image,
+            insets: SkinInsets::new(slice.left, slice.right, slice.top, slice.bottom),
+        };
+        let (width, border) = (frame.width, style.border);
+        let bands = SkinInsets::new(
+            width.left.resolve(border.left),
+            width.right.resolve(border.right),
+            width.top.resolve(border.top),
+            width.bottom.resolve(border.bottom),
+        );
+        list.nine_slice_bands(min, max, &sliced, bands, frame.fill, [1.0; 4]);
     }
 }
 

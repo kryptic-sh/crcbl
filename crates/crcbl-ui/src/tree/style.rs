@@ -271,6 +271,72 @@ impl NavId {
     }
 }
 
+/// A picture a stylesheet's `url()` names, hashed: what [`Ui::set_image`]
+/// binds to a registered [`AtlasImage`](crate::image::AtlasImage).
+///
+/// A name, never a path — see [`crate::style`]'s image notes.
+///
+/// [`Ui::set_image`]: crate::tree::Ui::set_image
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ImageName(pub(crate) u64);
+
+impl ImageName {
+    /// The name `name`, as the `url()` that names it spells it.
+    #[must_use]
+    pub fn new(name: &str) -> Self {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(name, &mut hasher);
+        Self(hasher.finish())
+    }
+}
+
+/// One side of `border-image-width`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BorderImageWidth {
+    /// This many pixels.
+    Px(f32),
+    /// This many times the side's `border-width`; the initial value is `1`.
+    Multiple(f32),
+}
+
+impl BorderImageWidth {
+    /// The band's width in pixels on a side whose `border-width` is `border`.
+    #[must_use]
+    pub fn resolve(self, border: f32) -> f32 {
+        match self {
+            Self::Px(px) => px,
+            Self::Multiple(factor) => factor * border,
+        }
+    }
+}
+
+/// `border-image-source`, `border-image-slice` and `border-image-width`: a
+/// picture cut into nine and drawn over the border box in place of the border.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BorderImage {
+    /// The picture; `None` draws the border as `border-color` instead.
+    pub source: Option<ImageName>,
+    /// Where the picture is cut, inward from each edge in **texels**.
+    pub slice: Edges<f32>,
+    /// Whether the middle of the picture is drawn over the padding box too:
+    /// the `fill` keyword.
+    pub fill: bool,
+    /// How wide each band is drawn.
+    pub width: Edges<BorderImageWidth>,
+}
+
+impl BorderImage {
+    /// The initial value: no picture, no fill and a width of `1`. The slice
+    /// is `0` where CSS's is `100%`: the subset takes no percentage, and with
+    /// no picture the slice cuts nothing either way.
+    pub const NONE: Self = Self {
+        source: None,
+        slice: Edges::all(0.0),
+        fill: false,
+        width: Edges::all(BorderImageWidth::Multiple(1.0)),
+    };
+}
+
 /// `nav-up`, `nav-right`, `nav-down` and `nav-left`: where a directional move
 /// from the node goes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -399,6 +465,12 @@ pub struct NodeStyle {
     /// `outline-offset`, in pixels: how far outside the border box the ring
     /// starts; negative draws it inside.
     pub outline_offset: f32,
+    /// `background-image`: a picture stretched over the padding box, drawn
+    /// over `background`.
+    pub background_image: Option<ImageName>,
+    /// `border-image-*`: a nine-sliced picture over the border box, drawn in
+    /// place of `border-color` while its source is set.
+    pub border_image: BorderImage,
 
     // -- navigation -----------------------------------------------------------
     /// `nav-up`.
@@ -450,6 +522,8 @@ impl NodeStyle {
         outline_width: 0.0,
         outline_color: [0.0; 4],
         outline_offset: 0.0,
+        background_image: None,
+        border_image: BorderImage::NONE,
         nav_up: NavTarget::Auto,
         nav_right: NavTarget::Auto,
         nav_down: NavTarget::Auto,
@@ -765,6 +839,13 @@ mod tests {
             outline_width: 2.0,
             outline_color: [1.0; 4],
             outline_offset: 1.0,
+            background_image: Some(ImageName::new("x")),
+            border_image: BorderImage {
+                source: Some(ImageName::new("y")),
+                slice: Edges::all(4.0),
+                fill: true,
+                width: Edges::all(BorderImageWidth::Px(3.0)),
+            },
             nav_up: NavTarget::None,
             nav_left: NavTarget::Id(NavId::new("x")),
             nav_wrap: NavWrap::Both,

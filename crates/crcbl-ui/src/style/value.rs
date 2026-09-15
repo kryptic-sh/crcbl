@@ -6,8 +6,9 @@
 
 use crate::draw_list::CornerRadii;
 use crate::tree::{
-    Align, Direction, Display, Edges, FlexDirection, FlexWrap, FontFamily, Justify, Length,
-    LengthAuto, LineHeight, NavTarget, NavWrap, NodeStyle, Overflow, Position, TextAlign,
+    Align, BorderImageWidth, Direction, Display, Edges, FlexDirection, FlexWrap, FontFamily,
+    ImageName, Justify, Length, LengthAuto, LineHeight, NavTarget, NavWrap, NodeStyle, Overflow,
+    Position, TextAlign,
 };
 
 /// Which sides of a box a declaration sets.
@@ -116,6 +117,16 @@ pub enum Declaration {
     OutlineColor([f32; 4]),
     /// `outline-offset`, in pixels.
     OutlineOffset(f32),
+    /// `background-image`; `None` is `none`.
+    BackgroundImage(Option<ImageName>),
+    /// `border-image-source`; `None` is `none`.
+    BorderImageSource(Option<ImageName>),
+    /// One side of `border-image-slice`, in texels.
+    BorderImageSlice(Sides, f32),
+    /// `border-image-slice`'s `fill` keyword.
+    BorderImageFill(bool),
+    /// One side of `border-image-width`.
+    BorderImageWidth(Sides, BorderImageWidth),
     /// `nav-up`, `nav-right`, `nav-down` or `nav-left`.
     Nav(Direction, NavTarget),
     /// `nav-wrap`.
@@ -179,6 +190,15 @@ impl Declaration {
             Self::OutlineWidth(value) => style.outline_width = value,
             Self::OutlineColor(value) => style.outline_color = value,
             Self::OutlineOffset(value) => style.outline_offset = value,
+            Self::BackgroundImage(value) => style.background_image = value,
+            Self::BorderImageSource(value) => style.border_image.source = value,
+            Self::BorderImageSlice(sides, value) => {
+                set_sides(&mut style.border_image.slice, sides, value);
+            }
+            Self::BorderImageFill(value) => style.border_image.fill = value,
+            Self::BorderImageWidth(sides, value) => {
+                set_sides(&mut style.border_image.width, sides, value);
+            }
             Self::Nav(direction, value) => *style.nav_mut(direction) = value,
             Self::NavWrap(value) => style.nav_wrap = value,
         }
@@ -226,6 +246,9 @@ impl NodeStyle {
             D::OutlineWidth(self.outline_width),
             D::OutlineColor(self.outline_color),
             D::OutlineOffset(self.outline_offset),
+            D::BackgroundImage(self.background_image),
+            D::BorderImageSource(self.border_image.source),
+            D::BorderImageFill(self.border_image.fill),
             D::NavWrap(self.nav_wrap),
         ];
         for direction in Direction::ALL {
@@ -243,6 +266,25 @@ impl NodeStyle {
             all.push(D::BorderWidth(
                 side,
                 [border.top, border.right, border.bottom, border.left][at],
+            ));
+            let image = self.border_image;
+            all.push(D::BorderImageSlice(
+                side,
+                [
+                    image.slice.top,
+                    image.slice.right,
+                    image.slice.bottom,
+                    image.slice.left,
+                ][at],
+            ));
+            all.push(D::BorderImageWidth(
+                side,
+                [
+                    image.width.top,
+                    image.width.right,
+                    image.width.bottom,
+                    image.width.left,
+                ][at],
             ));
         }
         let radii = self.radii;
@@ -305,6 +347,23 @@ mod tests {
             nav_up: NavTarget::None,
             nav_right: NavTarget::Id(crate::tree::NavId::new("next")),
             nav_wrap: NavWrap::Horizontal,
+            background_image: Some(crate::tree::ImageName::new("sky")),
+            border_image: crate::tree::BorderImage {
+                source: Some(crate::tree::ImageName::new("frame")),
+                slice: Edges {
+                    top: 1.0,
+                    right: 2.0,
+                    bottom: 3.0,
+                    left: 4.0,
+                },
+                fill: true,
+                width: Edges {
+                    top: BorderImageWidth::Px(5.0),
+                    right: BorderImageWidth::Multiple(2.0),
+                    bottom: BorderImageWidth::Px(7.0),
+                    left: BorderImageWidth::Multiple(0.5),
+                },
+            },
             ..NodeStyle::DEFAULT
         };
         let mut rebuilt = NodeStyle {

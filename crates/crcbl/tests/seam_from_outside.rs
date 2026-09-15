@@ -38,7 +38,7 @@ use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameBudget, FrameOutcome, GameLoop, GpuContext, GpuContextDesc,
     GpuError, Handled, LoopError, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MenuPump, ModeRequest, Pending,
-    PointerCapture, SettingsSource, accept_close, drive, open_window, run_ticks,
+    PointerCapture, SettingsSource, accept_close, drive, menu_actions, open_window, run_ticks,
     wait_for_configure,
 };
 use crcbl::hal::{CommandEncoderDesc, ResourceState};
@@ -346,13 +346,14 @@ fn the_loops_input_helpers_work_outside_the_engines_loop() {
     );
     menus.show(1);
     let mut held = Vec::new();
+    let mut actions = menu_actions();
     shell
         .key_press(window, MENU_ACTIVATE_KEY)
         .expect("the window is live");
     shell
         .key_release(window, MENU_ACTIVATE_KEY)
         .expect("the window is live");
-    let mut menu = MenuPump::new(&mut menus, &mut held, true);
+    let mut menu = MenuPump::new(&mut menus, &mut held, &mut actions, true, 0.0);
     shell.pump(&mut |event| {
         menu.observe(&event);
     });

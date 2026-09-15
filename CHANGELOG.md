@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::engine::MenuPump::new` takes the loop's action map and a frame
+  time**: `MenuPump::new(menus, held, actions, showing, dt)`, where `actions` is
+  the new `crcbl::engine::menu_actions()` map — the reserved `ui` context and
+  nothing else, pushed while a menu is showing. A menu key held from before a
+  panel opened is now withheld from that panel, and a held step repeats on
+  `Repeat::UI`'s schedule rather than the platform's key-repeat rate.
+- **`crcbl_ui::tree::NodeStyle` has `background_image` and `border_image`, and
+  `crcbl_ui::style::Declaration` five more members** (`BackgroundImage`,
+  `BorderImageSource`, `BorderImageSlice`, `BorderImageFill`,
+  `BorderImageWidth`), so an exhaustive match, or a struct literal without
+  `..NodeStyle::DEFAULT`, needs the new arms. `crcbl_input::Binding::visit_keys`
+  and `owns_key` are public.
 - **`crcbl_input::Binding` has a `Chord { modifier, key }` member and
   `ActionMapError` has `UnknownContext`, `ContextAlreadyActive` and
   `ContextNotOnTop`**, so an exhaustive match on either needs the new arms. A
@@ -177,6 +189,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Pictures in the stylesheet subset**: `background-image` and `border-image`
+  (with `-source`, `-slice` including `fill`, `-width` and `-repeat: stretch`),
+  whose `url(name)` names an image the application binds with the new
+  `Ui::set_image` — a name, never a path. `color(srgb …)` and
+  `color(srgb-linear …)` parse, so a linear-light colour needs no 8-bit round
+  trip, and `DrawList::nine_slice_bands` draws a nine-slice from per-side pixel
+  bands with an optional middle.
 - **A single-line text input on `crcbl_ui::tree`.** `Ui::text_input` and
   `text_input_with` (`TextInputOptions { placeholder, masked }`) edit a
   `&mut String` as an engaged widget: Shift+arrow, Home and End, word moves with
@@ -1775,6 +1794,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The engine's menus are built on the element tree.** `Menu` and `MenuSet`
+  keep their API: the panel, its title and every row are blocks and spans laid
+  out by flexbox and skinned by `default.css`'s menu rules — `border-image`
+  frames from the shipped art, a frame per row state, and the colours
+  `MenuStyle` restates — and a slider row's groove is `Ui::slider`. Every sample
+  compiles unchanged and every menu golden is pixel-identical. A menu's keys run
+  through the reserved `ui` context on a map the loop owns, narrowed to the keys
+  menus already claimed: the arrows and Enter.
 
 - **A frame with no instances records no cull and no scatter pass, and a shadow
   atlas view records no tonemap and no grid.** Metal opens an encoder for every

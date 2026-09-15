@@ -33,9 +33,13 @@
 //! toolkit cannot see them, and giving it a "resume" would be the layer
 //! boundary this crate's split exists to hold.
 
+use crcbl_input::{ActionMap, Binding, ui};
 use crcbl_ui::menu::{Menu, MenuItem, MenuSet};
 
-use super::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
+use super::{
+    DEBUG_OVERLAY_ID, FULLSCREEN_ID, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MENU_LEFT_KEY,
+    MENU_RIGHT_KEY, MENU_UP_KEY, RESUME_ID,
+};
 
 /// The panel's heading.
 ///
@@ -72,6 +76,100 @@ pub fn pause_menu() -> Menu {
 #[must_use]
 pub fn pause_only<K: Copy + Eq>(none: K, paused: K) -> MenuSet<K> {
     MenuSet::new(none, vec![(paused, pause_menu())])
+}
+
+/// The map the loop drives its menus from: the reserved `ui` context and
+/// nothing else, off the stack until a menu has input.
+///
+/// # The engine's map, not the game's
+///
+/// A game's map is inside its simulation — breakout, flappy, asteroids and
+/// horde keep theirs in `game.rs` and replay [`HostedGame::key_event`] into it
+/// at the start of a tick — and several games have none
+/// ([`HostedGame::actions`] is optional). A paused frame runs no tick, which
+/// is exactly when the pause panel has input, and [`crate::nav::nav_input`]
+/// wants a map ticked once per frame. So the loop owns this one and feeds it
+/// every key the pump sees; the game's map never hears of the `ui` context.
+///
+/// # Narrowed to the keys the menus have always taken
+///
+/// [`ui::declare`]'s keyboard column also binds W, A, S and D, Space, Tab,
+/// Shift+Tab and Escape. **Pushed, those would stop reaching the game under
+/// every panel**: breakout, flappy, asteroids and horde start a run with Space
+/// — their gameplay binding, which their start panels print as the `PLAY` row's
+/// hint — horde walks with WASD, and Escape is [`PAUSE_KEY`](super::PAUSE_KEY),
+/// which the loop folds before any menu sees a key. Taking them would change
+/// what those samples' keys do, so the reserved actions are rebound to what
+/// the menus claimed before the context existed: [`MENU_UP_KEY`],
+/// [`MENU_DOWN_KEY`], [`MENU_LEFT_KEY`] and [`MENU_RIGHT_KEY`] as
+/// [`ui::MOVE`], [`MENU_ACTIVATE_KEY`] as [`ui::ACCEPT`], and nothing for
+/// [`ui::NEXT`], [`ui::PREV`] and [`ui::BACK`].
+///
+/// [`HostedGame::key_event`]: super::HostedGame::key_event
+/// [`HostedGame::actions`]: super::HostedGame::actions
+///
+/// # Panics
+///
+/// Never on a fresh map: nothing is declared before the reserved context.
+#[must_use]
+pub fn menu_actions() -> ActionMap {
+    let mut actions = ActionMap::new();
+    ui::declare(&mut actions).expect("a fresh map has no names to clash with");
+    let rebinds = [
+        (
+            ui::MOVE,
+            vec![Binding::Wasd {
+                up: MENU_UP_KEY,
+                down: MENU_DOWN_KEY,
+                left: MENU_LEFT_KEY,
+                right: MENU_RIGHT_KEY,
+            }],
+        ),
+        (ui::ACCEPT, vec![Binding::Key(MENU_ACTIVATE_KEY)]),
+        (ui::NEXT, Vec::new()),
+        (ui::PREV, Vec::new()),
+        (ui::BACK, Vec::new()),
+    ];
+    for (name, bindings) in rebinds {
+        actions
+            .rebind(name, bindings)
+            .expect("ui::declare declared every reserved action");
+    }
+    actions
+}
+
+/// Whether `actions`' `ui` context binds `key` at all: a key a menu may take.
+pub(super) fn menu_binds(actions: &ActionMap, key: crcbl_core::input::KeyCode) -> bool {
+    [ui::MOVE, ui::NEXT, ui::PREV, ui::ACCEPT, ui::BACK]
+        .iter()
+        .filter_map(|name| actions.bindings(name))
+        .flatten()
+        .any(|binding| binding.owns_key(key))
+}
+
+/// Whether `key` is one of [`ui::MOVE`]'s horizontal keys: what a menu takes
+/// only over a value row.
+pub(super) fn moves_sideways(actions: &ActionMap, key: crcbl_core::input::KeyCode) -> bool {
+    actions.bindings(ui::MOVE).is_some_and(|bindings| {
+        bindings.iter().any(|binding| {
+            matches!(binding, Binding::Wasd { left, right, .. } if *left == key || *right == key)
+        })
+    })
+}
+
+/// Lets go of every key `actions`' `ui` context binds, for a window that lost
+/// focus: no platform sends those releases, and a key the map still held
+/// would be withheld from the next panel, or read as held down for good.
+pub(super) fn release_menu_keys(actions: &mut ActionMap) {
+    let mut keys = Vec::new();
+    for name in [ui::MOVE, ui::NEXT, ui::PREV, ui::ACCEPT, ui::BACK] {
+        for binding in actions.bindings(name).unwrap_or_default() {
+            binding.visit_keys(|key| keys.push(key));
+        }
+    }
+    for key in keys {
+        actions.key_event(key, false);
+    }
 }
 
 #[cfg(test)]

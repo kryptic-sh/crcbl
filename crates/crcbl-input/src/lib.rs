@@ -317,7 +317,7 @@ pub enum Binding {
 impl Binding {
     /// Calls `visit` with every key this binding owns — the keys a context
     /// consumes by binding it. A [`Binding::Chord`]'s modifier is not one.
-    fn visit_keys(&self, mut visit: impl FnMut(KeyCode)) {
+    pub fn visit_keys(&self, mut visit: impl FnMut(KeyCode)) {
         match self {
             Self::Key(key) | Self::Chord { key, .. } => visit(*key),
             Self::KeyAxis { negative, positive } => {
@@ -351,7 +351,8 @@ impl Binding {
     }
 
     /// Whether this binding owns `key`.
-    fn owns_key(&self, key: KeyCode) -> bool {
+    #[must_use]
+    pub fn owns_key(&self, key: KeyCode) -> bool {
         let mut owns = false;
         self.visit_keys(|owned| owns |= owned == key);
         owns

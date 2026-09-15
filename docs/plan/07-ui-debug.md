@@ -84,12 +84,18 @@ the pre-CSS toolkit the debug panel and the samples needed first:
 - **`widget`** — `Label`, `Button`, `ButtonSkin`, `Style`, `SkinInsets`,
   `PointerInput`, `UiState`, `WidgetId`. The rest of the MVP widget set below is
   unbuilt.
-- **`menu`** — `Menu`, `MenuItem`, `MenuSkin`, `Slider`, `Cycler`, `MenuSet`:
-  keyboard-first, with the pointer optional. `Menu::render` draws the whole menu
-  into the draw list — the scrim, the nine-sliced window frame and the button
-  frames from a `MenuSkin`, then the text — so the frames and the labels on them
-  are one pass. The shipped art stays in `crcbl-render`, which registers it into
-  the UI pass's image atlas (`crcbl_render::menu_skin`).
+- **`menu`** — **rung 7d1 is built** (2026-09-16): `Menu`, `MenuItem`,
+  `MenuSkin`, `Slider`, `Cycler` and `MenuSet` lay out and draw through `tree`
+  behind their existing API — a `menu-screen` root, the scrim, the `menu` panel,
+  a `menu-item` per row, and `Ui::slider` for a groove — skinned by
+  `default.css`'s menu rules over `background-image` and `border-image`, with
+  `crcbl_render::menu_skin`'s frames bound by name. `MenuPump` drives them
+  through the reserved `ui` context on the loop's own map
+  (`crcbl::engine::menu_actions`), so a key held into a panel is withheld from
+  it. Not built from that rung yet: the context's WASD, Space and Tab defaults
+  (four samples bind Space as gameplay under their start panels), a cycler
+  widget on the tree, and menu rows taking part in tree focus — the selection
+  stays the model's. `DebugPanel` and `ConsolePanel` are 7d2.
 - **`touch`** — `TouchStick`, `TouchButton`; see [19-input.md](19-input.md).
 - **`debug`** and **`budget`** — the modular panel described under "Debug tools"
   below, and the frame CPU-vs-GPU row [40-profiling.md](40-profiling.md) owns.
