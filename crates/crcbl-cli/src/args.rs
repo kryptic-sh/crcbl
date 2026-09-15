@@ -202,6 +202,8 @@ OPTIONS:
                                                modal's scrolled list
                            ui_widgets          every widget, clicked, dragged
                                                and stepped by a script
+                           ui_text_input       text inputs: scrolled to the
+                                               caret, selected, masked
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
                          be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
@@ -1285,6 +1287,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::UiText,
         Scene::UiFocus,
         Scene::UiWidgets,
+        Scene::UiTextInput,
     ]
 };
 
@@ -1323,6 +1326,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::UiText => "ui_text",
         Scene::UiFocus => "ui_focus",
         Scene::UiWidgets => "ui_widgets",
+        Scene::UiTextInput => "ui_text_input",
     }
 }
 

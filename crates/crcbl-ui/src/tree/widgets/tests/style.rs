@@ -6,7 +6,7 @@ use crate::tree::{InputMode, SplitAxis};
 
 /// Every widget of the set on one page, and the key of each node focus can
 /// rest on, in tree order.
-fn every_widget(ui: &mut Ui, nav: NavInput, values: &mut (bool, f32, f32)) -> Vec<NodeKey> {
+fn every_widget(ui: &mut Ui, nav: NavInput, values: &mut (bool, f32, f32, String)) -> Vec<NodeKey> {
     frame(ui, idle(), nav, |ui| {
         let mut keys = vec![
             ui.button("#b", "B").key,
@@ -15,6 +15,7 @@ fn every_widget(ui: &mut Ui, nav: NavInput, values: &mut (bool, f32, f32)) -> Ve
             ui.drag_value("#d", &mut values.2, 0.0..=1.0, 0.01, 0.1).key,
             ui.collapsing("#h", "H", |_| {}).key,
             ui.tree_leaf("#t", "T").key,
+            ui.text_input("#i", &mut values.3).key,
         ];
         let divider = ui.split(
             "",
@@ -40,7 +41,7 @@ fn every_widget(ui: &mut Ui, nav: NavInput, values: &mut (bool, f32, f32)) -> Ve
 fn the_default_sheet_rings_the_focused_widget_of_every_kind() {
     let ring = linear("#f5c400");
     let mut ui = Ui::new();
-    let mut values = (false, 0.5, 0.5);
+    let mut values = (false, 0.5, 0.5, String::new());
     let keys = every_widget(&mut ui, NavInput::default(), &mut values);
     let ringed = |ui: &Ui| -> Vec<NodeKey> {
         ui.nodes

@@ -6,6 +6,7 @@ mod disclosure;
 mod list;
 mod split;
 mod style;
+mod text_input;
 mod value;
 
 use glam::Vec2;
@@ -13,7 +14,8 @@ use glam::Vec2;
 use crate::style::Declaration;
 use crate::text::FontAtlas;
 use crate::tree::{
-    AvailableSpace, Direction, FlexDirection, LengthAuto, NavInput, NodeKey, NodeStyle, Ui,
+    AvailableSpace, Direction, FlexDirection, LengthAuto, NavInput, NodeKey, NodeStyle, TextInput,
+    Ui,
 };
 use crate::widget::PointerInput;
 
@@ -28,7 +30,19 @@ pub(super) fn frame<R>(
     nav: NavInput,
     build: impl FnOnce(&mut Ui) -> R,
 ) -> R {
+    frame_with_text(ui, pointer, nav, TextInput::default(), build)
+}
+
+/// [`frame`], with `text` as the frame's text input.
+pub(super) fn frame_with_text<R>(
+    ui: &mut Ui,
+    pointer: PointerInput,
+    nav: NavInput,
+    text: TextInput,
+    build: impl FnOnce(&mut Ui) -> R,
+) -> R {
     ui.begin_frame_with(pointer, nav);
+    ui.set_text_input(text);
     let mut out = None;
     ui.block(
         "#page",

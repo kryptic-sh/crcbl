@@ -51,9 +51,9 @@ readout-surface {
  * Each widget's look is its type (`button`, `slider`, ...) and the classes
  * of its parts; its state is a pseudo-class — `:hover` and `:active` from
  * the pointer, `:focus` from the pad or the keyboard, `:engaged`,
- * `:disabled`, and `:checked` or `:open`. Rules for one widget run base,
- * hover, active, engaged, then checked or open, then disabled, so the later
- * state wins within a tier.
+ * `:disabled`, and `:checked`, `:open` or `:refused`. Rules for one widget
+ * run base, hover, active, engaged, then checked, open or refused, then
+ * disabled, so the later state wins within a tier.
  */
 
 /* The focus ring: one rule for every focusable part of the set. */
@@ -63,7 +63,8 @@ slider:focus,
 drag-value:focus,
 collapsing > .collapsing-header:focus,
 tree-node > .tree-row:focus,
-split > .split-divider:focus {
+split > .split-divider:focus,
+text-input:focus {
   outline: 2px #f5c400;
   outline-offset: 1px;
 }
@@ -289,4 +290,57 @@ list {
 
 list .list-row:hover {
   background: #353d4c;
+}
+
+/*
+ * Text input: a well holding one line. The text never wraps or shrinks, so
+ * a long line overflows the well and the tree scrolls it to the caret. The
+ * selection and the caret are placed on glyph boundaries after layout, and
+ * `position: absolute` keeps them out of the text's flow. `:refused` is a
+ * clipboard the platform would not offer or read.
+ */
+text-input {
+  width: 120px;
+  padding: 2px 4px;
+  border-width: 1px;
+  border-color: #4a5468;
+  background: #171a20;
+  color: #e6e9ef;
+  overflow: hidden;
+}
+
+.text-input-text,
+.text-input-placeholder {
+  flex-shrink: 0;
+}
+
+.text-input-placeholder {
+  color: #7a8190;
+}
+
+.text-input-selection {
+  position: absolute;
+  background: #2f5a9e;
+}
+
+.text-input-caret {
+  position: absolute;
+  width: 1px;
+  background: #3d8bfd;
+}
+
+text-input:hover {
+  border-color: #e6e9ef;
+}
+
+text-input:engaged {
+  border-color: #3d8bfd;
+}
+
+text-input:refused {
+  border-color: #e5484d;
+}
+
+text-input:disabled {
+  color: #7a8190;
 }

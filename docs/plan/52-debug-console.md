@@ -213,8 +213,11 @@ Two new widgets in `crcbl_ui::console`, both drawn with `DrawList::rect` and
 
 - **`TextField`** — the crate's first editable field: content, caret index,
   insert/delete, the cursor keys above, a blinking caret rectangle from the
-  glyph rectangles. No selection in v0. It is a general widget; the console is
-  its first consumer and a settings screen with a name field is its second.
+  glyph rectangles. No selection in v0. Selection landed in
+  `crcbl_ui::edit::LineEdit` with `07-ui-debug.md`'s rung 7c (2026-09-16), and
+  `TextField` wraps it; the console makes no selection until its panel moves
+  onto the tree (rung 7d). It is a general widget; the console is its first
+  consumer and a settings screen with a name field is its second.
 - **`LogView`** — a scrollable list of lines coloured by level, newest at the
   bottom, that culls whole lines outside its rectangle because `DrawList` has no
   clip. Long lines wrap at the panel's width by glyph count, which the monospace

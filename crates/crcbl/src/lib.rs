@@ -354,6 +354,8 @@ pub mod session;
 
 pub mod settings;
 
+pub mod text_input;
+
 /// Everything this crate exposes to the debug console.
 ///
 /// One list per crate, gathered by the engine at one seam —

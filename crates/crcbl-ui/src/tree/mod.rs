@@ -54,9 +54,9 @@
 //! # Widgets
 //!
 //! [`Ui::button`], [`Ui::checkbox`], [`Ui::slider`], [`Ui::drag_value`],
-//! [`Ui::collapsing`], [`Ui::tree_node`], [`Ui::split`] and [`Ui::list`] are
-//! builders over blocks and spans, each styled by `default.css`; `widgets/mod.rs`
-//! has what each builds and the rules it keeps.
+//! [`Ui::collapsing`], [`Ui::tree_node`], [`Ui::split`], [`Ui::list`] and
+//! [`Ui::text_input`] are builders over blocks and spans, each styled by
+//! `default.css`; `widgets/mod.rs` has what each builds and the rules it keeps.
 //!
 //! # Identity
 //!
@@ -179,7 +179,10 @@ pub use style::{
     Align, Display, Edges, FlexDirection, FlexWrap, Justify, Length, LengthAuto, LineHeight, NavId,
     NavTarget, NavWrap, NodeStyle, Overflow, Position,
 };
-pub use widgets::{LIST_OVERSCAN, SPLIT_NAV_STEP, SplitAxis};
+pub use widgets::{
+    ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, LIST_OVERSCAN, MASK,
+    SPLIT_NAV_STEP, SplitAxis, TextInput, TextInputOptions,
+};
 
 /// How far the pointer must move from where a press began, in pixels, before
 /// the press is a drag rather than a click: the default of Windows'
@@ -381,6 +384,16 @@ pub struct Ui {
     /// The rows of the tree nodes whose children are being built, innermost
     /// last.
     tree_rows: Vec<NodeKey>,
+    /// This frame's text input, from [`Ui::set_text_input`].
+    text_frame: TextInput,
+    /// Every frame's [`TextInput::dt`] together.
+    text_clock: std::time::Duration,
+    /// Each text input's editing state, pruned with the store.
+    edits: HashMap<NodeKey, widgets::EditState>,
+    /// This frame's text inputs, for the pass after layout.
+    fits: Vec<widgets::TextFit>,
+    /// The clipboard requests this frame's text inputs made.
+    clipboard_requests: Vec<ClipboardRequest>,
 }
 
 impl Ui {
@@ -413,6 +426,9 @@ impl Ui {
         self.styles.begin_frame();
         self.disabled_depth = 0;
         self.tree_rows.clear();
+        self.text_frame = TextInput::default();
+        self.fits.clear();
+        self.clipboard_requests.clear();
         self.pointer = pointer;
         let clicked = self.resolve_pointer(pointer);
         self.resolve_navigation(nav, clicked, self.dragged);
@@ -869,6 +885,8 @@ impl Ui {
     pub fn layout(&mut self, origin: Vec2, available: AvailableSpace, atlas: &FontAtlas) {
         self.flatten_children();
         self.store.prune(self.frame);
+        let store = &self.store;
+        self.edits.retain(|key, _| store.find(*key).is_some());
         self.measure.retain(&self.live_text);
 
         let space = taffy::Size {
@@ -890,6 +908,7 @@ impl Ui {
             compute_root_layout(&mut tree, NodeId::from(root), space);
             round_layout(&mut tree, NodeId::from(root));
         }
+        self.fit_text_inputs(atlas);
         self.clamp_scroll();
         self.place(origin);
     }

@@ -200,7 +200,7 @@ fn paint_box(list: &mut DrawList, style: &NodeStyle, min: Vec2, max: Vec2) {
 }
 
 /// A layout's content-box width.
-fn content_width(layout: &taffy::Layout) -> f32 {
+pub(super) fn content_width(layout: &taffy::Layout) -> f32 {
     layout.size.width
         - layout.padding.left
         - layout.padding.right

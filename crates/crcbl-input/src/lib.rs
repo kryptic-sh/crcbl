@@ -10,7 +10,7 @@
 //! stack contexts over it, and **the topmost active context that binds an input
 //! consumes it** — `context.rs` has the rules, including what happens to a key
 //! held while the stack changes. [`ui`] declares the engine's reserved `ui`
-//! context.
+//! context, and [`text`] the `text` context a text field pushes over it.
 //!
 //! # Patterns and devices
 //!
@@ -21,6 +21,7 @@
 mod context;
 mod device;
 mod repeat;
+pub mod text;
 pub mod ui;
 
 pub use context::GAMEPLAY_CONTEXT;

@@ -7,6 +7,7 @@
 //! selector       = compound ((" " | ">") compound)*
 //! compound       = (type | "*")? ("#" id | "." class | ":" pseudo-class)*
 //! pseudo-class   = hover | active | focus | disabled | engaged | checked | open
+//!                | refused
 //! ```
 //!
 //! A type is `block`, `span` or a widget name a node declares; type names and
@@ -62,6 +63,10 @@ impl PseudoClasses {
     /// `:open`: a collapsing header or a tree node showing its children —
     /// Selectors Level 4's collapse state.
     pub const OPEN: Self = Self(1 << 6);
+    /// `:refused`: a text input whose last clipboard offer or read the
+    /// platform refused, until its next edit or until it is no longer engaged.
+    /// This crate's own, like `:engaged`.
+    pub const REFUSED: Self = Self(1 << 7);
 
     /// The pseudo-class `name` spells, ignoring ASCII case.
     #[must_use]
@@ -74,6 +79,7 @@ impl PseudoClasses {
             "engaged" => Self::ENGAGED,
             "checked" => Self::CHECKED,
             "open" => Self::OPEN,
+            "refused" => Self::REFUSED,
             _ => return None,
         })
     }

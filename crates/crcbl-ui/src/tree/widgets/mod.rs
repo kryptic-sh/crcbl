@@ -1,5 +1,4 @@
-//! The widget set on the tree: `docs/plan/07-ui-debug.md` rung 7, without text
-//! input.
+//! The widget set on the tree: `docs/plan/07-ui-debug.md` rung 7.
 //!
 //! Every widget is a builder on [`Ui`] that composes blocks and spans, as the
 //! plan says a widget is, and returns the [`Response`] of the node focus rests
@@ -16,6 +15,7 @@
 //! | `disclosure.rs` | [`Ui::collapsing`], [`Ui::tree_node`], [`Ui::tree_leaf`] | instant activation |
 //! | `split.rs` | [`Ui::split`] | the divider is engaged |
 //! | `list.rs` | [`Ui::list`] | each row is instant activation |
+//! | `text_input.rs` | [`Ui::text_input`], [`Ui::text_input_with`] | engaged |
 //!
 //! # Values are the caller's
 //!
@@ -30,8 +30,8 @@
 //! # Selectors
 //!
 //! A widget's `selector` is its `#id.class` part: the widget's type — `button`,
-//! `checkbox`, `slider`, `drag-value`, `collapsing`, `tree-node`, `split` or
-//! `list` — is put in front of it, and that type is what `default.css` styles.
+//! `checkbox`, `slider`, `drag-value`, `collapsing`, `tree-node`, `split`,
+//! `list` or `text-input` — is put in front of it, and that type is what `default.css` styles.
 //! A selector that names a type of its own keeps it, which opts the widget out
 //! of every engine rule for its type. The parts inside a widget have classes
 //! named after it (`.slider-fill`, `.tree-row`); each builder's docs name them.
@@ -39,7 +39,8 @@
 //! # State the stylesheet sees
 //!
 //! Beside `:hover`, `:active`, `:focus`, `:engaged` and `:disabled`, a checked
-//! checkbox has **`:checked`** and an open header or tree row has **`:open`**.
+//! checkbox has **`:checked`**, an open header or tree row has **`:open`**, and
+//! a text input the clipboard refused has **`:refused`**.
 //! Both are pseudo-classes rather than classes, as Selectors Level 4 defines
 //! them (§12.2's input value states and §11.1's collapse state): the state
 //! belongs to the element and the user changes it, where a class is the
@@ -53,7 +54,8 @@
 //! `focus/mod.rs`: focus moves past them until accept or a click engages one;
 //! then left and right (up and down for a column split) adjust it, accept or a
 //! click elsewhere commits, and back cancels to the value it had when it
-//! engaged. The pointer adjusts without engaging: a press drags the value, and
+//! engaged. A text input is engaged too; `text_input.rs` has what it takes
+//! while it is. The pointer adjusts without engaging: a press drags the value, and
 //! a press that moved past [`super::DRAG_THRESHOLD`] ends focused, not engaged.
 //!
 //! # Disabled
@@ -67,6 +69,7 @@ mod list;
 mod split;
 #[cfg(test)]
 mod tests;
+mod text_input;
 mod value;
 
 use std::borrow::Cow;
@@ -80,6 +83,11 @@ use crate::style::NodeSelector;
 
 pub use list::LIST_OVERSCAN;
 pub use split::{SPLIT_NAV_STEP, SplitAxis};
+pub use text_input::{
+    ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, MASK, TextInput,
+    TextInputOptions,
+};
+pub(crate) use text_input::{EditState, TextFit};
 
 /// What a widget keeps on one node between frames; see the module docs.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -110,6 +118,9 @@ pub(crate) enum WidgetState {
     Split(Option<f32>),
     /// A list: the row that held focus when it was last built.
     List(Option<usize>),
+    /// A text input, whose editing state is [`Ui`]'s `edits`: a drag that
+    /// ends on it leaves it engaged.
+    TextInput,
 }
 
 /// `selector` with the widget type `kind` in front, unless it names a type.

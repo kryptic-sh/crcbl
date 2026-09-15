@@ -32,6 +32,43 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 - **`Menu` is not on the tree**: stylesheets cannot express a nine-slice or
   image background yet, and its slider and cycler are widget-rung work.
 
+## What UI rung 7c shipped without (2026-09-16)
+
+`Ui::text_input`, `crcbl_ui::edit` and `crcbl::text_input::TextPump` landed with
+the gaps below.
+
+- **Nothing in `Loop` runs it.** `Loop` hosts no tree, pushes neither the `ui`
+  nor the `text` context and runs no `TextPump`; the clipboard wiring is
+  exercised only against `HeadlessShell`. Rung 7d inherits this, and with it two
+  clipboard paths to merge (`Loop`'s console paste request and
+  `TextPump::serve`) and `ConsolePanel` moving onto `Ui::text_input`.
+- **Decision owed: caret stops are `char`s, not grapheme clusters.** An `e` plus
+  a combining accent is two stops, and so is an emoji with a modifier. Nothing
+  in `Cargo.lock` segments by UAX #29; the options are adding a segmentation
+  crate such as `unicode-segmentation` (a new dependency) or keeping `char`.
+- **Pre-edit is not drawn**: the shell has no pre-edit event (`appkit/view.rs`
+  records the marked text's length and nothing reads it), so composition text
+  cannot be underlined at the caret until `15-windowing.md` adds one.
+- **The web clipboard refuses copy and paste**, shown by the field's `:refused`
+  border. Options: implement the web backend's clipboard, or keep an in-process
+  fallback so copy and paste work within one page.
+- **A value set from outside with a line break draws on two lines**:
+  `LineEdit::sync` copies the caller's string as it is, where HTML strips line
+  breaks from a text input's value. Stripping in `sync` alone would make every
+  frame see a change; the fix is sanitising the caller's `String` in
+  `Ui::text_input`.
+- **`PseudoClasses` is a `u8` and `:refused` took its last bit**; the next
+  pseudo-class has to widen it.
+- **Not built**: Ctrl+Backspace word delete, Shift+click to extend,
+  triple-click, undo, progressive scrolling while dragging past an edge, and an
+  on-screen keyboard for touch.
+- **Word moves follow the macOS and GTK convention** (Right stops at a word's
+  end), not Windows' (Ctrl+Right stops at the next word's start) — chosen, not
+  per-platform.
+- **Not tested**: parsed-font caret placement has unit tests and no golden; IME
+  commits and the clipboard were driven only through `HeadlessShell`, never on
+  X11, Wayland, Win32 or AppKit.
+
 ## What UI rung 7b shipped without (2026-09-16)
 
 `crcbl_ui::tree`'s widget set landed with the gaps below.
@@ -56,7 +93,8 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
   its parent; the divider is one extra navigation stop; `split { flex-grow: 1 }`
   in `default.css` assumes a split fills its parent.
 - **Drag-value has no snapping to `step` while dragged, no fine or coarse
-  modifier, and no click-to-type mode** — the last is 7c's, with text input.
+  modifier, and no click-to-type mode**; `Ui::text_input` exists now, so
+  click-to-type is a composition of the two.
 - **What 7d inherits**: `Menu`'s `Slider` and `Cycler` should map onto
   `Ui::slider` and a cycler that does not exist yet, and pushing the `ui`
   context waits on `Menu` moving onto the tree.

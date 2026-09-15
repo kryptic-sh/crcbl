@@ -95,6 +95,7 @@ use glam::Vec2;
 
 use super::store::NodeKey;
 use super::style::{NavTarget, Overflow};
+use super::widgets::WidgetState;
 use super::{Response, Ui};
 
 pub use debug::{NAV_DEBUG_BEAM, NAV_DEBUG_CHOSEN, NAV_DEBUG_OUTSIDE, NAV_DEBUG_PATH};
@@ -431,7 +432,8 @@ impl Ui {
     /// the pointer is resolved, before anything is built.
     ///
     /// A click that ended a drag — `dragged` — focuses what it clicked without
-    /// engaging it: the drag already was the engagement.
+    /// engaging it: the drag already was the engagement. A text input is the
+    /// exception, and engages: its drag selected text to type over or copy.
     pub(super) fn resolve_navigation(
         &mut self,
         nav: NavInput,
@@ -494,9 +496,13 @@ impl Ui {
                 && self.inside(target, modal)
             {
                 self.move_focus(target);
-                let engages =
-                    self.store.by_key(target).map(|node| node.behavior.role) == Some(Role::Engage);
-                if engages && !dragged && self.focus.engaged != Some(target) {
+                let (engages, selects) = self.store.by_key(target).map_or((false, false), |node| {
+                    (
+                        node.behavior.role == Role::Engage,
+                        node.widget == WidgetState::TextInput,
+                    )
+                });
+                if engages && (!dragged || selects) && self.focus.engaged != Some(target) {
                     self.focus.engaged = Some(target);
                     events.began = Some(target);
                 }

@@ -37,7 +37,8 @@
 //! the toolkit on: blocks and spans rebuilt every frame with identity that
 //! survives the rebuild, laid out by Taffy's flexbox and emitted into the same
 //! [`DrawList`]. [`readout`] is its first consumer, and [`tree::widgets`] is
-//! the widget set built on it.
+//! the widget set built on it. [`edit`] is the one line-editing model — caret,
+//! selection, words — the console's field and the tree's text input share.
 //!
 //! The draw list is the only interface between the UI and the renderer. The
 //! render backend takes a [`DrawList`] and emits GPU draw calls.
@@ -48,6 +49,7 @@ pub mod budget;
 pub mod console;
 pub mod debug;
 pub mod draw_list;
+pub mod edit;
 pub mod font;
 pub mod hud;
 pub mod image;

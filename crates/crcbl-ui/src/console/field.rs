@@ -9,6 +9,7 @@
 use glam::Vec2;
 
 use crate::draw_list::DrawList;
+use crate::edit::{LineEdit, Motion, byte_of};
 use crate::text::{FontAtlas, LINE_HEIGHT};
 use crate::widget::NATURAL_FONT_SIZE;
 
@@ -39,13 +40,13 @@ pub struct TextFieldStyle {
 /// of a multi-byte one. Byte offsets exist only where the `String` is actually
 /// cut, and are derived from the caret rather than stored.
 ///
-/// No selection — decision 6 says so, and the follow-up that adds one is the
-/// clipboard slice.
+/// The line and its caret are a [`LineEdit`], the model the tree's text input
+/// shares, so the caret arithmetic has one copy. The console selects nothing —
+/// decision 6's v0 — so no edit here ever makes a selection, and every one
+/// behaves as it did before the model had one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextField {
-    text: String,
-    /// How many characters are to the left of the caret.
-    caret: usize,
+    line: LineEdit,
 }
 
 impl TextField {
@@ -58,25 +59,25 @@ impl TextField {
     /// The line being edited.
     #[must_use]
     pub fn text(&self) -> &str {
-        &self.text
+        self.line.text()
     }
 
     /// How many characters are to the left of the caret.
     #[must_use]
     pub const fn caret(&self) -> usize {
-        self.caret
+        self.line.caret()
     }
 
     /// How many characters the line holds.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.text.chars().count()
+        self.line.len()
     }
 
     /// Whether the line is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.line.is_empty()
     }
 
     /// Replaces the line and puts the caret at its end.
@@ -85,15 +86,12 @@ impl TextField {
     /// where the typing would continue, which is after the text that arrived.
     /// Control characters are dropped, as they are for [`insert`](Self::insert).
     pub fn set_text(&mut self, text: &str) {
-        self.text.clear();
-        self.caret = 0;
-        self.insert(text);
+        self.line.set_text(text);
     }
 
     /// Empties the line and puts the caret back at the start.
     pub fn clear(&mut self) {
-        self.text.clear();
-        self.caret = 0;
+        self.line.clear();
     }
 
     /// Inserts text at the caret and leaves the caret after it.
@@ -104,65 +102,37 @@ impl TextField {
     /// character as well as a key — a single-line field that took them would
     /// hold a newline no caret arithmetic here can place.
     pub fn insert(&mut self, text: &str) {
-        for c in text.chars().filter(|c| !c.is_control()) {
-            let at = self.byte_at(self.caret);
-            self.text.insert(at, c);
-            self.caret += 1;
-        }
+        self.line.insert(text);
     }
 
     /// Deletes the character before the caret. Reports whether one was there.
     pub fn backspace(&mut self) -> bool {
-        if self.caret == 0 {
-            return false;
-        }
-        self.caret -= 1;
-        let at = self.byte_at(self.caret);
-        self.text.remove(at);
-        true
+        self.line.backspace()
     }
 
     /// Deletes the character after the caret. Reports whether one was there.
     pub fn delete(&mut self) -> bool {
-        let at = self.byte_at(self.caret);
-        if at == self.text.len() {
-            return false;
-        }
-        self.text.remove(at);
-        true
+        self.line.delete()
     }
 
     /// Moves the caret one character left. Reports whether it moved.
     pub fn move_left(&mut self) -> bool {
-        if self.caret == 0 {
-            return false;
-        }
-        self.caret -= 1;
-        true
+        self.line.move_caret(Motion::Left, false)
     }
 
     /// Moves the caret one character right. Reports whether it moved.
     pub fn move_right(&mut self) -> bool {
-        if self.caret >= self.len() {
-            return false;
-        }
-        self.caret += 1;
-        true
+        self.line.move_caret(Motion::Right, false)
     }
 
     /// Moves the caret to the start of the line. Reports whether it moved.
     pub fn move_home(&mut self) -> bool {
-        let moved = self.caret != 0;
-        self.caret = 0;
-        moved
+        self.line.move_caret(Motion::Home, false)
     }
 
     /// Moves the caret to the end of the line. Reports whether it moved.
     pub fn move_end(&mut self) -> bool {
-        let end = self.len();
-        let moved = self.caret != end;
-        self.caret = end;
-        moved
+        self.line.move_caret(Motion::End, false)
     }
 
     /// The part of the line that fits in `columns`, and where the caret is in
@@ -182,11 +152,13 @@ impl TextField {
         if columns == 0 {
             return ("", 0);
         }
-        let start = self.caret.saturating_sub(columns - 1);
+        let caret = self.caret();
+        let start = caret.saturating_sub(columns - 1);
         let end = start.saturating_add(columns).min(self.len());
+        let text = self.text();
         (
-            &self.text[self.byte_at(start)..self.byte_at(end)],
-            self.caret - start,
+            &text[byte_of(text, start)..byte_of(text, end)],
+            caret - start,
         )
     }
 
@@ -247,18 +219,6 @@ impl TextField {
             dl.rect(min, max, style.caret_color);
         }
     }
-
-    /// The byte offset of character `caret`, or the line's length past its end.
-    fn byte_at(&self, caret: usize) -> usize {
-        byte_of(&self.text, caret)
-    }
-}
-
-/// The byte offset of character `count` in `text`, or its length past the end.
-fn byte_of(text: &str, count: usize) -> usize {
-    text.char_indices()
-        .nth(count)
-        .map_or(text.len(), |(at, _)| at)
 }
 
 #[cfg(test)]

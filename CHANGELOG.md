@@ -177,6 +177,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A single-line text input on `crcbl_ui::tree`.** `Ui::text_input` and
+  `text_input_with` (`TextInputOptions { placeholder, masked }`) edit a
+  `&mut String` as an engaged widget: Shift+arrow, Home and End, word moves with
+  Ctrl or Alt, select-all, click, drag and double-click selection, a view that
+  scrolls to keep the caret in sight, and a caret that blinks on the frame
+  clock. `Ui::set_text_input` takes a frame's `TextInput`,
+  `Ui::take_clipboard_requests` hands out copy, cut and paste requests, and
+  `Ui::text_editing` says when typing belongs to the tree. `default.css` styles
+  `text-input` and its selection, caret and placeholder parts, plus a new
+  `:refused` state for a clipboard the backend cannot serve.
+- **`crcbl_ui::edit`**: `LineEdit`, `Edit` and `Motion`, the caret-and-selection
+  model the console's `TextField` now wraps, with `Edit::for_key`.
+- **The reserved `text` input context**: `crcbl_input::text::declare` and
+  `text::sync` keep the typing keys (letters, digits, Space, Left and Right
+  among them) from `ui_*` actions and the game while a text input is engaged;
+  Enter, Escape, Tab, Up and Down still reach navigation.
+- **`crcbl::text_input::TextPump`** turns key events and `TextCommit` into the
+  tree's `TextInput` and serves its clipboard requests through the shell.
 - **A widget set on `crcbl_ui::tree`.** `Ui::button`, `checkbox`, `slider`,
   `drag_value`, `collapsing`, `tree_node` and `tree_leaf`, `split`, and a
   fixed-row-height virtualized `list` that builds only its view plus

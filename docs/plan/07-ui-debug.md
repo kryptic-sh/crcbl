@@ -75,10 +75,12 @@ the pre-CSS toolkit the debug panel and the samples needed first:
 - **`widgets`** (in `tree`) — **rung 7b is built** (2026-09-16): button,
   checkbox, slider, drag-value, collapsing header, tree node, split pane and a
   fixed-row-height virtualized list as `Ui` builders styled by `default.css`,
-  with `:checked`, `:open` and a focus ring, and a `ui_widgets` golden. Not
-  built from rung 7 yet: single-line text input with selection and clipboard
-  (7c), and `Menu`, `MenuSet`, `DebugPanel` and `ConsolePanel` on the tree with
-  the `ui` context pushed (7d).
+  with `:checked`, `:open` and a focus ring, and a `ui_widgets` golden. **Rung
+  7c is built** (2026-09-16): `Ui::text_input` on `crcbl_ui::edit::LineEdit`,
+  the `text` input context, `crcbl::text_input::TextPump`'s clipboard, and a
+  `ui_text_input` golden; caret stops are `char`s and pre-edit is not drawn. Not
+  built from rung 7 yet: `Menu`, `MenuSet`, `DebugPanel` and `ConsolePanel` on
+  the tree with the `ui` and `text` contexts pushed (7d).
 - **`widget`** — `Label`, `Button`, `ButtonSkin`, `Style`, `SkinInsets`,
   `PointerInput`, `UiState`, `WidgetId`. The rest of the MVP widget set below is
   unbuilt.

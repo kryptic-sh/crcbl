@@ -100,6 +100,7 @@ mod ui_focus;
 mod ui_primitives;
 mod ui_style;
 mod ui_text;
+mod ui_text_input;
 mod ui_tree;
 mod ui_widgets;
 
@@ -134,6 +135,13 @@ pub use ui_text::{
     UI_TEXT_PAIR_SIZE, UI_TEXT_PARAGRAPH, UI_TEXT_PARAGRAPH_FILL, UI_TEXT_PARAGRAPH_SIZE,
     UI_TEXT_PARAGRAPH_WIDTH, UI_TEXT_SIZES_WORD, UI_TEXT_SMALL, UiTextLayout, ui_text_css,
     ui_text_draw_list, ui_text_layout,
+};
+pub use ui_text_input::{
+    UI_TEXT_INPUT_CARET, UI_TEXT_INPUT_CARET_WIDTH, UI_TEXT_INPUT_INSET_X, UI_TEXT_INPUT_INSET_Y,
+    UI_TEXT_INPUT_LONG, UI_TEXT_INPUT_PAGE, UI_TEXT_INPUT_PICK, UI_TEXT_INPUT_PICKED,
+    UI_TEXT_INPUT_PLACEHOLDER, UI_TEXT_INPUT_PLACEHOLDER_TEXT, UI_TEXT_INPUT_SECRET,
+    UI_TEXT_INPUT_SELECTION, UI_TEXT_INPUT_TEXT, UiTextInputLayout, ui_text_input_css,
+    ui_text_input_draw_list, ui_text_input_layout,
 };
 pub use ui_tree::{
     UI_TREE_BASE, UI_TREE_CELL, UI_TREE_CELLS, UI_TREE_CLIP_BORDER, UI_TREE_CLIP_BORDER_COLOR,
@@ -779,6 +787,12 @@ pub enum Scene {
     /// `default.css` and driven by a scripted pointer and pad. See
     /// [`ui_widgets_layout`] for what each part is for.
     UiWidgets,
+    /// `docs/plan/07-ui-debug.md` rung 7's single-line text input through
+    /// [`UiRenderer`]: an engaged input scrolled to the end of a long line, a
+    /// selection a held drag is making, a placeholder and a masked value,
+    /// styled by `default.css`. See [`ui_text_input_layout`] for what each part
+    /// is for.
+    UiTextInput,
 }
 
 /// How far from the cube's own column each pyramid sits, in world units.
@@ -6003,6 +6017,8 @@ enum UiContent {
     Focus,
     /// [`Scene::UiWidgets`]'s widget set.
     WidgetSet,
+    /// [`Scene::UiTextInput`]'s text inputs.
+    TextInput,
 }
 
 /// Puts one of the demo scene's meshes in the frame at `model`.
@@ -6680,6 +6696,11 @@ impl SceneState {
                 renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
                 content: UiContent::WidgetSet,
+            },
+            Scene::UiTextInput => Self::Ui {
+                renderer: Box::new(UiRenderer::new(device, queue, format)?),
+                atlas: FontAtlas::built_in(),
+                content: UiContent::TextInput,
             },
             Scene::UiPrimitives => {
                 let mut renderer = Box::new(UiRenderer::new(device, queue, format)?);
@@ -7707,6 +7728,7 @@ impl OffscreenSetup {
                         UiContent::Text => ui_text_draw_list(extent),
                         UiContent::Focus => ui_focus_draw_list(extent),
                         UiContent::WidgetSet => ui_widgets_draw_list(extent),
+                        UiContent::TextInput => ui_text_input_draw_list(extent),
                     };
                     // `scale` is 1.0 because every size in the draw list is
                     // already this frame's pixels; a second multiplier is a
@@ -8786,7 +8808,7 @@ mod tests {
             .expect("every forward frame has a forward pass")
             + 1;
         still_pool_passes.insert(after_forward, ("render", "sky"));
-        let expected: [(Scene, &[(&str, &str)]); 21] = [
+        let expected: [(Scene, &[(&str, &str)]); 22] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8892,6 +8914,10 @@ mod tests {
             ),
             (
                 Scene::UiWidgets,
+                &[("render", "scene background"), ("render", "ui-composite")],
+            ),
+            (
+                Scene::UiTextInput,
                 &[("render", "scene background"), ("render", "ui-composite")],
             ),
         ];
