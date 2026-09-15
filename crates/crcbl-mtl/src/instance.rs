@@ -595,12 +595,36 @@ pub(crate) mod tests {
             caps.features
         );
 
-        // The paths those features select, named rather than implied: this is
-        // what the renderer would record on this device today. The geometry
-        // path is the one the slice moved — `GeometryPath::from_features` reads
-        // `DRAW_INDIRECT_COUNT`, so `crcbl_render::forward` records a
-        // count-limited draw here now where it recorded one per batch before.
-        assert_eq!(caps.geometry_path(), GeometryPath::IndirectCount);
+        // Metal preserves adapter capabilities when opening a device. Mesh and
+        // task share the hardware/OS gate; otherwise indirect count remains the
+        // strongest reported geometry path, including on Paravirtual devices.
+        let mesh_stages = Features::MESH_SHADER | Features::TASK_SHADER;
+        assert_eq!(
+            caps.features & mesh_stages,
+            adapters[0].caps.features & mesh_stages
+        );
+        let mesh = adapters[0].caps.supports(Features::MESH_SHADER);
+        assert_eq!(caps.supports(Features::TASK_SHADER), mesh);
+        for (capability, feature) in [
+            (crcbl_hal::Capability::MeshShading, Features::MESH_SHADER),
+            (
+                crcbl_hal::Capability::TaskShaderStage,
+                Features::TASK_SHADER,
+            ),
+        ] {
+            assert_eq!(
+                matches!(device.supports(capability), crcbl_hal::Support::Yes),
+                caps.supports(feature)
+            );
+        }
+        assert_eq!(
+            caps.geometry_path(),
+            if mesh {
+                GeometryPath::MeshShader
+            } else {
+                GeometryPath::IndirectCount
+            }
+        );
         assert_eq!(
             caps.binding_model(),
             if bindless {

@@ -87,6 +87,7 @@ mod froxels;
 mod goldens;
 mod hdr;
 mod lod;
+mod material_minification;
 mod motion;
 mod mro_page;
 mod normal_map;

@@ -1305,9 +1305,13 @@ mod tests {
 
     /// A detached `CAMetalLayer` and the target naming it.
     ///
-    /// Core Animation vends layers without a window server, an `NSView` or a
-    /// run loop, so everything short of `nextDrawable` — which is the one thing
-    /// that needs a real display — is exercisable in CI on a layer built here.
+    /// Core Animation builds a layer with no `NSView`, no run loop and no window
+    /// at all. `nextDrawable` is the one call that needs more than the object —
+    /// a live window server to vend from — and it has one on the hosted macOS
+    /// runner as well as on a desktop Mac: `ci.yml`'s `mtl hardware e2e` job ran
+    /// the drawable test green on `30751f67` after this comment's earlier claim
+    /// that a runner's detached layer vends none was put to the test. Nothing
+    /// here is ever ordered on screen, so a run disturbs no one's desktop.
     fn detached_layer() -> Retained<CAMetalLayer> {
         CAMetalLayer::new()
     }
@@ -2210,9 +2214,8 @@ mod tests {
 
     /// **A real drawable, acquired and presented.**
     ///
-    /// `nextDrawable` is the one call in this module that needs a display
-    /// server to answer: a detached layer in a CI container has no surface to
-    /// vend a drawable from, and the call returns nil (reported here as
+    /// `nextDrawable` is the one call in this module that needs a live window
+    /// server to answer: with none, it returns nil (reported here as
     /// [`SurfaceError::Timeout`]) or blocks. Everything else on the layer path
     /// — creation, the caps, every property the configure writes, the
     /// wrong-class refusal — is asserted ungated above, so what this adds is
@@ -2239,16 +2242,16 @@ mod tests {
     /// exactly right for a test, which wants the narrowest window in which the
     /// report must appear.
     ///
-    /// Nothing automated runs this: the `mtl-e2e` job excludes it by name
-    /// because a headless runner's detached `CAMetalLayer` vends no drawable at
-    /// all. **A person on a real Mac running `tests/run-mtl-e2e.sh` is the only
-    /// thing that has ever executed the present-feedback path**, and if a
-    /// detached layer turns out to vend drawables whose handlers never fire,
-    /// this is where that will be discovered — as a timeout, with the wait
-    /// naming the id it gave up on.
+    /// **This ran nowhere automated until 2026-09-11.** The `mtl-e2e` job
+    /// excluded it by name on the claim that a headless runner's detached
+    /// `CAMetalLayer` vends no drawable; `ci.yml`'s `mtl hardware e2e` job now
+    /// runs it, and it passed on the hosted macOS 26 runner the first time it
+    /// was asked. So the present-feedback path is covered on every push, and a
+    /// detached layer that vends drawables whose handlers never fire shows up
+    /// here as a timeout naming the id it gave up on.
     #[cfg(feature = "mtl-e2e")]
     #[test]
-    #[ignore = "needs a real drawable; a CI container's detached layer vends none"]
+    #[ignore = "needs a window server to vend a drawable; tests/run-mtl-e2e.sh runs it"]
     fn a_layer_swapchain_acquires_a_drawable_and_presents_it() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -2312,6 +2315,128 @@ mod tests {
             }
             previous = Some(frame.index);
         }
+
+        device.destroy_swapchain(swapchain);
+        instance.destroy_surface(surface);
+    }
+
+    /// **A real drawable, at the new size, after the layer is reconfigured.**
+    ///
+    /// Obligation 3 is that a caller's extent comes off the drawable rather than
+    /// out of the descriptor, and obligation 4 that the layer's own size is the
+    /// cross-check. `configuring_a_layer_writes_the_format_the_table_says_and_the_size_asked_for`
+    /// asserts both against the *layer* and never acquires; this is the other
+    /// half. A resize, a Retina scale change and a fullscreen transition are one
+    /// call from here — `setDrawableSize:` — and what a caller reads back after
+    /// it has to be the new size, or every frame past the change is drawn into
+    /// an image the layer no longer shows.
+    ///
+    /// The presentation feedback is held across the change too: a reconfigure
+    /// that orphaned its outstanding drawables would stop reporting presents,
+    /// which is a resize that silently costs the frame loop its pacing.
+    ///
+    /// Red when `acquire_next_frame` reports the descriptor's extent instead of
+    /// the drawable's, when a reconfigure does not resize the layer, and when
+    /// the presented handler is not attached once per cycle.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "needs a window server to vend a drawable; tests/run-mtl-e2e.sh runs it"]
+    fn a_reconfigured_layer_vends_drawables_at_the_size_it_was_asked_for() {
+        use crcbl_hal::Device as _;
+        let (instance, device) = open_device();
+        let layer = detached_layer();
+        // SAFETY: a live layer this function owns and outlives the surface.
+        let surface = unsafe { instance.create_surface(&appkit_target(&layer)) }
+            .expect("a CAMetalLayer is a Metal surface");
+        let mut desc = swapchain_desc(surface, Format::Bgra8UnormSrgb, 3);
+        let swapchain = device.create_swapchain(&desc).expect("a layer swapchain");
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        // Ten display periods at 60 Hz, as the acquire/present test uses.
+        let present_wait = Duration::from_millis(160);
+
+        // A point-size pose, its Retina double, then a wide one: a resize, a
+        // scale change and a fullscreen-shaped extent are the same call here.
+        let mut present_id = 0u64;
+        for extent in [(64u32, 4u32), (128, 8), (192, 12)] {
+            present_id += 1;
+            desc.extent = extent;
+            device
+                .reconfigure_swapchain(swapchain, &desc)
+                .expect("a mode or size change keeps the handle");
+            assert_eq!(
+                (layer.drawableSize().width, layer.drawableSize().height),
+                (f64::from(extent.0), f64::from(extent.1)),
+                "the layer is laid out at the size the shell asked for"
+            );
+
+            let frame = device
+                .acquire_next_frame(swapchain)
+                .unwrap_or_else(|error| panic!("cycle {present_id} found no drawable: {error:?}"));
+            assert_eq!(
+                frame.extent, extent,
+                "obligation 3: the extent comes off the drawable, not the descriptor"
+            );
+
+            device
+                .present(
+                    queue,
+                    &crcbl_hal::PresentInfo {
+                        swapchain,
+                        waits: &[],
+                        present_id: Some(present_id),
+                    },
+                )
+                .expect("presented");
+            device
+                .wait_until_presented(swapchain, present_id, present_wait)
+                .unwrap_or_else(|error| {
+                    panic!("present {present_id} was never reported as shown: {error:?}")
+                });
+            assert!(
+                device.inner.view_raw(frame.view).is_err(),
+                "the seam says an acquired image is valid *until* the present"
+            );
+        }
+
+        // **The drawable, not the descriptor.** A window system resizes the
+        // layer itself — a Retina scale change is `setDrawableSize:` — so the
+        // seam can be asked for a frame at a size no reconfigure named, and what
+        // a caller must be told is the texture's own size. `suboptimal` is the
+        // seam's word for a drawable that disagreed with the configure, so it is
+        // the assertion that tells "read off the drawable" apart from "remembered
+        // the descriptor" — the mutable this test exists to catch.
+        layer.setDrawableSize(CGSize::new(256.0, 16.0));
+        let frame = device
+            .acquire_next_frame(swapchain)
+            .unwrap_or_else(|error| panic!("a drawable after the layer was resized: {error:?}"));
+        assert_eq!(
+            frame.extent,
+            (256, 16),
+            "obligation 3: a size set on the layer is the size the caller is given"
+        );
+        assert!(
+            frame.suboptimal,
+            "a drawable that disagrees with the configure is the suboptimal case"
+        );
+        present_id += 1;
+        device
+            .present(
+                queue,
+                &crcbl_hal::PresentInfo {
+                    swapchain,
+                    waits: &[],
+                    present_id: Some(present_id),
+                },
+            )
+            .expect("presented");
+        device
+            .wait_until_presented(swapchain, present_id, present_wait)
+            .unwrap_or_else(|error| {
+                panic!("present {present_id} was never reported as shown: {error:?}")
+            });
 
         device.destroy_swapchain(swapchain);
         instance.destroy_surface(surface);

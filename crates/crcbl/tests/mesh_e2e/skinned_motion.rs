@@ -256,7 +256,7 @@ impl SkinnedMotionScene {
             );
             let sink = &hdr_handle;
             graph
-                .add_compute_pass("hdr probe")
+                .add_copy_pass("hdr probe")
                 .use_image(scene, ResourceState::TransferSrc)
                 .execute(move |ctx| sink.set(Some(ctx.image(scene))));
             graph.compile(&self.pool).expect("a legal frame")

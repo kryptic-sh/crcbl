@@ -6,7 +6,7 @@
 #
 # # Who runs this
 #
-# **CI runs it, on `macos-latest`.** The device that image exposes is an
+# **CI runs it, on `macos-26`.** The device that image exposes is an
 # `Apple Paravirtual device`, and a paravirtual device was long assumed unable
 # to execute a shader — but that was generalised from macos-14, the one hosted
 # image whose `MTLCreateSystemDefaultDevice()` returns nil. macos-15 and
@@ -81,6 +81,12 @@
 #                        knowable from inside the process — Metal says so on
 #                        stderr and carries on — so this is asked for and
 #                        reported, never asserted.
+#   MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING
+#   MTL_SHADER_VALIDATION_REPORT_TO_STDERR
+#   MTL_SHADER_VALIDATION_ABORT_ON_FAULT
+#                        Defaulted to `1` so shader findings are printed and
+#                        fail the process. Validation alone can zero-fill an
+#                        invalid read while the command buffer succeeds.
 #   CRCBL_MTL_VALIDATION Whether the suite *requires* the layer to have been
 #                        interposed. Defaulted to `1`; set it to `0` to run
 #                        against an unvalidated device and have the log say so.
@@ -96,9 +102,9 @@
 #   * Metal really did interpose its validation layer on the device, read off
 #     the device object's Objective-C class, and
 #   * no command buffer the device submitted ended in `MTLCommandBufferStatus`
-#     `Error` — which is where shader validation's findings and every GPU fault
-#     arrive, and which nothing else in this backend noticed for a submission
-#     whose result no test waited on.
+#     `Error`, including faults from submissions whose result no test waited on.
+#     Shader validation can instead recover with zero-filled reads; the
+#     reporting and abort switches make those findings fail the test process.
 #
 # **That is weaker than the other two backends' gates and is not claimed to be
 # parity.** A violation caught by API validation reaches this script as a killed
@@ -149,6 +155,9 @@ export MTL_DEBUG_LAYER="${MTL_DEBUG_LAYER:-1}"
 export MTL_DEBUG_LAYER_ERROR_MODE="${MTL_DEBUG_LAYER_ERROR_MODE:-nslog}"
 export MTL_DEBUG_LAYER_WARNING_MODE="${MTL_DEBUG_LAYER_WARNING_MODE:-nslog}"
 export MTL_SHADER_VALIDATION="${MTL_SHADER_VALIDATION:-1}"
+export MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING="${MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING:-1}"
+export MTL_SHADER_VALIDATION_REPORT_TO_STDERR="${MTL_SHADER_VALIDATION_REPORT_TO_STDERR:-1}"
+export MTL_SHADER_VALIDATION_ABORT_ON_FAULT="${MTL_SHADER_VALIDATION_ABORT_ON_FAULT:-1}"
 # And this suite's own: whether a run that did not get the layer fails.
 export CRCBL_MTL_VALIDATION="${CRCBL_MTL_VALIDATION:-1}"
 echo "crcbl mtl e2e: MTL_DEBUG_LAYER=${MTL_DEBUG_LAYER}" \
@@ -156,6 +165,9 @@ echo "crcbl mtl e2e: MTL_DEBUG_LAYER=${MTL_DEBUG_LAYER}" \
     "MTL_DEBUG_LAYER_WARNING_MODE=${MTL_DEBUG_LAYER_WARNING_MODE}"
 echo "crcbl mtl e2e: MTL_SHADER_VALIDATION=${MTL_SHADER_VALIDATION}" \
     "CRCBL_MTL_VALIDATION=${CRCBL_MTL_VALIDATION}"
+echo "crcbl mtl e2e: MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING=${MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING}" \
+    "MTL_SHADER_VALIDATION_REPORT_TO_STDERR=${MTL_SHADER_VALIDATION_REPORT_TO_STDERR}" \
+    "MTL_SHADER_VALIDATION_ABORT_ON_FAULT=${MTL_SHADER_VALIDATION_ABORT_ON_FAULT}"
 
 # `--success-output immediate` publishes the validation report line, which
 # nextest would otherwise capture on exactly the run a reader wants to read it

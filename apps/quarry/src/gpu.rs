@@ -17,16 +17,13 @@
 //! `tests/device/harness.rs` does for `Levels::Dag`, with one instance at
 //! [`Mat4::IDENTITY`](crcbl::math::Mat4::IDENTITY).
 //!
-//! # Forcing a lesser path is done by not asking for a feature
+//! # Exact geometry requests
 //!
-//! `docs/plan/sample/00-samples-overview.md` rule 12: "every sample accepts a
-//! flag forcing a lesser path". There is no switch on the renderer to do it
-//! with, and there should not be — the selectors are computed from what the
-//! *device* has ([`crcbl::hal::DeviceCaps::geometry_path`] and its two
-//! siblings), so the honest way to reach a lesser one is to open a device
-//! without the feature that selects the better one. [`ForcedPaths`] is that, and
-//! [`Paths`] is what says which arm the frame actually took. This is the sample
-//! where it matters most: three paths is the widest selector in the engine.
+//! Explicit geometry selects the renderer's exact tail and fails if unsupported.
+//! Unforced runs use the device performance preference. Feature subtraction
+//! still applies on backends that negotiate features. Binding forcing is a
+//! capability ceiling; this forward renderer always uses array pages.
+//! [`Paths`] reports the renderer's actual geometry and binding.
 //!
 //! # There is no sprite pass
 //!
@@ -112,13 +109,18 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// What the device opened as, beside what the run asked for and what its
-    /// frames resolved to.
+    /// Actual renderer geometry and array-page binding, beside the request
+    /// and resolved effects.
     #[must_use]
-    pub const fn of(caps: &DeviceCaps, forced: ForcedPaths, effects: RenderEffects) -> Self {
+    pub const fn of(
+        caps: &DeviceCaps,
+        geometry: GeometryPath,
+        forced: ForcedPaths,
+        effects: RenderEffects,
+    ) -> Self {
         Self {
-            geometry: caps.geometry_path(),
-            binding: caps.binding_model(),
+            geometry,
+            binding: BindingModel::ArrayPages,
             lighting: caps.lighting_path(),
             forced,
             effects,
@@ -185,9 +187,8 @@ pub struct Gpu {
 /// One value rather than two copies, for the reason every sample gives: the two
 /// bring-up paths must open the *same* device, or a feature only one of them
 /// requested is a bug nobody sees until the other path runs. Here that is more
-/// than a tidiness argument — [`ForcedPaths::optional_features`] is how this sample
-/// forces a lesser path at all, so a path that asked for a different set would
-/// draw the face through different selectors.
+/// than a tidiness argument: [`ForcedPaths::optional_features`] must apply the
+/// same capability ceiling on backends that negotiate optional features.
 fn desc(gpu: GpuOptions, forced: ForcedPaths) -> GpuContextDesc<'static> {
     GpuContextDesc {
         label: "quarry",
@@ -311,8 +312,15 @@ impl Gpu {
                 "quarry's face does not coarsen into a cluster DAG: {error}"
             )))
         })?;
-        let mut renderer =
-            ForwardRenderer::with_scene(ctx.device(), ctx.queue(), ctx.format(), &scene)?;
+        let mut renderer = ForwardRenderer::with_scene_on_path(
+            ctx.device(),
+            ctx.queue(),
+            ctx.format(),
+            &scene,
+            forced
+                .geometry
+                .unwrap_or_else(|| ctx.device().preferred_geometry_path()),
+        )?;
         // One instance at the origin, which is `tests/device/harness.rs`'s
         // shape: the subject is one mesh whose *own surface* spans levels, so a
         // second copy of it would add instance culling to a picture about
@@ -338,7 +346,12 @@ impl Gpu {
 
         // Resolved rather than requested: the device clamps last, so what the
         // panel and the summary report has to come back off the renderer.
-        let paths = Paths::of(&caps, forced, renderer.resolved_effects());
+        let paths = Paths::of(
+            &caps,
+            renderer.geometry_path(),
+            forced,
+            renderer.resolved_effects(),
+        );
         crcbl::log::info!(
             "quarry: {:?} / {:?} / {:?}, effects {}, {triangles} triangles at a {lod_budget}px \
              budget",
@@ -738,6 +751,38 @@ impl crcbl::engine::PolledGpu for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_metadata_reports_execution_instead_of_capabilities() {
+        let caps = DeviceCaps {
+            features: crcbl::hal::Features::MESH_SHADER | crcbl::hal::Features::DESCRIPTOR_INDEXING,
+            limits: crcbl::hal::Limits::desktop(),
+        };
+        assert_eq!(caps.geometry_path(), GeometryPath::MeshShader);
+        assert_eq!(caps.binding_model(), BindingModel::Bindless);
+        let paths = Paths::of(
+            &caps,
+            GeometryPath::IndirectPerBatch,
+            ForcedPaths {
+                geometry: Some(GeometryPath::IndirectPerBatch),
+                binding: Some(BindingModel::Bindless),
+            },
+            RenderEffects::DEFAULT_STACK,
+        );
+        assert_eq!(paths.geometry, GeometryPath::IndirectPerBatch);
+        assert_eq!(paths.binding, BindingModel::ArrayPages);
+        use crcbl::ui::{DebugModule, DebugSection};
+        let mut section = DebugSection::new("");
+        paths.debug_section(&mut section);
+        assert_eq!(
+            section.rows()[0].value.to_string(),
+            "IndirectPerBatch (forced)"
+        );
+        assert_eq!(
+            section.rows()[1].value.to_string(),
+            "ArrayPages (requested ceiling: Bindless)"
+        );
+    }
     use crcbl::hal::Features;
 
     /// **An unforced run opens the engine's own bundle**, plus the
@@ -896,6 +941,74 @@ mod tests {
         gpu.destroy().expect("teardown");
         shell.destroy_window(window).expect("the window goes away");
         effects
+    }
+
+    fn paths_opened_with(forced: ForcedPaths) -> Result<Paths, GpuError> {
+        use crcbl::backend::GpuBackend;
+        use crcbl::engine::{Clock, open_window, wait_for_configure};
+        use crcbl::shell::{HeadlessShell, WindowDesc};
+
+        let mut shell = HeadlessShell::new();
+        let clock = Clock::new(true);
+        let window = open_window(
+            &mut shell,
+            &clock,
+            &WindowDesc {
+                title: "quarry",
+                app_id: "sh.kryptic.crcbl.quarry",
+                ..WindowDesc::default()
+            },
+        )
+        .expect("headless always creates a window");
+        let mut events = 0;
+        let extent =
+            wait_for_configure(&mut shell, window, &mut events).expect("headless configures");
+
+        let ctx = GpuContext::open(
+            &shell,
+            window,
+            extent,
+            &GpuContextDesc {
+                // The null backend, so this needs no driver and no window
+                // system — and the sample's own label and feature set, so it is
+                // this sample's start-up being asked.
+                backend: Some(GpuBackend::Null),
+
+                ..desc(GpuOptions::default(), ForcedPaths::default())
+            },
+        )
+        .expect("the null backend opens everywhere");
+
+        let result = Gpu::from_context(ctx, forced, 1.0, DebugView::Shaded).map(|gpu| {
+            let paths = gpu.paths();
+            gpu.destroy().expect("teardown");
+            paths
+        });
+        shell.destroy_window(window).expect("the window goes away");
+        result
+    }
+
+    #[test]
+    fn startup_honors_exact_geometry_and_propagates_unsupported_requests() {
+        assert_eq!(
+            paths_opened_with(ForcedPaths::default()).unwrap().geometry,
+            GeometryPath::IndirectCount
+        );
+        for geometry in [GeometryPath::IndirectCount, GeometryPath::IndirectPerBatch] {
+            let paths = paths_opened_with(ForcedPaths {
+                geometry: Some(geometry),
+                binding: None,
+            })
+            .unwrap();
+            assert_eq!(paths.geometry, geometry);
+        }
+        let result = paths_opened_with(ForcedPaths {
+            geometry: Some(GeometryPath::MeshShader),
+            binding: None,
+        });
+        assert!(
+            matches!(result, Err(GpuError::Hal(crcbl::hal::HalError::UnsupportedFeatures { missing })) if missing == crcbl::hal::Features::MESH_SHADER)
+        );
     }
 
     /// **The player's `[engine.video]` clamp reaches the frames this sample

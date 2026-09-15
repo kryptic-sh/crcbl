@@ -340,3 +340,7 @@ workspace = true
 # Metal), so what this gates is a genuine coverage gap; `docs/backlog.md` says so
 # rather than implying CI covers it.
 mtl-e2e = []
+# Native object/mesh execution proofs require a Metal 3 GPU. The general
+# hardware harness also runs on Apple's paravirtual GPU, which lacks it.
+# These tests stay ignored and must be selected explicitly on real hardware.
+mtl-mesh-e2e = ["mtl-e2e"]

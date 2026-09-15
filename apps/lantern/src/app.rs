@@ -697,11 +697,12 @@ mod tests {
     ///
     /// The null backend registers `NullInstance::gpu_driven`, whose bundle
     /// carries `DRAW_INDIRECT_COUNT` and `DESCRIPTOR_INDEXING` and **not**
-    /// `MESH_SHADER` — so the answer here is the middle geometry path and the
-    /// better binding model. Two different values rather than two defaults,
-    /// which is what makes this an assertion about a device rather than about a
-    /// struct literal: a summary that carried `Paths::of(&DeviceCaps::default())`
-    /// would report the floor on both axes.
+    /// `MESH_SHADER` — so the geometry row is the middle path, a device answer
+    /// rather than a struct-literal default: a summary that carried
+    /// `Paths::of(&DeviceCaps::default())` would report the floor there. Binding
+    /// is `ArrayPages` whatever the device reports, because the forward
+    /// renderer's material page is one `D2Array` image rather than a descriptor
+    /// array — that row names the renderer, not the ceiling.
     #[test]
     fn the_headless_summary_names_the_selected_paths() {
         let _view = crcbl::debug_view::for_test();
@@ -712,7 +713,11 @@ mod tests {
             crcbl::hal::GeometryPath::IndirectCount,
             "the null device has a GPU-side draw count and no mesh stage",
         );
-        assert_eq!(summary.paths.binding, crcbl::hal::BindingModel::Bindless);
+        assert_eq!(
+            summary.paths.binding,
+            crcbl::hal::BindingModel::ArrayPages,
+            "the renderer's page is one D2Array image, not a bindless array",
+        );
         assert_eq!(
             summary.paths.lighting,
             crcbl::hal::LightingPath::Rasterised,

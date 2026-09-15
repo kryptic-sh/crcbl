@@ -464,7 +464,7 @@ pub(super) struct View {
     /// The second half is the whole reason this is a group rather than
     /// [`View::mesh_groups`] reused. On the mesh-shader path the prepass runs
     /// the same amplification stage the forward pass does, and that stage counts
-    /// every surviving cluster into the buffer bound at binding 14 — so sharing
+    /// every surviving cluster into the buffer bound at CLUSTER_CULL_STATS_BINDING — so sharing
     /// the camera's would make
     /// [`CullStats::clusters`](crate::cull_stats::CullStats::clusters) report
     /// every cluster of the frame twice, which is a plausible number and a wrong
@@ -616,7 +616,7 @@ impl View {
 
         // `docs/plan/25-lod.md`'s observable: one word per resident cluster,
         // holding the cut the descent chose. Empty where there is no
-        // amplification stage, which is the same condition binding 18 exists
+        // amplification stage, which is the same condition CLUSTER_SELECTION_BINDING exists
         // under — and the two cannot disagree, because this vector is what
         // decides whether the entry is written.
         //
@@ -627,7 +627,7 @@ impl View {
         //
         // Allocated on the whole mesh path rather than only where there is an
         // amplification stage to write them, because the layout declares
-        // binding 18 there — see the layout, which is where that is argued. On
+        // CLUSTER_SELECTION_BINDING there — see the layout, which is where that is argued. On
         // a device with no task stage nothing writes them and
         // `ForwardRenderer::cluster_selection` still answers `None`, so the
         // cost is the allocation and nothing else.
@@ -745,10 +745,9 @@ impl View {
 
             // The depth prepass's group: this one again, counting its clusters
             // somewhere the camera's counter cannot see. See
-            // [`View::prepass_groups`] for why that matters, and note that
-            // binding 14 exists at all only where there is an amplification
-            // stage — so on every other path this buffer is bound nowhere and the
-            // group is the camera's under another handle.
+            // [`View::prepass_groups`] for why that matters, and note that only
+            // the amplification stage writes this binding, although both mesh
+            // layouts retain it to preserve native argument indices.
             //
             // `DeviceLocal`, because a shader writes it: D3D12 has no unordered
             // access view of a host-visible resource, and `create_bind_group`
@@ -2319,110 +2318,116 @@ impl View {
             debug_draw.add_pass(graph, frame, tonemapped, scene_depth);
         }
 
-        // The tonemap group names a *graph-owned* view, so it can only be built
-        // once the graph has realised one. It is cached against the view handle
-        // and therefore rebuilt only on a resize.
-        let TonemapPipeline {
-            sampler,
-            layout,
-            pipeline_layout,
-            pipeline: tonemap_pipeline,
-        } = passes.tonemap;
-        let exposure_block = self.tonemap_uniforms[frame];
-        let cached = &mut self.tonemap_groups[frame];
+        // **None of the display work under the shadow atlas viewer.** It fills
+        // every display pixel with a `DontCare` load, so a tonemapped frame or a
+        // grid recorded first would be stored and immediately discarded. The HDR
+        // scene passes above stay: callers still read their output.
+        if overlays.atlas_viewer.is_none() {
+            // The tonemap group names a *graph-owned* view, so it can only be built
+            // once the graph has realised one. It is cached against the view handle
+            // and therefore rebuilt only on a resize.
+            let TonemapPipeline {
+                sampler,
+                layout,
+                pipeline_layout,
+                pipeline: tonemap_pipeline,
+            } = passes.tonemap;
+            let exposure_block = self.tonemap_uniforms[frame];
+            let cached = &mut self.tonemap_groups[frame];
 
-        graph
-            .add_render_pass("tonemap")
-            // `DontCare`, not `Clear`: the full-screen triangle writes every
-            // pixel of the target, so loading or clearing it is pure bandwidth.
-            .color(
-                display,
-                LoadOp::DontCare,
-                StoreOp::Store,
-                crcbl_hal::ClearValue::default(),
-            )
-            // **The reflection pass's output where there is one, and the forward
-            // pass's where there is not.** The two are the same description and
-            // different images, and tonemapping the first one on a frame that
-            // reflected would compile, draw a picture, and silently be the frame
-            // without reflections in it.
-            .read_image(tonemapped)
-            .execute(move |ctx| {
-                let view = ctx.image_view(tonemapped);
-                let device = ctx.device();
-                let entries = vec![
-                    BindGroupEntry {
-                        binding: 0,
-                        array_index: 0,
-                        resource: BindingResource::ImageView(view),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        array_index: 0,
-                        resource: BindingResource::Sampler(sampler),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(exposure_block),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(measured),
-                    },
-                ];
-                let Some(group) = cached_group(
-                    cached,
-                    device,
-                    &[(0, view)],
-                    "tonemap scene",
-                    layout,
-                    entries,
-                ) else {
-                    return;
-                };
-                let encoder = ctx.encoder();
-                encoder.bind_graphics_pipeline(tonemap_pipeline);
-                encoder.bind_group(0, group, &[], pipeline_layout);
-                // Three vertices, no geometry bound, no vertex buffer anywhere.
-                encoder.draw(0..3, 0..1);
-            });
+            graph
+                .add_render_pass("tonemap")
+                // `DontCare`, not `Clear`: the full-screen triangle writes every
+                // pixel of the target, so loading or clearing it is pure bandwidth.
+                .color(
+                    display,
+                    LoadOp::DontCare,
+                    StoreOp::Store,
+                    crcbl_hal::ClearValue::default(),
+                )
+                // **The reflection pass's output where there is one, and the forward
+                // pass's where there is not.** The two are the same description and
+                // different images, and tonemapping the first one on a frame that
+                // reflected would compile, draw a picture, and silently be the frame
+                // without reflections in it.
+                .read_image(tonemapped)
+                .execute(move |ctx| {
+                    let view = ctx.image_view(tonemapped);
+                    let device = ctx.device();
+                    let entries = vec![
+                        BindGroupEntry {
+                            binding: 0,
+                            array_index: 0,
+                            resource: BindingResource::ImageView(view),
+                        },
+                        BindGroupEntry {
+                            binding: 1,
+                            array_index: 0,
+                            resource: BindingResource::Sampler(sampler),
+                        },
+                        BindGroupEntry {
+                            binding: 2,
+                            array_index: 0,
+                            resource: BindingResource::whole_buffer(exposure_block),
+                        },
+                        BindGroupEntry {
+                            binding: 3,
+                            array_index: 0,
+                            resource: BindingResource::whole_buffer(measured),
+                        },
+                    ];
+                    let Some(group) = cached_group(
+                        cached,
+                        device,
+                        &[(0, view)],
+                        "tonemap scene",
+                        layout,
+                        entries,
+                    ) else {
+                        return;
+                    };
+                    let encoder = ctx.encoder();
+                    encoder.bind_graphics_pipeline(tonemap_pipeline);
+                    encoder.bind_group(0, group, &[], pipeline_layout);
+                    // Three vertices, no geometry bound, no vertex buffer anywhere.
+                    encoder.draw(0..3, 0..1);
+                });
 
-        // --- the ground grid ---
-        //
-        // **After the tonemap, into the target the tonemap just wrote**, and
-        // that placement is the decision rather than an accident of ordering.
-        // The grid is reference chrome, not scene content: drawn into
-        // `scene_color` it would be exposed and tonemapped like geometry, so its
-        // colour would shift with how bright the scene happens to be — and a
-        // grid whose lines change with the exposure is no longer a reference.
-        // Blender draws its overlays the same way, in display space after the
-        // render.
-        //
-        // It still takes `scene_depth`, read-only, so geometry in front of the
-        // ground occludes it. That the depth survives this far is not luck: the
-        // forward pass stores it (`StoreOp::Store`) because the reflection march
-        // reads it, and the graph moves it from whatever state that left it in
-        // into `DepthStencilRead` for this pass.
-        //
-        // Nothing here is conditional on [`RenderEffects`]: the grid is a
-        // caller's opt-in, and a frame that never asked for one is the frame
-        // this renderer recorded before [`crate::grid`] existed — no pass, no
-        // pipeline, no block.
-        if let Some(grid) = overlays.ground_grid {
-            let view_proj = self.camera_view_proj;
-            grid.add_pass(
-                graph,
-                frame,
-                display,
-                scene_depth,
-                view_proj,
-                // The one inversion in the frame, and it is here rather than in
-                // the pass: `begin_frame` has no reason to compute it for a grid
-                // that is usually off.
-                view_proj.inverse(),
-            );
+            // --- the ground grid ---
+            //
+            // **After the tonemap, into the target the tonemap just wrote**, and
+            // that placement is the decision rather than an accident of ordering.
+            // The grid is reference chrome, not scene content: drawn into
+            // `scene_color` it would be exposed and tonemapped like geometry, so its
+            // colour would shift with how bright the scene happens to be — and a
+            // grid whose lines change with the exposure is no longer a reference.
+            // Blender draws its overlays the same way, in display space after the
+            // render.
+            //
+            // It still takes `scene_depth`, read-only, so geometry in front of the
+            // ground occludes it. That the depth survives this far is not luck: the
+            // forward pass stores it (`StoreOp::Store`) because the reflection march
+            // reads it, and the graph moves it from whatever state that left it in
+            // into `DepthStencilRead` for this pass.
+            //
+            // Nothing here is conditional on [`RenderEffects`]: the grid is a
+            // caller's opt-in, and a frame that never asked for one is the frame
+            // this renderer recorded before [`crate::grid`] existed — no pass, no
+            // pipeline, no block.
+            if let Some(grid) = overlays.ground_grid {
+                let view_proj = self.camera_view_proj;
+                grid.add_pass(
+                    graph,
+                    frame,
+                    display,
+                    scene_depth,
+                    view_proj,
+                    // The one inversion in the frame, and it is here rather than in
+                    // the pass: `begin_frame` has no reason to compute it for a grid
+                    // that is usually off.
+                    view_proj.inverse(),
+                );
+            }
         }
 
         // --- the shadow atlas viewer ---

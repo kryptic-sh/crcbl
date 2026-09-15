@@ -47,13 +47,15 @@
 //! * **API validation** — [`DEBUG_LAYER_ENV_VAR`], read by Metal itself when
 //!   the framework loads, never by this crate. A misuse is *printed* and then
 //!   handled per [`ERROR_MODE_ENV_VAR`] / [`WARNING_MODE_ENV_VAR`]: ignored,
-//!   asserted, aborted, or logged. There is no list to query and no callback to
+//!   asserted or logged. There is no list to query and no callback to
 //!   install, so the strongest form the check can take is **the process did not
 //!   die** — which is asserted by the test runner reaping a killed process, not
 //!   by any assertion in this crate.
 //! * **Shader validation** — [`SHADER_VALIDATION_ENV_VAR`], GPU-side bounds and
-//!   access checking. Its findings surface as a *failed command buffer*, which
-//!   is the one queryable channel.
+//!   access checking. Its default fault mode substitutes zero for invalid reads
+//!   and drops invalid writes; a command buffer can still complete successfully.
+//!   Strict test runners must also enable error reporting and
+//!   `MTL_SHADER_VALIDATION_ABORT_ON_FAULT=1` so a shader fault fails the process.
 //! * **Execution faults** — a page fault, a hang, a timeout. Also a failed
 //!   command buffer, and the thing the rest of this module was written for.
 //!
@@ -70,8 +72,8 @@
 //! Metal API misuse does not reach (2) at all — it is a message on stderr and,
 //! at the default error mode, a dead process. There is no count of validation
 //! messages, so "zero errors" cannot be asserted the way it is for the other two
-//! backends; what can be asserted is "the checking was switched on, and nothing
-//! it checks reported back".
+//! backends. This report checks layer interposition and command-buffer failures;
+//! the runner must enforce API assertions and shader-fault termination separately.
 //!
 //! ## How "the layer was interposed" is answered, and why it is a private detail
 //!
@@ -102,7 +104,7 @@ use objc2_metal::{
 pub(crate) const DEBUG_LAYER_ENV_VAR: &str = "MTL_DEBUG_LAYER";
 
 /// What the API-validation layer does with an error: `ignore`, `assert`,
-/// `abort` or `nslog`. Reported so a green run states what a violation would
+/// or `nslog`. Reported so a green run states what a violation would
 /// have done, rather than leaving it to whatever the platform defaults to.
 pub(crate) const ERROR_MODE_ENV_VAR: &str = "MTL_DEBUG_LAYER_ERROR_MODE";
 
@@ -112,8 +114,9 @@ pub(crate) const ERROR_MODE_ENV_VAR: &str = "MTL_DEBUG_LAYER_ERROR_MODE";
 pub(crate) const WARNING_MODE_ENV_VAR: &str = "MTL_DEBUG_LAYER_WARNING_MODE";
 
 /// GPU-side shader validation — bounds and access checking inside a running
-/// kernel. Unlike API validation, what it finds arrives as a **failed command
-/// buffer**, which is the one validation channel this process can read.
+/// kernel. Findings need not fail the command buffer: the default fault mode
+/// zero-fills invalid reads. The test runner separately enables reporting and
+/// abort-on-fault to make these findings fatal.
 pub(crate) const SHADER_VALIDATION_ENV_VAR: &str = "MTL_SHADER_VALIDATION";
 
 /// How many command-buffer failures are kept verbatim.

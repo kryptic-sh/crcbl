@@ -141,13 +141,11 @@ OPTIONS:
                          asks for, and the --no-* flags below still clear them
                          on top. A file that does not parse is refused by line
                          and column.
-    --force-geometry <P> Hold the geometry path at 'mesh-shader',
-                         'indirect-count' or 'indirect-per-batch' by opening a
-                         device without the features that select a better one.
-                         Default: whatever this device selects.
-    --force-binding <B>  Hold the binding model at 'bindless' or 'array-pages',
-                         on --force-geometry's terms. 'array-pages' is what
-                         every browser and every Apple device runs.
+    --force-geometry <P> Require 'mesh-shader', 'indirect-count' or
+                         'indirect-per-batch'; unsupported paths fail startup.
+                         Default: this device's preferred geometry path.
+    --force-binding <B>  Request a 'bindless' or 'array-pages' capability ceiling.
+                         This forward renderer always uses array-pages.
     --no-shadows         Draw with no shadow atlas: no cascade cull, no light
                          tile, and every comparison against the cleared atlas
                          reads as fully lit.

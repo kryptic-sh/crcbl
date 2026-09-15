@@ -67,7 +67,7 @@
 //! the SPIR-V it compiles — so a number disagreeing with `[numthreads(…)]`
 //! fails there rather than launching the wrong thread count here.
 //!
-//! **The mesh slice builds the object/mesh path, and nothing claims it works.**
+//! **The mesh slice builds and executes the object/mesh path on Metal 3.**
 //! `create_mesh_pipeline` fills an `MTLMeshRenderPipelineDescriptor` — object
 //! function, mesh function, fragment function, colour attachments, depth and
 //! stencil formats, sample count — through the same helpers the raster pipeline
@@ -79,18 +79,12 @@
 //! which the seam grew for this backend's sake exactly as it grew the compute
 //! one, because Slang's Metal target drops `[numthreads(…)]` entirely.
 //!
-//! **None of it has ever executed.** Mesh shading is gated on
-//! `supportsFamily:MTLGPUFamilyMetal3`, the Mac CI runs this backend on answers
-//! `false` to that, and nobody here has a Mac that answers `true`. So
-//! `crcbl_mtl::adapter` reports no
-//! [`Features::MESH_SHADER`](crcbl_hal::Features::MESH_SHADER),
-//! [`Device::supports`](crcbl_hal::Device::supports) still answers
-//! [`Support::No`](crcbl_hal::Support::No) for both mesh capabilities, and
-//! `crcbl_hal::DIVERGENCES` still carries both rows — the whole difference from
-//! the previous state is that the obstacle is now "unrun" rather than
-//! "unwritten". `crcbl_mtl::quirk`'s `check_mesh_support` is what refuses by
-//! name on a device or an OS that cannot run it, so the path fails loudly
-//! rather than raising inside Objective-C.
+//! Native MSL hardware proofs cover direct/indirect draws, object payloads,
+//! stage-specific resources, writable bindless arrays, mixed raster/mesh replay,
+//! depth-only output and timestamps. `tests/run-mtl-mesh-e2e.sh` runs them with
+//! strict validation on a real Metal 3 GPU. Adapter reporting and callable
+//! support share `crcbl_mtl::quirk::check_mesh_support`'s Metal3/macOS13 gate;
+//! the hosted Paravirtual device still refuses by device capability.
 //!
 //! **Push constants arrived with `crcbl_mtl::argument`**, which answers the
 //! question the binding slice sharpened rather than closed. Metal has no push

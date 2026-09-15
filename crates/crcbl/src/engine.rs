@@ -909,26 +909,29 @@ impl From<GpuOptions> for GpuContextDesc<'_> {
     }
 }
 
-/// A selector a run asked to be held **below** what the device offers.
+/// Geometry execution requests and binding capability ceilings for a run.
 ///
-/// Each field names a path, and what the type does is withhold the features
-/// that select anything better — so a run that forces one is a run on a device
-/// that genuinely does not have them, which is the only way a fallback gets
-/// executed on hardware that would otherwise never take it.
+/// Callers pass explicit geometry to `ForwardRenderer::with_scene_on_path`;
+/// unsupported paths fail construction. With no request, use the device's
+/// preferred geometry path. Binding only limits negotiated capabilities and
+/// does not select a binding implementation in the forward renderer.
 ///
 /// `docs/plan/sample/00-samples-overview.md` rule 12's "every sample accepts a
 /// flag forcing a lesser path" is what asks for this, and the flags themselves
 /// are [`crate::args::geometry_from_name`] and [`crate::args::binding_from_name`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ForcedPaths {
-    /// The geometry path to hold at, or `None` for whatever the device selects.
+    /// The exact geometry path, or `None` for the device performance preference.
     pub geometry: Option<GeometryPath>,
-    /// The binding model to hold at, on the same terms.
+    /// The binding capability ceiling; not a renderer implementation request.
     pub binding: Option<BindingModel>,
 }
 
 impl ForcedPaths {
-    /// What to ask a device for, given what a run wants held down.
+    /// Optional feature ceiling for backends that negotiate device features.
+    ///
+    /// This does not enforce geometry selection: callers must also pass the
+    /// exact geometry request to the renderer, including on native backends.
     ///
     /// Starts from [`GpuContextDesc::default`]'s optional set — the one every
     /// sample opens with — and removes the flags whose presence would select
@@ -1012,9 +1015,10 @@ impl DevicePathRows {
     }
 
     /// Writes `geometry`, `binding` and `lighting` into `section`, in that
-    /// order.
+    /// order. Binding requests name their capability ceiling separately from
+    /// actual binding; they do not promise a renderer implementation.
     ///
-    /// A forced selector is spelled `"MeshShader (forced)"` rather than
+    /// A forced geometry selector is spelled `"MeshShader (forced)"` rather than
     /// `"MeshShader"`, which is the difference between "this machine is like
     /// that" and "this run made it like that" — a report without it is one a
     /// reader cannot act on, and it is the distinction rule 12's flag exists to
@@ -1031,7 +1035,11 @@ impl DevicePathRows {
             "geometry",
             &row(self.geometry, self.forced.geometry.is_some()),
         );
-        section.row_str("binding", &row(self.binding, self.forced.binding.is_some()));
+        let binding = match self.forced.binding {
+            Some(ceiling) => format!("{:?} (requested ceiling: {ceiling:?})", self.binding),
+            None => format!("{:?}", self.binding),
+        };
+        section.row_str("binding", &binding);
         // No third field on [`ForcedPaths`]: nothing withholds a feature that
         // would select a lesser lighting path, so this row is never marked.
         section.row("lighting", format_args!("{:?}", self.lighting));
@@ -7725,6 +7733,17 @@ mod tests {
             plain[1..],
             forced[1..],
             "forcing the geometry axis relabelled another row",
+        );
+        let binding_request = DevicePathRows {
+            forced: ForcedPaths {
+                geometry: None,
+                binding: Some(BindingModel::Bindless),
+            },
+            ..device_chose
+        };
+        assert_eq!(
+            rows(&binding_request)[1].1,
+            "ArrayPages (requested ceiling: Bindless)"
         );
     }
 

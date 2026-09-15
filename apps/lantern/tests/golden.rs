@@ -16,15 +16,12 @@
 //! numbers: it moves when the tonemap moves, and it says nothing a reviewer can
 //! act on.
 //!
-//! # Two capability paths, one golden
+//! # Supported geometry tails, one golden
 //!
-//! Rule 12 asks a sample's CI run for "the path its runner selects plus one
-//! below it", and an adapter reports what it reports — so the lesser path is
-//! reached by opening a device *without* the features that select the better
-//! one. [`the_room_draws_the_same_on_a_path_below_the_devices_own`] is that
-//! second arm, and it is held to the **same** reference: a lesser path is a
-//! constraint on data layout rather than a separate renderer, so a difference
-//! between the arms is a bug and a second golden would bless it.
+//! The cross-path test explicitly builds every geometry tail the opened device
+//! supports and observes the renderer's actual selection. Every tail uses the
+//! same reference and lighting claims. Binding capabilities are diagnostic only:
+//! this renderer uses ArrayPages on every arm.
 //!
 //! # Feature-gated *and* ignored
 //!
@@ -35,8 +32,7 @@
 
 #![cfg(feature = "golden-e2e")]
 
-use crcbl::engine::ForcedPaths;
-use crcbl::hal::{AdapterInfo, BindingModel, Features, Format, GeometryPath};
+use crcbl::hal::{AdapterInfo, Features, Format, GeometryPath};
 use crcbl::math::Vec3;
 use crcbl::render::{Camera, EffectOverride, EffectRequest, Fog, ForwardRenderer, RenderEffects};
 use crcbl::screenshot::{ForwardScene, OffscreenSetup};
@@ -415,44 +411,6 @@ const UNCHANGED: f32 = 0.02;
 // Rendering
 // ---------------------------------------------------------------------------
 
-/// The selectors [`the_room_draws_the_same_on_a_path_below_the_devices_own`]
-/// holds its lesser arm at.
-///
-/// The floor of both axes — the browser's shape, which
-/// `docs/plan/sample/13-lantern.md` already names as the combination this desktop
-/// can be made to run. The floor rather than one named step down because an
-/// adapter reports what it reports: from here, *any* adapter offering anything
-/// above the floor gives the two arms a real difference to compare, and the one
-/// that offers nothing above it says so through the assertion rather than
-/// quietly.
-const BELOW: ForcedPaths = ForcedPaths {
-    geometry: Some(GeometryPath::IndirectPerBatch),
-    binding: Some(BindingModel::ArrayPages),
-};
-
-/// What to ask the lesser arm's device for: [`draw`]'s own set, minus the flags
-/// whose presence would select something above [`BELOW`].
-///
-/// **The subtraction is the engine's, not this file's.** `ForcedPaths` is what
-/// the binary's `--force-geometry` and `--force-binding` go through, so taking
-/// the difference there and applying it here means a selector that grows a flag
-/// moves this arm too, instead of leaving a second table behind still naming the
-/// old ones.
-///
-/// It has to be a difference rather than `BELOW.optional_features()` outright,
-/// because the two sets do **not** share a base:
-/// `ForcedPaths::optional_features` starts from `GpuContextDesc::default`'s optional
-/// set plus `TASK_SHADER`, which also carries the timestamp, present-feedback
-/// and present-timing flags [`OffscreenSetup::OPTIONAL_FEATURES`] never asks
-/// for. An arm opened from a different base than the one it is compared against
-/// is not a comparison.
-fn below_features() -> Features {
-    let selecting = ForcedPaths::default()
-        .optional_features()
-        .difference(BELOW.optional_features());
-    OffscreenSetup::OPTIONAL_FEATURES.difference(selecting)
-}
-
 /// The air the room is drawn through by the one claim that is about a medium.
 ///
 /// **The room ships in a vacuum, and this is not it.** Every blessed frame and
@@ -606,34 +564,7 @@ fn draw_scene_referred(extent: (u32, u32), effects: RenderEffects) -> Image {
     .0
 }
 
-/// [`draw`] opening the device with `optional_features` instead of
-/// [`OffscreenSetup::OPTIONAL_FEATURES`], and naming the adapter it opened.
-///
-/// Everything below the renderer — the offscreen surface, the adapter pin, the
-/// ring, the barriers around the readback and the row unpadding — is
-/// [`OffscreenSetup`]'s, reached through
-/// [`OffscreenSetup::open_forward_with`](crcbl::screenshot::OffscreenSetup::open_forward_with).
-/// A sample rebuilding that for itself is exactly what
-/// `docs/plan/sample/00-samples-overview.md` rule 1 forbids.
-///
-/// The adapter comes back because two arms are only a comparison if they opened
-/// the same one, and that is a claim the caller has to make.
-fn draw_with(
-    extent: (u32, u32),
-    effects: RenderEffects,
-    optional_features: Features,
-) -> (Image, String, AdapterInfo) {
-    draw_with_probes(
-        extent,
-        effects,
-        optional_features,
-        false,
-        Arm::of(room::View::Main),
-    )
-}
-
-/// [`draw_with`] with every authored probe row replaced by [`GpuProbe::ZERO`]
-/// while retaining the same probe-grid volume and table capacity.
+/// Draws with authored or zeroed probes and the device's preferred geometry tail.
 fn draw_with_probes(
     extent: (u32, u32),
     effects: RenderEffects,
@@ -641,6 +572,19 @@ fn draw_with_probes(
     zero_probes: bool,
     arm: Arm,
 ) -> (Image, String, AdapterInfo) {
+    let (image, paths, adapter, _, _) =
+        draw_on_path(extent, effects, optional_features, zero_probes, arm, None);
+    (image, paths, adapter)
+}
+
+fn draw_on_path(
+    extent: (u32, u32),
+    effects: RenderEffects,
+    optional_features: Features,
+    zero_probes: bool,
+    arm: Arm,
+    geometry_path: Option<GeometryPath>,
+) -> (Image, String, AdapterInfo, GeometryPath, Features) {
     // A logger before anything opens: without one, every line a backend emits on
     // the way to a device goes nowhere, and a failure inside `open` names the
     // call that noticed rather than the one that caused it.
@@ -654,7 +598,15 @@ fn draw_with_probes(
             Ok(ForwardScene {
                 camera: arm.view.camera(),
                 sun: room::sun(),
-                renderer: Box::new(build(device, queue, format, effects, zero_probes, arm)?),
+                renderer: Box::new(build(
+                    device,
+                    queue,
+                    format,
+                    effects,
+                    zero_probes,
+                    arm,
+                    geometry_path,
+                )?),
             })
         },
     )
@@ -672,36 +624,22 @@ fn draw_with_probes(
         name = adapter.name,
         kind = adapter.device_type,
     );
-    let paths = format!(
-        "{backend} {:?} / {:?} / {:?}",
+    let actual_path = setup
+        .geometry_path()
+        .expect("forward renderer reports its built tail");
+    let expected_path = geometry_path.unwrap_or_else(|| setup.preferred_geometry_path());
+    assert_eq!(
+        actual_path, expected_path,
+        "the renderer must build the requested tail"
+    );
+    let paths = format!("{backend} {actual_path:?} / ArrayPages");
+    eprintln!(
+        "lantern golden: rendered {paths} at {}x{}; capability ceiling {:?} / {:?} / {:?}; asked for {optional_features:?}",
+        extent.0,
+        extent.1,
         caps.geometry_path(),
         caps.binding_model(),
         caps.lighting_path(),
-    );
-    eprintln!(
-        "lantern golden: {paths} at {}x{}, asked for {optional_features:?}",
-        extent.0, extent.1,
-    );
-    // **The device landed on exactly the path its request names.** The frame
-    // alone cannot say — every path draws this room identically by construction
-    // — so an arm on a tail other than the one it asked for would leave every
-    // assertion below still passing. Met against the adapter, so on the default
-    // request this is the claim it has always made, "the best path the adapter
-    // offers"; on a forced one it is the lesser path, and an arm that got the
-    // better tail anyway is a self-comparison wearing a cross-path label.
-    let granted = optional_features.intersection(adapter.caps.features);
-    assert_eq!(
-        (caps.geometry_path(), caps.binding_model()),
-        (
-            GeometryPath::from_features(granted),
-            BindingModel::from_features(granted),
-        ),
-        "adapter {} offers {:?}, this run asked for {optional_features:?}, and the device \
-         opened on {:?} / {:?}",
-        adapter.name,
-        adapter.caps.features,
-        caps.geometry_path(),
-        caps.binding_model(),
     );
 
     let format = setup.format();
@@ -722,7 +660,7 @@ fn draw_with_probes(
     };
     let image = Image::from_readback(width, height, &pixels, order)
         .expect("the readback is exactly one image");
-    (image, paths, adapter)
+    (image, paths, adapter, actual_path, caps.features)
 }
 
 /// The room, made resident and placed, on a device the caller opened, drawing
@@ -734,6 +672,7 @@ fn build(
     effects: RenderEffects,
     zero_probes: bool,
     arm: Arm,
+    geometry_path: Option<GeometryPath>,
 ) -> Result<ForwardRenderer, crcbl::screenshot::OffscreenError> {
     let mut scene = room::room();
     if zero_probes {
@@ -747,7 +686,10 @@ fn build(
         scene.probes.probes.fill(GpuProbe::ZERO);
         scene.probes.update = crcbl::render::ProbeUpdate::Authored;
     }
-    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
+    let mut renderer = match geometry_path {
+        Some(path) => ForwardRenderer::with_scene_on_path(device, queue, format, &scene, path)?,
+        None => ForwardRenderer::with_scene(device, queue, format, &scene)?,
+    };
     // The **programmatic** layer of topic 39's resolution order, which is the
     // one a test has any business driving — see `crcbl::render::effects`.
     renderer.set_effect_request(EffectRequest {
@@ -1133,113 +1075,74 @@ fn zero_probes_only_remove_the_ssr_and_rough_fallbacks() {
     );
 }
 
-/// **The same room on the path below this device's own, against the same
-/// golden.**
-///
-/// `docs/plan/sample/00-samples-overview.md` rule 12 asks each sample's CI run
-/// to exercise "the path its runner selects plus one below it". Every other test
-/// here opens through [`draw`], which asks for
-/// [`OffscreenSetup::OPTIONAL_FEATURES`] — so without this one every frame the
-/// suite draws comes off the best tail the adapter reports, and the lesser ones,
-/// which is what browsers and Apple devices run, are code no run here executes.
-/// The sample already *said* which path it took; this is what makes it take more
-/// than one.
-///
-/// # One golden, both arms
-///
-/// Both frames are held to `tests/golden/room.png` rather than each to a
-/// reference of its own. `docs/plan/03-gpu-driven-rendering.md` §3.5's design
-/// rule is that a lesser path is a constraint on data layout and not a separate
-/// renderer, so a difference between the arms is a **bug in the better path** —
-/// and a second reference is exactly what would bless it.
-///
-/// # It cannot pass vacuously
-///
-/// Two frames drawn by the same code match perfectly, so the arms have to have
-/// actually differed. Both are asserted to open the same adapter, and the
-/// selectors they resolve to are asserted to differ **exactly when that adapter
-/// offers one of the flags [`BELOW`] withholds**. A device already at the floor
-/// of both axes — a software rasteriser, for instance — is a legitimate run of
-/// this test, and the printed line and that assertion are what keep it from
-/// being a silent one.
-///
-/// That pair is each other's alibi, though: a [`below_features`] withholding
-/// *nothing* leaves both halves false on every machine, and the comparison then
-/// holds trivially — which is what it did the first time it was broken on
-/// purpose to watch it fail. So the withheld set is asserted non-empty first,
-/// which is the claim that the second arm is a second arm at all.
+/// Every supported geometry tail renders the same room. A single-tail device
+/// reports that limitation explicitly and still runs the image claims.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-lantern-golden.sh"]
 fn the_room_draws_the_same_on_a_path_below_the_devices_own() {
-    let below = below_features();
-    // Only the flags a *selector* reads decide whether the arms can differ:
-    // `TASK_SHADER` comes out beside `MESH_SHADER` because it is an
-    // amplification stage in front of one, and no selector reads it — see
-    // `GeometryPath::INPUTS`, which is the table `downgrades` answers from.
-    let withheld = OffscreenSetup::OPTIONAL_FEATURES
-        .difference(below)
-        .intersection(GeometryPath::INPUTS.union(BindingModel::INPUTS));
-    // **Before either device opens**, and before the two claims below, which are
-    // each other's alibi otherwise: an empty set here makes "the arms differ" and
-    // "the adapter offers something better" both false on every machine, and the
-    // test would then compare a frame against itself and report a lesser path
-    // exercised.
-    assert!(
-        !withheld.is_empty(),
-        "the lesser arm asks for {below:?}, which withholds no selector input at all — it is \
-         the same request as the arm it is compared against"
-    );
-
-    let (best, best_paths, adapter) = draw_with(
+    let optional = OffscreenSetup::OPTIONAL_FEATURES;
+    let (default, default_label, adapter, default_path, features) = draw_on_path(
         EXTENT,
         RenderEffects::all(),
-        OffscreenSetup::OPTIONAL_FEATURES,
+        optional,
+        false,
+        Arm::of(room::View::Main),
+        None,
     );
-    let (lesser, lesser_paths, lesser_adapter) = draw_with(EXTENT, RenderEffects::all(), below);
-    assert_eq!(
-        adapter, lesser_adapter,
-        "the two arms opened different adapters, so they are not a comparison"
-    );
-
-    let offers_better = adapter.caps.features.intersects(withheld);
-    eprintln!(
-        "lantern golden: {best_paths} against {lesser_paths} — withheld {withheld:?}, \
-         adapter {name} has {held:?}",
-        name = adapter.name,
-        held = adapter.caps.features.intersection(withheld),
-    );
-    assert_eq!(
-        best_paths != lesser_paths,
-        offers_better,
-        "the adapter {} one of {withheld:?} and the two arms resolved to {best_paths} and \
-         {lesser_paths} — one of those two facts is wrong, and a self-comparison that reads \
-         as a cross-path one is worse than no test",
-        if offers_better {
-            "offers"
-        } else {
-            "offers none of"
-        },
-    );
-
-    // Every claim, on every arm: the golden is a comparison of pixels and the
-    // claims in front of it are what say the frame holds the room at all, so an
-    // arm that lost a mesh or a material row on the way down its lesser tail
-    // fails on the claim rather than on a diff nobody can read.
-    for (image, paths, optional) in [
-        (&best, &best_paths, OffscreenSetup::OPTIONAL_FEATURES),
-        (&lesser, &lesser_paths, below),
-    ] {
-        // The claims read a second frame off the same request, under the clamp
-        // — see `Arm::scene_referred`. The golden stays the arm's own frame.
-        let (claim, _, _) = draw_with_probes(
+    check_golden(&default, &default_label);
+    let supported = [
+        (GeometryPath::IndirectPerBatch, Features::empty()),
+        (GeometryPath::IndirectCount, Features::DRAW_INDIRECT_COUNT),
+        (GeometryPath::MeshShader, Features::MESH_SHADER),
+    ]
+    .into_iter()
+    .filter(|(_, required)| features.contains(*required));
+    let mut observed = Vec::new();
+    for (path, _) in supported {
+        let (image, label, arm_adapter, actual, arm_features) = draw_on_path(
+            EXTENT,
+            RenderEffects::all(),
+            optional,
+            false,
+            Arm::of(room::View::Main),
+            Some(path),
+        );
+        assert_eq!(
+            adapter, arm_adapter,
+            "geometry arms must use the same adapter"
+        );
+        assert_eq!(
+            features, arm_features,
+            "geometry arms must retain device capabilities"
+        );
+        assert_eq!(actual, path);
+        assert!(
+            !observed.contains(&actual),
+            "each exact arm must exercise a distinct tail"
+        );
+        observed.push(actual);
+        let (claim, _, claim_adapter, claim_path, _) = draw_on_path(
             EXTENT,
             RenderEffects::all(),
             optional,
             false,
             Arm::of(room::View::Main).scene_referred(),
+            Some(path),
         );
+        assert_eq!(adapter, claim_adapter);
+        assert_eq!(claim_path, path);
         inspect(&claim, EXTENT, BLOCK);
-        check_golden(image, paths);
+        check_golden(&image, &label);
+    }
+    assert!(observed.contains(&default_path));
+    if observed.len() == 1 {
+        eprintln!(
+            "lantern golden: only {observed:?} supported; image claims passed, cross-path coverage unavailable"
+        );
+    } else {
+        eprintln!(
+            "lantern golden: distinct rendered geometry tails {observed:?}; binding is ArrayPages throughout"
+        );
     }
 }
 

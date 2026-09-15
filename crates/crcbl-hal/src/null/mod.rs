@@ -193,6 +193,7 @@ pub struct NullInstance {
     /// How many adapters [`Instance::adapters`] reports. See
     /// [`NullInstance::with_adapters`].
     adapter_count: u32,
+    geometry_preference: Option<crate::GeometryPath>,
 }
 
 impl NullInstance {
@@ -205,7 +206,20 @@ impl NullInstance {
             name: "null adapter".to_string(),
             id: next_owner_id(),
             adapter_count: 1,
+            geometry_preference: None,
         }
+    }
+
+    /// Prefers a supported geometry tail while retaining the capability ceiling.
+    /// If a device request omits that tail's feature, uses its granted ceiling.
+    ///
+    /// # Panics
+    /// Panics if this instance's capabilities cannot run `path`.
+    #[must_use]
+    pub fn with_geometry_preference(mut self, path: crate::GeometryPath) -> Self {
+        assert!(supports_geometry_path(self.caps.features, path));
+        self.geometry_preference = Some(path);
+        self
     }
 
     /// A full desktop device: everything in [`Features::GPU_DRIVEN`] —
@@ -469,6 +483,9 @@ impl Instance for NullInstance {
             implicit_acquire: !caps.features.contains(Features::TIMELINE_SEMAPHORE),
             caps,
             adapter_features: self.caps.features,
+            geometry_preference: self
+                .geometry_preference
+                .filter(|path| supports_geometry_path(caps.features, *path)),
         };
         let polls_remaining = self.recorder.lock().device_latency;
         Ok(Box::new(NullPendingDevice {
@@ -532,6 +549,7 @@ struct NullDevice {
     /// enabled. Used to decide which queues exist.
     adapter_features: Features,
     implicit_acquire: bool,
+    geometry_preference: Option<crate::GeometryPath>,
 }
 
 impl NullDevice {
@@ -813,6 +831,14 @@ const fn queue_kind_index(kind: QueueKind) -> u32 {
     }
 }
 
+fn supports_geometry_path(features: Features, path: crate::GeometryPath) -> bool {
+    match path {
+        crate::GeometryPath::MeshShader => features.contains(Features::MESH_SHADER),
+        crate::GeometryPath::IndirectCount => features.contains(Features::DRAW_INDIRECT_COUNT),
+        crate::GeometryPath::IndirectPerBatch => true,
+    }
+}
+
 impl Device for NullDevice {
     fn backend(&self) -> BackendKind {
         BackendKind::Null
@@ -820,6 +846,11 @@ impl Device for NullDevice {
 
     fn caps(&self) -> DeviceCaps {
         self.caps
+    }
+
+    fn preferred_geometry_path(&self) -> crate::GeometryPath {
+        self.geometry_preference
+            .unwrap_or_else(|| self.caps.geometry_path())
     }
 
     /// What this recorder does with each seam behaviour.

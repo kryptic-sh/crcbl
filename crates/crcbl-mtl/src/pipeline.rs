@@ -610,13 +610,14 @@ impl MetalDevice {
         ))));
 
         let label = desc.label.unwrap_or("<unlabelled>");
+        let mut reflection = None;
         let raw = self
             .inner
             .raw
             .newRenderPipelineStateWithMeshDescriptor_options_reflection_error(
                 &descriptor,
-                MTLPipelineOption::None,
-                None,
+                MTLPipelineOption::BindingInfo,
+                Some(&mut reflection),
             )
             .map_err(|error| {
                 HalError::PipelineCreation(format!(
@@ -663,20 +664,7 @@ impl MetalDevice {
                     object: object_threads,
                     mesh: mesh_threads,
                 }),
-                // **Everything, and deliberately so.** An
-                // `MTLRenderPipelineReflection` for this pipeline would report
-                // `objectBindings` and `meshBindings`, and this backend binds a
-                // mesh pipeline's resources through the *vertex* argument table
-                // — `crcbl_mtl::binding`'s `apply` has `setVertexBuffer:` and
-                // `setFragmentBuffer:` and no object or mesh sibling. Mapping
-                // one onto the other is a guess, and
-                // `crcbl_mtl::binding_mask`'s rule is that a guess never binds
-                // less. No device here can reach this either: this backend
-                // reports no `Features::MESH_SHADER`, and `crcbl_mtl::quirk`'s
-                // `check_mesh_support` refuses the pipeline outright on the
-                // paravirtual GPU every Mac job runs on, so there is nothing to
-                // measure the mapping against.
-                mask: BindingMask::all(),
+                mask: mesh_mask(label, reflection.as_deref()),
             });
         Ok(self.stamp(handle))
     }
@@ -703,6 +691,32 @@ fn raster_mask(label: &str, reflection: Option<&MTLRenderPipelineReflection>) ->
             .vertexBindings()
             .iter()
             .map(|binding| reflected(Stage::Vertex, &binding))
+            .chain(
+                reflection
+                    .fragmentBindings()
+                    .iter()
+                    .map(|binding| reflected(Stage::Fragment, &binding)),
+            ),
+    )
+}
+
+/// Object and mesh functions have independent native argument tables.
+fn mesh_mask(label: &str, reflection: Option<&MTLRenderPipelineReflection>) -> BindingMask {
+    let Some(reflection) = reflection else {
+        missing_reflection(label);
+        return BindingMask::all();
+    };
+    BindingMask::from_reflection(
+        reflection
+            .objectBindings()
+            .iter()
+            .map(|binding| reflected(Stage::Object, &binding))
+            .chain(
+                reflection
+                    .meshBindings()
+                    .iter()
+                    .map(|binding| reflected(Stage::Mesh, &binding)),
+            )
             .chain(
                 reflection
                     .fragmentBindings()

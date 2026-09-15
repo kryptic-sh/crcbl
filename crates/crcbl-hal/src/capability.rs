@@ -129,10 +129,10 @@
 //! assert_eq!(permanent.kind, DivergenceKind::ApiAbsence);
 //! assert!(!permanent.kind.blocks_parity());
 //!
-//! // Metal's mesh stage is owed rather than absent, so it is one of the rows
+//! // D3D12's mesh reporting is owed rather than absent, so it is one of the rows
 //! // standing between crcbl and its end state.
 //! assert!(parity_blockers().any(|entry| {
-//!     entry.capability == Capability::MeshShading && entry.backend == BackendKind::Metal
+//!     entry.capability == Capability::MeshShading && entry.backend == BackendKind::Dx12
 //! }));
 //!
 //! // And Metal's GPU-side draw count is not, because that work landed — the
@@ -866,21 +866,8 @@ pub const DIVERGENCES: &[Divergence] = &[
     // `ApiAbsence` that is only an absence in the API is how a row survives
     // review: the reason reads as checkable and the thing it describes is not
     // the thing being declared.
-    Divergence {
-        capability: Capability::MeshShading,
-        backend: BackendKind::Metal,
-        kind: DivergenceKind::Unrun,
-        why: "the calls exist — crcbl_mtl::pipeline fills an MTLMeshRenderPipelineDescriptor with \
-              the object, mesh and fragment functions and crcbl_mtl::command records \
-              drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup: and its \
-              indirect twin — but no device has ever run them, so crcbl_mtl::adapter reports no \
-              Features::MESH_SHADER and the capability cannot answer Yes. Mesh shading is a Metal \
-              3 feature gated on supportsFamily:MTLGPUFamilyMetal3, and the Mac CI runs this \
-              backend on answers false to Metal3 and to every Apple family above 5 — measured by \
-              a_device_reports_its_indirect_command_buffer_support_and_draw_indirect_count_ceiling. \
-              Retiring this row takes a Metal 3 Mac running crcbl_mtl's mesh path and the flag \
-              being reported off the back of it",
-    },
+    // Metal mesh/task rows were retired after native execution qualification;
+    // unsupported Metal devices use the shared hardware/OS capability gate.
     Divergence {
         capability: Capability::MeshShading,
         backend: BackendKind::Dx12,
@@ -899,14 +886,6 @@ pub const DIVERGENCES: &[Divergence] = &[
         why: "WebGPU has no mesh stage: GPUDevice creates render and compute pipelines only and \
               GPURenderPassEncoder has no draw for one. No proposal for it has reached the \
               specification, so this is the API rather than the slice",
-    },
-    Divergence {
-        capability: Capability::TaskShaderStage,
-        backend: BackendKind::Metal,
-        kind: DivergenceKind::Unrun,
-        why: "MeshPipelineDesc::task reaches Metal's object stage through the same descriptor the \
-              mesh one does — setObjectFunction: beside setMeshFunction: — and it is behind the \
-              same unreported flag and the same unrun code; see the MeshShading entry",
     },
     Divergence {
         capability: Capability::TaskShaderStage,
@@ -1746,16 +1725,6 @@ mod tests {
         // move** — an unanswered question and unwritten work both block parity,
         // and reclassifying one as the other is honesty about what is owed,
         // not progress against it.
-        (
-            Capability::MeshShading,
-            BackendKind::Metal,
-            DivergenceKind::Unrun,
-        ),
-        (
-            Capability::TaskShaderStage,
-            BackendKind::Metal,
-            DivergenceKind::Unrun,
-        ),
         (
             Capability::PipelineStatisticsQuery,
             BackendKind::Metal,

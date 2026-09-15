@@ -279,36 +279,36 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 5f8c7dd2e54a82007ec2c0d4aadf9a739037e5541e788b8ff55bdfe32f69da93
+source-sha256 = a96f1779b94df53de9101c879aadb604165892a8ebcbf146ceab509142ea97d5
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = bfb2a39bfcfb59c0778dddee1beefc4c0bcfc547e62638c1f8f0aa8436df6eec
+spirv-sha256 = d88920326671645292875898c1448c268d18ce0a6829ecf1c067bbdf3ecf9f0d
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 7d316d288359d99c6291214e9bf4b8610e506b334b4e0a2bb7664222c9168a58
+wgsl-sha256 = f956ee5b69622cd3ee86c721fc9c7e137025e502ee8381abe2c5975c8ab4c6d4
 msl = msl/mesh.metal
-msl-sha256 = be8c58b3a57f61d4160772c672da3070ecb235d67a3bc539a42ce12c53141cb4
+msl-sha256 = b634261ea08147ea082f33423b06640a4bc782a25ae3a66f1a6e7404f76c32b8
 dxil = vertexMain:dxil/mesh.vertex.dxil:7f062c6fc32660fd6794f75648734a481bc8d666654cc4ecdb2aa91b8ca1372e
 dxil = depthVertexMain:dxil/mesh.depth_vertex.dxil:28ef733c67ccd12285ec0fa4274a8853ce1776d6827a0aae70e48250c10a148e
 dxil = depthClearVertexMain:dxil/mesh.depth_clear_vertex.dxil:e2007f43be9438f2c6d5022cb8fb44f825ab39426569a45117fd8c1494ab53a4
-dxil = fragmentMain:dxil/mesh.fragment.dxil:5b71c225a426f1ee22541aa181ecc1936bb416087d3c1cdcaeea3a336066d0f7
+dxil = fragmentMain:dxil/mesh.fragment.dxil:8200fe12d347b49defb325796204e2f6329ce226aaebdd077919c12afddd962b
 dxil = depthMaskedFragmentMain:dxil/mesh.depth_masked_fragment.dxil:b314b23166670c6e188d1315ee77c6815e08d094116d21bcc92896d812a47343
-dxil = rsmFragmentMain:dxil/mesh.rsm_fragment.dxil:018a7a2fae9b3b355e73c72632d0f1a4c72df010c1b3ab64f86e40566d9e5cde
+dxil = rsmFragmentMain:dxil/mesh.rsm_fragment.dxil:fbe2910d37d85d8cbb64382be50da42fcc297b9d17ff521eee0ff3b281b118fa
 entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:vertex, fragmentMain:fragment, depthMaskedFragmentMain:fragment, rsmFragmentMain:fragment
 
 [mesh_cluster]
 source = shaders/mesh_cluster.slang
-source-sha256 = 982517a59f4673e8f5f67e0aba77986496ce572a29b7e9e9d5c458b1932621f3
+source-sha256 = 18eb91f0d25bacb9f43c3703b0b3df62ffb6c4ab5eb20a46067ead213b0fc81f
 targets = spirv, msl, dxil
 spirv = spirv/mesh_cluster.spv
-spirv-sha256 = 26d2a64289bd14ecac69d6245832df686adcba744eb31e48c8257ea62699322e
-spirv-entry = meshMain:spirv/mesh_cluster.mesh.spv:90871d4c2da8f25ef03b1230c20dadcddb88b2d986f3df68c1f47e8fbe80832d
-spirv-entry = taskMain:spirv/mesh_cluster.task.spv:5ff86b381ee436f787bf1765c2c24326334d7f10eb98d36b45fcd5d62cfc0350
-spirv-entry = amplifiedMeshMain:spirv/mesh_cluster.amplified_mesh.spv:902f65b71b9f7e7777e65e485d5116144e07e4249197e718dd611d96901e9ae5
+spirv-sha256 = f03cf38179405904569a6745aa5213e34bd60434f09453c014d11914b2f5763d
+spirv-entry = meshMain:spirv/mesh_cluster.mesh.spv:7e80baa41566aa282f33228da03100f6e2fde4da769f99f4956fa3ddf61d7bed
+spirv-entry = taskMain:spirv/mesh_cluster.task.spv:0b83e73e234798869e8f6d4b2b487dab66dec504fd50a885782f54723e106097
+spirv-entry = amplifiedMeshMain:spirv/mesh_cluster.amplified_mesh.spv:014d97d57be5589e6299e8e7aed8ea7bd84bef9d82a3a06f5b8fceda828b727b
 msl = msl/mesh_cluster.metal
-msl-sha256 = 3792f2318da1628331723078ec9f49136201baca40ac30cea70a1557646b76fd
-dxil = meshMain:dxil/mesh_cluster.mesh.dxil:01d72c0aaba74c002942e2706f538511994e664e2627db98e2f2cc19193c3f29
-dxil = taskMain:dxil/mesh_cluster.task.dxil:20cd979ec9603ab0038fb110cf2ff13a0b6ce9f14ce194b76a9f3ae41a7a3050
-dxil = amplifiedMeshMain:dxil/mesh_cluster.amplified_mesh.dxil:23f1cbc9465c9703aa958cf6abea69364a362e366aaba5644a68793f63823218
+msl-sha256 = 2f7da6619c49606db8dbd2d5c24926d7520e005434bad9ebe8d3f36a20db1d96
+dxil = meshMain:dxil/mesh_cluster.mesh.dxil:d8b8076e130f42668db5a5486a280727f0397da7006d2be6055debeeffb445ab
+dxil = taskMain:dxil/mesh_cluster.task.dxil:ea7ba50d571335c1c12a1bf8c747943a4076c7d83f039edb932e5494bd8bf23b
+dxil = amplifiedMeshMain:dxil/mesh_cluster.amplified_mesh.dxil:fac09dea446f2a58aa0510eb5694695ac5940e640136f6e692239843b49aeb03
 entry-points = meshMain:meshext, taskMain:taskext, amplifiedMeshMain:meshext
 
 [mesh_shader]

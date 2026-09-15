@@ -1915,26 +1915,29 @@ stops a third kind of row joining them quietly.
 | rows                                              | kind        | what closes them                                                                     |
 | ------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------ |
 | dx12 `MeshShading`, `TaskShaderStage`             | `Unwritten` | the WARP device removal — `features_of` still never asks for `MeshShaderTier`        |
-| Metal `MeshShading`, `TaskShaderStage`            | `Unrun`     | **hardware.** The runner answers `Metal3 = false`, so nothing here can execute it    |
 | Metal `TimestampQuery`, `PipelineStatisticsQuery` | `Unrun`     | **hardware.** Written and compiled; the runner advertises no `counterSets`           |
 | `OcclusionQuery` on all four                      | `Unwritten` | **a seam verb.** A begin/end pair on `CommandEncoder`, then five backends serving it |
 
 **The two kinds are not the same distance from done, which is why `Unrun`
-exists.** Metal's four rows are written — `crcbl-mtl`'s `query.rs` builds the
-`MTLCounterSampleBuffer`, resolves it, and its `conv.rs` pins the result layouts
-against Apple's own structs at compile time — and they are blocked only on a
-device that will run them. dx12's two are not written at all: the adapter does
-not report `Features::MESH_SHADER`, because reporting it on a device that
-removes itself would be worse than not reporting it.
+exists.** Metal's two remaining rows are written — `crcbl-mtl`'s `query.rs`
+builds the `MTLCounterSampleBuffer`, resolves it, and its `conv.rs` pins the
+result layouts against Apple's own structs at compile time — and they are
+blocked only on a device that advertises a counter set. The mesh pair left this
+table on 2026-09-11: an M3 Pro ran the native proof harness, the adapter now
+reports the flags through the device/OS gate, and the reference is
+[metal-geometry-preference](metal-geometry-preference.md). dx12's two are not
+written at all: the adapter does not report `Features::MESH_SHADER`, because
+reporting it on a device that removes itself would be worse than not reporting
+it.
 
 **Two of the ten can be moved without new hardware**, and they are different in
 kind from each other. dx12's pair is the subject of "DEFERRED — dx12 mesh
 shading: WARP claims it and dies, hardware works". The occlusion four are one
 piece of work, not four: the verb, then the five backends, and all of it
 runnable here — they are parked because nothing wants the counts, not because
-this machine cannot reach them. The four Metal rows are unprovable here whatever
-anyone writes; the honest reachable state on this machine is four rows, not
-zero.
+this machine cannot reach them. The two remaining Metal rows are unprovable here
+whatever anyone writes; the honest reachable state on this machine is two rows,
+not zero.
 
 ### Cross-format image views were declined, and the seam now says a view keeps its image's format
 

@@ -2,7 +2,7 @@
 //!
 //! `docs/plan/sample/14-quarry.md`'s milestone 3 and its "three-way comparison"
 //! exit criterion. The three paths are not one per backend: they are reached by
-//! **subtracting features from one capable adapter**, which is what lets a
+//! **selecting exact renderer tails on one capable adapter**, which lets a
 //! machine with a mesh stage measure the two indirect paths as well — see
 //! [`Quarry::open_on`](crate::harness::Quarry::open_on).
 //!

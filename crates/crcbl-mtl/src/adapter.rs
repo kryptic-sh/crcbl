@@ -251,6 +251,13 @@ fn gpu_address_is_available() -> bool {
 ///   [`MTLGPUFamily::Metal3`]. `MTLBuffer::gpuAddress` is the Metal 3 API the
 ///   plan's mapping table names for this feature, so the family query is the
 ///   question that decides it.
+/// * [`Features::MESH_SHADER`] and [`Features::TASK_SHADER`] ←
+///   `supportsFamily:` with [`MTLGPUFamily::Metal3`] **and** macOS 13, through
+///   `crcbl_mtl::quirk`'s `check_mesh_support`. That is the same gate
+///   `create_mesh_pipeline_impl` applies, so a device reporting the flags is a
+///   device that can build the pipeline; `tests/run-mtl-mesh-e2e.sh` then runs
+///   the commands on it. The CI Paravirtual device answers no to both and takes
+///   `NotOnThisDevice`.
 /// * [`Features::TEXTURE_COMPRESSION_BC`] ← `supportsBCTextureCompression`.
 ///   Apple Silicon answers no and Intel Macs answer yes, so this is the one
 ///   flag here that genuinely varies across the machines the engine ships to.
@@ -455,6 +462,14 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>, name: &str) -> Features {
     if metal3 {
         out |= Features::BUFFER_DEVICE_ADDRESS;
     }
+    // Native object/mesh execution is covered separately from Paravirtual CI
+    // by tests/run-mtl-mesh-e2e.sh. Share the exact pipeline-creation gate.
+    out |= crate::quirk::mesh_features(
+        metal3,
+        NSProcessInfo::processInfo()
+            .operatingSystemVersion()
+            .majorVersion as i64,
+    );
     // Both halves are device queries and both are load-bearing: the tier is
     // what makes a dynamically indexed argument buffer legal, and the selector
     // check is what says `MTLBuffer::gpuAddress` — the value

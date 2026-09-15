@@ -45,9 +45,9 @@
 //!
 //! A device with a mesh stage draws these same tiles through
 //! `mesh_cluster.slang`'s `meshMain`, which reads a whole vertex; the depth-only
-//! mesh stage is its own rung. The fixture below opens a device without
-//! [`Features::MESH_SHADER`](crcbl::hal::Features), which is the path this
-//! suite runs everywhere anyway — see `mesh_e2e/main.rs`.
+//! mesh stage is its own rung. The fixture explicitly selects
+//! [`GeometryPath::IndirectPerBatch`](crcbl::hal::GeometryPath), so the price
+//! remains about `depthVertexMain` even on a device that supports mesh stages.
 
 use crate::area_light::{PRICE_WARMUP, price_frame};
 use crate::harness::Headless;
@@ -109,9 +109,14 @@ fn field_camera() -> Camera {
 /// same renderer built the same way on the same device, with an empty draw
 /// list.
 fn dunes_field(headless: &Headless, side: usize) -> (ForwardRenderer, TransientPool) {
-    let mut renderer =
-        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
-            .expect("the forward renderer builds");
+    let mut renderer = ForwardRenderer::with_scene_on_path(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+        &crcbl::render::scene::demo(),
+        crcbl::hal::GeometryPath::IndirectPerBatch,
+    )
+    .expect("the raster forward renderer builds");
     let step = 2.0 * DUNES_EXTENT;
     let first = -(side as f32 - 1.0) / 2.0;
     for row in 0..side {
@@ -194,11 +199,11 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; PRICE
     // **What is being priced, asked of the renderer rather than assumed.** A
     // mesh-shader path draws these same tiles through `mesh_cluster.slang`,
     // which reads a whole vertex, so a number measured there would be a number
-    // about a rung this one has not reached. The fixture asks for no mesh stage,
-    // and this is what says the device honoured that.
-    assert_ne!(
+    // about a rung this one has not reached. Assert the renderer honoured the
+    // explicit raster path, independently of the device capability preference.
+    assert_eq!(
         field.geometry_path(),
-        crcbl::hal::GeometryPath::MeshShader,
+        crcbl::hal::GeometryPath::IndirectPerBatch,
         "the depth pipeline's geometry came from a mesh stage, so `depthVertexMain` drew none \
          of the frames this priced"
     );
