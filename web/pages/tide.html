@@ -1,0 +1,195 @@
+<!--meta
+{
+  "out": "demos/tide/index.html",
+  "slug": "tide",
+  "name": "Tide",
+  "title": "Tide — Crucible",
+  "description": "tide, the water acceptance fixture, compiled to wasm32 and drawing a still pool through WebGPU — with the scene, the medium and the camera on the page.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#knobs", "label": "the knobs" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/tide", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/tide\">apps/tide</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/tide/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S4F</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Tide</span></h1>
+  <p class="tagline">
+    A gallery of four scenes built to show water — open sea, coast, valley and
+    courtyard — of which the first milestone builds the courtyard: a tiled pool
+    with a deep end and a shallow end under a fixed sun, its still surface
+    refracting the tile under it, absorbing more with depth and reflecting the
+    sky. The other three are empty rooms until the milestones that fill them.
+    Not a game: the water is the content.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="knobs">
+  <h2>the gallery, from the page</h2>
+  <h3>
+    Every knob the sample binds to a key, as something a finger can reach.
+  </h3>
+  <p>
+    Natively these are <kbd>N</kbd>, <kbd>M</kbd> and <kbd>C</kbd>, and rows on
+    the pause panel. A phone has none of them. Each button below writes the same
+    cell the key writes and then reads back the name the engine holds, so the
+    labels are never a copy the page keeps of its own.
+  </p>
+  <ul class="keys" id="gallery-knobs">
+    <li class="key-row">
+      <span>Which scene is drawn</span>
+      <span
+        ><button class="btn" type="button" id="knob-scene" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span>What the water is made of</span>
+      <span
+        ><button class="btn" type="button" id="knob-medium" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span>Which camera the scene is seen through</span>
+      <span
+        ><button class="btn" type="button" id="knob-camera" disabled>
+          …
+        </button></span
+      >
+    </li>
+    <li class="key-row">
+      <span>Every knob back to where a run opens</span>
+      <span
+        ><button class="btn" type="button" id="knob-reset" disabled>
+          reset
+        </button></span
+      >
+    </li>
+  </ul>
+  <div class="note">
+    <strong>Clicked the canvas? Press <kbd>Esc</kbd> first.</strong> The fixture
+    takes the pointer while it is running, the way any mouse-look camera does,
+    and a captured pointer sends every click to the canvas — so nothing above
+    can be reached until the browser hands it back, and <kbd>Esc</kbd> is how it
+    does that. Letting the pointer go also pauses the fixture: the status line
+    says <em>Paused</em> until you click the canvas and press <kbd>Esc</kbd>
+    again. The knobs change the picture whether it is ticking or not; the orbit
+    camera only turns while it is.
+  </div>
+  <div class="note">
+    <strong>The medium is the one to reach for.</strong> Each preset is a point
+    on one model of what light meets in water: pure water's own absorption,
+    which loses red fastest, plus dissolved organic matter, which stains the
+    water brown by eating blue, plus suspended silt, which scatters light back
+    out. The clear pool is pure water, so the deep end reads bluer than the
+    shallow end and the tile stays sharp; the lake adds a trace of both; the
+    pond enough that the floor fades; and the swamp is tannin-black water with
+    little silt in it, which is why it goes dark rather than milky.
+  </div>
+</section>
+
+<section id="what-you-are-looking-at">
+  <h2>what you are looking at</h2>
+  <h3>Three things, and each one is a water claim you can check.</h3>
+  <p>
+    <strong>The deep end against the shallow end.</strong> The two halves of the
+    pool are mirror images seen from the camera's column, so the only thing that
+    separates them is how much water is over the tile. The deep end should read
+    darker and bluer — and under the swamp preset, browner.
+  </p>
+  <p>
+    <strong>The tile through the surface.</strong> The lane line on the pool's
+    floor is bent by the water it is seen through: it sits higher in the frame
+    than it would with the pool drained, and the shallow end bends it less than
+    the deep end does.
+  </p>
+  <p>
+    <strong>The coping around it.</strong> The water stands a hand's width below
+    the rim, and the stone around the pool is exactly the stone it would be with
+    no water in it at all: the surface is drawn where the pool is and nowhere
+    else.
+  </p>
+</section>
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>Nothing to play. There is a camera, and there are the knobs above.</h3>
+  <p>
+    The page opens on the fixed pose the golden frames are taken from, over the
+    clear pool. The orbit camera turns round the pool on the simulation's own
+    fixed step, so it is the same pose at the same tick on every machine.
+  </p>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Move on to the next scene, medium or camera</span>
+      <span><kbd>N</kbd>, <kbd>M</kbd>, <kbd>C</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Fly the free camera</span>
+      <span
+        ><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>,
+        <kbd>Space</kbd> and <kbd>Shift</kbd> for up and down, the arrows to
+        look</span
+      >
+    </li>
+    <li class="key-row">
+      <span>Every knob back</span>
+      <span><kbd>R</kbd></span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="why-this-one">
+  <h2>why this one is worth publishing</h2>
+  <h3>Because water is a system, and this is where the system is looked at.</h3>
+  <p>
+    The engine's water is data first: a body is an outline, a level and a
+    medium, and the renderer is one reader of it. This page is that reader in a
+    browser. Press <kbd>F3</kbd> for the receipts: the panel names which
+    geometry path, which binding model and which lighting path this frame was
+    drawn through, which body and medium the frame drew, and what the two water
+    passes — the copy of the frame behind the surface, and the surface itself —
+    cost on this device.
+  </p>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The native sample, with three differences the browser forces.</h3>
+  <p>
+    Start-up is polled across several frames, because
+    <code>requestDevice</code> is a promise and the main thread cannot block on
+    it. The frame loop is driven by <code>requestAnimationFrame</code> out here
+    rather than by a <code>loop</code> inside the engine. And the clock is the
+    browser's, because <code>wasm32-unknown-unknown</code> has no
+    <code>Instant</code>.
+  </p>
+  <p>
+    There is no fourth difference about saved data: this demo keeps nothing and
+    loads nothing — the courtyard's geometry is built from literals in
+    <code>apps/tide</code>, and the shaders and the font atlas are compiled into
+    the module.
+  </p>
+  <div class="note">
+    <strong>Expect it to be slow on a machine with no GPU.</strong> A software
+    WebGPU adapter draws the pool twice over: once as the frame behind the water
+    and once more as the surface that refracts it.
+  </div>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

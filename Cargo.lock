@@ -1746,6 +1746,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tide"
+version = "0.1.0"
+dependencies = [
+ "crcbl",
+ "crcbl-golden",
+]
+
+[[package]]
 name = "toml"
 version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

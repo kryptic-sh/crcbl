@@ -1839,6 +1839,22 @@ jobs:
           CRCBL_VK_SYNC_VALIDATION: '1'
           CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/sundial/tests/run-sundial-golden.sh
+      # The water acceptance fixture's courtyard, and the only step that holds a
+      # sample's water to relations rather than to a picture. A body never handed
+      # to the renderer, a medium preset that never reached the shader and a
+      # surface that absorbed nothing with depth each draw a plausible pool and
+      # pass every other check in this workflow. The suite asserts the water
+      # moves the basin and not the stone around it, that the deep end reads
+      # deeper than its mirrored shallow end, and that each preset's blue falls
+      # with the dissolved matter in it, before it compares a golden at all.
+      - name: Draw tide on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
+        run: apps/tide/tests/run-tide-golden.sh
       # The first playable sample, against a real driver. `run-vk-e2e.sh` drives
       # `--package sandbox` and every other harness script does too, so until
       # this step existed nothing outside breakout's own unit tests ever ran the

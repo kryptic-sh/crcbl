@@ -1,0 +1,51 @@
+[package]
+name = "tide"
+description = "Tide — the water acceptance fixture: four scenes, and the courtyard pool drawn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with two front ends, like every other sample**, and a third caller:
+# `tests/golden.rs` is an integration test, and an integration test can only
+# reach the courtyard it renders through a lib target — a bin crate has no
+# linkable artifact. `src/main.rs` owns argv and the exit code.
+#
+# `cdylib` is what `wasm32-unknown-unknown` links into a `.wasm` — `src/web.rs`
+# is what it exports; `rlib` is what `main.rs` and the golden suite link
+# against.
+#
+# The lib is not called `tide`: a lib and a bin of the same name in one package
+# write the same file, which cargo calls an output filename collision.
+[lib]
+name = "crcbl_tide"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "tide"
+path = "src/main.rs"
+
+# One engine dependency, with the `scene` feature on for `apps/sundial`'s
+# reason: `crcbl::render::scene`'s `Geometry::Flat` carries a `MeshClusters`,
+# and nothing above the seam can build one without
+# `crcbl::scene::build_meshlets`. Water needs no feature of its own —
+# `crcbl::render` re-exports the body and its medium.
+[dependencies]
+crcbl = { workspace = true, features = ["scene"] }
+
+# The golden suite's image I/O. A dev-dependency, which is the whole of
+# `crcbl-golden`'s own manifest rule: it reaches no shipped binary.
+[dev-dependencies]
+crcbl-golden = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+# `tests/golden.rs` — the courtyard off a real device, against checked-in
+# goldens. Feature-gated *and* `#[ignore]`d, the pair every sample's golden suite
+# uses: a plain `cargo test --workspace --all-features` on a machine with no GPU
+# must stay green, and `tests/run-tide-golden.sh` is the only thing that turns it
+# on — and it fails when the suite reports zero tests run.
+golden-e2e = []

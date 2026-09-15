@@ -95,7 +95,8 @@ physics or animation that moves with it — so each measures that agreement, not
 only a picture. Each is a gallery of several scenes or looks in one sample
 rather than one sample per body of water or per style of grass, because the
 scenes share the system under test and would otherwise each repeat every
-registry a new demo joins. None has an `apps/` crate yet.
+registry a new demo joins. Tide has one: `apps/tide` was built at milestone 1 on
+2026-09-15 and ships at `/demos/tide/`; meadow and mane have none.
 
 **Where the ladder stands.** Every sample on it except arena (08) and mirrors
 (17) has an `apps/` crate that builds for `wasm32`, and every one of them but

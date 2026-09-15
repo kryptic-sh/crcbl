@@ -26,9 +26,9 @@ or the browser.
 > sections before moving.
 
 **Pre-1.0 and moving.** Frames draw on every backend, several samples are
-playable, and seventeen of them ship as browser demos that double as the
-engine's continuous cross-backend regression test. The API breaks when a caller
-needs it to.
+playable, and nineteen of them ship as browser demos that double as the engine's
+continuous cross-backend regression test. The API breaks when a caller needs it
+to.
 
 What is real today:
 
@@ -112,6 +112,7 @@ cargo run -p lantern                        # one room, every lighting effect
 cargo run -p lantern -- --stack my.ron      # ...the same room, your own render stack
 cargo run -p alcove                         # one room, every ambient-occlusion knob
 cargo run -p sundial                        # one plaza, a sun on a clock under the sky it lights
+cargo run -p tide                           # four water scenes, and the courtyard pool drawn
 
 # The glTF viewer: Suzanne, or bring your own model.
 cargo run -p viewer
@@ -231,6 +232,7 @@ built it.
 | `lantern`        | the lighting acceptance fixture: one room, every effect                | ✓              |
 | `alcove`         | the ambient-occlusion acceptance fixture: one court, every technique   | ✓              |
 | `sundial`        | the shadow acceptance fixture: one plaza, a scripted sun, every filter | ✓              |
+| `tide`           | the water acceptance fixture: four scenes, the courtyard pool drawn    | ✓              |
 | `quarry`         | the geometry acceptance fixture: one dense scene on every path         | ✓              |
 | `viewer`         | a glTF model viewer, and the asset pipeline's acceptance test          | ✓              |
 | `towers`         | the flagship: co-op tower defense, played solo over the loopback       | ✓              |

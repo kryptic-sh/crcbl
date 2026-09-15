@@ -120,6 +120,7 @@ SAMPLES=(
     "shard 960x720"
     "sparks 960x720"
     "sundial 960x720"
+    "tide 960x720"
     "towers 960x720"
     "viewer 960x720 ${VIEWER_MODEL}"
 )

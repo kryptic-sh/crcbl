@@ -1198,6 +1198,73 @@ const EXPECTATIONS = {
       loopField: /\[HUD\] tick: (\d+)/,
     },
   },
+  // **The water acceptance fixture**, and another demo whose controls are HTML
+  // rather than keys. `apps/tide` is a gallery of four scenes of which
+  // milestone 1 builds the courtyard — a still pool over a deep end and a
+  // shallow end — and the page switches the scene, the medium preset and the
+  // camera through `apps/tide/src/web.rs`'s own exports, because natively they
+  // are `N`, `M` and `C` and a phone has none of them.
+  //
+  // **No start key, and nothing moves**, on alcove's ground: the water is
+  // still, the sun is fixed and the page opens on the fixed camera, so `still`
+  // is here and group D reads the loop's frame counter instead of a changed
+  // picture. `moving` is the loop's own tick for the same reason as alcove's.
+  //
+  // `waiting` is this sample's own claim: `lighting: Rasterised` is the arm a
+  // browser resolves to by construction, and `scene: courtyard`, `medium:
+  // clear-pool` and `camera: FIXED` are the knobs before anything has touched
+  // them — the control for the page's own controls. Each is printed off what
+  // the frame **staged** rather than off the cell a button writes, so a knob
+  // the frame refused to stage cannot read as one that worked.
+  //
+  // **No `effectsRow`**: water is content rather than a render effect — a body
+  // set on the renderer draws the water passes, and there is no effect bit a
+  // device could clamp away — so there is no layer of the four for a row to
+  // name. The heartbeat's `cost:` field is the water passes' own timings, and
+  // it is not asserted here: a browser with no `timestamp-query` draws the same
+  // pool and says so in that field, which is a report rather than a failure.
+  tide: {
+    // A demo that draws mesh instances, so its cull pass has something to
+    // count. See lantern's row and group D.
+    culls: true,
+    // Held while the gallery is being flown, like lantern's row above.
+    locks: true,
+    still: true,
+    key: null,
+    waiting: (line) =>
+      line.includes('[HUD] tick: 60') &&
+      line.includes('lighting: Rasterised') &&
+      line.includes('scene: courtyard') &&
+      line.includes('medium: clear-pool') &&
+      line.includes('camera: FIXED'),
+    moving: /tick: (\d+)/,
+    movingLabel: 'the loop keeps ticking over still water',
+    // **The page's own controls.** Every id is one `web/pages/tide.html` gives a
+    // button and `web/demos/tide/main.js` binds; every field is one the `[HUD]`
+    // line `apps/tide/src/app.rs` logs. What each cycles *to* is not spelled
+    // here, on sundial's filter's terms: the check asks only that the field
+    // moved off where it opened, and `reset` that it came back.
+    knobs: {
+      cycles: [
+        {
+          control: 'knob-scene',
+          field: /\bscene: ([\w-]+)/,
+          noun: 'the scene',
+        },
+        {
+          control: 'knob-medium',
+          field: /\bmedium: ([\w-]+)/,
+          noun: 'the medium preset',
+        },
+        {
+          control: 'knob-camera',
+          field: /\bcamera: (\w+)/,
+          noun: 'the camera',
+        },
+      ],
+      reset: 'knob-reset',
+    },
+  },
   // **The third demo with no start key**, and the second that draws mesh
   // geometry. `apps/quarry` is the geometry acceptance fixture: there is no run
   // to begin and no state to leave, so there is nothing for a `Space` to do. It
@@ -4492,10 +4559,11 @@ try {
   );
 
   // **AND THE PAGE'S OWN CONTROLS, WHICH NOTHING ELSE HERE PRESSES.** Only the
-  // two comparison fixtures have a `knobs` block, because they are the only
-  // demos on the site whose controls are HTML rather than keys — the seam each
-  // exists to drive is walked natively with `,` and `.`, and sundial's sun is
-  // stopped with `P`, and a phone has none of them.
+  // two comparison fixtures and tide's gallery have a `knobs` block, because
+  // they are the only demos on the site whose controls are HTML rather than keys
+  // — the seam each comparison exists to drive is walked natively with `,` and
+  // `.`, sundial's sun is stopped with `P`, tide's scenes are switched with `N`,
+  // and a phone has none of them.
   //
   // Nothing else in this file would notice them going wrong.
   // `web/tools/check-exports.mjs` proves the symbols behind them are in the
@@ -4682,10 +4750,14 @@ try {
     const stands = (/** @type {string} */ line, /** @type {RegExp} */ field) =>
       line.match(field)?.[1] ?? '';
 
-    const startingCycled = stands(
-      hud()[hud().length - 1] ?? '',
-      knobs.cycleField
-    );
+    const startingCycled = knobs.cycleField
+      ? stands(hud()[hud().length - 1] ?? '', knobs.cycleField)
+      : '';
+
+    // **The control the page opens first**, which is the seam's button on the
+    // two comparison fixtures and the first entry of `cycles` on a page with no
+    // seam at all — tide's is a gallery, not a comparison.
+    const firstControl = knobs.seam ?? knobs.cycles?.[0]?.control;
 
     // **The controls open only once there is a loop behind them.** They are
     // `disabled` in the markup and `main.js` polls the sample's own status
@@ -4696,7 +4768,7 @@ try {
     const opened = await until(async () =>
       (await evaluate(
         page,
-        `document.getElementById('${knobs.seam}')?.disabled === false`
+        `document.getElementById('${firstControl}')?.disabled === false`
       )) === true
         ? true
         : null
@@ -4706,47 +4778,80 @@ try {
       'the page opens its own controls once the demo is running',
       opened === true,
       opened === true
-        ? `#${knobs.seam} is enabled`
-        : `#${knobs.seam} is still disabled after ${pollCeiling()} ms, or the ` +
+        ? `#${firstControl} is enabled`
+        : `#${firstControl} is still disabled after ${pollCeiling()} ms, or the ` +
             'page has no such control at all'
     );
 
     // The seam up, the technique or filter cycled, and the seam then moved off
     // the centre the button chose — three presses, read off one heartbeat
-    // afterwards.
-    const pressed =
-      (await clickControl(knobs.seam)) &&
-      (await clickControl(knobs.cycle)) &&
-      (await dragSlider(knobs.seamAt));
-    const running = pressed && (await resume());
-    const mark = hud().length;
-    const line = running ? await beatAfter(mark) : null;
-    const seamNow = stands(line ?? '', knobs.seamField);
-    check(
-      'C',
-      'a press and a drag on the page raise the seam and move it',
-      Boolean(line) && seamNow !== 'OFF' && seamNow !== knobs.centre,
-      !pressed
-        ? 'one of the controls named in EXPECTATIONS is not on the page'
-        : !running
-          ? 'the demo did not go back into play after the presses — status ' +
-            `${await evaluate(page, `crcbl.status()`)}`
-          : line
-            ? `the seam reads ${seamNow || '(nothing)'} — raised from OFF and ` +
-              `moved off the ${knobs.centre} the button puts it at`
-            : `no heartbeat in ${pollCeiling()} ms after the presses`
+    // afterwards. Only on a page that has a seam: the two comparison fixtures.
+    if (knobs.seam) {
+      const pressed =
+        (await clickControl(knobs.seam)) &&
+        (await clickControl(knobs.cycle)) &&
+        (await dragSlider(knobs.seamAt));
+      const running = pressed && (await resume());
+      const mark = hud().length;
+      const line = running ? await beatAfter(mark) : null;
+      const seamNow = stands(line ?? '', knobs.seamField);
+      check(
+        'C',
+        'a press and a drag on the page raise the seam and move it',
+        Boolean(line) && seamNow !== 'OFF' && seamNow !== knobs.centre,
+        !pressed
+          ? 'one of the controls named in EXPECTATIONS is not on the page'
+          : !running
+            ? 'the demo did not go back into play after the presses — status ' +
+              `${await evaluate(page, `crcbl.status()`)}`
+            : line
+              ? `the seam reads ${seamNow || '(nothing)'} — raised from OFF and ` +
+                `moved off the ${knobs.centre} the button puts it at`
+              : `no heartbeat in ${pollCeiling()} ms after the presses`
+      );
+      check(
+        'C',
+        `a press on the page cycles ${knobs.cycleLabel}`,
+        Boolean(line) &&
+          stands(line ?? '', knobs.cycleField) !== '' &&
+          stands(line ?? '', knobs.cycleField) !== startingCycled,
+        line
+          ? `it now reads ${stands(line, knobs.cycleField) || '(nothing)'}, ` +
+              `and it opened on ${startingCycled || '(nothing)'}`
+          : 'no heartbeat to read it off'
+      );
+    }
+
+    // **AND A GALLERY'S CYCLES, WHICH ARE ONE KIND OF STATE EACH.** tide's
+    // scene, medium preset and camera are each a button that moves one knob on
+    // to the next value, and each is read off its own heartbeat field: the
+    // field has to move off the value it opened on after one press. Pressed in
+    // turn, each read off the first heartbeat after its own press, so a button
+    // wired to its neighbour's knob reads as the neighbour's field moving and
+    // this one standing still. `reset` below is what brings all of them back.
+    const startingCycles = (knobs.cycles ?? []).map((cycle) =>
+      stands(hud()[hud().length - 1] ?? '', cycle.field)
     );
-    check(
-      'C',
-      `a press on the page cycles ${knobs.cycleLabel}`,
-      Boolean(line) &&
-        stands(line ?? '', knobs.cycleField) !== '' &&
-        stands(line ?? '', knobs.cycleField) !== startingCycled,
-      line
-        ? `it now reads ${stands(line, knobs.cycleField) || '(nothing)'}, ` +
-            `and it opened on ${startingCycled || '(nothing)'}`
-        : 'no heartbeat to read it off'
-    );
+    for (const [at, cycle] of (knobs.cycles ?? []).entries()) {
+      const pressedCycle =
+        (await clickControl(cycle.control)) && (await resume());
+      const cycleMark = hud().length;
+      const cycleLine = pressedCycle ? await beatAfter(cycleMark) : null;
+      const now = stands(cycleLine ?? '', cycle.field);
+      check(
+        'C',
+        `a press on the page moves ${cycle.noun} on`,
+        Boolean(cycleLine) && now !== '' && now !== startingCycles[at],
+        !pressedCycle
+          ? `the page has no #${cycle.control} control, or the demo did not ` +
+              'go back into play after the press — status ' +
+              `${await evaluate(page, `crcbl.status()`)}`
+          : cycleLine
+            ? `it now reads ${now || '(nothing)'}, and it opened on ` +
+              `${startingCycles[at] || '(nothing)'}`
+            : `no heartbeat in ${pollCeiling()} ms after the press`
+      );
+    }
 
     // **AND THE CLOCK, WHICH IS A DIFFERENT KIND OF STATE.** Only sundial has
     // one: the seam and the filter above are console cells a page writes
@@ -5061,11 +5166,28 @@ try {
       'C',
       'the page puts every knob back where the engine declares it',
       Boolean(restored) &&
-        stands(restored ?? '', knobs.seamField) === 'OFF' &&
-        stands(restored ?? '', knobs.cycleField) === startingCycled,
+        (!knobs.seamField ||
+          stands(restored ?? '', knobs.seamField) === 'OFF') &&
+        (!knobs.cycleField ||
+          stands(restored ?? '', knobs.cycleField) === startingCycled) &&
+        (knobs.cycles ?? []).every(
+          (cycle, at) =>
+            stands(restored ?? '', cycle.field) === startingCycles[at]
+        ),
       restored
-        ? `seam: ${stands(restored, knobs.seamField)}, cycled: ` +
-            `${stands(restored, knobs.cycleField)}`
+        ? [
+            ...(knobs.seamField
+              ? [`seam: ${stands(restored, knobs.seamField)}`]
+              : []),
+            ...(knobs.cycleField
+              ? [`cycled: ${stands(restored, knobs.cycleField)}`]
+              : []),
+            ...(knobs.cycles ?? []).map(
+              (cycle, at) =>
+                `${cycle.noun}: ${stands(restored, cycle.field)} (opened on ` +
+                `${startingCycles[at]})`
+            ),
+          ].join(', ')
         : !wasReset
           ? `the page has no #${knobs.reset} control`
           : !backInPlay

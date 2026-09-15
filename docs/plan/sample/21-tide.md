@@ -73,7 +73,17 @@ until a material wetness hook exists. Weather beyond the wind knob.
 **Exempt from sample rule 11**, on lantern's ground. **Not exempt from rule 2**:
 the floating bodies are why this sample has a server.
 
-## Status: planned 2026-09-15, nothing built
+## Status: milestone 1 built 2026-09-15
+
+`apps/tide` exists and ships at `/demos/tide/`: the four-scene switch with the
+courtyard built and three labelled rooms, four medium presets from one
+bio-optical model, fixed, orbit and free cameras, the water passes' cost on the
+panel, the summary and the heartbeat, a golden step in CI and a browser gate in
+`pages.yml`. **Two departures from the scope above**: the sun is fixed rather
+than on a clock (sundial's clock lives inside that sample, and reusing it would
+mean copying it), and there is no server yet — milestone 1 has no game state, so
+the server loop arrives with milestone 2's floating crates, which is when rule 2
+starts to bind.
 
 Milestones follow [55-water.md](../55-water.md)'s rungs, so a milestone cannot
 close before its rung has landed in the engine.
@@ -83,7 +93,11 @@ close before its rung has landed in the engine.
 1. **The courtyard pool, still.** Rung 1: the surface pass, refraction,
    absorption, shoreline fade, sky and probe reflection, received shadows. The
    sample skeleton, the four-scene switch with three scenes stubbed as empty
-   rooms, the web demo and the CI golden step.
+   rooms, the web demo and the CI golden step. **Done 2026-09-15**, held by
+   three relations and four goldens on lavapipe and radv. Its browser price at a
+   959×463 canvas, p50: `water-copy` 0.018 ms and `water` 0.055 ms on an RDNA-3
+   adapter, 5.7 ms and 44.7 ms on SwiftShader — one boot's frames from the
+   gate's run, not a dedicated measurement.
 2. **Waves and floating.** Rung 2: trochoid waves on the pool and lake, rings,
    the query, pontoon crates in the server loop, immersion events, the
    query-points debug view and the agreement check.

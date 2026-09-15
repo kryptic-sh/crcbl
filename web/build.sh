@@ -162,6 +162,7 @@ DEMOS=(
   "lantern:crcbl_lantern:demos/lantern"
   "alcove:crcbl_alcove:demos/alcove"
   "sundial:crcbl_sundial:demos/sundial"
+  "tide:crcbl_tide:demos/tide"
   "quarry:crcbl_quarry:demos/quarry"
   "viewer:crcbl_viewer:demos/viewer"
   "orbit:crcbl_orbit:demos/orbit"

@@ -131,6 +131,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/tide`, the water acceptance fixture, at milestone 1: the courtyard
+  pool, natively and at `/demos/tide/`.** A gallery of four scenes — open sea,
+  coast, valley and courtyard — switched with `N`, a pause row or a page button,
+  of which the courtyard is built: a tiled pool with a deep end and a shallow
+  end drawn through `ForwardRenderer::set_water`, and the other three are
+  labelled empty rooms naming the milestone that fills each. Four medium presets
+  (clear pool, lake, pond, swamp) on `M` are points on one bio-optical model —
+  pure water's absorption and scattering, dissolved organic matter and
+  particles, with the sources in `apps/tide/src/medium.rs` — and the camera is
+  fixed, orbit or free on `C`. The debug panel, the headless summary and the
+  `[HUD]` heartbeat carry the `water-copy` and `water` passes' cost, which is
+  where the browser price is read: on an RDNA-3 adapter in Chrome, 0.018 ms and
+  0.055 ms at the median. Its goldens stand behind three relations, each shown
+  red by a sabotage: the water changes the basin and not the stone around it,
+  the deep end reads under the shallow end in red, and the blue falls as a
+  preset's dissolved matter rises. CI draws it on lavapipe, and `pages.yml`
+  gates the page in a real browser.
+- **`web/tools/browser-e2e.mjs` presses a gallery's knobs**: a row's `knobs`
+  block may carry a `cycles` list, each button checked against its heartbeat
+  field, and the seam presses run only on a page that has a seam.
 - **Water, first rung: still bodies of water, drawn by every view.**
   `crcbl-water` is new and holds bodies as data — `WaterBody` (a simple outline
   on the XZ plane, a level and a `Medium` of per-channel absorption and

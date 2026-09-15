@@ -39,6 +39,29 @@ optional-extension diagnostics should be deduplicated per asset and extension so
 multiple scene/view imports do not flood the log. Recheck the Mossberg asset in
 EW after the engine implementation lands, then update EW's pinned revision.
 
+## What tide's milestone 1 shipped without (2026-09-15)
+
+- **Refraction ghosts in the courtyard**: a second image of the deep end's lane
+  line where it would sit with no water, along the near rim, and wedge-shaped
+  ghosts at the end walls — visible in tide's goldens. Not diagnosed; likely the
+  same one-step refraction and rejection limits the water rung 1 entry below
+  records.
+- **The near coping's margin is thin**: the sabotage that floods the water over
+  the coping moved the near coping only 2.00 levels against a 1.0 tolerance; the
+  far coping, at 18.56, carries that claim.
+- **Four samples carry their own quad builder** — alcove, lantern, sundial and
+  tide each have a `MeshBuilder`. Whether one shared builder belongs in
+  `crcbl-greybox` is a decision, not yet taken.
+- **Rule 12 is not exercised for tide**: its CI golden step draws the path the
+  runner selects and forces no lesser one. Sundial's step was not checked for
+  the same gap.
+- **The heartbeat reports the scene one frame behind the knob**. Harmless for
+  the gate, which reads after several frames.
+- **Not verified**: the windowed run (`tools/run-samples-windowed.sh`), macOS
+  and Windows, the Metal and D3D12 paths; the orbit and free cameras and the
+  stub rooms were looked at in single screenshots, and no golden holds a stub
+  room.
+
 ## What water rung 1 shipped without (2026-09-15)
 
 `docs/plan/55-water.md`'s still pool landed with the gaps below; each is
@@ -119,10 +142,10 @@ What the plans leave open:
   Uncharted and Zelda; Assassin's Creed III and IV and Far Cry coastline
   internals; Far Cry 5's wind runtime; primary sources for Breath of the Wild,
   Genshin, Sable and Ghibli-style grass.
-- **Doc drift seen while surveying, not fixed** (out of the planning task's
-  scope): `docs/plan/00-overview.md` still says towers is missing from `apps/`,
-  which was built 2026-09-07; `README.md` says seventeen samples ship as browser
-  demos where `web/build.sh`'s `DEMOS` lists eighteen.
+- **Doc drift seen while surveying, not fixed**: `docs/plan/00-overview.md`
+  still says towers is missing from `apps/`, which was built 2026-09-07, and
+  counts seventeen browser demos where `web/build.sh`'s `DEMOS` lists nineteen
+  since tide. (`README.md`'s count was corrected with tide.)
 
 ## Performance: VRAM, CPU and GPU cost (2026-09-15)
 

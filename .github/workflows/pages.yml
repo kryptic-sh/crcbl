@@ -446,6 +446,16 @@ jobs:
           # that row presses them and reads what the engine's own heartbeat says
           # they did, and here that includes stopping the sun and scrubbing it.
           - sundial
+          # tide is a 3D fixture and it sits with sundial: one small
+          # flat-shaded courtyard, a fixed sun and a fixed camera, so what it
+          # costs is the two water passes over the frame rather than the scene.
+          # Its `EXPECTATIONS` row carries `still`, on alcove's ground: nothing
+          # in the courtyard moves until a knob does. Its page controls are gated
+          # too — `knobs` in that row cycles the scene, the
+          # medium preset and the camera and reads what the heartbeat says the
+          # frame staged — and its heartbeat carries the water passes' cost,
+          # which is where their browser price is read.
+          - tide
           # viewer and orbit are the two samples whose subject does not move on
           # its own, and both answer group C off something the sample itself
           # advances — viewer's idle turntable, orbit's scripted ascent.
@@ -677,6 +687,12 @@ jobs:
       - name: Render sundial in a real browser
         timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=sundial ./web/run-browser-e2e.sh --headless
+
+      # Twenty, on sundial's terms: the courtyard is small, and the two water
+      # passes copy and redraw the frame behind the surface on every frame.
+      - name: Render tide in a real browser
+        timeout-minutes: 20
+        run: CRCBL_WEB_E2E_DEMO=tide ./web/run-browser-e2e.sh --headless
 
       - name: Render viewer in a real browser
         timeout-minutes: 12
