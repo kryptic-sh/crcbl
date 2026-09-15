@@ -198,6 +198,8 @@ OPTIONS:
                                                one button hovered
                            ui_text             wrapped, kerned and centred
                                                text in the UI font
+                           ui_focus            a pad-driven focus ring in a
+                                               modal's scrolled list
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
                          be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
@@ -1279,6 +1281,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::UiTree,
         Scene::UiStyle,
         Scene::UiText,
+        Scene::UiFocus,
     ]
 };
 
@@ -1315,6 +1318,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::UiTree => "ui_tree",
         Scene::UiStyle => "ui_style",
         Scene::UiText => "ui_text",
+        Scene::UiFocus => "ui_focus",
     }
 }
 

@@ -190,6 +190,10 @@ mod ui_style;
 #[path = "render_e2e/ui_text.rs"]
 mod ui_text;
 
+// Rung 6's focus, scopes and scrolling into view, for the same reason.
+#[path = "render_e2e/ui_focus.rs"]
+mod ui_focus;
+
 /// The size the goldens were blessed at.
 ///
 /// The same 256x192 the cross-backend harness and `crcbl-vk`'s mesh suite use,

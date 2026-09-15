@@ -4,7 +4,7 @@
 
 use glam::Vec2;
 
-use super::style::{Display, NodeStyle, Overflow};
+use super::style::{Display, NodeStyle};
 use super::{Content, Ui, padding_box};
 use crate::draw_list::{Border, CornerRadii, DrawList};
 use crate::font::layout::TextLayout;
@@ -19,13 +19,29 @@ impl Ui {
     /// build order, each parent before its children.
     ///
     /// Clips are pushed and popped in pairs, so `list`'s own clip is what it
-    /// was when this returns.
+    /// was when this returns. The navigation debug overlay follows the tree
+    /// when [`Ui::set_nav_debug`] switched it on.
     pub fn emit(&self, list: &mut DrawList) {
         for (index, node) in self.nodes.iter().enumerate() {
             if node.parent.is_none() {
                 self.emit_node(index, list);
             }
         }
+        // Outlines after the whole tree, as a browser paints them in a later
+        // phase: a focus ring a later sibling covered would show focus on
+        // nothing. Each is still clipped as its node was.
+        for node in &self.nodes {
+            let stored = self.store.get(node.slot);
+            if !stored.hittable || !has_outline(&node.style) {
+                continue;
+            }
+            let (min, max) = stored.rect;
+            list.push_clip(stored.clip.min, stored.clip.max);
+            paint_outline(list, &node.style, min, max);
+            list.pop_clip()
+                .expect("the clip pushed above is still on the stack");
+        }
+        self.emit_nav_debug(list);
     }
 
     fn emit_node(&self, index: usize, list: &mut DrawList) {
@@ -71,7 +87,7 @@ impl Ui {
             }
         }
 
-        let clipped = node.style.overflow == Overflow::Hidden;
+        let clipped = node.style.overflow.clips();
         if clipped {
             let (clip_min, clip_max) = padding_box(min, &node.layout);
             list.push_clip(clip_min, clip_max);
@@ -84,6 +100,46 @@ impl Ui {
                 .expect("the clip pushed above is still on the stack");
         }
     }
+}
+
+/// Whether a node's outline draws anything.
+fn has_outline(style: &NodeStyle) -> bool {
+    style.outline_width > 0.0 && visible(style.outline_color)
+}
+
+/// A node's outline: a ring `outline-offset` outside its border box `min..max`,
+/// `outline-width` wide, with its corners' radii grown by the offset.
+fn paint_outline(list: &mut DrawList, style: &NodeStyle, min: Vec2, max: Vec2) {
+    let width = style.outline_width;
+    let grow = Vec2::splat(style.outline_offset + width);
+    let (min, max) = (min - grow, max + grow);
+    if style.radii == CornerRadii::uniform(0.0) {
+        list.rect_outline(min, max, width, style.outline_color);
+        return;
+    }
+    let spread = |radius: f32| {
+        if radius > 0.0 {
+            (radius + grow.x).max(0.0)
+        } else {
+            0.0
+        }
+    };
+    let radii = style.radii;
+    list.rounded_rect(
+        min,
+        max,
+        CornerRadii {
+            top_left: spread(radii.top_left),
+            top_right: spread(radii.top_right),
+            bottom_right: spread(radii.bottom_right),
+            bottom_left: spread(radii.bottom_left),
+        },
+        [0.0; 4],
+        Border {
+            width,
+            color: style.outline_color,
+        },
+    );
 }
 
 /// A block's background and border over its border box `min..max`.

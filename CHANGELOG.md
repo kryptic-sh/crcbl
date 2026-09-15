@@ -171,6 +171,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Focus, navigation and the engaged state in `crcbl_ui::tree`.**
+  `Ui::begin_frame_with` takes a `NavInput` (a direction, next and previous,
+  accept, back and the input mode), and `block_with` and `block_keyed_with` take
+  a `Behavior` naming a node's role, focusability, disabled state and scope.
+  Buttons fire on accept through `Response::clicked`; an engage widget takes
+  navigation only once engaged — accept commits, back cancels to the value
+  `Ui::snapshot` kept, and engaging another widget commits the first. Scope
+  roots remember their last focused node, a modal traps focus, and an
+  `overflow: scroll` block (new) scrolls the focused node into view with a
+  clamped offset. Moves are scored beam first (`13·major² + minor²` within each
+  group), with `nav-up`, `nav-right`, `nav-down`, `nav-left` and `nav-wrap`
+  overrides in the stylesheet and tree order as the fallback. `:focus` shows in
+  keyboard and pad mode and `:hover` in pointer mode, `:engaged` and `:disabled`
+  reach the cascade, `outline-*` properties draw rings after the whole tree, and
+  `Ui::set_nav_debug` draws the focus path and every candidate's score.
+  `crcbl screenshot --scene ui_focus` draws the new golden.
 - **Real fonts in the UI (`crcbl_ui::font`).** Atkinson Hyperlegible (SIL Open
   Font License 1.1) is embedded and parsed with `skrifa`: cmap, advances, line
   metrics and GPOS pair kerning. Vertically hinted outlines are rasterised by

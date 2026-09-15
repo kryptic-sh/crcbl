@@ -26,6 +26,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 use std::time::Duration;
 
+use super::focus::InputMode;
 use super::store::StoredCandidates;
 use super::{Content, FrameNode, NodeStyle, Ui};
 use crate::style::{
@@ -128,12 +129,20 @@ impl Ui {
         let generation = self.styles.generation;
         let stored = self.store.get(slot);
         let interaction = stored.interaction;
+        // The mixed-input rule: hover shows while the pointer drives, focus
+        // while the pad or the keyboard does.
+        let pointing = self.input_mode() == InputMode::Pointer;
         let mut pseudo = PseudoClasses::NONE;
-        if interaction.hovered {
-            pseudo = pseudo | PseudoClasses::HOVER;
-        }
-        if interaction.pressed {
-            pseudo = pseudo | PseudoClasses::ACTIVE;
+        for (set, class) in [
+            (interaction.hovered && pointing, PseudoClasses::HOVER),
+            (interaction.pressed, PseudoClasses::ACTIVE),
+            (interaction.focused && !pointing, PseudoClasses::FOCUS),
+            (interaction.engagement.is_engaged(), PseudoClasses::ENGAGED),
+            (stored.behavior.disabled, PseudoClasses::DISABLED),
+        ] {
+            if set {
+                pseudo = pseudo | class;
+            }
         }
 
         let reused = stored.candidates.as_ref().is_some_and(|held| {

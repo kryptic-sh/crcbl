@@ -150,6 +150,7 @@ const SCENES: &[(Scene, &str)] = &[
     (Scene::UiTree, "ui_tree"),
     (Scene::UiStyle, "ui_style"),
     (Scene::UiText, "ui_text"),
+    (Scene::UiFocus, "ui_focus"),
 ];
 
 /// Every golden basename this gate drives, in the order it drives them.

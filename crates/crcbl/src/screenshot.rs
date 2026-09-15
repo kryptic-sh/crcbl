@@ -96,6 +96,7 @@ use crate::render::{
 use crate::ui::draw_list::DrawList;
 
 mod still_pool;
+mod ui_focus;
 mod ui_primitives;
 mod ui_style;
 mod ui_text;
@@ -106,6 +107,12 @@ pub use still_pool::{
     STILL_POOL_MEDIUM, STILL_POOL_NEAR_EDGE, STILL_POOL_POST, STILL_POOL_SHALLOW_FLOOR,
     STILL_POOL_SHORE_FLOOR, STILL_POOL_SHORE_START, still_pool_body, still_pool_camera,
     still_pool_forward, still_pool_sky, still_pool_sun,
+};
+pub use ui_focus::{
+    UI_FOCUS_BUTTON, UI_FOCUS_DIALOG, UI_FOCUS_LIST, UI_FOCUS_LIST_HEIGHT, UI_FOCUS_LIST_PADDING,
+    UI_FOCUS_PAGE, UI_FOCUS_RING, UI_FOCUS_RING_OFFSET, UI_FOCUS_RING_WIDTH, UI_FOCUS_ROW,
+    UI_FOCUS_ROW_HEIGHT, UI_FOCUS_ROWS, UI_FOCUS_TARGET, UI_FOCUS_TARGET_ROW, UiFocusLayout,
+    ui_focus_css, ui_focus_draw_list, ui_focus_layout,
 };
 pub use ui_primitives::{
     UI_PRIMITIVES_BASE, UI_PRIMITIVES_BORDER_COLOR, UI_PRIMITIVES_BORDERED_FILL,
@@ -753,6 +760,11 @@ pub enum Scene {
     /// committed font through the glyph atlas. See [`ui_text_layout`] for what
     /// each part is for.
     UiText,
+    /// `docs/plan/07-ui-debug.md` rung 6's focus through [`UiRenderer`]: a
+    /// scripted pad walks a grid of buttons, opens a modal and scrolls a list
+    /// inside it to a row that starts out of view, and a step toward the grid
+    /// is refused. See [`ui_focus_layout`] for what each part is for.
+    UiFocus,
 }
 
 /// How far from the cube's own column each pyramid sits, in world units.
@@ -5973,6 +5985,8 @@ enum UiContent {
     Style,
     /// [`Scene::UiText`]'s text.
     Text,
+    /// [`Scene::UiFocus`]'s focused page.
+    Focus,
 }
 
 /// Puts one of the demo scene's meshes in the frame at `model`.
@@ -6640,6 +6654,11 @@ impl SceneState {
                 renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
                 content: UiContent::Text,
+            },
+            Scene::UiFocus => Self::Ui {
+                renderer: Box::new(UiRenderer::new(device, queue, format)?),
+                atlas: FontAtlas::built_in(),
+                content: UiContent::Focus,
             },
             Scene::UiPrimitives => {
                 let mut renderer = Box::new(UiRenderer::new(device, queue, format)?);
@@ -7665,6 +7684,7 @@ impl OffscreenSetup {
                         UiContent::Tree => ui_tree_draw_list(extent),
                         UiContent::Style => ui_style_draw_list(extent),
                         UiContent::Text => ui_text_draw_list(extent),
+                        UiContent::Focus => ui_focus_draw_list(extent),
                     };
                     // `scale` is 1.0 because every size in the draw list is
                     // already this frame's pixels; a second multiplier is a
@@ -8744,7 +8764,7 @@ mod tests {
             .expect("every forward frame has a forward pass")
             + 1;
         still_pool_passes.insert(after_forward, ("render", "sky"));
-        let expected: [(Scene, &[(&str, &str)]); 19] = [
+        let expected: [(Scene, &[(&str, &str)]); 20] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8842,6 +8862,10 @@ mod tests {
             // pictures above.
             (
                 Scene::UiText,
+                &[("render", "scene background"), ("render", "ui-composite")],
+            ),
+            (
+                Scene::UiFocus,
                 &[("render", "scene background"), ("render", "ui-composite")],
             ),
         ];

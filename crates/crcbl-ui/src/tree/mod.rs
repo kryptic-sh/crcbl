@@ -42,6 +42,15 @@
 //! [`Ui::replace_stylesheet`] and, for one loaded from a file,
 //! [`Ui::poll_stylesheets`]; how resolution is cached is `resolve.rs`'s.
 //!
+//! # Focus
+//!
+//! A frame that begins with [`Ui::begin_frame_with`] also takes a
+//! [`NavInput`], and a node built with [`Ui::block_with`] declares a
+//! [`Behavior`]: whether it is a button, a widget with an engaged state or a
+//! focus scope. Focus sets `:focus`, engagement `:engaged` and a disabled
+//! behavior `:disabled`; `focus/mod.rs` has the rules, and
+//! [`Ui::set_nav_debug`] draws why a move went where it did.
+//!
 //! # Identity
 //!
 //! Every node has a [`NodeKey`]: `hash(parent key, id)`, where the id is
@@ -64,7 +73,8 @@
 //!
 //! # What survives a rebuild, and what clears it
 //!
-//! The store keeps, per key, the pointer's hover and press, a scroll offset,
+//! The store keeps, per key, the pointer's hover and press, focus and
+//! engagement, a scope's remembered node, a scroll offset,
 //! last frame's rectangle, its resolved style, Taffy's layout cache, and three
 //! hashes: the node's resolved layout style ([`NodeStyle::layout_hash`], which
 //! no paint field reaches), its
@@ -80,8 +90,10 @@
 //! [`Ui::layout`] produced, before this frame's tree exists — the classic
 //! immediate-mode trade the plan takes. The topmost node under the pointer and
 //! every node containing it are hovered; a press latches on the topmost node
-//! through [`UiState`]'s capture, so pressing one node and releasing over
-//! another clicks neither.
+//! — or on the innermost node around it with a [`Role`], so a click on a
+//! button's label clicks the button — through [`UiState`]'s capture, so
+//! pressing one node and releasing over another clicks neither. A disabled
+//! node takes the press and is never clicked.
 //!
 //! # Emission
 //!
@@ -90,11 +102,16 @@
 //! per side otherwise. With any corner radius it is one
 //! [`DrawList::rounded_rect`], whose border is uniform, **drawn at the top
 //! side's width**. A block with `overflow: hidden` clips its children to its
-//! padding box. A text span draws from its content box's top-left: in the
+//! padding box, and so does `overflow: scroll`. A text span draws from its content box's top-left: in the
 //! bitmap font as one line per newline, or — when its `font-family` names a
 //! parsed font — as a [`crate::font::layout::TextLayout`] broken at the width
 //! layout measured it under and aligned by its `text-align`. An image span
-//! stretches its picture over its content box.
+//! stretches its picture over its content box. Outlines are drawn after the
+//! whole tree, in build order, each under the clip its node was drawn under,
+//! so a later sibling never covers a focus ring: a ring `outline-offset`
+//! outside the border box, one [`DrawList::rect_outline`] — or a
+//! [`DrawList::rounded_rect`], its radii grown by the offset, when the node has
+//! any.
 //!
 //! # Text measures through Taffy
 //!
@@ -114,6 +131,7 @@
 //! `powf` or `mul_add` — so the result does not depend on a platform's libm.
 
 mod emit;
+pub mod focus;
 mod layout;
 mod resolve;
 mod store;
@@ -138,15 +156,20 @@ use crate::style::{Declaration, InheritedId, NodeSelector, PseudoClasses, Styles
 use crate::text::FontAtlas;
 use crate::widget::{ButtonState, PointerInput, UiState};
 
+use focus::FocusState;
 use layout::{LayoutTree, MeasureCache};
 use store::{Interaction, NodeStore};
 
 pub use crate::font::FontFamily;
 pub use crate::font::layout::TextAlign;
+pub use focus::{
+    Behavior, Direction, Engagement, FOCUS_HISTORY, InputMode, NavInput, NavScore, NavStep, Role,
+    Scope,
+};
 pub use store::NodeKey;
 pub use style::{
-    Align, Display, Edges, FlexDirection, FlexWrap, Justify, Length, LengthAuto, LineHeight,
-    NodeStyle, Overflow, Position,
+    Align, Display, Edges, FlexDirection, FlexWrap, Justify, Length, LengthAuto, LineHeight, NavId,
+    NavTarget, NavWrap, NodeStyle, Overflow, Position,
 };
 
 /// The space a root is laid out in, on one axis.
@@ -217,8 +240,8 @@ impl From<AtlasImage> for Span<'_> {
     }
 }
 
-/// A node's key and the pointer's relation to it, as resolved when the frame
-/// began.
+/// A node's key and its interaction state — the pointer's relation to it, its
+/// focus and its engagement — as resolved when the frame began.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Response {
     /// The node's identity; [`Ui::rect`] takes it.
@@ -228,8 +251,16 @@ pub struct Response {
     pub hovered: bool,
     /// The node captured the press that is held.
     pub pressed: bool,
-    /// The node captured a press that was released over it this frame.
+    /// The node captured a press that was released over it this frame, or —
+    /// focused, and not a [`Role::Engage`] — was accepted: the one event a
+    /// widget fires on, whichever device spoke.
     pub clicked: bool,
+    /// The node holds the tree's focus, in either [`InputMode`].
+    pub focused: bool,
+    /// Where the node's engagement is this frame.
+    pub engagement: Engagement,
+    /// The navigation step the engaged node took instead of focus this frame.
+    pub captured: Option<NavStep>,
 }
 
 /// What a frame node is.
@@ -318,6 +349,7 @@ pub struct Ui {
     malformed: HashSet<String>,
     measure: MeasureCache,
     capture: UiState,
+    focus: FocusState,
     frame: u64,
 }
 
@@ -328,9 +360,17 @@ impl Ui {
         Self::default()
     }
 
-    /// Starts a frame: drops last frame's nodes, and resolves `pointer`
-    /// against last frame's rectangles.
+    /// Starts a frame with no navigation input from a pointer: drops last
+    /// frame's nodes, and resolves `pointer` against last frame's rectangles.
+    /// [`Ui::begin_frame_with`] with [`NavInput::default`].
     pub fn begin_frame(&mut self, pointer: PointerInput) {
+        self.begin_frame_with(pointer, NavInput::default());
+    }
+
+    /// Starts a frame: drops last frame's nodes, resolves `pointer` against
+    /// last frame's rectangles, and then focus and engagement from `nav`
+    /// against last frame's tree. See `focus/mod.rs`.
+    pub fn begin_frame_with(&mut self, pointer: PointerInput, nav: NavInput) {
         self.frame += 1;
         self.nodes.clear();
         self.children.clear();
@@ -341,13 +381,25 @@ impl Ui {
         self.live_text.clear();
         self.selectors.clear();
         self.styles.begin_frame();
-        self.resolve_pointer(pointer);
+        let clicked = self.resolve_pointer(pointer);
+        self.resolve_navigation(nav, clicked);
     }
 
     /// Hover, press capture and click for every stored node, from last frame's
-    /// rectangles.
-    fn resolve_pointer(&mut self, pointer: PointerInput) {
+    /// rectangles. Returns the node clicked, unless it is disabled.
+    fn resolve_pointer(&mut self, pointer: PointerInput) -> Option<NodeKey> {
         let over = self.store.hit_chain(pointer.pos);
+        // A press goes to the innermost node with a role around the topmost
+        // one, so a button's label does not take its button's click.
+        let target = over
+            .iter()
+            .copied()
+            .find(|&key| {
+                self.store
+                    .by_key(key)
+                    .is_some_and(|node| node.behavior.role != Role::None)
+            })
+            .or_else(|| over.first().copied());
         let mut pressed = None;
         let mut clicked = None;
 
@@ -364,7 +416,7 @@ impl Ui {
             clicked = click.then_some(NodeKey(active));
         }
         if self.capture.active().is_none()
-            && let Some(&target) = over.first()
+            && let Some(target) = target
         {
             let (state, click) =
                 self.capture
@@ -377,6 +429,11 @@ impl Ui {
             }
         }
 
+        let clicked = clicked.filter(|&key| {
+            self.store
+                .by_key(key)
+                .is_some_and(|node| !node.behavior.disabled)
+        });
         let captured = self.store.ancestry(self.capture.active().map(NodeKey));
         for node in self.store.iter_mut() {
             node.interaction = Interaction {
@@ -384,8 +441,10 @@ impl Ui {
                     && (captured.is_empty() || captured.contains(&node.key)),
                 pressed: pressed == Some(node.key),
                 clicked: clicked == Some(node.key),
+                ..Interaction::default()
             };
         }
+        clicked
     }
 
     /// A block: a flex container whose children `build` adds.
@@ -402,12 +461,25 @@ impl Ui {
         inline: &[Declaration],
         build: impl FnOnce(&mut Self),
     ) -> Response {
+        self.block_with(selector, inline, Behavior::NONE, build)
+    }
+
+    /// A block that takes part in focus as `behavior` says: [`Ui::block`]
+    /// otherwise.
+    #[track_caller]
+    pub fn block_with(
+        &mut self,
+        selector: &str,
+        inline: &[Declaration],
+        behavior: Behavior,
+        build: impl FnOnce(&mut Self),
+    ) -> Response {
         let parsed = self.node_selector(selector);
         let key = match parsed.id {
             Some(id) => self.key(KeySource::Id(id)),
             None => self.call_site_key(Location::caller()),
         };
-        self.open_block(key, parsed, inline, build)
+        self.open_block(key, parsed, inline, behavior, build)
     }
 
     /// A block keyed by `key`, for one row of a loop: its identity follows the
@@ -420,9 +492,21 @@ impl Ui {
         inline: &[Declaration],
         build: impl FnOnce(&mut Self),
     ) -> Response {
+        self.block_keyed_with(key, selector, inline, Behavior::NONE, build)
+    }
+
+    /// [`Ui::block_keyed`] with a [`Behavior`], as [`Ui::block_with`].
+    pub fn block_keyed_with(
+        &mut self,
+        key: impl Hash,
+        selector: &str,
+        inline: &[Declaration],
+        behavior: Behavior,
+        build: impl FnOnce(&mut Self),
+    ) -> Response {
         let parsed = self.node_selector(selector);
         let key = self.key(KeySource::Keyed(hash_of(key)));
-        self.open_block(key, parsed, inline, build)
+        self.open_block(key, parsed, inline, behavior, build)
     }
 
     /// A span: text or a picture, keyed by its selector's `#id` or else by
@@ -451,7 +535,7 @@ impl Ui {
             }
             Span::Image(image) => Content::Image(image),
         };
-        let index = self.push(key, parsed, inline, content);
+        let index = self.push(key, parsed, inline, Behavior::NONE, content);
         self.close(index);
         self.response(index)
     }
@@ -474,9 +558,10 @@ impl Ui {
         key: NodeKey,
         selector: NodeSelector<'_>,
         inline: &[Declaration],
+        behavior: Behavior,
         build: impl FnOnce(&mut Self),
     ) -> Response {
-        let index = self.push(key, selector, inline, Content::Block);
+        let index = self.push(key, selector, inline, behavior, Content::Block);
         let response = self.response(index);
         self.open.push(index);
         build(self);
@@ -518,6 +603,7 @@ impl Ui {
         key: NodeKey,
         selector: NodeSelector<'_>,
         inline: &[Declaration],
+        behavior: Behavior,
         content: Content,
     ) -> usize {
         let key = self.unique(key);
@@ -529,6 +615,8 @@ impl Ui {
         let stored = self.store.get_mut(slot);
         stored.last_touched_frame = self.frame;
         stored.parent = parent.map(|parent| self.nodes[parent].key);
+        stored.behavior = behavior;
+        stored.id = selector.id.map(NavId::new);
 
         let span = !matches!(content, Content::Block);
         let start = self.selectors.len();
@@ -646,12 +734,18 @@ impl Ui {
             hovered,
             pressed,
             clicked,
+            focused,
+            engagement,
+            captured,
         } = self.store.get(node.slot).interaction;
         Response {
             key: node.key,
             hovered,
             pressed,
             clicked,
+            focused,
+            engagement,
+            captured,
         }
     }
 
@@ -691,9 +785,10 @@ impl Ui {
     }
 
     /// Scrolls the innermost open block's children by `offset`: they are drawn
-    /// and hit that far up and left of where they are laid out. **Not clamped**
-    /// — the tree does not yet measure how far its content reaches. Does
-    /// nothing outside every block.
+    /// and hit that far up and left of where they are laid out. For an
+    /// `overflow: scroll` block the offset is clamped at layout to how far its
+    /// content reaches; any other block takes it as given. Does nothing
+    /// outside every block.
     pub fn set_scroll_offset(&mut self, offset: Vec2) {
         if let Some(&index) = self.open.last() {
             self.store.get_mut(self.nodes[index].slot).scroll_offset = offset;
@@ -730,7 +825,23 @@ impl Ui {
             compute_root_layout(&mut tree, NodeId::from(root), space);
             round_layout(&mut tree, NodeId::from(root));
         }
+        self.clamp_scroll();
         self.place(origin);
+    }
+
+    /// Clamps every `overflow: scroll` block's offset to the reach its content
+    /// was just laid out with, and records that reach for focus to scroll by.
+    fn clamp_scroll(&mut self) {
+        for node in &self.nodes {
+            let stored = self.store.get_mut(node.slot);
+            if node.style.overflow == Overflow::Scroll {
+                let reach = Vec2::new(node.layout.scroll_width(), node.layout.scroll_height());
+                stored.scroll_max = reach;
+                stored.scroll_offset = stored.scroll_offset.clamp(Vec2::ZERO, reach);
+            } else {
+                stored.scroll_max = Vec2::ZERO;
+            }
+        }
     }
 
     /// Writes each node's children into `children` in build order.
@@ -761,7 +872,7 @@ impl Ui {
                     let (parent_min, parent_clip, parent_hidden) = placed[parent];
                     let parent_node = &self.nodes[parent];
                     let scroll = self.store.get(parent_node.slot).scroll_offset;
-                    let clip = if parent_node.style.overflow == Overflow::Hidden {
+                    let clip = if parent_node.style.overflow.clips() {
                         let (min, max) = padding_box(parent_min, &parent_node.layout);
                         parent_clip.intersect(ClipRect { min, max })
                     } else {

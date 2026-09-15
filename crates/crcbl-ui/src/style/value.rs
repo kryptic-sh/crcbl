@@ -6,8 +6,8 @@
 
 use crate::draw_list::CornerRadii;
 use crate::tree::{
-    Align, Display, Edges, FlexDirection, FlexWrap, FontFamily, Justify, Length, LengthAuto,
-    LineHeight, NodeStyle, Overflow, Position, TextAlign,
+    Align, Direction, Display, Edges, FlexDirection, FlexWrap, FontFamily, Justify, Length,
+    LengthAuto, LineHeight, NavTarget, NavWrap, NodeStyle, Overflow, Position, TextAlign,
 };
 
 /// Which sides of a box a declaration sets.
@@ -110,6 +110,16 @@ pub enum Declaration {
     LineHeight(LineHeight),
     /// `text-align`. Inherited.
     TextAlign(TextAlign),
+    /// `outline-width`, in pixels.
+    OutlineWidth(f32),
+    /// `outline-color`, in linear light.
+    OutlineColor([f32; 4]),
+    /// `outline-offset`, in pixels.
+    OutlineOffset(f32),
+    /// `nav-up`, `nav-right`, `nav-down` or `nav-left`.
+    Nav(Direction, NavTarget),
+    /// `nav-wrap`.
+    NavWrap(NavWrap),
 }
 
 fn set_sides<T: Copy>(edges: &mut Edges<T>, sides: Sides, value: T) {
@@ -166,6 +176,11 @@ impl Declaration {
             Self::FontFamily(value) => style.font_family = value,
             Self::LineHeight(value) => style.line_height = value,
             Self::TextAlign(value) => style.text_align = value,
+            Self::OutlineWidth(value) => style.outline_width = value,
+            Self::OutlineColor(value) => style.outline_color = value,
+            Self::OutlineOffset(value) => style.outline_offset = value,
+            Self::Nav(direction, value) => *style.nav_mut(direction) = value,
+            Self::NavWrap(value) => style.nav_wrap = value,
         }
     }
 }
@@ -208,7 +223,14 @@ impl NodeStyle {
             D::FontFamily(self.font_family),
             D::LineHeight(self.line_height),
             D::TextAlign(self.text_align),
+            D::OutlineWidth(self.outline_width),
+            D::OutlineColor(self.outline_color),
+            D::OutlineOffset(self.outline_offset),
+            D::NavWrap(self.nav_wrap),
         ];
+        for direction in Direction::ALL {
+            all.push(D::Nav(direction, self.nav(direction)));
+        }
         let padding = self.padding;
         let border = self.border;
         for (at, side) in sides.into_iter().enumerate() {
@@ -277,6 +299,12 @@ mod tests {
             line_height: LineHeight::Multiple(1.5),
             text_align: TextAlign::Center,
             align_self: Some(Align::Center),
+            outline_width: 2.0,
+            outline_color: [0.9, 0.8, 0.7, 0.6],
+            outline_offset: -1.0,
+            nav_up: NavTarget::None,
+            nav_right: NavTarget::Id(crate::tree::NavId::new("next")),
+            nav_wrap: NavWrap::Horizontal,
             ..NodeStyle::DEFAULT
         };
         let mut rebuilt = NodeStyle {

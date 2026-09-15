@@ -63,6 +63,15 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   readout panel draw with. Not built from that rung yet: the legacy `kern`
   table, fonts an application registers, shaping and bidi, a contrast curve for
   coverage, and a GPU page array that grows.
+- **`focus`** (in `tree`) — **rung 6 is built** (2026-09-16): focus, scopes with
+  memory and a modal trap, beam-first spatial scoring (`13·major² + minor²`),
+  `nav-*` and `nav-wrap`, the engaged state with snapshot, commit and cancel,
+  `:focus`, `:engaged` and `:disabled`, `overflow: scroll` with a clamped
+  offset, `outline-*`, and the scoring overlay. Not built from that rung yet:
+  the reserved `ui_*` actions — `crcbl-input` has no context stack, no gamepad
+  backend, no last-device tracking and no consumption, so a key bound to a menu
+  would still drive the game — key repeat, a drawn focus-history log, and a
+  focus style in `default.css`.
 - **`widget`** — `Label`, `Button`, `ButtonSkin`, `Style`, `SkinInsets`,
   `PointerInput`, `UiState`, `WidgetId`. The rest of the MVP widget set below is
   unbuilt.

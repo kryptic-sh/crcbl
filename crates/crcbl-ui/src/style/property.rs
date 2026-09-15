@@ -12,7 +12,7 @@
 //! | `margin` (1–4), `margin-*` | length, `auto` |
 //! | `padding` (1–4), `padding-*` | length |
 //! | `border-width` (1–4), `border-*-width` | px |
-//! | `overflow` | `visible` \| `hidden` |
+//! | `overflow` | `visible` \| `hidden` \| `scroll` |
 //! | `flex-direction` | `row` \| `column` \| `row-reverse` \| `column-reverse` |
 //! | `flex-wrap` | `nowrap` \| `wrap` \| `wrap-reverse` |
 //! | `justify-content` | `normal` `start` `end` `flex-start` `flex-end` `center` `space-between` `space-around` `space-evenly` |
@@ -27,6 +27,12 @@
 //! | `font-family` | a comma-separated list; the first of `bitmap`, `sans-serif` and `"Atkinson Hyperlegible"` in it is used |
 //! | `line-height` | `normal` \| number \| px |
 //! | `text-align` | `left` \| `start` \| `center` \| `right` \| `end` |
+//! | `outline-width` | px |
+//! | `outline-offset` | px, either sign |
+//! | `outline-color` | colour |
+//! | `outline` | `none` \| a px width and a colour, in either order |
+//! | `nav-up` `nav-right` `nav-down` `nav-left` | `auto` \| `none` \| `#id` |
+//! | `nav-wrap` | `none` \| `horizontal` \| `vertical` \| `both` |
 //!
 //! A **length** is `<n>px`, `<n>%` or a unitless `0`. A **colour** is `#rgb`,
 //! `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`rgba()` in either the comma or the
@@ -42,6 +48,10 @@
 //! specification's zero; Chrome serialises it as `0%`, which resolves the same
 //! against a definite container.
 //!
+//! `outline` has no style keyword: the ring is solid, and `none` is a zero
+//! width. `nav-*` names an id the way a selector does, `#` and all; the
+//! `nav-wrap` property is this engine's, not CSS's.
+//!
 //! A `font-family` list naming none of the three families this engine has is
 //! invalid rather than falling back to a default: the diagnostic is worth more
 //! than a silent bitmap font. `line-height` takes no percentage.
@@ -55,8 +65,8 @@ use cssparser::{ParseError, Parser, Token, match_ignore_ascii_case};
 
 use super::value::{Corners, Declaration, Sides};
 use crate::tree::{
-    Align, Display, Edges, FlexDirection, FlexWrap, FontFamily, Justify, Length, LengthAuto,
-    LineHeight, NodeStyle, Overflow, Position, TextAlign,
+    Align, Direction, Display, Edges, FlexDirection, FlexWrap, FontFamily, Justify, Length,
+    LengthAuto, LineHeight, NavId, NavTarget, NavWrap, NodeStyle, Overflow, Position, TextAlign,
 };
 
 /// A property a stylesheet can name, longhand or shorthand.
@@ -100,6 +110,12 @@ pub(crate) enum Property {
     FontFamily,
     LineHeight,
     TextAlign,
+    Outline,
+    OutlineWidth,
+    OutlineColor,
+    OutlineOffset,
+    Nav(Direction),
+    NavWrap,
 }
 
 /// The failure a value parser reports; the caller words the diagnostic.
@@ -167,6 +183,15 @@ impl Property {
             "font-family" => Self::FontFamily,
             "line-height" => Self::LineHeight,
             "text-align" => Self::TextAlign,
+            "outline" => Self::Outline,
+            "outline-width" => Self::OutlineWidth,
+            "outline-color" => Self::OutlineColor,
+            "outline-offset" => Self::OutlineOffset,
+            "nav-up" => Self::Nav(Direction::Up),
+            "nav-right" => Self::Nav(Direction::Right),
+            "nav-down" => Self::Nav(Direction::Down),
+            "nav-left" => Self::Nav(Direction::Left),
+            "nav-wrap" => Self::NavWrap,
             _ => return None,
         })
     }
@@ -237,6 +262,7 @@ impl Property {
                     Some(match_ignore_ascii_case! { name,
                         "visible" => Overflow::Visible,
                         "hidden" => Overflow::Hidden,
+                        "scroll" => Overflow::Scroll,
                         _ => return None,
                     })
                 })?)),
@@ -326,6 +352,20 @@ impl Property {
                         _ => return None,
                     })
                 })?)),
+                Self::Outline => outline(input, out)?,
+                Self::OutlineWidth => out.push(D::OutlineWidth(px(input, Sign::NonNegative)?)),
+                Self::OutlineColor => out.push(D::OutlineColor(color(input)?)),
+                Self::OutlineOffset => out.push(D::OutlineOffset(px(input, Sign::Any)?)),
+                Self::Nav(direction) => out.push(D::Nav(direction, nav_target(input)?)),
+                Self::NavWrap => out.push(D::NavWrap(keyword(input, |name| {
+                    Some(match_ignore_ascii_case! { name,
+                        "none" => NavWrap::None,
+                        "horizontal" => NavWrap::Horizontal,
+                        "vertical" => NavWrap::Vertical,
+                        "both" => NavWrap::Both,
+                        _ => return None,
+                    })
+                })?)),
             }
             Ok(())
         })
@@ -391,6 +431,15 @@ impl Property {
             Self::FontFamily => to.font_family = from.font_family,
             Self::LineHeight => to.line_height = from.line_height,
             Self::TextAlign => to.text_align = from.text_align,
+            Self::Outline => {
+                to.outline_width = from.outline_width;
+                to.outline_color = from.outline_color;
+            }
+            Self::OutlineWidth => to.outline_width = from.outline_width,
+            Self::OutlineColor => to.outline_color = from.outline_color,
+            Self::OutlineOffset => to.outline_offset = from.outline_offset,
+            Self::Nav(direction) => *to.nav_mut(direction) = from.nav(direction),
+            Self::NavWrap => to.nav_wrap = from.nav_wrap,
         }
     }
 }
@@ -626,6 +675,36 @@ fn named_family(name: &str) -> Option<FontFamily> {
         "atkinson hyperlegible" => FontFamily::Sans,
         _ => return None,
     })
+}
+
+/// `outline`: `none`, or a width and a colour in either order.
+fn outline(input: &mut Parser<'_>, out: &mut Vec<Declaration>) -> Result<(), Invalid> {
+    use Declaration as D;
+    if input
+        .try_parse(|input| input.expect_ident_matching("none"))
+        .is_ok()
+    {
+        out.extend([D::OutlineWidth(0.0), D::OutlineColor([0.0; 4])]);
+        return Ok(());
+    }
+    let (width, colour) = if let Ok(width) = input.try_parse(|input| px(input, Sign::NonNegative)) {
+        (width, color(input)?)
+    } else {
+        let colour = color(input)?;
+        (px(input, Sign::NonNegative)?, colour)
+    };
+    out.extend([D::OutlineWidth(width), D::OutlineColor(colour)]);
+    Ok(())
+}
+
+/// `nav-*`: `auto`, `none` or an id with its `#`.
+fn nav_target(input: &mut Parser<'_>) -> Result<NavTarget, Invalid> {
+    match *input.next()? {
+        Token::Ident(ref name) if name.eq_ignore_ascii_case("auto") => Ok(NavTarget::Auto),
+        Token::Ident(ref name) if name.eq_ignore_ascii_case("none") => Ok(NavTarget::None),
+        Token::IDHash(ref id) => Ok(NavTarget::Id(NavId::new(id))),
+        _ => invalid(),
+    }
 }
 
 /// `line-height`: `normal`, a number or a pixel length.
@@ -891,6 +970,11 @@ mod tests {
             ("top", "-4px"),
             ("line-height", "1.25"),
             ("text-align", "CENTER"),
+            ("outline-offset", "-2px"),
+            ("nav-up", "#top"),
+            ("nav-down", "NONE"),
+            ("nav-left", "auto"),
+            ("nav-wrap", "horizontal"),
         ]);
         assert_eq!(style.display, Display::None);
         assert_eq!(style.position, Position::Absolute);
@@ -908,6 +992,26 @@ mod tests {
         assert_eq!(style.inset.top, px(-4.0));
         assert_eq!(style.line_height, LineHeight::Multiple(1.25));
         assert_eq!(style.text_align, TextAlign::Center);
+        assert_eq!(style.outline_offset, -2.0);
+        assert_eq!(style.nav_up, NavTarget::Id(NavId::new("top")));
+        assert_eq!(style.nav_down, NavTarget::None);
+        assert_eq!(style.nav_left, NavTarget::Auto);
+        assert_eq!(style.nav_right, NavTarget::Auto);
+        assert_eq!(style.nav_wrap, NavWrap::Horizontal);
+        assert_eq!(
+            style_of(&[("overflow", "scroll")]).overflow,
+            Overflow::Scroll
+        );
+        for css in ["3px #ff0000", "#ff0000 3px"] {
+            let ring = style_of(&[("outline", css)]);
+            assert_eq!(
+                (ring.outline_width, ring.outline_color),
+                (3.0, [1.0, 0.0, 0.0, 1.0]),
+                "outline: {css}"
+            );
+        }
+        let none = style_of(&[("outline", "2px red"), ("outline", "none")]);
+        assert_eq!((none.outline_width, none.outline_color), (0.0, [0.0; 4]));
 
         let refused = [
             ("width", "10"),
@@ -918,7 +1022,7 @@ mod tests {
             ("padding", "1px 2px 3px 4px 5px"),
             ("border-width", "10%"),
             ("display", "block"),
-            ("overflow", "scroll"),
+            ("overflow", "auto"),
             ("align-self", "normal"),
             ("align-items", "auto"),
             ("flex-grow", "-1"),
@@ -939,6 +1043,14 @@ mod tests {
             ("line-height", "120%"),
             ("line-height", "2em"),
             ("text-align", "justify"),
+            ("outline-width", "-1px"),
+            ("outline", "2px"),
+            ("outline", "red"),
+            ("outline", "2px red solid"),
+            ("nav-up", "top"),
+            ("nav-up", "\"#top\""),
+            ("nav-up", "#a #b"),
+            ("nav-wrap", "wrap"),
         ];
         for (property, css) in refused {
             assert!(

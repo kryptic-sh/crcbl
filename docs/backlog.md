@@ -3,6 +3,33 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## What UI rung 6 shipped without (2026-09-16)
+
+`crcbl_ui::tree`'s focus landed with the gaps below.
+
+- **The reserved `ui_*` actions are not wired**, and no sample's keys changed.
+  `crcbl-input` has typed actions with flat bindings and per-action enabling,
+  and no context stack, no gamepad backend, no last-active-device tracking, no
+  repeat pattern and no consumption — a key bound to two actions drives both.
+  The proposal for the widget rung: `push_context` and `pop_context` in
+  `crcbl-input` with the active context consuming the keys it binds, device
+  tracking and a repeat pattern for a held move; a reserved `ui` context pushed
+  only while a menu has input; and an adapter in `crcbl` that builds `NavInput`
+  from the action map, so `crcbl-ui` depends on nothing new.
+- **`default.css` has no focus ring rule**, because no engine widget is on the
+  tree yet; it lands with the widgets.
+- **Focus history is kept and not drawn** by the overlay.
+- **A new modal or a newly built focusable node is seen a frame late**, because
+  focus resolves against last frame's tree, as hover does.
+- **Next and previous into a scope ignore its memory**, deliberately, so tree
+  order stays linear.
+- **Only `overflow: scroll` scrolls a focused node into view**, and the view is
+  the content box, so the container's padding is the ring's margin.
+- **Rounded outlines and nested scroll containers** are covered by unit tests
+  and no GPU claim; D3D12 and Metal draw `ui_focus` only on CI.
+- **`Menu` is not on the tree**: stylesheets cannot express a nine-slice or
+  image background yet, and its slider and cycler are widget-rung work.
+
 ## What UI rung 5 shipped without (2026-09-16)
 
 `crcbl_ui::font` landed with the gaps below.

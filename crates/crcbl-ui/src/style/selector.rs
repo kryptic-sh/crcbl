@@ -27,9 +27,10 @@
 //! # Matching
 //!
 //! Right to left, as browsers and RmlUi match: the rightmost compound against
-//! the node, then each combinator walks up. `:focus`, `:disabled` and `:engaged`
-//! parse and match against [`PseudoClasses`] like the others, and nothing in
-//! the tree sets them until the focus rung does, so today they match nothing.
+//! the node, then each combinator walks up. Every pseudo-class matches against
+//! the [`PseudoClasses`] the tree resolved for the node; see
+//! [`crate::tree::focus`] for when `:focus`, `:engaged` and `:disabled` are
+//! set.
 
 use core::ops::{BitAnd, BitOr};
 
@@ -43,16 +44,17 @@ pub struct PseudoClasses(u8);
 impl PseudoClasses {
     /// The empty set.
     pub const NONE: Self = Self(0);
-    /// `:hover`: the pointer is over the node or something inside it.
+    /// `:hover`: the pointer is over the node or something inside it, while
+    /// the pointer is the device driving.
     pub const HOVER: Self = Self(1);
     /// `:active`: the node holds the pointer's press.
     pub const ACTIVE: Self = Self(1 << 1);
-    /// `:focus`. Not set by the tree yet.
+    /// `:focus`: the node holds the focus, while the pad or the keyboard is
+    /// the device driving.
     pub const FOCUS: Self = Self(1 << 2);
-    /// `:disabled`. Not set by the tree yet.
+    /// `:disabled`: the node's behavior is disabled.
     pub const DISABLED: Self = Self(1 << 3);
-    /// `:engaged`: the focused widget is taking the navigation input. Not set
-    /// by the tree yet.
+    /// `:engaged`: the focused widget is taking the navigation input.
     pub const ENGAGED: Self = Self(1 << 4);
 
     /// The pseudo-class `name` spells, ignoring ASCII case.

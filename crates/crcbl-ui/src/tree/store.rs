@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use glam::Vec2;
 use taffy::{Cache, Layout};
 
-use super::style::NodeStyle;
+use super::focus::{Behavior, Engagement, NavStep};
+use super::style::{NavId, NodeStyle};
 use crate::draw_list::ClipRect;
 use crate::style::{Candidates, Declaration, InheritedId};
 
@@ -24,8 +25,8 @@ use crate::style::{Candidates, Declaration, InheritedId};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeKey(pub(crate) u64);
 
-/// The pointer's relation to one node, resolved against last frame's
-/// rectangles when a frame begins.
+/// The pointer's relation to one node, and its focus and engagement, resolved
+/// against last frame's rectangles when a frame begins.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Interaction {
     /// The pointer is over this node or over a node inside it, and no press
@@ -33,8 +34,15 @@ pub(crate) struct Interaction {
     pub hovered: bool,
     /// This node captured the press that is held.
     pub pressed: bool,
-    /// This node captured a press that was released over it this frame.
+    /// This node captured a press that was released over it this frame, or
+    /// it is focused and was accepted without engaging.
     pub clicked: bool,
+    /// This node holds its context's focus.
+    pub focused: bool,
+    /// Where this node's engagement is this frame.
+    pub engagement: Engagement,
+    /// The navigation step this engaged node took from focus this frame.
+    pub captured: Option<NavStep>,
 }
 
 /// Everything one node keeps between frames.
@@ -69,9 +77,19 @@ pub(crate) struct StoredNode {
     /// hit.
     pub hittable: bool,
     pub interaction: Interaction,
+    /// How it takes part in focus, as its builder declared it last.
+    pub behavior: Behavior,
+    /// Its selector's `#id`, hashed, for a `nav-*` property to find.
+    pub id: Option<NavId>,
+    /// The node focused inside it last, for a scope root.
+    pub remembered: Option<NodeKey>,
     /// How far its children are scrolled, subtracted from where they are laid
-    /// out. Set by the caller; nothing scrolls it by itself yet.
+    /// out. Set by the caller, and by the tree for an `overflow: scroll` block
+    /// that brings the focused node into view.
     pub scroll_offset: Vec2,
+    /// How far an `overflow: scroll` block's content lets it scroll, as last
+    /// laid out; zero for any other block.
+    pub scroll_max: Vec2,
     /// The candidate rules for its selector, and what they were gathered for.
     pub candidates: Option<StoredCandidates>,
     /// What its resolved style was keyed by last; see `resolve.rs`.
@@ -110,7 +128,11 @@ impl StoredNode {
             paint_order: 0,
             hittable: false,
             interaction: Interaction::default(),
+            behavior: Behavior::NONE,
+            id: None,
+            remembered: None,
             scroll_offset: Vec2::ZERO,
+            scroll_max: Vec2::ZERO,
             candidates: None,
             style_key: 0,
             inline: Vec::new(),
@@ -224,6 +246,25 @@ impl NodeStore {
             .filter(|node| node.contains(pos))
             .max_by_key(|node| node.paint_order);
         self.ancestry(target.map(|node| node.key))
+    }
+
+    /// Whether `key` is `ancestor` or was built under it, walking the same
+    /// chain [`NodeStore::ancestry`] does without collecting it.
+    pub fn is_within(&self, key: NodeKey, ancestor: NodeKey) -> bool {
+        let mut next = Some(key);
+        let mut steps = 0;
+        while let Some(key) = next {
+            if key == ancestor {
+                return true;
+            }
+            // The same bound `ancestry` walks under.
+            steps += 1;
+            if steps > self.len() {
+                break;
+            }
+            next = self.by_key(key).and_then(|node| node.parent);
+        }
+        false
     }
 
     /// `key` and the keys of every node it was built under, innermost first.

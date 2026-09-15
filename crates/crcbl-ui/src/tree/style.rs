@@ -23,6 +23,7 @@ use taffy::{
     FlexboxItemStyle, LengthPercentage, LengthPercentageAuto, Point, Rect, Size,
 };
 
+use super::focus::Direction;
 use crate::draw_list::CornerRadii;
 use crate::font::layout::TextAlign;
 use crate::font::{Font, FontFamily};
@@ -184,16 +185,30 @@ pub enum Position {
 
 /// `overflow`, on both axes at once.
 ///
-/// No `scroll`: a scroll container reserves a scrollbar gutter, and nothing
-/// draws a scrollbar yet.
+/// `scroll` reserves no scrollbar gutter — nothing draws a scrollbar yet, and
+/// Taffy's gutter is `scrollbar_width`, which this style leaves at zero — so it
+/// lays out exactly as `hidden` does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Overflow {
     /// Children may draw outside the box.
     #[default]
     Visible,
     /// Children are clipped to the padding box, and the box's automatic
-    /// minimum size as a flex item is zero rather than its content.
+    /// minimum size as a flex item is zero rather than its content. A scroll
+    /// offset the caller sets is applied as given.
     Hidden,
+    /// As `Hidden`, and the box is a scroll container the tree manages: its
+    /// offset is clamped to how far its content reaches, and it scrolls the
+    /// focused node inside it into view — see [`crate::tree`]'s focus docs.
+    Scroll,
+}
+
+impl Overflow {
+    /// Whether children are clipped to the padding box.
+    #[must_use]
+    pub const fn clips(self) -> bool {
+        matches!(self, Self::Hidden | Self::Scroll)
+    }
 }
 
 /// `line-height`: the pitch between a text span's lines.
@@ -237,6 +252,64 @@ impl LineHeight {
             1 => Self::Multiple(f32::from_bits(bits)),
             2 => Self::Px(f32::from_bits(bits)),
             _ => Self::Normal,
+        }
+    }
+}
+
+/// An id a `nav-*` property names, hashed: what a node's `#id` is compared
+/// against when a directional move follows the property.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NavId(pub(crate) u64);
+
+impl NavId {
+    /// The id `name` — without its `#`.
+    #[must_use]
+    pub fn new(name: &str) -> Self {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(name, &mut hasher);
+        Self(hasher.finish())
+    }
+}
+
+/// `nav-up`, `nav-right`, `nav-down` and `nav-left`: where a directional move
+/// from the node goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum NavTarget {
+    /// Wherever the spatial search finds.
+    #[default]
+    Auto,
+    /// Nowhere: the move leaves focus where it is.
+    None,
+    /// The first focusable node in tree order whose `#id` this is; the spatial
+    /// search when there is none.
+    Id(NavId),
+}
+
+/// `nav-wrap`, on a container: which axes a directional move that finds
+/// nothing inside it wraps round to the container's far side on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum NavWrap {
+    /// Neither: the move leaves the container, or stays put.
+    #[default]
+    None,
+    /// Left and right, as a carousel.
+    Horizontal,
+    /// Up and down.
+    Vertical,
+    /// Both, as a grid.
+    Both,
+}
+
+impl NavWrap {
+    /// Whether a move along the horizontal axis (`horizontal`) or the
+    /// vertical one wraps.
+    #[must_use]
+    pub const fn wraps(self, horizontal: bool) -> bool {
+        match self {
+            Self::None => false,
+            Self::Horizontal => horizontal,
+            Self::Vertical => !horizontal,
+            Self::Both => true,
         }
     }
 }
@@ -318,6 +391,26 @@ pub struct NodeStyle {
     pub line_height: LineHeight,
     /// Where a text span's lines sit across its content box. Inherited.
     pub text_align: TextAlign,
+    /// `outline-width`, in pixels: a ring drawn outside the border box that
+    /// takes no space. Nothing is drawn while it is zero.
+    pub outline_width: f32,
+    /// `outline-color`. Nothing is drawn while its alpha is zero.
+    pub outline_color: [f32; 4],
+    /// `outline-offset`, in pixels: how far outside the border box the ring
+    /// starts; negative draws it inside.
+    pub outline_offset: f32,
+
+    // -- navigation -----------------------------------------------------------
+    /// `nav-up`.
+    pub nav_up: NavTarget,
+    /// `nav-right`.
+    pub nav_right: NavTarget,
+    /// `nav-down`.
+    pub nav_down: NavTarget,
+    /// `nav-left`.
+    pub nav_left: NavTarget,
+    /// `nav-wrap`.
+    pub nav_wrap: NavWrap,
 }
 
 impl NodeStyle {
@@ -354,9 +447,18 @@ impl NodeStyle {
         font_family: FontFamily::Bitmap,
         line_height: LineHeight::Normal,
         text_align: TextAlign::Left,
+        outline_width: 0.0,
+        outline_color: [0.0; 4],
+        outline_offset: 0.0,
+        nav_up: NavTarget::Auto,
+        nav_right: NavTarget::Auto,
+        nav_down: NavTarget::Auto,
+        nav_left: NavTarget::Auto,
+        nav_wrap: NavWrap::None,
     };
 
-    /// Folds every layout field into `state`, and no paint field.
+    /// Folds every layout field into `state`, and no paint or navigation
+    /// field.
     ///
     /// Floats go in by their bits, so `0.0` and `-0.0` hash apart — a spurious
     /// relayout at worst, never a missed one. The text fields that size a
@@ -430,6 +532,27 @@ impl NodeStyle {
 }
 
 impl NodeStyle {
+    /// The `nav-*` property for a move in `direction`.
+    #[must_use]
+    pub const fn nav(&self, direction: Direction) -> NavTarget {
+        match direction {
+            Direction::Up => self.nav_up,
+            Direction::Right => self.nav_right,
+            Direction::Down => self.nav_down,
+            Direction::Left => self.nav_left,
+        }
+    }
+
+    /// The `nav-*` property for a move in `direction`, to set.
+    pub const fn nav_mut(&mut self, direction: Direction) -> &mut NavTarget {
+        match direction {
+            Direction::Up => &mut self.nav_up,
+            Direction::Right => &mut self.nav_right,
+            Direction::Down => &mut self.nav_down,
+            Direction::Left => &mut self.nav_left,
+        }
+    }
+
     /// A text span's line pitch in `font`, the parsed font its family names.
     #[must_use]
     pub fn text_line_height(&self, font: &Font) -> f32 {
@@ -513,6 +636,7 @@ impl CoreStyle for NodeStyle {
         let overflow = match self.overflow {
             Overflow::Visible => taffy::Overflow::Visible,
             Overflow::Hidden => taffy::Overflow::Hidden,
+            Overflow::Scroll => taffy::Overflow::Scroll,
         };
         Point {
             x: overflow,
@@ -638,6 +762,12 @@ mod tests {
             border_color: [0.0, 1.0, 0.0, 1.0],
             radii: CornerRadii::uniform(4.0),
             color: [0.5; 4],
+            outline_width: 2.0,
+            outline_color: [1.0; 4],
+            outline_offset: 1.0,
+            nav_up: NavTarget::None,
+            nav_left: NavTarget::Id(NavId::new("x")),
+            nav_wrap: NavWrap::Both,
             ..base
         };
         assert_eq!(layout_hash(&base), layout_hash(&painted));
