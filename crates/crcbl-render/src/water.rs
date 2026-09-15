@@ -974,7 +974,9 @@ mod tests {
             .split_once("pub(crate) fn add_passes<'a>(")
             .expect("this file declares `add_passes`")
             .1
-            .split_once("\n    }\n")
+            // `"\n    }"` and not `"\n    }\n"`: a Windows checkout reads this
+            // file with CRLF endings, and the brace is followed by `\r` there.
+            .split_once("\n    }")
             .expect("the function has a body")
             .0;
         let added = body.matches(".add_render_pass(").count() as u64;

@@ -6445,7 +6445,21 @@ fn draw_scene_on_every_geometry_path_measuring(
 /// zero. It is the frames' own difference that is unchanged; what changed is
 /// whether the encode can still see it.
 ///
-/// All seven budgets are two orders of magnitude under anything a level that
+/// `StillPool` is the eighth, and the first whose sensitive pixel is chosen by a
+/// cast from a float to a pixel index rather than by a comparison. The water
+/// surface reprojects where its refracted ray lands and truncates that to the
+/// pixel it reads the opaque frame from, so a last-place difference in the
+/// geometry the two paths drew beneath it can move the read by one pixel — a
+/// **hypothesis**, like `AlphaMask`'s, because the difference does not exist on
+/// either driver this workspace can run. What is measured is one channel, off
+/// by one, out of the frame's 196608 — the green of `(197, 65)`, `151` against
+/// `150` — on the Ubuntu runner's llvmpipe, Mesa 25.2.8 / LLVM 20.1.2, where
+/// Arch's Mesa 26.2.2 and radv both answer zero. **This is a guard that got
+/// weaker, and it is recorded as one rather than absorbed:** what is gone is
+/// this scene's ability to catch a one-level cross-path regression in the water
+/// surface; the golden and the band relations beside it are unaffected.
+///
+/// All eight budgets are two orders of magnitude under anything a level that
 /// failed to draw would produce — the failure this exists for moves whole
 /// clusters, not one channel.
 ///
@@ -6494,6 +6508,7 @@ const fn path_lsb_channels(scene: Scene) -> (usize, u8) {
         Scene::Ao => (16, 1),
         Scene::AlphaMask => (16, 1),
         Scene::DoubleSided => (16, 1),
+        Scene::StillPool => (16, 1),
         _ => (0, 1),
     }
 }
