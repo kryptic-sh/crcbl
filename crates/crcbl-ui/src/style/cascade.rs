@@ -26,9 +26,9 @@
 //! What a set of matched rules merges into is cached, keyed by the matched set,
 //! the node's pseudo-state bits those rules depend on and its parent's
 //! [`InheritedId`] — the interned identity of what a child can inherit:
-//! `color`, `font-size` and the custom properties. Keying on that rather than
-//! on the parent's whole resolved style is what lets a parent's `:hover`
-//! background change without re-resolving its children.
+//! `color`, the text properties and the custom properties. Keying on that
+//! rather than on the parent's whole resolved style is what lets a parent's
+//! `:hover` background change without re-resolving its children.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ use std::sync::Arc;
 use super::selector::{Bucket, Element, PseudoClasses, Selector};
 use super::sheet::{Decl, Stylesheet, WideKeyword};
 use super::var::{CustomProperties, resolve_custom, substitute};
-use crate::tree::NodeStyle;
+use crate::tree::{FontFamily, LineHeight, NodeStyle, TextAlign};
 
 /// Where a sheet's rules sit in the cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -173,7 +173,7 @@ impl RuleIndex {
 pub(crate) struct InheritedId(u32);
 
 impl InheritedId {
-    /// A root's parent: the initial `color` and `font-size` and no custom
+    /// A root's parent: the initial `color` and text properties and no custom
     /// properties.
     pub const ROOT: Self = Self(0);
 }
@@ -182,6 +182,9 @@ impl InheritedId {
 struct Inherited {
     color: [u32; 4],
     font_size: u32,
+    font_family: FontFamily,
+    line_height: (u8, u32),
+    text_align: TextAlign,
     custom: Arc<CustomProperties>,
 }
 
@@ -190,6 +193,9 @@ impl Inherited {
         Self {
             color: style.color.map(f32::to_bits),
             font_size: style.font_size.to_bits(),
+            font_family: style.font_family,
+            line_height: style.line_height.bits(),
+            text_align: style.text_align,
             custom,
         }
     }
@@ -312,6 +318,9 @@ fn compute(index: &RuleIndex, matched: &[u32], parent: &Inherited) -> Definition
     let base = NodeStyle {
         color: parent.color.map(f32::from_bits),
         font_size: f32::from_bits(parent.font_size),
+        font_family: parent.font_family,
+        line_height: LineHeight::from_bits(parent.line_height),
+        text_align: parent.text_align,
         ..NodeStyle::DEFAULT
     };
 

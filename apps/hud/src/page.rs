@@ -122,7 +122,7 @@ pub struct PageStats {
     /// Rectangle outlines — the frames around the panel's bars, the banner and
     /// each ability slot.
     pub outlines: usize,
-    /// Text spans.
+    /// Text spans, in the bitmap font or as a parsed font's glyph run.
     pub text: usize,
     /// Stroked lines and polylines.
     pub strokes: usize,
@@ -141,7 +141,7 @@ impl PageStats {
             match command {
                 DrawCommand::Rect { .. } => stats.rects += 1,
                 DrawCommand::RectOutline { .. } => stats.outlines += 1,
-                DrawCommand::Text { .. } => stats.text += 1,
+                DrawCommand::Text { .. } | DrawCommand::Glyphs { .. } => stats.text += 1,
                 DrawCommand::Line { .. } | DrawCommand::Polyline { .. } => stats.strokes += 1,
                 DrawCommand::Image { .. } | DrawCommand::RoundedRect { .. } => stats.shapes += 1,
             }
@@ -620,6 +620,7 @@ mod tests {
                     | DrawCommand::Image { min, max, .. }
                     | DrawCommand::RoundedRect { min, max, .. } => (*min, *max),
                     DrawCommand::Text { pos, .. } => (*pos, *pos),
+                    DrawCommand::Glyphs { origin, .. } => (*origin, *origin),
                     DrawCommand::Line { from, to, .. } => (from.min(*to), from.max(*to)),
                     DrawCommand::Polyline { points, .. } => points.iter().fold(
                         (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),

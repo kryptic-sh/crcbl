@@ -3,6 +3,14 @@
 //! Provides a built-in monospace bitmap font (the "engine font") with glyph
 //! metrics and a simple text-layout function that produces positioned glyph
 //! indices for the draw list.
+//!
+//! # Beside real fonts, not replaced by them
+//!
+//! [`crate::font`] parses and rasterises an outline font, and that is what a
+//! tree span draws when a stylesheet gives it `font-family: sans-serif`. This
+//! pixel font is still the one the menus, the console, the debug panel, the
+//! widgets, [`crate::readout::ReadoutPanel`] (through `default.css`) and every
+//! sample's hand-drawn HUD draw with, and the initial `font-family`.
 
 use glam::Vec2;
 

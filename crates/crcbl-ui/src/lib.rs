@@ -3,8 +3,8 @@
 //! Each frame the UI code produces a [`DrawList`] — a sequence of draw commands
 //! (rectangles, pictures, text spans) that a render backend processes. Text is
 //! rendered from the built-in [`FontAtlas`] which provides a monospace bitmap
-//! font, and pictures from an [`ImageAtlas`] the caller registers RGBA8 images
-//! into.
+//! font, or from a parsed font through [`font`]'s glyph atlas, and pictures from
+//! an [`ImageAtlas`] the caller registers RGBA8 images into.
 //!
 //! # Architecture
 //!
@@ -47,6 +47,7 @@ pub mod budget;
 pub mod console;
 pub mod debug;
 pub mod draw_list;
+pub mod font;
 pub mod hud;
 pub mod image;
 pub mod menu;

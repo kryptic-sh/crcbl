@@ -6,8 +6,8 @@
 
 use crate::draw_list::CornerRadii;
 use crate::tree::{
-    Align, Display, Edges, FlexDirection, FlexWrap, Justify, Length, LengthAuto, NodeStyle,
-    Overflow, Position,
+    Align, Display, Edges, FlexDirection, FlexWrap, FontFamily, Justify, Length, LengthAuto,
+    LineHeight, NodeStyle, Overflow, Position, TextAlign,
 };
 
 /// Which sides of a box a declaration sets.
@@ -104,6 +104,12 @@ pub enum Declaration {
     Color([f32; 4]),
     /// `font-size`, in pixels. Inherited.
     FontSize(f32),
+    /// `font-family`. Inherited.
+    FontFamily(FontFamily),
+    /// `line-height`. Inherited.
+    LineHeight(LineHeight),
+    /// `text-align`. Inherited.
+    TextAlign(TextAlign),
 }
 
 fn set_sides<T: Copy>(edges: &mut Edges<T>, sides: Sides, value: T) {
@@ -157,6 +163,9 @@ impl Declaration {
             }
             Self::Color(value) => style.color = value,
             Self::FontSize(value) => style.font_size = value,
+            Self::FontFamily(value) => style.font_family = value,
+            Self::LineHeight(value) => style.line_height = value,
+            Self::TextAlign(value) => style.text_align = value,
         }
     }
 }
@@ -196,6 +205,9 @@ impl NodeStyle {
             D::BorderColor(self.border_color),
             D::Color(self.color),
             D::FontSize(self.font_size),
+            D::FontFamily(self.font_family),
+            D::LineHeight(self.line_height),
+            D::TextAlign(self.text_align),
         ];
         let padding = self.padding;
         let border = self.border;
@@ -261,6 +273,9 @@ mod tests {
             background: [0.1, 0.2, 0.3, 0.4],
             color: [0.5; 4],
             font_size: 20.0,
+            font_family: FontFamily::Sans,
+            line_height: LineHeight::Multiple(1.5),
+            text_align: TextAlign::Center,
             align_self: Some(Align::Center),
             ..NodeStyle::DEFAULT
         };

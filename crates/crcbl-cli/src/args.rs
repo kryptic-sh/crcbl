@@ -196,6 +196,8 @@ OPTIONS:
                                                element tree
                            ui_style            a panel themed by a stylesheet,
                                                one button hovered
+                           ui_text             wrapped, kerned and centred
+                                               text in the UI font
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
                          be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
@@ -1276,6 +1278,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::UiPrimitives,
         Scene::UiTree,
         Scene::UiStyle,
+        Scene::UiText,
     ]
 };
 
@@ -1311,6 +1314,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::UiPrimitives => "ui_primitives",
         Scene::UiTree => "ui_tree",
         Scene::UiStyle => "ui_style",
+        Scene::UiText => "ui_text",
     }
 }
 

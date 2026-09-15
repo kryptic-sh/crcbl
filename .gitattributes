@@ -45,6 +45,9 @@ crates/crcbl-ui/tests/fixtures/taffy/** text eol=lf
 *.gltf binary
 *.glb  binary
 *.wav  binary
+# `crates/crcbl-ui/fonts/AtkinsonHyperlegible-Regular.ttf`: the engine's UI font,
+# parsed by `crcbl_ui::font`. A TrueType file is binary through and through.
+*.ttf  binary
 *.qoa  binary
 *.spv  binary
 # `crates/crcbl-shaders/dxil/*.dxil`: one DXIL container per entry point, hashed

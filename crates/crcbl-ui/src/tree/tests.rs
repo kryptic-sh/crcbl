@@ -5,6 +5,7 @@ use glam::Vec2;
 
 use super::*;
 use crate::draw_list::{DrawCommand, DrawList};
+use crate::style::Declaration;
 
 const fn px(value: f32) -> LengthAuto {
     LengthAuto::Px(value)
@@ -567,6 +568,189 @@ fn text_is_measured_once_and_an_unchanged_frame_measures_nothing() {
         ui.measure.texts(),
         1,
         "the old text's measurements outlived its span"
+    );
+}
+
+/// The paragraph the wrapping tests lay out.
+const PARAGRAPH: &str = "Wrapped labels lay out under Taffy, one greedy line at a time.";
+
+/// A column `width` pixels wide with 4px of padding, holding [`PARAGRAPH`] in
+/// the parsed font at 16px on 20px lines, `align`ed; returns the column's and
+/// the span's keys.
+fn wrapped(ui: &mut Ui, width: f32, align: &str) -> (NodeKey, NodeKey) {
+    let mut span = None;
+    let column = ui.block(
+        "",
+        &[
+            Declaration::FlexDirection(FlexDirection::Column),
+            Declaration::Width(px(width)),
+            Declaration::Padding(crate::style::Sides::All, Length::Px(4.0)),
+        ],
+        |ui| {
+            span = Some(
+                ui.span(
+                    "",
+                    PARAGRAPH,
+                    &[
+                        Declaration::FontFamily(FontFamily::Sans),
+                        Declaration::FontSize(16.0),
+                        Declaration::LineHeight(LineHeight::Px(20.0)),
+                        Declaration::TextAlign(match align {
+                            "center" => TextAlign::Center,
+                            _ => TextAlign::Left,
+                        }),
+                    ],
+                )
+                .key,
+            );
+        },
+    );
+    (column.key, span.expect("built"))
+}
+
+/// **A wrapped span grows its block's height**: the column is as tall as the
+/// lines its width breaks the paragraph into, laid out independently, and a
+/// narrower column is taller.
+#[test]
+fn a_wrapped_span_grows_its_blocks_height() {
+    use crate::font::Font;
+    use crate::font::layout::TextLayout;
+
+    let mut heights = Vec::new();
+    for width in [640.0, 160.0, 96.0] {
+        let mut ui = Ui::new();
+        let mut keys = None;
+        frame(&mut ui, idle(), |ui| {
+            keys = Some(wrapped(ui, width, "left"))
+        });
+        let (column, span) = keys.expect("built");
+        let (min, max) = ui.rect(column).expect("laid out");
+        let lines = TextLayout::new(Font::sans(), PARAGRAPH, 16.0, 20.0, Some(width - 8.0))
+            .lines()
+            .len();
+        assert_eq!(max.y - min.y, lines as f32 * 20.0 + 8.0, "{width}px column");
+        let (span_min, span_max) = ui.rect(span).expect("laid out");
+        assert_eq!(span_max.y - span_min.y, lines as f32 * 20.0);
+        heights.push((lines, max.y - min.y));
+    }
+    assert_eq!(heights[0].0, 1, "a wide column wraps nothing");
+    assert!(
+        heights[0].1 < heights[1].1 && heights[1].1 < heights[2].1,
+        "narrower columns are not taller: {heights:?}"
+    );
+}
+
+/// **A wrapped span emits one glyph run whose lines are the measured ones**,
+/// every glyph inside the content box and centred text centred in it.
+#[test]
+fn a_wrapped_span_emits_its_measured_lines_inside_its_box() {
+    use crate::font::Font;
+    use crate::font::layout::TextLayout;
+
+    let mut ui = Ui::new();
+    let mut keys = None;
+    frame(&mut ui, idle(), |ui| {
+        keys = Some(wrapped(ui, 160.0, "center"))
+    });
+    let (_, span) = keys.expect("built");
+    let (span_min, span_max) = ui.rect(span).expect("laid out");
+    let list = emitted(&ui);
+    let (origin, glyphs) = list
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            DrawCommand::Glyphs { origin, glyphs, .. } => Some((*origin, glyphs.clone())),
+            _ => None,
+        })
+        .expect("the span drew no glyph run");
+    assert_eq!(origin, span_min);
+
+    let font = Font::sans();
+    let mut laid = TextLayout::new(font, PARAGRAPH, 16.0, 20.0, Some(span_max.x - span_min.x));
+    laid.align(span_max.x - span_min.x, TextAlign::Center);
+    assert_eq!(
+        glyphs,
+        laid.glyphs(),
+        "the emitted run is not the measured layout"
+    );
+    assert!(laid.lines().len() >= 3);
+    for line in laid.lines() {
+        let left = line.offset;
+        let right = line.offset + line.width;
+        assert!(left >= 0.0 && right <= span_max.x - span_min.x + 1e-3);
+        assert!(
+            (left - (span_max.x - span_min.x - right)).abs() < 1e-3,
+            "a centred line is not centred: {left} left, {right} right"
+        );
+    }
+}
+
+/// **Changing only a span's family or line height re-measures it**: the
+/// measurement is keyed by both, so a cached size from the other font is never
+/// reused.
+#[test]
+fn changing_a_spans_family_or_line_height_remeasures_it() {
+    let build = |ui: &mut Ui, family: FontFamily, line: LineHeight| {
+        ui.span(
+            "",
+            "HEALTH 100",
+            &[
+                Declaration::FontFamily(family),
+                Declaration::LineHeight(line),
+            ],
+        )
+        .key
+    };
+    let mut ui = Ui::new();
+    let mut sizes = Vec::new();
+    for (family, line) in [
+        (FontFamily::Bitmap, LineHeight::Normal),
+        (FontFamily::Sans, LineHeight::Normal),
+        (FontFamily::Sans, LineHeight::Px(40.0)),
+        (FontFamily::Bitmap, LineHeight::Normal),
+    ] {
+        let mut key = None;
+        frame(&mut ui, idle(), |ui| key = Some(build(ui, family, line)));
+        let (min, max) = ui.rect(key.expect("built")).expect("laid out");
+        sizes.push(max - min);
+    }
+    assert_ne!(
+        sizes[0], sizes[1],
+        "the family change kept the bitmap font's size"
+    );
+    assert_eq!(
+        sizes[2].y, 40.0,
+        "the line height change kept the old height"
+    );
+    assert_eq!(sizes[3], sizes[0]);
+}
+
+/// **Parsed-font text is measured once per width bucket**: widths a fraction
+/// of a pixel apart share one measurement, and a whole pixel narrower is a
+/// new one.
+#[test]
+fn parsed_font_text_is_measured_once_per_whole_pixel_of_width() {
+    let mut ui = Ui::new();
+    for width in [160.0, 160.3, 160.9] {
+        frame(&mut ui, idle(), |ui| {
+            wrapped(ui, width, "left");
+        });
+    }
+    let after_one_pixel = ui.measure.misses;
+    frame(&mut ui, idle(), |ui| {
+        wrapped(ui, 159.0, "left");
+    });
+    assert!(
+        ui.measure.misses > after_one_pixel,
+        "a narrower width reused a measurement"
+    );
+    let mut again = Ui::new();
+    frame(&mut again, idle(), |ui| {
+        wrapped(ui, 160.0, "left");
+    });
+    assert_eq!(
+        after_one_pixel, again.measure.misses,
+        "widths within one pixel measured again"
     );
 }
 

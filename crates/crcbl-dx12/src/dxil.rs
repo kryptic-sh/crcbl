@@ -1216,7 +1216,9 @@ mod tests {
                 "ui",
                 &crcbl_shaders::UI,
                 &["vertexMain", "fragmentMain"],
-                &[Srv, Sampler, Srv, Cbv, Srv, Sampler],
+                // The bitmap font's atlas and its sampler, the vertices, the
+                // constants, the image atlas and its sampler, the glyph pages.
+                &[Srv, Sampler, Srv, Cbv, Srv, Sampler, Srv],
             ),
         ];
 

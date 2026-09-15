@@ -90,8 +90,19 @@
 //! per side otherwise. With any corner radius it is one
 //! [`DrawList::rounded_rect`], whose border is uniform, **drawn at the top
 //! side's width**. A block with `overflow: hidden` clips its children to its
-//! padding box. A text span draws at its content box's top-left in the
-//! built-in font; an image span stretches its picture over its content box.
+//! padding box. A text span draws from its content box's top-left: in the
+//! bitmap font as one line per newline, or — when its `font-family` names a
+//! parsed font — as a [`crate::font::layout::TextLayout`] broken at the width
+//! layout measured it under and aligned by its `text-align`. An image span
+//! stretches its picture over its content box.
+//!
+//! # Text measures through Taffy
+//!
+//! A text span is a leaf whose measure callback lays its text out under the
+//! width Taffy offers: unbroken for max-content, broken at every space for
+//! min-content, and broken to fit for a definite width — so a wrapped label
+//! grows its block's height. Measurements are cached by the text, the style
+//! fields that size it and the whole-pixel width; see `layout.rs`.
 //!
 //! # Layout output is rounded
 //!
@@ -130,11 +141,12 @@ use crate::widget::{ButtonState, PointerInput, UiState};
 use layout::{LayoutTree, MeasureCache};
 use store::{Interaction, NodeStore};
 
-pub use layout::MEASURE_WIDTH_BUCKET;
+pub use crate::font::FontFamily;
+pub use crate::font::layout::TextAlign;
 pub use store::NodeKey;
 pub use style::{
-    Align, Display, Edges, FlexDirection, FlexWrap, Justify, Length, LengthAuto, NodeStyle,
-    Overflow, Position,
+    Align, Display, Edges, FlexDirection, FlexWrap, Justify, Length, LengthAuto, LineHeight,
+    NodeStyle, Overflow, Position,
 };
 
 /// The space a root is laid out in, on one axis.
@@ -187,7 +199,7 @@ impl Available {
 /// What a span holds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Span<'a> {
-    /// A string in the built-in font, measured by it.
+    /// A string, measured in the font its style names.
     Text(&'a str),
     /// A registered picture, measured by its size in texels.
     Image(AtlasImage),
@@ -527,7 +539,13 @@ impl Ui {
         let content_hash = match content {
             Content::Block => 0,
             Content::Text { start, end } => {
-                let hash = hash_of((&self.text[start..end], resolved.style.font_size.to_bits()));
+                let style = &resolved.style;
+                let hash = hash_of((
+                    &self.text[start..end],
+                    style.font_size.to_bits(),
+                    style.font_family,
+                    style.line_height.bits(),
+                ));
                 self.live_text.insert(hash);
                 hash
             }

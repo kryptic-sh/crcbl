@@ -53,10 +53,16 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   `!important`, the `border` shorthand, `font` and text alignment; nothing sets
   `:focus`, `:disabled` or `:engaged` until the focus rung; and no application
   loads or polls a sheet yet.
-- **`text`** — `FontAtlas`, a built-in **monospace bitmap** ASCII font with
-  metrics and a simple layout. Not the `skrifa`-parsed rasteriser and the
-  shelf/skyline atlas with LRU eviction the rendering section specifies: those
-  arrive with real fonts, at rung 5.
+- **`text`** and **`font`** — **rung 5 is built** (2026-09-16): `skrifa` 0.47
+  parsing of the committed Atkinson Hyperlegible, vertical TrueType hinting, the
+  engine's own signed-area coverage rasteriser, a shelf-packed single-channel
+  glyph atlas with per-page least-recently-used eviction and a per-frame budget
+  uploaded as a texture array, GPOS pair kerning, greedy wrapping as the tree's
+  measure callback, and `font-family`, `line-height` and `text-align`.
+  `FontAtlas` remains the bitmap font the menus, console, debug panel and
+  readout panel draw with. Not built from that rung yet: the legacy `kern`
+  table, fonts an application registers, shaping and bidi, a contrast curve for
+  coverage, and a GPU page array that grows.
 - **`widget`** — `Label`, `Button`, `ButtonSkin`, `Style`, `SkinInsets`,
   `PointerInput`, `UiState`, `WidgetId`. The rest of the MVP widget set below is
   unbuilt.

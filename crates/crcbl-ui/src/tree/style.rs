@@ -24,6 +24,8 @@ use taffy::{
 };
 
 use crate::draw_list::CornerRadii;
+use crate::font::layout::TextAlign;
+use crate::font::{Font, FontFamily};
 use crate::widget::NATURAL_FONT_SIZE;
 
 /// A length that cannot be `auto`: padding and gaps.
@@ -194,6 +196,51 @@ pub enum Overflow {
     Hidden,
 }
 
+/// `line-height`: the pitch between a text span's lines.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum LineHeight {
+    /// The font's own: ascent to descent plus its line gap. The bitmap font's
+    /// is its fixed [`crate::text::LINE_HEIGHT`] at the span's scale.
+    #[default]
+    Normal,
+    /// This many times the font size. Inherited as the number, as CSS does, so
+    /// a child with a larger font gets a larger pitch.
+    Multiple(f32),
+    /// This many pixels.
+    Px(f32),
+}
+
+impl LineHeight {
+    /// The pitch in pixels at `font_size`, given what `normal` is there.
+    #[must_use]
+    pub fn resolve(self, font_size: f32, normal: f32) -> f32 {
+        match self {
+            Self::Normal => normal,
+            Self::Multiple(factor) => factor * font_size,
+            Self::Px(px) => px,
+        }
+    }
+
+    /// A tag and the bits of its number, for hashing and interning;
+    /// [`LineHeight::from_bits`] is the way back.
+    pub(crate) fn bits(self) -> (u8, u32) {
+        match self {
+            Self::Normal => (0, 0),
+            Self::Multiple(factor) => (1, factor.to_bits()),
+            Self::Px(px) => (2, px.to_bits()),
+        }
+    }
+
+    /// The value [`LineHeight::bits`] made `bits` from.
+    pub(crate) fn from_bits((tag, bits): (u8, u32)) -> Self {
+        match tag {
+            1 => Self::Multiple(f32::from_bits(bits)),
+            2 => Self::Px(f32::from_bits(bits)),
+            _ => Self::Normal,
+        }
+    }
+}
+
 /// Everything one node is laid out and painted with.
 ///
 /// A plain struct for now: `docs/plan/07-ui-debug.md` rung 4's cascade is what
@@ -264,6 +311,13 @@ pub struct NodeStyle {
     /// A text span's size in pixels, on [`crate::draw_list::DrawCommand::Text`]'s
     /// terms.
     pub font_size: f32,
+    /// Which font a text span draws in. Inherited.
+    pub font_family: FontFamily,
+    /// The pitch of a text span's lines in the parsed font; the bitmap font's
+    /// is fixed. Inherited.
+    pub line_height: LineHeight,
+    /// Where a text span's lines sit across its content box. Inherited.
+    pub text_align: TextAlign,
 }
 
 impl NodeStyle {
@@ -297,12 +351,17 @@ impl NodeStyle {
         radii: CornerRadii::uniform(0.0),
         color: [1.0; 4],
         font_size: NATURAL_FONT_SIZE,
+        font_family: FontFamily::Bitmap,
+        line_height: LineHeight::Normal,
+        text_align: TextAlign::Left,
     };
 
     /// Folds every layout field into `state`, and no paint field.
     ///
     /// Floats go in by their bits, so `0.0` and `-0.0` hash apart — a spurious
-    /// relayout at worst, never a missed one.
+    /// relayout at worst, never a missed one. The text fields that size a
+    /// span — its font, size and line height — are not here: they move a text
+    /// span's box through its content hash, which the tree folds them into.
     pub fn layout_hash(&self, state: &mut impl Hasher) {
         fn length(state: &mut impl Hasher, value: Length) {
             match value {
@@ -367,6 +426,17 @@ impl NodeStyle {
         state.write_u32(self.flex_shrink.to_bits());
         length(state, self.column_gap);
         length(state, self.row_gap);
+    }
+}
+
+impl NodeStyle {
+    /// A text span's line pitch in `font`, the parsed font its family names.
+    #[must_use]
+    pub fn text_line_height(&self, font: &Font) -> f32 {
+        self.line_height.resolve(
+            self.font_size,
+            font.metrics().normal_line_height(self.font_size),
+        )
     }
 }
 

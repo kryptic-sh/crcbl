@@ -12,7 +12,16 @@
  * ReadoutPanel: a column of fixed-height rows, each a label at the left and
  * a reading against the right edge. Its width, row height, padding, border
  * and colours are the panel's public fields, set inline per panel.
+ *
+ * It draws in the bitmap font. That is the initial `font-family` too; it is
+ * named here so the panel keeps it whatever the initial value becomes, and a
+ * rule selecting `sans-serif` for `readout` is what switches it.
  */
+readout,
+readout-surface {
+  font-family: bitmap;
+}
+
 readout {
   flex-direction: column;
 }

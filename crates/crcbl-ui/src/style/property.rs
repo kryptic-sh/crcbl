@@ -24,6 +24,9 @@
 //! | `background` `background-color` `border-color` `color` | colour |
 //! | `border-radius` (1–4), `border-*-*-radius` | px |
 //! | `font-size` | px |
+//! | `font-family` | a comma-separated list; the first of `bitmap`, `sans-serif` and `"Atkinson Hyperlegible"` in it is used |
+//! | `line-height` | `normal` \| number \| px |
+//! | `text-align` | `left` \| `start` \| `center` \| `right` \| `end` |
 //!
 //! A **length** is `<n>px`, `<n>%` or a unitless `0`. A **colour** is `#rgb`,
 //! `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`rgba()` in either the comma or the
@@ -39,6 +42,10 @@
 //! specification's zero; Chrome serialises it as `0%`, which resolves the same
 //! against a definite container.
 //!
+//! A `font-family` list naming none of the three families this engine has is
+//! invalid rather than falling back to a default: the diagnostic is worth more
+//! than a silent bitmap font. `line-height` takes no percentage.
+//!
 //! Not in the subset: `opacity` — the draw list has no group opacity to give
 //! it, and multiplying each command's alpha is not what `opacity` means where
 //! children overlap — `inherit`, `!important`, `em` and every other unit.
@@ -48,8 +55,8 @@ use cssparser::{ParseError, Parser, Token, match_ignore_ascii_case};
 
 use super::value::{Corners, Declaration, Sides};
 use crate::tree::{
-    Align, Display, Edges, FlexDirection, FlexWrap, Justify, Length, LengthAuto, NodeStyle,
-    Overflow, Position,
+    Align, Display, Edges, FlexDirection, FlexWrap, FontFamily, Justify, Length, LengthAuto,
+    LineHeight, NodeStyle, Overflow, Position, TextAlign,
 };
 
 /// A property a stylesheet can name, longhand or shorthand.
@@ -90,6 +97,9 @@ pub(crate) enum Property {
     BorderRadius(Corners),
     Color,
     FontSize,
+    FontFamily,
+    LineHeight,
+    TextAlign,
 }
 
 /// The failure a value parser reports; the caller words the diagnostic.
@@ -154,6 +164,9 @@ impl Property {
             "border-bottom-left-radius" => Self::BorderRadius(Corners::BottomLeft),
             "color" => Self::Color,
             "font-size" => Self::FontSize,
+            "font-family" => Self::FontFamily,
+            "line-height" => Self::LineHeight,
+            "text-align" => Self::TextAlign,
             _ => return None,
         })
     }
@@ -303,6 +316,16 @@ impl Property {
                 }
                 Self::Color => out.push(D::Color(color(input)?)),
                 Self::FontSize => out.push(D::FontSize(px(input, Sign::Positive)?)),
+                Self::FontFamily => out.push(D::FontFamily(font_family(input)?)),
+                Self::LineHeight => out.push(D::LineHeight(line_height(input)?)),
+                Self::TextAlign => out.push(D::TextAlign(keyword(input, |name| {
+                    Some(match_ignore_ascii_case! { name,
+                        "left" | "start" => TextAlign::Left,
+                        "center" => TextAlign::Center,
+                        "right" | "end" => TextAlign::Right,
+                        _ => return None,
+                    })
+                })?)),
             }
             Ok(())
         })
@@ -365,6 +388,9 @@ impl Property {
             },
             Self::Color => to.color = from.color,
             Self::FontSize => to.font_size = from.font_size,
+            Self::FontFamily => to.font_family = from.font_family,
+            Self::LineHeight => to.line_height = from.line_height,
+            Self::TextAlign => to.text_align = from.text_align,
         }
     }
 }
@@ -557,6 +583,65 @@ fn flex(input: &mut Parser<'_>, out: &mut Vec<Declaration>) -> Result<(), Invali
         D::FlexBasis(basis),
     ]);
     Ok(())
+}
+
+/// `font-family`: the first family in the list this engine has.
+fn font_family(input: &mut Parser<'_>) -> Result<FontFamily, Invalid> {
+    let mut chosen = None;
+    loop {
+        let family = if let Ok(family) =
+            input.try_parse(|input| input.expect_string().map(|name| named_family(name)))
+        {
+            family
+        } else {
+            let mut name = input.expect_ident()?.to_string();
+            let mut words = 1;
+            while let Ok(word) = input.try_parse(|input| input.expect_ident_cloned()) {
+                name.push(' ');
+                name.push_str(&word);
+                words += 1;
+            }
+            // The generic family is one bare identifier; quoted, or followed by
+            // another word, it is a family name like any other.
+            if words == 1 && name.eq_ignore_ascii_case("sans-serif") {
+                Some(FontFamily::Sans)
+            } else {
+                named_family(&name)
+            }
+        };
+        chosen = chosen.or(family);
+        if input.is_exhausted() {
+            break;
+        }
+        input.expect_comma()?;
+    }
+    chosen.map_or_else(invalid, Ok)
+}
+
+/// The family a family name — quoted, or unquoted identifiers joined by
+/// single spaces — names, if this engine has it.
+fn named_family(name: &str) -> Option<FontFamily> {
+    Some(match_ignore_ascii_case! { name,
+        "bitmap" => FontFamily::Bitmap,
+        "atkinson hyperlegible" => FontFamily::Sans,
+        _ => return None,
+    })
+}
+
+/// `line-height`: `normal`, a number or a pixel length.
+fn line_height(input: &mut Parser<'_>) -> Result<LineHeight, Invalid> {
+    match *input.next()? {
+        Token::Ident(ref name) if name.eq_ignore_ascii_case("normal") => Ok(LineHeight::Normal),
+        Token::Number { value, .. } if Sign::NonNegative.admits(value) => {
+            Ok(LineHeight::Multiple(value))
+        }
+        Token::Dimension {
+            value, ref unit, ..
+        } if unit.eq_ignore_ascii_case("px") && Sign::NonNegative.admits(value) => {
+            Ok(LineHeight::Px(value))
+        }
+        _ => invalid(),
+    }
 }
 
 /// A colour, decoded to linear light; see the module docs.
@@ -804,6 +889,8 @@ mod tests {
             ("flex-basis", "auto"),
             ("font-size", "26px"),
             ("top", "-4px"),
+            ("line-height", "1.25"),
+            ("text-align", "CENTER"),
         ]);
         assert_eq!(style.display, Display::None);
         assert_eq!(style.position, Position::Absolute);
@@ -819,6 +906,8 @@ mod tests {
         assert_eq!(style.align_self, Some(Align::FlexEnd));
         assert_eq!(style.font_size, 26.0);
         assert_eq!(style.inset.top, px(-4.0));
+        assert_eq!(style.line_height, LineHeight::Multiple(1.25));
+        assert_eq!(style.text_align, TextAlign::Center);
 
         let refused = [
             ("width", "10"),
@@ -841,6 +930,15 @@ mod tests {
             ("background", "rgb(1, 2)"),
             ("background", "rgb(1, 2 3)"),
             ("width", "1e39px"),
+            ("font-family", "serif"),
+            ("font-family", "\"sans-serif\""),
+            ("font-family", "sans-serif bold"),
+            ("font-family", "bitmap,"),
+            ("font-family", "12px"),
+            ("line-height", "-1"),
+            ("line-height", "120%"),
+            ("line-height", "2em"),
+            ("text-align", "justify"),
         ];
         for (property, css) in refused {
             assert!(
@@ -848,6 +946,32 @@ mod tests {
                 "`{property}: {css}` was accepted"
             );
         }
+    }
+
+    /// **`font-family` takes the first family in its list this engine has**,
+    /// by generic name, quoted name or unquoted words, in any case.
+    #[test]
+    fn font_family_takes_the_first_family_it_has() {
+        let cases = [
+            ("bitmap", FontFamily::Bitmap),
+            ("sans-serif", FontFamily::Sans),
+            ("\"Atkinson Hyperlegible\"", FontFamily::Sans),
+            ("atkinson   HYPERLEGIBLE", FontFamily::Sans),
+            ("\"Helvetica Neue\", Arial, sans-serif", FontFamily::Sans),
+            ("Fira Sans, bitmap, sans-serif", FontFamily::Bitmap),
+            ("sans-serif, bitmap", FontFamily::Sans),
+        ];
+        for (css, want) in cases {
+            assert_eq!(style_of(&[("font-family", css)]).font_family, want, "{css}");
+        }
+        let height = |css| style_of(&[("line-height", css)]).line_height;
+        assert_eq!(height("normal"), LineHeight::Normal);
+        assert_eq!(height("0"), LineHeight::Multiple(0.0));
+        assert_eq!(height("18px"), LineHeight::Px(18.0));
+        let align = |css| style_of(&[("text-align", css)]).text_align;
+        assert_eq!(align("start"), TextAlign::Left);
+        assert_eq!(align("end"), TextAlign::Right);
+        assert_eq!(align("right"), TextAlign::Right);
     }
 
     /// **A colour is decoded from sRGB to linear light in every syntax**, with

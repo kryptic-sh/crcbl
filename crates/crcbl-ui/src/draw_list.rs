@@ -7,7 +7,8 @@
 //!
 //! # Every primitive is one kind of quad
 //!
-//! Solid rectangles, strokes, glyphs, [`image`](DrawList::image) quads and
+//! Solid rectangles, strokes, bitmap glyphs, [`glyph runs`](DrawList::glyphs)
+//! from a parsed font, [`image`](DrawList::image) quads and
 //! [`rounded rectangles`](DrawList::rounded_rect) all expand to the same
 //! [`Vertex2d`], which says which of them it belongs to in
 //! [`Vertex2d::shape`]. `crcbl-render`'s UI pass draws the whole list with one
@@ -23,6 +24,9 @@
 //! is per draw, so a list that clipped two panels differently would be two
 //! draws, and `docs/plan/07-ui-debug.md` keeps batching as the reason.
 
+use crate::font::Font;
+use crate::font::atlas::{GlyphAtlas, SUBPIXEL_BINS};
+use crate::font::layout::PositionedGlyph;
 use crate::image::{AtlasImage, NineSliceImage, slice_bands, slice_cuts};
 use crate::text::FontAtlas;
 use crate::text::GLYPH_HEIGHT;
@@ -51,8 +55,9 @@ use glam::Vec2;
 pub struct Vertex2d {
     /// Position in screen-space pixels.
     pub pos: Vec2,
-    /// UV into the glyph atlas for [`Primitive::Glyph`] and into the image
-    /// atlas for [`Primitive::Image`]; zero for untextured primitives.
+    /// UV into the bitmap font for [`Primitive::Glyph`], into a glyph page for
+    /// [`Primitive::FontGlyph`] and into the image atlas for
+    /// [`Primitive::Image`]; zero for untextured primitives.
     ///
     /// For [`Primitive::RoundedRect`] it is not a UV at all: it is this vertex's
     /// offset from the rectangle's centre in pixels, which the fragment stage
@@ -65,7 +70,9 @@ pub struct Vertex2d {
     pub clip: [f32; 4],
     /// `[half width, half height, border width, primitive]`: the rounded
     /// rectangle's half extent and border in pixels, and the
-    /// [`Primitive`] as a float in the last lane, for every vertex.
+    /// [`Primitive`] as a float in the last lane, for every vertex. A
+    /// [`Primitive::FontGlyph`] carries its glyph page in the first lane
+    /// instead.
     pub shape: [f32; 4],
     /// The rounded rectangle's corner radii in pixels: top-left, top-right,
     /// bottom-right, bottom-left.
@@ -103,7 +110,7 @@ impl Vertex2d {
 /// What the fragment stage does with a vertex's lanes.
 ///
 /// Carried as a float in [`Vertex2d::shape`]'s last lane; `ui.slang` spells the
-/// same four numbers.
+/// same numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Primitive {
     /// The vertex colour, as it is.
@@ -115,11 +122,20 @@ pub enum Primitive {
     /// The analytic rounded rectangle: fill, border and corners evaluated as a
     /// signed distance per fragment.
     RoundedRect,
+    /// The vertex colour, its alpha multiplied by a [`GlyphAtlas`] page's
+    /// coverage — the page in [`Vertex2d::shape`]'s first lane.
+    FontGlyph,
 }
 
 impl Primitive {
     /// Every primitive, in lane order.
-    pub const ALL: [Self; 4] = [Self::Solid, Self::Glyph, Self::Image, Self::RoundedRect];
+    pub const ALL: [Self; 5] = [
+        Self::Solid,
+        Self::Glyph,
+        Self::Image,
+        Self::RoundedRect,
+        Self::FontGlyph,
+    ];
 
     /// The value [`Vertex2d::shape`]'s last lane holds for this primitive.
     #[must_use]
@@ -129,6 +145,7 @@ impl Primitive {
             Self::Glyph => 1.0,
             Self::Image => 2.0,
             Self::RoundedRect => 3.0,
+            Self::FontGlyph => 4.0,
         }
     }
 }
@@ -309,6 +326,24 @@ pub enum DrawCommand {
         /// Font size in pixels (height of the em-square).
         size: f32,
     },
+    /// A run of glyphs from a parsed font, already laid out — what
+    /// [`crate::font::layout::TextLayout`] produces.
+    ///
+    /// Each glyph is drawn at `origin + offset × scale` with its pen snapped:
+    /// the baseline to a whole pixel, the x to a whole pixel plus one of the
+    /// glyph atlas's subpixel bins. Its mask is drawn one texel to one pixel.
+    Glyphs {
+        /// The top-left every glyph's offset is measured from.
+        origin: Vec2,
+        /// The font.
+        font: &'static Font,
+        /// Pixels per em.
+        size: f32,
+        /// Text colour.
+        color: [f32; 4],
+        /// The glyphs and their pen positions.
+        glyphs: Vec<PositionedGlyph>,
+    },
     /// A rectangle of the image atlas, stretched to a screen rectangle.
     ///
     /// The UVs are already the atlas's: [`DrawList::image`] and
@@ -458,6 +493,24 @@ impl DrawList {
             text: text.into(),
             color,
             size,
+        });
+    }
+
+    /// Push a run of laid-out glyphs from `font`; see [`DrawCommand::Glyphs`].
+    pub fn glyphs(
+        &mut self,
+        origin: Vec2,
+        font: &'static Font,
+        size: f32,
+        color: [f32; 4],
+        glyphs: impl Into<Vec<PositionedGlyph>>,
+    ) {
+        self.push(DrawCommand::Glyphs {
+            origin,
+            font,
+            size,
+            color,
+            glyphs: glyphs.into(),
         });
     }
 
@@ -689,8 +742,13 @@ impl DrawList {
     /// [`to_triangles_split`](Self::to_triangles_split) without the overlay cut,
     /// for a caller that draws the whole list as one thing.
     #[must_use]
-    pub fn to_triangles(&self, atlas: Option<&FontAtlas>, scale: f32) -> (Vec<Vertex2d>, Vec<u32>) {
-        let triangles = self.to_triangles_split(atlas, scale);
+    pub fn to_triangles(
+        &self,
+        atlas: Option<&FontAtlas>,
+        glyphs: Option<&mut GlyphAtlas>,
+        scale: f32,
+    ) -> (Vec<Vertex2d>, Vec<u32>) {
+        let triangles = self.to_triangles_split(atlas, glyphs, scale);
         (triangles.vertices, triangles.indices)
     }
 
@@ -714,7 +772,14 @@ impl DrawList {
     /// one textured quad with UV coordinates into the atlas. When `atlas` is
     /// `None`, text commands are skipped (the `to_triangles` return from S6).
     ///
-    /// `scale` is a multiplier on the font size (1.0 = baked-in 8×13 px).
+    /// `Glyphs` commands are expanded when `glyphs` is `Some`, each glyph
+    /// looked up in — and on a miss rasterised into — that atlas, which is why
+    /// it is taken mutably. A glyph the atlas defers this frame is left out,
+    /// and a list with glyph runs should be expanded once a frame, after
+    /// [`GlyphAtlas::begin_frame`]. When `glyphs` is `None` they are skipped.
+    ///
+    /// `scale` is a multiplier on the font size (1.0 = baked-in 8×13 px) and
+    /// on a glyph run's size and offsets.
     ///
     /// The index buffer uses `u32` indices; callers that need `u16` must adapt.
     ///
@@ -729,7 +794,12 @@ impl DrawList {
     /// Glyph UVs follow the same convention: `v = 0` is the atlas's top row and
     /// is emitted at the quad's `min.y` vertex, so glyphs render upright.
     #[must_use]
-    pub fn to_triangles_split(&self, atlas: Option<&FontAtlas>, scale: f32) -> Triangles {
+    pub fn to_triangles_split(
+        &self,
+        atlas: Option<&FontAtlas>,
+        mut glyphs: Option<&mut GlyphAtlas>,
+        scale: f32,
+    ) -> Triangles {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
@@ -740,7 +810,14 @@ impl DrawList {
                 overlay = indices.len();
             }
             let first = vertices.len();
-            expand(cmd, atlas, scale, &mut vertices, &mut indices);
+            expand(
+                cmd,
+                atlas,
+                glyphs.as_deref_mut(),
+                scale,
+                &mut vertices,
+                &mut indices,
+            );
             for vertex in &mut vertices[first..] {
                 vertex.clip = clip.lane();
             }
@@ -763,6 +840,7 @@ impl DrawList {
 fn expand(
     cmd: &DrawCommand,
     atlas: Option<&FontAtlas>,
+    glyph_atlas: Option<&mut GlyphAtlas>,
     scale: f32,
     vertices: &mut Vec<Vertex2d>,
     indices: &mut Vec<u32>,
@@ -868,6 +946,24 @@ fn expand(
                 }
             }
         }
+        DrawCommand::Glyphs {
+            origin,
+            font,
+            size,
+            color,
+            glyphs,
+        } => {
+            if let Some(glyph_atlas) = glyph_atlas {
+                push_glyphs(
+                    glyph_atlas,
+                    (*origin, font, *size * scale, scale),
+                    glyphs,
+                    *color,
+                    vertices,
+                    indices,
+                );
+            }
+        }
         DrawCommand::Image {
             min,
             max,
@@ -892,6 +988,60 @@ fn expand(
             color,
             border,
         } => push_rounded_rect(*min, *max, *radii, *color, *border, vertices, indices),
+    }
+}
+
+/// Push one quad per inked glyph of a run, each mask one texel to one pixel.
+///
+/// `(origin, font, pixel_size, scale)` is the run: its top-left, its font, its
+/// size already scaled, and the scale its offsets take. Each pen's x is
+/// rounded to the nearest [`SUBPIXEL_BINS`]th of a pixel, split into a whole
+/// pixel and a bin, and its baseline to a whole pixel, so the quad's corners
+/// are whole pixels and a nearest sample at every fragment centre reads
+/// exactly one texel.
+fn push_glyphs(
+    atlas: &mut GlyphAtlas,
+    (origin, font, pixel_size, scale): (Vec2, &Font, f32, f32),
+    glyphs: &[PositionedGlyph],
+    color: [f32; 4],
+    vertices: &mut Vec<Vertex2d>,
+    indices: &mut Vec<u32>,
+) {
+    let bins = f32::from(SUBPIXEL_BINS);
+    let page = atlas.page_size() as f32;
+    for glyph in glyphs {
+        let pen = origin + glyph.offset * scale;
+        if !pen.is_finite() {
+            continue;
+        }
+        let steps = (pen.x * bins).round();
+        let whole = (steps / bins).floor();
+        let bin = (steps - whole * bins) as u8;
+        let Some(placed) = atlas.glyph(font, glyph.glyph, pixel_size, bin) else {
+            continue;
+        };
+        if placed.is_empty() {
+            continue;
+        }
+        let min = Vec2::new(
+            whole + placed.left as f32,
+            pen.y.round() + placed.top as f32,
+        );
+        let extent = Vec2::new(placed.width as f32, placed.height as f32);
+        let texel = Vec2::new(placed.x as f32, placed.y as f32);
+        let first = vertices.len();
+        push_quad(
+            min,
+            min + extent,
+            (texel / page, (texel + extent) / page),
+            color,
+            Primitive::FontGlyph,
+            vertices,
+            indices,
+        );
+        for vertex in &mut vertices[first..] {
+            vertex.shape[0] = placed.page as f32;
+        }
     }
 }
 
@@ -1143,6 +1293,80 @@ mod tests {
     /// An opaque colour for tests that only care about geometry.
     const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
+    /// **A glyph run becomes one whole-pixel quad per inked glyph**, its pen
+    /// split into a pixel and the nearest subpixel bin, its UVs exactly the
+    /// glyph's texels on its page, and its page in the first shape lane; a
+    /// space draws nothing, and with no glyph atlas nothing is drawn.
+    #[test]
+    fn a_glyph_run_expands_to_whole_pixel_quads_on_its_glyphs_texels() {
+        use crate::font::Font;
+        use crate::font::layout::PositionedGlyph;
+
+        let font = Font::sans();
+        let run = |c: char, x: f32, y: f32| PositionedGlyph {
+            glyph: font.glyph_id(c),
+            offset: Vec2::new(x, y),
+        };
+        let mut dl = DrawList::new();
+        dl.glyphs(
+            Vec2::new(20.0, 30.0),
+            font,
+            18.0,
+            RED,
+            [
+                run('H', 0.3, 14.6),
+                run(' ', 12.0, 14.6),
+                run('g', 14.9, 14.6),
+            ],
+        );
+        assert!(dl.to_triangles(None, None, 1.0).0.is_empty());
+
+        for scale in [1.0, 2.0] {
+            let mut atlas = GlyphAtlas::new(256, 1, 100);
+            atlas.begin_frame();
+            let (vertices, indices) = dl.to_triangles(None, Some(&mut atlas), scale);
+            assert_eq!(indices.len(), 12, "H and g, and nothing for the space");
+            for (quad, (c, x)) in vertices.chunks_exact(4).zip([('H', 0.3), ('g', 14.9)]) {
+                let pen = Vec2::new(20.0 + x * scale, 30.0 + 14.6 * scale);
+                let steps = (pen.x * 4.0).round();
+                let whole = (steps / 4.0).floor();
+                let bin = (steps - whole * 4.0) as u8;
+                let placed = atlas
+                    .cached(GlyphAtlas::key(font, font.glyph_id(c), 18.0 * scale, bin))
+                    .expect("rasterised during expansion");
+                let min = Vec2::new(
+                    whole + placed.left as f32,
+                    pen.y.round() + placed.top as f32,
+                );
+                let max = min + Vec2::new(placed.width as f32, placed.height as f32);
+                let top_left = quad[3];
+                let bottom_right = quad[1];
+                assert_eq!(
+                    (top_left.pos, bottom_right.pos),
+                    (min, max),
+                    "{c:?} at {scale}"
+                );
+                assert_eq!(min, min.round(), "{c:?} is off the pixel grid");
+                assert_eq!(
+                    top_left.uv * 256.0,
+                    Vec2::new(placed.x as f32, placed.y as f32)
+                );
+                assert_eq!(
+                    bottom_right.uv * 256.0,
+                    Vec2::new(
+                        (placed.x + placed.width) as f32,
+                        (placed.y + placed.height) as f32
+                    )
+                );
+                for vertex in quad {
+                    assert_eq!(vertex.primitive(), Some(Primitive::FontGlyph));
+                    assert_eq!(vertex.shape[0], placed.page as f32);
+                    assert_eq!(vertex.color, RED);
+                }
+            }
+        }
+    }
+
     #[test]
     fn new_draw_list_is_empty() {
         let dl = DrawList::new();
@@ -1222,7 +1446,7 @@ mod tests {
     #[test]
     fn to_triangles_from_empty_list() {
         let dl = DrawList::new();
-        let (verts, indices) = dl.to_triangles(None, 1.0);
+        let (verts, indices) = dl.to_triangles(None, None, 1.0);
         assert!(verts.is_empty());
         assert!(indices.is_empty());
     }
@@ -1235,7 +1459,7 @@ mod tests {
             Vec2::new(110.0, 120.0),
             [1.0, 0.5, 0.0, 1.0],
         );
-        let (verts, indices) = dl.to_triangles(None, 1.0);
+        let (verts, indices) = dl.to_triangles(None, None, 1.0);
 
         // One quad = 4 vertices, 6 indices (2 triangles).
         assert_eq!(verts.len(), 4);
@@ -1267,7 +1491,7 @@ mod tests {
             3.0,
             [0.0, 1.0, 0.0, 1.0],
         );
-        let (verts, indices) = dl.to_triangles(None, 1.0);
+        let (verts, indices) = dl.to_triangles(None, None, 1.0);
 
         // 4 quads = 16 vertices, 24 indices.
         assert_eq!(verts.len(), 16);
@@ -1283,7 +1507,7 @@ mod tests {
     fn text_commands_are_skipped_in_triangulation() {
         let mut dl = DrawList::new();
         dl.text(Vec2::new(5.0, 5.0), "hello", [1.0; 4], 16.0);
-        let (verts, indices) = dl.to_triangles(None, 1.0);
+        let (verts, indices) = dl.to_triangles(None, None, 1.0);
         assert!(verts.is_empty());
         assert!(indices.is_empty());
     }
@@ -1302,7 +1526,7 @@ mod tests {
             [0.0, 1.0, 0.0, 1.0],
         );
         dl.text(Vec2::ZERO, "skipped", [0.0; 4], 12.0);
-        let (verts, indices) = dl.to_triangles(None, 1.0);
+        let (verts, indices) = dl.to_triangles(None, None, 1.0);
 
         // 2 rects → 8 verts, 12 indices (text skipped).
         assert_eq!(verts.len(), 8);
@@ -1322,7 +1546,7 @@ mod tests {
         let atlas = FontAtlas::built_in();
         let mut dl = DrawList::new();
         dl.text(Vec2::new(100.0, 200.0), "A", [1.0, 0.0, 0.0, 1.0], 13.0);
-        let (verts, indices) = dl.to_triangles(Some(&atlas), 1.0);
+        let (verts, indices) = dl.to_triangles(Some(&atlas), None, 1.0);
 
         // One glyph 'A' → one quad.
         assert_eq!(verts.len(), 4);
@@ -1363,7 +1587,7 @@ mod tests {
         let atlas = FontAtlas::built_in();
         let mut dl = DrawList::new();
         dl.text(Vec2::new(100.0, 200.0), "A", [1.0; 4], 13.0);
-        let (verts, _) = dl.to_triangles(Some(&atlas), 1.0);
+        let (verts, _) = dl.to_triangles(Some(&atlas), None, 1.0);
         assert_eq!(verts.len(), 4);
 
         for v in &verts {
@@ -1397,7 +1621,7 @@ mod tests {
     fn rect_outline_covers_every_corner() {
         let mut dl = DrawList::new();
         dl.rect_outline(Vec2::ZERO, Vec2::new(100.0, 80.0), 3.0, [1.0; 4]);
-        let (verts, _) = dl.to_triangles(None, 1.0);
+        let (verts, _) = dl.to_triangles(None, None, 1.0);
 
         // Every point in the border ring must lie inside one of the four quads.
         let quads: Vec<(Vec2, Vec2)> = verts
@@ -1440,7 +1664,7 @@ mod tests {
     fn rect_outline_thickness_is_clamped_to_half_the_extent() {
         let mut dl = DrawList::new();
         dl.rect_outline(Vec2::ZERO, Vec2::splat(10.0), 8.0, [1.0; 4]);
-        let (verts, _) = dl.to_triangles(None, 1.0);
+        let (verts, _) = dl.to_triangles(None, None, 1.0);
 
         for q in verts.chunks_exact(4) {
             let (x0, x1) = (q[3].pos.x, q[1].pos.x);
@@ -1461,7 +1685,7 @@ mod tests {
         let atlas = FontAtlas::built_in();
         let mut dl = DrawList::new();
         dl.text(Vec2::ZERO, " ", [1.0; 4], 13.0);
-        let (verts, indices) = dl.to_triangles(Some(&atlas), 1.0);
+        let (verts, indices) = dl.to_triangles(Some(&atlas), None, 1.0);
         // Space glyph has width=0 → no quad.
         assert!(verts.is_empty());
         assert!(indices.is_empty());
@@ -1555,7 +1779,7 @@ mod tests {
             [0.4, 0.4, 0.4, 1.0],
         );
 
-        let (verts, indices) = dl.to_triangles(Some(&atlas), 1.0);
+        let (verts, indices) = dl.to_triangles(Some(&atlas), None, 1.0);
 
         // Structural assertions: exact vertex/index counts from known scene.
         assert_eq!(verts.len(), 136, "vertex count changed");
@@ -1615,7 +1839,7 @@ mod tests {
             1.0,
             [0.4, 0.4, 0.4, 1.0],
         );
-        let (verts2, indices2) = dl2.to_triangles(Some(&atlas), 1.0);
+        let (verts2, indices2) = dl2.to_triangles(Some(&atlas), None, 1.0);
         let hash2 = hash_triangles(&verts2, &indices2);
         assert_eq!(hash, hash2, "same scene → same hash");
 
@@ -1628,7 +1852,7 @@ mod tests {
     #[test]
     fn snapshot_empty_list_hash() {
         let dl = DrawList::new();
-        let (verts, indices) = dl.to_triangles(None, 1.0);
+        let (verts, indices) = dl.to_triangles(None, None, 1.0);
         let hash = hash_triangles(&verts, &indices);
         assert_eq!(
             hash, 15_130_871_412_783_076_140,
@@ -1669,7 +1893,7 @@ mod tests {
     fn a_line_is_stroked_centred_on_the_segment() {
         let mut dl = DrawList::new();
         dl.line(Vec2::new(0.0, 10.0), Vec2::new(100.0, 10.0), 4.0, RED);
-        let (vertices, indices) = dl.to_triangles(None, 1.0);
+        let (vertices, indices) = dl.to_triangles(None, None, 1.0);
 
         assert_eq!(vertices.len(), 4, "one quad");
         assert_eq!(indices.len(), 6);
@@ -1685,7 +1909,7 @@ mod tests {
         let (from, to) = (Vec2::new(10.0, 10.0), Vec2::new(50.0, 90.0));
         let mut dl = DrawList::new();
         dl.line(from, to, 6.0, RED);
-        let (vertices, _) = dl.to_triangles(None, 1.0);
+        let (vertices, _) = dl.to_triangles(None, None, 1.0);
 
         // Measured across the segment, not along an axis: an implementation
         // that offset by `half` in x and y would pass an axis-aligned check
@@ -1717,7 +1941,7 @@ mod tests {
             false,
             RED,
         );
-        let (vertices, indices) = dl.to_triangles(None, 1.0);
+        let (vertices, indices) = dl.to_triangles(None, None, 1.0);
 
         // The elbow opens down-and-right: the two segment quads reach only to
         // `corner` along their own axis, so the square just outside it belongs
@@ -1758,8 +1982,8 @@ mod tests {
         let mut closed = DrawList::new();
         closed.polyline(square, 4.0, true, RED);
 
-        let (_, open_indices) = open.to_triangles(None, 1.0);
-        let (closed_vertices, closed_indices) = closed.to_triangles(None, 1.0);
+        let (_, open_indices) = open.to_triangles(None, None, 1.0);
+        let (closed_vertices, closed_indices) = closed.to_triangles(None, None, 1.0);
         assert!(
             closed_indices.len() > open_indices.len(),
             "closing added nothing: {} vs {}",
@@ -1789,7 +2013,7 @@ mod tests {
             false,
             RED,
         );
-        let (vertices, indices) = dl.to_triangles(None, 1.0);
+        let (vertices, indices) = dl.to_triangles(None, None, 1.0);
 
         assert!(
             covered(Vec2::new(10.0, 50.0), &vertices, &indices),
@@ -1852,7 +2076,7 @@ mod tests {
                 dl
             }),
         ] {
-            let (vertices, indices) = list.to_triangles(None, 1.0);
+            let (vertices, indices) = list.to_triangles(None, None, 1.0);
             assert!(
                 vertices.is_empty() && indices.is_empty(),
                 "{name} emitted {} vertices",
@@ -1878,7 +2102,7 @@ mod tests {
             RED,
         );
         dl.rect(Vec2::ZERO, Vec2::new(4.0, 4.0), RED);
-        let (vertices, indices) = dl.to_triangles(None, 1.0);
+        let (vertices, indices) = dl.to_triangles(None, None, 1.0);
 
         assert_eq!(indices.len() % 3, 0);
         assert!(!indices.is_empty());
@@ -1918,7 +2142,7 @@ mod tests {
             dl.len()
         );
 
-        let triangles = dl.to_triangles_split(None, 1.0);
+        let triangles = dl.to_triangles_split(None, None, 1.0);
         // Every rect here is one quad, so the cut falls on a quad boundary and
         // the two halves are countable without re-tessellating anything.
         let per_quad = triangles.indices.len() / 3;
@@ -1930,7 +2154,7 @@ mod tests {
         );
         assert_eq!(
             triangles.indices,
-            dl.to_triangles(None, 1.0).1,
+            dl.to_triangles(None, None, 1.0).1,
             "splitting the list must not change the geometry it expands to"
         );
     }
@@ -1945,7 +2169,7 @@ mod tests {
 
         assert_eq!(dl.base_commands().len(), 1);
         assert!(dl.overlay_commands().is_empty());
-        let triangles = dl.to_triangles_split(None, 1.0);
+        let triangles = dl.to_triangles_split(None, None, 1.0);
         assert!(!triangles.indices.is_empty(), "the rect tessellated");
         assert_eq!(triangles.overlay, triangles.indices.len());
     }
@@ -2018,7 +2242,7 @@ mod tests {
         let mut dl = DrawList::new();
         dl.rect(Vec2::ZERO, Vec2::splat(10.0), RED);
         dl.text(Vec2::new(20.0, 0.0), "A", RED, 13.0);
-        let (vertices, _) = dl.to_triangles(Some(&atlas), 1.0);
+        let (vertices, _) = dl.to_triangles(Some(&atlas), None, 1.0);
         assert_eq!(vertices.len(), 8);
         for (index, vertex) in vertices.iter().enumerate() {
             let expected = if index < 4 {
@@ -2060,7 +2284,7 @@ mod tests {
         let tint = [0.5, 0.25, 1.0, 0.75];
         let mut dl = DrawList::new();
         dl.image(Vec2::new(10.0, 20.0), Vec2::new(42.0, 36.0), &image, tint);
-        let (vertices, indices) = dl.to_triangles(None, 1.0);
+        let (vertices, indices) = dl.to_triangles(None, None, 1.0);
 
         assert_eq!((vertices.len(), indices.len()), (4, 6));
         let page = crate::image::PAGE_SIZE as f32;
@@ -2243,7 +2467,7 @@ mod tests {
             RED,
             border,
         );
-        let (vertices, indices) = dl.to_triangles(None, 1.0);
+        let (vertices, indices) = dl.to_triangles(None, None, 1.0);
 
         assert_eq!((vertices.len(), indices.len()), (4, 6));
         for vertex in &vertices {
@@ -2282,7 +2506,7 @@ mod tests {
                 color: RED,
             },
         );
-        let (vertices, _) = dl.to_triangles(None, 1.0);
+        let (vertices, _) = dl.to_triangles(None, None, 1.0);
         assert_eq!(vertices[0].radii, [6.0, 0.0, 0.0, 3.0]);
         assert_eq!(vertices[0].shape[2], 6.0);
     }
@@ -2296,7 +2520,7 @@ mod tests {
         ] {
             let mut dl = DrawList::new();
             dl.rounded_rect(min, max, CornerRadii::uniform(2.0), RED, Border::NONE);
-            let (vertices, indices) = dl.to_triangles(None, 1.0);
+            let (vertices, indices) = dl.to_triangles(None, None, 1.0);
             assert!(
                 vertices.is_empty() && indices.is_empty(),
                 "{min:?}..{max:?}"
@@ -2309,7 +2533,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn clips_of(dl: &DrawList) -> Vec<[f32; 4]> {
-        let (vertices, _) = dl.to_triangles(None, 1.0);
+        let (vertices, _) = dl.to_triangles(None, None, 1.0);
         vertices.chunks_exact(4).map(|quad| quad[0].clip).collect()
     }
 

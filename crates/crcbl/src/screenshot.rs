@@ -98,6 +98,7 @@ use crate::ui::draw_list::DrawList;
 mod still_pool;
 mod ui_primitives;
 mod ui_style;
+mod ui_text;
 mod ui_tree;
 
 pub use still_pool::{
@@ -118,6 +119,13 @@ pub use ui_style::{
     UI_STYLE_BUTTON_BORDER_WIDTH, UI_STYLE_BUTTON_HEIGHT, UI_STYLE_GAP, UI_STYLE_HOVER,
     UI_STYLE_MUTED, UI_STYLE_PANEL, UI_STYLE_PANEL_BORDER_WIDTH, UI_STYLE_TEXT, UiStyleLayout,
     ui_style_css, ui_style_draw_list, ui_style_layout,
+};
+pub use ui_text::{
+    UI_TEXT_CENTRED, UI_TEXT_CENTRED_FILL, UI_TEXT_CENTRED_SIZE, UI_TEXT_CENTRED_WIDTH,
+    UI_TEXT_INK, UI_TEXT_LINE_HEIGHT, UI_TEXT_PAGE, UI_TEXT_PAIR, UI_TEXT_PAIR_LINE_HEIGHT,
+    UI_TEXT_PAIR_SIZE, UI_TEXT_PARAGRAPH, UI_TEXT_PARAGRAPH_FILL, UI_TEXT_PARAGRAPH_SIZE,
+    UI_TEXT_PARAGRAPH_WIDTH, UI_TEXT_SIZES_WORD, UI_TEXT_SMALL, UiTextLayout, ui_text_css,
+    ui_text_draw_list, ui_text_layout,
 };
 pub use ui_tree::{
     UI_TREE_BASE, UI_TREE_CELL, UI_TREE_CELLS, UI_TREE_CLIP_BORDER, UI_TREE_CLIP_BORDER_COLOR,
@@ -739,6 +747,12 @@ pub enum Scene {
     /// inherit their colour or fall back to one. See [`ui_style_layout`] for
     /// what each part is for.
     UiStyle,
+    /// `docs/plan/07-ui-debug.md` rung 5's real fonts through [`UiRenderer`]:
+    /// a paragraph wrapped to a fixed width, one word at two sizes, a kerned
+    /// pair beside the same glyphs unkerned, and centred text, all in the
+    /// committed font through the glyph atlas. See [`ui_text_layout`] for what
+    /// each part is for.
+    UiText,
 }
 
 /// How far from the cube's own column each pyramid sits, in world units.
@@ -5957,6 +5971,8 @@ enum UiContent {
     Tree,
     /// [`Scene::UiStyle`]'s styled panel.
     Style,
+    /// [`Scene::UiText`]'s text.
+    Text,
 }
 
 /// Puts one of the demo scene's meshes in the frame at `model`.
@@ -6619,6 +6635,11 @@ impl SceneState {
                 renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
                 content: UiContent::Style,
+            },
+            Scene::UiText => Self::Ui {
+                renderer: Box::new(UiRenderer::new(device, queue, format)?),
+                atlas: FontAtlas::built_in(),
+                content: UiContent::Text,
             },
             Scene::UiPrimitives => {
                 let mut renderer = Box::new(UiRenderer::new(device, queue, format)?);
@@ -7643,6 +7664,7 @@ impl OffscreenSetup {
                         UiContent::Primitives(images) => ui_primitives_draw_list(extent, images),
                         UiContent::Tree => ui_tree_draw_list(extent),
                         UiContent::Style => ui_style_draw_list(extent),
+                        UiContent::Text => ui_text_draw_list(extent),
                     };
                     // `scale` is 1.0 because every size in the draw list is
                     // already this frame's pixels; a second multiplier is a
@@ -8235,9 +8257,12 @@ mod tests {
                     // The scene draws no strokes; counted so that adding one
                     // later has to come back here and say what it expects.
                     DrawCommand::Line { .. } | DrawCommand::Polyline { .. } => strokes += 1,
-                    // Nor pictures or rounded rectangles — the primitives scene
-                    // is where those are drawn.
-                    DrawCommand::Image { .. } | DrawCommand::RoundedRect { .. } => shapes += 1,
+                    // Nor pictures, rounded rectangles or parsed-font glyph runs
+                    // — the primitives and text scenes are where those are
+                    // drawn.
+                    DrawCommand::Image { .. }
+                    | DrawCommand::RoundedRect { .. }
+                    | DrawCommand::Glyphs { .. } => shapes += 1,
                     // The glyphs' extent is the atlas's business, so only the
                     // anchor is checked here.
                     DrawCommand::Text { pos, .. } => {
@@ -8252,7 +8277,7 @@ mod tests {
             assert!(
                 rects >= 2 && outlines == 1 && texts >= 1 && strokes == 0 && shapes == 0,
                 "{extent:?}: {rects} rect(s), {outlines} outline(s), {texts} text(s), \
-                 {strokes} stroke(s), {shapes} image(s) or rounded rect(s)"
+                 {strokes} stroke(s), {shapes} image(s), rounded rect(s) or glyph run(s)"
             );
         }
     }
@@ -8719,7 +8744,7 @@ mod tests {
             .expect("every forward frame has a forward pass")
             + 1;
         still_pool_passes.insert(after_forward, ("render", "sky"));
-        let expected: [(Scene, &[(&str, &str)]); 18] = [
+        let expected: [(Scene, &[(&str, &str)]); 19] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8810,6 +8835,13 @@ mod tests {
             ),
             (
                 Scene::UiStyle,
+                &[("render", "scene background"), ("render", "ui-composite")],
+            ),
+            // The glyphs are rasterised by the frame that draws them, so it
+            // copies them in first — a copy, and not in this list, as the
+            // pictures above.
+            (
+                Scene::UiText,
                 &[("render", "scene background"), ("render", "ui-composite")],
             ),
         ];

@@ -118,15 +118,21 @@ fn the_cascade_orders_origin_then_tier_then_source_and_inline_wins() {
     );
 }
 
-/// **`color` and `font-size` inherit and nothing else does; `unset` inherits,
+/// **`color` and the text properties inherit and nothing else does; `unset` inherits,
 /// `initial` does not** — and a parent's inline colour changing reaches a child
 /// whose own inputs did not change.
 #[test]
 fn inherited_properties_reach_descendants_and_nothing_else_does() {
     let sheet = "
-        .panel { color: #ff0000; font-size: 20px; background: #0000ff; padding: 3px; }
+        .panel {
+            color: #ff0000; font-size: 20px; background: #0000ff; padding: 3px;
+            font-family: sans-serif; line-height: 1.5; text-align: right;
+        }
         .own { color: #00ff00; }
-        .initial { color: initial; font-size: initial; }
+        .initial {
+            color: initial; font-size: initial;
+            font-family: initial; line-height: initial; text-align: initial;
+        }
         .reset { color: unset; }
     ";
     let build = |ui: &mut Ui, panel_inline: &[Declaration]| {
@@ -151,6 +157,14 @@ fn inherited_properties_reach_descendants_and_nothing_else_does() {
 
     let direct = style_of(&ui, keys[0]);
     assert_eq!((direct.color, direct.font_size), (RED, 20.0));
+    assert_eq!(
+        (direct.font_family, direct.line_height, direct.text_align),
+        (
+            FontFamily::Sans,
+            LineHeight::Multiple(1.5),
+            TextAlign::Right
+        )
+    );
     assert_eq!(direct.background, [0.0; 4], "background inherited");
     assert_eq!(
         direct.padding,
@@ -162,6 +176,20 @@ fn inherited_properties_reach_descendants_and_nothing_else_does() {
     assert_eq!(
         (initial.color, initial.font_size),
         (NodeStyle::DEFAULT.color, NodeStyle::DEFAULT.font_size)
+    );
+    assert_eq!(
+        (initial.font_family, initial.line_height, initial.text_align),
+        (FontFamily::Bitmap, LineHeight::Normal, TextAlign::Left)
+    );
+    let deep = style_of(&ui, keys[4]);
+    assert_eq!(
+        (deep.font_family, deep.line_height, deep.text_align),
+        (
+            FontFamily::Sans,
+            LineHeight::Multiple(1.5),
+            TextAlign::Right
+        ),
+        "two levels down lost the text properties"
     );
     assert_eq!(style_of(&ui, keys[3]).color, RED, "`unset` did not inherit");
     assert_eq!(

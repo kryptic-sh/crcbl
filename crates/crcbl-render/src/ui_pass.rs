@@ -1,17 +1,30 @@
 //! UI compositing pass: renders a [`DrawList`] on top of the target.
 //!
 //! ```text
-//! UiRenderer ──begin_frame──▶ uploads vertex/index buffers from DrawList
-//!      │                     and stages what changed in the image atlas
+//! UiRenderer ──begin_frame──▶ uploads vertex/index buffers from DrawList,
+//!      │                     rasterising the glyphs its runs miss, and stages
+//!      │                     what changed in the image atlas and glyph pages
 //!      │
-//!      └──add_passes──▶ [ui-images] ─▶ ui-composite ─▶ ui-overlay
-//!                       a copy when the atlas changed, then two alpha-blended
-//!                       passes onto the same target, after the tonemap
+//!      └──add_passes──▶ [ui-images] ─▶ [ui-glyphs] ─▶ ui-composite ─▶ ui-overlay
+//!                       a copy when either atlas changed, then two
+//!                       alpha-blended passes onto the same target, after the
+//!                       tonemap
 //! ```
 //!
 //! The UI pass uses the same target as the tonemap pass, compositing on top
-//! with alpha blending. The glyph atlas is a static R8_UNORM texture uploaded
-//! once at creation.
+//! with alpha blending. The bitmap font's atlas is a static R8_UNORM texture
+//! uploaded once at creation.
+//!
+//! # Glyph pages upload what changed, the same way
+//!
+//! [`DrawList::glyphs`] runs draw from the renderer's own [`GlyphAtlas`], which
+//! [`begin_frame`](UiRenderer::begin_frame) starts a frame of and rasterises into
+//! while it tessellates. Its pages are the layers of one `R8Unorm` `D2Array`
+//! image bound at [`GLYPH_PAGES_BINDING`] — every page the atlas may open,
+//! allocated at start-up, because a WebGPU texture cannot grow in place and one
+//! image is one binding on every backend. What a frame rasterised is staged per
+//! page as a dirty rectangle and copied by a `ui-glyphs` copy pass, exactly as
+//! the image atlas's `ui-images` is.
 //!
 //! # The image atlas uploads what changed, inside the frame
 //!
@@ -98,6 +111,7 @@ use crcbl_hal::{
 
 use crcbl_shaders::{Stage, UI};
 use crcbl_ui::draw_list::{DrawList, Vertex2d};
+use crcbl_ui::font::atlas::{GLYPH_MAX_PAGES, GLYPH_PAGE_SIZE, GLYPH_RASTER_BUDGET, GlyphAtlas};
 use crcbl_ui::image::{ImageAtlas, PAGE_SIZE, TexelRect};
 use crcbl_ui::menu::MenuSkin;
 use crcbl_ui::text::FontAtlas;
@@ -108,7 +122,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::counters::FrameCounters;
 use crate::graph::{ImageId, ImportedImage, InitialClaim, RenderGraph};
-use crate::texture::{UploadedTexture, stage_region, upload_texture};
+use crate::texture::{UploadedTexture, stage_region, upload_texture, upload_texture_layers};
 
 /// The constant block matching `ui.slang`'s `UiConstants`.
 ///
@@ -127,8 +141,12 @@ pub const CONSTANTS_BINDING: u32 = 3;
 /// The binding number the image atlas occupies, after the constants.
 pub const IMAGE_ATLAS_BINDING: u32 = 4;
 
-/// The binding number the image atlas's linear sampler occupies — the last one.
+/// The binding number the image atlas's linear sampler occupies.
 pub const IMAGE_SAMPLER_BINDING: u32 = 5;
+
+/// The binding number the glyph pages occupy — the last one. They are sampled
+/// through the bitmap font's nearest sampler at binding 1.
+pub const GLYPH_PAGES_BINDING: u32 = 6;
 
 /// The image atlas page's format: sRGB-encoded, straight alpha, the sprite
 /// pass's sheet format.
@@ -190,6 +208,18 @@ pub struct UiRenderer {
     /// staged an upload and never recorded it puts the rectangle back on the
     /// atlas for the next frame to try again.
     image_recorded: Arc<AtomicBool>,
+
+    /// The glyphs [`DrawList::glyphs`] runs draw, rasterised on demand.
+    glyphs: GlyphAtlas,
+    /// Its pages, one layer each.
+    glyph_pages: UploadedTexture,
+    /// The staged copies of dirty page rectangles, per frame in flight, freed
+    /// on the slot's next turn as [`Self::image_staging`] is.
+    glyph_staging: Vec<Vec<BufferHandle>>,
+    /// This frame's page copies.
+    glyph_uploads: Vec<GlyphUpload>,
+    /// [`Self::image_recorded`]'s counterpart for the page copies.
+    glyph_recorded: Arc<AtomicBool>,
 
     // Per-frame bind groups (each contains atlas+sampler+vertex_buffer+constants)
     frame_groups: Vec<BindGroupHandle>,
@@ -327,8 +357,24 @@ impl UiRenderer {
         })?;
         rollback.samplers.push(image_sampler);
 
+        // The glyph pages: every page the atlas may open, empty, once. What the
+        // atlas rasterises later is copied inside a frame; see the module docs.
+        let glyphs = GlyphAtlas::new(GLYPH_PAGE_SIZE, GLYPH_MAX_PAGES, GLYPH_RASTER_BUDGET);
+        let empty_page = vec![0u8; GLYPH_PAGE_SIZE as usize * GLYPH_PAGE_SIZE as usize];
+        let glyph_pages = upload_texture_layers(
+            device,
+            queue,
+            "ui glyph pages",
+            Format::R8Unorm,
+            GLYPH_PAGE_SIZE,
+            GLYPH_PAGE_SIZE,
+            &[empty_page.as_slice(); GLYPH_MAX_PAGES],
+        )?;
+        rollback.textures.push(glyph_pages);
+
         // Bind group layout: atlas texture, sampler, vertex storage buffer, the
-        // constants uniform buffer, then the image atlas and its sampler.
+        // constants uniform buffer, the image atlas and its sampler, then the
+        // glyph pages.
         let layout_entries = [
             BindGroupLayoutEntry {
                 binding: 0,
@@ -385,6 +431,16 @@ impl UiRenderer {
                 count: 1,
                 flags: BindingFlags::empty(),
             },
+            BindGroupLayoutEntry {
+                binding: GLYPH_PAGES_BINDING,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2Array,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
         ];
         let layout_desc = BindGroupLayoutDesc {
             label: Some("ui pass"),
@@ -434,6 +490,7 @@ impl UiRenderer {
                     FrameTextures {
                         glyphs: (atlas.view, atlas_sampler),
                         images: (image_page.view, image_sampler),
+                        glyph_pages: glyph_pages.view,
                     },
                     vb,
                     cb,
@@ -515,6 +572,11 @@ impl UiRenderer {
             image_staging: vec![None; FRAMES_IN_FLIGHT],
             image_upload: None,
             image_recorded: Arc::new(AtomicBool::new(false)),
+            glyphs,
+            glyph_pages,
+            glyph_staging: vec![Vec::new(); FRAMES_IN_FLIGHT],
+            glyph_uploads: Vec::new(),
+            glyph_recorded: Arc::new(AtomicBool::new(false)),
             frame_groups,
             vertex_buffers,
             index_buffers,
@@ -559,6 +621,13 @@ impl UiRenderer {
         &mut self.images
     }
 
+    /// The glyph atlas [`DrawList::glyphs`] runs are rasterised into: what it
+    /// holds, and what it did in the last [`begin_frame`](Self::begin_frame).
+    #[must_use]
+    pub const fn glyphs(&self) -> &GlyphAtlas {
+        &self.glyphs
+    }
+
     /// Uploads the draw list's triangulated geometry and advances the ring.
     ///
     /// Call once per frame before `add_passes`. If the draw list is empty, the
@@ -568,6 +637,11 @@ impl UiRenderer {
     /// index where [`DrawList::begin_overlay`] cut it comes back with the
     /// geometry, so the two passes below share one upload and cannot disagree
     /// about where the HUD ends.
+    ///
+    /// **One glyph-atlas frame per call.** The tessellation rasterises every
+    /// glyph a run misses, up to the atlas's budget, and what it put on a page
+    /// is staged after it; a glyph past the budget is left out of this frame
+    /// and drawn by a later one.
     ///
     /// # Errors
     ///
@@ -583,11 +657,13 @@ impl UiRenderer {
         let idx = self.frame;
         self.stage_images(device, idx)?;
 
+        self.glyphs.begin_frame();
         let crcbl_ui::draw_list::Triangles {
             vertices,
             indices,
             overlay,
-        } = draw_list.to_triangles_split(Some(atlas), scale);
+        } = draw_list.to_triangles_split(Some(atlas), Some(&mut self.glyphs), scale);
+        self.stage_glyphs(device, idx)?;
 
         // Grow the ring buffers only when this frame genuinely needs more room.
         // Both sides of every comparison here are **bytes**.
@@ -649,6 +725,7 @@ impl UiRenderer {
                 FrameTextures {
                     glyphs: (self.atlas.view, self.atlas_sampler),
                     images: (self.image_page.view, self.image_sampler),
+                    glyph_pages: self.glyph_pages.view,
                 },
                 self.vertex_buffers[idx],
                 self.constant_buffers[idx],
@@ -709,17 +786,65 @@ impl UiRenderer {
         Ok(())
     }
 
+    /// Stages every glyph page rectangle this frame's tessellation dirtied, for
+    /// the `ui-glyphs` copy pass — and settles last frame's, as
+    /// [`stage_images`](Self::stage_images) does for the image atlas.
+    fn stage_glyphs(&mut self, device: &dyn Device, idx: usize) -> Result<(), HalError> {
+        if !self.glyph_recorded.swap(false, Ordering::Relaxed) {
+            for upload in self.glyph_uploads.drain(..) {
+                self.glyphs.mark_dirty(upload.page as usize, upload.rect);
+            }
+        }
+        self.glyph_uploads.clear();
+        for stale in self.glyph_staging[idx].drain(..) {
+            device.destroy_buffer(stale);
+        }
+        for page in 0..self.glyphs.page_count() {
+            let Some(rect) = self.glyphs.take_dirty(page) else {
+                continue;
+            };
+            let staged = stage_region(
+                device,
+                "ui glyph page staging",
+                Format::R8Unorm,
+                (rect.width, rect.height),
+                &self.glyphs.region(page, rect),
+            );
+            let (staging, row_texels) = match staged {
+                Ok(staged) => staged,
+                Err(error) => {
+                    // Not lost: this rectangle and every one staged before it
+                    // this frame go back on the atlas for the next frame.
+                    self.glyphs.mark_dirty(page, rect);
+                    for upload in self.glyph_uploads.drain(..) {
+                        self.glyphs.mark_dirty(upload.page as usize, upload.rect);
+                    }
+                    return Err(error);
+                }
+            };
+            self.glyph_staging[idx].push(staging);
+            self.glyph_uploads.push(GlyphUpload {
+                staging,
+                page: page as u32,
+                rect,
+                row_texels,
+            });
+        }
+        Ok(())
+    }
+
     /// The most passes [`add_passes`](Self::add_passes) adds to a frame.
     ///
-    /// Three: the image atlas's `ui-images` copy on a frame that registered a
-    /// picture, then the HUD half and the overlay half, either of which a frame
+    /// Four: the image atlas's `ui-images` copy on a frame that registered a
+    /// picture, the glyph pages' `ui-glyphs` copy on a frame that rasterised a
+    /// glyph, then the HUD half and the overlay half, either of which a frame
     /// can leave empty — a frame with no menu and no console draws only the
     /// first, and a frame with an empty draw list draws neither.
     ///
     /// The most rather than the count. What a caller sizing
     /// [`PassTimers`](crate::timing::PassTimers) adds up — see
     /// [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES).
-    pub const MAX_PASSES: u32 = 3;
+    pub const MAX_PASSES: u32 = 4;
 
     /// This frame's two index ranges: the HUD half, then the overlay half.
     ///
@@ -775,10 +900,11 @@ impl UiRenderer {
     /// Adds the UI's passes to `graph`, drawing on top of `target`.
     ///
     /// In order: `ui-images` when [`begin_frame`](Self::begin_frame) staged a
-    /// changed rectangle of the image atlas, then `ui-composite` for the
-    /// commands below [`DrawList::begin_overlay`]'s cut — the game's HUD and GUI
-    /// — then `ui-overlay` for the commands above it — the menu, the debug panel
-    /// and the console.
+    /// changed rectangle of the image atlas, `ui-glyphs` when it staged glyph
+    /// page rectangles, then `ui-composite` for the commands below
+    /// [`DrawList::begin_overlay`]'s cut — the game's HUD and GUI — then
+    /// `ui-overlay` for the commands above it — the menu, the debug panel and
+    /// the console.
     ///
     /// A half with no triangles in it adds **no pass at all** rather than an
     /// empty one, the rule this pass has always had — so an unpaused frame with
@@ -805,9 +931,65 @@ impl UiRenderer {
         extent: (u32, u32),
     ) {
         let (below, above) = self.segments();
-        let page = self.add_image_upload(graph);
-        self.add_segment(graph, target, extent, "ui-composite", below, page);
-        self.add_segment(graph, target, extent, "ui-overlay", above, page);
+        let pages = [self.add_image_upload(graph), self.add_glyph_upload(graph)];
+        self.add_segment(graph, target, extent, "ui-composite", below, pages);
+        self.add_segment(graph, target, extent, "ui-overlay", above, pages);
+    }
+
+    /// Adds the `ui-glyphs` copy of this frame's staged page rectangles, and
+    /// returns the page image as the graph knows it — or does nothing and
+    /// returns `None` on a frame that staged nothing.
+    ///
+    /// Imported tracked in [`ResourceState::ShaderRead`] and back, for
+    /// [`add_image_upload`](Self::add_image_upload)'s reason. One copy per
+    /// rectangle, each into its page's layer.
+    fn add_glyph_upload<'a>(&'a self, graph: &mut RenderGraph<'a>) -> Option<ImageId> {
+        if self.glyph_uploads.is_empty() {
+            return None;
+        }
+        let pages = graph.import_image(
+            "ui glyph pages",
+            ImportedImage {
+                image: self.glyph_pages.image,
+                view: self.glyph_pages.view,
+                format: Format::R8Unorm,
+                extent: (GLYPH_PAGE_SIZE, GLYPH_PAGE_SIZE),
+                initial: ResourceState::ShaderRead,
+                claim: InitialClaim::Tracked,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
+        let uploads = self.glyph_uploads.clone();
+        let recorded = Arc::clone(&self.glyph_recorded);
+        graph
+            .add_copy_pass("ui-glyphs")
+            .use_image(pages, ResourceState::TransferDst)
+            .execute(move |ctx| {
+                let image = ctx.image(pages);
+                for upload in &uploads {
+                    ctx.encoder().copy_buffer_to_image(&BufferImageCopy {
+                        buffer: upload.staging,
+                        buffer_offset: 0,
+                        buffer_row_length: upload.row_texels,
+                        buffer_image_height: upload.rect.height,
+                        image,
+                        image_subresource: ImageSubresourceLayers {
+                            aspect: ImageAspect::COLOR,
+                            mip: 0,
+                            base_layer: upload.page,
+                            layer_count: 1,
+                        },
+                        image_offset: Offset3d {
+                            x: upload.rect.x as i32,
+                            y: upload.rect.y as i32,
+                            z: 0,
+                        },
+                        image_extent: Extent3d::d2(upload.rect.width, upload.rect.height),
+                    });
+                }
+                recorded.store(true, Ordering::Relaxed);
+            });
+        Some(pages)
     }
 
     /// Adds the `ui-images` copy of this frame's staged rectangle, and returns
@@ -868,9 +1050,10 @@ impl UiRenderer {
     /// `vertices[SV_VertexID]` and the index values are absolute — so a half is
     /// a range of the frame's one upload rather than a second one.
     ///
-    /// `page` is the image atlas when this frame's graph imported it for an
-    /// upload, and the pass then declares that it samples it, so the graph
-    /// returns it from the copy's `TransferDst` before the draw reads it.
+    /// `pages` are the image atlas and the glyph pages, each when this frame's
+    /// graph imported it for an upload, and the pass then declares that it
+    /// samples it, so the graph returns it from the copy's `TransferDst` before
+    /// the draw reads it.
     fn add_segment<'a>(
         &'a self,
         graph: &mut RenderGraph<'a>,
@@ -878,7 +1061,7 @@ impl UiRenderer {
         extent: (u32, u32),
         label: &'static str,
         segment: Range<u32>,
-        page: Option<ImageId>,
+        pages: [Option<ImageId>; 2],
     ) {
         if segment.is_empty() {
             return; // nothing to draw
@@ -894,7 +1077,7 @@ impl UiRenderer {
             .add_render_pass(label)
             // Draw on top of the tonemapped target with alpha blending.
             .color(target, LoadOp::Load, StoreOp::Store, Default::default());
-        if let Some(page) = page {
+        for page in pages.into_iter().flatten() {
             pass = pass.read_image(page);
         }
         pass.execute(move |ctx| {
@@ -945,6 +1128,10 @@ impl UiRenderer {
         for staging in self.image_staging.drain(..).flatten() {
             device.destroy_buffer(staging);
         }
+        for staging in self.glyph_staging.drain(..).flatten() {
+            device.destroy_buffer(staging);
+        }
+        self.glyph_pages.destroy(device);
         device.destroy_sampler(self.atlas_sampler);
         self.atlas.destroy(device);
         device.destroy_sampler(self.image_sampler);
@@ -1023,14 +1210,27 @@ struct ImageUpload {
     row_texels: u32,
 }
 
-/// The two atlases a frame's bind group names, each as its view and sampler.
+/// One frame's staged glyph page copy.
+#[derive(Clone, Copy, Debug)]
+struct GlyphUpload {
+    staging: BufferHandle,
+    /// The page, which is the layer copied into.
+    page: u32,
+    rect: TexelRect,
+    /// The staged rows' pitch, in texels.
+    row_texels: u32,
+}
+
+/// The textures a frame's bind group names: the two atlases each as its view
+/// and sampler, and the glyph pages, which share the bitmap font's sampler.
 ///
-/// One argument rather than four, so the two pairs cannot be crossed at the
-/// call site — a glyph view under the image sampler still binds.
+/// One argument rather than loose handles, so the pairs cannot be crossed at
+/// the call site — a glyph view under the image sampler still binds.
 #[derive(Clone, Copy)]
 struct FrameTextures {
     glyphs: (ImageViewHandle, SamplerHandle),
     images: (ImageViewHandle, SamplerHandle),
+    glyph_pages: ImageViewHandle,
 }
 
 /// One frame's bind-group entries.
@@ -1043,7 +1243,7 @@ fn frame_entries(
     textures: FrameTextures,
     vertices: BufferHandle,
     constants: BufferHandle,
-) -> [BindGroupEntry; 6] {
+) -> [BindGroupEntry; 7] {
     [
         BindGroupEntry {
             binding: 0,
@@ -1074,6 +1274,11 @@ fn frame_entries(
             binding: IMAGE_SAMPLER_BINDING,
             array_index: 0,
             resource: BindingResource::Sampler(textures.images.1),
+        },
+        BindGroupEntry {
+            binding: GLYPH_PAGES_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(textures.glyph_pages),
         },
     ]
 }
@@ -1272,8 +1477,11 @@ mod tests {
                 (ResourceState::TransferDst, ResourceState::ShaderRead),
                 (ResourceState::Undefined, ResourceState::TransferDst),
                 (ResourceState::TransferDst, ResourceState::ShaderRead),
+                (ResourceState::Undefined, ResourceState::TransferDst),
+                (ResourceState::TransferDst, ResourceState::ShaderRead),
             ],
-            "the two atlases are the only barriers the UI renderer's construction records"
+            "the two atlases and the glyph pages are the only barriers the UI renderer's \
+             construction records"
         );
 
         renderer.destroy(device.as_ref());
@@ -1345,7 +1553,7 @@ mod tests {
                 .begin_frame(device.as_ref(), dl, &atlas, 1.0)
                 .expect("upload should succeed");
 
-            let (vertices, indices) = dl.to_triangles(Some(&atlas), 1.0);
+            let (vertices, indices) = dl.to_triangles(Some(&atlas), None, 1.0);
             let expected = (
                 vertices.len() * std::mem::size_of::<Vertex2d>(),
                 indices.len() * std::mem::size_of::<u32>(),
@@ -1481,7 +1689,7 @@ mod tests {
         );
         // The index list the pass actually built, so this is the pass's own
         // arithmetic and not a second count of the glyphs.
-        let (_, indices) = with_text.to_triangles(Some(&atlas), 1.0);
+        let (_, indices) = with_text.to_triangles(Some(&atlas), None, 1.0);
         assert_eq!(richer.triangles, Some(indices.len() as u64 / 3));
         assert!(
             richer.triangles > counters.triangles,
@@ -1686,7 +1894,7 @@ mod tests {
         );
         // The menu's frame is textured quads in the overlay half, off the
         // renderer's own atlas: every image vertex is above the cut.
-        let triangles = list.to_triangles_split(Some(&atlas), 1.0);
+        let triangles = list.to_triangles_split(Some(&atlas), None, 1.0);
         let image_vertices: Vec<u32> = triangles.indices[..]
             .iter()
             .copied()
@@ -2090,6 +2298,181 @@ mod tests {
         assert_eq!(first, again);
 
         ui.destroy(device.as_ref());
+    }
+
+    // -----------------------------------------------------------------------
+    // The glyph pages
+    // -----------------------------------------------------------------------
+
+    /// A list drawing `text` in the committed font at 20px from (4, 4).
+    fn glyph_run(text: &str) -> DrawList {
+        use crcbl_ui::font::Font;
+        use crcbl_ui::font::layout::TextLayout;
+
+        let font = Font::sans();
+        let layout = TextLayout::new(font, text, 20.0, 24.0, None);
+        let mut list = DrawList::new();
+        list.glyphs(
+            glam::Vec2::splat(4.0),
+            font,
+            20.0,
+            [1.0; 4],
+            layout.glyphs(),
+        );
+        list
+    }
+
+    /// **Every page the atlas may open goes up empty at start-up**, one R8 copy
+    /// per layer of one image.
+    #[test]
+    fn the_glyph_pages_are_every_layer_uploaded_empty_at_start_up() {
+        let (recorder, device, queue) = open_recorded();
+        let renderer =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+        let page = GLYPH_PAGE_SIZE as usize;
+        let layers: Vec<u32> = image_copies(&recorder.commands())
+            .into_iter()
+            .filter(|copy| copy.image == renderer.glyph_pages.image)
+            .map(|copy| {
+                assert_eq!(
+                    copy.image_extent,
+                    Extent3d::d2(GLYPH_PAGE_SIZE, GLYPH_PAGE_SIZE)
+                );
+                assert_eq!(copy.image_subresource.layer_count, 1);
+                copy.image_subresource.base_layer
+            })
+            .collect();
+        assert_eq!(layers, (0..GLYPH_MAX_PAGES as u32).collect::<Vec<_>>());
+        let writes: Vec<usize> = recorder
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                crcbl_hal::null::Event::BufferWritten { len, .. } => Some(len),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            writes.contains(&(page * page * GLYPH_MAX_PAGES)),
+            "no staging write of every page at one byte a texel in {writes:?}"
+        );
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **A frame that rasterises glyphs copies each dirty page rectangle into
+    /// its layer, in a `ui-glyphs` pass ahead of the draw** — covering every
+    /// glyph the frame drew — and the frame after it, drawing the same text,
+    /// rasterises and copies nothing.
+    #[test]
+    fn rasterised_glyphs_are_copied_into_their_page_once_ahead_of_the_draw() {
+        use crcbl_hal::null::Command;
+
+        let (recorder, device, queue) = open_recorded();
+        let mut pool = crate::transient::TransientPool::new();
+        let mut ui =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+        recorder.clear();
+
+        let list = glyph_run("Kerned AVATAR");
+        let labels = record_frame(&mut ui, device.as_ref(), queue, &mut pool, &list);
+        assert_eq!(labels, ["ui-glyphs", "ui-composite"]);
+        assert!(ui.glyphs().stats().rasterized > 0);
+        let commands = recorder.commands();
+        let copies: Vec<_> = image_copies(&commands)
+            .into_iter()
+            .filter(|copy| copy.image == ui.glyph_pages.image)
+            .collect();
+        assert_eq!(copies.len(), 1, "one page, one rectangle: {copies:?}");
+        let copy = copies[0];
+        assert_eq!(copy.image_subresource.base_layer, 0);
+
+        // Every quad the frame drew samples inside the copied rectangle.
+        let (vertices, _) = list.to_triangles(None, None, 1.0);
+        assert!(vertices.is_empty(), "the run needs the glyph atlas to draw");
+        let triangles = ui.last_index_count[ui.frame] / 6;
+        assert!(triangles >= 11, "{triangles} glyph quads");
+        let page = GLYPH_PAGE_SIZE as f32;
+        let mut atlas =
+            crcbl_ui::font::atlas::GlyphAtlas::new(GLYPH_PAGE_SIZE, GLYPH_MAX_PAGES, 1000);
+        atlas.begin_frame();
+        let (vertices, _) = list.to_triangles(None, Some(&mut atlas), 1.0);
+        for vertex in vertices {
+            let texel = vertex.uv * page;
+            assert!(
+                texel.x >= copy.image_offset.x as f32
+                    && texel.y >= copy.image_offset.y as f32
+                    && texel.x <= (copy.image_offset.x as u32 + copy.image_extent.width) as f32
+                    && texel.y <= (copy.image_offset.y as u32 + copy.image_extent.height) as f32,
+                "a glyph samples {texel} outside the copied {copy:?}"
+            );
+        }
+        // Back to `ShaderRead` before the draw that samples the pages.
+        let returned = commands
+            .iter()
+            .position(|command| match command {
+                Command::Barrier { images, .. } => images.iter().any(|barrier| {
+                    barrier.image == ui.glyph_pages.image && barrier.to == ResourceState::ShaderRead
+                }),
+                _ => false,
+            })
+            .expect("the pages are returned to ShaderRead");
+        let drawn = commands
+            .iter()
+            .position(|command| matches!(command, Command::DrawIndexed { .. }))
+            .expect("the glyphs are drawn");
+        assert!(returned < drawn);
+
+        recorder.clear();
+        let labels = record_frame(&mut ui, device.as_ref(), queue, &mut pool, &list);
+        assert_eq!(
+            labels,
+            ["ui-composite"],
+            "cached glyphs were uploaded again"
+        );
+        assert_eq!(ui.glyphs().stats().rasterized, 0);
+        assert!(image_copies(&recorder.commands()).is_empty());
+
+        ui.destroy(device.as_ref());
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// A staged page copy whose frame never recorded it is staged again.
+    #[test]
+    fn a_glyph_upload_that_was_never_recorded_is_staged_again() {
+        let (device, queue) = open();
+        let mut ui =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+        let atlas = FontAtlas::built_in();
+        let list = glyph_run("again");
+        ui.begin_frame(device.as_ref(), &list, &atlas, 1.0)
+            .expect("upload");
+        let first: Vec<TexelRect> = ui.glyph_uploads.iter().map(|upload| upload.rect).collect();
+        assert_eq!(first.len(), 1);
+        // No graph this frame; the glyphs are cached, so only the retry stages.
+        ui.begin_frame(device.as_ref(), &list, &atlas, 1.0)
+            .expect("upload");
+        let again: Vec<TexelRect> = ui.glyph_uploads.iter().map(|upload| upload.rect).collect();
+        assert_eq!(first, again);
+        ui.destroy(device.as_ref());
+    }
+
+    /// Every glyph staging buffer is given back, by the ring or by `destroy`.
+    #[test]
+    fn glyph_uploads_leak_nothing() {
+        let (recorder, device, queue) = open_recorded();
+        let before = recorder.total_live_objects();
+        let mut pool = crate::transient::TransientPool::new();
+        let mut ui =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+        for (round, text) in ["abc", "def", "ghi", "jkl"].into_iter().enumerate() {
+            let labels = record_frame(&mut ui, device.as_ref(), queue, &mut pool, &glyph_run(text));
+            assert_eq!(labels[0], "ui-glyphs", "round {round}");
+        }
+        ui.destroy(device.as_ref());
+        pool.destroy(device.as_ref());
+        assert_eq!(recorder.total_live_objects(), before);
+        recorder.assert_valid();
     }
 
     /// Every staging buffer an upload made is given back — by the ring on its

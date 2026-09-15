@@ -22,41 +22,39 @@ use taffy::{
 use super::store::NodeStore;
 use super::style::{Display, NodeStyle};
 use super::{Content, FrameNode};
+use crate::font::layout::{TextLayout, wrap_width};
 use crate::text::{FontAtlas, LINE_HEIGHT};
 use crate::widget::NATURAL_FONT_SIZE;
-
-/// The width a text measurement is bucketed by, in pixels.
-///
-/// The bitmap font never wraps, so every bucket measures a string the same and
-/// the bucket only decides how often a moving width re-measures it. A whole
-/// pixel is the finest bucket that still lets a sub-pixel jitter hit.
-pub const MEASURE_WIDTH_BUCKET: f32 = 1.0;
 
 /// Which width a text measurement was asked under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum WidthBucket {
     MinContent,
     MaxContent,
-    /// `floor(width / MEASURE_WIDTH_BUCKET)`.
-    Definite(i64),
+    /// The bits of [`wrap_width`] of the width: whole pixels, the widths lines
+    /// are broken at, so every width in one bucket measures exactly the same.
+    Definite(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct MeasureKey {
-    /// The span's content hash: its text and its size.
+    /// The span's content hash: its text, and every style field that sizes it.
     text: u64,
-    /// The glyph scale's bits.
-    scale: u32,
     width: WidthBucket,
 }
 
-/// Text measurements, keyed by (text, scale, width bucket), on Clay's
-/// measure-cache pattern.
+/// Text measurements, keyed by (text and its font, size and line height, width
+/// bucket), on Clay's measure-cache pattern.
 ///
 /// A flex pass asks a leaf for its min-content and max-content size and again
 /// at its final width, and a text span answers all three from one
 /// measurement here. Entries for text no live span holds are dropped at
 /// layout.
+///
+/// Text in the bitmap font never wraps, so it measures the same in every
+/// bucket. Text in a parsed font is laid out by [`TextLayout`]: its max-content
+/// size unbroken, its min-content size broken at every space, and at a definite
+/// width broken to fit it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MeasureCache {
     entries: HashMap<MeasureKey, Size<f32>>,
@@ -67,24 +65,22 @@ pub(crate) struct MeasureCache {
 }
 
 impl MeasureCache {
-    /// `text`'s natural size at `font_size`, under `available` width.
+    /// `text`'s natural size in `style`, under a `width` constraint.
     fn text(
         &mut self,
         atlas: &FontAtlas,
         text: &str,
         content_hash: u64,
-        font_size: f32,
-        available: AvailableSpace,
+        style: &NodeStyle,
+        width: AvailableSpace,
     ) -> Size<f32> {
-        let scale = font_size / NATURAL_FONT_SIZE;
         let key = MeasureKey {
             text: content_hash,
-            scale: scale.to_bits(),
-            width: match available {
+            width: match width {
                 AvailableSpace::MinContent => WidthBucket::MinContent,
                 AvailableSpace::MaxContent => WidthBucket::MaxContent,
                 AvailableSpace::Definite(width) => {
-                    WidthBucket::Definite((width / MEASURE_WIDTH_BUCKET).floor() as i64)
+                    WidthBucket::Definite(wrap_width(width).to_bits())
                 }
             },
         };
@@ -93,9 +89,33 @@ impl MeasureCache {
             return *size;
         }
         self.misses += 1;
-        let size = Size {
-            width: atlas.text_width(text, scale),
-            height: atlas.line_count(text) as f32 * LINE_HEIGHT * scale,
+        let size = match style.font_family.font() {
+            None => {
+                let scale = style.font_size / NATURAL_FONT_SIZE;
+                Size {
+                    width: atlas.text_width(text, scale),
+                    height: atlas.line_count(text) as f32 * LINE_HEIGHT * scale,
+                }
+            }
+            Some(font) => {
+                let wrap = match width {
+                    AvailableSpace::MinContent => Some(0.0),
+                    AvailableSpace::MaxContent => None,
+                    AvailableSpace::Definite(width) => Some(width),
+                };
+                let measured = TextLayout::new(
+                    font,
+                    text,
+                    style.font_size,
+                    style.text_line_height(font),
+                    wrap,
+                )
+                .measure();
+                Size {
+                    width: measured.x,
+                    height: measured.y,
+                }
+            }
         };
         self.entries.insert(key, size);
         size
@@ -210,12 +230,16 @@ impl LayoutPartialTree for LayoutTree<'_> {
                         |known, available| {
                             let natural = match frame.content {
                                 Content::Block => Size::ZERO,
+                                // The width the span is given, else the space
+                                // it may take: what a wrapped line breaks at.
                                 Content::Text { start, end } => measure.text(
                                     atlas,
                                     &text[start..end],
                                     frame.content_hash,
-                                    frame.style.font_size,
-                                    available.width,
+                                    &frame.style,
+                                    known
+                                        .width
+                                        .map_or(available.width, AvailableSpace::Definite),
                                 ),
                                 Content::Image(image) => Size {
                                     width: image.width as f32,

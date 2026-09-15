@@ -3,6 +3,31 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## What UI rung 5 shipped without (2026-09-16)
+
+`crcbl_ui::font` landed with the gaps below.
+
+- **Every browser demo grows by about 1.03 MB raw, 274 KB gzipped**, measured on
+  puppet and sparks, whether or not it draws a parsed font: `skrifa` and
+  `read-fonts` are linked into `crcbl-ui` unconditionally, and the font itself
+  is 54 KB of it. The automatic hinter is about 57 KB. Worth a size breakdown,
+  and a decision on gating the parsed font behind a feature a demo opts into.
+- **Light-on-dark text reads heavy** under linear-light blending; a contrast
+  curve built without `pow` (a table from a rational fit) needs a decision.
+- **The GPU glyph pages are allocated up front** (two layers at start-up)
+  because a WebGPU texture cannot grow in place; raising the page cap means
+  growing and re-uploading the array across frames in flight.
+- **Kerning gaps**: the legacy `kern` table is not read; only the first glyph's
+  x-advance is applied; only Latin-1 pairs are cached, and a codepoint past
+  Latin-1 re-opens the font on every lookup; whether pair subtables sum or the
+  first decides is untested against a font where it matters.
+- **`ReadoutPanel` cannot take an application stylesheet**, so only
+  `default.css` can move it onto the parsed font.
+- **`line-height` is ignored for bitmap-font spans** and takes no percentages;
+  only two families exist, and `Font::parse` wants `'static` bytes.
+- **A shelf emptied by eviction keeps its height**, so a fragmented page can
+  refuse a glyph; it is counted as unplaced.
+
 ## What UI rung 4 shipped without (2026-09-16)
 
 `crcbl_ui::style` landed with the gaps below.

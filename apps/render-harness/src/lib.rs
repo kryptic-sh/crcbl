@@ -149,6 +149,7 @@ const SCENES: &[(Scene, &str)] = &[
     (Scene::UiPrimitives, "ui_primitives"),
     (Scene::UiTree, "ui_tree"),
     (Scene::UiStyle, "ui_style"),
+    (Scene::UiText, "ui_text"),
 ];
 
 /// Every golden basename this gate drives, in the order it drives them.

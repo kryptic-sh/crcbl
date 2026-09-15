@@ -1,8 +1,8 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
 // UI compositing shader: renders screen-space quads on top of the existing
-// framebuffer — solid colour, glyph-atlas text, image-atlas pictures and
-// analytic rounded rectangles, all through one pipeline.
+// framebuffer — solid colour, bitmap-font text, glyph-page text, image-atlas
+// pictures and analytic rounded rectangles, all through one pipeline.
 //
 // Each quad vertex carries a position in screen-space pixels, a UV, an RGBA
 // colour, the clip rectangle it was pushed under, and the primitive it belongs
@@ -12,9 +12,10 @@
 // draw from the primitive and composites with alpha blending.
 //
 // Architecture: one draw call per half of the draw list (all UI geometry merged
-// into one vertex/index buffer). The glyph atlas is a single-channel R8 texture
-// multiplied into the vertex colour's alpha; the image atlas is `Rgba8UnormSrgb`
-// multiplied by the vertex colour. A primitive switch that is data rather than
+// into one vertex/index buffer). The bitmap font's atlas is a single-channel R8
+// texture multiplied into the vertex colour's alpha, and so is a layer of the
+// glyph pages; the image atlas is `Rgba8UnormSrgb` multiplied by the vertex
+// colour. A primitive switch that is data rather than
 // a pipeline is what keeps a menu frame, its labels and a rounded panel in the
 // same batch.
 //
@@ -39,7 +40,7 @@
 // # No branch reaches a sample or a derivative
 //
 // WGSL requires `textureSample` and `fwidth` to be called from uniform control
-// flow, and the primitive is a per-vertex value — so both atlases are sampled,
+// flow, and the primitive is a per-vertex value — so every atlas is sampled,
 // and the sharp-bilinear derivative taken, for **every** fragment before
 // anything is chosen, and the clip's `discard` is the fragment stage's last
 // statement. Dawn enforces the rule where naga and every Vulkan driver do not,
@@ -65,7 +66,8 @@ struct Vertex
     float2 uv;         // atlas UV; a rounded rect's offset from its centre
     float4 color;      // RGBA fill, text colour or image tint
     float4 clip;       // min.x, min.y, max.x, max.y in screen pixels
-    float4 shape;      // half width, half height, border width, primitive
+    float4 shape;      // half width, half height, border width, primitive;
+                       // a glyph-page glyph's page in the first lane
     float4 radii;      // top-left, top-right, bottom-right, bottom-left
     float4 border;     // a rounded rect's border colour
 };
@@ -74,6 +76,7 @@ struct Vertex
 static const float PRIMITIVE_GLYPH = 1.0;
 static const float PRIMITIVE_IMAGE = 2.0;
 static const float PRIMITIVE_ROUNDED_RECT = 3.0;
+static const float PRIMITIVE_FONT_GLYPH = 4.0;
 
 // **Declaration order is binding order, and it is load-bearing on Metal.**
 // Slang's Metal target ignores `[[vk::binding]]` and assigns each resource an
@@ -81,8 +84,8 @@ static const float PRIMITIVE_ROUNDED_RECT = 3.0;
 // while `crcbl-mtl` flattens `(set, binding)` by ascending binding number per
 // table. The two agree only while this file declares its resources in the order
 // it numbers them, so the glyph atlas, its sampler and the vertex buffer come
-// first, `constants` at binding 3 next, and the image atlas and its sampler,
-// at 4 and 5, last. `crcbl_shaders`' `declaration_order` lint checks it over
+// first, `constants` at binding 3 next, the image atlas and its sampler at 4
+// and 5, and the glyph pages at 6, last. `crcbl_shaders`' `declaration_order` lint checks it over
 // every source; see `crcbl_mtl::binding`'s "The index a binding lands on" for
 // the rule itself.
 
@@ -110,6 +113,13 @@ Texture2D<float4> imageAtlas;
 /// the sprite pass gives `SampleMode::Pixel` sheets.
 [[vk::binding(5, 0)]]
 SamplerState imageSampler;
+
+/// The glyph atlas's pages, a layer each: `R8Unorm` coverage —
+/// `crcbl_ui::font::atlas`. Sampled through `glyphSampler`: a glyph's mask is
+/// drawn one texel to one pixel with its corners on whole pixels, so a nearest
+/// sample at each fragment centre reads exactly its own texel.
+[[vk::binding(6, 0)]]
+Texture2DArray<float> glyphPages;
 
 struct UiOutput
 {
@@ -187,7 +197,7 @@ float roundedBoxDistance(float2 p, float2 halfExtent, float4 radii)
 [shader("fragment")]
 float4 fragmentMain(UiOutput input) : SV_Target
 {
-    // Both atlases sampled and the derivative taken first, unconditionally —
+    // Every atlas sampled and the derivative taken first, unconditionally —
     // see the header. A solid quad's UV is (0, 0) and a rounded rect's is a
     // pixel offset; what either samples is fetched and then not used.
     float glyph = glyphAtlas.Sample(glyphSampler, input.uv);
@@ -198,10 +208,17 @@ float4 fragmentMain(UiOutput input) : SV_Target
     float4 texel = imageAtlas.Sample(imageSampler, sharpen(input.uv, imageSize));
 
     float primitive = input.shape.w;
+    // Layer zero for everything but a glyph-page glyph, whose first shape lane
+    // is its page: another primitive's half width is no layer at all.
+    float page = primitive == PRIMITIVE_FONT_GLYPH ? input.shape.x : 0.0;
+    float pageCoverage = glyphPages.Sample(glyphSampler, float3(input.uv, page));
+
     float4 color = input.color;
 
-    // Solid colour is `color` as it is. A glyph multiplies coverage into alpha.
+    // Solid colour is `color` as it is. A glyph multiplies coverage into alpha,
+    // from the bitmap font or from its glyph page.
     color.a *= primitive == PRIMITIVE_GLYPH ? glyph : 1.0;
+    color.a *= primitive == PRIMITIVE_FONT_GLYPH ? pageCoverage : 1.0;
 
     // An image multiplies the whole texel by the tint.
     color = primitive == PRIMITIVE_IMAGE ? texel * input.color : color;

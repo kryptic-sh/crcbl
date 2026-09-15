@@ -147,6 +147,19 @@ impl ReadoutPanel {
         origin: Vec2,
         rows: &[ReadoutRow],
     ) {
+        self.draw_in(Ui::new(), list, atlas, origin, rows);
+    }
+
+    /// [`ReadoutPanel::draw_at`], through `ui` and whatever stylesheets it
+    /// holds.
+    fn draw_in(
+        &self,
+        mut ui: Ui,
+        list: &mut DrawList,
+        atlas: &FontAtlas,
+        origin: Vec2,
+        rows: &[ReadoutRow],
+    ) {
         // The border is inside the panel's `pad`, as it always was: content
         // starts `pad` in from the outer edge whatever the border's width.
         // Everything else about the panel's look is `default.css`'s.
@@ -163,7 +176,6 @@ impl ReadoutPanel {
         let row = [Declaration::Height(LengthAuto::Px(self.row_height))];
         let label = [Declaration::Color(self.label)];
 
-        let mut ui = Ui::new();
         ui.begin_frame(PointerInput::default());
         ui.block("readout", &panel, |ui| {
             for (index, reading) in rows.iter().enumerate() {
@@ -454,6 +466,63 @@ mod tests {
                 at(&tree),
                 at(&arithmetic) + Vec2::new(0.5, 0.0),
                 "{extent:?}"
+            );
+        }
+    }
+
+    /// **A stylesheet selecting the parsed font for the panel draws it in that
+    /// font, and still ends every reading at the right margin** — to within the
+    /// pixel a measured width is rounded up by.
+    #[test]
+    fn a_sheet_selecting_the_parsed_font_right_aligns_readings_in_it() {
+        use crate::font::Font;
+        use crate::font::layout::TextLayout;
+
+        let atlas = FontAtlas::built_in();
+        let mut ui = Ui::new();
+        ui.add_stylesheet("sans.css", "readout { font-family: sans-serif; }");
+        let mut list = DrawList::new();
+        let rows = rows();
+        PANEL.draw_in(ui, &mut list, &atlas, Vec2::splat(PANEL.inset), &rows);
+
+        assert!(
+            !list
+                .commands()
+                .iter()
+                .any(|command| matches!(command, DrawCommand::Text { .. })),
+            "a span still drew in the bitmap font"
+        );
+        let font = Font::sans();
+        let right = PANEL.inset + PANEL.width - PANEL.pad;
+        for row in &rows {
+            let laid = TextLayout::new(
+                font,
+                &row.value,
+                NATURAL_FONT_SIZE,
+                font.metrics().normal_line_height(NATURAL_FONT_SIZE),
+                None,
+            );
+            let wanted: Vec<_> = laid.glyphs().iter().map(|glyph| glyph.glyph).collect();
+            let origin = list
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    DrawCommand::Glyphs { origin, glyphs, .. }
+                        if glyphs
+                            .iter()
+                            .map(|glyph| glyph.glyph)
+                            .eq(wanted.iter().copied()) =>
+                    {
+                        Some(*origin)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{} was not drawn in the parsed font", row.value));
+            let end = origin.x + laid.width();
+            assert!(
+                end <= right && end > right - 1.0,
+                "{} ends at {end}, not within a pixel inside {right}",
+                row.value
             );
         }
     }

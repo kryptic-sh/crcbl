@@ -26,6 +26,14 @@ taffy = { version = "0.14.0", default-features = false, features = ["flexbox", "
 # `fast_match_color` pull in two proc-macro crates (`cssparser-macros` and
 # `phf_macros`, with `syn`) for speed-ups to a parser that runs once per sheet.
 cssparser = { version = "0.38.0", default-features = false }
+# Font parsing and hinted outlines for `font` — `docs/plan/07-ui-debug.md`'s
+# rendering section, the user's decision of 2026-09-15. Rasterisation and the
+# glyph atlas are this crate's. `read-fonts` comes with it and is reached as
+# `skrifa::raw`, so the GPOS reader is always the version skrifa was built
+# against. Default features off: `autohint_shaping` feeds the automatic hinter,
+# and the committed font carries TrueType instructions the interpreter runs
+# instead. `std` stays on, because the other float backend is `libm`.
+skrifa ={ version = "0.47.0", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

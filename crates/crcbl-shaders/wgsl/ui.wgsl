@@ -25,6 +25,8 @@ struct UiConstants_std140_0
 
 @binding(5) @group(0) var imageSampler_0 : sampler;
 
+@binding(6) @group(0) var glyphPages_0 : texture_2d_array<f32>;
+
 struct UiOutput_0
 {
     @builtin(position) position_1 : vec4<f32>,
@@ -123,82 +125,102 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_2 : vec4<f32>) 
     {var dim = textureDimensions((imageAtlas_0));((imageWidth_0)) = dim.x;((imageHeight_0)) = dim.y;};
     var texel_0 : vec4<f32> = (textureSample((imageAtlas_0), (imageSampler_0), (sharpen_0(_S3.uv_3, vec2<f32>(f32(imageWidth_0), f32(imageHeight_0))))));
     var primitive_0 : f32 = _S3.shape_2.w;
+    var _S4 : bool = primitive_0 == 4.0f;
+    var page_0 : f32;
+    if(_S4)
+    {
+        page_0 = _S3.shape_2.x;
+    }
+    else
+    {
+        page_0 = 0.0f;
+    }
+    var _S5 : vec3<f32> = vec3<f32>(_S3.uv_3, page_0);
+    var pageCoverage_0 : f32 = (textureSample((glyphPages_0), (glyphSampler_0), ((_S5)).xy, i32(((_S5)).z)).x);
     var color_3 : vec4<f32> = _S3.color_2;
-    var _S4 : f32;
     if(primitive_0 == 1.0f)
     {
-        _S4 = glyph_0;
+        page_0 = glyph_0;
     }
     else
     {
-        _S4 = 1.0f;
+        page_0 = 1.0f;
     }
-    color_3[i32(3)] = color_3[i32(3)] * _S4;
-    var _S5 : vec4<f32>;
+    color_3[i32(3)] = color_3[i32(3)] * page_0;
+    if(_S4)
+    {
+        page_0 = pageCoverage_0;
+    }
+    else
+    {
+        page_0 = 1.0f;
+    }
+    color_3[i32(3)] = color_3[i32(3)] * page_0;
+    var _S6 : vec4<f32>;
     if(primitive_0 == 2.0f)
     {
-        _S5 = texel_0 * _S3.color_2;
+        _S6 = texel_0 * _S3.color_2;
     }
     else
     {
-        _S5 = color_3;
+        _S6 = color_3;
     }
-    color_3 = _S5;
+    color_3 = _S6;
     var distance_0 : f32 = roundedBoxDistance_0(_S3.uv_3, _S3.shape_2.xy, _S3.radii_3);
     var coverage_0 : f32 = saturate(0.5f - distance_0);
-    var _S6 : f32 = _S3.shape_2.z;
-    var inner_0 : f32 = saturate(0.5f - (distance_0 + _S6));
+    var _S7 : f32 = _S3.shape_2.z;
+    var inner_0 : f32 = saturate(0.5f - (distance_0 + _S7));
     var rounded_0 : vec4<f32>;
-    if(_S6 > 0.0f)
+    if(_S7 > 0.0f)
     {
-        _S4 = inner_0;
+        page_0 = inner_0;
     }
     else
     {
-        _S4 = 1.0f;
+        page_0 = 1.0f;
     }
-    rounded_0 = mix(_S3.border_2, _S3.color_2, vec4<f32>(_S4));
+    rounded_0 = mix(_S3.border_2, _S3.color_2, vec4<f32>(page_0));
     rounded_0[i32(3)] = rounded_0[i32(3)] * coverage_0;
     if(primitive_0 == 3.0f)
     {
-        _S5 = rounded_0;
+        _S6 = rounded_0;
     }
     else
     {
-        _S5 = color_3;
+        _S6 = color_3;
     }
-    color_3 = _S5;
-    var _S7 : f32 = _S3.screen_1.x;
-    var _S8 : bool;
-    if(_S7 < (_S3.clip_2.x))
+    color_3 = _S6;
+    var _S8 : f32 = _S3.screen_1.x;
+    var _S9 : bool;
+    if(_S8 < (_S3.clip_2.x))
     {
-        _S8 = true;
+        _S9 = true;
     }
     else
     {
-        _S8 = (_S3.screen_1.y) < (_S3.clip_2.y);
+        _S9 = (_S3.screen_1.y) < (_S3.clip_2.y);
     }
-    if(_S8)
+    if(_S9)
     {
-        _S8 = true;
+        _S9 = true;
     }
     else
     {
-        _S8 = _S7 >= (_S3.clip_2.z);
+        _S9 = _S8 >= (_S3.clip_2.z);
     }
-    if(_S8)
+    if(_S9)
     {
-        _S8 = true;
+        _S9 = true;
     }
     else
     {
-        _S8 = (_S3.screen_1.y) >= (_S3.clip_2.w);
+        _S9 = (_S3.screen_1.y) >= (_S3.clip_2.w);
     }
-    if(_S8)
+    if(_S9)
     {
         discard;
     }
-    var _S9 : pixelOutput_0 = pixelOutput_0( color_3 );
-    return _S9;
+    var _S10 : pixelOutput_0 = pixelOutput_0( color_3 );
+    return _S10;
 }
 

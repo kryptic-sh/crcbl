@@ -726,7 +726,7 @@ mod tests {
 
             let mut dl = DrawList::new();
             btn.render(&mut dl, pos, &atlas, &style(), ButtonState::Idle);
-            let (verts, _) = dl.to_triangles(Some(&atlas), 1.0);
+            let (verts, _) = dl.to_triangles(Some(&atlas), None, 1.0);
             for v in &verts {
                 assert!(
                     v.pos.x >= min.x - 0.001
@@ -753,7 +753,7 @@ mod tests {
         let DrawCommand::Rect { min, max, .. } = dl.commands()[0] else {
             panic!("expected a background Rect");
         };
-        let (verts, _) = dl.to_triangles(Some(&atlas), 1.0);
+        let (verts, _) = dl.to_triangles(Some(&atlas), None, 1.0);
         assert!(!verts.is_empty());
         for v in &verts {
             assert!(

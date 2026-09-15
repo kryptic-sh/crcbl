@@ -7,6 +7,7 @@ use glam::Vec2;
 use super::style::{Display, NodeStyle, Overflow};
 use super::{Content, Ui, padding_box};
 use crate::draw_list::{Border, CornerRadii, DrawList};
+use crate::font::layout::TextLayout;
 
 /// Whether a colour draws anything.
 fn visible(color: [f32; 4]) -> bool {
@@ -36,13 +37,33 @@ impl Ui {
         match node.content {
             Content::Block => paint_box(list, &node.style, min, max),
             Content::Text { start, end } => {
-                let (content_min, _) = content_box(min, &node.layout);
-                list.text(
-                    content_min,
-                    &self.text[start..end],
-                    node.style.color,
-                    node.style.font_size,
-                );
+                let (content_min, content_max) = content_box(min, &node.layout);
+                let text = &self.text[start..end];
+                let style = &node.style;
+                match style.font_family.font() {
+                    None => list.text(content_min, text, style.color, style.font_size),
+                    Some(font) => {
+                        // Broken at the width the layout measured it under —
+                        // the unrounded one — and aligned in the box it is
+                        // drawn in, the rounded one.
+                        let unrounded = &self.store.get(node.slot).unrounded;
+                        let mut layout = TextLayout::new(
+                            font,
+                            text,
+                            style.font_size,
+                            style.text_line_height(font),
+                            Some(content_width(unrounded)),
+                        );
+                        layout.align(content_max.x - content_min.x, style.text_align);
+                        list.glyphs(
+                            content_min,
+                            font,
+                            style.font_size,
+                            style.color,
+                            layout.glyphs(),
+                        );
+                    }
+                }
             }
             Content::Image(image) => {
                 let (content_min, content_max) = content_box(min, &node.layout);
@@ -120,6 +141,15 @@ fn paint_box(list: &mut DrawList, style: &NodeStyle, min: Vec2, max: Vec2) {
             list.rect(band_min, band_max, style.border_color);
         }
     }
+}
+
+/// A layout's content-box width.
+fn content_width(layout: &taffy::Layout) -> f32 {
+    layout.size.width
+        - layout.padding.left
+        - layout.padding.right
+        - layout.border.left
+        - layout.border.right
 }
 
 /// A node's content box, given its border box's top-left.

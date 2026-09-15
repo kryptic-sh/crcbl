@@ -16,6 +16,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The draw list carries laid-out glyph runs.** `DrawList::to_triangles` and
+  `to_triangles_split` take an `Option<&mut GlyphAtlas>` after the bitmap atlas;
+  `DrawCommand::Glyphs` and `Primitive::FontGlyph` are new variants, so an
+  exhaustive match needs an arm; `UiRenderer::MAX_PASSES` is four; and
+  `crcbl_ui::tree::MEASURE_WIDTH_BUCKET` is removed.
 - **`crcbl_ui::tree`'s builders take a selector and inline declarations.**
   `Ui::block`, `block_keyed` and `span` take a `type#id.class` selector and a
   `&[Declaration]` inline override where they took `Option<&str>` and
@@ -166,6 +171,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Real fonts in the UI (`crcbl_ui::font`).** Atkinson Hyperlegible (SIL Open
+  Font License 1.1) is embedded and parsed with `skrifa`: cmap, advances, line
+  metrics and GPOS pair kerning. Vertically hinted outlines are rasterised by
+  the engine's own signed-area coverage rasteriser at four subpixel offsets into
+  `GlyphAtlas` — shelf-packed single-channel pages with least-recently-used
+  eviction per page and a per-frame rasterisation budget — which `UiRenderer`
+  binds as a texture array and updates in a `ui-glyphs` copy pass.
+  `DrawList::glyphs` draws laid-out runs, and `TextLayout` kerns, wraps greedily
+  at spaces and newlines, and aligns; it is the tree's measure callback, so a
+  wrapped span grows its block. `font-family`, `line-height` and `text-align`
+  are inherited stylesheet properties; `bitmap` is the initial family, and the
+  menus, console, debug panel and readout panel keep the bitmap font.
+  `crcbl screenshot --scene ui_text` draws the new golden. Adds the `skrifa`
+  dependency, which grows each browser demo by about 274 KB gzipped.
 - **`crcbl_ui::style`: stylesheets for the element tree.** `Ui::add_stylesheet`,
   `load_stylesheet`, `replace_stylesheet` and `poll_stylesheets` cascade the
   engine's embedded `default.css`, then app sheets, then inline `Declaration`s.
