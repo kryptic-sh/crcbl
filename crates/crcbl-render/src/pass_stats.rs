@@ -239,6 +239,7 @@ mod tests {
 
     fn frame(number: u64, passes: &[(&str, u64)]) -> FrameTimings {
         FrameTimings {
+            elapsed_nanos: None,
             passes: passes
                 .iter()
                 .map(|(label, gpu_nanos)| PassTiming {

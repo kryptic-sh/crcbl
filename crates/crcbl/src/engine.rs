@@ -2397,9 +2397,11 @@ impl GpuContext {
                 .unwrap_or_else(|| unreachable!("the queue is non-empty above"));
             match self.timeline {
                 Some(semaphore) => {
-                    let satisfied = self
-                        .device
-                        .wait_semaphores(&[SemaphoreWait { semaphore, value }], u64::MAX)?;
+                    let satisfied = {
+                        let _waiting = crcbl_core::trace::span(crate::perf::PRESENT_WAIT_SPAN);
+                        self.device
+                            .wait_semaphores(&[SemaphoreWait { semaphore, value }], u64::MAX)?
+                    };
                     if !satisfied {
                         // Back where it came from, still owned and still
                         // undestroyed: the caller may retry, and a buffer
@@ -2414,7 +2416,10 @@ impl GpuContext {
                 }
                 // The Tier B fallback. Correct, and coarse enough that the log
                 // line in `open` exists to explain the frame rate.
-                None => self.device.wait_idle()?,
+                None => {
+                    let _waiting = crcbl_core::trace::span(crate::perf::PRESENT_WAIT_SPAN);
+                    self.device.wait_idle()?;
+                }
             }
             self.device.destroy_command_buffer(command_buffer);
         }
@@ -6913,9 +6918,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         if let Some(timings) = self.gpu.timings()
             && !timings.is_empty()
         {
-            self.debug
-                .budget
-                .record_gpu(timings.frame, Duration::from_nanos(timings.total_nanos()));
+            if let Some(elapsed) = timings.elapsed_nanos {
+                self.debug
+                    .budget
+                    .record_gpu(timings.frame, Duration::from_nanos(elapsed));
+            }
             self.passes.record(timings);
         }
     }
@@ -13106,6 +13113,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn command_retirement_waits_are_excluded_from_cpu_work() {
+        in_a_traced_process(
+            "engine::tests::command_retirement_waits_are_excluded_from_cpu_work",
+            || {
+                use crcbl_core::trace::RecordKind::{SpanBegin, SpanEnd};
+                let (_shell, _window, _recorder, mut gpu) =
+                    null_context("retirement wait spans", Pacing::Vsync);
+                null_frame(&mut gpu).expect("first frame");
+                null_frame(&mut gpu).expect("second frame");
+                drop(crcbl_core::trace::drain());
+                gpu.retire_to(0).expect("retire both submissions");
+                assert_eq!(
+                    span_shapes(&crcbl_core::trace::drain()),
+                    vec![
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
+                    ],
+                    "each blocking wait needs its own CPU-idle exclusion"
+                );
+                gpu.destroy().expect("release resources");
+            },
+        );
+    }
+
     /// **A traced run fills the budget row's CPU window**, which is the whole
     /// chain: the span opens, the drain finds it, `frame_cpu_time` reads it and
     /// the row takes it.
@@ -13337,6 +13371,7 @@ mod tests {
     #[test]
     fn the_budget_rows_gpu_window_follows_the_timers_frame_number() {
         let timings = |frame: u64, nanos: u64| crcbl_render::FrameTimings {
+            elapsed_nanos: Some(nanos),
             frame,
             passes: vec![crcbl_render::PassTiming {
                 label: "forward".to_string(),
@@ -13368,6 +13403,37 @@ mod tests {
         assert!(pending.passes.is_empty(), "an empty report is not a frame");
     }
 
+    #[test]
+    fn the_gpu_budget_uses_elapsed_time_instead_of_overlapping_pass_sums() {
+        let mut engine = hosted(None);
+        for frame in 0..crcbl_core::stats::MIN_PERCENTILE_SAMPLES {
+            engine.gpu.timings = Some(crcbl_render::FrameTimings {
+                frame: frame as u64,
+                elapsed_nanos: Some(2_000_000),
+                passes: vec![
+                    crcbl_render::PassTiming {
+                        label: "a".into(),
+                        gpu_nanos: 2_000_000,
+                    },
+                    crcbl_render::PassTiming {
+                        label: "b".into(),
+                        gpu_nanos: 2_000_000,
+                    },
+                ],
+            });
+            engine.frame().expect("frame");
+        }
+        assert_eq!(
+            engine.debug.budget.gpu(),
+            Some((Duration::from_millis(2), Duration::from_millis(2)))
+        );
+        let previous = engine.debug.budget.gpu_frame();
+        engine.gpu.timings.as_mut().expect("timings").elapsed_nanos = None;
+        engine.gpu.timings.as_mut().expect("timings").frame += 1;
+        engine.frame().expect("frame without valid timestamps");
+        assert_eq!(engine.debug.budget.gpu_frame(), previous);
+    }
+
     /// **The per-pass windows follow the same frame number as the budget row.**
     ///
     /// `PassStats` has its own guard against the timers' latency and its own
@@ -13379,6 +13445,7 @@ mod tests {
     #[test]
     fn the_per_pass_windows_are_fed_the_frames_the_budget_row_is_fed() {
         let timings = |frame: u64, nanos: u64| crcbl_render::FrameTimings {
+            elapsed_nanos: Some(nanos),
             frame,
             passes: vec![crcbl_render::PassTiming {
                 label: "forward".to_string(),

@@ -100,6 +100,7 @@ fn setup(instance: &dyn Instance) -> Frame {
         })
         .expect("the adapter satisfies what we asked for");
     assert_eq!(device.caps().geometry_path(), geometry);
+    assert_eq!(device.preferred_geometry_path(), geometry);
 
     let queue: QueueHandle = device
         .queue(QueueKind::Graphics)

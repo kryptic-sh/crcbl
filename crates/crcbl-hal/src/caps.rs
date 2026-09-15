@@ -621,7 +621,10 @@ pub struct DeviceCaps {
 }
 
 impl DeviceCaps {
-    /// Which [`GeometryPath`] this device selects.
+    /// Default [`GeometryPath`] selected from the capability ceiling.
+    ///
+    /// [`crate::Device::preferred_geometry_path`] may recommend a cheaper
+    /// supported path when the highest-ranked capability is emulated.
     ///
     /// Derived rather than stored, here and for the other two selectors: a
     /// backend cannot claim a path while missing what that path is built on —
