@@ -301,17 +301,6 @@ pub fn upload_cleared_texture(
     // Whole words: `vkCmdFillBuffer` and `crcbl-dx12`'s clear refuse a size that
     // is not a multiple of four.
     let cleared = (full_pitch * u64::from(desc.height)).next_multiple_of(CLEAR_WORD_BYTES);
-    let layer_regions: Vec<StagedRegion> = (0..desc.layers)
-        .map(|layer| StagedRegion {
-            buffer_offset: 0,
-            row_texels: u32::try_from(full_pitch / u64::from(texel)).unwrap_or(u32::MAX),
-            extent: Extent3d::d2(desc.width, desc.height),
-            layer,
-            mip: 0,
-            image_offset: Offset3d { x: 0, y: 0, z: 0 },
-        })
-        .collect();
-
     let mut patched = Vec::new();
     let mut patch_regions = Vec::with_capacity(desc.patches.len());
     for (index, patch) in desc.patches.iter().enumerate() {
@@ -335,6 +324,16 @@ pub fn upload_cleared_texture(
                 desc.width,
                 desc.height,
                 desc.layers
+            )));
+        }
+        if let Some(other) = desc.patches[..index]
+            .iter()
+            .position(|earlier| earlier.layer == patch.layer && overlaps(earlier, patch))
+        {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{label}: patch {index} overlaps patch {other} on layer {}, and a texel written \
+                 twice in one upload is a synchronisation hazard",
+                patch.layer
             )));
         }
         let row_bytes = u64::from(patch.width) * u64::from(texel);
@@ -369,6 +368,34 @@ pub fn upload_cleared_texture(
         });
         patched.extend_from_slice(&staged);
     }
+
+    // The zeroes go only where no patch does, so no texel is written twice: two
+    // unbarriered writes to one subresource in one command buffer are a
+    // synchronisation hazard Vulkan's sync validation reports.
+    let row_texels = u32::try_from(full_pitch / u64::from(texel)).unwrap_or(u32::MAX);
+    let layer_regions: Vec<StagedRegion> = (0..desc.layers)
+        .flat_map(|layer| {
+            let covered: Vec<&TexturePatch<'_>> = desc
+                .patches
+                .iter()
+                .filter(|patch| patch.layer == layer)
+                .collect();
+            uncovered(desc.width, desc.height, &covered)
+                .into_iter()
+                .map(move |(x, y, width, height)| StagedRegion {
+                    buffer_offset: 0,
+                    row_texels,
+                    extent: Extent3d::d2(width, height),
+                    layer,
+                    mip: 0,
+                    image_offset: Offset3d {
+                        x: i32::try_from(x).unwrap_or(i32::MAX),
+                        y: i32::try_from(y).unwrap_or(i32::MAX),
+                        z: 0,
+                    },
+                })
+        })
+        .collect();
 
     // Device-local, because a clear writes into the buffer on the GPU: a
     // `crcbl-dx12` upload-heap buffer can never be a copy destination.
@@ -420,6 +447,43 @@ pub fn upload_cleared_texture(
     }
     device.destroy_buffer(zero);
     outcome
+}
+
+/// Whether two patches share a texel.
+fn overlaps(a: &TexturePatch<'_>, b: &TexturePatch<'_>) -> bool {
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+}
+
+/// The rectangles of a `width` by `height` layer that no patch in `covered`
+/// touches, as `(x, y, width, height)`: the layer cut into horizontal bands at
+/// every patch's top and bottom edge, and each band's gaps between patches.
+/// The patches must not overlap and must lie inside the layer.
+fn uncovered(width: u32, height: u32, covered: &[&TexturePatch<'_>]) -> Vec<(u32, u32, u32, u32)> {
+    let mut edges: Vec<u32> = covered
+        .iter()
+        .flat_map(|patch| [patch.y, patch.y + patch.height])
+        .chain([0, height])
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let mut gaps = Vec::new();
+    for band in edges.windows(2) {
+        let (top, bottom) = (band[0], band[1]);
+        let mut spans: Vec<(u32, u32)> = covered
+            .iter()
+            .filter(|patch| patch.y < bottom && top < patch.y + patch.height)
+            .map(|patch| (patch.x, patch.x + patch.width))
+            .collect();
+        spans.sort_unstable();
+        let mut x = 0;
+        for (left, right) in spans.into_iter().chain([(width, width)]) {
+            if left > x {
+                gaps.push((x, top, left - x, bottom - top));
+            }
+            x = x.max(right);
+        }
+    }
+    gaps
 }
 
 /// The word [`clear_buffer`](crcbl_hal::CommandEncoder::clear_buffer) zeroes in
@@ -1585,16 +1649,49 @@ mod tests {
         );
 
         let copies = the_copies(&recorder);
-        assert_eq!(copies.len(), 4, "three layers and one patch: {copies:?}");
-        for (layer, copy) in copies[..3].iter().enumerate() {
-            assert_eq!(copy.buffer, zero, "layer {layer} reads the zeroed buffer");
-            assert_eq!(copy.buffer_offset, 0);
-            assert_eq!(copy.buffer_row_length, 128);
-            assert_eq!(copy.image_subresource.base_layer, layer as u32);
-            assert_eq!(copy.image_extent, Extent3d::d2(WIDTH, HEIGHT));
-            assert_eq!(copy.image_offset, Offset3d { x: 0, y: 0, z: 0 });
+        // **Every texel of every layer is written exactly once**: by a zero
+        // copy, or by the patch — never both, which sync validation reports.
+        let mut writes = vec![0u8; 3 * (WIDTH * HEIGHT) as usize];
+        for copy in &copies {
+            let Offset3d { x, y, .. } = copy.image_offset;
+            let layer = copy.image_subresource.base_layer;
+            for row in 0..copy.image_extent.height {
+                for column in 0..copy.image_extent.width {
+                    let texel = (layer * WIDTH * HEIGHT
+                        + (y as u32 + row) * WIDTH
+                        + (x as u32 + column)) as usize;
+                    writes[texel] += 1;
+                }
+            }
+            if copy.buffer == zero {
+                assert_eq!(copy.buffer_offset, 0);
+                assert_eq!(copy.buffer_row_length, 128);
+            }
         }
-        let patch = copies[3];
+        assert!(
+            writes.iter().all(|&count| count == 1),
+            "a texel was written {} times, or not at all: {copies:?}",
+            writes
+                .iter()
+                .copied()
+                .find(|&count| count != 1)
+                .unwrap_or(1)
+        );
+        let zeroes: Vec<_> = copies.iter().filter(|copy| copy.buffer == zero).collect();
+        assert_eq!(
+            zeroes.len(),
+            2 + 3,
+            "one copy for each unpatched layer, and the patched layer as the row \
+             above its patch and the two spans beside it: {copies:?}"
+        );
+        let [patch] = copies
+            .iter()
+            .filter(|copy| copy.buffer != zero)
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("expected one staged patch copy: {copies:?}");
+        };
+        let patch = *patch;
         assert_ne!(patch.buffer, zero, "a patch is staged, not cleared");
         assert_eq!(patch.buffer_offset, 0);
         assert_eq!(
@@ -1714,6 +1811,25 @@ mod tests {
                 "a patch {why} got: {message}"
             );
         }
+        let overlapping = upload_cleared_texture(
+            device.as_ref(),
+            queue,
+            &ClearedTextureDesc {
+                label: "atlas",
+                format: Format::Rgba8Unorm,
+                width: 8,
+                height: 8,
+                layers: 1,
+                view_type: ImageViewType::D2,
+                patches: &[texel, texel],
+            },
+        )
+        .expect_err("two patches on one texel are refused")
+        .to_string();
+        assert!(
+            overlapping.contains("patch 1 overlaps patch 0"),
+            "got: {overlapping}"
+        );
         let short = upload(1, TexturePatch { width: 2, ..texel });
         assert!(
             short.contains("patch 0") && short.contains("8 bytes, got 4"),

@@ -2209,18 +2209,39 @@ mod tests {
             .into_iter()
             .filter(|copy| copy.image == renderer.image_page.image)
             .collect();
-        let [whole, art] = copies[..] else {
+        let rect = menu_art_rect();
+        let [.., art] = copies[..] else {
             panic!("expected the zeroed page and then the art, got {copies:?}");
         };
-        assert_eq!(whole.image_extent, Extent3d::d2(PAGE_SIZE, PAGE_SIZE));
-        assert_eq!(whole.image_offset, Offset3d { x: 0, y: 0, z: 0 });
+        let whole = copies[0];
         let page_bytes = u64::from(PAGE_SIZE) * u64::from(PAGE_SIZE) * 4;
         assert!(
             cleared_before_copied(&commands, whole.buffer, page_bytes),
-            "the whole-page copy must read a buffer zeroed first, in {commands:?}"
+            "the zero copies must read a buffer zeroed first, in {commands:?}"
         );
+        // **Every texel of the page is written exactly once**: zeroes around
+        // the art and the art inside its rectangle, never both — two writes to
+        // one texel are a hazard Vulkan's sync validation reports.
+        let mut writes = vec![0u8; PAGE_SIZE as usize * PAGE_SIZE as usize];
+        for copy in &copies {
+            assert!(
+                copy.buffer == whole.buffer || copy.buffer == art.buffer,
+                "a copy from neither the zeroed buffer nor the art: {copy:?}"
+            );
+            let Offset3d { x, y, .. } = copy.image_offset;
+            for row in 0..copy.image_extent.height {
+                let start = (y as u32 + row) * PAGE_SIZE + x as u32;
+                for texel in start..start + copy.image_extent.width {
+                    writes[texel as usize] += 1;
+                }
+            }
+        }
+        assert!(
+            writes.iter().all(|&count| count == 1),
+            "a page texel was written twice or never: {copies:?}"
+        );
+        assert_ne!(art.buffer, whole.buffer, "the art is staged, not zeroed");
 
-        let rect = menu_art_rect();
         assert_eq!(art.image_extent, Extent3d::d2(rect.width, rect.height));
         assert_eq!(
             (art.image_offset.x, art.image_offset.y),
