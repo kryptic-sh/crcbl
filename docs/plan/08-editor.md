@@ -29,6 +29,110 @@ Two things sit behind it, in both directions:
   editor, zero hand-edited scene text" — and
   [sample/08-arena.md](sample/08-arena.md) wants an editor-built map too.
 
+## Where the tree stands against this design (surveyed 2026-09-15)
+
+**Unparked 2026-09-15 by the user**, to be built after the UI system's rungs in
+[07-ui-debug.md](07-ui-debug.md), because every panel below is made of that
+system. A read-only survey of the tree found the editor further away than the
+rest of this document suggests; each line was checked in the source.
+
+**What already exists and the editor can stand on:**
+
+- `crcbl_scene::scn` loads a `.scn/` directory into a caller's `World` and saves
+  it back byte-stably, with stable `SceneEntityId`s through `IdMap` —
+  `crates/crcbl-scene/tests/scn_roundtrip.rs` holds the round trip.
+- `PhysicsSystem::cast_ray` returns the `Entity` a ray hits, over the dynamic
+  BVH — for entities with a collider.
+- `crcbl_render::orbit::OrbitCamera` (orbit, pan, zoom, frame an AABB — its docs
+  name the editor viewport) and `crcbl_render::fly::Flyer`.
+- `crcbl_render::debug_draw::DebugDraw` and `crcbl_render::grid`.
+- `World::hash_state` and `crcbl_server::sim_hash::hash_world`, which the undo
+  property test in the exit criteria needs.
+- The shell's clipboard with a RON mime type, cursor shapes, `set_title` for a
+  dirty marker, close requests, IME text; X11 drops now arrive through XDND and
+  Win32 drops through `WM_DROPFILES`.
+- `apps/viewer` as the nearest tool shell: file open and drop, orbit camera,
+  grid, a read-only information panel, a polled reload.
+
+**What this document assumes and the tree does not have:**
+
+1. **Commands are dropped on arrival.** `ClientToServer::Command` is encoded,
+   but the server's message handler matches it and does nothing, `Client` has no
+   way to send one, and `ServerToClient::Event` has no consumer. A server hosts
+   one session, so a GUI and a CLI client cannot share one.
+2. **One schedule per `World`** and no per-system gating, so there is no
+   edit-mode schedule to switch from.
+3. **No snapshot or restore of a `World`**, so play/stop has nothing to restore
+   from. Replication is one-way and carries transforms only.
+4. **Most samples keep their state outside the ECS**, in a `Stage` behind a
+   mutex the renderer locks. Towers — whose milestone 2 is this document's
+   dogfood pass — says in its own source that it has no entity and no ECS
+   system. An editor has no world to edit in it until it is ported.
+5. **No inspector**: `crcbl_ecs::Inspector::collect` returns a system's name and
+   entity count, and the per-system debug-UI callback is an empty stub.
+6. **The scene format cannot hold one entity in two systems**: each chunk row
+   spawns its own entity, so the same id in two chunk files is a duplicate-id
+   error. The "attach/detach system data" command needs that first. `IdMap` has
+   no removal, and there is no dirty tracking or per-chunk reload.
+7. **Debug draw is not a gizmo layer**: lines only, depth-tested, off by default
+   — no on-top mode, no filled handles, no constant screen size.
+8. **No screen-to-ray helper**, and only collider-bearing entities pick.
+9. **No undo or command log** anywhere, and the inventory kit's
+   optimistic-then-reconcile shape exists only as prose in
+   [34-inventory.md](34-inventory.md).
+10. **`AssetSource` cannot list** (it has `read` alone), `crcbl import` writes
+    nothing, and there is no watcher but the viewer's polled file.
+11. **The UI cannot host an editor yet**: no textured quad or clip rect in the
+    draw list, no layout, no keyboard focus, text input without selection, an
+    ASCII bitmap font, and a DPI scale passed as `1.0` everywhere — the rungs of
+    [07-ui-debug.md](07-ui-debug.md).
+12. **No `serve`, `scene` or `edit` CLI subcommands**, and no native file
+    dialogs or menus.
+13. **Two statements in the 2026-08-09 corrections below are now out of date**:
+    X11 does have drag-drop (through XDND), and Win32 OS drops work; only the
+    Win32 clipboard file-list half (`CF_HDROP`) stands.
+
+**The missing pieces, ranked, with owner and rough size**: the UI foundation
+(large, `crcbl-ui` and the UI pass); a viewport pane that samples a rendered
+view (medium); `World` snapshot and restore (medium, and it needs games' state
+in systems); server command handling with a client send path and reason-coded
+replies (medium); the command and undo log with its property test (medium); an
+edit schedule (small to medium); the widget set (large); a reflection-style
+property hook per component (medium to large); gizmos (medium); the scene format
+change for entities spanning systems (small to medium); asset listing and a
+watcher (medium); input chords and a context stack (small to medium); a
+multi-session server with `crcbl edit --serve` (large).
+
+**The smallest slice that uses only what exists** plus a screen-to-ray helper,
+modifier-carrying key events and a way to force debug draw on: a native,
+single-process `apps/editor` that loads breakout's board scene, renders it with
+the orbit camera and grid, lists entities per system, picks one by ray, draws
+its bounds, nudges it with keys, and saves with a dirty marker in the title —
+proving load, pick, mutate, save and a byte-stable diff before any protocol
+exists.
+
+**Decisions this raises, for the user before building** — the options are
+evidenced above:
+
+- **Protocol first, in-process first, or both**: the locked design routes every
+  edit through server commands, which needs items 1–4 first; mutating the server
+  `World` in-process reaches a usable tool sooner and breaks the "nothing
+  GUI-only" invariant; the middle is a command enum and undo log from day one,
+  applied in-process and routed over the transport later.
+- **Whether games must keep editable state in ECS systems** (towers ported
+  first), or the editor edits only scene data a game reads at load.
+- **How play/stop restores**: per-system serialize and restore, the scene chunk
+  codecs over every system, or restarting play from a scene reload.
+- **Docking**: splitters only, as the UI plan fixes, and whether tabs are in.
+- **The viewport**: a secondary view rendered to a texture a UI rect samples, or
+  the scene drawn full-window with UI panes around a scissored region.
+- **File dialogs**: native per backend, or an in-UI browser over
+  `StorageSource::list`.
+- **The scene format change** for entities spanning systems (the format is v0,
+  so a break is allowed).
+- **A file watcher dependency** for hot reload (`notify`), already open in the
+  backlog.
+
 ## Architecture
 
 - **The editor is a client+server pair**, exactly like the sandbox: an editor
