@@ -17847,32 +17847,35 @@ the evidence this entry lacks. (3) is in place since the fourth burst:
 step that prints processor time over a 3 s sample, free memory and the eight
 busiest processes.
 
-**The fifth burst read it, and it refutes the starved-runner story.** On
-`252d77c` the step read 3.5% processor time and 13.07 GiB free of 15.99 on 4
-logical processors — the same as the green runs either side of it (2.8% on
-`92dcfe0`, 27.3% on `a315b76`, 13.1 and 12.7 GiB free) — and the suite's own
-wall time was the same too: nextest's summary reads 168.9 s for the red run
-against 156.0 s and 171.0 s for the two green ones, with the same two `SLOW`
-tests in all three. The "half as long" in the earlier paragraph was the job, not
-the suite: a red suite stops the job before the forward suite runs. So the rest
-of the suite ran at full speed while two readbacks sat `Pending` for the whole
-deadline and `wait_idle` returned `Ok` — which is not load, it is a copy the
-Windows lavapipe ICD reported finished at the queue and never wrote, or a fence
-`poll_readback` never saw signalled. (1) and (2) are both off the table on that
-evidence: a longer wait on a copy that is not coming is still a wait, and a
-retry would hide a driver bug. What the next burst should carry is the
-readback's own state at the deadline — the fence status, whether the copy's
-command buffer was submitted before or after the frame's, and the destination
-buffer's first bytes — printed by the harness beside the panic; that is the next
-step, and until it is in the answer is still `gh run rerun <id> --failed`.
+**2026-09-16: the premise was wrong — the first mesh frame on Windows lavapipe
+is not "well under a second".** The passing one-frame mesh tests in the
+`3750aec` logs take 28.6–31.0 s in total and the reds 33.4–36.3 s, which is the
+30 s deadline plus the fixture. Mesa 26.1.5's `meson.build` disables the shader
+cache on Windows ("Shader Cache does not currently work on Windows"), so every
+test process compiles the whole forward and mesh pipeline inside its first
+submission, four processes at once on four vCPUs; the load step samples before
+the suite, not during it, which is why it read idle. Reproduced on Linux
+lavapipe with `MESA_SHADER_CACHE_DISABLE=true`: the first-frame readback goes
+from 52–72 ms to 2.0–3.6 s on four CPUs and to 18.4–18.8 s on one CPU with nine
+tests at once, and six busy-loop processes beside that gave the CI signature
+exactly — `Pending` at 30 s, then `wait_idle: Ok`. The code rules out a
+`crcbl-vk` completion bug: `submit` signals the retire timeline on every
+submission, and every readback in the suite already has nothing submitted after
+it. Bursts six (`3750aec`) and seven (`e112ec0`, 2026-09-16) are the same
+signature.
 
-**The sixth burst, on `3750aec` (2026-09-15), is the same two tests again** —
-`the_gpu_descends_the_dag_to_the_cut_the_host_rule_says` and
-`the_gpu_descends_a_scaled_instance_at_the_size_it_draws`, each panicking at the
-30 s deadline with the destination still holding the harness's fill — in a suite
-nextest timed at 177.8 s with the other 61 tests green, on a commit that touched
-only `crcbl-ui`. The same two tests in two of six bursts is where the harness's
-fence print should look first.
+**Instrumented, not fixed.** `Headless::readback` in
+`crates/crcbl-vk/tests/vk_e2e/harness.rs` now prints every readback's wait, so a
+green Windows log shows the margin, and a miss prints `vk e2e: stall:` lines —
+the device's submission count and retire timeline at the request and at the
+deadline, the staging bytes read past the timeline, 60 s more of slower polling,
+and a timed `wait_idle` — then panics with a LATE, STUCK or LOST verdict.
+**Next:** read the first-frame wait in the next Windows run, green or red. LATE
+on the runner confirms the cause and puts a longer deadline for that leg, or a
+smaller mesh test group running at once, back on the table; LOST or STUCK
+reopens the driver question. Not verified: the Windows runner itself, and
+whether the harness's busy poll matters there (on Linux, sleeping instead made
+no material difference).
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 

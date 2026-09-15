@@ -467,13 +467,29 @@ unsafe impl Send for DeviceInner {}
 unsafe impl Sync for DeviceInner {}
 
 impl core::fmt::Debug for DeviceInner {
+    /// `submissions` and `retired` bracket the work in flight: the first is the
+    /// last value a submission was issued to signal on the retire timeline, the
+    /// second is the value the driver says that timeline has reached. A
+    /// readback requested with no explicit wait is `Pending` until `retired`
+    /// reaches the `submissions` it read at its request — so the pair is what a
+    /// stalled readback's report needs, and the only view of it from above the
+    /// seam, where a `Box<dyn Device>` offers nothing but this impl.
+    ///
+    /// `retired` is asked of the driver on every format rather than cached,
+    /// because a cached value is exactly the stale number a stall report must
+    /// not print. A failed query prints its `vk::Result` in place of the value.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // SAFETY: `retire_timeline` is a timeline semaphore of `raw`, created
+        // with the device and destroyed only in `Drop`, which cannot run while
+        // `&self` is borrowed here.
+        let retired = unsafe { self.raw.get_semaphore_counter_value(self.retire_timeline) };
         f.debug_struct("DeviceInner")
             .field("id", &self.id)
             .field("geometry", &self.caps.geometry_path())
             .field("binding", &self.caps.binding_model())
             .field("lighting", &self.caps.lighting_path())
             .field("submissions", &self.submissions.load(Ordering::Relaxed))
+            .field("retired", &retired)
             .finish_non_exhaustive()
     }
 }
