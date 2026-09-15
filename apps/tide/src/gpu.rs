@@ -5,8 +5,8 @@
 //! is here is tide's: a renderer built from the gallery's own description, the
 //! [`Stage`] that switches it between scenes, the capability report rule 12 asks
 //! for, and what the water costs. `apps/sundial/src/gpu.rs` is the shape, and
-//! its header carries the argument for forcing a lesser path by not asking for a
-//! feature.
+//! its header carries the argument for exact geometry requests: a forced
+//! geometry builds that tail or fails, and [`Paths`] reports the tail built.
 //!
 //! # The scene is staged inside the frame
 //!
@@ -67,12 +67,17 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// What the device opened as, beside what the run asked for.
+    /// Actual renderer geometry and array-page binding, beside the request.
     #[must_use]
-    pub const fn of(caps: &DeviceCaps, forced: ForcedPaths, effects: RenderEffects) -> Self {
+    pub const fn of(
+        caps: &DeviceCaps,
+        geometry: GeometryPath,
+        forced: ForcedPaths,
+        effects: RenderEffects,
+    ) -> Self {
         Self {
-            geometry: caps.geometry_path(),
-            binding: caps.binding_model(),
+            geometry,
+            binding: BindingModel::ArrayPages,
             lighting: caps.lighting_path(),
             forced,
             effects,
@@ -257,7 +262,14 @@ impl Gpu {
         } else {
             crcbl::log::info!("tide: {report}");
         }
-        let mut renderer = scene::renderer(ctx.device(), ctx.queue(), ctx.format())?;
+        let mut renderer = scene::renderer(
+            ctx.device(),
+            ctx.queue(),
+            ctx.format(),
+            forced
+                .geometry
+                .unwrap_or_else(|| ctx.device().preferred_geometry_path()),
+        )?;
         let knobs = crate::knobs::read();
         let stage = match Stage::new(&mut renderer, knobs.scene, knobs.medium) {
             Ok(stage) => stage,
@@ -272,7 +284,12 @@ impl Gpu {
             ..EffectRequest::default()
         });
         // Resolved rather than requested: the device clamps last.
-        let paths = Paths::of(&caps, forced, renderer.resolved_effects());
+        let paths = Paths::of(
+            &caps,
+            renderer.geometry_path(),
+            forced,
+            renderer.resolved_effects(),
+        );
         crcbl::log::info!(
             "tide: {:?} / {:?} / {:?}, effects {}",
             paths.geometry,
@@ -586,6 +603,38 @@ impl crcbl::engine::PolledGpu for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_metadata_reports_execution_instead_of_capabilities() {
+        let caps = DeviceCaps {
+            features: crcbl::hal::Features::MESH_SHADER | crcbl::hal::Features::DESCRIPTOR_INDEXING,
+            limits: crcbl::hal::Limits::desktop(),
+        };
+        assert_eq!(caps.geometry_path(), GeometryPath::MeshShader);
+        assert_eq!(caps.binding_model(), BindingModel::Bindless);
+        let paths = Paths::of(
+            &caps,
+            GeometryPath::IndirectPerBatch,
+            ForcedPaths {
+                geometry: Some(GeometryPath::IndirectPerBatch),
+                binding: Some(BindingModel::Bindless),
+            },
+            RenderEffects::DEFAULT_STACK,
+        );
+        assert_eq!(paths.geometry, GeometryPath::IndirectPerBatch);
+        assert_eq!(paths.binding, BindingModel::ArrayPages);
+        use crcbl::ui::{DebugModule, DebugSection};
+        let mut section = DebugSection::new("");
+        paths.debug_section(&mut section);
+        assert_eq!(
+            section.rows()[0].value.to_string(),
+            "IndirectPerBatch (forced)"
+        );
+        assert_eq!(
+            section.rows()[1].value.to_string(),
+            "ArrayPages (requested ceiling: Bindless)"
+        );
+    }
 
     /// **An unforced run asks for everything the engine does.**
     #[test]

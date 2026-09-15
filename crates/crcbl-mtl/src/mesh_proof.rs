@@ -171,6 +171,7 @@ struct Payload {{ uint4 color; }};
             kind: BindingKind::StorageBuffer {
                 read_only: true,
                 dynamic: false,
+                stride: 16,
             },
             count: 1,
             flags: BindingFlags::empty(),
@@ -603,6 +604,7 @@ struct Sources {{ device const uint* values[2]; }};
                         kind: BindingKind::StorageBuffer {
                             read_only: true,
                             dynamic: false,
+                            stride: 4,
                         },
                         count: 2,
                         flags: BindingFlags::VARIABLE_COUNT,
@@ -913,6 +915,7 @@ struct Payload {{ uint value; }};
                     kind: BindingKind::StorageBuffer {
                         read_only: false,
                         dynamic: false,
+                        stride: 4,
                     },
                     count: 2,
                     flags: BindingFlags::VARIABLE_COUNT,

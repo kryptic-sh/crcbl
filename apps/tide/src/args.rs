@@ -107,13 +107,11 @@ OPTIONS:
                          are taken from), 'orbit' (turning round the pool on the
                          fixed step) or 'free' (fly it with WASD, Space/Shift
                          and the arrow keys). Default: fixed.
-    --force-geometry <P> Hold the geometry path at 'mesh-shader',
-                         'indirect-count' or 'indirect-per-batch' by opening a
-                         device without the features that select a better one.
-                         Default: whatever this device selects.
-    --force-binding <B>  Hold the binding model at 'bindless' or 'array-pages',
-                         on --force-geometry's terms. 'array-pages' is what
-                         every browser and every Apple device runs.
+    --force-geometry <P> Require 'mesh-shader', 'indirect-count' or
+                         'indirect-per-batch'; unsupported paths fail startup.
+                         Default: this device's preferred geometry path.
+    --force-binding <B>  Request a 'bindless' or 'array-pages' capability ceiling.
+                         This forward renderer always uses array-pages.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'

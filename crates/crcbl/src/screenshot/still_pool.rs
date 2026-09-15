@@ -36,7 +36,7 @@
 //! The surface of every floor and wall is [`plate_mesh`]'s one quad, scaled and
 //! turned, so the only geometry is the one the shading is about.
 
-use crate::hal::{Device, Format, QueueHandle};
+use crate::hal::{Device, Format, GeometryPath, QueueHandle};
 use crate::render::scene::SceneDesc;
 use crate::render::{Camera, ForwardRenderer, Medium, Projection, WaterBody};
 
@@ -288,7 +288,33 @@ pub fn still_pool_forward(
     format: Format,
     bodies: &[WaterBody],
 ) -> Result<ForwardScene, OffscreenError> {
-    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &still_pool_scene())?;
+    still_pool_forward_on_path(
+        device,
+        queue,
+        format,
+        bodies,
+        device.preferred_geometry_path(),
+    )
+}
+
+/// [`still_pool_forward`] on exactly the geometry tail `path`, which is how
+/// [`Scene::StillPool`]'s build arm honours a requested path.
+///
+/// # Errors
+///
+/// [`still_pool_forward`]'s, and [`OffscreenError::Hal`] carrying
+/// `HalError::UnsupportedFeatures` if the device lacks `path`.
+///
+/// [`Scene::StillPool`]: super::Scene::StillPool
+pub(super) fn still_pool_forward_on_path(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    bodies: &[WaterBody],
+    path: GeometryPath,
+) -> Result<ForwardScene, OffscreenError> {
+    let mut renderer =
+        ForwardRenderer::with_scene_on_path(device, queue, format, &still_pool_scene(), path)?;
     renderer.set_sky(still_pool_sky());
     for (material, model) in placements() {
         place(&mut renderer, PLATE_MESH, material, model);

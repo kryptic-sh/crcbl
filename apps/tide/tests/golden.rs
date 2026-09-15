@@ -109,6 +109,9 @@ fn draw(extent: (u32, u32), arm: Arm) -> Image {
 
     let caps = setup.caps();
     let adapter = setup.adapter().clone();
+    let built = setup
+        .geometry_path()
+        .expect("the forward renderer reports the tail it built");
     // Printed unconditionally: `tools/run-sample-golden.sh` reads it back.
     eprintln!(
         "tide golden: device on adapter {id} {name:?} type={kind:?}",
@@ -117,13 +120,14 @@ fn draw(extent: (u32, u32), arm: Arm) -> Image {
         kind = adapter.device_type,
     );
     eprintln!(
-        "tide golden: {} {:?} / {:?} / {:?} at {}x{}, arm {arm:?}",
+        "tide golden: rendered {} {built:?} / ArrayPages / {:?} at {}x{}, arm {arm:?}; \
+         capability ceiling {:?} / {:?}",
         setup.backend(),
-        caps.geometry_path(),
-        caps.binding_model(),
         caps.lighting_path(),
         extent.0,
         extent.1,
+        caps.geometry_path(),
+        caps.binding_model(),
     );
 
     let format = setup.format();
@@ -150,7 +154,7 @@ fn build(
     format: Format,
     arm: Arm,
 ) -> Result<ForwardRenderer, crcbl::screenshot::OffscreenError> {
-    let mut renderer = scene::renderer(device, queue, format)?;
+    let mut renderer = scene::renderer(device, queue, format, device.preferred_geometry_path())?;
     if let Err(error) = Stage::new(&mut renderer, Scene::Courtyard, arm.medium) {
         renderer.destroy(device);
         return Err(error.into());

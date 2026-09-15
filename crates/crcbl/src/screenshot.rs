@@ -6459,7 +6459,14 @@ impl SceneState {
                 // The whole of it is in `still_pool_forward`, on `Scene::Ssr`'s
                 // terms: `tests/render_e2e.rs` builds the same scene with no
                 // body, because the off-switch is only recognisable against it.
-                still_pool_forward(device, queue, format, &[still_pool_body()])?.into()
+                still_pool::still_pool_forward_on_path(
+                    device,
+                    queue,
+                    format,
+                    &[still_pool_body()],
+                    path,
+                )?
+                .into()
             }
             Scene::Bloom => {
                 // The floor every other overhead fixture stands on, and the

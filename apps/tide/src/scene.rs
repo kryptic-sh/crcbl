@@ -53,7 +53,7 @@
 
 use std::borrow::Cow;
 
-use crcbl::hal::{Device, Format, HalError, QueueHandle};
+use crcbl::hal::{Device, Format, GeometryPath, HalError, QueueHandle};
 use crcbl::math::Vec3;
 use crcbl::render::{
     Camera, Capacities, DirectionalLight, ForwardRenderer, Geometry, InstanceDesc, InstanceHandle,
@@ -524,18 +524,20 @@ pub const CAPACITIES: Capacities = Capacities {
     probes: 0,
 };
 
-/// The renderer every scene draws through, with nothing placed yet.
+/// The renderer every scene draws through, on exactly the geometry tail
+/// `path`, with nothing placed yet.
 ///
 /// # Errors
 ///
-/// [`HalError`] if the description does not fit what it reserves or a HAL call
-/// failed.
+/// [`HalError`] if the description does not fit what it reserves, if the device
+/// lacks `path`'s feature, or if a HAL call failed.
 pub fn renderer(
     device: &dyn Device,
     queue: QueueHandle,
     format: Format,
+    path: GeometryPath,
 ) -> Result<ForwardRenderer, HalError> {
-    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &desc())?;
+    let mut renderer = ForwardRenderer::with_scene_on_path(device, queue, format, &desc(), path)?;
     renderer.set_sky(sky());
     Ok(renderer)
 }
