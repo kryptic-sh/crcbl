@@ -105,6 +105,57 @@ pub fn ui_text(list: &DrawList) -> Vec<String> {
         .collect()
 }
 
+/// The rectangle of every image quad the UI pass will draw this frame, as
+/// `[min.x, min.y, max.x, max.y]` in screen pixels, in the order it draws them.
+///
+/// A menu's art is image quads — its scrim, its window frame's nine and nine per
+/// button — so this is how a test reads a menu's picture back without a device,
+/// beside [`ui_text`] for its words.
+#[must_use]
+pub fn ui_images(list: &DrawList) -> Vec<[f32; 4]> {
+    list.commands()
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::Image { min, max, .. } => Some([min.x, min.y, max.x, max.y]),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Asserts that a paused frame's list carries the menu's **art above the overlay
+/// cut and under the menu's title**: the scrim and the frames are image quads
+/// pushed after `DrawList::begin_overlay` and before the `title` string, and
+/// nothing below the cut is one.
+///
+/// The picture half of "the pause menu covers the HUD and its words cover the
+/// picture", read off the one list the UI pass draws — a menu whose art never
+/// went in draws its labels over the bare game, and one whose art went in after
+/// its title paints the frame over its own words.
+///
+/// # Panics
+///
+/// When any of the three does not hold, naming which.
+pub fn assert_menu_art_above_the_cut_and_under(list: &DrawList, title: &str) {
+    let is_image = |command: &DrawCommand| matches!(command, DrawCommand::Image { .. });
+    assert!(
+        !list.base_commands().iter().any(is_image),
+        "menu art landed below the overlay cut, under the game's HUD"
+    );
+    let overlay = list.overlay_commands();
+    let first_image = overlay
+        .iter()
+        .position(is_image)
+        .expect("the paused frame's overlay holds no menu art");
+    let title_at = overlay
+        .iter()
+        .position(|command| matches!(command, DrawCommand::Text { text, .. } if text == title))
+        .unwrap_or_else(|| panic!("the overlay holds no {title:?}"));
+    assert!(
+        first_image < title_at,
+        "the menu's art starts at overlay command {first_image}, after its title at {title_at}"
+    );
+}
+
 /// Every render pass the frame declared, in declaration order.
 ///
 /// A pass line of the graph dump reads `[i] <kind> pass "<label>"`, and the

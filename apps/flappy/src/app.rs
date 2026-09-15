@@ -547,7 +547,7 @@ mod tests {
 
     use super::*;
     use core::time::Duration;
-    use crcbl_sample_test::{headless_common, row_value, ui_text};
+    use crcbl_sample_test::{headless_common, row_value, ui_images, ui_text};
 
     use crcbl::core::input::KeyCode;
     use crcbl::engine::Flow;
@@ -1558,10 +1558,10 @@ mod tests {
     // The menus
     // -----------------------------------------------------------------------
 
-    /// **The start menu is on screen before the first flap, and it reaches both
-    /// passes.** The text is in the draw list the UI pass uploads and the frame
-    /// is in the sprite list the menu pass draws — a menu that only made it to
-    /// one of the two is a panel with no words or words with no panel.
+    /// **The start menu is on screen before the first flap, and both its halves
+    /// are in the draw list.** The text and the frame are both what the UI pass
+    /// uploads — a menu that only put one of the two in is a panel with no words
+    /// or words with no panel.
     #[test]
     fn the_start_menu_is_drawn_before_the_first_flap() {
         let mut engine = scripted(&headless(60));
@@ -1574,24 +1574,19 @@ mod tests {
             "the start menu's text is not in the draw list: {drawn:?}",
         );
 
-        let sprites = engine.gpu().menu_sprites();
-        assert_eq!(sprites.len(), 1 + 9 + 9 * 3, "{}", sprites.len());
+        let images = ui_images(engine.gpu().draw_list());
+        assert_eq!(images.len(), 1 + 9 + 9 * 3, "{}", images.len());
         let extent = engine.extent();
         assert_eq!(
-            sprites[0].rect,
-            [
-                -(extent.0 as f32) / 2.0,
-                -(extent.1 as f32) / 2.0,
-                extent.0 as f32,
-                extent.1 as f32,
-            ],
+            images[0],
+            [0.0, 0.0, extent.0 as f32, extent.1 as f32],
             "the scrim does not cover the framebuffer",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
-    /// **A run in the air draws no menu at all**, and the menu pass is handed
-    /// nothing — which is what makes it free rather than cheap.
+    /// **A run in the air draws no menu at all**: no image quad
+    /// reaches the draw list.
     #[test]
     fn a_run_in_the_air_draws_no_menu() {
         let mut engine = scripted(&headless(60));
@@ -1602,10 +1597,11 @@ mod tests {
             .expect("the window is live");
         run_frames(&mut engine, 10);
         assert_eq!(engine.menu_kind(), MenuKind::None);
+        let images = ui_images(engine.gpu().draw_list());
         assert!(
-            engine.gpu().menu_sprites().is_empty(),
-            "a flying frame submitted {} menu sprites",
-            engine.gpu().menu_sprites().len(),
+            images.is_empty(),
+            "a flying frame drew {} image quads",
+            images.len(),
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

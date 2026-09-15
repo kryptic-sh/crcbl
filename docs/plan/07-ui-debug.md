@@ -31,19 +31,25 @@ the pre-CSS toolkit the debug panel and the samples needed first:
 
 - **`draw_list`** — `DrawList`, `DrawCommand`, `Vertex2d`: the one interface
   between the UI and the renderer, as the rendering section below describes.
+  **Rung 1 is built:** textured quads from an RGBA image atlas
+  (`crcbl_ui::image`, one 1024² page, shelf-packed), the analytic rounded
+  rectangle and per-vertex clip rectangles, all drawn by one UI pipeline, with a
+  changed atlas copied inside the render graph. Not built from this section yet:
+  batching by stacking context and texture (there is one page), a second page,
+  eviction, and a smooth sampling mode for images.
 - **`text`** — `FontAtlas`, a built-in **monospace bitmap** ASCII font with
   metrics and a simple layout. Not the `skrifa`-parsed rasteriser and the
   shelf/skyline atlas with LRU eviction the rendering section specifies: those
   arrive with real fonts, at rung 5.
-- **`widget`** — `Label`, `Button`, `Style`, `SkinInsets`, `PointerInput`,
-  `UiState`, `WidgetId`. The rest of the MVP widget set below is unbuilt.
-- **`menu`** — `Menu`, `MenuItem`, `Slider`, `Cycler`, `MenuSet`:
-  keyboard-first, with the pointer optional. Worth reading before designing on
-  top of it, because it already meets one constraint this document has not: the
-  UI pass's atlas is a single-channel glyph coverage mask and `DrawList` has no
-  textured-quad command, so a menu's nine-sliced frames live in
-  `crcbl_render::MenuArt` and `Menu::render` emits text alone. Any styled widget
-  with a picture in it splits the same way.
+- **`widget`** — `Label`, `Button`, `ButtonSkin`, `Style`, `SkinInsets`,
+  `PointerInput`, `UiState`, `WidgetId`. The rest of the MVP widget set below is
+  unbuilt.
+- **`menu`** — `Menu`, `MenuItem`, `MenuSkin`, `Slider`, `Cycler`, `MenuSet`:
+  keyboard-first, with the pointer optional. `Menu::render` draws the whole menu
+  into the draw list — the scrim, the nine-sliced window frame and the button
+  frames from a `MenuSkin`, then the text — so the frames and the labels on them
+  are one pass. The shipped art stays in `crcbl-render`, which registers it into
+  the UI pass's image atlas (`crcbl_render::menu_skin`).
 - **`touch`** — `TouchStick`, `TouchButton`; see [19-input.md](19-input.md).
 - **`debug`** and **`budget`** — the modular panel described under "Debug tools"
   below, and the frame CPU-vs-GPU row [40-profiling.md](40-profiling.md) owns.
@@ -182,9 +188,9 @@ interface between `crcbl-ui` and the renderer.
   stencil masks in MVP — Unity's stencil masks break batches and nest at most
   seven deep.
 - **Two atlases**: the existing single-channel glyph coverage atlas and an RGBA
-  image atlas. That moves nine-sliced frames out of `crcbl_render::MenuArt` and
-  into styled widgets, which is what `menu`'s note above says is blocked today.
-  Pages are 2048² or smaller: WebGPU's compatibility mode caps a 2D texture
+  image atlas. That moved the menu's nine-sliced frames out of a sprite pass of
+  their own and into `crcbl-ui`, where styled widgets draw pictures the same
+  way. Pages are 2048² or smaller: WebGPU's compatibility mode caps a 2D texture
   at 4096.
 - **Batching by stacking context, then texture**, with CSS paint order kept —
   RmlUi's lack of batching is its top performance issue (thousands of draw

@@ -12,19 +12,23 @@
 //! differ, this is the one module that opens two `Headless` fixtures for a
 //! single test and joins their frames afterwards.
 //!
-//! **It is the real art.** The panel, the button skin and the scrim are frames
-//! of `crates/crcbl-render/assets/menu.crpix`, baked by that crate's own
-//! `build.rs` and uploaded by `crcbl::render::MenuArt::register` — not a
-//! lookalike assembled here. That is the whole reason the art lives in
-//! `crcbl-render` rather than under `apps/`: this crate cannot see `apps/`, and
-//! a golden image of a replica would be evidence about the replica.
+//! **It is the real art, through the real path.** The panel, the button skin and
+//! the scrim are frames of `crates/crcbl-render/assets/menu.crpix`, baked by that
+//! crate's own `build.rs`, registered into the UI pass's image atlas by
+//! `crcbl::render::menu_skin` and drawn by `Menu::render_art` through the UI
+//! pass — not a lookalike assembled here. That is the whole reason the art lives
+//! in `crcbl-render` rather than under `apps/`: this crate cannot see `apps/`,
+//! and a golden image of a replica would be evidence about the replica.
+//!
+//! The reference was blessed when the menu was a sprite pass of its own, and the
+//! UI pass draws it to the same pixels: its image primitive samples the same
+//! sharp-bilinear way, and every corner here is a whole number of pixels.
 
 use crate::harness::Headless;
 use crate::sprite::{
-    FrameStaging, SPRITE_CLEAR, background_rgb, close, report_goldens, rgb, sprite_golden,
-    srgb_byte,
+    background_rgb, close, render_ui, report_goldens, rgb, sprite_golden, srgb_byte,
 };
-use crcbl::hal::{CommandEncoderDesc, PresentInfo, ResourceState, SubmitInfo};
+use crcbl::ui::draw_list::DrawList;
 
 /// The two framebuffers the menu golden is taken in.
 ///
@@ -60,85 +64,33 @@ fn golden_small_menu() -> crcbl::render::Menu {
     crcbl::render::Menu::new("GO", vec![crcbl::render::MenuItem::new(1, "OK", "")])
 }
 
-/// Renders one menu frame **through the real `MenuRenderer` and the real
-/// `RenderGraph`** and reads the swapchain image back.
+/// Renders one menu's art **through the real `UiRenderer`**, on its own ring,
+/// and reads the frame back.
 ///
-/// A clear pass first and the menu pass on top of it, because
-/// `SpriteRenderer::add_pass` loads rather than clears — which is exactly how a
-/// sample composites a menu over a game.
-fn render_menu(
-    headless: &Headless,
-    renderer: &mut crcbl::render::MenuRenderer,
-    pool: &mut crcbl::render::TransientPool,
+/// The art alone — `Menu::render_art`, not `Menu::render` — because the
+/// reference is of the frame and the buttons, and the text on them is the
+/// glyph atlas's business and the `ui` scene's golden.
+fn render_menu_art(
+    menu: &crcbl::render::Menu,
+    layout: &crcbl::render::MenuLayout,
     extent: (u32, u32),
 ) -> crcbl_golden::Image {
-    use crcbl::render::RenderGraph;
-
-    let device = headless.device.as_ref();
-    let acquired = device
-        .acquire_next_frame(headless.swapchain)
-        .expect("the ring always has an image");
-    assert_eq!(acquired.extent, extent);
-
-    // **The rows are padded here and nowhere else in this suite matters.** These
-    // framebuffers are 416 wide, which is 1664 bytes a row — not a multiple of
-    // the 256 wgpu and D3D12 both require — where every other frame in the suite
-    // is 256 wide and aligned by accident. See `sprite::COPY_ROW_ALIGNMENT`.
-    let staging = FrameStaging::new(device, extent);
-
-    renderer
-        .begin_frame(device, extent)
-        .expect("the instance and constant buffers are writable");
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some("menu frame"),
-        queue: headless.queue,
-    });
-
-    let compiled = {
-        let mut graph = RenderGraph::new(headless.queue);
-        let target = graph.import_image(
-            "swapchain",
-            crcbl::render::ImportedImage {
-                image: acquired.image,
-                view: acquired.view,
-                format: headless.format,
-                extent,
-                initial: ResourceState::Undefined,
-                claim: crcbl::render::InitialClaim::Acquired,
-                final_state: ResourceState::TransferSrc,
-            },
-        );
-        graph
-            .add_render_pass("menu background")
-            .clear_color(target, SPRITE_CLEAR)
-            .execute(|_| {});
-        renderer.add_pass(&mut graph, target);
-        graph.compile(&*pool).expect("a legal frame")
-    };
-    compiled
-        .execute(device, pool, encoder.as_mut(), None)
-        .expect("the graph executed");
-
-    staging.copy_from(encoder.as_mut(), acquired.image);
-
-    let commands = encoder.finish().expect("recording succeeded");
-    device
-        .submit(headless.queue, &SubmitInfo::new(&[commands]))
-        .expect("submit");
-    device
-        .present(
-            headless.queue,
-            &PresentInfo {
-                swapchain: headless.swapchain,
-                waits: acquired.present_semaphore.as_slice(),
-                present_id: None,
-            },
-        )
-        .expect("present");
-
-    let image = staging.read(headless);
-    device.destroy_command_buffer(commands);
+    let headless = Headless::open_for_sprites_at(extent);
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut ui =
+        crcbl::render::UiRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the UI renderer builds");
+    let mut list = DrawList::new();
+    menu.render_art(&mut list, layout, ui.menu_skin());
+    let (image, labels) = render_ui(&headless, &mut ui, &mut pool, extent, &list);
+    assert_eq!(
+        labels,
+        ["ui background", "ui-composite"],
+        "the art is drawn by the UI pass and nothing else"
+    );
+    ui.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
     image
 }
 
@@ -195,43 +147,8 @@ fn the_shared_menu_keeps_its_frame_at_two_panel_sizes_and_two_shapes() {
 
     // Both halves are rendered on their own ring, because a swapchain has one
     // extent and the point is that the two extents differ.
-    let tall_headless = Headless::open_for_sprites_at(MENU_TALL_EXTENT);
-    let mut tall_pool = crcbl::render::TransientPool::new();
-    let mut tall_renderer = crcbl::render::MenuRenderer::new(
-        tall_headless.device.as_ref(),
-        tall_headless.queue,
-        tall_headless.format,
-    )
-    .expect("the menu renderer builds");
-    tall_renderer.set_menu(Some((&tall_menu, &tall_layout)));
-    let tall_image = render_menu(
-        &tall_headless,
-        &mut tall_renderer,
-        &mut tall_pool,
-        MENU_TALL_EXTENT,
-    );
-    tall_renderer.destroy(tall_headless.device.as_ref());
-    tall_pool.destroy(tall_headless.device.as_ref());
-    tall_headless.finish();
-
-    let wide_headless = Headless::open_for_sprites_at(MENU_WIDE_EXTENT);
-    let mut wide_pool = crcbl::render::TransientPool::new();
-    let mut wide_renderer = crcbl::render::MenuRenderer::new(
-        wide_headless.device.as_ref(),
-        wide_headless.queue,
-        wide_headless.format,
-    )
-    .expect("the menu renderer builds");
-    wide_renderer.set_menu(Some((&wide_menu, &wide_layout)));
-    let wide_image = render_menu(
-        &wide_headless,
-        &mut wide_renderer,
-        &mut wide_pool,
-        MENU_WIDE_EXTENT,
-    );
-    wide_renderer.destroy(wide_headless.device.as_ref());
-    wide_pool.destroy(wide_headless.device.as_ref());
-    wide_headless.finish();
+    let tall_image = render_menu_art(&tall_menu, &tall_layout, MENU_TALL_EXTENT);
+    let wide_image = render_menu_art(&wide_menu, &wide_layout, MENU_WIDE_EXTENT);
 
     let image = stack(&tall_image, &wide_image);
     let verdict = sprite_golden("menu_frame_two_sizes", &image);
@@ -260,31 +177,24 @@ const MARKER_SIZE: f32 = 12.0;
 /// See [`MARKER_SIZE`].
 const MARKER_INSET: f32 = 2.0;
 
-/// Renders one paused frame **through the real `UiRenderer` sandwich**: a clear,
-/// the draw list's HUD half, the menu's sprites, then the draw list's overlay
-/// half.
+/// Renders one paused frame **through the real `UiRenderer`**: a clear, the draw
+/// list's HUD half, then its overlay half with the menu's art at the top of it.
 ///
 /// Two identical white squares go into the draw list, one either side of
-/// `DrawList::begin_overlay`: the left one is HUD and must end up under the
-/// scrim, the right one is overlay and must not. Their positions are returned
-/// with the frame so the assertions sample the rectangles the list actually
-/// asked for.
+/// `DrawList::begin_overlay` — the left before the menu, the right after it: the
+/// left one is HUD and must end up under the scrim, the right one is drawn over
+/// the menu and must not. Their positions are returned with the frame so the
+/// assertions sample the rectangles the list actually asked for.
 fn render_paused_frame(
-    headless: &Headless,
-    ui: &mut crcbl::render::UiRenderer,
-    menu: &mut crcbl::render::MenuRenderer,
-    pool: &mut crcbl::render::TransientPool,
+    panel: &crcbl::render::Menu,
+    layout: &crcbl::render::MenuLayout,
     extent: (u32, u32),
 ) -> (crcbl_golden::Image, [glam::Vec2; 2], [glam::Vec2; 2]) {
-    use crcbl::render::RenderGraph;
-    use crcbl::ui::draw_list::DrawList;
-
-    let device = headless.device.as_ref();
-    let acquired = device
-        .acquire_next_frame(headless.swapchain)
-        .expect("the ring always has an image");
-    assert_eq!(acquired.extent, extent);
-    let staging = FrameStaging::new(device, extent);
+    let headless = Headless::open_for_sprites_at(extent);
+    let mut pool = crcbl::render::TransientPool::new();
+    let mut ui =
+        crcbl::render::UiRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the UI renderer builds");
 
     let hud = [
         glam::Vec2::splat(MARKER_INSET),
@@ -297,84 +207,32 @@ fn render_paused_frame(
 
     let mut list = DrawList::new();
     list.rect(hud[0], hud[1], MARKER);
-    // Exactly what `crcbl::engine`'s frame does between the game's draw and the
-    // menu's labels.
+    // Exactly what `crcbl::engine`'s frame does: the game's draw, the cut, then
+    // the menu, then whatever the engine draws over it.
     list.begin_overlay();
+    panel.render_art(&mut list, layout, ui.menu_skin());
     list.rect(overlay[0], overlay[1], MARKER);
 
-    let atlas = crcbl::render::FontAtlas::built_in();
-    menu.begin_frame(device, extent)
-        .expect("the instance and constant buffers are writable");
-    ui.begin_frame(device, &list, &atlas, 1.0)
-        .expect("the geometry uploads");
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some("paused frame"),
-        queue: headless.queue,
-    });
-
-    let compiled = {
-        let mut graph = RenderGraph::new(headless.queue);
-        let target = graph.import_image(
-            "swapchain",
-            crcbl::render::ImportedImage {
-                image: acquired.image,
-                view: acquired.view,
-                format: headless.format,
-                extent,
-                initial: ResourceState::Undefined,
-                claim: crcbl::render::InitialClaim::Acquired,
-                final_state: ResourceState::TransferSrc,
-            },
-        );
-        graph
-            .add_render_pass("menu background")
-            .clear_color(target, SPRITE_CLEAR)
-            .execute(|_| {});
-        ui.add_passes(&mut graph, target, extent, Some(menu));
-        graph.compile(&*pool).expect("a legal frame")
-    };
+    let (image, labels) = render_ui(&headless, &mut ui, &mut pool, extent, &list);
     assert_eq!(
-        compiled
-            .passes()
-            .iter()
-            .map(crcbl::render::CompiledPass::label)
-            .collect::<Vec<_>>(),
-        ["menu background", "ui-composite", "sprites", "ui-overlay"],
-        "the frame under test is the sandwich, not two passes in the old order"
+        labels,
+        ["ui background", "ui-composite", "ui-overlay"],
+        "the frame under test is the HUD half and then the overlay half"
     );
-    compiled
-        .execute(device, pool, encoder.as_mut(), None)
-        .expect("the graph executed");
 
-    staging.copy_from(encoder.as_mut(), acquired.image);
-    let commands = encoder.finish().expect("recording succeeded");
-    device
-        .submit(headless.queue, &SubmitInfo::new(&[commands]))
-        .expect("submit");
-    device
-        .present(
-            headless.queue,
-            &PresentInfo {
-                swapchain: headless.swapchain,
-                waits: acquired.present_semaphore.as_slice(),
-                present_id: None,
-            },
-        )
-        .expect("present");
-
-    let image = staging.read(headless);
-    device.destroy_command_buffer(commands);
+    ui.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
     (image, hud, overlay)
 }
 
 /// **The pause menu draws over the HUD and under its own labels — in pixels.**
 ///
-/// Two identical white squares, one on each side of the draw list's overlay cut,
-/// both outside the panel so the only thing that can touch them is the scrim.
-/// The HUD square must come back dimmed and the overlay square must come back
-/// white; before this slice the whole draw list was one pass *after* the menu
-/// and both squares read white, which is the bug a player saw as "the pause menu
+/// Two identical white squares, one before the menu and one after it, both
+/// outside the panel so the only thing that can touch them is the scrim. The
+/// HUD square must come back dimmed and the overlay square must come back white;
+/// when the menu was a pass of its own and the whole draw list was drawn *after*
+/// it, both squares read white, which is the bug a player saw as "the pause menu
 /// is behind the UI".
 ///
 /// The two are compared against each other as well as against the scrim's own
@@ -388,23 +246,7 @@ fn the_menu_dims_the_hud_and_leaves_the_overlay_alone() {
     let panel = golden_pause_menu();
     let layout = panel.layout_with(MENU_TALL_EXTENT, &atlas, &style);
 
-    let headless = Headless::open_for_sprites_at(MENU_TALL_EXTENT);
-    let mut pool = crcbl::render::TransientPool::new();
-    let mut menu =
-        crcbl::render::MenuRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
-            .expect("the menu renderer builds");
-    let mut ui =
-        crcbl::render::UiRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
-            .expect("the UI renderer builds");
-    menu.set_menu(Some((&panel, &layout)));
-
-    let (image, hud, overlay) =
-        render_paused_frame(&headless, &mut ui, &mut menu, &mut pool, MENU_TALL_EXTENT);
-
-    ui.destroy(headless.device.as_ref());
-    menu.destroy(headless.device.as_ref());
-    pool.destroy(headless.device.as_ref());
-    headless.finish();
+    let (image, hud, overlay) = render_paused_frame(&panel, &layout, MENU_TALL_EXTENT);
 
     // Neither square may touch the panel, or the comparison would be about the
     // window frame instead of about the scrim.
@@ -554,8 +396,8 @@ fn assert_menu_pixels(
          dimming it"
     );
     // And the panel's own interior is the art's fill, not that fill dimmed: the
-    // menu pass draws the scrim *before* the panel, and a pass order that put it
-    // after would show up here and nowhere else.
+    // menu draws the scrim *before* the panel, and an order that put it after
+    // would show up here and nowhere else.
     const PANEL_FILL: [u8; 3] = [0x14, 0x16, 0x1f];
     // One pixel inside the fill band, which starts at texel 4 on both axes — so
     // past the outline, the highlight and the two body texels, and above the

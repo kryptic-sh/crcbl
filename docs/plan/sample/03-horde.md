@@ -239,10 +239,11 @@ menu is up at the measured frame. The `sprites` column is the field pass alone;
 the `menu` column is the second one. `—` means the pass was empty and skipped.
 
 The frame's shape has moved since: the UI compositor now draws the list in two
-passes, `ui-composite` for the game's HUD and `ui-overlay` for the menu's
-labels, the debug panel and the console, with the menu's own sprite pass between
-them — see `crates/crcbl-render/src/ui_pass.rs`. The `ui-composite` column above
-is therefore the whole UI pass as it stood on the measurement date, not the HUD
+passes, `ui-composite` for the game's HUD and `ui-overlay` for the menu, the
+debug panel and the console, and since 2026-09-15 the menu's frame is drawn in
+`ui-overlay` too, so the `menu` column's pass no longer exists — see
+`crates/crcbl-render/src/ui_pass.rs`. The `ui-composite` column above is
+therefore the whole UI pass as it stood on the measurement date, not the HUD
 half alone, and a row where the menu was up would now split it in two.
 Re-measuring the table is not part of that change.
 

@@ -56,10 +56,11 @@
 //!
 //! It shares [`harness`] and nothing else, which is the same relationship
 //! `forward_e2e` and `draw_gen_e2e` have with each other. This one draws through
-//! [`SpriteRenderer`](crcbl::render::SpriteRenderer) and
-//! [`MenuRenderer`](crcbl::render::MenuRenderer) at a pinned `Rgba8UnormSrgb`,
-//! commits images, and never builds a `ForwardRenderer` or a scene; a machine
-//! that can run one should not have to run the other to get an answer.
+//! [`SpriteRenderer`](crcbl::render::SpriteRenderer), and the menu and the
+//! button skins through [`UiRenderer`](crcbl::render::UiRenderer), at a pinned
+//! `Rgba8UnormSrgb`, commits images, and never builds a `ForwardRenderer` or a
+//! scene; a machine that can run one should not have to run the other to get an
+//! answer.
 //!
 //! # The backend must be named
 //!
@@ -86,8 +87,10 @@ pub(crate) const SUITE: &str = "crcbl sprite e2e";
 //
 // `sprite` owns the fixture the other three import — the extent the goldens were
 // blessed at, the clear colour, the camera and its `world_to_pixel` mapping, the
-// test sheets and the golden helper — because a button skin, a nine-slice and a
-// menu are all sprite quads with a different generator in front of them.
+// test sheets, the golden helper and `render_ui` — because a nine-slice is sprite
+// quads with a different generator in front of them, and a button skin and a
+// menu are the same pictures drawn through the UI pass against the same
+// references.
 mod button_skin;
 mod menu;
 mod nine_slice;

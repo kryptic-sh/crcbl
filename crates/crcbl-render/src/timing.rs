@@ -68,7 +68,6 @@ use crcbl_ui::debug::{DebugModule, DebugSection};
 
 use crate::forward::ForwardRenderer;
 use crate::graph::{CompiledPass, PassKind};
-use crate::menu::MenuRenderer;
 use crate::skinning::Skinning;
 use crate::sprite_pass::SpriteRenderer;
 use crate::ui_pass::UiRenderer;
@@ -77,7 +76,7 @@ use crate::ui_pass::UiRenderer;
 ///
 /// **What a caller passes [`PassTimers::new`] instead of a number of its own.**
 /// Every renderer here says how many passes it adds — [`ForwardRenderer`],
-/// [`SpriteRenderer`], [`MenuRenderer`] and [`UiRenderer`] each carry a
+/// [`SpriteRenderer`] and [`UiRenderer`] each carry a
 /// `MAX_PASSES`, and [`Skinning`] carries one for the dispatch
 /// [`ForwardRenderer::add_skinned_passes`] puts in front of them — and this is
 /// their sum, so a pass added anywhere below moves this number with it. A game is in no position to know the count: it is a fact
@@ -94,7 +93,6 @@ use crate::ui_pass::UiRenderer;
 pub const MAX_TIMED_PASSES: u32 = ForwardRenderer::MAX_PASSES
     + Skinning::MAX_PASSES
     + SpriteRenderer::MAX_PASSES
-    + MenuRenderer::MAX_PASSES
     + UiRenderer::MAX_PASSES;
 
 /// What one pass cost on the GPU.

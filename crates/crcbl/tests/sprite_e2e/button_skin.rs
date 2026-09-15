@@ -1,20 +1,21 @@
 //! Slice 7's nine-slice button skins, drawn.
 //!
-//! `crcbl::render::button_skin` asserts the quads to the float and
-//! `crcbl_ui::widget` asserts the layout to the pixel. Neither can show the
-//! thing a reviewer actually wants to see: **the same skin, at two very
-//! different widths, with corners that did not smudge.** That is a picture, and
-//! this is where it is taken — `tests/golden/button_skin_widths.png`.
+//! `crcbl_ui::draw_list` asserts the quads to the float and `crcbl_ui::widget`
+//! asserts the layout to the pixel. Neither can show the thing a reviewer
+//! actually wants to see: **the same skin, at two very different widths, with
+//! corners that did not smudge.** That is a picture, and this is where it is
+//! taken — `tests/golden/button_skin_widths.png`.
 //!
-//! It is its own module rather than part of the sprite subtree because it is a
-//! different generator's output, but it borrows that subtree's fixture whole —
-//! `crate::sprite`'s extent, camera, `world_to_pixel` mapping and golden helper
-//! — since a button skin is sprite quads once the geometry is worked out.
+//! It is drawn through the UI pass: [`crcbl::ui::ButtonSkin`] pushes each
+//! button's frame into a draw list as image quads, from three images registered
+//! in the renderer's atlas after it was built — so the frame also exercises the
+//! atlas's in-frame upload. The reference was blessed when a button skin was
+//! sprite quads, and the UI pass draws the same pixels. It borrows the sprite
+//! subtree's extent, clear colour and golden helper.
 
 use crate::harness::Headless;
 use crate::sprite::{
-    SPRITE_EXTENT, assert_background, assert_the_camera_maps_a_world_unit_to_a_pixel, close,
-    register_sheet, render_sprites, report_goldens, rgb, sprite_golden, world_to_pixel,
+    SPRITE_EXTENT, assert_background, close, render_ui, report_goldens, rgb, sprite_golden,
 };
 
 /// The button sheet: 96×32, three 32×32 frames side by side, one per
@@ -79,22 +80,23 @@ fn button_skin_sheet() -> Vec<u8> {
     pixels
 }
 
-/// The three frames as nine-slice sources, built directly rather than through a
-/// `Sheet` — the point here is the geometry, not the loader, and a `.crpix` read
-/// through `crcbl::sprite` would put an encoder's output between this test and
-/// the quads it is about.
-fn button_source(frame: u32) -> crcbl::render::NineSliceSource {
-    crcbl::render::NineSliceSource {
-        nine: BUTTON_NINE,
-        frame: crcbl::render::Rect::new(frame * BUTTON_FRAME, 0, BUTTON_FRAME, BUTTON_FRAME),
-        sheet_width: BUTTON_SHEET_W,
-        sheet_height: BUTTON_SHEET_H,
-        texels_per_unit: 1.0,
+/// Frame `frame` of [`button_skin_sheet`], cut out as its own RGBA image.
+///
+/// Built directly rather than through a `Sheet` — the point here is the
+/// geometry, not the loader, and a `.crpix` read through `crcbl::sprite` would
+/// put an encoder's output between this test and the quads it is about.
+fn button_frame(frame: u32) -> Vec<u8> {
+    let sheet = button_skin_sheet();
+    let mut pixels = Vec::with_capacity((BUTTON_FRAME * BUTTON_FRAME * 4) as usize);
+    for y in 0..BUTTON_FRAME {
+        let start = ((y * BUTTON_SHEET_W + frame * BUTTON_FRAME) * 4) as usize;
+        pixels.extend_from_slice(&sheet[start..start + (BUTTON_FRAME * 4) as usize]);
     }
+    pixels
 }
 
 /// A button's rectangle on screen, in the Y-**down** pixel space `crcbl-ui` lays
-/// out in. `screen_rect_to_target` turns it into the sprite pass's Y-up world.
+/// out in and the UI pass draws in.
 struct ButtonRect {
     min: crcbl::math::Vec2,
     max: crcbl::math::Vec2,
@@ -120,9 +122,9 @@ impl ButtonRect {
 
     /// The pixel bounds this button occupies: `[left, top, right, bottom)`.
     ///
-    /// Under [`sprite_camera`] one world unit is one pixel and
-    /// `screen_rect_to_target` is its exact inverse, so the screen rect handed in
-    /// *is* the pixel rect — asserted in the test rather than assumed.
+    /// The UI pass draws in pixels, so the screen rect handed in *is* the pixel
+    /// rect — and the test asserts the quads cover exactly it rather than
+    /// assuming so.
     fn pixels(&self) -> [u32; 4] {
         [
             self.min.x as u32,
@@ -148,8 +150,6 @@ impl ButtonRect {
 fn a_button_skin_keeps_its_corners_at_two_very_different_widths() {
     use crcbl::render::ButtonState;
 
-    assert_the_camera_maps_a_world_unit_to_a_pixel();
-
     // Two widths of one skin on top, the three states underneath. Heights are
     // equal within each group so corner blocks can be compared directly.
     let narrow = ButtonRect::new(16.0, 16.0, 48.0, 40.0, ButtonState::Idle);
@@ -162,27 +162,25 @@ fn a_button_skin_keeps_its_corners_at_two_very_different_widths() {
 
     let headless = Headless::open_for_sprites();
     let mut pool = crcbl::render::TransientPool::new();
-    let mut renderer = crcbl::render::SpriteRenderer::new(
-        headless.device.as_ref(),
-        headless.queue,
-        headless.format,
-    )
-    .expect("the sprite renderer builds");
-    let sheet = register_sheet(
-        &mut renderer,
-        headless.device.as_ref(),
-        "button skin",
-        BUTTON_SHEET_W,
-        BUTTON_SHEET_H,
-        crcbl::render::SampleMode::Pixel,
-        &button_skin_sheet(),
-    );
-
-    let skin = crcbl::render::ButtonSkin {
-        sheet,
-        idle: button_source(0),
-        hovered: button_source(1),
-        pressed: button_source(2),
+    let mut ui =
+        crcbl::render::UiRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the UI renderer builds");
+    let mut frame = |index| crcbl::ui::NineSliceImage {
+        image: ui
+            .images_mut()
+            .register(BUTTON_FRAME, BUTTON_FRAME, &button_frame(index))
+            .expect("three 32x32 frames fit the atlas"),
+        insets: crcbl::render::SkinInsets::new(
+            BUTTON_NINE.left as f32,
+            BUTTON_NINE.right as f32,
+            BUTTON_NINE.top as f32,
+            BUTTON_NINE.bottom as f32,
+        ),
+    };
+    let skin = crcbl::ui::ButtonSkin {
+        idle: frame(0),
+        hovered: frame(1),
+        pressed: frame(2),
     };
     assert!(skin.insets_agree(), "the three frames share their insets");
     assert_eq!(
@@ -192,12 +190,12 @@ fn a_button_skin_keeps_its_corners_at_two_very_different_widths() {
     );
 
     // Every button through the same public path a caller would use: a screen
-    // rect, flipped once, expanded, turned into sprites.
-    let mut sprites: Vec<crcbl::render::Sprite> = Vec::new();
+    // rect and a state, into a draw list.
+    let mut list = crcbl::ui::draw_list::DrawList::new();
     for button in [&narrow, &wide].into_iter().chain(states.iter()) {
-        let target =
-            crcbl::render::screen_rect_to_target(button.min, button.max, SPRITE_EXTENT, [0.0, 0.0]);
-        let quads = skin.quads(button.state, target);
+        let before = list.len();
+        skin.draw(&mut list, button.state, button.min, button.max, 1.0);
+        let quads = &list.commands()[before..];
         assert_eq!(
             quads.len(),
             9,
@@ -205,11 +203,30 @@ fn a_button_skin_keeps_its_corners_at_two_very_different_widths() {
             button.state,
             button.pixels()
         );
-        sprites.extend(quads.sprites(sheet, [1.0; 4]));
+        // The quads tile exactly the rect the button was handed, which is what
+        // lets every pixel claim below index the frame with that rect.
+        let (low, high) = quads.iter().fold(
+            (
+                crcbl::math::Vec2::splat(f32::MAX),
+                crcbl::math::Vec2::splat(f32::MIN),
+            ),
+            |(low, high), command| match command {
+                crcbl::ui::draw_list::DrawCommand::Image { min, max, .. } => {
+                    (low.min(*min), high.max(*max))
+                }
+                other => panic!("a skin drew {other:?}"),
+            },
+        );
+        assert_eq!((low, high), (button.min, button.max), "{:?}", button.state);
     }
-    assert_eq!(sprites.len(), 45, "five buttons of nine quads each");
+    assert_eq!(list.len(), 45, "five buttons of nine quads each");
 
-    let image = render_sprites(&headless, &mut renderer, &mut pool, &sprites);
+    let (image, labels) = render_ui(&headless, &mut ui, &mut pool, SPRITE_EXTENT, &list);
+    assert_eq!(
+        labels,
+        ["ui background", "ui-images", "ui-composite"],
+        "the frames registered after start-up are uploaded by this frame, ahead of the draw"
+    );
 
     // Deferred so the teardown below always runs; unwrapped at the very end.
     let verdict = sprite_golden("button_skin_widths", &image);
@@ -217,7 +234,7 @@ fn a_button_skin_keeps_its_corners_at_two_very_different_widths() {
         assert_button_pixels(&image, &narrow, &wide, &states);
     }));
 
-    renderer.destroy(headless.device.as_ref());
+    ui.destroy(headless.device.as_ref());
     pool.destroy(headless.device.as_ref());
     headless.finish();
     if let Err(panic) = outcome {
@@ -234,23 +251,6 @@ fn assert_button_pixels(
     wide: &ButtonRect,
     states: &[ButtonRect],
 ) {
-    // --- the screen rect really is the pixel rect -------------------------
-    //
-    // Every assertion below indexes pixels with the coordinates the buttons were
-    // laid out in, so if `screen_rect_to_target` and the camera disagree they are
-    // all reading the wrong place and would pass on a blank frame.
-    for button in [narrow, wide].into_iter().chain(states.iter()) {
-        let target =
-            crcbl::render::screen_rect_to_target(button.min, button.max, SPRITE_EXTENT, [0.0, 0.0]);
-        let low = world_to_pixel([target[0], target[1]]);
-        let high = world_to_pixel([target[0] + target[2], target[1] + target[3]]);
-        assert_eq!(
-            [low[0], high[1], high[0], low[1]],
-            button.pixels().map(|v| v as f32),
-            "the flip and the camera disagree about where this button lands"
-        );
-    }
-
     // --- THE FEATURE: the corner blocks are identical at both widths ------
     //
     // Not "the same size" — the same *pixels*. A corner that stretched, or that

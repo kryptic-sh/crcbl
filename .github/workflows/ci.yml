@@ -1910,8 +1910,8 @@ jobs:
       # the workspace sweep, so the game logic is covered — but nothing ever
       # launched the binary, and a unit test cannot reach a driver. Each of
       # these renders a different pass mix through the engine (`space`/`sky`/
-      # `arena`, the game's `sprites` pass, and the UI sandwich — `ui-composite`,
-      # the menu's own `sprites` pass and `ui-overlay`), so a validation
+      # `arena`, the game's `sprites` pass, and the UI's `ui-composite` and
+      # `ui-overlay` with the menu drawn in the second), so a validation
       # error or a lost frame in a path breakout does not exercise now fails
       # here instead of shipping. Same frame budget and flags as breakout
       # above: 60 frames is larger than the swapchain's image count, which is

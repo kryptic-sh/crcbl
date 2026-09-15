@@ -5,6 +5,7 @@
 //! commands into a [`DrawList`].
 
 use crate::draw_list::DrawList;
+use crate::image::NineSliceImage;
 use crate::text::{FontAtlas, GLYPH_HEIGHT, LINE_HEIGHT};
 use glam::Vec2;
 
@@ -160,28 +161,19 @@ pub enum ButtonState {
 /// # Why a `Button` carries the insets and not the art
 ///
 /// A skinned button needs two things: art to draw, and the sizes that art
-/// refuses to stretch. Only the second is a *layout* fact, and layout is all
-/// this crate does.
-///
-/// It could not carry the art even if it wanted to. `crcbl-render` depends on
-/// `crcbl-ui` — its UI pass takes a [`DrawList`] and its glyph atlas is this
-/// crate's [`FontAtlas`] — so a `Button` naming a `SheetId`, a frame or a
-/// `NineSlice` would be a dependency *cycle*, not a convenience. The insets are
-/// four floats and belong to nobody.
-///
-/// So the split is: this crate knows how big the corners are and lays out
-/// around them, and `crcbl_render::ButtonSkin` owns the sheet and the per-state
-/// frames and expands them into sprites. `ButtonSkin::insets` hands back exactly
-/// this type, read off the art itself, so the two cannot drift.
+/// refuses to stretch. Only the second is a *layout* fact, and the layout is
+/// what a [`Button`] is: it measures, positions and hit-tests with no picture
+/// in the room. The art is a [`ButtonSkin`] — three registered images — and
+/// [`ButtonSkin::insets`] hands back exactly this type, read off the art itself,
+/// so the two cannot drift.
 ///
 /// # Screen space, so `top` is the visually-upper edge
 ///
 /// Every rectangle in this crate is Y-**down** with the origin at the
 /// framebuffer's top-left, and these insets follow it: `top` is the inset at the
-/// smaller Y. That happens to agree with `crcbl_sprite::NineSlice`, whose `top`
-/// is the top of the sheet *image* — the flip between the two conventions
-/// happens once, where a screen rect becomes a world-space sprite target, and
-/// not here.
+/// smaller Y. That agrees with an image's own rows — its top row is its first —
+/// so [`DrawList::nine_slice`] pairs `top` with the image's top band and nothing
+/// flips.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SkinInsets {
     /// Fixed width of the left column, in pixels.
@@ -240,6 +232,88 @@ impl SkinInsets {
     #[must_use]
     pub fn max_corner(&self) -> Vec2 {
         Vec2::new(self.right, self.bottom)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ButtonSkin
+// ---------------------------------------------------------------------------
+
+/// The art a skinned button draws: one nine-sliced image per [`ButtonState`].
+///
+/// ```text
+///    idle              hovered           pressed
+///   ┌──┬────────┬──┐  ┌──┬────────┬──┐  ┌──┬────────┬──┐
+///   │  │        │  │  │  │        │  │  │  │        │  │
+///   ├──┤  Play  ├──┤  ├──┤  Play  ├──┤  ├──┤  Play  ├──┤
+///   │  │        │  │  │  │        │  │  │  │        │  │
+///   └──┴────────┴──┘  └──┴────────┴──┘  └──┴────────┴──┘
+///    three pictures — pressing swaps art, it does not tint
+/// ```
+///
+/// Three pictures rather than one picture and three tints, because that is what
+/// the feature is for. A tint can only darken or lighten uniformly; separate
+/// frames let a pressed button have a sunken bevel, a different highlight, or a
+/// shadow that moved — none of which is a multiply.
+///
+/// [`draw`](Self::draw) emits the frame for a state into a [`DrawList`] as
+/// textured quads, so the frame and the label on it are drawn by one pass in
+/// the order they were pushed: frame first, label over it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ButtonSkin {
+    /// The frame drawn at rest.
+    pub idle: NineSliceImage,
+    /// The frame drawn under the cursor or the keyboard's selection.
+    pub hovered: NineSliceImage,
+    /// The frame drawn while the button holds the press.
+    pub pressed: NineSliceImage,
+}
+
+impl ButtonSkin {
+    /// One frame for every state — a skin that does not react.
+    #[must_use]
+    pub const fn uniform(frame: NineSliceImage) -> Self {
+        Self {
+            idle: frame,
+            hovered: frame,
+            pressed: frame,
+        }
+    }
+
+    /// The frame `state` draws.
+    #[must_use]
+    pub const fn frame(&self, state: ButtonState) -> &NineSliceImage {
+        match state {
+            ButtonState::Idle => &self.idle,
+            ButtonState::Hovered => &self.hovered,
+            ButtonState::Pressed => &self.pressed,
+        }
+    }
+
+    /// The insets to hand [`Button::with_skin`], in **texels**.
+    ///
+    /// Read off the **idle** frame, and off its clamped insets rather than its
+    /// declared ones, so the layout agrees with the geometry that will actually
+    /// be drawn. Idle specifically, and not "whichever state is current": a
+    /// button whose minimum size changed with the cursor would resize as the
+    /// mouse crossed it. [`insets_agree`](Self::insets_agree) is there for a
+    /// skin whose frames might not.
+    #[must_use]
+    pub fn insets(&self) -> SkinInsets {
+        self.idle.clamped_insets()
+    }
+
+    /// Whether all three frames have the same clamped insets.
+    #[must_use]
+    pub fn insets_agree(&self) -> bool {
+        let idle = self.idle.clamped_insets();
+        self.hovered.clamped_insets() == idle && self.pressed.clamped_insets() == idle
+    }
+
+    /// Pushes `state`'s frame stretched to `min..max`, at `scale` screen pixels
+    /// per texel of its fixed bands — see [`DrawList::nine_slice`].
+    pub fn draw(&self, dl: &mut DrawList, state: ButtonState, min: Vec2, max: Vec2, scale: f32) {
+        dl.nine_slice(min, max, self.frame(state), scale, [1.0; 4]);
     }
 }
 
@@ -365,10 +439,10 @@ impl UiState {
 /// one-pixel outline in [`Style`]'s colours, then the label. That is the whole
 /// widget, and [`Button::render`] emits all three commands.
 ///
-/// With a skin, the background is a **nine-sliced sprite** drawn by the sprite
-/// pass rather than by the UI pass, so pressing the button swaps art rather than
-/// changing a tint, and stretching it leaves the corners alone. [`Button::render`]
-/// then emits only the label — see its docs for what the caller owes.
+/// With a skin, the background is a [`ButtonSkin`]'s nine-sliced frame, so
+/// pressing the button swaps art rather than changing a tint, and stretching it
+/// leaves the corners alone. [`Button::render`] then emits only the label — see
+/// its docs for what the caller owes.
 #[derive(Debug, Clone)]
 pub struct Button {
     /// Button label.
@@ -384,8 +458,8 @@ pub struct Button {
     pub padding: Vec2,
     /// The skin's fixed corner sizes, or `None` for the flat painted button.
     ///
-    /// Set it from `crcbl_render::ButtonSkin::insets` rather than by hand, so the
-    /// layout and the art it is laying out around come from one place.
+    /// Set it from [`ButtonSkin::insets`] rather than by hand, so the layout and
+    /// the art it is laying out around come from one place.
     pub skin: Option<SkinInsets>,
     /// The size the caller wants the button drawn at, before
     /// [`Button::minimum_size`] is applied. `None` shrinks to fit the label.
@@ -480,7 +554,7 @@ impl Button {
     ///
     /// # Why clamp rather than shrink
     ///
-    /// `NineSliceSource::expand` handles a target below its minimum by squashing
+    /// [`DrawList::nine_slice`] handles a target below its minimum by squashing
     /// the corners in proportion, which is right for what it was written for: a
     /// pipe closing to nothing should close continuously rather than vanish or
     /// spill. A button is the other case. Its content is *text*, which does not
@@ -561,17 +635,10 @@ impl Button {
     ///
     /// # A skinned button emits only its label
     ///
-    /// The background of a skinned button is a nine-sliced **sprite**, and the
-    /// UI pass cannot draw one: its atlas is `R8Unorm` — a glyph coverage mask —
-    /// and `ui.slang` multiplies that single channel into alpha and takes RGB
-    /// from the vertex colour. There is no textured-quad command in
-    /// [`DrawList`], no second texture bound, and no UV on a `Rect`.
-    ///
-    /// So a skinned button is drawn by two passes. The caller expands
-    /// `crcbl_render::ButtonSkin` into sprites for the same `state` and submits
-    /// them to the sprite pass, then calls this for the label. **The sprite pass
-    /// must be added to the render graph before the UI pass** — passes execute in
-    /// the order they were declared — or the skin paints over its own text.
+    /// The layout knows the skin's corners and nothing else, so the frame is
+    /// the caller's to push: [`ButtonSkin::draw`] for the same `state` and the
+    /// same rect, **before** this call — the draw list composites in the order
+    /// commands went in, and a frame pushed after the label paints over it.
     pub fn render(
         &self,
         dl: &mut DrawList,
@@ -1043,9 +1110,9 @@ mod tests {
         }
     }
 
-    /// A skinned button emits **only** its label: the background is a sprite the
-    /// UI pass cannot draw, and a widget that also painted a flat rect would
-    /// paint it over the skin.
+    /// A skinned button emits **only** its label: the background is the
+    /// [`ButtonSkin`]'s to push, and a widget that also painted a flat rect
+    /// would paint it over the skin.
     #[test]
     fn a_skinned_button_draws_its_label_and_no_background() {
         let atlas = atlas();
@@ -1132,5 +1199,89 @@ mod tests {
         } else {
             panic!("first command not Rect");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ButtonSkin
+    // -----------------------------------------------------------------------
+
+    /// Three 16x16 frames in one atlas, with the given insets on each.
+    fn skin_with(insets: [SkinInsets; 3]) -> ButtonSkin {
+        let mut images = crate::image::ImageAtlas::new();
+        let mut frame = |shade: u8, insets| NineSliceImage {
+            image: images
+                .register(16, 16, &[shade; 16 * 16 * 4])
+                .expect("fits an empty page"),
+            insets,
+        };
+        ButtonSkin {
+            idle: frame(10, insets[0]),
+            hovered: frame(20, insets[1]),
+            pressed: frame(30, insets[2]),
+        }
+    }
+
+    /// **A state draws its own frame and nothing moves**: the same nine
+    /// rectangles for every state, each state sampling a different image.
+    #[test]
+    fn a_button_skin_swaps_the_picture_and_leaves_the_rectangles_alone() {
+        let skin = skin_with([SkinInsets::new(3.0, 5.0, 2.0, 4.0); 3]);
+        let quads = |state| {
+            let mut dl = DrawList::new();
+            skin.draw(
+                &mut dl,
+                state,
+                Vec2::new(10.0, 10.0),
+                Vec2::new(90.0, 40.0),
+                2.0,
+            );
+            dl.commands()
+                .iter()
+                .map(|command| match command {
+                    DrawCommand::Image {
+                        min, max, uv_min, ..
+                    } => (*min, *max, *uv_min),
+                    other => panic!("a skin drew {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let [idle, hovered, pressed] = [
+            ButtonState::Idle,
+            ButtonState::Hovered,
+            ButtonState::Pressed,
+        ]
+        .map(quads);
+        assert_eq!(idle.len(), 9);
+        for index in 0..9 {
+            assert_eq!(
+                (idle[index].0, idle[index].1),
+                (pressed[index].0, pressed[index].1),
+                "quad {index} moved with the state"
+            );
+            assert_eq!(
+                (hovered[index].0, hovered[index].1),
+                (idle[index].0, idle[index].1)
+            );
+            assert_ne!(idle[index].2, hovered[index].2, "quad {index}");
+            assert_ne!(hovered[index].2, pressed[index].2, "quad {index}");
+            assert_ne!(idle[index].2, pressed[index].2, "quad {index}");
+        }
+    }
+
+    #[test]
+    fn a_skins_insets_are_its_idle_frames_and_disagreement_is_reported() {
+        let agreed = skin_with([SkinInsets::new(3.0, 5.0, 2.0, 4.0); 3]);
+        assert_eq!(agreed.insets(), SkinInsets::new(3.0, 5.0, 2.0, 4.0));
+        assert!(agreed.insets_agree());
+
+        let split = skin_with([
+            SkinInsets::uniform(4.0),
+            SkinInsets::uniform(4.0),
+            SkinInsets::uniform(6.0),
+        ]);
+        assert!(!split.insets_agree());
+        // Clamped to the frame, as the drawing is.
+        let over = skin_with([SkinInsets::new(40.0, 40.0, 0.0, 0.0); 3]);
+        assert_eq!(over.insets(), SkinInsets::new(16.0, 0.0, 0.0, 0.0));
     }
 }

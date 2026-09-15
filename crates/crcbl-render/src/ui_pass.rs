@@ -2,30 +2,47 @@
 //!
 //! ```text
 //! UiRenderer ──begin_frame──▶ uploads vertex/index buffers from DrawList
+//!      │                     and stages what changed in the image atlas
 //!      │
-//!      └──add_passes──▶ ui-composite ─▶ the menu's sprites ─▶ ui-overlay
-//!                       three alpha-blended passes onto the same target,
-//!                       after the tonemap
+//!      └──add_passes──▶ [ui-images] ─▶ ui-composite ─▶ ui-overlay
+//!                       a copy when the atlas changed, then two alpha-blended
+//!                       passes onto the same target, after the tonemap
 //! ```
 //!
 //! The UI pass uses the same target as the tonemap pass, compositing on top
 //! with alpha blending. The glyph atlas is a static R8_UNORM texture uploaded
 //! once at creation.
 //!
-//! # The menu is drawn *inside* this pass, not before it
+//! # The image atlas uploads what changed, inside the frame
+//!
+//! Beside the glyph atlas the pass binds a second page: the
+//! [`ImageAtlas`] this renderer owns, `Rgba8UnormSrgb` and sampled through a
+//! linear sampler, which is what [`DrawList::image`] and
+//! [`DrawList::nine_slice`] draw from. The whole page is uploaded once at
+//! creation, like the glyphs. An image registered after that — through
+//! [`images_mut`](UiRenderer::images_mut) — marks a rectangle of the page
+//! dirty, and the next [`begin_frame`](UiRenderer::begin_frame) stages just that
+//! rectangle into a host-visible buffer. [`add_passes`](UiRenderer::add_passes)
+//! then records the copy as a `ui-images` copy pass ahead of the draws, with the
+//! page imported so the graph emits the transitions around it: a copy recorded
+//! mid-frame outside [`RenderGraph`] would be a barrier outside the graph, which
+//! is the one rule `crate`'s docs forbid. A frame with nothing dirty stages
+//! nothing, imports nothing and adds no pass.
+//!
+//! # The menu is in the draw list
 //!
 //! A [`DrawList`] carries the game's HUD **and** the engine's overlays — the
-//! menu's own labels, the debug panel, the console — and
-//! [`DrawList::begin_overlay`] marks where one ends and the other begins. This
-//! module draws the two halves as two passes and puts
-//! [`MenuRenderer::add_pass`](crate::menu::MenuRenderer::add_pass) between
-//! them, so the scrim dims the HUD and the labels stay legible over the panel.
+//! menu, the debug panel, the console — and [`DrawList::begin_overlay`] marks
+//! where one ends and the other begins. The menu's art is registered in this
+//! renderer's image atlas at start-up ([`menu_skin`](UiRenderer::menu_skin)),
+//! and [`Menu::render`](crcbl_ui::menu::Menu::render) pushes the scrim, the
+//! frame and the buttons ahead of the labels, so the scrim dims the HUD and the
+//! labels stay legible over the panel because that is the order they went in.
 //!
-//! It used to be the caller's job to interleave them, and every sample got it
-//! the same way round: the whole draw list in one pass *after* the menu, which
-//! painted the game's HUD over the panel that was supposed to be covering it.
-//! [`add_passes`](UiRenderer::add_passes) is one call for all three passes
-//! precisely so no caller can order them at all.
+//! It used to be a sprite pass of its own, sandwiched between the draw list's
+//! two halves by this module, because this pass had no textured quad. The two
+//! halves are still two passes, `ui-composite` and `ui-overlay`, drawn back to
+//! back; nothing is between them any more.
 //!
 //! # Per-pass constants are a uniform buffer, on every tier
 //!
@@ -71,23 +88,27 @@
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BlendState, BufferDesc,
-    BufferHandle, BufferUsage, ColorTargetState, ColorWrites, Device, FilterMode, Format,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewHandle, ImageViewType,
-    IndexFormat, LoadOp, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
-    QueueHandle, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry,
-    ShaderModuleDesc, ShaderStages, StoreOp, check_portable_storage_buffers,
+    BufferHandle, BufferImageCopy, BufferUsage, ColorTargetState, ColorWrites, Device, Extent3d,
+    FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageAspect,
+    ImageSubresourceLayers, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
+    Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, QueueHandle, ResourceState,
+    SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
+    ShaderStages, StoreOp, check_portable_storage_buffers,
 };
 
 use crcbl_shaders::{Stage, UI};
 use crcbl_ui::draw_list::{DrawList, Vertex2d};
+use crcbl_ui::image::{ImageAtlas, PAGE_SIZE, TexelRect};
+use crcbl_ui::menu::MenuSkin;
 use crcbl_ui::text::FontAtlas;
 
 use core::ops::Range;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::counters::FrameCounters;
-use crate::graph::{ImageId, RenderGraph};
-use crate::menu::MenuRenderer;
-use crate::texture::{UploadedTexture, upload_texture};
+use crate::graph::{ImageId, ImportedImage, InitialClaim, RenderGraph};
+use crate::texture::{UploadedTexture, stage_region, upload_texture};
 
 /// The constant block matching `ui.slang`'s `UiConstants`.
 ///
@@ -102,6 +123,16 @@ struct UiConstants {
 /// The binding number the constants buffer occupies, after the atlas (0), its
 /// sampler (1) and the vertex storage buffer (2).
 pub const CONSTANTS_BINDING: u32 = 3;
+
+/// The binding number the image atlas occupies, after the constants.
+pub const IMAGE_ATLAS_BINDING: u32 = 4;
+
+/// The binding number the image atlas's linear sampler occupies — the last one.
+pub const IMAGE_SAMPLER_BINDING: u32 = 5;
+
+/// The image atlas page's format: sRGB-encoded, straight alpha, the sprite
+/// pass's sheet format.
+const IMAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 
 /// Bytes reserved for one frame's constants buffer.
 ///
@@ -142,6 +173,23 @@ pub struct UiRenderer {
     // Glyph atlas
     atlas: UploadedTexture,
     atlas_sampler: SamplerHandle,
+
+    /// The pictures [`DrawList::image`] draws, and the page they are on.
+    images: ImageAtlas,
+    /// The shipped menu art, registered in [`Self::images`] at start-up.
+    menu_skin: MenuSkin,
+    image_page: UploadedTexture,
+    image_sampler: SamplerHandle,
+    /// The staged copy of a dirty rectangle, per frame in flight: a slot's
+    /// buffer is released when its turn of the ring comes round again, which is
+    /// when the frame that copied from it has finished.
+    image_staging: Vec<Option<BufferHandle>>,
+    /// This frame's copy, when [`begin_frame`](Self::begin_frame) staged one.
+    image_upload: Option<ImageUpload>,
+    /// Set by the copy pass's body once the copy is recorded. A frame that
+    /// staged an upload and never recorded it puts the rectangle back on the
+    /// atlas for the next frame to try again.
+    image_recorded: Arc<AtomicBool>,
 
     // Per-frame bind groups (each contains atlas+sampler+vertex_buffer+constants)
     frame_groups: Vec<BindGroupHandle>,
@@ -248,8 +296,39 @@ impl UiRenderer {
         })?;
         rollback.samplers.push(atlas_sampler);
 
-        // Bind group layout: atlas texture, sampler, vertex storage buffer and
-        // the constants uniform buffer.
+        // The image atlas: the menu's art registered, then the whole page, once,
+        // at start-up — the same staging path as the glyphs, and legal here for
+        // the same reason. What changes later is copied inside a frame; see the
+        // module docs.
+        let mut images = ImageAtlas::new();
+        let menu_skin = crate::menu::menu_skin(&mut images).map_err(|error| {
+            HalError::InvalidDescriptor(format!("ui image atlas: the menu art: {error}"))
+        })?;
+        let image_page = upload_texture(
+            device,
+            queue,
+            "ui image atlas",
+            IMAGE_FORMAT,
+            PAGE_SIZE,
+            PAGE_SIZE,
+            images.pixels(),
+        )?;
+        rollback.textures.push(image_page);
+        // The whole page is on the GPU now, so nothing is owed.
+        images.take_dirty();
+        // Linear, for the shader's sharp-bilinear bend — see `ui.slang`.
+        let image_sampler = device.create_sampler(&SamplerDesc {
+            label: Some("ui image atlas"),
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mip_filter: FilterMode::Nearest,
+            address_mode: [SamplerAddressMode::ClampToEdge; 3],
+            ..SamplerDesc::default()
+        })?;
+        rollback.samplers.push(image_sampler);
+
+        // Bind group layout: atlas texture, sampler, vertex storage buffer, the
+        // constants uniform buffer, then the image atlas and its sampler.
         let layout_entries = [
             BindGroupLayoutEntry {
                 binding: 0,
@@ -286,6 +365,23 @@ impl UiRenderer {
                 // See this module's docs on why a dynamic offset would only ever
                 // be zero here.
                 kind: BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: IMAGE_ATLAS_BINDING,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: IMAGE_SAMPLER_BINDING,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::Sampler { comparison: false },
                 count: 1,
                 flags: BindingFlags::empty(),
             },
@@ -334,7 +430,14 @@ impl UiRenderer {
             let bg = device.create_bind_group(&BindGroupDesc {
                 label: Some("ui frame"),
                 layout: bind_group_layout,
-                entries: &frame_entries(atlas.view, atlas_sampler, vb, cb),
+                entries: &frame_entries(
+                    FrameTextures {
+                        glyphs: (atlas.view, atlas_sampler),
+                        images: (image_page.view, image_sampler),
+                    },
+                    vb,
+                    cb,
+                ),
                 variable_count: None,
             })?;
             rollback.bind_groups.push(bg);
@@ -405,6 +508,13 @@ impl UiRenderer {
             bind_group_layout,
             atlas,
             atlas_sampler,
+            images,
+            menu_skin,
+            image_page,
+            image_sampler,
+            image_staging: vec![None; FRAMES_IN_FLIGHT],
+            image_upload: None,
+            image_recorded: Arc::new(AtomicBool::new(false)),
             frame_groups,
             vertex_buffers,
             index_buffers,
@@ -424,6 +534,29 @@ impl UiRenderer {
     #[must_use]
     pub const fn target_format(&self) -> Format {
         self.target_format
+    }
+
+    /// The shipped menu art, for [`Menu::render`](crcbl_ui::menu::Menu::render).
+    #[must_use]
+    pub const fn menu_skin(&self) -> &MenuSkin {
+        &self.menu_skin
+    }
+
+    /// The image atlas [`DrawList::image`] and [`DrawList::nine_slice`] draw
+    /// from.
+    #[must_use]
+    pub const fn images(&self) -> &ImageAtlas {
+        &self.images
+    }
+
+    /// The image atlas, to register pictures into.
+    ///
+    /// A registration marks the texels it wrote dirty, and the next
+    /// [`begin_frame`](Self::begin_frame) uploads that rectangle and nothing
+    /// else — see the module docs. The [`AtlasImage`](crcbl_ui::AtlasImage) it
+    /// returns is valid in a draw list from that frame on.
+    pub const fn images_mut(&mut self) -> &mut ImageAtlas {
+        &mut self.images
     }
 
     /// Uploads the draw list's triangulated geometry and advances the ring.
@@ -448,6 +581,7 @@ impl UiRenderer {
     ) -> Result<(), HalError> {
         self.frame = (self.frame + 1) % FRAMES_IN_FLIGHT;
         let idx = self.frame;
+        self.stage_images(device, idx)?;
 
         let crcbl_ui::draw_list::Triangles {
             vertices,
@@ -512,8 +646,10 @@ impl UiRenderer {
         // sampler never change, so a steady-state frame writes no descriptors.
         if vertex_buffer_replaced {
             let entries = frame_entries(
-                self.atlas.view,
-                self.atlas_sampler,
+                FrameTextures {
+                    glyphs: (self.atlas.view, self.atlas_sampler),
+                    images: (self.image_page.view, self.image_sampler),
+                },
                 self.vertex_buffers[idx],
                 self.constant_buffers[idx],
             );
@@ -529,20 +665,61 @@ impl UiRenderer {
         Ok(())
     }
 
+    /// Stages whatever of the image atlas changed since the last upload, for
+    /// this frame's `ui-images` copy pass.
+    ///
+    /// Also where last frame's staging is settled: an upload that was staged
+    /// and never recorded — a graph built and dropped, or `add_passes` never
+    /// called — hands its rectangle back to the atlas so it is not lost, and
+    /// this slot's buffer from a whole ring ago is released.
+    fn stage_images(&mut self, device: &dyn Device, idx: usize) -> Result<(), HalError> {
+        if let Some(upload) = self.image_upload.take()
+            && !self.image_recorded.swap(false, Ordering::Relaxed)
+        {
+            self.images.mark_dirty(upload.rect);
+        }
+        if let Some(stale) = self.image_staging[idx].take() {
+            device.destroy_buffer(stale);
+        }
+        let Some(rect) = self.images.take_dirty() else {
+            return Ok(());
+        };
+        let staged = stage_region(
+            device,
+            "ui image atlas staging",
+            IMAGE_FORMAT,
+            (rect.width, rect.height),
+            &self.images.region(rect),
+        );
+        let (buffer, row_texels) = match staged {
+            Ok(staged) => staged,
+            Err(error) => {
+                // Not lost: the next frame stages it again.
+                self.images.mark_dirty(rect);
+                return Err(error);
+            }
+        };
+        self.image_staging[idx] = Some(buffer);
+        self.image_recorded.store(false, Ordering::Relaxed);
+        self.image_upload = Some(ImageUpload {
+            staging: buffer,
+            rect,
+            row_texels,
+        });
+        Ok(())
+    }
+
     /// The most passes [`add_passes`](Self::add_passes) adds to a frame.
     ///
-    /// Two: the HUD half and the overlay half, either of which a frame can
-    /// leave empty — a frame with no menu and no console draws only the first,
-    /// and a frame with an empty draw list draws neither. The menu's own pass
-    /// is not counted here; it is
-    /// [`MenuRenderer::MAX_PASSES`](crate::menu::MenuRenderer::MAX_PASSES),
-    /// which [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES) already adds
-    /// beside this one.
+    /// Three: the image atlas's `ui-images` copy on a frame that registered a
+    /// picture, then the HUD half and the overlay half, either of which a frame
+    /// can leave empty — a frame with no menu and no console draws only the
+    /// first, and a frame with an empty draw list draws neither.
     ///
     /// The most rather than the count. What a caller sizing
     /// [`PassTimers`](crate::timing::PassTimers) adds up — see
     /// [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES).
-    pub const MAX_PASSES: u32 = 2;
+    pub const MAX_PASSES: u32 = 3;
 
     /// This frame's two index ranges: the HUD half, then the overlay half.
     ///
@@ -595,26 +772,18 @@ impl UiRenderer {
         }
     }
 
-    /// Adds the whole UI sandwich to `graph`, drawing on top of `target`.
+    /// Adds the UI's passes to `graph`, drawing on top of `target`.
     ///
-    /// In order: `ui-composite` for the commands below
-    /// [`DrawList::begin_overlay`]'s cut — the game's HUD and GUI — then
-    /// `menu`'s own sprite pass, then `ui-overlay` for the commands above it —
-    /// the menu's labels, the debug panel and the console. **That is the layer
-    /// order the whole engine draws in**, and it is one call so that no caller
-    /// can express any other one: a sample that added the menu pass itself
-    /// could only add it before or after the entire draw list, and drawing the
-    /// HUD over a pause menu is exactly what that used to do.
+    /// In order: `ui-images` when [`begin_frame`](Self::begin_frame) staged a
+    /// changed rectangle of the image atlas, then `ui-composite` for the
+    /// commands below [`DrawList::begin_overlay`]'s cut — the game's HUD and GUI
+    /// — then `ui-overlay` for the commands above it — the menu, the debug panel
+    /// and the console.
     ///
     /// A half with no triangles in it adds **no pass at all** rather than an
     /// empty one, the rule this pass has always had — so an unpaused frame with
     /// the console closed still records exactly one pass, named as it always
     /// was.
-    ///
-    /// `menu` is optional for the one caller that has no menu to draw between
-    /// the halves: `crcbl`'s offscreen screenshot fixture renders a draw list
-    /// with no game and no engine loop behind it. Passing `None` keeps the
-    /// halves and their order, and simply leaves the filling out.
     ///
     /// Each pass reads nothing except its own vertex buffer; both blend onto
     /// the target using alpha blending. Call after the tonemap pass.
@@ -634,14 +803,62 @@ impl UiRenderer {
         graph: &mut RenderGraph<'a>,
         target: ImageId,
         extent: (u32, u32),
-        menu: Option<&'a MenuRenderer>,
     ) {
         let (below, above) = self.segments();
-        self.add_segment(graph, target, extent, "ui-composite", below);
-        if let Some(menu) = menu {
-            menu.add_pass(graph, target);
-        }
-        self.add_segment(graph, target, extent, "ui-overlay", above);
+        let page = self.add_image_upload(graph);
+        self.add_segment(graph, target, extent, "ui-composite", below, page);
+        self.add_segment(graph, target, extent, "ui-overlay", above, page);
+    }
+
+    /// Adds the `ui-images` copy of this frame's staged rectangle, and returns
+    /// the page as the graph knows it — or does nothing and returns `None` on a
+    /// frame that staged nothing.
+    ///
+    /// The page is imported **tracked**, in [`ResourceState::ShaderRead`] and
+    /// back to it: that is where the start-up upload left it and where every
+    /// frame's graph leaves it, so the claim is one the pool's ledger can check.
+    fn add_image_upload<'a>(&'a self, graph: &mut RenderGraph<'a>) -> Option<ImageId> {
+        let upload = self.image_upload?;
+        let page = graph.import_image(
+            "ui image atlas",
+            ImportedImage {
+                image: self.image_page.image,
+                view: self.image_page.view,
+                format: IMAGE_FORMAT,
+                extent: (PAGE_SIZE, PAGE_SIZE),
+                initial: ResourceState::ShaderRead,
+                claim: InitialClaim::Tracked,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
+        let recorded = Arc::clone(&self.image_recorded);
+        graph
+            .add_copy_pass("ui-images")
+            .use_image(page, ResourceState::TransferDst)
+            .execute(move |ctx| {
+                let image = ctx.image(page);
+                ctx.encoder().copy_buffer_to_image(&BufferImageCopy {
+                    buffer: upload.staging,
+                    buffer_offset: 0,
+                    buffer_row_length: upload.row_texels,
+                    buffer_image_height: upload.rect.height,
+                    image,
+                    image_subresource: ImageSubresourceLayers {
+                        aspect: ImageAspect::COLOR,
+                        mip: 0,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_offset: Offset3d {
+                        x: upload.rect.x as i32,
+                        y: upload.rect.y as i32,
+                        z: 0,
+                    },
+                    image_extent: Extent3d::d2(upload.rect.width, upload.rect.height),
+                });
+                recorded.store(true, Ordering::Relaxed);
+            });
+        Some(page)
     }
 
     /// Adds one half of the draw list as one render pass, or nothing if the
@@ -650,6 +867,10 @@ impl UiRenderer {
     /// Both halves index the *same* vertex and index buffers — the shader reads
     /// `vertices[SV_VertexID]` and the index values are absolute — so a half is
     /// a range of the frame's one upload rather than a second one.
+    ///
+    /// `page` is the image atlas when this frame's graph imported it for an
+    /// upload, and the pass then declares that it samples it, so the graph
+    /// returns it from the copy's `TransferDst` before the draw reads it.
     fn add_segment<'a>(
         &'a self,
         graph: &mut RenderGraph<'a>,
@@ -657,6 +878,7 @@ impl UiRenderer {
         extent: (u32, u32),
         label: &'static str,
         segment: Range<u32>,
+        page: Option<ImageId>,
     ) {
         if segment.is_empty() {
             return; // nothing to draw
@@ -668,33 +890,36 @@ impl UiRenderer {
         let index_buffer = self.index_buffers[self.frame];
         let constants = self.constant_buffers[self.frame];
 
-        graph
+        let mut pass = graph
             .add_render_pass(label)
             // Draw on top of the tonemapped target with alpha blending.
-            .color(target, LoadOp::Load, StoreOp::Store, Default::default())
-            .execute(move |ctx| {
-                let block = UiConstants {
-                    viewport: [extent.0 as f32, extent.1 as f32],
-                };
-                let bytes: &[u8] = bytemuck::bytes_of(&block);
-                // A host-visible write, not a command: it lands before this
-                // frame is submitted, and the buffer is one of
-                // `FRAMES_IN_FLIGHT` — the same rotation that makes the vertex
-                // ring safe makes this safe.
-                if let Err(error) = ctx.device().write_buffer(constants, 0, bytes) {
-                    // Recording a pass that draws nothing beats aborting the
-                    // frame, as in the tonemap's bind-group path: the HUD
-                    // vanishes for a frame, the log says why, the next frame
-                    // retries.
-                    crcbl_core::log::error!("graph: ui constants write failed: {error}");
-                    return;
-                }
-                let encoder = ctx.encoder();
-                encoder.bind_graphics_pipeline(pipeline);
-                encoder.bind_group(0, bg, &[], pipeline_layout);
-                encoder.bind_index_buffer(index_buffer, 0, IndexFormat::Uint32);
-                encoder.draw_indexed(segment.clone(), 0, 0..1);
-            });
+            .color(target, LoadOp::Load, StoreOp::Store, Default::default());
+        if let Some(page) = page {
+            pass = pass.read_image(page);
+        }
+        pass.execute(move |ctx| {
+            let block = UiConstants {
+                viewport: [extent.0 as f32, extent.1 as f32],
+            };
+            let bytes: &[u8] = bytemuck::bytes_of(&block);
+            // A host-visible write, not a command: it lands before this
+            // frame is submitted, and the buffer is one of
+            // `FRAMES_IN_FLIGHT` — the same rotation that makes the vertex
+            // ring safe makes this safe.
+            if let Err(error) = ctx.device().write_buffer(constants, 0, bytes) {
+                // Recording a pass that draws nothing beats aborting the
+                // frame, as in the tonemap's bind-group path: the HUD
+                // vanishes for a frame, the log says why, the next frame
+                // retries.
+                crcbl_core::log::error!("graph: ui constants write failed: {error}");
+                return;
+            }
+            let encoder = ctx.encoder();
+            encoder.bind_graphics_pipeline(pipeline);
+            encoder.bind_group(0, bg, &[], pipeline_layout);
+            encoder.bind_index_buffer(index_buffer, 0, IndexFormat::Uint32);
+            encoder.draw_indexed(segment.clone(), 0, 0..1);
+        });
     }
 
     /// Destroys all GPU resources.
@@ -717,8 +942,13 @@ impl UiRenderer {
         for cb in self.constant_buffers.drain(..) {
             device.destroy_buffer(cb);
         }
+        for staging in self.image_staging.drain(..).flatten() {
+            device.destroy_buffer(staging);
+        }
         device.destroy_sampler(self.atlas_sampler);
         self.atlas.destroy(device);
+        device.destroy_sampler(self.image_sampler);
+        self.image_page.destroy(device);
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.bind_group_layout);
@@ -784,6 +1014,25 @@ impl Rollback {
     }
 }
 
+/// One frame's staged image-atlas copy: where the bytes are and where they go.
+#[derive(Clone, Copy, Debug)]
+struct ImageUpload {
+    staging: BufferHandle,
+    rect: TexelRect,
+    /// The staged rows' pitch, in texels.
+    row_texels: u32,
+}
+
+/// The two atlases a frame's bind group names, each as its view and sampler.
+///
+/// One argument rather than four, so the two pairs cannot be crossed at the
+/// call site — a glyph view under the image sampler still binds.
+#[derive(Clone, Copy)]
+struct FrameTextures {
+    glyphs: (ImageViewHandle, SamplerHandle),
+    images: (ImageViewHandle, SamplerHandle),
+}
+
 /// One frame's bind-group entries.
 ///
 /// One function rather than the two copies `new` and `begin_frame` used to
@@ -791,21 +1040,20 @@ impl Rollback {
 /// in the other is a bind group that stops matching its layout the first time
 /// the vertex ring grows.
 fn frame_entries(
-    atlas_view: ImageViewHandle,
-    atlas_sampler: SamplerHandle,
+    textures: FrameTextures,
     vertices: BufferHandle,
     constants: BufferHandle,
-) -> [BindGroupEntry; 4] {
+) -> [BindGroupEntry; 6] {
     [
         BindGroupEntry {
             binding: 0,
             array_index: 0,
-            resource: BindingResource::ImageView(atlas_view),
+            resource: BindingResource::ImageView(textures.glyphs.0),
         },
         BindGroupEntry {
             binding: 1,
             array_index: 0,
-            resource: BindingResource::Sampler(atlas_sampler),
+            resource: BindingResource::Sampler(textures.glyphs.1),
         },
         BindGroupEntry {
             binding: 2,
@@ -816,6 +1064,16 @@ fn frame_entries(
             binding: CONSTANTS_BINDING,
             array_index: 0,
             resource: BindingResource::whole_buffer(constants),
+        },
+        BindGroupEntry {
+            binding: IMAGE_ATLAS_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(textures.images.0),
+        },
+        BindGroupEntry {
+            binding: IMAGE_SAMPLER_BINDING,
+            array_index: 0,
+            resource: BindingResource::Sampler(textures.images.1),
         },
     ]
 }
@@ -1012,8 +1270,10 @@ mod tests {
             [
                 (ResourceState::Undefined, ResourceState::TransferDst),
                 (ResourceState::TransferDst, ResourceState::ShaderRead),
+                (ResourceState::Undefined, ResourceState::TransferDst),
+                (ResourceState::TransferDst, ResourceState::ShaderRead),
             ],
-            "the atlas is the only barrier the UI renderer's construction records"
+            "the two atlases are the only barriers the UI renderer's construction records"
         );
 
         renderer.destroy(device.as_ref());
@@ -1357,7 +1617,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The sandwich
+    // A paused frame
     // -----------------------------------------------------------------------
 
     /// A pause menu, laid out for `extent`, as `apps/*/src/menu.rs` builds one.
@@ -1372,9 +1632,10 @@ mod tests {
         )
     }
 
-    /// A draw list shaped like a paused frame: a HUD bar, the cut, then two
-    /// lines of overlay text.
-    fn paused_list() -> DrawList {
+    /// A draw list shaped like a paused frame, as the engine's loop builds one: a
+    /// HUD bar, the cut, then the whole menu — its art and its text — drawn with
+    /// the renderer's own skin.
+    fn paused_list(ui: &UiRenderer, extent: (u32, u32), atlas: &FontAtlas) -> DrawList {
         let mut list = DrawList::new();
         list.rect(
             glam::Vec2::new(0.0, 0.0),
@@ -1382,23 +1643,24 @@ mod tests {
             [1.0; 4],
         );
         list.begin_overlay();
-        list.text(glam::Vec2::new(8.0, 40.0), "PAUSED", [1.0; 4], 14.0);
-        list.text(glam::Vec2::new(8.0, 56.0), "RESUME", [1.0; 4], 14.0);
+        let panel = pause_menu();
+        panel.render(&mut list, &panel.layout(extent, atlas), ui.menu_skin());
         list
     }
 
-    /// **The menu is drawn between the two halves of the draw list, and the two
-    /// halves partition the index buffer.**
+    /// **A paused frame is the two halves of one upload drawn back to back, the
+    /// menu's art in the second** — and the two halves partition the index
+    /// buffer.
     ///
-    /// The whole slice, in one frame: the pass labels come out of the compiled
-    /// graph in execution order, and the index ranges come out of the recorded
-    /// draw calls — so a swap of the two `add_segment` calls fails the labels,
-    /// and a range that overlapped or left a gap fails the arithmetic. The
-    /// ranges are asserted against each other and against the frame's own index
-    /// count rather than against literals, which is what keeps the test about
-    /// the partition instead of about the glyph layout.
+    /// The pass labels come out of the compiled graph in execution order, and
+    /// the index ranges come out of the recorded draw calls — so a swap of the
+    /// two `add_segment` calls fails the labels, and a range that overlapped or
+    /// left a gap fails the arithmetic. The ranges are asserted against each
+    /// other and against the frame's own index count rather than against
+    /// literals, which is what keeps the test about the partition instead of
+    /// about the glyph layout.
     #[test]
-    fn the_menu_pass_sits_between_the_two_halves_of_the_draw_list() {
+    fn a_paused_frame_draws_both_halves_of_one_upload_with_the_menu_art_above_the_cut() {
         use crate::graph::{CompiledPass, RenderGraph};
         use crate::transient::{TransientImageDesc, TransientPool};
         use crcbl_hal::null::{Command, Event};
@@ -1410,16 +1672,9 @@ mod tests {
         let mut pool = TransientPool::new();
         let mut ui =
             UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
-        let mut menu = MenuRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
-            .expect("the null backend accepts the sprite pipeline and the sheet");
 
         let atlas = FontAtlas::built_in();
-        let list = paused_list();
-        let panel = pause_menu();
-        let layout = panel.layout(EXTENT, &atlas);
-        menu.set_menu(Some((&panel, &layout)));
-        menu.begin_frame(device.as_ref(), EXTENT)
-            .expect("the instance and constant buffers are writable");
+        let list = paused_list(&ui, EXTENT, &atlas);
         ui.begin_frame(device.as_ref(), &list, &atlas, 1.0)
             .expect("upload");
 
@@ -1428,6 +1683,24 @@ mod tests {
         assert!(
             split > 0 && split < total,
             "the fixture must put geometry on both sides of the cut: {split} of {total}"
+        );
+        // The menu's frame is textured quads in the overlay half, off the
+        // renderer's own atlas: every image vertex is above the cut.
+        let triangles = list.to_triangles_split(Some(&atlas), 1.0);
+        let image_vertices: Vec<u32> = triangles.indices[..]
+            .iter()
+            .copied()
+            .filter(|&index| {
+                triangles.vertices[index as usize].primitive()
+                    == Some(crcbl_ui::draw_list::Primitive::Image)
+            })
+            .collect();
+        assert!(!image_vertices.is_empty(), "the menu drew no art");
+        assert!(
+            triangles.indices[..split as usize]
+                .iter()
+                .all(|&index| !image_vertices.contains(&index)),
+            "menu art landed below the cut"
         );
 
         // The uploads are start-up and per-frame CPU work; what is under test is
@@ -1443,18 +1716,18 @@ mod tests {
                 ImageUsage::COLOR_ATTACHMENT,
             ),
         );
-        ui.add_passes(&mut graph, target, EXTENT, Some(&menu));
+        ui.add_passes(&mut graph, target, EXTENT);
         let compiled = graph.compile(&pool).expect("a legal frame");
 
         let labels: Vec<&str> = compiled.passes().iter().map(CompiledPass::label).collect();
         assert_eq!(
             labels,
-            ["ui-composite", "sprites", "ui-overlay"],
-            "the menu's sprite pass belongs between the HUD half and the overlay half"
+            ["ui-composite", "ui-overlay"],
+            "the HUD half, then the overlay half, and nothing between them"
         );
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("ui sandwich"),
+            label: Some("paused frame"),
             queue,
         });
         compiled
@@ -1502,7 +1775,6 @@ mod tests {
         );
 
         device.destroy_command_buffer(commands);
-        menu.destroy(device.as_ref());
         ui.destroy(device.as_ref());
         pool.destroy(device.as_ref());
     }
@@ -1537,7 +1809,7 @@ mod tests {
                 ImageUsage::COLOR_ATTACHMENT,
             ),
         );
-        ui.add_passes(&mut graph, target, EXTENT, None);
+        ui.add_passes(&mut graph, target, EXTENT);
         let compiled = graph.compile(&pool).expect("a legal frame");
 
         let labels: Vec<&str> = compiled.passes().iter().map(CompiledPass::label).collect();
@@ -1582,5 +1854,263 @@ mod tests {
             "the rebuilt group still names a constants buffer per frame"
         );
         renderer.destroy(device.as_ref());
+    }
+
+    // -----------------------------------------------------------------------
+    // The image atlas
+    // -----------------------------------------------------------------------
+
+    /// The copy-buffer-to-image commands in `commands`, in order.
+    fn image_copies(commands: &[crcbl_hal::null::Command]) -> Vec<crcbl_hal::BufferImageCopy> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                crcbl_hal::null::Command::CopyBufferToImage(copy) => Some(*copy),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Records one frame of `ui` through a real graph onto a fresh target and
+    /// returns the pass labels in execution order.
+    ///
+    /// The recorder's command stream is filled once the encoder is finished,
+    /// which this does before returning.
+    fn record_frame(
+        ui: &mut UiRenderer,
+        device: &dyn Device,
+        queue: QueueHandle,
+        pool: &mut crate::transient::TransientPool,
+        list: &DrawList,
+    ) -> Vec<String> {
+        use crate::graph::{CompiledPass, RenderGraph};
+        use crate::transient::TransientImageDesc;
+        use crcbl_hal::{CommandEncoderDesc, ImageUsage};
+
+        const EXTENT: (u32, u32) = (64, 48);
+        ui.begin_frame(device, list, &FontAtlas::built_in(), 1.0)
+            .expect("upload");
+        let mut graph = RenderGraph::new(queue);
+        let target = graph.create_image(
+            "target",
+            TransientImageDesc::new(EXTENT, Format::Bgra8UnormSrgb, ImageUsage::COLOR_ATTACHMENT),
+        );
+        ui.add_passes(&mut graph, target, EXTENT);
+        let compiled = graph.compile(pool).expect("a legal frame");
+        let labels = compiled
+            .passes()
+            .iter()
+            .map(|pass| CompiledPass::label(pass).to_owned())
+            .collect();
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("ui frame"),
+            queue,
+        });
+        compiled
+            .execute(device, pool, encoder.as_mut(), None)
+            .expect("the graph executed");
+        let commands = encoder.finish().expect("recording succeeded");
+        device.destroy_command_buffer(commands);
+        labels
+    }
+
+    /// A list with one quad on it, so the draw passes have something to do.
+    fn one_rect() -> DrawList {
+        let mut list = DrawList::new();
+        list.rect(glam::Vec2::ZERO, glam::Vec2::splat(8.0), [1.0; 4]);
+        list
+    }
+
+    /// **The page goes up whole at start-up, as four bytes a texel**, beside the
+    /// glyph atlas's one.
+    #[test]
+    fn the_image_atlas_is_an_rgba_page_uploaded_whole_at_start_up() {
+        let (recorder, device, queue) = open_recorded();
+        let renderer =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+
+        let page = PAGE_SIZE as usize;
+        let writes: Vec<usize> = recorder
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                crcbl_hal::null::Event::BufferWritten { len, .. } => Some(len),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            writes.contains(&(page * page * 4)),
+            "no staging write the size of an RGBA page in {writes:?}"
+        );
+        let copies = image_copies(&recorder.commands());
+        assert!(
+            copies
+                .iter()
+                .any(|copy| copy.image_extent == Extent3d::d2(PAGE_SIZE, PAGE_SIZE)),
+            "no copy of the whole page in {copies:?}"
+        );
+        assert_eq!(renderer.images().dirty(), None, "the page owes nothing");
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **A frame with nothing registered copies nothing**: no staging, no pass,
+    /// no import — the steady state every frame after start-up is in.
+    #[test]
+    fn a_frame_with_no_new_image_uploads_nothing() {
+        let (recorder, device, queue) = open_recorded();
+        let mut pool = crate::transient::TransientPool::new();
+        let mut ui =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+        recorder.clear();
+
+        let labels = record_frame(&mut ui, device.as_ref(), queue, &mut pool, &one_rect());
+        assert_eq!(labels, ["ui-composite"]);
+        assert!(image_copies(&recorder.commands()).is_empty());
+
+        ui.destroy(device.as_ref());
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **An image registered after start-up is copied once, as exactly the
+    /// rectangle it dirtied, inside the graph** — ahead of the draws, into the
+    /// page the graph moved to `TransferDst` and back — and the frame after it
+    /// copies nothing.
+    #[test]
+    fn a_registered_image_is_copied_once_as_its_own_rectangle_inside_the_graph() {
+        use crcbl_hal::null::Command;
+
+        let (recorder, device, queue) = open_recorded();
+        let mut pool = crate::transient::TransientPool::new();
+        let mut ui =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+        let image = ui
+            .images_mut()
+            .register(5, 3, &[200; 5 * 3 * 4])
+            .expect("fits an empty page");
+        let dirty = ui
+            .images()
+            .dirty()
+            .expect("the registration dirtied the page");
+        recorder.clear();
+
+        let labels = record_frame(&mut ui, device.as_ref(), queue, &mut pool, &one_rect());
+        assert_eq!(
+            labels,
+            ["ui-images", "ui-composite"],
+            "the copy comes before the draw that samples it"
+        );
+        let commands = recorder.commands();
+        let copies = image_copies(&commands);
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        let copy = copies[0];
+        assert_eq!(copy.image, ui.image_page.image);
+        assert_eq!(
+            (copy.image_offset.x, copy.image_offset.y),
+            (dirty.x as i32, dirty.y as i32)
+        );
+        assert_eq!(copy.image_extent, Extent3d::d2(dirty.width, dirty.height));
+        assert!(
+            dirty.x <= image.x
+                && dirty.y <= image.y
+                && image.x + image.width <= dirty.x + dirty.width
+                && image.y + image.height <= dirty.y + dirty.height,
+            "the copied rectangle {dirty:?} does not cover the image {image:?}"
+        );
+        // The graph, not the renderer, moved the page out of `ShaderRead` for
+        // the copy and back before the draw.
+        let page_transitions: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Barrier { images, .. } => Some(images.clone()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|barrier| barrier.image == ui.image_page.image)
+            .map(|barrier| (barrier.from, barrier.to))
+            .collect();
+        assert_eq!(
+            page_transitions,
+            [
+                (ResourceState::ShaderRead, ResourceState::TransferDst),
+                (ResourceState::TransferDst, ResourceState::ShaderRead),
+            ]
+        );
+        // And back *before* the draw that samples it, not at the end of the
+        // frame: a draw reading a page still in `TransferDst` is the hazard the
+        // pass's `read_image` declaration exists to rule out.
+        let returned = commands
+            .iter()
+            .position(|command| match command {
+                Command::Barrier { images, .. } => images.iter().any(|barrier| {
+                    barrier.image == ui.image_page.image && barrier.to == ResourceState::ShaderRead
+                }),
+                _ => false,
+            })
+            .expect("the page is returned to ShaderRead");
+        let drawn = commands
+            .iter()
+            .position(|command| matches!(command, Command::DrawIndexed { .. }))
+            .expect("the rect is drawn");
+        assert!(
+            returned < drawn,
+            "the page went back to ShaderRead at command {returned}, after the draw at {drawn}"
+        );
+
+        recorder.clear();
+        let labels = record_frame(&mut ui, device.as_ref(), queue, &mut pool, &one_rect());
+        assert_eq!(labels, ["ui-composite"], "uploaded once, not every frame");
+        assert!(image_copies(&recorder.commands()).is_empty());
+
+        ui.destroy(device.as_ref());
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// A staged upload whose frame never recorded it is not lost: the next
+    /// frame stages the same rectangle again.
+    #[test]
+    fn an_upload_that_was_never_recorded_is_staged_again() {
+        let (device, queue) = open();
+        let mut ui =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+        ui.images_mut()
+            .register(4, 4, &[9; 4 * 4 * 4])
+            .expect("fits");
+        let atlas = FontAtlas::built_in();
+
+        ui.begin_frame(device.as_ref(), &one_rect(), &atlas, 1.0)
+            .expect("upload");
+        let first = ui.image_upload.expect("staged").rect;
+        // No graph this frame.
+        ui.begin_frame(device.as_ref(), &one_rect(), &atlas, 1.0)
+            .expect("upload");
+        let again = ui.image_upload.expect("staged again").rect;
+        assert_eq!(first, again);
+
+        ui.destroy(device.as_ref());
+    }
+
+    /// Every staging buffer an upload made is given back — by the ring on its
+    /// next turn, or by `destroy` for the ones still in flight.
+    #[test]
+    fn image_uploads_leak_nothing() {
+        let (recorder, device, queue) = open_recorded();
+        let before = recorder.total_live_objects();
+        let mut pool = crate::transient::TransientPool::new();
+        let mut ui =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+        for round in 0..(FRAMES_IN_FLIGHT * 2) {
+            ui.images_mut()
+                .register(3, 3, &[round as u8; 3 * 3 * 4])
+                .expect("fits");
+            let labels = record_frame(&mut ui, device.as_ref(), queue, &mut pool, &one_rect());
+            assert_eq!(labels[0], "ui-images", "round {round}");
+        }
+        ui.destroy(device.as_ref());
+        pool.destroy(device.as_ref());
+        assert_eq!(recorder.total_live_objects(), before);
+        recorder.assert_valid();
     }
 }

@@ -190,6 +190,8 @@ OPTIONS:
                                                shallow basin, a shore and a post
                            sprite              four sprites over three batches
                            ui                  text, a rect and an outline
+                           ui_primitives       rounded rects, a clipped image
+                                               and a nine-slice
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
                          be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
@@ -1267,6 +1269,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::StillPool,
         Scene::Sprite,
         Scene::Ui,
+        Scene::UiPrimitives,
     ]
 };
 
@@ -1299,6 +1302,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::StillPool => "still_pool",
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",
+        Scene::UiPrimitives => "ui_primitives",
     }
 }
 

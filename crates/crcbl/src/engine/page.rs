@@ -2,12 +2,11 @@
 //! UI.
 //!
 //! ```text
-//!   acquire ─▶ menu.begin_frame ─▶ ui.begin_frame ─▶ graph
-//!                                                     │ backdrop  (clear)
-//!                                                     │ menu      (the art)
-//!                                                     │ ui        (the text)
-//!                                                     ▼
-//!                                    compile ─▶ encode ─▶ present
+//!   acquire ─▶ ui.begin_frame ─▶ graph
+//!                                 │ backdrop  (clear)
+//!                                 │ ui        (the page, the menu, the overlay)
+//!                                 ▼
+//!                compile ─▶ encode ─▶ present
 //! ```
 //!
 //! # Why this is not each sample's own
@@ -15,14 +14,10 @@
 //! `apps/{hud,orbit,bracket,options}` had it four times over, and comparing the
 //! comment-stripped files the only differences were the sample's **name** — in
 //! the context label, the graph log line and the encoder label — and the
-//! **clear colour**. Everything else is one piece of knowledge: which order the
-//! two renderers are built in and that a failed [`UiRenderer::new`] has to
-//! destroy the [`MenuRenderer`] that already opened; the frame's acquire →
-//! begin-frame → graph → compile → encode → present order; that the backdrop is
-//! the only pass that does not load, so declaring the UI pass first would put
-//! the panel under the words it frames; and that
-//! [`UiRenderer::add_passes`](crcbl_render::UiRenderer::add_passes) is handed
-//! the menu so the whole sandwich is one call no sample can reorder.
+//! **clear colour**. Everything else is one piece of knowledge: the frame's
+//! acquire → begin-frame → graph → compile → encode → present order, and that
+//! the backdrop is the only pass that does not load, so declaring the UI pass
+//! first would clear the page away.
 //!
 //! # What stays with the sample
 //!
@@ -41,16 +36,15 @@
 
 use crcbl_hal::CommandEncoderDesc;
 use crcbl_render::{
-    ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers, RenderGraph, TransientPool,
-    UiRenderer,
+    ForwardRenderer, MAX_TIMED_PASSES, PassTimers, RenderGraph, TransientPool, UiRenderer,
 };
 use crcbl_ui::draw_list::DrawList;
-use crcbl_ui::menu::{Menu, MenuLayout};
+use crcbl_ui::menu::MenuSkin;
 use crcbl_ui::text::FontAtlas;
 
 use super::{FRAMES_IN_FLIGHT, FrameOutcome, GpuContext, GpuError};
 
-/// A device, a swapchain, a menu pass and a UI pass — the whole of a sample
+/// A device, a swapchain and a UI pass — the whole of a sample
 /// whose frame has no scene in it.
 ///
 /// Built from a label and a clear colour; see the module docs for what is
@@ -60,9 +54,6 @@ pub struct PageBundle {
     ctx: GpuContext,
     pool: TransientPool,
     timers: Option<PassTimers>,
-    /// The menu pass: its own sheets, its own screen-space camera, and a pass
-    /// that declares nothing on a frame with no menu on it.
-    menu: MenuRenderer,
     /// UI compositing — the page and the debug overlay, in one list.
     ui: UiRenderer,
     atlas: FontAtlas,
@@ -95,26 +86,16 @@ impl PageBundle {
     ///
     /// # Errors
     ///
-    /// [`GpuError`] if the menu pass or the UI compositor refused the device.
-    /// The menu pass is destroyed if the UI compositor is the one that refused,
-    /// which is the half a hand-written copy forgets.
+    /// [`GpuError`] if the UI compositor refused the device.
     pub fn new(ctx: GpuContext, label: &'static str, clear: [f32; 4]) -> Result<Self, GpuError> {
         let format = ctx.format();
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
-        let menu = MenuRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
-        let ui = match UiRenderer::new(ctx.device(), ctx.queue(), format) {
-            Ok(ui) => ui,
-            Err(error) => {
-                menu.destroy(ctx.device());
-                return Err(GpuError::Hal(error));
-            }
-        };
+        let ui = UiRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
 
         Ok(Self {
             ctx,
             pool: TransientPool::new(),
             timers,
-            menu,
             ui,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
@@ -162,9 +143,11 @@ impl PageBundle {
         std::mem::swap(&mut self.draw_list, list);
     }
 
-    /// Takes this frame's menu, or `None` on a frame that shows none.
-    pub fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
-        self.menu.set_menu(menu);
+    /// The menu art the UI pass's atlas holds — see
+    /// [`GameGpu::menu_skin`](super::GameGpu::menu_skin).
+    #[must_use]
+    pub const fn menu_skin(&self) -> &MenuSkin {
+        self.ui.menu_skin()
     }
 
     /// The most recent pass timings, or `None` on a device without timestamp
@@ -175,13 +158,13 @@ impl PageBundle {
     }
 
     /// What the last [`frame`](Self::frame) recorded: draws, instances and
-    /// triangles, summed over the two passes this bundle adds.
+    /// triangles — the UI pass's own answer.
     ///
-    /// Each renderer's own answer rather than a count kept here — see
+    /// The renderer's rather than a count kept here — see
     /// [`crcbl_render::counters`], which is where that argument is made.
     #[must_use]
     pub fn counters(&self) -> crcbl_render::FrameCounters {
-        self.menu.counters().plus(self.ui.counters())
+        self.ui.counters()
     }
 
     /// The `[engine.video]` section this bundle's context read while opening.
@@ -233,9 +216,6 @@ impl PageBundle {
         };
         let extent = acquired.extent;
 
-        self.menu
-            .begin_frame(self.ctx.device(), extent)
-            .map_err(GpuError::Hal)?;
         self.ui
             .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
             .map_err(GpuError::Hal)?;
@@ -252,12 +232,9 @@ impl PageBundle {
                 .add_render_pass("backdrop")
                 .clear_color(target, self.clear)
                 .execute(|_| {});
-            // One call for the whole sandwich: the game's HUD, the menu's art
-            // over it, then the menu's own labels, the debug overlay and the
-            // console over that. `UiRenderer::add_passes` owns the order so no
-            // sample can express another one.
-            self.ui
-                .add_passes(&mut graph, target, extent, Some(&self.menu));
+            // The page, then the menu, the debug overlay and the console over
+            // it — the order the draw list was filled in.
+            self.ui.add_passes(&mut graph, target, extent);
             graph.compile(&self.pool)?
         };
 
@@ -314,7 +291,6 @@ impl PageBundle {
     pub fn destroy(mut self) -> Result<(), GpuError> {
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
-        self.menu.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());

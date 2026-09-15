@@ -171,12 +171,7 @@ fn inspect(image: &Image) {
     );
 
     // ---- 2. the title card is a menu on top of the field -------------------
-    block.drew(
-        "title card",
-        PANEL_AT,
-        DREW_AT_ALL,
-        "the menu pass drew nothing",
-    );
+    block.drew("title card", PANEL_AT, DREW_AT_ALL, "the menu drew nothing");
     block.over(
         ("FLY button", BUTTON_AT),
         ("card behind it", PANEL_AT),

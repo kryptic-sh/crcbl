@@ -626,7 +626,10 @@ mod tests {
 
     use super::*;
     use core::time::Duration;
-    use crcbl_sample_test::{headless_common, pass_labels, row_value, ui_text};
+    use crcbl_sample_test::{
+        assert_menu_art_above_the_cut_and_under, headless_common, pass_labels, row_value,
+        ui_images, ui_text,
+    };
 
     use crcbl::core::input::KeyCode;
     use crcbl::engine::Flow;
@@ -804,10 +807,11 @@ mod tests {
     /// so.**
     ///
     /// The whole layer order, as pass labels in declaration order: the board's
-    /// clear, the game's sprites, the HUD half of the draw list, the menu's own
-    /// sprite pass, then the overlay half the panel's title and labels are in.
-    /// `ui-composite` used to be *last* — the entire draw list in one pass after
-    /// the menu — which is what painted the score over the pause panel.
+    /// clear, the game's sprites, the HUD half of the draw list, then the overlay
+    /// half the panel's art, title and labels are in — art first. When the menu
+    /// was a sprite pass of its own, `ui-composite` was once *last* — the entire
+    /// draw list in one pass after the menu — which is what painted the score
+    /// over the pause panel.
     ///
     /// Asserted as the ordered list of labels rather than as `contains`, because
     /// what is wrong about the old frame is only the order.
@@ -831,15 +835,10 @@ mod tests {
         let dump = engine.gpu().last_dump();
         assert_eq!(
             pass_labels(dump),
-            [
-                "surround",
-                "sprites",
-                "ui-composite",
-                "sprites",
-                "ui-overlay"
-            ],
+            ["surround", "sprites", "ui-composite", "ui-overlay"],
             "the paused frame's passes, in declaration order:\n{dump}"
         );
+        assert_menu_art_above_the_cut_and_under(engine.gpu().draw_list(), "PAUSED");
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
@@ -1791,10 +1790,10 @@ mod tests {
     // The menus
     // -----------------------------------------------------------------------
 
-    /// **The start menu is on screen before the first serve, and it reaches both
-    /// passes.** The text is in the draw list the UI pass uploads and the frame
-    /// is in the sprite list the menu pass draws — a menu that only made it to
-    /// one of the two is a panel with no words or words with no panel.
+    /// **The start menu is on screen before the first serve, and both its halves
+    /// are in the draw list.** The text and the frame are both what the UI pass
+    /// uploads — a menu that only put one of the two in is a panel with no words
+    /// or words with no panel.
     #[test]
     fn the_start_menu_is_drawn_before_the_first_serve() {
         let mut engine = scripted(&headless(60));
@@ -1807,26 +1806,21 @@ mod tests {
             "the start menu's text is not in the draw list: {drawn:?}",
         );
 
-        let sprites = engine.gpu().menu_sprites();
+        let images = ui_images(engine.gpu().draw_list());
         // The scrim, the nine-slice frame, and nine quads for each of three
         // buttons.
-        assert_eq!(sprites.len(), 1 + 9 + 9 * 3, "{}", sprites.len());
+        assert_eq!(images.len(), 1 + 9 + 9 * 3, "{}", images.len());
         let extent = engine.extent();
         assert_eq!(
-            sprites[0].rect,
-            [
-                -(extent.0 as f32) / 2.0,
-                -(extent.1 as f32) / 2.0,
-                extent.0 as f32,
-                extent.1 as f32,
-            ],
+            images[0],
+            [0.0, 0.0, extent.0 as f32, extent.1 as f32],
             "the scrim does not cover the framebuffer",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
-    /// **A game being played draws no menu at all**, and the menu pass is handed
-    /// nothing — which is what makes it free rather than cheap.
+    /// **A game being played draws no menu at all**: no image quad
+    /// reaches the draw list.
     #[test]
     fn a_game_in_progress_draws_no_menu() {
         let mut engine = scripted(&headless(60));
@@ -1837,10 +1831,11 @@ mod tests {
             .expect("the window is live");
         run_frames(&mut engine, 10);
         assert_eq!(engine.menu_kind(), MenuKind::None);
+        let images = ui_images(engine.gpu().draw_list());
         assert!(
-            engine.gpu().menu_sprites().is_empty(),
-            "a playing frame submitted {} menu sprites",
-            engine.gpu().menu_sprites().len(),
+            images.is_empty(),
+            "a playing frame drew {} image quads",
+            images.len(),
         );
         let drawn = ui_text(engine.gpu().draw_list());
         assert!(

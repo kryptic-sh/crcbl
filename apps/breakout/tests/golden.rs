@@ -129,12 +129,7 @@ fn inspect(image: &Image) {
     block.distinct_enough("a board", MIN_COLORS);
 
     // ---- 1. the menu panel is a bright thing on a dark field ---------------
-    block.drew(
-        "menu panel",
-        MENU_AT,
-        DREW_AT_ALL,
-        "the menu pass drew nothing",
-    );
+    block.drew("menu panel", MENU_AT, DREW_AT_ALL, "the menu drew nothing");
     block.over(
         ("menu panel", MENU_AT),
         ("field behind it", FIELD_AT),

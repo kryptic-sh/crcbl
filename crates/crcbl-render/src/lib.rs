@@ -124,7 +124,6 @@
 
 mod atlas_view;
 mod bloom;
-pub mod button_skin;
 pub mod camera;
 pub mod cluster_pool;
 mod contact_shadows;
@@ -187,7 +186,6 @@ mod upscale;
 mod volumetric;
 mod water;
 
-pub use button_skin::{ButtonSkin, screen_rect_to_target};
 pub use camera::{Atmosphere, Camera, DirectionalLight, Fog, Projection, Sky};
 pub use cluster_pool::{ClusterPool, ClusterRange};
 pub use counters::{FrameCounters, INDIRECT, UNKNOWN};
@@ -198,18 +196,17 @@ pub use counters::{FrameCounters, INDIRECT, UNKNOWN};
 /// [`NineSlice`] and [`Rect`] are here for the same reason —
 /// [`NineSliceSource`]'s fields are spelled in both.
 pub use crcbl_sprite::{NineSlice, Rect, SampleMode};
-/// Re-exported for the same reason: [`MenuArt::extend`] is spelled in [`Menu`]
-/// and [`MenuLayout`], and a caller that can name this crate's menu API should
-/// not have to add a second dependency to build one. It is also what lets
-/// `crcbl-vk`'s end-to-end suite — which depends on this crate and not on
-/// `crcbl-ui` — take a golden image of the real menu rather than of a replica.
-pub use crcbl_ui::menu::{Menu, MenuItem, MenuItemLayout, MenuLayout, MenuStyle};
+/// Re-exported for the same reason: [`menu_skin`] returns a [`MenuSkin`], and
+/// a caller that can name this crate's menu art should not have to add a second
+/// dependency to lay out and draw the menu it skins. It is also what lets an
+/// end-to-end suite that depends on this crate take a golden image of the real
+/// menu rather than of a replica.
+pub use crcbl_ui::menu::{Menu, MenuItem, MenuItemLayout, MenuLayout, MenuSkin, MenuStyle};
 pub use crcbl_ui::text::FontAtlas;
-/// Re-exported for the same reason as [`NineSlice`]: [`ButtonSkin::source`] and
-/// [`ButtonSkin::quads`] are spelled in [`ButtonState`], and
-/// [`ButtonSkin::insets`] returns a [`SkinInsets`]. A caller that can name this
-/// crate's button API should not have to add a second dependency to call it.
-pub use crcbl_ui::{ButtonState, SkinInsets};
+/// Re-exported for the same reason as [`Menu`]: [`MenuSkin`]'s buttons are a
+/// [`ButtonSkin`] drawn per [`ButtonState`], and its insets are
+/// [`SkinInsets`].
+pub use crcbl_ui::{ButtonSkin, ButtonState, SkinInsets};
 /// Re-exported because [`ForwardRenderer::set_water`] is spelled in them, on
 /// [`SampleMode`]'s terms below: a caller setting water should not need a
 /// dependency of its own to name what it sets.
@@ -240,7 +237,7 @@ pub use light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc}
 pub use material_table::{
     Material, MaterialHandle, MaterialTable, MaterialTableDesc, MaterialTableError,
 };
-pub use menu::{MenuArt, MenuRenderer, menu_camera, menu_view_projection};
+pub use menu::menu_skin;
 pub use mesh_pool::{
     Mesh, MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshRange, MeshUpload, UPLOAD_TIMEOUT,
 };

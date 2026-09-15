@@ -652,7 +652,7 @@ mod tests {
     use crcbl::shell::HeadlessShell;
 
     use super::*;
-    use crcbl_sample_test::{row_value, ui_text};
+    use crcbl_sample_test::{row_value, ui_images, ui_text};
 
     /// A loop over a *concrete* `HeadlessShell`, so the test can play
     /// compositor. `run` uses `dyn Shell`; both go through the same
@@ -1044,34 +1044,30 @@ mod tests {
         assert!(drawn.iter().any(|t| t == "RESUME"), "{drawn:?}");
         assert!(drawn.iter().any(|t| t == "PACING: AUTO"), "{drawn:?}");
         assert!(drawn.iter().any(|t| t == "FPS: 1000"), "{drawn:?}");
-        // And the picture reached the *other* pass: the scrim, the nine-slice
-        // frame, and nine quads for each of five buttons.
-        let sprites = engine.gpu().menu_sprites();
-        assert_eq!(sprites.len(), 1 + 9 + 9 * 5, "{}", sprites.len());
+        // And the picture is in the list too: the scrim, the nine-slice frame,
+        // and nine quads for each of five buttons.
+        let images = ui_images(engine.gpu().draw_list());
+        assert_eq!(images.len(), 1 + 9 + 9 * 5, "{}", images.len());
         let extent = engine.gpu().extent();
         assert_eq!(
-            sprites[0].rect,
-            [
-                -(extent.0 as f32) / 2.0,
-                -(extent.1 as f32) / 2.0,
-                extent.0 as f32,
-                extent.1 as f32,
-            ],
+            images[0],
+            [0.0, 0.0, extent.0 as f32, extent.1 as f32],
             "the scrim does not cover the framebuffer",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
-    /// **A running sandbox submits no menu sprites at all**, which is what makes
-    /// the menu pass free rather than cheap.
+    /// **A running sandbox draws no menu at all**: no image quad reaches the
+    /// draw list.
     #[test]
     fn a_running_sandbox_draws_no_menu() {
         let mut engine = scripted(&headless(60));
         run_frames(&mut engine, 4);
+        let images = ui_images(engine.gpu().draw_list());
         assert!(
-            engine.gpu().menu_sprites().is_empty(),
-            "a running frame submitted {} menu sprites",
-            engine.gpu().menu_sprites().len(),
+            images.is_empty(),
+            "a running frame drew {} image quads",
+            images.len(),
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

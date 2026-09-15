@@ -57,6 +57,7 @@
 use core::ops::Deref;
 
 use crcbl_sprite::{NineSlice, Rect, Sheet};
+use crcbl_ui::image::{slice_bands, slice_cuts};
 
 use crate::sprite_pass::{SheetId, Sprite};
 
@@ -320,9 +321,9 @@ impl NineSliceSource {
         // The fixed bands come back in the caller's units: the texel insets
         // divided by the scale, so a six-texel cap at twenty texels per unit is
         // a 0.3-unit cap.
-        let xs = cuts(
+        let xs = slice_cuts(
             target[0],
-            bands(
+            slice_bands(
                 nine.left as f32 / self.texels_per_unit,
                 nine.right as f32 / self.texels_per_unit,
                 target[2],
@@ -331,9 +332,9 @@ impl NineSliceSource {
         );
         // World Y is up and the frame's `top` inset is the top of the *image*,
         // so the low world band is `bottom` and the high one is `top`.
-        let ys = cuts(
+        let ys = slice_cuts(
             target[1],
-            bands(
+            slice_bands(
                 nine.bottom as f32 / self.texels_per_unit,
                 nine.top as f32 / self.texels_per_unit,
                 target[3],
@@ -380,40 +381,6 @@ impl NineSliceSource {
             bottom: self.nine.bottom.min(self.frame.h - top),
         }
     }
-}
-
-/// The three world-space band lengths along one axis: the low fixed band, the
-/// stretched band, and the high fixed band.
-///
-/// `low` and `high` are the fixed bands in the caller's units — the texel
-/// insets already divided by [`NineSliceSource::texels_per_unit`]. Below
-/// `low + high` the two fixed bands shrink in proportion and the stretched band
-/// is zero — see [`NineSliceSource::expand`]'s account of that choice.
-fn bands(low: f32, high: f32, extent: f32) -> [f32; 3] {
-    if extent.is_nan() || extent <= 0.0 {
-        return [0.0; 3];
-    }
-    let fixed = low + high;
-    if extent < fixed {
-        // `fixed > extent > 0`, so the division is safe.
-        let low = low * (extent / fixed);
-        return [low, 0.0, extent - low];
-    }
-    [low, extent - fixed, high]
-}
-
-/// The four cut lines an axis's bands imply, starting at `origin`.
-///
-/// The far cut is `origin + extent` rather than the sum of the bands: a float
-/// sum that lands a half-ulp short would leave the last quad a sliver narrower
-/// than the target it was asked to fill.
-fn cuts(origin: f32, bands: [f32; 3], extent: f32) -> [f32; 4] {
-    [
-        origin,
-        origin + bands[0],
-        origin + bands[0] + bands[1],
-        origin + extent,
-    ]
 }
 
 #[cfg(test)]

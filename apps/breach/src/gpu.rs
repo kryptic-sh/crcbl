@@ -1,5 +1,6 @@
 //! Breach's GPU side: the shared shell↔HAL join, the forward renderer over
-//! [`crate::map`], and the UI and menu passes rule 4 asks every sample for.
+//! [`crate::map`], and the UI pass — the menu drawn in it — rule 4 asks
+//! every sample for.
 //!
 //! Everything that is not this sample's — opening a backend, choosing an
 //! adapter that can present, the swapchain, the frames-in-flight ring, resize
@@ -37,9 +38,9 @@
 //!
 //! # Pass order is declaration order
 //!
-//! The forward frame → `menu` → `ui`. The last two load the target rather than
-//! clearing it, so declaring the UI pass first would put the pause panel on top
-//! of the words it exists to frame.
+//! The forward frame → `ui`, the pause menu in the draw list ahead of its own
+//! words. The UI loads the target rather than clearing it, so it has to be
+//! declared after the frame it composites over.
 
 use crcbl::engine::{
     DevicePathRows, ForcedPaths, FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions,
@@ -47,12 +48,11 @@ use crcbl::engine::{
 };
 use crcbl::hal::{BindingModel, CommandEncoderDesc, DeviceCaps, GeometryPath, LightingPath};
 use crcbl::render::{
-    Camera, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers, RenderGraph,
-    TransientPool, UiRenderer,
+    Camera, ForwardRenderer, MAX_TIMED_PASSES, PassTimers, RenderGraph, TransientPool, UiRenderer,
 };
 use crcbl::shell::{Shell, WindowId};
 use crcbl::ui::draw_list::DrawList;
-use crcbl::ui::menu::{Menu, MenuLayout};
+use crcbl::ui::menu::MenuSkin;
 use crcbl::ui::text::FontAtlas;
 
 use crate::map::practice::{self, BotView};
@@ -133,9 +133,6 @@ pub struct Gpu {
     /// Where the frame is seen from. Written every frame by [`crate::app`],
     /// which owns the view; this is only where the frame reads it.
     camera: Camera,
-    /// The menu pass: its own sheets, its own screen-space camera, and a pass
-    /// that declares nothing on a frame with no menu on it.
-    menu: MenuRenderer,
     /// UI compositing — the crosshair, the readout and the debug panel, in one
     /// list.
     ui: UiRenderer,
@@ -242,7 +239,7 @@ impl Gpu {
     /// # Errors
     ///
     /// [`GpuError`] if the map's description is one the pools it asks for
-    /// cannot hold, if the menu pass or the UI compositor refused the device, or
+    /// cannot hold, if the UI compositor refused the device, or
     /// if any HAL call failed.
     fn from_context(ctx: GpuContext, map: MapChoice) -> Result<Self, GpuError> {
         let format = ctx.format();
@@ -272,17 +269,9 @@ impl Gpu {
         if timers.is_none() {
             crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
         }
-        let menu = match MenuRenderer::new(ctx.device(), ctx.queue(), format) {
-            Ok(menu) => menu,
-            Err(error) => {
-                renderer.destroy(ctx.device());
-                return Err(GpuError::Hal(error));
-            }
-        };
         let ui = match UiRenderer::new(ctx.device(), ctx.queue(), format) {
             Ok(ui) => ui,
             Err(error) => {
-                menu.destroy(ctx.device());
                 renderer.destroy(ctx.device());
                 return Err(GpuError::Hal(error));
             }
@@ -309,7 +298,6 @@ impl Gpu {
             // camera rather than an `Option` because a frame must never be
             // drawn from nowhere.
             camera: Camera::default(),
-            menu,
             ui,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
@@ -386,9 +374,11 @@ impl Gpu {
         std::mem::swap(&mut self.draw_list, dl);
     }
 
-    /// Takes this frame's menu, or `None` on a frame that shows none.
-    pub fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
-        self.menu.set_menu(menu);
+    /// The menu art the UI pass's atlas holds — see
+    /// [`crcbl::engine::GameGpu::menu_skin`].
+    #[must_use]
+    pub const fn menu_skin(&self) -> &MenuSkin {
+        self.ui.menu_skin()
     }
 
     /// The most recent pass timings, or `None` on a device without timestamp
@@ -402,10 +392,7 @@ impl Gpu {
     /// bundle adds.
     #[must_use]
     pub fn counters(&self) -> crcbl::render::FrameCounters {
-        self.renderer
-            .counters()
-            .plus(self.menu.counters())
-            .plus(self.ui.counters())
+        self.renderer.counters().plus(self.ui.counters())
     }
 
     /// The `[engine.video]` section this bundle's context read while opening.
@@ -454,9 +441,6 @@ impl Gpu {
 
         self.renderer
             .begin_frame(self.ctx.device(), &self.camera, &map::house_light(), extent)?;
-        self.menu
-            .begin_frame(self.ctx.device(), extent)
-            .map_err(GpuError::Hal)?;
         self.ui
             .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
             .map_err(GpuError::Hal)?;
@@ -471,12 +455,9 @@ impl Gpu {
             let _hdr = self
                 .renderer
                 .add_passes(&mut graph, &self.pool, target, extent);
-            // One call for the whole sandwich: the game's HUD, the menu's art
-            // over it, then the menu's own labels, the debug overlay and the
-            // console over that. `UiRenderer::add_passes` owns the order so no
-            // sample can express another one.
-            self.ui
-                .add_passes(&mut graph, target, extent, Some(&self.menu));
+            // The game's HUD, then the menu, the debug overlay and the
+            // console over it — the order the draw list was filled in.
+            self.ui.add_passes(&mut graph, target, extent);
             graph.compile(&self.pool)?
         };
 
@@ -534,7 +515,6 @@ impl Gpu {
     pub fn destroy(mut self) -> Result<(), GpuError> {
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
-        self.menu.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());

@@ -1043,9 +1043,9 @@ uncertainty.
   files. It also gives `crcbl-vk`'s suite nothing, because that crate cannot see
   `apps/`, so the golden would be a picture of a replica. _Changes it_: art that
   is genuinely one game's. A sample that wants its own frame should author it
-  under its own `assets/` and pass its own `MenuArt`; the shape for that is a
-  constructor beside `MenuArt::register` taking a `Sheet`, not a fork of this
-  one.
+  under its own `assets/` and register it into the UI pass's image atlas as a
+  `MenuSkin` of its own; the shape for that is a function beside
+  `crcbl_render::menu_skin` taking a `Sheet`, not a fork of this one.
 
 - **What size is the menu drawn at?** Taken: **the largest whole scale in 1..=4
   whose panel fits inside 90% of the framebuffer**, a pure function of the
@@ -1071,11 +1071,12 @@ uncertainty.
   is not being flown.
 
 - **Does the world keep drawing behind a menu?** Taken: **yes, and it is
-  dimmed** by a scrim sprite the menu's own pass draws. A frozen screenshot
-  would need a captured frame and a second code path; a menu with nothing behind
-  it loses the player's place. The scrim is a _sprite_ and not a `DrawList`
-  rectangle because the UI pass runs after the sprite pass, so a UI-pass scrim
-  would dim the menu's own frame along with the game. _Changes it_: a menu that
+  dimmed** by a scrim the menu draws first. A frozen screenshot would need a
+  captured frame and a second code path; a menu with nothing behind it loses the
+  player's place. The scrim was a sprite in the menu's own pass while the UI
+  pass could not draw a picture; since the UI pass drew the menu (2026-09-15) it
+  is the first image quad `Menu::render` pushes, ahead of the frame and the
+  labels, which is what keeps it from dimming them. _Changes it_: a menu that
   wants the game genuinely stopped in the background — a settings screen over a
   paused multiplayer session, where the world is still ticking and the motion is
   a distraction.
@@ -1134,16 +1135,14 @@ uncertainty.
   UV-carrying draw command `DrawList` does not have, and an RGB path added by
   hand to both tier permutations of `ui.slang`. `SpriteRenderer` already is an
   instanced RGBA pass with alpha blending, and a skinned button is nine sprites.
-  _The cost paid_: the caller owns the ordering. `RenderGraph` runs passes in
-  declaration order with no topological sort, and both passes load rather than
-  clear, so the sprite pass carrying a skin must precede the UI pass carrying
-  its label or the skin paints over its own words. For the **shared menu** that
-  is no longer a caller's job: `UiRenderer::add_passes` declares
-  `MenuRenderer`'s pass itself, between the two halves of the draw list, and a
-  sample cannot express any other order. A game skinning buttons of its own
-  still pays it, enforced by nothing but the order of two lines. _Changes it_: a
-  UI element needing colour art _interleaved_ with text rather than behind it,
-  which two passes cannot express at any ordering.
+  _The cost paid_: the caller owned the ordering, because `RenderGraph` runs
+  passes in declaration order and the sprite pass carrying a skin had to precede
+  the UI pass carrying its label. **Superseded 2026-09-15** by
+  `docs/plan/07-ui-debug.md` rung 1: the UI pass grew the RGBA image atlas and
+  the textured quad this decision declined, because the plan's styled widgets
+  need colour art interleaved with text — the _changes it_ this entry named. A
+  button skin is now `crcbl_ui::ButtonSkin`, drawn into the same draw list as
+  its label, and the menu's sprite pass is gone.
 
 - **A fixed backdrop for breakout, or a parallax band?** Taken: **fixed.**
   _(Moved here from Considered and declined — it is a judgement about this

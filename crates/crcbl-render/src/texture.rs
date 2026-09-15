@@ -345,6 +345,67 @@ fn upload(
     outcome
 }
 
+/// A tightly packed region of `format` texels staged for an in-frame copy: a
+/// host-visible `TRANSFER_SRC` buffer holding `pixels` with its rows padded to
+/// the device's copy alignment, and the row pitch in texels a
+/// [`BufferImageCopy`] reading it names.
+///
+/// The frame-time half of what [`upload_texture`] does at start-up, without the
+/// image, the barriers or the wait: the caller records the copy inside a
+/// [`RenderGraph`](crate::graph::RenderGraph) copy pass, which is where a
+/// barrier recorded during a frame belongs. `crate::ui_pass`'s image atlas is
+/// the caller, and it owns the buffer's lifetime.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] if `format` has no single colour plane, if
+/// the region is empty or if `pixels` is not exactly `width * height` texels;
+/// [`HalError`] from creating or writing the buffer, which is destroyed again
+/// if the write fails.
+pub(crate) fn stage_region(
+    device: &dyn Device,
+    label: &str,
+    format: Format,
+    (width, height): (u32, u32),
+    pixels: &[u8],
+) -> Result<(crcbl_hal::BufferHandle, u32), HalError> {
+    let texel = format.texel_size(ImageAspect::COLOR).ok_or_else(|| {
+        HalError::InvalidDescriptor(format!("{label}: {format:?} has no single colour plane"))
+    })?;
+    let row_bytes = u64::from(width) * u64::from(texel);
+    if width == 0 || height == 0 || pixels.len() as u64 != row_bytes * u64::from(height) {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{label}: a {width}x{height} {format:?} region is {} bytes, got {}",
+            row_bytes * u64::from(height),
+            pixels.len()
+        )));
+    }
+    let alignment = device
+        .caps()
+        .limits
+        .optimal_buffer_copy_offset_alignment
+        .max(1);
+    let row_pitch = padded_row_pitch(row_bytes, texel, alignment);
+    let staged = stage_rows(row_bytes, height, row_pitch, pixels).ok_or_else(|| {
+        HalError::InvalidDescriptor(format!(
+            "{label}: the staged region does not fit in this host's address space"
+        ))
+    })?;
+    let buffer = device.create_buffer(&BufferDesc {
+        label: Some(label),
+        size: staged.len() as u64,
+        usage: BufferUsage::TRANSFER_SRC,
+        memory: MemoryLocation::HostUpload,
+    })?;
+    if let Err(error) = device.write_buffer(buffer, 0, &staged) {
+        device.destroy_buffer(buffer);
+        return Err(error);
+    }
+    // `padded_row_pitch` returns a whole number of texels, so this is exact.
+    let row_texels = u32::try_from(row_pitch / u64::from(texel)).unwrap_or(u32::MAX);
+    Ok((buffer, row_texels))
+}
+
 /// The row pitch in **bytes**: at least `row_bytes`, a multiple of `alignment`,
 /// and a whole number of texels.
 ///

@@ -112,11 +112,11 @@ use crcbl::prelude::*;
 use crcbl::render::scene::{DEMO_CUBE, DEMO_UNTINTED};
 use crcbl::render::{
     Camera, DirectionalLight, ForwardRenderer, InstanceDesc, InstanceHandle, MAX_TIMED_PASSES,
-    MenuRenderer, PassTimers, RenderGraph, TransientPool, UiRenderer,
+    PassTimers, RenderGraph, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
-use crcbl::ui::menu::{Menu, MenuLayout};
+use crcbl::ui::menu::MenuSkin;
 use crcbl::ui::text::FontAtlas;
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
@@ -146,9 +146,6 @@ pub struct Gpu {
     /// `docs/plan/sample/00-samples-overview.md` rule 4 applies to it too, and
     /// a sample that cannot turn the panel on is a finding about the panel.
     ui: UiRenderer,
-    /// The menu pass: its own sheets, its own screen-space camera, and a pass
-    /// that declares nothing on a frame with no menu on it.
-    menu: MenuRenderer,
     atlas: FontAtlas,
     draw_list: DrawList,
     /// Seconds of animation, advanced by the loop rather than read from a clock
@@ -246,14 +243,6 @@ impl Gpu {
                 return Err(GpuError::Hal(error));
             }
         };
-        let menu = match MenuRenderer::new(ctx.device(), ctx.queue(), ctx.format()) {
-            Ok(menu) => menu,
-            Err(error) => {
-                ui.destroy(ctx.device());
-                renderer.destroy(ctx.device());
-                return Err(GpuError::Hal(error));
-            }
-        };
 
         Ok(Self {
             ctx,
@@ -264,7 +253,6 @@ impl Gpu {
             camera: Camera::default().with_projection(projection),
             light: DirectionalLight::default(),
             ui,
-            menu,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
             elapsed: 0.0,
@@ -316,10 +304,7 @@ impl Gpu {
     /// [`crcbl::render::ForwardRenderer::counters`].
     #[must_use]
     pub fn counters(&self) -> crcbl::render::FrameCounters {
-        self.renderer
-            .counters()
-            .plus(self.menu.counters())
-            .plus(self.ui.counters())
+        self.renderer.counters().plus(self.ui.counters())
     }
 
     /// The `[engine.video]` section this bundle's context read while opening.
@@ -337,18 +322,11 @@ impl Gpu {
         std::mem::swap(&mut self.draw_list, dl);
     }
 
-    /// Takes this frame's menu, or `None` on a frame that shows none.
-    ///
-    /// CPU only — the upload happens inside [`Gpu::frame`], at the extent the
-    /// swapchain was actually acquired at.
-    pub fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
-        self.menu.set_menu(menu);
-    }
-
-    /// The sprites the menu pass will draw this frame, for the loop's own tests.
-    #[cfg(test)]
-    pub fn menu_sprites(&self) -> &[crcbl::render::Sprite] {
-        self.menu.frame_sprites()
+    /// The menu art the UI pass's atlas holds — see
+    /// [`crcbl::engine::GameGpu::menu_skin`].
+    #[must_use]
+    pub const fn menu_skin(&self) -> &MenuSkin {
+        self.ui.menu_skin()
     }
 
     /// The glyph atlas the UI pass renders text from.
@@ -421,9 +399,6 @@ impl Gpu {
         );
         self.renderer
             .begin_frame(self.ctx.device(), &self.camera, &self.light, extent)?;
-        self.menu
-            .begin_frame(self.ctx.device(), extent)
-            .map_err(GpuError::Hal)?;
         // Upload this frame's UI geometry: the debug overlay, and only that.
         self.ui
             .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
@@ -439,12 +414,9 @@ impl Gpu {
             let _hdr = self
                 .renderer
                 .add_passes(&mut graph, &self.pool, target, extent);
-            // One call for the whole sandwich: the game's HUD, the menu's art
-            // over it, then the menu's own labels, the debug overlay and the
-            // console over that. `UiRenderer::add_passes` owns the order so no
-            // sample can express another one.
-            self.ui
-                .add_passes(&mut graph, target, extent, Some(&self.menu));
+            // The game's HUD, then the menu, the debug overlay and the
+            // console over it — the order the draw list was filled in.
+            self.ui.add_passes(&mut graph, target, extent);
             // The pool is what remembers the previous frame, so the barriers
             // that open this one are ordered against it rather than against
             // nothing.
@@ -553,7 +525,6 @@ impl Gpu {
         // Nothing may be destroyed while the device might still be using it.
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
-        self.menu.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());
@@ -576,8 +547,8 @@ impl crcbl::engine::GameGpu for Gpu {
         Self::atlas(self)
     }
 
-    fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
-        Self::set_menu(self, menu);
+    fn menu_skin(&self) -> &MenuSkin {
+        Self::menu_skin(self)
     }
 
     fn take_draw_list(&mut self, list: &mut DrawList) {

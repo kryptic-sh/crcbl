@@ -16,6 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The menu and the button skins are drawn by the UI pass, so the menu's own
+  sprite pass is gone.** `crcbl_render::MenuRenderer`, `MenuArt`, `menu_camera`,
+  `menu_view_projection`, `ButtonSkin` and `screen_rect_to_target` are removed;
+  `crcbl_render::menu_skin` registers the shipped menu art into an `ImageAtlas`
+  instead, and `UiRenderer` does that at start-up and hands the result back from
+  `UiRenderer::menu_skin`. `GameGpu::set_menu` is replaced by
+  `GameGpu::menu_skin`, so every bundle that implemented it forwards `menu_skin`
+  instead. `Menu::render` takes a `&MenuSkin` and draws the scrim, the window
+  frame and the buttons ahead of its text; `Menu::render_art` draws the pictures
+  alone. `UiRenderer::add_passes` loses its `menu` argument, a paused frame
+  records `ui-composite` then `ui-overlay` with nothing between them, and
+  `UiRenderer::MAX_PASSES` is 3 for the `ui-images` copy described under Added.
+  `crcbl_ui::Vertex2d` is 96 bytes, was 32: it carries its clip rectangle, the
+  primitive it belongs to and a rounded rectangle's parameters, and `ui.slang`
+  binds the image atlas at 4 and its sampler at 5.
+
 - **`FrameTimings` carries the frame's measured GPU interval, and
   `--force-geometry` selects a renderer tail exactly.** `FrameTimings` gains
   `elapsed_nanos: Option<u64>`, the earliest measured pass start to the latest
@@ -143,6 +159,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **The draw list draws pictures, rounded rectangles and clipped content.**
+  `crcbl_ui::image::ImageAtlas` packs caller-registered RGBA8 images into one
+  1024-texel page with a one-texel edge gutter, refusing an image that does not
+  fit with `AtlasError::Full`, and `DrawList::image` and `DrawList::nine_slice`
+  draw them — sharp-bilinear, as the sprite pass samples `SampleMode::Pixel`.
+  `DrawList::rounded_rect` draws per-corner radii, a fill and a border as a
+  signed distance per fragment, smooth with multisampling off.
+  `DrawList::push_clip` and `pop_clip` narrow everything pushed between them,
+  nested clips intersect, and an unmatched pop is `ClipUnderflow` rather than a
+  panic. `UiRenderer::images_mut` registers into the renderer's atlas, and the
+  next frame copies just the changed rectangle in a `ui-images` copy pass inside
+  the graph. `crcbl_ui::ButtonSkin` and `crcbl_ui::menu::MenuSkin` hold the
+  pictures a button and a menu are drawn with, and
+  `crcbl screenshot --scene ui_primitives` draws every new primitive against its
+  own golden.
 
 - **A device names the geometry tail it prefers beside the one it can run.**
   `Device::preferred_geometry_path` defaults to `DeviceCaps::geometry_path`;

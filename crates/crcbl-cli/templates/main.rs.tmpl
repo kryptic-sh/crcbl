@@ -50,13 +50,12 @@ use crcbl::hal::CommandEncoderDesc;
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
 use crcbl::render::{
-    FrameCounters, FrameTimings, MAX_TIMED_PASSES, MenuRenderer, PassTimers, TransientPool,
-    UiRenderer,
+    FrameCounters, FrameTimings, MAX_TIMED_PASSES, PassTimers, TransientPool, UiRenderer,
 };
 use crcbl::shell::{open, open_backend};
 use crcbl::ui::WidgetId;
 use crcbl::ui::draw_list::DrawList;
-use crcbl::ui::menu::{Menu, MenuLayout, MenuSet};
+use crcbl::ui::menu::{MenuSet, MenuSkin};
 use crcbl::ui::text::FontAtlas;
 
 /// This game's name: window title, log prefix, and the line a finished run
@@ -290,10 +289,8 @@ struct Gpu {
     /// `None` on a device without timestamp queries, which is not an error:
     /// the debug panel simply reports no per-pass times.
     timers: Option<PassTimers>,
-    /// The pause menu's own pass: its skin, its own screen-space camera, and a
-    /// pass that declares nothing on a frame with no menu on it.
-    menu: MenuRenderer,
-    /// The 2D compositor every draw list goes through.
+    /// The 2D compositor every draw list goes through, and the atlas the pause
+    /// menu's art is registered in.
     ui: UiRenderer,
     atlas: FontAtlas,
     draw_list: DrawList,
@@ -337,23 +334,12 @@ impl Gpu {
 
         let format = ctx.format();
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
-        let menu = MenuRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
-        // Hand-unwound rather than `?`: a renderer that failed after an earlier
-        // one succeeded leaves that one holding device objects, and dropping it
-        // does not release them.
-        let ui = match UiRenderer::new(ctx.device(), ctx.queue(), format) {
-            Ok(ui) => ui,
-            Err(error) => {
-                menu.destroy(ctx.device());
-                return Err(GpuError::Hal(error));
-            }
-        };
+        let ui = UiRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
 
         Ok(Self {
             ctx,
             pool: TransientPool::new(),
             timers,
-            menu,
             ui,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
@@ -375,9 +361,6 @@ impl Gpu {
         // agree with the surface actually being drawn into.
         let extent = acquired.extent;
 
-        self.menu
-            .begin_frame(self.ctx.device(), extent)
-            .map_err(GpuError::Hal)?;
         self.ui
             .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
             .map_err(GpuError::Hal)?;
@@ -386,9 +369,7 @@ impl Gpu {
         let compiled = {
             // **Pass order is declaration order.** The clear is the only pass
             // that does not load what is already in the target, so it goes
-            // first; the menu's scrim dims what the game drew, so it goes after
-            // it; the UI's text is drawn last or the frame paints over its own
-            // words.
+            // first, and the UI goes over it.
             let mut graph = RenderGraph::new(self.ctx.queue());
             let target = graph.import_image(
                 "swapchain",
@@ -398,12 +379,9 @@ impl Gpu {
                 .add_render_pass("background")
                 .clear_color(target, BACKGROUND)
                 .execute(|_| {});
-            // One call for the whole sandwich: the game's HUD, the menu's art
-            // over it, then the menu's own labels, the debug overlay and the
-            // console over that. `UiRenderer::add_passes` owns the order so no
-            // sample can express another one.
-            self.ui
-                .add_passes(&mut graph, target, extent, Some(&self.menu));
+            // The game's HUD, then the menu, the debug overlay and the console
+            // over it — the order the draw list was filled in.
+            self.ui.add_passes(&mut graph, target, extent);
             graph.compile(&self.pool)?
         };
 
@@ -457,9 +435,9 @@ impl Gpu {
         &self.atlas
     }
 
-    /// The menu to draw this frame, or `None` for a frame with none on it.
-    fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
-        self.menu.set_menu(menu);
+    /// The art the loop draws the pause menu with.
+    const fn menu_skin(&self) -> &MenuSkin {
+        self.ui.menu_skin()
     }
 
     /// Takes this frame's UI geometry, handing the previous frame's allocation
@@ -478,7 +456,7 @@ impl Gpu {
     /// added here has to be added to this sum too — a total that quietly omits
     /// one reads as a smaller frame rather than as a missing row.
     fn counters(&self) -> FrameCounters {
-        self.menu.counters().plus(self.ui.counters())
+        self.ui.counters()
     }
 
     /// The `[engine.video]` section this bundle's context read while opening.
@@ -498,7 +476,6 @@ impl Gpu {
     fn destroy(mut self) -> Result<(), GpuError> {
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
-        self.menu.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());

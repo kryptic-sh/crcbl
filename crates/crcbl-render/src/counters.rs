@@ -10,7 +10,6 @@
 //!
 //! Every renderer in this crate says what it recorded —
 //! [`SpriteRenderer::counters`](crate::sprite_pass::SpriteRenderer::counters),
-//! [`MenuRenderer::counters`](crate::menu::MenuRenderer::counters),
 //! [`UiRenderer::counters`](crate::ui_pass::UiRenderer::counters) and
 //! [`ForwardRenderer::counters`](crate::forward::ForwardRenderer::counters) —
 //! and a caller [`plus`](FrameCounters::plus)es them into one, exactly as it

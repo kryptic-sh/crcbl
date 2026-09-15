@@ -4771,14 +4771,14 @@ pub trait GameGpu: GpuSurface + Sized {
     /// the background rect is the wrong size for the text inside it.
     fn atlas(&self) -> &crcbl_ui::FontAtlas;
 
-    /// Takes this frame's menu, or `None` on a frame that shows none.
+    /// The art the loop draws menus with — the scrim, the window frame and the
+    /// button frames, registered in the UI pass's image atlas.
     ///
-    /// The menu's **art** only — the scrim, the window frame and the button
-    /// skins, which are sprites. Its title and labels are text and arrive in the
-    /// draw list instead, above the cut
-    /// [`DrawList::begin_overlay`](crcbl_ui::draw_list::DrawList::begin_overlay)
-    /// takes, so the compositor draws them over the art rather than under it.
-    fn set_menu(&mut self, menu: Option<(&crcbl_ui::menu::Menu, &crcbl_ui::menu::MenuLayout)>);
+    /// [`UiRenderer::menu_skin`](crcbl_render::UiRenderer::menu_skin) for a
+    /// bundle that holds one: the images are only valid on the renderer whose
+    /// atlas they were registered in, so the skin has to come from the bundle
+    /// that draws the list.
+    fn menu_skin(&self) -> &crcbl_ui::menu::MenuSkin;
 
     /// Takes this frame's UI geometry, handing the previous frame's allocation
     /// back so the loop can refill it instead of building a new one.
@@ -5092,10 +5092,7 @@ macro_rules! __impl_game_gpu {
                 (u32, u32),
             ) -> ::core::result::Result<(), $crate::engine::GpuError> = <$gpu>::resize;
             let _: fn(&$gpu) -> &$crate::ui::FontAtlas = <$gpu>::atlas;
-            let _: fn(
-                &mut $gpu,
-                ::core::option::Option<(&$crate::ui::menu::Menu, &$crate::ui::menu::MenuLayout)>,
-            ) = <$gpu>::set_menu;
+            let _: fn(&$gpu) -> &$crate::ui::menu::MenuSkin = <$gpu>::menu_skin;
             let _: fn(&mut $gpu, &mut $crate::ui::draw_list::DrawList) = <$gpu>::take_draw_list;
             let _: fn(&$gpu) -> ::core::option::Option<&$crate::render::FrameTimings> =
                 <$gpu>::timings;
@@ -5136,14 +5133,8 @@ macro_rules! __impl_game_gpu {
                 Self::atlas(self)
             }
 
-            fn set_menu(
-                &mut self,
-                menu: ::core::option::Option<(
-                    &$crate::ui::menu::Menu,
-                    &$crate::ui::menu::MenuLayout,
-                )>,
-            ) {
-                Self::set_menu(self, menu);
+            fn menu_skin(&self) -> &$crate::ui::menu::MenuSkin {
+                Self::menu_skin(self)
             }
 
             fn take_draw_list(&mut self, list: &mut $crate::ui::draw_list::DrawList) {
@@ -6786,11 +6777,10 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         };
         self.draw_list.clear();
         self.game.draw(&mut self.gpu, &mut self.draw_list, info);
-        // **Everything after this line draws over the menu.** The UI pass cuts
-        // the draw list here and puts the menu's art — the scrim, the window
-        // frame, the button skins — between the two halves, so the game's HUD
-        // goes under the scrim while the panel's own labels, the debug overlay
-        // and the console stay legible on top of it. See
+        // **Everything after this line draws over the game.** The menu goes in
+        // first — its scrim, its frame, its buttons, then its labels — so the
+        // game's HUD is under the scrim while the panel's own labels, the debug
+        // overlay and the console stay legible on top of it. See
         // `crcbl_ui::draw_list::DrawList::begin_overlay`.
         self.draw_list.begin_overlay();
         self.draw_menu();
@@ -7067,15 +7057,12 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         Ok(())
     }
 
-    /// Picks this frame's menu, lays it out, and emits both halves of it.
+    /// Picks this frame's menu, lays it out, and draws it into the draw list.
     ///
-    /// **Two halves, two passes.** The window frame and the buttons are
-    /// nine-sliced sprites and go to the menu pass through
-    /// [`GameGpu::set_menu`]; the title and the labels are text and go to the
-    /// UI pass through the draw list.
-    ///
-    /// Both land **above** the cut the caller took before calling this, so the
-    /// menu's art covers the game's HUD and the menu's own text covers its art.
+    /// The art — the scrim, the window frame and the buttons, in
+    /// [`GameGpu::menu_skin`]'s images — and then the title and the labels, all
+    /// **above** the cut the caller took before calling this, so the menu's art
+    /// covers the game's HUD and the menu's own text covers its art.
     fn draw_menu(&mut self) {
         let kind = self.game.menu_kind(&mut self.menus, self.paused);
         // A panel that has been replaced takes the press with it, the same way
@@ -7096,13 +7083,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             .menus
             .current()
             .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()));
-        match &layout {
-            Some(layout) => {
-                let menu = self.menus.current().expect("a layout implies a menu");
-                menu.render(&mut self.draw_list, layout);
-                self.gpu.set_menu(Some((menu, layout)));
-            }
-            None => self.gpu.set_menu(None),
+        if let Some(layout) = &layout {
+            let menu = self.menus.current().expect("a layout implies a menu");
+            menu.render(&mut self.draw_list, layout, self.gpu.menu_skin());
         }
     }
 
@@ -7955,8 +7938,9 @@ mod tests {
         atlas: crcbl_ui::FontAtlas,
         /// The UI geometry the last frame handed over.
         draw_list: crcbl_ui::draw_list::DrawList,
-        /// Whether the last frame handed over a menu.
-        had_menu: bool,
+        /// The menu art, registered into an atlas nothing uploads — a skin's
+        /// images are coordinates, and the loop's tests read the draw list.
+        menu_skin: crcbl_ui::menu::MenuSkin,
         /// Frames recorded and presented.
         frames: u32,
         /// What [`GameGpu::timings`] answers. `None` is a device with no
@@ -8020,7 +8004,8 @@ mod tests {
                 extent,
                 atlas: crcbl_ui::FontAtlas::built_in(),
                 draw_list: crcbl_ui::draw_list::DrawList::new(),
-                had_menu: false,
+                menu_skin: crcbl_render::menu_skin(&mut crcbl_ui::ImageAtlas::new())
+                    .expect("the menu art fits an empty atlas"),
                 frames: 0,
                 timings: None,
                 counters: crcbl_render::FrameCounters::default(),
@@ -8103,8 +8088,8 @@ mod tests {
             &self.atlas
         }
 
-        fn set_menu(&mut self, menu: Option<(&crcbl_ui::menu::Menu, &crcbl_ui::menu::MenuLayout)>) {
-            self.had_menu = menu.is_some();
+        fn menu_skin(&self) -> &crcbl_ui::menu::MenuSkin {
+            &self.menu_skin
         }
 
         fn take_draw_list(&mut self, list: &mut crcbl_ui::draw_list::DrawList) {
@@ -8191,8 +8176,8 @@ mod tests {
             self.0.atlas()
         }
 
-        fn set_menu(&mut self, menu: Option<(&crcbl_ui::menu::Menu, &crcbl_ui::menu::MenuLayout)>) {
-            self.0.set_menu(menu);
+        fn menu_skin(&self) -> &crcbl_ui::menu::MenuSkin {
+            self.0.menu_skin()
         }
 
         fn take_draw_list(&mut self, list: &mut crcbl_ui::draw_list::DrawList) {
@@ -16108,9 +16093,13 @@ mod tests {
         tap(&mut engine, PAUSE_KEY);
         step(&mut engine);
         assert!(engine.paused, "the frame under test is a paused one");
-        assert!(engine.gpu.had_menu, "and one with a menu's art on it");
-
         let list = &engine.gpu.draw_list;
+        assert!(
+            list.overlay_commands()
+                .iter()
+                .any(|command| matches!(command, crcbl_ui::draw_list::DrawCommand::Image { .. })),
+            "and one with a menu's art on it, above the cut"
+        );
         assert_eq!(
             list.base_commands().len(),
             1,
@@ -16196,6 +16185,10 @@ mod tests {
                     points.iter().copied().all(inside)
                 }
                 crcbl_ui::draw_list::DrawCommand::Text { pos, .. } => inside(*pos),
+                crcbl_ui::draw_list::DrawCommand::Image { min, max, .. }
+                | crcbl_ui::draw_list::DrawCommand::RoundedRect { min, max, .. } => {
+                    inside(*min) && inside(*max)
+                }
             };
             assert!(
                 ok,

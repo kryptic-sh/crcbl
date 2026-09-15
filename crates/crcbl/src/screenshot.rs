@@ -96,12 +96,20 @@ use crate::render::{
 use crate::ui::draw_list::DrawList;
 
 mod still_pool;
+mod ui_primitives;
 
 pub use still_pool::{
     STILL_POOL_DEEP_FLOOR, STILL_POOL_FAR_EDGE, STILL_POOL_HALF_WIDTH, STILL_POOL_LEVEL,
     STILL_POOL_MEDIUM, STILL_POOL_NEAR_EDGE, STILL_POOL_POST, STILL_POOL_SHALLOW_FLOOR,
     STILL_POOL_SHORE_FLOOR, STILL_POOL_SHORE_START, still_pool_body, still_pool_camera,
     still_pool_forward, still_pool_sky, still_pool_sun,
+};
+pub use ui_primitives::{
+    UI_PRIMITIVES_BASE, UI_PRIMITIVES_BORDER_COLOR, UI_PRIMITIVES_BORDERED_FILL,
+    UI_PRIMITIVES_CHECKER, UI_PRIMITIVES_CHECKER_TEXELS, UI_PRIMITIVES_FILL,
+    UI_PRIMITIVES_NINE_CENTRE, UI_PRIMITIVES_NINE_CORNERS, UI_PRIMITIVES_NINE_EDGE,
+    UI_PRIMITIVES_NINE_INSET, UI_PRIMITIVES_NINE_TEXELS, UiPrimitivesImages, UiPrimitivesLayout,
+    register_ui_primitives_images, ui_primitives_draw_list, ui_primitives_layout,
 };
 
 // ---------------------------------------------------------------------------
@@ -701,6 +709,12 @@ pub enum Scene {
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
+    /// `docs/plan/07-ui-debug.md` rung 1's draw-list primitives through
+    /// [`UiRenderer`]: two analytic rounded rectangles, a clipped image quad and
+    /// a nine-slice, from pictures registered after the renderer was built — so
+    /// the frame carries the image atlas's in-frame upload too. See
+    /// [`ui_primitives_layout`] for what each part is for.
+    UiPrimitives,
 }
 
 /// How far from the cube's own column each pyramid sits, in world units.
@@ -5901,8 +5915,13 @@ enum SceneState {
         sheets: [SheetId; 2],
     },
     Ui {
-        renderer: UiRenderer,
+        /// Boxed for [`Forward`](Self::Forward)'s reason, on a smaller scale:
+        /// the menu skin and the image atlas it owns make it the next largest.
+        renderer: Box<UiRenderer>,
         atlas: FontAtlas,
+        /// The primitives scene's registered pictures, or `None` for
+        /// [`Scene::Ui`]'s widgets.
+        primitives: Option<UiPrimitivesImages>,
     },
 }
 
@@ -6553,9 +6572,30 @@ impl SceneState {
                 }
             }
             Scene::Ui => Self::Ui {
-                renderer: UiRenderer::new(device, queue, format)?,
+                renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
+                primitives: None,
             },
+            Scene::UiPrimitives => {
+                let mut renderer = Box::new(UiRenderer::new(device, queue, format)?);
+                // Registered after the renderer uploaded its page, so the first
+                // frame's `ui-images` pass is what puts them on the GPU.
+                let images = match register_ui_primitives_images(renderer.images_mut()) {
+                    Ok(images) => images,
+                    Err(error) => {
+                        renderer.destroy(device);
+                        return Err(crate::hal::HalError::InvalidDescriptor(format!(
+                            "the ui primitives scene's pictures: {error}"
+                        ))
+                        .into());
+                    }
+                };
+                Self::Ui {
+                    renderer,
+                    atlas: FontAtlas::built_in(),
+                    primitives: Some(images),
+                }
+            }
         })
     }
 
@@ -7549,20 +7589,26 @@ impl OffscreenSetup {
                         .execute(|_| {});
                     renderer.add_pass(&mut graph, target);
                 }
-                SceneState::Ui { renderer, atlas } => {
+                SceneState::Ui {
+                    renderer,
+                    atlas,
+                    primitives,
+                } => {
+                    let list = match primitives {
+                        Some(images) => ui_primitives_draw_list(extent, images),
+                        None => ui_draw_list(extent),
+                    };
                     // `scale` is 1.0 because every size in the draw list is
-                    // already a fraction of this frame's extent; a second
-                    // multiplier is a second thing that can disagree with it.
-                    renderer.begin_frame(device, &ui_draw_list(extent), atlas, 1.0)?;
+                    // already this frame's pixels; a second multiplier is a
+                    // second thing that can disagree with it.
+                    renderer.begin_frame(device, &list, atlas, 1.0)?;
                     graph
                         .add_render_pass("scene background")
                         .clear_color(target, SCENE_CLEAR)
                         .execute(|_| {});
-                    // `None`: this fixture has no menu to sandwich between the
-                    // draw list's two halves, and `ui_draw_list` never cuts the
-                    // list — so the frame is the one `ui-composite` pass it has
-                    // always been.
-                    renderer.add_passes(&mut graph, target, extent, None);
+                    // `ui_draw_list` never cuts the list, so the frame is the
+                    // one `ui-composite` pass it has always been.
+                    renderer.add_passes(&mut graph, target, extent);
                 }
             }
             graph.compile(&self.pool)?
@@ -8128,7 +8174,7 @@ mod tests {
 
         for extent in [(256u32, 192u32), (97, 61), (1920, 1080)] {
             let list = ui_draw_list(extent);
-            let (mut rects, mut outlines, mut texts, mut strokes) = (0, 0, 0, 0);
+            let (mut rects, mut outlines, mut texts, mut strokes, mut shapes) = (0, 0, 0, 0, 0);
             for command in list.commands() {
                 match command {
                     DrawCommand::Rect { min, max, .. } => {
@@ -8143,6 +8189,9 @@ mod tests {
                     // The scene draws no strokes; counted so that adding one
                     // later has to come back here and say what it expects.
                     DrawCommand::Line { .. } | DrawCommand::Polyline { .. } => strokes += 1,
+                    // Nor pictures or rounded rectangles — the primitives scene
+                    // is where those are drawn.
+                    DrawCommand::Image { .. } | DrawCommand::RoundedRect { .. } => shapes += 1,
                     // The glyphs' extent is the atlas's business, so only the
                     // anchor is checked here.
                     DrawCommand::Text { pos, .. } => {
@@ -8155,9 +8204,9 @@ mod tests {
                 }
             }
             assert!(
-                rects >= 2 && outlines == 1 && texts >= 1 && strokes == 0,
+                rects >= 2 && outlines == 1 && texts >= 1 && strokes == 0 && shapes == 0,
                 "{extent:?}: {rects} rect(s), {outlines} outline(s), {texts} text(s), \
-                 {strokes} stroke(s)"
+                 {strokes} stroke(s), {shapes} image(s) or rounded rect(s)"
             );
         }
     }
@@ -8624,7 +8673,7 @@ mod tests {
             .expect("every forward frame has a forward pass")
             + 1;
         still_pool_passes.insert(after_forward, ("render", "sky"));
-        let expected: [(Scene, &[(&str, &str)]); 15] = [
+        let expected: [(Scene, &[(&str, &str)]); 16] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8699,6 +8748,14 @@ mod tests {
             ),
             (
                 Scene::Ui,
+                &[("render", "scene background"), ("render", "ui-composite")],
+            ),
+            // The pictures are registered after the renderer's start-up upload,
+            // so the first frame also copies them in before it draws — as a
+            // copy, which opens no pass scope and so is not in this list;
+            // `crcbl_render::ui_pass`'s own tests hold the copy.
+            (
+                Scene::UiPrimitives,
                 &[("render", "scene background"), ("render", "ui-composite")],
             ),
         ];

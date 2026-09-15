@@ -473,6 +473,89 @@ pub(crate) fn render_sprites(
     image
 }
 
+/// Renders one draw list **through the real `UiRenderer` and the real
+/// `RenderGraph`** onto a cleared `extent`-sized frame, reads it back, and
+/// returns the image with the frame's pass labels in execution order.
+///
+/// A clear pass first and the UI's passes on top, because the UI pass loads
+/// rather than clears — which is exactly how a sample composites a menu over a
+/// game. Images registered into `ui` since its last frame are uploaded by this
+/// frame's own `ui-images` pass, so a caller that registers and then renders
+/// exercises the in-frame upload as well.
+pub(crate) fn render_ui(
+    headless: &Headless,
+    ui: &mut crcbl::render::UiRenderer,
+    pool: &mut crcbl::render::TransientPool,
+    extent: (u32, u32),
+    list: &crcbl::ui::draw_list::DrawList,
+) -> (crcbl_golden::Image, Vec<String>) {
+    use crcbl::render::RenderGraph;
+
+    let device = headless.device.as_ref();
+    let acquired = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("the ring always has an image");
+    assert_eq!(acquired.extent, extent);
+    let staging = FrameStaging::new(device, extent);
+
+    ui.begin_frame(device, list, &crcbl::render::FontAtlas::built_in(), 1.0)
+        .expect("the geometry uploads");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("ui frame"),
+        queue: headless.queue,
+    });
+    let compiled = {
+        let mut graph = RenderGraph::new(headless.queue);
+        let target = graph.import_image(
+            "swapchain",
+            crcbl::render::ImportedImage {
+                image: acquired.image,
+                view: acquired.view,
+                format: headless.format,
+                extent,
+                initial: ResourceState::Undefined,
+                claim: crcbl::render::InitialClaim::Acquired,
+                final_state: ResourceState::TransferSrc,
+            },
+        );
+        graph
+            .add_render_pass("ui background")
+            .clear_color(target, SPRITE_CLEAR)
+            .execute(|_| {});
+        ui.add_passes(&mut graph, target, extent);
+        graph.compile(&*pool).expect("a legal frame")
+    };
+    let labels = compiled
+        .passes()
+        .iter()
+        .map(|pass| pass.label().to_owned())
+        .collect();
+    compiled
+        .execute(device, pool, encoder.as_mut(), None)
+        .expect("the graph executed");
+
+    staging.copy_from(encoder.as_mut(), acquired.image);
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: acquired.present_semaphore.as_slice(),
+                present_id: None,
+            },
+        )
+        .expect("present");
+
+    let image = staging.read(headless);
+    device.destroy_command_buffer(commands);
+    (image, labels)
+}
+
 /// Which order the readback's bytes arrive in, from the ring's format.
 ///
 /// The pin in [`Headless::open_for_sprites_at`] makes this `Rgba` on every

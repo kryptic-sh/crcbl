@@ -22,14 +22,13 @@
 //! corners do not move, the paused state does not also draw the start menu) be
 //! asserted as arithmetic.
 //!
-//! **Not the pictures.** The window frame and the three button frames are
-//! nine-sliced **sprites**, and the UI pass cannot draw one — its atlas is a
-//! single-channel glyph coverage mask, and [`DrawList`] has no textured-quad
-//! command. `crcbl_render::MenuArt` owns the art and turns a [`MenuLayout`] into
-//! sprites; [`Menu::render`] emits only the text. The split is exactly
-//! [`Button`](crate::Button)'s, for exactly the same reason, and the two halves
-//! are joined by [`MenuStyle`]'s insets — read off the art by
-//! `crcbl_render::MenuArt::insets`, so the layout and the picture cannot drift.
+//! **The pictures come from a [`MenuSkin`].** The scrim, the window frame and
+//! the three button frames are registered images, and [`Menu::render`] draws
+//! all of them into the [`DrawList`] as textured quads before the text that sits
+//! on them — one list, in compositing order, drawn by one pass. The art itself
+//! is `crcbl-render`'s (`crcbl_render::menu::menu_skin` registers it), and the
+//! layout reaches it only through [`MenuStyle`]'s insets, which that crate's
+//! tests read back off the art so the layout and the picture cannot drift.
 //!
 //! # Why the whole menu is one type and not a `Vec<Button>`
 //!
@@ -67,8 +66,32 @@
 use glam::Vec2;
 
 use crate::draw_list::DrawList;
+use crate::image::{AtlasImage, NineSliceImage};
 use crate::text::{FontAtlas, LINE_HEIGHT};
-use crate::widget::{ButtonState, NATURAL_FONT_SIZE, PointerInput, SkinInsets, UiState, WidgetId};
+use crate::widget::{
+    ButtonSkin, ButtonState, NATURAL_FONT_SIZE, PointerInput, SkinInsets, UiState, WidgetId,
+};
+
+// ---------------------------------------------------------------------------
+// Skin
+// ---------------------------------------------------------------------------
+
+/// The pictures a menu is drawn with: a window frame, a button frame per state
+/// and the scrim behind them, all registered in one [`ImageAtlas`](crate::ImageAtlas).
+///
+/// Every sample's menus use the one `crcbl-render` ships; see
+/// `crcbl_render::menu` for why the art lives there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MenuSkin {
+    /// The window frame, nine-sliced round the panel.
+    pub panel: NineSliceImage,
+    /// The button frames.
+    pub buttons: ButtonSkin,
+    /// Stretched over the whole framebuffer and multiplied by
+    /// [`MenuStyle::scrim_color`], so the art decides its texture and the style
+    /// how dark it gets.
+    pub scrim: AtlasImage,
+}
 
 // ---------------------------------------------------------------------------
 // Style
@@ -139,7 +162,7 @@ pub struct MenuStyle {
 /// the layout tested — with no renderer and no device, and checked against the
 /// art by `crcbl_render::menu`'s
 /// `the_shipped_art_has_the_insets_the_layout_assumes`, which reads the same
-/// figure back off the baked sheet and compares.
+/// figure back off the registered skin and compares.
 pub const PANEL_INSETS: SkinInsets = SkinInsets::new(4.0, 4.0, 4.0, 4.0);
 
 /// The insets of the button skin `crcbl-render` ships, in **texels**.
@@ -1109,6 +1132,24 @@ impl Menu {
         Vec2::new(width, height)
     }
 
+    /// Emits the menu's **pictures** alone: the scrim over the framebuffer, the
+    /// window frame, and each button's frame for its state.
+    ///
+    /// The half of [`render`](Self::render) that is art. The frames are
+    /// nine-sliced at [`MenuStyle::scale`] pixels per texel, which is what keeps
+    /// the art's corners the layout's corners.
+    pub fn render_art(&self, dl: &mut DrawList, layout: &MenuLayout, skin: &MenuSkin) {
+        let style = &layout.style;
+        let (scrim_min, scrim_max) = layout.scrim();
+        dl.image(scrim_min, scrim_max, &skin.scrim, style.scrim_color);
+        let (panel_min, panel_max) = layout.panel;
+        dl.nine_slice(panel_min, panel_max, &skin.panel, style.scale, [1.0; 4]);
+        for (index, placed) in layout.items.iter().enumerate() {
+            skin.buttons
+                .draw(dl, self.state(index), placed.min, placed.max, style.scale);
+        }
+    }
+
     /// Every button is the same height: its label, its padding and its skin's
     /// cap and base.
     fn button_height(&self, style: &MenuStyle) -> f32 {
@@ -1116,13 +1157,15 @@ impl Menu {
         line_height(style.item_size) + style.button_padding.y * 2.0 + inner.minimum_size().y
     }
 
-    /// Emits the menu's **text** — the title, and each item's label and hint.
+    /// Emits the whole menu, back to front: [`render_art`](Self::render_art),
+    /// then each slider's groove and handle and every string.
     ///
-    /// Not the panel and not the buttons: those are sprites, and the caller
-    /// submits them through `crcbl_render::MenuArt` to a pass that runs **before**
-    /// the UI pass. A menu drawn with this alone is a menu with no frame, which
-    /// is what a caller that forgot the other half sees.
-    pub fn render(&self, dl: &mut DrawList, layout: &MenuLayout) {
+    /// **The order is the compositing order.** The draw list is drawn in the
+    /// order commands went in, so the scrim dims what was pushed before this
+    /// call, the frame covers the scrim, and the text stays legible on the
+    /// frame.
+    pub fn render(&self, dl: &mut DrawList, layout: &MenuLayout, skin: &MenuSkin) {
+        self.render_art(dl, layout, skin);
         let style = &layout.style;
         if !self.title.is_empty() {
             dl.text(
@@ -1241,10 +1284,10 @@ impl MenuItemLayout {
 /// One frame's placement of a menu: the panel, the title and every button, in
 /// screen pixels.
 ///
-/// Produced by [`Menu::layout`], consumed by [`Menu::render`] for the text and by
-/// `crcbl_render::MenuArt` for the art. Carrying the [`MenuStyle`] it was built
-/// with is what stops the two halves being measured with different metrics — the
-/// failure that puts a label a scale out of step with the frame around it.
+/// Produced by [`Menu::layout`] and consumed by [`Menu::render`], for the art
+/// and the text alike. Carrying the [`MenuStyle`] it was built with is what
+/// stops the two being measured with different metrics — the failure that puts
+/// a label a scale out of step with the frame around it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MenuLayout {
     style: MenuStyle,
@@ -1616,6 +1659,33 @@ mod tests {
         FontAtlas::built_in()
     }
 
+    /// A skin of five flat 16x16 images, each a different shade, with the
+    /// shipped art's insets — enough for `render` to draw, and different
+    /// enough that a frame drawn from the wrong image samples a different UV.
+    fn skin() -> MenuSkin {
+        let mut images = crate::image::ImageAtlas::new();
+        let mut register = |shade: u8| {
+            images
+                .register(16, 16, &[shade; 16 * 16 * 4])
+                .expect("five 16x16 images fit an empty page")
+        };
+        let mut sliced = |shade, insets| NineSliceImage {
+            image: register(shade),
+            insets,
+        };
+        let panel = sliced(10, PANEL_INSETS);
+        let buttons = ButtonSkin {
+            idle: sliced(20, BUTTON_INSETS),
+            hovered: sliced(30, BUTTON_INSETS),
+            pressed: sliced(40, BUTTON_INSETS),
+        };
+        MenuSkin {
+            panel,
+            buttons,
+            scrim: register(255),
+        }
+    }
+
     fn pause_menu() -> Menu {
         Menu::new(
             "PAUSED",
@@ -1735,7 +1805,7 @@ mod tests {
     /// A menu with one short item and one with five long ones produce very
     /// different panels at the same scale, and the fixed bands the art refuses to
     /// stretch are the same number of pixels in both. This is the layout half of
-    /// the property `NineSliceSource::expand` implements — a caller that laid out
+    /// the property [`DrawList::nine_slice`] implements — a caller that laid out
     /// against a corner that scaled with the panel would put its content over the
     /// frame at one size and inside it at another.
     #[test]
@@ -2008,23 +2078,30 @@ mod tests {
     // Text
     // -----------------------------------------------------------------------
 
-    /// The menu emits its title, every label and every hint — and **no
-    /// rectangles**, because the frame and the buttons are sprites drawn by
-    /// another pass.
+    /// **The menu draws back to front: the scrim, the frame, the buttons, then
+    /// the text** — every picture before every string, so no frame paints over
+    /// a label — and the text is the title, every label and every hint.
     #[test]
-    fn render_emits_the_text_and_no_rectangles() {
+    fn render_emits_the_scrim_the_frame_the_buttons_then_the_text() {
         let atlas = atlas();
         let menu = pause_menu();
         let layout = menu.layout((960, 720), &atlas);
         let mut dl = DrawList::new();
-        menu.render(&mut dl, &layout);
+        menu.render(&mut dl, &layout, &skin());
 
-        let texts: Vec<&str> = dl
+        let pictures = dl
             .commands()
+            .iter()
+            .take_while(|command| matches!(command, DrawCommand::Image { .. }))
+            .count();
+        // One scrim, nine panel quads (every band non-empty at this size) and
+        // nine per button.
+        assert_eq!(pictures, 1 + 9 + 9 * 3, "{:#?}", dl.commands());
+        let texts: Vec<&str> = dl.commands()[pictures..]
             .iter()
             .map(|command| match command {
                 DrawCommand::Text { text, .. } => text.as_str(),
-                other => panic!("a menu drew {other:?}, which the UI pass cannot skin"),
+                other => panic!("a menu drew {other:?} after its first string"),
             })
             .collect();
         assert_eq!(
@@ -2048,8 +2125,123 @@ mod tests {
         let menu = Menu::new("T", vec![MenuItem::new(1, "OK", "")]);
         let layout = menu.layout((960, 720), &atlas);
         let mut dl = DrawList::new();
-        menu.render(&mut dl, &layout);
-        assert_eq!(dl.len(), 2, "the title and the label, and nothing else");
+        menu.render(&mut dl, &layout, &skin());
+        assert_eq!(
+            dl.len(),
+            1 + 9 + 9 + 2,
+            "the scrim, the frame, one button, the title and the label, and nothing else"
+        );
+    }
+
+    /// The `Image` rectangles of `commands`, with their UV origin.
+    fn pictures(dl: &DrawList) -> Vec<(Vec2, Vec2, Vec2)> {
+        dl.commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Image {
+                    min, max, uv_min, ..
+                } => Some((*min, *max, *uv_min)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The scrim covers the framebuffer, tinted by the style, and the frame's
+    /// nine quads tile exactly the panel the layout placed** — so the art is
+    /// centred wherever the layout is, and the layout's centring tests speak for
+    /// the picture.
+    #[test]
+    fn the_scrim_covers_the_screen_and_the_frame_tiles_the_panel() {
+        let atlas = atlas();
+        let menu = pause_menu();
+        let skin = skin();
+        for extent in EXTENTS {
+            let layout = menu.layout(extent, &atlas);
+            let mut dl = DrawList::new();
+            menu.render(&mut dl, &layout, &skin);
+
+            let DrawCommand::Image { min, max, tint, .. } = &dl.commands()[0] else {
+                panic!("{extent:?}: the first command is not the scrim");
+            };
+            assert_eq!((*min, *max), layout.scrim(), "{extent:?}");
+            assert_eq!(*tint, layout.style().scrim_color);
+
+            let frame = &pictures(&dl)[1..10];
+            let area: f32 = frame
+                .iter()
+                .map(|(min, max, _)| (max.x - min.x) * (max.y - min.y))
+                .sum();
+            let (panel_min, panel_max) = layout.panel();
+            let low = frame
+                .iter()
+                .fold(Vec2::splat(f32::MAX), |acc, q| acc.min(q.0));
+            let high = frame
+                .iter()
+                .fold(Vec2::splat(f32::MIN), |acc, q| acc.max(q.1));
+            assert_eq!((low, high), (panel_min, panel_max), "{extent:?}");
+            assert_eq!(area, layout.panel_size().x * layout.panel_size().y);
+        }
+    }
+
+    /// **A button's state changes the picture it samples, not the rectangle it
+    /// covers.** A `ButtonState` that never reached the art is a menu whose
+    /// buttons never light up and whose every layout test still passes.
+    #[test]
+    fn a_state_change_moves_the_uvs_and_leaves_the_rectangle_alone() {
+        let atlas = atlas();
+        let skin = skin();
+        let mut menu = pause_menu();
+        let layout = menu.layout((960, 720), &atlas);
+        let button = |menu: &Menu, index: usize| {
+            let mut dl = DrawList::new();
+            menu.render(&mut dl, &layout, &skin);
+            pictures(&dl)[10 + index * 9..10 + (index + 1) * 9].to_vec()
+        };
+
+        // Item 0 is selected, so it draws `Hovered` and the others `Idle`.
+        let idle = button(&menu, 1);
+        let hovered = button(&menu, 0);
+        menu.press(true);
+        let pressed = button(&menu, 0);
+        assert_eq!(menu.state(0), ButtonState::Pressed);
+
+        for quad in 0..9 {
+            assert_eq!(
+                (hovered[quad].0, hovered[quad].1),
+                (pressed[quad].0, pressed[quad].1)
+            );
+            assert_ne!(hovered[quad].2, pressed[quad].2, "quad {quad}");
+            assert_ne!(idle[quad].2, hovered[quad].2, "quad {quad}");
+            assert_ne!(idle[quad].2, pressed[quad].2, "quad {quad}");
+        }
+    }
+
+    /// **The frame's corners are the art's insets at the menu's scale** — four
+    /// texels at scale three is twelve pixels — whatever the panel's size.
+    #[test]
+    fn the_frames_corner_quads_are_the_insets_at_the_menus_scale() {
+        let atlas = atlas();
+        let skin = skin();
+        let style = MenuStyle::pixel_art(3);
+        let small = Menu::new("GO", vec![MenuItem::new(1, "OK", "")]);
+        let large = Menu::new(
+            "A MUCH LONGER TITLE",
+            (0..5)
+                .map(|i| MenuItem::new(i, "A VERY LONG MENU ITEM LABEL", "SHIFT+F11"))
+                .collect(),
+        );
+        let corners = |menu: &Menu| {
+            let layout = menu.layout_with((1600, 1200), &atlas, &style);
+            let mut dl = DrawList::new();
+            menu.render(&mut dl, &layout, &skin);
+            let frame = pictures(&dl)[1..10].to_vec();
+            [0usize, 2, 6, 8].map(|index| (frame[index].1 - frame[index].0, frame[index].2))
+        };
+        let (a, b) = (corners(&small), corners(&large));
+        assert_eq!(a, b, "a corner changed size or picture with the menu");
+        for (size, _) in a {
+            assert_eq!(size, Vec2::splat(PANEL_INSETS.left * style.scale));
+        }
     }
 
     /// Every glyph a menu draws is inside the button or panel it belongs to.
@@ -2734,7 +2926,7 @@ mod tests {
             );
 
             let mut dl = DrawList::new();
-            menu.render(&mut dl, &layout);
+            menu.render(&mut dl, &layout, &skin());
             let handle = dl
                 .commands()
                 .iter()
@@ -2767,7 +2959,7 @@ mod tests {
             assert!(menu.set_slider(DIAL, position));
             let layout = menu.layout(extent, &atlas);
             let mut dl = DrawList::new();
-            menu.render(&mut dl, &layout);
+            menu.render(&mut dl, &layout, &skin());
             let fill = dl
                 .commands()
                 .iter()
@@ -2917,7 +3109,7 @@ mod tests {
             let row = layout.items()[1];
             assert!(row.track.is_none(), "a cycler row was given a groove");
             let mut dl = DrawList::new();
-            menu.render(&mut dl, &layout);
+            menu.render(&mut dl, &layout, &skin());
             let texts: Vec<&str> = dl
                 .commands()
                 .iter()

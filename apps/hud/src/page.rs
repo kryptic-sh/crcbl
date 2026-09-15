@@ -126,6 +126,10 @@ pub struct PageStats {
     pub text: usize,
     /// Stroked lines and polylines.
     pub strokes: usize,
+    /// Image quads and rounded rectangles. This page draws neither, so the
+    /// panel has no row for them; they are counted so that [`total`](Self::total)
+    /// stays every command the list holds if the page ever does.
+    pub shapes: usize,
 }
 
 impl PageStats {
@@ -139,6 +143,7 @@ impl PageStats {
                 DrawCommand::RectOutline { .. } => stats.outlines += 1,
                 DrawCommand::Text { .. } => stats.text += 1,
                 DrawCommand::Line { .. } | DrawCommand::Polyline { .. } => stats.strokes += 1,
+                DrawCommand::Image { .. } | DrawCommand::RoundedRect { .. } => stats.shapes += 1,
             }
         }
         stats
@@ -147,7 +152,7 @@ impl PageStats {
     /// Every command the page emitted.
     #[must_use]
     pub const fn total(&self) -> usize {
-        self.rects + self.outlines + self.text + self.strokes
+        self.rects + self.outlines + self.text + self.strokes + self.shapes
     }
 }
 
@@ -611,7 +616,9 @@ mod tests {
             for command in dl.commands() {
                 let (min, max) = match command {
                     DrawCommand::Rect { min, max, .. }
-                    | DrawCommand::RectOutline { min, max, .. } => (*min, *max),
+                    | DrawCommand::RectOutline { min, max, .. }
+                    | DrawCommand::Image { min, max, .. }
+                    | DrawCommand::RoundedRect { min, max, .. } => (*min, *max),
                     DrawCommand::Text { pos, .. } => (*pos, *pos),
                     DrawCommand::Line { from, to, .. } => (from.min(*to), from.max(*to)),
                     DrawCommand::Polyline { points, .. } => points.iter().fold(

@@ -3,6 +3,46 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## What UI rung 1 shipped without (2026-09-15)
+
+`docs/plan/07-ui-debug.md` rung 1 — `crcbl_ui::image`, `DrawList::image`,
+`nine_slice`, `rounded_rect` and `push_clip`, and the menu drawn through the UI
+pass — left these:
+
+- **The overlay cut is vestigial.** `DrawList::begin_overlay` existed so the
+  menu's sprite pass could sit between `ui-composite` and `ui-overlay`; nothing
+  is between them now, so a paused frame records two render passes back to back
+  where one would do. Collapsing them changes pass names that sample tests
+  (`apps/hud`, `apps/orbit`, `apps/bracket`, `apps/breakout`, `apps/viewer`,
+  `apps/sandbox`) and CI comments assert, and raises whether `begin_overlay`
+  keeps a job (it also drops a game's unpopped clips before the engine's
+  overlay). Decision owed: collapse and delete the cut, or keep the two names.
+- **`sharpen` is written twice**, in `sprite.slang` and `ui.slang`, because the
+  shader build has no shared-module mechanism: `compile-shaders.sh` compiles
+  each source alone and `build.rs` hashes each one. Folding them needs an
+  include path in both and a rule for a module file that declares no targets.
+- **Image quads have one sampling mode and no pixel snap.** Every image is
+  sharp-bilinear, which is right for pixel art and wrong for a photo or a
+  rendered viewport pane; and quads are not rounded onto the pixel grid the way
+  the sprite pass rounds `SampleMode::Pixel` quads, so an image at a fractional
+  position crawls. Both are a primitive lane each when a caller needs them.
+- **The UI fragment stage costs more per fragment.** Both atlases are sampled,
+  the sharp-bilinear derivative taken and the rounded-rectangle distance
+  evaluated for every fragment, and `Vertex2d` is 96 bytes where it was 32.
+  Measured on breakout's start menu, release, p50 over 120 frames, three runs:
+  lavapipe's `ui-composite` went from 0.050 to 0.087 ms and `ui-overlay` from
+  0.051 to 0.103 ms, the frame 0.72–0.74 ms before and after because the menu's
+  sprite pass went away; radv's frame went from 0.024 to 0.027 ms. Not yet
+  tried: skipping the distance field and the second sample for solid and glyph
+  fragments without breaking WGSL's uniform-control-flow rule.
+- **One atlas page and no eviction.** A full page is `AtlasError::Full`; a
+  second page, eviction and batching by texture arrive with rung 5's text atlas.
+- **The lavapipe 1-level deltas in the menu sample goldens are unattributed.**
+  Breakout, flappy, asteroids and hud match radv exactly and differ by at most
+  one level on lavapipe, inside tolerance and outside the panel. Hud's golden
+  has no menu and shows the same pattern, so it reads as driver drift, but no
+  lavapipe run of the pre-rung tree was made to prove it.
+
 ## Accept repeated Wayland close events cleanly (2026-09-15)
 
 Quitting EW on Wayland returned a nonzero status after the engine logged
@@ -4826,18 +4866,13 @@ console left as limits" in `docs/notes/tooling.md` is what still stands about
 it.
 
 **What is built:** `crates/crcbl-ui`'s `draw_list` (`DrawList`, `DrawCommand`,
-`Vertex2d`), `text` (`FontAtlas` — a built-in **monospace bitmap** ASCII font,
-not a `fontdue`/`swash` rasterizer and not the shelf/skyline+LRU atlas the doc's
-2026-07-27 correction specifies), `widget` (`Label`, `Button`, `Style`,
-`SkinInsets`, `PointerInput`, `UiState`, `WidgetId`), `menu`, `touch`, `debug`
-and `budget`. `Style` is a struct of five colours — the pre-CSS model.
-
-**A constraint the CSS work must honour, discovered in `menu`:** the UI pass's
-atlas is a single-channel glyph coverage mask and `DrawList` has no
-textured-quad command, so `Menu::render` emits text only and
-`crcbl_render::MenuArt` owns the nine-sliced frames. Any styled widget with a
-picture in it splits the same way until `DrawList` grows a textured command.
-`07-ui-debug.md` now records this.
+`Vertex2d`, and since 2026-09-15 the image atlas, rounded rectangle and clip
+rectangles of the plan's rung 1), `text` (`FontAtlas` — a built-in **monospace
+bitmap** ASCII font, not a `fontdue`/`swash` rasterizer and not the
+shelf/skyline+LRU atlas the doc's 2026-07-27 correction specifies), `widget`
+(`Label`, `Button`, `Style`, `SkinInsets`, `PointerInput`, `UiState`,
+`WidgetId`), `menu`, `touch`, `debug` and `budget`. `Style` is a struct of five
+colours — the pre-CSS model.
 
 **Evidence:** no `.css` file is read by any engine crate (`web/style.css` is the
 demo site's); `grep flex crates/` hits only shader code; no `block`/`span`

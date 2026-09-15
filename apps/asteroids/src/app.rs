@@ -502,7 +502,7 @@ mod tests {
     use crcbl::core::input::PointerButton;
     use crcbl::shell::{ButtonState as PointerState, HeadlessShell, PhysicalPoint, ShellBackend};
     use crcbl::ui::draw_list::DrawCommand;
-    use crcbl_sample_test::{headless_common, row_value, ui_text};
+    use crcbl_sample_test::{headless_common, row_value, ui_images, ui_text};
 
     /// Options every test in this module builds its loop from.
     ///
@@ -837,10 +837,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// **The start menu is on screen before the first shot, it is centred, and
-    /// it reaches both passes.** The text is in the draw list the UI pass
-    /// uploads and the frame is in the sprite list the menu pass draws — a menu
-    /// that only made it to one of the two is a panel with no words or words
-    /// with no panel.
+    /// both its halves are in the draw list.** The text and the frame are both
+    /// what the UI pass uploads — a menu that only put one of the two in is a
+    /// panel with no words or words with no panel.
     #[test]
     fn the_start_menu_is_drawn_before_the_first_shot() {
         let mut engine = scripted(&headless(60));
@@ -866,40 +865,30 @@ mod tests {
             "the panel is centred at {centre:?} in a {extent:?} framebuffer",
         );
 
-        let sprites = engine.gpu().menu_sprites();
+        let images = ui_images(engine.gpu().draw_list());
         // The scrim, the window frame's nine quads, and nine per button.
-        assert_eq!(sprites.len(), 1 + 9 + 9 * 3, "{}", sprites.len());
+        assert_eq!(images.len(), 1 + 9 + 9 * 3, "{}", images.len());
 
-        // **Centred, measured on what the menu pass was actually handed** rather
-        // than on a layout the test recomputes. `crcbl::render::menu_camera` puts
-        // the origin at the middle of the framebuffer, so the window frame's
-        // nine quads have to straddle it.
-        let panel = &sprites[1..10];
-        let min_x = panel.iter().map(|s| s.rect[0]).fold(f32::MAX, f32::min);
-        let min_y = panel.iter().map(|s| s.rect[1]).fold(f32::MAX, f32::min);
-        let max_x = panel
-            .iter()
-            .map(|s| s.rect[0] + s.rect[2])
-            .fold(f32::MIN, f32::max);
-        let max_y = panel
-            .iter()
-            .map(|s| s.rect[1] + s.rect[3])
-            .fold(f32::MIN, f32::max);
+        // **Centred, measured on the quads the frame actually drew** rather than
+        // on a layout the test recomputes: the window frame's nine quads have to
+        // straddle the middle of the framebuffer.
+        let panel = &images[1..10];
+        let min_x = panel.iter().map(|r| r[0]).fold(f32::MAX, f32::min);
+        let min_y = panel.iter().map(|r| r[1]).fold(f32::MAX, f32::min);
+        let max_x = panel.iter().map(|r| r[2]).fold(f32::MIN, f32::max);
+        let max_y = panel.iter().map(|r| r[3]).fold(f32::MIN, f32::max);
         assert!(max_x > min_x && max_y > min_y, "the panel has no area");
+        let middle = (extent.0 as f32 / 2.0, extent.1 as f32 / 2.0);
         assert!(
-            ((min_x + max_x) / 2.0).abs() < 0.5 && ((min_y + max_y) / 2.0).abs() < 0.5,
+            ((min_x + max_x) / 2.0 - middle.0).abs() < 0.5
+                && ((min_y + max_y) / 2.0 - middle.1).abs() < 0.5,
             "the panel spans {min_x}..{max_x} by {min_y}..{max_y}, which is not \
              centred on a {extent:?} framebuffer",
         );
 
         assert_eq!(
-            sprites[0].rect,
-            [
-                -(extent.0 as f32) / 2.0,
-                -(extent.1 as f32) / 2.0,
-                extent.0 as f32,
-                extent.1 as f32,
-            ],
+            images[0],
+            [0.0, 0.0, extent.0 as f32, extent.1 as f32],
             "the scrim does not cover the framebuffer",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
@@ -993,8 +982,8 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
-    /// **A game being played draws no menu at all**, and the menu pass is handed
-    /// nothing — which is what makes it free rather than cheap.
+    /// **A game being played draws no menu at all**: no image quad
+    /// reaches the draw list.
     #[test]
     fn a_game_in_play_draws_no_menu() {
         let mut engine = scripted(&headless(60));
@@ -1006,10 +995,11 @@ mod tests {
         run_frames(&mut engine, 10);
         assert_eq!(engine.game().game().state, GameState::Playing);
         assert_eq!(engine.menu_kind(), MenuKind::None);
+        let images = ui_images(engine.gpu().draw_list());
         assert!(
-            engine.gpu().menu_sprites().is_empty(),
-            "a playing frame submitted {} menu sprites",
-            engine.gpu().menu_sprites().len(),
+            images.is_empty(),
+            "a playing frame drew {} image quads",
+            images.len(),
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

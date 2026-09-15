@@ -152,10 +152,10 @@ fn record_one_frame(preset: Preset) -> Vec<Command> {
 
     let mut graph = RenderGraph::new(harness.queue);
     let swap = graph.import_image("swapchain", target);
-    // `None`: this file is about the command stream one segment records, and
-    // an uncut draw list is one segment. The sandwich's order is asserted in
-    // `crcbl_render::ui_pass`'s own tests, which can build a `MenuRenderer`.
-    renderer.add_passes(&mut graph, swap, EXTENT, None);
+    // This file is about the command stream one segment records, and an uncut
+    // draw list is one segment. A paused frame's two halves are asserted in
+    // `crcbl_render::ui_pass`'s own tests.
+    renderer.add_passes(&mut graph, swap, EXTENT);
     let compiled = graph.compile(&pool).expect("a legal frame");
 
     let mut encoder = harness.device.create_command_encoder(&CommandEncoderDesc {

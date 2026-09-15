@@ -45,14 +45,14 @@ use crcbl::hal::{CommandEncoderDesc, Device, Features};
 use crcbl::math::{Mat4, Vec3};
 use crcbl::prelude::*;
 use crcbl::render::{
-    MAX_TIMED_PASSES, MenuRenderer, PassTimers, RenderEffects, SkinRange, SkinnedInstanceDesc,
-    SkinnedMesh, Skinning, SkinningDesc, SkinningError, TransientPool, UiRenderer, grid::GridStyle,
+    MAX_TIMED_PASSES, PassTimers, RenderEffects, SkinRange, SkinnedInstanceDesc, SkinnedMesh,
+    Skinning, SkinningDesc, SkinningError, TransientPool, UiRenderer, grid::GridStyle,
     scene::InstanceDesc,
 };
 use crcbl::shaders::skinning::SkinBinding;
 use crcbl::shell::{Shell, WindowId};
 use crcbl::ui::draw_list::DrawList;
-use crcbl::ui::menu::{Menu, MenuLayout};
+use crcbl::ui::menu::MenuSkin;
 use crcbl::ui::text::FontAtlas;
 
 /// How many frames the swapchain keeps in flight, which is what the pass timers
@@ -101,9 +101,6 @@ pub struct Gpu {
     /// too, and while this application owned its loop it could not honour that
     /// at all: `--debug-overlay` parsed and reached nothing. See [`crate::app`].
     ui: UiRenderer,
-    /// The menu pass: its own sheets, its own screen-space camera, and a pass
-    /// that declares nothing on a frame with no menu on it.
-    menu: MenuRenderer,
     atlas: FontAtlas,
     draw_list: DrawList,
     /// The pass that deforms this document's skinned geometry, and the regions
@@ -391,18 +388,6 @@ impl Gpu {
                 return Err(GpuError::Hal(error));
             }
         };
-        let menu = match MenuRenderer::new(ctx.device(), ctx.queue(), format) {
-            Ok(menu) => menu,
-            Err(error) => {
-                ui.destroy(ctx.device());
-                if let Some(skinning) = skinning {
-                    skinning.destroy(ctx.device());
-                }
-                renderer.destroy(ctx.device());
-                ctx.destroy()?;
-                return Err(GpuError::Hal(error));
-            }
-        };
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
         if timers.is_none() {
             crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
@@ -424,7 +409,6 @@ impl Gpu {
             pool: TransientPool::new(),
             camera: Camera::default(),
             ui,
-            menu,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
             skinning,
@@ -796,12 +780,11 @@ impl Gpu {
         &self.atlas
     }
 
-    /// Takes this frame's menu, or `None` on a frame that shows none.
-    ///
-    /// CPU only — the upload happens inside [`Gpu::frame`], at the extent the
-    /// swapchain was actually acquired at.
-    pub fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
-        self.menu.set_menu(menu);
+    /// The menu art the UI pass's atlas holds — see
+    /// [`crcbl::engine::GameGpu::menu_skin`].
+    #[must_use]
+    pub const fn menu_skin(&self) -> &MenuSkin {
+        self.ui.menu_skin()
     }
 
     /// Takes this frame's UI geometry, handing the previous frame's allocation
@@ -824,10 +807,7 @@ impl Gpu {
     /// summed over the three renderers this bundle holds.
     #[must_use]
     pub fn counters(&self) -> crcbl::render::FrameCounters {
-        self.renderer
-            .counters()
-            .plus(self.menu.counters())
-            .plus(self.ui.counters())
+        self.renderer.counters().plus(self.ui.counters())
     }
 
     /// The `[engine.video]` section this bundle's context read while opening.
@@ -902,9 +882,6 @@ impl Gpu {
                     .begin_frame(self.ctx.device(), &self.camera, &light, extent)?;
             }
         }
-        self.menu
-            .begin_frame(self.ctx.device(), extent)
-            .map_err(GpuError::Hal)?;
         // Upload this frame's UI geometry: the listing panel and the debug
         // overlay, both of which are off unless asked for.
         self.ui
@@ -933,12 +910,9 @@ impl Gpu {
                     .renderer
                     .add_passes(&mut graph, &self.pool, target, extent),
             };
-            // One call for the whole sandwich: the game's HUD, the menu's art
-            // over it, then the menu's own labels, the debug overlay and the
-            // console over that. `UiRenderer::add_passes` owns the order so no
-            // sample can express another one.
-            self.ui
-                .add_passes(&mut graph, target, extent, Some(&self.menu));
+            // The game's HUD, then the menu, the debug overlay and the
+            // console over it — the order the draw list was filled in.
+            self.ui.add_passes(&mut graph, target, extent);
             graph.compile(&self.pool)?
         };
 
@@ -997,7 +971,6 @@ impl Gpu {
     pub fn destroy(mut self) -> Result<(), GpuError> {
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
-        self.menu.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());

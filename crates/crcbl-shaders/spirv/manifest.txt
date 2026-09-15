@@ -558,16 +558,16 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ui]
 source = shaders/ui.slang
-source-sha256 = 1eb7c4cd9cbe080e6c880fa9a9197d4060a4106504ba26be98cc748f9a7e7732
+source-sha256 = 62d36dbe123e358d5c012167b189bd5d63cce6ada35c82194e34ba8c9c3b9417
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ui.spv
-spirv-sha256 = c09368c5eedef42b61e25c187991278baec65a193eea4b3f5ff0db90fcceb31c
+spirv-sha256 = 38589eb0fea82ea1d156063bf561b06b3f0d31cbb3e846a49ca2f5beab779a4a
 wgsl = wgsl/ui.wgsl
-wgsl-sha256 = 1113bc41a6805fae74a50a7227e2e6974c98d47a7391bd67a70dbd9cf0b50ee7
+wgsl-sha256 = af016e7aef9db6d11efcfae6e124ab5cdc6d6e3b0a78d8e85e462f20f2d95855
 msl = msl/ui.metal
-msl-sha256 = 7e1c20bbde3c08cfc200b72f5a69e3edf59e3321faa02893d55a9294779861de
-dxil = vertexMain:dxil/ui.vertex.dxil:e0c0a9bea6c938720bb4af00ab290cd612fb295cccb05fffb85280981bf60196
-dxil = fragmentMain:dxil/ui.fragment.dxil:3b8d3e9798e8673ba67a5ab96ef54cf064b01854c44bed06b957362700df52d1
+msl-sha256 = 21a6ef0abaef3bcf60ae55c7eb8cc6aedefa9bbaacf9d27784ddcab4c716a330
+dxil = vertexMain:dxil/ui.vertex.dxil:f48ea0c760b4503430425d090cceae4d59e72d0b0f71eaf0ad3d236234d696ff
+dxil = fragmentMain:dxil/ui.fragment.dxil:11a4d216d5a7e5013500099d6c20922efe81b97cf08f835ac5aa8d38492fa533
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [upscale]

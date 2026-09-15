@@ -173,6 +173,11 @@ use verdict::Offscreen;
 #[path = "render_e2e/still_pool.rs"]
 mod still_pool;
 
+// `docs/plan/07-ui-debug.md` rung 1's primitives, in a file of their own for the
+// same reason.
+#[path = "render_e2e/ui_primitives.rs"]
+mod ui_primitives;
+
 /// The size the goldens were blessed at.
 ///
 /// The same 256x192 the cross-backend harness and `crcbl-vk`'s mesh suite use,

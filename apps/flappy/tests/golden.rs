@@ -144,12 +144,7 @@ fn inspect(image: &Image) {
     block.distinct_enough("a course", MIN_COLORS);
 
     // ---- 1. the title card is a menu on top of the course ------------------
-    block.drew(
-        "title card",
-        PANEL_AT,
-        DREW_AT_ALL,
-        "the menu pass drew nothing",
-    );
+    block.drew("title card", PANEL_AT, DREW_AT_ALL, "the menu drew nothing");
     block.over(
         ("FLY button", BUTTON_AT),
         ("card behind it", PANEL_AT),

@@ -644,7 +644,7 @@ impl HudStrings {
 /// Draws the HUD, and nothing else.
 ///
 /// **No scrim here any more.** The placeholder renderer dimmed the field behind
-/// its death screen by hand; `crcbl::render::MenuRenderer` draws one behind every
+/// its death screen by hand; `crcbl::ui::menu::Menu::render` draws one behind every
 /// menu, so a second would dim the field twice on exactly the frames a menu is
 /// up.
 fn draw_hud(dl: &mut DrawList, hud: &HudStrings) {
@@ -705,7 +705,7 @@ mod tests {
     use crcbl::core::input::{ContactId, PointerButton, TouchPhase};
     use crcbl::math::DVec3;
     use crcbl::shell::{ButtonState as PointerState, HeadlessShell, PhysicalPoint, ShellBackend};
-    use crcbl_sample_test::{headless_common, ui_text};
+    use crcbl_sample_test::{headless_common, ui_images, ui_text};
 
     /// Options every test in this module builds its loop from.
     ///
@@ -1426,8 +1426,8 @@ mod tests {
             "the panel is at {centre:?} on a {extent:?} framebuffer",
         );
         assert!(
-            !engine.gpu().menu_sprites().is_empty(),
-            "the menu pass got nothing to draw",
+            !ui_images(engine.gpu().draw_list()).is_empty(),
+            "the menu drew no art",
         );
         let text = ui_text(engine.gpu().draw_list());
         assert!(
@@ -1577,8 +1577,8 @@ mod tests {
             "the panel is at {centre:?} on a {extent:?} framebuffer",
         );
         assert!(
-            !engine.gpu().menu_sprites().is_empty(),
-            "the menu pass got nothing to draw",
+            !ui_images(engine.gpu().draw_list()).is_empty(),
+            "the menu drew no art",
         );
         assert!(
             ui_text(engine.gpu().draw_list())

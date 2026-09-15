@@ -428,12 +428,12 @@ flappy's camera scrolls where breakout's is fixed.
 
 **Kept because the decline was right and that is worth not re-arguing.** The
 shared shape looked like a plausible `crcbl-render` bundle: orthographic camera,
-sprite pass, menu pass, UI pass over `GpuContext`. The stated reason for leaving
-it alone was that two 2D games at the same stage resembling each other is not
-the same as one piece of knowledge written twice, and that the failure mode
-would be a helper with two callers needing a flag per caller. That is exactly
-what a scrolling camera would have become. The trigger is unchanged: revisit
-when a third game wants the bundle.
+sprite pass, menu pass (since folded into the UI pass), UI pass over
+`GpuContext`. The stated reason for leaving it alone was that two 2D games at
+the same stage resembling each other is not the same as one piece of knowledge
+written twice, and that the failure mode would be a helper with two callers
+needing a flag per caller. That is exactly what a scrolling camera would have
+become. The trigger is unchanged: revisit when a third game wants the bundle.
 
 ## Considered and declined
 
@@ -713,8 +713,8 @@ Verified present in the tree:
 - **`crcbl::store::record::Record`** — the platform arms, the encode, the
   corrupt-file case (the residue is finding 14).
 - **`crcbl-golden`** — `Image`, `Golden`, `compare`, `Tolerance`, `srgb`.
-- **`crcbl::render::MenuRenderer` / `UiRenderer` / `RenderGraph` /
-  `TransientPool` / `PassTimers` / `ForwardRenderer::present_target`**.
+- **`crcbl::render::menu_skin` / `UiRenderer` / `RenderGraph` / `TransientPool`
+  / `PassTimers` / `ForwardRenderer::present_target`**.
 - **`crcbl-greybox`** — the primitive kit and `scene3d()` with its `GREYBOX_*`
   slots.
 - **`tools/nextest-summary.sh`, `tools/vk-validation-log.sh`,

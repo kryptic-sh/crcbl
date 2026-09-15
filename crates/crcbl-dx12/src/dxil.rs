@@ -1216,7 +1216,7 @@ mod tests {
                 "ui",
                 &crcbl_shaders::UI,
                 &["vertexMain", "fragmentMain"],
-                &[Srv, Sampler, Srv, Cbv],
+                &[Srv, Sampler, Srv, Cbv, Srv, Sampler],
             ),
         ];
 

@@ -8,38 +8,35 @@
 //! # There is no scene, and that is the sample
 //!
 //! A settings screen is measured in pixels against the surface, which is what
-//! the menu and UI passes have always drawn in, so there is nothing here for a
+//! the UI pass has always drawn in, so there is nothing here for a
 //! camera to project and nothing for a sprite to be —
 //! `docs/plan/sample/20-options.md` claims sample rule 11's exemption on the
 //! same ground `apps/hud` does. What is behind the panel is one clear colour.
 //!
 //! # The frame is [`crcbl::engine::PageBundle`]'s
 //!
-//! `backdrop` (clear) → `menu` → `ui` (the debug overlay). The last two load the
-//! target rather than clearing it, so declaring the UI pass first would put the
-//! panel on top of the overlay that is meant to sit over it.
+//! `backdrop` (clear) → `ui` (the panel, then the debug overlay over it). The UI
+//! loads the target rather than clearing it, so declaring it before the clear
+//! would wipe the panel away.
 //!
 //! That order is the bundle's rather than this file's: four samples wrote it
 //! out and it is one piece of knowledge — the build order, the acquire →
-//! begin-frame → graph → compile → present, and the sandwich
-//! `UiRenderer::add_passes` owns. What is left here is this sample's name, its
+//! begin-frame → graph → compile → present. What is left here is this sample's name, its
 //! clear colour, and the forwards the engine's macros resolve against.
 
 use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions, PageBundle};
 use crcbl::ui::draw_list::DrawList;
-use crcbl::ui::menu::{Menu, MenuLayout};
+use crcbl::ui::menu::MenuSkin;
 use crcbl::ui::text::FontAtlas;
 
 /// What the screen is drawn over: a flat, dark ground that leaves the panel the
 /// brightest thing in the frame.
 pub const BACKDROP: [f32; 4] = [0.04, 0.05, 0.07, 1.0];
 
-/// This sample's device, its swapchain and the two renderers it draws with.
+/// This sample's device, its swapchain and the renderer it draws with.
 ///
-/// A newtype over [`PageBundle`], which is the whole of it: the two renderers,
-/// the build order that destroys the menu pass when the UI compositor refuses
-/// the device, and the frame's acquire → begin-frame → graph → compile →
-/// present. What stays here is this sample's name, its clear colour, and the
+/// A newtype over [`PageBundle`], which is the whole of it: the UI renderer
+/// and the frame's acquire → begin-frame → graph → compile → present. What stays here is this sample's name, its clear colour, and the
 /// forwards `crcbl::impl_game_gpu!` resolves against — see that macro for why
 /// they are inherent methods rather than a blanket impl.
 #[derive(Debug)]
@@ -68,7 +65,7 @@ impl Gpu {
     ///
     /// # Errors
     ///
-    /// [`GpuError`] if the menu pass or the UI compositor refused the device.
+    /// [`GpuError`] if the UI compositor refused the device.
     fn from_context(ctx: GpuContext) -> Result<Self, GpuError> {
         let bundle = PageBundle::new(ctx, crate::APP_NAME, BACKDROP)?;
         Ok(Self(bundle))
@@ -94,9 +91,10 @@ impl Gpu {
         self.0.take_draw_list(dl);
     }
 
-    /// See [`PageBundle::set_menu`].
-    pub fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
-        self.0.set_menu(menu);
+    /// See [`PageBundle::menu_skin`].
+    #[must_use]
+    pub const fn menu_skin(&self) -> &MenuSkin {
+        self.0.menu_skin()
     }
 
     /// See [`PageBundle::timings`].

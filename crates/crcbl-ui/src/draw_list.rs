@@ -1,12 +1,32 @@
 //! Draw list: a sequence of UI draw commands queued for rendering.
 //!
 //! Each frame the UI code produces a [`DrawList`] — an ordered list of
-//! commands (rectangles, text spans) that a render backend then processes
-//! into GPU draw calls. The draw list is the only interface between the
-//! immediate-mode UI and the renderer.
+//! commands (rectangles, pictures, text spans) that a render backend then
+//! processes into GPU draw calls. The draw list is the only interface between
+//! the immediate-mode UI and the renderer.
+//!
+//! # Every primitive is one kind of quad
+//!
+//! Solid rectangles, strokes, glyphs, [`image`](DrawList::image) quads and
+//! [`rounded rectangles`](DrawList::rounded_rect) all expand to the same
+//! [`Vertex2d`], which says which of them it belongs to in
+//! [`Vertex2d::shape`]. `crcbl-render`'s UI pass draws the whole list with one
+//! pipeline and one draw a half, so a menu frame, the text on it and a rounded
+//! panel beside it never break a batch.
+//!
+//! # Clip rectangles travel on the vertex
+//!
+//! [`push_clip`](DrawList::push_clip) narrows everything pushed after it until
+//! the matching [`pop_clip`](DrawList::pop_clip), and every vertex a command
+//! expands to carries the clip that was current when the command went in. The
+//! fragment stage discards outside it. No GPU scissor and no stencil: a scissor
+//! is per draw, so a list that clipped two panels differently would be two
+//! draws, and `docs/plan/07-ui-debug.md` keeps batching as the reason.
 
+use crate::image::{AtlasImage, NineSliceImage, slice_bands, slice_cuts};
 use crate::text::FontAtlas;
 use crate::text::GLYPH_HEIGHT;
+use core::fmt;
 use glam::Vec2;
 
 // ---------------------------------------------------------------------------
@@ -14,6 +34,13 @@ use glam::Vec2;
 // ---------------------------------------------------------------------------
 
 /// A 2D vertex for UI rendering (screen-space, no Z).
+///
+/// Six lanes, mirrored field for field by `Vertex` in
+/// `crates/crcbl-shaders/shaders/ui.slang` and read out of one storage buffer
+/// by `crcbl_render::ui_pass`. The first three are what every primitive has
+/// always had; the last three are zero for a primitive that does not use them,
+/// except [`clip`](Self::clip), which is [`ClipRect::NONE`] when nothing is
+/// clipped.
 ///
 /// # Safety
 ///
@@ -24,11 +51,193 @@ use glam::Vec2;
 pub struct Vertex2d {
     /// Position in screen-space pixels.
     pub pos: Vec2,
-    /// UV coordinates into the glyph / atlas texture (0-1 range). Zero for
-    /// untextured primitives.
+    /// UV into the glyph atlas for [`Primitive::Glyph`] and into the image
+    /// atlas for [`Primitive::Image`]; zero for untextured primitives.
+    ///
+    /// For [`Primitive::RoundedRect`] it is not a UV at all: it is this vertex's
+    /// offset from the rectangle's centre in pixels, which the fragment stage
+    /// receives interpolated and measures the rectangle's distance field at.
     pub uv: Vec2,
-    /// RGBA colour, each component in `[0, 1]`.
+    /// RGBA colour, each component in `[0, 1]`: the fill, the text colour, or
+    /// the tint an image is multiplied by.
     pub color: [f32; 4],
+    /// The clip rectangle, `[min.x, min.y, max.x, max.y]` in screen pixels.
+    pub clip: [f32; 4],
+    /// `[half width, half height, border width, primitive]`: the rounded
+    /// rectangle's half extent and border in pixels, and the
+    /// [`Primitive`] as a float in the last lane, for every vertex.
+    pub shape: [f32; 4],
+    /// The rounded rectangle's corner radii in pixels: top-left, top-right,
+    /// bottom-right, bottom-left.
+    pub radii: [f32; 4],
+    /// The rounded rectangle's border colour.
+    pub border: [f32; 4],
+}
+
+impl Vertex2d {
+    /// A vertex of `primitive` with nothing clipped and no rounded-rectangle
+    /// lanes — what every primitive but the rounded rectangle is.
+    #[must_use]
+    pub const fn new(pos: Vec2, uv: Vec2, color: [f32; 4], primitive: Primitive) -> Self {
+        Self {
+            pos,
+            uv,
+            color,
+            clip: ClipRect::NONE.lane(),
+            shape: [0.0, 0.0, 0.0, primitive.lane()],
+            radii: [0.0; 4],
+            border: [0.0; 4],
+        }
+    }
+
+    /// Which primitive this vertex belongs to, or `None` for a lane holding no
+    /// primitive this crate emits.
+    #[must_use]
+    pub fn primitive(&self) -> Option<Primitive> {
+        Primitive::ALL
+            .into_iter()
+            .find(|primitive| primitive.lane() == self.shape[3])
+    }
+}
+
+/// What the fragment stage does with a vertex's lanes.
+///
+/// Carried as a float in [`Vertex2d::shape`]'s last lane; `ui.slang` spells the
+/// same four numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Primitive {
+    /// The vertex colour, as it is.
+    Solid,
+    /// The vertex colour, its alpha multiplied by the glyph atlas.
+    Glyph,
+    /// The image atlas, sampled sharp-bilinear and multiplied by the colour.
+    Image,
+    /// The analytic rounded rectangle: fill, border and corners evaluated as a
+    /// signed distance per fragment.
+    RoundedRect,
+}
+
+impl Primitive {
+    /// Every primitive, in lane order.
+    pub const ALL: [Self; 4] = [Self::Solid, Self::Glyph, Self::Image, Self::RoundedRect];
+
+    /// The value [`Vertex2d::shape`]'s last lane holds for this primitive.
+    #[must_use]
+    pub const fn lane(self) -> f32 {
+        match self {
+            Self::Solid => 0.0,
+            Self::Glyph => 1.0,
+            Self::Image => 2.0,
+            Self::RoundedRect => 3.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Clip rectangles, corner radii, borders
+// ---------------------------------------------------------------------------
+
+/// A screen-space rectangle nothing is drawn outside of.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipRect {
+    /// Top-left corner, in screen pixels.
+    pub min: Vec2,
+    /// Bottom-right corner, in screen pixels.
+    pub max: Vec2,
+}
+
+impl ClipRect {
+    /// No clip: the whole range of `f32`, which every fragment is inside.
+    pub const NONE: Self = Self {
+        min: Vec2::splat(f32::MIN),
+        max: Vec2::splat(f32::MAX),
+    };
+
+    /// The part of `self` that is also inside `other`.
+    ///
+    /// Two rectangles that do not overlap give an empty one — `max` pulled back
+    /// to `min` — which clips away everything rather than turning inside out.
+    #[must_use]
+    pub fn intersect(self, other: Self) -> Self {
+        let min = self.min.max(other.min);
+        let max = self.max.min(other.max).max(min);
+        Self { min, max }
+    }
+
+    /// The four floats [`Vertex2d::clip`] carries.
+    #[must_use]
+    pub const fn lane(self) -> [f32; 4] {
+        [self.min.x, self.min.y, self.max.x, self.max.y]
+    }
+}
+
+/// [`DrawList::pop_clip`] was called with no clip pushed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipUnderflow;
+
+impl fmt::Display for ClipUnderflow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("pop_clip was called with no clip rectangle pushed")
+    }
+}
+
+impl std::error::Error for ClipUnderflow {}
+
+/// A rounded rectangle's four corner radii, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CornerRadii {
+    /// The top-left corner.
+    pub top_left: f32,
+    /// The top-right corner.
+    pub top_right: f32,
+    /// The bottom-right corner.
+    pub bottom_right: f32,
+    /// The bottom-left corner.
+    pub bottom_left: f32,
+}
+
+impl CornerRadii {
+    /// The same radius at every corner.
+    #[must_use]
+    pub const fn uniform(radius: f32) -> Self {
+        Self {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
+        }
+    }
+
+    /// The radii as [`Vertex2d::radii`] carries them, each clamped into
+    /// `0..=limit` — so no corner is rounder than half the shorter side, and a
+    /// negative or NaN radius is a square corner.
+    #[must_use]
+    pub fn lane(self, limit: f32) -> [f32; 4] {
+        [
+            self.top_left,
+            self.top_right,
+            self.bottom_right,
+            self.bottom_left,
+        ]
+        .map(|radius| radius.max(0.0).min(limit))
+    }
+}
+
+/// A rounded rectangle's border: drawn inside its edge, following its corners.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Border {
+    /// Thickness in pixels.
+    pub width: f32,
+    /// RGBA colour.
+    pub color: [f32; 4],
+}
+
+impl Border {
+    /// No border at all.
+    pub const NONE: Self = Self {
+        width: 0.0,
+        color: [0.0; 4],
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +309,37 @@ pub enum DrawCommand {
         /// Font size in pixels (height of the em-square).
         size: f32,
     },
+    /// A rectangle of the image atlas, stretched to a screen rectangle.
+    ///
+    /// The UVs are already the atlas's: [`DrawList::image`] and
+    /// [`DrawList::nine_slice`] work them out from an
+    /// [`AtlasImage`].
+    Image {
+        /// Top-left corner in screen-space.
+        min: Vec2,
+        /// Bottom-right corner in screen-space.
+        max: Vec2,
+        /// Atlas UV drawn at `min`.
+        uv_min: Vec2,
+        /// Atlas UV drawn at `max`.
+        uv_max: Vec2,
+        /// Straight-alpha RGBA the sampled texel is multiplied by.
+        tint: [f32; 4],
+    },
+    /// A filled rectangle with rounded corners and an optional border,
+    /// evaluated per fragment as a signed distance.
+    RoundedRect {
+        /// Top-left corner in screen-space.
+        min: Vec2,
+        /// Bottom-right corner in screen-space.
+        max: Vec2,
+        /// Corner radii in pixels, each clamped to half the shorter side.
+        radii: CornerRadii,
+        /// RGBA fill colour.
+        color: [f32; 4],
+        /// The border inside the edge. Its width is clamped the same way.
+        border: Border,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -114,13 +354,17 @@ pub enum DrawCommand {
 ///
 /// The list is cut in two by [`begin_overlay`](DrawList::begin_overlay): the
 /// commands before the cut are the game's HUD and GUI, the ones after it are
-/// what has to stay on top of a menu — the menu's own labels, the debug overlay
-/// and the console. The renderer draws the halves as two passes with the menu's
-/// art between them, which is the only reason the cut exists; a list nobody cut
+/// what has to stay on top of a menu — the menu itself, the debug overlay and
+/// the console. The renderer draws the halves as two passes; a list nobody cut
 /// is one layer and draws exactly as it used to.
 #[derive(Debug, Clone, Default)]
 pub struct DrawList {
     commands: Vec<DrawCommand>,
+    /// The clip each command was pushed under, one per command.
+    clips: Vec<ClipRect>,
+    /// The clips pushed and not yet popped, each already intersected with the
+    /// one beneath it. Empty means [`ClipRect::NONE`].
+    clip_stack: Vec<ClipRect>,
     /// Where [`begin_overlay`](DrawList::begin_overlay) last cut the list.
     ///
     /// `None` on a list nobody cut, which puts every command below the cut.
@@ -150,18 +394,26 @@ impl DrawList {
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
+            clips: Vec::new(),
+            clip_stack: Vec::new(),
             overlay_start: None,
         }
     }
 
+    /// Appends one command under the current clip.
+    fn push(&mut self, command: DrawCommand) {
+        self.commands.push(command);
+        self.clips.push(self.clip());
+    }
+
     /// Push a filled rectangle command.
     pub fn rect(&mut self, min: Vec2, max: Vec2, color: [f32; 4]) {
-        self.commands.push(DrawCommand::Rect { min, max, color });
+        self.push(DrawCommand::Rect { min, max, color });
     }
 
     /// Push a rectangle outline command.
     pub fn rect_outline(&mut self, min: Vec2, max: Vec2, thickness: f32, color: [f32; 4]) {
-        self.commands.push(DrawCommand::RectOutline {
+        self.push(DrawCommand::RectOutline {
             min,
             max,
             thickness,
@@ -171,7 +423,7 @@ impl DrawList {
 
     /// Push a straight line segment, stroked centred on the segment.
     pub fn line(&mut self, from: Vec2, to: Vec2, thickness: f32, color: [f32; 4]) {
-        self.commands.push(DrawCommand::Line {
+        self.push(DrawCommand::Line {
             from,
             to,
             thickness,
@@ -191,7 +443,7 @@ impl DrawList {
         closed: bool,
         color: [f32; 4],
     ) {
-        self.commands.push(DrawCommand::Polyline {
+        self.push(DrawCommand::Polyline {
             points: points.into(),
             thickness,
             closed,
@@ -201,12 +453,146 @@ impl DrawList {
 
     /// Push a text command.
     pub fn text(&mut self, pos: Vec2, text: impl Into<String>, color: [f32; 4], size: f32) {
-        self.commands.push(DrawCommand::Text {
+        self.push(DrawCommand::Text {
             pos,
             text: text.into(),
             color,
             size,
         });
+    }
+
+    /// Push a whole registered image, stretched to `min..max` and multiplied by
+    /// `tint`.
+    pub fn image(&mut self, min: Vec2, max: Vec2, image: &AtlasImage, tint: [f32; 4]) {
+        self.push(DrawCommand::Image {
+            min,
+            max,
+            uv_min: image.uv_min(),
+            uv_max: image.uv_max(),
+            tint,
+        });
+    }
+
+    /// Push `sliced` drawn into `min..max` as a nine-slice: up to nine
+    /// [`DrawCommand::Image`]s, corners fixed, edges and centre stretched.
+    ///
+    /// `scale` is screen pixels per texel of the fixed bands, so a four-texel
+    /// corner at a scale of three is twelve pixels across. The stretched bands
+    /// take whatever is left.
+    ///
+    /// # What comes out
+    ///
+    /// The quads in image order — top row left to right, then the middle, then
+    /// the bottom — sharing every cut line as the same `f32`, so no seam can
+    /// open between two bands. **An empty band emits nothing**: a three-slice
+    /// with no top or bottom inset is three quads, not nine with six of them
+    /// zero-sized.
+    ///
+    /// A target smaller than its corners squashes the corners in proportion
+    /// rather than overlapping them; see [`slice_bands`]. A non-finite
+    /// rectangle, or a `scale` that is not a positive finite number, draws
+    /// nothing.
+    pub fn nine_slice(
+        &mut self,
+        min: Vec2,
+        max: Vec2,
+        sliced: &NineSliceImage,
+        scale: f32,
+        tint: [f32; 4],
+    ) {
+        if !(min.is_finite() && max.is_finite() && scale.is_finite() && scale > 0.0) {
+            return;
+        }
+        let insets = sliced.clamped_insets();
+        let size = sliced.image.size();
+        let texel_x = [0.0, insets.left, size.x - insets.right, size.x];
+        let texel_y = [0.0, insets.top, size.y - insets.bottom, size.y];
+        let extent = max - min;
+        let xs = slice_cuts(
+            min.x,
+            slice_bands(insets.left * scale, insets.right * scale, extent.x),
+            extent.x,
+        );
+        let ys = slice_cuts(
+            min.y,
+            slice_bands(insets.top * scale, insets.bottom * scale, extent.y),
+            extent.y,
+        );
+        for row in 0..3 {
+            if texel_y[row] == texel_y[row + 1] || ys[row + 1] <= ys[row] {
+                continue;
+            }
+            for column in 0..3 {
+                if texel_x[column] == texel_x[column + 1] || xs[column + 1] <= xs[column] {
+                    continue;
+                }
+                self.push(DrawCommand::Image {
+                    min: Vec2::new(xs[column], ys[row]),
+                    max: Vec2::new(xs[column + 1], ys[row + 1]),
+                    uv_min: sliced.image.uv(Vec2::new(texel_x[column], texel_y[row])),
+                    uv_max: sliced
+                        .image
+                        .uv(Vec2::new(texel_x[column + 1], texel_y[row + 1])),
+                    tint,
+                });
+            }
+        }
+    }
+
+    /// Push a filled rectangle with rounded corners and an optional border.
+    ///
+    /// The corners are a signed distance evaluated per fragment, so they are
+    /// smooth with multisampling off and cost no geometry: the command is one
+    /// quad whatever its radii. See [`DrawCommand::RoundedRect`].
+    pub fn rounded_rect(
+        &mut self,
+        min: Vec2,
+        max: Vec2,
+        radii: CornerRadii,
+        color: [f32; 4],
+        border: Border,
+    ) {
+        self.push(DrawCommand::RoundedRect {
+            min,
+            max,
+            radii,
+            color,
+            border,
+        });
+    }
+
+    /// Narrows the clip to its intersection with `min..max` until the matching
+    /// [`pop_clip`](Self::pop_clip).
+    ///
+    /// Nested clips intersect: a panel inside a scroll view is clipped by both.
+    pub fn push_clip(&mut self, min: Vec2, max: Vec2) {
+        let clip = self.clip().intersect(ClipRect { min, max });
+        self.clip_stack.push(clip);
+    }
+
+    /// Restores the clip that was current before the last
+    /// [`push_clip`](Self::push_clip).
+    ///
+    /// # Errors
+    ///
+    /// [`ClipUnderflow`] when no clip is pushed, and nothing changes. An error
+    /// rather than a panic, as everything else here that a mismatched caller
+    /// can reach degrades rather than taking the frame down with it.
+    pub fn pop_clip(&mut self) -> Result<(), ClipUnderflow> {
+        self.clip_stack.pop().map(|_| ()).ok_or(ClipUnderflow)
+    }
+
+    /// The clip a command pushed now would be drawn under.
+    #[must_use]
+    pub fn clip(&self) -> ClipRect {
+        self.clip_stack.last().copied().unwrap_or(ClipRect::NONE)
+    }
+
+    /// The clip each command was pushed under, one per
+    /// [`commands`](Self::commands) entry.
+    #[must_use]
+    pub fn clips(&self) -> &[ClipRect] {
+        &self.clips
     }
 
     /// Consume the draw list and return its commands.
@@ -223,20 +609,25 @@ impl DrawList {
 
     /// Cut the list here: everything pushed after this call is **overlay**.
     ///
-    /// `crcbl-render`'s UI pass draws the two halves as two render passes with
-    /// the menu's sprites between them, so a command pushed after this call
-    /// paints over a pause menu and one pushed before it goes under the scrim.
-    /// The engine calls this once a frame — after the game has drawn its HUD,
-    /// before the menu's labels, the debug overlay and the console go in.
+    /// `crcbl-render`'s UI pass draws the two halves as two render passes, so a
+    /// command pushed after this call paints over a pause menu's scrim and one
+    /// pushed before it goes under. The engine calls this once a frame — after
+    /// the game has drawn its HUD, before the menu, the debug overlay and the
+    /// console go in.
     ///
     /// **The last call wins.** A second call moves the cut down to the new
     /// length rather than being refused, which is the only answer that keeps
     /// the engine's overlays on top: a game that marked a boundary of its own
     /// during `draw` marked an earlier one, and the engine's comes after it.
     ///
+    /// **The cut also drops every pushed clip.** The overlay is the engine's,
+    /// and a clip a game pushed and forgot to pop would otherwise cut the debug
+    /// panel and the console down to that game's scroll view.
+    ///
     /// [`clear`](Self::clear) drops the cut along with the commands.
     pub fn begin_overlay(&mut self) {
         self.overlay_start = Some(self.commands.len());
+        self.clip_stack.clear();
     }
 
     /// The commands below the cut — the game's HUD and GUI.
@@ -281,13 +672,15 @@ impl DrawList {
         self.commands.is_empty()
     }
 
-    /// Clear all commands and the overlay cut (reuse the allocation across
-    /// frames).
+    /// Clear all commands, every pushed clip and the overlay cut (reuse the
+    /// allocation across frames).
     ///
     /// The cut goes with them: a frame that kept the previous frame's cut would
     /// put its first few commands above a menu for no reason anyone wrote down.
     pub fn clear(&mut self) {
         self.commands.clear();
+        self.clips.clear();
+        self.clip_stack.clear();
         self.overlay_start = None;
     }
 
@@ -311,10 +704,11 @@ impl DrawList {
     /// itself about the glyph layout.
     ///
     /// The vertices and indices are in a format a render backend can upload
-    /// directly. Each `Rect` becomes one quad (4 vertices, 6 indices).
-    /// `RectOutline` becomes 4 thin quads — one per side — forming a hollow
-    /// border. `Line` and `Polyline` become one quad per segment plus one
-    /// bevel triangle per corner.
+    /// directly. Each `Rect`, `Image` and `RoundedRect` becomes one quad (4
+    /// vertices, 6 indices). `RectOutline` becomes 4 thin quads — one per side
+    /// — forming a hollow border. `Line` and `Polyline` become one quad per
+    /// segment plus one bevel triangle per corner. Every vertex carries the clip
+    /// its command was pushed under.
     ///
     /// `Text` commands are expanded when `atlas` is `Some`: each glyph becomes
     /// one textured quad with UV coordinates into the atlas. When `atlas` is
@@ -339,12 +733,20 @@ impl DrawList {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        for cmd in self.base_commands() {
+        let cut = self.overlay_start();
+        let mut overlay = 0;
+        for (index, (cmd, clip)) in self.commands.iter().zip(&self.clips).enumerate() {
+            if index == cut {
+                overlay = indices.len();
+            }
+            let first = vertices.len();
             expand(cmd, atlas, scale, &mut vertices, &mut indices);
+            for vertex in &mut vertices[first..] {
+                vertex.clip = clip.lane();
+            }
         }
-        let overlay = indices.len();
-        for cmd in self.overlay_commands() {
-            expand(cmd, atlas, scale, &mut vertices, &mut indices);
+        if cut == self.commands.len() {
+            overlay = indices.len();
         }
         Triangles {
             vertices,
@@ -356,9 +758,8 @@ impl DrawList {
 
 /// Expand one draw command onto the end of `vertices` and `indices`.
 ///
-/// A free function rather than a loop body, because
-/// [`DrawList::to_triangles_split`] walks the list in two runs and both runs
-/// must expand a command the same way.
+/// The clip is not this function's: [`DrawList::to_triangles_split`] stamps it
+/// onto whatever this pushed, so no primitive below can forget to carry it.
 fn expand(
     cmd: &DrawCommand,
     atlas: Option<&FontAtlas>,
@@ -371,9 +772,9 @@ fn expand(
             push_quad(
                 *min,
                 *max,
-                Vec2::ZERO,
-                Vec2::ZERO,
+                (Vec2::ZERO, Vec2::ZERO),
                 *color,
+                Primitive::Solid,
                 vertices,
                 indices,
             );
@@ -400,7 +801,15 @@ fn expand(
             let inner_max = Vec2::new(max.x - t, max.y - t);
 
             let mut edge = |q_min: Vec2, q_max: Vec2| {
-                push_quad(q_min, q_max, Vec2::ZERO, Vec2::ZERO, c, vertices, indices);
+                push_quad(
+                    q_min,
+                    q_max,
+                    (Vec2::ZERO, Vec2::ZERO),
+                    c,
+                    Primitive::Solid,
+                    vertices,
+                    indices,
+                );
             };
             // top (full width, including both corners)
             edge(*min, Vec2::new(max.x, inner_min.y));
@@ -447,10 +856,87 @@ fn expand(
                     // quad's top edge in the Y-down screen convention.
                     let uv_min = Vec2::new(atlas.glyph_u_min(c), 0.0);
                     let uv_max = Vec2::new(atlas.glyph_u_max(c), 1.0);
-                    push_quad(min, max, uv_min, uv_max, *color, vertices, indices);
+                    push_quad(
+                        min,
+                        max,
+                        (uv_min, uv_max),
+                        *color,
+                        Primitive::Glyph,
+                        vertices,
+                        indices,
+                    );
                 }
             }
         }
+        DrawCommand::Image {
+            min,
+            max,
+            uv_min,
+            uv_max,
+            tint,
+        } => {
+            push_quad(
+                *min,
+                *max,
+                (*uv_min, *uv_max),
+                *tint,
+                Primitive::Image,
+                vertices,
+                indices,
+            );
+        }
+        DrawCommand::RoundedRect {
+            min,
+            max,
+            radii,
+            color,
+            border,
+        } => push_rounded_rect(*min, *max, *radii, *color, *border, vertices, indices),
+    }
+}
+
+/// Push one rounded rectangle: a single quad whose vertices carry the shape.
+///
+/// The UV lane is each corner's offset from the centre — `-half` at `min`,
+/// `+half` at `max` — so the fragment stage receives the offset interpolated
+/// and evaluates the distance field there. The radii and the border width are
+/// clamped to half the shorter side here rather than in the shader, where a
+/// radius past it would bend the corners of a pill into each other.
+///
+/// A rectangle with no area, or one that is not finite, pushes nothing.
+fn push_rounded_rect(
+    min: Vec2,
+    max: Vec2,
+    radii: CornerRadii,
+    color: [f32; 4],
+    border: Border,
+    vertices: &mut Vec<Vertex2d>,
+    indices: &mut Vec<u32>,
+) {
+    if !(min.is_finite() && max.is_finite()) || max.x <= min.x || max.y <= min.y {
+        return;
+    }
+    let half = (max - min) * 0.5;
+    let limit = half.x.min(half.y);
+    let first = vertices.len();
+    push_quad(
+        min,
+        max,
+        (-half, half),
+        color,
+        Primitive::RoundedRect,
+        vertices,
+        indices,
+    );
+    for vertex in &mut vertices[first..] {
+        vertex.shape = [
+            half.x,
+            half.y,
+            border.width.max(0.0).min(limit),
+            Primitive::RoundedRect.lane(),
+        ];
+        vertex.radii = radii.lane(limit);
+        vertex.border = border.color;
     }
 }
 
@@ -585,11 +1071,7 @@ fn push_quad_free(
 ) {
     let base = vertices.len() as u32;
     for pos in [p0, p1, p2, p3] {
-        vertices.push(Vertex2d {
-            pos,
-            uv: Vec2::ZERO,
-            color,
-        });
+        vertices.push(Vertex2d::new(pos, Vec2::ZERO, color, Primitive::Solid));
     }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
@@ -605,11 +1087,7 @@ fn push_triangle(
 ) {
     let base = vertices.len() as u32;
     for pos in [p0, p1, p2] {
-        vertices.push(Vertex2d {
-            pos,
-            uv: Vec2::ZERO,
-            color,
-        });
+        vertices.push(Vertex2d::new(pos, Vec2::ZERO, color, Primitive::Solid));
     }
     indices.extend_from_slice(&[base, base + 1, base + 2]);
 }
@@ -618,9 +1096,9 @@ fn push_triangle(
 /// [`DrawList::to_triangles`].
 ///
 /// `min`/`max` are the top-left and bottom-right corners in the Y-down screen
-/// convention, and `uv_min`/`uv_max` the matching atlas corners (both
-/// [`Vec2::ZERO`] for untextured primitives, which the fragment shader reads as
-/// "do not sample").
+/// convention, and `(uv_min, uv_max)` the matching UV corners (both
+/// [`Vec2::ZERO`] for untextured primitives). `primitive` is what the fragment
+/// stage does with them.
 ///
 /// Vertices are emitted bottom-left, bottom-right, top-right, top-left, which
 /// after the shader's Y flip is counter-clockwise in NDC. Nothing depends on
@@ -630,9 +1108,9 @@ fn push_triangle(
 fn push_quad(
     min: Vec2,
     max: Vec2,
-    uv_min: Vec2,
-    uv_max: Vec2,
+    (uv_min, uv_max): (Vec2, Vec2),
     color: [f32; 4],
+    primitive: Primitive,
     vertices: &mut Vec<Vertex2d>,
     indices: &mut Vec<u32>,
 ) {
@@ -643,13 +1121,14 @@ fn push_quad(
         (Vec2::new(max.x, min.y), Vec2::new(uv_max.x, uv_min.y)),
         (Vec2::new(min.x, min.y), Vec2::new(uv_min.x, uv_min.y)),
     ] {
-        vertices.push(Vertex2d { pos, uv, color });
+        vertices.push(Vertex2d::new(pos, uv, color, primitive));
     }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 // SAFETY: Vertex2d is `#[repr(C)]` with only f32 fields (Vec2 is 2×f32,
-// [f32; 4] is 4×f32). No padding, all bit patterns valid.
+// [f32; 4] is 4×f32), every field's alignment is 4, and the fields add to a
+// multiple of it. No padding, all bit patterns valid.
 unsafe impl bytemuck::Pod for Vertex2d {}
 unsafe impl bytemuck::Zeroable for Vertex2d {}
 
@@ -1509,5 +1988,405 @@ mod tests {
             "the later cut is the one taken"
         );
         assert_eq!(dl.overlay_commands().len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // The vertex layout
+    // -----------------------------------------------------------------------
+
+    /// **The layout `ui.slang`'s `Vertex` mirrors**: six lanes of floats, 96
+    /// bytes, each lane where the shader reads it. A field added, dropped or
+    /// reordered here moves an offset the storage buffer is read at, and the
+    /// fragment stage would then read a colour as a clip.
+    #[test]
+    fn the_vertex_is_six_lanes_at_the_offsets_the_shader_reads() {
+        assert_eq!(size_of::<Vertex2d>(), 96);
+        assert_eq!(core::mem::offset_of!(Vertex2d, pos), 0);
+        assert_eq!(core::mem::offset_of!(Vertex2d, uv), 8);
+        assert_eq!(core::mem::offset_of!(Vertex2d, color), 16);
+        assert_eq!(core::mem::offset_of!(Vertex2d, clip), 32);
+        assert_eq!(core::mem::offset_of!(Vertex2d, shape), 48);
+        assert_eq!(core::mem::offset_of!(Vertex2d, radii), 64);
+        assert_eq!(core::mem::offset_of!(Vertex2d, border), 80);
+    }
+
+    /// The pre-existing primitives say which they are, and nothing else about
+    /// them moved: no clip, no shape, no radii, no border.
+    #[test]
+    fn the_old_primitives_are_solid_or_glyph_and_unclipped() {
+        let atlas = FontAtlas::built_in();
+        let mut dl = DrawList::new();
+        dl.rect(Vec2::ZERO, Vec2::splat(10.0), RED);
+        dl.text(Vec2::new(20.0, 0.0), "A", RED, 13.0);
+        let (vertices, _) = dl.to_triangles(Some(&atlas), 1.0);
+        assert_eq!(vertices.len(), 8);
+        for (index, vertex) in vertices.iter().enumerate() {
+            let expected = if index < 4 {
+                Primitive::Solid
+            } else {
+                Primitive::Glyph
+            };
+            assert_eq!(vertex.primitive(), Some(expected), "vertex {index}");
+            assert_eq!(vertex.clip, ClipRect::NONE.lane());
+            assert_eq!(vertex.shape[..3], [0.0; 3]);
+            assert_eq!((vertex.radii, vertex.border), ([0.0; 4], [0.0; 4]));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Images and nine-slices
+    // -----------------------------------------------------------------------
+
+    use crate::image::{ImageAtlas, NineSliceImage};
+    use crate::widget::SkinInsets;
+
+    /// An atlas holding one `width` by `height` opaque image, registered after a
+    /// throwaway one so the image under test is not at the page origin.
+    fn atlas_with(width: u32, height: u32) -> (ImageAtlas, AtlasImage) {
+        let mut images = ImageAtlas::new();
+        images
+            .register(3, 3, &[9; 36])
+            .expect("a 3x3 image fits an empty page");
+        let image = images
+            .register(width, height, &vec![255; (width * height * 4) as usize])
+            .expect("fits");
+        assert_ne!((image.x, image.y), (0, 0));
+        (images, image)
+    }
+
+    #[test]
+    fn an_image_is_one_quad_sampling_exactly_its_own_rectangle() {
+        let (_, image) = atlas_with(16, 8);
+        let tint = [0.5, 0.25, 1.0, 0.75];
+        let mut dl = DrawList::new();
+        dl.image(Vec2::new(10.0, 20.0), Vec2::new(42.0, 36.0), &image, tint);
+        let (vertices, indices) = dl.to_triangles(None, 1.0);
+
+        assert_eq!((vertices.len(), indices.len()), (4, 6));
+        let page = crate::image::PAGE_SIZE as f32;
+        for vertex in &vertices {
+            assert_eq!(vertex.primitive(), Some(Primitive::Image));
+            assert_eq!(vertex.color, tint);
+            // The image's top-left texel corner at the quad's top-left, and its
+            // bottom-right at the bottom-right — upright, not mirrored.
+            let texel = if vertex.pos.x < 26.0 {
+                image.x
+            } else {
+                image.x + 16
+            };
+            let row = if vertex.pos.y < 28.0 {
+                image.y
+            } else {
+                image.y + 8
+            };
+            assert_eq!(
+                vertex.uv * page,
+                Vec2::new(texel as f32, row as f32),
+                "{vertex:?}"
+            );
+        }
+    }
+
+    /// The four cut lines of a nine-slice as the quads it emitted report them,
+    /// one axis at a time, deduplicated.
+    fn cut_lines(dl: &DrawList, axis: fn(Vec2) -> f32) -> Vec<f32> {
+        let mut cuts: Vec<f32> = dl
+            .commands()
+            .iter()
+            .flat_map(|command| match command {
+                DrawCommand::Image { min, max, .. } => [axis(*min), axis(*max)],
+                other => panic!("a nine-slice emitted {other:?}"),
+            })
+            .collect();
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup();
+        cuts
+    }
+
+    /// **The corners stay fixed as the target grows, the bands between take the
+    /// growth, and every quad samples its own band of the image.**
+    #[test]
+    fn a_nine_slice_keeps_its_corners_and_stretches_the_bands_between() {
+        let (_, image) = atlas_with(16, 12);
+        // All four insets different, so a mirrored or transposed cut shows up.
+        let sliced = NineSliceImage {
+            image,
+            insets: SkinInsets::new(3.0, 5.0, 2.0, 4.0),
+        };
+        let scale = 2.0;
+        for (min, max) in [
+            (Vec2::new(10.0, 10.0), Vec2::new(60.0, 40.0)),
+            (Vec2::new(0.0, 100.0), Vec2::new(300.0, 190.0)),
+        ] {
+            let mut dl = DrawList::new();
+            dl.nine_slice(min, max, &sliced, scale, [1.0; 4]);
+            assert_eq!(dl.len(), 9, "every band is non-empty at this size");
+
+            assert_eq!(
+                cut_lines(&dl, |v| v.x),
+                [min.x, min.x + 6.0, max.x - 10.0, max.x],
+                "the columns: 3 and 5 texels at two pixels each"
+            );
+            assert_eq!(
+                cut_lines(&dl, |v| v.y),
+                [min.y, min.y + 4.0, max.y - 8.0, max.y],
+                "the rows: 2 and 4 texels at two pixels each"
+            );
+
+            // Image order, and each quad's UVs are the matching texel band.
+            let page = crate::image::PAGE_SIZE as f32;
+            let texel_x = [0.0, 3.0, 11.0, 16.0];
+            let texel_y = [0.0, 2.0, 8.0, 12.0];
+            for (index, command) in dl.commands().iter().enumerate() {
+                let DrawCommand::Image { uv_min, uv_max, .. } = command else {
+                    unreachable!("cut_lines checked every command");
+                };
+                let (row, column) = (index / 3, index % 3);
+                assert_eq!(
+                    *uv_min * page,
+                    Vec2::new(
+                        image.x as f32 + texel_x[column],
+                        image.y as f32 + texel_y[row]
+                    ),
+                    "quad {index}"
+                );
+                assert_eq!(
+                    *uv_max * page,
+                    Vec2::new(
+                        image.x as f32 + texel_x[column + 1],
+                        image.y as f32 + texel_y[row + 1]
+                    ),
+                    "quad {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_band_emits_no_quad() {
+        let (_, image) = atlas_with(16, 8);
+        // A three-slice: caps left and right, nothing fixed top or bottom.
+        let bar = NineSliceImage {
+            image,
+            insets: SkinInsets::new(4.0, 4.0, 0.0, 0.0),
+        };
+        let mut dl = DrawList::new();
+        dl.nine_slice(Vec2::ZERO, Vec2::new(100.0, 20.0), &bar, 1.0, [1.0; 4]);
+        assert_eq!(dl.len(), 3, "a three-slice is three quads");
+
+        // No insets at all is the whole image once.
+        let plain = NineSliceImage {
+            image,
+            insets: SkinInsets::NONE,
+        };
+        let mut dl = DrawList::new();
+        dl.nine_slice(Vec2::ZERO, Vec2::new(100.0, 20.0), &plain, 1.0, [1.0; 4]);
+        assert_eq!(dl.len(), 1);
+    }
+
+    /// Below its corners the slice squashes them in proportion and still fills
+    /// exactly the target — nothing outside it and nothing inverted.
+    #[test]
+    fn a_nine_slice_smaller_than_its_corners_squashes_inside_the_target() {
+        let (_, image) = atlas_with(16, 16);
+        let sliced = NineSliceImage {
+            image,
+            insets: SkinInsets::new(4.0, 8.0, 4.0, 4.0),
+        };
+        let mut dl = DrawList::new();
+        let (min, max) = (Vec2::new(5.0, 5.0), Vec2::new(11.0, 45.0));
+        dl.nine_slice(min, max, &sliced, 1.0, [1.0; 4]);
+
+        let columns = cut_lines(&dl, |v| v.x);
+        assert_eq!(columns, [5.0, 7.0, 11.0], "4:8 of six pixels, no centre");
+        for command in dl.commands() {
+            let DrawCommand::Image { min: a, max: b, .. } = command else {
+                unreachable!()
+            };
+            assert!(a.x < b.x && a.y < b.y, "inverted quad {command:?}");
+            assert!(a.cmpge(min).all() && b.cmple(max).all(), "{command:?}");
+        }
+
+        // And nonsense draws nothing rather than NaN geometry.
+        for (scale, max) in [
+            (0.0, max),
+            (f32::NAN, max),
+            (1.0, Vec2::new(f32::INFINITY, 45.0)),
+        ] {
+            let mut dl = DrawList::new();
+            dl.nine_slice(min, max, &sliced, scale, [1.0; 4]);
+            assert!(dl.is_empty(), "scale {scale}, max {max:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rounded rectangles
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_rounded_rect_is_one_quad_carrying_its_shape() {
+        let border = Border {
+            width: 3.0,
+            color: [0.0, 1.0, 0.0, 1.0],
+        };
+        let radii = CornerRadii {
+            top_left: 2.0,
+            top_right: 4.0,
+            bottom_right: 6.0,
+            bottom_left: 8.0,
+        };
+        let mut dl = DrawList::new();
+        dl.rounded_rect(
+            Vec2::new(10.0, 20.0),
+            Vec2::new(50.0, 40.0),
+            radii,
+            RED,
+            border,
+        );
+        let (vertices, indices) = dl.to_triangles(None, 1.0);
+
+        assert_eq!((vertices.len(), indices.len()), (4, 6));
+        for vertex in &vertices {
+            assert_eq!(vertex.primitive(), Some(Primitive::RoundedRect));
+            assert_eq!(vertex.color, RED);
+            assert_eq!(
+                vertex.shape,
+                [20.0, 10.0, 3.0, Primitive::RoundedRect.lane()]
+            );
+            assert_eq!(vertex.radii, [2.0, 4.0, 6.0, 8.0]);
+            assert_eq!(vertex.border, border.color);
+            // The UV lane is the corner's offset from the centre (30, 30), so
+            // the fragment stage's distance field is centred on the rectangle.
+            assert_eq!(vertex.uv, vertex.pos - Vec2::new(30.0, 30.0), "{vertex:?}");
+        }
+    }
+
+    /// No corner rounder than half the shorter side, no border thicker, and a
+    /// radius that is negative or NaN is a square corner — the shader never
+    /// sees a number that bends two corners into each other.
+    #[test]
+    fn radii_and_border_are_clamped_to_half_the_shorter_side() {
+        let mut dl = DrawList::new();
+        dl.rounded_rect(
+            Vec2::ZERO,
+            Vec2::new(100.0, 12.0),
+            CornerRadii {
+                top_left: 50.0,
+                top_right: -1.0,
+                bottom_right: f32::NAN,
+                bottom_left: 3.0,
+            },
+            RED,
+            Border {
+                width: 40.0,
+                color: RED,
+            },
+        );
+        let (vertices, _) = dl.to_triangles(None, 1.0);
+        assert_eq!(vertices[0].radii, [6.0, 0.0, 0.0, 3.0]);
+        assert_eq!(vertices[0].shape[2], 6.0);
+    }
+
+    #[test]
+    fn a_rounded_rect_with_no_area_draws_nothing() {
+        for (min, max) in [
+            (Vec2::ZERO, Vec2::new(0.0, 10.0)),
+            (Vec2::splat(10.0), Vec2::ZERO),
+            (Vec2::ZERO, Vec2::new(f32::NAN, 10.0)),
+        ] {
+            let mut dl = DrawList::new();
+            dl.rounded_rect(min, max, CornerRadii::uniform(2.0), RED, Border::NONE);
+            let (vertices, indices) = dl.to_triangles(None, 1.0);
+            assert!(
+                vertices.is_empty() && indices.is_empty(),
+                "{min:?}..{max:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Clip rectangles
+    // -----------------------------------------------------------------------
+
+    fn clips_of(dl: &DrawList) -> Vec<[f32; 4]> {
+        let (vertices, _) = dl.to_triangles(None, 1.0);
+        vertices.chunks_exact(4).map(|quad| quad[0].clip).collect()
+    }
+
+    /// **Every vertex carries the clip its command went in under**, nested
+    /// clips intersect, and a pop restores the one beneath — asserted on the
+    /// vertices the renderer uploads, not on the stack.
+    #[test]
+    fn clips_nest_by_intersection_and_pop_back_to_the_one_beneath() {
+        let mut dl = DrawList::new();
+        dl.rect(Vec2::ZERO, Vec2::splat(4.0), RED);
+        dl.push_clip(Vec2::new(10.0, 10.0), Vec2::new(100.0, 80.0));
+        dl.rect(Vec2::ZERO, Vec2::splat(4.0), RED);
+        dl.push_clip(Vec2::new(50.0, 0.0), Vec2::new(200.0, 60.0));
+        dl.rect(Vec2::ZERO, Vec2::splat(4.0), RED);
+        dl.pop_clip().expect("two were pushed");
+        dl.rect(Vec2::ZERO, Vec2::splat(4.0), RED);
+        dl.pop_clip().expect("one is left");
+        dl.rect(Vec2::ZERO, Vec2::splat(4.0), RED);
+
+        assert_eq!(
+            clips_of(&dl),
+            [
+                ClipRect::NONE.lane(),
+                [10.0, 10.0, 100.0, 80.0],
+                [50.0, 10.0, 100.0, 60.0],
+                [10.0, 10.0, 100.0, 80.0],
+                ClipRect::NONE.lane(),
+            ]
+        );
+        assert_eq!(dl.clips().len(), dl.len());
+    }
+
+    #[test]
+    fn a_pop_with_nothing_pushed_is_an_error_and_changes_nothing() {
+        let mut dl = DrawList::new();
+        assert_eq!(dl.pop_clip(), Err(ClipUnderflow));
+        dl.push_clip(Vec2::ZERO, Vec2::splat(10.0));
+        dl.pop_clip().expect("one was pushed");
+        assert_eq!(dl.pop_clip(), Err(ClipUnderflow), "and only one");
+        dl.rect(Vec2::ZERO, Vec2::splat(4.0), RED);
+        assert_eq!(clips_of(&dl), [ClipRect::NONE.lane()]);
+    }
+
+    /// Two clips that do not overlap leave an empty one — which clips away
+    /// everything — rather than an inside-out rectangle a fragment test would
+    /// read as "no clip".
+    #[test]
+    fn disjoint_clips_intersect_to_nothing_rather_than_inside_out() {
+        let mut dl = DrawList::new();
+        dl.push_clip(Vec2::ZERO, Vec2::splat(10.0));
+        dl.push_clip(Vec2::splat(20.0), Vec2::splat(30.0));
+        let clip = dl.clip();
+        assert!(
+            clip.max.x <= clip.min.x && clip.max.y <= clip.min.y,
+            "{clip:?}"
+        );
+        assert!(clip.max.cmpge(clip.min).all(), "inside out: {clip:?}");
+    }
+
+    /// The overlay cut and `clear` both drop the stack: the engine's overlay is
+    /// never clipped by a clip the game forgot to pop, and neither is next
+    /// frame.
+    #[test]
+    fn the_overlay_cut_and_clear_drop_every_pushed_clip() {
+        let mut dl = DrawList::new();
+        dl.push_clip(Vec2::ZERO, Vec2::splat(10.0));
+        dl.rect(Vec2::ZERO, Vec2::splat(4.0), RED);
+        dl.begin_overlay();
+        dl.rect(Vec2::ZERO, Vec2::splat(4.0), RED);
+        assert_eq!(
+            clips_of(&dl),
+            [[0.0, 0.0, 10.0, 10.0], ClipRect::NONE.lane()]
+        );
+
+        dl.push_clip(Vec2::ZERO, Vec2::splat(10.0));
+        dl.clear();
+        dl.rect(Vec2::ZERO, Vec2::splat(4.0), RED);
+        assert_eq!(clips_of(&dl), [ClipRect::NONE.lane()]);
     }
 }

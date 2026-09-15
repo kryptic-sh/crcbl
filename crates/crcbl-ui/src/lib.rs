@@ -1,8 +1,10 @@
 //! Immediate-mode GUI toolkit for Crucible.
 //!
 //! Each frame the UI code produces a [`DrawList`] — a sequence of draw commands
-//! (rectangles, text spans) that a render backend processes. Text is rendered
-//! from the built-in [`FontAtlas`] which provides a monospace bitmap font.
+//! (rectangles, pictures, text spans) that a render backend processes. Text is
+//! rendered from the built-in [`FontAtlas`] which provides a monospace bitmap
+//! font, and pictures from an [`ImageAtlas`] the caller registers RGBA8 images
+//! into.
 //!
 //! # Architecture
 //!
@@ -17,6 +19,7 @@
 //!      │
 //!      ▼
 //! DrawList + FontAtlas         ←  first slice (P4-a)
+//!   + ImageAtlas                ←  textured quads, rounded rects, clips
 //!      │
 //!      ▼
 //! Render backend            ← crcbl-render's ui_pass
@@ -40,6 +43,7 @@ pub mod console;
 pub mod debug;
 pub mod draw_list;
 pub mod hud;
+pub mod image;
 pub mod menu;
 pub mod readout;
 pub mod text;
@@ -57,11 +61,15 @@ pub use debug::{
     DEFAULT_FRAME_WINDOW, DebugModule, DebugOverlay, DebugPanel, DebugRow, DebugSection,
     DebugStyle, FrameStats,
 };
-pub use draw_list::{DrawCommand, DrawList, Triangles, Vertex2d};
+pub use draw_list::{
+    Border, ClipRect, ClipUnderflow, CornerRadii, DrawCommand, DrawList, Primitive, Triangles,
+    Vertex2d,
+};
 pub use hud::{Anchor, Hud, HudPanel};
+pub use image::{AtlasError, AtlasImage, ImageAtlas, ImageId, NineSliceImage, TexelRect};
 pub use menu::{
     BUTTON_INSETS, Cycler, FIT_FRACTION, Menu, MenuItem, MenuItemKind, MenuItemLayout, MenuLayout,
-    MenuSet, MenuStyle, PANEL_INSETS, Slider,
+    MenuSet, MenuSkin, MenuStyle, PANEL_INSETS, Slider,
 };
 pub use readout::{NATURAL_SCALE, ReadoutPanel, ReadoutRow};
 pub use text::{
@@ -70,6 +78,6 @@ pub use text::{
 };
 pub use touch::{TouchButton, TouchStick};
 pub use widget::{
-    Button, ButtonState, Label, NATURAL_FONT_SIZE, PointerInput, SkinInsets, Style, UiState,
-    WidgetId,
+    Button, ButtonSkin, ButtonState, Label, NATURAL_FONT_SIZE, PointerInput, SkinInsets, Style,
+    UiState, WidgetId,
 };

@@ -86,10 +86,10 @@ here it is the dogfood case: the panel is built out of these widgets.
   `hud` (the ticker's counters) and `page` (how many rects, outlines and text
   spans the frame's page emitted, tallied off the draw list itself).
 - **Rule 11 exemption taken**: no `.crpix`, no `build.rs`, no sprite pass. The
-  frame is a `backdrop` clear and then the UI sandwich — `ui-composite`, the
-  menu pass, `ui-overlay`, of which only the halves with geometry in them are
-  declared — which makes it the only sample whose UI pass has nothing in front
-  of it in CI's `vk-e2e` job.
+  frame is a `backdrop` clear and then the UI pass — `ui-composite`, then
+  `ui-overlay` with the pause menu drawn in it, of which only the halves with
+  geometry in them are declared — which makes it the only sample whose UI pass
+  has nothing in front of it in CI's `vk-e2e` job.
 - **No game input.** Every key is the loop's — `ESC`, `F3`, `F11` — because the
   page is driven end to end by the ticker. The one menu is the pause panel, and
   every button on it is one the loop already owns, so `MenuAction` is

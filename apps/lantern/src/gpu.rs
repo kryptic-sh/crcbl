@@ -1,5 +1,6 @@
 //! Lantern's GPU side: the shared shell↔HAL join, the forward renderer over
-//! [`crate::room`], and the UI and menu passes rule 4 asks every sample for.
+//! [`crate::room`], and the UI pass — the menu drawn in it — rule 4 asks
+//! every sample for.
 //!
 //! Everything that is not this sample's is [`crcbl::engine::GpuContext`]'s —
 //! opening a backend, choosing an adapter, the swapchain, the frames-in-flight
@@ -30,12 +31,12 @@ use crcbl::hal::{
 use crcbl::prelude::*;
 use crcbl::render::{
     Antialiasing, CameraStack, EffectOverride, EffectRequest, ForwardRenderer, ImportedImage,
-    MAX_TIMED_PASSES, MenuRenderer, PassTimers, RenderEffects, RenderGraph, TransientImageDesc,
-    TransientPool, UiRenderer,
+    MAX_TIMED_PASSES, PassTimers, RenderEffects, RenderGraph, TransientImageDesc, TransientPool,
+    UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
-use crcbl::ui::menu::{Menu, MenuLayout};
+use crcbl::ui::menu::MenuSkin;
 use crcbl::ui::text::FontAtlas;
 
 use crate::room;
@@ -261,7 +262,6 @@ pub struct Gpu {
     /// here — a headless run must render the same room on every machine.
     elapsed: f32,
     ui: UiRenderer,
-    menu: MenuRenderer,
     atlas: FontAtlas,
     draw_list: DrawList,
     dumped: bool,
@@ -488,15 +488,6 @@ impl Gpu {
                 return Err(GpuError::Hal(error));
             }
         };
-        let menu = match MenuRenderer::new(ctx.device(), ctx.queue(), ctx.format()) {
-            Ok(menu) => menu,
-            Err(error) => {
-                ui.destroy(ctx.device());
-                monitor.destroy(ctx.device());
-                renderer.destroy(ctx.device());
-                return Err(GpuError::Hal(error));
-            }
-        };
 
         Ok(Self {
             ctx,
@@ -509,7 +500,6 @@ impl Gpu {
             camera: room::fixed_camera(),
             elapsed: 0.0,
             ui,
-            menu,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
             dumped: false,
@@ -629,7 +619,6 @@ impl Gpu {
         self.renderer
             .counters()
             .plus(self.monitor.counters())
-            .plus(self.menu.counters())
             .plus(self.ui.counters())
     }
 
@@ -648,9 +637,11 @@ impl Gpu {
         std::mem::swap(&mut self.draw_list, dl);
     }
 
-    /// Takes this frame's menu, or `None` on a frame that shows none.
-    pub fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
-        self.menu.set_menu(menu);
+    /// The menu art the UI pass's atlas holds — see
+    /// [`crcbl::engine::GameGpu::menu_skin`].
+    #[must_use]
+    pub const fn menu_skin(&self) -> &MenuSkin {
+        self.ui.menu_skin()
     }
 
     /// The glyph atlas the UI pass renders text from.
@@ -723,9 +714,6 @@ impl Gpu {
             &room::sun(),
             room::MONITOR_EXTENT,
         )?;
-        self.menu
-            .begin_frame(self.ctx.device(), extent)
-            .map_err(GpuError::Hal)?;
         self.ui
             .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
             .map_err(GpuError::Hal)?;
@@ -746,12 +734,9 @@ impl Gpu {
             let _hdr = self
                 .renderer
                 .add_passes(&mut graph, &self.pool, target, extent);
-            // One call for the whole sandwich: the game's HUD, the menu's art
-            // over it, then the menu's own labels, the debug overlay and the
-            // console over that. `UiRenderer::add_passes` owns the order so no
-            // sample can express another one.
-            self.ui
-                .add_passes(&mut graph, target, extent, Some(&self.menu));
+            // The game's HUD, then the menu, the debug overlay and the
+            // console over it — the order the draw list was filled in.
+            self.ui.add_passes(&mut graph, target, extent);
             feed_monitor(&mut graph, &self.pool, &mut self.monitor, page);
             graph.compile(&self.pool)?
         };
@@ -824,7 +809,6 @@ impl Gpu {
     pub fn destroy(mut self) -> Result<(), GpuError> {
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
-        self.menu.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());
