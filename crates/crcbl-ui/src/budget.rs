@@ -89,9 +89,10 @@ type Window = crcbl_core::stats::Window<DEFAULT_FRAME_WINDOW>;
 /// CPU active time against measured GPU elapsed time, over rolling windows.
 ///
 /// Fed once a frame from both ends — [`BudgetStats::record_cpu`] with the frame
-/// span's active duration, [`BudgetStats::record_gpu`] with the outer interval the timers
-/// resolved — and read by the debug panel. See the [module docs](self) for why
-/// the two are shown as distributions rather than paired frame by frame.
+/// span's active duration, [`BudgetStats::record_gpu`] with the outer interval
+/// the timers resolved — and read by the debug panel. See the
+/// [module docs](self) for why the two are shown as distributions rather than
+/// paired frame by frame.
 #[derive(Clone, Debug, Default)]
 pub struct BudgetStats {
     cpu: Window,

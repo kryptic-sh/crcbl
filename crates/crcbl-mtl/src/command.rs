@@ -637,7 +637,8 @@ impl<'a> RenderReplay<'a> {
             if previous
                 .is_none_or(|held| !core::ptr::eq(&*held.depth_stencil, &*bound.depth_stencil))
             {
-                // Always an object: nil hangs Apple's paravirtual GPU.
+                // Always an object: nil hangs Apple's paravirtual GPU. See
+                // `crcbl_mtl::pipeline`'s `default_depth_stencil_state`.
                 encoder.setDepthStencilState(Some(&bound.depth_stencil));
             }
             self.applied_pipeline = Some(bound);
@@ -677,10 +678,11 @@ impl<'a> RenderReplay<'a> {
 /// Makes one recorded command's Metal call.
 ///
 /// Every value here was checked when the seam call arrived — a handle resolved,
-/// a range bounded, a stage mask read off the pipeline layout — so this makes
-/// materializes validated state when a draw consumes it. A check moved here would
-/// report its failure at `end_render_pass` rather than at the call the caller
-/// made, and `crcbl_hal`'s own recorder tests assert on which call failed.
+/// a range bounded, a stage mask read off the pipeline layout — so this decides
+/// nothing: it makes calls, and materializes validated state when a draw
+/// consumes it. A check moved here would report its failure at
+/// `end_render_pass` rather than at the call the caller made, and `crcbl_hal`'s
+/// own recorder tests assert on which call failed.
 fn replay<'a>(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     command: &'a RenderCommand,
@@ -3360,14 +3362,16 @@ mod timestamp_tests {
             eprintln!("timestamp regression: this device has no timestamp counter set");
             return;
         };
+        // Opening, closing, and the independent fragment-start sample.
+        const SAMPLES: usize = 3;
         let desc = MTLCounterSampleBufferDescriptor::new();
         desc.setCounterSet(Some(&set));
         desc.setStorageMode(MTLStorageMode::Shared);
-        // SAFETY: three sample slots, with every index below bounded to 0..3.
-        unsafe { desc.setSampleCount(3) };
+        // SAFETY: `SAMPLES` slots, and every index below is less than it.
+        unsafe { desc.setSampleCount(SAMPLES) };
         let samples = raw
             .newCounterSampleBufferWithDescriptor_error(&desc)
-            .expect("six shared timestamp samples");
+            .expect("shared timestamp samples");
         let writes = PassSamples {
             raw: samples.clone(),
             beginning_of_pass: 0,
@@ -3442,15 +3446,16 @@ mod timestamp_tests {
             commands.commit();
             commands.waitUntilCompleted();
             assert_eq!(commands.status(), MTLCommandBufferStatus::Completed);
-            // SAFETY: the GPU completed and the range covers exactly three slots.
-            let data = unsafe { samples.resolveCounterRange(NSRange::new(0, 3)) }
+            // SAFETY: the GPU completed and the range covers exactly the
+            // `SAMPLES` slots the buffer was created with.
+            let data = unsafe { samples.resolveCounterRange(NSRange::new(0, SAMPLES)) }
                 .expect("resolved samples");
             let bytes = data.to_vec();
             let values: Vec<u64> = bytes
                 .chunks_exact(8)
                 .map(|word| u64::from_ne_bytes(word.try_into().expect("one timestamp")))
                 .collect();
-            assert_eq!(values.len(), 3);
+            assert_eq!(values.len(), SAMPLES);
             assert!(values[1] > values[0], "draw={draw}: {values:?}");
             if draw {
                 assert!(
