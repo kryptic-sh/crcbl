@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`FrameTimings` carries the frame's measured GPU interval, and
+  `--force-geometry` selects a renderer tail exactly.** `FrameTimings` gains
+  `elapsed_nanos: Option<u64>`, the earliest measured pass start to the latest
+  measured pass end, and `None` when the timestamps were incomplete; a struct
+  literal has to name it or take `..Default::default()`. `total_nanos` stays the
+  sum of pass spans, which double-counts overlapping stages. The samples'
+  `--force-geometry` now builds the named tail through
+  `ForwardRenderer::with_scene_on_path` and fails startup with
+  `HalError::UnsupportedFeatures` where the device lacks it, rather than
+  withholding the features that would select a better one; `--force-binding` is
+  a capability ceiling only, and the path rows report the geometry the renderer
+  built and `ArrayPages`.
+
 - **Draw generation's bucket runs share one region the size of the instance
   capacity, so a run's start is decided per frame on the GPU.** Each frame's
   `visible and bucket runs` buffer was `capacity * (1 + buckets)` words — every
@@ -130,6 +143,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **A device names the geometry tail it prefers beside the one it can run.**
+  `Device::preferred_geometry_path` defaults to `DeviceCaps::geometry_path`;
+  `crcbl-mtl` prefers `IndirectPerBatch` over an emulated count draw and over
+  the mesh tail, which measured no faster on an M3 Pro.
+  `ForwardRenderer::with_scene` builds the preferred tail, and
+  `ForwardRenderer::with_scene_on_path` builds exactly the one named, refusing a
+  missing feature before it creates anything. `OffscreenSetup::request_on_path`
+  and `open_on_path` open a builtin forward scene on a named tail,
+  `OffscreenSetup::geometry_path` reports the tail built, and
+  `NullInstance::with_geometry_preference` gives the null backend a preference
+  to test against.
 
 - **`apps/tide`, the water acceptance fixture, at milestone 1: the courtyard
   pool, natively and at `/demos/tide/`.** A gallery of four scenes — open sea,
@@ -1585,6 +1610,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **A frame with no instances records no cull and no scatter pass, and a shadow
+  atlas view records no tonemap and no grid.** Metal opens an encoder for every
+  graph pass and strict validation rejects one ending with no work, so
+  `DrawGen::add_passes` leaves out the `cull` and `draw-scatter` passes when
+  nothing is tested; `DrawGen::MAX_PASSES` is the ceiling. The atlas viewer
+  overwrites every display pixel, so the tonemap and ground grid it would
+  discard are not recorded and `ForwardRenderer::counters` no longer counts
+  their triangles. `mesh_cluster.slang`'s mesh-only bindings move from 9 to 14
+  and 17 to 19 up to 32 to 40, after every binding the shared fragment stage
+  declares, so Metal's dense argument indices agree between the mesh and raster
+  pipelines.
 
 - **A D3D12 adapter with DXR reports the ray-tracing features Vulkan reports for
   the same GPU.** `crcbl-dx12` now reads
