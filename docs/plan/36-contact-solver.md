@@ -17,6 +17,124 @@ and the **collider property block** carrying friction and restitution, which
 `37-materials.md` owns and which does not exist — `crcbl-phys`'s colliders have
 no material field of any kind.
 
+## Decisions from the engine research (2026-09-15)
+
+The user delegated the solver family to research — "do some deep research on the
+best physics engines and make the decisions based on the research" — after
+deciding that physics stays built from scratch and that a physics showcase
+([sample/24-tumble.md](sample/24-tumble.md)) drives it. The brief read Box2D
+v3's and Box3D's source and posts (Erin Catto), Jolt Physics's source and its
+Horizon Forbidden West talk, Rapier 0.35, PhysX 5.6, Avian, Bepu v2, Bullet,
+MuJoCo, Macklin et al.'s _Small Steps_ and Gregorius's contact-creation talks.
+**This section supersedes the sections below where they disagree**, and says
+which.
+
+**The finding that matters most**: Box2D v3, Box3D (June 2026), Rapier 0.35
+(August 2026) and Avian have converged on one design — _islands exist for
+sleeping only, and the awake set is solved as one pool split into persistent
+constraint colours_ whose constraints never share a body. Box2D's own source
+says it in a sentence: "Solver using graph coloring. Islands are only used for
+sleep". Jolt instead rebuilds islands each step, sorts each for determinism and
+splits the large ones; it ships at AAA scale, and it is the runner-up.
+
+1. **Solver: Soft Step, for contacts and joints** — which the section below
+   already names in spirit, now with its parameters written down. Collision runs
+   once per tick; the solver runs **4 substeps**, each with **1 biased iteration
+   and 1 relax iteration**, warm-started from the previous tick, with no
+   convergence loop. Contacts are soft at 30 Hz with damping ratio 10 (static
+   contacts at twice that), push-out capped at 3 m/s; joints at 60 Hz with
+   damping 2; speed capped at 400 m/s and rotation at π/4 per substep.
+   **Restitution is its own pass after the substeps**, above a 1 m/s threshold —
+   Rapier moved it there because speculative contacts damped bounces. A long
+   chain or bridge gets more substeps for its group, not more iterations.
+   _Evidence_: Catto's Solver2D comparison, where Soft Step needs 4 constraint
+   passes for the quality plain PGS reaches in 8; Macklin 2019's substeps over
+   iterations; adoption by Box2D, Box3D, Rapier, Avian and PhysX's TGS.
+   _Declined_: XPBD — Avian left it because deep overlap was explosive, it never
+   truly settled, friction was weaker and collision ran every substep, and was
+   4–6× faster after switching; Catto reports friction and far-from-origin
+   precision failures. Jolt-style PGS with a position solve works but needs 10 +
+   2 iterations.
+2. **Narrow phase: analytic pairs, and SAT for boxes and hulls, with no EPA.**
+   Sphere, capsule and their pairs are analytic. Boxes are hulls: a separating
+   axis test cached per pair, face clipping, reduction to at most four points
+   (deepest, then maximum area, with hysteresis), and **flip-invariant feature
+   IDs** for warm starting. Sphere or capsule against a hull uses GJK on the
+   core shape with a SAT fallback when deep. Friction acts at the manifold's
+   centroid with a twist term, as Box3D and Rapier do. _Declined_: GJK/EPA with
+   convex margins (Jolt, PhysX's PCM) — visible gaps, and warm-start points
+   matched by distance rather than by feature. **Replaces "SAT/GJK-EPA" below.**
+3. **Broadphase: keep the SAH/AVL tree, split and fattened.** A static tree and
+   a dynamic tree, the static one rebuilt after load; fat margins of min(5 cm, ⅛
+   of the extent); a move buffer so only enlarged proxies query; a pair set;
+   persistent contacts created before they touch. The ball pit's churn is an
+   O(log n) insert and remove per ball, which Box3D's rain benchmark exercises
+   the same way.
+4. **Islands, sleeping and parallelism: islands for sleep, colours for
+   solving.** Islands are persistent — merged on a contact beginning, split
+   lazily, the sleepiest one per tick — and sleep as a whole after 0.5 s below
+   0.05 m/s. Awake bodies live in dense arrays and sleeping ones move out. Awake
+   constraints are coloured greedily with per-colour body bitsets, persistently,
+   with an overflow colour. **Order comes from the persistent arrays, never a
+   per-step sort**, and parallel narrow-phase results merge through per-worker
+   bitsets, so `crcbl-jobs` schedules work without deciding its order: the
+   single-threaded Pages build runs the same stages in the same colour order and
+   hashes the same. A body wakes on a contact beginning with an awake body, an
+   applied impulse, a new joint, or **a touching neighbour's removal** (Jolt
+   does not wake on removal, which is a trap to test); **a query does not wake
+   anything**. **Replaces "Islands solve independently → par_for … ordered by
+   lowest entity id … contacts sorted per island" and "a query touching it"
+   below.**
+5. **Continuous collision: speculative contacts for everything, then sweeps for
+   fast bodies.** Contacts are created within four times the linear slop; after
+   the solve, a body that moved more than half its smallest extent sweeps
+   against statics (a bullet flag adds dynamic and kinematic bodies), and lost
+   time is dropped rather than re-solved — single-pass, as Box2D, Jolt and PhysX
+   practice. The existing sphere and capsule sweeps are reused; hulls use GJK
+   conservative advancement. The 10 km/s projectile stays
+   [28-ballistics.md](28-ballistics.md)'s segment test. **Inverts "CCD stays
+   L0/L1's job: fast movers sweep to their TOI, then the solver resolves" below,
+   and [05-physics.md](05-physics.md)'s "TOI baseline, speculative
+   alternative".**
+6. **Joints: impulse joints in the same solver** — revolute, spherical with cone
+   and twist limits, distance and rope, weld, prismatic; limits, motors,
+   breakable by impulse; capsule ragdolls, which is
+   [35-ragdolls.md](35-ragdolls.md)'s simplified server ragdoll. _Declined_:
+   reduced-coordinate multibodies — tree-only (a bridge needs loop-closing
+   constraints anyway), slow to add and remove, no joint forces for breaking,
+   and a second solver.
+7. **Precision: f64 positions, and a proposed f32 solver interior at the last
+   rung — pending the user's sign-off.** Body positions stay f64 in sector-local
+   space: f32 resolves only 0.125 m at a 2²⁰ m sector's edge. The solver already
+   works on deltas and anchors relative to each body, so its interior
+   (velocities, deltas, impulses, effective masses) can be f32. The argument for
+   switching at rung 6 is width: WebAssembly's SIMD offers two f64 lanes against
+   four f32 lanes, Jolt measured a naive all-double build at over 2× slower
+   against 5–10% for its boundary design, and Box2D reports "a few percent". f32
+   is exactly as deterministic as f64; only the hash differs, so every target
+   uses one precision. **This amends [05-physics.md](05-physics.md)'s locked
+   "f64" line**, and it is recorded as a decision rather than taken; the
+   runner-up is f64 on two lanes, kept if an A/B on the ball pit in the browser
+   shows no material gap.
+8. **Data layout: dense and generational, not hash maps.** `PhysicsSystem` keeps
+   bodies and transforms in hash maps keyed by entity and sorts the keys each
+   step (`crates/crcbl-phys/src/system.rs`), which cannot carry a contact graph
+   or a wide solve. The target is Box3D's: generational body ids mapped to (set,
+   index), the entity map only at the ECS boundary; a cold body record and a hot
+   body state; contacts in a persistent pooled array with per-body edge lists
+   and a colour index; constraints prepared each tick into per-colour
+   struct-of-arrays blocks whose scalar path does the same per-lane arithmetic,
+   so scalar and SIMD builds hash the same, as Box2D's CI proves. Hashing
+   canonicalises −0.0 and NaN; no `mul_add`, no relaxed SIMD.
+9. **Tests grow to the benchmarks' size.** The regression pyramid's base is 20
+   in CI and 100 (5050 boxes) as the benchmark, matching Box2D's and Box3D's
+   large pyramid; energy never rises; penetration stays under the slop; the hash
+   is equal across thread counts, SIMD and scalar, native and wasm.
+
+**Measured elsewhere, for pricing** (Box3D's benchmarks, a Ryzen 7950X, 60 Hz, 4
+substeps): the 5050-box pyramid at about 10.4 ms per step on one SSE2 thread, 25
+ms scalar, and 1.7 ms on eight threads.
+
 ## Algorithm: substepped sequential impulses
 
 The Catto/Box2D lineage, in its modern (soft-constraint, substepped) form — the
@@ -131,15 +249,22 @@ structurally:
 - **Sleeping**: an idle pile consumes ~zero solver time and wakes correctly on
   contact, impulse, and query.
 
-## Delivery (wave 2 — before ragdolls, which consume it)
+## Delivery (revised 2026-09-15: rungs, each with the scene that proves it)
 
-1. Mass properties, body kinds, manifold generation, contact IDs.
-2. Substepped sequential-impulse solver with soft constraints + warm starting;
-   friction/restitution from materials.
-3. Islands + deterministic ordering + `par_for` + sleeping.
-4. `KineticContact` emission from solver impulses (completes 28's contact half).
-5. L3 joints (fixed/hinge/cone/6-DOF) + limits/motors/breakable.
-6. Debug draw, profiler rows, stability suites.
+Each rung lands with a scene in [sample/24-tumble.md](sample/24-tumble.md) and
+the counters that scene displays. Sleep follows contacts and boxes rather than
+arriving with parallel islands; SIMD and parallelism come last.
+
+| Rung            | Scope                                                                                                                                                                                                                                              | Proving scene                                                                             | Counters                                                                                                                                        |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0 Spin          | Inertia tensors, quaternion integration, gyroscopic torque; dense solver sets replacing the hash maps; friction and restitution from materials ([37-materials.md](37-materials.md)); pinned trigonometry for the simulation                        | a zero-g tumbling T-handle; a box dropped flat                                            | angular momentum and energy drift, step time, hash                                                                                              |
+| 1 Pachinko      | Analytic sphere and capsule manifolds against static boxes and planes; split trees, move buffer, pair set, persistent contacts; scalar Soft Step with warm starting, speculative contacts and the restitution pass; `KineticContact` from impulses | the obstacle wall with falling balls; a thousand-ball pit                                 | bodies, pairs, contacts begun and ended; broadphase, narrow-phase and solver time; worst penetration; bounce ratio                              |
+| 2 Tower         | Boxes and hulls: cached SAT, clipping, four-point reduction, feature ids; GJK with SAT fallback for spheres and capsules against hulls; centroid and twist friction                                                                                | a 20-box column, a base-20 pyramid, dominoes, cubes on the wall                           | points per manifold, persisted-id ratio, top-box drift                                                                                          |
+| 3 Settle        | Persistent islands, lazy splitting, island sleep, the wake rules                                                                                                                                                                                   | every earlier scene settles to zero awake bodies                                          | islands, awake and sleeping bodies, solver time at rest                                                                                         |
+| 4 Bullets       | Fast-body sweeps against statics, the bullet flag, dropped time                                                                                                                                                                                    | a cannon at thin plates and a brick wall; a fast spinning plank                           | sweep candidates, hits, tunnels through a sensor behind the wall                                                                                |
+| 5 Bridge        | The joint framework and types, limits, motors, breaking, extra substeps per group; a static triangle mesh with active-edge handling before the stairs                                                                                              | a gapped Newton's cradle, a rope and chain bridge with crates, capsule ragdolls on stairs | joint error, bridge sag, cradle momentum in and out, broken joints                                                                              |
+| 6 Pit           | Persistent colouring with overflow, the wide solver kernel with its scalar twin, staged `crcbl-jobs` execution, contact recycling                                                                                                                  | the overflowing ball pit with its despawn radius, and cube rain                           | spawns and despawns per second, colours, overflow, stage times, threads, the hash across threads and targets, most bodies inside a 16.7 ms tick |
+| 7 Pool and gale | Buoyancy ([55-water.md](55-water.md)) and wind ([56-wind.md](56-wind.md)) force providers                                                                                                                                                          | crates and balls in a pool under gusts                                                    | submerged fraction, depth against Archimedes, drag                                                                                              |
 
 ## Risks
 

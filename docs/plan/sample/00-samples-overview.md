@@ -32,31 +32,33 @@ built second. Every sample starts only when all its engine dependencies exist,
 ships with spatial audio, and publishes as a wasm demo on the GitHub Pages site
 — viewer included, since 2026-08-24.
 
-| #   | Sample                       | Roadmap gate                 | Proves                                                                                                             |
-| --- | ---------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| 01  | [breakout](01-breakout.md)   | S1 (P0–P4A)                  | 2D path, minimal ECS, in-memory server loop, game UI, swept-sphere CCD, panning audio                              |
-| 12  | [flappy](12-flappy.md)       | S1B (needs nothing past P4A) | That the engine has no breakout-shaped assumptions; procedural churn, one-input latency, seeded determinism        |
-| 02  | [asteroids](02-asteroids.md) | S2 (P5–P6)                   | Entity churn, generational ids, broadphase churn, segment CCD, first forces                                        |
-| 03  | [horde](03-horde.md)         | S3 (P7–P8)                   | GPU-driven renderer at scale, flat CPU cost claim, 10k-body queries                                                |
-| 04  | [hud](04-hud.md)             | P4 skeleton → P10 done       | Pure UI demo: CSS HUD + widget gallery + themes; the UI system's living fixture                                    |
-| 05  | [viewer](05-viewer.md)       | S4 (P9–P10)                  | Asset pipeline as a _usable tool_, camera, inspector panels                                                        |
-| 06  | [orbit](06-orbit.md)         | S5 (P11)                     | Physics acceptance test: sector space, orbits, drag, CCD, on-rails handoff                                         |
-| 07  | [towers](07-towers.md)       | S6 (P12–P13)                 | **Flagship**: everything — editor content, co-op multiplayer, browser client, esports audio cues                   |
-| 08  | [arena](08-arena.md)         | post-MVP                     | Client prediction driver — pulls netcode forward; audio grammar under fire                                         |
-| 09  | [puppet](09-puppet.md)       | post-MVP wave 1              | Skeletal animation acceptance test; shadows + device-swap input showcase                                           |
-| 10  | [sparks](10-sparks.md)       | post-MVP wave 1              | VFX gallery + live workbench; GPU particle pipeline fixture                                                        |
-| 11  | [breach](11-breach.md)       | FPS-era                      | **FPS flagship**: web slice first, then native 5v5 comp — prediction/lagcomp, ballistics, FP rendering, integrity  |
-| 13  | [lantern](13-lantern.md)     | S4B (P7B–P7C)                | Lighting acceptance: the same scene under `RayTraced` and `Rasterised`, every effect, both paths side by side      |
-| 14  | [quarry](14-quarry.md)       | S4C (P7)                     | Geometry acceptance: meshlet clusters, QEM cluster LOD, and all three `GeometryPath` values on one scene           |
-| 15  | [shard](15-shard.md)         | S6B → wave 2                 | **MMO flagship**: web slice first, then a native persistent world — sector streaming, interest management at scale |
-| 16  | [bracket](16-bracket.md)     | P13                          | Matchmaking + rating + ranked auth as a service, with no game attached; the only genuinely networked web client    |
-| 17  | [mirrors](17-mirrors.md)     | S4D (P7B–P7C)                | Reflection ladder: every reflection technique the engine ships, compared side by side from one frame               |
-| 18  | [sundial](18-sundial.md)     | S4D (P7B–P7C)                | Shadow ladder: every filter, a moving sun, and somewhere for each named shadow artefact to appear                  |
-| 19  | [alcove](19-alcove.md)       | S4D (P7B–P7C)                | AO ladder: every occlusion technique, an AO-only view, and flat surfaces that hide nothing                         |
-| 20  | [options](20-options.md)     | S4E (P10)                    | Settings acceptance: the whole catalogue on a screen, saved and reloaded, on desktop and in a browser tab          |
-| 21  | [tide](21-tide.md)           | S4F (P7E)                    | Water acceptance: ocean, lake, river, waterfall, shore, pool and underwater, floated by the physics it draws       |
-| 22  | [meadow](22-meadow.md)       | S4G (P7D, P7F)               | Grass and wind acceptance: cards, blades and shells under one two-layer wind that also pushes bodies               |
-| 23  | [mane](23-mane.md)           | S4H (P7G)                    | Hair acceptance: fur, cards on simulated chains and strands, driven by the motion of what they hang from           |
+| #   | Sample                       | Roadmap gate                 | Proves                                                                                                                             |
+| --- | ---------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 01  | [breakout](01-breakout.md)   | S1 (P0–P4A)                  | 2D path, minimal ECS, in-memory server loop, game UI, swept-sphere CCD, panning audio                                              |
+| 12  | [flappy](12-flappy.md)       | S1B (needs nothing past P4A) | That the engine has no breakout-shaped assumptions; procedural churn, one-input latency, seeded determinism                        |
+| 02  | [asteroids](02-asteroids.md) | S2 (P5–P6)                   | Entity churn, generational ids, broadphase churn, segment CCD, first forces                                                        |
+| 03  | [horde](03-horde.md)         | S3 (P7–P8)                   | GPU-driven renderer at scale, flat CPU cost claim, 10k-body queries                                                                |
+| 04  | [hud](04-hud.md)             | P4 skeleton → P10 done       | Pure UI demo: CSS HUD + widget gallery + themes; the UI system's living fixture                                                    |
+| 05  | [viewer](05-viewer.md)       | S4 (P9–P10)                  | Asset pipeline as a _usable tool_, camera, inspector panels                                                                        |
+| 06  | [orbit](06-orbit.md)         | S5 (P11)                     | Physics acceptance test: sector space, orbits, drag, CCD, on-rails handoff                                                         |
+| 07  | [towers](07-towers.md)       | S6 (P12–P13)                 | **Flagship**: everything — editor content, co-op multiplayer, browser client, esports audio cues                                   |
+| 08  | [arena](08-arena.md)         | post-MVP                     | Client prediction driver — pulls netcode forward; audio grammar under fire                                                         |
+| 09  | [puppet](09-puppet.md)       | post-MVP wave 1              | Skeletal animation acceptance test; shadows + device-swap input showcase                                                           |
+| 10  | [sparks](10-sparks.md)       | post-MVP wave 1              | VFX gallery + live workbench; GPU particle pipeline fixture                                                                        |
+| 11  | [breach](11-breach.md)       | FPS-era                      | **FPS flagship**: web slice first, then native 5v5 comp — prediction/lagcomp, ballistics, FP rendering, integrity                  |
+| 13  | [lantern](13-lantern.md)     | S4B (P7B–P7C)                | Lighting acceptance: the same scene under `RayTraced` and `Rasterised`, every effect, both paths side by side                      |
+| 14  | [quarry](14-quarry.md)       | S4C (P7)                     | Geometry acceptance: meshlet clusters, QEM cluster LOD, and all three `GeometryPath` values on one scene                           |
+| 15  | [shard](15-shard.md)         | S6B → wave 2                 | **MMO flagship**: web slice first, then a native persistent world — sector streaming, interest management at scale                 |
+| 16  | [bracket](16-bracket.md)     | P13                          | Matchmaking + rating + ranked auth as a service, with no game attached; the only genuinely networked web client                    |
+| 17  | [mirrors](17-mirrors.md)     | S4D (P7B–P7C)                | Reflection ladder: every reflection technique the engine ships, compared side by side from one frame                               |
+| 18  | [sundial](18-sundial.md)     | S4D (P7B–P7C)                | Shadow ladder: every filter, a moving sun, and somewhere for each named shadow artefact to appear                                  |
+| 19  | [alcove](19-alcove.md)       | S4D (P7B–P7C)                | AO ladder: every occlusion technique, an AO-only view, and flat surfaces that hide nothing                                         |
+| 20  | [options](20-options.md)     | S4E (P10)                    | Settings acceptance: the whole catalogue on a screen, saved and reloaded, on desktop and in a browser tab                          |
+| 21  | [tide](21-tide.md)           | S4F (P7E)                    | Water acceptance: ocean, lake, river, waterfall, shore, pool and underwater, floated by the physics it draws                       |
+| 22  | [meadow](22-meadow.md)       | S4G (P7D, P7F)               | Grass and wind acceptance: cards, blades and shells under one two-layer wind that also pushes bodies                               |
+| 23  | [mane](23-mane.md)           | S4H (P7G)                    | Hair acceptance: fur, cards on simulated chains and strands, driven by the motion of what they hang from                           |
+| 24  | [tumble](24-tumble.md)       | S4I (P8B)                    | Physics acceptance and benchmark: the obstacle wall, the overflowing ball pit, stacks, bullets, joints, each scene one solver rung |
+| 25  | [relief](25-relief.md)       | S4J (P7H)                    | Tessellation acceptance: smooth silhouettes and displacement on every path, density drawn, no cracks                               |
 
 01–06 stay tiny (days, not weeks, each; hud is continuous — a P4 skeleton that
 grows until P10). 07 is the MVP-era flagship and long-lived dogfood. 08 exists
@@ -97,6 +99,14 @@ rather than one sample per body of water or per style of grass, because the
 scenes share the system under test and would otherwise each repeat every
 registry a new demo joins. Tide has one: `apps/tide` was built at milestone 1 on
 2026-09-15 and ships at `/demos/tide/`; meadow and mane have none.
+
+24 and 25 were planned the same day. **Tumble is the physics engine's acceptance
+suite and benchmark**, and the demand driver for
+[../36-contact-solver.md](../36-contact-solver.md): each of its scenes is one
+solver rung, and a scene the engine cannot produce yet ships labelled as the gap
+it is. **Relief proves tessellation**
+([../59-tessellation.md](../59-tessellation.md)) on every geometry path,
+including the browser's, where there is no tessellation stage at all.
 
 **Where the ladder stands.** Every sample on it except arena (08) and mirrors
 (17) has an `apps/` crate that builds for `wasm32`, and every one of them but

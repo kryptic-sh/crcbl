@@ -37,6 +37,7 @@ churned in a move commit.
 | Water: the surface pass, waves, foam, underwater                        | [55-water.md](55-water.md)                         |
 | Grass and vegetation wind: cards, blades, shells, trees                 | [57-grass.md](57-grass.md)                         |
 | Hair and fur: shells, cards, strands and their shading                  | [58-hair.md](58-hair.md)                           |
+| Tessellation: baked displacement, run-time pattern tables               | [59-tessellation.md](59-tessellation.md)           |
 
 **What this engine does not do at all** is a different question from how well it
 does these, and it is answered in one place:

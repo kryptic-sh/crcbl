@@ -39,6 +39,51 @@ optional-extension diagnostics should be deduplicated per asset and extension so
 multiple scene/view imports do not flood the log. Recheck the Mossberg asset in
 EW after the engine implementation lands, then update EW's pinned revision.
 
+## Physics and tessellation: planned, with decisions owed (2026-09-15)
+
+Both are researched and planned, nothing built:
+[36-contact-solver.md](plan/36-contact-solver.md)'s decisions and rung table
+with [tumble](plan/sample/24-tumble.md), and
+[59-tessellation.md](plan/59-tessellation.md) with
+[relief](plan/sample/25-relief.md). What stays open:
+
+- **Decision: an f32 solver interior at rung 6.** The research recommends body
+  positions in f64 and the solver's velocities, deltas and impulses in f32 once
+  it goes wide, because WebAssembly's SIMD has two f64 lanes against four f32
+  lanes and Jolt measured a naive all-double build at over twice the cost. It
+  amends [05-physics.md](plan/05-physics.md)'s locked f64 line; the runner-up is
+  f64 on two lanes if an A/B in the browser shows no material gap.
+- **Decision: pinned trigonometry for the simulation**, which rung 0 depends on.
+  The 2026-09-06 decision to use the `libm` crate is recorded and unbuilt; a
+  constructed f64 `sin` and `cos` on `crcbl_shaders::trig`'s pattern is the
+  alternative that adds no dependency.
+- **Physics plan errors found by the survey, not yet corrected in
+  `05-physics.md`**: its "SoA" storage is hash maps sorted each step; its
+  120–240 Hz substeps are not implemented (`PhysicsSystem::tick` steps once);
+  its per-sector fat-AABB tree is one tree with exact bounds; breakout's
+  "contact normal response" is game code, against sample rule 9; its libm
+  question was decided on 2026-09-06; and `crcbl sim` registers no
+  `PhysicsSystem`, so the determinism killer test it names cannot run.
+  `dynamics.rs`'s `thousand_body_substep_count_preserves_determinism` asserts
+  only a non-zero hash, which cannot fail.
+- **Decision: a height page in materials** — a 16-bit single-channel texture
+  array and a `GpuMaterial` stride change, golden-visible.
+- **Decision: read `KHR_materials_displacement` as an unofficial glTF
+  extension** (KhronosGroup/glTF issue 948, open since 2017; NVIDIA's sample
+  reads it), or take height from material instances only.
+- **Decision: parallax occlusion mapping stays refused**, so relief has no
+  parallax column unless the refusal in [44-lighting.md](plan/44-lighting.md) is
+  lifted.
+- **Asset sources for relief**: Poly Haven serves CC0 files individually but its
+  terms ask for a User-Agent and forbid scraping; ambientCG serves CC0 zips from
+  an unpinned CDN; Khronos's own height data (`terrain_heightmap_r16.ktx`) is
+  Apache-2.0, not CC0; no Khronos glTF sample asset carries a height map.
+- **The ~2 px triangle floor** [25-lod.md](plan/25-lod.md) specifies was not
+  found implemented in the cull or draw-generation shaders, and tessellation
+  rests on it.
+- **`03-gpu-driven-rendering.md` §3.2 says the material sampler is nearest**;
+  `crates/crcbl-render/src/material_table.rs` says trilinear.
+
 ## What tide's milestone 1 shipped without (2026-09-15)
 
 - **Refraction ghosts in the courtyard**: a second image of the deep end's lane
