@@ -17756,8 +17756,8 @@ joint's index on a skeleton. Nothing shipping.
 
 ## The Windows lavapipe vk e2e job reds in bursts of readback timeouts (2026-09-06)
 
-**Five times now, on five unrelated commits, and every time a rerun of the one
-job was green.** `vk e2e (lavapipe, windows)` fails a handful of
+**Six times now, on six unrelated commits, and every time a rerun of the one job
+was green.** `vk e2e (lavapipe, windows)` fails a handful of
 `crcbl-vk::vk_e2e mesh::*` tests with `harness.rs`'s readback deadline — "the
 196608-byte readback was still Pending after 30.0s, past the 30s this polls for"
 — while the same suite passes on the Linux lavapipe leg of the same run and on
@@ -17813,6 +17813,14 @@ readback's own state at the deadline — the fence status, whether the copy's
 command buffer was submitted before or after the frame's, and the destination
 buffer's first bytes — printed by the harness beside the panic; that is the next
 step, and until it is in the answer is still `gh run rerun <id> --failed`.
+
+**The sixth burst, on `3750aec` (2026-09-15), is the same two tests again** —
+`the_gpu_descends_the_dag_to_the_cut_the_host_rule_says` and
+`the_gpu_descends_a_scaled_instance_at_the_size_it_draws`, each panicking at the
+30 s deadline with the destination still holding the harness's fill — in a suite
+nextest timed at 177.8 s with the other 61 tests green, on a commit that touched
+only `crcbl-ui`. The same two tests in two of six bursts is where the harness's
+fence print should look first.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
