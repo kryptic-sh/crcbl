@@ -3,6 +3,24 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## Import glTF specular and IOR materials (2026-09-15)
+
+EW's `models/range/mossberg-590-placeholder.gltf` declares the optional
+`KHR_materials_specular` and `KHR_materials_ior` extensions. `crcbl-scene` loads
+the remaining document but ignores both extensions and emits the same warning
+each time EW imports the asset, so the authored dielectric response does not
+reach the renderer.
+
+Implement both extensions through the existing glTF material path: parse the
+specular factor, specular colour factor and their textures, parse the index of
+refraction, carry those values through the renderer's material records, and
+apply them consistently in every lit backend shader. Preserve the glTF defaults
+when an extension or property is absent. Add a synthesized importer fixture and
+a rendered material comparison that fail when each value is ignored. Unsupported
+optional-extension diagnostics should be deduplicated per asset and extension so
+multiple scene/view imports do not flood the log. Recheck the Mossberg asset in
+EW after the engine implementation lands, then update EW's pinned revision.
+
 ## Water, wind, grass and hair: planned, nothing built (2026-09-15)
 
 Four engine topics and three fixtures were researched and planned at the user's
