@@ -263,7 +263,8 @@ pub use stack::{
     ContactShadowsPass, ReflectionsPass, ShadowsPass, StackError, VolumetricFogPass,
 };
 pub use texture::{
-    UploadedTexture, upload_texture, upload_texture_layers, upload_texture_mip_layers,
+    ClearedTextureDesc, TexturePatch, UploadedTexture, upload_cleared_texture, upload_texture,
+    upload_texture_layers, upload_texture_mip_layers,
 };
 pub use timing::{FrameTimings, MAX_TIMED_PASSES, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};

@@ -1552,6 +1552,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **shard's browser build is back under its wasm heap ceiling, and no demo sends
+  empty UI atlas pages through the heap.** `UiRenderer::new` built the 1024²
+  RGBA image atlas page and both glyph pages from host zeroes, padded a second
+  copy and wrote it to a staging buffer; on `crcbl-webgpu` those bytes land on
+  the start-up command stream, which the wasm heap keeps. The image page alone
+  doubled that stream's buffer and took shard's peak heap from 18.4 MiB to 41.0
+  MiB, past `WASM_HEAP_CEILING`, which kept the Pages deploy red. The pages are
+  now zeroed on the GPU by the new `crcbl_render::upload_cleared_texture`
+  (`ClearedTextureDesc`, `TexturePatch`), with only the menu art staged; shard
+  peaks at 18.6 MiB.
 - **D3D12 shaders read and write their storage buffers on hardware.**
   `crcbl-dx12` bound every storage buffer through a raw view (`R32_TYPELESS`,
   `D3D12_BUFFER_SRV_FLAG_RAW`, stride zero), which is `ByteBuffer`'s shape;

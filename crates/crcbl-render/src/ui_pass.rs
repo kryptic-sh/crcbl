@@ -31,8 +31,10 @@
 //! Beside the glyph atlas the pass binds a second page: the
 //! [`ImageAtlas`] this renderer owns, `Rgba8UnormSrgb` and sampled through a
 //! linear sampler, which is what [`DrawList::image`] and
-//! [`DrawList::nine_slice`] draw from. The whole page is uploaded once at
-//! creation, like the glyphs. An image registered after that — through
+//! [`DrawList::nine_slice`] draw from. The page is built with the renderer,
+//! like the glyphs, through [`upload_cleared_texture`]: zeroed on the GPU, with
+//! only the menu art's rectangle staged from the host. An image registered
+//! after that — through
 //! [`images_mut`](UiRenderer::images_mut) — marks a rectangle of the page
 //! dirty, and the next [`begin_frame`](UiRenderer::begin_frame) stages just that
 //! rectangle into a host-visible buffer. [`add_passes`](UiRenderer::add_passes)
@@ -122,7 +124,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::counters::FrameCounters;
 use crate::graph::{ImageId, ImportedImage, InitialClaim, RenderGraph};
-use crate::texture::{UploadedTexture, stage_region, upload_texture, upload_texture_layers};
+use crate::texture::{
+    ClearedTextureDesc, TexturePatch, UploadedTexture, stage_region, upload_cleared_texture,
+    upload_texture,
+};
 
 /// The constant block matching `ui.slang`'s `UiConstants`.
 ///
@@ -326,26 +331,42 @@ impl UiRenderer {
         })?;
         rollback.samplers.push(atlas_sampler);
 
-        // The image atlas: the menu's art registered, then the whole page, once,
-        // at start-up — the same staging path as the glyphs, and legal here for
-        // the same reason. What changes later is copied inside a frame; see the
-        // module docs.
+        // The image atlas: the menu's art registered, then the page created once,
+        // at start-up — zeroed on the GPU with only the registered rectangle
+        // staged from the host, and legal here for the same reason as the glyphs.
+        // What changes later is copied inside a frame; see the module docs.
         let mut images = ImageAtlas::new();
         let menu_skin = crate::menu::menu_skin(&mut images).map_err(|error| {
             HalError::InvalidDescriptor(format!("ui image atlas: the menu art: {error}"))
         })?;
-        let image_page = upload_texture(
+        // Taken rather than read: the rectangle is on the GPU once the page is,
+        // so nothing is owed.
+        let registered = images.take_dirty().map(|rect| (rect, images.region(rect)));
+        let patches: Vec<TexturePatch<'_>> = registered
+            .iter()
+            .map(|(rect, pixels)| TexturePatch {
+                layer: 0,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+                pixels,
+            })
+            .collect();
+        let image_page = upload_cleared_texture(
             device,
             queue,
-            "ui image atlas",
-            IMAGE_FORMAT,
-            PAGE_SIZE,
-            PAGE_SIZE,
-            images.pixels(),
+            &ClearedTextureDesc {
+                label: "ui image atlas",
+                format: IMAGE_FORMAT,
+                width: PAGE_SIZE,
+                height: PAGE_SIZE,
+                layers: 1,
+                view_type: ImageViewType::D2,
+                patches: &patches,
+            },
         )?;
         rollback.textures.push(image_page);
-        // The whole page is on the GPU now, so nothing is owed.
-        images.take_dirty();
         // Linear, for the shader's sharp-bilinear bend — see `ui.slang`.
         let image_sampler = device.create_sampler(&SamplerDesc {
             label: Some("ui image atlas"),
@@ -357,18 +378,22 @@ impl UiRenderer {
         })?;
         rollback.samplers.push(image_sampler);
 
-        // The glyph pages: every page the atlas may open, empty, once. What the
-        // atlas rasterises later is copied inside a frame; see the module docs.
+        // The glyph pages: every page the atlas may open, empty, once — zeroed on
+        // the GPU rather than sent from the host. What the atlas rasterises later
+        // is copied inside a frame; see the module docs.
         let glyphs = GlyphAtlas::new(GLYPH_PAGE_SIZE, GLYPH_MAX_PAGES, GLYPH_RASTER_BUDGET);
-        let empty_page = vec![0u8; GLYPH_PAGE_SIZE as usize * GLYPH_PAGE_SIZE as usize];
-        let glyph_pages = upload_texture_layers(
+        let glyph_pages = upload_cleared_texture(
             device,
             queue,
-            "ui glyph pages",
-            Format::R8Unorm,
-            GLYPH_PAGE_SIZE,
-            GLYPH_PAGE_SIZE,
-            &[empty_page.as_slice(); GLYPH_MAX_PAGES],
+            &ClearedTextureDesc {
+                label: "ui glyph pages",
+                format: Format::R8Unorm,
+                width: GLYPH_PAGE_SIZE,
+                height: GLYPH_PAGE_SIZE,
+                layers: GLYPH_MAX_PAGES as u32,
+                view_type: ImageViewType::D2Array,
+                patches: &[],
+            },
         )?;
         rollback.textures.push(glyph_pages);
 
@@ -2129,35 +2154,123 @@ mod tests {
         list
     }
 
-    /// **The page goes up whole at start-up, as four bytes a texel**, beside the
-    /// glyph atlas's one.
+    /// Every buffer write the recorder saw, as `(buffer, bytes)`, in order.
+    fn buffer_writes(recorder: &crcbl_hal::null::Recorder) -> Vec<(BufferHandle, usize)> {
+        recorder
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                crcbl_hal::null::Event::BufferWritten { buffer, len, .. } => Some((buffer, len)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The rectangle the menu art dirties on an empty page: what start-up has to
+    /// put on the image atlas and nothing more.
+    fn menu_art_rect() -> crcbl_ui::image::TexelRect {
+        let mut images = ImageAtlas::new();
+        crate::menu::menu_skin(&mut images).expect("the menu art fits an empty page");
+        images
+            .dirty()
+            .expect("registering the menu art dirtied the page")
+    }
+
+    /// Whether `buffer` is zeroed across at least `bytes` by a recorded clear
+    /// that comes before the first command naming it as a copy source.
+    fn cleared_before_copied(
+        commands: &[crcbl_hal::null::Command],
+        buffer: BufferHandle,
+        bytes: u64,
+    ) -> bool {
+        use crcbl_hal::null::Command;
+
+        let cleared = commands.iter().position(|command| {
+            matches!(command, Command::ClearBuffer { buffer: cleared, offset: 0, size }
+                if *cleared == buffer && *size >= bytes)
+        });
+        let copied = commands.iter().position(
+            |command| matches!(command, Command::CopyBufferToImage(copy) if copy.buffer == buffer),
+        );
+        matches!((cleared, copied), (Some(cleared), Some(copied)) if cleared < copied)
+    }
+
+    /// **The page is created whole at start-up, zeroed on the GPU, and only the
+    /// menu art crosses from the host** — as four bytes a texel, into the
+    /// rectangle it was registered at.
     #[test]
-    fn the_image_atlas_is_an_rgba_page_uploaded_whole_at_start_up() {
+    fn the_image_atlas_page_is_zeroed_on_the_gpu_and_only_the_art_is_staged() {
         let (recorder, device, queue) = open_recorded();
         let renderer =
             UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
 
-        let page = PAGE_SIZE as usize;
-        let writes: Vec<usize> = recorder
-            .events()
+        let commands = recorder.commands();
+        let copies: Vec<_> = image_copies(&commands)
             .into_iter()
-            .filter_map(|event| match event {
-                crcbl_hal::null::Event::BufferWritten { len, .. } => Some(len),
-                _ => None,
-            })
+            .filter(|copy| copy.image == renderer.image_page.image)
             .collect();
+        let [whole, art] = copies[..] else {
+            panic!("expected the zeroed page and then the art, got {copies:?}");
+        };
+        assert_eq!(whole.image_extent, Extent3d::d2(PAGE_SIZE, PAGE_SIZE));
+        assert_eq!(whole.image_offset, Offset3d { x: 0, y: 0, z: 0 });
+        let page_bytes = u64::from(PAGE_SIZE) * u64::from(PAGE_SIZE) * 4;
         assert!(
-            writes.contains(&(page * page * 4)),
-            "no staging write the size of an RGBA page in {writes:?}"
+            cleared_before_copied(&commands, whole.buffer, page_bytes),
+            "the whole-page copy must read a buffer zeroed first, in {commands:?}"
         );
-        let copies = image_copies(&recorder.commands());
+
+        let rect = menu_art_rect();
+        assert_eq!(art.image_extent, Extent3d::d2(rect.width, rect.height));
+        assert_eq!(
+            (art.image_offset.x, art.image_offset.y),
+            (rect.x as i32, rect.y as i32)
+        );
+        let writes = buffer_writes(&recorder);
         assert!(
-            copies
+            writes.iter().all(|(buffer, _)| *buffer != whole.buffer),
+            "the zeroed buffer is never written from the host: {writes:?}"
+        );
+        assert_eq!(
+            writes
                 .iter()
-                .any(|copy| copy.image_extent == Extent3d::d2(PAGE_SIZE, PAGE_SIZE)),
-            "no copy of the whole page in {copies:?}"
+                .filter(|(buffer, _)| *buffer == art.buffer)
+                .map(|(_, len)| *len)
+                .sum::<usize>(),
+            rect.width as usize * rect.height as usize * 4,
+            "the art's staging is its own rectangle at four bytes a texel"
         );
         assert_eq!(renderer.images().dirty(), None, "the page owes nothing");
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **Construction writes nothing the GPU could zero itself**: the built-in
+    /// font's bitmap and the menu art's rectangle, and not a byte of either
+    /// empty page.
+    ///
+    /// What it guards is the wasm heap. On `crcbl-webgpu` every byte written
+    /// here is a byte of the start-up frame's command stream, which the heap
+    /// holds and never gives back — and the whole RGBA image page written from
+    /// the host, with its padded copies, took shard's peak heap from 18.4 MiB to
+    /// 41.0 MiB when the image atlas landed, over the browser gate's
+    /// `WASM_HEAP_CEILING`.
+    #[test]
+    fn construction_writes_only_the_font_bitmap_and_the_menu_art() {
+        let (recorder, device, queue) = open_recorded();
+        let renderer =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+
+        let (_, _, font) = FontAtlas::built_in().glyph_bitmap();
+        let rect = menu_art_rect();
+        let art = rect.width as usize * rect.height as usize * 4;
+        let writes = buffer_writes(&recorder);
+        assert_eq!(
+            writes.iter().map(|(_, len)| *len).sum::<usize>(),
+            font.len() + art,
+            "construction wrote {writes:?}; the font bitmap is {} bytes and the menu art {art}",
+            font.len()
+        );
         renderer.destroy(device.as_ref());
         recorder.assert_valid();
     }
@@ -2323,16 +2436,20 @@ mod tests {
     }
 
     /// **Every page the atlas may open goes up empty at start-up**, one R8 copy
-    /// per layer of one image.
+    /// per layer of one image, each from a buffer zeroed on the GPU rather than
+    /// written from the host.
     #[test]
     fn the_glyph_pages_are_every_layer_uploaded_empty_at_start_up() {
         let (recorder, device, queue) = open_recorded();
         let renderer =
             UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
-        let page = GLYPH_PAGE_SIZE as usize;
-        let layers: Vec<u32> = image_copies(&recorder.commands())
+        let commands = recorder.commands();
+        let copies: Vec<_> = image_copies(&commands)
             .into_iter()
             .filter(|copy| copy.image == renderer.glyph_pages.image)
+            .collect();
+        let layers: Vec<u32> = copies
+            .iter()
             .map(|copy| {
                 assert_eq!(
                     copy.image_extent,
@@ -2343,18 +2460,19 @@ mod tests {
             })
             .collect();
         assert_eq!(layers, (0..GLYPH_MAX_PAGES as u32).collect::<Vec<_>>());
-        let writes: Vec<usize> = recorder
-            .events()
-            .into_iter()
-            .filter_map(|event| match event {
-                crcbl_hal::null::Event::BufferWritten { len, .. } => Some(len),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            writes.contains(&(page * page * GLYPH_MAX_PAGES)),
-            "no staging write of every page at one byte a texel in {writes:?}"
-        );
+        let page_bytes = u64::from(GLYPH_PAGE_SIZE) * u64::from(GLYPH_PAGE_SIZE);
+        let writes = buffer_writes(&recorder);
+        for copy in &copies {
+            assert!(
+                cleared_before_copied(&commands, copy.buffer, page_bytes),
+                "layer {} must be copied from a buffer zeroed first, in {commands:?}",
+                copy.image_subresource.base_layer
+            );
+            assert!(
+                writes.iter().all(|(buffer, _)| *buffer != copy.buffer),
+                "the zeroed buffer is never written from the host: {writes:?}"
+            );
+        }
         renderer.destroy(device.as_ref());
         recorder.assert_valid();
     }

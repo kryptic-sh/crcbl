@@ -6895,33 +6895,35 @@ left out:
   wants console, CLI, UI button and autosave timer to be one path; the path
   exists (`Shard::autosave` → `Vault::store`) but only the timer calls it.
 
-### shard's peak wasm heap is measured on one adapter (2026-09-07)
+### shard's wasm heap: the ceiling's own figure is stale (2026-09-16)
 
-`web/demos/shard/main.js` prints a `[MEM] wasm heap:` line on every growth of
-the linear memory and once on its last frame, and `web/tools/browser-e2e.mjs`'s
-`wasmHeap` row holds the last of them against `WASM_HEAP_CEILING` — 32 MiB, set
-against a reading of 11 403 264 bytes (10.9 MiB) taken on this machine's
-hardware adapter and identical on all four page loads of that run.
+`web/demos/shard/main.js` prints `[MEM] wasm heap:` lines and
+`web/tools/browser-e2e.mjs`'s `wasmHeap` row holds the last against
+`WASM_HEAP_CEILING` (32 MiB). Readings now agree across adapters to the byte:
+18.4 MiB at `8892e1a`, 41.0 MiB after `a017a0c` (the regression the GPU-zeroed
+atlas pages fixed) and 18.6 MiB after the fix, on this machine's hardware
+adapter, local SwiftShader and CI's SwiftShader alike.
 
-**Not taken on CI.** The page change is newer than the last Pages run, so no
-`web-e2e-shard` artifact carries a `[MEM]` line yet. The figure should be the
-same — the linear memory holds game state, the CPU side of the zone and the two
-stream buffers, none of it a function of the rasteriser — but that is an
-argument, not a reading. Confirm it off the next Pages run's
-`shard-swiftshader.log`; if it differs, `WASM_HEAP_CEILING` is what moves rather
-than the page.
-
-**`web/engine/wasm-memory.js` is not what does this**, contrary to the entry
-this one replaces. That module decodes the `env.memory` import's declared limits
-out of a `.wasm` binary; its only readers are `web/engine/jobs.js`,
-`web/tools/check-exports.mjs` and `web/tools/worker-gate.mjs`. No demo page
-reads it, and it cannot report a runtime high-water mark — the reading comes
-from `memory.buffer.byteLength` in the page.
-
-**Also unverified: the threaded build.** `web/build.sh --threads` was not run
-against this change, so the `[MEM]` line has only been printed from an artifact
-whose `memory.buffer` is an `ArrayBuffer` rather than a `SharedArrayBuffer`.
-`byteLength` is defined on both, so this is expected to be uneventful.
+- **Decision owed: the ceiling's doc comment and `docs/plan/sample/15-shard.md`
+  argue from 10.9 MiB (2026-09-07), and the build now peaks at 18.6 MiB**, so
+  the ceiling is 1.7× the reading rather than the trebling it describes. The
+  growth from 10.9 to 18.4 MiB between 2026-09-07 and `8892e1a` is not
+  attributed; part of it is the forward renderer's start-up frame, which leaves
+  4 173 166 bytes on the command stream in a 7 536 640-byte buffer the stream
+  never releases. Options: attribute and cut it, or restate the comment and keep
+  or move the ceiling.
+- **`ImageAtlas` keeps a 4 MiB CPU page and `GlyphAtlas` 1 MiB per open page for
+  the renderer's life**, pixels the GPU already holds. `ImageAtlas::pixels`
+  exists so `region()` can stage one union dirty rectangle. It does not move
+  shard's peak today (the page fits in freed space); dropping it means queuing
+  uploads per registration, which changes `ui_pass`'s `stage_images` and
+  `mark_dirty` and the `image.rs` tests.
+- **Not verified: the threaded build** (`web/build.sh --threads`), whose
+  `memory.buffer` is a `SharedArrayBuffer`; `byteLength` is defined on both.
+- **Not verified: `crcbl_render::upload_cleared_texture` on D3D12 and Metal.**
+  The clear leaves the zero buffer a copy destination and an explicit barrier
+  moves it to a copy source, because D3D12 promotes a buffer implicitly only out
+  of `COMMON`; CI's WARP and Metal jobs are its first run.
 
 ### shard's goldens are drawn with anisotropic filtering off (2026-09-07)
 

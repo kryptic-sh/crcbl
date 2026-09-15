@@ -27,6 +27,15 @@
 //! [`ImageSubresourceLayers::mip`], and the buffer offset says where that
 //! subresource's rows start.
 //!
+//! # A page that starts empty
+//!
+//! [`upload_cleared_texture`] is the same copy for an image that is mostly
+//! zeroes — an atlas when it is created. The zeroes are written by a
+//! [`clear_buffer`](crcbl_hal::CommandEncoder::clear_buffer) on the GPU and
+//! copied into every layer, and only the rectangles written over them are
+//! staged from the host. See that function for why the difference is the wasm
+//! heap's.
+//!
 //! This is a **startup** path, not a frame path: it records its own barriers
 //! and blocks on [`Device::wait_idle`], which is only legal because no graph
 //! exists yet. See this crate's docs on the one rule — the two staging uploads
@@ -204,6 +213,219 @@ pub fn upload_texture_mip_layers(
     )
 }
 
+/// Texels written over an [`upload_cleared_texture`] image as it is created: a
+/// `width` by `height` rectangle of layer `layer`, its top-left texel at `x`,
+/// `y`.
+#[derive(Clone, Copy, Debug)]
+pub struct TexturePatch<'a> {
+    /// The array layer the rectangle is written to.
+    pub layer: u32,
+    /// The rectangle's left column.
+    pub x: u32,
+    /// The rectangle's top row.
+    pub y: u32,
+    /// Its width in texels.
+    pub width: u32,
+    /// Its height in texels.
+    pub height: u32,
+    /// Exactly `width * height * texel_size` bytes, tightly packed, rows top to
+    /// bottom.
+    pub pixels: &'a [u8],
+}
+
+/// The image [`upload_cleared_texture`] creates, and what goes on it.
+#[derive(Clone, Copy, Debug)]
+pub struct ClearedTextureDesc<'a> {
+    /// Names the image and the view, and is the stem of the buffers' and the
+    /// encoder's names, as in [`upload_texture`].
+    pub label: &'a str,
+    /// An uncompressed format with a single colour plane.
+    pub format: Format,
+    /// Width of every layer, in texels.
+    pub width: u32,
+    /// Height of every layer, in texels.
+    pub height: u32,
+    /// Array layers in the image; at least one.
+    pub layers: u32,
+    /// `D2` or `D2Array`: the shader's declaration decides, not `layers`.
+    pub view_type: ImageViewType,
+    /// Rectangles written over the zeroes, in order.
+    pub patches: &'a [TexturePatch<'a>],
+}
+
+/// Creates a sampled colour image whose every texel is zero, with `patches`
+/// written over it, and returns it with a full view.
+///
+/// **For a page that is mostly empty**, which is what an atlas is when it is
+/// created: [`crate::ui_pass`]'s image atlas and glyph pages. Staging such a
+/// page through [`upload_texture`] builds every zero texel on the host, pads a
+/// second copy of it, and writes it into a staging buffer — and on
+/// `crcbl-webgpu` that write is bytes on the command stream, which lives in the
+/// wasm heap, grows to hold the whole start-up frame and never gives the
+/// address space back. Here the zeroes never exist on the host: one
+/// device-local buffer a layer in size is zeroed by
+/// [`clear_buffer`](crcbl_hal::CommandEncoder::clear_buffer) and copied into
+/// every layer, and only the patches are staged and written. The page is
+/// transparent black where nothing was patched, on every backend, rather than
+/// whatever an uninitialised image held.
+///
+/// One mip level. The same startup rules as [`upload_texture`]: it records its
+/// own barriers, blocks on [`Device::wait_idle`], and releases every buffer it
+/// created on every path out.
+///
+/// # Errors
+///
+/// [`upload_texture`]'s format and extent errors;
+/// [`HalError::InvalidDescriptor`] for zero layers, and for a patch that is
+/// empty, is not on a layer or inside the extent, or whose `pixels` is not its
+/// own size — naming the patch. [`HalError`] from any seam call otherwise.
+pub fn upload_cleared_texture(
+    device: &dyn Device,
+    queue: QueueHandle,
+    desc: &ClearedTextureDesc<'_>,
+) -> Result<UploadedTexture, HalError> {
+    let label = desc.label;
+    let texel = image_texel(label, desc.format, (desc.width, desc.height))?;
+    if desc.layers == 0 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{label}: a texture needs at least one layer"
+        )));
+    }
+    let alignment = device
+        .caps()
+        .limits
+        .optimal_buffer_copy_offset_alignment
+        .max(1);
+    let full = u64::from(desc.width) * u64::from(texel);
+    let full_pitch = padded_row_pitch(full, texel, alignment);
+    // Whole words: `vkCmdFillBuffer` and `crcbl-dx12`'s clear refuse a size that
+    // is not a multiple of four.
+    let cleared = (full_pitch * u64::from(desc.height)).next_multiple_of(CLEAR_WORD_BYTES);
+    let layer_regions: Vec<StagedRegion> = (0..desc.layers)
+        .map(|layer| StagedRegion {
+            buffer_offset: 0,
+            row_texels: u32::try_from(full_pitch / u64::from(texel)).unwrap_or(u32::MAX),
+            extent: Extent3d::d2(desc.width, desc.height),
+            layer,
+            mip: 0,
+            image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        })
+        .collect();
+
+    let mut patched = Vec::new();
+    let mut patch_regions = Vec::with_capacity(desc.patches.len());
+    for (index, patch) in desc.patches.iter().enumerate() {
+        let inside = patch
+            .x
+            .checked_add(patch.width)
+            .is_some_and(|right| right <= desc.width)
+            && patch
+                .y
+                .checked_add(patch.height)
+                .is_some_and(|bottom| bottom <= desc.height);
+        if patch.width == 0 || patch.height == 0 || patch.layer >= desc.layers || !inside {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{label}: patch {index} is {}x{} at {},{} on layer {}, which is not a non-empty \
+                 rectangle inside a {}x{} image of {} layer(s)",
+                patch.width,
+                patch.height,
+                patch.x,
+                patch.y,
+                patch.layer,
+                desc.width,
+                desc.height,
+                desc.layers
+            )));
+        }
+        let row_bytes = u64::from(patch.width) * u64::from(texel);
+        let expected = row_bytes * u64::from(patch.height);
+        if patch.pixels.len() as u64 != expected {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{label}: patch {index} is {}x{} {:?}, {expected} bytes, got {}",
+                patch.width,
+                patch.height,
+                desc.format,
+                patch.pixels.len()
+            )));
+        }
+        let row_pitch = padded_row_pitch(row_bytes, texel, alignment);
+        let staged =
+            stage_rows(row_bytes, patch.height, row_pitch, patch.pixels).ok_or_else(|| {
+                HalError::InvalidDescriptor(format!(
+                    "{label}: patch {index} does not fit in this host's address space"
+                ))
+            })?;
+        patch_regions.push(StagedRegion {
+            buffer_offset: patched.len() as u64,
+            row_texels: u32::try_from(row_pitch / u64::from(texel)).unwrap_or(u32::MAX),
+            extent: Extent3d::d2(patch.width, patch.height),
+            layer: patch.layer,
+            mip: 0,
+            image_offset: Offset3d {
+                x: i32::try_from(patch.x).unwrap_or(i32::MAX),
+                y: i32::try_from(patch.y).unwrap_or(i32::MAX),
+                z: 0,
+            },
+        });
+        patched.extend_from_slice(&staged);
+    }
+
+    // Device-local, because a clear writes into the buffer on the GPU: a
+    // `crcbl-dx12` upload-heap buffer can never be a copy destination.
+    let zero_label = format!("{label} zero");
+    let zero = device.create_buffer(&BufferDesc {
+        label: Some(&zero_label),
+        size: cleared,
+        usage: BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::DeviceLocal,
+    })?;
+    let staging = if patched.is_empty() {
+        None
+    } else {
+        match create_staging(device, label, &patched) {
+            Ok(staging) => Some(staging),
+            Err(error) => {
+                device.destroy_buffer(zero);
+                return Err(error);
+            }
+        }
+    };
+    let zero_source = CopySource {
+        buffer: zero,
+        regions: &layer_regions,
+    };
+    let sources: Vec<CopySource<'_>> = core::iter::once(zero_source)
+        .chain(staging.map(|buffer| CopySource {
+            buffer,
+            regions: &patch_regions,
+        }))
+        .collect();
+    let outcome = upload_image(
+        device,
+        queue,
+        &UploadArgs {
+            label,
+            format: desc.format,
+            width: desc.width,
+            height: desc.height,
+            layer_count: desc.layers,
+            mip_levels: 1,
+            view_type: desc.view_type,
+            cleared: Some((zero, cleared)),
+            sources: &sources,
+        },
+    );
+    if let Some(staging) = staging {
+        device.destroy_buffer(staging);
+    }
+    device.destroy_buffer(zero);
+    outcome
+}
+
+/// The word [`clear_buffer`](crcbl_hal::CommandEncoder::clear_buffer) zeroes in
+/// on the backends that fill `u32`s, and so the unit its size is rounded to.
+const CLEAR_WORD_BYTES: u64 = 4;
+
 /// The body the public uploads share: validate, stage every level of every
 /// layer into one buffer, then hand over to [`upload_image`].
 ///
@@ -219,31 +441,7 @@ fn upload(
     view_type: ImageViewType,
 ) -> Result<UploadedTexture, HalError> {
     let (width, height) = extent;
-    // `texel_size`, not `block_size`: it is the number a `BufferImageCopy` is
-    // sized against, and it is `None` for exactly the formats this path cannot
-    // describe — a combined depth/stencil format, whose two planes need two
-    // copies and neither of which is a `COLOR` aspect.
-    let texel = format.texel_size(ImageAspect::COLOR).ok_or_else(|| {
-        HalError::InvalidDescriptor(format!(
-            "{label}: {format:?} has no single colour plane, so it cannot be uploaded as one \
-             colour-aspect copy"
-        ))
-    })?;
-    // A compressed format's `block_size` covers a 4×4 block, not one texel, so
-    // the per-texel sizing below would be wrong by a factor of four: a BC1 row
-    // is `ceil(width / 4) × 8` bytes, not `width × 8`. No caller uploads one
-    // today; refuse rather than corrupt.
-    if format.is_compressed() {
-        return Err(HalError::InvalidDescriptor(format!(
-            "{label}: {format:?} is block-compressed and this path sizes per texel; \
-             it cannot be uploaded as a colour-aspect copy"
-        )));
-    }
-    if width == 0 || height == 0 {
-        return Err(HalError::InvalidDescriptor(format!(
-            "{label}: texture extent {width}x{height} must be non-zero in both dimensions"
-        )));
-    }
+    let texel = image_texel(label, format, extent)?;
     let layer_count = u32::try_from(layers.len()).unwrap_or(u32::MAX);
     if layer_count == 0 {
         return Err(HalError::InvalidDescriptor(format!(
@@ -313,22 +511,17 @@ fn upload(
                 extent: Extent3d::d2(level_width, level_height),
                 layer: layer as u32,
                 mip: level as u32,
+                image_offset: Offset3d { x: 0, y: 0, z: 0 },
             });
             padded.extend_from_slice(&staged);
         }
     }
 
-    let staging_label = format!("{label} staging");
-    let staging = device.create_buffer(&BufferDesc {
-        label: Some(&staging_label),
-        size: padded.len() as u64,
-        usage: BufferUsage::TRANSFER_SRC,
-        memory: MemoryLocation::HostUpload,
-    })?;
+    let staging = create_staging(device, label, &padded)?;
     let outcome = upload_image(
         device,
         queue,
-        UploadArgs {
+        &UploadArgs {
             label,
             format,
             width,
@@ -336,13 +529,72 @@ fn upload(
             layer_count,
             mip_levels,
             view_type,
-            staging,
-            regions: &regions,
+            cleared: None,
+            sources: &[CopySource {
+                buffer: staging,
+                regions: &regions,
+            }],
         },
-        &padded,
     );
     device.destroy_buffer(staging);
     outcome
+}
+
+/// The bytes one texel of `format` occupies, once `format` and `extent` are
+/// known to describe an image this module can stage.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] for a format with no single colour plane, a
+/// block-compressed format, or a zero extent, each naming `label`.
+fn image_texel(label: &str, format: Format, (width, height): (u32, u32)) -> Result<u32, HalError> {
+    // `texel_size`, not `block_size`: it is the number a `BufferImageCopy` is
+    // sized against, and it is `None` for exactly the formats this path cannot
+    // describe — a combined depth/stencil format, whose two planes need two
+    // copies and neither of which is a `COLOR` aspect.
+    let texel = format.texel_size(ImageAspect::COLOR).ok_or_else(|| {
+        HalError::InvalidDescriptor(format!(
+            "{label}: {format:?} has no single colour plane, so it cannot be uploaded as one \
+             colour-aspect copy"
+        ))
+    })?;
+    // A compressed format's `block_size` covers a 4×4 block, not one texel, so
+    // the per-texel sizing below would be wrong by a factor of four: a BC1 row
+    // is `ceil(width / 4) × 8` bytes, not `width × 8`. No caller uploads one
+    // today; refuse rather than corrupt.
+    if format.is_compressed() {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{label}: {format:?} is block-compressed and this path sizes per texel; \
+             it cannot be uploaded as a colour-aspect copy"
+        )));
+    }
+    if width == 0 || height == 0 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{label}: texture extent {width}x{height} must be non-zero in both dimensions"
+        )));
+    }
+    Ok(texel)
+}
+
+/// A host-visible `TRANSFER_SRC` buffer labelled `"{label} staging"` holding
+/// `bytes`, destroyed again if the write fails.
+fn create_staging(
+    device: &dyn Device,
+    label: &str,
+    bytes: &[u8],
+) -> Result<crcbl_hal::BufferHandle, HalError> {
+    let staging_label = format!("{label} staging");
+    let staging = device.create_buffer(&BufferDesc {
+        label: Some(&staging_label),
+        size: bytes.len() as u64,
+        usage: BufferUsage::TRANSFER_SRC,
+        memory: MemoryLocation::HostUpload,
+    })?;
+    if let Err(error) = device.write_buffer(staging, 0, bytes) {
+        device.destroy_buffer(staging);
+        return Err(error);
+    }
+    Ok(staging)
 }
 
 /// A tightly packed region of `format` texels staged for an in-frame copy: a
@@ -458,6 +710,15 @@ struct StagedRegion {
     extent: Extent3d,
     layer: u32,
     mip: u32,
+    /// Where in that subresource the rows land: the origin for a whole level,
+    /// the rectangle's corner for a [`TexturePatch`].
+    image_offset: Offset3d,
+}
+
+/// One buffer the copies read, and the regions they read from it.
+struct CopySource<'a> {
+    buffer: crcbl_hal::BufferHandle,
+    regions: &'a [StagedRegion],
 }
 
 /// Everything [`upload_image`] needs that is not the device, the queue or the
@@ -477,9 +738,11 @@ struct UploadArgs<'a> {
     /// `layer_count`: a one-layer array view is a legitimate thing to want, and
     /// the shader's declaration is what decides which it is.
     view_type: ImageViewType,
-    staging: crcbl_hal::BufferHandle,
-    /// One copy per level of every layer, in staging order.
-    regions: &'a [StagedRegion],
+    /// A buffer the copies zero first, and how many bytes of it, for
+    /// [`upload_cleared_texture`].
+    cleared: Option<(crcbl_hal::BufferHandle, u64)>,
+    /// Every copy, in the order they are recorded.
+    sources: &'a [CopySource<'a>],
 }
 
 /// The half of [`upload_texture`] that owns the image and the view, so the
@@ -487,11 +750,8 @@ struct UploadArgs<'a> {
 fn upload_image(
     device: &dyn Device,
     queue: QueueHandle,
-    args: UploadArgs<'_>,
-    pixels: &[u8],
+    args: &UploadArgs<'_>,
 ) -> Result<UploadedTexture, HalError> {
-    device.write_buffer(args.staging, 0, pixels)?;
-
     let image = device.create_image(&ImageDesc {
         label: Some(args.label),
         image_type: ImageType::D2,
@@ -528,7 +788,7 @@ fn upload_image(
     };
 
     let uploaded = UploadedTexture { image, view };
-    match record_upload(device, queue, &args, image) {
+    match record_upload(device, queue, args, image) {
         Ok(()) => Ok(uploaded),
         Err(error) => {
             uploaded.destroy(device);
@@ -577,14 +837,35 @@ fn record_upload(
         ..Default::default()
     });
 
+    // Outside any pass, and before the copies that read it: a clear is recorded
+    // into the same command buffer, so it runs first on every backend. The
+    // buffer is then moved to a copy source explicitly, because the clear left
+    // it a copy destination: D3D12 promotes a buffer implicitly only out of
+    // `COMMON`, which a fresh one is in and this one no longer is.
+    if let Some((buffer, size)) = args.cleared {
+        encoder.clear_buffer(buffer, 0, size);
+        encoder.pipeline_barrier(&crcbl_hal::Barriers {
+            buffers: &[crcbl_hal::BufferBarrier::new(
+                buffer,
+                ResourceState::TransferDst,
+                ResourceState::TransferSrc,
+            )],
+            ..Default::default()
+        });
+    }
+
     // One copy per subresource. A region's `image_extent` is a 2D extent
     // whatever the image is — `crcbl-dx12` refuses anything else by name,
     // because `CopyTextureRegion` addresses one subresource — so the layer and
     // the level are named by `base_layer` and `mip`, and the buffer offset says
     // where that subresource's rows start.
-    for region in args.regions {
+    for (source, region) in args
+        .sources
+        .iter()
+        .flat_map(|source| source.regions.iter().map(move |region| (source, region)))
+    {
         encoder.copy_buffer_to_image(&BufferImageCopy {
-            buffer: args.staging,
+            buffer: source.buffer,
             buffer_offset: region.buffer_offset,
             buffer_row_length: region.row_texels,
             buffer_image_height: region.extent.height,
@@ -595,7 +876,7 @@ fn record_upload(
                 base_layer: region.layer,
                 layer_count: 1,
             },
-            image_offset: Offset3d { x: 0, y: 0, z: 0 },
+            image_offset: region.image_offset,
             image_extent: region.extent,
         });
     }
@@ -1238,6 +1519,260 @@ mod tests {
             recorder.total_live_objects(),
             before,
             "a rejected chain creates nothing"
+        );
+    }
+
+    /// **A cleared page is zeroed on the GPU and copied into every layer, and
+    /// only its patches cross from the host** — each into its own layer at its
+    /// own corner, after the zeroes it overwrites.
+    ///
+    /// Tier B, so the page and the patch pitch to different strides: a 100-texel
+    /// RGBA row pads to 512 bytes, the 5-texel patch row to 256.
+    #[test]
+    fn a_cleared_page_zeroes_every_layer_and_stages_only_its_patches() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_b(&recorder);
+        let before = recorder.total_live_objects();
+        let pixels = ramp(5 * 2 * 4);
+
+        let page = upload_cleared_texture(
+            device.as_ref(),
+            queue,
+            &ClearedTextureDesc {
+                label: "cleared page",
+                format: Format::Rgba8Unorm,
+                width: WIDTH,
+                height: HEIGHT,
+                layers: 3,
+                view_type: ImageViewType::D2Array,
+                patches: &[TexturePatch {
+                    layer: 2,
+                    x: 7,
+                    y: 1,
+                    width: 5,
+                    height: 2,
+                    pixels: &pixels,
+                }],
+            },
+        )
+        .expect("the null backend accepts this");
+
+        let commands = recorder.commands();
+        let clears: Vec<(crcbl_hal::BufferHandle, u64, u64)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::ClearBuffer {
+                    buffer,
+                    offset,
+                    size,
+                } => Some((*buffer, *offset, *size)),
+                _ => None,
+            })
+            .collect();
+        let [(zero, 0, size)] = clears[..] else {
+            panic!("expected one clear from the start of one buffer, got {clears:?}");
+        };
+        assert_eq!(size as usize, PITCH * HEIGHT as usize, "one padded layer");
+        let first_copy = commands
+            .iter()
+            .position(|command| matches!(command, Command::CopyBufferToImage(_)));
+        let clear_at = commands
+            .iter()
+            .position(|command| matches!(command, Command::ClearBuffer { .. }));
+        assert!(
+            clear_at < first_copy,
+            "the clear must be recorded before the copies that read it"
+        );
+
+        let copies = the_copies(&recorder);
+        assert_eq!(copies.len(), 4, "three layers and one patch: {copies:?}");
+        for (layer, copy) in copies[..3].iter().enumerate() {
+            assert_eq!(copy.buffer, zero, "layer {layer} reads the zeroed buffer");
+            assert_eq!(copy.buffer_offset, 0);
+            assert_eq!(copy.buffer_row_length, 128);
+            assert_eq!(copy.image_subresource.base_layer, layer as u32);
+            assert_eq!(copy.image_extent, Extent3d::d2(WIDTH, HEIGHT));
+            assert_eq!(copy.image_offset, Offset3d { x: 0, y: 0, z: 0 });
+        }
+        let patch = copies[3];
+        assert_ne!(patch.buffer, zero, "a patch is staged, not cleared");
+        assert_eq!(patch.buffer_offset, 0);
+        assert_eq!(
+            patch.buffer_row_length, 64,
+            "256 bytes of pitch is 64 texels"
+        );
+        assert_eq!(patch.image_subresource.base_layer, 2);
+        assert_eq!(patch.image_extent, Extent3d::d2(5, 2));
+        assert_eq!(patch.image_offset, Offset3d { x: 7, y: 1, z: 0 });
+
+        let writes: Vec<(crcbl_hal::BufferHandle, usize)> = recorder
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::BufferWritten { buffer, len, .. } => Some((buffer, len)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            writes,
+            [(patch.buffer, 256 * 2)],
+            "the host writes the padded patch and nothing of the page"
+        );
+
+        page.destroy(device.as_ref());
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "both buffers are released once the copies are submitted"
+        );
+        recorder.assert_valid();
+    }
+
+    /// A page with nothing patched creates no staging buffer and writes nothing.
+    #[test]
+    fn a_cleared_page_with_no_patches_writes_nothing() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let page = upload_cleared_texture(
+            device.as_ref(),
+            queue,
+            &ClearedTextureDesc {
+                label: "empty page",
+                format: Format::R8Unorm,
+                width: 16,
+                height: 16,
+                layers: 2,
+                view_type: ImageViewType::D2Array,
+                patches: &[],
+            },
+        )
+        .expect("accepted");
+        assert!(
+            !recorder
+                .events()
+                .iter()
+                .any(|event| matches!(event, Event::BufferWritten { .. })),
+            "an unpatched page is all zeroes, and zeroes are the GPU's to write"
+        );
+        assert_eq!(the_copies(&recorder).len(), 2, "one copy a layer");
+        page.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// A patch off its layer, outside the extent, empty, or not its own size is
+    /// refused naming the patch — and so is a page with no layers — before
+    /// anything is created.
+    #[test]
+    fn a_malformed_cleared_page_is_rejected_naming_the_patch() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let before = recorder.total_live_objects();
+        let four = [0u8; 4];
+        let upload = |layers: u32, patch: TexturePatch<'_>| {
+            upload_cleared_texture(
+                device.as_ref(),
+                queue,
+                &ClearedTextureDesc {
+                    label: "atlas",
+                    format: Format::Rgba8Unorm,
+                    width: 8,
+                    height: 8,
+                    layers,
+                    view_type: ImageViewType::D2,
+                    patches: &[patch],
+                },
+            )
+            .expect_err("a malformed page is not a texture")
+            .to_string()
+        };
+        let texel = TexturePatch {
+            layer: 0,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            pixels: &four,
+        };
+
+        let no_layers = upload(0, texel);
+        assert!(no_layers.contains("at least one layer"), "got: {no_layers}");
+        for (patch, why) in [
+            (TexturePatch { layer: 1, ..texel }, "off the only layer"),
+            (TexturePatch { x: 8, ..texel }, "right of the extent"),
+            (
+                TexturePatch {
+                    y: u32::MAX,
+                    ..texel
+                },
+                "overflowing the extent",
+            ),
+            (TexturePatch { width: 0, ..texel }, "empty"),
+        ] {
+            let message = upload(1, patch);
+            assert!(
+                message.contains("patch 0") && message.contains("inside a 8x8 image"),
+                "a patch {why} got: {message}"
+            );
+        }
+        let short = upload(1, TexturePatch { width: 2, ..texel });
+        assert!(
+            short.contains("patch 0") && short.contains("8 bytes, got 4"),
+            "got: {short}"
+        );
+
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "a rejected page creates nothing"
+        );
+    }
+
+    /// A failure after both buffers exist releases both: the image is what
+    /// fails, one texel past Tier A's `max_image_2d`.
+    #[test]
+    fn a_failed_cleared_page_leaks_nothing() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let limit = device.caps().limits.max_image_2d;
+        let before = recorder.total_live_objects();
+        let four = [0u8; 4];
+
+        let error = upload_cleared_texture(
+            device.as_ref(),
+            queue,
+            &ClearedTextureDesc {
+                label: "too wide",
+                format: Format::R8Unorm,
+                width: limit + 1,
+                height: 1,
+                layers: 1,
+                view_type: ImageViewType::D2,
+                patches: &[TexturePatch {
+                    layer: 0,
+                    x: 0,
+                    y: 0,
+                    width: 4,
+                    height: 1,
+                    pixels: &four,
+                }],
+            },
+        )
+        .expect_err("the device refuses an image past max_image_2d");
+        assert!(
+            error.to_string().contains("max_image_2d"),
+            "the failure must be the image, not something earlier: {error}"
+        );
+        assert!(
+            recorder
+                .events()
+                .iter()
+                .any(|event| matches!(event, Event::BufferWritten { .. })),
+            "only meaningful if the staging buffer really was created and written"
+        );
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "the zeroed and the staging buffer must both be destroyed"
         );
     }
 }
