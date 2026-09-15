@@ -362,6 +362,11 @@ pub mod ltc;
 // header, for `fog`'s reason above.
 pub mod trig;
 
+// The surface pass's block, rows and constants, and the guards over what
+// `water.slang` copies from four other shaders; its own `//!` header, for
+// `fog`'s reason above.
+pub mod water;
+
 use std::sync::OnceLock;
 
 /// Little-endian `f32`s in iteration order — what `std430` means for a struct

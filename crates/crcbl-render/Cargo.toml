@@ -39,6 +39,10 @@ crcbl-shaders = { workspace = true }
 # samples already enable, so nothing new reaches a binary that did not have it.
 crcbl-sprite = { workspace = true, features = ["load"] }
 crcbl-ui = { workspace = true }
+# Bodies of water as data, which [`water`] meshes and draws — the same data a
+# server that links no renderer reads. No cycle: it depends on `thiserror` and
+# nothing of this workspace.
+crcbl-water = { workspace = true }
 # [`features`]'s per-effect toggles, which are `crcbl_hal::Features`' shape one
 # level up: a set of independent switches with union, intersection and
 # difference over them, which is what topic 39's resolution order is written in.

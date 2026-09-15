@@ -421,14 +421,19 @@ impl VolumetricParams {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Anisotropies that cover both lobes, the isotropic case, and the clamp.
     const ANISOTROPIES: [f32; 7] = [-0.9, -0.5, -0.1, 0.0, 0.3, 0.8, MAX_ANISOTROPY];
 
-    /// The two shaders that read [`VolumetricParams`].
-    const SHADERS: [(&str, &str); 2] = [
+    /// The shaders that read [`VolumetricParams`].
+    ///
+    /// `water.slang` is the third: the water surface fogs the light it adds by
+    /// reading the froxel column the composite reads, through the same block and
+    /// the same phase function, so every guard here that holds the composite
+    /// holds it as well.
+    const SHADERS: [(&str, &str); 3] = [
         (
             "volumetric.slang",
             include_str!("../shaders/volumetric.slang"),
@@ -437,12 +442,13 @@ mod tests {
             "volumetric_composite.slang",
             include_str!("../shaders/volumetric_composite.slang"),
         ),
+        ("water.slang", include_str!("../shaders/water.slang")),
     ];
 
     /// The literal a shader assigns to a `static const float`, parsed as a
     /// value — `crate::fog`'s `shader_scalar`, and it compares numbers rather
     /// than text for that function's reason.
-    fn shader_scalar(source: &str, name: &str) -> f32 {
+    pub(crate) fn shader_scalar(source: &str, name: &str) -> f32 {
         let declaration = format!("static const float {name} = ");
         let at = source
             .find(&declaration)
@@ -714,7 +720,7 @@ mod tests {
         }
     }
 
-    /// Both shaders declare the same parameter block, field for field.
+    /// Every shader declares the same parameter block, field for field.
     ///
     /// Compared as text with the whitespace collapsed, because that is exactly
     /// what has to match: `crcbl_shaders::declaration_order` records that Metal
@@ -738,13 +744,14 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        assert_eq!(
-            block(SHADERS[0].1),
-            block(SHADERS[1].1),
-            "{} and {} declare different parameter blocks",
-            SHADERS[0].0,
-            SHADERS[1].0
-        );
+        for (file, source) in &SHADERS[1..] {
+            assert_eq!(
+                block(SHADERS[0].1),
+                block(source),
+                "{} and {file} declare different parameter blocks",
+                SHADERS[0].0,
+            );
+        }
     }
 
     /// The block's bytes are its fields in declaration order, and the writer
@@ -1036,7 +1043,7 @@ mod tests {
     /// Unlike `one_function` this keeps everything it finds: a table has no
     /// comments inside it, and the whole point of comparing two copies of one is
     /// that every literal in them is the same literal.
-    fn one_declaration(source: &str, name: &str, terminator: &str) -> String {
+    pub(crate) fn one_declaration(source: &str, name: &str, terminator: &str) -> String {
         let at = source
             .find(&format!("static const {name}"))
             .unwrap_or_else(|| panic!("no `static const {name}` in this shader"));
@@ -1070,7 +1077,7 @@ mod tests {
     /// enough for these two: neither has a brace inside a string, and a copy
     /// that grew one would fail the comparison above rather than pass it
     /// silently.
-    fn one_function(source: &str, signature: &str, block: &str) -> String {
+    pub(crate) fn one_function(source: &str, signature: &str, block: &str) -> String {
         let at = source
             .find(signature)
             .unwrap_or_else(|| panic!("no `{signature}` in this shader"));

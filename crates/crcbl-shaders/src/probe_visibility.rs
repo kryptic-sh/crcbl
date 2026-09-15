@@ -622,9 +622,14 @@ mod tests {
     /// specular term leaks through a wall the diffuse term does not; the third
     /// weighs the *samples it writes into* those rows by that same bound, so a
     /// drift there leaks light into the table before either reader sees it.
-    const SOURCES: [(&str, &str); 3] = [
+    ///
+    /// `water.slang` is a fourth reader: the water surface's reflection falls
+    /// back to the probes exactly as `ssr.slang`'s does, through a copy of that
+    /// file's weighting.
+    const SOURCES: [(&str, &str); 4] = [
         ("mesh.slang", include_str!("../shaders/mesh.slang")),
         ("ssr.slang", include_str!("../shaders/ssr.slang")),
+        ("water.slang", include_str!("../shaders/water.slang")),
         (
             "probe_gather.slang",
             include_str!("../shaders/probe_gather.slang"),

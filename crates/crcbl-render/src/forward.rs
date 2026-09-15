@@ -202,6 +202,7 @@ use crate::texture::{
 use crate::transient::{TransientImageDesc, TransientPool};
 use crate::upscale::Upscale;
 use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages};
+use crate::water::{Water, WaterBodies, WaterFrame, WaterImages, WaterInputs};
 use crcbl_shaders::atmosphere::{SKY_VIEW_BUILD_ROWS, SkyView, SkyViewBuild};
 
 mod view;
@@ -1180,6 +1181,7 @@ const RENDER_PASSES: u32 = 8
     + Hiz::PASSES
     + Ssr::PASSES
     + Volumetric::PASSES
+    + Water::PASSES
     + Exposure::PASSES
     + Bloom::MAX_PASSES
     + POST_TONEMAP_PASSES
@@ -2403,6 +2405,15 @@ pub struct ForwardRenderer {
     /// instance each, so it joins the full-screen draws rather than the
     /// indirect ones.
     recorded_tile_clears: u64,
+    /// `docs/plan/55-water.md`'s bodies of water, meshed, and the ring of
+    /// buffers every view draws them from — see [`crate::water`]. Empty until
+    /// [`set_water`](ForwardRenderer::set_water), and an empty set records no
+    /// pass.
+    water: WaterBodies,
+    /// The surface draws the last [`add_passes`](ForwardRenderer::add_passes)
+    /// recorded for the primary camera: one indexed draw per body, each of one
+    /// instance, so they join the direct draws on the debug draw layer's terms.
+    recorded_water_draws: u64,
 }
 
 /// What a partly-built [`ForwardRenderer`] has to give back.
@@ -2487,6 +2498,8 @@ struct Rollback {
     /// The background pass, which owns one pipeline, one layout and a ring of
     /// blocks and groups.
     sky_pass: Option<SkyPass>,
+    /// The water surface's two pipelines, their layouts and a ring of blocks.
+    water: Option<Water>,
     /// The shadow atlas viewer, which owns one pipeline, one layout and a ring
     /// of blocks and groups.
     atlas_viewer: Option<AtlasView>,
@@ -2540,6 +2553,9 @@ impl Rollback {
         }
         if let Some(atlas_viewer) = self.atlas_viewer {
             atlas_viewer.destroy(device);
+        }
+        if let Some(water) = self.water {
+            water.destroy(device);
         }
         if let Some(sky_pass) = self.sky_pass {
             sky_pass.destroy(device);
@@ -5639,6 +5655,10 @@ impl ForwardRenderer {
             // No frame has been recorded yet, on `recorded_fullscreen`'s terms.
             recorded_debug_draw: 0,
             recorded_tile_clears: 0,
+            // No bodies, so no pass: the frame every caller of this type drew
+            // before water existed. Nothing is allocated until a body is set.
+            water: WaterBodies::new(FRAMES_IN_FLIGHT),
+            recorded_water_draws: 0,
         })
     }
 
@@ -6348,6 +6368,10 @@ impl ForwardRenderer {
         let frames = self.primary.uniforms.len();
         self.debug_draw
             .begin_frame(device, frames, self.frame, self.primary.camera_view_proj)?;
+        // The water's buffers for this slot, if the bodies changed since the
+        // slot last came round — see [`crate::water::WaterBodies`], which says
+        // why this waits for the slot rather than happening in `set_water`.
+        self.water.begin_frame(device, self.frame)?;
 
         // One cull per cascade and per **occupied** light slot, against that
         // view's own frustum. The orthographic box gives
@@ -8304,6 +8328,10 @@ impl ForwardRenderer {
         // borrow `self` field by field, and a `&self` method called between
         // them would borrow the whole of it.
         let draws_sky = self.draws_sky();
+        // What the frame's water draws, or `None` for a frame with none — read
+        // here for `draws_sky`'s reason, and the same value every view records
+        // from.
+        let water = self.water.frame(self.frame);
         // Whether this frame ends by drawing the shadow atlas over itself — the
         // resolved view rather than the switch, so a caller who left the atlas
         // up and then asked for normals gets normals. Read here for
@@ -8382,6 +8410,9 @@ impl ForwardRenderer {
         self.recorded_fullscreen = fullscreen_passes(effects, extent, upscaling, self.frame_ssao_blurs)
                 + u64::from(self.ground_grid().is_some())
                 + if draws_sky { SkyPass::PASSES } else { 0 }
+                // The water copy's triangle, on the sky's terms: content rather
+                // than an effect bit, so the bodies decide it.
+                + if water.is_some() { Water::FULLSCREEN_PASSES } else { 0 }
                 // The atlas viewer, on the ground grid's terms: not an effect
                 // bit and not resolved by the toggle order, so what decides it
                 // is the debug view and not this frame's effects.
@@ -8402,6 +8433,10 @@ impl ForwardRenderer {
         // frame that cleared the whole attachment — see
         // [`MeshModules::depth_clear_pipeline`].
         self.recorded_tile_clears = shadow_tile_clears;
+        // One indexed draw per body the frame's water holds.
+        self.recorded_water_draws = water
+            .as_ref()
+            .map_or(0, |water: &WaterFrame| water.draws.len() as u64);
         self.recorded_draws =
             shadow_draws + 2 * bucket_draws.calls.len() as u64 + self.direct_draws();
 
@@ -8449,6 +8484,7 @@ impl ForwardRenderer {
             target_format: self.target_format,
             ssao_blurs: self.frame_ssao_blurs,
             draws_sky,
+            water,
             skinned,
             probe_buffer,
             probe_table,
@@ -10259,6 +10295,40 @@ impl ForwardRenderer {
         self.atmosphere = atmosphere;
     }
 
+    /// The bodies of water every view draws — `docs/plan/55-water.md`'s rung 1,
+    /// and this crate's `water` module for how.
+    ///
+    /// Replaces whatever was set before. Each body is meshed here, by
+    /// [`crcbl_water::surface_mesh`], and the result is uploaded to each frame
+    /// slot as that slot next begins, so the call touches no device and a frame
+    /// still in flight keeps the buffers it was submitted with.
+    ///
+    /// # Off is exactly off
+    ///
+    /// An empty slice is the default, and a renderer with no bodies records no
+    /// water pass at all: the frame it draws is the one it drew before this
+    /// existed, bit for bit. Water is content, not a
+    /// [`RenderEffects`] bit, on [`set_sky`](Self::set_sky)'s terms.
+    ///
+    /// # Errors
+    ///
+    /// [`crcbl_water::BodyError`] for the first body that cannot be meshed —
+    /// too few points, a non-finite coordinate, an outline that crosses itself,
+    /// a negative coefficient — and then **nothing is replaced**: the bodies set
+    /// before this call go on drawing.
+    pub fn set_water(
+        &mut self,
+        bodies: &[crcbl_water::WaterBody],
+    ) -> Result<(), crcbl_water::BodyError> {
+        self.water.set(bodies)
+    }
+
+    /// The bodies of water this renderer draws, as they were last set.
+    #[must_use]
+    pub fn water(&self) -> &[crcbl_water::WaterBody] {
+        self.water.bodies()
+    }
+
     /// The atmosphere this renderer draws, if it has one.
     #[must_use]
     pub const fn atmosphere(&self) -> Option<Atmosphere> {
@@ -11087,6 +11157,7 @@ impl ForwardRenderer {
         self.recorded_fullscreen * FULLSCREEN_DRAWS
             + self.recorded_debug_draw
             + self.recorded_tile_clears
+            + self.recorded_water_draws
     }
 
     /// What the camera's cull kept, on the frame the ring has reached.
@@ -11139,6 +11210,8 @@ impl ForwardRenderer {
             view.destroy(device);
         }
         self.primary.destroy(device);
+        // After every view, whose water groups name these buffers.
+        self.water.destroy(device);
         device.destroy_sampler(self.sampler);
         device.destroy_graphics_pipeline(self.tonemap_pipeline);
         device.destroy_pipeline_layout(self.tonemap_pipeline_layout);
@@ -17861,6 +17934,19 @@ mod tests {
         renderer
             .set_ground_grid(device, Some(GridStyle::default()))
             .expect("the null backend builds every pipeline");
+        // **A body of water**, on the ground grid's terms: content rather than
+        // an effect bit, so the widest frame is one a caller gave water to, and
+        // `Water::PASSES` is in the bound for it.
+        renderer
+            .set_water(&[crcbl_water::WaterBody {
+                outline: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+                level: 0.0,
+                medium: crcbl_water::Medium {
+                    absorption: [0.4, 0.1, 0.05],
+                    scattering: [0.01, 0.01, 0.01],
+                },
+            }])
+            .expect("a square meshes");
         renderer.set_render_scale(WIDEST_SCALE);
         assert_eq!(
             renderer.internal_extent(WIDEST_EXTENT),

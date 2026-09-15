@@ -186,6 +186,8 @@ OPTIONS:
                            aa                  a slab whose silhouette runs
                                                diagonally, resolved
                            probes              a room lit by irradiance probes
+                           still_pool          a still pool over a deep and a
+                                               shallow basin, a shore and a post
                            sprite              four sprites over three batches
                            ui                  text, a rect and an outline
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
@@ -1262,6 +1264,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::Bloom,
         Scene::Aa,
         Scene::Probes,
+        Scene::StillPool,
         Scene::Sprite,
         Scene::Ui,
     ]
@@ -1293,6 +1296,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::Bloom => "bloom",
         Scene::Aa => "aa",
         Scene::Probes => "probes",
+        Scene::StillPool => "still_pool",
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",
     }

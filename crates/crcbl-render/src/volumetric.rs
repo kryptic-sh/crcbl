@@ -609,6 +609,10 @@ impl Volumetric {
     /// the medium is *in* it, and the scene colour it was composited over is not
     /// the finished picture any more.
     ///
+    /// Returns the column and its lighting as the graph knows them, so a later
+    /// pass that reads them — [`crate::water`] — declares the read against the
+    /// same ids rather than importing the buffers a second time.
+    ///
     /// # Panics
     ///
     /// If `frame` is not a slot this was built with.
@@ -619,7 +623,7 @@ impl Volumetric {
         grid: Grid,
         images: VolumetricImages,
         light_grid: BufferId,
-    ) {
+    ) -> (BufferId, BufferId) {
         let VolumetricImages {
             depth,
             color,
@@ -775,6 +779,7 @@ impl Volumetric {
                 encoder.bind_group(0, group, &[], pipeline_layout);
                 encoder.draw(0..FULLSCREEN_VERTICES, 0..1);
             });
+        (volume, seen)
     }
 
     /// Releases everything, in dependency order. The device must be idle.

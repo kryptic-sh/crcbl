@@ -131,6 +131,10 @@ crcbl-anim = { path = "crates/crcbl-anim", version = "0.1.0" }
 # a browser build nothing beyond the simulation itself — there is no renderer,
 # no shader and no asset parser in it, by design.
 crcbl-vfx = { path = "crates/crcbl-vfx", version = "0.1.0" }
+# Bodies of water and their medium, as data: `docs/plan/55-water.md`'s first
+# decision. Depends on `thiserror` alone, so the renderer, the physics world and
+# a server that draws nothing can all read one body.
+crcbl-water = { path = "crates/crcbl-water", version = "0.1.0" }
 # The grid-inventory kit: the container primitive, the item catalogue and the
 # placement rules, headless. `serde`, `ron` and `thiserror` and nothing else —
 # no `glam` and no `crcbl-core` — so the arrow into it costs a browser build

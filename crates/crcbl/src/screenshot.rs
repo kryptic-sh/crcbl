@@ -95,6 +95,15 @@ use crate::render::{
 };
 use crate::ui::draw_list::DrawList;
 
+mod still_pool;
+
+pub use still_pool::{
+    STILL_POOL_DEEP_FLOOR, STILL_POOL_FAR_EDGE, STILL_POOL_HALF_WIDTH, STILL_POOL_LEVEL,
+    STILL_POOL_MEDIUM, STILL_POOL_NEAR_EDGE, STILL_POOL_POST, STILL_POOL_SHALLOW_FLOOR,
+    STILL_POOL_SHORE_FLOOR, STILL_POOL_SHORE_START, still_pool_body, still_pool_camera,
+    still_pool_forward, still_pool_sky, still_pool_sun,
+};
+
 // ---------------------------------------------------------------------------
 // Scenes
 // ---------------------------------------------------------------------------
@@ -668,6 +677,27 @@ pub enum Scene {
     /// `probe_grid` for why the two probes differ in the *direction* their light
     /// arrives from and not in how much of it there is.
     Probes,
+    /// `docs/plan/55-water.md` rung 1: **a still pool** over a floor with a deep
+    /// and a shallow basin side by side, a sandy shore step at its far edge, a
+    /// red post standing out of the deep basin, a sun and a gradient sky.
+    ///
+    /// The frame `crcbl_render`'s water passes are held to, and every part of
+    /// the layout is there for one claim `tests/render_e2e.rs` reads as a
+    /// relation between bands of this one frame — see [`still_pool_forward`]'s
+    /// module for the layout and why each piece is where it is:
+    ///
+    /// * the tile floor reads **darker through the deep basin** than through
+    ///   the shallow one at the mirrored point, which is the absorption;
+    /// * the **shore step reads close to the dry sand** beside it, which is the
+    ///   shoreline fade;
+    /// * the deep basin **reflects more toward grazing** than head-on, which is
+    ///   the Fresnel term over the sky;
+    /// * the water just beyond the post does **not** take the post's red, which
+    ///   is the refraction's in-front rejection.
+    ///
+    /// And the one that needs a second frame: the same scene with its body
+    /// removed is bit for bit the scene never given one.
+    StillPool,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -1860,13 +1890,24 @@ const ATMOSPHERE_MIRROR_MESH: usize = 4;
 /// the paragraphs it carries about the cluster's cone and the absent tangents
 /// are this function's too.
 fn atmosphere_mirror_mesh() -> crate::render::scene::MeshDesc<'static> {
+    plate_mesh("atmosphere mirror floor", ATMOSPHERE_MIRROR_FLOOR_SCALE)
+}
+
+/// One authored quad `side` world units on a side, centred on the origin in the
+/// plane `y = 0` and facing `+Y`, with a white vertex tint.
+///
+/// [`atmosphere_mirror_mesh`]'s plate at any size, for the fixtures that lay
+/// neutral floors and walls out of it — [`Scene::StillPool`] places it scaled
+/// and turned. What the paragraphs on that function say about the tint and the
+/// cluster hold for every caller.
+fn plate_mesh(label: &'static str, side: f32) -> crate::render::scene::MeshDesc<'static> {
     use crate::shaders::mesh::MeshVertex;
     use crate::shaders::meshlet::{MeshClusters, Meshlet};
 
     let range = crate::shaders::mesh::demo_uv_range();
     let tint = [1.0, 1.0, 1.0, 1.0];
     let normal = [0.0, 1.0, 0.0];
-    let half = 0.5 * ATMOSPHERE_MIRROR_FLOOR_SCALE;
+    let half = 0.5 * side;
     // `crcbl_shaders::mesh`'s `+Y` face corner order, which `0 1 2, 0 2 3`
     // winds counter-clockwise seen from above.
     let corners = [
@@ -1896,7 +1937,7 @@ fn atmosphere_mirror_mesh() -> crate::render::scene::MeshDesc<'static> {
         .unwrap_or_else(|fault| unreachable!("the fixture's own cluster is in range: {fault}"));
 
     crate::render::scene::MeshDesc {
-        label: std::borrow::Cow::Borrowed("atmosphere mirror floor"),
+        label: std::borrow::Cow::Borrowed(label),
         geometry: crate::render::scene::Geometry::Flat {
             vertices: std::borrow::Cow::Owned(crate::shaders::mesh::vertex_bytes(&vertices)),
             uv_range: range,
@@ -6298,6 +6339,12 @@ impl SceneState {
                     renderer: Box::new(renderer),
                 }
             }
+            Scene::StillPool => {
+                // The whole of it is in `still_pool_forward`, on `Scene::Ssr`'s
+                // terms: `tests/render_e2e.rs` builds the same scene with no
+                // body, because the off-switch is only recognisable against it.
+                still_pool_forward(device, queue, format, &[still_pool_body()])?.into()
+            }
             Scene::Bloom => {
                 // The floor every other overhead fixture stands on, and the
                 // emitter laid on it — see `bloom_emitter`. Nothing else is in
@@ -6680,6 +6727,10 @@ pub enum OffscreenError {
     /// past `report::emit` entirely.
     #[error("readback did not complete within {0:?}")]
     ReadbackTimeout(Duration),
+
+    /// A body of water a scene set could not be meshed.
+    #[error("water: {0}")]
+    Water(#[from] crate::render::BodyError),
 }
 
 impl OffscreenSetup {
@@ -7162,6 +7213,31 @@ impl OffscreenSetup {
                 true
             }
             SceneState::Sprite { .. } | SceneState::Ui { .. } => false,
+        }
+    }
+
+    /// Replaces the bodies of water this scene's forward renderer draws, for the
+    /// frames drawn after this call — [`ForwardRenderer::set_water`].
+    ///
+    /// **What it exists for is the off-switch.** A body removed from a scene
+    /// that has already drawn it has to leave the frame the scene would have
+    /// drawn without it, and the only way to ask that of a scene built by this
+    /// module is to change it between frames.
+    ///
+    /// Returns whether it reached a renderer, on [`Self::set_tonemap_curve`]'s
+    /// terms: the sprite and UI scenes draw no water.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::render::BodyError`] if a body cannot be meshed, in which case
+    /// the bodies set before this call go on drawing.
+    pub fn set_water(
+        &mut self,
+        bodies: &[crate::render::WaterBody],
+    ) -> Result<bool, crate::render::BodyError> {
+        match &mut self.scene {
+            SceneState::Forward { renderer, .. } => renderer.set_water(bodies).map(|()| true),
+            SceneState::Sprite { .. } | SceneState::Ui { .. } => Ok(false),
         }
     }
 
@@ -8234,7 +8310,30 @@ mod tests {
             ("render", "ssr-blur"),
             ("render", "tonemap"),
         ];
-        let expected: [(Scene, &[(&str, &str)]); 14] = [
+        // **`Scene::StillPool` is the cube scene's list with the water pair
+        // spliced in after the reflection composite**, and where it goes is the
+        // claim: the surface draws into the image the bloom chain and the
+        // tonemap read, after the shared march has run, so a pair scheduled
+        // anywhere else would either reflect in the march or miss the lens.
+        let mut still_pool_passes = forward_passes(0);
+        let after_reflection = still_pool_passes
+            .iter()
+            .position(|(_, label)| *label == "ssr-blur")
+            .expect("every default forward frame composites its reflection")
+            + 1;
+        still_pool_passes.splice(
+            after_reflection..after_reflection,
+            [("render", "water-copy"), ("render", "water")],
+        );
+        // The background pass too: the pool has a sky, where the cube scene
+        // does not, and `sky` is recorded straight after `forward`.
+        let after_forward = still_pool_passes
+            .iter()
+            .position(|(_, label)| *label == "forward")
+            .expect("every forward frame has a forward pass")
+            + 1;
+        still_pool_passes.insert(after_forward, ("render", "sky"));
+        let expected: [(Scene, &[(&str, &str)]); 15] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8302,6 +8401,7 @@ mod tests {
             // measures diffuse irradiance alone, and rough probe specular would
             // otherwise be an unmodelled addition to every floor pixel.
             (Scene::Probes, &probe_passes),
+            (Scene::StillPool, &still_pool_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

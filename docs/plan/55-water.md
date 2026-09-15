@@ -16,7 +16,23 @@ crate layout below before it decides any shader.
 
 ## Where this is
 
-Absent, and every consumer it needs is missing something:
+**Rung 1's engine half landed 2026-09-15**: `crcbl-water` and
+`ForwardRenderer::set_water`, with the `water-copy` and `water` passes after
+`ssr-blur` in every view. It is held by `Scene::StillPool`'s golden, four band
+relations — absorption with depth, the shoreline fade, grazing Fresnel and the
+in-front rejection — and a claim that removing the body draws the frame never
+given one bit for bit, each shown red by a sabotage. Priced at 1920×1080 by
+`mesh_e2e`'s `the_price_of_the_water_passes`, p50: on radv (RX 7900 XTX)
+`water-copy` 0.021 ms and `water` 0.132 ms, the frame 0.955 ms against 0.803 ms
+with no body; on lavapipe 1.160 ms and 14.799 ms, the frame 82.6 ms against 67.0
+ms. **The browser price is not taken**: the render harness has no pass timer, so
+it waits for the tide sample, which is the rung's other half. The DFG table is
+not read (Schlick); the sky prefilter, sky-view LUT and reflection block are
+borrowed from the SSR and sky passes rather than uploaded twice; `Medium` has no
+anisotropy until a rung reads one.
+
+The rest of this section is the survey that preceded rung 1, and the consumers
+it names are still missing what it says:
 
 - **No surface a camera can see through.** `crates/crcbl-render/src/forward.rs`
   builds no mesh pipeline with a `BlendState`; `GpuMaterial`'s mode bits stop at

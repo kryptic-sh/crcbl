@@ -262,6 +262,57 @@ fn a_view_records_its_own_frame_and_the_scenes_passes_run_once() {
     renderer.destroy(device);
 }
 
+/// **Water is drawn in every view, and a renderer with no bodies records none
+/// of it** — [`crate::water`]'s off position, as the passes a frame records.
+///
+/// The frame before any body and the frame after the bodies are removed record
+/// the same list, label for label: no pass, and nothing moved to make room for
+/// one.
+#[test]
+fn every_view_draws_the_water_and_no_body_records_no_pass() {
+    let (_, device, queue) = open();
+    let device = device.as_ref();
+    let (mut renderer, view) = renderer_with_view(device, queue);
+    place_cube(&mut renderer, Mat4::IDENTITY);
+    let count =
+        |labels: &[String], label: &str| labels.iter().filter(|each| *each == label).count();
+
+    let dry = frame_labels(device, queue, &mut renderer, Some(view));
+    assert_eq!(count(&dry, "water-copy") + count(&dry, "water"), 0);
+
+    renderer
+        .set_water(&[crcbl_water::WaterBody {
+            outline: vec![[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0]],
+            level: 0.25,
+            medium: crcbl_water::Medium {
+                absorption: [0.4, 0.1, 0.05],
+                scattering: [0.01, 0.01, 0.01],
+            },
+        }])
+        .expect("a square meshes");
+    let alone = frame_labels(device, queue, &mut renderer, None);
+    let wet = frame_labels(device, queue, &mut renderer, Some(view));
+    for label in ["water-copy", "water"] {
+        assert_eq!(
+            count(&alone, label),
+            1,
+            "the primary camera records `{label}`"
+        );
+        assert_eq!(count(&wet, label), 2, "the view records its own `{label}`");
+    }
+
+    renderer.set_water(&[]).expect("an empty set is a set");
+    // Two frames, so both slots of the ring have come round since the bodies
+    // were removed.
+    frame_labels(device, queue, &mut renderer, Some(view));
+    let removed = frame_labels(device, queue, &mut renderer, Some(view));
+    assert_eq!(
+        removed, dry,
+        "removing the water left the frame a different shape"
+    );
+    renderer.destroy(device);
+}
+
 /// A view's visibility reaches the instance record, survives the caller
 /// rewriting the object, and is handed back when the view is released.
 #[test]

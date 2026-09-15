@@ -185,6 +185,7 @@ pub mod transient;
 pub mod ui_pass;
 mod upscale;
 mod volumetric;
+mod water;
 
 pub use button_skin::{ButtonSkin, screen_rect_to_target};
 pub use camera::{Atmosphere, Camera, DirectionalLight, Fog, Projection, Sky};
@@ -209,6 +210,10 @@ pub use crcbl_ui::text::FontAtlas;
 /// [`ButtonSkin::insets`] returns a [`SkinInsets`]. A caller that can name this
 /// crate's button API should not have to add a second dependency to call it.
 pub use crcbl_ui::{ButtonState, SkinInsets};
+/// Re-exported because [`ForwardRenderer::set_water`] is spelled in them, on
+/// [`SampleMode`]'s terms below: a caller setting water should not need a
+/// dependency of its own to name what it sets.
+pub use crcbl_water::{BodyError, Medium, WaterBody};
 pub use cull::{Aabb, Frustum, visible_instances};
 pub use cull_stats::{ClusterCull, CullStats, CullStatsRing};
 pub use debug_draw::{DebugDraw, DebugVertex, frustum_corners};

@@ -2090,21 +2090,29 @@ mod tests {
     fn the_shaders_pick_a_level_the_way_this_module_does() {
         let mesh = include_str!("../shaders/mesh.slang");
         let ssr = include_str!("../shaders/ssr.slang");
+        // The water surface's reflection picks a level with `ssr.slang`'s copy.
+        let water = include_str!("../shaders/water.slang");
         for signature in [
             "float probe_level_reach(float3 world_position, float3 origin, float3 inv_spacing, \
              float3 last)",
             "float2 probe_level_of(float reach, uint levels)",
         ] {
-            let bodies: Vec<(&str, String)> = [("mesh.slang", mesh), ("ssr.slang", ssr)]
-                .into_iter()
-                .map(|(name, source)| (name, slang_body(name, source, signature)))
-                .collect();
-            assert_eq!(
-                bodies[0].1, bodies[1].1,
-                "`{signature}` differs between {} and {}; the clipmap's level \
-                 pick is copied verbatim and one copy has drifted",
-                bodies[0].0, bodies[1].0
-            );
+            let bodies: Vec<(&str, String)> = [
+                ("mesh.slang", mesh),
+                ("ssr.slang", ssr),
+                ("water.slang", water),
+            ]
+            .into_iter()
+            .map(|(name, source)| (name, slang_body(name, source, signature)))
+            .collect();
+            for body in &bodies[1..] {
+                assert_eq!(
+                    bodies[0].1, body.1,
+                    "`{signature}` differs between {} and {}; the clipmap's level \
+                     pick is copied verbatim and one copy has drifted",
+                    bodies[0].0, body.0
+                );
+            }
         }
     }
 
@@ -2143,6 +2151,7 @@ mod tests {
         for (name, source) in [
             ("mesh.slang", include_str!("../shaders/mesh.slang")),
             ("ssr.slang", include_str!("../shaders/ssr.slang")),
+            ("water.slang", include_str!("../shaders/water.slang")),
         ] {
             assert_eq!(
                 slang_body(name, source, signature),

@@ -1,0 +1,28 @@
+[package]
+name = "crcbl-water"
+description = "Crucible water: bodies of water, their medium, and the CPU mesher for their surface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# One dependency, and it is an *error*, not a runtime. `docs/plan/55-water.md`'s
+# first decision is that this crate is pure data and CPU arithmetic that links
+# no device, so a server that draws nothing can answer questions about the same
+# water a client draws. Nothing here has a handle, a clock or a vector type, so
+# neither `crcbl-core` nor `glam` is named: an outline is `[f32; 2]`s, and a
+# dependency nothing reads is one `cargo machete` refuses.
+[dependencies]
+# `BodyError` is returned from the mesher, so it needs `Display` and `Error`
+# without a macro of this crate's own.
+thiserror = { workspace = true }
+
+# The mesher's invariants — the triangles cover exactly the outline's area, and
+# every one of them faces up — hold over every simple outline, not over the few
+# a table of cases would list. `crates/crcbl-vfx/Cargo.toml` makes the same
+# argument for its pool.
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

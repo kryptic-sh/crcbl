@@ -149,6 +149,11 @@ mod verdict;
 
 use verdict::Offscreen;
 
+// `docs/plan/55-water.md` rung 1's fixture, in a file of its own for the reason
+// it gives.
+#[path = "render_e2e/still_pool.rs"]
+mod still_pool;
+
 /// The size the goldens were blessed at.
 ///
 /// The same 256x192 the cross-backend harness and `crcbl-vk`'s mesh suite use,

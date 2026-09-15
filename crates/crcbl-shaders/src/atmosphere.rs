@@ -2595,6 +2595,9 @@ mod tests {
         for (file, source) in [
             ("sky.slang", include_str!("../shaders/sky.slang")),
             ("ssr.slang", include_str!("../shaders/ssr.slang")),
+            // The water surface's reflection reads the LUT through a copy of
+            // `ssr.slang`'s spelling.
+            ("water.slang", include_str!("../shaders/water.slang")),
         ] {
             let declared = |name: &str| {
                 source

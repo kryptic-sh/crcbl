@@ -271,7 +271,7 @@ mod tests {
     /// checked against the directory by
     /// `every_shader_that_spells_the_exponential_is_guarded` so the list
     /// cannot fall behind it.
-    const SHADERS_WITH_A_COPY: [(&str, &str); 3] = [
+    const SHADERS_WITH_A_COPY: [(&str, &str); 4] = [
         ("mesh.slang", include_str!("../shaders/mesh.slang")),
         (
             "volumetric.slang",
@@ -281,6 +281,7 @@ mod tests {
             "volumetric_composite.slang",
             include_str!("../shaders/volumetric_composite.slang"),
         ),
+        ("water.slang", include_str!("../shaders/water.slang")),
     ];
 
     /// `f64::exp` is the oracle throughout: a test is not shading, so the rule
@@ -403,6 +404,11 @@ mod tests {
                 "volumetric_composite.slang",
                 include_str!("../shaders/volumetric_composite.slang"),
                 "float partial_survives = fog_exp_neg(tau);",
+            ),
+            (
+                "water.slang",
+                include_str!("../shaders/water.slang"),
+                "float3 transmittance = float3(fog_exp_neg(extinction.r * thickness),",
             ),
         ] {
             assert!(

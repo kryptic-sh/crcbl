@@ -612,6 +612,34 @@ dxil = vertexMain:dxil/volumetric_composite.vertex.dxil:b8a3948984e0decc91b47b05
 dxil = fragmentMain:dxil/volumetric_composite.fragment.dxil:75624c2bb1d334014288a0b121ca2603003882e2750effa8df0590644cec6176
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
+[water]
+source = shaders/water.slang
+source-sha256 = 591fef003488419b35092a8bbd5030e48ef4196551a67f0c68c3a42aa121886b
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/water.spv
+spirv-sha256 = 72e05244cfd6f6554dfe418a6e8216f40d11b974a8b4a58e35dab600d178024c
+wgsl = wgsl/water.wgsl
+wgsl-sha256 = 2a43ca290ebac4b2fa16eee3d7d729332cea055326c59f2f8f7bfe90926df209
+msl = msl/water.metal
+msl-sha256 = 688e8be3582f0beff6e695a78eed71600adde170c3a93328dc389fdc49a8d70f
+dxil = vertexMain:dxil/water.vertex.dxil:d839c902dd846b2ebdc5bc587cd7956527b504677b5cc08f2ba5087f94c2b697
+dxil = fragmentMain:dxil/water.fragment.dxil:2893b608df7adf0751dbd192b0f49b5c5bb31664e40b236e8e060389a5d5964a
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[water_copy]
+source = shaders/water_copy.slang
+source-sha256 = 848e036965d6fc8384723a89028c5ef4dc5c8d66682ca118ab7babc88692e524
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/water_copy.spv
+spirv-sha256 = 9decec90521dc03e1ea08bdaaaf60e6313866c8bf733f55a3e4b312a4b82d4e7
+wgsl = wgsl/water_copy.wgsl
+wgsl-sha256 = 92542870038fe46a7adf4441981a976076d4cf055e3e673832371e50ef32af39
+msl = msl/water_copy.metal
+msl-sha256 = 1dfcf042cc68c83c6b341268e6f9b9eae1cab30993744d2cb8468a2a1781e81d
+dxil = vertexMain:dxil/water_copy.vertex.dxil:d90f2f11f7dc43aba893511ca1c9d141facdbbe0e2562be4b79e030e1da116a0
+dxil = fragmentMain:dxil/water_copy.fragment.dxil:12be893aaad9f7954e6a8bae79d473cfa1445054688522cf93af9b45a16a2f35
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
 [zero_dispatch_probe]
 source = shaders/zero_dispatch_probe.slang
 source-sha256 = d60feb7eb0a7da318bc9e37f36bf9b11ba346811957142fd5ec36587d2b777fe

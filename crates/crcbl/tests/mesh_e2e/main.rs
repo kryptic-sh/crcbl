@@ -98,6 +98,7 @@ mod shadow_tiles;
 mod skinned_motion;
 mod two_dags;
 mod vertex_v2;
+mod water;
 
 // The fixture, out of `tests/gpu_scene/` rather than beside the root, because
 // three other suites open the same device against the same offscreen ring and a

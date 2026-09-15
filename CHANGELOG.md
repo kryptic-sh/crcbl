@@ -131,6 +131,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Water, first rung: still bodies of water, drawn by every view.**
+  `crcbl-water` is new and holds bodies as data — `WaterBody` (a simple outline
+  on the XZ plane, a level and a `Medium` of per-channel absorption and
+  scattering in 1/m) and `surface_mesh`, a grid clipped to the outline that
+  returns a `BodyError` rather than panicking on a bad outline. It depends on
+  nothing that opens a device, so a server can read the same bodies a client
+  draws. `ForwardRenderer::set_water` registers bodies (all or nothing), and
+  each view records two timed passes between the reflection composite and the
+  bloom chain: `water-copy`, a full-screen draw that copies the HDR colour and
+  the opaque depth, and `water`, the surface itself — refraction with in-front
+  rejection, per-channel absorption through the constructed exponential, single
+  scattering lit by the sun's cascades, a sky and probe reflection with Schlick
+  Fresnel, fog on only the light the surface adds, and a soft shoreline. No
+  bodies records no pass and draws a bit-identical frame.
+  `crcbl screenshot --scene still_pool` and `OffscreenSetup::set_water` draw the
+  golden scene that holds it; at 1920×1080 on an RX 7900 XTX the two passes cost
+  0.021 ms and 0.132 ms.
 - **`crcbl_shaders::trig::sin` and `cos`: trigonometry that may reach a
   colour.** Built only from operations IEEE-754 specifies exactly — a three-part
   `π/2` reduction, a reciprocal-factorial Taylor kernel and quadrant selection —

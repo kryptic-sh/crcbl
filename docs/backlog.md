@@ -39,6 +39,39 @@ optional-extension diagnostics should be deduplicated per asset and extension so
 multiple scene/view imports do not flood the log. Recheck the Mossberg asset in
 EW after the engine implementation lands, then update EW's pinned revision.
 
+## What water rung 1 shipped without (2026-09-15)
+
+`docs/plan/55-water.md`'s still pool landed with the gaps below; each is
+verified absent, not guessed.
+
+- **The browser price of both water passes is unmeasured.** The render harness
+  draws the golden in Chrome but times no pass; the price comes with the tide
+  sample's demo, which is also rung 1's owed half (the sample skeleton, the
+  courtyard scene and `/demos/tide/`).
+- **A rejected refraction sample shows the straight-through floor**, which
+  leaves a ghost of the occluder's silhouette — visible above the post in
+  `still_pool.png`. That is the standard screen-space refraction limit; the
+  options are fading the offset near a rejection or marching the depth copy.
+- **Refraction is one step**, to the depth the straight ray reached below the
+  surface, so the landing is an estimate under a sloping floor or at a basin
+  wall.
+- **Not drawn by any GPU frame yet**: the froxel-fog branch of the surface's
+  fog, the analytic-fog branch with a non-zero density, probe-lit and
+  atmosphere-lit reflections, water in a secondary view (covered by the
+  null-device pass list only), and Metal and D3D12 (the artifacts compile; no
+  device ran them).
+- **Golden margins are thin on software adapters.** SwiftShader draws
+  `still_pool` at 0.67% of pixels over tolerance against a 1% limit, and the
+  Fresnel claim reads 4.5 levels against a threshold of 2. CI's lavapipe is an
+  older Mesa than this machine's; a red there is the first place to look.
+- **The surface runs the full sun shadow filter per water pixel** for the
+  scattered term alone; a cheaper filter for that term is unpriced.
+- **The surface grid spacing is fixed** (`SURFACE_SPACING`, one metre) and
+  bodies are not culled, so a camera below the surface draws the same shader
+  until rung 7's underwater mask.
+- **`BodyError::TooManyVertices` has no test**: reaching a `u32` index's limit
+  is impractical in a test.
+
 ## Water, wind, grass and hair: planned, nothing built (2026-09-15)
 
 Four engine topics and three fixtures were researched and planned at the user's

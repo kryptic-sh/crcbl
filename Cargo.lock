@@ -497,6 +497,7 @@ dependencies = [
  "crcbl-shaders",
  "crcbl-sprite",
  "crcbl-ui",
+ "crcbl-water",
  "glam",
  "ron",
  "serde",
@@ -611,6 +612,14 @@ dependencies = [
  "crcbl-render",
  "crcbl-shaders",
  "glam",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "crcbl-water"
+version = "0.1.0"
+dependencies = [
+ "proptest",
  "thiserror 2.0.20",
 ]
 

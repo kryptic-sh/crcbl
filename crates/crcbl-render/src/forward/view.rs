@@ -324,6 +324,9 @@ pub(super) struct FramePasses {
     pub(super) ssao_blurs: u32,
     /// Whether the background pass draws.
     pub(super) draws_sky: bool,
+    /// What the frame's water draws, or `None` for a frame with none — see
+    /// [`crate::water`].
+    pub(super) water: Option<WaterFrame>,
     /// The skinning dispatch's vertex pool, when the frame skins.
     pub(super) skinned: Option<BufferId>,
     /// This frame's slot of the probe ring, as a handle and as the graph's id.
@@ -543,6 +546,10 @@ pub(super) struct View {
     /// which is every frame until a caller calls
     /// [`set_sky`](ForwardRenderer::set_sky).
     pub(super) sky_pass: SkyPass,
+    /// `docs/plan/55-water.md`'s surface passes — see [`crate::water`]. They
+    /// draw on no frame with no bodies, which is every frame until a caller
+    /// calls [`set_water`](ForwardRenderer::set_water).
+    pub(super) water: Water,
 }
 
 impl View {
@@ -936,6 +943,20 @@ impl View {
             ForwardRenderer::build_tested_fullscreen,
         )?);
 
+        // --- the water surface ---
+        //
+        // After the background, so `Rollback::run` releases it before that
+        // pass. It takes the atlas's sampler, which the renderer owns for its
+        // life, and the full-screen builder with a depth state, because its copy
+        // pass writes a colour target and a depth one at once. See
+        // [`crate::water`].
+        rollback.water = Some(Water::new(
+            device,
+            frames,
+            inputs.shadow_sampler,
+            ForwardRenderer::build_fullscreen_with,
+        )?);
+
         // Whole, so the rollback lets go of every handle: the view owns them
         // from here, and a rollback still naming one would release it twice.
         let view =
@@ -1014,6 +1035,10 @@ impl View {
                     .sky_pass
                     .take()
                     .unwrap_or_else(|| unreachable!("the sky was placed in the rollback above")),
+                water: rollback
+                    .water
+                    .take()
+                    .unwrap_or_else(|| unreachable!("the water was placed in the rollback above")),
             };
         rollback.buffers.clear();
         rollback.bind_groups.clear();
@@ -1362,6 +1387,25 @@ impl View {
             camera.view().inverse().to_cols_array(),
             &gradient,
             sky_view.map(|presented| &presented.view),
+        )?;
+        // The water surface's own block: the sun its scattering is lit by and
+        // whether this frame's air is the froxel column's. Written whether or
+        // not the frame has water, on the blocks above's terms. The sun is
+        // normalised on `sun_row`'s terms — a caller may hand the renderer any
+        // vector, and the shader reads this as a unit direction.
+        self.water.begin_frame(
+            device,
+            slot,
+            crcbl_shaders::water::WaterParams {
+                sun_direction: scene
+                    .light
+                    .direction
+                    .normalize_or_zero()
+                    .extend(0.0)
+                    .to_array(),
+                sun_color: scene.light.color.extend(0.0).to_array(),
+                froxels: self.frame_effects.contains(RenderEffects::VOLUMETRIC_FOG),
+            },
         )?;
         // The bloom chain's blocks, one row per step: each step needs the texel
         // size of the image it reads, and the chain's shape is a function of the
@@ -2085,6 +2129,17 @@ impl View {
                 .add_pass(graph, frame, scene_color, scene_depth);
         }
 
+        // What the water surface reads out of three other passes' state, read
+        // before those passes take their mutable borrows below — see
+        // [`crate::water`] for why it binds their handles rather than copies.
+        let water_reads = (
+            self.uniforms[frame],
+            self.ssr.uniforms(frame),
+            self.ssr.sky_prefilter_view(),
+            self.volumetric.buffers(frame),
+            self.sky_pass.lut(frame),
+        );
+
         // `docs/plan/51-volumetrics.md`'s froxel volume, and it composites over
         // the sky as well as over the geometry — a pixel at the far plane is a
         // whole column of air, which is exactly what makes a distant horizon
@@ -2095,9 +2150,9 @@ impl View {
         // it can see is fog the surface it bounced off could see. The reflection
         // the blur adds afterwards is still unfogged, which is the same gap the
         // analytic path has and `docs/backlog.md` carries.
-        let scene_color = match fogged {
+        let (scene_color, froxel_ids) = match fogged {
             Some(composited) => {
-                self.volumetric.add_passes(
+                let ids = self.volumetric.add_passes(
                     graph,
                     frame,
                     self.grid,
@@ -2109,9 +2164,9 @@ impl View {
                     },
                     light_grid,
                 );
-                composited
+                (composited, Some(ids))
             }
-            None => scene_color,
+            None => (scene_color, None),
         };
 
         // `docs/plan/18-render-features.md`'s reflection march and its blur, and
@@ -2165,6 +2220,48 @@ impl View {
             }
             None => scene_color,
         };
+
+        // `docs/plan/55-water.md`'s surface, **after the reflection composite
+        // and before the bloom chain**. After, because the surface computes its
+        // own reflection and is not a receiver of the shared march, which has
+        // already run; before, because water is scene content and the chain is
+        // a lens. It draws into the image the chain would have read and into the
+        // scene depth, in place, so every pass below reads the same two images
+        // it always did. A frame with no bodies adds nothing here and takes no
+        // transient — see [`crate::water`] — and requests its two after every
+        // other image this view asks for, so the pool hands each of those the
+        // physical image it had before water existed.
+        if let Some(mesh) = passes.water.clone() {
+            let color_copy =
+                graph.create_image("water-color", TransientImageDesc::scene_color(extent));
+            let depth_copy =
+                graph.create_image("water-depth", TransientImageDesc::hiz_level(extent));
+            let (frame_block, reflection_block, sky_prefilter, froxels, sky_view) = water_reads;
+            let inputs = WaterInputs {
+                frame_block,
+                reflection_block,
+                froxels,
+                froxel_ids,
+                probes: probe_buffer,
+                probe_id: probe_table,
+                probe_visibility: passes.probe_visibility,
+                sky_prefilter,
+                sky_view,
+                mesh,
+            };
+            self.water.add_passes(
+                graph,
+                frame,
+                WaterImages {
+                    color: tonemapped,
+                    depth: scene_depth,
+                    color_copy,
+                    depth_copy,
+                    shadow_atlas,
+                },
+                inputs,
+            );
+        }
 
         // `docs/plan/18-render-features.md`'s bloom chain, and it slots in
         // exactly where the reflection composite left off: it reads whatever the
@@ -2421,6 +2518,7 @@ impl View {
         for buffer in self.tonemap_uniforms {
             device.destroy_buffer(buffer);
         }
+        self.water.destroy(device);
         self.sky_pass.destroy(device);
         self.upscale.destroy(device);
         self.cmaa2.destroy(device);

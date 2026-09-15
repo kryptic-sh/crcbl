@@ -519,6 +519,28 @@ impl Ssr {
         })
     }
 
+    /// `frame`'s uniform block — the buffer [`Ssr::begin_frame`] writes.
+    ///
+    /// **Handed to [`crate::water`] rather than copied for it**, on
+    /// [`crate::sky_pass::SkyPass::lut`]'s terms: the water surface reflects the
+    /// probe grid and the sky exactly as this pass falls back to them, so it
+    /// binds this block itself. It is written on every frame whether or not the
+    /// march runs, which is what lets a frame with reflections off still have a
+    /// surface that reflects.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    pub(crate) fn uniforms(&self, frame: usize) -> BufferHandle {
+        self.uniforms[frame]
+    }
+
+    /// The sky prefilter table's view — see [`Ssr::uniforms`] for why
+    /// [`crate::water`] reads this rather than uploading the table again.
+    pub(crate) fn sky_prefilter_view(&self) -> ImageViewHandle {
+        self.sky_prefilter.view
+    }
+
     /// Writes `frame`'s uniform block.
     ///
     /// # Errors
