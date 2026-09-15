@@ -32,6 +32,7 @@
 //! crcbl::backend   → (this crate)    runtime GPU backend selection
 //! crcbl::adapter   → (this crate)    which adapter inside that backend
 //! crcbl::engine    → (this crate)    the shell↔HAL join every sample repeats
+//! crcbl::nav       → (this crate)    the `ui` actions as the UI tree's NavInput
 //! ```
 //!
 //! # One dependency is the whole point, and it took until S3 to mean it
@@ -344,6 +345,8 @@ pub mod debug_view;
 pub mod engine;
 
 pub mod knob;
+
+pub mod nav;
 
 pub mod perf;
 

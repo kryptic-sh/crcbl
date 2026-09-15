@@ -318,6 +318,60 @@ mod tests {
     /// The extent every UI golden is blessed at.
     const EXTENT: (u32, u32) = (256, 192);
 
+    /// **The scripted pad is what a keyboard produces through the reserved
+    /// `ui` context**: the same eleven frames, from key events fed to an action
+    /// map and read back by [`crate::nav::nav_input`] — so the golden this
+    /// scene commits is a frame the real input path reaches, including five
+    /// steps down from one held arrow on the repeat schedule.
+    #[test]
+    fn the_script_is_what_the_keyboard_produces_through_the_ui_context() {
+        use crate::core::input::KeyCode;
+        use crate::input::{ActionMap, REPEAT_DELAY, REPEAT_INTERVAL, ui};
+
+        const FRAME: f32 = 1.0 / 60.0;
+        // Longer than the schedule's own steps, so each frame is past its due
+        // time rather than on it.
+        let after_delay = REPEAT_DELAY + FRAME;
+        let after_interval = REPEAT_INTERVAL * 1.5;
+        let frames: [(f32, &[(KeyCode, bool)]); 11] = [
+            (FRAME, &[(KeyCode::KeyQ, true)]),
+            (
+                FRAME,
+                &[(KeyCode::KeyQ, false), (KeyCode::ArrowRight, true)],
+            ),
+            (
+                FRAME,
+                &[(KeyCode::ArrowRight, false), (KeyCode::Enter, true)],
+            ),
+            (FRAME, &[(KeyCode::Enter, false)]),
+            (FRAME, &[(KeyCode::ArrowDown, true)]),
+            (after_delay, &[]),
+            (after_interval, &[]),
+            (after_interval, &[]),
+            (after_interval, &[]),
+            (
+                FRAME,
+                &[(KeyCode::ArrowDown, false), (KeyCode::ArrowLeft, true)],
+            ),
+            (FRAME, &[(KeyCode::ArrowLeft, false)]),
+        ];
+
+        let mut actions = ActionMap::new();
+        ui::declare(&mut actions).expect("an empty map clashes with nothing");
+        actions.push_context(ui::CONTEXT).expect("declared");
+        let produced: Vec<NavInput> = frames
+            .iter()
+            .map(|(dt, keys)| {
+                actions.begin_tick(*dt);
+                for &(key, pressed) in *keys {
+                    actions.key_event(key, pressed);
+                }
+                crate::nav::nav_input(&actions)
+            })
+            .collect();
+        assert_eq!(produced, SCRIPT);
+    }
+
     /// The scene is what its claims need before any pixel is read: the script
     /// ends with focus on the target row inside the dialog and nothing
     /// engaged, the list scrolled to show that row and no further than its

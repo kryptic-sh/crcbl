@@ -67,10 +67,11 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   memory and a modal trap, beam-first spatial scoring (`13·major² + minor²`),
   `nav-*` and `nav-wrap`, the engaged state with snapshot, commit and cancel,
   `:focus`, `:engaged` and `:disabled`, `overflow: scroll` with a clamped
-  offset, `outline-*`, and the scoring overlay. Not built from that rung yet:
-  the reserved `ui_*` actions — `crcbl-input` has no context stack, no gamepad
-  backend, no last-device tracking and no consumption, so a key bound to a menu
-  would still drive the game — key repeat, a drawn focus-history log, and a
+  offset, `outline-*`, and the scoring overlay. The reserved `ui_*` actions,
+  their context and key repeat are in `crcbl_input::ui` (2026-09-16), and
+  `crcbl::nav::nav_input` builds the tree's `NavInput` from them; nothing in
+  `Loop` pushes that context yet, because no engine screen is on the tree. Not
+  built from that rung yet: gamepad bindings, a drawn focus-history log, and a
   focus style in `default.css`.
 - **`widget`** — `Label`, `Button`, `ButtonSkin`, `Style`, `SkinInsets`,
   `PointerInput`, `UiState`, `WidgetId`. The rest of the MVP widget set below is

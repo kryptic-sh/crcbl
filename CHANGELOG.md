@@ -16,6 +16,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_input::Binding` has a `Chord { modifier, key }` member and
+  `ActionMapError` has `UnknownContext`, `ContextAlreadyActive` and
+  `ContextNotOnTop`**, so an exhaustive match on either needs the new arms. A
+  key bound in a pushed context no longer reaches an action beneath it that
+  binds the same key; with nothing pushed, every existing map resolves as
+  before.
 - **The draw list carries laid-out glyph runs.** `DrawList::to_triangles` and
   `to_triangles_split` take an `Option<&mut GlyphAtlas>` after the bitmap atlas;
   `DrawCommand::Glyphs` and `Primitive::FontGlyph` are new variants, so an
@@ -171,6 +177,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Input contexts, key repeat and the reserved `ui` actions in `crcbl-input`.**
+  `ActionMap::declare_in` puts an action in a named context over the
+  always-active `GAMEPLAY_CONTEXT`; `push_context` and `pop_context` stack
+  contexts, and the topmost active context that binds a key, button, on-screen
+  control or the pointer consumes it, while an input it does not bind falls
+  through. A key held while the stack changes is withheld from its new owner
+  until released, so the Enter that closes a menu does not also reach the game.
+  `ActionMap::set_repeat` attaches a `Repeat` schedule on the tick clock
+  (`REPEAT_DELAY` then `REPEAT_INTERVAL`) read through `ActionMap::repeated` and
+  `ActionMap::cardinal`; `ActionMap::last_device` names the `Device` that last
+  spoke. `crcbl_input::ui::declare` adds the reserved `ui_move`, `ui_next`,
+  `ui_prev` (Shift+Tab), `ui_accept` and `ui_back` actions, off the stack, and
+  `crcbl::nav::nav_input` turns them into the tree's `NavInput`. No sample's
+  bindings changed and nothing in `Loop` pushes the context yet.
 - **Focus, navigation and the engaged state in `crcbl_ui::tree`.**
   `Ui::begin_frame_with` takes a `NavInput` (a direction, next and previous,
   accept, back and the input mode), and `block_with` and `block_keyed_with` take

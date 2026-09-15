@@ -90,11 +90,17 @@ does not: `PointerPosition { axis }` for where the pointer _is_, normalised
 rather than in pixels, and `KeyAxis { negative, positive }` for a
 keyboard-driven `Axis1`, since a single key can only ever push an axis positive.
 The composite is `Binding::Wasd { up, down, left, right }` and is normalised, so
-a diagonal is a unit vector. **Patterns and contexts are not built**: an action
-carries no pattern list, and a button reports `ButtonState::Held { duration }`
-for the game to interpret rather than firing a named `hold` — there is no `tap`,
-`double-tap` or `repeat` evaluator, and no context stack. Those parts of this
-document are still the plan.
+a diagonal is a unit vector. **Contexts and `repeat` are built** (2026-09-16):
+`ActionMap::declare_in`, `push_context` and `pop_context` over the base
+`GAMEPLAY_CONTEXT`, with the topmost binder consuming an input and a held input
+withheld from a new owner until released (the rules are in
+`crates/crcbl-input/src/context.rs`); `ActionMap::set_repeat` on the tick clock;
+`ActionMap::last_device`; `Binding::Chord` for Shift+Tab; and the reserved `ui`
+context in `crcbl_input::ui`. **The other patterns are not built**: a button
+reports `ButtonState::Held { duration }` for the game to interpret rather than
+firing a named `hold`, and there is no `tap` or `double-tap` evaluator. The
+reserved context declares no gamepad bindings, because `Binding` has no gamepad
+member.
 
 ## Device backends (zero 3rd-party rule, topic 15 discipline)
 
@@ -135,7 +141,7 @@ assignment is post-MVP but the device-id plumbing supports it from day one.
 
 | Slice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Phase                                           |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Action layer + kb/mouse — **patterns, contexts and the RON binding asset are not built**, per the section above: an action carries no pattern list, there is no context stack, and nothing parses a binding file.                                                                                                                                                                                                                                                                                                                                                                                       | P2 (replaces the raw-input pipeline plan there) |
+| Action layer + kb/mouse — **contexts and `repeat` are built; `hold`, `tap`, `double-tap` and the RON binding asset are not**, per the section above: nothing parses a binding file.                                                                                                                                                                                                                                                                                                                                                                                                                     | P2 (replaces the raw-input pipeline plan there) |
 | Profile rebind storage + glyph hints — **neither built**, checked 2026-08-23: `crcbl-store` has no profile or binding type and `crcbl-input` contains no glyph anything, and `ActionMap::rebind` is in-memory only — nothing serialises it. This row used to add that `record.rs` was the crate's only cross-session helper, which was 24 days out of date when the "checked" date was written on it: `crcbl-store::settings` persists `settings.toml` through `SettingsStack::save`, which is the mechanism a rebind file sits on. So what is owed is the binding **schema**, not a persistence layer. | unbuilt                                         |
 | Rebind UI in settings screen; input inspector                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | P10                                             |
 | Gamepad: evdev (Linux) + Web Gamepad API                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | P10                                             |

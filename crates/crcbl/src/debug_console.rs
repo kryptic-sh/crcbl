@@ -377,6 +377,7 @@ fn binding_name(binding: &Binding) -> String {
         Binding::KeyAxis { negative, positive } => {
             format!("{}/{}", negative.as_str(), positive.as_str())
         }
+        Binding::Chord { modifier, key } => format!("{modifier:?}+{}", key.as_str()),
         Binding::Virtual(id) => format!("on-screen `{id}`"),
         Binding::Wasd {
             up,
@@ -979,6 +980,17 @@ pub fn engine_tables() -> [(&'static str, Table); 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chord prints as it is pressed, which is how `ui_prev`'s Shift+Tab
+    /// reads in a `bind` listing.
+    #[test]
+    fn a_chord_prints_its_modifier_and_key() {
+        let chord = Binding::Chord {
+            modifier: crcbl_input::Modifier::Shift,
+            key: KeyCode::Tab,
+        };
+        assert_eq!(binding_name(&chord), "Shift+Tab");
+    }
 
     #[test]
     fn the_token_being_completed_is_the_whole_value_after_the_name() {

@@ -1,8 +1,35 @@
 //! Device-agnostic action system: gameplay and UI code consume **actions**,
 //! never raw devices. Keyboard, mouse, and future gamepad/touch are
 //! interchangeable binding sources behind one config layer.
+//!
+//! # Contexts
+//!
+//! Every action belongs to one named context: [`ActionMap::declare`] puts it in
+//! [`GAMEPLAY_CONTEXT`], which is always active, and [`ActionMap::declare_in`]
+//! names another. [`ActionMap::push_context`] and [`ActionMap::pop_context`]
+//! stack contexts over it, and **the topmost active context that binds an input
+//! consumes it** — `context.rs` has the rules, including what happens to a key
+//! held while the stack changes. [`ui`] declares the engine's reserved `ui`
+//! context.
+//!
+//! # Patterns and devices
+//!
+//! [`ActionMap::set_repeat`] attaches a [`Repeat`] to an action, evaluated on
+//! the clock [`ActionMap::begin_tick`] advances (`repeat.rs`), and
+//! [`ActionMap::last_device`] names the kind of [`Device`] that last spoke.
 
+mod context;
+mod device;
+mod repeat;
+pub mod ui;
+
+pub use context::GAMEPLAY_CONTEXT;
+pub use device::Device;
+pub use repeat::{Cardinal, REPEAT_DELAY, REPEAT_INTERVAL, Repeat};
+
+use context::{Routes, Suppressed, View};
 use crcbl_core::input::{KeyCode, PointerButton};
+use repeat::RepeatState;
 use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
@@ -117,6 +144,49 @@ pub enum PointerAxis {
     Y,
 }
 
+/// The modifier a [`Binding::Chord`] waits for: either of its two keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Modifier {
+    /// [`KeyCode::ShiftLeft`] or [`KeyCode::ShiftRight`].
+    Shift,
+    /// [`KeyCode::ControlLeft`] or [`KeyCode::ControlRight`].
+    Control,
+    /// [`KeyCode::AltLeft`] or [`KeyCode::AltRight`].
+    Alt,
+    /// [`KeyCode::SuperLeft`] or [`KeyCode::SuperRight`].
+    Super,
+}
+
+impl Modifier {
+    /// The left and the right key of this modifier.
+    #[must_use]
+    pub const fn keys(self) -> [KeyCode; 2] {
+        match self {
+            Self::Shift => [KeyCode::ShiftLeft, KeyCode::ShiftRight],
+            Self::Control => [KeyCode::ControlLeft, KeyCode::ControlRight],
+            Self::Alt => [KeyCode::AltLeft, KeyCode::AltRight],
+            Self::Super => [KeyCode::SuperLeft, KeyCode::SuperRight],
+        }
+    }
+
+    /// The modifier `key` is one side of, if it is one.
+    #[must_use]
+    pub const fn of(key: KeyCode) -> Option<Self> {
+        match key {
+            KeyCode::ShiftLeft | KeyCode::ShiftRight => Some(Self::Shift),
+            KeyCode::ControlLeft | KeyCode::ControlRight => Some(Self::Control),
+            KeyCode::AltLeft | KeyCode::AltRight => Some(Self::Alt),
+            KeyCode::SuperLeft | KeyCode::SuperRight => Some(Self::Super),
+            _ => None,
+        }
+    }
+
+    /// Whether either side is in `held`.
+    fn held(self, held: &HashSet<KeyCode>) -> bool {
+        self.keys().iter().any(|key| held.contains(key))
+    }
+}
+
 /// A binding source: what raw input triggers this action.
 ///
 /// Keyboard, mouse and on-screen controls today; gamepad lands at P10. A game
@@ -181,6 +251,24 @@ pub enum Binding {
         /// Key for the +1.0 direction.
         positive: KeyCode,
     },
+    /// A key that counts only while a [`Modifier`] is held — Shift+Tab.
+    ///
+    /// **The more specific binding takes the key.** While the modifier is
+    /// held, every plain [`Binding::Key`], [`Binding::KeyAxis`] and
+    /// [`Binding::Wasd`] on the same key, in the context that owns the key,
+    /// reads it as up — so `ui_next` on Tab and `ui_prev` on Shift+Tab never
+    /// both fire. Holding Tab and then pressing Shift therefore releases the
+    /// one and presses the other.
+    ///
+    /// **The modifier is read, not consumed**: a chord owns its `key` and
+    /// nothing else, so a Shift+Tab in a pushed context leaves a sprint bound
+    /// to Shift in the context beneath it alone.
+    Chord {
+        /// The modifier that must be held.
+        modifier: Modifier,
+        /// The key the chord owns.
+        key: KeyCode,
+    },
     /// An **on-screen control**, by the id the widget drawing it was given.
     ///
     /// The touch row of a binding table, and the one binding whose device is a
@@ -225,6 +313,50 @@ pub enum Binding {
     },
 }
 
+impl Binding {
+    /// Calls `visit` with every key this binding owns — the keys a context
+    /// consumes by binding it. A [`Binding::Chord`]'s modifier is not one.
+    fn visit_keys(&self, mut visit: impl FnMut(KeyCode)) {
+        match self {
+            Self::Key(key) | Self::Chord { key, .. } => visit(*key),
+            Self::KeyAxis { negative, positive } => {
+                visit(*negative);
+                visit(*positive);
+            }
+            Self::Wasd {
+                up,
+                down,
+                left,
+                right,
+            } => {
+                visit(*up);
+                visit(*down);
+                visit(*left);
+                visit(*right);
+            }
+            Self::MouseButton(_)
+            | Self::MouseMotion
+            | Self::MouseScroll
+            | Self::PointerPosition { .. }
+            | Self::Virtual(_) => {}
+        }
+    }
+
+    /// Whether this binding reads the keyboard at all.
+    fn reads_keyboard(&self) -> bool {
+        let mut any = false;
+        self.visit_keys(|_| any = true);
+        any
+    }
+
+    /// Whether this binding owns `key`.
+    fn owns_key(&self, key: KeyCode) -> bool {
+        let mut owns = false;
+        self.visit_keys(|owned| owns |= owned == key);
+        owns
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Action declaration
 // ---------------------------------------------------------------------------
@@ -259,6 +391,10 @@ pub struct ActionDecl {
 #[derive(Debug, Clone)]
 struct ActionSlot {
     decl: ActionDecl,
+    /// Index into [`ActionMap::contexts`] of the context this action is in.
+    context: usize,
+    /// The repeat pattern, if one is attached — see [`ActionMap::set_repeat`].
+    repeat: Option<RepeatState>,
     /// The current resolved value.
     value: ActionValue,
     /// True when at least one binding for this action is "down" (key held,
@@ -276,7 +412,7 @@ struct ActionSlot {
 }
 
 impl ActionSlot {
-    fn new(decl: ActionDecl) -> Self {
+    fn new(decl: ActionDecl, context: usize) -> Self {
         let value = match decl.kind {
             ActionKind::Button => ActionValue::Button(ButtonAction::default()),
             ActionKind::Axis1 => ActionValue::Axis1(Axis1Action::default()),
@@ -284,6 +420,8 @@ impl ActionSlot {
         };
         Self {
             decl,
+            context,
+            repeat: None,
             value,
             active: false,
             hold_start: None,
@@ -300,6 +438,9 @@ impl ActionSlot {
     fn reset(&mut self) {
         self.active = false;
         self.hold_start = None;
+        if let Some(repeat) = &mut self.repeat {
+            repeat.reset();
+        }
         match &mut self.value {
             ActionValue::Button(a) => {
                 a.state = ButtonState::Released;
@@ -329,6 +470,14 @@ pub enum ActionMapError {
     DuplicateName(String),
     /// No action with this name has been declared.
     UnknownAction(String),
+    /// No context with this name has been declared.
+    UnknownContext(String),
+    /// [`ActionMap::push_context`] was asked for a context already on the
+    /// stack — [`GAMEPLAY_CONTEXT`] always is.
+    ContextAlreadyActive(String),
+    /// [`ActionMap::pop_context`] was asked for a context that is not the
+    /// topmost pushed one — [`GAMEPLAY_CONTEXT`] is never pushed.
+    ContextNotOnTop(String),
 }
 
 impl std::fmt::Display for ActionMapError {
@@ -336,6 +485,11 @@ impl std::fmt::Display for ActionMapError {
         match self {
             Self::DuplicateName(name) => write!(f, "duplicate action name: {name}"),
             Self::UnknownAction(name) => write!(f, "no such action: {name}"),
+            Self::UnknownContext(name) => write!(f, "no such context: {name}"),
+            Self::ContextAlreadyActive(name) => write!(f, "context already active: {name}"),
+            Self::ContextNotOnTop(name) => {
+                write!(f, "context is not the topmost pushed one: {name}")
+            }
         }
     }
 }
@@ -356,6 +510,22 @@ pub struct ActionMap {
     slots: Vec<ActionSlot>,
     /// name → index into `slots`.
     name_to_idx: HashMap<String, usize>,
+
+    // Contexts ---------------------------------------------------------------
+    /// Every declared context's name, in declaration order;
+    /// [`GAMEPLAY_CONTEXT`] is index 0.
+    contexts: Vec<String>,
+    /// The active contexts as indices into `contexts`, bottom first. Never
+    /// empty: index 0 is the base and is never popped.
+    stack: Vec<usize>,
+    /// Which active context owns each bound input, rebuilt whenever the stack
+    /// or a binding changes.
+    routes: Routes,
+    /// Held inputs withheld from their owner until released, because the
+    /// stack changed under them.
+    suppressed: Suppressed,
+    /// The kind of device that last spoke — see [`ActionMap::last_device`].
+    last_device: Option<Device>,
 
     // Raw input state -------------------------------------------------------
     held_keys: HashSet<KeyCode>,
@@ -396,6 +566,11 @@ impl ActionMap {
         Self {
             slots: Vec::new(),
             name_to_idx: HashMap::new(),
+            contexts: vec![GAMEPLAY_CONTEXT.to_owned()],
+            stack: vec![0],
+            routes: Routes::default(),
+            suppressed: Suppressed::default(),
+            last_device: None,
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
             held_controls: HashSet::new(),
@@ -407,7 +582,8 @@ impl ActionMap {
         }
     }
 
-    /// Register an action.  Actions are enabled by default.
+    /// Register an action in [`GAMEPLAY_CONTEXT`].  Actions are enabled by
+    /// default.
     ///
     /// # Panics
     /// Panics if an action with the same name has already been declared. Use
@@ -424,12 +600,47 @@ impl ActionMap {
     /// # Errors
     /// [`ActionMapError::DuplicateName`] if the name is already declared.
     pub fn try_declare(&mut self, decl: ActionDecl) -> Result<(), ActionMapError> {
+        self.try_declare_in(GAMEPLAY_CONTEXT, decl)
+    }
+
+    /// Register an action in the named context, declaring the context on first
+    /// use.
+    ///
+    /// # Panics
+    /// Panics on a duplicate action name, as [`ActionMap::declare`] does.
+    pub fn declare_in(&mut self, context: &str, decl: ActionDecl) {
+        if let Err(error) = self.try_declare_in(context, decl) {
+            panic!("{error}");
+        }
+    }
+
+    /// Register an action in the named context, reporting a duplicate name
+    /// rather than panicking. Action names are unique across every context.
+    ///
+    /// An action declared into an active context with its input already held
+    /// reports it at once, as [`ActionMap::rebind`] does.
+    ///
+    /// # Errors
+    /// [`ActionMapError::DuplicateName`] if the name is already declared.
+    pub fn try_declare_in(
+        &mut self,
+        context: &str,
+        decl: ActionDecl,
+    ) -> Result<(), ActionMapError> {
         if self.name_to_idx.contains_key(&decl.name) {
             return Err(ActionMapError::DuplicateName(decl.name));
         }
+        let context = match self.contexts.iter().position(|name| name == context) {
+            Some(index) => index,
+            None => {
+                self.contexts.push(context.to_owned());
+                self.contexts.len() - 1
+            }
+        };
         let idx = self.slots.len();
         self.name_to_idx.insert(decl.name.clone(), idx);
-        self.slots.push(ActionSlot::new(decl));
+        self.slots.push(ActionSlot::new(decl, context));
+        self.reroute();
         Ok(())
     }
 
@@ -449,9 +660,9 @@ impl ActionMap {
         let slot = &mut self.slots[idx];
         slot.decl.bindings = bindings;
         slot.reset();
-        if slot.enabled {
-            self.resolve_one(idx);
-        }
+        // Every live action, not only this one: the new bindings can take an
+        // input from a context beneath, or give one back.
+        self.reroute();
         Ok(())
     }
 
@@ -491,35 +702,35 @@ impl ActionMap {
     // -- feeding raw events --------------------------------------------------
 
     /// Feed a key event. `pressed` → key-down, `!pressed` → key-up.
+    ///
+    /// A press makes [`Device::Keyboard`] the last device; a release does not,
+    /// since letting go of a key after reaching for the mouse is not the
+    /// keyboard speaking.
     pub fn key_event(&mut self, key: KeyCode, pressed: bool) {
         if pressed {
             self.held_keys.insert(key);
+            self.last_device = Some(Device::Keyboard);
         } else {
             self.held_keys.remove(&key);
+            self.suppressed.keys.remove(&key);
         }
-        self.resolve_matching(|b| match b {
-            Binding::Key(k) => *k == key,
-            Binding::KeyAxis { negative, positive } => *negative == key || *positive == key,
-            Binding::Wasd {
-                up,
-                down,
-                left,
-                right,
-            } => *up == key || *down == key || *left == key || *right == key,
-            Binding::MouseButton(_)
-            | Binding::MouseMotion
-            | Binding::MouseScroll
-            | Binding::PointerPosition { .. }
-            | Binding::Virtual(_) => false,
-        });
+        if Modifier::of(key).is_some() {
+            // A modifier can press or release any chord, and shadow or unshadow
+            // any plain key a chord shares.
+            self.resolve_matching(Binding::reads_keyboard);
+        } else {
+            self.resolve_matching(|b| b.owns_key(key));
+        }
     }
 
     /// Feed a mouse-button event.
     pub fn mouse_button(&mut self, button: PointerButton, pressed: bool) {
         if pressed {
             self.held_buttons.insert(button);
+            self.last_device = Some(Device::Pointer);
         } else {
             self.held_buttons.remove(&button);
+            self.suppressed.buttons.remove(&button);
         }
         self.resolve_matching(|b| matches!(b, Binding::MouseButton(b2) if *b2 == button));
     }
@@ -532,6 +743,9 @@ impl ActionMap {
     pub fn mouse_motion(&mut self, dx: f32, dy: f32) {
         if !dx.is_finite() || !dy.is_finite() {
             return;
+        }
+        if dx != 0.0 || dy != 0.0 {
+            self.last_device = Some(Device::Pointer);
         }
         self.mouse_delta.0 += dx;
         self.mouse_delta.1 += dy;
@@ -546,6 +760,9 @@ impl ActionMap {
     pub fn mouse_scroll(&mut self, dx: f32, dy: f32) {
         if !dx.is_finite() || !dy.is_finite() {
             return;
+        }
+        if dx != 0.0 || dy != 0.0 {
+            self.last_device = Some(Device::Pointer);
         }
         self.scroll_delta.0 += dx;
         self.scroll_delta.1 += dy;
@@ -573,6 +790,7 @@ impl ActionMap {
             return;
         }
         self.pointer = moved;
+        self.last_device = Some(Device::Pointer);
 
         for i in 0..self.slots.len() {
             let slot = &self.slots[i];
@@ -581,7 +799,8 @@ impl ActionMap {
                 .bindings
                 .iter()
                 .any(|b| matches!(b, Binding::PointerPosition { .. }));
-            if !slot.enabled || !drives {
+            // The owner only: a consumed pointer has not moved for anyone else.
+            if !self.is_live(i) || !drives || self.routes.pointer != Some(slot.context) {
                 continue;
             }
             self.resolve_one(i);
@@ -609,8 +828,10 @@ impl ActionMap {
             if !self.held_controls.contains(control) {
                 self.held_controls.insert(control.to_owned());
             }
+            self.last_device = Some(Device::Touch);
         } else {
             self.held_controls.remove(control);
+            self.suppressed.controls.remove(control);
         }
         self.resolve_matching(|b| matches!(b, Binding::Virtual(id) if id == control));
     }
@@ -629,6 +850,9 @@ impl ActionMap {
         if !x.is_finite() || !y.is_finite() {
             return;
         }
+        if x != 0.0 || y != 0.0 {
+            self.last_device = Some(Device::Touch);
+        }
         if let Some(held) = self.control_sticks.get_mut(control) {
             *held = (x, y);
         } else {
@@ -640,7 +864,8 @@ impl ActionMap {
     /// Called at the start of each server tick.
     ///
     /// - Resets per-frame edge flags (`just_pressed`, `just_released` on every
-    ///   button action, `pointer_moved` on every 1-D axis).
+    ///   button action, `pointer_moved` on every 1-D axis, and what
+    ///   [`ActionMap::repeated`] reads).
     /// - Zeroes accumulated mouse-motion and scroll deltas.
     /// - Advances the internal clock by `dt` seconds so that [`ButtonState::Held`]
     ///   durations are up-to-date next time a button action is resolved.
@@ -660,8 +885,11 @@ impl ActionMap {
         // `held_keys` and re-pressed them — so disabling "jump" while Space was
         // held cleared it, and the next tick emitted `just_pressed` again.
         for i in 0..self.slots.len() {
-            if !self.slots[i].enabled {
+            if !self.is_live(i) {
                 continue;
+            }
+            if let Some(repeat) = &mut self.slots[i].repeat {
+                repeat.fired = false;
             }
             match &mut self.slots[i].value {
                 ActionValue::Button(a) => a.reset_edges(),
@@ -777,17 +1005,17 @@ impl ActionMap {
     fn resolve_matching(&mut self, matches: impl Fn(&Binding) -> bool) {
         for i in 0..self.slots.len() {
             let slot = &self.slots[i];
-            if slot.enabled && slot.decl.bindings.iter().any(&matches) {
+            if self.is_live(i) && slot.decl.bindings.iter().any(&matches) {
                 self.resolve_one(i);
             }
         }
     }
 
     /// Compute the current value of a single action slot from raw state.
+    ///
+    /// Reads raw input only through the slot's context's [`View`], which is
+    /// where consumption happens.
     fn resolve_one(&mut self, idx: usize) {
-        let held_keys = &self.held_keys;
-        let held_buttons = &self.held_buttons;
-        let held_controls = &self.held_controls;
         let control_sticks = &self.control_sticks;
         let mouse_delta = self.mouse_delta;
         let scroll_delta = self.scroll_delta;
@@ -795,32 +1023,36 @@ impl ActionMap {
         let elapsed = self.elapsed;
 
         let slot = &mut self.slots[idx];
+        let view = View {
+            context: slot.context,
+            routes: &self.routes,
+            suppressed: &self.suppressed,
+            held_keys: &self.held_keys,
+            held_buttons: &self.held_buttons,
+            held_controls: &self.held_controls,
+        };
         let kind = slot.kind();
         let bindings = &slot.decl.bindings;
 
         match kind {
             ActionKind::Button => {
                 let down = bindings.iter().any(|b| match b {
-                    Binding::Key(k) => held_keys.contains(k),
-                    Binding::MouseButton(b) => held_buttons.contains(b),
-                    Binding::Virtual(id) => held_controls.contains(id.as_str()),
+                    Binding::Key(k) => view.key(*k),
+                    Binding::Chord { modifier, key } => view.chord(*modifier, *key),
+                    Binding::MouseButton(b) => view.button(*b),
+                    Binding::Virtual(id) => view.control(id),
                     Binding::MouseMotion
                     | Binding::MouseScroll
                     | Binding::PointerPosition { .. } => false,
                     Binding::KeyAxis { negative, positive } => {
-                        held_keys.contains(negative) || held_keys.contains(positive)
+                        view.key(*negative) || view.key(*positive)
                     }
                     Binding::Wasd {
                         up,
                         down: w_down,
                         left,
                         right,
-                    } => {
-                        held_keys.contains(up)
-                            || held_keys.contains(w_down)
-                            || held_keys.contains(left)
-                            || held_keys.contains(right)
-                    }
+                    } => view.key(*up) || view.key(*w_down) || view.key(*left) || view.key(*right),
                 });
 
                 let was_active = slot.active;
@@ -856,7 +1088,7 @@ impl ActionMap {
                 // ever reported a position. It **replaces** the relative
                 // contributions below rather than adding to them: a place and a
                 // rate do not sum. See [`Binding::PointerPosition`].
-                let absolute = pointer.and_then(|(px, py)| {
+                let absolute = pointer.filter(|_| view.pointer()).and_then(|(px, py)| {
                     bindings.iter().find_map(|binding| match binding {
                         Binding::PointerPosition { axis } => Some(match axis {
                             PointerAxis::X => px,
@@ -871,17 +1103,20 @@ impl ActionMap {
                 if absolute.is_none() {
                     for binding in bindings {
                         match binding {
-                            Binding::MouseScroll => {
+                            Binding::MouseScroll if view.scroll() => {
                                 value += scroll_delta.1;
                             }
-                            Binding::Key(k) if held_keys.contains(k) => {
+                            Binding::Key(k) if view.key(*k) => {
+                                value += 1.0;
+                            }
+                            Binding::Chord { modifier, key } if view.chord(*modifier, *key) => {
                                 value += 1.0;
                             }
                             Binding::KeyAxis { negative, positive } => {
-                                if held_keys.contains(negative) {
+                                if view.key(*negative) {
                                     value -= 1.0;
                                 }
-                                if held_keys.contains(positive) {
+                                if view.key(*positive) {
                                     value += 1.0;
                                 }
                             }
@@ -921,29 +1156,29 @@ impl ActionMap {
                             left,
                             right,
                         } => {
-                            if held_keys.contains(up) {
+                            if view.key(*up) {
                                 dir_y += 1.0;
                             }
-                            if held_keys.contains(w_down) {
+                            if view.key(*w_down) {
                                 dir_y -= 1.0;
                             }
-                            if held_keys.contains(left) {
+                            if view.key(*left) {
                                 dir_x -= 1.0;
                             }
-                            if held_keys.contains(right) {
+                            if view.key(*right) {
                                 dir_x += 1.0;
                             }
                         }
                         // Into the same accumulator as the keys, so a player
                         // pushing a stick *and* holding a key asks for one
                         // direction rather than for twice the speed.
-                        Binding::Virtual(id) => {
+                        Binding::Virtual(id) if view.stick(id) => {
                             if let Some((sx, sy)) = control_sticks.get(id.as_str()) {
                                 dir_x += sx;
                                 dir_y += sy;
                             }
                         }
-                        Binding::MouseMotion => {
+                        Binding::MouseMotion if view.motion() => {
                             x += mouse_delta.0;
                             y += mouse_delta.1;
                         }
@@ -967,6 +1202,10 @@ impl ActionMap {
                 action.y = y;
             }
         }
+
+        if let Some(repeat) = &mut slot.repeat {
+            repeat.update(&slot.value, elapsed);
+        }
     }
 }
 
@@ -987,6 +1226,8 @@ impl std::fmt::Debug for ActionMap {
             .field("held_buttons", &self.held_buttons.len())
             .field("held_controls", &self.held_controls)
             .field("control_sticks", &self.control_sticks)
+            .field("contexts", &self.active_contexts().collect::<Vec<_>>())
+            .field("last_device", &self.last_device)
             .field("pointer", &self.pointer)
             .field("elapsed", &self.elapsed)
             .finish_non_exhaustive()
@@ -1019,7 +1260,10 @@ impl InputTickState {
     /// Capture the current state of every declared action from `map`.
     ///
     /// This snapshots enabled and disabled actions alike; disabled actions will
-    /// be in their idle state.
+    /// be in their idle state, and so are the actions of a context that is not
+    /// on the stack. An action whose input a context above it consumed is
+    /// captured as that input left it — which is exactly what the active
+    /// contexts let through, and all the simulation should see.
     pub fn capture(map: &ActionMap) -> Self {
         let actions = map
             .slots

@@ -7,15 +7,19 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 `crcbl_ui::tree`'s focus landed with the gaps below.
 
-- **The reserved `ui_*` actions are not wired**, and no sample's keys changed.
-  `crcbl-input` has typed actions with flat bindings and per-action enabling,
-  and no context stack, no gamepad backend, no last-active-device tracking, no
-  repeat pattern and no consumption — a key bound to two actions drives both.
-  The proposal for the widget rung: `push_context` and `pop_context` in
-  `crcbl-input` with the active context consuming the keys it binds, device
-  tracking and a repeat pattern for a held move; a reserved `ui` context pushed
-  only while a menu has input; and an adapter in `crcbl` that builds `NavInput`
-  from the action map, so `crcbl-ui` depends on nothing new.
+- **The reserved `ui` context is declared and pushed by nobody.**
+  `crcbl_input::ui::declare` and `crcbl::nav::nav_input` exist and are exercised
+  by `screenshot::ui_focus`'s test, which holds the golden's scripted pad to
+  what keys produce through them. `Loop` hosts no tree, and its `Menu` reads raw
+  keys through `MenuPump`, so the pause menu does not push `ui`: a paused frame
+  runs no game tick (`crcbl::engine::run_ticks` drains and discards), so game
+  actions already cannot fire under it, and pushing would change nothing a
+  sample does. Pushing lands when `Menu` moves onto the tree; the samples then
+  stop handling menu keys directly, per `07-ui-debug.md`'s 2026-08-09
+  correction.
+- **No gamepad bindings on the `ui` actions**: `Binding` has no gamepad member
+  and there is no backend, so the plan's dpad, stick, shoulder, South and East
+  column is undeclared.
 - **`default.css` has no focus ring rule**, because no engine widget is on the
   tree yet; it lands with the widgets.
 - **Focus history is kept and not drawn** by the overlay.
@@ -5060,17 +5064,13 @@ leaves as an empty arm.
 static-vs-wasm equivalence gate is unprotected against NaN divergence, and a
 browser-hosted single-player game with mods has no containment at all.
 
-### Input: patterns, contexts, RON bindings, rebind persistence and every gamepad backend (2026-08-27)
+### Input: patterns, RON bindings, rebind persistence and every gamepad backend (2026-08-27)
 
 **Not built**, all of it re-verified:
 
-- **Patterns.** `ActionDecl` carries no pattern list. A button reports
+- **Patterns other than `repeat`.** A button reports
   `ButtonState::Held { duration }` for the game to interpret; there is no `tap`,
-  `double-tap`, `hold` or `repeat` evaluator.
-- **Contexts.** No context stack anywhere in `crates/crcbl-input/src/lib.rs`.
-  The only gating is `ActionMap::set_enabled` per action. This is what
-  `07-ui-debug.md`'s reserved UI action set depends on to keep menu WASD from
-  shadowing gameplay WASD.
+  `double-tap` or `hold` evaluator. `ActionMap::set_repeat` is the only pattern.
 - **RON binding assets.** Nothing parses one; a game declares actions in code.
 - **Rebind persistence.** `ActionMap::rebind` exists and is in-memory only — it
   overwrites `slot.decl.bindings` and re-resolves. Nothing serialises it, and
@@ -5081,7 +5081,8 @@ browser-hosted single-player game with mods has no containment at all.
   returns only prose saying gamepad support is future work.
 
 **Built:** `ActionMap`, `ActionDecl`, the three `ActionKind`s, `Binding::Key`,
-`MouseButton`, `Virtual`, `PointerPosition`, `KeyAxis`, `Wasd`, and
+`MouseButton`, `Virtual`, `PointerPosition`, `KeyAxis`, `Wasd`, `Chord`, the
+context stack, `ActionMap::set_repeat`, `ActionMap::last_device`, and
 `virtual_stick` driving `crcbl_ui::touch`'s `TouchStick` — `apps/horde` is the
 caller. `virtual_button` is built and **unjoined**: no production code calls it,
 because the two `TouchButton` users read the widget's own `take_fired` instead.
