@@ -357,6 +357,11 @@ pub mod cmaa2;
 // reason above.
 pub mod ltc;
 
+// `sin` and `cos` built from exactly specified operations, so trigonometry can
+// reach a colour without breaking the no-transcendental rule; its own `//!`
+// header, for `fog`'s reason above.
+pub mod trig;
+
 use std::sync::OnceLock;
 
 /// Little-endian `f32`s in iteration order — what `std430` means for a struct

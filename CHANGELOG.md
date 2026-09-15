@@ -127,6 +127,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_shaders::trig::sin` and `cos`: trigonometry that may reach a
+  colour.** Built only from operations IEEE-754 specifies exactly — a three-part
+  `π/2` reduction, a reciprocal-factorial Taylor kernel and quadrant selection —
+  so the workspace rule against platform transcendentals no longer rules out a
+  sine. On the CPU the result is bit-identical on every target; against
+  `f64::sin` and `f64::cos` it stays within `MAX_KERNEL_ULP` over every `f32` up
+  to `MAX_ARGUMENT`, and arguments beyond it saturate rather than turn `NaN`.
+  The water plan's waves (`docs/plan/55-water.md` decision 6) are its first
+  intended user; no shader carries a copy yet.
 - `crcbl_hal::null::Recorder::buffer_size` answers the size a live buffer was
   created with in any memory location, where `buffer_bytes` holds contents for
   mappable memory only — so a null-device test can assert what a device-local
