@@ -32,9 +32,9 @@ the pre-CSS toolkit the debug panel and the samples needed first:
 - **`draw_list`** — `DrawList`, `DrawCommand`, `Vertex2d`: the one interface
   between the UI and the renderer, as the rendering section below describes.
 - **`text`** — `FontAtlas`, a built-in **monospace bitmap** ASCII font with
-  metrics and a simple layout. Not the `fontdue`/`swash`-class rasterizer, and
-  not the shelf/skyline atlas with LRU eviction the corrections below specify:
-  those arrive with real fonts, and nothing has needed one yet.
+  metrics and a simple layout. Not the `skrifa`-parsed rasteriser and the
+  shelf/skyline atlas with LRU eviction the rendering section specifies: those
+  arrive with real fonts, at rung 5.
 - **`widget`** — `Label`, `Button`, `Style`, `SkinInsets`, `PointerInput`,
   `UiState`, `WidgetId`. The rest of the MVP widget set below is unbuilt.
 - **`menu`** — `Menu`, `MenuItem`, `Slider`, `Cycler`, `MenuSet`:
@@ -66,41 +66,97 @@ Three cleanly separated layers:
 - **Authoring stays immediate-mode**: game/editor code rebuilds the tree every
   frame through a builder API —
   `ui.block("#health-bar.hud", |ui| { ui.span("75/100"); … })`. No retained
-  scene graph to sync; identity comes from the id path (same as the old ID-stack
-  plan). Internally the tree is diffed/cached per frame for layout- and
-  style-resolution reuse, but that's an optimization detail, not the API.
+  scene graph for a caller to sync.
+- **The implementation is a cache keyed by identity** (decided 2026-09-15, from
+  the research below). Each build pushes node records into a frame arena; a
+  persistent node store keyed by
+  `hash(parent key, #id or call site + sibling index)` holds what must survive a
+  rebuild — hover/active/focus/engaged state, scroll offset, the engaged
+  widget's snapshot, the resolved-style handle, the layout cache and last
+  frame's rect — and prunes nodes a frame did not touch. Ryan Fleury's "build it
+  every frame" series, Dear ImGui's ID stack and React's position-keyed state
+  all arrive at this. **A loop's children need an explicit key** (`#id` or a
+  keyed builder), because a sibling index moves focus, scroll and engaged state
+  onto the wrong row when a list reorders — Clay's docs and React's both warn of
+  exactly that — and a duplicate key is a debug warning, as ImGui's ID-conflict
+  tooling reports it.
+- **Rebuilding is not relaying out.** The build is diffed against the store by
+  hashes of style inputs, child keys and content: only a changed node
+  re-resolves its style, only a changed node or its ancestors clear their layout
+  caches, and a paint-only change (colour, opacity, transform) touches neither.
 
-### 2. Layout engine (CSS-subset, from scratch)
+### 2. Layout engine (CSS-subset flexbox, on Taffy)
 
-- **Flexbox subset** as the one layout model (covers game HUDs and editor
-  panels; grid post-MVP if something demands it): `display: flex | none`,
+**Taffy is adopted for layout** — the user's decision of 2026-09-15, reversing
+this section's original "from scratch". The reason is the correctness long tail
+rather than the size of the code: Yoga had to ship `YGErrata` flags because
+React Native apps came to depend on its non-spec behaviour, and every one of
+`min-width: auto`, percentages against indefinite sizes, stretch re-layout,
+absolute containing blocks and pixel rounding is a documented pitfall in Taffy's
+changelog, Yoga's errata or Gameface's divergence list. Taffy is MIT, used by
+Bevy, Zed's GPUI, Servo and Slint, and ships 1,544 Chrome-generated fixtures
+(677 of them flex).
+
+- **Through its low-level traits, not `TaffyTree`.** crcbl's node store
+  implements `TraversePartialTree`, `LayoutPartialTree` and `CacheTree`, and its
+  resolved style type implements Taffy's style traits directly, so there is no
+  conversion into `taffy::Style` and no second arena. Features: `flexbox` now,
+  `block_layout` if a consumer needs it; not `taffy_tree` and not `grid` until
+  something does. That keeps the dependency to `arrayvec`.
+- **Per-node caches survive the rebuild**: the store keeps each node's Taffy
+  cache and clears it on that node and its ancestors only when its style hash,
+  child keys or measured content changed — Yoga's dirty-flag model driven by
+  diffing. GPUI instead clears the whole tree every frame ("we always re-layout
+  the whole app on each frame") and still ships; that is the fallback if the
+  diff proves not worth its complexity.
+- **Text leaves measure through a callback** cached by (string hash, font, size,
+  width bucket), on Clay's measure-cache pattern, because repeated measuring of
+  wrapped text under min- and max-content is where layout time goes.
+- **Pinned, and upgrades gated on the fixture corpus.** Taffy is 0.x and makes
+  breaking releases; an upgrade lands with its fixtures green. Its layout code
+  uses `floor` and `ceil` and basic arithmetic and no `sqrt`, `powf` or
+  `mul_add`, so layout output should not vary with a platform's libm — which is
+  what keeps a UI golden portable.
+- **The supported subset is unchanged**: `display: flex | none`,
   `flex-direction`, `flex-wrap`, `justify-content`, `align-items`, `align-self`,
-  `flex-grow/shrink/basis`, `gap`.
-- Box model: `width/height/min/max` in px / % / `auto`, `padding`, `margin`,
-  `border` (widths), `box-sizing: border-box` semantics only.
-- `position: relative | absolute` (+ `top/right/bottom/left`) for overlays,
-  tooltips, drag ghosts; `overflow: hidden | scroll` (scroll = scissor +
-  offset); `z-index` within a stacking context.
-- Not full CSS spec, deliberately: no floats, no inline flow beyond span runs
-  inside a block, no tables (a table widget composes flex rows), no
-  animations/transitions in MVP (style values can still be tweened by code).
+  `flex-grow/shrink/basis`, `gap`; `width/height/min/max` in px / % / `auto`,
+  `padding`, `margin`, `border` widths, `box-sizing: border-box`;
+  `position: relative | absolute` with offsets; `overflow: hidden | scroll`;
+  `z-index` within a stacking context. No floats, no tables, no animations or
+  transitions in MVP. **Every divergence from the browser is written into the
+  fixture corpus the day it is made** — Yoga's lesson is that a divergence you
+  ship becomes a contract.
 
 ### 3. Style system (CSS-compatible-ish)
 
-- **Stylesheets in actual `.css`-syntax files** (subset parser, from scratch):
-  type (`block`, `span`, widget names like `button`), `#id`, `.class`,
-  descendant combinator, and pseudo-classes `:hover`, `:active`, `:focus`,
-  `:disabled`. Specificity = simplified (inline > id > class > type; last-wins
-  within a tier) — predictable over spec-faithful.
+- **Stylesheets in actual `.css`-syntax files.** Tokenizing and rule-block
+  parsing use **`cssparser`** (Servo's CSS Syntax Level 3 tokenizer and parser;
+  MPL-2.0, which `deny.toml` allows; three small dependencies) — the user's
+  decision of 2026-09-15. It parses syntax only, so **selectors, typed property
+  values, the cascade and matching are this crate's own**: type (`block`,
+  `span`, widget names like `button`), `#id`, `.class`, descendant and child
+  combinators, and pseudo-classes `:hover`, `:active`, `:focus`, `:disabled`,
+  `:engaged`. Specificity is simplified (inline > id > class > type; last wins
+  within a tier) — predictable over spec-faithful. A parse error reports its
+  file and line to the console and **keeps the last good sheet**.
 - Properties: colors (`background`, `color`, `border-color`), `border-radius`,
   `opacity`, `font-size`, `font` (family id), text align, plus every layout
   property above. Custom properties (`--vars`) + `var()` for theming.
 - Cascade sources: engine `default.css` → game/app stylesheet(s) → inline
-  overrides on the node. **Hot reload** via the stage 6 asset watcher — editing
-  a `.css` restyles the running app; the editor's own look is a stylesheet, and
-  game HUD theming = shipping a different stylesheet.
-- Style resolution is cached per node id + class-set + pseudo-state; only dirty
-  nodes re-resolve (style thrash is the classic perf trap here).
+  overrides on the node. **Hot reload** via the asset watcher — editing a `.css`
+  restyles the running app; the editor's own look is a stylesheet, and game HUD
+  theming = shipping a different stylesheet. A reload bumps a stylesheet
+  generation, which invalidates every cached definition for one full re-resolve.
+- **Matching follows RmlUi's index and cache**: rules are bucketed by the id,
+  class or type of their rightmost compound selector; a node gathers candidates
+  from its own buckets, matches right to left, and the merged definition is
+  cached keyed by the matched-rule set and a pseudo-state bitmask. **Each rule
+  records which pseudo-classes it depends on**, so a node none of whose
+  candidate rules mention `:hover` never re-resolves when the pointer moves —
+  Unity's documentation names `:hover` restyling whole subtrees as "the main
+  culprit", and RmlUi's issue tracker has a `:hover` border shorthand forcing
+  relayout. A changed property is diffed, so a paint-only change dirties no
+  layout. The UI inspector shows resolve counts so thrash is visible early.
 
 ### Pipeline per frame
 
@@ -108,16 +164,46 @@ Three cleanly separated layers:
 Hit-testing against the _previous_ frame's layout (one-frame interaction latency
 — same simplicity win as classic imgui, now with real layout).
 
-## Rendering (unchanged from original plan)
+## Rendering
 
-- Draw list: triangles + scissor rects + texture id per command; CPU
-  tessellation for rects/rounded rects/borders/text quads.
-- Uploads into the per-frame bump-allocated vertex buffer, dedicated graph pass,
-  ortho projection (stage 3's 2D path — UI is its first consumer). World-space
-  UI = same tree rendered with a world transform (3D nameplates free).
-- Text: `fontdue`/`swash`-class rasterizer → glyph atlas in the texture system.
-  Bitmap atlas at fixed sizes MVP; SDF post-MVP. Spans wrap within their block
-  (simple greedy line-break; no shaping/RTL in MVP).
+Revised 2026-09-15 from the research below; the draw list stays the one
+interface between `crcbl-ui` and the renderer.
+
+- **One UI uber shader with an analytic rounded rectangle**: per-corner radii,
+  border and optional shadow evaluated as a signed distance in the fragment
+  stage, as GPUI and Bevy do. Unity tessellates rounded corners (a resize
+  rebuilds geometry) and RmlUi assumes MSAA for smooth corners; this engine has
+  MSAA off by default ([49-antialiasing.md](49-antialiasing.md)), so the
+  distance field is the answer that looks right on the default view.
+- **Textured quads and a clip rectangle per command.** `DrawCommand` gains a
+  texture id with UVs and a clip rect. Rectangular clips are applied in the
+  shader or on the CPU (Bevy clips polygons on the CPU) so a batch survives a
+  scroll view; GPU scissor only at window or scroll-container boundaries, and no
+  stencil masks in MVP — Unity's stencil masks break batches and nest at most
+  seven deep.
+- **Two atlases**: the existing single-channel glyph coverage atlas and an RGBA
+  image atlas. That moves nine-sliced frames out of `crcbl_render::MenuArt` and
+  into styled widgets, which is what `menu`'s note above says is blocked today.
+  Pages are 2048² or smaller: WebGPU's compatibility mode caps a 2D texture
+  at 4096.
+- **Batching by stacking context, then texture**, with CSS paint order kept —
+  RmlUi's lack of batching is its top performance issue (thousands of draw
+  calls).
+- Uploads into the per-frame vertex buffer, dedicated graph pass, orthographic
+  projection. World-space UI = the same tree with a world transform.
+- **Text** (the user's decision of 2026-09-15): **`skrifa`/`read-fonts`** parse
+  fonts — `ttf-parser`, which the 2026-07-27 correction named, is now in
+  maintenance mode and its README recommends the fontations crates; `skrifa`
+  includes hinting and is tested on wasm32. **Rasterisation and the atlas stay
+  this engine's**: a coverage rasteriser over hinted outlines, the shelf/skyline
+  atlas with LRU eviction below, subpixel horizontal positioning in a few bins
+  (GPUI uses four), and **grayscale antialiasing only** — LCD subpixel rendering
+  needs dual-source blending, which WebGPU offers only as an optional feature.
+  Latin-1 with pair kerning first; `harfrust` shaping and UAX #9 bidi only when
+  non-Latin text is needed (`rustybuzz` is archived and HarfRust replaces it).
+  Greedy line breaking; SDF text post-MVP, for world-space text, since SDF and
+  MSDF look worse than hinted bitmaps at small UI sizes (Godot's and Unreal's
+  documentation both say so).
 
 ## Widgets
 
@@ -199,16 +285,25 @@ settings list — the classic console-menu UX failure, banned by rule.
 
 ### Spatial navigation (automatic, from layout)
 
-- Directional moves resolve **geometrically from the laid-out rects** (the CSS
-  spatial-navigation approach): candidates = focusables whose rect lies in the
-  direction's half-plane from the current rect; score by along-axis distance +
-  cross-axis overlap/misalignment penalty; best score wins. **No per-screen
-  wiring** — a new menu is navigable the moment it lays out.
+- Directional moves resolve **geometrically from the laid-out rects**, and the
+  scoring is **beam first, distance second** (revised 2026-09-15): candidates
+  whose rect overlaps the band the current rect projects in that direction win
+  over any outside it, and only then does distance decide. Godot's 4.4
+  regression — a plain gap-plus-misalignment score let a taller neighbour steal
+  `ui_down` — is why; Android's `FocusFinder`, Gameface's 50% cross-axis
+  overlap, RmlUi's ×10,000 cross-axis weight and Godot 4.8's new default all
+  converge on the beam. **No per-screen wiring** — a new menu is navigable the
+  moment it lays out.
 - **Explicit overrides where auto is wrong**: stylesheet/inline props
   `nav-up: "#id"`, `nav-down`, `nav-left`, `nav-right` (+ `nav-wrap` for
   grids/carousels) — the escape hatch is data, matching the CSS-subset
-  philosophy. Focus-scope boundaries clamp candidates (a modal never leaks
-  focus).
+  philosophy. Unity UI Toolkit's lack of explicit neighbours is its most
+  reported navigation complaint. Focus-scope boundaries clamp candidates (a
+  modal never leaks focus), and so do scroll containers.
+- **Each focus scope remembers its last focused element** (added 2026-09-15), so
+  returning to a pane or reopening a menu resumes where the player left it.
+  Gameface does this per area; RmlUi, UI Toolkit and Godot do not, and it is a
+  gap in each.
 - Degenerate layouts (nothing in that direction): stay put, or wrap if
   `nav-wrap`; `ui_next` order = depth-first tree order as the always-works
   fallback.
@@ -302,18 +397,46 @@ Surfaces for instrumentation that already exists:
 
 ## Tasks
 
-1. Element tree + builder API, id/class/pseudo-state, hover/active/focus
-   tracking, hit-testing.
-2. CSS-subset parser (+ tests against a fixture corpus), cascade/specificity,
-   resolution cache, `default.css`.
-3. Flex layout engine + property-test suite (layout invariants: children fit
-   parent under constraints, gap/grow math vs hand-computed fixtures).
-4. Draw-list emit + tessellation; glyph atlas + text; graph pass + input routing
-   (UI consumes first; unconsumed falls through — capture rules explicit).
-5. Widget set, driven by building the profiler HUD first as proving ground.
-6. Stylesheet hot reload; UI inspector.
-7. Inspector + console + stats panels.
-8. Sandbox: full debug overlay over the Sponza scene from stage 6.
+The rung ladder, revised 2026-09-15. Each rung unblocks the next and is useful
+on its own; the first two need no new dependency.
+
+1. **Draw-list primitives.** `DrawCommand` gains textured quads, a clip rect and
+   the analytic rounded-rectangle primitive; the UI pass binds an RGBA image
+   atlas beside the glyph atlas. Unblocks nine-slice frames in `crcbl-ui`,
+   images in spans, `border-radius`, and a viewport pane that samples a rendered
+   image.
+2. **Node tree and identity.** Block/span builder, key hashing, the persistent
+   node store with pruning, hover/active from last frame's rects, the
+   duplicate-key warning. Unblocks stateful widgets that survive rebuilds.
+3. **Layout on Taffy.** The store implements Taffy's low-level traits; flex
+   subset, absolute, overflow hidden/scroll with scroll state in the store,
+   measure callbacks; Taffy's flex fixtures plus this engine's own divergences
+   as the corpus. Unblocks deleting `Hud`/`HudPanel`, auto-sized debug panels,
+   scroll views.
+4. **Styles.** `cssparser` tokenizing; selectors, typed values, cascade
+   (`default.css` → app → inline), pseudo-classes including `:engaged`, `var()`,
+   the rule index and definition cache with per-rule pseudo dependencies,
+   resolve counters, hot reload keeping the last good sheet. Unblocks the "HUD
+   by editing CSS plus ~30 lines" exit criterion, and themes.
+5. **Text.** `skrifa` parsing, own coverage rasteriser, shelf/skyline + LRU
+   atlas, greedy wrap, pair kerning, the measure cache. Unblocks real fonts,
+   wrapped labels, a proportional console, and world-anchored text.
+6. **Focus.** Scopes (modal trap, scroll into view), beam-first spatial scoring,
+   `nav-*` and `nav-wrap`, per-scope memory, engaged state with snapshot, commit
+   and cancel, the candidate-score overlay. Unblocks pad-only menus and the
+   settings and rebind screens.
+7. **Widgets.** Button, checkbox, slider, drag-value, single-line text input
+   with selection and clipboard, collapsing header, tree node, split pane, and a
+   fixed-row-height virtualized list/table — Unity's `ListView` virtualizes only
+   at a fixed height and Godot's `Tree` stalls past ten thousand rows, which is
+   what an outliner reaches. The existing `Menu`, `MenuSet`, `DebugPanel`,
+   `ConsolePanel` and `ReadoutPanel` are re-implemented on the tree **behind
+   their current APIs**, so the samples that call them do not change and only
+   their goldens move.
+8. **Editor-grade surfaces.** A reflection-driven property inspector with
+   per-type overrides (Unreal's Details panel and Fyrox's `Reflect` inspector
+   are the shape), a virtualized outliner, splitter layouts, then tabs. Unblocks
+   stage 8.
 
 ## Exit criteria
 
@@ -336,9 +459,13 @@ Surfaces for instrumentation that already exists:
 - **CSS scope creep** — the subset above is the contract; a property gets added
   only when the editor or a sample needs it, and "browser does it" is not a
   requirement. Simplified specificity is a feature, not a gap.
-- **Layout engine correctness rabbit hole.** Flexbox subset only, fixture-
-  driven; when a case is ambiguous, match what the browser does for the subset,
-  document divergence otherwise.
+- **Layout engine correctness rabbit hole.** Adopting Taffy moves most of it
+  upstream; what stays is the subset's divergences and the measure callbacks.
+  Fixture-driven; when a case is ambiguous, match what the browser does for the
+  subset, document divergence otherwise.
+- **Dependency churn.** Taffy is 0.x and the fontations crates bump minor
+  versions roughly monthly (egui pins them). Pin each; an upgrade is its own
+  change with the fixture corpus and the UI goldens green.
 - **Style resolution perf.** Cache by (id, classes, pseudo-state) from day one;
   the UI inspector shows resolve counts so thrash is visible early.
 - **Text rendering rabbit hole.** Bitmap atlas, Latin-1 + basic UTF-8, two font
@@ -346,6 +473,28 @@ Surfaces for instrumentation that already exists:
 - **Docking complexity.** Split panes via flex + dividers only; full docking is
   the classic time sink. The editor layout (stage 8) is designed around
   splitters.
+
+## Decisions (2026-09-15)
+
+Taken by the user after a survey of the tree and a research brief on shipped
+CSS-style game UI (Unity UI Toolkit, Coherent Gameface, RmlUi, NoesisGUI, Bevy
+UI, Godot, Dear ImGui, egui, Clay, Morphorm, Zed's GPUI, Unreal's Slate, Fyrox):
+
+- **Layout: adopt Taffy** — section 2.
+- **CSS: adopt `cssparser`** for tokenizing and rule blocks; selectors, values
+  and the cascade are built — section 3.
+- **Fonts: `skrifa` for parsing, own rasteriser and atlas** — the rendering
+  section. This supersedes the 2026-07-27 correction's naming of `ttf-parser`.
+
+Adding each crate is done with `cargo add` when its rung starts, not before, so
+no dependency arrives ahead of the code that reads it.
+
+**Two findings that did not need a decision but shape the work.** Bevy chose no
+CSS at all — its scene proposal says "a BSN style system _should look like BSN_"
+— and archived its editor prototypes citing "ballooning scope"; this document
+keeps CSS, and keeps docking to splitters for the same scope reason. And O3DE
+runs its editor on Qt and its game UI on a separate system, which is exactly the
+two-UI cost this document's one-GUI rule exists to avoid.
 
 ## Corrections (design review, 2026-07-27)
 
