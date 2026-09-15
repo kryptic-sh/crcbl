@@ -134,6 +134,32 @@ green local run.
   `BENT_NORMAL_NONE` is 128 — and pass on lavapipe. Not diagnosed: rounding of
   the half-resolution upsample on that driver is the suspect, not a view or
   culling change (they failed before either landed).
+- **lavapipe runs commands in the order they were recorded, which hides a
+  missing barrier.** `crcbl-vk` records explicit pipeline barriers
+  (`vkCmdPipelineBarrier2`), and a driver may run commands that declare no
+  dependency on each other in any order. P1 first recorded `binMain`,
+  `startsMain` and `scatterMain` as three dispatches in one graph pass: every
+  lavapipe suite passed, while on the MX550 the prefix sum and the scatter read
+  the routes before they existed, every bucket's start collapsed onto the run
+  region's first word, and `ew` drew each bucket with another bucket's instances
+  (a scene of stretched triangles). The fix gave each stage a pass of its own
+  (`draw-args`, `draw-starts`, `draw-scatter`), so the graph puts barriers
+  between them; `the_graph_barriers_the_arguments_into_place_before_the_draws`
+  now asserts those barriers. **Any change that makes one GPU stage read
+  another's output needs a pass boundary between them, and needs the suites run
+  on a hardware adapter** — `CRCBL_VK_ICD=hardware` with the validation
+  variables above — not only on lavapipe. On the MX550 after the fix,
+  `run-draw-gen-e2e.sh` passes 17 of 17.
+- **Two `mesh_e2e` exposure tests fail on the MX550** and pass on lavapipe:
+  `exposure::the_histogram_bins_every_texel_of_the_frame_the_host_reads_back`
+  ("a frame that landed in one bin would make every comparison here vacuous")
+  and `exposure::the_direction_of_travel_picks_the_rate` (measured 10.563887).
+  Not diagnosed. Given the ordering bug above, first check whether the
+  histogram's readers are ordered against its writer by a barrier on hardware;
+  "Exposure reduces to a slightly different number" under the D3D12 hardware
+  section may be the same fault. The full `run-mesh-e2e.sh`, `run-render-e2e.sh`
+  and `run-forward-e2e.sh` suites have not been run on the MX550 beyond these
+  filters.
 
 ## What secondary views shipped without (2026-09-15)
 
@@ -407,13 +433,19 @@ resolution.
 validation fatal: `run-draw-gen-e2e.sh`, `run-forward-e2e.sh`,
 `run-render-e2e.sh`, `run-mesh-e2e.sh`. What that does not cover:
 
-- **Not run on Metal, D3D12 or WebGPU.** All three consume the regenerated
-  `draw_gen`, `mesh` and `mesh_cluster` artifacts. The MSL kernels were read and
-  bind every buffer at the same index in all three entry points, and
-  `crcbl-dx12`'s host-side DXIL tests (register union, workgroup sizes) pass;
-  nothing executed them. `crcbl-dx12/src/device.rs`'s cluster probe renamed
-  `ClusterDrawConstants::base` to `start_at` under `cfg(target_os = "windows")`
-  and was not compiled here — CI's Windows leg is the first build of it.
+- **Run on one hardware Vulkan adapter since.** An NVIDIA GeForce MX550 exposed
+  the missing barriers between the three stages (see "lavapipe runs commands in
+  the order they were recorded" above); with a pass per stage its
+  `run-draw-gen-e2e.sh` passes 17 of 17. CI's Metal, D3D12 (WARP) and Windows
+  legs passed at `a09f8c16`, before the passes were split.
+- **Not run on Metal, D3D12 or WebGPU hardware.** All three consume the
+  regenerated `draw_gen`, `mesh` and `mesh_cluster` artifacts. The MSL kernels
+  were read and bind every buffer at the same index in all three entry points,
+  and `crcbl-dx12`'s host-side DXIL tests (register union, workgroup sizes)
+  pass; nothing executed them. `crcbl-dx12/src/device.rs`'s cluster probe
+  renamed `ClusterDrawConstants::base` to `start_at` under
+  `cfg(target_os = "windows")` and was not compiled here — CI's Windows leg is
+  the first build of it.
 - **The extra load per vertex is not measured.** `vertexMain`, `depthVertexMain`
   and both `mesh_cluster.slang` instance reads now index `visible_instances`
   twice. Measure a vertex-heavy scene's forward and shadow pass time before and

@@ -242,7 +242,13 @@ fn per_pass_gpu_timers_report_real_numbers() {
     // HUD nobody counted.
     let mut expected: Vec<&str> = Vec::new();
     for cascade in 0..=crcbl_render::shadow::CASCADES {
-        expected.extend(["clear-counters", "cull", "draw-args"]);
+        expected.extend([
+            "clear-counters",
+            "cull",
+            "draw-args",
+            "draw-starts",
+            "draw-scatter",
+        ]);
         if cascade == 0 {
             // The camera's alone: a cascade shades nothing, so one froxel grid
             // per camera is the whole of what the light list costs a frame.

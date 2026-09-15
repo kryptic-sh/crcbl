@@ -71,7 +71,7 @@
 // bucket table is built, whatever the scene holds — which is the property §3.3
 // is about.
 //
-// # Three dispatches, because where a run starts is this frame's
+// # Three passes, because where a run starts is this frame's
 //
 // **Every bucket's run lives in one region sized by the instance capacity**, not
 // in a region per bucket. Until 2026-09 each bucket reserved a whole capacity of
@@ -83,8 +83,12 @@
 //
 // Packing the runs end to end means a run's start depends on how many survivors
 // every earlier bucket took, which is a number no invocation has until all of
-// them have counted. So the pass is three entry points, dispatched in order
-// inside the one compute pass `crcbl_render::DrawGen` records:
+// them have counted. So the work is three entry points, each dispatched by a
+// compute pass of its own that `crcbl_render::DrawGen` records in this order —
+// its own pass rather than a second dispatch inside one, because a dependency
+// between two dispatches of one pass is declared to no device, and a driver
+// that runs undeclared commands in any order ran the prefix sum before the
+// routes existed (see `DrawGen::add_passes`):
 //
 // 1. `binMain`, one invocation per bucket and per survivor: writes each bucket's
 //    static arguments, selects the survivor's level, and **routes** it — the
@@ -986,7 +990,7 @@ uint survivor_count()
 /// and it routes visible instance `index` if there is one. A dispatch is
 /// therefore sized for the larger of the two.
 ///
-/// The first of the pass's three dispatches — see the header.
+/// The first of the three stages, the `draw-args` pass — see the header.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void binMain(uint3 thread: SV_DispatchThreadID)
@@ -1073,13 +1077,13 @@ void binMain(uint3 thread: SV_DispatchThreadID)
     visible_instances[route_word(index)] = routed;
 }
 
-/// The second of the pass's three dispatches: where every bucket's run starts
+/// The second stage, the `draw-starts` pass: where every bucket's run starts
 /// this frame, and whether it draws at all.
 ///
 /// One invocation walking the table in bucket order, for the reason the header
 /// gives. By the time it runs every `binMain` invocation has finished, so each
 /// y extent is a total rather than a counter still moving — which is the whole
-/// reason this is a dispatch of its own.
+/// reason this is a pass of its own.
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void startsMain()
@@ -1099,7 +1103,7 @@ void startsMain()
     }
 }
 
-/// The third of the pass's three dispatches: every routed survivor's instance
+/// The third stage, the `draw-scatter` pass: every routed survivor's instance
 /// index, written into its bucket's run.
 ///
 /// One invocation per survivor, and it reads three regions of

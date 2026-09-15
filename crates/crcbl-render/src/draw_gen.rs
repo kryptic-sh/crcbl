@@ -1254,23 +1254,23 @@ impl DrawGen {
         )
     }
 
-    /// How many passes [`add_passes`](Self::add_passes) adds to a frame.
+    /// How many passes [`add_passes`](Self::add_passes) adds to a frame: the
+    /// clear, the cull, and the route, prefix-sum and scatter passes.
     ///
-    /// Exact rather than a ceiling: all three are recorded unconditionally, and
-    /// the dispatch a frame has nothing for is a dispatch of no workgroups
-    /// rather than a pass that drops out. What a caller sizing
+    /// Exact rather than a ceiling: every one is recorded unconditionally, and
+    /// the dispatch a frame has nothing for is skipped inside its pass rather
+    /// than a pass that drops out. What a caller sizing
     /// [`PassTimers`](crate::timing::PassTimers) adds up — see
     /// [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES).
-    pub const MAX_PASSES: u32 = 3;
+    pub const MAX_PASSES: u32 = 5;
 
     /// How many dispatches [`add_passes`](Self::add_passes) records for a frame
     /// that tests at least one instance: the clear, the cull, and the
     /// draw-argument pass's route, prefix sum and scatter.
     ///
-    /// **Not [`MAX_PASSES`](Self::MAX_PASSES)**, which counts graph passes: the
-    /// last of those dispatches three entry points, for the reason the module
-    /// docs give. A frame that tests no instance records neither the cull nor
-    /// the scatter, since a dispatch of no workgroups is one Metal rejects.
+    /// One per pass of [`MAX_PASSES`](Self::MAX_PASSES), which is the same
+    /// number: a frame that tests no instance records neither the cull's nor
+    /// the scatter's, since a dispatch of no workgroups is one Metal rejects.
     pub const DISPATCHES: u32 = 5;
 
     /// Adds the cull and draw-argument passes to `graph` and returns what the
@@ -1398,11 +1398,6 @@ impl DrawGen {
                 encoder.dispatch(cull_groups, 1, 1);
             });
 
-        let pipelines = (
-            self.bin_pipeline,
-            self.starts_pipeline,
-            self.scatter_pipeline,
-        );
         let gen_layout = self.gen_pipeline_layout;
         let gen_group = self.gen_groups[frame];
         // One `binMain` invocation owns bucket `i` *and* routes visible instance
@@ -1415,41 +1410,50 @@ impl DrawGen {
         // `scatterMain` only scatters, and the survivors are at most the tested
         // instances.
         let scatter_groups = instance_count.div_ceil(draw_gen::WORKGROUP_SIZE);
-        graph
-            .add_compute_pass("draw-args")
-            .read_buffer(visible_count)
-            // Read for the survivor list and written for the routes, the runs
-            // and their starts, which share it — one declaration, and
-            // `ShaderReadWrite` is what it really is.
-            .use_buffer(runs, ResourceState::ShaderReadWrite)
-            .use_buffer(args, ResourceState::ShaderReadWrite)
-            .use_buffer(counts, ResourceState::ShaderReadWrite)
-            .use_buffer(group_state, ResourceState::ShaderReadWrite)
-            .execute(move |ctx| {
-                // **Three dispatches in one pass, in this order, with no
-                // barrier between them**: all three bind the one group in the
-                // states declared above, and each reads what the one before it
-                // finished writing — the counts are totals by the time the
-                // prefix sum runs, and every start is written by the time the
-                // scatter reads one. A pass is recorded in order and nothing in
-                // it runs concurrently with the dispatch before it.
-                let (bin, starts, scatter) = pipelines;
-                let encoder = ctx.encoder();
-                encoder.bind_compute_pipeline(bin);
-                encoder.bind_group(0, gen_group, &[], gen_layout);
-                encoder.dispatch(bin_groups, 1, 1);
-                encoder.bind_compute_pipeline(starts);
-                encoder.bind_group(0, gen_group, &[], gen_layout);
-                encoder.dispatch(1, 1, 1);
-                // No instances tested is no survivors to scatter, and a
-                // dispatch of no workgroups is one Metal rejects outright.
-                if scatter_groups == 0 {
-                    return;
-                }
-                encoder.bind_compute_pipeline(scatter);
-                encoder.bind_group(0, gen_group, &[], gen_layout);
-                encoder.dispatch(scatter_groups, 1, 1);
-            });
+        // **Three passes, not three dispatches in one**, and the difference is
+        // the whole of whether this works on every device. Each stage reads what
+        // the one before it wrote — `startsMain` the routes and counts
+        // `binMain` finished, `scatterMain` the starts — and a dependency a pass
+        // does not declare is one the device is not told about: `crcbl-vk`
+        // records explicit pipeline barriers, and a driver may run commands with
+        // no barrier between them in any order it likes. Recorded as one pass,
+        // an NVIDIA GeForce MX550 (615.71.09) ran the prefix sum and the scatter
+        // against buffers the routing dispatch had not written yet, so every
+        // bucket's start collapsed onto the run region's first word — while
+        // lavapipe, which runs commands in order, passed every check. As three
+        // passes over the same declarations the graph puts a barrier on each
+        // buffer between them, as it does between the cull and this.
+        //
+        // Every pass declares all four written buffers, because every pass binds
+        // the one group that names them.
+        let passes = [
+            ("draw-args", self.bin_pipeline, bin_groups),
+            ("draw-starts", self.starts_pipeline, 1),
+            ("draw-scatter", self.scatter_pipeline, scatter_groups),
+        ];
+        for (label, pipeline, groups) in passes {
+            graph
+                .add_compute_pass(label)
+                .read_buffer(visible_count)
+                // Read for the survivor list and written for the routes, the runs
+                // and their starts, which share it — one declaration, and
+                // `ShaderReadWrite` is what it really is.
+                .use_buffer(runs, ResourceState::ShaderReadWrite)
+                .use_buffer(args, ResourceState::ShaderReadWrite)
+                .use_buffer(counts, ResourceState::ShaderReadWrite)
+                .use_buffer(group_state, ResourceState::ShaderReadWrite)
+                .execute(move |ctx| {
+                    // No instances tested is no survivors to scatter, and a
+                    // dispatch of no workgroups is one Metal rejects outright.
+                    if groups == 0 {
+                        return;
+                    }
+                    let encoder = ctx.encoder();
+                    encoder.bind_compute_pipeline(pipeline);
+                    encoder.bind_group(0, gen_group, &[], gen_layout);
+                    encoder.dispatch(groups, 1, 1);
+                });
+        }
 
         GeneratedDraws {
             args: self.args[frame],

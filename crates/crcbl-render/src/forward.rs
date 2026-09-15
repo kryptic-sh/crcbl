@@ -15796,6 +15796,19 @@ mod tests {
                  buffer here carrying a value out of the previous frame, so what it needs \
                  ordering against is that frame rather than this one's clear"
             );
+            // **And the prefix sum and the scatter behind barriers of their own**,
+            // on every buffer the stage before them wrote. This is what orders
+            // them on a device that runs undeclared commands in any order — see
+            // `DrawGen::add_passes` — and what three dispatches in one pass
+            // silently lacked.
+            for label in ["draw-starts", "draw-scatter"] {
+                assert_eq!(
+                    after(label),
+                    4,
+                    "round {round}: `{label}` reads what the pass before it wrote, so every \
+                     buffer they share is ordered behind a barrier"
+                );
+            }
 
             // The compiled graph borrows the renderer's pass bodies, so it has
             // to go before the next frame borrows the renderer again.
@@ -15842,8 +15855,8 @@ mod tests {
             .iter()
             .map(|pass| pass.label().to_string())
             .collect();
-        // The camera's compute triple and topic 18's clustering dispatch, then
-        // one triple per shadow cascade, then the depth-only pass they feed and
+        // The camera's five compute passes and topic 18's clustering dispatch,
+        // then five per shadow cascade, then the depth-only pass they feed and
         // the colour pass that samples it.
         //
         // **The clustering pass is after the camera's clearing dispatch**, and
@@ -15853,9 +15866,15 @@ mod tests {
         let mut expected: Vec<String> = Vec::new();
         for cascade in 0..=shadow::CASCADES {
             expected.extend(
-                ["clear-counters", "cull", "draw-args"]
-                    .into_iter()
-                    .map(str::to_string),
+                [
+                    "clear-counters",
+                    "cull",
+                    "draw-args",
+                    "draw-starts",
+                    "draw-scatter",
+                ]
+                .into_iter()
+                .map(str::to_string),
             );
             if cascade == 0 {
                 expected.push("light-cluster".to_string());
@@ -15900,7 +15919,7 @@ mod tests {
         );
         assert_eq!(
             passes, expected,
-            "each cull's three compute passes come first, and in that order"
+            "each cull's five compute passes come first, and in that order"
         );
 
         // **The depth prepass, not the colour pass**, and that is what says the

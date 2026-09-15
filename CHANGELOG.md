@@ -24,10 +24,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   survivor's route, one run region every bucket packs into, and a start word per
   bucket. A scene of 17219 instances and 938 buckets goes from 61.7 MiB a
   buffer, about 864 MiB a renderer, to 205.4 KiB a buffer. `draw_gen.slang`'s
-  `computeMain` is three entry points the `draw-args` pass dispatches in turn —
-  `binMain` routes and counts each survivor, `startsMain` prefix-sums the counts
-  into starts, `scatterMain` writes the runs — so `DrawGen::DISPATCHES` (five)
-  is what a frame records, while `DrawGen::MAX_PASSES` stays three. The geometry
+  `computeMain` is three entry points, each dispatched by a compute pass of its
+  own — `draw-args` (`binMain` routes and counts each survivor), `draw-starts`
+  (`startsMain` prefix-sums the counts into starts) and `draw-scatter`
+  (`scatterMain` writes the runs) — so `DrawGen::MAX_PASSES` and
+  `DrawGen::DISPATCHES` are both five and a frame's pass list gains two labels
+  per generator. Separate passes are what put barriers between the stages: as
+  three dispatches in one pass they declared no dependency, and an NVIDIA driver
+  ran the prefix sum and scatter before the routes were written. The geometry
   stages read a bucket's start out of the runs buffer: `DrawGen::bucket_base` is
   replaced by `DrawGen::bucket_start_word`, the word holding that start, and
   `mesh::DrawConstants::base` and `meshlet::ClusterDrawConstants::base` are

@@ -8105,6 +8105,8 @@ mod tests {
                     ("compute", "clear-counters"),
                     ("compute", "cull"),
                     ("compute", "draw-args"),
+                    ("compute", "draw-starts"),
+                    ("compute", "draw-scatter"),
                 ]);
                 if cull == 0 {
                     passes.push(("compute", "light-cluster"));
@@ -8220,6 +8222,8 @@ mod tests {
             ("compute", "clear-counters"),
             ("compute", "cull"),
             ("compute", "draw-args"),
+            ("compute", "draw-starts"),
+            ("compute", "draw-scatter"),
             ("compute", "light-cluster"),
             ("render", "shadow"),
             ("render", "depth-prepass"),
