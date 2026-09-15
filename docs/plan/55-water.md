@@ -60,8 +60,8 @@ Absent, and every consumer it needs is missing something:
   holds a position and no orientation.
 
 What water _can_ build on: `RenderGraph::add_compute_pass` and compute on every
-backend including the browser; `copy_image_to_image` in the HAL
-(`crates/crcbl-hal/src/command.rs`); the Hillaire sky, the sky prefilter table
+backend including the browser; the Hi-Z pyramid's depth-writing full-screen pass
+(`crates/crcbl-render/src/hiz.rs`); the Hillaire sky, the sky prefilter table
 and the probe volume for reflection fallback; the cascade atlas walk that
 `volumetric.slang` already copies out of `mesh.slang`; froxel volumetric fog;
 `crcbl_shaders::fog`'s constructed exponential; and secondary views.
@@ -126,13 +126,35 @@ taken here, for three reasons:
   glass and particles, and it is recorded after water so a translucent object
   above a lake is depth-tested against the lake.
 
-**The pass is recorded after `ssr` and `volumetric-composite`**, where 53's
-decision 4 puts the blended pass, and before it. It copies the HDR scene colour
-and the opaque depth with `copy_image_to_image`, then draws the water bodies
-into the HDR target and the depth attachment. Consequences, stated:
+**The pass is recorded after `volumetric-composite` and `ssr-blur`**, which is
+where 53's decision 4 puts the blended pass, and before it: in
+`View::add_passes` the frame runs `forward`, `sky`, the volumetric chain, the
+Hi-Z levels, `ssr` and `ssr-blur`, then bloom, exposure, `debug-draw` and
+`tonemap`, and water sits between `ssr-blur` and the bloom chain. It is recorded
+per view, so a secondary view sees water too. It is two passes:
 
-- **Water applies the froxel fog itself**, sampling the integrated volume at its
-  own depth, for 53's reason.
+- **`water-copy`**, one full-screen draw that `Load`s the HDR scene colour and
+  the opaque depth into two images of its own, writing the depth through
+  `SV_Depth` under an always-pass compare — the Hi-Z pyramid's construction.
+  **It is not `copy_image_to_image`** (corrected 2026-09-15, after a survey of
+  the frame): the render graph refuses to attach and sample one image in one
+  pass, so the opaque depth has to live in a second image; no depth
+  image-to-image copy is exercised on any backend in this tree, and a browser is
+  where it would first be tried; and a `PassKind::Copy` has no timer, where
+  [sample/21-tide.md](sample/21-tide.md) needs per-pass cost. The render pass
+  runs on all four backends today, because `hiz` does.
+- **`water`**, which draws the bodies into the HDR target and the depth
+  attachment with depth writes on, reading the two copies.
+
+A body is content, not an effect, so it follows the sky pass rather than a
+`RenderEffects` bit: no body registered means no pass and the same frame bit for
+bit. Consequences, stated:
+
+- **Water fogs only the light it adds.** The transmitted term already carries
+  the fog between the eye and the floor, because the opaque frame was fogged per
+  fragment or by `volumetric-composite`; the reflected and scattered terms are
+  fogged at the surface's own depth, sampling the integrated froxel volume when
+  that effect ran and the analytic fog when it did not.
 - **Water is not an SSR receiver through the shared pass** (SSR has already run,
   and its reconstructed normal could not see a ripple anyway). The surface
   computes its own reflection — decision 7.
@@ -486,17 +508,17 @@ Each rung is priced on the desktop adapter, lavapipe and the browser before it
 counts as built, per [43-render-standards.md](43-render-standards.md), and every
 rung runs on the WebGPU backend and publishes in the fixture's browser demo.
 
-| Rung | What it buys                                                                                                                                                                                                                                                                   | What it costs                                                                  | Needs                                                               |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
-| 1    | `crcbl-water` bodies and medium; the surface pass after `volumetric-composite`; scene colour and depth copies; refraction with the in-front rejection; per-channel absorption; soft shoreline fade; sky and probe reflection with Fresnel; sun cascades received; a still lake | one HDR and one depth copy per frame; one pass over water pixels               | a tick uniform for the pass; `copy_image_to_image` on every backend |
-| 2    | `crcbl_shaders::trig`; trochoid waves for lakes and pools; hex-tiled detail normals (Mikkelsen 2022); camera-centred rings; `WaterQuery` height, normal and velocity; pontoon buoyancy; immersion events                                                                       | the trigonometry construction and its guard; ring vertices per tier            | rung 1; rigid-body rotation and per-body medium properties          |
-| 3    | The FFT ocean: cooked spectrum, integer phase, storage-buffer FFT in compute, cascades, sea-state blend, the Sea of Thieves colour model, Bruneton variance, whitecap coverage and erosion foam; the CPU swell field for physics                                               | compute per cascade; mipmapped cascade textures; a CPU FFT at the physics tick | rung 2; wind speed from [56-wind.md](56-wind.md)                    |
-| 4    | Rivers and waterfalls: spline meshes, cooked flow maps, two-phase flow, flow-driven foam, fall meshes, impact stamps, CPU flow drift; body transitions                                                                                                                         | flow textures; spline cook                                                     | rung 2                                                              |
-| 5    | Shores: the distance-field cook, shore waves, shallow attenuation, shore foam, openness                                                                                                                                                                                        | one RGBA8 field per body                                                       | rung 3                                                              |
-| 6    | The surface's own Hi-Z march; planar reflection for one flat body                                                                                                                                                                                                              | the march per water pixel; planar is a second scene draw                       | rung 1; 47's planar rung for the second half                        |
-| 7    | Underwater: mask, horizon, fill, medium composite, meniscus, Snell's window, caustics                                                                                                                                                                                          | a mask target; a full-screen composite; the caustics texture                   | rungs 2 and 5                                                       |
-| 8    | Interaction: the CPU ripple grid, wake stamps, Kerner hull buoyancy                                                                                                                                                                                                            | a CPU grid step per tick; an upload per tick                                   | rung 2; rigid-body rotation                                         |
-| 9    | Pools and fountains: clear medium, floor caustics, a planar candidate, jets as meshes with parabolic paths, ripples from rung 8                                                                                                                                                | as its parts                                                                   | rungs 6, 7, 8                                                       |
+| Rung | What it buys                                                                                                                                                                                                                                                                               | What it costs                                                                  | Needs                                                      |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| 1    | `crcbl-water` bodies and medium; the surface pass after `ssr-blur`; `water-copy` (colour and depth by a full-screen pass); refraction with the in-front rejection; per-channel absorption; soft shoreline fade; sky and probe reflection with Fresnel; sun cascades received; a still lake | one HDR and one depth image per frame; one pass over water pixels              | none; the tick waits for rung 2                            |
+| 2    | `crcbl_shaders::trig`; trochoid waves for lakes and pools; hex-tiled detail normals (Mikkelsen 2022); camera-centred rings; `WaterQuery` height, normal and velocity; pontoon buoyancy; immersion events                                                                                   | the trigonometry construction and its guard; ring vertices per tier            | rung 1; rigid-body rotation and per-body medium properties |
+| 3    | The FFT ocean: cooked spectrum, integer phase, storage-buffer FFT in compute, cascades, sea-state blend, the Sea of Thieves colour model, Bruneton variance, whitecap coverage and erosion foam; the CPU swell field for physics                                                           | compute per cascade; mipmapped cascade textures; a CPU FFT at the physics tick | rung 2; wind speed from [56-wind.md](56-wind.md)           |
+| 4    | Rivers and waterfalls: spline meshes, cooked flow maps, two-phase flow, flow-driven foam, fall meshes, impact stamps, CPU flow drift; body transitions                                                                                                                                     | flow textures; spline cook                                                     | rung 2                                                     |
+| 5    | Shores: the distance-field cook, shore waves, shallow attenuation, shore foam, openness                                                                                                                                                                                                    | one RGBA8 field per body                                                       | rung 3                                                     |
+| 6    | The surface's own Hi-Z march; planar reflection for one flat body                                                                                                                                                                                                                          | the march per water pixel; planar is a second scene draw                       | rung 1; 47's planar rung for the second half               |
+| 7    | Underwater: mask, horizon, fill, medium composite, meniscus, Snell's window, caustics                                                                                                                                                                                                      | a mask target; a full-screen composite; the caustics texture                   | rungs 2 and 5                                              |
+| 8    | Interaction: the CPU ripple grid, wake stamps, Kerner hull buoyancy                                                                                                                                                                                                                        | a CPU grid step per tick; an upload per tick                                   | rung 2; rigid-body rotation                                |
+| 9    | Pools and fountains: clear medium, floor caustics, a planar candidate, jets as meshes with parabolic paths, ripples from rung 8                                                                                                                                                            | as its parts                                                                   | rungs 6, 7, 8                                              |
 
 **Gated elsewhere and recorded, not planned here**: mist, spray and splash
 particles ([53-transparency.md](53-transparency.md),
