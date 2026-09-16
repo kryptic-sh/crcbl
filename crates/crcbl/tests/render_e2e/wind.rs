@@ -82,6 +82,26 @@ const CAMERA: DVec3 = DVec3::new(137.5, 4.0, -61.25);
 /// lattice of either layer, and a spread wider than both layers so the `repeat`
 /// addressing is crossed in both directions. The count is a multiple of
 /// [`WORKGROUP_SIZE`] so the dispatch is exact.
+/// `pixels` with each row padded to `alignment` bytes, and the padded row's
+/// width in texels for [`BufferImageCopy::buffer_row_length`].
+///
+/// A copy's row pitch is the backend's business and they disagree: D3D12
+/// requires a multiple of 256 bytes and refuses anything else by name, where
+/// Vulkan takes a tightly packed row. `crcbl_render`'s own upload path pads for
+/// exactly this reason, and a fixture that hand-rolls an upload owes the same
+/// arithmetic — a 4-texel-wide layer's row is 16 bytes.
+fn padded_rows(pixels: &[u8], width: u32, alignment: u64) -> (Vec<u8>, u32) {
+    const TEXEL: usize = 4;
+    let row_bytes = width as usize * TEXEL;
+    let pitch = (row_bytes as u64).next_multiple_of(alignment.max(TEXEL as u64)) as usize;
+    let mut padded = Vec::with_capacity(pixels.len() / row_bytes.max(1) * pitch);
+    for row in pixels.chunks(row_bytes) {
+        padded.extend_from_slice(row);
+        padded.resize(padded.len() + pitch - row.len(), 0);
+    }
+    (padded, (pitch / TEXEL) as u32)
+}
+
 fn probe_points() -> Vec<DVec3> {
     (0..256)
         .map(|index| {
@@ -243,8 +263,28 @@ impl WindProbe {
         let params_upload = host("wind params upload", &params_bytes);
         let probe_upload = host("wind probe params upload", &probe_bytes);
         let points_upload = host("wind points upload", &point_bytes);
-        let direction_upload = host("wind direction layer upload", &layers.direction_pixels);
-        let intensity_upload = host("wind intensity layer upload", &layers.intensity_pixels);
+        // **Rows padded to the device's copy alignment, not tightly packed.**
+        // D3D12 requires a copy's row pitch to be a multiple of 256 bytes, and
+        // a 4-texel-wide layer's row is 16 — which is why the fixture's own
+        // tiny layers failed there and nowhere else. `crcbl_render`'s upload
+        // path pads for the same reason.
+        let alignment = device
+            .caps()
+            .limits
+            .optimal_buffer_copy_offset_alignment
+            .max(1);
+        let (direction_rows, direction_row_texels) = padded_rows(
+            &layers.direction_pixels,
+            layers.direction.grid().width,
+            alignment,
+        );
+        let (intensity_rows, intensity_row_texels) = padded_rows(
+            &layers.intensity_pixels,
+            layers.intensity.grid().width,
+            alignment,
+        );
+        let direction_upload = host("wind direction layer upload", &direction_rows);
+        let intensity_upload = host("wind intensity layer upload", &intensity_rows);
 
         let uniform = |label: &str, size: u64| {
             device
@@ -551,7 +591,10 @@ impl WindProbe {
                 (probe_upload, probe_params, PROBE_PARAMS_SIZE as u64),
                 (points_upload, points_buffer, point_bytes.len() as u64),
             ],
-            [direction_upload, intensity_upload],
+            [
+                (direction_upload, direction_row_texels),
+                (intensity_upload, intensity_row_texels),
+            ],
         );
         probe
     }
@@ -562,7 +605,7 @@ impl WindProbe {
         headless: &Headless,
         layers: &Layers,
         buffers: [(crcbl::hal::BufferHandle, crcbl::hal::BufferHandle, u64); 3],
-        images: [crcbl::hal::BufferHandle; 2],
+        images: [(crcbl::hal::BufferHandle, u32); 2],
     ) {
         let device = headless.device.as_ref();
         let mut encoder = device.create_command_encoder(&crcbl::hal::CommandEncoderDesc {
@@ -602,13 +645,15 @@ impl WindProbe {
             images: &to_transfer,
             ..Barriers::default()
         });
-        for ((upload, image), grid) in images.into_iter().zip(self.images).zip(grids) {
-            // Whole-subresource, tightly packed, at offset zero: the shape
-            // every backend accepts without an alignment of its own to satisfy.
+        for (((upload, row_texels), image), grid) in images.into_iter().zip(self.images).zip(grids)
+        {
+            // Whole-subresource at offset zero, with the row length the padding
+            // above produced: a tightly packed row is what D3D12 refuses when
+            // it is not a multiple of 256 bytes.
             encoder.copy_buffer_to_image(&BufferImageCopy {
                 buffer: upload,
                 buffer_offset: 0,
-                buffer_row_length: 0,
+                buffer_row_length: row_texels,
                 buffer_image_height: 0,
                 image,
                 image_subresource: ImageSubresourceLayers {
@@ -935,4 +980,32 @@ fn calm_means_calm_on_the_gpu() {
         );
     }
     headless.finish();
+}
+
+/// **A padded row is a whole number of texels wide and a multiple of the
+/// device's alignment**, and the padding is at the end of each row rather than
+/// at the end of the image.
+///
+/// The claim behind [`padded_rows`], which exists because D3D12 refuses a row
+/// pitch that is not a multiple of 256 bytes and the fixture's layers are four
+/// texels wide. It runs on every backend because it touches none: the
+/// arithmetic is what went wrong, and only the WARP leg could see it.
+#[test]
+fn a_padded_row_is_a_multiple_of_the_alignment_and_keeps_its_texels() {
+    // Two rows of four RGBA texels: 16 bytes each, the shape that failed.
+    let pixels: Vec<u8> = (0..32).collect();
+    let (padded, row_texels) = padded_rows(&pixels, 4, 256);
+
+    assert_eq!(row_texels, 64, "256 bytes is 64 RGBA texels");
+    assert_eq!(padded.len(), 512, "two rows at the padded pitch");
+    assert_eq!(&padded[..16], &pixels[..16], "the first row's texels");
+    assert!(
+        padded[16..256].iter().all(|byte| *byte == 0),
+        "the first row's padding is not zeroed",
+    );
+    assert_eq!(&padded[256..272], &pixels[16..], "the second row's texels");
+
+    // An alignment a row already satisfies pads nothing.
+    let (tight, tight_texels) = padded_rows(&pixels, 4, 4);
+    assert_eq!((tight, tight_texels), (pixels, 4));
 }
