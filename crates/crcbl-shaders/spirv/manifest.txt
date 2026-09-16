@@ -226,6 +226,34 @@ dxil = vertexMain:dxil/fxaa.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3f
 dxil = fragmentMain:dxil/fxaa.fragment.dxil:72e562c2515257567307ea6f0a32d9a9789f69405238ed14916659f7c7470165
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
+[grass]
+source = shaders/grass.slang
+source-sha256 = da49c4527898e968ce95dafbdaa9ad5c1052261bb33600ae32f17e3c73e79d57
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/grass.spv
+spirv-sha256 = 74235a39fb1be8e71e24c06f7b8cab3c6193ba000a7f9264961e20ca6eb3238c
+wgsl = wgsl/grass.wgsl
+wgsl-sha256 = 698bc06fc27aab7c8f6560d63c3e6273bcd4096bbbe1c485eeb172132f09eeac
+msl = msl/grass.metal
+msl-sha256 = e240755fe1adc100830cc4ea1af662840f68c28a80c255ac6db542ec69b3f54e
+dxil = vertexMain:dxil/grass.vertex.dxil:d6b329c4e03b73601c3195e7407d18450da8326e97223cea4e489001e52ca090
+dxil = fragmentMain:dxil/grass.fragment.dxil:de90a1e1b526fe193b4de48b78bdfffd8e8617e014c0b13980cf5baa24b84a5f
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[grass_gen]
+source = shaders/grass_gen.slang
+source-sha256 = deb1d6daab785b1c47082f9a1baa6507bbe63907152b6a595d2b9221c419f16d
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/grass_gen.spv
+spirv-sha256 = 6f6796545433ab4ff0210496a4d2132facf20893709062d17bd8de50e582ed11
+wgsl = wgsl/grass_gen.wgsl
+wgsl-sha256 = 252698507a12792d4ffe79db304f9219ceb404e80bfbb2e2b8e5b8addba6a9a8
+msl = msl/grass_gen.metal
+msl-sha256 = 55bd4a29ba678e1e08fe9296de6670b9d29a80cdea36d9f03e3c1fc5862679f2
+dxil = clearMain:dxil/grass_gen.clear.dxil:c8fd499bd1a02e8caab615704dc0c1dbb3310b3937ad9d9f0b561fbc50582099
+dxil = generateMain:dxil/grass_gen.generate.dxil:ce7583fe95612061598bc4b59851d9eceb18377e90426b37224df975b0717245
+entry-points = clearMain:glcompute, generateMain:glcompute
+
 [grid]
 source = shaders/grid.slang
 source-sha256 = d5049517c497424b52e17caf19fe905188db84f71727f155ccecbbf4c3e3664f

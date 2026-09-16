@@ -891,11 +891,12 @@ jobs:
   # anywhere in it, so none of the compositor machinery the demo and probe gates
   # need applies. Headless Chromium plus SwiftShader is the whole environment.
   #
-  # **`--expect-fail ssr,ui` IS A MEASUREMENT, NOT A TOLERANCE.** Every scene
-  # but two matches SwiftShader's output exactly within
-  # `Tolerance::RASTERISER`. Those two reproduce to the digit across runs:
+  # **`--expect-fail ssr,ui,meadow` IS A MEASUREMENT, NOT A TOLERANCE.** Every
+  # scene but three matches SwiftShader's output exactly within
+  # `Tolerance::RASTERISER`. Those three reproduce to the digit across runs:
   # `ssr` at 58 grossly-wrong pixels and ssim 0.988822, `ui` at 506 and ssim
-  # 0.983257. They are rasteriser differences rather than backend defects — the
+  # 0.983257, and `meadow` at 184 and ssim 0.990042 — and all three match on
+  # real hardware, which is what says each is a rasteriser's limit. They are rasteriser differences rather than backend defects — the
   # same `ssr` scene matches on real hardware with a max channel delta of 9 and
   # zero gross pixels, and its diff is banding confined to the reflection
   # ray-march and the horizon edges, so the geometry and the instancing that a
@@ -938,12 +939,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux is the leg that has always run, and nothing about it changes:
-          # SwiftShader, and the two scenes a software rasteriser cannot serve.
+          # Linux is the leg that has always run: SwiftShader, and the scenes a
+          # software rasteriser cannot serve.
+          #
+          # **`meadow` joined them on 2026-09-16, measured rather than assumed.**
+          # `docs/plan/57-grass.md`'s field is alpha-cut cards, and a cutout
+          # turns any disagreement about a filtered texel into a *binary*
+          # per-pixel decision: a sampler's bilinear filter is specified to eight
+          # bits of sub-texel precision, so where the mask crosses the cutoff
+          # moves between implementations and the pixels in that band flip. On
+          # SwiftShader that reached 2.6% of the frame past
+          # `Tolerance::RASTERISER`'s per-channel allowance and 0.37% past its
+          # gross one, against 0.59% and 0.047% on an RX 7900 XTX under radv —
+          # and **the same wasm on the same machine's own GPU matched 31 of 31
+          # goldens, `meadow` included**, which is what says this is a
+          # rasteriser's limit and not a browser-backend defect. The macOS leg
+          # below therefore gates it, exactly as it gates `ssr` and `ui`.
           - os: ubuntu-latest
             label: linux
             adapter: swiftshader
-            excuse: --expect-fail ssr,ui
+            excuse: --expect-fail ssr,ui,meadow
             timeout: 45
           # **macOS runs on the machine's own GPU, and gates every one.** Not a
           # preference — Chrome's Dawn has no Vulkan backend on macOS and so has
@@ -952,7 +967,8 @@ jobs:
           # before this leg was written: the same harness in `hardware` mode on
           # an RX 7900 XTX matches **11 of 11** goldens at `Tolerance::RASTERISER`
           # — `ssr` and `ui` included, so those two are a SwiftShader limit and
-          # not a browser-backend defect. That is why this leg carries no excuse
+          # not a browser-backend defect. Re-measured on 2026-09-16 with the
+          # grass field in the set: **31 of 31**, `meadow` included. That is why this leg carries no excuse
           # list and is the *stronger* of the three. If Metal turns out to differ
           # on a scene, the answer is a measured excuse here, not a wider
           # tolerance.
@@ -975,7 +991,7 @@ jobs:
           - os: windows-latest
             label: windows
             adapter: swiftshader
-            excuse: --expect-fail ssr,ui
+            excuse: --expect-fail ssr,ui,meadow
             # **Sized for one cold run, because this leg has never had a warm
             # one.** 90 was extrapolated from a first attempt cancelled at
             # 45m20s — it had reached `11/11 scene(s) rendered and saved` with
@@ -1126,6 +1142,16 @@ jobs:
       # golden comparison rather than looser, `ssr` differing in 1355 pixels
       # here against 25611 there.
       #
+      # **`meadow` joined the excuse list on 2026-09-16 for the same reason it
+      # joined the golden step's**, and this comparison cannot be tighter than
+      # that one for it: the field's cutout is what diverges, both halves here
+      # are software rasterisers, and the reference this leg uses is the very
+      # driver the golden was blessed on — so the two steps report the same
+      # numbers to the digit. The macOS step below compares two *hardware*
+      # renderers and carries no excuse; measured on 2026-09-16, the harness in
+      # `hardware` mode on an RX 7900 XTX matched every golden including this
+      # one.
+      #
       # **Linux only for now**, and that is a scope line rather than a limit:
       # `--reference mtl` on macOS and `--reference dx12` on Windows would each
       # compare a browser against its own platform's native backend on the same
@@ -1137,7 +1163,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-        run: ./web/run-cross-backend-e2e.sh --reference vk --expect-fail ssr,ui
+        run: ./web/run-cross-backend-e2e.sh --reference vk --expect-fail ssr,ui,meadow
 
       # **The strongest form of the same question, and the reason this leg is
       # worth its runner minutes.** On Linux the browser renders on SwiftShader

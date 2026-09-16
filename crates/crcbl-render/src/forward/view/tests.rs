@@ -313,6 +313,104 @@ fn every_view_draws_the_water_and_no_body_records_no_pass() {
     renderer.destroy(device);
 }
 
+/// **Grass is generated and drawn in every view, and a renderer with no field
+/// records none of it** — [`crate::grass`]'s off position, as the passes a frame
+/// records.
+///
+/// The frame before any field and the frame after the field is removed record
+/// the same list, label for label: no pass, and nothing moved to make room for
+/// one.
+#[test]
+fn every_view_draws_the_grass_and_no_field_records_no_pass() {
+    let (_, device, queue) = open();
+    let device = device.as_ref();
+    let (mut renderer, view) = renderer_with_view(device, queue);
+    place_cube(&mut renderer, Mat4::IDENTITY);
+    let count =
+        |labels: &[String], label: &str| labels.iter().filter(|each| *each == label).count();
+    const LABELS: [&str; 3] = ["grass-clear", "grass-generate", "grass"];
+
+    let bare = frame_labels(device, queue, &mut renderer, Some(view));
+    assert_eq!(
+        LABELS
+            .iter()
+            .map(|label| count(&bare, label))
+            .sum::<usize>(),
+        0
+    );
+
+    let field = crate::grass::GrassField::new(
+        [1, 1],
+        4.0,
+        [-2.0, -2.0],
+        50.0,
+        crate::grass::Heightfield {
+            texels: [4, 4],
+            metres_per_texel: 1.0,
+            origin: [-2.0, -2.0],
+            heights: vec![0.0; 16],
+        },
+        crate::grass::CoverMap {
+            texels: [4, 4],
+            metres_per_texel: 1.0,
+            origin: [-2.0, -2.0],
+            cover: vec![[255, 0]; 16],
+        },
+        vec![crate::grass::BladeType {
+            root_color: [0.05, 0.1, 0.02],
+            tip_color: [0.3, 0.5, 0.1],
+            height: 0.3,
+            half_width: 0.03,
+            height_spread: 0.3,
+            width_spread: 0.2,
+        }],
+    )
+    .expect("a real field");
+    renderer
+        .set_grass(device, queue, Some(&field))
+        .expect("the null backend uploads every map");
+    let alone = frame_labels(device, queue, &mut renderer, None);
+    let grown = frame_labels(device, queue, &mut renderer, Some(view));
+    for label in LABELS {
+        assert_eq!(
+            count(&alone, label),
+            1,
+            "the primary camera records `{label}`"
+        );
+        assert_eq!(
+            count(&grown, label),
+            2,
+            "the view records its own `{label}`"
+        );
+    }
+    // And the three are in the order the module's header draws them.
+    let at = |label: &str| {
+        grown
+            .iter()
+            .position(|each| each == label)
+            .unwrap_or_else(|| panic!("`{label}` is in the frame"))
+    };
+    assert!(at("grass-clear") < at("grass-generate"));
+    assert!(at("grass-generate") < at("grass"));
+    assert!(
+        at("forward") < at("grass"),
+        "the cards must draw over the opaque frame, not under it"
+    );
+
+    renderer
+        .set_grass(device, queue, None)
+        .expect("removing is a set");
+    // Two frames, so both slots of the ring have come round since the field was
+    // removed.
+    frame_labels(device, queue, &mut renderer, Some(view));
+    let removed = frame_labels(device, queue, &mut renderer, Some(view));
+    assert_eq!(
+        removed, bare,
+        "removing the grass left the frame a different shape"
+    );
+    renderer.destroy(device);
+}
+
 /// A view's visibility reaches the instance record, survives the caller
 /// rewriting the object, and is handed back when the view is released.
 #[test]

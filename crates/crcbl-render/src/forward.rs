@@ -179,6 +179,7 @@ use crate::bloom::Bloom;
 use crate::cmaa2::Cmaa2;
 use crate::exposure::{Exposure, ExposureAdaptation, ExposureBuffers};
 use crate::fxaa::Fxaa;
+use crate::grass::{Grass, GrassFrame, GrassScene};
 use crate::grid::{Grid as GroundGrid, GridStyle};
 use crate::hiz::Hiz;
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError};
@@ -1138,6 +1139,7 @@ const RENDER_PASSES: u32 = 8
     + Ssr::PASSES
     + Volumetric::PASSES
     + Water::PASSES
+    + Grass::PASSES
     + Exposure::PASSES
     + Bloom::MAX_PASSES
     + POST_TONEMAP_PASSES
@@ -2370,6 +2372,22 @@ pub struct ForwardRenderer {
     /// recorded for the primary camera: one indexed draw per body, each of one
     /// instance, so they join the direct draws on the debug draw layer's terms.
     recorded_water_draws: u64,
+    /// `docs/plan/57-grass.md`'s field, its device resources and the ring of
+    /// retirements a replaced one leaves — see [`crate::grass`]. Empty until
+    /// [`set_grass`](ForwardRenderer::set_grass), and an empty field records no
+    /// pass.
+    grass: GrassScene,
+    /// The wind block every view writes into its own ring — see
+    /// [`set_wind`](ForwardRenderer::set_wind). Calm until a caller sets one.
+    wind: crcbl_shaders::wind::WindParams,
+    /// The grass draws the last [`add_passes`](ForwardRenderer::add_passes)
+    /// recorded for the primary camera: one per tile slot.
+    ///
+    /// **Not among the direct draws**, unlike the water surface's: every one of
+    /// them is an indirect call whose instance count lives in a buffer a
+    /// dispatch wrote, so the CPU knows how many *calls* it submitted and
+    /// nothing about how many blades came out of them.
+    recorded_grass_draws: u64,
 }
 
 /// What a partly-built [`ForwardRenderer`] has to give back.
@@ -2456,6 +2474,9 @@ struct Rollback {
     sky_pass: Option<SkyPass>,
     /// The water surface's two pipelines, their layouts and a ring of blocks.
     water: Option<Water>,
+    /// The grass passes' three pipelines, their layouts and two rings of
+    /// blocks.
+    grass: Option<Grass>,
     /// The shadow atlas viewer, which owns one pipeline, one layout and a ring
     /// of blocks and groups.
     atlas_viewer: Option<AtlasView>,
@@ -2509,6 +2530,9 @@ impl Rollback {
         }
         if let Some(atlas_viewer) = self.atlas_viewer {
             atlas_viewer.destroy(device);
+        }
+        if let Some(grass) = self.grass {
+            grass.destroy(device);
         }
         if let Some(water) = self.water {
             water.destroy(device);
@@ -5628,6 +5652,12 @@ impl ForwardRenderer {
             // before water existed. Nothing is allocated until a body is set.
             water: WaterBodies::new(FRAMES_IN_FLIGHT),
             recorded_water_draws: 0,
+            // No field, so no pass: the frame every caller of this type drew
+            // before grass existed. The two calm wind layers are one texel
+            // each and are what makes a field with no weather set still.
+            grass: GrassScene::new(device, queue, FRAMES_IN_FLIGHT)?,
+            wind: crcbl_shaders::wind::WindParams::default(),
+            recorded_grass_draws: 0,
         })
     }
 
@@ -6341,6 +6371,10 @@ impl ForwardRenderer {
         // slot last came round — see [`crate::water::WaterBodies`], which says
         // why this waits for the slot rather than happening in `set_water`.
         self.water.begin_frame(device, self.frame)?;
+        // The grass field's retirements, aged by one frame — see
+        // [`crate::grass::GrassScene`], which says why a replaced field waits
+        // for the ring rather than being released where it was replaced.
+        self.grass.begin_frame(device);
 
         // One cull per cascade and per **occupied** light slot, against that
         // view's own frustum. The orthographic box gives
@@ -8301,6 +8335,9 @@ impl ForwardRenderer {
         // here for `draws_sky`'s reason, and the same value every view records
         // from.
         let water = self.water.frame(self.frame);
+        // The same, for the grass field: read here for `draws_sky`'s reason,
+        // and the same value every view records from.
+        let grass = self.grass.frame();
         // Whether this frame ends by drawing the shadow atlas over itself — the
         // resolved view rather than the switch, so a caller who left the atlas
         // up and then asked for normals gets normals. Read here for
@@ -8408,8 +8445,14 @@ impl ForwardRenderer {
         self.recorded_water_draws = water
             .as_ref()
             .map_or(0, |water: &WaterFrame| water.draws.len() as u64);
-        self.recorded_draws =
-            shadow_draws + 2 * bucket_draws.calls.len() as u64 + self.direct_draws();
+        // One indirect draw per tile slot the frame's field holds.
+        self.recorded_grass_draws = grass
+            .as_ref()
+            .map_or(0, |grass: &GrassFrame| u64::from(grass.slots));
+        self.recorded_draws = shadow_draws
+            + 2 * bucket_draws.calls.len() as u64
+            + self.recorded_grass_draws
+            + self.direct_draws();
 
         // --- the probe gather ---
         //
@@ -8456,6 +8499,7 @@ impl ForwardRenderer {
             ssao_blurs: self.frame_ssao_blurs,
             draws_sky,
             water,
+            grass,
             skinned,
             probe_buffer,
             probe_table,
@@ -10300,6 +10344,97 @@ impl ForwardRenderer {
         self.water.bodies()
     }
 
+    /// The field of grass every view draws — `docs/plan/57-grass.md`'s rung G1,
+    /// and this crate's `grass` module for how.
+    ///
+    /// Replaces whatever was set before. The field's ground, cover map, blade
+    /// table and per-tile blocks are uploaded here, and the buffers a dispatch
+    /// writes are created here; a field replaced while a frame is in flight
+    /// leaves its resources alive until the ring has come round, so the call is
+    /// safe at any point between frames.
+    ///
+    /// # Off is exactly off
+    ///
+    /// [`None`] is the default, and a renderer with no field records no grass
+    /// pass at all: the frame it draws is the one it drew before this existed,
+    /// bit for bit. Grass is content, not a [`RenderEffects`] bit, on
+    /// [`set_water`](Self::set_water)'s terms.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::grass::SetError::Field`] for a description the field itself
+    /// refuses — no tiles, a zero texel scale, an empty blade table — and then
+    /// **nothing is replaced**: the field set before this call goes on drawing.
+    /// [`crate::grass::SetError::Hal`] for a seam call that failed, on the same
+    /// terms.
+    pub fn set_grass(
+        &mut self,
+        device: &dyn Device,
+        queue: QueueHandle,
+        field: Option<&crate::grass::GrassField>,
+    ) -> Result<(), crate::grass::SetError> {
+        self.grass.set(device, queue, field)
+    }
+
+    /// The field of grass this renderer draws, as it was last set.
+    #[must_use]
+    pub fn grass(&self) -> Option<&crate::grass::GrassField> {
+        self.grass.field()
+    }
+
+    /// The two buffers the grass generation pass writes, or [`None`] for a
+    /// renderer with no field.
+    ///
+    /// What `crcbl`'s `render_e2e` copies back to check the placement blade by
+    /// blade and to read each slot's instance count, on
+    /// [`froxel_buffers`](Self::froxel_buffers)' terms — see
+    /// [`crate::grass::GrassBuffers`] for the layout. They hold whatever the
+    /// last frame that generated left there, which for a field nobody has drawn
+    /// yet is undefined rather than empty.
+    #[must_use]
+    pub fn grass_buffers(&self) -> Option<crate::grass::GrassBuffers> {
+        self.grass.buffers()
+    }
+
+    /// The two authored wind layers `docs/plan/56-wind.md`'s decision 1 names,
+    /// as the GPU copy of the field samples them.
+    ///
+    /// [`None`] restores the calm placeholder: one texel of no deflection and
+    /// one of zero intensity, which is what makes a field with no weather set
+    /// stand still. A replaced pair waits for the ring exactly as a replaced
+    /// field does.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::grass::WindLayerError`] for a layer that is not four bytes a
+    /// texel of the grid it came with, or a seam call that failed.
+    pub fn set_wind_layers(
+        &mut self,
+        device: &dyn Device,
+        queue: QueueHandle,
+        layers: Option<&crate::grass::WindLayers>,
+    ) -> Result<(), crate::grass::WindLayerError> {
+        self.grass.set_wind_layers(device, queue, layers)
+    }
+
+    /// The wind's uniform block for the frames from here on —
+    /// `crcbl_wind::WindField::gpu_params`, which is where the authoritative
+    /// `f64` formula is narrowed to `f32`.
+    ///
+    /// Everything in it is camera-relative or already wrapped, so a caller
+    /// writes it once per frame from the field's own state and never from a
+    /// world-scale coordinate. The default is a base speed of zero, which is
+    /// calm.
+    pub const fn set_wind(&mut self, params: crcbl_shaders::wind::WindParams) {
+        self.wind = params;
+    }
+
+    /// The wind block this renderer writes, as it was last set.
+    #[must_use]
+    pub const fn wind(&self) -> crcbl_shaders::wind::WindParams {
+        self.wind
+    }
+
     /// The atmosphere this renderer draws, if it has one.
     #[must_use]
     pub const fn atmosphere(&self) -> Option<Atmosphere> {
@@ -11182,7 +11317,8 @@ impl ForwardRenderer {
             view.destroy(device);
         }
         self.primary.destroy(device);
-        // After every view, whose water groups name these buffers.
+        // After every view, whose grass and water groups name these buffers.
+        self.grass.destroy(device);
         self.water.destroy(device);
         device.destroy_sampler(self.sampler);
         device.destroy_graphics_pipeline(self.tonemap_pipeline);
@@ -18241,6 +18377,44 @@ mod tests {
                 },
             }])
             .expect("a square meshes");
+        // **A field of grass**, on the water body's terms exactly: content
+        // rather than an effect bit, so the widest frame is one a caller gave a
+        // field to and `Grass::PASSES` is in the bound for it.
+        renderer
+            .set_grass(
+                device,
+                queue,
+                Some(
+                    &crate::grass::GrassField::new(
+                        [1, 1],
+                        4.0,
+                        [-2.0, -2.0],
+                        50.0,
+                        crate::grass::Heightfield {
+                            texels: [4, 4],
+                            metres_per_texel: 1.0,
+                            origin: [-2.0, -2.0],
+                            heights: vec![0.0; 16],
+                        },
+                        crate::grass::CoverMap {
+                            texels: [4, 4],
+                            metres_per_texel: 1.0,
+                            origin: [-2.0, -2.0],
+                            cover: vec![[255, 0]; 16],
+                        },
+                        vec![crate::grass::BladeType {
+                            root_color: [0.05, 0.1, 0.02],
+                            tip_color: [0.3, 0.5, 0.1],
+                            height: 0.3,
+                            half_width: 0.03,
+                            height_spread: 0.3,
+                            width_spread: 0.2,
+                        }],
+                    )
+                    .expect("a real field"),
+                ),
+            )
+            .expect("the null backend uploads every map");
         renderer.set_render_scale(WIDEST_SCALE);
         assert_eq!(
             renderer.internal_extent(WIDEST_EXTENT),

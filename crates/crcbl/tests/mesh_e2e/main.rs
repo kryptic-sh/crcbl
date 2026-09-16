@@ -85,6 +85,7 @@ mod exposure;
 mod fill_light;
 mod froxels;
 mod goldens;
+mod grass;
 mod hdr;
 mod lod;
 mod material_minification;

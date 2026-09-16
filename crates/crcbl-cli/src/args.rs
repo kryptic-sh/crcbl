@@ -188,6 +188,8 @@ OPTIONS:
                            probes              a room lit by irradiance probes
                            still_pool          a still pool over a deep and a
                                                shallow basin, a shore and a post
+                           meadow              a hillside of card grass over a
+                                               bare path, half of it in wind
                            sprite              four sprites over three batches
                            ui                  text, a rect and an outline
                            ui_primitives       rounded rects, a clipped image
@@ -1283,6 +1285,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::Aa,
         Scene::Probes,
         Scene::StillPool,
+        Scene::Meadow,
         Scene::Sprite,
         Scene::Ui,
         Scene::UiPrimitives,
@@ -1324,6 +1327,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::Aa => "aa",
         Scene::Probes => "probes",
         Scene::StillPool => "still_pool",
+        Scene::Meadow => "meadow",
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",
         Scene::UiPrimitives => "ui_primitives",

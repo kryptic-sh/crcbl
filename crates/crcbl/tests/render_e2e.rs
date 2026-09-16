@@ -189,6 +189,12 @@ mod still_pool;
 #[path = "render_e2e/wind.rs"]
 mod wind;
 
+// `docs/plan/57-grass.md` rung G1's field, in a file of its own for the reason
+// it gives: most of its claims read the instance data a generation dispatch
+// wrote rather than the pixels a draw produced.
+#[path = "render_e2e/grass.rs"]
+mod grass;
+
 // `docs/plan/07-ui-debug.md` rung 1's primitives, in a file of their own for the
 // same reason.
 #[path = "render_e2e/ui_primitives.rs"]

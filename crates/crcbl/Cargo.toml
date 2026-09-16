@@ -90,6 +90,16 @@ crcbl-inventory = { workspace = true, optional = true }
 # baked pair rather than producing it. A build script wanting the encoder names
 # `crcbl-sprite` itself — see `src/lib.rs`'s `sprite` re-export.
 crcbl-sprite = { workspace = true, features = ["load"] }
+# `docs/plan/56-wind.md`'s field, and an ordinary dependency since
+# `docs/plan/57-grass.md`'s rung G1: `src/screenshot/meadow.rs` builds a
+# `WindField` and hands the renderer its `gpu_params`, which is the one place
+# the authoritative `f64` formula is narrowed to `f32`. It was a dev-dependency
+# while `tests/render_e2e/wind.rs` was the only caller and nothing shipped read
+# the field; the grass fixture is the first consumer, and a second copy of
+# `gpu_params` written to avoid this arrow is exactly what decision 6 forbids.
+# It costs one compilation unit: `crcbl-phys` and `crcbl-sprite/load` are
+# already above, and `crcbl-shaders` is the only other thing it names.
+crcbl-wind = { workspace = true }
 # Re-exported alongside `crcbl-render` so a game writes camera and light maths
 # in the same types the renderer takes, without a second workspace path.
 glam = { workspace = true }
@@ -190,12 +200,6 @@ crcbl-golden = { workspace = true }
 # tiling material to prove a 2 m surface shows twice the grid cells of a 1 m one.
 # A dev-dependency because no shipped `crcbl` binary references the greybox pack.
 crcbl-greybox = { workspace = true }
-# `tests/render_e2e/wind.rs` — `docs/plan/56-wind.md` rung W1's CPU–GPU
-# agreement. The wind field is the *authoritative* side of that comparison, so
-# the test has to build one; a dev-dependency because no shipped `crcbl` binary
-# reads the field yet (W4's drag provider and the vegetation rungs are its
-# consumers, and each is its own slice).
-crcbl-wind = { workspace = true }
 # `tests/gltf_e2e.rs` builds a `.glb` and imports it through the real
 # `DirSource`, so it needs a real directory to put it in. The asset seam itself
 # is an ordinary dependency above — see there.

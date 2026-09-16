@@ -362,6 +362,11 @@ pub mod ltc;
 // header, for `fog`'s reason above.
 pub mod trig;
 
+// The grass field's blocks, rows and placement hash, and the guards over what
+// the two grass shaders copy from `mesh.slang` and `wind.slang`; its own `//!`
+// header, for `fog`'s reason above.
+pub mod grass;
+
 // The surface pass's block, rows and constants, and the guards over what
 // `water.slang` copies from four other shaders; its own `//!` header, for
 // `fog`'s reason above.

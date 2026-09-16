@@ -267,6 +267,11 @@ pub(super) struct ViewFrame<'a> {
     pub(super) lod_hold_ratio: f32,
     /// The sun, the light rows and the shadow matrices the frame fitted.
     pub(super) scene: &'a FrameScene,
+    /// What the frame's grass field holds, for the generation block this view
+    /// writes — see [`crate::grass`].
+    pub(super) grass: Option<crate::grass::GrassFrame>,
+    /// The wind's block, as the renderer was last handed it.
+    pub(super) wind: crcbl_shaders::wind::WindParams,
     pub(super) fog: Fog,
     pub(super) probe_volume: crcbl_shaders::probe::ProbeVolume,
     pub(super) attribute_base: u32,
@@ -327,6 +332,9 @@ pub(super) struct FramePasses {
     /// What the frame's water draws, or `None` for a frame with none — see
     /// [`crate::water`].
     pub(super) water: Option<WaterFrame>,
+    /// What the frame's grass field holds, or `None` for a frame with none —
+    /// see [`crate::grass`].
+    pub(super) grass: Option<crate::grass::GrassFrame>,
     /// The skinning dispatch's vertex pool, when the frame skins.
     pub(super) skinned: Option<BufferId>,
     /// This frame's slot of the probe ring, as a handle and as the graph's id.
@@ -550,6 +558,10 @@ pub(super) struct View {
     /// draw on no frame with no bodies, which is every frame until a caller
     /// calls [`set_water`](ForwardRenderer::set_water).
     pub(super) water: Water,
+    /// `docs/plan/57-grass.md`'s three passes — see [`crate::grass`]. They run
+    /// on no frame with no field, which is every frame until a caller calls
+    /// [`set_grass`](ForwardRenderer::set_grass).
+    pub(super) grass: crate::grass::Grass,
 }
 
 impl View {
@@ -956,6 +968,19 @@ impl View {
             ForwardRenderer::build_fullscreen_with,
         )?);
 
+        // --- the grass field ---
+        //
+        // After the water surface, so `Rollback::run` releases it first. It
+        // takes the atlas's sampler for the same reason that one does: the
+        // cards are lit through a copy of the forward pass's cascade walk, and
+        // the walk reads the atlas through a comparison sampler the renderer
+        // owns for its life. See [`crate::grass`].
+        rollback.grass = Some(crate::grass::Grass::new(
+            device,
+            frames,
+            inputs.shadow_sampler,
+        )?);
+
         // Whole, so the rollback lets go of every handle: the view owns them
         // from here, and a rollback still naming one would release it twice.
         let view =
@@ -1038,6 +1063,10 @@ impl View {
                     .water
                     .take()
                     .unwrap_or_else(|| unreachable!("the water was placed in the rollback above")),
+                grass: rollback
+                    .grass
+                    .take()
+                    .unwrap_or_else(|| unreachable!("the grass was placed in the rollback above")),
             };
         rollback.buffers.clear();
         rollback.bind_groups.clear();
@@ -1404,6 +1433,46 @@ impl View {
                     .to_array(),
                 sun_color: scene.light.color.extend(0.0).to_array(),
                 froxels: self.frame_effects.contains(RenderEffects::VOLUMETRIC_FOG),
+            },
+        )?;
+        // The grass field's two blocks: the generation pass's, whose camera is
+        // this view's, and the wind's, which the renderer holds for the whole
+        // frame. Written whether or not the frame has a field, on the block
+        // above's terms.
+        self.grass.begin_frame(
+            device,
+            slot,
+            frame
+                .grass
+                .as_ref()
+                .map_or_else(Default::default, |grass| grass.gen_params(camera.eye)),
+            frame.wind,
+            crcbl_shaders::grass::Params {
+                limits: [
+                    crate::grass::SLOT_CAPACITY,
+                    frame
+                        .grass
+                        .as_ref()
+                        .map_or(1, crate::grass::GrassFrame::rows),
+                    0,
+                    0,
+                ],
+                // **How many pixels a metre spans at one unit of view depth.**
+                // The projection's own `x` scale is `1 / (aspect · tan(fov/2))`
+                // for a perspective camera and `1 / half-width` for an
+                // orthographic one, and half the viewport's width takes a
+                // normalised-device length to pixels — so a card of `w` metres
+                // at a view depth of `d` is `w · this / d` pixels across, which
+                // is exactly what `grassCardLevel` reads. Taken off the very
+                // matrix this frame draws with rather than from the camera's
+                // own fields, so a projection this view resolved differently
+                // cannot disagree with it.
+                screen: [
+                    view_projection.x_axis.x * 0.5 * extent.0 as f32,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
             },
         )?;
         // The bloom chain's blocks, one row per step: each step needs the texel
@@ -2105,6 +2174,32 @@ impl View {
             }
         });
 
+        // `docs/plan/57-grass.md`'s field, **after the forward pass and before
+        // the background**. Grass is opaque scene content with a cutout: the
+        // depth its cards write has to be in the buffer before the sky decides
+        // which pixels it covers, before the Hi-Z pyramid is built and before
+        // the reflection march reads the frame. A frame with no field adds
+        // nothing here and takes no transient — see [`crate::grass`].
+        if let Some(field) = passes.grass {
+            let frame_block = self.uniforms[frame];
+            self.grass.add_passes(
+                graph,
+                frame,
+                crate::grass::GrassImages {
+                    color: scene_color,
+                    depth: scene_depth,
+                    shadow_atlas,
+                },
+                crate::grass::GrassInputs {
+                    frame_block,
+                    lights: self.lights.lights(frame),
+                    cluster_lights: self.lights.grid(frame),
+                    light_grid,
+                    field,
+                },
+            );
+        }
+
         // --- the background ---
         //
         // **After the forward pass and before everything that reads the scene
@@ -2523,6 +2618,7 @@ impl View {
         for buffer in self.tonemap_uniforms {
             device.destroy_buffer(buffer);
         }
+        self.grass.destroy(device);
         self.water.destroy(device);
         self.sky_pass.destroy(device);
         self.upscale.destroy(device);
@@ -2850,6 +2946,11 @@ impl ForwardRenderer {
             lod_error_budget: self.lod_error_budget,
             lod_hold_ratio: self.lod_hold_ratio,
             scene,
+            // The field as it stands, and the weather over it. Read here rather
+            // than in `View::begin_frame` because that method takes `&mut self`
+            // on the view and the field is the *renderer's*.
+            grass: self.grass.frame(),
+            wind: self.wind,
             fog: self.fog,
             probe_volume: self.probe_volume,
             attribute_base: self.pool.attribute_base(),

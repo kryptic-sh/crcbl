@@ -95,6 +95,7 @@ use crate::render::{
 };
 use crate::ui::draw_list::DrawList;
 
+mod meadow;
 mod still_pool;
 mod ui_focus;
 mod ui_inspector;
@@ -106,6 +107,15 @@ mod ui_text_input;
 mod ui_tree;
 mod ui_widgets;
 
+pub use meadow::{
+    MEADOW_COVER_METRES_PER_TEXEL, MEADOW_DENSE, MEADOW_DIRECTION_METRES_PER_TEXEL,
+    MEADOW_DIRECTION_TEXELS, MEADOW_GROUND_METRES_PER_TEXEL, MEADOW_HALF,
+    MEADOW_INTENSITY_METRES_PER_TEXEL, MEADOW_INTENSITY_TEXELS, MEADOW_PATH_HALF_WIDTH,
+    MEADOW_REACH, MEADOW_SECOND_ROW, MEADOW_SLOPE, MEADOW_SPARSE, MEADOW_TILE_SIZE, MEADOW_TILES,
+    MEADOW_WEATHER, meadow_blades, meadow_camera, meadow_cover, meadow_cover_texel, meadow_field,
+    meadow_forward, meadow_ground, meadow_ground_normal, meadow_height, meadow_sky, meadow_sun,
+    meadow_wind_field, meadow_wind_layers,
+};
 pub use still_pool::{
     STILL_POOL_DEEP_FLOOR, STILL_POOL_FAR_EDGE, STILL_POOL_HALF_WIDTH, STILL_POOL_LEVEL,
     STILL_POOL_MEDIUM, STILL_POOL_NEAR_EDGE, STILL_POOL_POST, STILL_POOL_SHALLOW_FLOOR,
@@ -772,6 +782,34 @@ pub enum Scene {
     /// And the one that needs a second frame: the same scene with its body
     /// removed is bit for bit the scene never given one.
     StillPool,
+    /// `docs/plan/57-grass.md` rung G1's field of card grass, and the first
+    /// milestone of `docs/plan/sample/22-meadow.md`: a hillside of compute-
+    /// generated cards under one wind, with a bare path down the middle.
+    ///
+    /// **The only frame in the tree drawn by an indirect draw whose instance
+    /// count a compute pass wrote this frame.** The bucket draws the forward
+    /// pass issues read counts `draw_gen.slang` wrote, but their *geometry* is
+    /// a mesh a caller placed; every card here was placed by a hash, and a
+    /// generation pass that produced nothing at all still draws a plausible
+    /// picture — the ground, the sky and the path — which is why the claims in
+    /// `tests/render_e2e/grass.rs` read the instance buffer and the draw
+    /// arguments as well as the pixels.
+    ///
+    /// Four quadrants that differ in one thing each, so every claim is a
+    /// comparison of two bands alike in everything else — see
+    /// [`meadow_forward`]'s module for the layout:
+    ///
+    /// * the far half's cover is **dense** and the near half's **sparse**, so
+    ///   the far tiles' instance counts stand above the near tiles';
+    /// * the wind's intensity is full on `x < 0` and **exactly zero** on
+    ///   `x > 0`, so every card on the calm side carries a lean of exactly
+    ///   zero — the plan's "calm means still", as an equality;
+    /// * the bare path between them is wider than the intensity layer's blend,
+    ///   which is what makes that an equality rather than a threshold.
+    ///
+    /// And the one that needs a second frame: the same scene with its field
+    /// removed is bit for bit the scene never given one.
+    Meadow,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -6622,6 +6660,13 @@ impl SceneState {
                 )?
                 .into()
             }
+            Scene::Meadow => {
+                // The whole of it is in `meadow_forward`, on
+                // `Scene::StillPool`'s terms: `tests/render_e2e.rs` builds the
+                // same scene with no field, because the off-switch is only
+                // recognisable against it.
+                meadow::meadow_forward_on_path(device, queue, format, true, path)?.into()
+            }
             Scene::Bloom => {
                 // The floor every other overhead fixture stands on, and the
                 // emitter laid on it — see `bloom_emitter`. Nothing else is in
@@ -7095,6 +7140,14 @@ pub enum OffscreenError {
     /// A body of water a scene set could not be meshed.
     #[error("water: {0}")]
     Water(#[from] crate::render::BodyError),
+
+    /// A field of grass a scene set could not be made resident.
+    #[error("grass: {0}")]
+    Grass(#[from] crcbl_render::grass::SetError),
+
+    /// A wind layer a scene set could not be uploaded.
+    #[error("wind: {0}")]
+    Wind(#[from] crcbl_render::grass::WindLayerError),
 }
 
 impl OffscreenSetup {
@@ -7644,6 +7697,158 @@ impl OffscreenSetup {
             SceneState::Forward { renderer, .. } => renderer.set_water(bodies).map(|()| true),
             SceneState::Sprite { .. } | SceneState::Ui { .. } => Ok(false),
         }
+    }
+
+    /// Replaces the field of grass this scene's forward renderer draws, for the
+    /// frames drawn after this call — [`ForwardRenderer::set_grass`].
+    ///
+    /// **What it exists for is the off-switch**, on [`Self::set_water`]'s terms:
+    /// a field removed from a scene that has already drawn it has to leave the
+    /// frame the scene would have drawn without it, and the only way to ask that
+    /// of a scene built by this module is to change it between frames.
+    ///
+    /// Returns whether it reached a renderer, on [`Self::set_tonemap_curve`]'s
+    /// terms: the sprite and UI scenes draw no grass.
+    ///
+    /// # Errors
+    ///
+    /// [`crcbl_render::grass::SetError`] if the field cannot be made resident,
+    /// in which case the field set before this call goes on drawing.
+    pub fn set_grass(
+        &mut self,
+        field: Option<&crcbl_render::grass::GrassField>,
+    ) -> Result<bool, crcbl_render::grass::SetError> {
+        match &mut self.scene {
+            SceneState::Forward { renderer, .. } => renderer
+                .set_grass(self.device.as_ref(), self.queue, field)
+                .map(|()| true),
+            SceneState::Sprite { .. } | SceneState::Ui { .. } => Ok(false),
+        }
+    }
+
+    /// The two buffers this scene's grass generation pass writes, or [`None`]
+    /// where it has no field or draws through no forward renderer.
+    ///
+    /// What `tests/render_e2e/grass.rs` copies back to hold the placement
+    /// against `crcbl_render::grass::placement` — see
+    /// [`ForwardRenderer::grass_buffers`].
+    #[must_use]
+    pub fn grass_buffers(&self) -> Option<crcbl_render::grass::GrassBuffers> {
+        match &self.scene {
+            SceneState::Forward { renderer, .. } => renderer.grass_buffers(),
+            SceneState::Sprite { .. } | SceneState::Ui { .. } => None,
+        }
+    }
+
+    /// Copies `bytes` bytes out of `buffer` and blocks until they land.
+    ///
+    /// **A device-local buffer a pass wrote is not readable any other way**, and
+    /// the claims `docs/plan/57-grass.md` grades rung G1 on are about instance
+    /// data rather than about pixels: "the same tile generates the same blades,
+    /// in the same slots, on every backend — compared as instance data read
+    /// back". [`Self::draw_and_readback`] answers the pixel half; this is the
+    /// other one, and it is here rather than in the test because the device, the
+    /// queue and the deadline are all this type's.
+    ///
+    /// `buffer` must have been created with
+    /// [`BufferUsage::TRANSFER_SRC`](crate::hal::BufferUsage::TRANSFER_SRC) and
+    /// must be in [`ResourceState::ShaderReadWrite`](crate::hal::ResourceState),
+    /// which is the state the render graph leaves the grass buffers in.
+    ///
+    /// # Errors
+    ///
+    /// [`OffscreenError::Hal`] if the copy cannot be recorded or submitted, and
+    /// [`OffscreenError::ReadbackTimeout`] if it has not landed after
+    /// [`READBACK_DEADLINE`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_buffer(
+        &mut self,
+        buffer: crate::hal::BufferHandle,
+        bytes: u64,
+    ) -> Result<Vec<u8>, OffscreenError> {
+        use crate::hal::{
+            Barriers, BufferBarrier, BufferCopy, BufferDesc, BufferUsage, CommandEncoderDesc,
+            MemoryLocation, ReadbackDesc, ReadbackState, ResourceState, SubmitInfo,
+        };
+
+        let device = self.device.as_ref();
+        let staging = device.create_buffer(&BufferDesc {
+            label: Some("offscreen buffer readback"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })?;
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("offscreen buffer readback"),
+            queue: self.queue,
+        });
+        let barrier = |from, to| [BufferBarrier::new(buffer, from, to)];
+        let out = barrier(ResourceState::ShaderReadWrite, ResourceState::TransferSrc);
+        let back = barrier(ResourceState::TransferSrc, ResourceState::ShaderReadWrite);
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &out,
+            ..Barriers::default()
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: buffer,
+            src_offset: 0,
+            dst: staging,
+            dst_offset: 0,
+            size: bytes,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &back,
+            ..Barriers::default()
+        });
+        let recorded = encoder.finish();
+        let commands = match recorded {
+            Ok(commands) => commands,
+            Err(error) => {
+                device.destroy_buffer(staging);
+                return Err(error.into());
+            }
+        };
+        let readback = device
+            .submit(self.queue, &SubmitInfo::new(&[commands]))
+            .and_then(|()| {
+                device.request_readback(&ReadbackDesc {
+                    label: Some("offscreen buffer readback"),
+                    buffer: staging,
+                    offset: 0,
+                    size: bytes,
+                    after: None,
+                })
+            });
+        let readback = match readback {
+            Ok(readback) => readback,
+            Err(error) => {
+                device.destroy_command_buffer(commands);
+                device.destroy_buffer(staging);
+                return Err(error.into());
+            }
+        };
+
+        // The poison byte the GPU suites fill a destination with: neither a
+        // plausible instance nor a plausible count, so a byte of it surviving
+        // into an assertion is evidence that nothing was copied over it.
+        let mut out = vec![0xA5u8; usize::try_from(bytes).unwrap_or(usize::MAX)];
+        let deadline = std::time::Instant::now() + READBACK_DEADLINE;
+        let landed = loop {
+            match device.poll_readback(readback, &mut out) {
+                Ok(ReadbackState::Ready) => break Ok(()),
+                Ok(ReadbackState::Pending) if std::time::Instant::now() < deadline => {
+                    std::thread::yield_now();
+                }
+                Ok(ReadbackState::Pending) => {
+                    break Err(OffscreenError::ReadbackTimeout(READBACK_DEADLINE));
+                }
+                Err(error) => break Err(error.into()),
+            }
+        };
+        device.destroy_readback(readback);
+        device.destroy_command_buffer(commands);
+        device.destroy_buffer(staging);
+        landed.map(|()| out)
     }
 
     /// Records, submits, and reads back one frame, blocking until it lands.
@@ -8859,7 +9064,32 @@ mod tests {
             .expect("every forward frame has a forward pass")
             + 1;
         still_pool_passes.insert(after_forward, ("render", "sky"));
-        let expected: [(Scene, &[(&str, &str)]); 24] = [
+        // **`Scene::Meadow` is the cube scene's list with the three grass
+        // passes spliced in after the forward pass and before the background**,
+        // and where they go is the claim: the cards are opaque scene content, so
+        // the depth they write has to be in the buffer before the sky decides
+        // which pixels it covers and before the pyramid the reflection march
+        // climbs is built. The two dispatches are a pair rather than one because
+        // the appends are an atomic add on the very word the clear zeroes —
+        // `crcbl_render`'s `grass` module argues both.
+        let mut meadow_passes = forward_passes(0);
+        let after_forward = meadow_passes
+            .iter()
+            .position(|(_, label)| *label == "forward")
+            .expect("every forward frame has a forward pass")
+            + 1;
+        meadow_passes.splice(
+            after_forward..after_forward,
+            [
+                ("compute", "grass-clear"),
+                ("compute", "grass-generate"),
+                ("render", "grass"),
+                // The background pass too: the meadow has a sky, where the cube
+                // scene does not, and `sky` is recorded straight after the grass.
+                ("render", "sky"),
+            ],
+        );
+        let expected: [(Scene, &[(&str, &str)]); 25] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8928,6 +9158,7 @@ mod tests {
             // otherwise be an unmodelled addition to every floor pixel.
             (Scene::Probes, &probe_passes),
             (Scene::StillPool, &still_pool_passes),
+            (Scene::Meadow, &meadow_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

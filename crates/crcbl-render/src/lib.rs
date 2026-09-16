@@ -138,6 +138,7 @@ pub mod fly;
 pub mod forward;
 mod fxaa;
 pub mod graph;
+pub mod grass;
 pub mod grid;
 pub mod hiz;
 pub mod instance_pool;

@@ -60,7 +60,10 @@ What is real today:
   the background draws from, and the device pays four buffer loads for it, with
   the sun's own limb-darkened disc drawn beside it, carrying exactly the
   illuminance the scene is shaded by; volumetric fog, bloom, auto-exposure,
-  CMAA2 and FXAA, render-scale upscaling, GPU skinning, alpha-masked cutout
+  CMAA2 and FXAA, render-scale upscaling, GPU skinning; compute-generated card
+  grass — a field placed by an integer hash the CPU recomputes exactly, one
+  dispatch per tile appending into fixed indirect slots, cut out against
+  coverage-preserving mips and leaning in the wind field; alpha-masked cutout
   materials cut in the depth prepass and the shadows as well as in the shading
   and routed per draw bucket, so an opaque mesh keeps its vertex-only depth
   stage in a scene that has a cutout in it; double-sided materials, drawn

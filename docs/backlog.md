@@ -30,6 +30,51 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 - **Rounded outlines and nested scroll containers** are covered by unit tests
   and no GPU claim; D3D12 and Metal draw `ui_focus` only on CI.
 
+## What grass rung G1 shipped without (2026-09-16)
+
+The card-grass field landed with the gaps below; `docs/plan/57-grass.md`'s rungs
+G2–G6 and T1–T2 are separate slices rather than gaps.
+
+- **Grass is not in the depth prepass.** Decision 1 wants a depth-only prepass
+  then an equal-depth pass; one colour pass is recorded instead. What it saves
+  is proportional to how much grass covers a pixel, so price it where cards
+  overlap several deep rather than on `Scene::Meadow`.
+- **The generation pass spends no frustum and no occlusion cull**, only the
+  distance one. Deliberate: a plane test at the boundary is the one piece of
+  arithmetic the CPU mirror cannot be held bit-identical to, and the occlusion
+  half needs the Hi-Z pyramid, which is built after the grass pass runs.
+- **Grass is Lambert**: no specular lobe, no probe irradiance, no ambient
+  occlusion, no contact shadow, no fog, and a rectangle light in a blade's
+  froxel is skipped rather than shaded as a point. Each is a binding and a
+  guarded copy of its own; the specular half is the one a reader misses first.
+- **`Scene::meadow` is excused on the two SwiftShader legs of the browser
+  gates**, measured 2026-09-16: 2.58% of pixels past `Tolerance::RASTERISER` and
+  0.37% past its gross allowance there, against 0.59% and 0.047% on radv — and
+  **31 of 31 goldens matched** with the same wasm on this machine's own GPU. It
+  is a rasteriser's limit, like `ssr` and `ui`.
+- **The grass passes are unpriced in a browser.** The render harness reads one
+  frame back and reports no timings, and there is no meadow demo with a debug
+  panel yet. Measured elsewhere: 0.001, 0.003 and 0.484 ms on an RX 7900 XTX at
+  1920×1080; 0.098, 0.092 and 37.2 ms on lavapipe.
+- **The card is authored in arithmetic and a field cannot name a texture.** An
+  authored page needs an asset seam, a layer per blade row and a cook with a
+  `--check` mode, on the wind layers' model.
+- **The blade row is picked from the nearest cover texel**, where decision 2
+  asks for a gather and a position-weighted pick; the jitter dithers the
+  transition instead. The gather form needs `textureGather` on every target and
+  a weighting whose CPU mirror stays exact.
+- **`CELLS_PER_TILE` is an engine constant**, so a field's density is only its
+  tile size. Making it per-field is a validated parameter and an accessor.
+- **Considered and declined: a per-scene golden tolerance for the field.**
+  `crcbl-golden`'s own header says a tolerance calibrated per comparison is one
+  nobody can defend, so the divergence was fixed in the shader and the residue
+  excused by name. **Also declined: `precise` on the placement arithmetic** —
+  Slang accepts it and emits no `NoContraction` in SPIR-V, and WGSL has no
+  equivalent, so it cannot make two compilers agree about a multiply-add.
+- **Not reviewed or tested**: the grass passes on Metal and D3D12. The artefacts
+  are committed and compile, but no frame has been drawn on either; CI's
+  software adapters are the only verdict available.
+
 ## What wind rung W1 shipped without (2026-09-16)
 
 `crcbl-wind` landed with the gaps below; `docs/plan/56-wind.md` is the design,
