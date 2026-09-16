@@ -8,12 +8,30 @@
 //! handed. This module is where they meet:
 //!
 //! ```text
-//! ShellEvent ─→ Console::observe ─→ TextField / History / Registry::complete
+//! ShellEvent ─→ Console::observe ─→ History / Registry::complete / the log view
 //!                     └ Enter ─→ Registry::execute ─→ log::console::print ─→ ring
+//!            ─→ TextPump::observe ─→ Edit ─→ TextInput ─→ Ui::text_input
 //! contact ──→ Console::note_contact ─→ the panel draws its on-screen keyboard
-//! pointer ──→ Console::point ─→ ConsoleInput ─→ Console::tapped / the same run
-//! frame ────→ Console::draw ─→ snapshot_since ─→ LogView ─→ DrawList
+//! frame ────→ Console::frame ─→ snapshot_since ─→ LogView ─→ ConsolePanel's tree
+//!                     └ ConsoleInput ─→ Console::tapped / the same run
+//! draw ─────→ Console::draw ─→ the tree that frame built ─→ DrawList
 //! ```
+//!
+//! # The field is the tree's, and so is its clipboard
+//!
+//! The typed line is [`crcbl_ui::tree::Ui::text_input`] — rung 7c's widget — so
+//! the console selects, moves by word, double-clicks a word and copies, cuts
+//! and pastes, none of which its own field could do. The keys that edit reach
+//! it as [`Edit`]s through [`crate::text_input::TextPump`], which the loop
+//! owns; what is left here is the console's own vocabulary — `Enter`, `Tab`,
+//! the history arrows, the page keys and the level key.
+//!
+//! **There is one clipboard path and it is the pump's.** `Ctrl`/`Cmd`+`V` is an
+//! `Edit::Paste` like it is in any other field, the field asks through
+//! [`Ui::take_clipboard_requests`](crcbl_ui::tree::Ui::take_clipboard_requests),
+//! and [`TextPump::serve`](crate::text_input::TextPump::serve) carries it to the
+//! shell and matches the answer back by request id. The console's own
+//! `CONSOLE_PASTE_KEY` and the loop's `ask_for_paste` are gone with it.
 //!
 //! A line the console prints goes through the **log**, not into the panel, so
 //! the terminal and the panel show the same records in the same order — plan
@@ -32,13 +50,14 @@
 //! settings write.
 
 use std::any::Any;
-use std::time::Duration;
 
 use crcbl_console::{Context, Fault, History, Registry, Table};
-use crcbl_core::input::{KeyCode, Modifiers, ScrollDelta};
+use crcbl_core::input::{KeyCode, ScrollDelta};
 use crcbl_input::{ActionMap, Binding};
-use crcbl_shell::{ButtonState, ClipboardContent, ClipboardRequestId, ShellEvent};
-use crcbl_ui::console::{ConsoleInput, ConsolePanel, KeyCap, caret_shown};
+use crcbl_shell::{ButtonState, ShellEvent};
+use crcbl_ui::console::{ConsoleInput, ConsoleLayout, ConsolePanel, KeyCap};
+use crcbl_ui::edit::Edit;
+use crcbl_ui::tree::{ClipboardRequest, TextInput};
 use crcbl_ui::{FontAtlas, PointerInput, UiState, draw_list::DrawList};
 
 use crate::settings::ConsoleHost;
@@ -57,25 +76,6 @@ use crate::settings::ConsoleHost;
 ///
 /// [`LogView::set_filter`]: crcbl_ui::console::LogView::set_filter
 pub const CONSOLE_LEVEL_KEY: KeyCode = KeyCode::F2;
-
-/// Pastes the clipboard into the field, held with `Ctrl` or the platform's
-/// `Meta`/`Command` key.
-///
-/// Plan 52's first follow-up, and it is one key rather than a command because
-/// pasting is what a person does *while* typing a line. Both modifiers are
-/// accepted on every platform: the engine has no per-platform shortcut table,
-/// `Meta`+`V` is what a Mac keyboard sends and `Ctrl`+`V` is what every other
-/// one does, and neither means anything else to the console.
-///
-/// **`Shift`+`Insert` is deliberately not a second spelling.** It is the X11
-/// convention for the *primary selection*, which is a different clipboard from
-/// the one [`Shell::clipboard_request`](crcbl_shell::Shell::clipboard_request)
-/// reads, and binding it to this one would paste the wrong text on the one
-/// platform whose users expect it.
-pub const CONSOLE_PASTE_KEY: KeyCode = KeyCode::KeyV;
-
-/// The modifiers [`CONSOLE_PASTE_KEY`] is read under.
-const PASTE_MODIFIERS: Modifiers = Modifiers::CTRL.union(Modifiers::SUPER);
 
 /// How many log lines one wheel detent scrolls.
 ///
@@ -394,6 +394,20 @@ fn binding_name(binding: &Binding) -> String {
     }
 }
 
+/// One key press that reads or rewrites the whole line, waiting for the frame
+/// that applies it. See [`Console::line_asks`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineAsk {
+    /// `Enter`: send what is in the field.
+    Submit,
+    /// `Tab`: fill in the common prefix, then cycle the candidates.
+    Complete,
+    /// The up arrow: the line before this one in the history.
+    Older,
+    /// The down arrow: the line after it.
+    Newer,
+}
+
 /// The engine's own console state: the registry, the panel, the history and the
 /// host every command and binding is run over.
 ///
@@ -407,8 +421,35 @@ pub struct Console {
     history: History,
     ui: UiState,
     open: bool,
-    /// How long the run has been going, which is all the caret's blink needs.
-    elapsed: Duration,
+    /// Where this frame's build put everything, for [`Console::draw`] to emit
+    /// under and for the next frame's pointer to be tested against.
+    ///
+    /// The panel is an element tree, and a tree is built once a frame:
+    /// [`Console::frame`] is that build, and `draw` only emits it.
+    layout: Option<ConsoleLayout>,
+    /// The keys that read or rewrite the whole line, in the order they were
+    /// pressed, waiting for [`Console::frame`] to apply them.
+    ///
+    /// Deferred, and they have to be: a key arrives during the shell's pump,
+    /// and the characters typed **in the same batch** have not reached the
+    /// field yet — they are [`Edit`]s the tree applies when `frame` builds.
+    /// Submitting or completing where the key lands would work on the line as
+    /// it stood before whatever was typed with it, which is an empty line for
+    /// anything that types a command and presses Enter in one go.
+    ///
+    /// A queue rather than one slot, for the reason `EngineLink`'s `binds` is
+    /// one: two `Tab`s in one batch are a completion and then a cycle through
+    /// it, and both were meant.
+    line_asks: Vec<LineAsk>,
+    /// The line as the last frame left it, for noticing that an edit changed
+    /// it.
+    ///
+    /// **An edit drops the completion**, and the console cannot see one happen:
+    /// a typed character is an [`Edit`] the *tree* applies, where the field's
+    /// own `insert` used to be a call this module made. So the line is compared
+    /// against what it was — after the deferred `Tab` has had its turn, so the
+    /// completion's own fill is not read as an edit that cancels it.
+    last_line: String,
     /// Rows the last drawn layout had, which is what a page scroll moves by.
     ///
     /// Read off the layout rather than assumed, so `PageUp` moves exactly one
@@ -424,23 +465,6 @@ pub struct Console {
     /// The prefix every candidate shares, which is the head the panel
     /// highlights.
     cycle_prefix: String,
-    /// [`CONSOLE_PASTE_KEY`] was pressed and the loop has not yet asked the
-    /// shell for the clipboard.
-    ///
-    /// A request rather than a read for [`EngineLink`]'s reason once more: the
-    /// shell is being pumped while the key arrives, so the console cannot call
-    /// [`Shell::clipboard_request`](crcbl_shell::Shell::clipboard_request) from
-    /// inside the pump's own closure.
-    paste_wanted: bool,
-    /// The clipboard read the loop issued and no [`ShellEvent::ClipboardData`]
-    /// has answered yet.
-    ///
-    /// Matched by id, because exactly one event answers each request and a
-    /// backend may answer several frames later — the seam's obligation 4. A
-    /// second paste while one is outstanding replaces it: the newer press is the
-    /// one the person is waiting on, and the older answer is then ignored rather
-    /// than typed into the field behind it.
-    awaiting_paste: Option<ClipboardRequestId>,
 }
 
 impl Console {
@@ -470,14 +494,14 @@ impl Console {
             history: History::new(),
             ui: UiState::new(),
             open: false,
-            elapsed: Duration::ZERO,
+            layout: None,
+            line_asks: Vec::new(),
+            last_line: String::new(),
             page: 1,
             cycle: Vec::new(),
             cycle_at: None,
             cycle_stem: String::new(),
             cycle_prefix: String::new(),
-            paste_wanted: false,
-            awaiting_paste: None,
         }
     }
 
@@ -493,17 +517,19 @@ impl Console {
         self.panel.log_mut().scroll_to_bottom();
     }
 
-    /// Hides the panel and drops any completion it was offering, and any paste
-    /// that has not been answered.
+    /// Hides the panel and drops any completion it was offering, and what this
+    /// frame laid out.
     ///
-    /// The read is not cancellable — a backend answers every request it
-    /// accepted — so what is dropped here is the *expectation*: an answer that
-    /// arrives after the panel is shut lands in no field, rather than in the
-    /// line whoever opens the console next is typing.
+    /// A clipboard read the field asked for is **not** dropped here, and cannot
+    /// be: a backend answers every request it accepted, and
+    /// [`TextPump`](crate::text_input::TextPump) matches that answer to the node
+    /// that asked. A shut panel's field is not engaged, so the answer reaches a
+    /// field that refuses it rather than the line whoever opens the console next
+    /// is typing.
     pub fn close(&mut self) {
         self.open = false;
-        self.paste_wanted = false;
-        self.awaiting_paste = None;
+        self.layout = None;
+        self.line_asks.clear();
         self.clear_cycle();
     }
 
@@ -533,55 +559,39 @@ impl Console {
         &mut self.host
     }
 
-    /// Folds one event in while the console is open, and says whether the
-    /// console claimed it.
+    /// Folds one event into the console's **own** vocabulary while the panel is
+    /// up, and says whether it acted on it.
     ///
-    /// **Everything the keyboard produces is claimed while the panel is up**,
-    /// including keys this does nothing with: a game that saw the letters being
-    /// typed into the field would be played by the console. The reserved keys
-    /// never reach here at all — [`Pending::observe`](crate::engine::Pending)
-    /// takes them first — which is what leaves `F3`, `F11` and the console's own
-    /// key working with the panel open.
+    /// What is left here after rung 7d2: `Enter`, `Tab`, the history arrows,
+    /// the page keys and [`CONSOLE_LEVEL_KEY`]. Everything that edits the line —
+    /// the letters, `Backspace`, `Delete`, the caret arrows, `Home` and `End`,
+    /// and the clipboard shortcuts — is an [`Edit`] the loop's
+    /// [`TextPump`](crate::text_input::TextPump) reads off the same events.
+    ///
+    /// **Claiming the keys is no longer this method's job**, and used to be.
+    /// The console is in the context stack now: the loop's
+    /// [`MenuPump`](crate::engine::MenuPump) withholds every key from the game
+    /// while the panel is up and still feeds them to the loop's own map, so a
+    /// key held into the console is heard to come up. The reserved keys never
+    /// reach here at all — [`Pending::observe`](crate::engine::Pending) takes
+    /// them first — which is what leaves `F3`, `F11` and the console's own key
+    /// working with the panel open.
     pub fn observe(&mut self, event: &ShellEvent) -> bool {
         if !self.open {
             return false;
         }
-        match event {
-            ShellEvent::TextCommit { text, .. } => {
-                self.panel.field_mut().insert(text);
-                self.clear_cycle();
-                true
-            }
-            ShellEvent::Key {
-                key_code: Some(code),
-                state,
-                modifiers,
-                ..
-            } => {
-                // Repeats included: holding Backspace to clear a line is what a
-                // text field is for, and the reserved keys — the ones a repeat
-                // would toggle at the keyboard's rate — were claimed before
-                // this.
-                if matches!(state, ButtonState::Pressed) {
-                    self.key(*code, *modifiers);
-                }
-                true
-            }
-            // The answer to this console's own paste, and to no other read: a
-            // game that asked the clipboard for something of its own gets its
-            // event back untouched.
-            ShellEvent::ClipboardData {
-                request, content, ..
-            } if self.awaiting_paste == Some(*request) => {
-                self.awaiting_paste = None;
-                self.paste(content);
-                true
-            }
-            // A key with no `key_code` is one no layout named; nothing here can
-            // act on it, and the text it produced arrives as a `TextCommit`.
-            ShellEvent::Key { .. } => true,
-            _ => false,
-        }
+        let ShellEvent::Key {
+            key_code: Some(code),
+            state: ButtonState::Pressed,
+            ..
+        } = event
+        else {
+            return false;
+        };
+        // Repeats included: holding `PageUp` to walk back through a `help`
+        // listing is what a page key is for, and the reserved keys — the ones a
+        // repeat would toggle at the keyboard's rate — were claimed before this.
+        self.key(*code)
     }
 
     /// Scrolls the log by one wheel event.
@@ -599,28 +609,95 @@ impl Console {
         self.panel.log_mut().scroll_by(lines);
     }
 
-    /// Runs one frame of pointer input against the panel, and applies what it
-    /// produced: a line **Send** or the keyboard's return key submitted, or a
-    /// key the on-screen keyboard was tapped on.
+    /// Where the last frame put every part of the panel, or `None` for a
+    /// console that has not been built — one that is shut, or open and not yet
+    /// through a frame.
     ///
-    /// Answers whether the pointer was **over anything the console draws** —
-    /// the panel and the keyboard both, which
+    /// What a caller hit-tests the on-screen keyboard's keys against, and what
+    /// [`Console::draw`] emits under.
+    #[must_use]
+    pub const fn layout(&self) -> Option<&ConsoleLayout> {
+        self.layout.as_ref()
+    }
+
+    /// Whether the console is drawing anything over `at`, as the **last**
+    /// frame laid it out.
+    ///
+    /// The panel and the on-screen keyboard both, which
     /// [`ConsoleLayout::covers`](crcbl_ui::console::ConsoleLayout::covers) is
-    /// the one call for. That is what the loop needs to keep the press away
-    /// from a menu or a game underneath: the console is drawn over the frame,
-    /// so a tap that lands on it is not a tap on what it is covering.
+    /// the one call for: the keyboard is drawn along the frame's bottom edge,
+    /// outside the panel, so a caller testing only the panel's rectangle would
+    /// hand every key press on to the game underneath.
     ///
-    /// **`false` while the console is shut**, before anything is laid out, so a
-    /// closed console claims nothing anywhere.
-    pub fn point(&mut self, extent: (u32, u32), atlas: &FontAtlas, pointer: PointerInput) -> bool {
+    /// **`false` while the console is shut**, and before the first frame of a
+    /// run that opened it, so a closed console claims nothing anywhere.
+    #[must_use]
+    pub fn covers(&self, at: glam::Vec2) -> bool {
+        self.open && self.layout.as_ref().is_some_and(|layout| layout.covers(at))
+    }
+
+    /// Runs the console's whole frame: takes what the log ring has gained,
+    /// builds and lays out the panel's tree over `extent` with `pointer` and
+    /// `input`, and applies what the pointer produced — a line **Send** or the
+    /// on-screen keyboard's return key submitted, or a key the keyboard was
+    /// tapped on.
+    ///
+    /// What it lays out is what [`Console::covers`] answers from on the next
+    /// frame, and what [`Console::draw`] emits at the end of this one. A shut
+    /// console lays out nothing and forgets what it had.
+    ///
+    /// # Once a frame, and in the input phase
+    ///
+    /// The panel is an element tree, so this is the one call that begins its
+    /// frame and builds it: a second build would latch the **Send** button's
+    /// click twice and take the field's edits twice. It runs in the input phase
+    /// rather than beside the drawing so that a line submitted here still
+    /// reaches [`Loop::drain_console`](crate::engine::Loop) on the frame it was
+    /// sent.
+    ///
+    /// **A command's answer is held now and drawn next frame.** Every line runs
+    /// after the spans were built, so the second pull below puts the answer in
+    /// the view — where a caller reading [`Console::panel`] finds it at once —
+    /// and the frame after this one is the one that shows it. The panel is
+    /// redrawn every frame it is open, so that is one frame of a blink.
+    pub fn frame(
+        &mut self,
+        extent: (u32, u32),
+        atlas: &FontAtlas,
+        pointer: PointerInput,
+        input: TextInput,
+    ) {
         if !self.open {
-            return false;
+            self.layout = None;
+            return;
         }
-        let layout = self.panel.layout(extent, atlas);
+        // The cursor is what makes this a copy of the new lines rather than of
+        // the whole ring — see `snapshot_since`. A console that has just opened
+        // has a cursor of zero and so takes everything, which is what "the panel
+        // shows the log" means on the first frame.
+        let records = crcbl_core::log::console::snapshot_since(self.panel.log().cursor());
+        self.panel.log_mut().push_records(&records);
+
+        let layout = self.panel.layout(extent, atlas, pointer, input);
+        self.page = layout.log_rows().max(1);
+        // The build is where this batch's typing reached the field, so it is
+        // also where an edit that cancels a completion becomes visible.
+        if self.panel.line() != self.last_line {
+            self.clear_cycle();
+        }
+        // **After the build, for `line_asks`' reason**, and after the check
+        // above so that a `Tab` filling the line in is not then read as an
+        // edit that drops the completion it just offered.
+        for ask in std::mem::take(&mut self.line_asks) {
+            self.apply(ask);
+        }
+        self.last_line.clear();
+        self.last_line.push_str(self.panel.line());
         let produced = {
             let Self { panel, ui, .. } = self;
             panel.point(&layout, ui, pointer)
         };
+        self.layout = Some(layout);
         match produced {
             ConsoleInput::Nothing => {}
             ConsoleInput::Submitted(line) => {
@@ -629,10 +706,39 @@ impl Console {
             }
             ConsoleInput::Key(cap) => self.tapped(cap),
         }
-        // **The keyboard as well as the panel.** It is drawn along the frame's
-        // bottom edge, outside the panel, so a caller testing only the panel's
-        // rectangle would hand every key press on to the game underneath.
-        layout.covers(pointer.pos)
+        // **A second pull, for whatever the lines above printed.** The spans
+        // were built before any of them ran, so the panel *draws* a command's
+        // answer on the next frame; the view holds it now, which is what a
+        // reader of `Console::panel` is asking about and what stops the answer
+        // being taken twice when the next frame pulls again.
+        let answers = crcbl_core::log::console::snapshot_since(self.panel.log().cursor());
+        self.panel.log_mut().push_records(&answers);
+    }
+
+    /// The clipboard offers and reads this frame's field asked for, for the
+    /// loop to carry to the shell through
+    /// [`TextPump::serve`](crate::text_input::TextPump::serve).
+    ///
+    /// Empty while the console is shut, because a shut console builds no field.
+    pub fn take_clipboard_requests(&mut self) -> Vec<ClipboardRequest> {
+        self.panel.take_clipboard_requests()
+    }
+
+    /// Whether the panel's field is taking typed text: what the loop reads the
+    /// shell's keys into [`Edit`]s for, and what it syncs the reserved `text`
+    /// context on.
+    ///
+    /// **This is the panel being open, and not the tree's engagement.** A
+    /// console prompt takes typing by construction — there is nothing else on
+    /// the panel to type at — where the tree's `:engaged` is a fact about a
+    /// build, and a build lags the key that opened the panel by a frame. Reading
+    /// the tree here would drop the first character somebody typed, which is
+    /// what the panel's own edit queue exists to stop. Use
+    /// [`ConsolePanel::is_editing`](crcbl_ui::console::ConsolePanel::is_editing)
+    /// for the tree's answer.
+    #[must_use]
+    pub const fn is_editing(&self) -> bool {
+        self.open
     }
 
     /// A key the on-screen keyboard was tapped on, applied to the field.
@@ -643,22 +749,16 @@ impl Console {
     /// history and the completion cycle in the same state, and the way to be
     /// sure of that is for both to end up here.
     fn tapped(&mut self, cap: KeyCap) {
-        let field = self.panel.field_mut();
-        let moved = match cap {
-            KeyCap::Type(character) => {
-                let mut buffer = [0u8; 4];
-                field.insert(character.encode_utf8(&mut buffer));
-                true
-            }
-            KeyCap::Backspace => field.backspace(),
+        let edit = match cap {
+            KeyCap::Type(character) => Edit::Insert(character.to_string()),
+            KeyCap::Backspace => Edit::Backspace,
             // `TouchKeyboard::point` swallows the two layer keys and the panel
             // turns `Enter` into a submission, so none of the three arrives
             // here; they change the keyboard or the line, not the caret.
-            KeyCap::Enter | KeyCap::Shift | KeyCap::Symbols => false,
+            KeyCap::Enter | KeyCap::Shift | KeyCap::Symbols => return,
         };
-        if moved {
-            self.clear_cycle();
-        }
+        self.panel.edit(edit);
+        self.clear_cycle();
     }
 
     /// Notes that a contact has reached this run, which is what puts the
@@ -681,128 +781,40 @@ impl Console {
         self.panel.show_keyboard(true);
     }
 
-    /// Draws the panel, after taking whatever the log ring has gained.
+    /// Emits the panel [`Console::frame`] built this frame.
     ///
-    /// `render_dt` advances the caret's blink and is folded in **whether or not
-    /// the panel is showing**, so the caret is where the clock says it is on the
-    /// frame the console opens rather than starting its blink over.
-    pub fn draw(
-        &mut self,
-        dl: &mut DrawList,
-        extent: (u32, u32),
-        atlas: &FontAtlas,
-        render_dt: Duration,
-    ) {
-        self.elapsed += render_dt;
+    /// Nothing at all when the console is shut, or before the first
+    /// [`Console::frame`] of a run that opened it.
+    pub fn draw(&mut self, dl: &mut DrawList, atlas: &FontAtlas) {
         if !self.open {
             return;
         }
-        // The cursor is what makes this a copy of the new lines rather than of
-        // the whole ring — see `snapshot_since`. A console that has just opened
-        // has a cursor of zero and so takes everything, which is what "the panel
-        // shows the log" means on the first frame.
-        let records = crcbl_core::log::console::snapshot_since(self.panel.log().cursor());
-        self.panel.log_mut().push_records(&records);
-        let layout = self.panel.layout(extent, atlas);
-        self.page = layout.log_rows().max(1);
-        self.panel
-            .render(dl, &layout, atlas, caret_shown(self.elapsed));
-    }
-
-    /// Whether [`CONSOLE_PASTE_KEY`] was pressed since the loop last asked.
-    ///
-    /// The loop takes it, issues the read where the shell is in hand, and hands
-    /// the id back through [`expect_paste`](Self::expect_paste).
-    pub const fn take_paste_request(&mut self) -> bool {
-        std::mem::replace(&mut self.paste_wanted, false)
-    }
-
-    /// The read the loop issued for the paste this console asked for.
-    pub const fn expect_paste(&mut self, request: ClipboardRequestId) {
-        self.awaiting_paste = Some(request);
-    }
-
-    /// Puts a clipboard answer into the field, or says why it could not.
-    ///
-    /// The text goes in through [`TextField::insert`], which drops control
-    /// characters — so a copied newline joins the two lines rather than
-    /// submitting the first, and a line pasted from a file arrives as one line.
-    ///
-    /// [`TextField::insert`]: crcbl_ui::console::TextField::insert
-    fn paste(&mut self, content: &ClipboardContent) {
-        match content {
-            ClipboardContent::Bytes(bytes) => match core::str::from_utf8(bytes) {
-                Ok(text) => {
-                    self.panel.field_mut().insert(text);
-                    self.clear_cycle();
-                }
-                // Refused rather than replaced character by character: a paste
-                // that silently corrupts what was copied is worse than one that
-                // does not happen — `ClipboardContent::text` makes the same
-                // call for the same reason.
-                Err(_) => {
-                    crcbl_core::log::console::print("paste: the clipboard is not UTF-8 text");
-                }
-            },
-            ClipboardContent::Empty => {
-                crcbl_core::log::console::print("paste: the clipboard is empty");
-            }
-            ClipboardContent::Unavailable => {
-                crcbl_core::log::console::print("paste: the clipboard could not be read");
-            }
-        }
-    }
-
-    /// One key press, while the console is open.
-    fn key(&mut self, code: KeyCode, modifiers: Modifiers) {
-        if code == CONSOLE_PASTE_KEY && modifiers.intersects(PASTE_MODIFIERS) {
-            self.paste_wanted = true;
+        let Some(layout) = self.layout.as_ref() else {
             return;
-        }
+        };
+        self.panel.render(dl, layout, atlas);
+    }
+
+    /// One key press, while the console is open. Reports whether the console
+    /// acted on it.
+    ///
+    /// Every key that **edits** the line is absent from this match, deliberately
+    /// — `Backspace`, `Delete`, the caret arrows, `Home`, `End` and the
+    /// clipboard shortcuts are [`Edit`]s the loop's text pump makes, applied by
+    /// [`Ui::text_input`](crcbl_ui::tree::Ui::text_input) itself. Two paths onto
+    /// one line would be two places for the caret to be.
+    fn key(&mut self, code: KeyCode) -> bool {
         match code {
-            KeyCode::Enter => {
-                if let Some(line) = self.panel.submit() {
-                    self.run(&line);
-                }
-                self.clear_cycle();
-            }
-            KeyCode::Tab => self.complete(),
-            KeyCode::ArrowUp => {
-                let current = self.panel.field().text().to_owned();
-                if let Some(line) = self.history.up(&current).map(str::to_owned) {
-                    self.panel.field_mut().set_text(&line);
-                }
-                self.clear_cycle();
-            }
-            KeyCode::ArrowDown => {
-                if let Some(line) = self.history.down().map(str::to_owned) {
-                    self.panel.field_mut().set_text(&line);
-                }
-                self.clear_cycle();
-            }
+            KeyCode::Enter => self.line_asks.push(LineAsk::Submit),
+            KeyCode::Tab => self.line_asks.push(LineAsk::Complete),
+            KeyCode::ArrowUp => self.line_asks.push(LineAsk::Older),
+            KeyCode::ArrowDown => self.line_asks.push(LineAsk::Newer),
             KeyCode::PageUp => self.panel.log_mut().scroll_by(page_step(self.page)),
             KeyCode::PageDown => self.panel.log_mut().scroll_by(-page_step(self.page)),
             CONSOLE_LEVEL_KEY => self.cycle_level(),
-            _ => {
-                let field = self.panel.field_mut();
-                let moved = match code {
-                    KeyCode::Backspace => field.backspace(),
-                    KeyCode::Delete => field.delete(),
-                    KeyCode::ArrowLeft => field.move_left(),
-                    KeyCode::ArrowRight => field.move_right(),
-                    KeyCode::Home => field.move_home(),
-                    KeyCode::End => field.move_end(),
-                    // Every other key is claimed and does nothing: the character
-                    // it produced arrives as a `TextCommit` with the layout
-                    // applied, which is the only thing that can type in a
-                    // language whose letters are not on the keycodes.
-                    _ => false,
-                };
-                if moved {
-                    self.clear_cycle();
-                }
-            }
+            _ => return false,
         }
+        true
     }
 
     /// Runs `line` through the registry and puts everything it printed in the
@@ -866,18 +878,45 @@ impl Console {
         did
     }
 
+    /// Carries out one deferred [`LineAsk`] against the line the build just
+    /// left in the field.
+    fn apply(&mut self, ask: LineAsk) {
+        match ask {
+            LineAsk::Submit => {
+                if let Some(line) = self.panel.submit() {
+                    self.run(&line);
+                }
+                self.clear_cycle();
+            }
+            LineAsk::Complete => self.complete(),
+            LineAsk::Older => {
+                let current = self.panel.line().to_owned();
+                if let Some(line) = self.history.up(&current).map(str::to_owned) {
+                    self.panel.set_line(&line);
+                }
+                self.clear_cycle();
+            }
+            LineAsk::Newer => {
+                if let Some(line) = self.history.down().map(str::to_owned) {
+                    self.panel.set_line(&line);
+                }
+                self.clear_cycle();
+            }
+        }
+    }
+
     /// `Tab`: fill in the prefix every candidate shares, then cycle them.
     fn complete(&mut self) {
         if !self.cycle.is_empty() {
             let next = self.cycle_at.map_or(0, |at| (at + 1) % self.cycle.len());
             self.cycle_at = Some(next);
             let filled = format!("{}{}", self.cycle_stem, self.cycle[next]);
-            self.panel.field_mut().set_text(&filled);
+            self.panel.set_line(&filled);
             self.show_candidates();
             return;
         }
 
-        let text = self.panel.field().text().to_owned();
+        let text = self.panel.line().to_owned();
         let partial = completing(&text);
         let stem = text[..text.len() - partial.len()].to_owned();
         let completion = self.registry.complete(&text);
@@ -886,7 +925,7 @@ impl Console {
             return;
         }
         let filled = format!("{stem}{}", completion.common);
-        self.panel.field_mut().set_text(&filled);
+        self.panel.set_line(&filled);
         self.cycle_stem = stem;
         self.cycle_prefix = completion.common;
         // One candidate is a completion and not a cycle: a second `Tab` on it

@@ -211,9 +211,12 @@ shim's swallowed-key set gains `Backquote` so a page does not also act on it.
 Two new widgets in `crcbl_ui::console`, both drawn with `DrawList::rect` and
 `DrawList::text` and laid out with `FontAtlas::layout_line`:
 
-- **`TextField`** — the crate's first editable field: content, caret index,
-  insert/delete, the cursor keys above, a blinking caret rectangle from the
-  glyph rectangles. No selection in v0. Selection landed in
+- **`TextField`** — **deleted by `07-ui-debug.md`'s rung 7d2 (2026-09-16)**: the
+  console's line is the tree's `Ui::text_input` over `crcbl_ui::edit::LineEdit`,
+  so the panel selects, moves by word, double-clicks a word and uses the
+  clipboard, and the crate has one editable field rather than two. What it was:
+  content, caret index, insert/delete, the cursor keys above, a blinking caret
+  rectangle from the glyph rectangles. No selection in v0. Selection landed in
   `crcbl_ui::edit::LineEdit` with `07-ui-debug.md`'s rung 7c (2026-09-16), and
   `TextField` wraps it; the console makes no selection until its panel moves
   onto the tree (rung 7d). It is a general widget; the console is its first
@@ -413,24 +416,25 @@ entry; the browser gate runs on every slice that touches a demo.
    `set_filter`/`filter` pair over an `RwLock` on the installed logger; `log` is
    a `concommand!` in `crcbl_core::log` listed by `crcbl_core::console_table()`
    and held there by `crates/crcbl-core/tests/console_table.rs`.
-4. **`crcbl_ui::console` — landed 2026-08-30.** `TextField` is the crate's first
-   editable widget: a line, a caret counted in characters rather than bytes,
-   `insert` (which drops control characters), `backspace`/`delete`, the four
-   cursor motions, and a `window` that scrolls a long line under a caret held in
-   the last column it can occupy — the draw list has no clip, so a field that
-   drew its whole line would draw it over the button beside it. `LogView` takes
-   `crcbl_core::log::console::Record`s through `push_records`, keeps the
-   `cursor` the next `snapshot_since` needs, is bounded at `CONSOLE_RING_LINES`,
-   wraps at the panel's column count, culls whole rows, colours by level,
-   scrolls in lines — holding still while the log fills up behind it — and
-   carries a `LevelFilter` of its own that hides lines rather than dropping
-   them. `ConsolePanel` lays the two out at `ConsoleStyle::pixel_art`'s scale
-   over the top `CONSOLE_HEIGHT_FRACTION` of the frame: the log, then the `]`
-   `PROMPT`, the field and the **Send** button on one row, with up to
-   `COMPLETION_ROWS` candidates hanging below the panel with their matched head
-   highlighted. `ConsolePanel::point` submits through the same
-   `ConsolePanel::submit` that `Enter` will call, and the scale chosen is the
-   largest whose panel still shows `MINIMUM_LOG_ROWS` rows and
+4. **`crcbl_ui::console` — landed 2026-08-30**, and its field was replaced by
+   the tree's `Ui::text_input` on 2026-09-16 (rung 7d2). `TextField` was the
+   crate's first editable widget: a line, a caret counted in characters rather
+   than bytes, `insert` (which drops control characters), `backspace`/`delete`,
+   the four cursor motions, and a `window` that scrolls a long line under a
+   caret held in the last column it can occupy — the draw list has no clip, so a
+   field that drew its whole line would draw it over the button beside it.
+   `LogView` takes `crcbl_core::log::console::Record`s through `push_records`,
+   keeps the `cursor` the next `snapshot_since` needs, is bounded at
+   `CONSOLE_RING_LINES`, wraps at the panel's column count, culls whole rows,
+   colours by level, scrolls in lines — holding still while the log fills up
+   behind it — and carries a `LevelFilter` of its own that hides lines rather
+   than dropping them. `ConsolePanel` lays the two out at
+   `ConsoleStyle::pixel_art`'s scale over the top `CONSOLE_HEIGHT_FRACTION` of
+   the frame: the log, then the `]` `PROMPT`, the field and the **Send** button
+   on one row, with up to `COMPLETION_ROWS` candidates hanging below the panel
+   with their matched head highlighted. `ConsolePanel::point` submits through
+   the same `ConsolePanel::submit` that `Enter` will call, and the scale chosen
+   is the largest whose panel still shows `MINIMUM_LOG_ROWS` rows and
    `MINIMUM_FIELD_COLUMNS` columns. Nothing here reads the ring, the registry, a
    clock or a keycode — the records, the candidates and the caret's blink
    (`caret_shown`) all arrive as values, which is what slice 5 wires up.
@@ -540,22 +544,24 @@ entry; the browser gate runs on every slice that touches a demo.
    and so commits nothing. Both in `docs/backlog.md`.
 
 8. **The paste key and the rebinding commands — landed 2026-08-31.**
-   `CONSOLE_PASTE_KEY` is `V` under `Ctrl` or `Meta`: the open console records
-   the press, `Loop::ask_for_paste` issues `Shell::clipboard_request` after the
-   pump has let the shell go — a command cannot ask the shell for anything from
-   inside the pump's own closure — and the `ShellEvent::ClipboardData` that
-   answers it lands in the field through `TextField::insert`, matched by request
-   id so a game's own read is not stolen. A backend that refuses the read says
-   which half is missing; the web backend is that backend, and
-   `EXPECTATIONS.quarry.console.pasteRefused` is the browser check that it says
-   so. `bind`/`unbind` reach the game's `ActionMap` through a new defaulted
-   `HostedGame::actions`, with the ask recorded on `EngineLink` and applied by
-   `Loop::drain_binds` where the game is in hand; `debug_console::apply_bind`
-   owns the reporting, so what a binding is called in a printed line is the
-   console's business and not the loop's. `toggle` and `reset` — decision 7's
-   table, and slice 5's leftovers — are `crcbl-console` built-ins now, the bare
-   `reset` skipping every `ARCHIVE` variable so a debug session cannot empty the
-   player's settings file.
+   `CONSOLE_PASTE_KEY`, `Loop::ask_for_paste` and the console's own paste
+   request were removed by rung 7d2 (2026-09-16): `Ctrl` or `Meta` with `V` is
+   an `Edit::Paste` like it is in any other field, and
+   `crcbl::text_input::TextPump::serve` issues `Shell::clipboard_request` and
+   matches the `ShellEvent::ClipboardData` that answers it by request id, so a
+   game's own read is not stolen. What it was: the open console recorded the
+   press and the loop asked after the pump had let the shell go — a command
+   cannot ask the shell for anything from inside the pump's own closure. A
+   backend that refuses the read says which half is missing; the web backend is
+   that backend, and `EXPECTATIONS.quarry.console.pasteRefused` is the browser
+   check that it says so. `bind`/`unbind` reach the game's `ActionMap` through a
+   new defaulted `HostedGame::actions`, with the ask recorded on `EngineLink`
+   and applied by `Loop::drain_binds` where the game is in hand;
+   `debug_console::apply_bind` owns the reporting, so what a binding is called
+   in a printed line is the console's business and not the loop's. `toggle` and
+   `reset` — decision 7's table, and slice 5's leftovers — are `crcbl-console`
+   built-ins now, the bare `reset` skipping every `ARCHIVE` variable so a debug
+   session cannot empty the player's settings file.
 
    Every sample that keeps an `ActionMap` overrides `actions` — the four whose
    map lives on their `Game` through a new `Game::action_map_mut`, since a

@@ -15,6 +15,8 @@
 //!      │
 //! Debug console ([`console`])  ←  the panel the `` ` `` key drops down
 //!      │
+//! Element tree ([`tree`])      ←  blocks, spans and the widget set
+//!      │
 //! Widgets (Label, Button, …)   ←  this slice (P4-b)
 //!      │
 //!      ▼
@@ -37,8 +39,9 @@
 //! the toolkit on: blocks and spans rebuilt every frame with identity that
 //! survives the rebuild, laid out by Taffy's flexbox and emitted into the same
 //! [`DrawList`]. [`readout`] is its first consumer, and [`tree::widgets`] is
-//! the widget set built on it. [`edit`] is the one line-editing model — caret,
-//! selection, words — the console's field and the tree's text input share.
+//! the widget set built on it — the console's input line among them. [`edit`]
+//! is the one line-editing model — caret, selection, words — every editable
+//! field in the crate is built on.
 //!
 //! The draw list is the only interface between the UI and the renderer. The
 //! render backend takes a [`DrawList`] and emits GPU draw calls.
@@ -66,7 +69,7 @@ pub use console::{
     CARET_BLINK, COMPLETION_ROWS, CONSOLE_HEIGHT_FRACTION, ConsoleInput, ConsoleLayout,
     ConsolePanel, ConsoleStyle, KEY_ID_BASE, KEY_ID_SPAN, KEYBOARD_HEIGHT_FRACTION, KeyBox, KeyCap,
     KeyboardLayout, Layer, LogLine, LogView, MINIMUM_FIELD_COLUMNS, MINIMUM_LOG_ROWS, PROMPT,
-    SEND_ID, SEND_LABEL, TextField, TextFieldStyle, TouchKeyboard, caret_shown,
+    SEND_ID, SEND_LABEL, TouchKeyboard, caret_shown,
 };
 pub use debug::{
     DEFAULT_FRAME_WINDOW, DebugModule, DebugOverlay, DebugPanel, DebugRow, DebugSection,

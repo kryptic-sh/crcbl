@@ -1,21 +1,50 @@
 //! The console panel: where the log, the prompt, the field, the **Send** button
 //! and the completion rows sit, and what they draw.
 //!
-//! `docs/plan/52-debug-console.md` decision 6. The panel is laid out first and
-//! drawn second — [`ConsolePanel::layout`] answers with every rectangle, and
-//! [`ConsolePanel::render`] only fills them in — so a test can ask where a thing
-//! is without a draw list, and the pointer is hit-tested against the same
+//! `docs/plan/52-debug-console.md` decision 6, on the element tree —
+//! `docs/plan/07-ui-debug.md` rung 7d2. [`ConsolePanel::layout`] begins the
+//! frame, builds the tree and lays it out; [`ConsolePanel::point`] and
+//! [`ConsolePanel::render`] only read what it built. So a test can ask where a
+//! thing is without a draw list, and the pointer is hit-tested against the same
 //! rectangles the frame was drawn from.
+//!
+//! # One build a frame
+//!
+//! The build is where the **Send** button latches its click and where the
+//! field takes the frame's edits, so building twice would do both twice. That
+//! is why the scale is chosen by `probe`'s arithmetic rather than by laying
+//! the panel out once per candidate scale, and why
+//! `the_scale_the_probe_chose_is_the_scale_the_tree_delivers` exists: the
+//! arithmetic is a claim about the tree, and that test is what holds it to one.
+//!
+//! # What comes from where
+//!
+//! [`Menu`](crate::menu::Menu)'s split. Every **length** is [`ConsoleStyle`]'s
+//! — a whole-number pixel-art scale times a base metric — and goes on the nodes
+//! inline, because a stylesheet has no arithmetic to scale with. The
+//! **structure** is `default.css`'s `console*` rules: the column, the log box's
+//! clip and its flex-end packing, the field's row, the candidate list hanging
+//! out of the flow. The colours [`ConsoleStyle`] owns go inline beside its
+//! lengths; the two skins that change with a pointer — the **Send** button's
+//! three states and the input's selection, caret and engaged border — are
+//! `default.css`'s, because an inline declaration wins over every rule and so
+//! could not have a `:hover` at all.
 
 use glam::Vec2;
 
 use crate::draw_list::DrawList;
+use crate::edit::{Edit, Motion};
 use crate::menu::MenuStyle;
+use crate::style::{Declaration, SheetId, Sides};
 use crate::text::FontAtlas;
-use crate::widget::{Button, ButtonState, NATURAL_FONT_SIZE, PointerInput, UiState, WidgetId};
+use crate::tree::{
+    AvailableSpace, Behavior, ClipboardRequest, Length, LengthAuto, NodeKey, Position, TextInput,
+    Ui,
+};
+use crate::widget::{ButtonState, NATURAL_FONT_SIZE, PointerInput, UiState, WidgetId};
 
 use super::keyboard::{KeyCap, KeyboardLayout, TouchKeyboard};
-use super::{ConsoleStyle, LogView, TextField};
+use super::{ConsoleStyle, LogView};
 
 /// The share of the frame's height the console drops down over.
 ///
@@ -37,13 +66,26 @@ pub const PROMPT: &str = "] ";
 /// The label on the button that submits the line.
 pub const SEND_LABEL: &str = "SEND";
 
-/// The [`WidgetId`] the **Send** button interacts under.
+/// The ceiling the console's own [`WidgetId`]s sit below.
 ///
 /// At the top of the range because a [`UiState`] is shared by every widget
 /// driven through it and the ids are the caller's own: a game numbering its
 /// buttons from zero never reaches this one, and a console that is given its
 /// own [`UiState`] never has to.
+///
+/// **Nothing interacts under this id itself.** The **Send** button is a node of
+/// the element tree and is hit-tested by the tree's own identity, not by a
+/// [`WidgetId`]; what is left below here is the on-screen keyboard's block of
+/// ids — see [`KEY_ID_BASE`](super::KEY_ID_BASE), which is measured down from
+/// this figure.
 pub const SEND_ID: WidgetId = WidgetId::MAX;
+
+/// The framebuffer [`ConsolePanel::new`]'s warm-up build is laid out over.
+///
+/// Any size would do — the build exists for the field's identity and the first
+/// real frame lays out over the framebuffer's own extent — so this is the one
+/// the console's own tests open at.
+const WARM_UP_EXTENT: Vec2 = Vec2::new(960.0, 720.0);
 
 /// The fewest log rows a console is worth opening with.
 ///
@@ -56,8 +98,9 @@ pub const MINIMUM_LOG_ROWS: usize = 6;
 /// The fewest columns the input line is worth typing into.
 ///
 /// The other half of the scale choice. `anisotropic_filtering 16` is 24
-/// columns, and a field that cannot hold the longest settings key and its value
-/// scrolls sideways — which this field, having no horizontal scroll, cannot do.
+/// columns, and a field narrower than the longest settings key and its value
+/// makes the tree scroll the line sideways under the caret, which is a line
+/// nobody can read whole.
 pub const MINIMUM_FIELD_COLUMNS: usize = 24;
 
 /// What one frame of pointer input at the console produced.
@@ -85,17 +128,42 @@ pub enum ConsoleInput {
 /// records the ring handed over and [`ConsolePanel::set_completion`] takes the
 /// candidates the registry answered with. The panel resolves no name, reads no
 /// variable and knows no keycode.
-#[derive(Debug, Clone)]
+///
+/// **Not [`Clone`].** It owns the [`Ui`] its tree lives in — the node store
+/// keyed by identity, each node's resolved style and Taffy cache — and a copy
+/// of that is a second tree with the same keys, not a second console.
+#[derive(Debug)]
 pub struct ConsolePanel {
-    field: TextField,
+    /// The tree the panel is built, laid out and drawn in. One, kept between
+    /// frames: that is what makes a node's identity — its focus, its
+    /// engagement, its caret and its selection — survive the rebuild.
+    ui: Ui,
+    /// The line being typed. The tree's text input edits this `String`; the
+    /// panel owns it, so [`ConsolePanel::line`] is a read of the value and not
+    /// of a widget's copy of it.
+    line: String,
     log: LogView,
     /// The token the candidates were matched from — its length is what is
     /// highlighted at the head of each of them.
     prefix: String,
     candidates: Vec<String>,
-    /// The **Send** button's appearance, as the last [`ConsolePanel::point`]
-    /// resolved it.
+    /// The edits waiting for a frame the field is engaged on; see
+    /// [`ConsolePanel::edit`].
+    queued: Vec<Edit>,
+    /// The **Send** button's appearance, as the last build resolved it.
     send: ButtonState,
+    /// Whether that build latched a click on **Send**, for
+    /// [`ConsolePanel::point`] to report.
+    send_clicked: bool,
+    /// The field's node, for engaging it and for reading its box back. `None`
+    /// until the first build.
+    field_key: Option<NodeKey>,
+    /// Whether the tree reported the field engaged after the last build.
+    editing: bool,
+    /// The panel's own stylesheet — see [`scale_sheet`] — and the scale it was
+    /// last written at, so a steady frame does not replace it.
+    sheet: SheetId,
+    sheet_scale: f32,
     /// The on-screen keyboard, which is only laid out and drawn while
     /// [`keyboard_shown`](ConsolePanel::keyboard_shown) is set.
     keyboard: TouchKeyboard,
@@ -104,18 +172,72 @@ pub struct ConsolePanel {
 
 impl ConsolePanel {
     /// An empty panel: no lines, no typed text, no candidates, and no on-screen
-    /// keyboard.
+    /// keyboard — **with its prompt already engaged**.
+    ///
+    /// # The constructor builds the tree once, and draws nothing
+    ///
+    /// A console prompt is the only thing on the panel that typing can go to,
+    /// so the field is engaged from the moment the panel exists rather than
+    /// from a click or an accept. [`Ui::engage`] needs a [`NodeKey`] and a key
+    /// only comes out of a build, so this builds the tree once — at a nominal
+    /// extent, over an empty log, with no pointer and no text
+    /// input — for the field's identity alone. Nothing is emitted from it and
+    /// the first real [`ConsolePanel::layout`] replaces every node of it.
+    ///
+    /// It is what makes the **first** frame the console is shown take that
+    /// frame's edits: an input engaged on the frame the engagement began
+    /// deliberately takes none, so a panel that engaged on its first laid-out
+    /// frame would swallow whatever was typed on it.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            field: TextField::new(),
+        let style = ConsoleStyle::pixel_art(1);
+        let mut ui = Ui::new();
+        let sheet = ui.add_stylesheet("crcbl-ui console", &scale_sheet(&style));
+        let mut panel = Self {
+            ui,
+            line: String::new(),
             log: LogView::new(),
             prefix: String::new(),
             candidates: Vec::new(),
+            queued: Vec::new(),
             send: ButtonState::Idle,
+            send_clicked: false,
+            field_key: None,
+            editing: false,
+            sheet,
+            sheet_scale: style.scale,
             keyboard: TouchKeyboard::new(),
             keyboard_shown: false,
-        }
+        };
+        let atlas = FontAtlas::built_in();
+        panel.ui.begin_frame(PointerInput::default());
+        panel.ui.set_text_input(TextInput::default());
+        let field = {
+            let Self {
+                ui,
+                line,
+                log,
+                prefix,
+                candidates,
+                ..
+            } = &mut panel;
+            let built = build(
+                ui,
+                line,
+                log,
+                prefix,
+                candidates,
+                WARM_UP_EXTENT,
+                &style,
+                &atlas,
+            );
+            ui.layout(Vec2::ZERO, AvailableSpace::definite(WARM_UP_EXTENT), &atlas);
+            built.field
+        };
+        panel.ui.engage(field);
+        panel.field_key = Some(field);
+        panel.editing = panel.ui.text_editing();
+        panel
     }
 
     /// The on-screen keyboard, to read — what a test asserts a layer against.
@@ -144,13 +266,47 @@ impl ConsolePanel {
 
     /// The line being typed.
     #[must_use]
-    pub const fn field(&self) -> &TextField {
-        &self.field
+    pub fn line(&self) -> &str {
+        &self.line
     }
 
-    /// The line being typed, to edit — what a key press reaches.
-    pub const fn field_mut(&mut self) -> &mut TextField {
-        &mut self.field
+    /// Replaces the line and puts the caret at its end.
+    ///
+    /// What a history recall and a completion fill both do: the caret goes
+    /// where the typing would continue, which is after the text that arrived.
+    /// The caret move is [queued](ConsolePanel::edit) rather than applied,
+    /// because the caret is the tree's and the tree moves it on its next build.
+    pub fn set_line(&mut self, text: &str) {
+        self.line.clear();
+        self.line.push_str(text);
+        self.edit(Edit::Move {
+            motion: Motion::End,
+            select: false,
+        });
+    }
+
+    /// Queues one edit for the field on the next frame: what a tapped
+    /// on-screen key makes, so a tapped `q` and a typed `q` are one path.
+    ///
+    /// **Held until the field is engaged.** The tree takes edits only from an
+    /// input engaged since an earlier frame, so a key pressed on the frame the
+    /// console opened would otherwise be dropped. Queued edits are handed over
+    /// in the order they arrived on the first frame the field takes any.
+    pub fn edit(&mut self, edit: Edit) {
+        self.queued.push(edit);
+    }
+
+    /// Whether the tree reports the field engaged — what the caller syncs the
+    /// reserved `text` context on.
+    ///
+    /// The **tree's** answer, as of the last [`ConsolePanel::layout`]: false
+    /// before the first one, and false for the frame a click elsewhere in the
+    /// panel committed the field and the next build has not re-engaged it. A
+    /// caller that wants "typing belongs to the console" rather than "the tree
+    /// is editing this instant" should ask whether the console is open.
+    #[must_use]
+    pub const fn is_editing(&self) -> bool {
+        self.editing
     }
 
     /// The log the panel shows.
@@ -164,8 +320,7 @@ impl ConsolePanel {
         &mut self.log
     }
 
-    /// The **Send** button's appearance, as the last [`ConsolePanel::point`]
-    /// resolved it.
+    /// The **Send** button's appearance, as this frame's build resolved it.
     #[must_use]
     pub const fn send_state(&self) -> ButtonState {
         self.send
@@ -213,8 +368,7 @@ impl ConsolePanel {
     /// things. A line with nothing but whitespace in it is not a command:
     /// the field is cleared and the answer is `None`.
     pub fn submit(&mut self) -> Option<String> {
-        let line = self.field.text().to_owned();
-        self.field.clear();
+        let line = std::mem::take(&mut self.line);
         self.clear_completion();
         // A command's own output lands at the bottom of the log, so a reader
         // who had scrolled back is put where the answer will appear.
@@ -225,32 +379,32 @@ impl ConsolePanel {
         Some(line)
     }
 
-    /// Runs one frame of pointer input against `layout`, and reports what it
-    /// produced: a line **Send** or the keyboard's return key submitted, or a
-    /// key the on-screen keyboard was tapped on.
+    /// The clipboard requests this frame's field made, for the caller to carry
+    /// to the platform — [`Ui::take_clipboard_requests`].
+    pub fn take_clipboard_requests(&mut self) -> Vec<ClipboardRequest> {
+        self.ui.take_clipboard_requests()
+    }
+
+    /// What this frame's pointer produced: a line **Send** or the on-screen
+    /// keyboard's return key submitted, or a key the keyboard was tapped on.
+    /// Call it after [`ConsolePanel::layout`], with the same pointer.
+    ///
+    /// The **Send** button's click was resolved by the build — the tree
+    /// hit-tests its own nodes — so this reports it rather than testing a
+    /// rectangle a second time. The on-screen keyboard keeps its own hit test
+    /// and its own [`UiState`] capture, which is what `ui` is for.
     ///
     /// The keyboard's key is handed back rather than applied here, so that a
     /// tapped `q` and a typed `q` reach the field down **one** path: the caller
     /// owns the completion cycle a keystroke drops, and a panel that edited the
     /// field behind its back would leave that cycle stale.
-    ///
-    /// Press capture goes through `ui`, so a press that starts on a button or a
-    /// key and is released off it does nothing — the rule every other clickable
-    /// widget in this crate follows.
     pub fn point(
         &mut self,
         layout: &ConsoleLayout,
         ui: &mut UiState,
         pointer: PointerInput,
     ) -> ConsoleInput {
-        let (min, max) = layout.send();
-        let inside = pointer.pos.x >= min.x
-            && pointer.pos.x <= max.x
-            && pointer.pos.y >= min.y
-            && pointer.pos.y <= max.y;
-        let (state, clicked) = ui.interact(SEND_ID, inside, pointer.down, pointer.released);
-        self.send = state;
-        if clicked {
+        if std::mem::take(&mut self.send_clicked) {
             return self
                 .submit()
                 .map_or(ConsoleInput::Nothing, ConsoleInput::Submitted);
@@ -272,86 +426,116 @@ impl ConsolePanel {
         }
     }
 
-    /// Lays the panel out over an `extent`-sized framebuffer, at the largest
-    /// scale that leaves it readable.
+    /// Begins the panel's frame and builds it over an `extent`-sized
+    /// framebuffer at the largest scale that stays readable.
     ///
     /// The scale is a pure function of the extent: the largest whole number up
     /// to [`MenuStyle::MAX_SCALE`] whose panel still shows [`MINIMUM_LOG_ROWS`]
     /// rows of log and [`MINIMUM_FIELD_COLUMNS`] columns of input, and one when
-    /// none of them do. Whole numbers because the glyphs are a bitmap, and the
-    /// two floors because a console that is bigger than it is useful is not a
-    /// better console.
-    #[must_use]
-    pub fn layout(&self, extent: (u32, u32), atlas: &FontAtlas) -> ConsoleLayout {
+    /// none of them do, and `probe` is that arithmetic. Whole numbers because the
+    /// glyphs are a bitmap, and the two floors because a console that is bigger
+    /// than it is useful is not a better console.
+    ///
+    /// Call it **once a frame** while the console is open: this is the only
+    /// place the tree is built, so a second call would latch the **Send**
+    /// button's click twice and take the field's edits twice.
+    pub fn layout(
+        &mut self,
+        extent: (u32, u32),
+        atlas: &FontAtlas,
+        pointer: PointerInput,
+        input: TextInput,
+    ) -> ConsoleLayout {
+        let screen = Vec2::new(extent.0 as f32, extent.1 as f32);
         let mut chosen = ConsoleStyle::pixel_art(1);
         for scale in 2..=MenuStyle::MAX_SCALE {
             let style = ConsoleStyle::pixel_art(scale);
-            let candidate = self.layout_with(extent, atlas, &style);
-            if candidate.log_rows() >= MINIMUM_LOG_ROWS
-                && candidate.field_columns(atlas) >= MINIMUM_FIELD_COLUMNS
-            {
+            if fits(screen, atlas, &style) {
                 chosen = style;
             } else {
                 break;
             }
         }
-        self.layout_with(extent, atlas, &chosen)
+        self.layout_with(extent, atlas, &chosen, pointer, input)
     }
 
-    /// Lays the panel out at a style the caller chose.
+    /// Lays the panel out at a style the caller chose — what a test asserting
+    /// one scale calls.
     ///
-    /// Every rectangle is clamped to be non-inverted, so a framebuffer too small
-    /// to hold the input row produces a panel that draws nothing rather than one
-    /// whose boxes are inside out.
-    #[must_use]
+    /// Hit-tests `pointer` against last frame's rectangles, takes `input`'s
+    /// edits and clipboard answers into the field, keeps the field engaged, and
+    /// lays the tree out.
     pub fn layout_with(
-        &self,
+        &mut self,
         extent: (u32, u32),
         atlas: &FontAtlas,
         style: &ConsoleStyle,
+        pointer: PointerInput,
+        input: TextInput,
     ) -> ConsoleLayout {
         let screen = Vec2::new(extent.0 as f32, extent.1 as f32);
-        // Whole pixels, for the reason `Menu::layout_with` rounds its origin: a
-        // row of an 8x13 bitmap font starting on a half pixel is a blurred row.
-        let panel = (
-            Vec2::ZERO,
-            Vec2::new(screen.x, (screen.y * CONSOLE_HEIGHT_FRACTION).round()),
-        );
-        let pad = style.padding;
-        let row = style.row_height();
+        // Before the frame begins, because a replaced sheet takes effect there
+        // — and only on a scale change, because each one re-resolves the tree.
+        if style.scale != self.sheet_scale {
+            if let Err(errors) = self.ui.replace_stylesheet(self.sheet, &scale_sheet(style)) {
+                crcbl_core::warn!("console: its own stylesheet did not parse: {errors:?}");
+            } else {
+                self.sheet_scale = style.scale;
+            }
+        }
+        self.ui.begin_frame(pointer);
 
-        let send_size = send_button(style).size(atlas);
-        let field_height = send_size.y.max(row + pad.y);
-        let content_left = panel.0.x + pad.x;
-        let content_right = (panel.1.x - pad.x).max(content_left);
-        let field_max_y = (panel.1.y - pad.y).max(panel.0.y);
-        let field_min_y = (field_max_y - field_height).max(panel.0.y);
+        // The queue drains only onto a frame the field will take edits on; see
+        // `ConsolePanel::edit`. `begin_frame` has just resolved that: the field
+        // takes edits while it was engaged before the frame began, and a click
+        // elsewhere in the panel — on **Send**, say — has committed it by here.
+        // The clock and the clipboard's answers go through whatever the field's
+        // engagement is, because the caret's blink and an answer to a request an
+        // earlier frame made are not edits.
+        self.queued.extend(input.edits);
+        let engaged = self
+            .field_key
+            .is_some_and(|key| self.ui.engaged() == Some(key));
+        let edits = if engaged {
+            std::mem::take(&mut self.queued)
+        } else {
+            Vec::new()
+        };
+        self.ui.set_text_input(TextInput {
+            dt: input.dt,
+            edits,
+            clipboard: input.clipboard,
+        });
 
-        let send_min_x = (content_right - send_size.x).max(content_left);
-        let send_min = Vec2::new(
-            send_min_x,
-            (field_min_y + (field_height - send_size.y) * 0.5).round(),
-        );
-        let send = (send_min, send_min + send_size);
+        let built = {
+            let Self {
+                ui,
+                line,
+                log,
+                prefix,
+                candidates,
+                ..
+            } = self;
+            let built = build(ui, line, log, prefix, candidates, screen, style, atlas);
+            ui.layout(Vec2::ZERO, AvailableSpace::definite(screen), atlas);
+            built
+        };
 
-        let field = (
-            Vec2::new(content_left, field_min_y),
-            Vec2::new((send_min_x - pad.x).max(content_left), field_max_y),
-        );
-        let text_y = (field_min_y + (field_height - row) * 0.5).round();
-        let prompt_pos = Vec2::new(field.0.x + pad.x, text_y);
-        let text_pos = Vec2::new(
-            prompt_pos.x + atlas.text_width(PROMPT, style.text_size / NATURAL_FONT_SIZE),
-            text_y,
-        );
+        // **Engaged for as long as the console is open.** A console prompt
+        // always takes typing, so a click on Send — or anywhere else in the
+        // panel — that committed the field takes it back on the next frame.
+        // `Ui::engage` engages now rather than next frame, so that frame
+        // reports the field engaged rather than freshly begun, and the edits it
+        // carries are taken rather than swallowed.
+        if self.ui.engaged() != Some(built.field) {
+            self.ui.engage(built.field);
+        }
+        self.field_key = Some(built.field);
+        self.editing = self.ui.text_editing();
+        self.send = built.send_state;
+        self.send_clicked = built.send_clicked;
 
-        let log_min = Vec2::new(content_left, panel.0.y + pad.y);
-        let log = (
-            log_min,
-            Vec2::new(content_right, (field_min_y - pad.y).max(log_min.y)),
-        );
-
-        let completion = self.completion_rows(screen, panel.1.y, text_pos.x, atlas, style);
+        let rect = |key| self.ui.rect(key).expect("laid out this frame");
         // Laid out only when it is showing, so a hidden keyboard claims no
         // pointer and costs no allocation on the frames nobody is typing.
         let keyboard = if self.keyboard_shown {
@@ -359,143 +543,37 @@ impl ConsolePanel {
         } else {
             KeyboardLayout::default()
         };
-
         ConsoleLayout {
             style: *style,
             screen,
-            panel,
-            log,
-            field,
-            prompt_pos,
-            text_pos,
-            send,
-            completion,
+            panel: rect(built.panel),
+            log: rect(built.log),
+            field: rect(built.field_well),
+            prompt_pos: rect(built.prompt).0,
+            text_pos: rect(built.field).0,
+            input_right: rect(built.field).1.x,
+            send: rect(built.send),
+            completion: built.candidates.iter().copied().map(rect).collect(),
             keyboard,
         }
     }
 
-    /// Draws the panel into `dl`, in back-to-front order.
+    /// Draws the tree [`ConsolePanel::layout`] built, then the on-screen
+    /// keyboard over it.
     ///
-    /// `caret_visible` is the blink, which the caller owns: see
-    /// [`caret_shown`](super::caret_shown). Nothing here reads a clock, so a
-    /// test draws both halves of the blink without waiting for either.
-    pub fn render(
-        &self,
-        dl: &mut DrawList,
-        layout: &ConsoleLayout,
-        atlas: &FontAtlas,
-        caret_visible: bool,
-    ) {
-        let style = layout.style();
-        let (panel_min, panel_max) = layout.panel();
-        dl.rect(panel_min, panel_max, style.panel_color);
-        // The drop-down's leading edge, so the panel reads as a thing over the
-        // frame rather than as a tint on the top of it.
-        dl.line(
-            Vec2::new(panel_min.x, panel_max.y),
-            panel_max,
-            style.scale,
-            style.border_color,
-        );
-
-        self.log.render(dl, layout.log(), atlas, style);
-
-        let (field_min, field_max) = layout.field();
-        dl.rect(field_min, field_max, style.field_color);
-        dl.rect_outline(field_min, field_max, style.scale, style.border_color);
-        dl.text(
-            layout.prompt_pos(),
-            PROMPT,
-            style.prompt_color,
-            style.text_size,
-        );
-        self.field.render(
-            dl,
-            layout.text_pos(),
-            atlas,
-            &style.field_style(),
-            layout.field_columns(atlas),
-            caret_visible,
-        );
-
-        let (send_min, send_max) = layout.send();
-        send_button(style)
-            .with_fixed_size(send_max - send_min)
-            .render(dl, send_min, atlas, &style.button, self.send);
-
-        self.render_completion(dl, layout, atlas);
-        // **After the candidates**, which hang off the panel's bottom edge and
-        // can reach the keyboard on a short frame. The keyboard is the half a
-        // finger presses, so it is the half that stays on top.
+    /// The tree's own paint order: the panel's fill, the log's rows inside its
+    /// clip, the field's well and what is on it, the **Send** button, and the
+    /// candidate rows hanging below the panel. The keyboard is drawn **after**
+    /// the candidates, which can reach it on a short frame — it is the half a
+    /// finger presses, so it is the half that stays on top.
+    ///
+    /// The caret's blink is the tree's, off [`TextInput::dt`]; nothing here
+    /// reads a clock.
+    pub fn render(&self, dl: &mut DrawList, layout: &ConsoleLayout, atlas: &FontAtlas) {
+        self.ui.emit(dl);
         if self.keyboard_shown {
-            self.keyboard.render(dl, layout.keyboard(), atlas, style);
-        }
-    }
-
-    /// The candidate rows, hanging below the panel like Source's.
-    fn completion_rows(
-        &self,
-        screen: Vec2,
-        below: f32,
-        left: f32,
-        atlas: &FontAtlas,
-        style: &ConsoleStyle,
-    ) -> Vec<(Vec2, Vec2)> {
-        let row = style.row_height();
-        if self.candidates.is_empty() || row <= 0.0 {
-            return Vec::new();
-        }
-        // Only rows that fit whole between the panel and the bottom of the
-        // frame: the list is drawn outside the panel, so nothing else stops one
-        // from hanging off the screen.
-        let fits = ((screen.y - below) / row).max(0.0) as usize;
-        let count = self.candidates.len().min(COMPLETION_ROWS).min(fits);
-        if count == 0 {
-            return Vec::new();
-        }
-
-        let scale = style.text_size / NATURAL_FONT_SIZE;
-        let widest = self.candidates[..count]
-            .iter()
-            .map(|name| atlas.text_width(name, scale))
-            .fold(0.0f32, f32::max);
-        let min_x = (left - style.padding.x).max(0.0);
-        let max_x = (min_x + widest + style.padding.x * 2.0).min(screen.x.max(min_x));
-        (0..count)
-            .map(|index| {
-                let top = below + index as f32 * row;
-                (Vec2::new(min_x, top), Vec2::new(max_x, top + row))
-            })
-            .collect()
-    }
-
-    /// Draws the candidate rows: one background, then each name with its
-    /// matched head in [`ConsoleStyle::match_color`].
-    fn render_completion(&self, dl: &mut DrawList, layout: &ConsoleLayout, atlas: &FontAtlas) {
-        let rows = layout.completion();
-        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
-            return;
-        };
-        let style = layout.style();
-        dl.rect(first.0, last.1, style.completion_color);
-
-        let scale = style.text_size / NATURAL_FONT_SIZE;
-        let matched = self.prefix.chars().count();
-        for (candidate, row) in self.candidates.iter().zip(rows) {
-            let at = Vec2::new(layout.text_pos().x, row.0.y);
-            let head: String = candidate.chars().take(matched).collect();
-            let tail: String = candidate.chars().skip(matched).collect();
-            if !head.is_empty() {
-                dl.text(at, head.as_str(), style.match_color, style.text_size);
-            }
-            if !tail.is_empty() {
-                dl.text(
-                    Vec2::new(at.x + atlas.text_width(&head, scale), at.y),
-                    tail,
-                    style.candidate_color,
-                    style.text_size,
-                );
-            }
+            self.keyboard
+                .render(dl, layout.keyboard(), atlas, layout.style());
         }
     }
 }
@@ -506,12 +584,316 @@ impl Default for ConsolePanel {
     }
 }
 
+/// The nodes one build made, for reading a layout back — [`Menu`]'s
+/// `BuiltMenu`.
+///
+/// [`Menu`]: crate::menu::Menu
+struct Built {
+    panel: NodeKey,
+    log: NodeKey,
+    /// The well holding the prompt and the input.
+    field_well: NodeKey,
+    /// The text input itself.
+    field: NodeKey,
+    prompt: NodeKey,
+    send: NodeKey,
+    candidates: Vec<NodeKey>,
+    send_state: ButtonState,
+    send_clicked: bool,
+}
+
+/// Builds the panel into `ui` at `style`: the tree [`ConsolePanel::layout_with`]
+/// lays out, reads back and draws, one for all three.
+///
+/// A free function rather than a method because it borrows four of the panel's
+/// fields at once beside the tree, and `line` mutably: the text input edits the
+/// panel's own `String`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the panel's fields, split so the tree and the line can be borrowed apart"
+)]
+fn build(
+    ui: &mut Ui,
+    line: &mut String,
+    log: &LogView,
+    prefix: &str,
+    candidates: &[String],
+    screen: Vec2,
+    style: &ConsoleStyle,
+    atlas: &FontAtlas,
+) -> Built {
+    use Declaration as D;
+    let px = LengthAuto::Px;
+    let pad = style.padding;
+    let row = style.row_height();
+    let panel_height = (screen.y * CONSOLE_HEIGHT_FRACTION).round();
+
+    let screen_style = [
+        D::Width(px(screen.x)),
+        D::Height(px(screen.y)),
+        D::FontSize(style.text_size),
+    ];
+    let panel_style = [
+        D::Width(LengthAuto::Percent(1.0)),
+        D::Height(px(panel_height)),
+        D::Padding(Sides::Top, Length::Px(pad.y)),
+        D::Padding(Sides::Bottom, Length::Px(pad.y)),
+        D::Padding(Sides::Left, Length::Px(pad.x)),
+        D::Padding(Sides::Right, Length::Px(pad.x)),
+        // The drop-down's leading edge, so the panel reads as a thing over the
+        // frame rather than as a tint on the top of it. A border takes part in
+        // layout, unlike the line this was drawn as before the tree, so it eats
+        // its own width out of the panel rather than straddling its edge.
+        D::BorderWidth(Sides::Bottom, style.scale),
+        D::RowGap(Length::Px(pad.y)),
+        D::Background(style.panel_color),
+        D::BorderColor(style.border_color),
+    ];
+    let well_style = [
+        D::Padding(Sides::Top, Length::Px(pad.y)),
+        D::Padding(Sides::Bottom, Length::Px(pad.y)),
+        D::Padding(Sides::Left, Length::Px(pad.x)),
+        D::Padding(Sides::Right, Length::Px(pad.x)),
+        D::BorderWidth(Sides::All, style.scale),
+        D::Background(style.field_color),
+        D::BorderColor(style.border_color),
+    ];
+    let send_style = [
+        D::Padding(Sides::Top, Length::Px(pad.y)),
+        D::Padding(Sides::Bottom, Length::Px(pad.y)),
+        D::Padding(Sides::Left, Length::Px(pad.x)),
+        D::Padding(Sides::Right, Length::Px(pad.x)),
+        D::BorderWidth(Sides::All, style.scale),
+        D::Margin(Sides::Left, px(pad.x)),
+    ];
+
+    // The rows the log offers the tree. More than the box can show, because
+    // the box clips what does not fit and packs the rest against its bottom
+    // edge — so the oldest of these are the ones that fall off the top, which
+    // is what "newest at the bottom" is here. The wrap is the panel's content
+    // width, which is the frame less the panel's padding.
+    let advance = style.advance(atlas);
+    let columns = if advance > 0.0 {
+        ((screen.x - 2.0 * pad.x) / advance).max(0.0) as usize
+    } else {
+        0
+    };
+    let rows = if row > 0.0 {
+        (panel_height / row).max(0.0) as usize + 1
+    } else {
+        0
+    };
+    let visible = log.visible_rows(rows, columns);
+
+    let mut panel_key = None;
+    let mut log_key = None;
+    let mut well_key = None;
+    let mut input_key = None;
+    let mut prompt_key = None;
+    let mut send_key = None;
+    let mut rows_built = Vec::new();
+    let mut send_state = ButtonState::Idle;
+    let mut send_clicked = false;
+
+    ui.block("console-screen", &screen_style, |ui| {
+        panel_key = Some(
+            ui.block("console", &panel_style, |ui| {
+                log_key = Some(
+                    ui.block(".console-log", &[], |ui| {
+                        for (level, text) in &visible {
+                            ui.span(
+                                ".console-line",
+                                text.as_str(),
+                                &[D::Color(style.level_color(*level))],
+                            );
+                        }
+                    })
+                    .key,
+                );
+                ui.block(".console-row", &[], |ui| {
+                    well_key = Some(
+                        ui.block(".console-field", &well_style, |ui| {
+                            prompt_key = Some(
+                                ui.span(".console-prompt", PROMPT, &[D::Color(style.prompt_color)])
+                                    .key,
+                            );
+                            input_key = Some(ui.text_input(".console-input", line).key);
+                        })
+                        .key,
+                    );
+                    let send =
+                        ui.block_with("button.console-send", &send_style, Behavior::BUTTON, |ui| {
+                            ui.span(".button-label", SEND_LABEL, &[]);
+                        });
+                    send_key = Some(send.key);
+                    send_clicked = send.clicked;
+                    send_state = if send.pressed {
+                        ButtonState::Pressed
+                    } else if send.hovered {
+                        ButtonState::Hovered
+                    } else {
+                        ButtonState::Idle
+                    };
+                });
+            })
+            .key,
+        );
+
+        // The candidate list hangs below the panel, out of the flow, lined up
+        // with the typed token rather than with the panel's edge — Source's.
+        // Only rows that fit whole between the panel and the bottom of the
+        // frame: it is drawn outside the panel, so nothing else stops one from
+        // hanging off the screen.
+        let fits = if row > 0.0 {
+            ((screen.y - panel_height) / row).max(0.0) as usize
+        } else {
+            0
+        };
+        let count = candidates.len().min(COMPLETION_ROWS).min(fits);
+        if count == 0 {
+            return;
+        }
+        let left = (text_inset(atlas, style) - pad.x).max(0.0);
+        let list_style = [
+            D::Position(Position::Absolute),
+            D::Inset(Sides::Top, px(panel_height)),
+            D::Inset(Sides::Left, px(left)),
+            D::MaxWidth(px((screen.x - left).max(0.0))),
+            D::Background(style.completion_color),
+        ];
+        let candidate_style = [
+            D::Height(px(row)),
+            D::Padding(Sides::Left, Length::Px(pad.x)),
+            D::Padding(Sides::Right, Length::Px(pad.x)),
+        ];
+        let matched = prefix.chars().count();
+        ui.block(".console-completion", &list_style, |ui| {
+            for (index, candidate) in candidates[..count].iter().enumerate() {
+                let head: String = candidate.chars().take(matched).collect();
+                let tail: String = candidate.chars().skip(matched).collect();
+                rows_built.push(
+                    ui.block_keyed(index, ".console-candidate", &candidate_style, |ui| {
+                        if !head.is_empty() {
+                            ui.span(
+                                ".console-match",
+                                head.as_str(),
+                                &[D::Color(style.match_color)],
+                            );
+                        }
+                        if !tail.is_empty() {
+                            ui.span(
+                                ".console-tail",
+                                tail.as_str(),
+                                &[D::Color(style.candidate_color)],
+                            );
+                        }
+                    })
+                    .key,
+                );
+            }
+        });
+    });
+    Built {
+        panel: panel_key.expect("the screen builds its panel"),
+        log: log_key.expect("the panel builds its log"),
+        field_well: well_key.expect("the input row builds its well"),
+        field: input_key.expect("the well builds its input"),
+        prompt: prompt_key.expect("the well builds its prompt"),
+        send: send_key.expect("the input row builds its button"),
+        candidates: rows_built,
+        send_state,
+        send_clicked,
+    }
+}
+
+/// Where the typed line's em box starts, measured from the panel's left edge:
+/// the panel's padding, then the field well's border and padding, then the
+/// prompt.
+///
+/// What the candidate list is lined up with, and the one thing about the input
+/// row's box that is needed **before** the tree lays it out.
+/// `the_completion_rows_highlight_the_matched_head` asserts the list lands on
+/// [`ConsoleLayout::text_pos`], which is read back off the laid-out tree, so
+/// the two cannot drift.
+fn text_inset(atlas: &FontAtlas, style: &ConsoleStyle) -> f32 {
+    2.0f32.mul_add(
+        style.padding.x,
+        style.scale + atlas.text_width(PROMPT, style.text_size / NATURAL_FONT_SIZE),
+    )
+}
+
+/// How many rows of log and columns of input a panel at `style` shows on a
+/// `screen`-sized frame — [`ConsoleLayout::log_rows`] and
+/// [`ConsoleLayout::field_columns`], worked out without laying a tree out.
+///
+/// **[`build`]'s box model, written as arithmetic.** The scale probe cannot lay
+/// a tree out per candidate scale — there is one build a frame, and it latches
+/// a click and consumes the frame's edits — so this is the claim the probe
+/// chooses by, and `the_scale_the_probe_chose_is_the_scale_the_tree_delivers`
+/// holds it to the tree it is a claim about, figure for figure.
+///
+/// Down the frame: the panel is [`CONSOLE_HEIGHT_FRACTION`] of it, with
+/// `padding.y` above and below, a `scale`-wide bottom border, and a `padding.y`
+/// gap between the log and the input row; the input row is one text row inside
+/// the well's own `padding.y` and `scale` border. What is left is the log.
+/// Across it: the panel's `padding.x` on both sides, then the **Send** button
+/// and the `padding.x` margin before it, then the well's border and padding,
+/// then the prompt. What is left is the input.
+fn probe(screen: Vec2, atlas: &FontAtlas, style: &ConsoleStyle) -> (usize, usize) {
+    let pad = style.padding;
+    let row = style.row_height();
+    let advance = style.advance(atlas);
+    if row <= 0.0 || advance <= 0.0 {
+        return (0, 0);
+    }
+    let glyphs = style.text_size / NATURAL_FONT_SIZE;
+
+    let panel_height = (screen.y * CONSOLE_HEIGHT_FRACTION).round();
+    let input_row = 2.0f32.mul_add(pad.y + style.scale, row);
+    let log_height = panel_height - 3.0 * pad.y - style.scale - input_row;
+    let rows = (log_height / row).max(0.0) as usize;
+
+    let send = atlas.text_width(SEND_LABEL, glyphs) + 2.0 * (pad.x + style.scale);
+    let well = screen.x - 3.0 * pad.x - send;
+    let input = well - 2.0 * (pad.x + style.scale) - atlas.text_width(PROMPT, glyphs);
+    let columns = (input / advance).max(0.0) as usize;
+
+    (rows, columns)
+}
+
+/// Whether [`probe`] says a panel at `style` shows [`MINIMUM_LOG_ROWS`] rows of
+/// log and [`MINIMUM_FIELD_COLUMNS`] columns of input.
+fn fits(screen: Vec2, atlas: &FontAtlas, style: &ConsoleStyle) -> bool {
+    let (rows, columns) = probe(screen, atlas, style);
+    rows >= MINIMUM_LOG_ROWS && columns >= MINIMUM_FIELD_COLUMNS
+}
+
+/// The console's own stylesheet: the lengths of the tree text input's parts,
+/// which are the panel's to scale and inline declarations cannot reach.
+///
+/// A widget's parts are built inside the widget, so the only way to give the
+/// caret a width that grows with the panel is a rule; the sheet is rewritten
+/// when — and only when — the chosen scale changes, because each change
+/// re-resolves every node of the tree. The **colours** of those parts stay in
+/// `default.css`: they do not scale, and this sheet is lengths only.
+///
+/// The caret's width is the only one. The selection block is placed and sized
+/// by the tree after layout, from the boundaries of the glyphs it covers, and
+/// the input's own padding and border are zeroed by `default.css` so the well
+/// around it is its box.
+fn scale_sheet(style: &ConsoleStyle) -> String {
+    format!(
+        "text-input.console-input > .text-input-caret {{ width: {}px; }}\n",
+        style.caret_width,
+    )
+}
+
 /// Where every part of the panel goes, for one frame at one size.
 ///
-/// Held rather than recomputed between [`ConsolePanel::point`] and
-/// [`ConsolePanel::render`]: the pointer must be tested against the rectangles
-/// the frame was actually drawn from, and a second call could differ by a
-/// resize.
+/// Read back off the tree [`ConsolePanel::layout`] built, and held rather than
+/// recomputed between [`ConsolePanel::point`] and [`ConsolePanel::render`]: the
+/// pointer must be tested against the rectangles the frame was actually drawn
+/// from, and a second build is not something this panel does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConsoleLayout {
     style: ConsoleStyle,
@@ -521,6 +903,8 @@ pub struct ConsoleLayout {
     field: (Vec2, Vec2),
     prompt_pos: Vec2,
     text_pos: Vec2,
+    /// The input's own right edge, which is where its columns run out.
+    input_right: f32,
     send: (Vec2, Vec2),
     completion: Vec<(Vec2, Vec2)>,
     keyboard: KeyboardLayout,
@@ -545,7 +929,7 @@ impl ConsoleLayout {
         self.panel
     }
 
-    /// The box the log is drawn in.
+    /// The box the log is drawn in. Its rows are clipped to it.
     #[must_use]
     pub const fn log(&self) -> (Vec2, Vec2) {
         self.log
@@ -563,7 +947,12 @@ impl ConsoleLayout {
         self.prompt_pos
     }
 
-    /// The top-left of the typed line's em box, and so the caret's origin.
+    /// The top-left of the typed line's em box, and so the caret's origin at
+    /// the start of the line.
+    ///
+    /// The input's content box, unscrolled: a line longer than the box is
+    /// scrolled under the caret by the tree, and the glyphs then start left of
+    /// this and are clipped to the box.
     #[must_use]
     pub const fn text_pos(&self) -> Vec2 {
         self.text_pos
@@ -612,645 +1001,13 @@ impl ConsoleLayout {
     /// How many columns of text the input line holds.
     #[must_use]
     pub fn field_columns(&self, atlas: &FontAtlas) -> usize {
-        let right = (self.field.1.x - self.style.padding.x).max(self.text_pos.x);
         LogView::columns_in(
-            (self.text_pos, Vec2::new(right, self.text_pos.y)),
+            (self.text_pos, Vec2::new(self.input_right, self.text_pos.y)),
             atlas,
             &self.style,
         )
     }
 }
 
-/// The **Send** button, at the panel's own size and spacing.
-fn send_button(style: &ConsoleStyle) -> Button {
-    let mut button = Button::new(SEND_LABEL).with_size(style.text_size);
-    button.padding = style.padding;
-    button
-}
-
 #[cfg(test)]
-mod tests {
-    use core::time::Duration;
-
-    use crcbl_core::log::Level;
-    use crcbl_core::log::console::Record;
-
-    use super::*;
-    use crate::draw_list::DrawCommand;
-
-    /// The five extents every "it is on screen" test in this repository uses.
-    const EXTENTS: [(u32, u32); 5] = [
-        (960, 720),
-        (800, 600),
-        (1920, 1080),
-        (1440, 400),
-        (600, 900),
-    ];
-
-    fn atlas() -> FontAtlas {
-        FontAtlas::built_in()
-    }
-
-    /// A panel with `lines` info records and `typed` in the field.
-    fn panel(lines: &[&str], typed: &str) -> ConsolePanel {
-        let mut panel = ConsolePanel::new();
-        let records: Vec<Record> = lines
-            .iter()
-            .enumerate()
-            .map(|(index, message)| Record {
-                sequence: index as u64,
-                level: Level::Info,
-                target: crcbl_core::log::console::CONSOLE_TARGET.to_owned(),
-                message: (*message).to_owned(),
-                elapsed: Duration::ZERO,
-            })
-            .collect();
-        panel.log_mut().push_records(&records);
-        panel.field_mut().insert(typed);
-        panel
-    }
-
-    /// Every text command a frame draws, in order.
-    fn texts(dl: &DrawList) -> Vec<String> {
-        dl.commands()
-            .iter()
-            .filter_map(|command| match command {
-                DrawCommand::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn press_at(pos: Vec2) -> PointerInput {
-        PointerInput {
-            pos,
-            down: true,
-            released: false,
-        }
-    }
-
-    fn release_at(pos: Vec2) -> PointerInput {
-        PointerInput {
-            pos,
-            down: false,
-            released: true,
-        }
-    }
-
-    /// The centre of the first key on the laid-out keyboard whose cap is `cap`.
-    fn key_centre(layout: &ConsoleLayout, cap: KeyCap) -> Vec2 {
-        let key = layout
-            .keyboard()
-            .keys()
-            .iter()
-            .find(|key| key.cap == cap)
-            .unwrap_or_else(|| panic!("the keyboard has no {cap:?} key"));
-        (key.min + key.max) * 0.5
-    }
-
-    /// **A hidden keyboard is not a keyboard drawn off screen**: it lays out no
-    /// keys, claims none of the frame, and takes no press.
-    ///
-    /// The half that matters is [`ConsoleLayout::covers`]. The console hands
-    /// that answer to the loop as "the press was mine", so a hidden keyboard
-    /// that still claimed its strip would take every tap along the bottom third
-    /// of the frame away from the game — on every desktop, where the keyboard
-    /// is never shown at all.
-    #[test]
-    fn a_hidden_keyboard_lays_out_nothing_and_claims_nothing() {
-        let atlas = atlas();
-        for extent in EXTENTS {
-            let mut panel = panel(&[], "");
-            assert!(!panel.keyboard_shown(), "a new panel showed a keyboard");
-            let layout = panel.layout(extent, &atlas);
-            assert!(
-                layout.keyboard().keys().is_empty(),
-                "a hidden keyboard laid out {} keys",
-                layout.keyboard().keys().len(),
-            );
-
-            // Where the keys would be if it were showing.
-            let mut shown = ConsolePanel::new();
-            shown.show_keyboard(true);
-            let visible = shown.layout(extent, &atlas);
-            let at = key_centre(&visible, KeyCap::Type('q'));
-
-            assert!(
-                !layout.covers(at),
-                "a hidden keyboard claimed {at} on a {extent:?} frame",
-            );
-            let mut ui = UiState::new();
-            panel.point(&layout, &mut ui, press_at(at));
-            assert_eq!(
-                panel.point(&layout, &mut ui, release_at(at)),
-                ConsoleInput::Nothing,
-                "a hidden keyboard took a press",
-            );
-            assert!(panel.field().is_empty());
-        }
-    }
-
-    /// **A tap on a key is reported as that key**, and the strip it was tapped
-    /// in is the console's so the game never sees the press.
-    #[test]
-    fn a_tap_on_the_keyboard_is_the_consoles_and_names_its_key() {
-        let atlas = atlas();
-        for extent in EXTENTS {
-            let mut panel = panel(&[], "");
-            panel.show_keyboard(true);
-            let layout = panel.layout(extent, &atlas);
-            let at = key_centre(&layout, KeyCap::Type('q'));
-            assert!(
-                layout.covers(at),
-                "the console did not claim its own key at {at} on {extent:?}",
-            );
-
-            let mut ui = UiState::new();
-            panel.point(&layout, &mut ui, press_at(at));
-            assert_eq!(
-                panel.point(&layout, &mut ui, release_at(at)),
-                ConsoleInput::Key(KeyCap::Type('q')),
-                "a tap on q on a {extent:?} frame reported nothing",
-            );
-        }
-    }
-
-    /// The keyboard is drawn only when it is showing, and it is drawn **last**
-    /// so the candidate rows cannot cover the keys they hang over.
-    #[test]
-    fn the_keyboard_is_drawn_only_when_it_is_showing() {
-        let atlas = atlas();
-        let extent = (600, 900);
-        let mut panel = panel(&["one"], "q");
-
-        let mut hidden = DrawList::new();
-        let layout = panel.layout(extent, &atlas);
-        panel.render(&mut hidden, &layout, &atlas, true);
-
-        panel.show_keyboard(true);
-        let mut shown = DrawList::new();
-        let layout = panel.layout(extent, &atlas);
-        panel.render(&mut shown, &layout, &atlas, true);
-
-        assert!(
-            shown.commands().len() > hidden.commands().len(),
-            "showing the keyboard drew nothing: {} commands either way",
-            hidden.commands().len(),
-        );
-        let labels = texts(&shown);
-        assert!(
-            labels.iter().any(|text| text == "SPACE"),
-            "the space bar was not drawn: {labels:?}",
-        );
-    }
-
-    /// **The panel is the top slice of the frame and everything is inside it**,
-    /// at every aspect ratio: the log above the input row, the input row above
-    /// the panel's bottom edge, and the button at the right-hand end of it.
-    #[test]
-    fn the_panel_is_the_top_of_the_frame_and_holds_its_parts() {
-        let atlas = atlas();
-        let content = panel(&["one", "two"], "help");
-        for extent in EXTENTS {
-            let layout = content.layout(extent, &atlas);
-            let (min, max) = layout.panel();
-            assert_eq!(min, Vec2::ZERO, "{extent:?}: the panel left the top-left");
-            assert_eq!(
-                max.x, extent.0 as f32,
-                "{extent:?}: the panel is not full width"
-            );
-            assert!(
-                (max.y - (extent.1 as f32 * CONSOLE_HEIGHT_FRACTION).round()).abs() < 1e-3,
-                "{extent:?}: the panel is {} tall, not {CONSOLE_HEIGHT_FRACTION} of the frame",
-                max.y,
-            );
-
-            let (log_min, log_max) = layout.log();
-            let (field_min, field_max) = layout.field();
-            let (send_min, send_max) = layout.send();
-            for (name, (part_min, part_max)) in [
-                ("the log", (log_min, log_max)),
-                ("the field", (field_min, field_max)),
-                ("the button", (send_min, send_max)),
-            ] {
-                assert!(
-                    part_min.x >= min.x
-                        && part_min.y >= min.y
-                        && part_max.x <= max.x
-                        && part_max.y <= max.y,
-                    "{extent:?}: {name} at {part_min:?}..{part_max:?} escapes the panel",
-                );
-                assert!(
-                    part_max.x >= part_min.x && part_max.y >= part_min.y,
-                    "{extent:?}: {name} is inside out",
-                );
-            }
-            assert!(
-                log_max.y <= field_min.y,
-                "{extent:?}: the log runs into the input row",
-            );
-            assert!(
-                field_max.x <= send_min.x,
-                "{extent:?}: the field runs into the Send button",
-            );
-            assert!(
-                send_max.x >= max.x - layout.style().padding.x * 2.0,
-                "{extent:?}: the Send button is not at the right-hand edge",
-            );
-        }
-    }
-
-    /// **The prompt, the typed line and the button are one row**, and the line
-    /// starts after the prompt rather than under it.
-    #[test]
-    fn the_prompt_the_line_and_the_button_share_the_input_row() {
-        let atlas = atlas();
-        let content = panel(&[], "antialiasing");
-        let layout = content.layout((960, 720), &atlas);
-        let style = layout.style();
-
-        let prompt_width = atlas.text_width(PROMPT, style.text_size / NATURAL_FONT_SIZE);
-        assert!(
-            (layout.text_pos().x - layout.prompt_pos().x - prompt_width).abs() < 1e-3,
-            "the typed line does not start one prompt past the prompt",
-        );
-        assert_eq!(layout.text_pos().y, layout.prompt_pos().y);
-
-        let (field_min, field_max) = layout.field();
-        assert!(
-            layout.prompt_pos().y >= field_min.y
-                && layout.prompt_pos().y + style.row_height() <= field_max.y + 1e-3,
-            "the prompt is not inside the input row",
-        );
-        let (send_min, send_max) = layout.send();
-        assert!(
-            send_min.y >= field_min.y - 1e-3 && send_max.y <= field_max.y + 1e-3,
-            "the button {send_min:?}..{send_max:?} is not on the input row \
-             {field_min:?}..{field_max:?}",
-        );
-    }
-
-    /// **A frame draws the log, the prompt, the typed line and the button** —
-    /// in that order, and with a scrim and an input box behind them.
-    #[test]
-    fn a_frame_draws_the_log_the_prompt_the_line_and_the_button() {
-        let atlas = atlas();
-        let content = panel(&["first", "second"], "help fps");
-        let layout = content.layout((960, 720), &atlas);
-        let mut dl = DrawList::new();
-        content.render(&mut dl, &layout, &atlas, true);
-
-        assert_eq!(
-            texts(&dl),
-            ["first", "second", PROMPT, "help fps", SEND_LABEL],
-        );
-        assert!(
-            matches!(
-                dl.commands().first(),
-                Some(DrawCommand::Rect { min, max, color })
-                    if *min == layout.panel().0
-                        && *max == layout.panel().1
-                        && *color == layout.style().panel_color
-            ),
-            "the scrim is not the first thing drawn: {:?}",
-            dl.commands().first(),
-        );
-    }
-
-    /// **Every log line is drawn above the input row.** Without this the log
-    /// could be laid out over the field and every other test here would pass —
-    /// the text would still be in the panel.
-    #[test]
-    fn no_log_line_is_drawn_over_the_input_row() {
-        let atlas = atlas();
-        let lines: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
-        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
-        let content = panel(&borrowed, "");
-        for extent in EXTENTS {
-            let layout = content.layout(extent, &atlas);
-            let style = layout.style();
-            let mut dl = DrawList::new();
-            content.render(&mut dl, &layout, &atlas, false);
-            let drawn = dl
-                .commands()
-                .iter()
-                .filter_map(|command| match command {
-                    DrawCommand::Text { pos, text, .. } if text.starts_with("line ") => Some(*pos),
-                    _ => None,
-                })
-                .count();
-            assert!(drawn > 0, "{extent:?}: the panel drew no log at all");
-            for command in dl.commands() {
-                let DrawCommand::Text { pos, text, .. } = command else {
-                    continue;
-                };
-                if !text.starts_with("line ") {
-                    continue;
-                }
-                assert!(
-                    pos.y + style.row_height() <= layout.field().0.y + 1e-3,
-                    "{extent:?}: {text:?} at {pos:?} is drawn over the input row",
-                );
-                assert!(
-                    pos.y >= layout.log().0.y - 1e-3,
-                    "{extent:?}: {text:?} at {pos:?} is above the panel's log box",
-                );
-            }
-        }
-    }
-
-    /// **A typed line longer than the input box stays inside it**, text and
-    /// caret both. Nothing clips a draw list, so a field that drew its whole
-    /// line would put glyphs over the **Send** button and off the panel.
-    #[test]
-    fn a_long_line_stays_inside_the_input_box() {
-        let atlas = atlas();
-        let extent = (960, 720);
-        let long = "log warn,crcbl_vk=trace,crcbl_render=debug,crcbl_scene=trace,crcbl_ui=trace";
-        let content = panel(&[], long);
-        let layout = content.layout(extent, &atlas);
-        let style = layout.style();
-        assert!(
-            long.chars().count() > layout.field_columns(&atlas),
-            "the line is not longer than the box, so this proves nothing",
-        );
-
-        let mut dl = DrawList::new();
-        content.render(&mut dl, &layout, &atlas, true);
-        let right_edge = layout.field().1.x;
-        let scale = style.text_size / NATURAL_FONT_SIZE;
-        let mut drew_some_of_it = false;
-        for command in dl.commands() {
-            let (left, right) = match command {
-                DrawCommand::Text { pos, text, .. } if long.contains(text.as_str()) => {
-                    drew_some_of_it = true;
-                    (pos.x, pos.x + atlas.text_width(text, scale))
-                }
-                DrawCommand::Rect { min, max, color } if *color == style.caret_color => {
-                    (min.x, max.x)
-                }
-                _ => continue,
-            };
-            assert!(
-                left >= layout.field().0.x - 1e-3 && right <= right_edge + 1e-3,
-                "{left}..{right} escapes the input box {:?}..{right_edge}",
-                layout.field().0.x,
-            );
-        }
-        assert!(drew_some_of_it, "none of the typed line was drawn");
-    }
-
-    /// **`Enter` and the Send button submit the same line**, and both leave the
-    /// field empty — the decision-6 requirement that the button is not a second
-    /// path with its own behaviour.
-    #[test]
-    fn enter_and_the_send_button_submit_the_same_line() {
-        let atlas = atlas();
-        let extent = (960, 720);
-
-        let mut typed = panel(&[], "antialiasing cmaa2");
-        assert_eq!(typed.submit().as_deref(), Some("antialiasing cmaa2"));
-        assert!(typed.field().is_empty(), "the field kept the sent line");
-        assert_eq!(typed.submit(), None, "an empty field submitted a command");
-
-        let mut clicked = panel(&[], "antialiasing cmaa2");
-        let layout = clicked.layout(extent, &atlas);
-        let (min, max) = layout.send();
-        let on_button = (min + max) * 0.5;
-        let mut ui = UiState::new();
-        assert_eq!(
-            clicked.point(&layout, &mut ui, press_at(on_button)),
-            ConsoleInput::Nothing,
-        );
-        assert_eq!(
-            clicked.send_state(),
-            ButtonState::Pressed,
-            "the press did not reach the button's art",
-        );
-        assert_eq!(
-            clicked.point(&layout, &mut ui, release_at(on_button)),
-            ConsoleInput::Submitted("antialiasing cmaa2".to_owned()),
-        );
-        assert!(clicked.field().is_empty());
-    }
-
-    /// **Submitting a line puts the log back at its bottom**, whichever way it
-    /// was sent — the answer lands there, and a reader who had scrolled back
-    /// would otherwise be looking at old lines while it arrives.
-    ///
-    /// Neither `Enter` nor a click reads the scroll, so nothing else here would
-    /// notice `submit` forgetting it: the panel would still send the line and
-    /// still clear the field.
-    #[test]
-    fn a_submitted_line_returns_the_log_to_its_newest_lines() {
-        let lines: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
-        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
-        let mut panel = panel(&lines, "help");
-        panel.log_mut().scroll_by(10);
-        assert_eq!(panel.log().scroll(), 10, "the view did not scroll back");
-
-        assert_eq!(panel.submit().as_deref(), Some("help"));
-        assert_eq!(
-            panel.log().scroll(),
-            0,
-            "the log stayed scrolled back after a line was sent",
-        );
-
-        // And a blank submission is still a submission for this purpose: the
-        // person pressed Enter to get back to the bottom, which a terminal also
-        // does.
-        panel.log_mut().scroll_by(10);
-        assert_eq!(panel.submit(), None);
-        assert_eq!(panel.log().scroll(), 0);
-    }
-
-    /// **A press that starts on the button and is released off it sends
-    /// nothing**, and a press that never touches it sends nothing either.
-    #[test]
-    fn a_press_that_leaves_the_button_sends_nothing() {
-        let atlas = atlas();
-        let mut content = panel(&[], "quit");
-        let layout = content.layout((960, 720), &atlas);
-        let on_button = (layout.send().0 + layout.send().1) * 0.5;
-        let elsewhere = layout.text_pos();
-        let mut ui = UiState::new();
-
-        content.point(&layout, &mut ui, press_at(on_button));
-        assert_eq!(
-            content.point(&layout, &mut ui, release_at(elsewhere)),
-            ConsoleInput::Nothing,
-        );
-        assert_eq!(content.field().text(), "quit", "the line was sent anyway");
-
-        content.point(&layout, &mut ui, press_at(elsewhere));
-        assert_eq!(
-            content.point(&layout, &mut ui, release_at(elsewhere)),
-            ConsoleInput::Nothing,
-        );
-        assert_eq!(content.field().text(), "quit");
-    }
-
-    /// **The completion rows hang under the field with the matched head
-    /// highlighted**, capped at [`COMPLETION_ROWS`], and lined up with the
-    /// typed token rather than with the panel's edge.
-    #[test]
-    fn the_completion_rows_highlight_the_matched_head() {
-        let atlas = atlas();
-        let mut content = panel(&[], "r_a");
-        content.set_completion("r_a", &["r_ao_view", "r_ambient"]);
-        let layout = content.layout((960, 720), &atlas);
-        let style = *layout.style();
-        assert_eq!(layout.completion().len(), 2);
-
-        let mut dl = DrawList::new();
-        content.render(&mut dl, &layout, &atlas, false);
-        let rows: Vec<(Vec2, String, [f32; 4])> = dl
-            .commands()
-            .iter()
-            .filter_map(|command| match command {
-                DrawCommand::Text {
-                    pos, text, color, ..
-                } => Some((*pos, text.clone(), *color)),
-                _ => None,
-            })
-            .collect();
-        // The prompt, the typed line and the button come first; what follows is
-        // two candidates, each split into a matched head and a tail.
-        let tail = &rows[rows.len() - 4..];
-        assert_eq!(
-            tail.iter()
-                .map(|(_, text, color)| (text.as_str(), *color))
-                .collect::<Vec<_>>(),
-            [
-                ("r_a", style.match_color),
-                ("o_view", style.candidate_color),
-                ("r_a", style.match_color),
-                ("mbient", style.candidate_color),
-            ],
-        );
-        assert!(
-            (tail[1].0.x
-                - tail[0].0.x
-                - atlas.text_width("r_a", style.text_size / NATURAL_FONT_SIZE))
-            .abs()
-                < 1e-3,
-            "the tail is not drawn one matched head to the right of it",
-        );
-        assert_eq!(
-            tail[0].0.x,
-            layout.text_pos().x,
-            "the candidates do not line up with the typed token",
-        );
-        assert!(
-            tail[2].0.y - tail[0].0.y >= style.row_height() - 1e-3,
-            "the two candidates are on the same row",
-        );
-        for row in layout.completion() {
-            assert!(
-                row.0.y >= layout.panel().1.y - 1e-3,
-                "a candidate row is drawn inside the panel, over the input",
-            );
-            assert!(
-                row.1.y <= layout.screen().y + 1e-3,
-                "a candidate row hangs off the bottom of the frame",
-            );
-        }
-    }
-
-    /// The list is capped, and it is capped by the frame as well as by
-    /// [`COMPLETION_ROWS`] — a row that would hang off the bottom is not drawn,
-    /// because nothing clips it.
-    #[test]
-    fn the_completion_list_is_capped_by_the_rows_and_by_the_frame() {
-        let atlas = atlas();
-        let names: Vec<String> = (0..COMPLETION_ROWS + 4)
-            .map(|i| format!("cmd_{i}"))
-            .collect();
-        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut content = panel(&[], "cmd_");
-        content.set_completion("cmd_", &borrowed);
-
-        let roomy = content.layout((960, 720), &atlas);
-        assert_eq!(roomy.completion().len(), COMPLETION_ROWS);
-
-        // A frame with almost nothing below the panel fits fewer rows than the
-        // cap, and every one of them still ends inside the frame.
-        let cramped = content.layout((960, 80), &atlas);
-        assert!(
-            cramped.completion().len() < COMPLETION_ROWS,
-            "an 80-pixel frame offered {} rows below the panel",
-            cramped.completion().len(),
-        );
-        for row in cramped.completion() {
-            assert!(row.1.y <= cramped.screen().y + 1e-3);
-        }
-
-        content.clear_completion();
-        assert!(
-            content.layout((960, 720), &atlas).completion().is_empty(),
-            "the candidates outlived the completion",
-        );
-    }
-
-    /// **A bigger window gets a bigger console**, and every window gets one that
-    /// shows the log rows and the input columns the floors ask for.
-    #[test]
-    fn a_bigger_window_gets_a_bigger_console() {
-        let atlas = atlas();
-        let content = panel(&["one"], "");
-        let small = content.layout((640, 480), &atlas);
-        let large = content.layout((3840, 2160), &atlas);
-        assert!(
-            large.style().scale > small.style().scale,
-            "640x480 chose {} and 3840x2160 chose {}",
-            small.style().scale,
-            large.style().scale,
-        );
-        assert!(large.style().scale <= MenuStyle::MAX_SCALE as f32);
-
-        for extent in EXTENTS {
-            let layout = content.layout(extent, &atlas);
-            assert!(
-                layout.log_rows() >= MINIMUM_LOG_ROWS,
-                "{extent:?}: {} log rows at scale {}",
-                layout.log_rows(),
-                layout.style().scale,
-            );
-            assert!(
-                layout.field_columns(&atlas) >= MINIMUM_FIELD_COLUMNS,
-                "{extent:?}: {} input columns at scale {}",
-                layout.field_columns(&atlas),
-                layout.style().scale,
-            );
-        }
-    }
-
-    /// A framebuffer too small for the console lays out without inverting a
-    /// rectangle and draws no text over the frame.
-    #[test]
-    fn a_frame_with_no_room_lays_out_without_inverting_anything() {
-        let atlas = atlas();
-        let content = panel(&["one", "two"], "help");
-        for extent in [(0, 0), (1, 1), (32, 24)] {
-            let layout = content.layout(extent, &atlas);
-            for (name, (min, max)) in [
-                ("the panel", layout.panel()),
-                ("the log", layout.log()),
-                ("the field", layout.field()),
-            ] {
-                assert!(
-                    max.x >= min.x && max.y >= min.y,
-                    "{extent:?}: {name} is inside out at {min:?}..{max:?}",
-                );
-            }
-            assert_eq!(layout.log_rows(), 0, "{extent:?}: a log row fitted");
-            let mut dl = DrawList::new();
-            content.render(&mut dl, &layout, &atlas, true);
-            for command in dl.commands() {
-                if let DrawCommand::Text { text, .. } = command {
-                    assert_ne!(text, "one", "{extent:?}: a log line was drawn anyway");
-                }
-            }
-        }
-    }
-}
+mod tests;

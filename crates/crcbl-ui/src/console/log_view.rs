@@ -21,7 +21,6 @@ use glam::Vec2;
 use crcbl_core::log::console::{CONSOLE_RING_LINES, CONSOLE_TARGET, Record};
 use crcbl_core::log::{Level, LevelFilter};
 
-use crate::draw_list::DrawList;
 use crate::text::FontAtlas;
 
 use super::ConsoleStyle;
@@ -44,9 +43,9 @@ pub struct LogLine {
     /// **Kept because the level cannot say it.** Command output is logged at
     /// [`Level::Info`], the same level as the engine's own running commentary,
     /// so a view that hid info to be quiet would hide the answer to what
-    /// somebody just typed. This is what [`LogView::render`] tests instead, and
-    /// it is why a filter of [`LevelFilter::Warn`] still shows a typed
-    /// command's reply.
+    /// somebody just typed. This is what [`LogView::visible_rows`] tests
+    /// instead, and it is why a filter of [`LevelFilter::Warn`] still shows a
+    /// typed command's reply.
     pub from_console: bool,
 }
 
@@ -136,7 +135,8 @@ impl LogView {
     }
 
     /// The lines the view holds, oldest first and before the level filter — so
-    /// this yields the engine's info lines that [`render`](Self::render) hides.
+    /// this yields the engine's info lines that
+    /// [`visible_rows`](Self::visible_rows) hides.
     pub fn lines(&self) -> impl Iterator<Item = &LogLine> {
         self.lines.iter()
     }
@@ -236,28 +236,27 @@ impl LogView {
         (width / advance) as usize
     }
 
-    /// Draws the lines that fit in `rect`, newest at its bottom edge.
+    /// The rows to draw, oldest first, at most `rows` of them and each at most
+    /// `columns` characters wide.
     ///
-    /// Two things the caller does not have to do, because [`DrawList`] has no
-    /// clip rectangle and cannot be given one:
+    /// The **model's** half of drawing a log — the panel builds one span per
+    /// row and the element tree places them, clipping what does not fit and
+    /// pushing the newest against the bottom edge. Two things this does that a
+    /// column of spans cannot:
     ///
-    /// * **Whole rows outside the rectangle are dropped**, not clipped. A row
-    ///   that would only half fit at the top is not drawn at all, so nothing
-    ///   ever crosses the panel's edge into the frame behind it.
-    /// * **A line longer than the rectangle wraps** at the column count, which
-    ///   the monospace atlas makes exact, and its continuation rows follow it in
+    /// * **The newest lines are the ones gathered.** The scroll counts from the
+    ///   newest line, and the wrap of a line only half on screen costs the rows
+    ///   it actually shows.
+    /// * **A line longer than the panel wraps** at the column count, which the
+    ///   monospace atlas makes exact, and its continuation rows follow it in
     ///   order.
-    pub fn render(
-        &self,
-        dl: &mut DrawList,
-        rect: (Vec2, Vec2),
-        atlas: &FontAtlas,
-        style: &ConsoleStyle,
-    ) {
-        let rows_fit = Self::rows_in(rect, style);
-        let columns = Self::columns_in(rect, atlas, style);
-        if rows_fit == 0 || columns == 0 {
-            return;
+    ///
+    /// A row may be empty — a blank log line keeps its row, which is how a
+    /// program's output is paragraphed.
+    #[must_use]
+    pub fn visible_rows(&self, rows: usize, columns: usize) -> Vec<(Level, String)> {
+        if rows == 0 || columns == 0 {
+            return Vec::new();
         }
 
         let visible: Vec<&LogLine> = self
@@ -271,30 +270,17 @@ impl LogView {
         // Newest first while the rows are gathered, so the wrap of a line only
         // half on screen costs the rows it actually shows, then reversed into
         // reading order.
-        let mut rows: Vec<(Level, String)> = Vec::with_capacity(rows_fit);
+        let mut gathered: Vec<(Level, String)> = Vec::with_capacity(rows);
         'gather: for line in visible[..end].iter().rev() {
             for chunk in wrap(&line.text, columns).into_iter().rev() {
-                if rows.len() == rows_fit {
+                if gathered.len() == rows {
                     break 'gather;
                 }
-                rows.push((line.level, chunk));
+                gathered.push((line.level, chunk));
             }
         }
-        rows.reverse();
-
-        let row_height = style.row_height();
-        let top = rect.1.y - rows.len() as f32 * row_height;
-        for (index, (level, text)) in rows.iter().enumerate() {
-            if text.is_empty() {
-                continue;
-            }
-            dl.text(
-                Vec2::new(rect.0.x, top + index as f32 * row_height),
-                text.as_str(),
-                style.level_color(*level),
-                style.text_size,
-            );
-        }
+        gathered.reverse();
+        gathered
     }
 }
 
@@ -344,7 +330,6 @@ mod tests {
     use core::time::Duration;
 
     use super::*;
-    use crate::draw_list::DrawCommand;
 
     fn atlas() -> FontAtlas {
         FontAtlas::built_in()
@@ -389,18 +374,21 @@ mod tests {
         )
     }
 
-    /// The text commands a view draws into `rect`, in the order they were
-    /// emitted — top row first.
+    /// The rows a view offers for `rect`, top row first — what the panel
+    /// builds a span each of.
     fn drawn(view: &LogView, rect: (Vec2, Vec2), style: &ConsoleStyle) -> Vec<String> {
-        let mut dl = DrawList::new();
-        view.render(&mut dl, rect, &atlas(), style);
-        dl.commands()
-            .iter()
-            .filter_map(|command| match command {
-                DrawCommand::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
+        rows_of(view, rect, style)
+            .into_iter()
+            .map(|(_, text)| text)
             .collect()
+    }
+
+    /// The rows a view offers for `rect`, with their levels.
+    fn rows_of(view: &LogView, rect: (Vec2, Vec2), style: &ConsoleStyle) -> Vec<(Level, String)> {
+        view.visible_rows(
+            LogView::rows_in(rect, style),
+            LogView::columns_in(rect, &atlas(), style),
+        )
     }
 
     /// **The cursor is one past the newest record taken**, which is what makes
@@ -451,10 +439,15 @@ mod tests {
         assert_eq!(oldest.text, "[crcbl::demo] line 10");
     }
 
-    /// **The newest line is at the bottom edge and stays there** as lines
-    /// arrive — the property that makes a console readable while a run logs.
+    /// **The newest line is the last row offered**, whatever else has arrived
+    /// — the property that makes a console readable while a run logs.
+    ///
+    /// Where that last row *lands* is the panel's: the tree packs the rows
+    /// against the log box's bottom edge and clips what does not fit, which
+    /// `no_log_line_is_drawn_over_the_input_row` asserts. What is the model's
+    /// is that the newest line is the one gathered last and never dropped.
     #[test]
-    fn the_newest_line_sits_on_the_bottom_edge_whatever_else_arrives() {
+    fn the_newest_line_is_the_last_row_offered_whatever_else_arrives() {
         let atlas = atlas();
         let style = style();
         let rect = rect_of(4, 40, &atlas, &style);
@@ -462,29 +455,19 @@ mod tests {
         // Layout, not filtering: these are engine info lines, which the
         // quiet default hides — see `set_filter`.
         view.set_filter(LevelFilter::Trace);
-        let mut bottoms = Vec::new();
         for step in 0..6 {
             view.push_records(&records(step, 1));
-            let mut dl = DrawList::new();
-            view.render(&mut dl, rect, &atlas, &style);
-            let last = dl
-                .commands()
-                .iter()
-                .filter_map(|command| match command {
-                    DrawCommand::Text { pos, text, .. } => Some((*pos, text.clone())),
-                    _ => None,
-                })
-                .next_back()
-                .expect("a line is drawn");
-            assert_eq!(last.1, format!("[crcbl::demo] line {step}"));
-            bottoms.push(last.0.y);
-        }
-        for (index, y) in bottoms.iter().enumerate() {
+            let rows = drawn(&view, rect, &style);
+            assert_eq!(
+                rows.last().map(String::as_str),
+                Some(format!("[crcbl::demo] line {step}").as_str()),
+                "after {step} lines the newest is not the last row offered",
+            );
             assert!(
-                (y + style.row_height() - rect.1.y).abs() < 1e-3,
-                "after {index} lines the newest sat at {y}, not on the bottom edge \
-                 {}",
-                rect.1.y,
+                rows.len() <= LogView::rows_in(rect, &style),
+                "{} rows were offered for a box that shows {}",
+                rows.len(),
+                LogView::rows_in(rect, &style),
             );
         }
     }
@@ -567,25 +550,9 @@ mod tests {
         let mut view = LogView::new();
         view.push_records(&[record(0, Level::Info, CONSOLE_TARGET, "one\n\ntwo")]);
 
-        // The blank row emits no text command of its own, so what is asserted
-        // is where the two that do land: a row apart, not touching.
-        let mut dl = DrawList::new();
-        view.render(&mut dl, rect, &atlas, &style);
-        let placed: Vec<(Vec2, String)> = dl
-            .commands()
-            .iter()
-            .filter_map(|command| match command {
-                DrawCommand::Text { pos, text, .. } => Some((*pos, text.clone())),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(placed.len(), 2);
-        assert_eq!(placed[0].1, "one");
-        assert_eq!(placed[1].1, "two");
-        assert!(
-            (placed[1].0.y - placed[0].0.y - style.row_height() * 2.0).abs() < 1e-3,
-            "the blank row between them was swallowed",
-        );
+        // The blank row is a row of its own, so the two that carry text are
+        // two rows apart rather than touching.
+        assert_eq!(drawn(&view, rect, &style), ["one", "", "two"]);
     }
 
     /// **Scrolling back walks the log**, stops at the oldest line, and the text
@@ -707,8 +674,8 @@ mod tests {
         );
     }
 
-    /// Every line is drawn in its own level's colour, so the level is readable
-    /// with no level name on screen.
+    /// Every row carries its line's level, which is what the panel colours the
+    /// span with — so the level is readable with no level name on screen.
     #[test]
     fn each_line_is_drawn_in_its_levels_colour() {
         let atlas = atlas();
@@ -728,15 +695,9 @@ mod tests {
             view.push_records(&[record(index as u64, level, CONSOLE_TARGET, "line")]);
         }
 
-        let mut dl = DrawList::new();
-        view.render(&mut dl, rect, &atlas, &style);
-        let colors: Vec<[f32; 4]> = dl
-            .commands()
-            .iter()
-            .filter_map(|command| match command {
-                DrawCommand::Text { color, .. } => Some(*color),
-                _ => None,
-            })
+        let colors: Vec<[f32; 4]> = rows_of(&view, rect, &style)
+            .into_iter()
+            .map(|(level, _)| style.level_color(level))
             .collect();
         assert_eq!(
             colors,

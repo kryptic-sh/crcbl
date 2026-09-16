@@ -4186,6 +4186,7 @@ pub struct MenuPump<'a, K> {
     held: &'a mut Vec<crcbl_core::input::KeyCode>,
     actions: &'a mut crate::input::ActionMap,
     showing: bool,
+    console: bool,
     /// The widget the commit key released over, if any.
     ///
     /// Set on **release**, not press, so the pressed frame of the skin is on
@@ -4194,26 +4195,43 @@ pub struct MenuPump<'a, K> {
 }
 
 impl<'a, K: Copy + Eq> MenuPump<'a, K> {
-    /// Starts a batch: puts the `ui` context on `actions`' stack if a menu is
-    /// showing and takes it off if not, advances the map by `dt` seconds —
-    /// the frame that just ended — and applies any repeat that fell due.
+    /// Starts a batch: puts the `ui` context on `actions`' stack if the loop's
+    /// own UI is showing and takes it off if not, advances the map by `dt`
+    /// seconds — the frame that just ended — and applies any repeat that fell
+    /// due.
     ///
-    /// `showing` is whether a menu was on screen **before** this pump — last
-    /// frame's, deliberately. The pump runs before this frame's state is known,
-    /// and the menu the player is pressing keys at is the one that was on screen
-    /// when they pressed them. `actions` is the loop's [`menu_actions`] map,
-    /// kept between batches.
+    /// `showing` is whether a menu was on screen and `console` whether the
+    /// debug console's panel was up, both **before** this pump — last frame's,
+    /// deliberately. The pump runs before this frame's state is known, and the
+    /// panel the player is pressing keys at is the one that was on screen when
+    /// they pressed them. `actions` is the loop's [`menu_actions`] map, kept
+    /// between batches.
+    ///
+    /// # The console is over the menu, and both are over the game
+    ///
+    /// The `ui` context is pushed while **either** panel has input, so the map
+    /// tracks every key through a console that opens over a menu and back — and
+    /// so the release of a key held into the console reaches the map, which is
+    /// why the loop no longer has to let go of the menu's keys by hand when the
+    /// console opens.
+    ///
+    /// The console is drawn over the menu, so it takes the input: with
+    /// `console` set, the pump navigates nothing and every key is
+    /// withheld from the game. That is where "the open console claims every key"
+    /// lives now, and the keys still reach the map on their way past.
     pub fn new(
         menus: &'a mut crcbl_ui::menu::MenuSet<K>,
         held: &'a mut Vec<crcbl_core::input::KeyCode>,
         actions: &'a mut crate::input::ActionMap,
         showing: bool,
+        console: bool,
         dt: f32,
     ) -> Self {
+        let wants = showing || console;
         let pushed = actions.is_context_active(crate::input::ui::CONTEXT);
-        let restacked = if showing && !pushed {
+        let restacked = if wants && !pushed {
             actions.push_context(crate::input::ui::CONTEXT)
-        } else if !showing && pushed {
+        } else if !wants && pushed {
             actions.pop_context(crate::input::ui::CONTEXT)
         } else {
             Ok(())
@@ -4225,6 +4243,7 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
             held,
             actions,
             showing,
+            console,
             activated: None,
         };
         pump.navigate();
@@ -4270,11 +4289,15 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         // menu is a list of buttons — which is every menu in this workspace
         // but one. A value row under the highlight is the case where the
         // player is aiming at the panel. Decided before the key moves anything.
-        let claimed = self.showing
-            && menu::menu_binds(self.actions, code)
-            && (!menu::moves_sideways(self.actions, code)
-                || self.menus.slider_highlighted()
-                || self.menus.cycler_highlighted());
+        // The console is drawn over the menu and claims the lot: a game that
+        // saw the letters being typed into the field would be played by the
+        // console. Everything below still runs, so the map hears the key.
+        let claimed = self.console
+            || (self.showing
+                && menu::menu_binds(self.actions, code)
+                && (!menu::moves_sideways(self.actions, code)
+                    || self.menus.slider_highlighted()
+                    || self.menus.cycler_highlighted()));
 
         // Fed whether or not the menu claims it, so the map knows every key
         // that is down when the context is next pushed — which is what
@@ -4312,7 +4335,16 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
 
     /// Moves the menu on what the map's `ui` actions did since its edges were
     /// last cleared.
+    ///
+    /// **Nothing at all while the console is up.** The panel is drawn over the
+    /// menu and owns the input, so a line typed at it must not also walk the
+    /// selection of the panel behind it. The map is still fed — see
+    /// [`MenuPump::new`] — so the edges this frame drops are edges the map
+    /// itself has seen come and go.
     fn navigate(&mut self) {
+        if self.console {
+            return;
+        }
         let nav = crate::nav::nav_input(self.actions);
         match nav.direction {
             Some(crcbl_ui::tree::Direction::Up) => self.menus.select_previous(),
@@ -6163,6 +6195,14 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// [`crate::debug_console::engine_tables`] — and drawn last in the frame, so
     /// nothing covers it.
     console: crate::debug_console::Console,
+    /// The join between the shell and the console's text field: the key events
+    /// and committed text that become one frame's edits, and the clipboard
+    /// calls the field's copy, cut and paste ask for.
+    ///
+    /// One pump for the loop rather than one per field, because it is the
+    /// **shell** that has one clipboard and answers one read at a time; the
+    /// answers it matches by request id are routed to the field that asked.
+    text_pump: crate::text_input::TextPump,
     /// The on-screen button that opens and closes the console.
     ///
     /// The loop's rather than each game's, unlike [`PauseControl`], because
@@ -6376,6 +6416,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             pointer: PointerCapture::new(),
             debug: crcbl_ui::DebugOverlay::with_visible(config.debug_overlay),
             console,
+            text_pump: crate::text_input::TextPump::new(),
             console_button: ConsoleButton::new(),
             debug_view: None,
             passes: crcbl_render::PassStats::new(),
@@ -6453,7 +6494,12 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // is typing at is the one that was on screen when they typed, and the
         // toggle this batch carries is applied below rather than mid-pump.
         let console_showing = self.console.is_open();
+        // Last frame's answer, for `showing`'s reason once more: the pump reads
+        // the edits a key makes, and whether the field was taking them is a
+        // fact about the tree that was on screen when the key was pressed.
+        let console_editing = self.console.is_editing();
         let console = &mut self.console;
+        let text_pump = &mut self.text_pump;
         // Last frame's duration, which is the time since the last pump: this
         // frame's clock is not advanced until after the input is read.
         let since_last_pump = self.frame_clock.render_dt_secs();
@@ -6461,7 +6507,8 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             &mut self.menus,
             &mut self.held_keys,
             &mut self.menu_actions,
-            showing,
+            showing && !console_showing,
+            console_showing,
             since_last_pump,
         );
         // The character the toggling key produced, which must not be typed into
@@ -6475,9 +6522,10 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             }
             // The window's business, the pointer, focus loss and the loop's
             // four reserved keys are all folded by `Pending::observe`; the
-            // console claims what is left while it is open; the menu's three
-            // and the held-key list are `MenuPump`'s. What comes back from that
-            // is the key the *game* should see.
+            // console takes the keys it acts on itself and the text pump the
+            // ones that edit its field; the menu's three, the console's blanket
+            // claim and the held-key list are `MenuPump`'s. What comes back
+            // from that is the key the *game* should see.
             if pending.observe(&event) == Handled::Loop {
                 return;
             }
@@ -6485,17 +6533,21 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 swallow_text = false;
                 return;
             }
-            if console_showing && console.observe(&event) {
-                return;
+            if console_showing {
+                console.observe(&event);
             }
+            // **Whatever the console is doing**, because the clipboard answer
+            // this matches by request id may arrive frames after the panel that
+            // asked for it was shut.
+            text_pump.observe(&event, console_editing);
+            // **Every key, open console or not**, so the map hears the release
+            // of a key held into the panel — which is what lets the console
+            // open without the loop letting go of the menu's keys by hand.
             if let Some((code, pressed)) = menu.observe(&event) {
                 game.key_event(code, pressed);
             }
         });
         let from_keyboard = menu.activated;
-        // Here rather than inside the pump: the closure above is borrowing the
-        // shell, and a clipboard read is something to ask the shell for.
-        self.ask_for_paste();
         self.events += pending.count;
         // Hit-tested against **this** frame's layout, which is why the pointer
         // is resolved here and not inside the pump: the rectangles depend on the
@@ -6527,9 +6579,14 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // answers whether the cursor is on the panel; a press there is the
         // console's and must not also latch a menu button underneath it, which
         // is `menu_owns_press`' rule applied to a panel the loop draws last.
-        let console_took_pointer =
-            self.console
-                .point(self.gpu.extent(), self.gpu.atlas(), pointer_input);
+        // **Against last frame's panel, deliberately.** The console's own frame
+        // runs below, after the toggle this batch may carry, so that a panel
+        // opened by a key or by the on-screen button is built and drawn on the
+        // frame it opened. What is wanted *here* is only whether the press
+        // belongs to the console rather than to a menu under it, and the panel
+        // is the top `CONSOLE_HEIGHT_FRACTION` of the frame whichever frame you
+        // ask on — a resize is the one case this is a frame behind.
+        let console_took_pointer = self.console.covers(pointer_input.pos);
         let from_pointer = self.menus.point(
             self.gpu.extent(),
             self.gpu.atlas(),
@@ -6703,6 +6760,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // held-key repair below and the swallowed character above are the same
         // code for a tap as for a press — a second toggle path would be a
         // second place for a game to be left holding a key.
+        //
+        // **The loop's own map is not let go of here, and used to be.** The
+        // console withheld every key from the map as well as from the game, so
+        // a key held into it was never heard to come up and the menu's map had
+        // to be released by hand. The console is in the context stack now:
+        // `MenuPump` feeds the map every key whether or not the panel is up, so
+        // the map hears the release itself.
         pending.toggle_console |= self.console_button.take_fired();
         if pending.toggle_console {
             if !self.console.is_open() {
@@ -6710,12 +6774,31 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 for key in std::mem::take(&mut self.held_keys) {
                     game.key_event(key, false);
                 }
-                // The console takes both edges of every key while it is open,
-                // so the menu's map would never hear these come up either.
-                menu::release_menu_keys(&mut self.menu_actions);
             }
             self.console.toggle();
         }
+        // **The console's whole frame**, not only its hit test: the panel is an
+        // element tree now, and a tree is built once — building it twice would
+        // latch the **Send** button's click twice and take the field's edits
+        // twice. Here, after the toggle, so a panel that opened on this batch is
+        // built and drawn on this frame; and still in the input phase, so a line
+        // the pointer submits reaches `drain_console` below on the frame it was
+        // sent.
+        self.console.frame(
+            self.gpu.extent(),
+            self.gpu.atlas(),
+            pointer_input,
+            self.text_pump.frame(self.frame_clock.render_dt()),
+        );
+        // Here rather than inside the pump: that closure was borrowing the
+        // shell, and a clipboard offer or read is something to ask the shell
+        // for. This is the **one** clipboard path — `Loop::ask_for_paste` and
+        // the console's own request are gone, folded into the field's own
+        // `Edit::Paste`, which is what every other text input already asks
+        // through.
+        let requests = self.console.take_clipboard_requests();
+        self.text_pump
+            .serve(requests, self.shell.as_mut(), self.window);
         // Where a console write reaches the frame. `Binding`s record into a
         // `settings::Deferred` because they are handed their host as
         // `&mut dyn Any` and cannot hold a borrow of the renderer; this is the
@@ -6793,6 +6876,30 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             self.paused = !self.paused;
             log::info!("game {}", if self.paused { "paused" } else { "resumed" });
         }
+        // **The two reserved contexts, in the order they stack.** Last in the
+        // frame, so both read the panels as this frame left them: a console the
+        // on-screen button just opened has input now, and one Escape just shut
+        // has no engaged field now.
+        //
+        // `ui` is only ever **pushed** here and never popped, which is the whole
+        // reason this is not one call. A panel that opened on this frame needs
+        // `ui` underneath `text` before `text` goes on, or a typed W would be
+        // `ui_move` on the map rather than a character; but popping `ui` here
+        // could find `text` still above it on a frame that shut both, and the
+        // stack refuses an out-of-order pop rather than hiding it. So the pop
+        // stays where it was — `MenuPump::new`, at the top of the next frame,
+        // by which time `text` has come off below.
+        if (self.menus.current().is_some() || self.console.is_open())
+            && !self
+                .menu_actions
+                .is_context_active(crate::input::ui::CONTEXT)
+        {
+            self.menu_actions
+                .push_context(crate::input::ui::CONTEXT)
+                .expect("the loop's map declares the ui context");
+        }
+        crate::input::text::sync(&mut self.menu_actions, self.console.is_editing())
+            .expect("the loop's map declares the text context and nothing pushes over it");
         if pending.toggle_fullscreen {
             ModeRequest::toggle(self.shell.as_mut(), self.window)?;
         }
@@ -6872,10 +6979,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // **Last, so nothing covers it** — plan decision 6. The overlay is a
         // developer tool that stays legible over the game; the console is the
         // one thing that stays legible over the overlay.
-        let extent = self.gpu.extent();
-        let render_dt = self.frame_clock.render_dt();
-        self.console
-            .draw(&mut self.draw_list, extent, self.gpu.atlas(), render_dt);
+        self.console.draw(&mut self.draw_list, self.gpu.atlas());
         // **Over the panel**, because it is the way out as much as the way in:
         // a finger that opened the console has no key to close it with.
         self.console_button
@@ -7242,35 +7346,6 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         }
         if let Some(limit) = limit {
             self.clock_source.set_limit(limit);
-        }
-    }
-
-    /// Issues the clipboard read an open console's paste key asked for.
-    ///
-    /// The read is asynchronous on every backend — see
-    /// [`crcbl_shell::clipboard`] — so this only starts it: the answer arrives
-    /// as a [`ShellEvent::ClipboardData`] in some later batch and
-    /// [`Console::observe`](crate::debug_console::Console::observe) is what puts
-    /// it in the field.
-    ///
-    /// **A backend with no clipboard says so, loudly.** The web backend answers
-    /// [`crcbl_shell::ShellError::Unsupported`] — a browser's clipboard read is
-    /// a permission-gated promise and
-    /// `crcbl-shell`'s web backend has no route to one — and a paste that
-    /// silently did nothing there would be indistinguishable from a clipboard
-    /// that happened to be empty.
-    fn ask_for_paste(&mut self) {
-        if !self.console.take_paste_request() {
-            return;
-        }
-        match self
-            .shell
-            .clipboard_request(self.window, crcbl_shell::MimeType::TextUtf8)
-        {
-            Ok(request) => self.console.expect_paste(request),
-            Err(error) => crcbl_core::log::console::print(&format!(
-                "paste: this backend has no clipboard to read — {error}"
-            )),
         }
     }
 
@@ -9041,7 +9116,7 @@ mod tests {
             let before = selected(&set);
 
             let mut forwarded = Vec::new();
-            let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, showing, 0.0);
+            let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, showing, false, 0.0);
             shell.pump(&mut |event| {
                 if let Some(key) = pump.observe(&event) {
                     forwarded.push(key);
@@ -9114,7 +9189,7 @@ mod tests {
                 .expect("the row is a slider");
 
             let mut forwarded = Vec::new();
-            let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, showing, 0.0);
+            let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, showing, false, 0.0);
             shell.pump(&mut |event| {
                 if let Some(key) = pump.observe(&event) {
                     forwarded.push(key);
@@ -9154,7 +9229,7 @@ mod tests {
         shell.key_press(window, MENU_RIGHT_KEY).expect("live");
         shell.key_release(window, MENU_RIGHT_KEY).expect("live");
         let mut forwarded = Vec::new();
-        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, 0.0);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, false, 0.0);
         shell.pump(&mut |event| {
             if let Some(key) = pump.observe(&event) {
                 forwarded.push(key);
@@ -9204,7 +9279,7 @@ mod tests {
             }
 
             let mut forwarded = Vec::new();
-            let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, showing, 0.0);
+            let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, showing, false, 0.0);
             shell.pump(&mut |event| {
                 if let Some(key) = pump.observe(&event) {
                     forwarded.push(key);
@@ -9252,7 +9327,7 @@ mod tests {
         shell
             .key_press(window, crcbl_core::input::KeyCode::KeyW)
             .expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, 0.0);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, false, 0.0);
         shell.pump(&mut |event| {
             pump.observe(&event);
         });
@@ -9276,14 +9351,14 @@ mod tests {
         let mut actions = menu_actions();
 
         shell.key_press(window, MENU_ACTIVATE_KEY).expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, 0.0);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, false, 0.0);
         shell.pump(&mut |event| {
             pump.observe(&event);
         });
         assert_eq!(pump.activated, None, "pressing must not commit");
 
         shell.key_release(window, MENU_ACTIVATE_KEY).expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, 0.0);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, false, 0.0);
         shell.pump(&mut |event| {
             pump.observe(&event);
         });
@@ -9308,7 +9383,7 @@ mod tests {
         shell
             .key_press(window, crcbl_core::input::KeyCode::KeyW)
             .expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, false, 0.0);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, false, false, 0.0);
         shell.pump(&mut |event| {
             pump.observe(&event);
         });
@@ -9317,7 +9392,7 @@ mod tests {
         shell
             .key_release(window, crcbl_core::input::KeyCode::KeyW)
             .expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, false, 0.0);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, false, false, 0.0);
         shell.pump(&mut |event| {
             pump.observe(&event);
         });
@@ -9341,7 +9416,7 @@ mod tests {
 
         // Pressed while no menu is up: forwarded, and tracked as held.
         shell.key_press(window, MENU_UP_KEY).expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, false, 0.0);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, false, false, 0.0);
         let mut forwarded = Vec::new();
         shell.pump(&mut |event| {
             if let Some(key) = pump.observe(&event) {
@@ -9354,7 +9429,7 @@ mod tests {
         // Released while the menu is up: the menu is claiming that key, and the
         // release reaches the game anyway.
         shell.key_release(window, MENU_UP_KEY).expect("live");
-        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, 0.0);
+        let mut pump = MenuPump::new(&mut set, &mut held, &mut actions, true, false, 0.0);
         let mut forwarded = Vec::new();
         shell.pump(&mut |event| {
             if let Some(key) = pump.observe(&event) {
@@ -15194,6 +15269,24 @@ mod tests {
             .expect("the window is live");
     }
 
+    /// Presses `key` and leaves it down.
+    fn hold(engine: &mut Hosted, key: crcbl_core::input::KeyCode) {
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .key_press(window, key)
+            .expect("the window is live");
+    }
+
+    /// Lets go of `key`.
+    fn release(engine: &mut Hosted, key: crcbl_core::input::KeyCode) {
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .key_release(window, key)
+            .expect("the window is live");
+    }
+
     /// Commits `text`, the way a keyboard layout does.
     ///
     /// The only way a character reaches a field: `TextCommit` carries the
@@ -15215,7 +15308,16 @@ mod tests {
         );
     }
 
-    /// A loop whose console the console key has just opened.
+    /// A loop whose console the console key has just opened, and whose field
+    /// the frame after that engaged.
+    ///
+    /// **Two frames, and the second one is load-bearing.** The panel is an
+    /// element tree: the frame the key arrives on toggles the console after the
+    /// console's own frame has already run, so the first build is the next one,
+    /// and a tree engages a widget for the build that comes after the one that
+    /// asked. Nothing is lost in the meantime — `ConsolePanel` queues the edits
+    /// it cannot apply yet — but a check that wants to read the field on its
+    /// very next frame wants the field already taking keys.
     fn with_console_open() -> Hosted {
         let mut engine = hosted(None);
         assert!(!engine.console().is_open(), "a run starts with it closed");
@@ -15224,6 +15326,11 @@ mod tests {
         assert!(
             engine.console().is_open(),
             "the console key opens the panel"
+        );
+        step(&mut engine);
+        assert!(
+            engine.console().panel().is_editing(),
+            "the panel's field did not engage on the frame after it was built"
         );
         engine
     }
@@ -15302,12 +15409,17 @@ mod tests {
         }
     }
 
-    /// Where the console panel puts `cap` on this frame, in framebuffer pixels.
+    /// Where the console panel put `cap` on the last frame, in framebuffer
+    /// pixels.
+    ///
+    /// Read off the layout the console's own frame built rather than laid out
+    /// again here: the panel is an element tree and a second build in the same
+    /// frame would take the field's edits a second time.
     fn key_at(engine: &Hosted, cap: crcbl_ui::console::KeyCap) -> glam::Vec2 {
         let layout = engine
             .console()
-            .panel()
-            .layout(engine.gpu().extent(), engine.gpu().atlas());
+            .layout()
+            .expect("the console has been through a frame");
         let key = layout
             .keyboard()
             .keys()
@@ -15359,8 +15471,13 @@ mod tests {
             let at = key_at(&engine, crcbl_ui::console::KeyCap::Type(character));
             glass(&mut engine, at);
         }
+        // **One more frame for the last tap.** A tap is read off the tree the
+        // frame's build produced, so the character it makes is an `Edit` the
+        // *next* build applies — the same one frame a typed key waits, and the
+        // reason `ConsolePanel` queues its edits rather than dropping them.
+        step(&mut engine);
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "echo",
             "the keys a finger pressed did not spell the line",
         );
@@ -15372,7 +15489,8 @@ mod tests {
             let at = key_at(&engine, crcbl_ui::console::KeyCap::Type(character));
             glass(&mut engine, at);
         }
-        assert_eq!(engine.console().panel().field().text(), "echo hi");
+        step(&mut engine);
+        assert_eq!(engine.console().panel().line(), "echo hi");
 
         // **Sent from the keyboard's own return key**, not from **Send**: a
         // thumb is already down there, and this is the path a phone takes.
@@ -15384,7 +15502,7 @@ mod tests {
             "the line a finger sent never ran: {printed:?}",
         );
         assert!(
-            engine.console().panel().field().is_empty(),
+            engine.console().panel().line().is_empty(),
             "and the field kept the line it sent",
         );
     }
@@ -15428,7 +15546,7 @@ mod tests {
             2,
             "the console claimed a press where a hidden keyboard would be",
         );
-        assert!(engine.console().panel().field().is_empty());
+        assert!(engine.console().panel().line().is_empty());
     }
 
     /// **A tap on the on-screen keyboard is the console's and never the
@@ -15454,7 +15572,11 @@ mod tests {
             "a tap on the keyboard reached the game as a press: {:?}",
             engine.game.pointers,
         );
-        assert_eq!(engine.console().panel().field().text(), "q");
+        // One more frame for the tap, for `a_finger_opens_the_console…`'s
+        // reason: a tap is read off the build, so the edit it makes is the
+        // next build's.
+        step(&mut engine);
+        assert_eq!(engine.console().panel().line(), "q");
 
         // Shut it, and the same point is the game's again.
         tap(&mut engine, CONSOLE_KEY);
@@ -15558,9 +15680,264 @@ mod tests {
             engine.game.keys,
         );
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "w",
             "and the character reached the field"
+        );
+    }
+
+    /// **A key let go of while the console is up is heard to come up.**
+    ///
+    /// The check the removed fold leaves behind. The loop used to call
+    /// `menu::release_menu_keys` when the console opened, because the console
+    /// swallowed every key before the loop's own map saw it and a key held into
+    /// the panel was never heard to be released — so the map went on reporting
+    /// it held, and [`crate::input::Repeat::UI`]'s schedule would have walked
+    /// the panel underneath with nothing pressed once the console shut. The
+    /// console is in the context stack now and `MenuPump` feeds the map every
+    /// key whether or not the panel is up, so the map hears the release itself.
+    ///
+    /// Asserted on the map's own axis rather than on a repeat: a repeat needs
+    /// [`REPEAT_DELAY`](crate::input::REPEAT_DELAY) of wall time to elapse
+    /// between frames, and a headless loop runs a frame in microseconds. What
+    /// the axis says is the thing the repeat would be reading.
+    #[test]
+    fn a_key_let_go_of_under_the_console_is_heard_to_come_up() {
+        let mut engine = hosted(None);
+        serve(&mut engine);
+        tap(&mut engine, PAUSE_KEY);
+        step(&mut engine);
+
+        hold(&mut engine, MENU_DOWN_KEY);
+        step(&mut engine);
+        assert_eq!(
+            engine.menus.current().map(|menu| menu.selected()),
+            Some(1),
+            "the held key did not move the panel, so nothing below is about it",
+        );
+        assert_eq!(
+            engine.menu_actions.cardinal(crate::input::ui::MOVE),
+            Some(crate::input::Cardinal::Down),
+            "the map is not holding the key the console is about to cover",
+        );
+
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        release(&mut engine, MENU_DOWN_KEY);
+        step(&mut engine);
+        assert_eq!(
+            engine.menu_actions.cardinal(crate::input::ui::MOVE),
+            None,
+            "the map never heard the key come up under the open console, so it \
+             would walk the panel on the repeat schedule once the panel shut",
+        );
+
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        step(&mut engine);
+        assert_eq!(
+            engine.menus.current().map(|menu| menu.selected()),
+            Some(1),
+            "the panel walked on with nothing pressed",
+        );
+    }
+
+    /// **The two reserved contexts follow the console on and off the stack.**
+    ///
+    /// Rung 7d2's wiring, read off the loop's own map: `ui` goes on while the
+    /// panel has input and `text` over it while its field is taking typing, and
+    /// both come off again. Asserted on
+    /// [`ActionMap::is_context_active`](crate::input::ActionMap::is_context_active)
+    /// rather than on a key's effect because this is the mechanism the effects
+    /// below are downstream of — and a stack that leaked a push would refuse the
+    /// next pop rather than fail quietly.
+    #[test]
+    fn the_reserved_contexts_follow_the_console_open_and_shut() {
+        use crate::input::{text, ui};
+
+        let mut engine = hosted(None);
+        // Past the fixture's own start panel, which has input of its own and
+        // would hold the `ui` context up through all of this.
+        serve(&mut engine);
+        assert!(
+            engine.menus.current().is_none(),
+            "the fixture is still showing a menu, so nothing below is the console's"
+        );
+        assert!(
+            !engine.menu_actions.is_context_active(ui::CONTEXT),
+            "a run with no panel up has the ui context off the stack"
+        );
+        assert!(!engine.menu_actions.is_context_active(text::CONTEXT));
+
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        assert!(engine.console().is_open());
+        step(&mut engine);
+        assert!(
+            engine.menu_actions.is_context_active(ui::CONTEXT),
+            "the open console did not put the ui context on the stack"
+        );
+        assert!(
+            engine.menu_actions.is_context_active(text::CONTEXT),
+            "the open console's field did not take the text context"
+        );
+
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        assert!(!engine.console().is_open());
+        assert!(
+            !engine.menu_actions.is_context_active(text::CONTEXT),
+            "the text context outlived the panel that pushed it"
+        );
+        // `ui` comes off at the *start* of the next frame, where `MenuPump`
+        // decides whether the loop's UI has input at all: the frame that shut
+        // the panel had it up when it began.
+        step(&mut engine);
+        assert!(
+            !engine.menu_actions.is_context_active(ui::CONTEXT),
+            "the ui context outlived the panel that pushed it"
+        );
+    }
+
+    /// **A line typed at the console walks neither the panel under it nor the
+    /// game**, and the two halves are two different mechanisms.
+    ///
+    /// * The reserved `text` context owns the keys that edit, so
+    ///   [`MENU_LEFT_KEY`] and [`MENU_RIGHT_KEY`] — which the loop's own map
+    ///   binds as [`ui::MOVE`](crate::input::ui::MOVE) and a menu takes over a
+    ///   value row — produce no direction at all while the field has them.
+    /// * [`MenuPump`] does not navigate at all while the panel is up, which is
+    ///   what protects the panel from [`MENU_UP_KEY`] and [`MENU_DOWN_KEY`]:
+    ///   the console's history arrows are deliberately **not** in the `text`
+    ///   context, so those two still reach `ui_move` and must move nothing.
+    /// * And the game sees none of it, which is the pump's blanket claim —
+    ///   Space is this fixture's serve key and a console that let it through
+    ///   would serve the ball while somebody typed a command.
+    ///
+    /// Each half has its control: the same keys with the console shut steer the
+    /// panel and reach the game. Without them every assertion here would hold
+    /// for a panel that had stopped listening to the keyboard altogether.
+    #[test]
+    fn typing_at_the_console_walks_neither_the_panel_under_it_nor_the_game() {
+        use crcbl_core::input::KeyCode;
+
+        let mut engine = hosted(None);
+        serve(&mut engine);
+        tap(&mut engine, PAUSE_KEY);
+        step(&mut engine);
+        let rows = engine
+            .menus
+            .current()
+            .expect("Escape put the loop's own panel up")
+            .items()
+            .len();
+        assert!(rows > 1, "a one-row panel cannot show a move");
+        assert_eq!(engine.menus.current().map(|menu| menu.selected()), Some(0));
+
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        step(&mut engine);
+        engine.game.keys.clear();
+        engine.game.served = false;
+
+        // **The sideways pair, read off the map while they are held.** A tap
+        // would prove nothing: the map's edges are cleared per key inside the
+        // pump, so by the time a check can look they are gone either way. Held
+        // is a state, and the state says who owns the key — `text_type` while
+        // the field has it, and `ui_move`'s axis reading nothing.
+        for key in [MENU_LEFT_KEY, MENU_RIGHT_KEY] {
+            hold(&mut engine, key);
+            step(&mut engine);
+            assert!(
+                engine.menu_actions.button_held(crate::input::text::TYPE),
+                "{key} is not the text context's while the console's field has it",
+            );
+            assert_eq!(
+                engine.menu_actions.cardinal(crate::input::ui::MOVE),
+                None,
+                "{key} steered the ui while the console's field had it",
+            );
+            release(&mut engine, key);
+            step(&mut engine);
+        }
+        // The history pair: still `ui_move`, because a single-line field has no
+        // use for up and down and the `text` context leaves them alone. They
+        // move nothing all the same, because the pump does not navigate under
+        // an open panel — and the first assertion is what stops the second
+        // being a claim about the `text` context instead.
+        for key in [MENU_DOWN_KEY, MENU_UP_KEY] {
+            hold(&mut engine, key);
+            step(&mut engine);
+            assert!(
+                engine
+                    .menu_actions
+                    .cardinal(crate::input::ui::MOVE)
+                    .is_some(),
+                "{key} is not ui_move at all, so the panel below proves nothing",
+            );
+            // Checked per key rather than at the end, because down and then up
+            // is a round trip: a panel that took both would be back on row
+            // zero and a check that only looked afterwards would pass.
+            assert_eq!(
+                engine.menus.current().map(|menu| menu.selected()),
+                Some(0),
+                "{key} walked the panel under the console",
+            );
+            release(&mut engine, key);
+            step(&mut engine);
+        }
+        // And the letters, which only the game could have had.
+        for (key, character) in [
+            (KeyCode::KeyW, "w"),
+            (KeyCode::KeyA, "a"),
+            (KeyCode::Space, " "),
+        ] {
+            typed(&mut engine, character);
+            tap(&mut engine, key);
+            step(&mut engine);
+        }
+        step(&mut engine);
+        assert_eq!(
+            engine.console().panel().line(),
+            "wa ",
+            "the typing did not reach the field"
+        );
+        assert_eq!(
+            engine.menus.current().map(|menu| menu.selected()),
+            Some(0),
+            "typing at the console walked the panel underneath it"
+        );
+        assert!(
+            engine.game.keys.is_empty(),
+            "a key typed at the console reached the game: {:?}",
+            engine.game.keys,
+        );
+        assert!(
+            !engine.game.served,
+            "Space served the ball from the console"
+        );
+
+        // **The controls**, with the console shut: the panel steers and the
+        // game hears its own key again.
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        step(&mut engine);
+        tap(&mut engine, MENU_DOWN_KEY);
+        step(&mut engine);
+        assert_eq!(
+            engine.menus.current().map(|menu| menu.selected()),
+            Some(1),
+            "the down key is not ui_move once the console is shut, so the check \
+             above proves nothing",
+        );
+        engine.game.keys.clear();
+        tap(&mut engine, KeyCode::KeyW);
+        step(&mut engine);
+        assert!(
+            engine.game.keys.contains(&(KeyCode::KeyW, true)),
+            "a letter does not reach the game once the console is shut either, so \
+             the claim above proves nothing: {:?}",
+            engine.game.keys,
         );
     }
 
@@ -15593,7 +15970,7 @@ mod tests {
         step(&mut engine);
         assert!(engine.console().is_open());
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "",
             "the backtick that opened the console was typed into it"
         );
@@ -15601,7 +15978,7 @@ mod tests {
         // Closing, over a line that is being typed.
         typed(&mut engine, "ech");
         step(&mut engine);
-        assert_eq!(engine.console().panel().field().text(), "ech");
+        assert_eq!(engine.console().panel().line(), "ech");
         engine
             .shell_mut()
             .key_press(window, CONSOLE_KEY)
@@ -15617,7 +15994,7 @@ mod tests {
         step(&mut engine);
         assert!(!engine.console().is_open(), "the key closed the panel");
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "ech",
             "the backtick that closed the console was typed into the line first"
         );
@@ -15899,12 +16276,14 @@ mod tests {
     /// **Ctrl+V puts what is on the clipboard into the field.**
     ///
     /// `docs/plan/52-debug-console.md` slice 8's first follow-up, end to end
-    /// through the loop: the key is claimed by the open console, the loop asks
-    /// the shell once the pump has let go of it, and the answer — which arrives
-    /// in a *later* batch, because every backend's read is asynchronous — lands
-    /// in the line being typed. The field's contents are the observable; the
-    /// request having been made is not, since a request nothing answered types
-    /// nothing.
+    /// through the loop — and down **one** path since rung 7d2: the key is an
+    /// `Edit::Paste` like it is in any other field, the field asks through
+    /// `Ui::take_clipboard_requests`, the loop's `TextPump` issues the read once
+    /// the pump has let go of the shell, and the answer — which arrives in a
+    /// *later* batch, because every backend's read is asynchronous — is matched
+    /// back by request id and lands in the line being typed. The field's
+    /// contents are the observable; the request having been made is not, since a
+    /// request nothing answered types nothing.
     #[test]
     fn the_paste_key_puts_the_clipboard_into_the_console_field() {
         let mut engine = with_console_open();
@@ -15916,14 +16295,16 @@ mod tests {
             .expect("the headless clipboard takes an offer");
 
         holding(&mut engine, crcbl_core::input::Modifiers::CTRL, |engine| {
-            tap(engine, crate::debug_console::CONSOLE_PASTE_KEY)
+            tap(engine, crcbl_core::input::KeyCode::KeyV)
         });
-        // Two frames: the first takes the key and issues the read, the second
-        // is the batch the answer arrives in.
+        // Three frames: the first takes the key and makes the edit, the second
+        // is the frame the field asks and the read is issued, the third is the
+        // batch the answer arrives in.
+        step(&mut engine);
         step(&mut engine);
         step(&mut engine);
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "echo pasted",
             "the clipboard did not reach the line being typed"
         );
@@ -15931,7 +16312,7 @@ mod tests {
         // And the pasted line runs, which is what a paste is for.
         tap(&mut engine, crcbl_core::input::KeyCode::Enter);
         step(&mut engine);
-        assert_eq!(engine.console().panel().field().text(), "");
+        assert_eq!(engine.console().panel().line(), "");
     }
 
     /// **A bare `V` is a letter, not a paste.**
@@ -15948,12 +16329,12 @@ mod tests {
             .clipboard_offer(window, &[crcbl_shell::ClipboardOffer::text("pasted")])
             .expect("the headless clipboard takes an offer");
 
-        tap(&mut engine, crate::debug_console::CONSOLE_PASTE_KEY);
+        tap(&mut engine, crcbl_core::input::KeyCode::KeyV);
         typed(&mut engine, "v");
         step(&mut engine);
         step(&mut engine);
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "v",
             "a bare V pasted instead of typing"
         );
@@ -15967,6 +16348,11 @@ mod tests {
     /// did nothing there would look exactly like an empty clipboard. Driven here
     /// by taking the capability off the headless shell, which is what
     /// [`HeadlessShell::set_caps`](crcbl_shell::HeadlessShell::set_caps) is for.
+    ///
+    /// Since rung 7d2 the refusal is the **field's**, not the console's: the
+    /// pump warns with the error in it and answers the input
+    /// `ClipboardReply::Refused`, which sets `:refused` and draws
+    /// `default.css`'s red border. One refusal path for every field there is.
     #[test]
     fn a_backend_with_no_clipboard_says_so_rather_than_pasting_nothing() {
         let logs = crcbl_core::log::capture();
@@ -15976,19 +16362,24 @@ mod tests {
         );
 
         holding(&mut engine, crcbl_core::input::Modifiers::CTRL, |engine| {
-            tap(engine, crate::debug_console::CONSOLE_PASTE_KEY)
+            tap(engine, crcbl_core::input::KeyCode::KeyV)
         });
         step(&mut engine);
         step(&mut engine);
-        let printed = console_lines(&logs);
+        step(&mut engine);
+        let warned: Vec<String> = logs
+            .records()
+            .into_iter()
+            .map(|record| record.message)
+            .collect();
         assert!(
-            printed
+            warned
                 .iter()
-                .any(|line| line.starts_with("paste: this backend has no clipboard")),
-            "a refused clipboard read said nothing at all: {printed:?}"
+                .any(|line| line.starts_with("text input: the clipboard refused the paste")),
+            "a refused clipboard read said nothing at all: {warned:?}"
         );
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "",
             "and nothing was typed into the field"
         );
@@ -16238,7 +16629,7 @@ mod tests {
         tap(&mut engine, crcbl_core::input::KeyCode::Tab);
         step(&mut engine);
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "an",
             "`anisotropic_filtering` and `antialiasing` share only `an`, so a longer \
              fill would have chosen between them"
@@ -16253,7 +16644,7 @@ mod tests {
         tap(&mut engine, crcbl_core::input::KeyCode::Tab);
         step(&mut engine);
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "antialiasing",
             "one candidate completes to the whole name"
         );
@@ -16266,17 +16657,17 @@ mod tests {
         let mut engine = with_console_open();
         run_line(&mut engine, "echo hello");
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "",
             "a submit clears the field"
         );
         tap(&mut engine, crcbl_core::input::KeyCode::ArrowUp);
         step(&mut engine);
-        assert_eq!(engine.console().panel().field().text(), "echo hello");
+        assert_eq!(engine.console().panel().line(), "echo hello");
         tap(&mut engine, crcbl_core::input::KeyCode::ArrowDown);
         step(&mut engine);
         assert_eq!(
-            engine.console().panel().field().text(),
+            engine.console().panel().line(),
             "",
             "and walking back down gives the half-typed line back"
         );
@@ -16439,8 +16830,10 @@ mod tests {
         engine.debug.toggle();
         step(&mut engine);
 
-        let extent = engine.gpu.extent();
-        let layout = engine.console().panel().layout(extent, engine.gpu.atlas());
+        let layout = engine
+            .console()
+            .layout()
+            .expect("the console has been through a frame");
         let (panel_min, panel_max) = layout.panel();
         let scrim = layout.style().panel_color;
         let commands = engine.gpu.draw_list.commands();
@@ -16458,6 +16851,26 @@ mod tests {
             at > 0,
             "the console drew first, so nothing was underneath it"
         );
+        // **And after the debug overlay by name**, which the rectangle check
+        // below cannot say: the overlay is anchored in the top-right corner
+        // and the panel is the whole top of the frame, so an overlay drawn
+        // *over* the console is still inside its rectangle and every
+        // assertion below would hold. The overlay's own background is what
+        // names it.
+        let overlay = engine.debug.panel.style.bg;
+        let overlay_at = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    crcbl_ui::draw_list::DrawCommand::Rect { color, .. } if *color == overlay
+                )
+            })
+            .expect("the debug overlay drew no background, so its order proves nothing");
+        assert!(
+            overlay_at < at,
+            "the debug overlay was drawn at {overlay_at}, after the console's scrim at {at}",
+        );
 
         let inside = |point: glam::Vec2| {
             point.x >= panel_min.x
@@ -16465,7 +16878,18 @@ mod tests {
                 && point.y >= panel_min.y
                 && point.y <= panel_max.y
         };
-        for command in &commands[at..] {
+        // **Or clipped to somewhere inside it.** The panel is an element tree
+        // since UI rung 7d2 and its log box has `overflow: hidden`, so the
+        // rows that scrolled off the top are *clipped* rather than culled: the
+        // command carries a position above the panel and the pass draws none of
+        // it. A clip wholly inside the panel is therefore as good as a position
+        // inside it, and the assertion keeps its teeth — a command with no clip
+        // is still held to its own rectangle.
+        let clips: Vec<_> = engine.gpu.draw_list.clips().to_vec();
+        for (command, clip) in commands[at..].iter().zip(&clips[at..]) {
+            if inside(clip.min) && inside(clip.max) {
+                continue;
+            }
             let ok = match command {
                 crcbl_ui::draw_list::DrawCommand::Rect { min, max, .. }
                 | crcbl_ui::draw_list::DrawCommand::RectOutline { min, max, .. } => {

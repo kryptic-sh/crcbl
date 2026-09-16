@@ -30,6 +30,39 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 - **Rounded outlines and nested scroll containers** are covered by unit tests
   and no GPU claim; D3D12 and Metal draw `ui_focus` only on CI.
 
+## What UI rung 7d2 shipped without (2026-09-16)
+
+`DebugPanel` and `ConsolePanel` moved onto the tree with the gaps below.
+
+- **The on-screen keyboard is not on the tree.** `TouchKeyboard` keeps its own
+  layout, hit test and `render`, drawn over the panel's emission, and
+  `web/tools/browser-e2e.mjs` restates its geometry as constants — so moving it
+  moves those too.
+- **The debug panel's value column is measured, not laid out.** One column
+  across sections is a grid, which flexbox cannot express, so the widest label
+  is measured in the `FontAtlas`; a sheet that selected a parsed font for
+  `debug-panel` would measure in the wrong font.
+- **The debug panel costs about 13.0 µs a frame where its arithmetic cost 0.62
+  µs** (release, median of seven, ten rows at 1920×1080). About half is the
+  second `Ui::layout` the anchor needs, which only re-places what it laid out; a
+  `Ui::place(origin)` would remove it. A console frame is 19.3 µs against 0.2 µs
+  with nothing on screen.
+- **A pointer-driven console action lands a frame late**: a tapped on-screen key
+  is read off the build, so its edit is the next build's, and a command's
+  printed answer is drawn on the next frame. `Console::covers` is likewise a
+  frame behind on a resize, because the console's frame runs after the toggle
+  this batch may carry.
+- **`Console::is_editing` is "the console is open"**, not the tree's own
+  engagement — the honest answer for the context stack, and the reason
+  `ConsolePanel` keeps an edit queue.
+- **The console's clipboard is still only exercised through `HeadlessShell`** —
+  X11, Wayland, Win32 and AppKit are untested, as rung 7c left it.
+- **Geometry moved by a pixel or two** where a border now takes part in layout
+  instead of being drawn into space the layout had not reserved: the console's
+  log box, input well, prompt and Send button each shift up to 6 px, and at
+  scale 1 the log shows 17 rows where it showed 18. No golden holds either
+  panel, so none moved.
+
 ## What UI rung 7d1 shipped without (2026-09-16)
 
 `Menu` and `MenuSet` moved onto the tree with the gaps below.
@@ -72,22 +105,12 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
   percentage `border-image-width`, `border-image-outset`, `repeat`, `round` and
   `space`, `background-repeat`, `-size` and `-position`; a rounded corner clips
   neither image.
-- **What 7d2 inherits**: `DebugPanel` and `ConsolePanel` on the tree with the
-  `ui` and `text` contexts pushed, `ConsolePanel` onto `Ui::text_input`,
-  `TextPump` wired into `Loop`, and the two clipboard paths merged. The console
-  claims both edges of every key while it is open, so the loop releases the menu
-  map's keys when it opens; that fold moves when the console joins the stack.
 
 ## What UI rung 7c shipped without (2026-09-16)
 
 `Ui::text_input`, `crcbl_ui::edit` and `crcbl::text_input::TextPump` landed with
 the gaps below.
 
-- **Nothing in `Loop` runs it.** `Loop` hosts no tree, pushes neither the `ui`
-  nor the `text` context and runs no `TextPump`; the clipboard wiring is
-  exercised only against `HeadlessShell`. Rung 7d inherits this, and with it two
-  clipboard paths to merge (`Loop`'s console paste request and
-  `TextPump::serve`) and `ConsolePanel` moving onto `Ui::text_input`.
 - **Decision owed: caret stops are `char`s, not grapheme clusters.** An `e` plus
   a combining accent is two stops, and so is an emoji with a modifier. Nothing
   in `Cargo.lock` segments by UAX #29; the options are adding a segmentation

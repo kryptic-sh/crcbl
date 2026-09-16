@@ -1347,14 +1347,17 @@ const EXPECTATIONS = {
       // blocks below that move the level.
       filter: 'log',
       filterAnswer: 'log info',
-      // **What Ctrl+V answers here.** `crcbl::engine::Loop::ask_for_paste`
-      // prints this when the shell refuses the read, and the web backend is
-      // the backend that refuses: a browser's clipboard read is a
-      // permission-gated promise and `crates/crcbl-shell/src/web/mod.rs` has
-      // no route to one. The line is the whole point of the check — a paste
-      // that silently did nothing on this tier would read exactly like an
-      // empty clipboard.
-      pasteRefused: 'paste: this backend has no clipboard to read',
+      // **What Ctrl+V answers here.** The console's field is the tree's text
+      // input since UI rung 7d2, so the paste is an `Edit::Paste` like it is
+      // in any other field and `crcbl::text_input::TextPump::serve` is what
+      // warns when the shell refuses the read. The web backend is the backend
+      // that refuses: a browser's clipboard read is a permission-gated promise
+      // and `crates/crcbl-shell/src/web/mod.rs` has no route to one. The line
+      // is the whole point of the check — a paste that silently did nothing on
+      // this tier would read exactly like an empty clipboard. The field also
+      // turns its border red, which nothing here can read: the panel is
+      // glyphs on a canvas.
+      pasteRefused: 'text input: the clipboard refused the paste',
     },
     // **THE ONE CONSOLE LINE NOBODY TYPES.** `autoexec.cfg` is the only route
     // into this engine that does not need a keyboard: `crcbl::engine::Loop::new`
@@ -8952,7 +8955,7 @@ try {
 
     // **The paste key, and the answer this tier gives it.** `Ctrl+V` is
     // claimed by the open console on every tier and issues
-    // `Shell::clipboard_request`; here that is refused, and the console says
+    // `Shell::clipboard_request`; here that is refused, and the engine says
     // which half is missing rather than leaving the field empty and the
     // visitor guessing at their own clipboard. No `text` on the keydown,
     // because a browser sends none while Ctrl is held — the same condition the

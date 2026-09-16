@@ -78,9 +78,13 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   with `:checked`, `:open` and a focus ring, and a `ui_widgets` golden. **Rung
   7c is built** (2026-09-16): `Ui::text_input` on `crcbl_ui::edit::LineEdit`,
   the `text` input context, `crcbl::text_input::TextPump`'s clipboard, and a
-  `ui_text_input` golden; caret stops are `char`s and pre-edit is not drawn. Not
-  built from rung 7 yet: `Menu`, `MenuSet`, `DebugPanel` and `ConsolePanel` on
-  the tree with the `ui` and `text` contexts pushed (7d).
+  `ui_text_input` golden; caret stops are `char`s and pre-edit is not drawn.
+  **Rung 7d2 is built** (2026-09-16): `DebugPanel` and `ConsolePanel` lay out
+  and draw through `tree` behind their APIs, `Loop` runs the console's tree once
+  a frame and pushes both reserved contexts, and `TextPump` drives the field.
+  Not built from that rung yet: the on-screen keyboard, which keeps its own
+  layout and hit test over the tree, and the debug panel's value column, which
+  is a measured `min-width` rather than a grid flexbox cannot express.
 - **`widget`** — `Label`, `Button`, `ButtonSkin`, `Style`, `SkinInsets`,
   `PointerInput`, `UiState`, `WidgetId`. The rest of the MVP widget set below is
   unbuilt.
@@ -95,7 +99,8 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   it. Not built from that rung yet: the context's WASD, Space and Tab defaults
   (four samples bind Space as gameplay under their start panels), a cycler
   widget on the tree, and menu rows taking part in tree focus — the selection
-  stays the model's. `DebugPanel` and `ConsolePanel` are 7d2.
+  stays the model's. `DebugPanel` and `ConsolePanel` are rung 7d2, in the
+  `widgets` bullet above.
 - **`touch`** — `TouchStick`, `TouchButton`; see [19-input.md](19-input.md).
 - **`debug`** and **`budget`** — the modular panel described under "Debug tools"
   below, and the frame CPU-vs-GPU row [40-profiling.md](40-profiling.md) owns.

@@ -9,11 +9,20 @@
 //! nothing running.
 //!
 //! ```text
-//! ConsolePanel ── layout(extent, atlas) ─→ ConsoleLayout ─→ render(&mut DrawList)
-//!    ├── LogView       the records, wrapped, coloured by level, newest at the bottom
-//!    ├── TextField     the line being typed, and its caret
-//!    └── TouchKeyboard the keys a finger presses, on a device that has no others
+//! ConsolePanel ── layout(extent, atlas, pointer, input) ─→ ConsoleLayout
+//!    │                     │                                    │
+//!    │                     └─ crcbl_ui::tree ──────────────→ render(&mut DrawList)
+//!    ├── LogView        the records, wrapped, coloured by level, newest at the bottom
+//!    ├── Ui::text_input the line being typed: its caret, selection and clipboard
+//!    └── TouchKeyboard  the keys a finger presses, on a device that has no others
 //! ```
+//!
+//! The panel lays out and draws through [`crate::tree`] — one block tree a
+//! frame, styled by `default.css`'s `console*` rules — and its input line is
+//! the tree's own [`Ui::text_input`](crate::tree::Ui::text_input), so the
+//! console selects, moves by words, double-clicks and copies, cuts and pastes
+//! with everything else built on the tree. [`TouchKeyboard`] is the one part
+//! that keeps its own layout and draws itself, over the tree's emission.
 //!
 //! The panel is the top [`CONSOLE_HEIGHT_FRACTION`] of the frame, Source's
 //! drop-down, and is laid out at [`MenuStyle::pixel_art`]'s whole-number scale
@@ -21,7 +30,6 @@
 //!
 //! [`MenuStyle::pixel_art`]: crate::menu::MenuStyle::pixel_art
 
-mod field;
 mod keyboard;
 mod log_view;
 mod panel;
@@ -35,7 +43,6 @@ use crcbl_core::log::Level;
 use crate::text::{FontAtlas, LINE_HEIGHT};
 use crate::widget::{NATURAL_FONT_SIZE, Style};
 
-pub use field::{TextField, TextFieldStyle};
 pub use keyboard::{
     KEY_ID_BASE, KEY_ID_SPAN, KEYBOARD_HEIGHT_FRACTION, KeyBox, KeyCap, KeyboardLayout, Layer,
     TouchKeyboard,
@@ -56,9 +63,13 @@ pub const CARET_BLINK: Duration = Duration::from_millis(530);
 /// Whether the caret is in its shown half of the blink at `elapsed` into the
 /// run.
 ///
-/// The console's own clock is the caller's — the panel draws no frames of its
-/// own and holds no `Instant`, which is also what makes a test able to draw
-/// both halves of the blink without waiting for one.
+/// The clock is the caller's — nothing here holds an `Instant`, which is what
+/// makes a test able to draw both halves of the blink without waiting for one.
+/// **The tree's text input is what calls it now**, off the time since that
+/// input last moved its caret ([`TextInput::dt`](crate::tree::TextInput::dt)
+/// summed), so every editable field in the crate — the console's among them —
+/// blinks on one interval. It stays here because this is where the interval
+/// is, and because it is public.
 #[must_use]
 pub fn caret_shown(elapsed: Duration) -> bool {
     let period = CARET_BLINK.as_nanos().max(1);
@@ -83,20 +94,27 @@ pub struct ConsoleStyle {
     pub text_size: f32,
     /// Space between the panel's edge and its contents.
     pub padding: Vec2,
-    /// How wide the caret bar is drawn.
+    /// How wide the typed line's caret is drawn.
+    ///
+    /// A length of the tree text input's own caret block, so it reaches it
+    /// through the one-rule stylesheet the panel writes at its chosen scale
+    /// rather than through an inline declaration: a widget builds its parts
+    /// itself, and inline declarations reach only the node the caller built.
     pub caret_width: f32,
     /// The panel's own fill — the scrim the frame behind it is dimmed with.
     pub panel_color: [f32; 4],
     /// The line along the panel's bottom edge, and the field's outline.
     pub border_color: [f32; 4],
     /// The input row's fill, behind the prompt and the typed line.
+    ///
+    /// The **typed line itself**, its caret and its selection are the tree's
+    /// text input, and `default.css`'s `text-input.console-input` rules are
+    /// what colour them: none of the three is a length that scales, and a
+    /// colour set here could not carry the widget's `:engaged` and `:refused`
+    /// states, which inline declarations win over.
     pub field_color: [f32; 4],
     /// The `]` prompt's colour.
     pub prompt_color: [f32; 4],
-    /// The typed line's colour.
-    pub text_color: [f32; 4],
-    /// The caret's colour.
-    pub caret_color: [f32; 4],
     /// A record logged at [`Level::Error`].
     pub error_color: [f32; 4],
     /// A record logged at [`Level::Warn`].
@@ -114,7 +132,14 @@ pub struct ConsoleStyle {
     /// The matched prefix at the head of every candidate, which is what says
     /// why the list holds what it holds.
     pub match_color: [f32; 4],
-    /// The **Send** button's palette, which is [`crate::widget::Button`]'s own.
+    /// The on-screen keyboard's key palette, which is
+    /// [`crate::widget::Button`]'s own — [`TouchKeyboard::render`] is what
+    /// draws from it.
+    ///
+    /// **Not the Send button's.** That is a node of the element tree now, and
+    /// its three states are `default.css`'s `button` rules: an inline
+    /// declaration wins over every rule, so a colour set here could not have a
+    /// `:hover` at all.
     pub button: Style,
 }
 
@@ -141,8 +166,6 @@ impl ConsoleStyle {
             border_color: [0.42, 0.46, 0.72, 1.0],
             field_color: [0.10, 0.11, 0.18, 1.0],
             prompt_color: [0.62, 0.64, 0.82, 1.0],
-            text_color: [0.94, 0.95, 1.0, 1.0],
-            caret_color: [0.94, 0.95, 1.0, 1.0],
             // The five levels read as a temperature: red, amber, plain, then two
             // greys the eye passes over, so a warning in a wall of debug lines
             // is found without reading it.
@@ -192,17 +215,6 @@ impl ConsoleStyle {
     #[must_use]
     pub fn advance(&self, atlas: &FontAtlas) -> f32 {
         atlas.text_width("M", self.glyph_scale())
-    }
-
-    /// How a [`TextField`] in this panel draws itself.
-    #[must_use]
-    pub fn field_style(&self) -> TextFieldStyle {
-        TextFieldStyle {
-            size: self.text_size,
-            text_color: self.text_color,
-            caret_color: self.caret_color,
-            caret_width: self.caret_width,
-        }
     }
 
     /// The multiplier from the atlas's baked-in size to this style's.

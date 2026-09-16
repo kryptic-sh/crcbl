@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The console's editable line is the tree's text input, and `TextField` is
+  gone.** `crcbl_ui::console::TextField`, `TextFieldStyle`,
+  `ConsoleStyle::field_style`, `ConsoleStyle::text_color` and `caret_color` are
+  removed; `LogView::render` is replaced by
+  `LogView::visible_rows(rows, columns)`; `ConsolePanel::layout` and
+  `layout_with` take `&mut self`, a `PointerInput` and the frame's `TextInput`,
+  and `render` loses `caret_visible`. `crcbl::debug_console::CONSOLE_PASTE_KEY`,
+  `Console::take_paste_request`, `Console::expect_paste` and
+  `Loop::ask_for_paste` are removed — Ctrl or Cmd with V is an `Edit::Paste`
+  that `crcbl::text_input::TextPump::serve` carries — and `Console::point` is
+  now `Console::frame(extent, atlas, pointer, text)` with
+  `Console::draw(dl, atlas)` beside it.
 - **`crcbl::engine::MenuPump::new` takes the loop's action map and a frame
   time**: `MenuPump::new(menus, held, actions, showing, dt)`, where `actions` is
   the new `crcbl::engine::menu_actions()` map — the reserved `ui` context and
@@ -189,6 +201,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Ui::engage(key)`** engages a focusable `Role::Engage` node immediately
+  rather than next frame, so the frame after it already takes that frame's
+  edits; whatever it displaces reports `Engagement::Committed`. It is what a
+  screen that is always editing, like the debug console's prompt, calls where a
+  click would have engaged the node.
 - **Pictures in the stylesheet subset**: `background-image` and `border-image`
   (with `-source`, `-slice` including `fill`, `-width` and `-repeat: stretch`),
   whose `url(name)` names an image the application binds with the new
@@ -1794,6 +1811,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The debug panel and the console are built on the element tree**, styled by
+  `default.css`'s new `debug-panel` and console rules and laid out by flexbox.
+  The debug panel emits the same draw list it did before, command for command,
+  so no sample's overlay moves; the console's line gains selection, word moves,
+  double-click and the clipboard from `Ui::text_input`. `Loop` pushes the
+  reserved `ui` context while either panel has input and `text` over it while
+  the console's field is taking typing, and no longer releases the menu map's
+  keys by hand when the console opens.
 
 - **The engine's menus are built on the element tree.** `Menu` and `MenuSet`
   keep their API: the panel, its title and every row are blocks and spans laid

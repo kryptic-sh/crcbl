@@ -45,6 +45,31 @@ readout-surface {
 }
 
 /*
+ * DebugPanel: a column of sections, each a title over `label: value` rows.
+ * Its colours, font size, padding and the two gaps are `DebugStyle`'s, set
+ * inline per panel; the labels' `min-width` is the widest label in the whole
+ * panel, which is what puts every value in one column across sections.
+ *
+ * It draws in the bitmap font, for the reason `readout` names: a developer
+ * tool stays legible whatever an app's sheet selects for its own text.
+ */
+debug-panel {
+  font-family: bitmap;
+  flex-direction: column;
+}
+
+.debug-section {
+  flex-direction: column;
+}
+
+/* A row is as wide as the panel; neither of its spans gives up a column. */
+.debug-title,
+.debug-label,
+.debug-value {
+  flex-shrink: 0;
+}
+
+/*
  * The widget set: crcbl_ui::tree::widgets, in one dark theme. A game restyles
  * a widget by naming the same selectors in its own sheet.
  *
@@ -474,4 +499,107 @@ menu-item:active {
 .menu-thumb {
   flex-shrink: 0;
   background: color(srgb-linear 0.94 0.95 1);
+}
+
+/*
+ * ConsolePanel: crcbl_ui::console's drop-down. Like the menu, it is drawn at a
+ * whole-number pixel-art scale, so every length — the panel's height and
+ * padding, the well's border, the row and the font size — is `ConsoleStyle`'s,
+ * set inline per scale, and so are the colours that style owns, the log's
+ * per-level colour among them.
+ *
+ * What is here is the structure, and what an inline declaration cannot carry:
+ * the Send button's three states — the widget set's own `button` rules above,
+ * because an inline colour wins over every rule and so could have no `:hover`
+ * — and the look of the text input's own parts, which the widget builds itself
+ * and a caller's inline declarations never reach.
+ *
+ * The log box clips and packs its rows against its bottom edge: that is what
+ * "newest at the bottom" is on the tree, and the rows that fall off the top are
+ * the oldest ones the model offered.
+ */
+console-screen {
+  font-family: bitmap;
+}
+
+console {
+  flex-direction: column;
+}
+
+.console-log {
+  flex-direction: column;
+  justify-content: flex-end;
+  flex-grow: 1;
+  flex-basis: 0;
+  overflow: hidden;
+}
+
+/* A row keeps its height however many of them the log offers. */
+.console-line {
+  flex-shrink: 0;
+}
+
+.console-row {
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.console-field {
+  flex-grow: 1;
+  align-items: center;
+  min-width: 0;
+}
+
+.console-prompt {
+  flex-shrink: 0;
+}
+
+/*
+ * The typed line takes the well's free width and is scrolled under its caret
+ * by the tree, so a long line is clipped by the well rather than windowed by
+ * the field.
+ */
+text-input.console-input {
+  flex-grow: 1;
+  min-width: 0;
+  width: auto;
+  padding: 0;
+  border-width: 0;
+  background: transparent;
+  color: color(srgb-linear 0.94 0.95 1);
+}
+
+/*
+ * The caret and the selection are parts the widget builds itself, so an inline
+ * declaration cannot reach them. Their colours are here; the caret's *width*
+ * is `ConsoleStyle::caret_width`, which grows with the scale, and the panel
+ * writes it into a one-rule sheet of its own above this one. This width is
+ * what a panel that has not written that sheet yet draws.
+ */
+text-input.console-input > .text-input-caret {
+  width: 2px;
+  background: color(srgb-linear 0.94 0.95 1);
+}
+
+text-input.console-input > .text-input-selection {
+  background: color(srgb-linear 0.24 0.27 0.44);
+}
+
+button.console-send {
+  flex-shrink: 0;
+}
+
+/* The candidates hang below the panel, lined up with the typed token. */
+.console-completion {
+  flex-direction: column;
+}
+
+.console-candidate {
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.console-match,
+.console-tail {
+  flex-shrink: 0;
 }

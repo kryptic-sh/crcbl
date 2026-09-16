@@ -379,6 +379,9 @@ pub(crate) struct FocusState {
     pub debug: bool,
     /// What [`Ui::set_focus`] asked for, applied when the next frame begins.
     requested: Option<NodeKey>,
+    /// A node [`Ui::engage`] took the engagement from, for the next frame to
+    /// report [`Engagement::Committed`] on.
+    displaced: Option<NodeKey>,
     /// Nodes whose `nav-*` id was already reported as matching nothing.
     warned: HashSet<NodeKey>,
 }
@@ -465,6 +468,14 @@ impl Ui {
 
         let modal = self.active_modal();
         let mut events = Events::default();
+
+        // `Ui::engage` took the engagement between frames; the node it took it
+        // from hears about it here, as a click elsewhere would have told it.
+        if let Some(displaced) = self.focus.displaced.take()
+            && self.focus.engaged != Some(displaced)
+        {
+            events.ended = Some((displaced, Engagement::Committed));
+        }
 
         // A request stands in for a click on the node it names.
         if let Some(requested) = self.focus.requested.take()
@@ -855,6 +866,39 @@ impl Ui {
     /// which leaves focus where it is.
     pub fn set_focus(&mut self, key: NodeKey) {
         self.focus.requested = Some(key);
+    }
+
+    /// Focuses and engages `key` **now**, for the frames that follow: what a
+    /// screen that is always editing calls, where a click would have done it.
+    ///
+    /// Engagement is taken immediately rather than requested for the next
+    /// frame, unlike [`Ui::set_focus`], and that is the point of it: the next
+    /// frame's resolution finds the node already engaged and reports
+    /// [`Engagement::Engaged`] rather than [`Engagement::Began`], so
+    /// [`Ui::text_input`] takes that frame's edits — an input engaged only on
+    /// the `Began` frame deliberately takes none. The debug console's prompt is
+    /// engaged for as long as the console is open, and a frame of typing
+    /// swallowed each time a click landed elsewhere in the panel is what this
+    /// avoids.
+    ///
+    /// **It engages nothing** unless `key` is a focusable, drawn node of the
+    /// tree as last laid out whose [`Behavior`] role is [`Role::Engage`]:
+    /// engagement is a contract a widget keeps, and a node that is not one has
+    /// nothing to keep it. Whatever was engaged before is displaced, and
+    /// reports [`Engagement::Committed`] when the next frame resolves, which is
+    /// what a click elsewhere would have given it.
+    pub fn engage(&mut self, key: NodeKey) {
+        if !self.can_focus(key)
+            || self.store.by_key(key).map(|node| node.behavior.role) != Some(Role::Engage)
+        {
+            return;
+        }
+        self.focus.requested = Some(key);
+        if self.focus.engaged == Some(key) {
+            return;
+        }
+        self.focus.displaced = self.focus.engaged;
+        self.focus.engaged = Some(key);
     }
 
     /// The engaged node.

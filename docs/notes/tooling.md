@@ -132,7 +132,12 @@ than fixed:
   text before the caret with `FontAtlas::text_width` instead — the same advances
   `layout_line` walks — and
   `the_caret_lands_on_the_column_it_names_across_a_space` is the check.
-- **`TextField` has a caret-following window and no other scrolling.** A line
+- **`TextField` was deleted by UI rung 7d2 (2026-09-16)**, and the console's
+  line is `Ui::text_input` over `crcbl_ui::edit::LineEdit`, which selects,
+  word-moves and pastes. The two records below describe that widget as it was;
+  they are kept because the caret-column trap and the control-character rule
+  outlived it.
+- **`TextField` had a caret-following window and no other scrolling.** A line
   longer than the box shows its last columns with the caret pinned to the last
   one; there is no stored scroll offset, no selection, no clipboard and no IME
   (all declined for v0 by the plan). A caller that passes `usize::MAX` columns

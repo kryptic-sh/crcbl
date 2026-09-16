@@ -42,10 +42,28 @@
 //! Visible, the cost is one [`DrawList`] text command per row plus one
 //! background rect. Section and row strings are reused across frames; the draw
 //! commands are not, because [`DrawList::text`] takes an owned `String`.
+//!
+//! # The panel is built on the element tree
+//!
+//! [`DebugPanel::size`] and [`DebugPanel::render`] build the same
+//! [`crate::tree`] — a `debug-panel` column, a `.debug-section` per module, a
+//! `.debug-row` per row and a span for each title, label and value — lay it out
+//! on Taffy and read its extent back or emit it. The structure is styled by the
+//! engine's `default.css`; what [`DebugStyle`] holds — the colours, the font
+//! size, the padding and the two gaps — is each panel's own and goes on the
+//! nodes as inline declarations, which is the split [`crate::readout`] already
+//! takes.
+//!
+//! **The value column is measured, not laid out.** Every value in the panel
+//! starts at one column, across sections as well as rows, and flexbox aligns
+//! nothing across two containers — that is a grid. So the widest label is
+//! measured in `atlas` and becomes the labels' `min-width`, which is the
+//! arithmetic the panel did before, moved onto a node.
 
 use core::fmt;
 use core::fmt::Write as _;
 use core::time::Duration;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use glam::Vec2;
@@ -53,8 +71,10 @@ use glam::Vec2;
 use crate::budget::BudgetStats;
 use crate::draw_list::DrawList;
 use crate::hud::Anchor;
-use crate::text::{FontAtlas, LINE_HEIGHT};
-use crate::widget::NATURAL_FONT_SIZE;
+use crate::style::{Declaration, Sides};
+use crate::text::FontAtlas;
+use crate::tree::{AvailableSpace, Length, LengthAuto, NodeKey, Ui};
+use crate::widget::{NATURAL_FONT_SIZE, PointerInput};
 
 // ---------------------------------------------------------------------------
 // Sections
@@ -474,7 +494,11 @@ impl DebugPanel {
     /// nothing.
     #[must_use]
     pub fn size(&self, atlas: &FontAtlas) -> Vec2 {
-        self.layout(atlas).map_or(Vec2::ZERO, |layout| layout.size)
+        self.laid_out(atlas, |ui, panel| {
+            let (min, max) = ui.rect(panel).expect("laid out this frame");
+            max - min
+        })
+        .unwrap_or(Vec2::ZERO)
     }
 
     /// Draws the panel into `dl`.
@@ -483,85 +507,107 @@ impl DebugPanel {
     /// including no background rect, so an overlay with nothing to say is
     /// invisible rather than an empty box.
     pub fn render(&self, dl: &mut DrawList, screen_size: Vec2, atlas: &FontAtlas) {
-        let Some(layout) = self.layout(atlas) else {
-            return;
-        };
-        let style = &self.style;
-        let origin = self.anchor.position(screen_size, self.offset, layout.size);
-        dl.rect(origin, origin + layout.size, style.bg);
-
-        let mut cursor = origin + Vec2::splat(style.padding);
-        for section in self.sections() {
-            dl.text(cursor, section.title(), style.title, style.font_size);
-            cursor.y += layout.line_height;
-            for row in section.rows() {
-                dl.text(cursor, row.label.as_str(), style.label, style.font_size);
-                dl.text(
-                    Vec2::new(cursor.x + layout.value_column, cursor.y),
-                    row.value.as_str(),
-                    style.value,
-                    style.font_size,
-                );
-                cursor.y += layout.line_height;
-            }
-            cursor.y += style.section_gap;
-        }
+        self.laid_out(atlas, |ui, panel| {
+            let (min, max) = ui.rect(panel).expect("laid out this frame");
+            // The anchor is an inset, so where the panel starts depends on how
+            // big it came out: measured at the origin above, then placed. The
+            // second call lays out nothing new — every measurement, every
+            // resolved style and Taffy's whole cache are the first call's — it
+            // only moves the roots, which is what `Ui::layout`'s `origin` does.
+            let origin = self.anchor.position(screen_size, self.offset, max - min);
+            ui.layout(origin, AvailableSpace::MAX_CONTENT, atlas);
+            ui.emit(dl);
+        });
     }
 
-    /// Measures the panel, or `None` if it would draw nothing.
+    /// Builds the panel with [`DebugPanel::build`], lays it out at the origin
+    /// in the calling thread's one debug tree, and hands the tree to `read`.
     ///
-    /// There is deliberately **no** `if !self.visible` here, though there was:
-    /// it could not be reached and therefore could not be tested. Visibility is
-    /// enforced at the two places that can actually observe it —
-    /// [`DebugPanel::add`] refuses to gather while hidden, and
-    /// [`DebugPanel::set_visible`] drops whatever was gathered — so a hidden
-    /// panel has no sections by construction and this returns `None` on the
-    /// emptiness check below. A third copy of the rule would be a guard that
-    /// silently matches nothing.
-    fn layout(&self, atlas: &FontAtlas) -> Option<PanelLayout> {
-        let sections = self.sections();
-        if sections.is_empty() {
+    /// `None` — and **no tree touched at all** — when the panel has nothing to
+    /// draw, which is every frame it is hidden: [`DebugPanel::add`] refuses to
+    /// gather while hidden and [`DebugPanel::set_visible`] drops whatever was
+    /// gathered, so a hidden panel has no sections by construction.
+    ///
+    /// One tree per thread, rebuilt by every call, for [`crate::menu`]'s
+    /// reason: the panel is measured and drawn separately every frame with the
+    /// same selectors, so a kept tree resolves each node's style from its own
+    /// last resolve and lays out from Taffy's cache instead of from nothing. It
+    /// holds no state a call can see — the pointer it begins with is off every
+    /// rectangle, so no rule's `:hover` applies.
+    fn laid_out<R>(
+        &self,
+        atlas: &FontAtlas,
+        read: impl FnOnce(&mut Ui, NodeKey) -> R,
+    ) -> Option<R> {
+        if self.sections().is_empty() {
             return None;
         }
+        DEBUG_TREE.with(|tree| {
+            let mut ui = tree.borrow_mut();
+            ui.begin_frame(PointerInput::hovering(OFF_SCREEN));
+            let panel = self.build(&mut ui, atlas);
+            ui.layout(Vec2::ZERO, AvailableSpace::MAX_CONTENT, atlas);
+            Some(read(&mut ui, panel))
+        })
+    }
+
+    /// Builds this panel into `ui`: the column, a section per module, a row per
+    /// reading, and a span for every string. Returns the panel's own node.
+    ///
+    /// Every colour, the font size, the padding and the two gaps are
+    /// [`DebugStyle`]'s and go on inline; the rest of the look is
+    /// `default.css`'s. The labels' `min-width` is the widest label in the
+    /// **whole** panel — see the module docs.
+    fn build(&self, ui: &mut Ui, atlas: &FontAtlas) -> NodeKey {
+        use Declaration as D;
         let style = &self.style;
         let scale = style.font_size / NATURAL_FONT_SIZE;
-        let line_height = LINE_HEIGHT * scale;
-
         let mut label_width = 0.0f32;
-        let mut value_width = 0.0f32;
-        let mut title_width = 0.0f32;
-        let mut lines = 0.0f32;
-        for section in sections {
-            title_width = title_width.max(atlas.text_width(section.title(), scale));
-            lines += 1.0;
+        for section in self.sections() {
             for row in section.rows() {
                 label_width = label_width.max(atlas.text_width(&row.label, scale));
-                value_width = value_width.max(atlas.text_width(&row.value, scale));
-                lines += 1.0;
             }
         }
 
-        let value_column = label_width + style.column_gap;
-        let content_width = title_width.max(value_column + value_width);
-        let gaps = (sections.len() - 1) as f32 * style.section_gap;
-        let content_height = lines * line_height + gaps;
-        Some(PanelLayout {
-            size: Vec2::new(content_width, content_height) + Vec2::splat(style.padding * 2.0),
-            value_column,
-            line_height,
+        let panel = [
+            D::Padding(Sides::All, Length::Px(style.padding)),
+            D::RowGap(Length::Px(style.section_gap)),
+            D::Background(style.bg),
+            D::FontSize(style.font_size),
+        ];
+        let title = [D::Color(style.title)];
+        let label = [
+            D::Color(style.label),
+            D::MinWidth(LengthAuto::Px(label_width + style.column_gap)),
+        ];
+        let value = [D::Color(style.value)];
+
+        ui.block("debug-panel", &panel, |ui| {
+            for (index, section) in self.sections().iter().enumerate() {
+                ui.block_keyed(index, ".debug-section", &[], |ui| {
+                    ui.span(".debug-title", section.title(), &title);
+                    for (row_index, row) in section.rows().iter().enumerate() {
+                        ui.block_keyed(row_index, ".debug-row", &[], |ui| {
+                            ui.span(".debug-label", row.label.as_str(), &label);
+                            ui.span(".debug-value", row.value.as_str(), &value);
+                        });
+                    }
+                });
+            }
         })
+        .key
     }
 }
 
-/// What [`DebugPanel::layout`] worked out, shared by measuring and drawing.
-#[derive(Debug, Clone, Copy)]
-struct PanelLayout {
-    /// Padding included.
-    size: Vec2,
-    /// Where the value column starts, relative to the label column.
-    value_column: f32,
-    line_height: f32,
+thread_local! {
+    /// The tree [`DebugPanel::laid_out`] measures and draws panels in; see
+    /// there.
+    static DEBUG_TREE: RefCell<Ui> = RefCell::new(Ui::new());
 }
+
+/// Where [`DebugPanel::laid_out`]'s pointer is: above and left of every
+/// rectangle the panel lays out, which all start at the origin.
+const OFF_SCREEN: Vec2 = Vec2::splat(-1.0);
 
 // ---------------------------------------------------------------------------
 // Overlay
@@ -1205,6 +1251,164 @@ mod tests {
         assert_eq!(section.rows().len(), 1, "one live row");
         assert_eq!(section.rows()[0].value, "30.0");
         assert_eq!(section.rows.len(), 2, "and the second slot is still there");
+    }
+
+    /// The arithmetic `render` was before the element tree laid it out,
+    /// verbatim: the oracle the tree's output is held to.
+    fn arithmetic_render(
+        panel: &DebugPanel,
+        dl: &mut DrawList,
+        screen_size: Vec2,
+        atlas: &FontAtlas,
+    ) {
+        use crate::text::LINE_HEIGHT;
+
+        let sections = panel.sections();
+        if sections.is_empty() {
+            return;
+        }
+        let style = &panel.style;
+        let scale = style.font_size / NATURAL_FONT_SIZE;
+        let line_height = LINE_HEIGHT * scale;
+
+        let mut label_width = 0.0f32;
+        let mut value_width = 0.0f32;
+        let mut title_width = 0.0f32;
+        let mut lines = 0.0f32;
+        for section in sections {
+            title_width = title_width.max(atlas.text_width(section.title(), scale));
+            lines += 1.0;
+            for row in section.rows() {
+                label_width = label_width.max(atlas.text_width(&row.label, scale));
+                value_width = value_width.max(atlas.text_width(&row.value, scale));
+                lines += 1.0;
+            }
+        }
+        let value_column = label_width + style.column_gap;
+        let content_width = title_width.max(value_column + value_width);
+        let gaps = (sections.len() - 1) as f32 * style.section_gap;
+        let content_height = lines * line_height + gaps;
+        let size = Vec2::new(content_width, content_height) + Vec2::splat(style.padding * 2.0);
+
+        let origin = panel.anchor.position(screen_size, panel.offset, size);
+        dl.rect(origin, origin + size, style.bg);
+        let mut cursor = origin + Vec2::splat(style.padding);
+        for section in sections {
+            dl.text(cursor, section.title(), style.title, style.font_size);
+            cursor.y += line_height;
+            for row in section.rows() {
+                dl.text(cursor, row.label.as_str(), style.label, style.font_size);
+                dl.text(
+                    Vec2::new(cursor.x + value_column, cursor.y),
+                    row.value.as_str(),
+                    style.value,
+                    style.font_size,
+                );
+                cursor.y += line_height;
+            }
+            cursor.y += style.section_gap;
+        }
+    }
+
+    /// Every command and the clip it was pushed under, with every float printed
+    /// to round-trip precision — so two renderings are equal exactly when every
+    /// float is the same value.
+    fn rendering(dl: &DrawList) -> Vec<String> {
+        dl.commands()
+            .iter()
+            .zip(dl.clips())
+            .map(|(command, clip)| format!("{command:?} under {clip:?}"))
+            .collect()
+    }
+
+    /// **The tree draws exactly the commands the arithmetic did**, float for
+    /// float, at every anchor, on every extent the repository's "it is on
+    /// screen" tests use, and for panels from one section to several — which is
+    /// what says every sample's overlay golden is the picture it was.
+    ///
+    /// Every length involved is a whole number (`LINE_HEIGHT` is 16,
+    /// `GLYPH_ADVANCE` is 10, the style's padding and gaps are integers), so
+    /// Taffy's whole-pixel rounding has nothing to move; a style whose font
+    /// size was not a multiple of `NATURAL_FONT_SIZE` would be the case where
+    /// the two part company, and nothing ships one.
+    #[test]
+    fn the_tree_draws_the_panel_exactly_where_the_arithmetic_did() {
+        let atlas = FontAtlas::built_in();
+        let modules = [
+            Fake {
+                title: "frame",
+                rows: &[("fps", "59.9"), ("avg", "16.68 ms"), ("window", "120/120")],
+            },
+            Fake {
+                title: "budget",
+                rows: &[("cpu p50/p95", "4.00 / 4.00 ms"), ("bound", "gpu")],
+            },
+            Fake {
+                title: "a-much-longer-section-title",
+                rows: &[("", ""), ("x", "1")],
+            },
+        ];
+        for anchor in [
+            Anchor::TopLeft,
+            Anchor::TopRight,
+            Anchor::BottomLeft,
+            Anchor::BottomRight,
+            Anchor::Center,
+        ] {
+            for count in 1..=modules.len() {
+                let mut panel = shown();
+                panel.anchor = anchor;
+                for module in &modules[..count] {
+                    panel.add(module);
+                }
+                for screen in [
+                    Vec2::new(960.0, 720.0),
+                    Vec2::new(800.0, 600.0),
+                    Vec2::new(1920.0, 1080.0),
+                    Vec2::new(1440.0, 400.0),
+                    Vec2::new(600.0, 900.0),
+                ] {
+                    let mut tree = DrawList::new();
+                    panel.render(&mut tree, screen, &atlas);
+                    let mut arithmetic = DrawList::new();
+                    arithmetic_render(&panel, &mut arithmetic, screen, &atlas);
+                    assert_eq!(
+                        rendering(&tree),
+                        rendering(&arithmetic),
+                        "{anchor:?}, {count} sections, {screen:?}",
+                    );
+                    assert!(
+                        !tree.is_empty(),
+                        "the panel drew nothing, so this proves nothing",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The tree's extent is the extent the arithmetic measured, which is what a
+    /// page stacking something under the panel offsets by.
+    #[test]
+    fn the_trees_panel_is_the_size_the_arithmetic_measured() {
+        let atlas = FontAtlas::built_in();
+        let mut panel = shown();
+        panel.add(&Fake {
+            title: "frame",
+            rows: &[("fps", "59.9"), ("a-much-longer-label", "16.68 ms")],
+        });
+        panel.add(&Fake {
+            title: "budget",
+            rows: &[("bound", "gpu")],
+        });
+
+        let mut arithmetic = DrawList::new();
+        arithmetic_render(&panel, &mut arithmetic, Vec2::ZERO, &atlas);
+        let measured = match arithmetic.commands().first() {
+            Some(DrawCommand::Rect { min, max, .. }) => *max - *min,
+            other => panic!("expected the panel background, got {other:?}"),
+        };
+        assert_eq!(panel.size(&atlas), measured);
+        assert_ne!(measured, Vec2::ZERO, "a zero panel proves nothing");
     }
 
     #[test]

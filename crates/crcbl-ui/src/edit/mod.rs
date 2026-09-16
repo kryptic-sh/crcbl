@@ -1,10 +1,10 @@
 //! One line of editable text: its content, a caret, a selection anchor, and
 //! every edit the keys make.
 //!
-//! The model both of the crate's editable fields share —
-//! [`crate::console::TextField`], which never selects, and
-//! [`Ui::text_input`](crate::tree::Ui::text_input), which does — so there is one
-//! copy of the caret arithmetic. It names no keycode and draws nothing: a
+//! The model every editable field in the crate is built on —
+//! [`Ui::text_input`](crate::tree::Ui::text_input), which the console's prompt
+//! is one of — so there is one copy of the caret arithmetic. It names no
+//! keycode and draws nothing: a
 //! [`LineEdit`] takes [`Edit`]s, and [`Edit::for_key`] is the one place a key
 //! becomes one.
 //!

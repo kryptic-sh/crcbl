@@ -33,7 +33,7 @@
 //! toolkit cannot see them, and giving it a "resume" would be the layer
 //! boundary this crate's split exists to hold.
 
-use crcbl_input::{ActionMap, Binding, ui};
+use crcbl_input::{ActionMap, Binding, text, ui};
 use crcbl_ui::menu::{Menu, MenuItem, MenuSet};
 
 use super::{
@@ -78,8 +78,8 @@ pub fn pause_only<K: Copy + Eq>(none: K, paused: K) -> MenuSet<K> {
     MenuSet::new(none, vec![(paused, pause_menu())])
 }
 
-/// The map the loop drives its menus from: the reserved `ui` context and
-/// nothing else, off the stack until a menu has input.
+/// The map the loop drives its menus and its console from: the two reserved
+/// contexts and nothing else, both off the stack until something has input.
 ///
 /// # The engine's map, not the game's
 ///
@@ -105,16 +105,26 @@ pub fn pause_only<K: Copy + Eq>(none: K, paused: K) -> MenuSet<K> {
 /// [`ui::MOVE`], [`MENU_ACTIVATE_KEY`] as [`ui::ACCEPT`], and nothing for
 /// [`ui::NEXT`], [`ui::PREV`] and [`ui::BACK`].
 ///
+/// # The `text` context rides on the same map
+///
+/// [`text::declare`] puts the reserved `text` context here too, off the stack,
+/// and [`Loop`](crate::engine::Loop) pushes it over `ui` while the debug
+/// console's field is engaged. That is what stops a letter typed at the console
+/// from also being [`ui::MOVE`] or [`ui::ACCEPT`] for a panel underneath it: the
+/// context stack is the disambiguator, rather than the loop withholding keys
+/// from the map by hand.
+///
 /// [`HostedGame::key_event`]: super::HostedGame::key_event
 /// [`HostedGame::actions`]: super::HostedGame::actions
 ///
 /// # Panics
 ///
-/// Never on a fresh map: nothing is declared before the reserved context.
+/// Never on a fresh map: nothing is declared before the reserved contexts.
 #[must_use]
 pub fn menu_actions() -> ActionMap {
     let mut actions = ActionMap::new();
     ui::declare(&mut actions).expect("a fresh map has no names to clash with");
+    text::declare(&mut actions).expect("a fresh map has no names to clash with");
     let rebinds = [
         (
             ui::MOVE,

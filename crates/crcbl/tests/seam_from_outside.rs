@@ -353,7 +353,7 @@ fn the_loops_input_helpers_work_outside_the_engines_loop() {
     shell
         .key_release(window, MENU_ACTIVATE_KEY)
         .expect("the window is live");
-    let mut menu = MenuPump::new(&mut menus, &mut held, &mut actions, true, 0.0);
+    let mut menu = MenuPump::new(&mut menus, &mut held, &mut actions, true, false, 0.0);
     shell.pump(&mut |event| {
         menu.observe(&event);
     });
