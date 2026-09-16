@@ -436,11 +436,13 @@ impl DrawList {
         }
     }
 
-    /// Appends one command under the current clip.
-    /// Appends one command under the current clip: for a caller that took
-    /// commands out of another list, as [`crate::menu::Menu::render_art`]
-    /// keeps a tree's pictures.
-    pub(crate) fn push_command(&mut self, command: DrawCommand) {
+    /// Appends one command under the current clip and overlay state.
+    ///
+    /// This supports adapters that transform commands from another list without
+    /// losing primitive parameters. The source command's clip and overlay are
+    /// not part of the command; restore them with [`Self::push_clip`] and
+    /// [`Self::begin_overlay`] before appending it.
+    pub fn push_command(&mut self, command: DrawCommand) {
         self.push(command);
     }
 
@@ -2166,6 +2168,47 @@ mod tests {
     // -----------------------------------------------------------------------
     // The overlay cut
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn raw_image_commands_keep_their_parameters_and_current_clip() {
+        let mut list = DrawList::new();
+        let clip = ClipRect {
+            min: Vec2::new(2.0, 3.0),
+            max: Vec2::new(8.0, 9.0),
+        };
+        let uv_min = Vec2::new(0.25, 0.125);
+        let uv_max = Vec2::new(0.5, 0.75);
+        list.begin_overlay();
+        list.push_clip(clip.min, clip.max);
+        list.push_command(DrawCommand::Image {
+            min: Vec2::ZERO,
+            max: Vec2::splat(10.0),
+            uv_min,
+            uv_max,
+            tint: RED,
+        });
+        list.pop_clip().unwrap();
+        assert!(list.base_commands().is_empty());
+        let [
+            DrawCommand::Image {
+                uv_min: actual_min,
+                uv_max: actual_max,
+                tint,
+                ..
+            },
+        ] = list.overlay_commands()
+        else {
+            panic!("the appended image belongs to the overlay");
+        };
+        assert_eq!((*actual_min, *actual_max, *tint), (uv_min, uv_max, RED));
+        assert_eq!(list.clips(), &[clip]);
+        let triangles = list.to_triangles_split(None, None, 1.0);
+        assert!(!triangles.indices.is_empty());
+        assert_eq!(triangles.overlay, 0);
+        assert!(triangles.vertices.iter().all(|vertex| {
+            vertex.clip == clip.lane() && vertex.primitive() == Some(Primitive::Image)
+        }));
+    }
 
     /// **The cut lands where `begin_overlay` was called**, in the commands and
     /// in the triangles both.

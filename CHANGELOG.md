@@ -204,6 +204,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- `DrawList::push_command` is public, allowing game font and presentation
+  adapters to append existing primitives without reconstructing registered image
+  handles or losing their parameters. Commands use the destination list's
+  current clip and overlay state.
+
 - **`crcbl::registry`: one place a tool learns what a scene's chunks are made
   of.** `Registry::register::<T>("bricks")` produces, from one type parameter,
   the `SystemChunk` codec its file is read and written with, the `System<T>` a
