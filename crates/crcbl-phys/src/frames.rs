@@ -386,6 +386,11 @@ impl Frames {
 /// If `primary_mu` is not positive, which would make the ratio meaningless, or
 /// if `semi_major_axis` or `mu` is negative.
 #[must_use]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "no constructed power exists yet; a sphere of influence is set up once \
+              per frame rather than stepped, and docs/backlog.md carries it"
+)]
 pub fn sphere_of_influence(semi_major_axis: f64, mu: f64, primary_mu: f64) -> f64 {
     assert!(
         semi_major_axis >= 0.0,
@@ -519,6 +524,10 @@ mod tests {
         let base = sphere_of_influence(1.0, 1.0, 1.0e6);
         let quadrupled = sphere_of_influence(1.0, 4.0, 1.0e6);
         let ratio = quadrupled / base;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the platform's power is the oracle"
+        )]
         let expected = 4.0f64.powf(0.4);
         assert!(
             (ratio - expected).abs() < 1e-12,

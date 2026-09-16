@@ -31,6 +31,9 @@
 //!   half of the profiler: scoped spans with static names, nesting freely and
 //!   carrying the thread they ran on, plus named `u64` counters. Compiled into
 //!   every build and gated at runtime; see the module docs for what that costs.
+//! * [`trig`] — [`sin`](trig::sin) and [`cos`](trig::cos) in `f64`, built
+//!   from operations IEEE-754 pins down so a simulation that calls them reaches
+//!   the same bits on every target. No platform `libm`; see the module docs.
 //! * [`surface`] — [`SurfaceTarget`], the native window handles the shell
 //!   produces and a HAL backend consumes. It lives here, and not in either of
 //!   those crates, because neither may depend on the other; see the module docs
@@ -46,6 +49,7 @@ pub mod stats;
 pub mod surface;
 pub mod time;
 pub mod trace;
+pub mod trig;
 pub mod world;
 
 /// Everything this crate exposes to the debug console.

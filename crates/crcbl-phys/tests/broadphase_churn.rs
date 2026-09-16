@@ -217,6 +217,10 @@ fn removed_elements_are_gone_and_their_indices_recycled() {
 /// alternative observables — node count, nodes visited per query — either
 /// cannot degrade (node count is exactly `2L-1` by construction) or vary with
 /// the query as much as with the tree.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a bound on tree depth, computed by the test rather than simulated"
+)]
 fn avl_depth_bound(leaves: usize) -> f64 {
     if leaves <= 1 {
         return 1.0;
@@ -390,7 +394,8 @@ fn world_overlap_sphere_matches_brute_force_under_churn() {
                 // applies — written out here so the test does not check the
                 // code against itself.
                 let delta = sphere.centre - query.centre;
-                delta.length_squared() <= (sphere.radius + query.radius).powi(2)
+                let reach = sphere.radius + query.radius;
+                delta.length_squared() <= reach * reach
             })
             .map(|(id, _)| *id)
             .collect();

@@ -173,6 +173,7 @@ DEMOS=(
   "shard:crcbl_shard:demos/shard"
   "options:crcbl_options:demos/options"
   "towers:crcbl_towers:demos/towers"
+  "tumble:crcbl_tumble:demos/tumble"
 )
 
 profile_flag=()

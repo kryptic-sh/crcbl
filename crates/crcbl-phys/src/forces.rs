@@ -380,7 +380,6 @@ impl ForceProvider for ThrustForce {
 mod tests {
     use super::*;
     use crate::integrator::{Integrator as _, SemiImplicitEuler};
-    use glam::DQuat;
 
     // ── Gravity ──────────────────────────────────────────────────────────
 
@@ -547,7 +546,7 @@ mod tests {
         let mut body = RigidBody::new_dynamic(1.0);
         let transform = Transform::new(
             DVec3::ZERO,
-            DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2),
+            crate::rotation_from_scaled_axis(DVec3::Y * std::f64::consts::FRAC_PI_2),
         );
         thrust.apply(&mut body, &transform, 0.1);
         assert!(
@@ -566,7 +565,7 @@ mod tests {
         let mut body = RigidBody::new_dynamic(1.0);
         let transform = Transform::new(
             DVec3::ZERO,
-            DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+            crate::rotation_from_scaled_axis(DVec3::Z * std::f64::consts::FRAC_PI_2),
         );
         thrust.apply(&mut body, &transform, 0.1);
         assert!(

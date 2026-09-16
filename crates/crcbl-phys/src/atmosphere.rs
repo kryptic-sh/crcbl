@@ -128,8 +128,22 @@ impl Atmosphere {
         if altitude <= 0.0 {
             return self.sea_level_density;
         }
-        self.sea_level_density * (-altitude / self.scale_height).exp()
+        self.sea_level_density * exp_neg(altitude / self.scale_height)
     }
+}
+
+/// `e^-x`, through the platform's `exp`.
+///
+/// Named so the one platform transcendental left in a force provider is one
+/// place, not a call buried in an expression: no in-engine exponential is
+/// constructed yet, so a body under [`AtmosphericDrag`] is not guaranteed the
+/// same bits on every target. `docs/backlog.md` carries it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "no constructed exponential exists yet; see the doc comment"
+)]
+fn exp_neg(x: f64) -> f64 {
+    (-x).exp()
 }
 
 /// Quadratic drag through an [`Atmosphere`] around a spherical body.

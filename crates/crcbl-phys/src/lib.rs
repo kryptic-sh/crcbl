@@ -16,7 +16,17 @@
 //!
 //! L1 today is the force pipeline and one integrator: [`GravityForce`],
 //! [`DragForce`], [`DampingForce`] and [`ThrustForce`] feed
-//! [`SemiImplicitEuler`] through [`ForceProvider`]. [`Atmosphere`] and its
+//! [`SemiImplicitEuler`] through [`ForceProvider`]. The integrator turns bodies
+//! as well as moving them — torque, an inertia tensor from [`MassProperties`],
+//! the gyroscopic term by the implicit midpoint rule, and the quaternion turned
+//! to match — which is rung 0 of `docs/plan/36-contact-solver.md`. This crate's
+//! `clippy.toml` refuses the platform's transcendental functions: the sine and
+//! cosine it constructs are `crcbl_core::trig`'s, and the three platform calls
+//! still standing — `AtmosphericDrag`'s exponential, the sphere of influence's
+//! power and the Kepler solution's Stumpff functions — each say why where they
+//! are made.
+//! [`SurfaceMaterial`] carries each body's friction and restitution for the
+//! contact solver that does not exist yet. [`Atmosphere`] and its
 //! quadratic [`AtmosphericDrag`] have landed, the [`Frames`] hierarchy carries
 //! sphere-of-influence crossings, and [`propagate`] is the analytic Kepler
 //! solution a coasting body is put on rails with.
@@ -41,6 +51,8 @@ pub mod components;
 pub mod forces;
 pub mod frames;
 pub mod integrator;
+pub mod mass;
+pub mod material;
 pub mod orbit;
 pub mod query;
 pub mod system;
@@ -54,7 +66,12 @@ pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};
 pub use forces::{DampingForce, DragForce, ForceProvider, GravityForce, PointGravity, ThrustForce};
 pub use frames::{FrameId, Frames, State, sphere_of_influence};
-pub use integrator::{Integrator, SemiImplicitEuler};
+pub use integrator::{
+    GYROSCOPIC_ITERATIONS, Integrator, MAX_ROTATION_LENGTH_ERROR, SemiImplicitEuler,
+    cayley_rotation, gyroscopic_step, integrate_rotation, rotation_from_scaled_axis,
+};
+pub use mass::MassProperties;
+pub use material::{CombineRule, ContactMaterial, SurfaceMaterial};
 pub use orbit::{Orbit, propagate};
 pub use query::{
     Penetration, ShapeHit, capsule_penetration_vs_aabb, capsule_penetration_vs_capsule,

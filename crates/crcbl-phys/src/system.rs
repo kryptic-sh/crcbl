@@ -4,9 +4,46 @@
 //! registered in a schedule. It owns a [`crate::PhysicsWorld`], stores
 //! per-entity rigid body and transform data, and drives the integration
 //! loop with configurable force providers.
+//!
+//! # Storage: dense sets behind generational ids
+//!
+//! `docs/plan/36-contact-solver.md` decision 8 sets the layout, after Box3D's:
+//! a body is named by a **generational id** — a [`Handle`] from a [`Pool`] of
+//! cold records — and the record says which **set** its state lives in and at
+//! which **index**. A set is struct-of-arrays: the ids, the transforms and, for
+//! the set that moves, the bodies, each column packed with no holes, so
+//! [`PhysicsSystem::step`] walks contiguous arrays in their own order and never
+//! touches a hash map or sorts anything. The entity-to-id map is consulted only
+//! where an entity crosses in: the methods that take an [`Entity`].
+//!
+//! There are two sets today. **Static** holds an entity that has a transform
+//! and no [`RigidBody`] — a wall's collider, a replicated prop — and nothing
+//! steps it. **Awake** holds every entity with a body, dynamic or kinematic.
+//! Sleeping bodies, which the plan moves into a set per island, arrive with
+//! rung 3.
+//!
+//! **Removal swaps.** Taking a body out of a set moves the set's last body into
+//! the hole and rewrites that one record's index, so a set stays dense and its
+//! order is a function of the calls that built it. Two runs of one script
+//! build the same order; two different call histories reaching the same bodies
+//! may not, which is why [`SystemTrait::hash_state`] and
+//! [`SystemTrait::replicate`] still visit entities in ascending order, as
+//! `crcbl_ecs::System` does — they describe state, not the order it was built
+//! in.
+//!
+//! # Where f32 goes later
+//!
+//! Decision 7 makes the solver's interior `f32` over `f64` positions once the
+//! solver is wide, at rung 6. The awake set is where that lands: velocities,
+//! deltas and impulses become a hot column of their own beside `transforms`,
+//! indexed exactly like it, while positions stay in `transforms` as `f64`.
+//! Adding a column is adding a `Vec` to the awake set and a line to its push
+//! and swap-remove; the id, the record and the (set, index) addressing do not
+//! change shape.
 
 use std::collections::HashMap;
 
+use crcbl_core::{Handle, Pool};
 use crcbl_ecs::{DebugCtx, Entity, SystemTrait};
 use glam::DVec3;
 
@@ -14,9 +51,90 @@ use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 use crate::components::{ColliderComponent, RigidBody, Transform};
 use crate::forces::ForceProvider;
 use crate::integrator::{Integrator as _, SemiImplicitEuler};
+use crate::material::SurfaceMaterial;
 use crate::query::ShapeHit;
 use crate::world::{ColliderId, OverlapQueries, PhysicsWorld, QueryScratch};
 use crate::{Ray, Segment};
+
+// ---------------------------------------------------------------------------
+// Body storage
+// ---------------------------------------------------------------------------
+
+/// A body's generational id: the slot of its [`BodyRecord`].
+type BodyId = Handle<BodyRecord>;
+
+/// Which set a body's state lives in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodySet {
+    /// A transform and no body: never stepped.
+    Static,
+    /// A body, dynamic or kinematic: stepped every [`PhysicsSystem::step`].
+    Awake,
+}
+
+/// The cold half of a body: what names it and what the step never reads.
+#[derive(Debug)]
+struct BodyRecord {
+    /// The entity this body belongs to, for mapping hits and hashing.
+    entity: Entity,
+    /// The set its state lives in.
+    set: BodySet,
+    /// Its index in that set's columns.
+    index: usize,
+    /// Its collider in the world, and the component it was built from.
+    collider: Option<(ColliderId, ColliderComponent)>,
+    /// Its surface's friction and restitution.
+    material: SurfaceMaterial,
+}
+
+/// Transforms with no body: struct-of-arrays, dense, indexed alike.
+#[derive(Debug, Default)]
+struct StaticSet {
+    ids: Vec<BodyId>,
+    transforms: Vec<Transform>,
+}
+
+/// Bodies that step: struct-of-arrays, dense, indexed alike.
+#[derive(Debug, Default)]
+struct AwakeSet {
+    ids: Vec<BodyId>,
+    transforms: Vec<Transform>,
+    bodies: Vec<RigidBody>,
+}
+
+impl StaticSet {
+    fn push(&mut self, id: BodyId, transform: Transform) -> usize {
+        self.ids.push(id);
+        self.transforms.push(transform);
+        self.ids.len() - 1
+    }
+
+    /// Removes `index`, returning its transform and the id now at `index`, if
+    /// one moved there.
+    fn swap_remove(&mut self, index: usize) -> (Transform, Option<BodyId>) {
+        self.ids.swap_remove(index);
+        let transform = self.transforms.swap_remove(index);
+        (transform, self.ids.get(index).copied())
+    }
+}
+
+impl AwakeSet {
+    fn push(&mut self, id: BodyId, transform: Transform, body: RigidBody) -> usize {
+        self.ids.push(id);
+        self.transforms.push(transform);
+        self.bodies.push(body);
+        self.ids.len() - 1
+    }
+
+    /// Removes `index`, returning its transform and body and the id now at
+    /// `index`, if one moved there.
+    fn swap_remove(&mut self, index: usize) -> (Transform, RigidBody, Option<BodyId>) {
+        self.ids.swap_remove(index);
+        let transform = self.transforms.swap_remove(index);
+        let body = self.bodies.swap_remove(index);
+        (transform, body, self.ids.get(index).copied())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // PhysicsSystem
@@ -24,6 +142,8 @@ use crate::{Ray, Segment};
 
 /// ECS system that owns a [`PhysicsWorld`], stores rigid body dynamics data,
 /// and runs the integration loop with force providers.
+///
+/// See the [module docs](self) for how bodies are stored.
 ///
 /// # Integration loop
 ///
@@ -34,17 +154,18 @@ use crate::{Ray, Segment};
 pub struct PhysicsSystem {
     world: PhysicsWorld,
 
-    /// Entity → ColliderId mapping.
-    entity_to_collider: HashMap<Entity, ColliderId>,
+    /// Every registered entity's cold record, issuing its generational id.
+    records: Pool<BodyRecord>,
+    /// Entity → body id: the ECS boundary, and read nowhere else.
+    entity_to_body: HashMap<Entity, BodyId>,
+    /// Transforms with no body.
+    statics: StaticSet,
+    /// Bodies that step.
+    awake: AwakeSet,
+    /// How many records hold a collider.
+    collider_count: usize,
     /// ColliderId → Entity reverse mapping.
     collider_to_entity: Vec<Option<Entity>>,
-
-    /// Per-entity rigid body data.
-    bodies: HashMap<Entity, RigidBody>,
-    /// Per-entity world-space transform.
-    transforms: HashMap<Entity, Transform>,
-    /// Per-entity collider component (cached for transform updates).
-    collider_comps: HashMap<Entity, ColliderComponent>,
 
     /// Force providers applied in order each substep before integration.
     force_providers: Vec<Box<dyn ForceProvider>>,
@@ -184,11 +305,12 @@ impl PhysicsSystem {
     pub fn new() -> Self {
         Self {
             world: PhysicsWorld::new(),
-            entity_to_collider: HashMap::new(),
+            records: Pool::new(),
+            entity_to_body: HashMap::new(),
+            statics: StaticSet::default(),
+            awake: AwakeSet::default(),
+            collider_count: 0,
             collider_to_entity: Vec::new(),
-            bodies: HashMap::new(),
-            transforms: HashMap::new(),
-            collider_comps: HashMap::new(),
             force_providers: Vec::new(),
             scratch: QueryScratch::new(),
         }
@@ -197,13 +319,13 @@ impl PhysicsSystem {
     /// Number of entities with colliders registered.
     #[must_use]
     pub fn collider_count(&self) -> usize {
-        self.entity_to_collider.len()
+        self.collider_count
     }
 
     /// Number of entities with rigid bodies registered.
     #[must_use]
     pub fn body_count(&self) -> usize {
-        self.bodies.len()
+        self.awake.bodies.len()
     }
 
     // ── Dynamics setup ───────────────────────────────────────────────────
@@ -211,48 +333,99 @@ impl PhysicsSystem {
     /// Register a rigid body for `entity`.
     ///
     /// Replaces any existing body. The entity will participate in the
-    /// integration loop.
+    /// integration loop, from the transform it already has or from
+    /// [`Transform::IDENTITY`] if it has none.
     pub fn set_body(&mut self, entity: Entity, body: RigidBody) {
-        self.bodies.insert(entity, body);
-        self.transforms.entry(entity).or_insert(Transform::IDENTITY);
+        let id = self.record_for(entity, Transform::IDENTITY);
+        let record = self.records.get(id).expect("a live record");
+        let index = record.index;
+        match record.set {
+            BodySet::Awake => self.awake.bodies[index] = body,
+            BodySet::Static => {
+                let (transform, moved) = self.statics.swap_remove(index);
+                self.reindex_to(moved, index);
+                let awake_index = self.awake.push(id, transform, body);
+                let record = self.records.get_mut(id).expect("a live record");
+                record.set = BodySet::Awake;
+                record.index = awake_index;
+            }
+        }
     }
 
     /// Set the world-space transform for `entity`.
     ///
     /// If the entity has a collider, it is repositioned immediately.
     pub fn set_transform(&mut self, entity: Entity, transform: Transform) {
-        self.transforms.insert(entity, transform);
-        self.sync_collider_from_cached(entity);
+        let id = self.record_for(entity, transform);
+        *self.transform_slot(id) = transform;
+        self.sync_collider(id);
     }
 
     /// Get a reference to an entity's rigid body.
     #[must_use]
     pub fn body(&self, entity: Entity) -> Option<&RigidBody> {
-        self.bodies.get(&entity)
+        let record = self.record(entity)?;
+        match record.set {
+            BodySet::Awake => Some(&self.awake.bodies[record.index]),
+            BodySet::Static => None,
+        }
     }
 
     /// Get a mutable reference to an entity's rigid body, for a game that
     /// **chooses** a velocity rather than having one integrated onto it.
     ///
-    /// [`set_body`](Self::set_body) is the wrong tool for that: it inserts into
-    /// the body map and then touches the transform map, two hash operations to
-    /// change one `DVec3`, and a crowd sample does it once per agent per tick.
-    /// [`apply_force`](Self::apply_force) is not the tool either — a kinematic
-    /// body has zero inverse mass, so a force on it is a no-op by construction,
-    /// and kinematic is exactly what a steered agent is.
+    /// [`set_body`](Self::set_body) is the wrong tool for that: it replaces
+    /// the whole body to change one `DVec3`, and a crowd sample does it once
+    /// per agent per tick. [`apply_force`](Self::apply_force) is not the tool
+    /// either — a kinematic body has zero inverse mass, so a force on it is a
+    /// no-op by construction, and kinematic is exactly what a steered agent is.
     ///
     /// It hands back the body and nothing else, so it cannot move a collider:
     /// position lives in the transform, and changing that still goes through
     /// [`set_transform`](Self::set_transform), which repositions the broadphase.
     #[must_use]
     pub fn body_mut(&mut self, entity: Entity) -> Option<&mut RigidBody> {
-        self.bodies.get_mut(&entity)
+        let &id = self.entity_to_body.get(&entity)?;
+        let record = self.records.get(id)?;
+        match record.set {
+            BodySet::Awake => Some(&mut self.awake.bodies[record.index]),
+            BodySet::Static => None,
+        }
     }
 
     /// Get a reference to an entity's transform.
     #[must_use]
     pub fn transform(&self, entity: Entity) -> Option<&Transform> {
-        self.transforms.get(&entity)
+        let record = self.record(entity)?;
+        Some(match record.set {
+            BodySet::Awake => &self.awake.transforms[record.index],
+            BodySet::Static => &self.statics.transforms[record.index],
+        })
+    }
+
+    /// Set the surface material of `entity`'s body or collider. Returns `false`
+    /// if the entity is not registered.
+    ///
+    /// Every registered entity starts with [`SurfaceMaterial::DEFAULT`]. Nothing
+    /// reads it back but [`material`](Self::material) until the contact solver
+    /// exists; see [`crate::material`].
+    pub fn set_material(&mut self, entity: Entity, material: SurfaceMaterial) -> bool {
+        let Some(&id) = self.entity_to_body.get(&entity) else {
+            return false;
+        };
+        match self.records.get_mut(id) {
+            Some(record) => {
+                record.material = material;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The surface material of `entity`, if it is registered.
+    #[must_use]
+    pub fn material(&self, entity: Entity) -> Option<SurfaceMaterial> {
+        self.record(entity).map(|record| record.material)
     }
 
     /// Add a force provider. Providers are applied in order before
@@ -279,9 +452,25 @@ impl PhysicsSystem {
     /// here from a body's orientation, so a per-entity thrust and a pipeline
     /// one are the same model either way.
     pub fn apply_force(&mut self, entity: Entity, force: DVec3) -> bool {
-        match self.bodies.get_mut(&entity) {
+        match self.body_mut(entity) {
             Some(body) => {
                 body.apply_force(force);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Add a world-space torque to one entity's accumulator for the next
+    /// [`PhysicsSystem::step`], on [`apply_force`](Self::apply_force)'s terms.
+    /// Returns `false` if the entity has no body.
+    ///
+    /// A body with no rotational inertia accepts the torque and ignores it;
+    /// see [`RigidBody`].
+    pub fn apply_torque(&mut self, entity: Entity, torque: DVec3) -> bool {
+        match self.body_mut(entity) {
+            Some(body) => {
+                body.apply_torque(torque);
                 true
             }
             None => false,
@@ -301,25 +490,90 @@ impl PhysicsSystem {
         component: &ColliderComponent,
         transform: &Transform,
     ) {
-        // Store transform, caching the component.
-        self.transforms.insert(entity, *transform);
-        self.collider_comps.insert(entity, component.clone());
-        self.add_collider_to_world(entity, component, transform);
+        let id = self.record_for(entity, *transform);
+        *self.transform_slot(id) = *transform;
+        self.remove_collider(entity);
+
+        let world_centre = transform.position;
+        let collider = match component {
+            ColliderComponent::Sphere {
+                offset,
+                radius,
+                is_trigger,
+            } => {
+                let centre = world_centre + *offset;
+                let collider = self.world.add_sphere(Sphere::new(centre, *radius));
+                self.world.set_trigger(collider, *is_trigger);
+                collider
+            }
+            ColliderComponent::Box {
+                offset,
+                half_extents,
+                is_trigger,
+            } => {
+                let centre = world_centre + *offset;
+                let collider = self.world.add_box(BoxCollider::new(centre, *half_extents));
+                self.world.set_trigger(collider, *is_trigger);
+                collider
+            }
+            ColliderComponent::Capsule {
+                offset,
+                radius,
+                half_height,
+                is_trigger,
+            } => {
+                let centre = world_centre + *offset;
+                let collider = self
+                    .world
+                    .add_capsule(Capsule::new(centre, *radius, *half_height));
+                self.world.set_trigger(collider, *is_trigger);
+                collider
+            }
+        };
+
+        self.records.get_mut(id).expect("a live record").collider =
+            Some((collider, component.clone()));
+        self.collider_count += 1;
+        let slot = collider.index() as usize;
+        if slot >= self.collider_to_entity.len() {
+            self.collider_to_entity.resize(slot + 1, None);
+        }
+        self.collider_to_entity[slot] = Some(entity);
     }
 
     /// Remove the collider and dynamics data for `entity`.
     pub fn remove_entity(&mut self, entity: Entity) {
         self.remove_collider(entity);
-        self.bodies.remove(&entity);
-        self.transforms.remove(&entity);
-        self.collider_comps.remove(&entity);
+        let Some(id) = self.entity_to_body.remove(&entity) else {
+            return;
+        };
+        let Some(record) = self.records.remove(id) else {
+            return;
+        };
+        match record.set {
+            BodySet::Static => {
+                let (_, moved) = self.statics.swap_remove(record.index);
+                self.reindex_to(moved, record.index);
+            }
+            BodySet::Awake => {
+                let (_, _, moved) = self.awake.swap_remove(record.index);
+                self.reindex_to(moved, record.index);
+            }
+        }
     }
 
     /// Remove only the collider (no-op if none).
     pub fn remove_collider(&mut self, entity: Entity) {
-        if let Some(id) = self.entity_to_collider.remove(&entity) {
-            self.world.remove(id);
-            let slot = id.index() as usize;
+        let Some(&id) = self.entity_to_body.get(&entity) else {
+            return;
+        };
+        let Some(record) = self.records.get_mut(id) else {
+            return;
+        };
+        if let Some((collider, _)) = record.collider.take() {
+            self.world.remove(collider);
+            self.collider_count -= 1;
+            let slot = collider.index() as usize;
             if slot < self.collider_to_entity.len() {
                 self.collider_to_entity[slot] = None;
             }
@@ -330,45 +584,38 @@ impl PhysicsSystem {
 
     /// Advance dynamics by one substep of `dt` seconds.
     ///
-    /// Applies all force providers, then integrates every dynamic body with
-    /// [`SemiImplicitEuler`]. Collider positions are synced to the new
-    /// transforms.
+    /// Applies all force providers, then integrates every body — position,
+    /// velocity, orientation and angular velocity — with [`SemiImplicitEuler`].
+    /// Collider positions are synced to the new transforms.
     ///
-    /// Bodies are visited in ascending entity order. `bodies` is a `HashMap`
-    /// with a randomly-seeded hasher, so its iteration order differs between
-    /// processes; floating-point work in a different order is a different
-    /// result, and this crate promises determinism.
+    /// Bodies are visited in the awake set's own order, which is the order of
+    /// the calls that registered them; see the [module docs](self). Nothing a
+    /// step computes for one body reads another's, so the order reaches no
+    /// result today — it is the order the contact solver will inherit.
     pub fn step(&mut self, dt: f64) {
-        // Collect entity list to avoid borrow conflicts, in a canonical order
-        // so the arithmetic does not depend on the map's seed.
-        let mut entities: Vec<Entity> = self.bodies.keys().copied().collect();
-        entities.sort_unstable_by_key(|entity| entity.to_bits());
+        let AwakeSet {
+            ids,
+            transforms,
+            bodies,
+        } = &mut self.awake;
 
-        // Apply forces.
-        for &entity in &entities {
-            let Some(body) = self.bodies.get_mut(&entity) else {
-                continue;
-            };
-            let transform = self.transforms.get(&entity).copied().unwrap_or_default();
+        for (body, transform) in bodies.iter_mut().zip(transforms.iter()) {
             for provider in &self.force_providers {
-                provider.apply(body, &transform, dt);
+                provider.apply(body, transform, dt);
             }
         }
 
-        // Integrate.
-        for &entity in &entities {
-            let Some(body) = self.bodies.get_mut(&entity) else {
-                continue;
-            };
-            let Some(transform) = self.transforms.get_mut(&entity) else {
-                continue;
-            };
+        for (body, transform) in bodies.iter_mut().zip(transforms.iter_mut()) {
             SemiImplicitEuler.step(body, transform, dt);
         }
 
-        // Sync colliders to new transforms.
-        for entity in entities {
-            self.sync_collider_from_cached(entity);
+        for (id, transform) in ids.iter().zip(transforms.iter()) {
+            let Some(record) = self.records.get(*id) else {
+                continue;
+            };
+            if let Some((collider, component)) = &record.collider {
+                place_collider(&mut self.world, *collider, component, transform);
+            }
         }
     }
 
@@ -430,7 +677,10 @@ impl PhysicsSystem {
             start: transform.position - body.velocity * dt,
             end: transform.position,
         };
-        let own = self.entity_to_collider.get(&entity).copied();
+        let own = self
+            .record(entity)
+            .and_then(|record| record.collider.as_ref())
+            .map(|(collider, _)| *collider);
         let (id, hit) = self.world.sweep_sphere_excluding(&segment, radius, own)?;
         Some((self.entity_for(id)?, hit))
     }
@@ -546,102 +796,107 @@ impl PhysicsSystem {
         entity_for_in(&self.collider_to_entity, id)
     }
 
-    fn add_collider_to_world(
-        &mut self,
-        entity: Entity,
-        component: &ColliderComponent,
-        transform: &Transform,
-    ) {
-        // Remove existing if present.
-        self.remove_collider(entity);
-
-        let world_centre = transform.position;
-        let id = match component {
-            ColliderComponent::Sphere {
-                offset,
-                radius,
-                is_trigger,
-            } => {
-                let centre = world_centre + *offset;
-                let id = self.world.add_sphere(Sphere::new(centre, *radius));
-                self.world.set_trigger(id, *is_trigger);
-                id
-            }
-            ColliderComponent::Box {
-                offset,
-                half_extents,
-                is_trigger,
-            } => {
-                let centre = world_centre + *offset;
-                let id = self.world.add_box(BoxCollider::new(centre, *half_extents));
-                self.world.set_trigger(id, *is_trigger);
-                id
-            }
-            ColliderComponent::Capsule {
-                offset,
-                radius,
-                half_height,
-                is_trigger,
-            } => {
-                let centre = world_centre + *offset;
-                let id = self
-                    .world
-                    .add_capsule(Capsule::new(centre, *radius, *half_height));
-                self.world.set_trigger(id, *is_trigger);
-                id
-            }
-        };
-
-        self.entity_to_collider.insert(entity, id);
-        let slot = id.index() as usize;
-        if slot >= self.collider_to_entity.len() {
-            self.collider_to_entity.resize(slot + 1, None);
-        }
-        self.collider_to_entity[slot] = Some(entity);
+    /// The record of `entity`, if it is registered.
+    fn record(&self, entity: Entity) -> Option<&BodyRecord> {
+        self.records.get(*self.entity_to_body.get(&entity)?)
     }
 
-    /// Reposition the collider for `entity` from the cached component and
-    /// current transform. No-op if entity has no collider.
-    fn sync_collider_from_cached(&mut self, entity: Entity) {
-        let Some(&id) = self.entity_to_collider.get(&entity) else {
-            return;
-        };
-        let Some(comp) = self.collider_comps.get(&entity) else {
-            return;
-        };
-        let Some(transform) = self.transforms.get(&entity) else {
-            return;
-        };
-
-        let centre = transform.position;
-        match comp {
-            ColliderComponent::Sphere {
-                offset,
-                radius,
-                is_trigger: _,
-            } => {
-                let c = centre + *offset;
-                self.world.set_sphere(id, Sphere::new(c, *radius));
-            }
-            ColliderComponent::Box {
-                offset,
-                half_extents,
-                is_trigger: _,
-            } => {
-                let c = centre + *offset;
-                self.world.set_box(id, BoxCollider::new(c, *half_extents));
-            }
-            ColliderComponent::Capsule {
-                offset,
-                radius,
-                half_height,
-                is_trigger: _,
-            } => {
-                let c = centre + *offset;
-                self.world
-                    .set_capsule(id, Capsule::new(c, *radius, *half_height));
-            }
+    /// The id of `entity`'s record, registering it in the static set at
+    /// `transform` first if it has none.
+    fn record_for(&mut self, entity: Entity, transform: Transform) -> BodyId {
+        if let Some(&id) = self.entity_to_body.get(&entity) {
+            return id;
         }
+        let id = self.records.insert(BodyRecord {
+            entity,
+            set: BodySet::Static,
+            index: 0,
+            collider: None,
+            material: SurfaceMaterial::DEFAULT,
+        });
+        let index = self.statics.push(id, transform);
+        self.records.get_mut(id).expect("just inserted").index = index;
+        self.entity_to_body.insert(entity, id);
+        id
+    }
+
+    /// The transform of the body `id` names, wherever it lives.
+    fn transform_slot(&mut self, id: BodyId) -> &mut Transform {
+        let record = self.records.get(id).expect("a live record");
+        match record.set {
+            BodySet::Awake => &mut self.awake.transforms[record.index],
+            BodySet::Static => &mut self.statics.transforms[record.index],
+        }
+    }
+
+    /// Point the record of a body a swap-remove `moved` into `index` at its
+    /// new place. `None` is the removal that emptied the end of the set.
+    fn reindex_to(&mut self, moved: Option<BodyId>, index: usize) {
+        if let Some(record) = moved.and_then(|id| self.records.get_mut(id)) {
+            record.index = index;
+        }
+    }
+
+    /// Reposition the collider of the body `id` names from its cached component
+    /// and current transform. No-op if it has no collider.
+    fn sync_collider(&mut self, id: BodyId) {
+        let Some(record) = self.records.get(id) else {
+            return;
+        };
+        let Some((collider, component)) = &record.collider else {
+            return;
+        };
+        let transform = match record.set {
+            BodySet::Awake => &self.awake.transforms[record.index],
+            BodySet::Static => &self.statics.transforms[record.index],
+        };
+        place_collider(&mut self.world, *collider, component, transform);
+    }
+}
+
+/// Move `collider` to where `component` sits on a body at `transform`.
+fn place_collider(
+    world: &mut PhysicsWorld,
+    collider: ColliderId,
+    component: &ColliderComponent,
+    transform: &Transform,
+) {
+    let centre = transform.position;
+    match component {
+        ColliderComponent::Sphere { offset, radius, .. } => {
+            world.set_sphere(collider, Sphere::new(centre + *offset, *radius));
+        }
+        ColliderComponent::Box {
+            offset,
+            half_extents,
+            ..
+        } => {
+            world.set_box(collider, BoxCollider::new(centre + *offset, *half_extents));
+        }
+        ColliderComponent::Capsule {
+            offset,
+            radius,
+            half_height,
+            ..
+        } => {
+            world.set_capsule(
+                collider,
+                Capsule::new(centre + *offset, *radius, *half_height),
+            );
+        }
+    }
+}
+
+/// `value`'s bits with every zero and every `NaN` made one: `-0.0` hashes as
+/// `+0.0` and any `NaN` as the canonical one, so two states that compare equal
+/// hash equal — `docs/plan/36-contact-solver.md` decision 8.
+fn canonical_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0
+    } else if value.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        value.to_bits()
     }
 }
 
@@ -654,8 +909,8 @@ impl Default for PhysicsSystem {
 impl std::fmt::Debug for PhysicsSystem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PhysicsSystem")
-            .field("collider_count", &self.entity_to_collider.len())
-            .field("body_count", &self.bodies.len())
+            .field("collider_count", &self.collider_count)
+            .field("body_count", &self.awake.bodies.len())
             .field("force_provider_count", &self.force_providers.len())
             .finish()
     }
@@ -679,7 +934,7 @@ impl SystemTrait for PhysicsSystem {
     }
 
     fn entity_count(&self) -> usize {
-        self.entity_to_collider.len()
+        self.collider_count
     }
 
     fn sweep(&mut self, dead: &[Entity]) {
@@ -694,42 +949,42 @@ impl SystemTrait for PhysicsSystem {
 
     /// Feed transform and rigid-body state into the determinism hash.
     ///
-    /// Entities are visited in ascending `to_bits()` order (the `HashMap`s
-    /// this reads are seeded per process) and every float goes in as
-    /// `to_bits()`, so the hash is a bit-exact function of the simulation
-    /// state and nothing else.
+    /// Entities are visited in ascending `to_bits()` order rather than in the
+    /// sets' order, which depends on the history of calls that built them, and
+    /// every float goes in canonicalised — `-0.0` as `+0.0`, every `NaN` as one — so the hash
+    /// is a function of the simulation state and nothing else.
     fn hash_state(&self, hasher: &mut dyn std::hash::Hasher) {
-        let mut entities: Vec<Entity> = self
-            .transforms
-            .keys()
-            .chain(self.bodies.keys())
-            .copied()
+        let mut entities: Vec<(u64, &BodyRecord)> = self
+            .records
+            .iter()
+            .map(|(_, record)| (record.entity.to_bits(), record))
             .collect();
-        entities.sort_unstable_by_key(|entity| entity.to_bits());
-        entities.dedup();
+        entities.sort_unstable_by_key(|(bits, _)| *bits);
 
-        for entity in entities {
-            hasher.write(&entity.to_bits().to_le_bytes());
+        for (bits, record) in entities {
+            hasher.write(&bits.to_le_bytes());
+            let (transform, body) = match record.set {
+                BodySet::Awake => (
+                    &self.awake.transforms[record.index],
+                    Some(&self.awake.bodies[record.index]),
+                ),
+                BodySet::Static => (&self.statics.transforms[record.index], None),
+            };
 
-            match self.transforms.get(&entity) {
-                Some(transform) => {
-                    hasher.write(&[1]);
-                    for value in [
-                        transform.position.x,
-                        transform.position.y,
-                        transform.position.z,
-                        transform.rotation.x,
-                        transform.rotation.y,
-                        transform.rotation.z,
-                        transform.rotation.w,
-                    ] {
-                        hasher.write(&value.to_bits().to_le_bytes());
-                    }
-                }
-                None => hasher.write(&[0]),
+            hasher.write(&[1]);
+            for value in [
+                transform.position.x,
+                transform.position.y,
+                transform.position.z,
+                transform.rotation.x,
+                transform.rotation.y,
+                transform.rotation.z,
+                transform.rotation.w,
+            ] {
+                hasher.write(&canonical_bits(value).to_le_bytes());
             }
 
-            match self.bodies.get(&entity) {
+            match body {
                 Some(body) => {
                     hasher.write(&[1]);
                     for value in [
@@ -741,8 +996,17 @@ impl SystemTrait for PhysicsSystem {
                         body.force_accum.x,
                         body.force_accum.y,
                         body.force_accum.z,
-                    ] {
-                        hasher.write(&value.to_bits().to_le_bytes());
+                        body.angular_velocity.x,
+                        body.angular_velocity.y,
+                        body.angular_velocity.z,
+                        body.torque_accum.x,
+                        body.torque_accum.y,
+                        body.torque_accum.z,
+                    ]
+                    .into_iter()
+                    .chain(body.local_inertia.to_cols_array())
+                    {
+                        hasher.write(&canonical_bits(value).to_le_bytes());
                     }
                 }
                 None => hasher.write(&[0]),
@@ -758,14 +1022,24 @@ impl SystemTrait for PhysicsSystem {
         // Per-entity Transform: position (3 × f64 LE) then rotation
         // quaternion (4 × f64 LE, x/y/z/w). Entities are sorted by bits so
         // the wire encoding is deterministic across runs and platforms.
-        let mut entries: Vec<_> = self.transforms.iter().collect();
-        entries.sort_by_key(|(entity, _)| entity.to_bits());
-        for (entity, transform) in entries {
-            out.extend_from_slice(&entity.to_bits().to_le_bytes());
+        let mut entries: Vec<(u64, &Transform)> = self
+            .records
+            .iter()
+            .map(|(_, record)| {
+                let transform = match record.set {
+                    BodySet::Awake => &self.awake.transforms[record.index],
+                    BodySet::Static => &self.statics.transforms[record.index],
+                };
+                (record.entity.to_bits(), transform)
+            })
+            .collect();
+        entries.sort_unstable_by_key(|(bits, _)| *bits);
+        for (bits, transform) in &entries {
+            out.extend_from_slice(&bits.to_le_bytes());
             out.extend_from_slice(&(transform.encoded_len() as u32).to_le_bytes());
             transform.encode(out);
         }
-        !self.transforms.is_empty()
+        !entries.is_empty()
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -1149,7 +1423,7 @@ mod tests {
     fn transform_encode_decode_roundtrips_and_lerp_midpoint() {
         let t = Transform::new(
             DVec3::new(1.25, -2.5, 3.75),
-            glam::DQuat::from_rotation_y(1.0),
+            crate::rotation_from_scaled_axis(DVec3::Y),
         );
         let mut buf = Vec::new();
         t.encode(&mut buf);
@@ -1401,12 +1675,19 @@ mod tests {
             &Transform::from_position(DVec3::ZERO),
         );
 
-        let before = phys.entity_to_collider[&mover];
+        let collider_of = |phys: &PhysicsSystem| {
+            phys.record(mover)
+                .and_then(|record| record.collider.as_ref())
+                .map(|(collider, _)| *collider)
+                .expect("the mover has a collider")
+        };
+        let before = collider_of(&phys);
         for _ in 0..8 {
             let _ = phys.sweep_body(mover, 1.0, 0.5);
         }
         assert_eq!(
-            phys.entity_to_collider[&mover], before,
+            collider_of(&phys),
+            before,
             "the sweep re-registered the collider it swept"
         );
         assert_eq!(phys.collider_count(), 1);
@@ -1891,5 +2172,142 @@ mod tests {
         body.velocity = DVec3::new(0.0, -1.0, 0.0);
         moving.set_body(e, body);
         assert_ne!(hash(&build(false, 0.0)), hash(&moving));
+    }
+
+    // ── Dense storage ───────────────────────────────────────────────────
+
+    /// **Removing bodies from the middle of a set leaves every other one's
+    /// body, transform and collider where its entity finds them.**
+    ///
+    /// A swap-remove moves the set's last body into the hole, so a record whose
+    /// index was not rewritten would name its neighbour's state. Each entity
+    /// here has a mass, a position and a collider that are its own, so a stale
+    /// index shows up as the wrong one of each. Both sets are exercised: the
+    /// statics are colliders with no body.
+    #[test]
+    fn removing_from_the_middle_of_a_set_leaves_every_other_body_its_own_state() {
+        let mut phys = PhysicsSystem::new();
+        let at = |i: u32| DVec3::new(f64::from(i) * 10.0, 0.0, 0.0);
+        let sphere = ColliderComponent::Sphere {
+            offset: DVec3::ZERO,
+            radius: 1.0,
+            is_trigger: false,
+        };
+        for i in 0..12u32 {
+            let e = test_entity(i);
+            phys.set_collider(e, &sphere, &Transform::from_position(at(i)));
+            if i % 3 != 0 {
+                let mut body = RigidBody::new_dynamic(1.0 + f64::from(i));
+                body.velocity = DVec3::Y;
+                phys.set_body(e, body);
+            }
+        }
+        for i in [1u32, 3, 7, 0, 11] {
+            phys.remove_entity(test_entity(i));
+        }
+        phys.step(1.0);
+
+        for i in 0..12u32 {
+            let e = test_entity(i);
+            let removed = [1u32, 3, 7, 0, 11].contains(&i);
+            if removed {
+                assert!(phys.transform(e).is_none(), "{i} survived its removal");
+                continue;
+            }
+            let has_body = i % 3 != 0;
+            let want = at(i) + if has_body { DVec3::Y } else { DVec3::ZERO };
+            assert_eq!(
+                phys.transform(e).expect("a transform").position,
+                want,
+                "entity {i} has another's transform"
+            );
+            assert_eq!(
+                phys.body(e).map(|body| body.mass),
+                has_body.then(|| 1.0 + f64::from(i)),
+                "entity {i} has another's body"
+            );
+            let hit = phys
+                .cast_ray(&Ray::new(want - DVec3::Z * 5.0, DVec3::Z))
+                .map(|(entity, _)| entity);
+            assert_eq!(hit, Some(e), "entity {i}'s collider is not where it is");
+        }
+        assert_eq!(phys.body_count(), 5);
+        assert_eq!(phys.collider_count(), 7);
+    }
+
+    /// **Giving a static entity a body moves it into the awake set with its
+    /// transform, and leaves the static it swapped with intact.**
+    #[test]
+    fn a_body_moves_a_static_entity_into_the_awake_set_with_its_transform() {
+        let mut phys = PhysicsSystem::new();
+        let (wall, prop, crate_) = (test_entity(0), test_entity(1), test_entity(2));
+        phys.set_transform(wall, Transform::from_position(DVec3::X));
+        phys.set_transform(crate_, Transform::from_position(DVec3::Y));
+        phys.set_transform(prop, Transform::from_position(DVec3::Z));
+
+        let mut body = RigidBody::new_kinematic();
+        body.velocity = DVec3::X;
+        phys.set_body(wall, body);
+        phys.step(1.0);
+
+        assert_eq!(
+            phys.transform(wall).expect("a transform").position,
+            DVec3::X * 2.0
+        );
+        assert_eq!(
+            phys.transform(crate_).expect("a transform").position,
+            DVec3::Y
+        );
+        assert_eq!(
+            phys.transform(prop).expect("a transform").position,
+            DVec3::Z
+        );
+        assert!(phys.body(crate_).is_none() && phys.body(prop).is_none());
+        assert_eq!(phys.body_count(), 1);
+    }
+
+    #[test]
+    fn a_material_is_carried_on_its_entity_and_defaults_until_set() {
+        let mut phys = PhysicsSystem::new();
+        let (ice, floor) = (test_entity(0), test_entity(1));
+        let ghost = test_entity(2);
+        phys.set_body(ice, RigidBody::new_dynamic(1.0));
+        phys.set_transform(floor, Transform::IDENTITY);
+
+        assert_eq!(phys.material(ice), Some(SurfaceMaterial::DEFAULT));
+        let slick = SurfaceMaterial::new(0.02, 0.1);
+        assert!(phys.set_material(ice, slick));
+        assert!(phys.set_material(floor, SurfaceMaterial::new(0.9, 0.0)));
+        assert_eq!(phys.material(ice), Some(slick));
+        assert_eq!(phys.material(floor).map(|m| m.friction), Some(0.9));
+
+        assert!(!phys.set_material(ghost, slick), "an unregistered entity");
+        assert_eq!(phys.material(ghost), None);
+        phys.remove_entity(ice);
+        assert_eq!(phys.material(ice), None, "the material outlived its entity");
+    }
+
+    /// Decision 8's canonical hash: a state that compares equal hashes equal,
+    /// so a velocity of `-0.0` is the same state as `+0.0`.
+    #[test]
+    fn the_hash_does_not_tell_a_negative_zero_from_a_positive_one() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher as _;
+
+        let hash = |vx: f64| {
+            let mut phys = PhysicsSystem::new();
+            let mut body = RigidBody::new_dynamic(1.0);
+            body.velocity = DVec3::new(vx, 1.0, 0.0);
+            phys.set_body(test_entity(0), body);
+            let mut h = DefaultHasher::new();
+            SystemTrait::hash_state(&phys, &mut h);
+            h.finish()
+        };
+        assert_eq!(hash(0.0), hash(-0.0));
+        assert_ne!(
+            hash(0.0),
+            hash(f64::MIN_POSITIVE),
+            "the hash cannot see velocity"
+        );
     }
 }

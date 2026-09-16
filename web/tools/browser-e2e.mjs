@@ -2365,6 +2365,34 @@ const EXPECTATIONS = {
       maxBounty: 60,
     },
   },
+  // **The demo whose claim is a constant.** tumble takes no input — both scenes
+  // start the same way every run — so `moving` reads the tick, and the
+  // `determinism` block below holds the wasm build's state hash at the check
+  // tick to the value the native test in `apps/tumble/src/scene.rs` pins. The
+  // page logs both, so the constant lives in one place.
+  tumble: {
+    // A demo that draws mesh instances — the floor and three boxes — so its
+    // cull pass has something to count. See lantern's row and group D.
+    culls: true,
+    key: null,
+    // Read off the *first* line. What it asks is that the simulation is
+    // already stepping and hashing, and that the box has not picked up spin
+    // from nothing, which is the one scene claim true from the first tick.
+    waiting: (line) =>
+      line.includes('[HUD] tick:') &&
+      /\bhash: [0-9a-f]{16}/.test(line) &&
+      /\bbox-spin: 0\b/.test(line),
+    moving: /\btick: (\d+)/,
+    movingLabel: 'the scenes step under their own steam',
+    // Every pattern is a field of the `[HUD]` line `apps/tumble/src/app.rs`
+    // logs.
+    determinism: {
+      tick: /\btick: (\d+)/,
+      hash: /\bhash: ([0-9a-f]{16})/,
+      pinnedTick: /\bpinned-tick: (\d+)/,
+      pinned: /\bpinned: ([0-9a-f]{16})/,
+    },
+  },
 };
 
 const EXPECTED = EXPECTATIONS[SLUG];
@@ -7855,6 +7883,63 @@ try {
         ? `the refusal counter went ${first.refused} → ${last.refused} over ` +
             `${budgeted.length} heartbeat(s)`
         : 'no heartbeat carried a refusal counter at all'
+    );
+  }
+
+  // **AND THE HASH, WHICH NOTHING ABOVE ASKS ABOUT.**
+  // Only tumble has one. Every check above passes for a page whose simulation
+  // reaches different bits than the native build does — a platform `sin` in the
+  // integrator would draw the same flipping handle and never be caught by a
+  // picture. So this block reads the wasm build's state hash at the check tick
+  // off the demo's own heartbeat and holds it to the value the native test pins,
+  // which the same heartbeat carries.
+  //
+  // Its control is that the hash moves: a hash that never changed would match a
+  // constant for the wrong reason.
+  if (EXPECTED.determinism) {
+    const det = EXPECTED.determinism;
+
+    /** Every HUD line, as the fields this block cares about. */
+    const readings = () =>
+      hud()
+        .map((line) => {
+          const tick = line.match(det.tick);
+          const hash = line.match(det.hash);
+          const pinnedTick = line.match(det.pinnedTick);
+          const pinned = line.match(det.pinned);
+          if (!tick || !hash || !pinnedTick || !pinned) return null;
+          return {
+            tick: Number(tick[1]),
+            hash: hash[1],
+            pinnedTick: Number(pinnedTick[1]),
+            pinned: pinned[1],
+          };
+        })
+        .filter((reading) => reading !== null);
+
+    const atCheck = await until(
+      async () =>
+        readings().find((reading) => reading.tick === reading.pinnedTick) ??
+        null
+    );
+    const seen = readings();
+    check(
+      'C',
+      "the wasm build's state hash at the check tick is the one the native test pins",
+      Boolean(atCheck) && atCheck.hash === atCheck.pinned,
+      atCheck
+        ? `tick ${atCheck.tick} hashed to ${atCheck.hash} against the pinned ` +
+            `${atCheck.pinned}`
+        : `no heartbeat reached the check tick in ${seen.length} line(s); the ` +
+            `last was tick ${seen[seen.length - 1]?.tick ?? 'none'}`
+    );
+
+    const distinct = new Set(seen.map((reading) => reading.hash)).size;
+    check(
+      'C',
+      'and the hash changes as the scenes move',
+      distinct > 1,
+      `${distinct} distinct hash(es) over ${seen.length} heartbeat(s)`
     );
   }
 

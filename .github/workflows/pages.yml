@@ -486,6 +486,12 @@ jobs:
           # for it, and then asks the server for a plot that is already taken,
           # which is the refusal this sample exists to make a number.
           - towers
+          # tumble is the physics gallery, and its gate is the one on this site
+          # that holds a hash to a constant: the `determinism` block in
+          # `web/tools/browser-e2e.mjs` reads the wasm build's state hash at
+          # the check tick and compares it with the one the native test pins.
+          # Its stage is a slab and three boxes, so it costs little.
+          - tumble
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -731,6 +737,10 @@ jobs:
       - name: Render towers in a real browser
         timeout-minutes: 12
         run: CRCBL_WEB_E2E_DEMO=towers ./web/run-browser-e2e.sh --headless
+
+      - name: Render tumble in a real browser
+        timeout-minutes: 12
+        run: CRCBL_WEB_E2E_DEMO=tumble ./web/run-browser-e2e.sh --headless
 
   probe-windows:
     name: probe the seam on Windows
@@ -1163,7 +1173,9 @@ jobs:
         if: runner.os == 'Linux'
         env:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-        run: ./web/run-cross-backend-e2e.sh --reference vk --expect-fail ssr,ui,meadow
+        run:
+          ./web/run-cross-backend-e2e.sh --reference vk --expect-fail
+          ssr,ui,meadow
 
       # **The strongest form of the same question, and the reason this leg is
       # worth its runner minutes.** On Linux the browser renders on SwiftShader

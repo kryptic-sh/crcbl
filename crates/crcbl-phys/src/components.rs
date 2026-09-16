@@ -4,8 +4,7 @@
 //! [`crcbl_ecs::System<T>`] arrays. They carry no storage or scheduling logic —
 //! that belongs to the physics system (see [`crate::system`]).
 
-use glam::DQuat;
-use glam::DVec3;
+use glam::{DMat3, DQuat, DVec3};
 
 // ---------------------------------------------------------------------------
 // RigidBody
@@ -13,8 +12,29 @@ use glam::DVec3;
 
 /// Dynamics data for a physics entity.
 ///
-/// Mass and velocity are in SI units (kg, m/s). The accumulated force vector is
-/// cleared every substep after integration.
+/// Mass and velocity are in SI units (kg, m/s); angular velocity is in rad/s
+/// and inertia in kg·m². The force and torque accumulators are cleared every
+/// substep after integration.
+///
+/// # Rotation
+///
+/// A body rotates at [`angular_velocity`](Self::angular_velocity) whatever its
+/// inertia, so a kinematic body spun by a game turns just as it moves. What the
+/// inertia decides is how the spin *changes*: a torque turns into angular
+/// acceleration through [`inverse_local_inertia`](Self::inverse_local_inertia),
+/// and a body whose inertia is not isotropic precesses and tumbles under the
+/// gyroscopic term — see [`crate::integrator::SemiImplicitEuler`].
+///
+/// A body starts with **no rotational inertia at all**: both tensors are zero,
+/// which this crate reads as "torque does nothing and the spin never changes".
+/// That keeps every body built before rotation existed exactly as it was, and a
+/// body that should tumble says so with [`with_inertia`](Self::with_inertia) —
+/// [`crate::mass::MassProperties`] computes the tensor from collider shapes.
+///
+/// The inertia is about the body's origin, which is taken to be its centre of
+/// mass: a centre of mass away from the origin is not modelled yet, so a
+/// compound body places its parts about the centre
+/// [`MassProperties::combine`](crate::mass::MassProperties::combine) reports.
 ///
 /// An entity with a [`RigidBody`] but no [`Transform`] component is a bug
 /// (detected at system registration time).
@@ -29,10 +49,23 @@ pub struct RigidBody {
     /// Net force accumulated this substep, in newtons. Cleared after
     /// integration.
     pub force_accum: DVec3,
+    /// Angular velocity in rad/s (world-space): the axis is the direction and
+    /// the rate is the length.
+    pub angular_velocity: DVec3,
+    /// Net torque accumulated this substep, in newton-metres (world-space).
+    /// Cleared after integration.
+    pub torque_accum: DVec3,
+    /// The inertia tensor about the centre of mass, in the body's own frame,
+    /// in kg·m². Zero for a body with no rotational inertia; see the type docs.
+    pub local_inertia: DMat3,
+    /// The inverse of [`local_inertia`](Self::local_inertia), or zero where
+    /// that is zero.
+    pub inverse_local_inertia: DMat3,
 }
 
 impl RigidBody {
-    /// Create a dynamic rigid body.
+    /// Create a dynamic rigid body with no rotational inertia; see
+    /// [`with_inertia`](Self::with_inertia).
     ///
     /// # Panics
     ///
@@ -44,8 +77,7 @@ impl RigidBody {
         Self {
             mass,
             inverse_mass: 1.0 / mass,
-            velocity: DVec3::ZERO,
-            force_accum: DVec3::ZERO,
+            ..Self::new_kinematic()
         }
     }
 
@@ -58,6 +90,39 @@ impl RigidBody {
             inverse_mass: 0.0,
             velocity: DVec3::ZERO,
             force_accum: DVec3::ZERO,
+            angular_velocity: DVec3::ZERO,
+            torque_accum: DVec3::ZERO,
+            local_inertia: DMat3::ZERO,
+            inverse_local_inertia: DMat3::ZERO,
+        }
+    }
+
+    /// This body with `local_inertia` as its inertia tensor, about its centre
+    /// of mass in its own frame.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the body is kinematic — its inertia is infinite, and a finite
+    /// tensor would make torque turn it — or if the tensor is not symmetric
+    /// positive definite, which no physical body's is.
+    #[must_use]
+    pub fn with_inertia(self, local_inertia: DMat3) -> Self {
+        assert!(self.is_dynamic(), "a kinematic body has no finite inertia");
+        let m = local_inertia;
+        assert!(
+            m.x_axis.y == m.y_axis.x && m.x_axis.z == m.z_axis.x && m.y_axis.z == m.z_axis.y,
+            "an inertia tensor is symmetric: {m:?}"
+        );
+        // Sylvester's criterion: every leading principal minor is positive.
+        let minor2 = m.x_axis.x * m.y_axis.y - m.y_axis.x * m.x_axis.y;
+        assert!(
+            m.x_axis.x > 0.0 && minor2 > 0.0 && m.determinant() > 0.0,
+            "an inertia tensor is positive definite: {m:?}"
+        );
+        Self {
+            local_inertia,
+            inverse_local_inertia: local_inertia.inverse(),
+            ..self
         }
     }
 
@@ -68,10 +133,19 @@ impl RigidBody {
         self.inverse_mass > 0.0
     }
 
-    /// Clear the force accumulator (called after integration).
+    /// Whether this body responds to torque: it is dynamic and has been given
+    /// an inertia tensor.
+    #[inline]
+    #[must_use]
+    pub fn has_rotational_inertia(&self) -> bool {
+        self.is_dynamic() && self.inverse_local_inertia != DMat3::ZERO
+    }
+
+    /// Clear the force and torque accumulators (called after integration).
     #[inline]
     pub fn clear_forces(&mut self) {
         self.force_accum = DVec3::ZERO;
+        self.torque_accum = DVec3::ZERO;
     }
 
     /// Apply a world-space force for this substep.
@@ -80,10 +154,40 @@ impl RigidBody {
         self.force_accum += force;
     }
 
+    /// Apply a world-space torque for this substep. A body with no rotational
+    /// inertia ignores it when it integrates.
+    #[inline]
+    pub fn apply_torque(&mut self, torque: DVec3) {
+        self.torque_accum += torque;
+    }
+
     /// Apply an impulse (instantaneous velocity change).
     #[inline]
     pub fn apply_impulse(&mut self, impulse: DVec3) {
         self.velocity += impulse * self.inverse_mass;
+    }
+
+    /// The angular momentum about the centre of mass, world-space, for a body
+    /// oriented at `rotation`: `R · I · Rᵀ · ω`.
+    #[must_use]
+    pub fn angular_momentum(&self, rotation: DQuat) -> DVec3 {
+        let local = rotation.inverse() * self.angular_velocity;
+        rotation * (self.local_inertia * local)
+    }
+
+    /// Kinetic energy in joules: `½ m v²` plus `½ ωᵀ I ω`.
+    ///
+    /// Zero for a kinematic body, whose mass is infinite — what it carries is
+    /// not energy the simulation can exchange. The rotational half is zero for
+    /// a body with no rotational inertia, for the same reason.
+    #[must_use]
+    pub fn kinetic_energy(&self, rotation: DQuat) -> f64 {
+        if !self.is_dynamic() {
+            return 0.0;
+        }
+        let local = rotation.inverse() * self.angular_velocity;
+        0.5 * self.mass * self.velocity.length_squared()
+            + 0.5 * local.dot(self.local_inertia * local)
     }
 }
 
@@ -322,6 +426,54 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "a kinematic body has no finite inertia")]
+    fn a_kinematic_body_refuses_an_inertia() {
+        let _ = RigidBody::new_kinematic().with_inertia(DMat3::IDENTITY);
+    }
+
+    #[test]
+    #[should_panic(expected = "positive definite")]
+    fn an_inertia_that_is_not_positive_definite_is_refused() {
+        let _ = RigidBody::new_dynamic(1.0)
+            .with_inertia(DMat3::from_diagonal(DVec3::new(1.0, -1.0, 1.0)));
+    }
+
+    #[test]
+    #[should_panic(expected = "symmetric")]
+    fn an_asymmetric_inertia_is_refused() {
+        let mut inertia = DMat3::IDENTITY;
+        inertia.x_axis.y = 0.1;
+        let _ = RigidBody::new_dynamic(1.0).with_inertia(inertia);
+    }
+
+    /// A body spinning at `ω` about a principal axis of moment `I`: momentum
+    /// `I ω` along the axis, whichever way the body is turned, and energy
+    /// `½ m v² + ½ I ω²`.
+    #[test]
+    fn momentum_and_energy_read_the_inertia_in_the_bodys_own_frame() {
+        let mut body = RigidBody::new_dynamic(2.0)
+            .with_inertia(DMat3::from_diagonal(DVec3::new(1.0, 2.0, 3.0)));
+        body.velocity = DVec3::new(3.0, 0.0, 0.0);
+        // Turned a quarter about Z, the body's X lies along world Y; spinning
+        // about world Y is spinning about the body's X, moment 1.
+        let quarter = DQuat::from_xyzw(
+            0.0,
+            0.0,
+            core::f64::consts::FRAC_1_SQRT_2,
+            core::f64::consts::FRAC_1_SQRT_2,
+        );
+        body.angular_velocity = DVec3::new(0.0, 4.0, 0.0);
+        let momentum = body.angular_momentum(quarter);
+        assert!(
+            (momentum - DVec3::new(0.0, 4.0, 0.0)).length() < 1e-12,
+            "{momentum:?}"
+        );
+        let energy = body.kinetic_energy(quarter);
+        assert!((energy - (9.0 + 8.0)).abs() < 1e-12, "{energy}");
+        assert_eq!(RigidBody::new_kinematic().kinetic_energy(quarter), 0.0);
+    }
+
+    #[test]
     fn applied_forces_sum_into_the_accumulator_and_clearing_zeroes_it() {
         let mut body = RigidBody::new_dynamic(1.0);
         body.apply_force(DVec3::new(1.0, 0.0, 0.0));
@@ -355,7 +507,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_non_finite_and_degenerate_payloads() {
-        let good = Transform::new(DVec3::new(1.0, 2.0, 3.0), DQuat::from_rotation_y(0.75));
+        let good = Transform::new(
+            DVec3::new(1.0, 2.0, 3.0),
+            crate::rotation_from_scaled_axis(DVec3::Y * 0.75),
+        );
         let mut buf = Vec::new();
         good.encode(&mut buf);
         assert!(Transform::decode(&buf).is_some());

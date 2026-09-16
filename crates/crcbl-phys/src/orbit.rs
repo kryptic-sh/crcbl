@@ -399,6 +399,12 @@ fn bracket(residual: &impl Fn(f64) -> (f64, f64), alpha: f64, dt: f64) -> (f64, 
 /// numbers divided by a small number, which loses most of the mantissa, so the
 /// series each converges to is used instead. The threshold is where the two
 /// agree to better than `f64` can tell them apart.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crcbl_core::trig saturates past a million radians, which a long propagate's \
+              anomaly passes, and no hyperbolic functions are constructed yet; \
+              docs/backlog.md carries both"
+)]
 fn stumpff(psi: f64) -> (f64, f64) {
     /// Below this the closed forms cancel catastrophically and the series is
     /// both faster and more accurate.

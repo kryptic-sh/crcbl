@@ -1,0 +1,81 @@
+<!--meta
+{
+  "out": "demos/tumble/index.html",
+  "slug": "tumble",
+  "name": "Tumble",
+  "title": "Tumble — Crucible",
+  "description": "Crucible's physics gallery: a T-handle tumbling in zero gravity with its angular momentum held, and a box dropped flat — with the gap the contact solver will close labelled on the page.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/tumble", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/tumble\">apps/tumble</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/tumble/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● post-MVP</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Tumble</span></h1>
+  <p class="tagline">
+    The physics engine, one rung at a time, on the scene built to prove each one
+    — and, where a rung has not landed yet, the gap it leaves, said out loud.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>There are none. It runs itself.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Nothing to press — both scenes start the same way every time</span>
+      <span><kbd>—</kbd></span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>A T-handle in zero gravity, flipping.</h3>
+  <p>
+    The orange handle is spun about its middle axis — the one whose moment of
+    inertia sits between the other two — with a tiny nudge about another. That
+    spin is unstable, and the handle turns itself over and back again for as
+    long as the page is open. It is the Dzhanibekov effect, and nothing on this
+    page drives it: it falls out of the inertia tensor the two boxes add up to
+    and the gyroscopic term in the rotation equations.
+  </p>
+  <p>
+    <strong>The counters are the claim.</strong> A free body keeps its angular
+    momentum and its energy, and a simulation that did not would show it here as
+    a handle slowly settling into a steady spin. The integrator solves the
+    gyroscopic step by the implicit midpoint rule, which conserves both, and the
+    panel shows how far each has drifted, in trillionths.
+  </p>
+  <h3>A box dropped flat, and the floor it cannot land on.</h3>
+  <p>
+    The blue box is dropped with no spin, and it gains none: its angular
+    velocity stays exactly zero and its orientation stays exactly level all the
+    way down. Then it falls straight through the floor. That is not a bug —
+    there is no contact solver yet, and landing is what the next rung builds.
+    The box is put back at the top each time and the panel counts the drops.
+  </p>
+  <p>
+    <strong>The hash is the same everywhere.</strong> Nothing in a physics step
+    calls a platform's maths library: the operations it uses are ones every
+    processor performs identically, and the sine and cosine it needs are built
+    inside the engine from them. So the state hash this page reaches ten seconds
+    in is the very number the native build's test pins, and the browser test
+    checks the two agree.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

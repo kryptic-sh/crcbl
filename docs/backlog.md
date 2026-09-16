@@ -529,6 +529,26 @@ optional-extension diagnostics should be deduplicated per asset and extension so
 multiple scene/view imports do not flood the log. Recheck the Mossberg asset in
 EW after the engine implementation lands, then update EW's pinned revision.
 
+## Physics rung 0 shipped without (2026-09-17)
+
+- **Tumble's milestone 1**: the ball-pit fountain, bullets, wind tunnel, the
+  scene switch and a golden frame ([24-tumble.md](plan/sample/24-tumble.md)).
+  `apps/tumble` has only the Spin scenes.
+- **A browser clock for tumble's step time.** `Instant` panics on wasm32, so the
+  page shows "no clock".
+- **A rotation cap per substep.** `36-contact-solver.md` caps rotation at a
+  quarter turn per substep; `SemiImplicitEuler` does not enforce it.
+- **The cost of `GYROSCOPIC_ITERATIONS` Newton iterations per body** is
+  unmeasured at rung 6's body counts.
+- **Colliders do not rotate with their body**, collider offsets are not rotated,
+  and a centre of mass away from the body origin is not modelled; rung 2's
+  oriented boxes need all three.
+- **Tumble's scenes never exercise `crcbl_core::trig`**: bodies with inertia
+  turn by the Cayley rotation, which needs no sine. Only inertia-less bodies and
+  built orientations call it.
+- **Not verified**: the browser gates ran locally on the hardware adapter, not
+  SwiftShader; tumble on Metal and D3D12 is CI's verdict only.
+
 ## Physics and tessellation: planned, with decisions owed (2026-09-15)
 
 Both are researched and planned, nothing built:
@@ -538,14 +558,11 @@ with [tumble](plan/sample/24-tumble.md), and
 [relief](plan/sample/25-relief.md). What stays open:
 
 - **Physics plan errors found by the survey, not yet corrected in
-  `05-physics.md`**: its "SoA" storage is hash maps sorted each step; its
-  120–240 Hz substeps are not implemented (`PhysicsSystem::tick` steps once);
-  its per-sector fat-AABB tree is one tree with exact bounds; breakout's
-  "contact normal response" is game code, against sample rule 9; its libm
-  question was decided on 2026-09-06; and `crcbl sim` registers no
-  `PhysicsSystem`, so the determinism killer test it names cannot run.
-  `dynamics.rs`'s `thousand_body_substep_count_preserves_determinism` asserts
-  only a non-zero hash, which cannot fail.
+  `05-physics.md`**: its 120–240 Hz substeps are not implemented
+  (`PhysicsSystem::tick` steps once); its per-sector fat-AABB tree is one tree
+  with exact bounds; breakout's "contact normal response" is game code, against
+  sample rule 9; and `crcbl sim` registers no `PhysicsSystem`, so the
+  determinism killer test it names cannot run.
 - **Decision: a height page in materials** — a 16-bit single-channel texture
   array and a `GpuMaterial` stride change, golden-visible.
 - **Decision: read `KHR_materials_displacement` as an unofficial glTF
@@ -4749,25 +4766,6 @@ heightfield form or a decision to fold heightfields into trimesh.
   tunnels terrain").
 - `apps/orbit`'s landing on terrain, and the towers sample generally.
 
-### Rotational dynamics in `crcbl-phys` (2026-08-27)
-
-**Not built.** `RigidBody` in `crates/crcbl-phys/src/components.rs` carries
-`mass`, `inverse_mass`, `velocity` and `force_accum` — and nothing else. There
-is no angular velocity, no torque and no inertia tensor anywhere in the crate
-(`grep -i angular|torque|inertia` over `crates/crcbl-phys/src/` hits only prose
-about orbital angular momentum in `orbit.rs`). `Transform` does carry a `DQuat`
-and `ThrustForce::world_force` reads it, so a body has an orientation that is
-**set and never integrated**.
-
-`05-physics.md`'s dynamics section promises "full inertia tensor, torque,
-quaternion integration with renormalization". That sentence has no
-implementation.
-
-**What it blocks:** the contact solver (36) — its "mass properties … inertia
-tensor" line has nothing to write into; ragdolls (35), which cannot articulate a
-body that cannot tumble; and anything that wants a spinning asteroid to spin in
-the engine rather than in a sample.
-
 ### Buoyancy and wind force providers (2026-08-27)
 
 **Not built.** `crcbl-phys`'s force providers are `GravityForce`,
@@ -4804,31 +4802,31 @@ from the origin.
 exercised, because nothing has yet been far enough from the origin. Task 1 of
 `05-physics.md` reads as done and its second half is not.
 
-### Cross-target determinism: the CPU side takes `libm` (2026-08-27, decided 2026-09-06)
+### Cross-target determinism: the rest of the constructed maths (2026-08-27, re-decided 2026-09-17)
 
-The record behind this — the argument, the options and the measurements — is in
-`docs/notes/simulation.md` under this heading.
+The record behind the earlier `libm`-crate answer is in
+`docs/notes/simulation.md` under "Cross-target determinism: the CPU side takes
+`libm`". **The user re-decided on 2026-09-17** (`05-physics.md`, "Decision
+(determinism math, 2026-09-17)"): transcendentals are constructed in-engine, no
+`libm` crate.
 
-**DECIDED 2026-09-06 —** the CPU side takes `libm`. Determinism-bearing maths —
-`crcbl-phys`, `crcbl-audio`'s synth and spatial paths, anything the simulation
-hash sees — goes through the `libm` crate plus glam's `libm` feature, which is
-bit-identical across glibc, Apple and MSVC by construction; rapier's
-`enhanced-determinism` and Bevy's `libm` feature are the precedent. The deny
-mechanism is clippy's `disallowed-methods` in `clippy.toml` for those crates
-(`f32::sin`, `powf`, `exp`, and the rest), shown red before it is trusted. The
-shader side is unchanged: the cooked tables of plan 43 §4 stand. It schedules
-the dependency, the deny list, retiring the sized-for-any-libm tolerance
-constants in `character.rs` and `orbit.rs`, and the byte-pinned cross-platform
-golden buffers those constants were blocking.
+**Built:** `crcbl_core::trig`'s `f64` `sin` and `cos` (within `MAX_KERNEL_ULP`,
+arguments up to `MAX_ARGUMENT`), and `crates/crcbl-phys/clippy.toml` denying
+platform transcendentals, `mul_add` and glam's trig-based rotation builders in
+`crcbl-phys`.
 
-**New evidence since that correction was written:** the cost is now visible in
-the tree. `crates/crcbl-phys/src/character.rs` and
-`crates/crcbl-phys/src/orbit.rs` each carry tolerance constants sized so a
-_different_ platform `libm` still passes — the orbit drift bound's doc comment
-says so by name, and `character.rs` describes a step threshold that "shifts by
-exactly the amount a different libm does". Those constants are the workaround
-this decision would remove, and they are what would have to be re-derived once
-it is taken.
+**Still owed:**
+
+- Constructed `exp`, `powf`, `cosh` and `sinh`. Three `crcbl-phys` calls carry
+  an `#[expect(clippy::disallowed_methods)]` until they exist:
+  `AtmosphericDrag`'s `exp`, `sphere_of_influence`'s `powf`, and the Kepler
+  solver's Stumpff functions.
+- A trig domain past `MAX_ARGUMENT`, or reducing the anomaly per orbit: a
+  century-long Kepler propagation exceeds it, which is why the Stumpff functions
+  still call the platform.
+- Retiring the tolerance constants in `character.rs` and `orbit.rs` sized so a
+  _different_ platform `libm` still passes, once their arithmetic is
+  constructed, and the byte-pinned cross-platform golden buffers they block.
 
 ### Client-side read-only query world (2026-08-27)
 
@@ -5165,14 +5163,14 @@ this topic; it shares no vocabulary with it.
 
 Nothing built. `crcbl-phys` names no manifold, contact, island, sleeping or
 joint; its only mention of a sequential-impulse solver is the layer table in
-`crates/crcbl-phys/src/lib.rs` marking L2 "Stretch". **Blocked on rotational
-dynamics** (above) and on the material block for friction/restitution.
+`crates/crcbl-phys/src/lib.rs` marking L2 "Stretch". Rung 0's rotation and
+carried `SurfaceMaterial` exist (2026-09-17); rungs 1 onward are the work.
 
 ### Ragdolls — `35-ragdolls.md` (2026-08-27)
 
-Nothing built, and every dependency is also missing: the contact solver (36), L3
-joints, rotational dynamics, and `KineticContact` (28) which the death handoff
-reads the killing impulse from. This is the deepest item in the slice.
+Nothing built, and most dependencies are also missing: the contact solver (36),
+L3 joints, and `KineticContact` (28) which the death handoff reads the killing
+impulse from. This is the deepest item in the slice.
 
 ### Player kit — `30-player-kit.md` (2026-08-27)
 
@@ -5763,25 +5761,16 @@ two delay lines for a large jump or an ear swap.
 **What it blocks:** the cue grammar's own promise. This is the failure mode that
 corrupts the pitch cues rules 3 and 4 depend on, so it is not cosmetic.
 
-### The transcendental policy is decided; the deny mechanism is not built (2026-08-27, decided 2026-09-06)
+### Audio's transcendentals and deny (2026-08-27, re-decided 2026-09-17)
 
-The record behind this — the argument, the options and the measurements — is in
-`docs/notes/simulation.md` under this heading.
-
-**DECIDED 2026-09-06 —** the policy is settled and is no longer two conflicting
-requirements. Shaders keep the cooked tables of plan 43 §4; CPU
-determinism-bearing maths takes the `libm` crate plus glam's `libm` feature,
-which is bit-identical across glibc, Apple and MSVC by construction, with
-rapier's `enhanced-determinism` and Bevy's `libm` feature as precedent. It
-schedules the dependency and the clippy `disallowed-methods` deny list in
-`clippy.toml` for those crates, shown red before it is trusted — no such file
-exists today and `crcbl-audio` still calls `powf`, `sin`, `exp` and `cos`.
-
-**The deny mechanism does not exist either.** There is no `clippy.toml` anywhere
-in the workspace, and no CI step greps for anything of the kind. The audio doc
-cited a `std::fs` deny as the pattern to copy; that deny has never existed.
-Whoever builds this builds the first one of its kind and must show it failing
-before trusting it.
+The record behind this is in `docs/notes/simulation.md` under "The
+transcendental policy is decided; the deny mechanism is not built". Shaders keep
+the cooked tables of plan 43 §4. CPU determinism-bearing maths is constructed
+in-engine (2026-09-17, superseding the 2026-09-06 `libm`-crate answer).
+`crcbl-phys` has its deny (`crates/crcbl-phys/clippy.toml`); **`crcbl-audio` has
+none**, and still calls `powf`, `sin`, `exp` and `cos`. What it would take:
+route them through `crcbl_core::trig` and constructed `exp`/`powf` (owed above),
+and give `crcbl-audio` its own `clippy.toml`, shown red before it is trusted.
 
 **Evidence it matters, measured rather than argued:** the one golden buffer in
 the tree started as a digest of every sample's `f32::to_bits` and CI failed it
@@ -13620,16 +13609,6 @@ it costs is **tree quality**, not answers.
   than fall through to the next one. `sweep_sphere_excluding` is the shape to
   copy.
 
-- **Rotational dynamics are absent.** `Transform` carries a `DQuat` and
-  `ThrustForce` reads it, but there is no angular velocity, no torque and no
-  quaternion integration: `RigidBody` has `velocity` and `force_accum` and
-  nothing angular. Asteroids' ship integrates its own heading in `turn_ship` and
-  writes it through `set_transform`. That is right for this game — a turn rate
-  is a constant, not a physical response — and wrong for the inertia tensor the
-  design doc describes. Whoever needs real torque adds `angular_velocity`,
-  `torque_accum` and an inertia term to `RigidBody` and a rotation step to
-  `SemiImplicitEuler`.
-
 - **No benchmark, and no rebuild policy.** Churn cost was measured as tree
   _depth_, not as time: the claim "insert/remove beats a rebuild" is an
   algorithmic one (one root-to-leaf path against `O(n log n)`) and was not
@@ -14433,10 +14412,8 @@ docs/notes/simulation.md under its own heading.
   (`crates/crcbl-audio/tests/burst-reference.wav`), not one per sample that
   emits sound, which is what the exit criterion asks for; asteroids and horde
   both synthesise deterministically from fixed seeds.
-- **The transcendental policy is decided and unbuilt.** Settled 2026-09-06 — see
-  "The transcendental policy is decided; the deny mechanism is not built". No
-  `Cargo.toml` names `libm` directly (it is in `Cargo.lock` only as a transitive
-  dependency) and there is no `clippy.toml` in the workspace.
+- **Audio's transcendentals are unconstructed.** See "Audio's transcendentals
+  and deny".
 - **`DeviceId` is per-kind on three backends of four** — Win32, X11 and AppKit —
   which blocks the local-multiplayer device assignment `19-input.md` says is
   supported "from day one". Wayland allocates one id per `wl_seat`

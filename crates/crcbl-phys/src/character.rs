@@ -820,7 +820,11 @@ mod tests {
     /// the contact normal is the radial direction from the grown shape's top
     /// cap, which is what this offsets from.
     fn on_dome(config: &CharacterConfig, angle: f64) -> DVec3 {
-        let normal = DVec3::new(angle.sin(), angle.cos(), 0.0);
+        let normal = DVec3::new(
+            crcbl_core::trig::sin(angle),
+            crcbl_core::trig::cos(angle),
+            0.0,
+        );
         DVec3::new(0.0, -DOME_RADIUS + config.half_height, 0.0)
             + normal * (DOME_RADIUS + config.radius)
     }
@@ -986,6 +990,10 @@ mod tests {
                  slope and {first_creep:?} the first creeping one",
             );
         };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the platform's arccosine is the oracle"
+        )]
         let limit = config.min_ground_normal_y.acos().to_degrees();
         assert!(
             last_still <= limit && limit <= first_creep,
@@ -1031,6 +1039,10 @@ mod tests {
     /// `bMaintainHorizontalGroundVelocity` and the reason a ramp does not feel
     /// like treacle.
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the platform's tangent is the oracle"
+    )]
     fn a_walkable_slope_is_climbed_without_losing_horizontal_ground() {
         let config = CharacterConfig::default();
         let angle = 30.0_f64.to_radians();

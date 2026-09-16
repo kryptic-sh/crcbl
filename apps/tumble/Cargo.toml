@@ -1,0 +1,32 @@
+[package]
+name = "tumble"
+description = "Tumble — the physics gallery: each contact-solver rung on the scene built to prove it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with two front ends, like every other sample.** `src/main.rs` owns
+# argv and the exit code, `src/web.rs` is an `extern "C"` entry point a browser's
+# JS shim drives once per `requestAnimationFrame`, and a bin crate has no
+# linkable artifact for the second. See `apps/breakout/Cargo.toml` at length.
+#
+# The lib is not called `tumble`: a lib and a bin of the same name in one package
+# write the same `tumble.wasm`, which cargo calls an output filename collision.
+[lib]
+name = "crcbl_tumble"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "tumble"
+path = "src/main.rs"
+
+# One engine dependency, with `greybox` on for the floor and the bodies' boxes.
+# The physics is `crcbl::phys` and its `f64` vectors are `crcbl::math`'s, so no
+# direct `glam` either.
+[dependencies]
+crcbl = { workspace = true, features = ["greybox"] }
+
+[lints]
+workspace = true

@@ -1123,6 +1123,21 @@ case "$DEMO" in
         ;;
 esac
 
+# And once more for the hash, which is tumble's cross-target claim. Every other
+# check in the driver passes against a page whose wasm build reaches different
+# bits than the native one, so the determinism block must have run: a renamed
+# check or a heartbeat that lost its fields would otherwise skip it silently.
+case "$DEMO" in
+    tumble)
+        PINNED="$(grep -F "the wasm build's state hash at the check tick is the one the native test pins" "${OUTPUT}.plain" || true)"
+        if [ -z "$PINNED" ]; then
+            echo "crcbl web e2e: the driver never compared $DEMO's hash with the pinned" >&2
+            echo "               one; the native-against-wasm determinism claim went unchecked" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the same argument for the one demo on this site that is a client and a
 # server at once. towers seals `PlaceTower` and `StartWave` into bytes and hands
 # them to a server over `crcbl-net`'s loopback; every other check in the driver

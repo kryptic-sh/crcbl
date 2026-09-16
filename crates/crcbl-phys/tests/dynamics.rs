@@ -13,9 +13,9 @@
 
 use crcbl_phys::{
     DampingForce, DragForce, ForceProvider, GravityForce, PhysicsSystem, RigidBody, ThrustForce,
-    Transform,
+    Transform, rotation_from_scaled_axis,
 };
-use glam::{DQuat, DVec3};
+use glam::DVec3;
 
 /// Build an [`Entity`] from a raw index for use in these tests.
 ///
@@ -143,7 +143,7 @@ fn thrust_follows_the_body_orientation() {
         e,
         Transform::new(
             DVec3::ZERO,
-            DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+            rotation_from_scaled_axis(DVec3::Z * std::f64::consts::FRAC_PI_2),
         ),
     );
 
@@ -189,6 +189,7 @@ fn thrust_against_damping_reaches_the_closed_form_terminal_velocity() {
     }
 
     let decay = 1.0 - DAMPING * dt / MASS;
+    #[expect(clippy::disallowed_methods, reason = "the closed form is the oracle")]
     let closed_form = (THRUST / DAMPING) * (1.0 - decay.powi(STEPS as i32));
     let vy = phys.body(e).unwrap().velocity.y;
     let error = (vy - closed_form).abs() / closed_form.abs();
@@ -325,7 +326,10 @@ fn thrust_and_damping_are_deterministic() {
         phys.set_body(e, RigidBody::new_dynamic(1.75));
         phys.set_transform(
             e,
-            Transform::new(DVec3::new(3.0, 1.0, -2.0), DQuat::from_rotation_x(0.4)),
+            Transform::new(
+                DVec3::new(3.0, 1.0, -2.0),
+                rotation_from_scaled_axis(DVec3::X * 0.4),
+            ),
         );
         for _ in 0..2_000 {
             phys.step(1.0 / 240.0);
@@ -462,7 +466,7 @@ fn a_thousand_body_run_hashes_the_same_state_twice_over() {
             body.velocity = DVec3::new(
                 (i as f64) * 0.1,
                 -((i as f64) % 7.0) * 0.5,
-                (i as f64).sin() * 2.0,
+                crcbl_core::trig::sin(i as f64) * 2.0,
             );
             phys.set_body(e, body);
             phys.set_transform(
@@ -489,39 +493,83 @@ fn a_thousand_body_run_hashes_the_same_state_twice_over() {
     assert_eq!(h1, h2, "1000-body sim produced different state hashes");
 }
 
+/// **Each substep count is deterministic, and different counts are different
+/// runs that each land exactly where their own arithmetic says.**
+///
+/// This used to assert only that the hash was non-zero, which a hash of
+/// nothing at all satisfies. It now makes three claims, each able to fail:
+///
+/// * the same substep count run twice hashes identically;
+/// * 60 and 120 substeps over the same ten seconds hash *differently* — so the
+///   hash can tell two states apart, and the count genuinely reaches the
+///   arithmetic;
+/// * every body at either count sits where semi-implicit Euler's closed form
+///   under constant gravity puts it after `n` steps,
+///   `y₀ − g·dt²·n(n+1)/2`, which is neither the analytic `½ g t²` nor the
+///   other count's answer.
 #[test]
 fn thousand_body_substep_count_preserves_determinism() {
-    // Same total dt, different substep counts — different result (by design
-    // with explicit Euler, but symplectic Euler also diverges). This test
-    // just verifies the hash is computed without panicking at scale.
-    let mut phys = PhysicsSystem::new();
-    phys.add_force_provider(Box::new(GravityForce::EARTH));
+    const COUNT: usize = 500;
+    const SECONDS: u32 = 10;
+    const START_Y: f64 = 50.0;
 
-    let count = 500;
-    for i in 0..count {
-        let e = test_entity(i as u32);
-        phys.set_body(e, RigidBody::new_dynamic(1.0 + (i % 5) as f64));
-        phys.set_transform(
-            e,
-            Transform::from_position(DVec3::new((i as f64) * 1.5, 50.0, 0.0)),
-        );
-    }
+    let run = |substeps_per_second: u32| {
+        let mut phys = PhysicsSystem::new();
+        phys.add_force_provider(Box::new(GravityForce::EARTH));
+        for i in 0..COUNT {
+            let e = test_entity(i as u32);
+            phys.set_body(e, RigidBody::new_dynamic(1.0 + (i % 5) as f64));
+            phys.set_transform(
+                e,
+                Transform::from_position(DVec3::new((i as f64) * 1.5, START_Y, 0.0)),
+            );
+        }
+        let dt = 1.0 / f64::from(substeps_per_second);
+        for _ in 0..SECONDS * substeps_per_second {
+            phys.step(dt);
+        }
+        phys
+    };
+    let system_hash = |phys: &PhysicsSystem| {
+        use crcbl_ecs::SystemTrait as _;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        phys.hash_state(&mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    };
 
-    let dt = 1.0 / 60.0;
-    for _ in 0..600 {
-        phys.step(dt);
-    }
+    let at_60 = run(60);
+    let at_120 = run(120);
+    assert_eq!(
+        system_hash(&at_60),
+        system_hash(&run(60)),
+        "60 substeps a second hashed differently on a second run"
+    );
+    assert_eq!(
+        hash_physics_state(&at_120, COUNT),
+        hash_physics_state(&run(120), COUNT),
+        "120 substeps a second hashed differently on a second run"
+    );
+    assert_ne!(
+        system_hash(&at_60),
+        system_hash(&at_120),
+        "different substep counts hashed the same, so the hash cannot see the state"
+    );
 
-    let hash = hash_physics_state(&phys, count);
-    // Hash is non-zero (sanity check).
-    assert!(hash != 0, "state hash should be non-zero");
-
-    // Verify all bodies exist and have finite state.
-    for i in 0..count {
-        let e = test_entity(i as u32);
-        let b = phys.body(e).expect("body should exist");
-        let t = phys.transform(e).expect("transform should exist");
-        assert!(b.velocity.is_finite());
-        assert!(t.position.is_finite());
+    for (phys, rate) in [(&at_60, 60u32), (&at_120, 120u32)] {
+        let dt = 1.0 / f64::from(rate);
+        let n = f64::from(SECONDS * rate);
+        let closed_form = START_Y - 9.81 * dt * dt * n * (n + 1.0) / 2.0;
+        for i in 0..COUNT {
+            let e = test_entity(i as u32);
+            let y = phys
+                .transform(e)
+                .expect("transform should exist")
+                .position
+                .y;
+            assert!(
+                (y - closed_form).abs() < 1e-9,
+                "body {i} at {rate} Hz is at y = {y}, not the closed form {closed_form}"
+            );
+        }
     }
 }
