@@ -111,18 +111,28 @@ its bounds, nudges it with keys, and saves with a dirty marker in the title —
 proving load, pick, mutate, save and a byte-stable diff before any protocol
 exists.
 
-**Decisions this raises, for the user before building** — the options are
-evidenced above:
+**Decided by the user, 2026-09-16** — the options were the ones evidenced above:
 
-- **Protocol first, in-process first, or both**: the locked design routes every
-  edit through server commands, which needs items 1–4 first; mutating the server
-  `World` in-process reaches a usable tool sooner and breaks the "nothing
-  GUI-only" invariant; the middle is a command enum and undo log from day one,
-  applied in-process and routed over the transport later.
-- **Whether games must keep editable state in ECS systems** (towers ported
-  first), or the editor edits only scene data a game reads at load.
-- **How play/stop restores**: per-system serialize and restore, the scene chunk
-  codecs over every system, or restarting play from a scene reload.
+- **The command enum and the undo log exist from day one, applied in-process,
+  and are routed over the transport later.** So every edit is a `Command` value
+  from the first slice even while the editor mutates the server `World`
+  directly, and "nothing GUI-only" is kept by construction rather than
+  retrofitted: what the transport gains later is a carrier, not a vocabulary.
+- **Games keep editable state in ECS systems**, towers ported first, so the
+  editor sees and edits live entities rather than only the scene a game reads at
+  load. Most samples' state is outside the ECS today, so each port is its own
+  slice and the backlog carries them.
+- **Play/stop restores by reloading the scene.** Restore is the load path the
+  engine already tests, at the cost of losing unsaved edits when play starts and
+  of a load's worth of time on stop. Per-system snapshots stay declined: a
+  system that forgets one loses state silently.
+- **A component's editable fields come from `#[derive(Reflect)]`** in a new
+  proc-macro crate, one annotation per component, checked at compile time. This
+  is the workspace's first proc-macro dependency (`syn`, `quote`,
+  `proc-macro2`), approved with the decision.
+
+**Decisions still open:**
+
 - **Docking**: splitters only, as the UI plan fixes, and whether tabs are in.
 - **The viewport**: a secondary view rendered to a texture a UI rect samples, or
   the scene drawn full-window with UI panes around a scissored region.

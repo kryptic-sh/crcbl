@@ -5154,6 +5154,16 @@ allow-lists that path on purpose, naming `docs/plan/08-editor.md` as its design.
 features 5 and 6 have nothing to open or save) and stage 7's inspector (previous
 entry).
 
+**Its four owner decisions were answered 2026-09-16** and are recorded in
+`08-editor.md`: the edit command enum and undo log exist from day one and are
+applied in-process, with the transport carrying them later; games keep editable
+state in ECS systems, **towers ported first** — most samples' state is outside
+the ECS today, so each port is its own slice and is owed here; play/stop
+restores by reloading the scene; and a component's editable fields come from
+`#[derive(Reflect)]`, the workspace's first proc-macro dependency. Still open:
+docking and tabs, the viewport's shape, file dialogs, the scene-format change
+for entities spanning systems, and the `notify` watcher.
+
 **It blocks two sample plans, and they are the only two samples with no app
 directory:** `docs/plan/sample/07-towers.md`, whose milestone 2 _is_ the editor
 dogfood pass and whose exit criterion is "map authored 100% in the editor, zero
