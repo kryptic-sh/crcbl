@@ -305,6 +305,7 @@ dependencies = [
  "crcbl-vfx",
  "crcbl-vk",
  "crcbl-webgpu",
+ "crcbl-wind",
  "glam",
  "log",
  "png",
@@ -652,6 +653,18 @@ version = "0.1.0"
 dependencies = [
  "crcbl-core",
  "crcbl-hal",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "crcbl-wind"
+version = "0.1.0"
+dependencies = [
+ "crcbl-assets",
+ "crcbl-phys",
+ "crcbl-shaders",
+ "crcbl-sprite",
+ "glam",
  "thiserror 2.0.20",
 ]
 

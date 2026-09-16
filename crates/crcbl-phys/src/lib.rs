@@ -44,6 +44,7 @@ pub mod integrator;
 pub mod orbit;
 pub mod query;
 pub mod system;
+pub mod wind;
 pub mod world;
 
 pub use atmosphere::{Atmosphere, AtmosphericDrag};
@@ -63,4 +64,5 @@ pub use query::{
     swept_sphere_vs_capsule, swept_sphere_vs_sphere,
 };
 pub use system::{EntityOverlapQueries, PhysicsSystem};
+pub use wind::WindQuery;
 pub use world::{BroadphaseStats, ColliderId, OverlapQueries, PhysicsWorld, QueryScratch};

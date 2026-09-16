@@ -208,7 +208,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   adapters to append existing primitives without reconstructing registered image
   handles or losing their parameters. Commands use the destination list's
   current clip and overlay state.
-
+- **`crcbl-wind`: the wind field every consumer samples** —
+  `docs/plan/56-wind.md`'s rung W1. Two authored layers load as ordinary PNGs
+  through `crcbl-assets` (a coarse direction layer holding a deflection vector
+  per texel, a fine intensity layer where zero means calm), a `Weather` state
+  sits over them with the five Beaufort presets, and one world-wide gust scroll
+  offset in 2⁻³² m integer fixed point cannot drift or stall far from the
+  origin. `WindField::sample` is the authoritative CPU copy of the plan's
+  formula, bit-identical between runs and free of any transcendental — the
+  direction composes with the weather by a complex product rather than an angle
+  — and `shaders/wind.slang` is the same formula on the GPU behind one bind
+  group of sampled textures, with no storage texture, so it runs on WebGPU.
+  `crcbl-phys` declares `WindQuery`, which `WindField` implements, so the crate
+  with the bodies does not link the crate with the weather; the two samplers are
+  held to `crcbl_shaders::wind::MAX_CPU_GPU_ERROR`, 3% of the base speed, on
+  every backend. Nothing consumes the field yet: rigid-body drag is rung W4, and
+  vegetation, hair and water are their own plans.
 - **`crcbl::registry`: one place a tool learns what a scene's chunks are made
   of.** `Registry::register::<T>("bricks")` produces, from one type parameter,
   the `SystemChunk` codec its file is read and written with, the `System<T>` a

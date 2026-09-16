@@ -640,6 +640,19 @@ dxil = vertexMain:dxil/water_copy.vertex.dxil:d90f2f11f7dc43aba893511ca1c9d141fa
 dxil = fragmentMain:dxil/water_copy.fragment.dxil:12be893aaad9f7954e6a8bae79d473cfa1445054688522cf93af9b45a16a2f35
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
+[wind]
+source = shaders/wind.slang
+source-sha256 = 80efa361a5d53f5f3e28f0a62a65c7d0e554fa37f5b2afd5d88127e26776a14f
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/wind.spv
+spirv-sha256 = bbc35c950a88466a27e9d49bace9b3def2e30a9c336354c63e0b7087a202c9ed
+wgsl = wgsl/wind.wgsl
+wgsl-sha256 = 3bb019d8b4a9ee4fa7bcfd5722db47cc2b347b4eacb372badbdfc3d51b651594
+msl = msl/wind.metal
+msl-sha256 = 1a9d27f3f528579bbe3b24cc4906c27af893c65f92298c6798ac6db017e2e41e
+dxil = computeMain:dxil/wind.compute.dxil:ef7192bac700b12493972c457f735dee9aa0b3e9f2d20ea017d0afb1910cec68
+entry-points = computeMain:glcompute
+
 [zero_dispatch_probe]
 source = shaders/zero_dispatch_probe.slang
 source-sha256 = d60feb7eb0a7da318bc9e37f36bf9b11ba346811957142fd5ec36587d2b777fe

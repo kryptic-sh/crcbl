@@ -292,6 +292,7 @@ crates/crcbl-wl-scanner the Wayland protocol code generator, run at build time
 crates/crcbl-vfx        particle simulation: pooled effects, a fixed modifier menu
 crates/crcbl-inventory  the grid-inventory kit: one container, footprints, stacking
 crates/crcbl-water      water bodies, their media, and the surface mesh a pass draws
+crates/crcbl-wind       the wind field: two authored layers, a weather state, one gust offset
 crates/crcbl-reflect    a component's editable fields, and the derive that writes them
 crates/crcbl-greybox    greybox prototyping primitives, sized in real-world metres
 crates/crcbl-golden     golden-image comparison for the render tests

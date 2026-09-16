@@ -144,6 +144,12 @@ crcbl-vfx = { path = "crates/crcbl-vfx", version = "0.1.0" }
 # decision. Depends on `thiserror` alone, so the renderer, the physics world and
 # a server that draws nothing can all read one body.
 crcbl-water = { path = "crates/crcbl-water", version = "0.1.0" }
+# The wind field: `docs/plan/56-wind.md`'s two authored layers, the weather over
+# them and the one formula every consumer samples with. The arrow into
+# `crcbl-phys` is that document's decision 6 — physics declares `WindQuery` and
+# this crate implements it, so the crate with the bodies in it does not link the
+# crate with the weather in it.
+crcbl-wind = { path = "crates/crcbl-wind", version = "0.1.0" }
 # The grid-inventory kit: the container primitive, the item catalogue and the
 # placement rules, headless. `serde`, `ron` and `thiserror` and nothing else —
 # no `glam` and no `crcbl-core` — so the arrow into it costs a browser build

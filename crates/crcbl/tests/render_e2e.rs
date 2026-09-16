@@ -168,10 +168,26 @@ mod verdict;
 
 use verdict::Offscreen;
 
+// The fixture the backend-agnostic GPU suites open with, out of
+// `tests/gpu_scene/` for the reason its header gives. This suite draws its
+// frames through `crcbl::screenshot` and wants none of it — `wind` below opens
+// a device of its own, dispatches a compute shader and reads a buffer back,
+// which is what that fixture is.
+#[path = "gpu_scene/harness.rs"]
+mod harness;
+
 // `docs/plan/55-water.md` rung 1's fixture, in a file of its own for the reason
 // it gives.
 #[path = "render_e2e/still_pool.rs"]
 mod still_pool;
+
+// `docs/plan/56-wind.md` rung W1's CPU–GPU agreement: the wind field's shader
+// against the authoritative CPU copy, at fixed points. Here rather than in a
+// suite of its own because this is the runner that goes round both a software
+// rasteriser and the hardware adapter, which is what a claim about filtering
+// hardware needs.
+#[path = "render_e2e/wind.rs"]
+mod wind;
 
 // `docs/plan/07-ui-debug.md` rung 1's primitives, in a file of their own for the
 // same reason.

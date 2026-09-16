@@ -205,14 +205,14 @@ platform's library, not the math, so the mapping is decided here once:
 
 ## The rungs
 
-| Rung | What it buys                                                                                             | What it costs                                    | Needs                          |
-| ---- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------ |
-| W1   | `crcbl-wind`: weather state, the two layers, CPU and GPU sampling, the bind group, the `WindQuery` trait | two taps per sample; two textures                | —                              |
-| W2   | Travelling gusts: the integer scroll offset and baked gust noise                                         | one or two taps                                  | W1                             |
-| W3   | The motor list: vorticle frames and motor shapes                                                         | per sample, linear in the list's cap             | W1                             |
-| W4   | Rigid-body wind drag with per-body coefficient and projected area                                        | per body per tick                                | W1; per-body medium properties |
-| W5   | The CPU 2D motor grid for lingering wakes                                                                | a grid step and an upload per tick               | W3                             |
-| W6   | A 3D grid for vertical structure                                                                         | a larger step, or a GPU step that is visual-only | W5                             |
+| Rung | What it buys                                                                                                                                                                                                              | What it costs                                    | Needs                          |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------ |
+| W1   | `crcbl-wind`: weather state, the two layers, CPU and GPU sampling, the bind group, the `WindQuery` trait — **built 2026-09-16**, with decision 3's smoothed-triangle gust front and the integer scroll offset it rides on | two taps per sample; two textures                | —                              |
+| W2   | Travelling gusts: the integer scroll offset and baked gust noise                                                                                                                                                          | one or two taps                                  | W1                             |
+| W3   | The motor list: vorticle frames and motor shapes                                                                                                                                                                          | per sample, linear in the list's cap             | W1                             |
+| W4   | Rigid-body wind drag with per-body coefficient and projected area                                                                                                                                                         | per body per tick                                | W1; per-body medium properties |
+| W5   | The CPU 2D motor grid for lingering wakes                                                                                                                                                                                 | a grid step and an upload per tick               | W3                             |
+| W6   | A 3D grid for vertical structure                                                                                                                                                                                          | a larger step, or a GPU step that is visual-only | W5                             |
 
 Every rung runs on the WebGPU backend; none needs a storage texture.
 

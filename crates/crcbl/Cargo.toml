@@ -190,6 +190,12 @@ crcbl-golden = { workspace = true }
 # tiling material to prove a 2 m surface shows twice the grid cells of a 1 m one.
 # A dev-dependency because no shipped `crcbl` binary references the greybox pack.
 crcbl-greybox = { workspace = true }
+# `tests/render_e2e/wind.rs` — `docs/plan/56-wind.md` rung W1's CPU–GPU
+# agreement. The wind field is the *authoritative* side of that comparison, so
+# the test has to build one; a dev-dependency because no shipped `crcbl` binary
+# reads the field yet (W4's drag provider and the vegetation rungs are its
+# consumers, and each is its own slice).
+crcbl-wind = { workspace = true }
 # `tests/gltf_e2e.rs` builds a `.glb` and imports it through the real
 # `DirSource`, so it needs a real directory to put it in. The asset seam itself
 # is an ordinary dependency above — see there.

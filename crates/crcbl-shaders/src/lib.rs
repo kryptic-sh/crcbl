@@ -367,6 +367,10 @@ pub mod trig;
 // `fog`'s reason above.
 pub mod water;
 
+// The wind field's two blocks, its workgroup size and the tolerance its GPU
+// copy is held to; its own `//!` header, for `fog`'s reason above.
+pub mod wind;
+
 use std::sync::OnceLock;
 
 /// Little-endian `f32`s in iteration order — what `std430` means for a struct

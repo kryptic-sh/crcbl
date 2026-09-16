@@ -1,0 +1,52 @@
+[package]
+name = "crcbl-wind"
+description = "Crucible wind: the two-layer field, its weather, and the one formula every consumer samples it with"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The asset seam decision 1 says the two layers arrive through: "Both are
+# ordinary assets in a standard image format … loaded through `crcbl-assets`."
+# It is the IO trait and the error type and nothing else — no decoder, no
+# device — so the arrow costs a browser build the same nothing a directory read
+# does.
+crcbl-assets = { workspace = true }
+# **The arrow runs this way on purpose.** `docs/plan/56-wind.md`'s decision 6:
+# "`crcbl-phys` defines a `WindQuery` trait that `crcbl-wind` implements … so
+# physics does not depend on the wind crate." A server simulating a room must
+# not link two authored texture layers to answer a question it never asks, and
+# it would if the dependency were the other way round.
+crcbl-phys = { workspace = true }
+# The uniform block `shaders/wind.slang` declares, so the `f64` formula and its
+# `f32` narrowing sit in one file. `crcbl-shaders` has no dependencies of its
+# own — it hands out `&[u32]` and layouts — and `crcbl-scene` already names it
+# for the same reason: the crate that produces an artifact's bytes should be
+# able to name the layout they go into.
+crcbl-shaders = { workspace = true }
+# The one PNG reader this workspace has, behind its `load` feature so nothing
+# but the decoder comes with it. Writing a second one here would be a second
+# place the `output_buffer_size` guard has to land.
+crcbl-sprite = { workspace = true, features = ["load"] }
+glam = { workspace = true }
+# `WindError` is returned from four constructors and two loaders, so it needs
+# `Display` and `Error` without a macro of this crate's own.
+thiserror = { workspace = true }
+
+# The PNG *encoder*, for the generator that writes the committed layer pair —
+# the same half `crcbl-sprite`'s own manifest says a `build.rs` enables. A
+# dev-dependency because nothing at runtime writes a layer, and an example
+# rather than a binary because a binary cannot see one.
+[dev-dependencies]
+crcbl-sprite = { workspace = true, features = ["bake", "load"] }
+
+# The committed layer pair's generator, in `tools/` beside the module it shares
+# with `tests/authored_layers.rs`. `crates/crcbl-shaders/tools/cook-dfg.rs` is
+# the arrangement this copies, down to the `--check` mode.
+[[example]]
+name = "cook-wind-layers"
+path = "tools/cook-wind-layers.rs"
+
+[lints]
+workspace = true

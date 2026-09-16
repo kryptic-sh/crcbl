@@ -65,6 +65,7 @@ crcbl/
 │   ├── crcbl-anim/         # topic 17: skeletons, clips, blending
 │   ├── crcbl-vfx/          # topic 20: particle simulation
 │   ├── crcbl-water/        # topic 55: water bodies, media, the surface mesh
+│   ├── crcbl-wind/         # topic 56: the two-layer wind field and its weather
 │   ├── crcbl-inventory/    # topic 34: the grid-inventory kit
 │   ├── crcbl-ecs/          # stage 4: system-owned arrays
 │   ├── crcbl-net/          # stage 4: transport seam, replication

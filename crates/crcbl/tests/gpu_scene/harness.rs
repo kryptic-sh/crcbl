@@ -172,6 +172,14 @@ pub(crate) struct Headless {
     pub(crate) surface: crcbl::hal::SurfaceHandle,
     pub(crate) swapchain: crcbl::hal::SwapchainHandle,
     pub(crate) queue: crcbl::hal::QueueHandle,
+    /// The format the ring was created at.
+    ///
+    /// `allow(dead_code)` because one of the suites that opens this fixture
+    /// never presents: `tests/render_e2e.rs`'s `wind` module wants a device and
+    /// a queue for a compute dispatch, and the ring it gets with them is
+    /// unused. The other four read it. A field-level allow rather than one on
+    /// the struct, so a field that genuinely fell out of use still says so.
+    #[allow(dead_code)]
     pub(crate) format: Format,
     /// Destroyed last, and therefore declared last: a field is dropped in
     /// declaration order, and the surface handle above it names an object this

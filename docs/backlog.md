@@ -30,6 +30,43 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 - **Rounded outlines and nested scroll containers** are covered by unit tests
   and no GPU claim; D3D12 and Metal draw `ui_focus` only on CI.
 
+## What wind rung W1 shipped without (2026-09-16)
+
+`crcbl-wind` landed with the gaps below; `docs/plan/56-wind.md` is the design,
+and its rungs W2–W6 are separate slices rather than gaps.
+
+- **Nothing reads the field.** `crcbl_phys::WindQuery` has one implementation
+  and no caller: rung W4's rigid-body drag needs two `crcbl-phys` prerequisites
+  that do not exist (rigid-body rotation, per-body medium properties), and
+  trees, grass, hair and water are other plans. The crate is therefore **not
+  linked into `crcbl-server`**, which the plan's decision 6 says it should be —
+  an unused dependency is one `cargo machete` refuses, so the arrow lands with
+  the first consumer.
+- **The GPU bind group is built by the test, not by `crcbl-render`.** The layout
+  is declared by `shaders/wind.slang` and constructed in
+  `crates/crcbl/tests/render_e2e/wind.rs`; a `crcbl_render::wind` module with no
+  pass reading it would be machinery nothing exercises.
+- **Two readings the plan does not settle.** The direction layer's texel is a
+  _deflection_ composed with the weather's base direction by a complex product,
+  not an absolute direction — otherwise turning the weather would not turn the
+  field — and the gust term at W1 is the smoothed triangle wave rather than the
+  baked noise the same decision names, because the plan's rung table puts the
+  noise in W2. Both are documented where they are implemented.
+- **The intensity layer does not page.** Decision 1 wants it paged per world
+  tile; `LayerGrid` repeats one image over the whole world instead. Paging needs
+  the streaming layer and a consumer that cares how big the field is.
+- **No vertical component and no extra channels**: the terrain-following updraft
+  and the candidate turbulence, gust-susceptibility and shelter channels are
+  unbuilt, and blue and alpha in both layers are unread.
+- **Only Vulkan was measured.** The figures behind
+  `crcbl_shaders::wind::MAX_CPU_GPU_ERROR` (3% of the base speed) come from
+  lavapipe and an RX 7900 XTX; the worst relative disagreement measured was
+  0.0126 on lavapipe and 0.0037 on hardware, and the error is a bilinear
+  _weight_ error, so it scales with speed rather than being flat. Metal, D3D12
+  and a browser run the same test only on CI.
+- **`DEFAULT_GUST_WAVELENGTH` (32 m) is a starting value, not a measurement**,
+  and changes nothing until a caller raises `Weather::gust_amplitude` off zero.
+
 ## What UI rung 8b shipped without (2026-09-16)
 
 `Ui::inspector` landed with the gaps below.
