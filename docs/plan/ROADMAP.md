@@ -75,6 +75,15 @@ browser's own gate and the demo site's deploy.
 
 ### The engine crates
 
+- **`crcbl-reflect`** — what an editor's property panel needs to know about a
+  component: each field's name, label, type, optional range and step, and a way
+  to read and write it. `#[derive(Reflect)]` is the one annotation a component
+  carries, in the companion `crcbl-reflect-derive`, the workspace's only
+  proc-macro crate. Not general-purpose reflection: there is no type registry
+  and no construction, because a panel shows a value, edits it and reports the
+  change as a command. [08-editor.md](08-editor.md) feature 3 and
+  [07-ui-debug.md](07-ui-debug.md)'s rung 8 are what read it.
+
 - **`crcbl-core`** — `Handle`/`Pool`, sector-tiled `WorldPos` (`I64Vec3`
   sectors, 2^20 m cells), `FrameArena`, `FrameClock` with an injected
   `TimeSource`, the input vocabulary, `SurfaceTarget`, logging, and

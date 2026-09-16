@@ -111,6 +111,7 @@ use crcbl::ecs::{ComponentHash, System, World};
 use crcbl::greybox::{GREYBOX_TILE_M, cube, grid_material, grid_page, platform, sphere};
 use crcbl::math::{DVec3, Mat4, Vec3};
 use crcbl::phys::{BoxCollider, PhysicsWorld, Sphere};
+use crcbl::reflect::Reflect;
 use crcbl::render::scene::{Capacities, Geometry, InstanceDesc, MeshDesc, ProbeGrid, SceneDesc};
 use crcbl::render::{
     DirectionalLight, ForwardRenderer, InstanceHandle, InstancePoolError, MeshPoolError, SkinRange,
@@ -292,11 +293,21 @@ const BLOCKOUT_SUN_RON: &str = include_str!("../assets/scenes/blockout.scn/sys/s
 /// **Puppet's own type**, for the reason the [module docs](self) give at length:
 /// a chunk's component is whatever its game says it is, and one consumer is not
 /// an engine type.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// **Derives [`Reflect`] as well as `Serialize`**, and the two answer different
+/// questions: `Serialize` is how a row reaches `sys/surfaces.ron`, `Reflect` is
+/// how it reaches an editor's property panel. This type is the one in the
+/// workspace that exercises the whole derive — a `String`, two arrays, and a
+/// nested enum whose rows change with the variant — which is why it is annotated
+/// here rather than only in a test fixture. `docs/plan/08-editor.md` feature 3
+/// is the panel that reads it.
+#[derive(Clone, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(crate = "crcbl::reflect")]
 #[serde(crate = "crcbl::serde")]
 pub struct Surface {
     /// What the mesh is called — the label the renderer holds it under, and what
     /// a frame dump names it in.
+    #[reflect(name = "Label")]
     pub label: String,
     /// Where the primitive's own origin sits, in metres.
     ///
@@ -304,11 +315,18 @@ pub struct Surface {
     /// spelled in — [`BoxCollider`] and [`Sphere`] take [`DVec3`] — and a map
     /// written as `f32` would round on the way through the file and put the
     /// collider somewhere the mesh is not.
+    #[reflect(name = "Position")]
     pub position: [f64; 3],
     /// What it is, which decides the mesh and the collider together.
+    #[reflect(name = "Shape")]
     pub shape: Shape,
     /// Linear RGB the greybox grid is tinted with, through this module's
     /// `painted`.
+    ///
+    /// The range is what a linear RGB channel is: the tint is multiplied into
+    /// the grid page rather than added to it, so nothing outside `0..=1` means
+    /// anything.
+    #[reflect(name = "Tint", min = 0.0, max = 1.0, step = 0.01)]
     pub tint: [f32; 3],
 }
 
@@ -317,17 +335,21 @@ pub struct Surface {
 /// Each carries the collider that is the **same** surface the mesh draws, which
 /// is the whole claim [`Map::world`] and [`Map::place`] make together: there is
 /// one set of numbers per object and the two halves both read it.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(crate = "crcbl::reflect")]
 #[serde(crate = "crcbl::serde")]
 pub enum Shape {
     /// A cuboid standing on the primitive's origin: [`platform`]'s geometry, and
     /// a [`BoxCollider`] over the same eight corners.
     Platform {
         /// Its extent along `X`, in metres.
+        #[reflect(name = "Width", min = 0.0, max = 64.0, step = 0.1)]
         width: f64,
         /// Its extent along `Z`, in metres.
+        #[reflect(name = "Depth", min = 0.0, max = 64.0, step = 0.1)]
         depth: f64,
         /// How far it rises above the origin, in metres.
+        #[reflect(name = "Height", min = 0.0, max = 64.0, step = 0.1)]
         height: f64,
     },
     /// A sphere centred on the primitive's origin: [`sphere`]'s tessellation at
@@ -338,6 +360,7 @@ pub enum Shape {
     /// how this map has a slope at all — see the [module docs](self).
     Dome {
         /// Its radius, in metres.
+        #[reflect(name = "Radius", min = 0.0, max = 64.0, step = 0.1)]
         radius: f64,
     },
 }
@@ -374,14 +397,22 @@ impl ComponentHash for Surface {
 }
 
 /// Where the character starts, and which way it is turned when it gets there.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(crate = "crcbl::reflect")]
 #[serde(crate = "crcbl::serde")]
 pub struct Spawn {
     /// The **feet**, in metres. See [`SPAWN`], which is what the committed row
     /// was written from.
+    #[reflect(name = "Position")]
     pub position: [f64; 3],
     /// The yaw the body is turned to, in radians about `+Y`, measured the way
     /// [`crate::camera`] measures one: zero looks down `-Z`.
+    ///
+    /// A step and no range: a yaw is periodic, so there is no end for a widget
+    /// to clamp to — and `#[reflect(min = …)]` takes a literal rather than an
+    /// expression, so a range here could not have named `std::f64::consts::TAU`
+    /// even if one were wanted.
+    #[reflect(name = "Facing", step = 0.01)]
     pub facing: f64,
 }
 
@@ -399,19 +430,27 @@ impl ComponentHash for Spawn {
 /// slot for "the light a scene sits in when nothing else reaches it", and a
 /// second copy of it in this row would be a second thing to keep in step. See
 /// [`Map::sun`], which puts the two together.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(crate = "crcbl::reflect")]
 #[serde(crate = "crcbl::serde")]
 pub struct Sun {
     /// How high it stands, as the `+Y` component of the unit vector toward it.
-    /// See [`SUN_ELEVATION`].
+    /// See [`SUN_ELEVATION`]. The range is what a component of a unit vector
+    /// can be.
+    #[reflect(name = "Elevation", min = -1.0, max = 1.0, step = 0.01)]
     pub elevation: f32,
-    /// Its colour, before the intensity below is applied to it. Linear RGB.
+    /// Its colour, before the intensity below is applied to it. Linear RGB, so
+    /// the range is a channel's, and the brightness above one is
+    /// [`intensity`](Self::intensity)'s job rather than this field's.
+    #[reflect(name = "Colour", min = 0.0, max = 1.0, step = 0.01)]
     pub color: [f32; 3],
     /// How bright it is. Above 1.0, like every other sun in this engine — see
     /// [`SUN_INTENSITY`].
+    #[reflect(name = "Intensity", min = 0.0, max = 16.0, step = 0.05)]
     pub intensity: f32,
     /// How long it takes to come back round to where it started, in seconds.
     /// See [`SUN_PERIOD`].
+    #[reflect(name = "Period", min = 0.1, max = 3600.0, step = 0.5)]
     pub period: f64,
 }
 
@@ -1201,6 +1240,7 @@ mod tests {
     use super::*;
 
     use crcbl::phys::Aabb;
+    use crcbl::reflect::{Kind, Value, get_path, set_path};
     use crcbl::scene::scn::EnvCamera;
 
     /// **The blockout as this module built it before it was a file**, written in
@@ -1803,5 +1843,124 @@ mod tests {
             .expect_err("a map with two spawns is not a puppet map");
         assert!(message.contains("sys/spawn.ron"), "{message}");
         assert!(message.contains('2'), "{message}");
+    }
+
+    // -- reflection ----------------------------------------------------------
+
+    #[test]
+    fn a_surface_describes_its_own_rows_and_its_shapes_separately() {
+        let surface = Surface {
+            label: "ground".to_owned(),
+            position: [0.0, 0.0, 0.0],
+            shape: Shape::Platform {
+                width: 2.0 * GROUND_HALF,
+                depth: 2.0 * GROUND_HALF,
+                height: GROUND_THICKNESS,
+            },
+            tint: [0.5, 0.5, 0.5],
+        };
+
+        assert_eq!(surface.kind(), Kind::Struct);
+        assert_eq!(
+            surface
+                .fields()
+                .iter()
+                .map(|row| row.label)
+                .collect::<Vec<_>>(),
+            ["Label", "Position", "Shape", "Tint"]
+        );
+
+        // The nested enum describes the variant the surface is actually in.
+        let shape = surface.field(2).expect("the shape row");
+        assert_eq!(shape.kind(), Kind::Enum);
+        assert_eq!(shape.variant(), Some("Platform"));
+        assert_eq!(
+            shape
+                .fields()
+                .iter()
+                .map(|row| row.name)
+                .collect::<Vec<_>>(),
+            ["width", "depth", "height"]
+        );
+
+        let dome = Surface {
+            shape: Shape::Dome { radius: 4.0 },
+            ..surface
+        };
+        let shape = dome.field(2).expect("the shape row");
+        assert_eq!(shape.variant(), Some("Dome"));
+        assert_eq!(
+            shape
+                .fields()
+                .iter()
+                .map(|row| row.name)
+                .collect::<Vec<_>>(),
+            ["radius"],
+            "the other variant's rows are not here"
+        );
+    }
+
+    #[test]
+    fn an_edit_into_a_surfaces_shape_reaches_the_variant_that_is_active() {
+        let mut surface = Surface {
+            label: "mound".to_owned(),
+            position: [0.0, 0.0, 0.0],
+            shape: Shape::Dome {
+                radius: GENTLE_MOUND.2,
+            },
+            tint: [0.5, 0.5, 0.5],
+        };
+
+        let old = get_path(&surface, "shape.radius").expect("the row is an f64");
+        assert_eq!(old, Value::Float(GENTLE_MOUND.2));
+        assert!(
+            get_path(&surface, "shape.width").is_err(),
+            "`width` is the platform variant's"
+        );
+
+        set_path(&mut surface, "shape.radius", &Value::Float(9.5)).expect("an f64 takes a float");
+        assert_eq!(surface.shape, Shape::Dome { radius: 9.5 });
+        set_path(&mut surface, "shape.radius", &old).expect("the recorded value");
+        assert_eq!(
+            surface.shape,
+            Shape::Dome {
+                radius: GENTLE_MOUND.2
+            }
+        );
+    }
+
+    #[test]
+    fn the_suns_rows_carry_the_ranges_its_own_units_have() {
+        let sun = Sun {
+            elevation: SUN_ELEVATION,
+            color: [1.0, 0.95, 0.9],
+            intensity: SUN_INTENSITY,
+            period: SUN_PERIOD,
+        };
+        let by_name = |name: &str| {
+            *sun.fields()
+                .iter()
+                .find(|row| row.name == name)
+                .unwrap_or_else(|| panic!("no row called `{name}`"))
+        };
+
+        assert_eq!(by_name("elevation").label, "Elevation");
+        let elevation = by_name("elevation").range.expect("a unit-vector component");
+        assert_eq!((elevation.min, elevation.max), (-1.0, 1.0));
+        let colour = by_name("color").range.expect("a linear channel");
+        assert_eq!((colour.min, colour.max), (0.0, 1.0));
+        assert_eq!(get_path(&sun, "period"), Ok(Value::Float(SUN_PERIOD)));
+    }
+
+    #[test]
+    fn a_spawns_facing_is_a_step_with_no_range_because_a_yaw_is_periodic() {
+        let spawn = Spawn {
+            position: SPAWN.to_array(),
+            facing: 0.0,
+        };
+        let facing = spawn.fields()[1];
+        assert_eq!(facing.name, "facing");
+        assert_eq!(facing.range, None);
+        assert_eq!(facing.step, Some(0.01));
     }
 }

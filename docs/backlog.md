@@ -30,6 +30,53 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 - **Rounded outlines and nested scroll containers** are covered by unit tests
   and no GPU claim; D3D12 and Metal draw `ui_focus` only on CI.
 
+## What the reflection crate shipped without (2026-09-16)
+
+`crcbl-reflect` and `#[derive(Reflect)]` landed with the gaps below;
+`crates/crcbl-reflect/src/impls.rs`'s module docs carry the coverage table.
+
+- **Nothing reads it yet.** The inspector widget is `07-ui-debug.md`'s rung 8,
+  so the trait's shape is argued rather than demonstrated: the tests show a
+  value can be read, written and undone, not that a panel built on it is
+  pleasant to use.
+- **Decision owed: `crcbl_console::Value::Float` is `f32` and this crate's is
+  `f64`.** The console's `Kind`/`Value`/`Binding` are the same shape — a tag, a
+  range, a payload, a getter and a setter — and its crate costs nothing to
+  depend on, so the two vocabularies could be one. The blocker is the width:
+  every component position here is `f64` (`Brick.position`, `Surface.position`,
+  `Sun.period`), and `apps/breakout/src/scene.rs` says a board written as `f32`
+  "would round on the way through the file and move the picture". Widening the
+  console's float arm touches every `convar!` and settings key, which is why it
+  was not done with this slice.
+- **No enum variant switching**, and no `Vec<T>`, `Option<T>` or maps:
+  `Reflect::variant` names the active variant and `fields` describes it, but
+  changing which variant is active needs a constructor and a default per field.
+  All four need the same missing mechanism — changing a value's _shape_.
+- **`glam::Vec4`, `Quat` and `Vec3A` have no impl** and cannot in this design:
+  on every SIMD path glam stores them as one 128-bit register, their components
+  are methods, and there is no `&mut f32` to hand back. `DVec4` and `DQuat` are
+  covered because f64 has no SIMD path. Closing it needs a by-value element
+  accessor beside the by-reference one; a rotation also wants a Euler-angle
+  per-type override in the panel, which is a different fix.
+- **Ids are uncovered**: `crcbl_core::Handle<T>` and `crcbl_ecs::Entity` have no
+  impl, because the arrow would be `crcbl-core -> crcbl-reflect`, which makes
+  every crate depend on this one. A decision, not an oversight — an entity
+  reference in a panel is wanted eventually.
+- **`i128`, `u128` and `char` are uncovered**: the first two cannot round-trip
+  through `Value`'s 64-bit arms, and no component holds any of the three.
+- **`Field::range` and `Field::step` are advisory.** A widget bounds its drag by
+  them; `Reflect::set` does not read them, because a `set_path` resolution
+  reaches the leaf without passing the row that carries them. A range meant to
+  be enforced needs the row on the write path.
+- **An attribute value must be a literal**, so `#[reflect(min = …)]` cannot name
+  a constant; `apps/puppet`'s `Spawn::facing` takes a step and no range partly
+  for that reason.
+- **A generic type gets no named-field assertion**: the `const _` block cannot
+  name a type parameter, so a missing `Reflect` on a generic type's field points
+  at the derive rather than the field. No generic component exists.
+- **The 76% workspace coverage floor was not measured** for this slice;
+  `cargo llvm-cov` was not run.
+
 ## What UI rung 7d2 shipped without (2026-09-16)
 
 `DebugPanel` and `ConsolePanel` moved onto the tree with the gaps below.

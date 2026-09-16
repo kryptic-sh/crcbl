@@ -48,6 +48,7 @@ use std::path::Path;
 use crcbl::assets::{AssetSource, DirSource, MemorySource};
 use crcbl::ecs::{ComponentHash, System, World};
 use crcbl::math::DVec3;
+use crcbl::reflect::Reflect;
 use crcbl::scene::scn::{Scene, ScnError, SystemChunk, chunk_of};
 use crcbl::serde::{Deserialize, Serialize};
 
@@ -72,12 +73,28 @@ const BOARD_BRICKS_RON: &str = include_str!("../assets/scenes/board.scn/sys/bric
 /// they reach is spelled in — `crcbl::phys::Transform` and
 /// `ColliderComponent::Box` take [`DVec3`], and a board written as `f32` would
 /// round on the way through the file and move the picture.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// **The first component an editor edits.**
+/// `docs/plan/08-editor.md`'s smallest slice is a tool that loads this board,
+/// picks a brick and nudges it, so [`Reflect`] is derived here rather than on a
+/// fixture: the property panel's rows are these two fields, and a range on the
+/// half extents is what keeps a drag from inverting a collider. The two derives
+/// answer different questions and both are needed — `Serialize` is how the row
+/// reaches `sys/bricks.ron`, `Reflect` is how it reaches a widget.
+#[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(crate = "crcbl::reflect")]
 #[serde(crate = "crcbl::serde")]
 pub struct Brick {
     /// The brick's centre.
+    #[reflect(name = "Position")]
     pub position: [f64; 3],
     /// Half its extent on each axis, which is the box collider's own shape.
+    ///
+    /// The range is the playfield's own: a half extent is never negative, and
+    /// nothing on this board is wider than the span `crate::game`'s
+    /// `WORLD_LEFT` and `WORLD_RIGHT` bound, so a drag past that has left the
+    /// picture. Advisory — it bounds the widget, not the write.
+    #[reflect(name = "Half extents", min = 0.0, max = 28.0, step = 0.01)]
     pub half_extents: [f64; 3],
 }
 
@@ -212,6 +229,7 @@ fn built_in_source() -> MemorySource {
 mod tests {
     use super::*;
 
+    use crcbl::reflect::{Kind, Range, Value, get_path, set_path};
     use crcbl::scene::scn::{Env, EnvCamera, IdMap};
 
     use crate::game::{BRICK_COUNT, BRICK_HEIGHT, BRICK_WIDTH, brick_position};
@@ -400,5 +418,50 @@ mod tests {
         assert!(message.contains("scene.ron"), "{message}");
         assert!(message.contains("line"), "{message}");
         assert!(message.contains("column"), "{message}");
+    }
+
+    // -- reflection ----------------------------------------------------------
+
+    #[test]
+    fn a_brick_describes_the_two_rows_a_property_panel_draws() {
+        let brick = Brick {
+            position: [1.0, 2.0, 3.0],
+            half_extents: [BRICK_WIDTH / 2.0, BRICK_HEIGHT / 2.0, 0.5],
+        };
+
+        assert_eq!(crcbl::reflect::Reflect::type_name(&brick), "Brick");
+        assert_eq!(crcbl::reflect::Reflect::kind(&brick), Kind::Struct);
+
+        let rows = crcbl::reflect::Reflect::fields(&brick);
+        assert_eq!(
+            rows.iter().map(|row| row.label).collect::<Vec<_>>(),
+            ["Position", "Half extents"]
+        );
+        assert_eq!(rows[0].range, None, "a centre may be anywhere on the board");
+        assert_eq!(
+            rows[1].range,
+            Some(Range {
+                min: 0.0,
+                max: 28.0
+            }),
+            "a half extent is never negative and never wider than the playfield"
+        );
+    }
+
+    #[test]
+    fn an_edit_to_a_brick_reads_back_and_undoes() {
+        let mut brick = Brick {
+            position: [1.0, 2.0, 3.0],
+            half_extents: [1.2, 0.4, 0.5],
+        };
+        let before = brick;
+
+        let old = get_path(&brick, "position.0").expect("the row is an f64");
+        assert_eq!(old, Value::Float(1.0));
+        set_path(&mut brick, "position.0", &Value::Float(-6.5)).expect("an f64 takes a float");
+        assert_eq!(brick.position(), DVec3::new(-6.5, 2.0, 3.0));
+
+        set_path(&mut brick, "position.0", &old).expect("the recorded value");
+        assert_eq!(brick, before);
     }
 }

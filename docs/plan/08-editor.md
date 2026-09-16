@@ -46,6 +46,12 @@ rest of this document suggests; each line was checked in the source.
 - `crcbl_render::orbit::OrbitCamera` (orbit, pan, zoom, frame an AABB — its docs
   name the editor viewport) and `crcbl_render::fly::Flyer`.
 - `crcbl_render::debug_draw::DebugDraw` and `crcbl_render::grid`.
+- `crcbl_reflect::Reflect` and `#[derive(Reflect)]` (2026-09-16) describe a
+  component's editable fields — name, label, range, step, and a
+  `&mut dyn Reflect` per row — and `get_path`/`set_path` reach one leaf by name,
+  which is the shape feature 3's property-set command and the undo log both
+  need. `apps/breakout`'s `Brick` and `apps/puppet`'s `Surface`, `Shape`,
+  `Spawn` and `Sun` carry it; nothing reads it yet.
 - `World::hash_state` and `crcbl_server::sim_hash::hash_world`, which the undo
   property test in the exit criteria needs.
 - The shell's clipboard with a RON mime type, cursor shapes, `set_title` for a
@@ -69,7 +75,9 @@ rest of this document suggests; each line was checked in the source.
    dogfood pass — says in its own source that it has no entity and no ECS
    system. An editor has no world to edit in it until it is ported.
 5. **No inspector**: `crcbl_ecs::Inspector::collect` returns a system's name and
-   entity count, and the per-system debug-UI callback is an empty stub.
+   entity count, and the per-system debug-UI callback is an empty stub. The
+   per-component half is no longer missing — `crcbl-reflect` landed 2026-09-16 —
+   but nothing reads it yet.
 6. **The scene format cannot hold one entity in two systems**: each chunk row
    spawns its own entity, so the same id in two chunk files is a duplicate-id
    error. The "attach/detach system data" command needs that first. `IdMap` has
@@ -97,11 +105,10 @@ rest of this document suggests; each line was checked in the source.
 view (medium); `World` snapshot and restore (medium, and it needs games' state
 in systems); server command handling with a client send path and reason-coded
 replies (medium); the command and undo log with its property test (medium); an
-edit schedule (small to medium); the widget set (large); a reflection-style
-property hook per component (medium to large); gizmos (medium); the scene format
-change for entities spanning systems (small to medium); asset listing and a
-watcher (medium); input chords and a context stack (small to medium); a
-multi-session server with `crcbl edit --serve` (large).
+edit schedule (small to medium); gizmos (medium); the scene format change for
+entities spanning systems (small to medium); asset listing and a watcher
+(medium); input chords and a context stack (small to medium); a multi-session
+server with `crcbl edit --serve` (large).
 
 **The smallest slice that uses only what exists** plus a screen-to-ray helper,
 modifier-carrying key events and a way to force debug draw on: a native,

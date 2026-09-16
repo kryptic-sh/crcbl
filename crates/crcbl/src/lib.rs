@@ -11,6 +11,7 @@
 //! crcbl::shell     → crcbl-shell     the windowing seam and its backends
 //! crcbl::hal       → crcbl-hal       the GPU seam, plus the recording null backend
 //! crcbl::render    → crcbl-render    the render graph, cameras, the forward frame
+//! crcbl::reflect   → crcbl-reflect   a component's editable fields, for the inspector
 //! crcbl::scene     → crcbl-scene     the `.scn/` format (`scn`), glTF import (`scene`)
 //! crcbl::shaders   → crcbl-shaders   the engine's shaders, as SPIR-V
 //! crcbl::ui        → crcbl-ui        draw lists, the glyph atlas, HUD widgets
@@ -183,6 +184,21 @@ pub use crcbl_net as net;
 /// [`crcbl-phys`](crcbl_phys): rigid bodies, colliders, forces, the broadphase
 /// and the sweep queries.
 pub use crcbl_phys as phys;
+/// [`crcbl-reflect`](crcbl_reflect): the field description an editor's property
+/// panel reads, and the `#[derive(Reflect)]` that writes it.
+///
+/// Re-exported for the reason [`serde`] is: a component a game hands to an
+/// inspector has to derive *the* `Reflect` the panel's bound names, and a
+/// sample that spelled its own workspace path would be one dependency past "the
+/// engine and nothing else". A game writes `#[reflect(crate =
+/// "crcbl::reflect")]` beside its `#[serde(crate = "crcbl::serde")]`, and
+/// `apps/breakout`'s `Brick` is the first component that does.
+///
+/// Unconditional rather than behind a feature, on [`console`]'s terms: the
+/// crate depends on `glam` and `thiserror`, both of which are in this crate's
+/// tree already, and its derive is host-compiled — so the arrow costs a browser
+/// build the description and nothing else.
+pub use crcbl_reflect as reflect;
 /// [`crcbl-render`](crcbl_render): the render graph, the transient pool, the
 /// per-pass GPU timers, cameras, and the forward frame.
 ///

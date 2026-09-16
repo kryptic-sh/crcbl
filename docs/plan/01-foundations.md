@@ -64,6 +64,8 @@ crcbl/
 │   ├── crcbl-sprite/       # sprite sheets: frames, clips, nine-slice
 │   ├── crcbl-anim/         # topic 17: skeletons, clips, blending
 │   ├── crcbl-vfx/          # topic 20: particle simulation
+│   ├── crcbl-water/        # topic 55: water bodies, media, the surface mesh
+│   ├── crcbl-inventory/    # topic 34: the grid-inventory kit
 │   ├── crcbl-ecs/          # stage 4: system-owned arrays
 │   ├── crcbl-net/          # stage 4: transport seam, replication
 │   ├── crcbl-server/       # stage 4: authoritative fixed-tick simulation
@@ -72,6 +74,8 @@ crcbl/
 │   ├── crcbl-scene/        # stage 6: scene format, glTF import
 │   ├── crcbl-assets/       # topic 6: asset ids, load states, the IO seam
 │   ├── crcbl-ui/           # stage 7: immediate-mode GUI
+│   ├── crcbl-reflect/      # topic 08: a component's editable fields, for the inspector
+│   ├── crcbl-reflect-derive/ # topic 08: `#[derive(Reflect)]`, host-compiled
 │   ├── crcbl-input/        # topic 19: actions and bindings
 │   ├── crcbl-audio/        # topic 13: mixer + spatial cue grammar
 │   ├── crcbl-store/        # topic 14: saves, settings, profiles, replays

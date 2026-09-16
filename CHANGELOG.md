@@ -201,6 +201,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-reflect` and its `#[derive(Reflect)]`**, the field description an
+  editor's property panel reads. `Reflect` says what a value is made of
+  (`Kind::Leaf`, `Struct`, `Enum`, `List`), reads and writes its leaves as a
+  `Value` (`Bool`, `Int`, `UInt`, `Float`, `Text` — the float arm is `f64`, so a
+  position does not round on the way to a widget), and hands out `&dyn Reflect`
+  children so a panel can recurse. `get_path` and `set_path` reach one leaf by a
+  dotted path (`"position.1"`, `"shape.width"`), which is the form an undoable
+  edit takes: a command records the path and the value it replaced, and its
+  inverse is the same call. The derive covers named, tuple and unit structs and
+  enums, with `#[reflect(skip)]`, `#[reflect(name = "…")]`,
+  `#[reflect(min = …, max = …)]`, `#[reflect(step = …)]` and
+  `#[reflect(crate = "crcbl::reflect")]`; a field whose type is not `Reflect` is
+  a compile error at that field, naming it. `crcbl::reflect` is the umbrella
+  re-export, and `apps/breakout`'s `Brick` and `apps/puppet`'s `Surface`,
+  `Shape`, `Spawn` and `Sun` are the first components to derive it.
 - **`Ui::engage(key)`** engages a focusable `Role::Engage` node immediately
   rather than next frame, so the frame after it already takes that frame's
   edits; whatever it displaces reports `Engagement::Committed`. It is what a

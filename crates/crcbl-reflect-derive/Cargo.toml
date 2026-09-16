@@ -1,0 +1,42 @@
+[package]
+name = "crcbl-reflect-derive"
+description = "Crucible's `#[derive(Reflect)]`: the field description an editor's property panel reads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A crate of its own rather than a module of `crcbl-reflect`, because a
+# `proc-macro = true` crate can export nothing but macros — and because the
+# split is what makes the trait reachable from a browser build: cargo compiles
+# this crate for the **host** even when its dependent is building for
+# `wasm32-unknown-unknown`, the same way `crcbl-wl-scanner` is host-compiled on
+# every build of `crcbl-shell`.
+[lib]
+proc-macro = true
+
+# The standard proc-macro trio, and the first direct use of any of them in this
+# workspace — `docs/notes/tooling.md` records the 2026-09-06 call that declined
+# `paste` for identifier concatenation, which is a different question: there is
+# no way to read a type's field names, types and attributes at compile time
+# other than a procedural macro, and `docs/plan/08-editor.md`'s property panel
+# needs exactly that. Every one is already in `Cargo.lock` transitively (through
+# `thiserror`, `serde` and `bytemuck`), so naming them adds no new crate to any
+# build; `syn` is taken at the 3.x line the workspace already resolves, rather
+# than at the 2.x `deny.toml` skips, so this creates no new duplicate.
+[dependencies]
+# The parser. Default features only: `derive` is the `DeriveInput` half and
+# `parsing`/`printing` are what reading an attribute and writing an impl need.
+# The `full` feature is deliberately off — it is the expression and statement
+# grammar, which nothing here parses; `src/attrs.rs` reads a numeric bound
+# straight off the token stream for that reason.
+syn = { workspace = true }
+# Writing the expansion, and `quote_spanned!` in particular: the field's own
+# span is what makes a missing `Reflect` impl a compile error at the field.
+quote = { workspace = true }
+# `TokenStream` and `Literal` — the float and index literals the expansion
+# writes — beside `quote`'s.
+proc-macro2 = { workspace = true }
+
+[lints]
+workspace = true

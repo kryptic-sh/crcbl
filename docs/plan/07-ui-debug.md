@@ -493,7 +493,11 @@ on its own; the first two need no new dependency.
 8. **Editor-grade surfaces.** A reflection-driven property inspector with
    per-type overrides (Unreal's Details panel and Fyrox's `Reflect` inspector
    are the shape), a virtualized outliner, splitter layouts, then tabs. Unblocks
-   stage 8.
+   stage 8. **The reflection half landed 2026-09-16** as `crcbl-reflect` and its
+   `#[derive(Reflect)]`, so what the inspector owes is the widget: rows from
+   `Reflect::fields`, recursion through `Reflect::field_mut`, `Range` and `step`
+   driving a drag-value, and a per-type override recognising a vector through
+   `as_any`. An edit is a `set_path` call, which is already the undoable form.
 
 ## Exit criteria
 

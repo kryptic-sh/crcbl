@@ -55,6 +55,18 @@ log = "0.4"
 # a dependency rather than a hand-rolled encoder.
 png = "0.18"
 proptest = "1.9"
+# The proc-macro trio, behind `crcbl-reflect-derive` and nothing else. Added by
+# the slice that first needs to read a type's fields at compile time —
+# `#[derive(Reflect)]`, for `docs/plan/08-editor.md`'s property panel — and every
+# one of them was already in `Cargo.lock` transitively, under `thiserror`,
+# `serde` and `bytemuck`. `syn` is pinned to the 3.x line the workspace already
+# resolves rather than the 2.x `deny.toml` skips as a transitive leftover, so no
+# second copy joins the tree. Default features throughout: `syn`'s `full` — the
+# expression grammar — is not on, because the derive parses attributes and
+# writes an impl and nothing else.
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = "3.0.5"
 # Randomness seam (`crcbl-rand`). `rand_chacha` is the portable ChaCha PRNG
 # (ChaCha8 for the deterministic `Rng`, ChaCha20 for the wasm entropy CSPRNG);
 # `rand_core` is the `RngCore`/`SeedableRng` traits it plugs into. Pinned to the
@@ -145,6 +157,14 @@ crcbl-inventory = { path = "crates/crcbl-inventory", version = "0.1.0" }
 # and the CLI all speak. It depends on nothing but `core`/`std`, so the arrow
 # into it costs every target the same nothing — see that crate's own manifest.
 crcbl-console = { path = "crates/crcbl-console", version = "0.1.0" }
+# The field description an editor's property panel reads, and the derive that
+# writes it. Two crates because a `proc-macro = true` crate can export nothing
+# but macros; the trait half depends on `glam` and `thiserror` alone, so the
+# arrow into it from a component costs a browser build the description and no
+# more, and the macro half is host-compiled and reaches no target at all. See
+# `docs/plan/07-ui-debug.md`'s rung 8 for what reads it.
+crcbl-reflect = { path = "crates/crcbl-reflect", version = "0.1.0" }
+crcbl-reflect-derive = { path = "crates/crcbl-reflect-derive", version = "0.1.0" }
 # The golden suites' shared fixture, `apps/crcbl-sample-test`. A path-only
 # workspace member like every crate above, and a `[dev-dependencies]` entry
 # wherever it is named — see that crate's own manifest for why it is under

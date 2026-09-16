@@ -1,0 +1,36 @@
+[package]
+name = "crcbl-reflect"
+description = "Crucible reflection: what an editor's property panel needs to know about a component's fields"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Three dependencies, and the charter is that a component can reach this crate
+# without dragging anything behind it: an arrow into it from `crcbl-ecs`, from a
+# sample, or eventually from `apps/editor` must cost a browser build nothing
+# beyond the description itself. So there is **no `crcbl-ui`** here — the
+# inspector widget is `docs/plan/07-ui-debug.md`'s rung 8 and a later slice, and
+# the arrow does not exist in either direction — and **no `crcbl-scene`**: that
+# crate writes a whole component to a file and this one describes one field of
+# it, which `src/lib.rs` argues at length are different jobs.
+[dependencies]
+# The `#[derive(Reflect)]` half, re-exported from `src/lib.rs` so that a
+# component names this crate once. A proc-macro crate is built for the **host**
+# even when the dependent builds for `wasm32`, which is why it is its own crate
+# rather than a module: the trait has to be linkable into a browser demo and the
+# macro cannot be.
+crcbl-reflect-derive = { workspace = true }
+# `glam::Vec3` and its scalar-layout siblings get a `Reflect` impl here rather
+# than in `crcbl-core`, because the arrow has to point this way: `crcbl-core`
+# already depends on `glam`, and a `Reflect` impl for `Handle` would make
+# *everything* depend on this crate. `src/impls.rs` says which glam types are
+# covered and why the SIMD-backed ones cannot be.
+glam = { workspace = true }
+# `SetError` and `PathError` are returned from the two halves of an edit, so
+# they need `Display` and `Error` without a macro of this crate's own. Same
+# argument as `crates/crcbl-water/Cargo.toml` makes for its `BodyError`.
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
