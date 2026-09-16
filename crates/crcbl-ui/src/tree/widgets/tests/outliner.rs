@@ -570,3 +570,79 @@ fn focus_steps_past_the_view_and_keeps_its_row() {
         assert_eq!(built.built[0].id, id(40), "the kept row is not first");
     }
 }
+
+/// **A row far outside the window is brought into it by writing the
+/// outliner's own scroll offset**, which is the claim
+/// [`Ui::set_scroll_offset_of`] exists for: until the offset moves, that row
+/// has no node and no rectangle, so nothing that works from a rectangle — the
+/// scroll-into-view a focus move does — can reach it.
+#[test]
+fn setting_the_offset_brings_a_row_outside_the_window_into_it() {
+    /// Which row is scrolled to: far enough past the window that the frame
+    /// before builds nothing near it.
+    const WANTED: u64 = 500;
+
+    let mut ui = Ui::new();
+    sheet(&mut ui);
+    let mut state = OutlinerState::new();
+    state.set_expanded(id(0), true);
+    let long = wide(1_000);
+    let step = |ui: &mut Ui, state: &mut OutlinerState| {
+        page(
+            ui,
+            state,
+            idle(),
+            NavInput::default(),
+            SelectMode::Replace,
+            &long,
+        )
+    };
+
+    let first = step(&mut ui, &mut state);
+    assert!(
+        !first.built.iter().any(|row| row.id == id(WANTED)),
+        "row {WANTED} is already in the window, so this proves nothing",
+    );
+    assert_eq!(ui.scroll_offset_of(first.outliner.key), Vec2::ZERO);
+
+    // The root is row 0 and leaf `n` is row `n`, so the wanted row's top is
+    // its index times the row height.
+    let top = WANTED as f32 * ROW;
+    ui.set_scroll_offset_of(first.outliner.key, Vec2::new(0.0, top));
+    let scrolled = step(&mut ui, &mut state);
+    assert!(
+        scrolled.built.iter().any(|row| row.id == id(WANTED)),
+        "the row the offset names was not built: {:?}",
+        scrolled.built,
+    );
+    let (row_min, row_max) = rect(&ui, row_key(&ui, &scrolled, id(WANTED)));
+    let (view_min, view_max) = rect(&ui, scrolled.outliner.key);
+    assert!(
+        row_min.y >= view_min.y && row_max.y <= view_max.y,
+        "row {WANTED} at {row_min}..{row_max} is outside the view \
+         {view_min}..{view_max}",
+    );
+    assert_eq!(
+        ui.scroll_offset_of(scrolled.outliner.key),
+        Vec2::new(0.0, top),
+        "the offset was not kept",
+    );
+
+    // Past the content's reach the next layout clamps it, as it clamps a
+    // wheel's, so the frame after shows the last rows rather than nothing.
+    ui.set_scroll_offset_of(first.outliner.key, Vec2::new(0.0, 1.0e9));
+    step(&mut ui, &mut state);
+    let reach = ui.scroll_offset_of(first.outliner.key).y;
+    assert_eq!(
+        reach,
+        1_001.0 * ROW - VIEW,
+        "the offset was not clamped to the content's reach",
+    );
+    let clamped = step(&mut ui, &mut state);
+    assert_eq!(
+        clamped.built.last().map(|row| row.id),
+        Some(id(1_000)),
+        "the last row is not in the window: {:?}",
+        clamped.built,
+    );
+}

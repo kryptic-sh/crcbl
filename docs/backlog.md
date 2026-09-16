@@ -5352,9 +5352,39 @@ binary is in `tools/run-samples-windowed.sh`'s `SAMPLES`. What slice 1 leaves:
   sequence plus a full undo compared by `World::hash_state` — is owed with the
   second variant; with one it would assert what the byte-for-byte round trip
   already asserts.
-- **No panel.** The outline is logged at start-up, not drawn; a viewport pane,
-  an outliner and a property inspector are `07-ui-debug.md` rungs, and the
-  editor deliberately does not depend on `crcbl-ui` yet.
+- **The viewport is a hole, not a view.** The scene is drawn full-window and the
+  panels are composited over it; the pane's rectangle only gates picking. A real
+  viewport pane needs one of two engine changes: an image draw command that can
+  name a rendered target (`DrawCommand::Image` carries no texture identity and
+  `ImageAtlas::register` takes host bytes), or a render area the graph takes
+  from its caller (every pass's scissor comes from the attachment's full
+  extent). Until then a panel cannot show a second camera either.
+- **`default.css` sets no `min-width: 0` on `split`, `.split-pane` or
+  `.dock-pane`.** Flexbox's `min-width: auto` let a 240 px pane's content grow
+  to 348 px; `overflow: hidden` hid it, but a rectangle is a hit test, so the
+  panel reached across the divider and a click meant for a field was read as a
+  click in the scene. The editor's own sheet works around it; the engine sheet
+  is where the rule belongs.
+- **The editor rebinds `ui_move` to the arrows alone**, because the reserved
+  context's default also binds W, A, S and D — so a pushed `ui` owns `s` and
+  Ctrl+S would stop saving while a panel had the keyboard. That is the fifth
+  caller to work around the default the rung 7d1 note already records as
+  unsettled, which is an argument for changing it.
+- **`Ctrl+Shift+Z` is read from the modifier state**, not from a binding:
+  `Binding::Chord` carries one `Modifier`, so the editor treats an undo arriving
+  with Shift held as a redo. **Page Up and Page Down are bound by no reserved
+  context**, so the stack cannot take them from an application while a field is
+  engaged; the editor asks for nothing while `editing`, which its own test
+  holds.
+- **No drag-to-dock, no entity names and no multi-row inspector.** The layout
+  moves only by dragging dividers (`DockLayout::move_pane` has no gesture), an
+  entity has no name to show or rename, and the inspector draws the first of a
+  multi-row selection.
+- **Cost**: the panels add 18.5 µs to a headless frame (40.4 → 58.9 µs, release,
+  null backend, 4 entities). `Panels::frame` is flat past a full window — 27 µs
+  at 4 entities, 59 µs at 500, 55 µs at 3 000 — but `Document::outline` is 83 µs
+  at 3 000 entities and is cached against the entity count, which no command in
+  these slices can move; a spawn or a delete will.
 - **Coverage gaps.** Slice 2 adds no golden and no `vk-e2e` leg either, and the
   default document is now a four-entity greybox scene. The editor has no golden
   image and no `vk-e2e` leg; `tools/run-samples-windowed.sh` asserts frames,

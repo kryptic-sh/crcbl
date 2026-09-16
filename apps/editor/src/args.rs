@@ -82,17 +82,33 @@ ARGS:
                          into it, which has nowhere to save — Ctrl+S on it says
                          so rather than guessing where to write.
 
+PANELS:
+    The scene's entities are listed on the left, grouped by the system whose
+    chunk file they came out of, with the selected one's fields under them.
+    Selecting a row and picking in the viewport are the same selection. Drag a
+    divider to move a panel's edge; where they were left is remembered between
+    runs. The rest of the window is the viewport.
+
 EDITING:
-    Left click           Pick the entity under the cursor
-    Arrow keys           Nudge the selection along X (left/right) and Y (up/down)
+    Left click           In the viewport, pick the entity under the cursor; on
+                         an outliner row, select what it names
+    Ctrl / Shift click   Add a row to the selection, or take a run of them
+    Drag a field         Edit it, one step a pixel — an undoable command like
+                         every other edit
+    Arrow keys           Nudge the selection along X (left/right) and Y
+                         (up/down), or walk the rows once a panel has the
+                         keyboard
     Page Up / Page Down  Nudge the selection along Z
     Ctrl+Z / Ctrl+Y      Undo and redo. Ctrl+Shift+Z redoes too
     Ctrl+S               Save the scene back over the directory it came from
 
+    A click in the viewport takes the keyboard back from the panels, and none
+    of the keys above fire while a field is being typed into.
+
 VIEW:
-    Right drag           Orbit
+    Right drag           Orbit (from inside the viewport)
     Middle drag          Pan
-    Wheel                Zoom
+    Wheel                Zoom in the viewport, scroll a panel over one
     F                    Frame the whole scene
 
 OPTIONS:

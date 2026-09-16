@@ -2,11 +2,18 @@
 //!
 //! **This is the decision of 2026-09-16**, recorded in
 //! `docs/plan/08-editor.md`: the command enum and the undo log exist from day
-//! one, applied in-process, and are routed over the transport later. So nothing
-//! in this crate writes a component field at the call site; a key press builds
-//! an [`EditCommand`], hands it to [`crate::Document::apply`], and the log gets
-//! the pair back. What the transport gains later is a carrier, not a
+//! one, applied in-process, and are routed over the transport later. So no edit
+//! in this crate is a component field written at the call site: a key press
+//! builds an [`EditCommand`], hands it to [`crate::Document::apply`], and the
+//! log gets the pair back. What the transport gains later is a carrier, not a
 //! vocabulary.
+//!
+//! An inspector is the one thing that arrives the other way round — the widget
+//! writes the field and *reports* what it wrote — and
+//! [`crate::Document::record_edit`] is where that is turned back into a
+//! command. It is the crate's only field write, and it is a rewind: what the
+//! panel did is undone so the command can do it, and so record an exact
+//! inverse. That method's docs say why.
 //!
 //! # The shape of an edit
 //!

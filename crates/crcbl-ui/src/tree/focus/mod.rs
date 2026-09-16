@@ -868,6 +868,27 @@ impl Ui {
         self.focus.requested = Some(key);
     }
 
+    /// Takes focus and engagement away from the tree entirely, leaving nothing
+    /// focused: what a caller calls when input has gone somewhere the tree
+    /// knows nothing about.
+    ///
+    /// **A click the tree cannot focus does not do this**, and cannot: the
+    /// pointer resolution finds no focusable node in that click's ancestry, so
+    /// focus stays where it was — which is right for a click on a panel's own
+    /// background and wrong for one on an application's viewport, where the
+    /// keyboard has genuinely left the panel. The application is the only thing
+    /// that can tell those two apart, so it is the one that says so.
+    ///
+    /// The engaged node is **committed**, exactly as a click on another node
+    /// commits it: the next frame reports it [`Engagement::Committed`], so a
+    /// text input keeps what was typed rather than cancelling back.
+    pub fn clear_focus(&mut self) {
+        self.focus.focused = None;
+        if let Some(engaged) = self.focus.engaged.take() {
+            self.focus.displaced = Some(engaged);
+        }
+    }
+
     /// Focuses and engages `key` **now**, for the frames that follow: what a
     /// screen that is always editing calls, where a click would have done it.
     ///

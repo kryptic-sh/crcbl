@@ -34,7 +34,7 @@ use crcbl::assets::AssetSource;
 use crcbl::ecs::{Entity, World};
 use crcbl::math::{DVec3, Vec3};
 use crcbl::phys::{ColliderComponent, PhysicsSystem, Ray, RigidBody, Transform};
-use crcbl::reflect::{PathError, Value, get_path};
+use crcbl::reflect::{PathError, Reflect, Value, get_path, set_path};
 use crcbl::registry::Registry;
 use crcbl::render::ViewRay;
 use crcbl::scene::scn::{IdMap, Scene, SceneEntityId, ScnError};
@@ -344,6 +344,65 @@ impl Document {
             .component(&mut self.world, entity)
             .ok_or(EditError::NoEntity(id))?;
         Ok(get_path(component, path)?)
+    }
+
+    /// The component of the entity `id` names, as the editable value a panel
+    /// draws: [`crcbl::registry`]'s `&mut dyn Reflect`, which is the same one
+    /// an [`EditCommand`] is applied to.
+    ///
+    /// [`None`] for an id this document does not hold, and for an entity no
+    /// registered system holds a component of.
+    pub fn component(&mut self, id: SceneEntityId) -> Option<&mut dyn Reflect> {
+        let entity = self.ids.entity(id)?;
+        self.registry.component(&mut self.world, entity)
+    }
+
+    /// Turns an edit a panel **has already made** into an [`EditCommand`], so
+    /// that it lands in the log like every other edit.
+    ///
+    /// # Why this rewinds first
+    ///
+    /// [`crcbl::ui::tree::Ui::inspector`] edits the `&mut dyn Reflect` it is
+    /// handed and then *reports* what it did, as a `FieldEdit` of a path, the
+    /// value the field held and the value it holds now. By the time a caller
+    /// sees that report the write has happened, so handing the new value
+    /// straight to [`apply`](Self::apply) would produce an inverse reading
+    /// "set it to what it already is" — an undo that undoes nothing, and the
+    /// one failure that would pass every test asserting the command was
+    /// recorded.
+    ///
+    /// So `before` is written back first, putting the component where the panel
+    /// found it, and the command is then applied over the top. **This is the
+    /// only field write in the crate**, and it exists to make sure the command
+    /// is the thing that does the editing: the value it restores came out of
+    /// the same leaf a moment earlier, so nothing is invented and the inverse
+    /// the log records is exact.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NoEntity`] for an id this document does not hold, or
+    /// [`EditError::Path`] if the path names nothing in that component or the
+    /// leaf refuses either value. A refusal on the way back in leaves the
+    /// rewind standing, which is the panel's own `before` and so still a value
+    /// the document held.
+    pub fn record_edit(
+        &mut self,
+        id: SceneEntityId,
+        path: &str,
+        before: &Value,
+        after: &Value,
+    ) -> Result<(), EditError> {
+        let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
+        let component = self
+            .registry
+            .component(&mut self.world, entity)
+            .ok_or(EditError::NoEntity(id))?;
+        set_path(component, path, before)?;
+        self.apply(EditCommand::SetProperty {
+            entity: id,
+            path: path.to_owned(),
+            value: after.clone(),
+        })
     }
 
     /// Applies `command` and records it with the inverse it produced.

@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1 and 2 landed 2026-09-16, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, and what still waits
 
 `apps/editor` exists: a native, single-process tool that loads `apps/breakout`'s
 board, renders it with `crcbl_render::orbit::OrbitCamera` and the ground grid,
@@ -33,6 +33,22 @@ apart. It lives in the umbrella because it needs `crcbl-ecs`, `crcbl-scene` and
 call deliberately absent. `apps/breakout` and `apps/puppet` register their own
 components and load their own scenes through it, and slice 1's hand-written
 vocabulary module is gone.
+
+**Slice 3 drew the panels**, which is task 3's "outliner + property panels on
+the inspector foundation": a `Ui::dock` layout holds the scene's entities per
+system over the selected one's fields beside the viewport, the outliner's
+selection _is_ the document's in both directions, every inspector edit is an
+`EditCommand` so undo and the collider follow it, and the layout is saved to the
+player's `settings.toml` and read back. The editor's keys became an `ActionMap`
+with the reserved `ui` and `text` contexts pushed from what the panels report.
+
+**The viewport decision below is still open, and slice 3 took neither branch.**
+The tree can draw neither: `DrawCommand::Image` carries no texture identity,
+`ImageAtlas::register` takes host bytes, and the render graph sets every pass's
+scissor from the attachment's full extent with no sub-rect. So the scene is
+drawn full-window, the panels are composited over it, and the viewport pane is a
+hole whose rectangle gates picking. Closing it needs an image command that can
+name a rendered target, or a render area the graph takes from the caller.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor

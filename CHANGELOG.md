@@ -204,6 +204,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/editor` has its panels: a docked outliner and property inspector
+  beside the viewport.** `Ui::dock` over a `DockLayout` the editor owns lays out
+  a side column — the scene's entities grouped by system, over the selected
+  one's fields — with the viewport taking the rest; a dragged divider is written
+  back into the layout, and the layout is saved as RON to `editor.layout` in the
+  player's `settings.toml` and read back next run, discarding anything that is
+  not this build's three panes. **The outliner's selection is the document's,
+  both ways**: clicking a row selects that entity, and picking one by ray moves
+  the outliner's selection and scrolls its row into view. **Every inspector edit
+  is an `EditCommand`** applied through `Document::apply`, so undo, redo, the
+  dirty marker and the entity's collider follow a dragged field exactly as they
+  follow a key nudge. Picking is gated to the viewport pane's rectangle, so a
+  click in a panel selects nothing; the editor's keys are an `ActionMap` with
+  the reserved `ui` and `text` contexts pushed from what the panels report, so a
+  nudge, Ctrl+Z or Ctrl+S cannot fire while a field is being typed into.
+- **`Ui::set_scroll_offset_of` and `Ui::clear_focus`.** The first scrolls a node
+  by key rather than only the block being built, which is the only way to reveal
+  a _virtualized_ row: one outside the window has no node, so the
+  scroll-into-view a focus move does cannot reach it. The second takes focus and
+  engagement away from the tree, committing what was engaged — a click that
+  lands on a node the tree cannot focus is right to ignore for a panel's
+  background and wrong for an application's viewport, and only the application
+  can tell them apart.
+
 - `DrawList::push_command` is public, allowing game font and presentation
   adapters to append existing primitives without reconstructing registered image
   handles or losing their parameters. Commands use the destination list's

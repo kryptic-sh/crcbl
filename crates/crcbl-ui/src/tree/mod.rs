@@ -1022,6 +1022,24 @@ impl Ui {
             .map_or(Vec2::ZERO, |node| node.scroll_offset)
     }
 
+    /// Scrolls `key`'s children to `offset`, whether or not that node is the
+    /// one being built: [`Ui::set_scroll_offset`] by key, and the mirror of
+    /// [`Ui::scroll_offset_of`]. Does nothing for a node the store does not
+    /// hold.
+    ///
+    /// **This is how a caller scrolls a virtualized row into view.** A list or
+    /// an outliner builds only the rows in its window, so a row the offset is
+    /// nowhere near has no node and no rectangle — [`Ui::set_focus`]'s
+    /// scroll-into-view, which works from a node's rectangle, cannot reach it.
+    /// The caller knows the row's index and height and so knows where it is; it
+    /// writes the offset here, and the next [`Ui::layout`] clamps it to the
+    /// content's reach, as it clamps every offset it is given.
+    pub fn set_scroll_offset_of(&mut self, key: NodeKey, offset: Vec2) {
+        if let Some(slot) = self.store.find(key) {
+            self.store.get_mut(slot).scroll_offset = offset;
+        }
+    }
+
     /// Last layout's border box for `key`, in screen pixels.
     #[must_use]
     pub fn rect(&self, key: NodeKey) -> Option<(Vec2, Vec2)> {

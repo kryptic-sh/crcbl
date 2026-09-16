@@ -807,6 +807,65 @@ fn engaging_a_second_widget_commits_the_first_and_a_click_away_commits() {
     assert_eq!(page.name(ui.focused()), Some("ok"));
 }
 
+/// **`Ui::clear_focus` is the only way focus leaves the tree**, which is the
+/// claim it exists for: a click on a node the tree cannot focus — a panel's own
+/// background, an application's viewport — commits whatever was engaged and
+/// leaves focus exactly where it was, because the resolution has no node to
+/// move it to. An application that knows the click went somewhere the tree
+/// knows nothing about is the only thing that can say so.
+///
+/// And the engaged node is **committed**, as a click on another node commits
+/// it, so a text input keeps what was typed rather than cancelling back.
+#[test]
+fn clearing_focus_takes_it_away_and_commits_what_was_engaged() {
+    let mut ui = Ui::new();
+    let mut volume = 5.0;
+    let on_volume = centre([0.0, 0.0, 100.0, 20.0]);
+    // A press on `#empty`, which has no `Behavior` and so is a node no focus
+    // move can land on: the tree's stand-in for a click outside every widget.
+    let nowhere = centre([300.0, 300.0, 100.0, 20.0]);
+    let click = |ui: &mut Ui, at: Vec2, volume: &mut f32| {
+        slide(ui, press(at), NavInput::default(), volume);
+        slide(ui, release(at), NavInput::default(), volume)
+    };
+
+    slide(&mut ui, idle(), NavInput::default(), &mut volume);
+    let page = click(&mut ui, on_volume, &mut volume);
+    assert_eq!(page.get("volume").engagement, Engagement::Began);
+    assert_eq!(page.name(ui.focused()), Some("volume"));
+
+    let page = click(&mut ui, nowhere, &mut volume);
+    assert_eq!(
+        page.name(ui.focused()),
+        Some("volume"),
+        "a click on an unfocusable node took focus away on its own, \
+         so this call would not be needed",
+    );
+    ui.clear_focus();
+    assert_eq!(ui.focused(), None, "focus was not taken away");
+    let page = slide(&mut ui, idle(), NavInput::default(), &mut volume);
+    assert_eq!(page.name(ui.focused()), None, "focus came back");
+
+    // And the engaged half, which that click had already committed: engage
+    // again and take it away with nothing else touching the tree.
+    let page = click(&mut ui, on_volume, &mut volume);
+    assert_eq!(page.get("volume").engagement, Engagement::Began);
+    assert_eq!(ui.engaged(), Some(page.get("volume").key));
+
+    ui.clear_focus();
+    assert_eq!(ui.engaged(), None, "the engagement was not taken away");
+    let page = slide(&mut ui, idle(), NavInput::default(), &mut volume);
+    assert_eq!(
+        page.get("volume").engagement,
+        Engagement::Committed,
+        "the engaged widget was not told it had been committed",
+    );
+    assert_eq!(volume, 5.0, "the commit restored the snapshot as a cancel");
+    let page = slide(&mut ui, idle(), NavInput::default(), &mut volume);
+    assert_eq!(page.get("volume").engagement, Engagement::Idle);
+    assert_eq!(page.name(ui.focused()), None);
+}
+
 /// **A button fires on accept through `clicked`, with no engaged state**, and
 /// a disabled button is neither focused, accepted nor clicked.
 #[test]
