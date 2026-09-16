@@ -3,9 +3,12 @@
 
 mod button;
 mod disclosure;
+mod dock;
 mod list;
+mod outliner;
 mod split;
 mod style;
+mod tabs;
 mod text_input;
 mod value;
 
@@ -111,14 +114,7 @@ pub(super) fn style_of(ui: &Ui, key: NodeKey) -> NodeStyle {
 
 /// The keys of every child `key` was built with this frame, in order.
 pub(super) fn children_of(ui: &Ui, key: NodeKey) -> Vec<NodeKey> {
-    let Some(parent) = ui.nodes.iter().position(|node| node.key == key) else {
-        return Vec::new();
-    };
-    ui.nodes
-        .iter()
-        .filter(|node| node.parent == Some(parent))
-        .map(|node| node.key)
-        .collect()
+    ui.child_keys(key)
 }
 
 /// `#rrggbb` as the linear-light colour the stylesheet decodes it to.

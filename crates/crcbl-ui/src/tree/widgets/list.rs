@@ -7,6 +7,8 @@
 //! positioned at its index times the row height. The row height being fixed
 //! is what makes that window arithmetic rather than a measurement: Unity's
 //! `ListView` virtualizes only at a fixed height for the same reason.
+//! [`Ui::row_window`](super::Ui::row_window) is the arithmetic, shared with
+//! [`Ui::outliner`].
 //!
 //! **Focus moves through rows that are not built.** The overscan rows are in
 //! the tree, clipped out of sight, so a step past the last row shown lands on
@@ -39,11 +41,7 @@ impl Ui {
         mut row: impl FnMut(&mut Self, usize),
     ) -> Response {
         let selector = typed("list", selector);
-        let height = if row_height.is_finite() {
-            row_height.max(1.0)
-        } else {
-            1.0
-        };
+        let height = row_span(row_height);
         let mut focused = None;
         let response = self.block_with(
             &selector,
@@ -51,7 +49,7 @@ impl Ui {
             Behavior::NONE,
             |ui| focused = ui.list_rows(rows, height, &mut row),
         );
-        self.set_widget_state(response.key, WidgetState::List(focused));
+        self.set_widget_state(response.key, WidgetState::Rows(focused));
         response
     }
 
@@ -63,29 +61,8 @@ impl Ui {
         height: f32,
         row: &mut impl FnMut(&mut Self, usize),
     ) -> Option<usize> {
-        let list = &self.nodes[*self.open.last().expect("called inside the list block")];
-        let stored = self.store.get(list.slot);
-        let view = if list.fresh {
-            // Nothing laid out yet: the stylesheet's height, when it is one.
-            match list.style.height {
-                LengthAuto::Px(px) => px,
-                LengthAuto::Percent(_) | LengthAuto::Auto => 0.0,
-            }
-        } else {
-            let (start, end) = stored.content_box();
-            end.y - start.y
-        };
-        let offset = stored.scroll_offset.y.max(0.0);
-        let kept = match stored.widget {
-            WidgetState::List(focused) => focused.filter(|&index| index < rows),
-            _ => None,
-        };
-
-        // Float-to-integer casts saturate, so a huge offset is the last row.
-        let first = ((offset / height).floor() as usize).saturating_sub(LIST_OVERSCAN);
-        let last = ((offset + view.max(0.0)) / height).ceil() as usize;
-        let end = last.saturating_add(LIST_OVERSCAN).min(rows);
-        let first = first.min(end);
+        let list = self.nodes[*self.open.last().expect("called inside the list block")].key;
+        let window = self.row_window(rows, height);
 
         let content = [
             Declaration::Height(LengthAuto::Px(rows as f32 * height)),
@@ -95,24 +72,18 @@ impl Ui {
         self.block(".list-content", &content, |ui| {
             // The focused row outside the window, built in its place in tree
             // order so that next and previous still walk the rows in order.
-            let outside = kept.filter(|&index| {
-                (index < first || index >= end)
-                    && ui.focused() == Some(ui.key(KeySource::Keyed(hash_of(index))))
-            });
+            let outside = ui
+                .kept_row(list, rows, |ui, index| {
+                    ui.key(KeySource::Keyed(hash_of(index)))
+                })
+                .filter(|&index| index < window.first || index >= window.end);
             let indices = outside
-                .filter(|&index| index < first)
+                .filter(|&index| index < window.first)
                 .into_iter()
-                .chain(first..end)
-                .chain(outside.filter(|&index| index >= end));
+                .chain(window.first..window.end)
+                .chain(outside.filter(|&index| index >= window.end));
             for index in indices {
-                let top = index as f32 * height;
-                let inline = [
-                    Declaration::Position(Position::Absolute),
-                    Declaration::Inset(Sides::Top, LengthAuto::Px(top)),
-                    Declaration::Inset(Sides::Left, LengthAuto::Px(0.0)),
-                    Declaration::Inset(Sides::Right, LengthAuto::Px(0.0)),
-                    Declaration::Height(LengthAuto::Px(height)),
-                ];
+                let inline = row_inline(index, height);
                 let response =
                     ui.block_keyed_with(index, ".list-row", &inline, Behavior::BUTTON, |ui| {
                         row(ui, index);
@@ -124,4 +95,26 @@ impl Ui {
         });
         focused
     }
+}
+
+/// `row_height` as a usable row span: a height under one pixel, or one that is
+/// not finite, is taken as one pixel.
+pub(super) fn row_span(row_height: f32) -> f32 {
+    if row_height.is_finite() {
+        row_height.max(1.0)
+    } else {
+        1.0
+    }
+}
+
+/// The inline declarations that place row `index` of a virtualized block: a
+/// full-width absolute box at its index times `height`.
+pub(super) fn row_inline(index: usize, height: f32) -> [Declaration; 5] {
+    [
+        Declaration::Position(Position::Absolute),
+        Declaration::Inset(Sides::Top, LengthAuto::Px(index as f32 * height)),
+        Declaration::Inset(Sides::Left, LengthAuto::Px(0.0)),
+        Declaration::Inset(Sides::Right, LengthAuto::Px(0.0)),
+        Declaration::Height(LengthAuto::Px(height)),
+    ]
 }

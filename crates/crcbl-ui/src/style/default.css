@@ -89,13 +89,18 @@ drag-value:focus,
 collapsing > .collapsing-header:focus,
 tree-node > .tree-row:focus,
 split > .split-divider:focus,
-text-input:focus {
+text-input:focus,
+.tab-strip > .tab:focus {
   outline: 2px #f5c400;
   outline-offset: 1px;
 }
 
-/* A row is clipped by its list, so its ring is drawn inside it. */
-list .list-row:focus {
+/*
+ * A row is clipped by the list or outliner that scrolls it, so its ring is
+ * drawn inside it.
+ */
+list .list-row:focus,
+outliner .outliner-row:focus {
   outline: 2px #f5c400;
   outline-offset: -2px;
 }
@@ -368,6 +373,101 @@ text-input:refused {
 
 text-input:disabled {
   color: #7a8190;
+}
+
+/*
+ * Outliner: the same well a list is, with a toggle at the start of each row.
+ * Depth is the row's own `padding-left`, written inline by the widget, so a
+ * level of nesting costs a number rather than a block — which is why the row
+ * has no left padding of its own here. An expanded row is `:open` and a
+ * selected one `:checked`.
+ */
+outliner {
+  flex-direction: column;
+  border-width: 1px;
+  border-color: #4a5468;
+  background: #171a20;
+  color: #e6e9ef;
+}
+
+.outliner-row {
+  gap: 2px;
+  padding-right: 4px;
+  align-items: center;
+}
+
+.outliner-toggle {
+  width: 9px;
+  flex-shrink: 0;
+  justify-content: center;
+  color: #7a8190;
+}
+
+.outliner-row:open > .outliner-toggle {
+  color: #3d8bfd;
+}
+
+.outliner-toggle:hover {
+  color: #e6e9ef;
+}
+
+outliner .outliner-row:hover {
+  background: #353d4c;
+}
+
+outliner .outliner-row:checked {
+  background: #2f5a9e;
+}
+
+/*
+ * Tabs: a strip of tabs over the one pane that is showing. The tab showing is
+ * `:checked`, drawn in the accent, and the panes that are not showing are not
+ * built at all.
+ */
+tabs {
+  flex-direction: column;
+  color: #e6e9ef;
+}
+
+.tab-strip {
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.tab {
+  padding: 1px 6px;
+  flex-shrink: 0;
+  background: #2a303c;
+}
+
+.tab-strip > .tab:hover {
+  background: #353d4c;
+}
+
+.tab-strip > .tab:checked {
+  background: #3d8bfd;
+  color: #10121a;
+}
+
+.tab-pane {
+  flex-grow: 1;
+  padding: 2px;
+  background: #171a20;
+  overflow: hidden;
+}
+
+/*
+ * Dock: nested splits filling their parent, each pane clipping what it holds.
+ * A pane's own look is the application's; what is here is only that it fills
+ * the split that holds it.
+ */
+dock {
+  flex-grow: 1;
+}
+
+.dock-pane {
+  flex-grow: 1;
+  overflow: hidden;
 }
 
 /*

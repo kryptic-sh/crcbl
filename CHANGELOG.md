@@ -16,6 +16,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::screenshot::Scene` has a `UiLayout` member**, so an exhaustive match
+  on it — `crcbl-cli`'s `scene_name` is one — needs the new arm, and
+  `crcbl screenshot --scene ui_layout` draws it.
 - **The console's editable line is the tree's text input, and `TextField` is
   gone.** `crcbl_ui::console::TextField`, `TextFieldStyle`,
   `ConsoleStyle::field_style`, `ConsoleStyle::text_color` and `caret_color` are
@@ -201,6 +204,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A virtualized outliner, a tab strip and dockable splitter layouts on the
+  element tree.** `Ui::outliner` and `Ui::outliner_with` build a tree of rows
+  over the same fixed-row-height window `Ui::list` builds, so ten thousand rows
+  cost a frame what two hundred do. The application owns an `OutlinerState` —
+  which items are expanded, which are selected, and the flattened visible rows —
+  and flattens through an `OutlinerBuilder` whose `branch` never walks a
+  collapsed subtree, and only when `OutlinerState::is_stale`. A click on a row's
+  toggle expands it, a click elsewhere selects it, left and right follow the
+  WAI-ARIA tree view rule `Ui::tree_node` already follows, and `SelectMode` is
+  the frame's modifier for single, toggle and range selection, mapped by the
+  caller from its own input as `NavInput` is. A row is `:open` while expanded
+  and `:checked` while selected.
+- **`Ui::tabs`** builds a tab strip and only the pane that is showing, with the
+  showing tab remembered by its title's hash, so it survives a rebuild that
+  reorders or inserts tabs. Each tab is a button, so focus walks the strip.
+- **`Ui::dock` and `DockLayout`** build nested splits from a value the
+  application owns and saves: panes addressed by name, each divider's position
+  written back into the value the frame a drag or an engaged step moves it, and
+  `remove_pane`, `dock` and `move_pane` to edit the layout. `Ui::split_at` is
+  `Ui::split` with the position in the caller's `Option<f32>`, which is what a
+  layout outliving the frames that show it is built on, and `Ui::current_key`
+  and `Ui::child_keys` answer which node a builder is filling and what it holds.
+  A `ui_layout` golden draws all three through the UI pass.
 - **`crcbl-reflect` and its `#[derive(Reflect)]`**, the field description an
   editor's property panel reads. `Reflect` says what a value is made of
   (`Kind::Leaf`, `Struct`, `Enum`, `List`), reads and writes its leaves as a

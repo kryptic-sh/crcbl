@@ -97,6 +97,7 @@ use crate::ui::draw_list::DrawList;
 
 mod still_pool;
 mod ui_focus;
+mod ui_layout;
 mod ui_primitives;
 mod ui_style;
 mod ui_text;
@@ -115,6 +116,15 @@ pub use ui_focus::{
     UI_FOCUS_PAGE, UI_FOCUS_RING, UI_FOCUS_RING_OFFSET, UI_FOCUS_RING_WIDTH, UI_FOCUS_ROW,
     UI_FOCUS_ROW_HEIGHT, UI_FOCUS_ROWS, UI_FOCUS_TARGET, UI_FOCUS_TARGET_ROW, UiFocusLayout,
     ui_focus_css, ui_focus_draw_list, ui_focus_layout,
+};
+pub use ui_layout::{
+    UI_LAYOUT_ACCENT, UI_LAYOUT_CLICKED_ROW, UI_LAYOUT_DIVIDER_DRAG, UI_LAYOUT_LEAVES,
+    UI_LAYOUT_LOG_FILL, UI_LAYOUT_NESTED, UI_LAYOUT_NESTED_BASE, UI_LAYOUT_NESTED_KIDS,
+    UI_LAYOUT_PADDING, UI_LAYOUT_PAGE, UI_LAYOUT_PANE_MIN, UI_LAYOUT_ROW_HEIGHT,
+    UI_LAYOUT_SELECTED, UI_LAYOUT_SELECTED_ROW, UI_LAYOUT_SHOWN_TAB, UI_LAYOUT_STRIPE_CYCLE,
+    UI_LAYOUT_STRIPE_EVEN, UI_LAYOUT_STRIPE_ODD, UI_LAYOUT_STRIPE_STEP, UI_LAYOUT_TAB_FILLS,
+    UI_LAYOUT_TABS, UiLayoutLayout, ui_layout_css, ui_layout_draw_list, ui_layout_indent,
+    ui_layout_layout, ui_layout_rows, ui_layout_stripe_steps,
 };
 pub use ui_primitives::{
     UI_PRIMITIVES_BASE, UI_PRIMITIVES_BORDER_COLOR, UI_PRIMITIVES_BORDERED_FILL,
@@ -787,6 +797,12 @@ pub enum Scene {
     /// `default.css` and driven by a scripted pointer and pad. See
     /// [`ui_widgets_layout`] for what each part is for.
     UiWidgets,
+    /// `docs/plan/07-ui-debug.md` rung 8a's editor-grade surfaces through
+    /// [`UiRenderer`]: a virtualized outliner scrolled to the row the pad walked
+    /// to with one row selected, a tab strip showing one pane, and a dockable
+    /// splitter layout whose outer divider a drag moved, styled by
+    /// `default.css`. See [`ui_layout_layout`] for what each part is for.
+    UiLayout,
     /// `docs/plan/07-ui-debug.md` rung 7's single-line text input through
     /// [`UiRenderer`]: an engaged input scrolled to the end of a long line, a
     /// selection a held drag is making, a placeholder and a masked value,
@@ -6019,6 +6035,8 @@ enum UiContent {
     WidgetSet,
     /// [`Scene::UiTextInput`]'s text inputs.
     TextInput,
+    /// [`Scene::UiLayout`]'s outliner, tabs and dock.
+    Layout,
 }
 
 /// Puts one of the demo scene's meshes in the frame at `model`.
@@ -6701,6 +6719,11 @@ impl SceneState {
                 renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
                 content: UiContent::TextInput,
+            },
+            Scene::UiLayout => Self::Ui {
+                renderer: Box::new(UiRenderer::new(device, queue, format)?),
+                atlas: FontAtlas::built_in(),
+                content: UiContent::Layout,
             },
             Scene::UiPrimitives => {
                 let mut renderer = Box::new(UiRenderer::new(device, queue, format)?);
@@ -7729,6 +7752,7 @@ impl OffscreenSetup {
                         UiContent::Focus => ui_focus_draw_list(extent),
                         UiContent::WidgetSet => ui_widgets_draw_list(extent),
                         UiContent::TextInput => ui_text_input_draw_list(extent),
+                        UiContent::Layout => ui_layout_draw_list(extent),
                     };
                     // `scale` is 1.0 because every size in the draw list is
                     // already this frame's pixels; a second multiplier is a
@@ -8808,7 +8832,7 @@ mod tests {
             .expect("every forward frame has a forward pass")
             + 1;
         still_pool_passes.insert(after_forward, ("render", "sky"));
-        let expected: [(Scene, &[(&str, &str)]); 22] = [
+        let expected: [(Scene, &[(&str, &str)]); 23] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8918,6 +8942,10 @@ mod tests {
             ),
             (
                 Scene::UiTextInput,
+                &[("render", "scene background"), ("render", "ui-composite")],
+            ),
+            (
+                Scene::UiLayout,
                 &[("render", "scene background"), ("render", "ui-composite")],
             ),
         ];

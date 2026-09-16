@@ -204,6 +204,8 @@ OPTIONS:
                                                and stepped by a script
                            ui_text_input       text inputs: scrolled to the
                                                caret, selected, masked
+                           ui_layout           an outliner, tabs and a
+                                               dockable splitter layout
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
                          be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
@@ -1288,6 +1290,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::UiFocus,
         Scene::UiWidgets,
         Scene::UiTextInput,
+        Scene::UiLayout,
     ]
 };
 
@@ -1327,6 +1330,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::UiFocus => "ui_focus",
         Scene::UiWidgets => "ui_widgets",
         Scene::UiTextInput => "ui_text_input",
+        Scene::UiLayout => "ui_layout",
     }
 }
 

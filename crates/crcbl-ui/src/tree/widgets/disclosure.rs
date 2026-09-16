@@ -151,6 +151,7 @@ impl Ui {
                         branch,
                         parent: grandparent,
                         first_child: None,
+                        item,
                     } = self.widget_state(parent)
                 {
                     self.set_widget_state(
@@ -160,6 +161,7 @@ impl Ui {
                             branch,
                             parent: grandparent,
                             first_child: Some(key),
+                            item,
                         },
                     );
                 }
@@ -168,6 +170,9 @@ impl Ui {
                     branch: kind == Row::Branch,
                     parent,
                     first_child: None,
+                    // A tree node's open state is this node's own, not an
+                    // outliner item's.
+                    item: None,
                 }
             }
         };
@@ -190,6 +195,7 @@ impl Ui {
             branch,
             parent,
             first_child,
+            item,
         } = self.widget_state(focused)
         else {
             return false;
@@ -203,10 +209,12 @@ impl Ui {
             branch,
             parent,
             first_child,
+            item,
         };
         match direction {
             Direction::Right if branch && !open => {
                 self.set_widget_state(focused, toggled(true));
+                self.tree_toggled = Some(focused);
                 true
             }
             Direction::Right if branch => match reachable(self, first_child) {
@@ -218,6 +226,7 @@ impl Ui {
             },
             Direction::Left if branch && open => {
                 self.set_widget_state(focused, toggled(false));
+                self.tree_toggled = Some(focused);
                 true
             }
             Direction::Left => match reachable(self, parent) {

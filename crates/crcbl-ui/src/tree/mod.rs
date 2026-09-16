@@ -54,9 +54,10 @@
 //! # Widgets
 //!
 //! [`Ui::button`], [`Ui::checkbox`], [`Ui::slider`], [`Ui::drag_value`],
-//! [`Ui::collapsing`], [`Ui::tree_node`], [`Ui::split`], [`Ui::list`] and
-//! [`Ui::text_input`] are builders over blocks and spans, each styled by
-//! `default.css`; `widgets/mod.rs` has what each builds and the rules it keeps.
+//! [`Ui::collapsing`], [`Ui::tree_node`], [`Ui::split`], [`Ui::list`],
+//! [`Ui::text_input`], [`Ui::outliner`], [`Ui::tabs`] and [`Ui::dock`] are
+//! builders over blocks and spans, each styled by `default.css`;
+//! `widgets/mod.rs` has what each builds and the rules it keeps.
 //!
 //! # Identity
 //!
@@ -185,8 +186,10 @@ pub use style::{
     Position,
 };
 pub use widgets::{
-    ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, LIST_OVERSCAN, MASK,
-    SPLIT_NAV_STEP, SplitAxis, TextInput, TextInputOptions,
+    ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, DockLayout, DockSide,
+    LIST_OVERSCAN, MASK, OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId,
+    OutlinerOptions, OutlinerRow, OutlinerState, SPLIT_NAV_STEP, SelectMode, SplitAxis, TextInput,
+    TextInputOptions,
 };
 
 /// How far the pointer must move from where a press began, in pixels, before
@@ -401,6 +404,11 @@ pub struct Ui {
     clipboard_requests: Vec<ClipboardRequest>,
     /// The pictures a stylesheet's `url()` names, from [`Ui::set_image`].
     images: HashMap<ImageName, AtlasImage>,
+    /// The node this frame's pointer clicked, resolved when the frame began.
+    clicked: Option<NodeKey>,
+    /// The tree row [`Ui::tree_item_step`] opened or closed when this frame
+    /// began, if it opened or closed one.
+    tree_toggled: Option<NodeKey>,
 }
 
 impl Ui {
@@ -437,7 +445,9 @@ impl Ui {
         self.fits.clear();
         self.clipboard_requests.clear();
         self.pointer = pointer;
+        self.tree_toggled = None;
         let clicked = self.resolve_pointer(pointer);
+        self.clicked = clicked;
         self.resolve_navigation(nav, clicked, self.dragged);
     }
 
@@ -1044,6 +1054,31 @@ impl Ui {
     #[must_use]
     pub fn duplicate_keys(&self) -> &[NodeKey] {
         &self.duplicates
+    }
+
+    /// The key of the block whose builder is running: what a closure a widget
+    /// calls back — a list's row, an outliner's row, a dock's pane — reads to
+    /// learn which node it is filling. None outside every block.
+    #[must_use]
+    pub fn current_key(&self) -> Option<NodeKey> {
+        self.open.last().map(|&index| self.nodes[index].key)
+    }
+
+    /// The keys of every node built inside `key` this frame, in build order;
+    /// empty for a node this frame did not build. What a test or a UI
+    /// inspector walks the tree with.
+    #[must_use]
+    pub fn child_keys(&self, key: NodeKey) -> Vec<NodeKey> {
+        let Some(parent) = self.nodes.iter().position(|node| node.key == key) else {
+            return Vec::new();
+        };
+        let mut keys = Vec::new();
+        let mut next = self.nodes[parent].first_child;
+        while let Some(child) = next {
+            keys.push(self.nodes[child].key);
+            next = self.nodes[child].next_sibling;
+        }
+        keys
     }
 }
 

@@ -202,6 +202,10 @@ mod ui_widgets;
 #[path = "render_e2e/ui_text_input.rs"]
 mod ui_text_input;
 
+// Rung 8a's outliner, tabs and dock, for the same reason.
+#[path = "render_e2e/ui_layout.rs"]
+mod ui_layout;
+
 /// The size the goldens were blessed at.
 ///
 /// The same 256x192 the cross-backend harness and `crcbl-vk`'s mesh suite use,

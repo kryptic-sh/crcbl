@@ -13,9 +13,12 @@
 //! | `button.rs` | [`Ui::button`], [`Ui::checkbox`] | instant activation |
 //! | `value.rs` | [`Ui::slider`], [`Ui::drag_value`] | engaged |
 //! | `disclosure.rs` | [`Ui::collapsing`], [`Ui::tree_node`], [`Ui::tree_leaf`] | instant activation |
-//! | `split.rs` | [`Ui::split`] | the divider is engaged |
+//! | `split.rs` | [`Ui::split`], [`Ui::split_at`] | the divider is engaged |
 //! | `list.rs` | [`Ui::list`] | each row is instant activation |
 //! | `text_input.rs` | [`Ui::text_input`], [`Ui::text_input_with`] | engaged |
+//! | `outliner.rs` | [`Ui::outliner`], [`Ui::outliner_with`] | each row is instant activation |
+//! | `tabs.rs` | [`Ui::tabs`] | each tab is instant activation |
+//! | `dock.rs` | [`Ui::dock`] | each divider is engaged |
 //!
 //! # Values are the caller's
 //!
@@ -31,7 +34,8 @@
 //!
 //! A widget's `selector` is its `#id.class` part: the widget's type — `button`,
 //! `checkbox`, `slider`, `drag-value`, `collapsing`, `tree-node`, `split`,
-//! `list` or `text-input` — is put in front of it, and that type is what `default.css` styles.
+//! `list`, `text-input`, `outliner`, `tabs` or `dock` — is put in front of it,
+//! and that type is what `default.css` styles.
 //! A selector that names a type of its own keeps it, which opts the widget out
 //! of every engine rule for its type. The parts inside a widget have classes
 //! named after it (`.slider-fill`, `.tree-row`); each builder's docs name them.
@@ -39,8 +43,12 @@
 //! # State the stylesheet sees
 //!
 //! Beside `:hover`, `:active`, `:focus`, `:engaged` and `:disabled`, a checked
-//! checkbox has **`:checked`**, an open header or tree row has **`:open`**, and
-//! a text input the clipboard refused has **`:refused`**.
+//! checkbox has **`:checked`**, an open header, tree row or outliner row has
+//! **`:open`**, and a text input the clipboard refused has **`:refused`**. A
+//! selected outliner row and the tab that is showing have **`:checked`** too:
+//! Selectors Level 4 §12.2 gives `:checked` to an `option` element that is
+//! selected, which is what both are, and the eight pseudo-classes fill
+//! [`PseudoClasses`](crate::style::PseudoClasses)' bits.
 //! Both are pseudo-classes rather than classes, as Selectors Level 4 defines
 //! them (§12.2's input value states and §11.1's collapse state): the state
 //! belongs to the element and the user changes it, where a class is the
@@ -65,8 +73,11 @@
 
 mod button;
 mod disclosure;
+mod dock;
 mod list;
+mod outliner;
 mod split;
+mod tabs;
 #[cfg(test)]
 mod tests;
 mod text_input;
@@ -79,9 +90,15 @@ use std::panic::Location;
 use super::Response;
 use super::Ui;
 use super::store::{Interaction, NodeKey};
+use super::style::LengthAuto;
 use crate::style::NodeSelector;
 
+pub use dock::{DockLayout, DockSide};
 pub use list::LIST_OVERSCAN;
+pub use outliner::{
+    OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions,
+    OutlinerRow, OutlinerState, SelectMode,
+};
 pub use split::{SPLIT_NAV_STEP, SplitAxis};
 pub use text_input::{
     ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, MASK, TextInput,
@@ -100,7 +117,7 @@ pub(crate) enum WidgetState {
         /// Whether its body is built.
         open: bool,
     },
-    /// A tree node's row.
+    /// A tree node's or an outliner's row.
     TreeItem {
         /// Whether its children are built.
         open: bool,
@@ -110,14 +127,22 @@ pub(crate) enum WidgetState {
         parent: Option<NodeKey>,
         /// The row of the first tree node built inside it, last frame.
         first_child: Option<NodeKey>,
+        /// The item an outliner row stands for; none for a [`Ui::tree_node`],
+        /// whose open state is this node's own.
+        item: Option<OutlinerId>,
     },
     /// A drag-value or a divider under a press: what the value was when the
     /// press began.
     Anchor(Option<f32>),
     /// A split: where its divider was put, as the first pane's length.
     Split(Option<f32>),
-    /// A list: the row that held focus when it was last built.
-    List(Option<usize>),
+    /// A virtualized list or outliner: the row that held focus when it was
+    /// last built.
+    Rows(Option<usize>),
+    /// An outliner row's toggle: the item a click on it expands or collapses.
+    OutlinerToggle(OutlinerId),
+    /// A tab strip: the tab that is showing, as the hash of its title.
+    Tabs(u64),
     /// A text input, whose editing state is [`Ui`]'s `edits`: a drag that
     /// ends on it leaves it engaged.
     TextInput,
@@ -187,8 +212,8 @@ impl Ui {
         self.disabled_depth -= disables;
     }
 
-    /// Whether the collapsing header or tree node whose row is `key` is open.
-    /// False for any other node.
+    /// Whether the collapsing header, tree node or outliner row whose row is
+    /// `key` is open. False for any other node.
     #[must_use]
     pub fn is_open(&self, key: NodeKey) -> bool {
         matches!(
@@ -196,4 +221,67 @@ impl Ui {
             WidgetState::Header { open: true } | WidgetState::TreeItem { open: true, .. }
         )
     }
+
+    /// The node this frame's pointer clicked, or none.
+    const fn clicked_key(&self) -> Option<NodeKey> {
+        self.clicked
+    }
+
+    /// Which of `rows` rows of `height` pixels the innermost open block builds
+    /// this frame: the rows its view shows at its scroll offset and
+    /// [`LIST_OVERSCAN`] more on each side. Both [`Ui::list`] and
+    /// [`Ui::outliner`] window their rows with it, so the two agree by
+    /// construction on what "in the window" means.
+    ///
+    /// Panics outside every block.
+    fn row_window(&self, rows: usize, height: f32) -> RowWindow {
+        let block = &self.nodes[*self.open.last().expect("called inside the block")];
+        let stored = self.store.get(block.slot);
+        let view = if block.fresh {
+            // Nothing laid out yet: the stylesheet's height, when it is one.
+            match block.style.height {
+                LengthAuto::Px(px) => px,
+                LengthAuto::Percent(_) | LengthAuto::Auto => 0.0,
+            }
+        } else {
+            let (start, end) = stored.content_box();
+            end.y - start.y
+        };
+        let offset = stored.scroll_offset.y.max(0.0);
+
+        // Float-to-integer casts saturate, so a huge offset is the last row.
+        let first = ((offset / height).floor() as usize).saturating_sub(LIST_OVERSCAN);
+        let last = ((offset + view.max(0.0)) / height).ceil() as usize;
+        let end = last.saturating_add(LIST_OVERSCAN).min(rows);
+        RowWindow {
+            first: first.min(end),
+            end,
+        }
+    }
+
+    /// The row a virtualized block kept focus on, when it is still a row and
+    /// still the focused node. `key` is the block's, and `row_key` makes a
+    /// row's key from its index.
+    fn kept_row(
+        &self,
+        key: NodeKey,
+        rows: usize,
+        row_key: impl Fn(&Self, usize) -> NodeKey,
+    ) -> Option<usize> {
+        let kept = match self.widget_state(key) {
+            WidgetState::Rows(focused) => focused.filter(|&index| index < rows),
+            _ => None,
+        }?;
+        let expected = row_key(self, kept);
+        (self.focused() == Some(expected)).then_some(kept)
+    }
+}
+
+/// Which rows a virtualized block builds this frame; see [`Ui::row_window`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RowWindow {
+    /// The first row in the window.
+    pub first: usize,
+    /// One past the last row in the window.
+    pub end: usize,
 }

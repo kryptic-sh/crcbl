@@ -84,7 +84,16 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   a frame and pushes both reserved contexts, and `TextPump` drives the field.
   Not built from that rung yet: the on-screen keyboard, which keeps its own
   layout and hit test over the tree, and the debug panel's value column, which
-  is a measured `min-width` rather than a grid flexbox cannot express.
+  is a measured `min-width` rather than a grid flexbox cannot express. **Rung 8a
+  is built** (2026-09-16): `Ui::outliner` over a caller-owned `OutlinerState` —
+  expansion, selection and a flattened visible-row model built through
+  `OutlinerBuilder`, virtualized on the same row window `Ui::list` uses —
+  `Ui::tabs`, and `Ui::dock` over a `DockLayout` value the application saves,
+  with `Ui::split_at` under it; a `ui_layout` golden holds all three, and the
+  outliner costs the same frame at ten thousand rows as at two hundred. Not
+  built from 8a yet: the property inspector over `#[derive(Reflect)]`, and
+  drag-to-dock, which needs a drag payload, a five-zone drop hit test and a
+  preview over `DockLayout::move_pane`.
 - **`widget`** — `Label`, `Button`, `ButtonSkin`, `Style`, `SkinInsets`,
   `PointerInput`, `UiState`, `WidgetId`. The rest of the MVP widget set below is
   unbuilt.

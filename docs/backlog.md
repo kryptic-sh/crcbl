@@ -30,6 +30,56 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 - **Rounded outlines and nested scroll containers** are covered by unit tests
   and no GPU claim; D3D12 and Metal draw `ui_focus` only on CI.
 
+## What UI rung 8a shipped without (2026-09-16)
+
+`Ui::outliner`, `Ui::tabs` and `Ui::dock` landed with the gaps below.
+
+- **Drag-to-dock is not built.** `DockLayout::move_pane` is the value half and
+  is tested; a gesture needs a drag source (a pane header or tab the press
+  latches on — `Response::pressed` reports it, nothing routes it as a payload),
+  a drop target resolved from the pointer against last frame's pane rectangles
+  into a `DockSide` (the five-zone hit test), and a preview drawn over the pane
+  the drop would take.
+- **Decision owed: multi-selection needs modifiers nothing supplies.**
+  `SelectMode::Toggle` and `Range` are applied by `Ui::outliner`, but neither
+  `NavInput` nor `PointerInput` carries a modifier, so no engine caller can
+  produce anything but `Replace`. Where control and shift enter — a `NavInput`
+  field or a `PointerInput` one — is the call; there is likewise no keyboard
+  range select.
+- **`OutlinerState::select` with `Range` walks the model** to find the anchor,
+  so a range click costs the model's length; `Replace` and `Toggle` are
+  constant.
+- **The expansion and selection sets never shrink**: `OutlinerState` keeps an
+  `OutlinerId` for every item ever expanded or selected, including ones the tree
+  no longer holds. A `retain` against the last flatten would need the flatten to
+  report what it saw.
+- **No scroll-to-index or reveal on the outliner**: the only way to bring a row
+  into view is to focus it, and nothing scrolls it with a wheel — `PointerInput`
+  still has no wheel, as rung 7b left it.
+- **A tab strip neither wraps nor scrolls**, so tabs past the pane's width are
+  clipped; arrows move between tabs only because spatial navigation finds them,
+  and activation is manual (focus, then accept). **A tab's pane is dropped when
+  another shows**, with every widget state inside it — the same rule a closed
+  `Ui::collapsing` body follows, but a text input in a tab loses its caret on a
+  switch.
+- **A dock gives every split the same `min`**, and a divider's position is
+  pixels rather than a fraction (inherited from rung 7b), so a layout restored
+  at a different window size keeps the pixel split. A per-pane minimum would
+  have to live in `DockLayout`. `Ui::dock` also clones each pane's name every
+  frame to satisfy the borrow checker — immaterial at editor pane counts, but it
+  is an allocation per pane per frame.
+- **Cost**: the outliner is 87.9 µs a frame at 10 001 rows and 86.8 µs at 201
+  (release, median of 41, 1920×1080, 70 rows in view), against 37.8 µs for a
+  `Ui::list` of the same length — four nodes a row against two. The flatten,
+  when the expansion moves, is 12.5 µs at 10 001 rows and 134.7 µs at 100 001.
+  `default.css` grew 1795 bytes, which is the whole raw wasm growth of a 2D demo
+  (+1800 B raw, +5.9 KB gzipped on breakout).
+- **Not tested**: an outliner inside a modal or nested scroll containers;
+  `Ui::enabled` on the outliner and tab pointer paths; a dock nested more than
+  two levels deep; duplicate pane names in a `DockLayout` (the editing methods
+  refuse to make one, a hand-built layout can); and a tab strip in a parsed font
+  — the `ui_layout` golden's labels are the bitmap font.
+
 ## What the reflection crate shipped without (2026-09-16)
 
 `crcbl-reflect` and `#[derive(Reflect)]` landed with the gaps below;

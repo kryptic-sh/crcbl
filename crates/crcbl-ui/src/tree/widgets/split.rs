@@ -1,20 +1,28 @@
 //! A split pane: two panes and a divider between them that a drag or an
 //! engaged step moves.
 //!
-//! The divider's position is the first pane's length along the split, kept in
-//! the store. Until anything moves it there is none, and both panes share the
-//! space equally. Each pane has its minimum length as an inline `min-width`
-//! (or `min-height`), so flex layout holds them to it at any size, and a
-//! position is clamped so the second pane keeps its minimum — **the first
-//! pane's minimum wins** when the split is too short for both.
+//! The divider's position is the first pane's length along the split. Until
+//! anything moves it there is none, and both panes share the space equally.
+//! Each pane has its minimum length as an inline `min-width` (or
+//! `min-height`), so flex layout holds them to it at any size, and a position
+//! is clamped so the second pane keeps its minimum — **the first pane's
+//! minimum wins** when the split is too short for both.
+//!
+//! [`Ui::split`] keeps the position in the store, as every widget keeps its own
+//! interaction state. [`Ui::split_at`] hands it to the caller instead, for a
+//! layout the application saves and restores — [`Ui::dock`] is built on it —
+//! and both run the same code: the position is an input and an output, and
+//! only where it lives between frames differs.
 
 use std::panic::Location;
 
 use glam::Vec2;
 
 use super::{Ui, WidgetState, typed};
-use crate::style::{Declaration, PseudoClasses};
-use crate::tree::{Behavior, Direction, FlexDirection, LengthAuto, NavStep, Response};
+use crate::style::{Declaration, NodeSelector, PseudoClasses};
+#[cfg(doc)]
+use crate::tree::DockLayout;
+use crate::tree::{Behavior, Direction, FlexDirection, LengthAuto, NavStep, NodeKey, Response};
 
 /// How far one engaged step moves a divider, in pixels.
 pub const SPLIT_NAV_STEP: f32 = 8.0;
@@ -67,6 +75,23 @@ impl SplitAxis {
     }
 }
 
+/// `first` and `second` as the one builder a split's panes are built through,
+/// called with `0` and then `1`. A split builds each pane once, so each
+/// closure is taken once and a second call with the same index builds nothing.
+fn either(first: impl FnOnce(&mut Ui), second: impl FnOnce(&mut Ui)) -> impl FnMut(&mut Ui, usize) {
+    let mut first = Some(first);
+    let mut second = Some(second);
+    move |ui, which| {
+        if which == 0 {
+            if let Some(build) = first.take() {
+                build(ui);
+            }
+        } else if let Some(build) = second.take() {
+            build(ui);
+        }
+    }
+}
+
 impl Ui {
     /// A split pane: a `split` block laid out along `axis`, holding a
     /// `.split-pane.split-first` block `first` builds, a `.split-divider`
@@ -88,41 +113,103 @@ impl Ui {
         second: impl FnOnce(&mut Self),
     ) -> Response {
         let selector = typed("split", selector);
+        let parsed = self.node_selector(&selector);
+        let key = self.widget_key(parsed, Location::caller());
+        let mut position = match self.widget_state(key) {
+            WidgetState::Split(position) => position,
+            _ => None,
+        };
+        let divider =
+            self.split_block(key, parsed, axis, min, &mut position, either(first, second));
+        self.set_widget_state(key, WidgetState::Split(position));
+        divider
+    }
+
+    /// [`Ui::split`] with the divider's position in `position` rather than in
+    /// the store: the first pane's length along `axis` in pixels, `None` while
+    /// the panes share the space equally, written back the frame a drag or an
+    /// engaged step moves it.
+    ///
+    /// This is the variant a saved layout is built on — a [`DockLayout`] holds
+    /// one position per split — because a position the store keeps is dropped
+    /// the moment a frame does not build the split, and a layout outlives the
+    /// frames that show it.
+    #[track_caller]
+    pub fn split_at(
+        &mut self,
+        selector: &str,
+        axis: SplitAxis,
+        min: [f32; 2],
+        position: &mut Option<f32>,
+        first: impl FnOnce(&mut Self),
+        second: impl FnOnce(&mut Self),
+    ) -> Response {
+        self.split_at_indexed(selector, axis, min, position, either(first, second))
+    }
+
+    /// [`Ui::split_at`] with one builder for both panes, called with `0` and
+    /// then `1`: what [`Ui::dock`] needs, whose two children share one pane
+    /// builder that a closure each would borrow twice over.
+    #[track_caller]
+    pub(super) fn split_at_indexed(
+        &mut self,
+        selector: &str,
+        axis: SplitAxis,
+        min: [f32; 2],
+        position: &mut Option<f32>,
+        panes: impl FnMut(&mut Self, usize),
+    ) -> Response {
+        let selector = typed("split", selector);
+        let parsed = self.node_selector(&selector);
+        let key = self.widget_key(parsed, Location::caller());
+        self.split_block(key, parsed, axis, min, position, panes)
+    }
+
+    /// The `split` block on `key`, with the divider's position read from and
+    /// written back to `position`.
+    fn split_block(
+        &mut self,
+        key: NodeKey,
+        parsed: NodeSelector<'_>,
+        axis: SplitAxis,
+        min: [f32; 2],
+        position: &mut Option<f32>,
+        panes: impl FnMut(&mut Self, usize),
+    ) -> Response {
         let direction = match axis {
             SplitAxis::Row => FlexDirection::Row,
             SplitAxis::Column => FlexDirection::Column,
         };
+        let held = *position;
         let mut divider = None;
-        let response = self.block_with(
-            &selector,
+        self.open_block(
+            key,
+            parsed,
             &[Declaration::FlexDirection(direction)],
             Behavior::NONE,
-            |ui| divider = Some(ui.split_panes(axis, min, first, second)),
+            PseudoClasses::NONE,
+            |ui| divider = Some(ui.split_panes(axis, min, held, panes)),
         );
-        let (divider, position) = divider.expect("the panes are built inside the block");
-        self.set_widget_state(response.key, WidgetState::Split(position));
+        let (divider, moved) = divider.expect("the panes are built inside the block");
+        *position = moved;
         divider
     }
 
-    /// The inside of an open split block: resolves the divider's position,
-    /// builds both panes and the divider, and returns the divider's response
-    /// with the position to keep.
+    /// The inside of an open split block: resolves the divider's position from
+    /// `held`, builds both panes and the divider, and returns the divider's
+    /// response with the position to keep.
     fn split_panes(
         &mut self,
         axis: SplitAxis,
         min: [f32; 2],
-        first: impl FnOnce(&mut Self),
-        second: impl FnOnce(&mut Self),
+        held: Option<f32>,
+        mut panes: impl FnMut(&mut Self, usize),
     ) -> (Response, Option<f32>) {
         let min = min.map(|length| length.max(0.0));
         let split = &self.nodes[*self.open.last().expect("called inside the split block")];
         let fresh = split.fresh;
         let stored = self.store.get(split.slot);
         let room = (!fresh).then(|| axis.along(stored.content_box().1 - stored.content_box().0));
-        let held = match stored.widget {
-            WidgetState::Split(position) => position,
-            _ => None,
-        };
 
         let first_selector = self.node_selector(".split-pane.split-first");
         let first_key = self.widget_key(first_selector, Location::caller());
@@ -193,7 +280,7 @@ impl Ui {
             &first_inline,
             Behavior::NONE,
             none,
-            first,
+            |ui| panes(ui, 0),
         );
         let mut divider = self.open_block(
             divider_key,
@@ -209,7 +296,7 @@ impl Ui {
             &second_inline,
             Behavior::NONE,
             none,
-            second,
+            |ui| panes(ui, 1),
         );
         self.set_widget_state(divider_key, WidgetState::Anchor(anchor));
         divider.changed = position.is_some() && position.map(f32::to_bits) != was.map(f32::to_bits);
