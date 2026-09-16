@@ -235,6 +235,20 @@ early.
   across targets _within the sim math kernel_", which is what the gates actually
   require.
 
+## Decision (determinism math, 2026-09-17)
+
+**The user decided: the simulation's transcendentals are constructed in-engine,
+in f64**, on `crcbl_shaders::trig`'s pattern — a range reduction and a
+polynomial, no platform `libm` and no `libm` crate. It supersedes both the
+`libm`-crate answer above and the 2026-09-06 note recording that crate as the
+choice, and it agrees with topic 13's "own polynomial approximations" line, so
+the two documents no longer prescribe different answers. The implementation owes
+golden values from the specification and an accuracy sweep, as the shader
+construction did. **The solver interior is f32 over f64 positions** — see
+[36-contact-solver.md](36-contact-solver.md)'s decision 7, which amends this
+document's "f64 math" line for the solver's velocities, deltas and impulses
+while body positions stay f64.
+
 ## Correction (determinism math, 2026-08-09)
 
 **This document and [13-audio.md](13-audio.md) prescribe different answers to

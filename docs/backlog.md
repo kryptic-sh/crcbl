@@ -537,16 +537,6 @@ with [tumble](plan/sample/24-tumble.md), and
 [59-tessellation.md](plan/59-tessellation.md) with
 [relief](plan/sample/25-relief.md). What stays open:
 
-- **Decision: an f32 solver interior at rung 6.** The research recommends body
-  positions in f64 and the solver's velocities, deltas and impulses in f32 once
-  it goes wide, because WebAssembly's SIMD has two f64 lanes against four f32
-  lanes and Jolt measured a naive all-double build at over twice the cost. It
-  amends [05-physics.md](plan/05-physics.md)'s locked f64 line; the runner-up is
-  f64 on two lanes if an A/B in the browser shows no material gap.
-- **Decision: pinned trigonometry for the simulation**, which rung 0 depends on.
-  The 2026-09-06 decision to use the `libm` crate is recorded and unbuilt; a
-  constructed f64 `sin` and `cos` on `crcbl_shaders::trig`'s pattern is the
-  alternative that adds no dependency.
 - **Physics plan errors found by the survey, not yet corrected in
   `05-physics.md`**: its "SoA" storage is hash maps sorted each step; its
   120–240 Hz substeps are not implemented (`PhysicsSystem::tick` steps once);

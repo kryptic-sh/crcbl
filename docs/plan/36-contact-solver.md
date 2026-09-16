@@ -103,19 +103,19 @@ splits the large ones; it ships at AAA scale, and it is the runner-up.
    reduced-coordinate multibodies — tree-only (a bridge needs loop-closing
    constraints anyway), slow to add and remove, no joint forces for breaking,
    and a second solver.
-7. **Precision: f64 positions, and a proposed f32 solver interior at the last
-   rung — pending the user's sign-off.** Body positions stay f64 in sector-local
-   space: f32 resolves only 0.125 m at a 2²⁰ m sector's edge. The solver already
-   works on deltas and anchors relative to each body, so its interior
-   (velocities, deltas, impulses, effective masses) can be f32. The argument for
-   switching at rung 6 is width: WebAssembly's SIMD offers two f64 lanes against
-   four f32 lanes, Jolt measured a naive all-double build at over 2× slower
-   against 5–10% for its boundary design, and Box2D reports "a few percent". f32
-   is exactly as deterministic as f64; only the hash differs, so every target
-   uses one precision. **This amends [05-physics.md](05-physics.md)'s locked
-   "f64" line**, and it is recorded as a decision rather than taken; the
-   runner-up is f64 on two lanes, kept if an A/B on the ball pit in the browser
-   shows no material gap.
+7. **Precision: f64 positions and an f32 solver interior — decided by the user,
+   2026-09-17.** Body positions stay f64 in sector-local space: f32 resolves
+   only 0.125 m at a 2²⁰ m sector's edge. The solver already works on deltas and
+   anchors relative to each body, so its interior (velocities, deltas, impulses,
+   effective masses) can be f32. The argument for switching at rung 6 is width:
+   WebAssembly's SIMD offers two f64 lanes against four f32 lanes, Jolt measured
+   a naive all-double build at over 2× slower against 5–10% for its boundary
+   design, and Box2D reports "a few percent". f32 is exactly as deterministic as
+   f64; only the hash differs, so every target uses one precision. **This amends
+   [05-physics.md](05-physics.md)'s locked "f64" line.** The simulation's `sin`
+   and `cos` are constructed in-engine in f64 on `crcbl_shaders::trig`'s
+   pattern, also decided 2026-09-17, which is what rung 0's "pinned
+   trigonometry" means.
 8. **Data layout: dense and generational, not hash maps.** `PhysicsSystem` keeps
    bodies and transforms in hash maps keyed by entity and sorts the keys each
    step (`crates/crcbl-phys/src/system.rs`), which cannot carry a contact graph
