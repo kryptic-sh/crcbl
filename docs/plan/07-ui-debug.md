@@ -91,9 +91,19 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   `Ui::tabs`, and `Ui::dock` over a `DockLayout` value the application saves,
   with `Ui::split_at` under it; a `ui_layout` golden holds all three, and the
   outliner costs the same frame at ten thousand rows as at two hundred. Not
-  built from 8a yet: the property inspector over `#[derive(Reflect)]`, and
-  drag-to-dock, which needs a drag payload, a five-zone drop hit test and a
-  preview over `DockLayout::move_pane`.
+  built from 8a yet: drag-to-dock, which needs a drag payload, a five-zone drop
+  hit test and a preview over `DockLayout::move_pane`. **Rung 8b is built**
+  (2026-09-16): `Ui::inspector` and `Ui::inspector_with` over a
+  `&mut dyn Reflect` — a row per `Reflect::fields` entry with the widget its
+  `ValueKind` picks, recursion under a `Ui::collapsing` header through
+  `Reflect::field_mut`, `Field::range` and `Field::step` driving the drag-value,
+  and `Overrides` registering a row builder per type through `Reflect::as_any`,
+  with a three-component vector row shipped — plus a `ui_inspector` golden. An
+  edit is reported as a `FieldEdit` (path, before, after) a caller undoes with
+  `set_path`. Not built from that rung yet: enum-variant switching (the
+  reflection crate has none), rows keyed by position rather than field name, a
+  nested struct inheriting a parent's bounds, and multi-select or copy/paste of
+  a field.
 - **`widget`** — `Label`, `Button`, `ButtonSkin`, `Style`, `SkinInsets`,
   `PointerInput`, `UiState`, `WidgetId`. The rest of the MVP widget set below is
   unbuilt.
@@ -114,9 +124,13 @@ the pre-CSS toolkit the debug panel and the samples needed first:
 - **`debug`** and **`budget`** — the modular panel described under "Debug tools"
   below, and the frame CPU-vs-GPU row [40-profiling.md](40-profiling.md) owns.
 
-`crcbl-ui` depends on `glam`, `bytemuck` and `crcbl-core` (the latter for the
-shell's `ContactId`/`TouchPhase`, which `touch` hit-tests). It names no
-renderer, so the dependency-direction exit criterion below holds.
+`crcbl-ui` depends on `glam`, `bytemuck`, `crcbl-core` (for the shell's
+`ContactId`/`TouchPhase`, which `touch` hit-tests), `crcbl-reflect` (rung 8b's
+inspector, 2026-09-16), `taffy`, `cssparser` and `skrifa`. **It still names no
+renderer**, which is what the dependency-direction exit criterion below is about
+— and `crcbl-reflect` sits at the bottom of the graph, on `glam` and
+`thiserror`, so the arrow costs a browser build nothing but the description. The
+criterion is prose: nothing in CI checks it mechanically.
 
 ## Architecture: immediate-mode authoring, DOM-like model, CSS-subset styling
 
@@ -502,8 +516,8 @@ on its own; the first two need no new dependency.
 8. **Editor-grade surfaces.** A reflection-driven property inspector with
    per-type overrides (Unreal's Details panel and Fyrox's `Reflect` inspector
    are the shape), a virtualized outliner, splitter layouts, then tabs. Unblocks
-   stage 8. **The reflection half landed 2026-09-16** as `crcbl-reflect` and its
-   `#[derive(Reflect)]`, so what the inspector owes is the widget: rows from
+   stage 8. **Both halves landed 2026-09-16**: `crcbl-reflect` with its
+   `#[derive(Reflect)]`, and `Ui::inspector` over it — rows from
    `Reflect::fields`, recursion through `Reflect::field_mut`, `Range` and `step`
    driving a drag-value, and a per-type override recognising a vector through
    `as_any`. An edit is a `set_path` call, which is already the undoable form.

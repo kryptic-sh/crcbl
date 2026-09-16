@@ -206,6 +206,8 @@ OPTIONS:
                                                caret, selected, masked
                            ui_layout           an outliner, tabs and a
                                                dockable splitter layout
+                           ui_inspector        a property panel over a
+                                               component's reflected fields
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
                          be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
@@ -1291,6 +1293,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::UiWidgets,
         Scene::UiTextInput,
         Scene::UiLayout,
+        Scene::UiInspector,
     ]
 };
 
@@ -1331,6 +1334,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::UiWidgets => "ui_widgets",
         Scene::UiTextInput => "ui_text_input",
         Scene::UiLayout => "ui_layout",
+        Scene::UiInspector => "ui_inspector",
     }
 }
 

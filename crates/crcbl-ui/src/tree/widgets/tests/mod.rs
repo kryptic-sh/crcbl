@@ -4,6 +4,7 @@
 mod button;
 mod disclosure;
 mod dock;
+mod inspector;
 mod list;
 mod outliner;
 mod split;
@@ -17,8 +18,8 @@ use glam::Vec2;
 use crate::style::Declaration;
 use crate::text::FontAtlas;
 use crate::tree::{
-    AvailableSpace, Direction, FlexDirection, LengthAuto, NavInput, NodeKey, NodeStyle, TextInput,
-    Ui,
+    AvailableSpace, Direction, FlexDirection, InspectorOptions, LengthAuto, NavInput, NodeKey,
+    NodeStyle, TextInput, Ui,
 };
 use crate::widget::PointerInput;
 

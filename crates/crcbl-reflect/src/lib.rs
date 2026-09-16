@@ -135,9 +135,12 @@
 //!
 //! # What this crate deliberately does not do
 //!
-//! * **No UI.** `docs/plan/07-ui-debug.md`'s rung 8 is the inspector widget and
-//!   is a later slice; this crate does not depend on `crcbl-ui`, and `crcbl-ui`
-//!   does not depend on it.
+//! * **No UI.** `docs/plan/07-ui-debug.md`'s rung 8's inspector widget is
+//!   `crcbl_ui::tree::widgets::inspector`, and the arrow points **from** it to
+//!   here: this crate does not depend on `crcbl-ui` and never will, because a
+//!   component has to be able to describe itself without dragging a stylesheet,
+//!   a glyph atlas and a layout engine behind it. (Until 2026-09-16 there was no
+//!   arrow in either direction; rung 8 added the one that exists.)
 //! * **No variant switching.** [`Reflect::variant`] names an enum's active
 //!   variant and [`Reflect::fields`] describes that variant's fields; there is
 //!   no way to *change* which variant is active. Doing so means constructing the

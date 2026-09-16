@@ -19,6 +19,7 @@
 //! | `outliner.rs` | [`Ui::outliner`], [`Ui::outliner_with`] | each row is instant activation |
 //! | `tabs.rs` | [`Ui::tabs`] | each tab is instant activation |
 //! | `dock.rs` | [`Ui::dock`] | each divider is engaged |
+//! | `inspector.rs` | [`Ui::inspector`], [`Ui::inspector_with`] | each row's own widget |
 //!
 //! # Values are the caller's
 //!
@@ -34,10 +35,10 @@
 //!
 //! A widget's `selector` is its `#id.class` part: the widget's type — `button`,
 //! `checkbox`, `slider`, `drag-value`, `collapsing`, `tree-node`, `split`,
-//! `list`, `text-input`, `outliner`, `tabs` or `dock` — is put in front of it,
-//! and that type is what `default.css` styles.
-//! A selector that names a type of its own keeps it, which opts the widget out
-//! of every engine rule for its type. The parts inside a widget have classes
+//! `list`, `text-input`, `outliner`, `tabs`, `dock` or `inspector` — is put in
+//! front of it, and that type is what `default.css` styles. A selector that
+//! names a type of its own keeps it, which opts the widget out of every engine
+//! rule for its type. The parts inside a widget have classes
 //! named after it (`.slider-fill`, `.tree-row`); each builder's docs name them.
 //!
 //! # State the stylesheet sees
@@ -74,6 +75,7 @@
 mod button;
 mod disclosure;
 mod dock;
+mod inspector;
 mod list;
 mod outliner;
 mod split;
@@ -94,6 +96,10 @@ use super::style::LengthAuto;
 use crate::style::NodeSelector;
 
 pub use dock::{DockLayout, DockSide};
+pub use inspector::{
+    AXES, FieldEdit, FieldRow, INSPECTOR_STEP, Inspection, InspectorOptions, Overrides, RowBuilder,
+    WHOLE_STEP,
+};
 pub use list::LIST_OVERSCAN;
 pub use outliner::{
     OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions,

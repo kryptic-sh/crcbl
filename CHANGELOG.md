@@ -16,9 +16,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
-- **`crcbl::screenshot::Scene` has a `UiLayout` member**, so an exhaustive match
-  on it — `crcbl-cli`'s `scene_name` is one — needs the new arm, and
-  `crcbl screenshot --scene ui_layout` draws it.
+- **`crcbl::screenshot::Scene` has `UiLayout` and `UiInspector` members**, so an
+  exhaustive match on it — `crcbl-cli`'s `scene_name` is one — needs the new
+  arms, and `crcbl screenshot --scene ui_layout|ui_inspector` draws them.
 - **The console's editable line is the tree's text input, and `TextField` is
   gone.** `crcbl_ui::console::TextField`, `TextFieldStyle`,
   `ConsoleStyle::field_style`, `ConsoleStyle::text_color` and `caret_color` are
@@ -204,6 +204,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A reflection-driven property inspector on the element tree.**
+  `Ui::inspector` and `Ui::inspector_with` build one row per `Reflect::fields`
+  entry over a `&mut dyn Reflect`: a checkbox for a `bool`, a text input for a
+  `String`, a drag-value for a number bounded by `Field::range` and stepped by
+  `Field::step`, and a `Ui::collapsing` header for a struct, an enum or a list
+  whose body is reached through `Reflect::field_mut` and is not built while it
+  is shut. An enum's header carries its active variant, and a list's elements
+  inherit the list's own range and step. **An edit is a command, not a write**:
+  `Inspection::edits` is a `FieldEdit` per change — the dotted `set_path` path,
+  the value the field held and the one it holds now — and undoing one is
+  `set_path` with the value it replaced; a field nobody touched is never
+  written, so a 64-bit number keeps every digit the widget cannot show.
+  `Overrides::register::<T>` takes a row builder matched through
+  `Reflect::as_any`, and `Overrides::vectors()` ships one: a three-component
+  vector as three drag-values on a row, for `[f64; 3]`, `[f32; 3]`,
+  `glam::DVec3` and `glam::Vec3`. `crcbl-ui` now depends on `crcbl-reflect`, and
+  a `ui_inspector` golden draws the panel through the UI pass.
 - **`apps/editor`: open a scene, pick, edit, undo, save.** `editor [SCENE_DIR]`
   loads a `.scn/` directory into a `World` through `crcbl::scene::scn`, draws
   every entity as a greybox cube over the ground grid under an orbit camera,

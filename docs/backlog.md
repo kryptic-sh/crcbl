@@ -30,6 +30,47 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 - **Rounded outlines and nested scroll containers** are covered by unit tests
   and no GPU claim; D3D12 and Metal draw `ui_focus` only on CI.
 
+## What UI rung 8b shipped without (2026-09-16)
+
+`Ui::inspector` landed with the gaps below.
+
+- **Rows are keyed by position, not by field name.** `Ui::collapsing` has no
+  keyed variant, so a group's open state follows its index among its siblings. A
+  struct's `fields()` is `&'static` and cannot move, and `crcbl-reflect` has no
+  variant switching, so nothing can trip it today — but an enum that could
+  change variant would move open state onto the wrong header. The fix is a
+  `Ui::collapsing_keyed`, or a keyed block per row.
+- **Only a `Kind::List` inherits its parent's range and step.** A
+  `#[reflect(min, max)]` on a nested struct — a `glam::DVec3` position, say — is
+  dropped, because that struct's own fields carry `range: None` and the widget
+  cannot tell "no bound" from "inherit". `Overrides::vectors()` covers the case
+  that matters; a general answer needs `Field` to say which.
+- **The drag-value is `f32` and `Value` is 64 bits.** A row narrows to show and
+  writes back only in the frame the widget reports a change, so an untouched
+  field keeps every digit — but a _dragged_ `f64` lands on `f64::from(f32)`
+  precision, and a dragged `i64` past 2^24 cannot be moved one at a time. A
+  64-bit drag-value fixes both.
+- **No variant switching, no list resize, no reordering, no reset-to-default, no
+  multi-select and no copy/paste of a field** — each needs a mechanism
+  `crcbl-reflect` does not have.
+- **`Overrides` is a linear scan** of `(TypeId, Box<dyn Fn>)`, right for the
+  handful an editor registers and wrong for hundreds, and its builders are not
+  `Send + Sync`, so an `InspectorOptions` cannot cross a thread.
+- **The golden's component is a copy.** `crates/crcbl` cannot name
+  `apps/puppet`'s `Surface` — the arrow points the other way — so the scene's
+  own struct mirrors it field for field, and `apps/puppet`'s test holds the real
+  type to the same rows. The two can drift; nothing checks it.
+- **The "shows its value within the range" claim is not a pixel claim**: the
+  number is glyphs, so the golden reads it off the draw list and the frame
+  carries a scene-drawn gauge instead.
+- **Cost**: 13.8 µs a frame over nine fields (five leaf rows, four shut groups)
+  and 20–22 µs with `Overrides::vectors()`, against 0.5 µs for the same page
+  with an empty block (release, median of 41 runs of 200 frames, 400 px page).
+  `default.css` grew 1332 bytes and a 2D demo's wasm 2069 bytes raw.
+- **Not tested**: an inspector inside a modal or a scroll container;
+  `Ui::enabled` over it; a component deeper than three levels; a parsed font; a
+  `Kind::List` longer than a handful; an override that builds nothing.
+
 ## What UI rung 8a shipped without (2026-09-16)
 
 `Ui::outliner`, `Ui::tabs` and `Ui::dock` landed with the gaps below.
@@ -85,10 +126,6 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 `crcbl-reflect` and `#[derive(Reflect)]` landed with the gaps below;
 `crates/crcbl-reflect/src/impls.rs`'s module docs carry the coverage table.
 
-- **Nothing reads it yet.** The inspector widget is `07-ui-debug.md`'s rung 8,
-  so the trait's shape is argued rather than demonstrated: the tests show a
-  value can be read, written and undone, not that a panel built on it is
-  pleasant to use.
 - **Decision owed: `crcbl_console::Value::Float` is `f32` and this crate's is
   `f64`.** The console's `Kind`/`Value`/`Binding` are the same shape — a tag, a
   range, a payload, a getter and a setter — and its crate costs nothing to

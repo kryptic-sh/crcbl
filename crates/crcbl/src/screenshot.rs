@@ -97,6 +97,7 @@ use crate::ui::draw_list::DrawList;
 
 mod still_pool;
 mod ui_focus;
+mod ui_inspector;
 mod ui_layout;
 mod ui_primitives;
 mod ui_style;
@@ -116,6 +117,17 @@ pub use ui_focus::{
     UI_FOCUS_PAGE, UI_FOCUS_RING, UI_FOCUS_RING_OFFSET, UI_FOCUS_RING_WIDTH, UI_FOCUS_ROW,
     UI_FOCUS_ROW_HEIGHT, UI_FOCUS_ROWS, UI_FOCUS_TARGET, UI_FOCUS_TARGET_ROW, UiFocusLayout,
     ui_focus_css, ui_focus_draw_list, ui_focus_layout,
+};
+pub use ui_inspector::{
+    UI_INSPECTOR_ENGAGED, UI_INSPECTOR_GAP, UI_INSPECTOR_GAUGE_FILL, UI_INSPECTOR_GAUGE_HEIGHT,
+    UI_INSPECTOR_GAUGE_SPAN, UI_INSPECTOR_GAUGE_TRACK, UI_INSPECTOR_GAUGE_WIDTH,
+    UI_INSPECTOR_HEIGHT_MAX, UI_INSPECTOR_HEIGHT_START, UI_INSPECTOR_HEIGHT_STEP,
+    UI_INSPECTOR_NESTED, UI_INSPECTOR_NESTED_ROWS, UI_INSPECTOR_OPEN_GROUP, UI_INSPECTOR_PADDING,
+    UI_INSPECTOR_PAGE, UI_INSPECTOR_ROW, UI_INSPECTOR_SHUT_GROUP, UI_INSPECTOR_SHUT_ROWS,
+    UI_INSPECTOR_STEPS, UI_INSPECTOR_TOP_ROWS, UiInspectorLayout, UiInspectorMotion,
+    UiInspectorShape, UiInspectorSurface, ui_inspector_css, ui_inspector_draw_list,
+    ui_inspector_edited, ui_inspector_edits, ui_inspector_gauge, ui_inspector_layout,
+    ui_inspector_surface,
 };
 pub use ui_layout::{
     UI_LAYOUT_ACCENT, UI_LAYOUT_CLICKED_ROW, UI_LAYOUT_DIVIDER_DRAG, UI_LAYOUT_LEAVES,
@@ -803,6 +815,13 @@ pub enum Scene {
     /// splitter layout whose outer divider a drag moved, styled by
     /// `default.css`. See [`ui_layout_layout`] for what each part is for.
     UiLayout,
+    /// `docs/plan/07-ui-debug.md` rung 8's reflection-driven property inspector
+    /// through [`UiRenderer`]: one row per field of a component, an open group
+    /// beside a shut one, a three-component vector on one row through a
+    /// per-type override, and a drag-value the script engaged and stepped past
+    /// the end of its field's range, styled by `default.css`. See
+    /// [`ui_inspector_layout`] for what each part is for.
+    UiInspector,
     /// `docs/plan/07-ui-debug.md` rung 7's single-line text input through
     /// [`UiRenderer`]: an engaged input scrolled to the end of a long line, a
     /// selection a held drag is making, a placeholder and a masked value,
@@ -6037,6 +6056,8 @@ enum UiContent {
     TextInput,
     /// [`Scene::UiLayout`]'s outliner, tabs and dock.
     Layout,
+    /// [`Scene::UiInspector`]'s property panel.
+    Inspector,
 }
 
 /// Puts one of the demo scene's meshes in the frame at `model`.
@@ -6724,6 +6745,11 @@ impl SceneState {
                 renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
                 content: UiContent::Layout,
+            },
+            Scene::UiInspector => Self::Ui {
+                renderer: Box::new(UiRenderer::new(device, queue, format)?),
+                atlas: FontAtlas::built_in(),
+                content: UiContent::Inspector,
             },
             Scene::UiPrimitives => {
                 let mut renderer = Box::new(UiRenderer::new(device, queue, format)?);
@@ -7753,6 +7779,7 @@ impl OffscreenSetup {
                         UiContent::WidgetSet => ui_widgets_draw_list(extent),
                         UiContent::TextInput => ui_text_input_draw_list(extent),
                         UiContent::Layout => ui_layout_draw_list(extent),
+                        UiContent::Inspector => ui_inspector_draw_list(extent),
                     };
                     // `scale` is 1.0 because every size in the draw list is
                     // already this frame's pixels; a second multiplier is a
@@ -8832,7 +8859,7 @@ mod tests {
             .expect("every forward frame has a forward pass")
             + 1;
         still_pool_passes.insert(after_forward, ("render", "sky"));
-        let expected: [(Scene, &[(&str, &str)]); 23] = [
+        let expected: [(Scene, &[(&str, &str)]); 24] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -8946,6 +8973,10 @@ mod tests {
             ),
             (
                 Scene::UiLayout,
+                &[("render", "scene background"), ("render", "ui-composite")],
+            ),
+            (
+                Scene::UiInspector,
                 &[("render", "scene background"), ("render", "ui-composite")],
             ),
         ];

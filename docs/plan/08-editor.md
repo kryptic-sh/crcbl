@@ -70,7 +70,11 @@ rest of this document suggests; each line was checked in the source.
   `&mut dyn Reflect` per row — and `get_path`/`set_path` reach one leaf by name,
   which is the shape feature 3's property-set command and the undo log both
   need. `apps/breakout`'s `Brick` and `apps/puppet`'s `Surface`, `Shape`,
-  `Spawn` and `Sun` carry it; nothing reads it yet.
+  `Spawn` and `Sun` carry it.
+- `crcbl_ui::tree`'s `Ui::inspector` (2026-09-16) builds a component's rows from
+  that description and reports each edit as a path and the value it replaced —
+  feature 3's property-set command without its carrier. The editor does not draw
+  it yet: it has no panel.
 - `World::hash_state` and `crcbl_server::sim_hash::hash_world`, which the undo
   property test in the exit criteria needs.
 - The shell's clipboard with a RON mime type, cursor shapes, `set_title` for a
@@ -93,10 +97,11 @@ rest of this document suggests; each line was checked in the source.
    mutex the renderer locks. Towers — whose milestone 2 is this document's
    dogfood pass — says in its own source that it has no entity and no ECS
    system. An editor has no world to edit in it until it is ported.
-5. **No inspector**: `crcbl_ecs::Inspector::collect` returns a system's name and
-   entity count, and the per-system debug-UI callback is an empty stub. The
-   per-component half is no longer missing — `crcbl-reflect` landed 2026-09-16 —
-   but nothing reads it yet.
+5. **No inspector _in the editor_**: `crcbl_ecs::Inspector::collect` returns a
+   system's name and entity count, and the per-system debug-UI callback is an
+   empty stub. The per-component half is built — `crcbl-reflect` and
+   `Ui::inspector`, both 2026-09-16 — and what is missing is the editor drawing
+   a panel with it.
 6. **The scene format cannot hold one entity in two systems**: each chunk row
    spawns its own entity, so the same id in two chunk files is a duplicate-id
    error. The "attach/detach system data" command needs that first. `IdMap` has

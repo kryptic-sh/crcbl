@@ -13,6 +13,16 @@ bytemuck = { workspace = true }
 # vocabulary a finger arrives in belongs to the shell's seam, and a widget that
 # invented its own copy would be a second answer to "which finger is this".
 crcbl-core = { workspace = true }
+# `Reflect`, `Value` and `get_path`/`set_path` for `tree::widgets::inspector` —
+# `docs/plan/07-ui-debug.md` rung 8's property panel. The arrow points this way
+# because the panel is a widget and a widget needs `Ui`; the reverse would put
+# blocks, spans and a stylesheet inside a crate whose whole charter is that a
+# component can depend on it for free. It costs a browser build nothing new:
+# `crcbl-reflect` takes `glam` (already here), `thiserror`, and a proc-macro
+# crate built for the host. The exit criterion this crate is checked against is
+# that it names no **renderer** (`07-ui-debug.md`'s 2026-08-09 correction says
+# so in as many words), and `crcbl-reflect` sits below everything.
+crcbl-reflect = { workspace = true }
 # Flexbox layout for `tree`, through Taffy's low-level traits rather than its
 # `TaffyTree` — `docs/plan/07-ui-debug.md` section 2, the user's decision of
 # 2026-09-15. `flexbox` is the one layout mode the subset has; `taffy_tree` and

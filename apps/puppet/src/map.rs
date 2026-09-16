@@ -1929,6 +1929,125 @@ mod tests {
         );
     }
 
+    /// **The inspector widget over the real component**, which is the claim
+    /// `crcbl-ui`'s own tests cannot make: that crate sits below `apps/` and
+    /// its fixture is a copy of this type. Here the panel is built over a
+    /// `Surface` itself — one row per field, a closed header building no body,
+    /// the registered vector override drawing the position as three
+    /// drag-values — and a dragged component is reported as a path and the
+    /// value it replaced, which `crcbl::reflect::set_path` puts back.
+    #[test]
+    fn an_inspector_over_a_surface_draws_its_rows_and_reports_an_undoable_edit() {
+        use crcbl::math::Vec2;
+        use crcbl::ui::style::Declaration;
+        use crcbl::ui::text::FontAtlas;
+        use crcbl::ui::tree::{
+            AvailableSpace, FlexDirection, Inspection, InspectorOptions, LengthAuto, NavInput,
+            Overrides, Ui,
+        };
+        use crcbl::ui::widget::PointerInput;
+
+        /// The page the panel is laid out in, in pixels.
+        const PAGE: f32 = 400.0;
+
+        fn inspect(
+            ui: &mut Ui,
+            pointer: PointerInput,
+            surface: &mut Surface,
+            overrides: &Overrides,
+        ) -> Inspection {
+            ui.begin_frame_with(pointer, NavInput::default());
+            let size = [
+                Declaration::FlexDirection(FlexDirection::Column),
+                Declaration::Width(LengthAuto::Px(PAGE)),
+                Declaration::Height(LengthAuto::Px(PAGE)),
+            ];
+            let mut built = None;
+            ui.block("#page", &size, |ui| {
+                let options = InspectorOptions {
+                    overrides: Some(overrides),
+                    ..InspectorOptions::default()
+                };
+                built = Some(ui.inspector_with("#props", surface, &options));
+            });
+            ui.layout(
+                Vec2::ZERO,
+                AvailableSpace::definite(Vec2::splat(PAGE)),
+                &FontAtlas::built_in(),
+            );
+            built.expect("the page builds the inspector")
+        }
+
+        let mut surface = Surface {
+            label: "mound".to_owned(),
+            position: [1.0, 2.0, 3.0],
+            shape: Shape::Dome {
+                radius: GENTLE_MOUND.2,
+            },
+            tint: [0.5, 0.25, 0.125],
+        };
+        let overrides = Overrides::vectors();
+        let mut ui = Ui::new();
+        let away = PointerInput::hovering(Vec2::splat(-1.0));
+        let first = inspect(&mut ui, away, &mut surface, &overrides);
+
+        assert!(first.edits.is_empty(), "a still frame edited the surface");
+        let rows = ui.child_keys(first.response.key);
+        assert_eq!(
+            rows.len(),
+            surface.fields().len(),
+            "the panel is not one row per field of the component"
+        );
+        // The shape is the third field and a `Kind::Enum`, so its row is a
+        // collapsing header — closed, so the header alone is built.
+        assert_eq!(
+            ui.child_keys(rows[2]).len(),
+            1,
+            "the closed shape header built its body"
+        );
+        // The position is the second field and the override draws it as its
+        // label and one block per axis.
+        let axes = ui.child_keys(rows[1]);
+        assert_eq!(axes.len(), 4, "the vector override did not draw three axes");
+
+        // Drag the position's X past the drag threshold: one step a pixel.
+        let drag = ui.child_keys(axes[1])[1];
+        let (min, max) = ui.rect(drag).expect("the axis was laid out");
+        let on = (min + max) * 0.5;
+        let held = |pos: Vec2| PointerInput {
+            pos,
+            down: true,
+            released: false,
+        };
+        inspect(&mut ui, held(on), &mut surface, &overrides);
+        let dragged = inspect(
+            &mut ui,
+            held(on + Vec2::new(8.0, 0.0)),
+            &mut surface,
+            &overrides,
+        );
+
+        let [edit] = dragged.edits.as_slice() else {
+            panic!("the drag reported {:?}", dragged.edits);
+        };
+        assert_eq!(edit.path, "position.0", "the edit names another field");
+        assert_eq!(
+            edit.before,
+            Value::Float(1.0),
+            "the edit does not carry what the field held"
+        );
+        assert_ne!(surface.position[0], 1.0, "the drag moved nothing");
+
+        // Undoing it is the same call with the value it replaced.
+        set_path(&mut surface, &edit.path, &edit.before).expect("an f64 takes a float");
+        assert_eq!(surface.position[0], 1.0, "the undo did not restore it");
+        assert_eq!(
+            get_path(&surface, &edit.path),
+            Ok(edit.before.clone()),
+            "the reported path does not read back what it replaced"
+        );
+    }
+
     #[test]
     fn the_suns_rows_carry_the_ranges_its_own_units_have() {
         let sun = Sun {

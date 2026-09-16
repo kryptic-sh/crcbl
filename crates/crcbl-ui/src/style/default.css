@@ -471,6 +471,63 @@ dock {
 }
 
 /*
+ * Inspector: one `.inspector-row` per reflected field — its label at the left
+ * and the widget that edits it against the right edge — and a collapsing
+ * header per composite field. A level of nesting is `.collapsing-body`'s own
+ * padding and costs no rule here, which is what "depth is styling" means.
+ *
+ * `.inspector-field` is a class on the widget itself, so it outranks that
+ * widget's type rule: a row's editor never shrinks, whatever the label does.
+ */
+inspector {
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px;
+  background: #171a20;
+  color: #e6e9ef;
+}
+
+.inspector-row {
+  gap: 6px;
+  padding: 1px 4px;
+  align-items: center;
+}
+
+.inspector-label {
+  flex-grow: 1;
+  flex-shrink: 1;
+}
+
+.inspector-field {
+  flex-shrink: 0;
+}
+
+/* One component of a vector row: its axis, then its own drag-value. */
+.inspector-axis {
+  gap: 2px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.inspector-axis-label {
+  color: #7a8190;
+}
+
+/*
+ * A component's field is narrower than a row's own editor: three of them and
+ * their axis labels share one row, and `drag-value`'s 48-pixel minimum would
+ * put the last of them past the panel's edge.
+ */
+.inspector-axis > .inspector-field {
+  min-width: 32px;
+}
+
+/* A composite field's header and body fill the panel rather than the row. */
+.inspector-group {
+  flex-shrink: 0;
+}
+
+/*
  * Menu and MenuSet: crcbl_ui::menu's panel. The menu is pixel art drawn at a
  * whole-number scale, so every length — the frame's bands, the padding, the
  * gaps, the font sizes, the groove and the handle — is `MenuStyle`'s, set

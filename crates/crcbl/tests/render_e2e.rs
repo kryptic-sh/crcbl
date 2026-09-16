@@ -206,6 +206,10 @@ mod ui_text_input;
 #[path = "render_e2e/ui_layout.rs"]
 mod ui_layout;
 
+// Rung 8b's property inspector, for the same reason.
+#[path = "render_e2e/ui_inspector.rs"]
+mod ui_inspector;
+
 /// The size the goldens were blessed at.
 ///
 /// The same 256x192 the cross-backend harness and `crcbl-vk`'s mesh suite use,

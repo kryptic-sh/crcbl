@@ -186,10 +186,11 @@ pub use style::{
     Position,
 };
 pub use widgets::{
-    ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, DockLayout, DockSide,
-    LIST_OVERSCAN, MASK, OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId,
-    OutlinerOptions, OutlinerRow, OutlinerState, SPLIT_NAV_STEP, SelectMode, SplitAxis, TextInput,
-    TextInputOptions,
+    AXES, ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, DockLayout,
+    DockSide, FieldEdit, FieldRow, INSPECTOR_STEP, Inspection, InspectorOptions, LIST_OVERSCAN,
+    MASK, OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions,
+    OutlinerRow, OutlinerState, Overrides, RowBuilder, SPLIT_NAV_STEP, SelectMode, SplitAxis,
+    TextInput, TextInputOptions, WHOLE_STEP,
 };
 
 /// How far the pointer must move from where a press began, in pixels, before

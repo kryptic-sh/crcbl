@@ -10,11 +10,12 @@ repository.workspace = true
 # without dragging anything behind it: an arrow into it from `crcbl-ecs`, from a
 # sample, or from `apps/editor` — which reads a component through `get_path` and
 # `set_path` and is the reader this crate was written for — must cost a browser
-# build nothing beyond the description itself. So there is **no `crcbl-ui`** here — the
-# inspector widget is `docs/plan/07-ui-debug.md`'s rung 8 and a later slice, and
-# the arrow does not exist in either direction — and **no `crcbl-scene`**: that
-# crate writes a whole component to a file and this one describes one field of
-# it, which `src/lib.rs` argues at length are different jobs.
+# build nothing beyond the description itself. So there is **no `crcbl-ui`**
+# here: the inspector widget of `docs/plan/07-ui-debug.md`'s rung 8 landed
+# 2026-09-16 and depends on *this* crate, which is the only direction the arrow
+# can point — and **no `crcbl-scene`**: that crate writes a whole component to a
+# file and this one describes one field of it, which `src/lib.rs` argues at
+# length are different jobs.
 [dependencies]
 # The `#[derive(Reflect)]` half, re-exported from `src/lib.rs` so that a
 # component names this crate once. A proc-macro crate is built for the **host**
