@@ -41,8 +41,6 @@ allowed() {
   case "$1" in
     # A layout the entry proposes if `web.rs` is ever split; not a real path.
     'crates/crcbl/src/web/') return 0 ;;
-    # The editor is planned, not built. `docs/plan/08-editor.md` is its design.
-    'apps/editor') return 0 ;;
   esac
   return 1
 }

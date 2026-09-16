@@ -5244,8 +5244,45 @@ what is left of it" entry has been updated to say so.
 
 ### The editor is not started, and blocks two sample plans (2026-08-27)
 
-**Not built.** There is no `apps/editor`; `tools/check-doc-citations.sh`
-allow-lists that path on purpose, naming `docs/plan/08-editor.md` as its design.
+**Slice 1 landed 2026-09-16.** `apps/editor` loads breakout's board, picks by
+ray, edits through `EditCommand`/`UndoLog` and saves byte-stably;
+`docs/plan/08-editor.md`'s status section says what that cleared and what it did
+not. The allow-list entry in `tools/check-doc-citations.sh` is gone and the
+binary is in `tools/run-samples-windowed.sh`'s `SAMPLES`. What slice 1 leaves:
+
+- **The editor knows one component type, and depends on a game to know it.**
+  `apps/editor/src/board.rs` is a hand-written vocabulary with one entry,
+  `breakout::Brick`, and `apps/editor/Cargo.toml` depends on `apps/breakout` to
+  get it — the only arrow in the workspace pointing at a sample. A `.scn/` chunk
+  cannot be read without the type its rows are of (`chunk_of::<T>` is bounded on
+  it), so removing that arrow means a component registry holding, per system
+  name, the codec, the `&mut dyn Reflect` accessor and the system registration.
+  Until then the editor opens breakout's board and nothing else. `cargo machete`
+  cannot see that dependency either, because breakout's `[lib]` is
+  `crcbl_breakout` and machete matches by package name; the manifest carries an
+  `ignored` entry saying so, and it goes away with the dependency.
+- **Nothing says which of a component's fields is a placement.** `board.rs`
+  reads `Brick::position` and `half_extents` by name, because
+  `#[derive(Reflect)]` describes which fields are editable and not which is a
+  position — and a collider and a bounds box both need one. The general answer
+  is `crcbl::phys::Transform` on the entity, which is the scene-format change
+  and still an open decision.
+- **One command variant.** `SetProperty` is what slice 1 issues; spawn, delete,
+  duplicate, rename and attach/detach each wait on something absent (`IdMap` has
+  no removal, the format cannot hold one entity in two systems, an entity has no
+  name). **The undo property test the exit criteria name** — a random command
+  sequence plus a full undo compared by `World::hash_state` — is owed with the
+  second variant; with one it would assert what the byte-for-byte round trip
+  already asserts.
+- **No panel.** The outline is logged at start-up, not drawn; a viewport pane,
+  an outliner and a property inspector are `07-ui-debug.md` rungs, and the
+  editor deliberately does not depend on `crcbl-ui` yet.
+- **Coverage gaps.** The editor has no golden image and no `vk-e2e` leg;
+  `tools/run-samples-windowed.sh` asserts frames, extent, mode, no live objects
+  at teardown and a silent validation layer — not a picture. Nothing measures a
+  scene of thousands of entities (it places one instance and one collider per
+  entity and rewrites every instance every frame), a save onto a directory it
+  does not own, or a save that fails part-way.
 
 **It waits on two unbuilt things:** the scene format (first entry above —
 features 5 and 6 have nothing to open or save) and stage 7's inspector (previous

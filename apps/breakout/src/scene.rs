@@ -58,7 +58,10 @@ const BRICKS: &str = "bricks";
 
 /// The directory `--scene` defaults to, relative to nothing: the committed
 /// board is compiled in, and this is the name its keys are spelled under.
-const BOARD: &str = "board.scn";
+///
+/// Public because [`built_in_source`] is, and a source whose keys nobody can
+/// spell is a source nobody can read.
+pub const BOARD: &str = "board.scn";
 
 /// `assets/scenes/board.scn/scene.ron`, as it is committed.
 const BOARD_SCENE_RON: &str = include_str!("../assets/scenes/board.scn/scene.ron");
@@ -200,8 +203,17 @@ impl Board {
     }
 }
 
-/// The committed scene directory, as a source with no filesystem under it.
-fn built_in_source() -> MemorySource {
+/// The committed scene directory, as a source with no filesystem under it,
+/// keyed under [`BOARD`].
+///
+/// Public so that a **tool** can open this game's board without one: `.scn/` is
+/// the engine's own scene format, `apps/editor` opens this board as its default
+/// document, and a tool that had to find `apps/breakout/assets/` on disk would
+/// be one whose behaviour depended on the directory it was started from. The
+/// game reads it through [`Board::built_in`], which is this source and the
+/// loader over it.
+#[must_use]
+pub fn built_in_source() -> MemorySource {
     let mut source = MemorySource::new();
     for (key, text) in [
         ("scene.ron", BOARD_SCENE_RON),

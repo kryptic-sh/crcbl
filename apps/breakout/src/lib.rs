@@ -49,4 +49,8 @@ pub use args::{Invocation, Options, USAGE, parse};
 // `Options::board`'s type and the component its chunk file is rows of. Public
 // because `Options` is: a field nobody outside this crate can name is one they
 // cannot construct an `Options` around.
-pub use scene::{Board, Brick};
+//
+// `BOARD` and `built_in_source` are public for a second reader: `apps/editor`
+// opens this game's committed board as its default document, and `.scn/` is the
+// engine's format rather than this game's. See `scene::built_in_source`.
+pub use scene::{BOARD, Board, Brick, built_in_source};

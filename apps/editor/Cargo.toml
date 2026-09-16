@@ -1,0 +1,75 @@
+[package]
+name = "editor"
+description = "The Crucible scene editor — open a scene, pick, edit, undo, save"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with one front end**, unlike the samples: `src/main.rs` natively
+# and no `src/web.rs`. `docs/plan/08-editor.md`'s 2026-08-09 correction is that
+# the editor is a native target — the asset browser, OS drag-drop import and the
+# file watcher are all native-shaped and nobody has examined what a browser
+# would do with them.
+#
+# It is still checked for `wasm32-unknown-unknown`, because the workspace's
+# wasm job is a deny-list and this crate is not on it. Nothing here needs a
+# `cfg`: the document is arithmetic over a `World`, and the one call that
+# reaches a filesystem — `Document::save_to` — goes through
+# `crcbl::store::NativeStorage`, which compiles everywhere and fails at run time
+# where there is no directory. A browser build would therefore link and refuse
+# to save, which is the honest answer until someone builds the browser half.
+#
+# The lib is not called `editor`: a lib and a bin of the same name in one
+# package write the same file, which cargo calls an output filename collision.
+[lib]
+name = "crcbl_editor"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "editor"
+path = "src/main.rs"
+
+[dependencies]
+# The engine, with the two features this tool needs beyond the default set.
+#
+# `scn` is the scene *format* half of `crcbl::scene` — the `.scn/` directory
+# this editor opens — without the glTF importer, which it reads none of. It is
+# the same feature `apps/breakout` asks for, and for the same reason.
+#
+# `greybox` is the one-call prototyping scene: the editor draws every entity as
+# `crcbl::greybox::GREYBOX_CUBE` scaled to its own extents, so the picture comes
+# out of a pack the engine already ships rather than out of a mesh builder here.
+crcbl = { workspace = true, features = ["greybox", "scn"] }
+
+# **Breakout's `Brick`, which is the one component this slice can edit.**
+#
+# A `.scn/` chunk file holds one system's component array, and reading it needs
+# that component's type — `crcbl::scene::scn::chunk_of::<T>` is bounded on it.
+# There is no component registry yet (`docs/plan/08-editor.md`'s missing-pieces
+# list), so the editor's vocabulary is a list written in `src/board.rs`, and for
+# slice 1 that list has one entry: the board `apps/breakout` reads its brick
+# grid out of.
+#
+# This arrow is the thing a later slice removes. It is here rather than a second
+# `Brick` declared in this crate because the field names, the ranges and the
+# `#[derive(Reflect)]` rows are the same knowledge, and two copies of it would
+# drift the first time a brick gains a field.
+breakout = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+# **`breakout` is used, and `cargo machete` cannot see it.** That crate's `[lib]`
+# is named `crcbl_breakout` rather than `breakout` — a lib and a bin of the same
+# name in one package write the same file — and machete matches a dependency by
+# its *package* name against the source text. Every `crcbl_breakout::` in
+# `src/board.rs` and `src/document.rs` is therefore invisible to it, and the
+# alternative to this entry is renaming the dependency at every call site to
+# match a tool rather than the crate.
+[package.metadata.cargo-machete]
+ignored = ["breakout"]
+
+[lints]
+workspace = true

@@ -186,7 +186,7 @@ mod upscale;
 mod volumetric;
 mod water;
 
-pub use camera::{Atmosphere, Camera, DirectionalLight, Fog, Projection, Sky};
+pub use camera::{Atmosphere, Camera, DirectionalLight, Fog, Projection, Sky, ViewRay};
 pub use cluster_pool::{ClusterPool, ClusterRange};
 pub use counters::{FrameCounters, INDIRECT, UNKNOWN};
 /// Re-exported because [`SheetDesc::sample`] is spelled in it: a crate whose

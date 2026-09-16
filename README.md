@@ -82,8 +82,11 @@ What is real today:
 
 What is not:
 
-- **No editor.** `apps/editor` is deliberately absent until there is something
-  to put in it.
+- **The editor opens one game's scene.** `apps/editor` loads `apps/breakout`'s
+  board, picks an entity by ray, edits it through commands with undo and redo,
+  and saves byte-stably — but a `.scn/` chunk cannot be read without the type
+  its rows are of, so the tool depends on the game whose components it knows.
+  Opening any scene needs a component registry.
 - The viewer opens a file from the command line, from a drop on its window
   (Wayland, X11, Win32 and AppKit), from a drop on the canvas in the browser,
   and from the shelf of Khronos CC0 models on its `ESC` panel.
@@ -237,6 +240,7 @@ built it.
 | `viewer`         | a glTF model viewer, and the asset pipeline's acceptance test          | ✓              |
 | `towers`         | the flagship: co-op tower defense, played solo over the loopback       | ✓              |
 | `bare`           | the engine as a plain library, with a hand-written loop                |                |
+| `editor`         | the scene editor: open a scene, pick, edit, undo, save                 |                |
 | `render-harness` | drives the golden scenes through a browser GPU for the parity gate     |                |
 
 ## Testing

@@ -204,6 +204,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/editor`: open a scene, pick, edit, undo, save.** `editor [SCENE_DIR]`
+  loads a `.scn/` directory into a `World` through `crcbl::scene::scn`, draws
+  every entity as a greybox cube over the ground grid under an orbit camera,
+  picks one by ray through `PhysicsSystem::cast_ray`, draws its bounds through
+  the debug-draw layer, nudges it with the arrow keys and Page Up/Down, walks
+  the history with Ctrl+Z and Ctrl+Y, and writes the scene back with Ctrl+S,
+  with a `*` in the window title while there are unsaved edits. With no argument
+  it opens `apps/breakout`'s committed board.
+- **`crcbl_editor::EditCommand` and `UndoLog` are the whole edit vocabulary,
+  from day one.** A command carries a `SceneEntityId`, a dotted `crcbl::reflect`
+  path and the new `Value`; applying one hands back the inverse carrying the
+  value it replaced, so an undo restores the bits that were there rather than a
+  value recomputed from a rule. Nothing writes a component field at a call site,
+  which is what the 2026-09-16 decision buys: a transport later gains a carrier,
+  not a vocabulary. `crcbl_editor::Document` holds the scene, the world, the
+  selection, the log and the save with no device, so every claim about them is
+  held headlessly.
+- **`crcbl::render::Camera::ray_through` and `ViewRay`**: the world-space ray
+  through a viewport pixel, and the inverse of `Camera::depth_of`. `(0, 0)` is
+  the window's top-left with `y` growing downward, the ray begins on the near
+  plane rather than at the eye — an orthographic camera has no single eye — and
+  the direction is unit length, so a hit's parametric distance is metres.
+- **`breakout::BOARD` and `breakout::built_in_source` are public**, so a tool
+  can open the game's committed board with no filesystem under it.
 - **A virtualized outliner, a tab strip and dockable splitter layouts on the
   element tree.** `Ui::outliner` and `Ui::outliner_with` build a tree of rows
   over the same fixed-row-height window `Ui::list` builds, so ten thousand rows

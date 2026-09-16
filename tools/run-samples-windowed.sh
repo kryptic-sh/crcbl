@@ -93,9 +93,10 @@ VIEWER_MODEL="${RUNTIME_DIR}/triangle.glb"
 # off the `--size` help text — writing this list is what caught `bare` opening
 # at 640x480 while the shared `--size` line in its own help said 960x720.
 #
-# Every binary in `apps/` that opens a window is listed here. `render-harness`
-# is a library and `sim` is a headless determinism harness, so neither has a
-# window to open.
+# Every binary in `apps/` that opens a window is listed here — `editor`
+# included, which is not a sample but is a binary with a window, and so is
+# exactly what this gate is about. `render-harness` is a library and
+# `crcbl-sample-test` is a test fixture, so neither has a window to open.
 #
 # Anything after the extent is handed to the sample itself. `viewer` is the only
 # entry that needs it — it takes the model as a positional argument — so the
@@ -108,6 +109,7 @@ SAMPLES=(
     "bracket 960x720"
     "breach 960x720"
     "breakout 960x720"
+    "editor 960x720"
     "flappy 960x720"
     "horde 960x720"
     "hud 960x720"

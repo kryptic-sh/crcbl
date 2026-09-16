@@ -4,11 +4,30 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: not started, and what waits on it
+## Status: slice 1 landed 2026-09-16, and what still waits
 
-There is no `apps/editor`. `tools/check-doc-citations.sh` allow-lists that path
-on purpose, naming this document as its design, so the absence is recorded
-rather than merely true.
+`apps/editor` exists: a native, single-process tool that loads `apps/breakout`'s
+board, renders it with `crcbl_render::orbit::OrbitCamera` and the ground grid,
+lists the entities per system, picks one by ray, draws its bounds, nudges it
+with keys through the command enum and the undo log, and saves byte-stably with
+a dirty marker in the title. That is "The smallest slice that uses only what
+exists" below, delivered. `tools/check-doc-citations.sh` no longer allow-lists
+the path, and `tools/run-samples-windowed.sh` runs the binary windowed.
+
+**Two of the three things that section said the slice also needed already
+existed.** Key, button and wheel events have carried `Modifiers` since the shell
+seam landed (`crates/crcbl-shell/src/event.rs`, whose module docs open by saying
+modifiers are stamped onto every event), and
+`crcbl_render::debug_draw::r_debug_draw` is a writable console bool that
+`crates/crcbl/tests/mesh_e2e/debug_draw.rs` already sets. Only the screen-to-ray
+helper was missing; it is `crcbl_render::Camera::ray_through`, beside
+`Camera::depth_of` whose inverse it is.
+
+Everything else below stands unchanged: the server still drops commands, there
+is one schedule per `World`, there is no snapshot, the samples' state is outside
+the ECS, there is no inspector panel in the editor, the format cannot hold one
+entity in two systems, debug draw is not a gizmo layer, `AssetSource` cannot
+list, and there are no `serve`/`scene`/`edit` subcommands.
 
 Two things sit behind it, in both directions:
 

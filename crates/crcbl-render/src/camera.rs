@@ -38,7 +38,17 @@
 
 use core::f32::consts::FRAC_PI_4;
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3, Vec4};
+
+/// A second clip-space depth, in front of [`crcbl_hal::depth::NEAR`], that
+/// [`Camera::ray_through`] unprojects to get a ray's direction.
+///
+/// Any depth between the two ends gives the same direction; this one is picked
+/// because it is well away from both under either projection.
+/// [`crcbl_hal::depth::FAR`] would **not** do: under
+/// [`Projection::Perspective`] the far plane is at infinity, so a point there
+/// has `w = 0` and the perspective divide is undefined.
+const RAY_DEPTH: f32 = 0.5;
 
 /// How a camera flattens the world into clip space.
 ///
@@ -318,6 +328,88 @@ impl Camera {
         let clip = self.view_projection(aspect) * point.extend(1.0);
         (clip.w > f32::MIN_POSITIVE).then(|| clip.z / clip.w)
     }
+
+    /// The world-space ray through the pixel at `at`, in a viewport of
+    /// `extent` pixels.
+    ///
+    /// The inverse of [`depth_of`](Self::depth_of), and the reason it is here
+    /// rather than in the caller: both are the perspective divide done on the
+    /// CPU, and a screen-to-ray written against a matrix somebody else built is
+    /// the classic place a convention gets applied twice or not at all.
+    ///
+    /// **`at` is in the same pixels a [`ShellEvent`] reports**: `(0, 0)` is the
+    /// top-left corner of the window and `y` grows downward, which is
+    /// `crcbl_ui::draw_list`'s convention too. A whole pixel is its top-left
+    /// corner, so a caller that wants the ray through a pixel's **centre** adds
+    /// half a pixel to both — what matters for picking, and what a test
+    /// projecting a point back must account for.
+    ///
+    /// The ray begins on the near plane rather than at
+    /// [`eye`](Self::eye), because that is where the visible world starts and
+    /// because [`Projection::Orthographic`] has no single eye point at all. The
+    /// direction is unit length, so a hit's parametric distance is a distance
+    /// in metres.
+    ///
+    /// ```
+    /// use crcbl_render::{Camera, Projection};
+    /// use glam::Vec2;
+    ///
+    /// let camera = Camera::default();
+    /// let extent = (800, 600);
+    /// // The centre of the viewport looks where the camera looks.
+    /// let ray = camera.ray_through(Vec2::new(400.0, 300.0), extent);
+    /// let forward = (camera.target - camera.eye).normalize();
+    /// assert!((ray.direction - forward).length() < 1e-5);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// If `extent` has a zero side — there is no pixel to shoot through — and
+    /// otherwise as [`Projection::matrix`] and [`Camera::view`].
+    ///
+    /// [`ShellEvent`]: https://docs.rs/crcbl-shell
+    #[must_use]
+    pub fn ray_through(&self, at: Vec2, extent: (u32, u32)) -> ViewRay {
+        let (width, height) = extent;
+        assert!(
+            width > 0 && height > 0,
+            "a viewport with a zero side has no pixel to shoot a ray through, got {width}x{height}"
+        );
+        let size = Vec2::new(width as f32, height as f32);
+        // Clip space is +Y up and the window is +Y down, which is the one
+        // conversion in here that is a convention rather than arithmetic.
+        let ndc = Vec2::new(at.x / size.x * 2.0 - 1.0, 1.0 - at.y / size.y * 2.0);
+
+        let inverse = self.view_projection(size.x / size.y).inverse();
+        let unproject = |depth: f32| {
+            let point = inverse * Vec4::new(ndc.x, ndc.y, depth, 1.0);
+            point.truncate() / point.w
+        };
+        let origin = unproject(crcbl_hal::depth::NEAR);
+        ViewRay {
+            origin,
+            direction: (unproject(RAY_DEPTH) - origin).normalize(),
+        }
+    }
+}
+
+/// Where a pixel's ray starts and where it goes — what
+/// [`Camera::ray_through`] answers with.
+///
+/// A pair rather than a [`crcbl_phys::Ray`]: this crate does not depend on the
+/// physics crate and must not, so the caller that wants to cast one builds it —
+/// one line, and the widening from render space's `f32` to simulation space's
+/// `f64` is that caller's decision to make rather than this one's to make for
+/// it.
+///
+/// [`crcbl_phys::Ray`]: https://docs.rs/crcbl-phys
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewRay {
+    /// Where the ray begins: the point on the near plane the pixel unprojects
+    /// to.
+    pub origin: Vec3,
+    /// Unit direction, away from the viewer.
+    pub direction: Vec3,
 }
 
 /// A directional light: the whole of milestone 4's lighting model.
@@ -1228,5 +1320,177 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Screen to ray ──────────────────────────────────────────────────────
+
+    /// The extent every ray test shoots through: not square, so a transposed
+    /// aspect or a swapped axis is a different answer rather than the same one.
+    const VIEWPORT: (u32, u32) = (800, 600);
+
+    /// The centre of `VIEWPORT`, as a pixel coordinate.
+    fn centre() -> Vec2 {
+        Vec2::new(VIEWPORT.0 as f32, VIEWPORT.1 as f32) * 0.5
+    }
+
+    /// An off-centre camera, so a ray test that quietly ignored the view matrix
+    /// would answer in the wrong space.
+    fn perspective() -> Camera {
+        Camera {
+            eye: Vec3::new(3.0, 4.0, 5.0),
+            target: Vec3::new(-1.0, 0.5, 0.0),
+            up: Vec3::Y,
+            projection: Projection::Perspective {
+                fov_y: FRAC_PI_4,
+                near: 0.25,
+            },
+        }
+    }
+
+    /// **The ray through a pixel projects back to that pixel.**
+    ///
+    /// The round trip against [`Camera::view_projection`], which is the only
+    /// check here that could catch a sign, an axis or an aspect applied twice —
+    /// every one of those still yields a plausible-looking unit direction.
+    #[test]
+    fn a_pixels_ray_projects_back_to_that_pixel() {
+        let size = Vec2::new(VIEWPORT.0 as f32, VIEWPORT.1 as f32);
+        let view_proj = perspective().view_projection(size.x / size.y);
+        for at in [
+            Vec2::new(0.5, 0.5),
+            centre(),
+            Vec2::new(11.5, 523.5),
+            Vec2::new(799.5, 0.5),
+            Vec2::new(640.5, 480.5),
+        ] {
+            let ray = perspective().ray_through(at, VIEWPORT);
+            for distance in [0.5_f32, 7.0, 250.0] {
+                let clip = view_proj * (ray.origin + ray.direction * distance).extend(1.0);
+                let ndc = clip.truncate() / clip.w;
+                let pixel = Vec2::new((ndc.x + 1.0) * 0.5 * size.x, (1.0 - ndc.y) * 0.5 * size.y);
+                assert!(
+                    (pixel - at).length() < 1e-2,
+                    "the ray through {at:?} reached {pixel:?} {distance} m along itself",
+                );
+            }
+        }
+    }
+
+    /// **The window's +Y is down and clip space's is up.**
+    ///
+    /// The one conversion in [`Camera::ray_through`] that is a convention
+    /// rather than arithmetic, and the one a reader cannot check by inspection.
+    /// A camera looking down `-Z` with `+Y` up: the top of the window has to be
+    /// the `+Y` half of the world and the left of it the `-X` half.
+    #[test]
+    fn the_top_left_pixel_is_up_and_to_the_left_in_the_world() {
+        let camera = Camera {
+            eye: Vec3::ZERO,
+            target: -Vec3::Z,
+            up: Vec3::Y,
+            projection: Projection::Perspective {
+                fov_y: FRAC_PI_4,
+                near: 0.1,
+            },
+        };
+        let top_left = camera.ray_through(Vec2::new(0.5, 0.5), VIEWPORT);
+        assert!(
+            top_left.direction.y > 0.0,
+            "the top of the window must look up, got {:?}",
+            top_left.direction,
+        );
+        assert!(
+            top_left.direction.x < 0.0,
+            "the left of the window must look left, got {:?}",
+            top_left.direction,
+        );
+        let bottom_right = camera.ray_through(Vec2::new(799.5, 599.5), VIEWPORT);
+        assert!(bottom_right.direction.y < 0.0 && bottom_right.direction.x > 0.0);
+    }
+
+    /// **The ray starts on the near plane**, which is what
+    /// [`Camera::ray_through`] promises rather than "at the eye" — and under
+    /// [`Projection::Orthographic`] the two are not even the same kind of
+    /// thing.
+    #[test]
+    fn the_ray_begins_at_the_near_plane_depth() {
+        for camera in [
+            perspective(),
+            Camera {
+                projection: Projection::Orthographic {
+                    half_height: 3.0,
+                    near: 0.5,
+                    far: 40.0,
+                },
+                ..perspective()
+            },
+        ] {
+            let ray = camera.ray_through(Vec2::new(210.5, 99.5), VIEWPORT);
+            let depth = camera
+                .depth_of(ray.origin, VIEWPORT.0 as f32 / VIEWPORT.1 as f32)
+                .expect("the near plane is in front of the eye");
+            assert!(
+                (depth - crcbl_hal::depth::NEAR).abs() < 1e-4,
+                "the ray started at depth {depth}, not the near plane",
+            );
+        }
+    }
+
+    /// **An orthographic viewport's rays are parallel**, and a perspective
+    /// one's are not. The projection is the only thing that differs between the
+    /// two halves, so this is what says the unprojection reads it at all.
+    #[test]
+    fn an_orthographic_camera_shoots_parallel_rays_and_a_perspective_one_does_not() {
+        let orthographic = Camera {
+            projection: Projection::Orthographic {
+                half_height: 3.0,
+                near: 0.5,
+                far: 40.0,
+            },
+            ..perspective()
+        };
+        let left = Vec2::new(40.5, 300.5);
+        let right = Vec2::new(760.5, 300.5);
+        let spread = |camera: &Camera| {
+            camera
+                .ray_through(left, VIEWPORT)
+                .direction
+                .dot(camera.ray_through(right, VIEWPORT).direction)
+        };
+        assert!(
+            (spread(&orthographic) - 1.0).abs() < 1e-5,
+            "orthographic rays must be parallel, got a dot of {}",
+            spread(&orthographic),
+        );
+        assert!(
+            spread(&perspective()) < 0.95,
+            "perspective rays must diverge, got a dot of {}",
+            spread(&perspective()),
+        );
+        // Their origins still differ: an orthographic camera moves the ray
+        // rather than turning it.
+        assert!(
+            orthographic
+                .ray_through(left, VIEWPORT)
+                .origin
+                .distance(orthographic.ray_through(right, VIEWPORT).origin)
+                > 1.0
+        );
+    }
+
+    /// The direction is unit length, which is what makes a hit's parametric
+    /// distance a distance in metres.
+    #[test]
+    fn the_direction_is_unit_length() {
+        let ray = perspective().ray_through(Vec2::new(1.5, 599.5), VIEWPORT);
+        assert!((ray.direction.length() - 1.0).abs() < 1e-6);
+    }
+
+    /// A viewport with no pixels in it has no pixel to shoot through, and says
+    /// so rather than handing back a `NaN` ray.
+    #[test]
+    #[should_panic(expected = "zero side")]
+    fn a_viewport_with_a_zero_side_is_refused() {
+        let _ = perspective().ray_through(centre(), (800, 0));
     }
 }
