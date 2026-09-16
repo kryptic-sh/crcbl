@@ -43,33 +43,29 @@ path = "src/main.rs"
 # out of a pack the engine already ships rather than out of a mesh builder here.
 crcbl = { workspace = true, features = ["greybox", "scn"] }
 
-# **Breakout's `Brick`, which is the one component this slice can edit.**
+# **The vocabularies this build ships with.** A `.scn/` chunk cannot be read
+# without the type its rows are of, so every tool that opens a scene carries a
+# vocabulary; `crcbl::registry` is what one is, and `src/scene.rs` builds this
+# build's out of three — the editor's own greybox block, and the two games whose
+# committed scenes the workspace wants edited
+# (`docs/plan/sample/07-towers.md`'s milestone 2 is the dogfood pass).
 #
-# A `.scn/` chunk file holds one system's component array, and reading it needs
-# that component's type — `crcbl::scene::scn::chunk_of::<T>` is bounded on it.
-# There is no component registry yet (`docs/plan/08-editor.md`'s missing-pieces
-# list), so the editor's vocabulary is a list written in `src/board.rs`, and for
-# slice 1 that list has one entry: the board `apps/breakout` reads its brick
-# grid out of.
-#
-# This arrow is the thing a later slice removes. It is here rather than a second
-# `Brick` declared in this crate because the field names, the ranges and the
-# `#[derive(Reflect)]` rows are the same knowledge, and two copies of it would
-# drift the first time a brick gains a field.
+# Slice 1's arrow was different in kind: `src/board.rs` was a hand-written list
+# that could drift from the game's own, and `src/document.rs` was wired to it.
+# Nothing in `src/` outside `scene.rs` names a game now, and a build that wants
+# other scenes edits one function.
 breakout = { workspace = true }
+puppet = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
 
-# **`breakout` is used, and `cargo machete` cannot see it.** That crate's `[lib]`
-# is named `crcbl_breakout` rather than `breakout` — a lib and a bin of the same
-# name in one package write the same file — and machete matches a dependency by
-# its *package* name against the source text. Every `crcbl_breakout::` in
-# `src/board.rs` and `src/document.rs` is therefore invisible to it, and the
-# alternative to this entry is renaming the dependency at every call site to
-# match a tool rather than the crate.
+# **`breakout` and `puppet` are named through their `[lib]` names**
+# (`crcbl_breakout`, `crcbl_puppet`) and `cargo machete` matches a dependency by
+# its *package* name against the source text, so it cannot see either use.
+# Measured 2026-09-16: machete reads `[dependencies]` only.
 [package.metadata.cargo-machete]
-ignored = ["breakout"]
+ignored = ["breakout", "puppet"]
 
 [lints]
 workspace = true

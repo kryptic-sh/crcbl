@@ -366,6 +366,9 @@ pub mod nav;
 
 pub mod perf;
 
+#[cfg(any(feature = "scene", feature = "scn"))]
+pub mod registry;
+
 pub mod session;
 
 pub mod settings;

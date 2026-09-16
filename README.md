@@ -82,11 +82,12 @@ What is real today:
 
 What is not:
 
-- **The editor opens one game's scene.** `apps/editor` loads `apps/breakout`'s
-  board, picks an entity by ray, edits it through commands with undo and redo,
-  and saves byte-stably — but a `.scn/` chunk cannot be read without the type
-  its rows are of, so the tool depends on the game whose components it knows.
-  Opening any scene needs a component registry.
+- **The editor opens the scenes its build knows.** `apps/editor` picks an entity
+  by ray, edits it through commands with undo and redo, and saves byte-stably. A
+  `.scn/` chunk cannot be read without the type its rows are of, so a build
+  carries a `crcbl::registry` vocabulary: the shipped one holds a greybox block
+  and both samples' components, and opening some other game's scene is a line in
+  `apps/editor/src/scene.rs`. There is no run-time component discovery.
 - The viewer opens a file from the command line, from a drop on its window
   (Wayland, X11, Win32 and AppKit), from a drop on the canvas in the browser,
   and from the shelf of Khronos CC0 models on its `ESC` panel.

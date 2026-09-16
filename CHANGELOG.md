@@ -204,6 +204,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::registry`: one place a tool learns what a scene's chunks are made
+  of.** `Registry::register::<T>("bricks")` produces, from one type parameter,
+  the `SystemChunk` codec its file is read and written with, the `System<T>` a
+  load spawns into, the `&mut dyn Reflect` an edit is applied to, and the
+  `Placement` a collider and a bounds box are built from — so a component
+  registered for the scene and missing from the tool is a thing that does not
+  compile, rather than a chunk that loads as nothing to edit. `Placement` is the
+  new trait that answers "where is this row", `None` for a component that is not
+  a thing in space; the scene format is unchanged. `apps/breakout` and
+  `apps/puppet` each expose `register_components`, and their own loaders use it,
+  so a game's vocabulary is one list rather than two that agree today.
+  `apps/editor` is no longer wired to a single game: it opens any scene whose
+  systems its registry knows, the shipped build registers its own greybox block
+  and both samples' components, and a manifest naming a system that build did
+  not register is refused by that system's name.
 - **A reflection-driven property inspector on the element tree.**
   `Ui::inspector` and `Ui::inspector_with` build one row per `Reflect::fields`
   entry over a `&mut dyn Reflect`: a checkbox for a `bool`, a text input for a
@@ -228,7 +243,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the debug-draw layer, nudges it with the arrow keys and Page Up/Down, walks
   the history with Ctrl+Z and Ctrl+Y, and writes the scene back with Ctrl+S,
   with a `*` in the window title while there are unsaved edits. With no argument
-  it opens `apps/breakout`'s committed board.
+  it opens the greybox scene compiled into the binary.
 - **`crcbl_editor::EditCommand` and `UndoLog` are the whole edit vocabulary,
   from day one.** A command carries a `SceneEntityId`, a dotted `crcbl::reflect`
   path and the new `Value`; applying one hands back the inverse carrying the

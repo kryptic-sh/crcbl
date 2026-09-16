@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slice 1 landed 2026-09-16, and what still waits
+## Status: slices 1 and 2 landed 2026-09-16, and what still waits
 
 `apps/editor` exists: a native, single-process tool that loads `apps/breakout`'s
 board, renders it with `crcbl_render::orbit::OrbitCamera` and the ground grid,
@@ -23,11 +23,30 @@ modifiers are stamped onto every event), and
 helper was missing; it is `crcbl_render::Camera::ray_through`, beside
 `Camera::depth_of` whose inverse it is.
 
+**Slice 2 removed the editor's wiring to one game.** `crcbl::registry` is the
+component registry missing piece 5's second half asked for: one
+`Registry::register::<T>(system)` call produces the chunk codec, the `System<T>`
+a load spawns into, the `&mut dyn Reflect` an edit is applied to and the
+`Placement` a collider and a bounds box come from, so those four cannot drift
+apart. It lives in the umbrella because it needs `crcbl-ecs`, `crcbl-scene` and
+`crcbl-reflect` at once and every lower home would gain an arrow its own docs
+call deliberately absent. `apps/breakout` and `apps/puppet` register their own
+components and load their own scenes through it, and slice 1's hand-written
+vocabulary module is gone.
+
+**What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
+linked binary cannot learn a component type at run time: a build of the editor
+opens the vocabularies it was compiled with. The shipped build registers its own
+greybox block and both samples' components, so it still opens breakout's board;
+a build for another game adds a line to `apps/editor/src/scene.rs::vocabulary`.
+Run-time discovery needs a link-time distributed slice (`linkme` or
+`inventory`), which is a new dependency and the user's call.
+
 Everything else below stands unchanged: the server still drops commands, there
 is one schedule per `World`, there is no snapshot, the samples' state is outside
-the ECS, there is no inspector panel in the editor, the format cannot hold one
-entity in two systems, debug draw is not a gizmo layer, `AssetSource` cannot
-list, and there are no `serve`/`scene`/`edit` subcommands.
+the ECS, the editor draws no inspector panel, the format cannot hold one entity
+in two systems, debug draw is not a gizmo layer, `AssetSource` cannot list, and
+there are no `serve`/`scene`/`edit` subcommands.
 
 Two things sit behind it, in both directions:
 
@@ -99,9 +118,10 @@ rest of this document suggests; each line was checked in the source.
    system. An editor has no world to edit in it until it is ported.
 5. **No inspector _in the editor_**: `crcbl_ecs::Inspector::collect` returns a
    system's name and entity count, and the per-system debug-UI callback is an
-   empty stub. The per-component half is built — `crcbl-reflect` and
-   `Ui::inspector`, both 2026-09-16 — and what is missing is the editor drawing
-   a panel with it.
+   empty stub. The per-component half is built — `crcbl-reflect`,
+   `Ui::inspector` and `crcbl::registry`, which is what a tool reads a component
+   through, all 2026-09-16 — and what is missing is the editor drawing a panel
+   with it.
 6. **The scene format cannot hold one entity in two systems**: each chunk row
    spawns its own entity, so the same id in two chunk files is a duplicate-id
    error. The "attach/detach system data" command needs that first. `IdMap` has

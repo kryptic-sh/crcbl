@@ -33,13 +33,13 @@ use std::path::{Path, PathBuf};
 use crcbl::assets::AssetSource;
 use crcbl::ecs::{Entity, World};
 use crcbl::math::{DVec3, Vec3};
-use crcbl::phys::{PhysicsSystem, Ray};
+use crcbl::phys::{ColliderComponent, PhysicsSystem, Ray, RigidBody, Transform};
 use crcbl::reflect::{PathError, Value, get_path};
+use crcbl::registry::Registry;
 use crcbl::render::ViewRay;
 use crcbl::scene::scn::{IdMap, Scene, SceneEntityId, ScnError};
 use crcbl::store::{NativeStorage, StorageError, StorageSource};
 
-use crate::board;
 use crate::command::{EditCommand, UndoLog};
 
 /// A loaded scene and everything the editor knows about it.
@@ -48,6 +48,13 @@ pub struct Document {
     world: World,
     scene: Scene,
     ids: IdMap,
+    /// The vocabulary this document was opened with: the codec, the system, the
+    /// `&mut dyn Reflect` and the placement, per chunk name.
+    ///
+    /// Held rather than borrowed, so a `Document` has no lifetime and two of them
+    /// can be open on different vocabularies. It is a handful of function
+    /// pointers per component — see [`crcbl::registry::Registry`].
+    registry: Registry,
     /// Which [`SceneEntityId`] is selected, if any. An id rather than an
     /// [`Entity`] for [`EditCommand`]'s reason: it is what survives a reload.
     selected: Option<SceneEntityId>,
@@ -127,7 +134,8 @@ impl From<PathError> for EditError {
 }
 
 impl Document {
-    /// Opens the `.scn/` directory at `dir`, read through `source`.
+    /// Opens the `.scn/` directory at `dir`, read through `source`, with the
+    /// components `registry` knows.
     ///
     /// The world is this document's: the systems are registered here, the
     /// entities are spawned here, and nothing else holds a handle into it. That
@@ -135,23 +143,41 @@ impl Document {
     /// `docs/plan/08-editor.md`'s decided play/stop — reloading is opening
     /// again, not restoring a snapshot.
     ///
+    /// **The registry is the vocabulary and there is no other.** The systems a
+    /// scene loads into, the codecs its chunks are read with, the component an
+    /// edit is applied to and the box a selection is drawn as all come out of the
+    /// same entries, so a component registered for one of them cannot be missing
+    /// from another.
+    ///
     /// # Errors
     ///
-    /// [`EditError::Scene`], which names the key it is about: a file that is
-    /// not there, text that is not this format, a header this build does not
-    /// read, or a manifest naming a system this editor has no codec for.
-    pub fn open(source: &dyn AssetSource, dir: &Path) -> Result<Self, EditError> {
+    /// [`EditError::Scene`], which names the key or the system it is about: a
+    /// file that is not there, text that is not this format, a header this build
+    /// does not read, or a manifest naming a system `registry` has no entry for
+    /// — which is [`ScnError::NoCodec`], and is a refusal naming that system
+    /// rather than a scene opened with a third of its entities missing.
+    pub fn open(
+        source: &dyn AssetSource,
+        dir: &Path,
+        registry: Registry,
+    ) -> Result<Self, EditError> {
         let mut world = World::new();
-        board::register(&mut world);
-        let (scene, ids) = Scene::load(source, dir, &board::codecs(), &mut world)?;
+        registry.register_systems(&mut world);
+        // Every pick goes through it, and an entity with no collider does not
+        // pick. Registered here rather than by the registry: a scene's chunks are
+        // the registry's business and the way this tool selects things is not.
+        world.register_system(Box::new(PhysicsSystem::new()));
+
+        let (scene, ids) = Scene::load(source, dir, &registry.codecs(), &mut world)?;
         for system in scene.systems() {
-            let entities = board::entities(&mut world, &ids, system);
-            board::sync_colliders(&mut world, entities);
+            let entities = registry.entities(&mut world, &ids, system);
+            sync_colliders(&registry, &mut world, entities);
         }
         Ok(Self {
             world,
             scene,
             ids,
+            registry,
             selected: None,
             log: UndoLog::new(),
             saved_at: 0,
@@ -167,36 +193,43 @@ impl Document {
     /// # Errors
     ///
     /// As [`Document::open`].
-    pub fn open_dir(path: impl Into<PathBuf>) -> Result<Self, EditError> {
+    pub fn open_dir(path: impl Into<PathBuf>, registry: Registry) -> Result<Self, EditError> {
         let path = path.into();
         // Rooted at the scene directory itself and read with an empty prefix,
         // which is what `apps/breakout`'s `Board::read_dir` does and for the
         // same reason: `DirSource` refuses an absolute key and a `..`, so the
         // root is how a caller says where the scene is.
         let source = crcbl::assets::DirSource::at(path.clone());
-        let mut document = Self::open(&source, Path::new(""))?;
+        let mut document = Self::open(&source, Path::new(""), registry)?;
         document.origin = Some(path);
         Ok(document)
     }
 
-    /// Opens `apps/breakout`'s committed board — the document the editor starts
-    /// on when it is not given one.
+    /// Opens this build's compiled-in scene — the document the editor starts on
+    /// when it is not given one.
     ///
-    /// Out of the game's own compiled-in source rather than off disk, for the
-    /// reason that crate gives about its own loader: a tool that had to find
-    /// `apps/breakout/assets/` would be one whose behaviour depended on the
+    /// [`crate::scene`]'s greybox blocks, through that module's own vocabulary,
+    /// out of a compiled-in source rather than off disk: a tool that had to find
+    /// its own default document would be one whose behaviour depended on the
     /// directory it was started from. It has no [`origin`](Document::save), so
     /// saving it means naming a directory.
     ///
     /// # Errors
     ///
-    /// [`EditError::Scene`] if the committed board is not readable, which is a
-    /// tree in which `apps/breakout`'s own tests are red too.
+    /// [`EditError::Scene`] if the compiled-in scene is not readable, which is a
+    /// tree in which `crate::scene`'s own tests are red too.
     pub fn built_in() -> Result<Self, EditError> {
         Self::open(
-            &crcbl_breakout::built_in_source(),
-            Path::new(crcbl_breakout::BOARD),
+            &crate::scene::built_in_source(),
+            Path::new(crate::scene::GREYBOX),
+            crate::scene::vocabulary(),
         )
+    }
+
+    /// The vocabulary this document was opened with.
+    #[must_use]
+    pub const fn registry(&self) -> &Registry {
+        &self.registry
     }
 
     /// The scene's name, as its header spells it.
@@ -223,10 +256,12 @@ impl Document {
         // does not capture the whole of `self`.
         let ids = &self.ids;
         let world = &mut self.world;
+        let registry = &self.registry;
         systems
             .into_iter()
             .map(|system| {
-                let entities = board::entities(world, ids, &system)
+                let entities = registry
+                    .entities(world, ids, &system)
                     .into_iter()
                     .filter_map(|entity| ids.id(entity))
                     .collect();
@@ -259,8 +294,8 @@ impl Document {
     ///
     /// **Only entities with a collider pick**, which is
     /// `docs/plan/08-editor.md`'s missing piece 8 and is why
-    /// [`board::sync_colliders`] runs after a load and after every edit that
-    /// moves something.
+    /// this module's `sync_colliders` runs after a load and after every edit
+    /// that moves something.
     #[must_use]
     pub fn pick(&mut self, ray: &Ray) -> Option<SceneEntityId> {
         let entity = self.world.system_mut::<PhysicsSystem>()?.cast_ray(ray)?.0;
@@ -285,7 +320,7 @@ impl Document {
     #[must_use]
     pub fn bounds(&mut self, id: SceneEntityId) -> Option<(Vec3, Vec3)> {
         let entity = self.ids.entity(id)?;
-        let (centre, half) = board::placement(&mut self.world, entity)?;
+        let (centre, half) = self.registry.placement(&mut self.world, entity)?;
         let (centre, half) = (narrow(centre), narrow(half));
         Some((centre - half, centre + half))
     }
@@ -304,7 +339,10 @@ impl Document {
     /// [`EditError::Path`] if the path names nothing or stops short of a leaf.
     pub fn read(&mut self, id: SceneEntityId, path: &str) -> Result<Value, EditError> {
         let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
-        let component = board::component(&mut self.world, entity).ok_or(EditError::NoEntity(id))?;
+        let component = self
+            .registry
+            .component(&mut self.world, entity)
+            .ok_or(EditError::NoEntity(id))?;
         Ok(get_path(component, path)?)
     }
 
@@ -402,7 +440,7 @@ impl Document {
     pub fn files(&mut self) -> Result<BTreeMap<String, String>, EditError> {
         Ok(self
             .scene
-            .save(&mut self.world, &self.ids, &board::codecs())?)
+            .save(&mut self.world, &self.ids, &self.registry.codecs())?)
     }
 
     /// Writes [`files`](Self::files) into the directory at `dir`, and marks the
@@ -439,7 +477,7 @@ impl Document {
     /// # Errors
     ///
     /// [`EditError::NoOrigin`] for a document that was not opened from one —
-    /// the compiled-in board is the case — and otherwise as
+    /// the compiled-in scene is the case — and otherwise as
     /// [`save_to`](Self::save_to).
     pub fn save(&mut self) -> Result<(), EditError> {
         let dir = self.origin.clone().ok_or(EditError::NoOrigin)?;
@@ -454,10 +492,12 @@ impl Document {
         entity: Entity,
         command: &EditCommand,
     ) -> Result<EditCommand, EditError> {
-        let component = board::component(&mut self.world, entity)
+        let component = self
+            .registry
+            .component(&mut self.world, entity)
             .ok_or_else(|| EditError::NoEntity(command.entity()))?;
         let undo = command.apply(component)?;
-        board::sync_colliders(&mut self.world, [entity]);
+        sync_colliders(&self.registry, &mut self.world, [entity]);
         Ok(undo)
     }
 
@@ -468,6 +508,53 @@ impl Document {
         let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
         self.apply_to(entity, command)?;
         Ok(())
+    }
+}
+
+/// Gives every entity in `entities` the collider a ray picks it by, replacing any
+/// it already had, from whatever [`crcbl::registry::Placement`] its component
+/// answers.
+///
+/// Called once after a load and again after any edit that moved or resized the
+/// thing edited — **not** only after a load. A collider left where the entity
+/// used to be is the failure this exists to prevent, and it is one a picture
+/// would not show: the thing draws in its new place and picks in its old one.
+///
+/// An entity whose component is not a thing in space — `apps/puppet`'s `Sun` is
+/// the case — gets no collider and so cannot be picked, which is the honest
+/// answer rather than a box at the origin.
+///
+/// Kinematic bodies: the body is what the broadphase tracks, and nothing
+/// integrates it because nothing here ticks.
+fn sync_colliders(
+    registry: &Registry,
+    world: &mut World,
+    entities: impl IntoIterator<Item = Entity>,
+) {
+    let placements: Vec<(Entity, DVec3, DVec3)> = entities
+        .into_iter()
+        .filter_map(|entity| {
+            registry
+                .placement(world, entity)
+                .map(|(centre, half_extents)| (entity, centre, half_extents))
+        })
+        .collect();
+    let Some(phys) = world.system_mut::<PhysicsSystem>() else {
+        return;
+    };
+    for (entity, centre, half_extents) in placements {
+        let transform = Transform::from_position(centre);
+        phys.set_body(entity, RigidBody::new_kinematic());
+        phys.set_transform(entity, transform);
+        phys.set_collider(
+            entity,
+            &ColliderComponent::Box {
+                offset: DVec3::ZERO,
+                half_extents,
+                is_trigger: false,
+            },
+            &transform,
+        );
     }
 }
 
@@ -494,17 +581,27 @@ fn narrow(value: DVec3) -> Vec3 {
 mod tests {
     use super::*;
 
-    /// The board every test here opens: `apps/breakout`'s committed one,
-    /// through its own compiled-in source, so nothing below depends on a
-    /// working directory.
+    /// The document every test here opens: this build's compiled-in greybox
+    /// scene, so nothing below depends on a working directory **or on a game** —
+    /// `apps/editor/tests/vocabularies.rs` is where the samples' own scenes are
+    /// opened through this module.
     fn document() -> Document {
-        Document::built_in().expect("the committed board is a scene")
+        Document::built_in().expect("the compiled-in scene is a scene")
     }
+
+    /// The id of the step a test picks, and the `(x, y)` a ray down `-Z` hits it
+    /// at: `crate::scene`'s three steps, whose centres are these and whose gaps
+    /// are between them.
+    const STEPS: [(u32, f64, f64); 3] = [(1, -3.0, 0.25), (2, 0.0, 0.75), (3, 3.0, 1.25)];
+
+    /// `(x, y)` in the gap between the first two steps, at the first one's
+    /// height: outside both, and above the ground slab whose top is `y = 0`.
+    const GAP: (f64, f64) = (-1.5, 0.25);
 
     /// A command that moves `id` along `axis` by `delta`, read off the
     /// document so the *replaced* value is the one actually in the component.
     fn nudge(document: &mut Document, id: SceneEntityId, axis: usize, delta: f64) -> EditCommand {
-        let (min, max) = document.bounds(id).expect("a brick in this document");
+        let (min, max) = document.bounds(id).expect("a block in this document");
         let centre = (min + max) * 0.5;
         let was = f64::from([centre.x, centre.y, centre.z][axis]);
         EditCommand::SetProperty {
@@ -514,25 +611,26 @@ mod tests {
         }
     }
 
-    /// A ray that comes down `-Z` at `(x, y)`, which is how the board is
-    /// looked at — every brick's `position.2` is 0 and its half extent on that
-    /// axis is 0.5.
+    /// A ray that comes down `-Z` at `(x, y)`, which is how the greybox scene is
+    /// looked at — every step's `position.2` is 0 and its half extent on that
+    /// axis is 1.5, so a ray from `z = 20` meets every one of them.
     fn ray_at(x: f64, y: f64) -> Ray {
         Ray::new(DVec3::new(x, y, 20.0), DVec3::NEG_Z)
     }
 
-    /// **The board loads, and it is the board.**
+    /// **The compiled-in scene loads, grouped by the system its chunk came out
+    /// of, in file order.**
     #[test]
-    fn the_committed_board_opens_with_every_brick_the_file_names() {
+    fn the_built_in_scene_opens_with_every_block_the_file_names() {
         let mut document = document();
-        assert_eq!(document.name(), "board");
+        assert_eq!(document.name(), "greybox");
         let outline = document.outline();
         assert_eq!(outline.len(), 1, "the manifest names one system");
-        assert_eq!(outline[0].0, "bricks");
+        assert_eq!(outline[0].0, crate::scene::BLOCKS);
         assert_eq!(
-            outline[0].1.len(),
-            crcbl_breakout::Board::built_in().bricks().len(),
-            "the editor and the game read a different number of bricks out of one file",
+            outline[0].1,
+            (0..4).map(SceneEntityId).collect::<Vec<_>>(),
+            "the outline is not the file's own ids in the file's own order",
         );
         assert_eq!(document.entity_count(), outline[0].1.len());
         assert!(!document.is_dirty(), "a document nobody edited opens clean");
@@ -540,69 +638,78 @@ mod tests {
 
     /// **The ray hits the entity under the cursor and not its neighbour.**
     ///
-    /// The neighbour is named rather than merely "something else": the bricks
-    /// are 2.4 m wide on a 2.6 m pitch, so a ray aimed 2.6 m along the row has
-    /// to come back with the next id, and a pick that quietly answered "the
-    /// nearest entity in the world" would pass a test that only asserted a hit.
+    /// Every step is aimed at by name rather than "something was hit": they are
+    /// 2.4 m wide on a 3.0 m pitch, so a ray 3 m along the row has to come back
+    /// with the *next* id — and a pick that quietly answered "the nearest entity
+    /// in the world" would pass a test that only asserted a hit.
     #[test]
-    fn a_ray_picks_the_brick_it_points_at_and_not_the_one_beside_it() {
+    fn a_ray_picks_the_step_it_points_at_and_not_the_one_beside_it() {
         let mut document = document();
-        let bricks = crcbl_breakout::Board::built_in();
-        let first = bricks.bricks()[0];
-        let second = bricks.bricks()[1];
-        assert!(
-            (second.position[0] - first.position[0]).abs() > 2.0,
-            "the fixture assumes the first two bricks are neighbours along x",
-        );
+        for (id, x, y) in STEPS {
+            // The constant is checked against the file before it is used with
+            // it, so a step that moved in `crate::scene` is red here rather than
+            // a ray that quietly aims at nothing in particular.
+            let (min, max) = document
+                .bounds(SceneEntityId(id))
+                .unwrap_or_else(|| panic!("step {id} is in the document"));
+            let centre = (min + max) * 0.5;
+            assert!(
+                (f64::from(centre.x) - x).abs() < 1e-5 && (f64::from(centre.y) - y).abs() < 1e-5,
+                "step {id} is at {centre:?}, not at ({x}, {y})",
+            );
+            assert_eq!(
+                document.pick(&ray_at(x, y)),
+                Some(SceneEntityId(id)),
+                "a ray down step {id} picked something else",
+            );
+        }
+    }
 
-        let hit = document
-            .pick(&ray_at(first.position[0], first.position[1]))
-            .expect("a ray down the first brick hits it");
-        let next = document
-            .pick(&ray_at(second.position[0], second.position[1]))
-            .expect("and one down its neighbour hits that");
-        assert_ne!(hit, next, "both rays picked the same brick");
-        assert_eq!(hit, SceneEntityId(0), "file order is id order");
-        assert_eq!(next, SceneEntityId(1));
+    /// A ray down the **gap between two steps** picks nothing, which is the half
+    /// that says the pick is a ray and not a nearest-entity query: the same ray
+    /// 1.5 m either way hits a step.
+    #[test]
+    fn a_ray_down_the_gap_between_two_steps_picks_nothing() {
+        let mut document = document();
+        let (x, y) = GAP;
+        assert_eq!(document.pick(&ray_at(x, y)), None);
+        assert!(document.pick(&ray_at(x - 1.5, y)).is_some());
+        assert!(document.pick(&ray_at(x + 1.5, y)).is_some());
     }
 
     /// A ray that points at nothing picks nothing, rather than the nearest
     /// thing anywhere.
     #[test]
-    fn a_ray_that_misses_the_board_picks_nothing() {
+    fn a_ray_that_misses_the_scene_picks_nothing() {
         let mut document = document();
         assert!(document.pick(&ray_at(0.0, 400.0)).is_none());
     }
 
     /// **The collider follows the edit**, which is what makes a second pick
-    /// find the brick where it now is rather than where it was.
+    /// find the entity where it now is rather than where it was.
     ///
     /// The observable is a *pick*, not a field: an edit that wrote the
-    /// component and skipped [`board::sync_colliders`] would satisfy every
+    /// component and skipped [`sync_colliders`] would satisfy every
     /// assertion about `position` and still hand the wrong entity back to the
     /// next click.
     #[test]
-    fn a_moved_brick_is_picked_where_it_now_is() {
+    fn a_moved_block_is_picked_where_it_now_is() {
         let mut document = document();
-        let first = crcbl_breakout::Board::built_in().bricks()[0];
-        let id = document
-            .pick(&ray_at(first.position[0], first.position[1]))
-            .expect("the first brick");
+        let (_, x, y) = STEPS[0];
+        let id = document.pick(&ray_at(x, y)).expect("the first step");
 
         // Straight up, far enough to clear its own half extent and land
-        // somewhere the board has no other row.
+        // somewhere the scene has no other row.
         const LIFT: f64 = 40.0;
         let command = nudge(&mut document, id, 1, LIFT);
-        document.apply(command).expect("a brick has a y");
+        document.apply(command).expect("a block has a y");
 
         assert!(
-            document
-                .pick(&ray_at(first.position[0], first.position[1]))
-                .is_none(),
-            "the brick still picks where it used to be",
+            document.pick(&ray_at(x, y)).is_none(),
+            "the block still picks where it used to be",
         );
         assert_eq!(
-            document.pick(&ray_at(first.position[0], first.position[1] + LIFT)),
+            document.pick(&ray_at(x, y + LIFT)),
             Some(id),
             "and does not pick where it now is",
         );
@@ -610,18 +717,18 @@ mod tests {
 
     /// **Load → save with no edits is byte-identical.**
     ///
-    /// Against the committed files themselves rather than against a second
-    /// save: a writer that was merely self-consistent would pass that, and the
-    /// claim is that opening this board and saving it changes nothing on disk.
+    /// Against the source's own files rather than against a second save: a
+    /// writer that was merely self-consistent would pass that, and the claim is
+    /// that opening a scene and saving it changes nothing on disk.
     #[test]
     fn a_load_and_a_save_with_no_edits_is_byte_identical() {
         let mut document = document();
-        let written = document.files().expect("every brick has an id");
-        let source = crcbl_breakout::built_in_source();
+        let written = document.files().expect("every block has an id");
+        let source = crate::scene::built_in_source();
         for (key, text) in &written {
             let committed = source
-                .read(Path::new(&format!("{}/{key}", crcbl_breakout::BOARD)))
-                .unwrap_or_else(|error| panic!("the committed {key}: {error}"));
+                .read(Path::new(&format!("{}/{key}", crate::scene::GREYBOX)))
+                .unwrap_or_else(|error| panic!("the compiled-in {key}: {error}"));
             assert_eq!(
                 text.as_bytes(),
                 committed.as_slice(),
@@ -630,7 +737,7 @@ mod tests {
         }
         assert_eq!(
             written.keys().collect::<Vec<_>>(),
-            ["env.ron", "scene.ron", "sys/bricks.ron"]
+            ["env.ron", "scene.ron", "sys/blocks.ron"]
                 .iter()
                 .collect::<Vec<_>>(),
             "the save wrote a different set of files",
@@ -647,32 +754,32 @@ mod tests {
     #[test]
     fn a_load_edit_and_save_changes_exactly_the_edited_field() {
         let mut before = document();
-        let before = before.files().expect("every brick has an id");
+        let before = before.files().expect("every block has an id");
 
         let mut document = document();
-        let id = SceneEntityId(4);
+        let id = SceneEntityId(3);
         document
             .apply(EditCommand::SetProperty {
                 entity: id,
                 path: "position.1".to_owned(),
                 value: Value::Float(-3.5),
             })
-            .expect("a brick has a y");
-        let after = document.files().expect("every brick has an id");
+            .expect("a block has a y");
+        let after = document.files().expect("every block has an id");
 
         assert_eq!(
             before.keys().collect::<Vec<_>>(),
             after.keys().collect::<Vec<_>>()
         );
         for key in before.keys() {
-            if key != "sys/bricks.ron" {
+            if key != "sys/blocks.ron" {
                 assert_eq!(before[key], after[key], "{key} moved and nothing edited it");
             }
         }
 
-        let changed: Vec<(usize, &str, &str)> = before["sys/bricks.ron"]
+        let changed: Vec<(usize, &str, &str)> = before["sys/blocks.ron"]
             .lines()
-            .zip(after["sys/bricks.ron"].lines())
+            .zip(after["sys/blocks.ron"].lines())
             .enumerate()
             .filter(|(_, (was, now))| was != now)
             .map(|(line, (was, now))| (line, was, now))
@@ -716,18 +823,18 @@ mod tests {
     #[test]
     fn undoing_every_edit_restores_the_files_byte_for_byte() {
         let mut document = document();
-        let before = document.files().expect("every brick has an id");
+        let before = document.files().expect("every block has an id");
 
         for (id, axis, delta) in [(0_u32, 0_usize, 0.35_f64), (1, 1, -0.4), (2, 2, 1.25)] {
             let id = SceneEntityId(id);
             let command = nudge(&mut document, id, axis, delta);
-            document.apply(command).expect("a brick has that axis");
+            document.apply(command).expect("a block has that axis");
         }
         assert_ne!(document.files().expect("ids"), before, "nothing was edited");
 
         while document.undo().expect("every entry names a live entity") {}
         assert_eq!(
-            document.files().expect("every brick has an id"),
+            document.files().expect("every block has an id"),
             before,
             "walking the whole log back did not restore the file",
         );
@@ -739,9 +846,9 @@ mod tests {
         let mut document = document();
         for (id, axis, delta) in [(0_u32, 0_usize, 0.35_f64), (3, 1, -0.4)] {
             let command = nudge(&mut document, SceneEntityId(id), axis, delta);
-            document.apply(command).expect("a brick has that axis");
+            document.apply(command).expect("a block has that axis");
         }
-        let edited = document.files().expect("every brick has an id");
+        let edited = document.files().expect("every block has an id");
 
         while document.undo().expect("live entities") {}
         while document.redo().expect("live entities") {}
@@ -762,10 +869,10 @@ mod tests {
         assert!(!document.title().starts_with('*'), "{}", document.title());
 
         let command = nudge(&mut document, SceneEntityId(0), 0, 0.5);
-        document.apply(command).expect("a brick has an x");
+        document.apply(command).expect("a block has an x");
         assert!(document.is_dirty());
         assert!(
-            document.title().starts_with("*board"),
+            document.title().starts_with("*greybox"),
             "{}",
             document.title()
         );
@@ -774,7 +881,7 @@ mod tests {
         assert!(!document.is_dirty(), "a save clears the marker");
 
         let command = nudge(&mut document, SceneEntityId(0), 0, 0.5);
-        document.apply(command).expect("a brick has an x");
+        document.apply(command).expect("a block has an x");
         assert!(document.is_dirty());
         assert!(document.undo().expect("one entry"));
         assert!(
@@ -793,11 +900,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let mut document = document();
         let command = nudge(&mut document, SceneEntityId(2), 1, -1.5);
-        document.apply(command).expect("a brick has a y");
-        let expected = document.files().expect("every brick has an id");
+        document.apply(command).expect("a block has a y");
+        let expected = document.files().expect("every block has an id");
         document.save_to(dir.path()).expect("a writable directory");
 
-        let mut reopened = Document::open_dir(dir.path()).expect("what we just wrote is a scene");
+        let mut reopened = Document::open_dir(dir.path(), crate::scene::vocabulary())
+            .expect("what we just wrote is a scene");
         assert_eq!(reopened.files().expect("ids"), expected);
         assert_eq!(reopened.origin(), Some(dir.path()));
         assert!(!reopened.is_dirty());
@@ -814,7 +922,7 @@ mod tests {
                 path: "position.0".to_owned(),
                 value: Value::Float(0.0),
             })
-            .expect_err("that id is not on this board");
+            .expect_err("that id is not in this scene");
         assert!(
             matches!(error, EditError::NoEntity(SceneEntityId(9_999))),
             "{error}",
@@ -835,7 +943,7 @@ mod tests {
                 path: "rotation.0".to_owned(),
                 value: Value::Float(1.0),
             })
-            .expect_err("a brick has no rotation");
+            .expect_err("a block has no rotation");
         assert!(matches!(error, EditError::Path(_)), "{error}");
         assert!(document.log().is_empty());
         assert_eq!(document.files().expect("ids"), before);
@@ -851,16 +959,22 @@ mod tests {
         assert_eq!(document.selected(), None);
     }
 
-    /// The bounds a selection is drawn with are the brick's own box.
+    /// **The bounds a selection is drawn with come from the component's own
+    /// `Placement`**, and they are that component's box.
+    ///
+    /// Checked against the numbers the chunk file spells rather than against
+    /// whatever the registry answered, so a placement that read the wrong field
+    /// — or the right field of the wrong row — is red here.
     #[test]
-    fn the_bounds_of_a_brick_are_its_centre_plus_and_minus_its_half_extents() {
+    fn the_bounds_of_a_block_are_its_centre_plus_and_minus_its_half_extents() {
         let mut document = document();
-        let brick = crcbl_breakout::Board::built_in().bricks()[0];
-        let (min, max) = document.bounds(SceneEntityId(0)).expect("the first brick");
+        let (min, max) = document.bounds(SceneEntityId(3)).expect("the third step");
         let centre = (min + max) * 0.5;
         let half = (max - min) * 0.5;
-        assert!((f64::from(centre.x) - brick.position[0]).abs() < 1e-5);
-        assert!((f64::from(half.x) - brick.half_extents[0]).abs() < 1e-5);
+        assert!((f64::from(centre.x) - 3.0).abs() < 1e-5, "{centre:?}");
+        assert!((f64::from(centre.y) - 1.25).abs() < 1e-5, "{centre:?}");
+        assert!((f64::from(half.x) - 1.2).abs() < 1e-5, "{half:?}");
+        assert!((f64::from(half.y) - 1.25).abs() < 1e-5, "{half:?}");
         assert!(document.bounds(SceneEntityId(9_999)).is_none());
     }
 }

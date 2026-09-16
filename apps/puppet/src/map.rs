@@ -87,7 +87,7 @@
 //! [`Surface`] — a greybox primitive, the collider that is the same surface, and
 //! the tint it is painted with — is declared here, in the sample, rather than in
 //! `crcbl-greybox` or `crcbl-scene`. A chunk's component is whatever its game
-//! says it is: [`chunk_of`] bounds it by `serde` and
+//! says it is: [`chunk_of`](crcbl::scene::scn::chunk_of) bounds it by `serde` and
 //! [`ComponentHash`] and by nothing else. One consumer is not an
 //! engine type, and the moment a second sample wants these same rows is the
 //! moment to hoist them; `apps/breakout`'s `Brick` sits on the same side of that
@@ -112,12 +112,13 @@ use crcbl::greybox::{GREYBOX_TILE_M, cube, grid_material, grid_page, platform, s
 use crcbl::math::{DVec3, Mat4, Vec3};
 use crcbl::phys::{BoxCollider, PhysicsWorld, Sphere};
 use crcbl::reflect::Reflect;
+use crcbl::registry::{Placement, Registry};
 use crcbl::render::scene::{Capacities, Geometry, InstanceDesc, MeshDesc, ProbeGrid, SceneDesc};
 use crcbl::render::{
     DirectionalLight, ForwardRenderer, InstanceHandle, InstancePoolError, MeshPoolError, SkinRange,
     SkinnedInstanceDesc, SkinnedMesh,
 };
-use crcbl::scene::scn::{Env, IdMap, Scene, ScnError, SystemChunk, chunk_of};
+use crcbl::scene::scn::{Env, IdMap, Scene, ScnError};
 use crcbl::serde::{Deserialize, Serialize};
 use crcbl::shaders::mesh::GpuMaterial;
 use crcbl::shaders::skinning::SkinBinding;
@@ -274,7 +275,10 @@ const SUN: &str = "sun";
 
 /// The directory the committed map lives in, and the name its keys are spelled
 /// under in the built-in source.
-const BLOCKOUT: &str = "blockout.scn";
+///
+/// Public because [`built_in_source`] is, and a source whose keys nobody can
+/// spell is a source nobody can read.
+pub const BLOCKOUT: &str = "blockout.scn";
 
 /// `assets/scenes/blockout.scn/scene.ron`, as it is committed.
 const BLOCKOUT_SCENE_RON: &str = include_str!("../assets/scenes/blockout.scn/scene.ron");
@@ -396,6 +400,33 @@ impl ComponentHash for Surface {
     }
 }
 
+/// The box a surface occupies, which is the box its collider already is for a
+/// [`Shape::Platform`] and the box its sphere is inscribed in for a
+/// [`Shape::Dome`].
+///
+/// [`Map::world`] reads the platform arm of this rather than repeating it, so
+/// there is one statement of where a platform's centre is. The dome arm is not
+/// shared: a collider there is the analytic [`Sphere`], and this is the box a
+/// tool draws and picks it by.
+impl Placement for Surface {
+    fn placement(&self) -> Option<(DVec3, DVec3)> {
+        let origin = DVec3::from_array(self.position);
+        Some(match self.shape {
+            // A `platform` stands *on* its origin, so the centre is half a
+            // height up.
+            Shape::Platform {
+                width,
+                depth,
+                height,
+            } => (
+                origin + DVec3::new(0.0, 0.5 * height, 0.0),
+                DVec3::new(0.5 * width, 0.5 * height, 0.5 * depth),
+            ),
+            Shape::Dome { radius } => (origin, DVec3::splat(radius)),
+        })
+    }
+}
+
 /// Where the character starts, and which way it is turned when it gets there.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl::reflect")]
@@ -421,6 +452,23 @@ impl ComponentHash for Spawn {
         for value in self.position.iter().chain(&[self.facing]) {
             hasher.write(&value.to_bits().to_le_bytes());
         }
+    }
+}
+
+/// The volume the character occupies when it stands here: the capsule
+/// [`CHARACTER_RADIUS`] and [`CHARACTER_HEIGHT`] describe, standing on the feet
+/// this row spells.
+///
+/// The body rather than a marker of some size picked to look right — a spawn
+/// point a tool draws as the thing that will stand in it is one a person can see
+/// is clipping into a wall.
+impl Placement for Spawn {
+    fn placement(&self) -> Option<(DVec3, DVec3)> {
+        let half_height = 0.5 * CHARACTER_HEIGHT;
+        Some((
+            DVec3::from_array(self.position) + DVec3::new(0.0, half_height, 0.0),
+            DVec3::new(CHARACTER_RADIUS, half_height, CHARACTER_RADIUS),
+        ))
     }
 }
 
@@ -463,6 +511,32 @@ impl ComponentHash for Sun {
         hasher.write(&self.intensity.to_bits().to_le_bytes());
         hasher.write(&self.period.to_bits().to_le_bytes());
     }
+}
+
+/// **A sun is not a thing in space.** It is a direction, a colour and a rate, and
+/// the row is the whole of it — so an outliner lists it, a property panel edits
+/// it, and a ray cannot hit it.
+///
+/// [`None`] rather than a box at the origin, which would put a pickable cube in
+/// the middle of every map and make "the sun is selected" a thing a person
+/// reached by accident.
+impl Placement for Sun {
+    fn placement(&self) -> Option<(DVec3, DVec3)> {
+        None
+    }
+}
+
+/// This sample's scene vocabulary: three components, under the names their chunk
+/// files are spelled with.
+///
+/// **The one place those three names are joined to their types.** [`Map::load`]
+/// uses it and so does any tool that opens this map, so the vocabulary the sample
+/// ships and the vocabulary an editor sees are the same list rather than two that
+/// agree today — `docs/plan/08-editor.md`'s component registry.
+pub fn register_components(registry: &mut Registry) {
+    registry.register::<Surface>(SURFACES);
+    registry.register::<Spawn>(SPAWN_POINT);
+    registry.register::<Sun>(SUN);
 }
 
 /// Why a directory is not one of puppet's maps.
@@ -548,17 +622,12 @@ impl Map {
     /// header this build does not read, a manifest naming a system with no codec
     /// — or one that leaves out a system a puppet map is made of.
     pub fn load(source: &dyn AssetSource, dir: &Path) -> Result<Self, MapError> {
-        let codecs: Vec<Box<dyn SystemChunk>> = vec![
-            chunk_of::<Surface>(SURFACES),
-            chunk_of::<Spawn>(SPAWN_POINT),
-            chunk_of::<Sun>(SUN),
-        ];
+        let mut registry = Registry::new();
+        register_components(&mut registry);
         let mut world = World::new();
-        world.register_system(Box::new(System::<Surface>::new(SURFACES)));
-        world.register_system(Box::new(System::<Spawn>::new(SPAWN_POINT)));
-        world.register_system(Box::new(System::<Sun>::new(SUN)));
+        registry.register_systems(&mut world);
         let (scene, ids) =
-            Scene::load(source, dir, &codecs, &mut world).map_err(MapError::Scene)?;
+            Scene::load(source, dir, &registry.codecs(), &mut world).map_err(MapError::Scene)?;
 
         // A manifest that names a system with no codec is `Scene::load`'s
         // refusal; a manifest that names *fewer* systems is not an error to the
@@ -668,8 +737,16 @@ fn only<T>(rows: Vec<T>, system: &'static str) -> Result<T, MapError> {
         .ok_or(MapError::NotOne { system, found })
 }
 
-/// The committed scene directory, as a source with no filesystem under it.
-fn built_in_source() -> MemorySource {
+/// The committed scene directory, as a source with no filesystem under it,
+/// keyed under [`BLOCKOUT`].
+///
+/// Public so that a **tool** can open this sample's map without one: `.scn/` is
+/// the engine's own scene format, and a tool that had to find
+/// `apps/puppet/assets/` on disk would be one whose behaviour depended on the
+/// directory it was started from. The sample reads it through [`Map::built_in`],
+/// which is this source and the loader over it.
+#[must_use]
+pub fn built_in_source() -> MemorySource {
     let mut source = MemorySource::new();
     for (key, text) in [
         ("scene.ron", BLOCKOUT_SCENE_RON),
@@ -1122,17 +1199,15 @@ impl Map {
         for surface in &self.surfaces {
             let origin = DVec3::from_array(surface.position);
             match surface.shape {
-                // A `BoxCollider` is a centre and half-extents; a `platform`
-                // stands *on* its origin, so the centre is half a height up.
-                Shape::Platform {
-                    width,
-                    depth,
-                    height,
-                } => {
-                    world.add_box(BoxCollider::new(
-                        origin + DVec3::new(0.0, 0.5 * height, 0.0),
-                        DVec3::new(0.5 * width, 0.5 * height, 0.5 * depth),
-                    ));
+                // A `BoxCollider` is a centre and half-extents, which is exactly
+                // what `Placement` answers — and a `platform` stands *on* its
+                // origin, so that centre is half a height up. Read from there
+                // rather than repeated, so the collider and the box a tool draws
+                // cannot disagree.
+                Shape::Platform { .. } => {
+                    let (centre, half_extents) =
+                        surface.placement().expect("a surface is a thing in space");
+                    world.add_box(BoxCollider::new(centre, half_extents));
                 }
                 Shape::Dome { radius } => {
                     world.add_sphere(Sphere::new(origin, radius));
@@ -1238,6 +1313,8 @@ impl Map {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crcbl::scene::scn::SystemChunk;
 
     use crcbl::phys::Aabb;
     use crcbl::reflect::{Kind, Value, get_path, set_path};
@@ -1412,13 +1489,13 @@ mod tests {
         (scene, ids, world)
     }
 
-    /// The codecs a puppet map is read and written through.
+    /// The codecs a puppet map is read and written through — this sample's own
+    /// registration rather than a second list, so the writer test is about the
+    /// vocabulary the sample ships.
     fn codecs() -> Vec<Box<dyn SystemChunk>> {
-        vec![
-            chunk_of::<Surface>(SURFACES),
-            chunk_of::<Spawn>(SPAWN_POINT),
-            chunk_of::<Sun>(SUN),
-        ]
+        let mut registry = Registry::new();
+        register_components(&mut registry);
+        registry.codecs()
     }
 
     /// Asserts a committed file is what the writer wrote, and says *where* it

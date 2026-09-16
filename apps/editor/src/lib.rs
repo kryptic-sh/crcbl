@@ -20,8 +20,10 @@
 //! * [`document`] — the scene, the [`World`](crcbl::ecs::World) it loaded into,
 //!   the selection, the history and the save. Runs with no device and no
 //!   window, which is how the gates hold it.
-//! * [`board`] — the one component vocabulary this slice knows, because there
-//!   is no component registry in the tree yet.
+//! * [`scene`] — this build's component vocabulary and the document it opens
+//!   on. **The only module that names a component type**, and it names no
+//!   game: the rest of the crate asks a [`Registry`](crcbl::registry::Registry)
+//!   and opens any scene whose systems are in it.
 //! * [`app`] — the window, the device and the loop, which does nothing but call
 //!   [`document`].
 //! * [`args`] — the command line.
@@ -36,9 +38,9 @@
 
 pub mod app;
 pub mod args;
-pub mod board;
 pub mod command;
 pub mod document;
+pub mod scene;
 
 pub use app::{Editor, EditorError, Summary, run};
 pub use args::{Invocation, Options, USAGE, parse};

@@ -167,12 +167,14 @@ crcbl-reflect-derive = { path = "crates/crcbl-reflect-derive", version = "0.1.0"
 # wherever it is named — see that crate's own manifest for why it is under
 # `apps/` rather than beside `crcbl-golden`.
 crcbl-sample-test = { path = "apps/crcbl-sample-test", version = "0.1.0" }
-# **The one sample another member depends on**, and the only arrow in this table
-# that points at a game. `apps/editor` opens `apps/breakout`'s board, and a
-# `.scn/` chunk cannot be read without the type its rows are of — so until there
-# is a component registry the editor's scene vocabulary is breakout's `Brick`.
-# See `apps/editor/Cargo.toml`, which says what removes this.
+# **The two samples another member names, and only as dev-dependencies.**
+# `apps/editor`'s `tests/vocabularies.rs` opens both of their committed scenes
+# through `crcbl::registry`, which is what says a tool opens *any* registered
+# scene rather than the one game it was built against. Nothing in this table
+# reaches a shipped binary from a sample: `cargo tree -p editor -e normal` names
+# neither. See `apps/editor/Cargo.toml`.
 breakout = { path = "apps/breakout", version = "0.1.0" }
+puppet = { path = "apps/puppet", version = "0.1.0" }
 bytemuck = { version = "1", features = ["derive"] }
 
 [workspace.lints.rust]

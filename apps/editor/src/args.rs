@@ -19,7 +19,7 @@ pub const DEFAULT_TICK_HZ: u32 = 60;
 pub struct Options {
     /// The half every binary in this workspace shares.
     pub common: Common,
-    /// The `.scn/` directory to open, or [`None`] for the compiled-in board.
+    /// The `.scn/` directory to open, or [`None`] for the compiled-in scene.
     pub scene: Option<std::path::PathBuf>,
 }
 
@@ -76,9 +76,10 @@ USAGE:
 
 ARGS:
     <SCENE_DIR>          A .scn/ scene directory to open. Saving writes back
-                         over it. Without one the editor opens the board
-                         apps/breakout reads its brick grid out of, which is
-                         compiled in and has no directory — Ctrl+S on it says
+                         over it. Its systems must be ones this build
+                         registers; one it does not is refused by name. Without
+                         a directory the editor opens the greybox scene compiled
+                         into it, which has nowhere to save — Ctrl+S on it says
                          so rather than guessing where to write.
 
 EDITING:
@@ -132,9 +133,9 @@ mod tests {
         parse(args.iter().map(|arg| (*arg).to_owned()))
     }
 
-    /// No argument at all opens the compiled-in board.
+    /// No argument at all opens the compiled-in scene.
     #[test]
-    fn no_positional_argument_opens_the_built_in_board() {
+    fn no_positional_argument_opens_the_built_in_scene() {
         let Invocation::Run(options) = run(&[]) else {
             panic!("an empty command line is a run");
         };

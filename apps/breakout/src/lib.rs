@@ -50,7 +50,8 @@ pub use args::{Invocation, Options, USAGE, parse};
 // because `Options` is: a field nobody outside this crate can name is one they
 // cannot construct an `Options` around.
 //
-// `BOARD` and `built_in_source` are public for a second reader: `apps/editor`
-// opens this game's committed board as its default document, and `.scn/` is the
-// engine's format rather than this game's. See `scene::built_in_source`.
-pub use scene::{BOARD, Board, Brick, built_in_source};
+// `BOARD`, `built_in_source` and `register_components` are public for a second
+// reader: a tool opens this game's committed board through the engine's
+// component registry, and `.scn/` is the engine's format rather than this
+// game's. See `scene::built_in_source` and `scene::register_components`.
+pub use scene::{BOARD, Board, Brick, built_in_source, register_components};

@@ -49,7 +49,8 @@ use crcbl::assets::{AssetSource, DirSource, MemorySource};
 use crcbl::ecs::{ComponentHash, System, World};
 use crcbl::math::DVec3;
 use crcbl::reflect::Reflect;
-use crcbl::scene::scn::{Scene, ScnError, SystemChunk, chunk_of};
+use crcbl::registry::{Placement, Registry};
+use crcbl::scene::scn::{Scene, ScnError};
 use crcbl::serde::{Deserialize, Serialize};
 
 /// The one system a breakout board is made of, and so the manifest entry, the
@@ -123,6 +124,29 @@ impl ComponentHash for Brick {
     }
 }
 
+/// A brick's own box, which is what its collider already is.
+///
+/// The two fields spell a centre and half extents directly, so this is the
+/// identity — and it is still worth having, because it is what lets a tool ask
+/// *where* a row is without knowing that a brick's position is called
+/// `position`. See [`crcbl::registry::Placement`].
+impl Placement for Brick {
+    fn placement(&self) -> Option<(DVec3, DVec3)> {
+        Some((self.position(), self.half_extents()))
+    }
+}
+
+/// This game's scene vocabulary: one component, under the name its chunk file is
+/// spelled with.
+///
+/// **The one place `bricks` is joined to [`Brick`].** [`Board::load`] uses it and
+/// so does any tool that opens this game's board, so the vocabulary the game
+/// ships and the vocabulary an editor sees are the same list rather than two that
+/// agree today — `docs/plan/08-editor.md`'s component registry.
+pub fn register_components(registry: &mut Registry) {
+    registry.register::<Brick>(BRICKS);
+}
+
 /// A board's brick layout, in the order its chunk file spells it.
 ///
 /// Not `Eq`: the positions are floats. [`PartialEq`] is what
@@ -156,10 +180,11 @@ impl Board {
     /// text that is not this format, a header this build does not read, or a
     /// manifest naming a system that is not `bricks`.
     pub fn load(source: &dyn AssetSource, dir: &Path) -> Result<Self, ScnError> {
-        let codecs: Vec<Box<dyn SystemChunk>> = vec![chunk_of::<Brick>(BRICKS)];
+        let mut registry = Registry::new();
+        register_components(&mut registry);
         let mut world = World::new();
-        world.register_system(Box::new(System::<Brick>::new(BRICKS)));
-        let (_scene, ids) = Scene::load(source, dir, &codecs, &mut world)?;
+        registry.register_systems(&mut world);
+        let (_scene, ids) = Scene::load(source, dir, &registry.codecs(), &mut world)?;
 
         // Sorted by the file's own id rather than taken in storage order, so
         // the grid is spawned in the order the chunk spells it however the ECS
@@ -356,9 +381,12 @@ mod tests {
     #[test]
     fn the_committed_board_is_what_the_writer_writes() {
         let (scene, ids, mut world) = generated();
-        let codecs: Vec<Box<dyn SystemChunk>> = vec![chunk_of::<Brick>(BRICKS)];
+        // This game's own registration rather than a second list, so the writer
+        // test is about the vocabulary the game ships.
+        let mut registry = Registry::new();
+        register_components(&mut registry);
         let files = scene
-            .save(&mut world, &ids, &codecs)
+            .save(&mut world, &ids, &registry.codecs())
             .expect("a generated board is writable");
 
         assert_committed("scene.ron", &files["scene.ron"], BOARD_SCENE_RON);

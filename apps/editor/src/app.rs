@@ -57,8 +57,8 @@ use crate::document::{Document, EditError};
 
 /// How far one arrow key moves the selection, in metres.
 ///
-/// A centimetre, which is `apps/breakout`'s `Brick` own `#[reflect(step)]` on
-/// the half extents — the step that component says a drag should take. Holding
+/// A centimetre, which is the `#[reflect(step)]` [`crate::scene::Block`] carries
+/// on its half extents — the step a component says a drag should take. Holding
 /// the key repeats, so a coarse move is a held key rather than a second
 /// constant.
 pub const NUDGE_M: f64 = 0.01;
@@ -607,10 +607,14 @@ fn sun() -> DirectionalLight {
     DirectionalLight::default()
 }
 
-/// Opens what the command line named, or the compiled-in board.
+/// Opens what the command line named, or the compiled-in scene.
+///
+/// Both through [`crate::scene::vocabulary`], which is the components **this**
+/// build knows: a directory whose manifest names a system it does not is refused
+/// by that system's name rather than opened with the chunk missing.
 fn open_document(options: &Options) -> Result<Document, EditorError> {
     let document = match &options.scene {
-        Some(path) => Document::open_dir(path.clone()),
+        Some(path) => Document::open_dir(path.clone(), crate::scene::vocabulary()),
         None => Document::built_in(),
     };
     document.map_err(LoopError::Game)
@@ -952,8 +956,10 @@ mod tests {
         assert_eq!(summary.run.exit, ExitReason::FrameBudget);
         assert_eq!(
             summary.entities,
-            crcbl_breakout::Board::built_in().bricks().len(),
-            "the run opened a different board from the one the game reads",
+            Document::built_in()
+                .expect("the compiled-in scene is a scene")
+                .entity_count(),
+            "the run opened a different document from the compiled-in one",
         );
         assert_eq!(summary.commands, 0, "nothing was edited");
     }
@@ -1007,10 +1013,10 @@ mod tests {
         editor.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
-    /// Saving the compiled-in board says there is nowhere to write rather than
+    /// Saving the compiled-in scene says there is nowhere to write rather than
     /// guessing one, and leaves the document dirty.
     #[test]
-    fn saving_the_built_in_board_is_refused_and_leaves_it_dirty() {
+    fn saving_the_built_in_scene_is_refused_and_leaves_it_dirty() {
         let mut editor = Editor::start(&options(2)).expect("headless starts");
         editor.document_mut().select(Some(SceneEntityId(0)));
         editor.act(&Action::Nudge {

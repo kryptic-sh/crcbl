@@ -734,6 +734,7 @@ version = "0.1.0"
 dependencies = [
  "breakout",
  "crcbl",
+ "puppet",
  "tempfile",
 ]
 
