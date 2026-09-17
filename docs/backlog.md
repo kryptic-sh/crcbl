@@ -990,6 +990,18 @@ Sample and browser follow-up:
   remain unchanged. These are implementation and coverage requirements, not a
   completed retained-scratch trial.
 
+  A smaller related candidate is the local `slot_matrices` closure in
+  `ForwardRenderer::begin_frame_body`: it collects owned `Mat4` runs from the
+  frame scene's existing `light_view_proj` values. The changed-record fixture
+  reported 211,200 bytes in 550 blocks for the point run and 35,200 bytes in 550
+  blocks for the spot run at the observed matrix-collection sites. Borrowing the
+  encoded matrix run for view assembly, with bounded matrix materialization
+  where point face planes require it, could remove that heap storage without
+  retaining another cache. This is a source candidate, not a changed-caller
+  result. Price it after the larger scratch trial; compare complete matrices,
+  frusta, face planes, view order and shadow-off reflective producers before
+  keeping it. Platform stack use and CPU benefit remain unverified.
+
   The original `shadow_group_record` capacity hint reserves for
   `shadow::POINT_FACES` uniform blocks, even for a cascade with one view, and
   omits record headers, view IDs and cull plane bytes. A source-format capacity
