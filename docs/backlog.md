@@ -1054,13 +1054,17 @@ Sample and browser follow-up:
   `cluster_heat`, including its level-group lookup, projected error, stretch
   bound and heat ramp. The inspected bodies use view/camera, pool, overlay and
   previous-view fields rather than punctual sampling matrices. This source
-  coverage still leaves decoding/packing helper dependencies and compiled
-  masked/reflective/task/mesh artifacts unverified. Confirm them before unused
-  fields can be canonicalized. Do not weaken cache records by ignoring GPU
-  inputs. Preserve cadence, layout, skinned previous/current data, reflective
-  and probe producers, failure recovery and native image parity. Price native
-  redraw cost before ranking this ahead of measured scratch allocation; no
-  changed-caller optimization or GPU saving has been verified.
+  review also covered snorm/unorm/RGBA unpacking, quaternion rotation and
+  QTangent decoding, corner unpacking, material-mode and cone predicates,
+  angle-preservation checks, LOD tint and frame-word packing. Those helper
+  bodies use arguments and pool/table data rather than sampling matrices.
+  Compiled masked/reflective/task/mesh artifact dependencies remain unverified.
+  Confirm them before unused fields can be canonicalized. Do not weaken cache
+  records by ignoring GPU inputs. Preserve cadence, layout, skinned
+  previous/current data, reflective and probe producers, failure recovery and
+  native image parity. Price native redraw cost before ranking this ahead of
+  measured scratch allocation; no changed-caller optimization or GPU saving has
+  been verified.
 
   A smaller related candidate is the local `slot_matrices` closure in
   `ForwardRenderer::begin_frame_body`: it collects owned `Mat4` runs from the
