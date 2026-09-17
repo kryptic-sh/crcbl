@@ -990,6 +990,20 @@ Sample and browser follow-up:
   remain unchanged. These are implementation and coverage requirements, not a
   completed retained-scratch trial.
 
+  Refusal-fixture preparation inspected `NullDevice::write_buffer` and
+  `Recorder` in `crates/crcbl-hal/src/null/mod.rs` and
+  `crates/crcbl-hal/src/null/record.rs`. A valid undersized HostUpload buffer
+  rejects an oversized block with `HalError::InvalidDescriptor` before changing
+  bytes or recording a write, without a validation violation. A standalone
+  actual-null-device probe exercised a captured complete shadow block, checked
+  unchanged bytes and absent write events, then observed a valid retry's bytes
+  and write event with clean validation and teardown. Making the buffer fit
+  failed the refusal observation; the restored probe passed. Use this mechanism
+  for first, middle and last shadow-uniform failures in the private production
+  tests rather than adding a general fault API. This verifies the leaf refusal
+  mechanism only: retained renderer capacity, pending commits, next-frame
+  recovery, draw-generation and gather failure paths remain unverified.
+
   A smaller related candidate is the local `slot_matrices` closure in
   `ForwardRenderer::begin_frame_body`: it collects owned `Mat4` runs from the
   frame scene's existing `light_view_proj` values. The changed-record fixture
