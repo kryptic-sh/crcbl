@@ -1068,13 +1068,24 @@ Sample and browser follow-up:
   accesses, and found only `ambient`, `camera_position`, `lod_params`,
   `previous_view_proj`, `vertex_pool` and `view_proj`. Injecting a
   `light_view_proj` access failed before the restored audit passed. This is
-  SPIR-V task/mesh evidence only; compiled masked/reflective dependencies and
-  other artifact formats remain unverified. Confirm them before unused fields
-  can be canonicalized. Do not weaken cache records by ignoring GPU inputs.
-  Preserve cadence, layout, skinned previous/current data, reflective and probe
-  producers, failure recovery and native image parity. Price native redraw cost
-  before ranking this ahead of measured scratch allocation; no changed-caller
-  optimization or GPU saving has been verified.
+  SPIR-V task/mesh evidence only. A separate generated-WGSL audit followed
+  declared function calls reachable from `vertexMain`, `depthVertexMain`,
+  `depthMaskedFragmentMain` and `rsmFragmentMain`, checking actual frame-field
+  references. It required observed vertex frame reads, confirmed masked and
+  reflective traversal reached the shared base-color helper, and rejected
+  unsupported whole-frame references. No punctual matrix read was reachable; an
+  injected matrix read failed before restoration passed. WGSL shared vertex
+  dependencies included ambient, previous-view, vertex-pool and view-projection
+  fields; the depth-only vertex path read the view projection, and the inspected
+  masked/reflective fragment paths read no frame fields. These artifact audits
+  do not execute shaders or establish image parity. Masked/reflective SPIR-V,
+  DXIL/MSL dependencies, native images and actual GPU cost remain unverified.
+  Confirm the relevant paths before unused fields can be canonicalized. Do not
+  weaken cache records by ignoring GPU inputs. Preserve cadence, layout, skinned
+  previous/current data, reflective and probe producers, failure recovery and
+  native image parity. Price native redraw cost before ranking this ahead of
+  measured scratch allocation; no changed-caller optimization or GPU saving has
+  been verified.
 
   A smaller related candidate is the local `slot_matrices` closure in
   `ForwardRenderer::begin_frame_body`: it collects owned `Mat4` runs from the
