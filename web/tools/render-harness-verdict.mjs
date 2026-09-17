@@ -171,7 +171,7 @@ function verdict(entry) {
         entry.driver.replayFailure ??
         entry.driver.error ??
         (entry.driver.timedOut
-          ? `timed out after ${entry.driver.frames} frames`
+          ? `timed out after ${entry.driver.elapsedMs} ms (${entry.driver.frames} frames)`
           : `state ${entry.driver.stateName}`);
       why.push(`did not render: ${String(detail).split('\n')[0]}`);
     }

@@ -63,12 +63,21 @@ function toBase64(bytes) {
 }
 
 /**
- * A hard ceiling on frames spent driving one scene, so a backend that never
- * completes an open cannot hang the whole gate. Six hundred frames is ten
- * seconds at 60 Hz — orders of magnitude more than an open that is going to
- * finish needs, and a clean "timed out" verdict for one that is not.
+ * A hard ceiling on the wall-clock time spent driving one scene, so a backend
+ * that never completes an open cannot hang the whole gate.
+ *
+ * **Time, not frames.** It was a count of 600 animation frames, "ten seconds at
+ * 60 Hz" — but a scene awaits its GPU work one animation frame at a time, and a
+ * slow rasteriser spends more of them waiting. On 2026-09-17 the Linux
+ * SwiftShader leg timed out `meadow_shells` and `meadow_blades` at 600 frames
+ * while Windows' and macOS' legs rendered both, and a local SwiftShader run
+ * rendered them in 163 and 148. Each scene reports `frames` and `elapsedMs`,
+ * so the next slow scene is a measurement rather than a guess.
+ *
+ * It must stay under `STALL_TIMEOUT_MS` in `web/tools/render-harness-e2e.mjs`,
+ * or the driver gives up on the run before a stuck scene reports itself.
  */
-const MAX_FRAMES = 600;
+const SCENE_TIMEOUT_MS = 60_000;
 
 /**
  * How many device errors one scene records before the rest are only counted.
@@ -129,6 +138,7 @@ async function main() {
    *   fatal: string | null,
    *   scenes: Array<{ scene: string, state: number, stateName: string,
    *                   rendered: boolean, error: string, frames: number,
+   *                   elapsedMs: number,
    *                   timedOut: boolean, replayFailure: string | null,
    *                   fatal: string | null, deviceErrors: string[],
    *                   deviceErrorsDropped: number,
@@ -286,6 +296,8 @@ async function main() {
       /** What the module threw while this scene was being driven, or null. */
       let fatal = null;
       let frames = 0;
+      const startedAt = performance.now();
+      let elapsedMs = 0;
       let state = STATE.IDLE;
       let error = '';
       try {
@@ -296,7 +308,8 @@ async function main() {
           state = exports.__crcbl_render_harness_step();
           pump();
           frames += 1;
-          if (frames >= MAX_FRAMES) break;
+          elapsedMs = performance.now() - startedAt;
+          if (elapsedMs >= SCENE_TIMEOUT_MS) break;
         }
         error = readUtf8(
           memory,
@@ -330,7 +343,7 @@ async function main() {
       }
 
       const timedOut =
-        frames >= MAX_FRAMES &&
+        elapsedMs >= SCENE_TIMEOUT_MS &&
         state !== STATE.RENDERED &&
         state !== STATE.FAILED;
       result.scenes.push({
@@ -343,6 +356,7 @@ async function main() {
         rendered: state === STATE.RENDERED && frame !== null,
         error,
         frames,
+        elapsedMs: Math.round(elapsedMs),
         timedOut,
         replayFailure,
         fatal,

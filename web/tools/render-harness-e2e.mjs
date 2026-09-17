@@ -143,7 +143,7 @@ function printTable(scenes) {
       : scene.replayFailure
         ? `replay: ${scene.replayFailure.split('\n')[0]}`
         : scene.timedOut
-          ? `timed out after ${scene.frames} frames`
+          ? `timed out after ${scene.elapsedMs} ms (${scene.frames} frames)`
           : scene.error ||
             (refused.length > 0
               ? `device: ${refused[0]}${refused.length > 1 ? ` (+${refused.length - 1} more)` : ''}`
