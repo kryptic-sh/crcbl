@@ -1021,14 +1021,21 @@ Sample and browser follow-up:
   Inspect the `view_block` closure in `ForwardRenderer::begin_frame_body`:
   `..uniforms` carries primary frame fields into each shadow view, while
   `shadow_group_record` correctly serializes the complete uploaded blocks.
-  Inherited fields are a possible explanation for collateral invalidation, not
-  an established cause. Audit actual depth vertex, task and mesh shader field
-  reads and compare complete per-group blocks before deciding whether unused
-  fields can be canonicalized. Do not weaken cache records by ignoring GPU
-  inputs. Preserve cadence, layout, skinned previous/current data, reflective
-  and probe producers, failure recovery and native image parity. Price native
-  redraw cost before ranking this ahead of measured scratch allocation; no
-  changed-caller optimization or GPU saving has been verified.
+  Complete uploaded block comparisons before and after the point move found that
+  each unchanged cascade and the unchanged spot view differed only in
+  `light_view_proj`; every byte outside that encoded array matched. Its range
+  was derived from the actual `FrameUniforms::to_bytes` field order and resolved
+  shadow constants. Altering a byte outside the array failed the observation.
+  This establishes collateral cache-input changes in this fixture. The Slang and
+  generated WGSL `depthVertexMain` bodies read the view projection rather than
+  the punctual sampling matrices, but the full masked, task/mesh and reflective
+  shader dependency audit remains incomplete. Audit those actual field reads
+  before deciding whether unused fields can be canonicalized. Do not weaken
+  cache records by ignoring GPU inputs. Preserve cadence, layout, skinned
+  previous/current data, reflective and probe producers, failure recovery and
+  native image parity. Price native redraw cost before ranking this ahead of
+  measured scratch allocation; no changed-caller optimization or GPU saving has
+  been verified.
 
   A smaller related candidate is the local `slot_matrices` closure in
   `ForwardRenderer::begin_frame_body`: it collects owned `Mat4` runs from the
