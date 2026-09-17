@@ -143,15 +143,22 @@ fn bin_of_0( luminance_0 : f32) -> u32
 @workgroup_size(64, 1, 1)
 fn histogramMain(@builtin(global_invocation_id) thread_1 : vec3<u32>)
 {
-    var index_0 : u32 = thread_1.x;
-    if(index_0 >= (params_0.viewport_x_0 * params_0.viewport_y_0))
+    var texel_0 : vec2<u32> = thread_1.xy;
+    var _S9 : bool;
+    if((texel_0.x) >= (params_0.viewport_x_0))
+    {
+        _S9 = true;
+    }
+    else
+    {
+        _S9 = (texel_0.y) >= (params_0.viewport_y_0);
+    }
+    if(_S9)
     {
         return;
     }
-    var _S9 : u32 = index_0 % params_0.viewport_x_0;
-    var _S10 : u32 = index_0 / params_0.viewport_x_0;
-    var _S11 : vec3<i32> = vec3<i32>(vec2<i32>(vec2<u32>(_S9, _S10)), i32(0));
-    var _S12 : u32 = atomicAdd(&(histogram_0[bin_of_0(luma_0((textureLoad((scene_0), ((_S11)).xy, ((_S11)).z)).xyz))]), u32(1));
+    var _S10 : vec3<i32> = vec3<i32>(vec2<i32>(texel_0), i32(0));
+    var _S11 : u32 = atomicAdd(&(histogram_0[bin_of_0(luma_0((textureLoad((scene_0), ((_S10)).xy, ((_S10)).z)).xyz))]), u32(1));
     return;
 }
 

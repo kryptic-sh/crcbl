@@ -490,8 +490,8 @@ impl Exposure {
         // One invocation per texel of the scene target, and never zero: the
         // extent is floored at one texel, and Metal rejects an empty dispatch
         // outright rather than treating it as a no-op.
-        let texels = extent.0.max(1).saturating_mul(extent.1.max(1));
-        let texel_groups = texels.div_ceil(WORKGROUP_SIZE);
+        let row_groups = extent.0.max(1).div_ceil(WORKGROUP_SIZE);
+        let rows = extent.1.max(1);
         let bind = Rc::clone(&group);
         graph
             .add_compute_pass("exposure-histogram")
@@ -504,7 +504,7 @@ impl Exposure {
                 let encoder = ctx.encoder();
                 encoder.bind_compute_pipeline(histogram);
                 encoder.bind_group(0, group, &[], pipeline_layout);
-                encoder.dispatch(texel_groups, 1, 1);
+                encoder.dispatch(row_groups, rows, 1);
             });
 
         let bind = group;
@@ -544,6 +544,89 @@ impl Exposure {
             .chain(self.measured)
         {
             device.destroy_buffer(buffer);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TransientImageDesc, TransientPool};
+    use crcbl_hal::{
+        ClearValue, CommandEncoderDesc, DeviceDesc, Features, Instance, Limits, LoadOp, QueueKind,
+        StoreOp,
+        null::{Command, NullInstance},
+    };
+
+    #[test]
+    fn histogram_dispatch_stays_within_the_portable_budget() {
+        let backend = NullInstance::portable();
+        let recorder = backend.recorder();
+        let adapter = backend.adapters().remove(0);
+        let device = backend
+            .create_device(&DeviceDesc {
+                required_features: Features::COMPUTE,
+                ..DeviceDesc::for_adapter(adapter.id)
+            })
+            .expect("device");
+        let queue = device.queue(QueueKind::Graphics).expect("queue");
+        let limits = Limits::minimum();
+        for extent in [
+            (3840, 2160),
+            (0, 0),
+            (1, 1),
+            (63, 193),
+            (64, 193),
+            (65, 193),
+            (limits.max_image_2d, limits.max_image_2d),
+        ] {
+            let normalized = (extent.0.max(1), extent.1.max(1));
+            let mut exposure = Exposure::new(device.as_ref(), queue, 2).expect("exposure");
+            exposure
+                .begin_frame(device.as_ref(), 0, extent, None)
+                .expect("parameters");
+            let mut pool = TransientPool::new();
+            let mut graph = RenderGraph::new(queue);
+            let scene = graph.create_image("scene", TransientImageDesc::scene_color(normalized));
+            graph
+                .add_render_pass("scene-clear")
+                .color(scene, LoadOp::Clear, StoreOp::Store, ClearValue::default())
+                .execute(|_| {});
+            exposure.add_passes(&mut graph, 0, extent, scene);
+            let compiled = graph.compile(&pool).expect("compiled");
+            recorder.clear();
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            compiled
+                .execute(device.as_ref(), &mut pool, encoder.as_mut(), None)
+                .expect("recorded");
+            let command_buffer = encoder.finish().expect("finished");
+            let dispatches: Vec<_> = recorder
+                .commands()
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Dispatch { x, y, z } => Some([x, y, z]),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(dispatches.len(), Exposure::PASSES as usize, "{extent:?}");
+            for dispatch in &dispatches {
+                assert!(
+                    dispatch.iter().all(
+                        |&axis| axis > 0 && axis <= limits.max_compute_workgroups_per_dimension
+                    ),
+                    "{extent:?}: {dispatch:?} exceeds the portable dispatch budget"
+                );
+            }
+            assert_eq!(
+                dispatches[1],
+                [normalized.0.div_ceil(WORKGROUP_SIZE), normalized.1, 1],
+                "{extent:?}"
+            );
+            device.destroy_command_buffer(command_buffer);
+            exposure.destroy(device.as_ref());
+            pool.destroy(device.as_ref());
+            recorder.assert_valid();
         }
     }
 }

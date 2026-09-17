@@ -189,19 +189,11 @@ pub(crate) fn render_mesh_lit(
     // a light's *share of the frame* and so needs pixels to measure it in —
     // gets its own frame out of the same path rather than a second copy of it.
     //
-    // What the constant used to be asserted against is asserted here instead,
-    // and it is the condition that actually binds: `copy_image_to_buffer` wants
-    // a row pitch of 256 bytes on wgpu and D3D12, which four bytes a texel
-    // makes a width divisible by 64.
     let (width, height) = acquired.extent;
-    assert!(
-        (width * 4).is_multiple_of(256),
-        "a ring {width} texels wide has a {}-byte row, which is not the 256-byte copy pitch \
-         wgpu and D3D12 enforce",
-        width * 4
-    );
-
-    let color_bytes = u64::from(width) * u64::from(height) * 4;
+    const COPY_ROW_ALIGNMENT: u32 = 256;
+    let color_pitch = (width * 4).next_multiple_of(COPY_ROW_ALIGNMENT);
+    let hdr_pitch = (width * 8).next_multiple_of(COPY_ROW_ALIGNMENT);
+    let color_bytes = u64::from(color_pitch) * u64::from(height);
     let staging = device
         .create_buffer(&BufferDesc {
             label: Some("mesh readback"),
@@ -210,10 +202,7 @@ pub(crate) fn render_mesh_lit(
             memory: MemoryLocation::HostReadback,
         })
         .expect("a readback buffer");
-    // `Rgba16Float`: four channels of two bytes. The row is `4 * 2 * 256`
-    // bytes wide, so it satisfies the 256-byte copy pitch wgpu and D3D12
-    // enforce without this having to pad — see `MESH_EXTENT`.
-    let hdr_bytes = u64::from(width) * u64::from(height) * 8;
+    let hdr_bytes = u64::from(hdr_pitch) * u64::from(height);
     let hdr_staging = hdr.as_ref().map(|_| {
         device
             .create_buffer(&BufferDesc {
@@ -289,7 +278,7 @@ pub(crate) fn render_mesh_lit(
     encoder.copy_image_to_buffer(&BufferImageCopy {
         buffer: staging,
         buffer_offset: 0,
-        buffer_row_length: 0,
+        buffer_row_length: color_pitch / 4,
         buffer_image_height: 0,
         image: acquired.image,
         image_subresource: layers,
@@ -300,7 +289,7 @@ pub(crate) fn render_mesh_lit(
         encoder.copy_image_to_buffer(&BufferImageCopy {
             buffer: hdr_staging,
             buffer_offset: 0,
-            buffer_row_length: 0,
+            buffer_row_length: hdr_pitch / 8,
             buffer_image_height: 0,
             image: hdr_handle.get().expect("the probe pass ran"),
             image_subresource: layers,
@@ -329,15 +318,27 @@ pub(crate) fn render_mesh_lit(
     if let (Some(hdr_staging), Some(hdr)) = (hdr_staging, hdr) {
         *hdr = poisoned(hdr_bytes as usize);
         headless.readback(hdr_staging, hdr_bytes, hdr);
+        *hdr = tight_rows(core::mem::take(hdr), width as usize * 8, hdr_pitch as usize);
         device.destroy_buffer(hdr_staging);
     }
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);
 
+    let color = tight_rows(color, width as usize * 4, color_pitch as usize);
     let order = match headless.format {
         Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
         _ => crcbl_golden::ChannelOrder::Rgba,
     };
     crcbl_golden::Image::from_readback(width, height, &color, order)
         .expect("the readback is exactly one image")
+}
+
+fn tight_rows(bytes: Vec<u8>, row_bytes: usize, pitch: usize) -> Vec<u8> {
+    if row_bytes == pitch {
+        return bytes;
+    }
+    bytes
+        .chunks_exact(pitch)
+        .flat_map(|row| row[..row_bytes].iter().copied())
+        .collect()
 }

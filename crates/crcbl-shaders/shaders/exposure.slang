@@ -301,12 +301,10 @@ void reduceMain()
 
 /// One invocation per texel of the scene target, each adding one to its bin.
 ///
-/// **A linear dispatch over the frame rather than a two-dimensional one**, so
-/// the workgroup is the `WORKGROUP_SIZE` every other compute pass in this
-/// engine declares and `crcbl_render` sizes it from the same constant. The
-/// texel is recovered with a divide and a modulo, which is two integer
-/// operations against a bound that would otherwise be two dispatch axes to keep
-/// in step with two extents.
+/// One dispatch row per image row keeps the group count on each axis within
+/// the portable budget, instead of putting the entire image on the x axis.
+/// The host sizes each row from `WORKGROUP_SIZE`; the edge guard excludes the
+/// unused lanes of its final group.
 ///
 /// **Straight to the buffer, with no workgroup-local tile in front of it.** The
 /// tile is the standard optimisation and it is deliberately not here yet: a
@@ -319,12 +317,11 @@ void reduceMain()
 [numthreads(64, 1, 1)]
 void histogramMain(uint3 thread: SV_DispatchThreadID)
 {
-    uint index = thread.x;
-    if (index >= params.viewport_x * params.viewport_y)
+    uint2 texel = thread.xy;
+    if (texel.x >= params.viewport_x || texel.y >= params.viewport_y)
     {
         return;
     }
-    uint2 texel = uint2(index % params.viewport_x, index / params.viewport_x);
     float3 color = scene.Load(int3(int2(texel), 0)).rgb;
     histogram[bin_of(luma(color))].add(1);
 }

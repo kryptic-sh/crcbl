@@ -1005,6 +1005,15 @@ for §5's reason — the exponent of an IEEE-754 float _is_ the floor of its bas
 logarithm, so the bins are identical on all four backends where the
 transcendental would not be.
 
+**Histogram dispatch now follows image rows (2026-09-17).** The host dispatches
+row workgroups on x and image rows on y; the shader addresses `thread.xy` and
+rejects unused edge lanes. This preserves full-resolution binning while keeping
+large frames within the portable per-axis workgroup-count budget. A recorder
+assertion checks actual dispatches on the minimum-capability adapter, and GPU
+fixtures compare odd-width histograms against the same frame's HDR pixels.
+Shared mesh readback pads rows for backend copy alignment and removes that
+padding before host image processing.
+
 **Adaptation followed the same day.** The reduce no longer writes what it
 measured; it writes a step toward it from what the frame before was exposed by,
 which is the slot behind it in the same ring —

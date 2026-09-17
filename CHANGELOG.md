@@ -3767,6 +3767,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   because float addition is not associative and a tree would sum the bins in an
   order the device schedules.
 
+  Histogram dispatch follows image rows instead of flattening the frame onto the
+  x axis, keeping large images within the portable workgroup-count budget.
+  Independent pixel bounds preserve every texel at partial workgroup edges.
+
   **It is not in `DEFAULT_STACK`**, and it is the first post effect with no
   additive-zero form — a measured exposure is by definition not the one the
   caller set, so a view has to ask. A frame that does not ask draws exactly the

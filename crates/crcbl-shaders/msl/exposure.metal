@@ -296,39 +296,56 @@ uint bin_of_0(float luminance_0)
 }
 
 
-#line 320
+#line 318
 [[kernel]] void histogramMain(uint3 thread_1 [[thread_position_in_grid]], atomic<uint> device* histogram_3 [[buffer(1)]], float device* previous_3 [[buffer(3)]], ExposureParams_0 constant* params_3 [[buffer(0)]], float device* measured_3 [[buffer(2)]], texture2d<float, access::sample> scene_3 [[texture(0)]])
 {
 
-#line 320
+#line 318
     thread KernelContext_0 kernelContext_2;
 
-#line 320
+#line 318
     (&kernelContext_2)->histogram_0 = histogram_3;
 
-#line 320
+#line 318
     (&kernelContext_2)->previous_0 = previous_3;
 
-#line 320
+#line 318
     (&kernelContext_2)->params_0 = params_3;
 
-#line 320
+#line 318
     (&kernelContext_2)->measured_0 = measured_3;
 
-#line 320
+#line 318
     (&kernelContext_2)->scene_0 = scene_3;
 
-    uint index_0 = thread_1.x;
-    if(index_0 >= (params_3->viewport_x_0 * params_3->viewport_y_0))
+    uint2 texel_0 = thread_1.xy;
+
+#line 320
+    bool _S9;
+    if((texel_0.x) >= (params_3->viewport_x_0))
+    {
+
+#line 321
+        _S9 = true;
+
+#line 321
+    }
+    else
+    {
+
+#line 321
+        _S9 = (texel_0.y) >= ((&kernelContext_2)->params_0->viewport_y_0);
+
+#line 321
+    }
+
+#line 321
+    if(_S9)
     {
         return;
     }
-    uint _S9 = index_0 % params_3->viewport_x_0;
-
-#line 327
-    uint _S10 = index_0 / params_3->viewport_x_0;
-    int3 _S11 = int3(int2(uint2(_S9, _S10)), int(0));
-    uint _S12 = atomic_fetch_add_explicit((&kernelContext_2)->histogram_0+bin_of_0(luma_0((((&kernelContext_2)->scene_0).read(vec<uint,2>(((_S11)).xy), uint(((_S11)).z))).xyz)), 1U, memory_order_relaxed);
+    int3 _S10 = int3(int2(texel_0), int(0));
+    uint _S11 = atomic_fetch_add_explicit((&kernelContext_2)->histogram_0+bin_of_0(luma_0((((&kernelContext_2)->scene_0).read(vec<uint,2>(((_S10)).xy), uint(((_S10)).z))).xyz)), 1U, memory_order_relaxed);
     return;
 }
 

@@ -20,7 +20,7 @@ use crate::harness::{Headless, poisoned};
 use crate::hdr::HdrTarget;
 use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, render_mesh_lit};
 use crcbl::hal::{
-    Barriers, BufferBarrier, BufferCopy, BufferDesc, BufferUsage, CommandEncoderDesc,
+    Barriers, BufferBarrier, BufferCopy, BufferDesc, BufferUsage, CommandEncoderDesc, Features,
     MemoryLocation, ResourceState, SubmitInfo,
 };
 use crcbl::math::Vec3;
@@ -88,7 +88,20 @@ fn draw_lit(
     adaptation: Option<ExposureAdaptation>,
     light: &DirectionalLight,
 ) -> Frame {
-    let headless = Headless::open_for_mesh();
+    draw_lit_at(auto, exposure, adaptation, light, MESH_EXTENT)
+}
+
+fn draw_lit_at(
+    auto: bool,
+    exposure: f32,
+    adaptation: Option<ExposureAdaptation>,
+    light: &DirectionalLight,
+    extent: (u32, u32),
+) -> Frame {
+    let headless = Headless::open_at(
+        extent,
+        Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
+    );
     let mut pool = TransientPool::new();
     let mut renderer =
         ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
@@ -121,7 +134,7 @@ fn draw_lit(
     headless.finish();
     assert_eq!(
         hdr.len(),
-        (TEXELS * 8) as usize,
+        (extent.0 * extent.1 * 8) as usize,
         "the scene target came back the wrong size, so every texel binned below \
          is at the wrong offset"
     );
@@ -223,11 +236,12 @@ fn read_back(headless: &Headless, buffers: ExposureBuffers) -> (Vec<u32>, f32) {
 /// The histogram the host builds from the same target, bin for bin.
 fn host_histogram(hdr: &HdrTarget) -> Vec<u32> {
     let mut bins = vec![0u32; BIN_COUNT as usize];
-    for y in 0..MESH_EXTENT.1 {
-        for x in 0..MESH_EXTENT.0 {
-            let [r, g, b, _] = hdr.pixel(x, y);
-            bins[bin_of(luma([r, g, b])) as usize] += 1;
-        }
+    for pixel in hdr.0.chunks_exact(8) {
+        let rgb = core::array::from_fn(|channel| {
+            let at = channel * 2;
+            crcbl_shaders::ltc::half_value(u16::from_le_bytes([pixel[at], pixel[at + 1]]))
+        });
+        bins[bin_of(luma(rgb)) as usize] += 1;
     }
     bins
 }
@@ -285,6 +299,35 @@ fn the_histogram_bins_every_texel_of_the_frame_the_host_reads_back() {
         "at most a thousandth of the frame may sit on the other side of a bin \
          edge from the host's arithmetic; {moved} of {TEXELS} did"
     );
+}
+
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn histogram_row_edges_match_the_same_frames_hdr_pixels() {
+    for extent in [(63, 193), (64, 193), (65, 193), (257, 193)] {
+        let frame = draw_lit_at(
+            true,
+            crcbl_shaders::tonemap::DEFAULT_EXPOSURE,
+            None,
+            &DirectionalLight::default(),
+            extent,
+        );
+        let (gpu, _) = frame.measured.expect("the histogram ran");
+        let host = host_histogram(&frame.hdr);
+        let texels = extent.0 * extent.1;
+        assert_eq!(gpu.iter().sum::<u32>(), texels, "{extent:?}");
+        assert_eq!(host.iter().sum::<u32>(), texels, "{extent:?}");
+        assert!(gpu.iter().filter(|count| **count > 0).count() > 1);
+        let moved: u32 = gpu
+            .iter()
+            .zip(host)
+            .map(|(gpu, host)| gpu.abs_diff(host))
+            .sum();
+        assert!(
+            moved * 1000 <= texels,
+            "{extent:?}: {moved} of {texels} differ"
+        );
+    }
 }
 
 /// **The reduce is the host's, and the tonemap applied what it wrote.**
