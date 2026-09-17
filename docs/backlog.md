@@ -1058,13 +1058,20 @@ Sample and browser follow-up:
   QTangent decoding, corner unpacking, material-mode and cone predicates,
   angle-preservation checks, LOD tint and frame-word packing. Those helper
   bodies use arguments and pool/table data rather than sampling matrices.
-  Compiled masked/reflective/task/mesh artifact dependencies remain unverified.
-  Confirm them before unused fields can be canonicalized. Do not weaken cache
-  records by ignoring GPU inputs. Preserve cadence, layout, skinned
-  previous/current data, reflective and probe producers, failure recovery and
-  native image parity. Price native redraw cost before ranking this ahead of
-  measured scratch allocation; no changed-caller optimization or GPU saving has
-  been verified.
+  Disassembly of committed `mesh_cluster.spv`, `mesh_cluster.mesh.spv` and
+  `mesh_cluster.amplified_mesh.spv` confirmed their actual entry points and
+  direct frame-member accesses. The guarded audit resolved member names and
+  constant indices, rejected unsupported frame-pointer uses, required observed
+  accesses, and found only `ambient`, `camera_position`, `lod_params`,
+  `previous_view_proj`, `vertex_pool` and `view_proj`. Injecting a
+  `light_view_proj` access failed before the restored audit passed. This is
+  SPIR-V task/mesh evidence only; compiled masked/reflective dependencies and
+  other artifact formats remain unverified. Confirm them before unused fields
+  can be canonicalized. Do not weaken cache records by ignoring GPU inputs.
+  Preserve cadence, layout, skinned previous/current data, reflective and probe
+  producers, failure recovery and native image parity. Price native redraw cost
+  before ranking this ahead of measured scratch allocation; no changed-caller
+  optimization or GPU saving has been verified.
 
   A smaller related candidate is the local `slot_matrices` closure in
   `ForwardRenderer::begin_frame_body`: it collects owned `Mat4` runs from the
