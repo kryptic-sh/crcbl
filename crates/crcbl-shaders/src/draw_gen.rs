@@ -28,12 +28,14 @@
 //! [`crcbl_render::ForwardRenderer`]: https://docs.rs/crcbl-render
 
 /// Invocations per workgroup, matching `[numthreads(64, 1, 1)]` on
-/// `binMain` and `scatterMain` in `shaders/draw_gen.slang`.
+/// the parallel entry points in `shaders/draw_gen.slang`.
 ///
 /// One `binMain` invocation owns bucket `i` if there is one *and* routes visible
 /// instance `i` if there is one, so a caller dispatches
 /// `max(buckets, visible_capacity).div_ceil(WORKGROUP_SIZE)` groups of it;
 /// `scatterMain` only scatters, so `visible_capacity.div_ceil(WORKGROUP_SIZE)`.
+/// `lateFinishMain` owns one bucket per invocation, so it needs
+/// `buckets.div_ceil(WORKGROUP_SIZE)` groups.
 /// `startsMain` is one invocation and declares `[numthreads(1, 1, 1)]`.
 pub const WORKGROUP_SIZE: u32 = 64;
 
@@ -614,7 +616,12 @@ mod tests {
     #[test]
     fn the_workgroup_size_matches_the_numthreads_draw_gen_slang_declares() {
         let source = include_str!("../shaders/draw_gen.slang");
-        for entry in ["binMain", "scatterMain"] {
+        for entry in [
+            "binMain",
+            "scatterMain",
+            "lateScatterMain",
+            "lateFinishMain",
+        ] {
             let declaration = format!(
                 "[numthreads({WORKGROUP_SIZE}, 1, 1)]\nvoid {entry}(uint3 thread: SV_DispatchThreadID)"
             );

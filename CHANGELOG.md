@@ -232,7 +232,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   faces it reaches and each face draws only its own, leaving the shadow atlas
   byte-identical. `CullStats::occlusion` counts early, late and small-feature
   rejects; `Scene::Occluders` (`crcbl screenshot --scene occluders`) is the
-  proving scene.
+  proving scene. Late-phase bucket finalization runs one GPU invocation per
+  bucket instead of walking every bucket serially, keeping many-bucket occlusion
+  frames from concentrating that work on one invocation.
 
 - **Mesh-blade grass with two levels of detail and clumps**
   (`docs/plan/57-grass.md` rung G2). A row with `look: BladeLook::Blades` is

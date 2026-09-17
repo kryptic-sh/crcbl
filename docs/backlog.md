@@ -3,6 +3,148 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+Current execution priority: performance work before feature expansion. Profile
+the relevant workload, preserve correctness, and measure the result before
+keeping an optimization. Authored interior and browser culling measurements, CPU
+draw-recording cost, and overlapping grass workloads remain open below.
+
+## Performance review and execution priority (2026-09-17)
+
+Performance work takes priority over feature expansion. Complete the review and
+the supported low-effort performance changes first, then resume feature and
+backlog implementation in the plans’ priority order. Review the full codebase
+for low-effort improvements, covering engine frame and tick paths, render graph
+and GPU passes, backend submission and uploads, UI layout and text, physics and
+ECS, animation, audio, jobs, networking, asset loading and cooking, samples, and
+browser integration. Follow call sites to distinguish steady-state work from
+startup, tools, tests, and opt-in diagnostics.
+
+The review is in progress; its coverage and ranked findings are not yet
+complete. Record candidates here with their symbols, workload, evidence,
+expected mechanism, and verification needed. Profiling must establish which
+candidates deserve implementation; no speedup is implied by a source scan.
+Measured parallel occlusion bucket finalization is the current slice. Authored
+interior and browser culling measurements, CPU draw-recording cost, and
+overlapping grass workloads remain open below.
+
+Initial source review findings (unpriced; not implementation priorities yet):
+
+- `crcbl_ui::tree::Ui::layout` collects root indices into a fresh `Vec` on each
+  layout. The tree already distinguishes roots by `parent`; iterating indices
+  while borrowing the layout fields could avoid this allocation. Measure an
+  unchanged editor panel and a changing large tree, then preserve layout and
+  focus behaviour. This is a small allocation candidate, not a demonstrated
+  frame-time bottleneck.
+- `crcbl_render::graph::compile`, `lifetimes` and `assign` build temporary
+  vectors each frame; `assign` sorts all resource indices before skipping
+  imported resources. Profile CPU graph compilation on shard and an empty graph
+  before deciding whether scratch reuse or transient-only sorting earns its
+  complexity. Preserve resource aliasing, barriers, lifetime ordering and
+  cross-frame import validation.
+- `crcbl_assets::Registry::poll` collects loading handles and clones each key
+  before a source read on each frame with pending assets. Check whether disjoint
+  borrows of `source` and the asset pool can remove that repeated allocation and
+  key copy. Measure a delayed browser source with many pending assets; loaded
+  registries are not the same workload.
+- `crcbl_client::Client::send_input` clones `pending_input` into an owned
+  protocol message before the codec copies it into a payload. A borrowed input
+  encoder could remove that intermediate copy while retaining input for later
+  sends. Check callers before implementation; measure bounded input payloads and
+  preserve bytes, tick identity, retry and authentication behaviour.
+- Initial review found existing reuse in `crcbl_anim::Clip::sample_into` and
+  `BlendSpace1d`, and in physics query and broadphase scratch. These are not
+  evidence for blanket allocation rewrites. `crcbl_audio::Mixer::fill` mixes
+  through retained voice storage; allocations found in output-building helpers
+  need their call sites checked before treating them as callback work.
+- `crcbl::engine::GpuContext::retire_to` waits on the submission timeline on
+  capable devices. Its `wait_idle` arm is the documented fallback for devices
+  without a timeline, not an unconditional hardware frame stall.
+
+Simulation and loading follow-up:
+
+- `crcbl_vfx::system::update` redraws each live particle's `Life` through
+  `particle::life` before shading. That repeats the PCG hash and immutable
+  base-size/spin ranges each step; lifetime is already stored separately. Price
+  large live effects before caching base size and spin, since caching increases
+  particle storage. Preserve seeded results, pool compaction, lifetime
+  retirement and curve evaluation.
+- Inspected wind sampling uses fixed layer taps and a stored weather direction,
+  without building temporary vectors; no low-effort allocation fix was found in
+  those functions. Gust arithmetic still runs with zero amplitude, but an
+  early-out needs dense-consumer measurements and identical calm-field results
+  before it is worth a change.
+- `crcbl_scene::scn::Scene::load` reads and parses scene and system files at
+  load time. Its formatting and owned data are not evidence of a per-frame
+  bottleneck; cooking, importer and large-scene load costs still need review
+  separately.
+
+- `crcbl_store::crash_ring::CrashRing::push` allocates owned tick bytes, but the
+  repository search found no caller outside its own module's examples and tests.
+  Capacity reuse is latent work, not a current sample-frame priority; revisit
+  when crash capture is wired into a running server. Input
+  `ActionMap::begin_tick` visits live actions to reset edges and resolve held
+  input; no allocation removal was established in the inspected entry points.
+  Inventory `Grid::find_slot` is a bounded placement search driven by inventory
+  operations, not proof of continuous tick cost.
+
+Sample and browser follow-up:
+
+- `apps/editor/src/app.rs::Editor::draw` walks `instances` and calls
+  `ForwardRenderer::set_instance` each frame. `InstancePool::set` reaches
+  `write_live` and `write`, which mark dirty ranges and advance the revision
+  even for unchanged authored data; `shadow_group_record` includes that
+  revision. Price idle-editor upload bytes, cache redraws and recording time.
+  Filtering unchanged document instances may be a small fix with a larger effect
+  than scratch allocation alone. Preserve edits, previous transforms,
+  hidden-view flags and slot reuse. Runtime benefit is not measured yet.
+- Input tick entry points in shard and puppet take `pending_keys` with
+  `mem::take` and drop the allocation after replay. A draining iterator could
+  retain capacity for later input bursts. This is event-driven allocation,
+  rather than an idle-frame bottleneck; check every equivalent caller and keep
+  tick-edge semantics before considering a shared fix.
+- Considered and declined: removing browser command-field copies without a
+  lifetime redesign. `gpu-stream.js::StreamReader::readField` produces owned
+  bytes, and `gpu-transport.js::takeCommandStream` releases the wasm stream
+  before replay; a view into released storage would be invalid. String copies
+  also support decoding a shared wasm memory. Profile copied bytes before
+  proposing a different streaming contract.
+- Shard and horde GPU frame entry points build a graph per frame and share
+  acquisition/submission plumbing through `GpuContext`; shard's inspected
+  row-label cloning was inside a test, not steady-state rendering.
+
+Backend and render-cache follow-up:
+
+- Revalidated P11's `VkCommandEncoder::use_object` linear deduplication and
+  `bind_group`'s collection and sorting of dynamic binding kinds. Price the
+  recording path before moving immutable layout metadata to layout creation or
+  changing reference tracking. Handle validation and deferred destruction must
+  remain complete.
+- Revalidated P13’s partition building in `ForwardRenderer::partitions` and
+  per-frame call lists: material-mode metadata is fixed, while partitions and
+  call vectors are rebuilt. Price unchanged scenes before caching them; retain
+  pipeline/material mode separation and frame-specific region offsets.
+- Revalidated P14 in `ssao::cached_group`: a cache hit returns immediately, but
+  callers such as the depth SSAO pass already built an owned entry vector. A
+  borrowed template or lazy entry builder is a small candidate worth pricing
+  ahead of graph-plan caching. Repeated hits must allocate fewer entries while
+  view changes still replace the group correctly.
+- Revalidated P17's pool creation in `VkCommandEncoder::begin` and destruction
+  in `VkDevice::destroy_command_buffer`. Reuse needs explicit completion and
+  queue-family ownership, so it carries more lifecycle risk than immutable
+  metadata or cache-hit allocation changes.
+- Native buffer-write inspection found mapped copying on Vulkan and Metal, and a
+  map/copy/unmap on D3D12. A persistent D3D12 mapping is only a candidate; its
+  runtime and dynamic-analysis verdict need a Windows host. WebGPU's
+  `Writer::clear` retains its byte storage; `write_buffer` chunking preserves
+  command-size limits, and neither is evidence for replacing that wire format.
+
+Coverage so far: inspected these functions and their surrounding blocks only,
+plus the server tick sequence. `crcbl_jobs::Pool::par_for` and `run_in_parallel`
+retain chunk storage and run a single chunk inline; the remaining worker and
+deque implementation has not yet been reviewed. The remaining subsystem,
+backend, sample, browser and tooling review is still open; this is not a
+full-codebase verdict.
+
 ## What UI rung 6 shipped without (2026-09-16)
 
 `crcbl_ui::tree`'s focus landed with the gaps below.
@@ -77,17 +219,66 @@ G2–G6 and T1–T2 are separate slices rather than gaps.
 
 ## What occlusion culling shipped without (2026-09-17)
 
-- **Decision: occlusion culling on by default.** It is off (`r_occlusion_cull`),
-  because in `Scene::Occluders` at 1920×1080 it costs an RX 7900 XTX 0.905
-  against 0.859 ms while saving lavapipe 12.5% of the frame (64.66 against 73.87
-  ms); in the open meadow, where nothing is hidden, it adds about 0.06 ms on
-  radv and 0.9 ms on lavapipe. The saving grows with what a hidden draw costs,
-  so the options are on everywhere, on for software and slower tiers only, or a
-  per-scene switch; a heavier proving scene (shard's interior, towers) would
-  decide it better than the crate-and-wall fixture.
+**Default remains a decision.** `r_occlusion_cull` is off. The original
+crate-and-wall fixture is too cheap to establish the default for detailed
+interiors. A controlled follow-up on 2026-09-17 kept
+`occluders_forward_on_path`'s walls, object bounds, materials and camera path,
+and replaced its crates with cubes tessellated on a regular grid per face. This
+isolates geometry processing cost; it is not an authored interior.
+
+The table reports the sum of GPU pass durations per frame on an RX 7900 XTX with
+Vulkan/radv: median of three runs, each with 400 recorded frames at 1920×1080.
+Culling and plain frames were interleaved on the same device, with no other
+benchmark running beside them. Vulkan validation was enabled. The graph times
+pass boundaries; its barriers and copy passes are outside those timings, so
+these are not end-to-end frame or FPS measurements.
+
+| Crate geometry   | Culling off | Culling on | GPU time saved |
+| ---------------- | ----------- | ---------- | -------------- |
+| Original fixture | 0.861 ms    | 0.913 ms   | −6.0%          |
+| 3,072 triangles  | 1.137 ms    | 1.088 ms   | 4.3%           |
+| 12,288 triangles | 2.319 ms    | 1.925 ms   | 17.0%          |
+| 49,152 triangles | 6.660 ms    | 4.865 ms   | 27.0%          |
+
+Lavapipe was measured separately with three runs of 64 recorded frames at
+1920×1080, with the original production finalizer and pyramid. The original
+fixture measured 74.781 ms off and 66.029 ms on (11.7% saved); the
+3,072-triangle crates measured 416.524 ms off and 270.874 ms on (35.0% saved).
+Its open meadow measured 86.630 ms off and 87.201 ms on in the original-fixture
+run. Exact frame comparisons passed on its available geometry paths for both
+crate workloads.
+
+The open meadow still pays overhead: 1.182 ms off against 1.247 ms on in the
+original-fixture run. More hidden geometry makes the cull worthwhile on this
+hardware; more visible geometry alone is not the same workload.
+
+**Considered and declined: reducing the farthest pyramid's level count as a
+general optimization.** Caps of six and four levels reduced pyramid work but
+increased texel reads in `cull.slang::occluded`. With detailed crates the
+standard pyramid's culling frame was 1.925 ms, against 1.961 ms with six levels
+and 2.268 ms with four. The four-level original fixture took 1.119 ms against
+the standard's 0.913 ms. The open meadow improved slightly with four levels, but
+the occluded workload regressed.
+
+Exact frame comparisons along the camera path passed for the detailed crates,
+the parallel finalizer with the many-bucket fixture, and both pyramid caps on
+all hardware geometry paths available locally. Deliberately changing the front
+wall's material in the culling renderer made the comparison fail; the sabotage
+was removed. Experimental scene and pyramid switches were removed after
+measurement. Parallel finalization’s local regression check passed on radv and
+lavapipe, including draw arguments, counts and extents; the single-workgroup
+sabotage made it fail. Its runtime verdict on other backends awaits CI, and
+performance beyond Vulkan remains unpriced.
+
+**Next:** price an authored interior such as shard, including CPU record and
+submit cost and browser time, then choose a global, tier-specific or per-scene
+default. Compact late-phase candidate lists and a fused pyramid build were not
+implemented or benchmarked.
+
 - **Per-cluster occlusion** inside `mesh_cluster.slang`'s amplification stage is
   not built; the `MeshShader` path culls whole instances only.
-- **CPU record and submit grow with the cull on**: 1.38 against 1.16 ms on radv.
+- **CPU record and submit grow with the cull on**: the repeated original fixture
+  measured 1.382 against 1.153 ms on radv with validation enabled.
 - **Draw-region layout VRAM**: in a 17,219-instance, 938-bucket scene a frame in
   flight's generator buffers went from 1,709,036 to 4,397,628 bytes, most of it
   six face regions per point light, and the host-side draw-constants buffer is
@@ -1044,11 +1235,13 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 
 ### GPU time
 
-- **P20 — `draw_gen.slang` searches every bucket for each survivor.** Its
-  scatter loops `bucket < bucket_count` reading the tables twice per step, per
-  visible instance, per generator: O(visible × buckets) — about nine million
-  reads a view in the measured scene (estimate). **Fix:** a
-  `(level mesh, mode) → bucket` table written at build, making the scatter O(1).
+- **P20 — draw generation routes survivors with a linear bucket search.**
+  `draw_gen.slang::binMain` walks the bucket table until `(mesh_id, mode)`
+  matches, then writes a route that scatter consumes. The old description of a
+  repeated scatter search is stale; the routing cost remains proportional to
+  survivors times the bucket-table prefix searched. Price `draw-bin` on a
+  many-bucket scene, then consider a build-time `(level mesh, mode) → bucket`
+  table. Preserve material-mode and LOD routing, empty buckets and `NO_BUCKET`.
 - **P21 — one bind and one indirect call per bucket per pass per view.**
   `BucketDraws::record` issues a call for every bucket, empty or not, in the
   prepass, the forward pass and every shadow view — about ten thousand calls a
@@ -1065,12 +1258,15 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   where DAG LOD reads it, quantised; per-group dirtiness from moved instances'
   bounds against each group's frustum; consider `r_shadow_cadence = 2` for tier
   one and up.
-- **P23 — probe irradiance does 32–64 loads per fragment with no early-out.**
-  `probe_irradiance` evaluates eight corners (sixteen in the level blend), each
-  with four `Load`s and a `GetDimensions`, even with zero probes or the 1×1
-  visibility placeholder; `ssr.slang` repeats it before its own early-out.
-  **Fix:** uniform branches for no probes and no captured visibility, hoist
-  `GetDimensions`; optionally one bilinear sample, which moves goldens.
+- **P23 — probe gathers still run for an empty volume.** Revalidated
+  `mesh.slang::probe_irradiance` and `probe_level_irradiance`: they blend
+  corners even when `frame.probe_counts` describes the zeroed placeholder.
+  `probe_moments` queries dimensions and reads visibility moments per corner.
+  `ssr.slang` builds `probe_environment` before its sharpness early-out. Price
+  forward and SSR passes with empty volumes before adding uniform empty-volume
+  branches or hoisting dimension queries. Preserve exact zero irradiance,
+  captured visibility, clipmap blends and the sky fallback. Actual driver load
+  counts have not been measured; shader source is not a compiled-cost report.
 - **P24 — the sun's PCSS always runs a 16-tap blocker search.**
   `cascade_visibility` searches before `tile_pcf`'s five-tap probe and repeats
   for the next cascade in the fade band. Run the probe first and return on
@@ -1108,13 +1304,15 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 - **P32 — `spin_until` busy-spins up to half of each period.** `SPIN_GUARD` is
   100 µs but the slack is capped only at `SLACK_PERIOD_SHARE` of the period. Cap
   the spin absolutely and skip it under FIFO.
-- **P33 — `PhysicsSystem::step` allocates, sorts and refits every step.** Four
-  SipHash `HashMap<Entity, _>`s, `keys().collect()` plus a sort per step, about
-  six lookups per body, and `set_*` → `Bvh::update_aabb` for every body whether
-  it moved or not, walking to the root. **Fix:** a dense store kept in entity
-  order, skip unchanged transforms, fat AABBs with early-exit refits.
-  Determinism is the constraint: keep ascending entity order and check
-  closest-hit tie breaking against tree shape.
+- **P33 — unchanged collider placements still refit the query BVH.** The old
+  body-map sorting and lookup finding has shipped: `PhysicsSystem` now owns
+  dense generational sets and `step_with_clock` iterates awake bodies directly.
+  Its placement loop still calls `place_collider` for every awake transform;
+  `PhysicsWorld::set` replaces the shape and calls `Bvh::update_aabb` without
+  checking whether it changed. Price stationary awake bodies with an already
+  built query tree; skip unchanged shapes if that workload benefits. Preserve
+  query results, generation checks, triggers and update counters. Contact
+  broadphase fat bounds are already present; the query tree is separate.
 - **P34 — the server re-serialises and re-hashes the whole world every tick.**
   `emit_snapshot` → `collect_systems` allocates a `HashSet`, a `String` per
   system and a `Vec` per system; `Baseline::from_snapshot` builds nested

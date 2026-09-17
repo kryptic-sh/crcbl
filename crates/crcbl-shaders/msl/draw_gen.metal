@@ -1218,127 +1218,108 @@ uint runs_at_0(KernelContext_0 thread* kernelContext_18)
 }
 
 
-#line 1358
-[[kernel]] void lateFinishMain(DrawGenParams_0 constant* gen_5 [[buffer(0)]], uint device* tables_5 [[buffer(4)]], GpuMesh_0 device* meshes_5 [[buffer(2)]], atomic<uint> device* args_5 [[buffer(6)]], atomic<uint> device* counts_and_mesh_args_5 [[buffer(7)]], uint device* visible_count_5 [[buffer(3)]], uint device* visible_instances_5 [[buffer(5)]], GpuInstance_natural_0 device* instances_5 [[buffer(1)]], uint device* group_state_5 [[buffer(8)]])
+#line 1357
+[[kernel]] void lateFinishMain(uint3 thread_3 [[thread_position_in_grid]], DrawGenParams_0 constant* gen_5 [[buffer(0)]], uint device* tables_5 [[buffer(4)]], GpuMesh_0 device* meshes_5 [[buffer(2)]], atomic<uint> device* args_5 [[buffer(6)]], atomic<uint> device* counts_and_mesh_args_5 [[buffer(7)]], uint device* visible_count_5 [[buffer(3)]], uint device* visible_instances_5 [[buffer(5)]], GpuInstance_natural_0 device* instances_5 [[buffer(1)]], uint device* group_state_5 [[buffer(8)]])
 {
 
-#line 1358
+#line 1357
     thread KernelContext_0 kernelContext_22;
 
-#line 1358
+#line 1357
     (&kernelContext_22)->gen_0 = gen_5;
 
-#line 1358
+#line 1357
     (&kernelContext_22)->tables_0 = tables_5;
 
-#line 1358
+#line 1357
     (&kernelContext_22)->meshes_0 = meshes_5;
 
-#line 1358
+#line 1357
     (&kernelContext_22)->args_0 = args_5;
 
-#line 1358
+#line 1357
     (&kernelContext_22)->counts_and_mesh_args_0 = counts_and_mesh_args_5;
 
-#line 1358
+#line 1357
     (&kernelContext_22)->visible_count_0 = visible_count_5;
 
-#line 1358
+#line 1357
     (&kernelContext_22)->visible_instances_0 = visible_instances_5;
 
-#line 1358
+#line 1357
     (&kernelContext_22)->instances_0 = instances_5;
 
-#line 1358
+#line 1357
     (&kernelContext_22)->group_state_0 = group_state_5;
 
-#line 1358
-    uint bucket_13 = 0U;
-
-    for(;;)
+    uint bucket_13 = thread_3.x;
+    if(bucket_13 >= (gen_5->bucket_count_0))
     {
-
-#line 1360
-        if(bucket_13 < ((&kernelContext_22)->gen_0->bucket_count_0))
-        {
-        }
-        else
-        {
-
-#line 1360
-            break;
-        }
-
-#line 1360
-        uint _S77 = arg_word_0(1U, bucket_13, 1U, &kernelContext_22);
-
-        uint early_1 = atomic_load_explicit((&kernelContext_22)->args_0+_S77, memory_order_relaxed);
+        return;
+    }
 
 #line 1362
-        uint _S78 = arg_word_0(2U, bucket_13, 1U, &kernelContext_22);
-        uint late_0 = atomic_load_explicit((&kernelContext_22)->args_0+_S78, memory_order_relaxed);
+    uint _S77 = arg_word_0(1U, bucket_13, 1U, &kernelContext_22);
 
-#line 1363
-        uint _S79 = mesh_arg_word_0(2U, bucket_13, 1U, &kernelContext_22);
-        atomic_store_explicit((&kernelContext_22)->counts_and_mesh_args_0+_S79, late_0, memory_order_relaxed);
-        if(late_0 != 0U)
-        {
+    uint early_1 = atomic_load_explicit((&kernelContext_22)->args_0+_S77, memory_order_relaxed);
 
-#line 1365
-            uint _S80 = count_word_0(2U, bucket_13, &kernelContext_22);
-
-            atomic_store_explicit((&kernelContext_22)->counts_and_mesh_args_0+_S80, 1U, memory_order_relaxed);
+#line 1364
+    uint _S78 = arg_word_0(2U, bucket_13, 1U, &kernelContext_22);
+    uint late_0 = atomic_load_explicit((&kernelContext_22)->args_0+_S78, memory_order_relaxed);
 
 #line 1365
-        }
+    uint _S79 = mesh_arg_word_0(2U, bucket_13, 1U, &kernelContext_22);
+    atomic_store_explicit((&kernelContext_22)->counts_and_mesh_args_0+_S79, late_0, memory_order_relaxed);
+    if(late_0 != 0U)
+    {
+
+#line 1367
+        uint _S80 = count_word_0(2U, bucket_13, &kernelContext_22);
+
+        atomic_store_explicit((&kernelContext_22)->counts_and_mesh_args_0+_S80, 1U, memory_order_relaxed);
+
+#line 1367
+    }
 
 
 
-        uint drawn_0 = early_1 + late_0;
-
-#line 1369
-        uint _S81 = arg_word_0(0U, bucket_13, 1U, &kernelContext_22);
-        atomic_store_explicit((&kernelContext_22)->args_0+_S81, drawn_0, memory_order_relaxed);
-
-#line 1370
-        uint _S82 = mesh_arg_word_0(0U, bucket_13, 1U, &kernelContext_22);
-        atomic_store_explicit((&kernelContext_22)->counts_and_mesh_args_0+_S82, drawn_0, memory_order_relaxed);
+    uint drawn_0 = early_1 + late_0;
 
 #line 1371
-        uint _S83 = count_word_0(0U, bucket_13, &kernelContext_22);
-        atomic<uint> device* _S84 = (&kernelContext_22)->counts_and_mesh_args_0+_S83;
+    uint _S81 = arg_word_0(0U, bucket_13, 1U, &kernelContext_22);
+    atomic_store_explicit((&kernelContext_22)->args_0+_S81, drawn_0, memory_order_relaxed);
 
 #line 1372
-        int _S85;
+    uint _S82 = mesh_arg_word_0(0U, bucket_13, 1U, &kernelContext_22);
+    atomic_store_explicit((&kernelContext_22)->counts_and_mesh_args_0+_S82, drawn_0, memory_order_relaxed);
 
-#line 1372
-        if(drawn_0 != 0U)
-        {
+#line 1373
+    uint _S83 = count_word_0(0U, bucket_13, &kernelContext_22);
+    atomic<uint> device* _S84 = (&kernelContext_22)->counts_and_mesh_args_0+_S83;
 
-#line 1372
-            _S85 = int(1);
+#line 1374
+    int _S85;
 
-#line 1372
-        }
-        else
-        {
+#line 1374
+    if(drawn_0 != 0U)
+    {
 
-#line 1372
-            _S85 = int(0);
+#line 1374
+        _S85 = int(1);
 
-#line 1372
-        }
+#line 1374
+    }
+    else
+    {
 
-#line 1372
-        atomic_store_explicit(_S84, uint(_S85), memory_order_relaxed);
+#line 1374
+        _S85 = int(0);
 
-#line 1360
-        bucket_13 = bucket_13 + 1U;
-
-#line 1360
+#line 1374
     }
 
 #line 1374
+    atomic_store_explicit(_S84, uint(_S85), memory_order_relaxed);
     return;
 }
 

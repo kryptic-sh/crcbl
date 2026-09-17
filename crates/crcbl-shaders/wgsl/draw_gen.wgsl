@@ -562,41 +562,34 @@ fn lateScatterMain(@builtin(global_invocation_id) thread_2 : vec3<u32>)
 }
 
 @compute
-@workgroup_size(1, 1, 1)
-fn lateFinishMain()
+@workgroup_size(64, 1, 1)
+fn lateFinishMain(@builtin(global_invocation_id) thread_3 : vec3<u32>)
 {
-    var bucket_12 : u32 = u32(0);
-    for(;;)
+    var bucket_12 : u32 = thread_3.x;
+    if(bucket_12 >= (gen_0.bucket_count_0))
     {
-        if(bucket_12 < (gen_0.bucket_count_0))
-        {
-        }
-        else
-        {
-            break;
-        }
-        var early_1 : u32 = atomicLoad(&(args_0[arg_word_0(u32(1), bucket_12, u32(1))]));
-        var late_0 : u32 = atomicLoad(&(args_0[arg_word_0(u32(2), bucket_12, u32(1))]));
-        atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(2), bucket_12, u32(1))]), late_0);
-        if(late_0 != u32(0))
-        {
-            atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(2), bucket_12)]), u32(1));
-        }
-        var drawn_0 : u32 = early_1 + late_0;
-        atomicStore(&(args_0[arg_word_0(u32(0), bucket_12, u32(1))]), drawn_0);
-        atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(0), bucket_12, u32(1))]), drawn_0);
-        var _S28 : i32;
-        if(drawn_0 != u32(0))
-        {
-            _S28 = i32(1);
-        }
-        else
-        {
-            _S28 = i32(0);
-        }
-        atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(0), bucket_12)]), u32(_S28));
-        bucket_12 = bucket_12 + u32(1);
+        return;
     }
+    var early_1 : u32 = atomicLoad(&(args_0[arg_word_0(u32(1), bucket_12, u32(1))]));
+    var late_0 : u32 = atomicLoad(&(args_0[arg_word_0(u32(2), bucket_12, u32(1))]));
+    atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(2), bucket_12, u32(1))]), late_0);
+    if(late_0 != u32(0))
+    {
+        atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(2), bucket_12)]), u32(1));
+    }
+    var drawn_0 : u32 = early_1 + late_0;
+    atomicStore(&(args_0[arg_word_0(u32(0), bucket_12, u32(1))]), drawn_0);
+    atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(0), bucket_12, u32(1))]), drawn_0);
+    var _S28 : i32;
+    if(drawn_0 != u32(0))
+    {
+        _S28 = i32(1);
+    }
+    else
+    {
+        _S28 = i32(0);
+    }
+    atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(0), bucket_12)]), u32(_S28));
     return;
 }
 

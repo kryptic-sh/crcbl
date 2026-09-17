@@ -1165,7 +1165,7 @@ impl DrawGen {
             &DRAW_GEN,
             "lateFinishMain",
             gen_pipeline_layout,
-            1,
+            draw_gen::WORKGROUP_SIZE,
         )?;
         rollback.pipelines.push(late_finish);
         Ok(OcclusionPipelines {
@@ -1798,7 +1798,11 @@ impl DrawGen {
                 occlusion.late_scatter,
                 instance_count.div_ceil(draw_gen::WORKGROUP_SIZE),
             ),
-            ("draw-late-finish", occlusion.late_finish, 1),
+            (
+                "draw-late-finish",
+                occlusion.late_finish,
+                self.bucket_count.div_ceil(draw_gen::WORKGROUP_SIZE),
+            ),
         ] {
             if groups == 0 {
                 continue;

@@ -174,6 +174,18 @@ the frame costs what it did before the slice. Small-feature culling
 (`r_small_feature_px`) is opt-in because it moves pixels. Per-cluster occlusion
 inside the amplification stage is not built.
 
+`draw_gen.slang::lateFinishMain` finalizes buckets in parallel after the late
+scatter's graph dependency. A Vulkan/radv stress fixture with 512 crate buckets
+reduced the sum of GPU pass durations from 4.769 to 4.579 ms; the finalizer
+itself went from 0.181 to 0.002 ms. These are repeated-run GPU pass
+measurements, not end-to-end frame time, and the original bucket layout showed
+negligible benefit. `mesh_e2e::occlusion_finish` reads early, late and forward
+draw arguments, draw counts and mesh-dispatch extents across workgroup
+boundaries, including empty, hidden and rescued buckets. Forcing a single
+workgroup made its draw argument comparison fail; the normal dispatch passed on
+radv and lavapipe, including the extended counts-and-extents check. The slice’s
+full local workspace gates passed; CI remains the cross-platform verdict.
+
 ### 3.4 Sorting + passes
 
 - Opaque pass sorted by pipeline/material via GPU-side binning (or CPU sort of

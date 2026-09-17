@@ -948,8 +948,12 @@ mod tests {
                 "lateScatterMain",
                 crcbl_shaders::draw_gen::WORKGROUP_SIZE,
             ),
-            // The late finish is one invocation, on the prefix sum's terms.
-            ("draw_gen", &crcbl_shaders::DRAW_GEN, "lateFinishMain", 1),
+            (
+                "draw_gen",
+                &crcbl_shaders::DRAW_GEN,
+                "lateFinishMain",
+                crcbl_shaders::draw_gen::WORKGROUP_SIZE,
+            ),
         ];
         assert!(!compute.is_empty(), "nothing to check");
         for (name, shader, entry, size) in compute {

@@ -1348,27 +1348,28 @@ void lateScatterMain(uint3 thread: SV_DispatchThreadID)
 /// Closes the two phases: the late region's draw counts and extents, and region
 /// 0 — the forward pass's — as the early and late regions together.
 ///
-/// One invocation walking the buckets, for `startsMain`'s reason: by the time it
-/// runs every late scatter has finished, so both instance counts are totals.
-/// Region 0's count and y extent are **stored** over what the routing pass
-/// counted there, which was every routed survivor including the ones never
-/// drawn.
+/// Each invocation owns one bucket. The graph dependency on the late scatter
+/// makes both phase counts complete before this pass reads them.
+/// Region 0's count and y extent are stored over every routed survivor,
+/// including the ones never drawn.
 [shader("compute")]
-[numthreads(1, 1, 1)]
-void lateFinishMain()
+[numthreads(64, 1, 1)]
+void lateFinishMain(uint3 thread: SV_DispatchThreadID)
 {
-    for (uint bucket = 0; bucket < gen.bucket_count; ++bucket)
+    uint bucket = thread.x;
+    if (bucket >= gen.bucket_count)
     {
-        uint early = args[arg_word(EARLY_REGION, bucket, ARG_INSTANCE_COUNT)].load();
-        uint late = args[arg_word(LATE_REGION, bucket, ARG_INSTANCE_COUNT)].load();
-        counts_and_mesh_args[mesh_arg_word(LATE_REGION, bucket, MESH_ARG_GROUP_Y)].store(late);
-        if (late != 0)
-        {
-            counts_and_mesh_args[count_word(LATE_REGION, bucket)].store(1);
-        }
-        uint drawn = early + late;
-        args[arg_word(0, bucket, ARG_INSTANCE_COUNT)].store(drawn);
-        counts_and_mesh_args[mesh_arg_word(0, bucket, MESH_ARG_GROUP_Y)].store(drawn);
-        counts_and_mesh_args[count_word(0, bucket)].store(drawn != 0 ? 1 : 0);
+        return;
     }
+    uint early = args[arg_word(EARLY_REGION, bucket, ARG_INSTANCE_COUNT)].load();
+    uint late = args[arg_word(LATE_REGION, bucket, ARG_INSTANCE_COUNT)].load();
+    counts_and_mesh_args[mesh_arg_word(LATE_REGION, bucket, MESH_ARG_GROUP_Y)].store(late);
+    if (late != 0)
+    {
+        counts_and_mesh_args[count_word(LATE_REGION, bucket)].store(1);
+    }
+    uint drawn = early + late;
+    args[arg_word(0, bucket, ARG_INSTANCE_COUNT)].store(drawn);
+    counts_and_mesh_args[mesh_arg_word(0, bucket, MESH_ARG_GROUP_Y)].store(drawn);
+    counts_and_mesh_args[count_word(0, bucket)].store(drawn != 0 ? 1 : 0);
 }
