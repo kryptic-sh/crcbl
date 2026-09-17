@@ -5287,11 +5287,11 @@ export class Replayer {
    *
    * `#createBuffer`'s shape — synchronous, no reply, every failure into
    * {@link Replayer#takeError} — for a descriptor that carries **four artifacts
-   * and this backend consumes exactly one**. `spirv`, `msl` and `dxil` all cross
-   * so the Rust decoder (`crcbl-dx12` reads the DXIL, `crcbl-mtl` the MSL) has
-   * them, but a WebGPU backend has no path for any of them — naga cannot take the
-   * `DrawParameters` SPIR-V this engine ships — so `wgsl` is the only field read
-   * here. Two of its states are decided before the browser is asked, and one is
+   * and this backend consumes exactly one**. `spirv`, `msl` and `dxil` are fields
+   * of the command because the encoding is the seam's, but a WebGPU backend has
+   * no path for any of them — naga cannot take the `DrawParameters` SPIR-V this
+   * engine ships — so `crcbl-webgpu`'s device sends them empty and `wgsl` is the
+   * only field read here. Two of its states are decided before the browser is asked, and one is
    * left to the browser exactly as `#createBuffer` leaves an allocation failure:
    *
    *   * **`wgsl` is `null` — refused, by name.** A module carrying no WGSL is

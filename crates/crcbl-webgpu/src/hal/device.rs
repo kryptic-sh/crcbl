@@ -1175,9 +1175,24 @@ impl Device for WebGpuDevice {
         if desc.wgsl.is_none() {
             return Err(desc.unusable(ShaderSources::WGSL));
         }
+        // **Only the WGSL crosses**, with the label the replayer names the
+        // module by. The replayer reads nothing else, and the SPIR-V, MSL and
+        // DXIL are most of a module's bytes. They cost the wasm heap and not
+        // just the wire: a renderer's build is recorded into one frame's
+        // stream, whose buffer grows to the largest frame and never shrinks, so
+        // every artifact the browser drops is linear memory the page keeps.
+        // shard's build once pushed that buffer through a doubling this way.
+        let wgsl_only = ShaderModuleDesc {
+            label: desc.label,
+            spirv: &[],
+            wgsl: desc.wgsl,
+            msl: None,
+            dxil: &[],
+        };
         let handle: ShaderModuleHandle = self.pool.alloc();
-        self.channel
-            .with(|channel| channel.encode(|stream| stream.create_shader_module(handle, desc)));
+        self.channel.with(|channel| {
+            channel.encode(|stream| stream.create_shader_module(handle, &wgsl_only))
+        });
         Ok(handle)
     }
 

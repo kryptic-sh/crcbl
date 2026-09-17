@@ -1682,6 +1682,55 @@ fn write_buffer_encodes_a_write_buffer_command() {
     );
 }
 
+/// **A shader module offering every format crosses with its WGSL alone.**
+///
+/// The replayer compiles WGSL and nothing else, and the other artifacts are
+/// most of a module's bytes — bytes a renderer's build puts into one frame's
+/// stream, whose buffer never shrinks. So a module carrying all four must reach
+/// the wire as its label and its WGSL, with the other three absent.
+#[test]
+fn a_shader_module_crosses_with_its_wgsl_alone() {
+    let (channel, device) = device_on_fresh_channel();
+    let wgsl = "@compute @workgroup_size(1) fn main() {}";
+    let module = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("every format"),
+            spirv: &[0x0723_0203, 0x0001_0600, 42, 7, 0],
+            wgsl: Some(wgsl),
+            msl: Some("kernel void main() {}"),
+            dxil: &[("main", &[0x44, 0x58, 0x42, 0x43])],
+        })
+        .expect("a module carrying WGSL is one this backend compiles");
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    let [
+        crate::Command::CreateShaderModule {
+            module: encoded,
+            label,
+            spirv,
+            wgsl: encoded_wgsl,
+            msl,
+            dxil,
+        },
+    ] = commands.as_slice()
+    else {
+        panic!("one CreateShaderModule and nothing else: {commands:?}");
+    };
+    assert_eq!(*encoded, module, "the command names the returned handle");
+    assert_eq!(label.as_deref(), Some("every format"), "the label crosses");
+    assert_eq!(encoded_wgsl.as_deref(), Some(wgsl), "the WGSL crosses");
+    assert!(spirv.is_empty(), "no SPIR-V crosses: {} words", spirv.len());
+    assert_eq!(*msl, None, "no MSL crosses");
+    assert!(
+        dxil.is_empty(),
+        "no DXIL crosses: {} containers",
+        dxil.len()
+    );
+}
+
 // ── (e) readback ───────────────────────────────────────────────────────────
 
 #[test]
