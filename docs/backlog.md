@@ -1719,6 +1719,29 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   float-check policy, decoded pixel comparison, dimensions and missing/corrupt
   artifact failures. No cooking latency was measured; these follow runtime work.
   Other import/cooking functions remain a review gap.
+
+  Further source review inspected `read_nodes`, `read_msft_lod`,
+  `read_primitive`, `read_skins`, `read_clips` and `check_sample_count` in
+  `crates/crcbl-scene/src/gltf_import.rs`, plus the animation/accessor
+  validation in `crates/crcbl-scene/src/gltf_check.rs`. Returned node children,
+  attributes, joint tables, bind matrices and curve samples own data used after
+  import; declining their allocation without an ownership change avoids a false
+  zero-copy proposal. `read_clips` formats its channel diagnostic context on
+  successful reads too, and `check_animations` formats context and attribute
+  labels during validation. Lazy diagnostic formatting is a load-time candidate
+  for channel-heavy files; price actual imports and preserve every refusal
+  message before changing it. This does not establish a frame bottleneck. The
+  resolved animation channel iterator forwards its underlying size hint but does
+  not implement `ExactSizeIterator`; do not propose `.len()` as an installed
+  API. Pre-sizing channels would need the supported size hint and import
+  allocation/latency evidence. No channel-heavy import was priced here.
+  Considered and declined: treating empty keyframe division as a reachable
+  importer defect from `check_sample_count` alone. `check_document` validates
+  accessor ranges and rejects zero counts before `build` reads the channels.
+  Preserve that validation boundary. These findings close the named reader
+  source-review gap; other cooking and importer validation paths still need
+  review and workload measurements.
+
 - Texture/loading follow-up inspected `texture::upload_texture_layers`,
   `upload_texture_mip_layers`, their shared `upload`, `upload_cleared_texture`,
   `stage_region`, `stage_rows` and row-pitch calculation, plus renderer page
