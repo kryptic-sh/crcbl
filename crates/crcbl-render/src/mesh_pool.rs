@@ -588,6 +588,32 @@ impl MeshPool {
         self.table
     }
 
+    /// The mesh table as the device holds it: every slot, a resident mesh's
+    /// entry where one is and the cleared entry everywhere else.
+    ///
+    /// Built from the residents rather than mirrored, because the one place an
+    /// entry is written writes exactly a resident's range — so this is what a
+    /// readback of [`table_buffer`](Self::table_buffer) would decode to, without
+    /// a buffer the device has to make readable. For `crate::cull`'s oracle,
+    /// which indexes it by an instance's mesh id.
+    #[must_use]
+    pub fn table_entries(&self) -> Vec<GpuMesh> {
+        let mut entries = vec![GpuMesh::default(); self.table_capacity as usize];
+        for (handle, resident) in self.meshes.iter() {
+            let range = resident.range;
+            entries[handle.index() as usize] = GpuMesh {
+                base_vertex: range.base_vertex,
+                base_index: range.base_index,
+                index_count: range.index_count,
+                bounds_min: range.bounds.min.to_array(),
+                bounds_max: range.bounds.max.to_array(),
+                uv_range: range.uv_range,
+                flags: range.flags,
+            };
+        }
+        entries
+    }
+
     /// How many meshes the table holds, which is the bound every mesh id is
     /// below.
     #[must_use]

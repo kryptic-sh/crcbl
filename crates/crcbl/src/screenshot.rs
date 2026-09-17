@@ -96,6 +96,7 @@ use crate::render::{
 use crate::ui::draw_list::DrawList;
 
 mod meadow;
+mod occluders;
 mod still_pool;
 mod ui_focus;
 mod ui_inspector;
@@ -117,6 +118,11 @@ pub use meadow::{
     meadow_forward, meadow_forward_with, meadow_ground, meadow_ground_normal, meadow_height,
     meadow_mesh_blades, meadow_shell_blades, meadow_shells_field, meadow_sky, meadow_sun,
     meadow_wind_field, meadow_wind_layers,
+};
+pub use occluders::{
+    OCCLUDERS_CRATES, OCCLUDERS_CULLING, OCCLUDERS_FRONT_HALF_WIDTH, OCCLUDERS_GOLDEN_FRAME,
+    OCCLUDERS_INSTANCES, OCCLUDERS_PATH_FRAMES, OCCLUDERS_PYRAMIDS, Occluders, occluders_camera,
+    occluders_forward_on_path, occluders_walker, occluders_walker_desc,
 };
 pub use still_pool::{
     STILL_POOL_DEEP_FLOOR, STILL_POOL_FAR_EDGE, STILL_POOL_HALF_WIDTH, STILL_POOL_LEVEL,
@@ -846,6 +852,18 @@ pub enum Scene {
     /// wide, clumps a measured structure in the colours, and calm blades
     /// upright to the pixel.
     MeadowBlades,
+    /// `docs/plan/03-gpu-driven-rendering.md` §3.3's occlusion cull, with
+    /// something to cull: two walls across a floor, a field of crates between
+    /// them, rows of pyramids behind the back one and a walker leaving the front
+    /// one's shadow — frame [`OCCLUDERS_GOLDEN_FRAME`] of the camera path
+    /// [`occluders_camera`] describes, drawn with the cull on.
+    ///
+    /// **One frame cannot show the cull hiding anything**: its first phase has
+    /// no previous frame to test against. What the golden holds is the scene and
+    /// the pipelines — every backend builds and runs the occlusion passes here —
+    /// and `tests/mesh_e2e/occlusion_cull.rs` is where the path is walked and the
+    /// frames with the cull on are held to the frames with it off.
+    Occluders,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -6725,6 +6743,21 @@ impl SceneState {
                 )?
                 .into()
             }
+            Scene::Occluders => {
+                // The whole of it is in `occluders_forward_on_path`, on
+                // `Scene::StillPool`'s terms: `tests/mesh_e2e/occlusion_cull.rs`
+                // builds the same scene with the cull off and walks it along
+                // its path.
+                occluders::occluders_forward_on_path(
+                    device,
+                    queue,
+                    format,
+                    path,
+                    OCCLUDERS_CULLING,
+                )?
+                .scene
+                .into()
+            }
             Scene::MeadowShells => {
                 // `Scene::Meadow`'s build with the other look of its field.
                 let field = meadow::meadow_shells_field();
@@ -9053,6 +9086,33 @@ mod tests {
             passes
         };
         let cube_passes = forward_passes(0);
+        // **`Scene::Occluders` is the cube list with the occlusion cull's
+        // second phase spliced in behind the prepass**, and where it goes is
+        // the claim: the farthest pyramid is reduced from the early depth the
+        // prepass wrote, the late cull reads that pyramid, the late scatter
+        // reads the late cull's tags and the finish reads the scatter's counts,
+        // and the late prepass draws what the finish counted — all before the
+        // occlusion chain reads the depth. Four levels, because a 16×16 frame
+        // halves four times before a level would reach one texel.
+        let mut occluders_passes = forward_passes(0);
+        let after_prepass = occluders_passes
+            .iter()
+            .position(|(_, label)| *label == "depth-prepass")
+            .expect("every forward frame has a depth prepass")
+            + 1;
+        occluders_passes.splice(
+            after_prepass..after_prepass,
+            [
+                ("render", "occlusion-hiz-1"),
+                ("render", "occlusion-hiz-2"),
+                ("render", "occlusion-hiz-3"),
+                ("render", "occlusion-hiz-4"),
+                ("compute", "occlusion-late"),
+                ("compute", "draw-late-scatter"),
+                ("compute", "draw-late-finish"),
+                ("render", "depth-prepass-late"),
+            ],
+        );
         // The probe fixture disables reflections: its Rust mirror predicts only
         // diffuse irradiance, and a rough probe fallback would be an unmodelled
         // specular term in every measured floor pixel.
@@ -9160,7 +9220,7 @@ mod tests {
                 ("render", "sky"),
             ],
         );
-        let expected: [(Scene, &[(&str, &str)]); 27] = [
+        let expected: [(Scene, &[(&str, &str)]); 28] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -9235,6 +9295,7 @@ mod tests {
             (Scene::MeadowShells, &meadow_passes),
             // And again: both levels of mesh blades are draws inside `grass`.
             (Scene::MeadowBlades, &meadow_passes),
+            (Scene::Occluders, &occluders_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

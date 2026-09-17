@@ -66,6 +66,13 @@ wasted.
   moving anything: the visible set is already per-light, and narrowing it is a
   change to one dispatch rather than a change to how many there are.
 
+  **Refined 2026-09-17, in exactly that shape.** The one cull now tags each
+  survivor with the cube faces its box reaches, and each face draws its own draw
+  region of the same generator, so a face no longer draws what is behind it.
+  Still one `DrawGen` per light; the atlas is byte-identical, and the region
+  layout costs per frame in flight what `crcbl_shaders::draw_gen::runs_words`
+  says for six face regions.
+
 ### A fifth, taken 2026-08-14: the sun's bias is denominated in texels
 
 The sun's shadow comparison used to be biased in **shadow-clip depth**, on the

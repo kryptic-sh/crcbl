@@ -156,12 +156,23 @@ An animated material is what makes it a ring.
   and not a visibility-buffer renderer, which [44-lighting.md](44-lighting.md)'s
   forward rule refuses.
 
-**Built, less the occlusion row.** `crcbl_render::cull` is the CPU reference
-`cull.slang` is checked against, `crcbl_render::draw_gen` runs that dispatch and
-turns its survivors into indirect arguments, and `crcbl_render::cluster_pool`
-with `mesh_cluster.slang` is the `MeshShader` tail. There is no two-phase pass
-anywhere in the tree, so the visibility slot the third bullet asks for is still
-the thing a later slice has to insert.
+**Built, occlusion row included (2026-09-17).** `crcbl_render::cull` is the CPU
+reference `cull.slang` is checked against, `crcbl_render::draw_gen` runs that
+dispatch and turns its survivors into indirect arguments, and
+`crcbl_render::cluster_pool` with `mesh_cluster.slang` is the `MeshShader` tail.
+**Two-phase occlusion culling** (`ForwardRenderer::set_occlusion_culling`,
+`r_occlusion_cull`) tests the frustum survivors against the previous frame's
+**farthest**-depth pyramid (`crcbl_render::occlusion_cull`, a second chain of
+`hiz.slang`), draws what passes in the depth prepass, reduces that depth and
+retests the rest before a late prepass; frames with it on are pixel-identical to
+frames with it off on all three paths. The generator's buffers are laid out per
+draw region so the early and late sets are separate draws. It is **off by
+default**: measured at 1920×1080 in `Scene::Occluders` it hides two thirds of
+the survivors and takes lavapipe's frame from 73.87 to 64.66 ms, but costs an RX
+7900 XTX 0.905 against 0.859 ms, where the draws it saves are cheap; with it off
+the frame costs what it did before the slice. Small-feature culling
+(`r_small_feature_px`) is opt-in because it moves pixels. Per-cluster occlusion
+inside the amplification stage is not built.
 
 ### 3.4 Sorting + passes
 

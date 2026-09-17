@@ -22,6 +22,7 @@
 //! it, and the shadow atlas is drawn once for the frame.
 
 use super::*;
+use crate::draw_gen::OcclusionFrame;
 
 /// How many views one [`ForwardRenderer`] draws at most, the camera
 /// [`ForwardRenderer::begin_frame`] opens included.
@@ -282,6 +283,9 @@ pub(super) struct ViewFrame<'a> {
     pub(super) exposure: f32,
     pub(super) exposure_adaptation: Option<ExposureAdaptation>,
     pub(super) tonemap_curve: tonemap::TonemapCurve,
+    /// The occlusion and small-feature culls this frame asks for — see
+    /// [`ForwardRenderer::occlusion_culling`], resolved against the frame.
+    pub(super) occlusion: OcclusionCulling,
 }
 
 /// Where [`View::add_passes`] ends a view's frame, and the two extents it is
@@ -298,7 +302,7 @@ pub(super) struct ViewOutput {
 }
 
 /// What [`View::add_cull`] recorded, for [`View::add_passes`] to draw from.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct ViewCull {
     /// The cull and draw-argument pair's outputs.
     pub(super) generated: GeneratedDraws,
@@ -306,6 +310,19 @@ pub(super) struct ViewCull {
     pub(super) selection: Option<BufferId>,
     /// The froxel grid the clustering pass filled.
     pub(super) light_grid: BufferId,
+    /// The farthest-depth pyramid a two-phase occlusion frame reads and
+    /// rewrites, or `None` for a frame that culls in one phase.
+    pub(super) pyramid: Option<ViewPyramid>,
+    /// Instances the cull tested, which the second phase tests again.
+    pub(super) instance_count: u32,
+}
+
+/// [`ViewCull::pyramid`]: the pyramid's levels as this frame's graph knows them,
+/// and the cull's group naming them.
+#[derive(Clone, Debug)]
+pub(super) struct ViewPyramid {
+    pub(super) levels: Vec<ImageId>,
+    pub(super) group: BindGroupHandle,
 }
 
 /// The tonemap's pipeline and what its group names besides the frame.
@@ -359,6 +376,80 @@ pub(super) struct FramePasses {
     pub(super) prepass_partitions: Vec<BucketDraws>,
     pub(super) color_partitions: Vec<BucketDraws>,
     pub(super) tonemap: TonemapPipeline,
+}
+
+/// What both depth prepasses declare and do not write, as the graph knows it —
+/// see [`declare_prepass_reads`].
+#[derive(Clone, Copy, Debug)]
+struct PrepassReads {
+    shadow_atlas: ImageId,
+    occlusion_placeholder: ImageId,
+    pages: MaterialPages,
+    probe_table: BufferId,
+    skinned: Option<BufferId>,
+    selection: Option<BufferId>,
+    prepass_stats: BufferId,
+}
+
+/// Declares everything a depth prepass binds — the early one and, with the
+/// occlusion cull on, the late one, which bind the same group and draw from the
+/// same generator.
+fn declare_prepass_reads<'g, 'a>(
+    pass: PassBuilder<'g, 'a>,
+    reads: &PrepassReads,
+    generated: &GeneratedDraws,
+    emit: EmitTail,
+) -> PassBuilder<'g, 'a> {
+    let pass = pass
+        // Both are in this pass's bind group and neither is sampled by
+        // either depth-only pipeline — but a bound descriptor whose image is
+        // in the wrong layout is what
+        // `VUID-vkCmdDrawIndexedIndirectCount-imageLayout-00344` names, and
+        // the other backends read whatever the last writer left behind.
+        .read_image(reads.shadow_atlas)
+        .read_image(reads.occlusion_placeholder)
+        // And the page, which the **cutout** pipeline does sample: the alpha
+        // it cuts against is a texel of it. Declared on every frame rather
+        // than on the masked ones, because a declaration is also what lets
+        // the graph order a copy into a page layer against this pass — see
+        // `base_color_page_import`.
+        .read_image(reads.pages.base_color)
+        // And §2's other three pages, which are in the same groups for the
+        // same reason and are sampled here just as little.
+        .read_image(reads.pages.normal)
+        .read_image(reads.pages.mro)
+        .read_image(reads.pages.emissive)
+        // And the probe rows, which `mesh_layout` names in this group too
+        // and which the depth-only pipeline reads not at all — declared for
+        // the colour pass's reason exactly: they are device-local and
+        // writable-by-copy so a gather can fill them, and the graph orders a
+        // write against a pass only if that pass declared the read.
+        .read_buffer(reads.probe_table);
+    // `read_draw_sources` declares the *camera's* statistics buffer, because
+    // that is the one the arguments came out of; the prepass writes its own
+    // instead, so both are declared and the graph barriers both.
+    let pass = read_draw_sources(pass, generated, emit)
+        .use_buffer(reads.prepass_stats, ResourceState::ShaderReadWrite);
+    // The skinned vertices, on the shadow pass's terms. This pass writes the
+    // depth the occlusion pair samples and the forward pass tests against,
+    // so a prepass reading the region before the dispatch is visible lays
+    // down the previous pose's silhouette and the frame is rejected against
+    // it.
+    let pass = match reads.skinned {
+        Some(vertices) => pass.read_buffer(vertices),
+        None => pass,
+    };
+    // The camera's own cut, written here and again by the forward pass with
+    // the same camera and the same budget. Shared rather than a buffer of its
+    // own — unlike a cascade's, which a *later* pass would overwrite before
+    // anything could read it — because the second write is the one that stands
+    // and it writes the same words.
+    match reads.selection {
+        Some(selection) if emit.is_mesh() => {
+            pass.use_buffer(selection, ResourceState::ShaderReadWrite)
+        }
+        _ => pass,
+    }
 }
 
 /// The primary camera's overlays — nothing for a secondary view.
@@ -526,6 +617,9 @@ pub(super) struct View {
     /// `docs/plan/18-render-features.md`'s depth pyramid, which the reflection
     /// march climbs — see [`crate::hiz`].
     pub(super) hiz: Hiz,
+    /// `docs/plan/03-gpu-driven-rendering.md` §3.3's farthest-depth pyramid,
+    /// which the occlusion cull reads — see [`crate::occlusion_cull`].
+    pub(super) occlusion_pyramid: OcclusionPyramid,
     /// `docs/plan/18-render-features.md`'s reflection march — see
     /// [`crate::ssr`].
     pub(super) ssr: Ssr,
@@ -612,6 +706,9 @@ impl View {
                 level_meshes: inputs.level_meshes,
                 instance_capacity: inputs.instance_capacity,
                 hidden_view: inputs.id.hidden_bit(),
+                // Every camera can cull by occlusion: the regions it adds are a
+                // few words a bucket, and the switch is per frame.
+                mode: crcbl_shaders::draw_gen::DrawMode::Occlusion,
             },
         )?;
         let runs: Vec<BufferHandle> = (0..frames).map(|frame| draws.runs(frame)).collect();
@@ -857,6 +954,13 @@ impl View {
             frames,
             ForwardRenderer::build_depth_fullscreen,
         )?);
+        // The occlusion cull's farthest pyramid beside it, built from the same
+        // reduction. Its images wait for a frame's extent.
+        rollback.occlusion_pyramid = Some(OcclusionPyramid::new(
+            device,
+            frames,
+            ForwardRenderer::build_depth_fullscreen,
+        )?);
 
         // --- the froxel volume ---
         //
@@ -1034,6 +1138,9 @@ impl View {
                 hiz: rollback.hiz.take().unwrap_or_else(|| {
                     unreachable!("the pyramid was placed in the rollback above")
                 }),
+                occlusion_pyramid: rollback.occlusion_pyramid.take().unwrap_or_else(|| {
+                    unreachable!("the occlusion pyramid was placed in the rollback above")
+                }),
                 ssr: rollback.ssr.take().unwrap_or_else(|| {
                     unreachable!("the reflection march was placed in the rollback above")
                 }),
@@ -1093,6 +1200,9 @@ impl View {
         let scene = frame.scene;
         let slot = frame.slot;
         let extent = frame.extent;
+        // Read before this call advances it below: the first occlusion phase
+        // reprojects through the matrix the pyramid it reads was drawn with.
+        let previous_view_projection = self.previous_view_projection;
         // One matrix, used twice. Recomputing it for the frustum below would be
         // two chances to pass a different aspect ratio, and the failure that
         // produces — geometry culled against a camera the frame does not draw
@@ -1511,17 +1621,48 @@ impl View {
         // frame's own view-projection, and the frame block written above carries
         // `camera.eye`, so a pinned selection changes which cut is chosen and
         // nothing about what is culled, faced or drawn.
-        self.draws.begin_frame(
+        //
+        // **And what the cull does beyond the frustum.** The pyramid is made to
+        // match this frame's extent first — a resize replaces it and forgets
+        // its history — and a frame with no pyramid to read culls by the
+        // frustum alone, which is what a one-texel target gets.
+        let history = self.occlusion_pyramid.take_history(extent);
+        let cull = match self.draws.occlusion_layout() {
+            Some(layout) if frame.occlusion.any() => {
+                self.occlusion_pyramid.prepare(device, extent, layout)?;
+                if self.occlusion_pyramid.cull_group().is_some() {
+                    FrameCull::Occlusion(OcclusionFrame {
+                        view_projection,
+                        previous_view_projection: previous_view_projection
+                            .unwrap_or(view_projection),
+                        target: extent,
+                        pyramid_levels: self.occlusion_pyramid.levels(),
+                        occlusion: frame.occlusion.occlusion,
+                        // A first frame has no previous camera, and a chain
+                        // just rebuilt holds nothing.
+                        history: history && previous_view_projection.is_some(),
+                        small_feature_pixels: frame.occlusion.small_feature_pixels,
+                    })
+                } else {
+                    FrameCull::Plain
+                }
+            }
+            _ => FrameCull::Plain,
+        };
+        self.draws.begin_frame_with(
             device,
             slot,
             &Frustum::from_view_projection(view_projection),
             frame.instance_count,
-            [
-                frame.selection_eye.x,
-                frame.selection_eye.y,
-                frame.selection_eye.z,
-            ],
-            self.lod_params,
+            crate::draw_gen::Selection {
+                camera_position: [
+                    frame.selection_eye.x,
+                    frame.selection_eye.y,
+                    frame.selection_eye.z,
+                ],
+                lod_params: self.lod_params,
+            },
+            &cull,
         )?;
         Ok(uniforms)
     }
@@ -1535,6 +1676,7 @@ impl View {
     pub(super) fn add_cull(
         &self,
         graph: &mut RenderGraph<'_>,
+        pool: &TransientPool,
         slot: usize,
         instance_count: u32,
     ) -> ViewCull {
@@ -1542,7 +1684,35 @@ impl View {
         // draws. Every barrier between them and the passes that draw — including
         // the one into `IndirectArgument` — is the graph's, computed from what
         // each pass declares.
-        let generated = self.draws.add_passes(graph, slot, instance_count);
+        //
+        // **Through the occlusion entry point** on a frame `begin_frame` began
+        // with occlusion or small-feature culling, reading the pyramid the last
+        // frame left: `DrawGen::begin_frame_with` recorded which.
+        let occlusion_group = self
+            .occlusion_pyramid
+            .cull_group()
+            .filter(|_| self.draws.uses_occlusion_entry(slot));
+        let (generated, pyramid) = match occlusion_group {
+            Some(group) => {
+                let levels = self.occlusion_pyramid.import(graph, pool);
+                let generated = self.draws.add_occlusion_passes(
+                    graph,
+                    slot,
+                    instance_count,
+                    &crate::draw_gen::PyramidInputs {
+                        levels: &levels,
+                        group,
+                    },
+                );
+                let two_phase =
+                    self.draws.frame_mode(slot) == crcbl_shaders::draw_gen::DrawMode::Occlusion;
+                (
+                    generated,
+                    two_phase.then_some(ViewPyramid { levels, group }),
+                )
+            }
+            None => (self.draws.add_passes(graph, slot, instance_count), None),
+        };
         // `docs/plan/25-lod.md`'s record of the view's cut. Written by exactly
         // one mesh pass of this view, so what the graph orders here is this
         // frame's write against the next frame's use of the same slot.
@@ -1564,6 +1734,8 @@ impl View {
             generated,
             selection,
             light_grid,
+            pyramid,
+            instance_count,
         }
     }
 
@@ -1604,6 +1776,8 @@ impl View {
             generated,
             selection,
             light_grid,
+            pyramid: culled_pyramid,
+            instance_count,
         } = cull;
         let emit = passes.emit;
         let skinned = passes.skinned;
@@ -1873,65 +2047,40 @@ impl View {
         // barrier naming `Undefined` as its source carries no source scope, so it
         // would order this frame's write against nothing.
         let prepass_stats = import_read_write(graph, "prepass-stats", self.prepass_stats[frame]);
-        let prepass = graph
-            .add_render_pass("depth-prepass")
-            .depth(
-                scene_depth,
-                LoadOp::Clear,
-                StoreOp::Store,
-                crcbl_hal::ClearValue {
-                    depth: crcbl_hal::depth::CLEAR,
-                    ..crcbl_hal::ClearValue::default()
-                },
-            )
-            // Both are in this pass's bind group and neither is sampled by
-            // either depth-only pipeline — but a bound descriptor whose image is
-            // in the wrong layout is what
-            // `VUID-vkCmdDrawIndexedIndirectCount-imageLayout-00344` names, and
-            // the other backends read whatever the last writer left behind.
-            .read_image(shadow_atlas)
-            .read_image(occlusion_placeholder)
-            // And the page, which the **cutout** pipeline does sample: the alpha
-            // it cuts against is a texel of it. Declared on every frame rather
-            // than on the masked ones, because a declaration is also what lets
-            // the graph order a copy into a page layer against this pass — see
-            // `base_color_page_import`.
-            .read_image(base_color_page)
-            // And §2's other three pages, which are in the same groups for the
-            // same reason and are sampled here just as little.
-            .read_image(normal_page)
-            .read_image(mro_page)
-            .read_image(emissive_page)
-            // And the probe rows, which `mesh_layout` names in this group too
-            // and which the depth-only pipeline reads not at all — declared for
-            // the colour pass's reason exactly: they are device-local and
-            // writable-by-copy so a gather can fill them, and the graph orders a
-            // write against a pass only if that pass declared the read.
-            .read_buffer(probe_table);
-        // `read_draw_sources` declares the *camera's* statistics buffer, because
-        // that is the one the arguments came out of; the prepass writes its own
-        // instead, so both are declared and the graph barriers both.
-        let prepass = read_draw_sources(prepass, &generated, emit)
-            .use_buffer(prepass_stats, ResourceState::ShaderReadWrite);
-        // The skinned vertices, on the shadow pass's terms. This pass writes the
-        // depth the occlusion pair samples and the forward pass tests against,
-        // so a prepass reading the region before the dispatch is visible lays
-        // down the previous pose's silhouette and the frame is rejected against
-        // it.
-        let prepass = match skinned {
-            Some(vertices) => prepass.read_buffer(vertices),
-            None => prepass,
+        let prepass_reads = PrepassReads {
+            shadow_atlas,
+            occlusion_placeholder,
+            pages: passes.pages,
+            probe_table,
+            skinned,
+            selection,
+            prepass_stats,
         };
-        // The camera's own cut, written here and again by the forward pass with
-        // the same camera and the same budget. Shared rather than a buffer of its
-        // own — unlike a cascade's, which a *later* pass would overwrite before
-        // anything could read it — because the second write is the one that stands
-        // and it writes the same words.
-        let prepass = match selection {
-            Some(selection) if emit.is_mesh() => {
-                prepass.use_buffer(selection, ResourceState::ShaderReadWrite)
-            }
-            _ => prepass,
+        // **Which of the generator's draw regions the prepass draws.** With the
+        // occlusion cull on it is the survivors the first phase passed — the
+        // late prepass below draws the ones the second phase rescued, and the
+        // forward pass region 0, which is both. Off, it is region 0, which is
+        // every survivor, exactly as before the cull existed.
+        let two_phase = culled_pyramid.is_some();
+        let early_region = if two_phase {
+            crcbl_shaders::draw_gen::EARLY_REGION
+        } else {
+            0
+        };
+        let prepass = graph.add_render_pass("depth-prepass").depth(
+            scene_depth,
+            LoadOp::Clear,
+            StoreOp::Store,
+            crcbl_hal::ClearValue {
+                depth: crcbl_hal::depth::CLEAR,
+                ..crcbl_hal::ClearValue::default()
+            },
+        );
+        let prepass = declare_prepass_reads(prepass, &prepass_reads, &generated, emit);
+        let early_partitions = if two_phase {
+            prepass_partitions.clone()
+        } else {
+            Vec::new()
         };
         prepass.execute(move |ctx| {
             let encoder = ctx.encoder();
@@ -1940,9 +2089,54 @@ impl View {
             // pipeline that bucket's mode asked for.
             for partition in &prepass_partitions {
                 partition.open(encoder);
-                partition.record(encoder, depth_group, &generated);
+                partition.record_region(encoder, depth_group, &generated, early_region);
             }
         });
+
+        // --- the occlusion cull's second phase ---
+        //
+        // `docs/plan/03-gpu-driven-rendering.md` §3.3: this frame's farthest
+        // pyramid out of the early depth, every survivor the first phase marked
+        // tested against it, and the ones it rescues drawn into the same depth
+        // before anything reads it. See [`crate::occlusion_cull`].
+        if let Some(culled) = &culled_pyramid {
+            let levels = culled.levels.clone();
+            let group = culled.group;
+            self.occlusion_pyramid
+                .add_passes(graph, frame, scene_depth, &levels);
+            self.draws.add_late_passes(
+                graph,
+                frame,
+                instance_count,
+                &generated,
+                &crate::draw_gen::PyramidInputs {
+                    levels: &levels,
+                    group,
+                },
+            );
+            // **Loaded, not cleared**: the early prepass's depth is what the
+            // rescued survivors are drawn into, and what everything after reads
+            // is the two together.
+            let late = graph.add_render_pass("depth-prepass-late").depth(
+                scene_depth,
+                LoadOp::Load,
+                StoreOp::Store,
+                crcbl_hal::ClearValue::default(),
+            );
+            let late = declare_prepass_reads(late, &prepass_reads, &generated, emit);
+            late.execute(move |ctx| {
+                let encoder = ctx.encoder();
+                for partition in &early_partitions {
+                    partition.open(encoder);
+                    partition.record_region(
+                        encoder,
+                        depth_group,
+                        &generated,
+                        crcbl_shaders::draw_gen::LATE_REGION,
+                    );
+                }
+            });
+        }
 
         // `docs/plan/18-render-features.md`'s occlusion pair, or the one texel
         // that stands for "no occlusion was computed" where it is switched off.
@@ -2629,6 +2823,7 @@ impl View {
         self.volumetric.destroy(device);
         self.ssr.destroy(device);
         self.hiz.destroy(device);
+        self.occlusion_pyramid.destroy(device);
         self.contact_shadows.destroy(device);
         self.ssao.destroy(device);
         for group in self
@@ -2960,6 +3155,7 @@ impl ForwardRenderer {
             exposure: self.exposure,
             exposure_adaptation: self.exposure_adaptation,
             tonemap_curve: self.resolved_tonemap_curve(),
+            occlusion: self.resolved_occlusion_culling(),
         }
     }
 }

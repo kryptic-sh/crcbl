@@ -206,6 +206,11 @@ mod grass_shells;
 #[path = "render_e2e/grass_blades.rs"]
 mod grass_blades;
 
+// `docs/plan/03-gpu-driven-rendering.md` §3.3's occlusion proving scene, in a
+// file of its own because its claims walk a path in `tests/mesh_e2e/`.
+#[path = "render_e2e/occluders.rs"]
+mod occluders;
+
 // `docs/plan/07-ui-debug.md` rung 1's primitives, in a file of their own for the
 // same reason.
 #[path = "render_e2e/ui_primitives.rs"]

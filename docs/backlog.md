@@ -75,6 +75,30 @@ G2–G6 and T1–T2 are separate slices rather than gaps.
   are committed and compile, but no frame has been drawn on either; CI's
   software adapters are the only verdict available.
 
+## What occlusion culling shipped without (2026-09-17)
+
+- **Decision: occlusion culling on by default.** It is off (`r_occlusion_cull`),
+  because in `Scene::Occluders` at 1920×1080 it costs an RX 7900 XTX 0.905
+  against 0.859 ms while saving lavapipe 12.5% of the frame (64.66 against 73.87
+  ms); in the open meadow, where nothing is hidden, it adds about 0.06 ms on
+  radv and 0.9 ms on lavapipe. The saving grows with what a hidden draw costs,
+  so the options are on everywhere, on for software and slower tiers only, or a
+  per-scene switch; a heavier proving scene (shard's interior, towers) would
+  decide it better than the crate-and-wall fixture.
+- **Per-cluster occlusion** inside `mesh_cluster.slang`'s amplification stage is
+  not built; the `MeshShader` path culls whole instances only.
+- **CPU record and submit grow with the cull on**: 1.38 against 1.16 ms on radv.
+- **Draw-region layout VRAM**: in a 17,219-instance, 938-bucket scene a frame in
+  flight's generator buffers went from 1,709,036 to 4,397,628 bytes, most of it
+  six face regions per point light, and the host-side draw-constants buffer is
+  seven times larger.
+- **`Scene::Occluders` is excused on the SwiftShader browser legs** and the
+  cross-backend step: 252 pixels past `Tolerance::RASTERISER` and 72 gross, ssim
+  0.997511, with every crate present; hardware matched 34 of 34.
+- **Unpriced in a browser**, like the grass passes.
+- **The small-feature goldens check only guards scenes with small instances**:
+  forcing it on reddened only `occluders`.
+
 ## What grass rung G2 shipped without (2026-09-17)
 
 - **`Scene::MeadowBlades` is excused on the SwiftShader browser legs** and the
@@ -1051,12 +1075,6 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   `cascade_visibility` searches before `tile_pcf`'s five-tap probe and repeats
   for the next cascade in the fade band. Run the probe first and return on
   all-lit or all-shadowed.
-- **P25 — no occlusion or small-feature culling, and point lights draw their
-  whole sphere into all six faces.** `cull.slang` tests planes only; the Hi-Z
-  pyramid exists only for SSR. Reuse last frame's pyramid for a conservative
-  reprojected test, add a projected-size cull, and cull point-light faces
-  separately (watch the VRAM of per-face runs: a generator's survivors-and-runs
-  buffer is `crcbl_shaders::draw_gen::runs_words` per frame in flight).
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the
   atlas is held. `rsm-punctual` records with zero faces.
@@ -4483,20 +4501,6 @@ indirect call per blended slot, written by a GPU radix sort over 64-bit
 `BLEND` is exclusive with `MASK`, six modes. The rung's size, its crate-by-crate
 change list, its fixture and what it unblocks are in that plan. What is owed is
 the rung.
-
-### Occlusion culling: depth pyramid / two-phase (2026-08-27)
-
-**Not built, and correctly marked post-MVP.** §3.3 asks that the compute pass be
-left "structured so it can be inserted (visibility buffer slot in the pass
-inputs)". There is no occlusion pass and no two-phase cull in `crcbl-render`.
-**A Hi-Z pyramid does exist since 2026-08-27** — `hiz.slang`, built for the SSR
-march — so the pyramid half of the technique is in the tree and what is absent
-is the cull that reads it.
-
-**Coverage gap, stated plainly:** whether `crcbl_render::draw_gen`'s pass
-structure actually admits the insertion was **not** verified. The three-dispatch
-shape (clear, cull, draw-args) with graph-computed barriers looks like it does,
-but nobody has tried.
 
 ### `20-particles.md`'s GPU-resident system (2026-08-27)
 

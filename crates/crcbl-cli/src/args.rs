@@ -194,6 +194,8 @@ OPTIONS:
                                                stylised shells with fins
                            meadow_blades       that hillside under clumped mesh
                                                blades at two levels of detail
+                           occluders           two walls hiding a field of
+                                               crates and rows of pyramids
                            sprite              four sprites over three batches
                            ui                  text, a rect and an outline
                            ui_primitives       rounded rects, a clipped image
@@ -1292,6 +1294,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::Meadow,
         Scene::MeadowShells,
         Scene::MeadowBlades,
+        Scene::Occluders,
         Scene::Sprite,
         Scene::Ui,
         Scene::UiPrimitives,
@@ -1336,6 +1339,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::Meadow => "meadow",
         Scene::MeadowShells => "meadow_shells",
         Scene::MeadowBlades => "meadow_blades",
+        Scene::Occluders => "occluders",
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",
         Scene::UiPrimitives => "ui_primitives",

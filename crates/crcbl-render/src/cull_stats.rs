@@ -168,6 +168,30 @@ impl ClusterCull {
     }
 }
 
+/// What the camera's occlusion and small-feature culls did — zero on a frame
+/// that ran neither, which is every frame until a caller switches one on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OcclusionCull {
+    /// Survivors the **first** phase marked hidden against the previous frame's
+    /// pyramid. Every one of them was tested again.
+    pub early_rejects: u64,
+    /// Survivors the **second** phase still found hidden against this frame's
+    /// early depth — the instances the frame did not draw.
+    pub late_rejects: u64,
+    /// Instances dropped as smaller than the threshold, which are not in
+    /// [`CullStats::instances`] at all.
+    pub small_feature_rejects: u64,
+}
+
+impl OcclusionCull {
+    /// Survivors the first phase got wrong and the second drew anyway — a
+    /// disocclusion, a moved occluder or a camera cut.
+    #[must_use]
+    pub const fn rescued(&self) -> u64 {
+        self.early_rejects.saturating_sub(self.late_rejects)
+    }
+}
+
 /// What one frame's culling actually kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CullStats {
@@ -193,6 +217,10 @@ pub struct CullStats {
     /// three words untouched, and three separately-unknown numbers would invite
     /// a caller to add two of them up.
     pub clusters: Option<ClusterCull>,
+    /// What the occlusion and small-feature culls rejected. The instances drawn
+    /// are [`instances`](Self::instances) less
+    /// [`OcclusionCull::late_rejects`].
+    pub occlusion: OcclusionCull,
     /// Which frame these came from — a few frames behind the one being
     /// recorded, and how many is the device's to decide rather than this
     /// module's. See the module docs.
@@ -482,6 +510,11 @@ impl CullStatsRing {
                 frustum_rejects: u64::from(word(bytes, cull::CLUSTER_FRUSTUM_REJECT_WORD)),
                 cone_rejects: u64::from(word(bytes, cull::CLUSTER_CONE_REJECT_WORD)),
             }),
+            occlusion: OcclusionCull {
+                early_rejects: u64::from(word(bytes, cull::OCCLUSION_EARLY_REJECT_WORD)),
+                late_rejects: u64::from(word(bytes, cull::OCCLUSION_LATE_REJECT_WORD)),
+                small_feature_rejects: u64::from(word(bytes, cull::SMALL_FEATURE_REJECT_WORD)),
+            },
             frame,
         };
         // At `trace!` and nowhere near `debug!`: this is a line per frame, and
@@ -786,6 +819,9 @@ mod tests {
             (crcbl_shaders::light::CLUSTER_OVERFLOW_WORD, 11),
             (cull::CLUSTER_FRUSTUM_REJECT_WORD, 13),
             (cull::CLUSTER_CONE_REJECT_WORD, 17),
+            (cull::OCCLUSION_EARLY_REJECT_WORD, 19),
+            (cull::OCCLUSION_LATE_REJECT_WORD, 23),
+            (cull::SMALL_FEATURE_REJECT_WORD, 29),
         ] {
             let at = index as usize * 4;
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
@@ -814,6 +850,14 @@ mod tests {
                     frustum_rejects: 13,
                     cone_rejects: 17,
                 }),
+                // And the occlusion words beside them, on the same terms: a
+                // distinct value in each, so a word read for its neighbour is a
+                // different number here.
+                occlusion: OcclusionCull {
+                    early_rejects: 19,
+                    late_rejects: 23,
+                    small_feature_rejects: 29,
+                },
                 frame: 3,
             }),
         );

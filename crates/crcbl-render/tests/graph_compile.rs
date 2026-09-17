@@ -2653,6 +2653,7 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
             level_meshes: &[0],
             instance_capacity: 64,
             hidden_view: 0,
+            mode: crcbl_shaders::draw_gen::DrawMode::Plain,
         },
     )
     .expect("the null backend accepts every descriptor");

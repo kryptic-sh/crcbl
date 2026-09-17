@@ -39,11 +39,78 @@ pub const WORKGROUP_SIZE: u32 = 64;
 
 /// Bytes of the uniform block.
 ///
-/// Eight `uint` and then two `float4`, which `std140` puts at the next multiple
-/// of 16 — offset 32, directly behind the eighth. Checked against the `Offset`
-/// decorations `slangc` emits by this module's
+/// Eight `uint`, two `float4` — which `std140` puts at the next multiple of 16,
+/// offset 32, directly behind the eighth — and four `uint` more. Checked against
+/// the `Offset` decorations `slangc` emits by this module's
 /// `the_draw_gen_params_block_matches_the_offsets_slangc_emits`.
-pub const PARAMS_SIZE: usize = 64;
+pub const PARAMS_SIZE: usize = 80;
+
+/// How many **draw regions** the per-bucket words are laid out for.
+///
+/// A region is one argument structure, one draw count, three dispatch-extent
+/// words and one run start per bucket — a whole set of draws a pass can record.
+/// Region 0 is the only one a [`DrawMode::Plain`] generator writes, and its
+/// layout is the one every buffer here had before there were regions: a
+/// generator that allocates one region is byte for byte what it always was.
+///
+/// [`EARLY_REGION`] and [`LATE_REGION`] are the camera's two occlusion phases,
+/// and [`FACE_REGION_BASE`] onwards a point light's six faces. A number every
+/// generator of one renderer agrees on, because the start words sit a
+/// `DRAW_REGIONS * buckets` region long and a draw's constant block names one.
+pub const DRAW_REGIONS: u32 = 7;
+
+/// The region the camera's early depth prepass draws: the survivors the first
+/// occlusion phase passed.
+pub const EARLY_REGION: u32 = 1;
+
+/// The region the late depth prepass draws: the survivors the second phase
+/// rescued. Region 0 is the two together, which the forward pass draws.
+pub const LATE_REGION: u32 = 2;
+
+/// Point-light face `f` draws region `FACE_REGION_BASE + f`.
+pub const FACE_REGION_BASE: u32 = 1;
+
+const _: () = assert!(FACE_REGION_BASE as usize + crate::cull::FACE_COUNT <= DRAW_REGIONS as usize);
+const _: () = assert!(LATE_REGION < DRAW_REGIONS);
+
+/// Which regions a frame's survivors scatter into — `DrawGenParams::mode`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DrawMode {
+    /// Every survivor into region 0: every generator's mode before there were
+    /// regions, and every cascade's and spot's still.
+    #[default]
+    Plain,
+    /// The camera's two-phase occlusion: region 0's runs are sized for every
+    /// survivor, the early scatter fills the front of each with the unmarked
+    /// ones — [`EARLY_REGION`] — and the late scatter appends the rescued ones
+    /// behind them — [`LATE_REGION`].
+    Occlusion,
+    /// A point light's culls: each survivor scatters into the region of every
+    /// face its tags name, in runs packed from [`face_runs_at`].
+    Faces,
+}
+
+impl DrawMode {
+    /// The word `draw_gen.slang` reads.
+    #[must_use]
+    pub const fn word(self) -> u32 {
+        match self {
+            Self::Plain => 0,
+            Self::Occlusion => 1,
+            Self::Faces => 2,
+        }
+    }
+
+    /// Regions a generator running in this mode writes.
+    #[must_use]
+    pub const fn regions(self) -> u32 {
+        match self {
+            Self::Plain => 1,
+            Self::Occlusion => LATE_REGION + 1,
+            Self::Faces => DRAW_REGIONS,
+        }
+    }
+}
 
 /// The uniform block, matching `struct DrawGenParams` in
 /// `shaders/draw_gen.slang`.
@@ -132,6 +199,14 @@ pub struct Params {
     /// (instance, group) here and `mesh_cluster.slang`'s amplification stage
     /// reads the answer rather than the numbers.
     pub lod_params: [f32; 3],
+    /// Which regions this frame's survivors scatter into.
+    pub mode: DrawMode,
+    /// Regions this generator's buffers hold, and so how many copies of each
+    /// bucket's static arguments the routing pass writes.
+    pub draw_regions: u32,
+    /// Where the face regions' runs start, in words — [`face_runs_at`]. Read
+    /// only under [`DrawMode::Faces`].
+    pub face_runs_at: u32,
 }
 
 impl Params {
@@ -167,6 +242,12 @@ impl Params {
         }
         for (slot, value) in self.lod_params.into_iter().enumerate() {
             put(48 + slot * 4, value.to_le_bytes());
+        }
+        for (slot, value) in [self.mode.word(), self.draw_regions, self.face_runs_at]
+            .into_iter()
+            .enumerate()
+        {
+            put(64 + slot * 4, value.to_le_bytes());
         }
         bytes
     }
@@ -304,8 +385,9 @@ pub const NO_BUCKET: u32 = u32::MAX;
 /// |---|---|
 /// | `cull.slang`'s survivor list | `0..C` |
 /// | each survivor's route — its bucket, or [`NO_BUCKET`] | `C..runs_at(C)` |
-/// | every bucket's run, end to end | `runs_at(C)..run_start_word(C, 0)` |
-/// | each bucket's run start this frame | `run_start_word(C, 0)..runs_words(C, B)` |
+/// | every bucket's run, end to end | `runs_at(C)..run_start_word(C, B, 0, 0)` |
+/// | each region's bucket run starts this frame | `run_start_word(C, B, 0, 0)..face_runs_at(C, B)` |
+/// | a point light's face runs, where built | `face_runs_at(C, B)..runs_words(C, B, true)` |
 ///
 /// **The runs share one region of `C` words**, because a survivor lands in one
 /// bucket and the runs between them hold what the list does. A run's start is
@@ -317,25 +399,56 @@ pub const fn runs_at(visible_capacity: u32) -> u32 {
     2 * visible_capacity
 }
 
-/// Which word of the same buffer holds where bucket `bucket`'s run starts this
-/// frame, as an absolute word index into that buffer — the word
-/// [`DrawConstants::start_at`](crate::mesh::DrawConstants::start_at) names.
+/// Which word of the same buffer holds where bucket `bucket`'s run of region
+/// `region` starts this frame, as an absolute word index into that buffer — the
+/// word [`DrawConstants::start_at`](crate::mesh::DrawConstants::start_at) names.
 ///
-/// See [`runs_at`] for the layout.
+/// The starts sit behind the runs, [`DRAW_REGIONS`] regions of them a bucket
+/// count apart, so region 0's are at the words they always were. See
+/// [`runs_at`] for the layout.
 #[must_use]
-pub const fn run_start_word(visible_capacity: u32, bucket: u32) -> u32 {
-    3 * visible_capacity + bucket
+pub const fn run_start_word(
+    visible_capacity: u32,
+    bucket_count: u32,
+    region: u32,
+    bucket: u32,
+) -> u32 {
+    3 * visible_capacity + region * bucket_count + bucket
 }
 
-/// Words the whole buffer holds: the four regions [`runs_at`] lays out, and so
-/// **one capacity of runs however many buckets there are**, plus a word of start
-/// per bucket.
+/// Where a point-light generator's face runs start: behind every region's
+/// starts.
+#[must_use]
+pub const fn face_runs_at(visible_capacity: u32, bucket_count: u32) -> u32 {
+    3 * visible_capacity + DRAW_REGIONS * bucket_count
+}
+
+/// Words the whole buffer holds: the regions [`runs_at`] lays out, and so **one
+/// capacity of runs however many buckets there are**, plus [`DRAW_REGIONS`]
+/// words of start per bucket.
+///
+/// `faces` adds a point light's face runs behind the starts: six capacities —
+/// a survivor can reach every face — and one word more, so a face whose runs
+/// are empty and start at the very end still names a word inside the buffer,
+/// which `mesh_cluster.slang`'s task stage reads even for a bucket it then
+/// dispatches nothing of.
 ///
 /// `None` if that is more words than a `u32` addresses, which is what the shader
 /// indexes the buffer with.
 #[must_use]
-pub fn runs_words(visible_capacity: u32, bucket_count: u32) -> Option<u32> {
-    visible_capacity.checked_mul(3)?.checked_add(bucket_count)
+pub fn runs_words(visible_capacity: u32, bucket_count: u32, faces: bool) -> Option<u32> {
+    let starts = visible_capacity
+        .checked_mul(3)?
+        .checked_add(bucket_count.checked_mul(DRAW_REGIONS)?)?;
+    if faces {
+        let face_runs = u32::try_from(crate::cull::FACE_COUNT)
+            .ok()?
+            .checked_mul(visible_capacity)?
+            .checked_add(1)?;
+        starts.checked_add(face_runs)
+    } else {
+        Some(starts)
+    }
 }
 
 /// Words in one indexed-indirect argument structure.
@@ -523,8 +636,8 @@ mod tests {
     #[test]
     fn the_draw_gen_params_block_matches_the_offsets_slangc_emits() {
         // `OpMemberDecorate %DrawGenParams_std140 n Offset …`: 0, 4, 8, 12, 16,
-        // 20, 24, 28, 32, 48.
-        assert_eq!(PARAMS_SIZE, 64);
+        // 20, 24, 28, 32, 48, 64, 68, 72, 76.
+        assert_eq!(PARAMS_SIZE, 80);
         assert_eq!(
             PARAMS_SIZE % 16,
             0,
@@ -542,6 +655,9 @@ mod tests {
             level_meshes_at: 23,
             camera_position: [1.5, 2.5, 3.5],
             lod_params: [4.5, 5.5, 6.5],
+            mode: DrawMode::Faces,
+            draw_regions: DRAW_REGIONS,
+            face_runs_at: 29,
         }
         .to_bytes();
         let uint_at =
@@ -562,10 +678,14 @@ mod tests {
         assert_eq!(float_at(48), 4.5, "lod_params at offset 48");
         assert_eq!(float_at(52), 5.5, "and its expand budget beside it");
         assert_eq!(float_at(56), 6.5, "and the hold budget after that");
+        assert_eq!(uint_at(60), 0, "the fourth component is padding, and zero");
+        assert_eq!(uint_at(64), 2, "mode at offset 64");
+        assert_eq!(uint_at(68), DRAW_REGIONS, "draw_regions at offset 68");
+        assert_eq!(uint_at(72), 29, "face_runs_at at offset 72");
         assert!(
-            bytes[60..].iter().all(|byte| *byte == 0),
+            bytes[76..].iter().all(|byte| *byte == 0),
             "the std140 tail padding is written, and it is zero: {:?}",
-            &bytes[60..]
+            &bytes[76..]
         );
     }
 
@@ -713,8 +833,12 @@ mod tests {
             ),
             ("uint runs_at()", "return 2 * gen.visible_capacity;"),
             (
-                "uint run_start_word(uint bucket)",
-                "return 3 * gen.visible_capacity + bucket;",
+                "uint draw_slot(uint region, uint bucket)",
+                "return region * gen.bucket_count + bucket;",
+            ),
+            (
+                "uint run_start_word(uint region, uint bucket)",
+                "return 3 * gen.visible_capacity + draw_slot(region, bucket);",
             ),
         ] {
             let spelled = format!("{accessor}\n{{\n    {body}\n}}");
@@ -739,17 +863,32 @@ mod tests {
             "a capacity of survivors and one of routes"
         );
         assert_eq!(
-            run_start_word(capacity, 0),
+            run_start_word(capacity, 5, 0, 0),
             runs_at(capacity) + capacity,
             "one capacity of runs for every bucket together"
         );
         assert_eq!(
-            runs_words(capacity, 5),
-            Some(run_start_word(capacity, 5)),
-            "and the buffer ends behind the last bucket's start"
+            run_start_word(capacity, 5, 1, 0),
+            run_start_word(capacity, 5, 0, 4) + 1,
+            "each region's starts directly behind the one before"
         );
         assert_eq!(
-            runs_words(u32::MAX / 2, 1),
+            runs_words(capacity, 5, false),
+            Some(run_start_word(capacity, 5, DRAW_REGIONS, 0)),
+            "and the buffer ends behind the last region's last start"
+        );
+        assert_eq!(
+            face_runs_at(capacity, 5),
+            run_start_word(capacity, 5, DRAW_REGIONS, 0),
+            "a point light's face runs start where the starts end"
+        );
+        assert_eq!(
+            runs_words(capacity, 5, true),
+            Some(face_runs_at(capacity, 5) + 6 * capacity + 1),
+            "six capacities of face runs and a word to spare"
+        );
+        assert_eq!(
+            runs_words(u32::MAX / 2, 1, false),
             None,
             "a layout a u32 cannot index is refused"
         );
@@ -896,5 +1035,63 @@ mod tests {
             source.contains(&declaration),
             "draw_gen.slang does not declare `{declaration}`"
         );
+    }
+
+    /// **The regions, the modes and the per-region words are laid out where this
+    /// module says**, in the shader that writes them.
+    ///
+    /// A region offset the host and the shader disagree about is a pass drawing
+    /// another region's arguments: the early prepass drawing the late survivors,
+    /// or a point light's face drawing its neighbour's casters — frames that
+    /// look almost right, which is the worst way to be wrong.
+    #[test]
+    fn the_shader_lays_out_the_draw_regions_where_this_module_says() {
+        let source = include_str!("../shaders/draw_gen.slang");
+        for (name, value) in [
+            ("DRAW_REGIONS", DRAW_REGIONS),
+            ("EARLY_REGION", EARLY_REGION),
+            ("LATE_REGION", LATE_REGION),
+            ("FACE_REGION_BASE", FACE_REGION_BASE),
+            ("DRAW_MODE_PLAIN", DrawMode::Plain.word()),
+            ("DRAW_MODE_OCCLUSION", DrawMode::Occlusion.word()),
+            ("DRAW_MODE_FACES", DrawMode::Faces.word()),
+        ] {
+            let declaration = format!("static const uint {name} = {value};");
+            assert!(
+                source.contains(&declaration),
+                "draw_gen.slang does not declare `{declaration}`"
+            );
+        }
+        for (accessor, body) in [
+            (
+                "uint count_word(uint region, uint bucket)",
+                "return region * 4 * gen.bucket_count + bucket;",
+            ),
+            (
+                "uint mesh_arg_word(uint region, uint bucket, uint slot)",
+                "return region * 4 * gen.bucket_count + gen.bucket_count + bucket * MESH_ARGS_WORDS + slot;",
+            ),
+            (
+                "uint arg_word(uint region, uint bucket, uint field)",
+                "return draw_slot(region, bucket) * DRAW_ARGS_WORDS + field;",
+            ),
+        ] {
+            let spelled = format!("{accessor}\n{{\n    {body}\n}}");
+            assert!(
+                source.contains(&spelled),
+                "draw_gen.slang does not define `{accessor}` as `{body}`"
+            );
+        }
+        assert_eq!(
+            DrawMode::Plain.regions(),
+            1,
+            "a plain generator is region 0"
+        );
+        assert_eq!(
+            DrawMode::Occlusion.regions(),
+            LATE_REGION + 1,
+            "the camera's two phases are regions 1 and 2 beside region 0"
+        );
+        assert_eq!(DrawMode::Faces.regions(), DRAW_REGIONS);
     }
 }

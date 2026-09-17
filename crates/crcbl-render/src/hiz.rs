@@ -180,6 +180,8 @@ impl Hiz {
             &dyn Device,
             &str,
             &crcbl_shaders::Shader,
+            &str,
+            &str,
             PipelineLayoutHandle,
             Format,
         ) -> Result<GraphicsPipelineHandle, HalError>,
@@ -214,7 +216,17 @@ impl Hiz {
             push_constants: None,
         })?;
         let pipeline =
-            build_depth_fullscreen(device, "hiz", &HIZ, pipeline_layout, Format::D32Float)?;
+            // The **nearest** reduction; `farthestMain` beside it is
+            // `crate::occlusion_cull`'s.
+            build_depth_fullscreen(
+                device,
+                "hiz",
+                &HIZ,
+                "vertexMain",
+                "fragmentMain",
+                pipeline_layout,
+                Format::D32Float,
+            )?;
 
         Ok(Self {
             layout,

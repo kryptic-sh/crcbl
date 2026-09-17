@@ -115,6 +115,22 @@
 // addition per bucket, where a parallel scan would be several dispatches and an
 // order a device schedules.
 //
+// # Draw regions: more than one set of draws out of one generator
+//
+// Every per-bucket word — an argument structure, a draw count, three extent
+// words and a run start — is laid out once per **draw region**, a bucket count
+// apart, and region 0 is the layout this pass always had. `DRAW_MODE_OCCLUSION`
+// adds the camera's early and late regions: region 0's run for a bucket is sized
+// for every routed survivor, the early scatter fills its front with the survivors
+// `cull.slang`'s first phase did not mark, `lateScatterMain` appends the ones its
+// second phase rescued, and `lateFinishMain` makes region 0 the two together —
+// so the forward pass reads one contiguous run while the two depth prepasses
+// read its halves. `DRAW_MODE_FACES` adds a region per point-light face, with
+// runs of their own behind the starts, and scatters a survivor into every face
+// its tags name. The hysteresis state is judged for every routed survivor in
+// every mode, marked or not, so a cull that hides an instance leaves its level
+// selection exactly where drawing it would have.
+//
 // # The instance count is the atomic, and that is deliberate
 //
 // A bucket's `instance_count` is `scatterMain`'s slot allocator: a scattering
@@ -362,6 +378,52 @@ static const uint MESH_ARG_GROUP_Z = 2;
 /// statistics block: the element beside it is the amplification stage's.
 static const uint INSTANCE_SURVIVOR_WORD = 0;
 
+/// The low bits of a survivor-list entry, which are the instance index, and the
+/// tags `cull.slang` writes above them — matching the constants of the same
+/// names there and in `crcbl_shaders::cull`.
+static const uint ENTRY_INDEX_MASK = 16777215;
+static const uint ENTRY_FACE_SHIFT = 24;
+static const uint ENTRY_RESCUED = 1073741824;
+static const uint ENTRY_OCCLUDED = 2147483648;
+
+/// Point-light faces, and so how many face regions `DRAW_MODE_FACES` fills.
+static const uint FACE_COUNT = 6;
+
+/// How many **draw regions** every argument, count, dispatch-extent and start
+/// word is laid out for, matching `crcbl_shaders::draw_gen::DRAW_REGIONS`.
+///
+/// A region is a whole copy of the per-bucket words — one argument structure,
+/// one draw count, one dispatch extent and one run start per bucket — so one
+/// generator can hand a pass more than one set of draws. Region 0 is what every
+/// generator has always written: every survivor. `DRAW_MODE_OCCLUSION` adds the
+/// early and late regions, and `DRAW_MODE_FACES` a region per point-light face.
+/// A generator allocates the regions its mode can use and no more; the layout
+/// of region 0 is the same in all of them.
+static const uint DRAW_REGIONS = 7;
+
+/// The survivors the first occlusion phase passed, drawn by the early prepass.
+static const uint EARLY_REGION = 1;
+
+/// The survivors the second phase rescued, drawn by the late prepass. Region 0
+/// is the two together, which is what the forward pass draws.
+static const uint LATE_REGION = 2;
+
+/// Face `f` of a point light draws region `FACE_REGION_BASE + f`.
+static const uint FACE_REGION_BASE = 1;
+
+/// `DrawGenParams::mode`: every survivor, into region 0.
+static const uint DRAW_MODE_PLAIN = 0;
+
+/// `DrawGenParams::mode`: the camera's two-phase occlusion — region 0's runs
+/// are sized for every survivor, the early scatter fills each run's front with
+/// the unmarked ones and `lateScatterMain` appends the rescued ones behind them.
+static const uint DRAW_MODE_OCCLUSION = 1;
+
+/// `DrawGenParams::mode`: a point light's culls — each survivor scatters into
+/// the region of every face its tags name, in runs packed from
+/// `DrawGenParams::face_runs_at`.
+static const uint DRAW_MODE_FACES = 2;
+
 /// One group of a mesh's cluster DAG, matching
 /// `crcbl_shaders::level_select::LevelGroup`.
 ///
@@ -530,6 +592,15 @@ struct DrawGenParams
     /// keeps the cut a cover: the rule below is unchanged and its monotonicity
     /// turns on the projected error, not on the constants.
     float4 lod_params;
+    /// One of `DRAW_MODE_*`: which regions this frame's survivors scatter into.
+    uint mode;
+    /// Regions this generator's buffers hold, and so how many copies of each
+    /// bucket's static arguments `binMain` writes.
+    uint draw_regions;
+    /// Where the face regions' runs start in `visible_instances`, in words —
+    /// past every region's starts. Read only under `DRAW_MODE_FACES`.
+    uint face_runs_at;
+    uint mode_pad;
 };
 
 [[vk::binding(0, 0)]]
@@ -594,8 +665,13 @@ StructuredBuffer<uint> tables;
 /// |---|---|---|---|
 /// | survivors | `0..C` | `cull.slang` | `binMain`, `scatterMain` |
 /// | routes: survivor `i`'s bucket | `C..2C` | `binMain` | `scatterMain` |
-/// | runs, every bucket's end to end | `2C..3C` | `scatterMain` | geometry stages |
-/// | starts: bucket `b`'s first run word | `3C..3C+B` | `startsMain` | `scatterMain`, geometry stages |
+/// | runs, every bucket's end to end | `2C..3C` | `scatterMain`, `lateScatterMain` | geometry stages |
+/// | starts: region `r` bucket `b`'s first run word | `3C..3C+RB` | `startsMain` | the scatters, geometry stages |
+/// | face runs, every face's buckets end to end | `face_runs_at..+6C+1` | `scatterMain` | geometry stages |
+///
+/// `R` is `DrawGenParams::draw_regions`. The face runs exist only in a generator
+/// built for a point light's faces, and end with one spare word for the reason
+/// the next paragraph gives.
 ///
 /// The survivors are in whatever order `cull.slang`'s atomic handed slots out,
 /// and each run in whatever order `scatterMain`'s did — nothing here depends on
@@ -795,28 +871,46 @@ uint runs_at()
     return 2 * gen.visible_capacity;
 }
 
-/// Which word of `visible_instances` holds where bucket `bucket`'s run starts
-/// this frame, past the runs.
+/// Which argument structure, and which element of every per-draw table, bucket
+/// `bucket` of region `region` is: the regions sit end to end, a bucket count
+/// apart. The number `mesh_cluster.slang`'s `ClusterDrawConstants::bucket`
+/// carries, so its read of `draw_args` lands on the same structure.
+uint draw_slot(uint region, uint bucket)
+{
+    return region * gen.bucket_count + bucket;
+}
+
+/// Which word of `visible_instances` holds where bucket `bucket`'s run of region
+/// `region` starts this frame, past the runs.
 ///
 /// The same arithmetic `crcbl_render::DrawGen::bucket_start_word` performs, and
 /// the word `mesh.slang`'s `DrawConstants::start_at` names — fixed at build,
 /// where the start it holds is `startsMain`'s every frame.
-uint run_start_word(uint bucket)
+uint run_start_word(uint region, uint bucket)
 {
-    return 3 * gen.visible_capacity + bucket;
+    return 3 * gen.visible_capacity + draw_slot(region, bucket);
 }
 
-/// Which word of `counts_and_mesh_args` holds bucket `bucket`'s draw count.
-uint count_word(uint bucket)
+/// Which word of `counts_and_mesh_args` holds bucket `bucket`'s draw count in
+/// region `region`. A region is one draw count and three extent words per
+/// bucket, so region 0 is the layout the buffer always had.
+uint count_word(uint region, uint bucket)
 {
-    return bucket;
+    return region * 4 * gen.bucket_count + bucket;
 }
 
 /// Which word of `counts_and_mesh_args` holds word `slot` of bucket `bucket`'s
-/// mesh-dispatch extents, past the one draw count per bucket in front of them.
-uint mesh_arg_word(uint bucket, uint slot)
+/// mesh-dispatch extents in region `region`, past that region's draw counts.
+uint mesh_arg_word(uint region, uint bucket, uint slot)
 {
-    return gen.bucket_count + bucket * MESH_ARGS_WORDS + slot;
+    return region * 4 * gen.bucket_count + gen.bucket_count + bucket * MESH_ARGS_WORDS + slot;
+}
+
+/// The word of `args` holding field `field` of bucket `bucket`'s structure in
+/// region `region`.
+uint arg_word(uint region, uint bucket, uint field)
+{
+    return draw_slot(region, bucket) * DRAW_ARGS_WORDS + field;
 }
 
 /// What `projected_error` answers for an eye inside the group's own sphere.
@@ -1003,24 +1097,29 @@ void binMain(uint3 thread: SV_DispatchThreadID)
     if (index < gen.bucket_count)
     {
         GpuMesh mesh = meshes[bucket_mesh(index)];
-        uint at = index * DRAW_ARGS_WORDS;
-        args[at + ARG_INDEX_COUNT].store(mesh.index_count);
-        args[at + ARG_FIRST_INDEX].store(mesh.base_index);
-        // **Zero for both bases, and it is not an omission.** The mesh's base
-        // vertex reaches the vertex stage through the mesh table and the
-        // instance reaches it through `visible_instances`, because the four
-        // targets fold a draw's bases into `SV_VertexID` and `SV_InstanceID`
-        // differently — `mesh.slang`'s header measures all four.
-        args[at + ARG_VERTEX_OFFSET].store(0);
-        args[at + ARG_FIRST_INSTANCE].store(0);
+        // Every region's copy: a region draws the same mesh through the same
+        // index range, and only the instance counts differ between them.
+        for (uint region = 0; region < gen.draw_regions; ++region)
+        {
+            args[arg_word(region, index, ARG_INDEX_COUNT)].store(mesh.index_count);
+            args[arg_word(region, index, ARG_FIRST_INDEX)].store(mesh.base_index);
+            // **Zero for both bases, and it is not an omission.** The mesh's
+            // base vertex reaches the vertex stage through the mesh table and
+            // the instance reaches it through `visible_instances`, because the
+            // four targets fold a draw's bases into `SV_VertexID` and
+            // `SV_InstanceID` differently — `mesh.slang`'s header measures all
+            // four.
+            args[arg_word(region, index, ARG_VERTEX_OFFSET)].store(0);
+            args[arg_word(region, index, ARG_FIRST_INSTANCE)].store(0);
 
-        // The static half of the same bucket's mesh dispatch. The y extent is
-        // the routing half's, below, for the reason `ARG_INSTANCE_COUNT` is:
-        // nothing inside one dispatch can wait for every other invocation to
-        // have finished counting.
-        counts_and_mesh_args[mesh_arg_word(index, MESH_ARG_GROUP_X)]
-            .store(bucket_clusters(index));
-        counts_and_mesh_args[mesh_arg_word(index, MESH_ARG_GROUP_Z)].store(1);
+            // The static half of the same bucket's mesh dispatch. The y extent
+            // is the routing half's, below, for the reason `ARG_INSTANCE_COUNT`
+            // is: nothing inside one dispatch can wait for every other
+            // invocation to have finished counting.
+            counts_and_mesh_args[mesh_arg_word(region, index, MESH_ARG_GROUP_X)]
+                .store(bucket_clusters(index));
+            counts_and_mesh_args[mesh_arg_word(region, index, MESH_ARG_GROUP_Z)].store(1);
+        }
     }
 
     // Clamped to the list, which is what makes the runs unable to overflow —
@@ -1032,7 +1131,10 @@ void binMain(uint3 thread: SV_DispatchThreadID)
 
     // The survivor list is the front of the same buffer the routes are written
     // into — see `visible_instances`.
-    uint instance_index = visible_instances[index];
+    uint entry = visible_instances[index];
+    // The tags above the index are the cull's answers about the survivor — see
+    // `ENTRY_INDEX_MASK` — and the index is what everything below names.
+    uint instance_index = entry & ENTRY_INDEX_MASK;
     GpuInstance instance = instances[instance_index];
     // **`docs/plan/25-lod.md`'s uniform cut, and the one decision this pass
     // makes about detail.** The instance names level 0 of its mesh — that is
@@ -1068,7 +1170,30 @@ void binMain(uint3 thread: SV_DispatchThreadID)
         // equal by measurement rather than by assertion: `crcbl-vk`'s
         // `the_mesh_dispatch_extent_is_the_culled_instance_count` reads both
         // buffers back and compares them.
-        counts_and_mesh_args[mesh_arg_word(bucket, MESH_ARG_GROUP_Y)].add(1);
+        if (gen.mode == DRAW_MODE_FACES)
+        {
+            // One count per face the survivor reaches, into that face's region.
+            for (uint face = 0; face < FACE_COUNT; ++face)
+            {
+                if (((entry >> (ENTRY_FACE_SHIFT + face)) & 1) != 0)
+                {
+                    counts_and_mesh_args[mesh_arg_word(FACE_REGION_BASE + face, bucket,
+                        MESH_ARG_GROUP_Y)].add(1);
+                }
+            }
+        }
+        else
+        {
+            // Region 0 counts **every** routed survivor, marked or not, because
+            // under occlusion its runs are sized for the late scatter to append
+            // into; the early region counts the ones drawn first.
+            counts_and_mesh_args[mesh_arg_word(0, bucket, MESH_ARG_GROUP_Y)].add(1);
+            if (gen.mode == DRAW_MODE_OCCLUSION && (entry & ENTRY_OCCLUDED) == 0)
+            {
+                counts_and_mesh_args[mesh_arg_word(EARLY_REGION, bucket, MESH_ARG_GROUP_Y)]
+                    .add(1);
+            }
+        }
         break;
     }
     // Invocation `index` owns word `index` of the routes, so this is a plain
@@ -1088,16 +1213,54 @@ void binMain(uint3 thread: SV_DispatchThreadID)
 [numthreads(1, 1, 1)]
 void startsMain()
 {
+    if (gen.mode == DRAW_MODE_FACES)
+    {
+        // Each face's runs end to end, face by face, in their own region of the
+        // buffer: a survivor can reach several faces, so the faces together can
+        // hold more than one capacity of runs.
+        uint face_start = gen.face_runs_at;
+        for (uint face = 0; face < FACE_COUNT; ++face)
+        {
+            uint region = FACE_REGION_BASE + face;
+            for (uint bucket = 0; bucket < gen.bucket_count; ++bucket)
+            {
+                visible_instances[run_start_word(region, bucket)] = face_start;
+                uint reached =
+                    counts_and_mesh_args[mesh_arg_word(region, bucket, MESH_ARG_GROUP_Y)].load();
+                if (reached != 0)
+                {
+                    counts_and_mesh_args[count_word(region, bucket)].store(1);
+                }
+                face_start += reached;
+            }
+        }
+        return;
+    }
+
     uint start = runs_at();
     for (uint bucket = 0; bucket < gen.bucket_count; ++bucket)
     {
-        visible_instances[run_start_word(bucket)] = start;
-        uint routed = counts_and_mesh_args[mesh_arg_word(bucket, MESH_ARG_GROUP_Y)].load();
+        visible_instances[run_start_word(0, bucket)] = start;
+        uint routed = counts_and_mesh_args[mesh_arg_word(0, bucket, MESH_ARG_GROUP_Y)].load();
         // `1` for a bucket with something in it; an empty one keeps the zero
         // the clearing pass wrote, which is what `IndirectCount`'s call reads.
         if (routed != 0)
         {
-            counts_and_mesh_args[count_word(bucket)].store(1);
+            counts_and_mesh_args[count_word(0, bucket)].store(1);
+        }
+        if (gen.mode == DRAW_MODE_OCCLUSION)
+        {
+            // The early run is the front of region 0's, and the late run starts
+            // where the early one ends — so the forward pass reads one
+            // contiguous run of both.
+            uint early =
+                counts_and_mesh_args[mesh_arg_word(EARLY_REGION, bucket, MESH_ARG_GROUP_Y)].load();
+            visible_instances[run_start_word(EARLY_REGION, bucket)] = start;
+            visible_instances[run_start_word(LATE_REGION, bucket)] = start + early;
+            if (early != 0)
+            {
+                counts_and_mesh_args[count_word(EARLY_REGION, bucket)].store(1);
+            }
         }
         start += routed;
     }
@@ -1124,6 +1287,88 @@ void scatterMain(uint3 thread: SV_DispatchThreadID)
     {
         return;
     }
-    uint slot = args[bucket * DRAW_ARGS_WORDS + ARG_INSTANCE_COUNT].add(1);
-    visible_instances[visible_instances[run_start_word(bucket)] + slot] = visible_instances[index];
+    uint entry = visible_instances[index];
+    uint instance_index = entry & ENTRY_INDEX_MASK;
+    if (gen.mode == DRAW_MODE_FACES)
+    {
+        for (uint face = 0; face < FACE_COUNT; ++face)
+        {
+            if (((entry >> (ENTRY_FACE_SHIFT + face)) & 1) == 0)
+            {
+                continue;
+            }
+            uint region = FACE_REGION_BASE + face;
+            uint face_slot = args[arg_word(region, bucket, ARG_INSTANCE_COUNT)].add(1);
+            visible_instances[visible_instances[run_start_word(region, bucket)] + face_slot] =
+                instance_index;
+        }
+        return;
+    }
+    // A survivor the first occlusion phase marked waits for `lateScatterMain`.
+    if (gen.mode == DRAW_MODE_OCCLUSION && (entry & ENTRY_OCCLUDED) != 0)
+    {
+        return;
+    }
+    uint region = gen.mode == DRAW_MODE_OCCLUSION ? EARLY_REGION : 0;
+    uint slot = args[arg_word(region, bucket, ARG_INSTANCE_COUNT)].add(1);
+    visible_instances[visible_instances[run_start_word(region, bucket)] + slot] = instance_index;
+}
+
+/// The late scatter: every survivor `cull.slang`'s `lateMain` rescued, written
+/// into its bucket's late run — which starts where the early run ended, inside
+/// region 0's run.
+///
+/// A pass of its own after that one, on `scatterMain`'s terms: it reads the tag
+/// `lateMain` wrote, and a dependency between two dispatches of one pass is one
+/// no device is told about.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lateScatterMain(uint3 thread: SV_DispatchThreadID)
+{
+    uint index = thread.x;
+    if (index >= survivor_count())
+    {
+        return;
+    }
+    uint entry = visible_instances[index];
+    if ((entry & ENTRY_RESCUED) == 0)
+    {
+        return;
+    }
+    uint bucket = visible_instances[route_word(index)];
+    if (bucket == NO_BUCKET)
+    {
+        return;
+    }
+    uint slot = args[arg_word(LATE_REGION, bucket, ARG_INSTANCE_COUNT)].add(1);
+    visible_instances[visible_instances[run_start_word(LATE_REGION, bucket)] + slot] =
+        entry & ENTRY_INDEX_MASK;
+}
+
+/// Closes the two phases: the late region's draw counts and extents, and region
+/// 0 — the forward pass's — as the early and late regions together.
+///
+/// One invocation walking the buckets, for `startsMain`'s reason: by the time it
+/// runs every late scatter has finished, so both instance counts are totals.
+/// Region 0's count and y extent are **stored** over what the routing pass
+/// counted there, which was every routed survivor including the ones never
+/// drawn.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lateFinishMain()
+{
+    for (uint bucket = 0; bucket < gen.bucket_count; ++bucket)
+    {
+        uint early = args[arg_word(EARLY_REGION, bucket, ARG_INSTANCE_COUNT)].load();
+        uint late = args[arg_word(LATE_REGION, bucket, ARG_INSTANCE_COUNT)].load();
+        counts_and_mesh_args[mesh_arg_word(LATE_REGION, bucket, MESH_ARG_GROUP_Y)].store(late);
+        if (late != 0)
+        {
+            counts_and_mesh_args[count_word(LATE_REGION, bucket)].store(1);
+        }
+        uint drawn = early + late;
+        args[arg_word(0, bucket, ARG_INSTANCE_COUNT)].store(drawn);
+        counts_and_mesh_args[mesh_arg_word(0, bucket, MESH_ARG_GROUP_Y)].store(drawn);
+        counts_and_mesh_args[count_word(0, bucket)].store(drawn != 0 ? 1 : 0);
+    }
 }

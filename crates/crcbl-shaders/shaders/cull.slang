@@ -60,6 +60,20 @@
 // Normalizing would divide that one by zero and turn every test against it into
 // a `NaN` comparison, which passes for "outside". `crcbl_render::cull::Frustum`
 // therefore hands them over as extracted.
+//
+// # Three entry points over one set of declarations
+//
+// `computeMain` is the frustum cull every generator runs — and under
+// `CULL_FACES`, a point light's, which also tags each survivor with the faces of
+// its cube the box reaches. `occlusionMain` and `lateMain` are
+// `docs/plan/03-gpu-driven-rendering.md` §3.3's two occlusion phases, which only
+// the camera's generator runs: the first reprojects every frustum survivor into
+// the previous frame's farthest-depth pyramid and marks the ones it hides, the
+// second tests the marked ones against this frame's early depth and rescues what
+// that does not hide. `crcbl_render::cull`'s `occlusion` module is their oracle.
+//
+// A survivor-list entry is the instance index below `ENTRY_INDEX_MASK` and the
+// cull's tags above it; `draw_gen.slang` reads both.
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance` and
 /// `mesh.slang`'s copy.
@@ -173,6 +187,82 @@ struct GpuMesh
 /// than against a literal.
 static const uint PLANE_COUNT = 6;
 
+/// Faces of a point light's cube, matching `crcbl_render::shadow::POINT_FACES`.
+static const uint FACE_COUNT = 6;
+
+/// Planes kept per face: the four sides of its 90° pyramid, which are the only
+/// planes that separate one face from another — see `CULL_FACES`.
+static const uint FACE_PLANES = 4;
+
+/// `FACE_COUNT * FACE_PLANES`, spelled as a literal because it sizes an array
+/// in a struct `mesh_cluster.slang` re-declares field for field.
+static const uint FACE_PLANE_SLOTS = 24;
+
+/// `CullParams::features` bit: tag each survivor with the point-light faces its
+/// box reaches, in `ENTRY_FACE_SHIFT`'s six bits. Read by `computeMain`.
+static const uint CULL_FACES = 1;
+
+/// `CullParams::features` bit: the farthest-depth pyramid holds the previous
+/// frame, so `occlusionMain` may test against it. Clear on the first frame, on
+/// a resize and wherever the pyramid was not built — the second phase alone
+/// then decides.
+static const uint CULL_OCCLUSION_HISTORY = 2;
+
+/// `CullParams::features` bit: `occlusionMain` drops an instance whose
+/// projected box is narrower than `CullParams::small_feature_pixels`.
+static const uint CULL_SMALL_FEATURE = 4;
+
+/// The low bits of a survivor-list entry: the instance index. Everything above
+/// is a tag, and `crcbl_render::DrawGen::new` refuses a capacity that would
+/// reach it.
+static const uint ENTRY_INDEX_MASK = 16777215;
+
+/// Where a survivor's six face bits start — bit `ENTRY_FACE_SHIFT + f` is face
+/// `f`, written by `computeMain` under `CULL_FACES`.
+static const uint ENTRY_FACE_SHIFT = 24;
+
+/// The survivor passed the second phase's test after failing the first:
+/// `lateMain` sets it and `draw_gen.slang`'s `lateScatterMain` scatters it.
+static const uint ENTRY_RESCUED = 1073741824;
+
+/// The survivor failed the first phase's test against the previous frame's
+/// pyramid. `occlusionMain` sets it; the early scatter skips it and `lateMain`
+/// tests it again.
+static const uint ENTRY_OCCLUDED = 2147483648;
+
+/// Which element of `visible_count` counts the survivors the **first** phase
+/// marked occluded, matching `crcbl_shaders::cull::OCCLUSION_EARLY_REJECT_WORD`.
+static const uint OCCLUSION_EARLY_REJECT_WORD = 5;
+
+/// Which element counts the ones the **second** phase still found occluded —
+/// the instances the frame did not draw — matching
+/// `crcbl_shaders::cull::OCCLUSION_LATE_REJECT_WORD`.
+static const uint OCCLUSION_LATE_REJECT_WORD = 6;
+
+/// Which element counts the instances the small-feature test dropped, matching
+/// `crcbl_shaders::cull::SMALL_FEATURE_REJECT_WORD`.
+static const uint SMALL_FEATURE_REJECT_WORD = 7;
+
+/// Farthest-depth pyramid levels bound below, matching
+/// `crcbl_shaders::cull::OCCLUSION_MAX_LEVELS`.
+static const uint OCCLUSION_MAX_LEVELS = 8;
+
+/// Texels the projected rectangle is widened by on every side before it is
+/// looked up, matching `crcbl_shaders::cull::OCCLUSION_GUARD_TEXELS`. The
+/// rectangle bounds every pixel centre a rasteriser could cover, and one texel
+/// more absorbs the difference between this arithmetic and the vertex stage's.
+static const int OCCLUSION_GUARD_TEXELS = 1;
+
+/// How much nearer than the stored depth an instance's nearest point must be
+/// before it counts as hidden, as a fraction of that depth — `2^-12`, matching
+/// `crcbl_shaders::cull::OCCLUSION_DEPTH_SLACK`. A surface touching the
+/// occluder is kept rather than decided by rounding.
+static const float OCCLUSION_DEPTH_SLACK = 0.000244140625;
+
+/// A projected coordinate at or past this many pixels from the origin is
+/// treated as unprojectable, which keeps the integer conversion below in range.
+static const float PROJECTION_LIMIT = 16777216.0;
+
 /// Everything an invocation needs that is not buffer contents, matching
 /// `crcbl_shaders::cull::Params`.
 ///
@@ -196,6 +286,29 @@ struct CullParams
     /// the camera's own bit of the hidden-views mask, or zero for a cull that
     /// is no view's — every shadow cull — which rejects nothing on it.
     uint hidden_view;
+    /// `CULL_*` bits: what this frame's dispatches do beyond the frustum.
+    uint features;
+    /// This frame's world → clip, column-major — what the second occlusion
+    /// phase and the small-feature test project through.
+    float4x4 view_proj;
+    /// The previous frame's, which the first phase reprojects through because
+    /// the pyramid it reads was drawn with it.
+    float4x4 previous_view_proj;
+    /// The depth prepass's extent in texels, which level 0 of the pyramid is.
+    uint target_width;
+    uint target_height;
+    /// Levels of the farthest-depth pyramid bound in set 1, level 1 first. Zero
+    /// where there is none, which hides nothing.
+    uint pyramid_levels;
+    uint occlusion_pad;
+    /// The small-feature threshold, in pixels of the projected box's longer side.
+    float small_feature_pixels;
+    float small_feature_pad0;
+    float small_feature_pad1;
+    float small_feature_pad2;
+    /// Under `CULL_FACES`: face `f`'s side planes at `f * FACE_PLANES`, on
+    /// `planes`' convention.
+    float4 face_planes[FACE_PLANE_SLOTS];
 };
 
 [[vk::binding(0, 0)]]
@@ -243,8 +356,263 @@ RWStructuredBuffer<uint> visible;
 [[vk::binding(4, 0)]]
 RWStructuredBuffer<Atomic<uint> > visible_count;
 
+// # The farthest-depth pyramid, for the two occlusion phases
+//
+// Set 1 is `crcbl_render::occlusion`'s pyramid: level `n` holds, per texel, the
+// **farthest** depth of the `2^n`-texel block of the prepass it covers — under
+// reversed-Z the `min`, which `hiz.slang`'s `farthestMain` reduces. That is the
+// conservative bound an occlusion test needs: every pixel of the block is at
+// least that near, so a box whose nearest point is farther still cannot pass
+// the forward pass's `GreaterOrEqual` test anywhere in it. `ssr.slang`'s
+// pyramid keeps the nearest depth instead, which hides boxes that are really
+// visible, and is not what is bound here.
+//
+// One image per level for `hiz.slang`'s reasons, so one binding per level: a
+// WebGPU stage has sixteen sampled textures to spend and this uses eight. Every
+// slot is filled — a pyramid shorter than `OCCLUSION_MAX_LEVELS` repeats its
+// deepest level — and `CullParams::pyramid_levels` bounds what is read.
+
+[[vk::binding(0, 1)]]
+DepthTexture2D pyramid_1;
+[[vk::binding(1, 1)]]
+DepthTexture2D pyramid_2;
+[[vk::binding(2, 1)]]
+DepthTexture2D pyramid_3;
+[[vk::binding(3, 1)]]
+DepthTexture2D pyramid_4;
+[[vk::binding(4, 1)]]
+DepthTexture2D pyramid_5;
+[[vk::binding(5, 1)]]
+DepthTexture2D pyramid_6;
+[[vk::binding(6, 1)]]
+DepthTexture2D pyramid_7;
+[[vk::binding(7, 1)]]
+DepthTexture2D pyramid_8;
+
+/// Whether `instance` is a record this view's cull may read at all.
+///
+/// The first two of the refusals every entry point asks, in the order
+/// `computeMain` always asked them. A slot whose instance has been removed keeps
+/// whatever transform and mesh id it last had — `crcbl_render::InstancePool::
+/// remove` rewrites the flags word and nothing else — so the live bit is asked
+/// before anything else in the record is interpreted, including the mesh id
+/// that indexes the table.
+bool admits(GpuInstance instance)
+{
+    if ((instance.flags & INSTANCE_LIVE) == 0)
+    {
+        return false;
+    }
+    // The view this cull draws for has been told not to draw the instance —
+    // `crcbl_shaders::mesh::GpuInstance::HIDDEN_VIEWS_SHIFT`. A shadow cull
+    // passes zero, so a hidden instance still casts its shadow.
+    return (instance.flags & cull.hidden_view) == 0;
+}
+
+/// The world-space box of `instance`'s mesh bounds: its centre and half-extent.
+///
+/// The conservative transform the header names. `mul(m, v)` is row-wise —
+/// `r[i] = dot(m[i], v)` — so `mul(abs(basis), e)` is `r[i] = sum_j |m[i][j]| *
+/// e[j]`, which is the world-axis half-extent of the rotated box.
+void world_box(GpuInstance instance, GpuMesh mesh, out float3 center, out float3 extent)
+{
+    float3 bounds_min = float3(mesh.min_x, mesh.min_y, mesh.min_z);
+    float3 bounds_max = float3(mesh.max_x, mesh.max_y, mesh.max_z);
+    float3 local_center = 0.5 * (bounds_max + bounds_min);
+    float3 local_extent = 0.5 * (bounds_max - bounds_min);
+    float3x3 basis = (float3x3)instance.transform;
+    center = mul(instance.transform, float4(local_center, 1.0)).xyz;
+    extent = mul(abs(basis), local_extent);
+}
+
+/// Whether the box is inside or straddles `half_space`.
+///
+/// How far the box can reach towards the plane from its centre, along that
+/// plane's normal: the same `abs`-and-dot as the extent above, and the reason
+/// neither the plane nor the normal needs to be unit length.
+bool reaches(float4 half_space, float3 center, float3 extent)
+{
+    float radius = dot(abs(half_space.xyz), extent);
+    return dot(half_space.xyz, center) + half_space.w >= -radius;
+}
+
+/// Whether the box is inside or straddles every plane of the frustum.
+bool in_frustum(float3 center, float3 extent)
+{
+    for (uint plane = 0; plane < PLANE_COUNT; ++plane)
+    {
+        if (!reaches(cull.planes[plane], center, extent))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// A box projected to the screen: the pixel rectangle its eight corners span
+/// and the nearest reversed-Z depth any of them has.
+///
+/// `crcbl_render::cull::ScreenBounds` is this in Rust.
+struct ScreenBounds
+{
+    /// False when a corner is on or behind the eye plane, in front of the near
+    /// plane, or too far off screen to convert — every caller reads that as
+    /// "cannot be shown hidden or small".
+    bool valid;
+    float min_x;
+    float min_y;
+    float max_x;
+    float max_y;
+    /// The largest depth of the eight corners, which under reversed-Z is the
+    /// nearest. Depth is monotone along a view ray, so no point of the box is
+    /// nearer than its nearest corner.
+    float nearest;
+};
+
+/// Projects the box `center ± extent` through `view_proj` onto a target of
+/// `width` × `height` pixels, with pixel `(0, 0)` at the top left — the
+/// convention `ssr.slang`'s `pixel_of` uses.
+ScreenBounds project_box(float4x4 view_proj, float3 center, float3 extent, float width, float height)
+{
+    ScreenBounds bounds;
+    bounds.valid = true;
+    bounds.min_x = PROJECTION_LIMIT;
+    bounds.min_y = PROJECTION_LIMIT;
+    bounds.max_x = -PROJECTION_LIMIT;
+    bounds.max_y = -PROJECTION_LIMIT;
+    bounds.nearest = 0.0;
+    for (uint corner = 0; corner < 8; ++corner)
+    {
+        float3 side = float3(
+            (corner & 1) != 0 ? 1.0 : -1.0,
+            (corner & 2) != 0 ? 1.0 : -1.0,
+            (corner & 4) != 0 ? 1.0 : -1.0);
+        float4 clip = mul(view_proj, float4(center + side * extent, 1.0));
+        // Written so a `NaN` fails: every comparison with one is false, and a
+        // corner nothing can be said about makes the box invalid.
+        if (!(clip.w > 0.0))
+        {
+            bounds.valid = false;
+            return bounds;
+        }
+        float depth = clip.z / clip.w;
+        float x = (clip.x / clip.w * 0.5 + 0.5) * width;
+        float y = (0.5 - clip.y / clip.w * 0.5) * height;
+        if (!(depth <= 1.0) || !(abs(x) < PROJECTION_LIMIT) || !(abs(y) < PROJECTION_LIMIT))
+        {
+            bounds.valid = false;
+            return bounds;
+        }
+        bounds.min_x = min(bounds.min_x, x);
+        bounds.min_y = min(bounds.min_y, y);
+        bounds.max_x = max(bounds.max_x, x);
+        bounds.max_y = max(bounds.max_y, y);
+        bounds.nearest = max(bounds.nearest, depth);
+    }
+    return bounds;
+}
+
+/// Level `level` of the pyramid at an integer texel. No sampler and no filter,
+/// for `hiz.slang`'s reason: `min` of integer fetches is the same number on
+/// every rasteriser.
+float pyramid_load(uint level, int2 texel)
+{
+    int3 at = int3(texel, 0);
+    switch (level)
+    {
+    case 1:
+        return pyramid_1.Load(at);
+    case 2:
+        return pyramid_2.Load(at);
+    case 3:
+        return pyramid_3.Load(at);
+    case 4:
+        return pyramid_4.Load(at);
+    case 5:
+        return pyramid_5.Load(at);
+    case 6:
+        return pyramid_6.Load(at);
+    case 7:
+        return pyramid_7.Load(at);
+    default:
+        return pyramid_8.Load(at);
+    }
+}
+
+/// Whether the box is hidden behind what the pyramid holds, seen through
+/// `view_proj` — **the occlusion test both phases run**, and
+/// `crcbl_render::cull::occluded` is it in Rust.
+///
+/// Conservative in the only direction a cull may err: anything unprojectable,
+/// off screen or touching a covering texel's depth is **not** hidden.
+///
+/// # Which texels
+///
+/// The rectangle is widened by `OCCLUSION_GUARD_TEXELS` and clamped to the
+/// target, and the level is the finest from 1 up at which it spans at most two
+/// texels on each axis — so at most four `Load`s — or the deepest level, whose
+/// whole covered range is read. A texel of level `n` covers the `2^n` prepass
+/// texels its index names, and the last texel of an odd axis covers the rest
+/// (`hiz.slang`'s third tap), which is why an index is clamped rather than
+/// dropped.
+bool occluded(float4x4 view_proj, float3 center, float3 extent)
+{
+    if (cull.pyramid_levels == 0)
+    {
+        return false;
+    }
+    ScreenBounds bounds = project_box(
+        view_proj, center, extent, float(cull.target_width), float(cull.target_height));
+    if (!bounds.valid)
+    {
+        return false;
+    }
+    int width = int(cull.target_width);
+    int height = int(cull.target_height);
+    int x0 = int(floor(bounds.min_x)) - OCCLUSION_GUARD_TEXELS;
+    int y0 = int(floor(bounds.min_y)) - OCCLUSION_GUARD_TEXELS;
+    int x1 = int(floor(bounds.max_x)) + OCCLUSION_GUARD_TEXELS;
+    int y1 = int(floor(bounds.max_y)) + OCCLUSION_GUARD_TEXELS;
+    // Entirely off the target: nothing the pyramid holds says anything about
+    // it, so it is not hidden.
+    if (x1 < 0 || y1 < 0 || x0 >= width || y0 >= height)
+    {
+        return false;
+    }
+    uint left = uint(max(x0, 0));
+    uint top = uint(max(y0, 0));
+    uint right = uint(min(x1, width - 1));
+    uint bottom = uint(min(y1, height - 1));
+
+    uint level = 1;
+    while (level < cull.pyramid_levels
+        && ((right >> level) - (left >> level) > 1 || (bottom >> level) - (top >> level) > 1))
+    {
+        ++level;
+    }
+    uint level_width = max(cull.target_width >> level, 1u);
+    uint level_height = max(cull.target_height >> level, 1u);
+    uint first_x = min(left >> level, level_width - 1);
+    uint first_y = min(top >> level, level_height - 1);
+    uint last_x = min(right >> level, level_width - 1);
+    uint last_y = min(bottom >> level, level_height - 1);
+
+    // The nearest a depth can be, so the first texel read lowers it.
+    float farthest = 1.0;
+    for (uint y = first_y; y <= last_y; ++y)
+    {
+        for (uint x = first_x; x <= last_x; ++x)
+        {
+            farthest = min(farthest, pyramid_load(level, int2(int(x), int(y))));
+        }
+    }
+    return bounds.nearest * (1.0 + OCCLUSION_DEPTH_SLACK) < farthest;
+}
+
 /// Invocations per workgroup, matching
 /// `crcbl_shaders::cull::WORKGROUP_SIZE`. One instance each.
+///
+/// The frustum cull, and under `CULL_FACES` the point-light face tags.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void computeMain(uint3 thread: SV_DispatchThreadID)
@@ -256,25 +624,10 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     }
 
     GpuInstance instance = instances[index];
-    // A slot whose instance has been removed keeps whatever transform and mesh
-    // id it last had — `crcbl_render::InstancePool::remove` rewrites the flags
-    // word and nothing else — so this is the first thing asked and the rest of
-    // the record is never interpreted without it. First rather than second
-    // because it is also what keeps a stale `instance.mesh` from indexing the
-    // table below.
-    if ((instance.flags & INSTANCE_LIVE) == 0)
+    if (!admits(instance))
     {
         return;
     }
-
-    // The view this cull draws for has been told not to draw the instance —
-    // `crcbl_shaders::mesh::GpuInstance::HIDDEN_VIEWS_SHIFT`. A shadow cull
-    // passes zero, so a hidden instance still casts its shadow.
-    if ((instance.flags & cull.hidden_view) != 0)
-    {
-        return;
-    }
-
     GpuMesh mesh = meshes[instance.mesh];
     // A mesh id whose entry has been cleared — `MeshPool::free` writes all
     // zeroes — names no geometry, and the all-zero bounds are a degenerate box
@@ -286,38 +639,164 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
         return;
     }
 
+    uint entry = index;
     if ((instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) == 0)
     {
-        float3 bounds_min = float3(mesh.min_x, mesh.min_y, mesh.min_z);
-        float3 bounds_max = float3(mesh.max_x, mesh.max_y, mesh.max_z);
-        float3 local_center = 0.5 * (bounds_max + bounds_min);
-        float3 local_extent = 0.5 * (bounds_max - bounds_min);
-
-        // The conservative transform the header names. `mul(m, v)` is row-wise —
-        // `r[i] = dot(m[i], v)` — so `mul(abs(basis), e)` is
-        // `r[i] = sum_j |m[i][j]| * e[j]`, which is the world-axis half-extent of
-        // the rotated box.
-        float3x3 basis = (float3x3)instance.transform;
-        float3 center = mul(instance.transform, float4(local_center, 1.0)).xyz;
-        float3 extent = mul(abs(basis), local_extent);
-
-        for (uint plane = 0; plane < PLANE_COUNT; ++plane)
+        float3 center;
+        float3 extent;
+        world_box(instance, mesh, center, extent);
+        if (!in_frustum(center, extent))
         {
-            float4 half_space = cull.planes[plane];
-            // How far the box can reach towards the plane from its centre, along
-            // that plane's normal. The same `abs`-and-dot as the extent above, and
-            // the reason neither the plane nor the normal needs to be unit length.
-            float radius = dot(abs(half_space.xyz), extent);
-            if (dot(half_space.xyz, center) + half_space.w < -radius)
+            return;
+        }
+        // **Which faces of a point light's cube the box reaches.** The frustum
+        // above is the light's whole box, so the survivors — and the LOD
+        // hysteresis `draw_gen.slang` updates for them — are exactly what one
+        // cull against the sphere kept. What this adds is a tag per face: its
+        // four side planes are the pyramid a 90° face projects, and the six
+        // pyramids tile every direction, so a box inside the light's box that
+        // reaches no face's sides cannot put a texel in that face's tile.
+        if ((cull.features & CULL_FACES) != 0)
+        {
+            for (uint face = 0; face < FACE_COUNT; ++face)
             {
+                bool inside = true;
+                for (uint plane = 0; plane < FACE_PLANES; ++plane)
+                {
+                    if (!reaches(cull.face_planes[face * FACE_PLANES + plane], center, extent))
+                    {
+                        inside = false;
+                        break;
+                    }
+                }
+                if (inside)
+                {
+                    entry |= 1u << (ENTRY_FACE_SHIFT + face);
+                }
+            }
+        }
+    }
+    else if ((cull.features & CULL_FACES) != 0)
+    {
+        // A deforming instance's source bounds do not describe its vertices, so
+        // it is kept whole — in every face, on the same terms.
+        entry |= ((1u << FACE_COUNT) - 1) << ENTRY_FACE_SHIFT;
+    }
+
+    uint slot = visible_count[INSTANCE_SURVIVOR_WORD].add(1);
+    if (slot < cull.capacity)
+    {
+        visible[slot] = entry;
+    }
+}
+
+/// The first occlusion phase, and the camera's cull while
+/// `crcbl_render::ForwardRenderer` has occlusion or small-feature culling on.
+///
+/// `computeMain`'s frustum cull, then the small-feature test against this
+/// frame's projection, then the occlusion test against the **previous** frame's
+/// pyramid reprojected through the previous frame's view-projection. A survivor
+/// that fails the last is still a survivor — written with `ENTRY_OCCLUDED` so
+/// `draw_gen.slang` selects its level, routes it and leaves it out of the early
+/// scatter, and `lateMain` tests it again against this frame's depth. So this
+/// phase decides only what is drawn *first*; nothing it gets wrong reaches a
+/// pixel.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void occlusionMain(uint3 thread: SV_DispatchThreadID)
+{
+    uint index = thread.x;
+    if (index >= cull.instance_count)
+    {
+        return;
+    }
+
+    GpuInstance instance = instances[index];
+    if (!admits(instance))
+    {
+        return;
+    }
+    GpuMesh mesh = meshes[instance.mesh];
+    // A mesh id whose entry has been cleared — `MeshPool::free` writes all
+    // zeroes — names no geometry, and the all-zero bounds are a degenerate box
+    // at the origin that would otherwise be "visible" whenever the origin is on
+    // screen. The index count is the field that says an entry is empty, so it
+    // is the field this asks.
+    if (mesh.index_count == 0)
+    {
+        return;
+    }
+
+    uint entry = index;
+    if ((instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) == 0)
+    {
+        float3 center;
+        float3 extent;
+        world_box(instance, mesh, center, extent);
+        if (!in_frustum(center, extent))
+        {
+            return;
+        }
+        if ((cull.features & CULL_SMALL_FEATURE) != 0)
+        {
+            ScreenBounds bounds = project_box(cull.view_proj, center, extent,
+                float(cull.target_width), float(cull.target_height));
+            if (bounds.valid
+                && max(bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y)
+                    < cull.small_feature_pixels)
+            {
+                visible_count[SMALL_FEATURE_REJECT_WORD].add(1);
                 return;
             }
+        }
+        if ((cull.features & CULL_OCCLUSION_HISTORY) != 0
+            && occluded(cull.previous_view_proj, center, extent))
+        {
+            entry |= ENTRY_OCCLUDED;
+            visible_count[OCCLUSION_EARLY_REJECT_WORD].add(1);
         }
     }
 
     uint slot = visible_count[INSTANCE_SURVIVOR_WORD].add(1);
     if (slot < cull.capacity)
     {
-        visible[slot] = index;
+        visible[slot] = entry;
     }
+}
+
+/// The second occlusion phase: every survivor the first phase marked is tested
+/// again, against the pyramid reduced from **this** frame's early depth through
+/// this frame's view-projection.
+///
+/// That depth holds only what the first phase passed, which is less than the
+/// frame will hold — so a box it hides is hidden by the finished frame too, and
+/// this is the test the pixel-identity contract rests on. A box that passes is
+/// tagged `ENTRY_RESCUED` in place for `draw_gen.slang`'s late scatter; one that
+/// fails keeps its mark and is counted. Invocation `i` reads and writes entry
+/// `i` alone.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lateMain(uint3 thread: SV_DispatchThreadID)
+{
+    uint index = thread.x;
+    if (index >= min(visible_count[INSTANCE_SURVIVOR_WORD].load(), cull.capacity))
+    {
+        return;
+    }
+    uint entry = visible[index];
+    if ((entry & ENTRY_OCCLUDED) == 0)
+    {
+        return;
+    }
+    GpuInstance instance = instances[entry & ENTRY_INDEX_MASK];
+    GpuMesh mesh = meshes[instance.mesh];
+    float3 center;
+    float3 extent;
+    world_box(instance, mesh, center, extent);
+    if (occluded(cull.view_proj, center, extent))
+    {
+        visible_count[OCCLUSION_LATE_REJECT_WORD].add(1);
+        return;
+    }
+    visible[index] = entry | ENTRY_RESCUED;
 }

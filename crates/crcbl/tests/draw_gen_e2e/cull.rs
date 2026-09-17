@@ -483,11 +483,9 @@ impl CullProbe {
                 dxil: &crcbl::shaders::CULL.dxil_containers(),
             })
             .expect("the committed artifacts are accepted");
-        // The manifest's name rather than a literal: it is read out of the
-        // artifact's own `OpEntryPoint`.
-        let entry_point = crcbl::shaders::CULL
-            .entry_point(crcbl::shaders::Stage::Compute)
-            .expect("the cull pass has exactly one compute entry point");
+        // The frustum cull's own entry point, named: the module also carries the
+        // two occlusion phases, so a stage looked up by kind is ambiguous.
+        let entry_point = "computeMain";
         let pipeline = device
             .create_compute_pipeline(&crcbl::hal::ComputePipelineDesc {
                 label: Some("cull"),
@@ -537,6 +535,7 @@ impl CullProbe {
                     instance_count: self.instance_count,
                     capacity: self.capacity,
                     hidden_view: self.hidden_view,
+                    ..crcbl::shaders::cull::Params::default()
                 }
                 .to_bytes(),
             )

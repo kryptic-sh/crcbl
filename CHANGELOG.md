@@ -221,6 +221,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Two-phase GPU occlusion culling, small-feature culling and per-face
+  point-light shadow culls.** `ForwardRenderer::set_occlusion_culling` and the
+  `r_occlusion_cull` console switch (off by default) test frustum survivors
+  against the previous frame's farthest-depth pyramid, draw what passes, then
+  retest the rest against this frame's early depth before a late prepass; frames
+  are pixel-identical to the cull being off on all three geometry paths.
+  `r_small_feature_px` drops instances under a projected size and changes
+  pixels, so it is opt-in. A point light's cull tags each caster with the cube
+  faces it reaches and each face draws only its own, leaving the shadow atlas
+  byte-identical. `CullStats::occlusion` counts early, late and small-feature
+  rejects; `Scene::Occluders` (`crcbl screenshot --scene occluders`) is the
+  proving scene.
+
 - **Mesh-blade grass with two levels of detail and clumps**
   (`docs/plan/57-grass.md` rung G2). A row with `look: BladeLook::Blades` is
   drawn as a Bézier per blade, 15 vertices near and 7 past
@@ -2048,6 +2061,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **`DrawGen` buffers are laid out per draw region**: `DrawGenDesc` takes a
+  `mode`, `crcbl_shaders::draw_gen::run_start_word` and `runs_words` take the
+  bucket count, region and faces flag, `CullParams` grew and `STATS_WORDS` is 8,
+  `build_depth_fullscreen` takes entry names, and `FrameCounters::drawn`
+  subtracts occlusion rejects.
 
 - **`PhysicsSystem` stores bodies in dense generational sets** instead of hash
   maps sorted every step. `hash_state` now treats `-0.0` as `0.0` and every NaN

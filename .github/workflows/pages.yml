@@ -901,14 +901,14 @@ jobs:
   # anywhere in it, so none of the compositor machinery the demo and probe gates
   # need applies. Headless Chromium plus SwiftShader is the whole environment.
   #
-  # **`--expect-fail ssr,ui,meadow,meadow_shells,meadow_blades` IS A
-  # MEASUREMENT, NOT A TOLERANCE.** Every scene but five matches SwiftShader's
-  # output exactly within `Tolerance::RASTERISER`. Those five reproduce to the
+  # **`--expect-fail ssr,ui,meadow,meadow_shells,meadow_blades,occluders` IS A
+  # MEASUREMENT, NOT A TOLERANCE.** Every scene but six matches SwiftShader's
+  # output exactly within `Tolerance::RASTERISER`. Those six reproduce to the
   # digit across runs: `ssr` at 58 grossly-wrong pixels and ssim 0.988822, `ui`
   # at 506 and ssim 0.983257, `meadow` at 184 and ssim 0.990042,
-  # `meadow_shells` at 252 and ssim 0.990946, and `meadow_blades` at 409 and ssim
-  # 0.985431 — and all five match on real hardware, which is what says each is a
-  # rasteriser's limit. They are rasteriser differences rather than backend defects — the
+  # `meadow_shells` at 252 and ssim 0.990946, `meadow_blades` at 409 and ssim
+  # 0.985431, and `occluders` at 72 and ssim 0.997511 — and all six match on
+  # real hardware, which is what says each is a rasteriser's limit. They are rasteriser differences rather than backend defects — the
   # same `ssr` scene matches on real hardware with a max channel delta of 9 and
   # zero gross pixels, and its diff is banding confined to the reflection
   # ray-march and the horizon edges, so the geometry and the instancing that a
@@ -989,10 +989,22 @@ jobs:
           # natively against the radv golden; the same wasm on this machine's
           # own GPU matched **33 of 33** goldens, `meadow_blades` included, one
           # pixel of it differing by one level.
+          #
+          # **`occluders` joined them on 2026-09-17, measured the same way.**
+          # `docs/plan/03-gpu-driven-rendering.md` §3.3's proving scene is a
+          # lit wall, a floor and rows of small crates: the wall's shading bands
+          # and the crates' shadowed edges move with a rasteriser's last bits.
+          # On SwiftShader it reached 0.51% of the frame past the per-channel
+          # allowance and 0.15% past the gross one, against 0.024% and 0.004%
+          # on an RX 7900 XTX under radv natively against the lavapipe golden;
+          # the same wasm on this machine's own GPU matched **34 of 34**
+          # goldens, `occluders` included. Every crate is in the SwiftShader
+          # frame — the occlusion cull's first frame hides nothing.
           - os: ubuntu-latest
             label: linux
             adapter: swiftshader
-            excuse: --expect-fail ssr,ui,meadow,meadow_shells,meadow_blades
+            excuse:
+              --expect-fail ssr,ui,meadow,meadow_shells,meadow_blades,occluders
             timeout: 45
           # **macOS runs on the machine's own GPU, and gates every one.** Not a
           # preference — Chrome's Dawn has no Vulkan backend on macOS and so has
@@ -1004,7 +1016,8 @@ jobs:
           # not a browser-backend defect. Re-measured on 2026-09-16 with the
           # grass field in the set: **31 of 31**, `meadow` included, and on
           # 2026-09-17 with the shells: **32 of 32**, and with the mesh blades:
-          # **33 of 33**. That is why this leg carries no excuse
+          # **33 of 33**, and on 2026-09-17 with the occlusion cull's proving
+          # scene: **34 of 34**. That is why this leg carries no excuse
           # list and is the *stronger* of the three. If Metal turns out to differ
           # on a scene, the answer is a measured excuse here, not a wider
           # tolerance.
@@ -1027,7 +1040,8 @@ jobs:
           - os: windows-latest
             label: windows
             adapter: swiftshader
-            excuse: --expect-fail ssr,ui,meadow,meadow_shells,meadow_blades
+            excuse:
+              --expect-fail ssr,ui,meadow,meadow_shells,meadow_blades,occluders
             # **Sized for one cold run, because this leg has never had a warm
             # one.** 90 was extrapolated from a first attempt cancelled at
             # 45m20s — it had reached `11/11 scene(s) rendered and saved` with
@@ -1194,6 +1208,10 @@ jobs:
       # **`meadow_blades` joined it on 2026-09-17 on the same argument**:
       # without the excuse this step failed on it at 1755 pixels over tolerance
       # and 415 grossly wrong, against lavapipe's own frame.
+      # **`occluders` joined it on 2026-09-17 on the same argument**: without
+      # the excuse this step failed on it at 252 pixels over tolerance and 72
+      # grossly wrong, to the digit the golden step reports, the golden having
+      # been blessed on lavapipe.
       #
       # **Linux only for now**, and that is a scope line rather than a limit:
       # `--reference mtl` on macOS and `--reference dx12` on Windows would each
@@ -1208,7 +1226,7 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run:
           ./web/run-cross-backend-e2e.sh --reference vk --expect-fail
-          ssr,ui,meadow,meadow_shells,meadow_blades
+          ssr,ui,meadow,meadow_shells,meadow_blades,occluders
 
       # **The strongest form of the same question, and the reason this leg is
       # worth its runner minutes.** On Linux the browser renders on SwiftShader

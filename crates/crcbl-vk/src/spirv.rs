@@ -745,14 +745,17 @@ mod tests {
             Some([crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1])
         );
 
+        // Every compute entry point of the cull module — the frustum cull and
+        // the two occlusion phases — named, because the module has three and a
+        // stage looked up by kind is ambiguous.
         let cull = crcbl_shaders::CULL.spirv();
-        let cull_entry = crcbl_shaders::CULL
-            .entry_point(crcbl_shaders::Stage::Compute)
-            .expect("the cull pass has a compute entry point");
-        assert_eq!(
-            workgroup_size(cull, cull_entry).expect("the committed artifact parses"),
-            Some([crcbl_shaders::cull::WORKGROUP_SIZE, 1, 1])
-        );
+        for cull_entry in ["computeMain", "occlusionMain", "lateMain"] {
+            assert_eq!(
+                workgroup_size(cull, cull_entry).expect("the committed artifact parses"),
+                Some([crcbl_shaders::cull::WORKGROUP_SIZE, 1, 1]),
+                "{cull_entry}"
+            );
+        }
     }
 
     /// Instructions the parser does not care about must be skipped by their

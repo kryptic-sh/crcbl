@@ -170,20 +170,24 @@
 //! reads the region in front of it, and the words it finds there are plausible
 //! `u32`s.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crcbl_hal::{
     Barriers, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
     BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
     BufferBarrier, BufferCopy, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc,
-    ComputePipelineDesc, ComputePipelineHandle, Device, HalError, MemoryLocation,
-    PipelineLayoutDesc, PipelineLayoutHandle, QueueHandle, ResourceState, ShaderEntry,
+    ComputePipelineDesc, ComputePipelineHandle, Device, HalError, ImageViewType, MemoryLocation,
+    PipelineLayoutDesc, PipelineLayoutHandle, QueueHandle, ResourceState, SampleType, ShaderEntry,
     ShaderModuleDesc, ShaderStages, SubmitInfo, check_portable_storage_buffers,
 };
+use crcbl_shaders::draw_gen::DrawMode;
 use crcbl_shaders::{
     CLEAR_COUNTERS, CULL, DRAW_GEN, Stage, clear_counters, cull as cull_shader, draw_gen,
 };
+use glam::Mat4;
 
-use crate::cull::Frustum;
-use crate::graph::{BufferId, ImportedBuffer, RenderGraph};
+use crate::cull::{FacePlanes, Frustum};
+use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
 
 /// How large a [`DrawGen`] is, and what it draws.
 #[derive(Clone, Copy, Debug)]
@@ -260,6 +264,80 @@ pub struct DrawGenDesc<'a> {
     /// for no view — a shadow cascade's or a shadowed light's — which rejects
     /// nothing on it, so an instance a camera hides still casts its shadow.
     pub hidden_view: u32,
+    /// The most a frame of this generator may ask for, which decides what it
+    /// allocates: [`DrawMode::Plain`] is region 0 alone, as every generator was;
+    /// [`DrawMode::Occlusion`] adds the two occlusion regions and the three
+    /// occlusion pipelines; [`DrawMode::Faces`] adds six face regions and six
+    /// capacities of face runs.
+    ///
+    /// A frame may always run [`DrawMode::Plain`] instead — see
+    /// [`DrawGen::begin_frame_with`].
+    pub mode: DrawMode,
+}
+
+/// [`DrawGen::frame_modes`]' word for a frame that dispatches the occlusion
+/// entry point for its small-feature test alone and scatters plainly — past
+/// every [`DrawMode`] word.
+const SMALL_FEATURE_ONLY: u32 = 3;
+
+/// The eye and the budgets a frame's level of detail is selected under — the two
+/// numbers [`DrawGen::begin_frame`] takes beside the frustum, as one value for
+/// [`DrawGen::begin_frame_with`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Selection {
+    /// The eye, in world space — [`draw_gen::Params::camera_position`].
+    pub camera_position: [f32; 3],
+    /// Pixels per unit and the two budgets — [`draw_gen::Params::lod_params`].
+    pub lod_params: [f32; 3],
+}
+
+/// What one frame's cull does beyond the frustum — handed to
+/// [`DrawGen::begin_frame_with`].
+#[derive(Clone, Copy, Debug)]
+pub enum FrameCull<'a> {
+    /// The frustum and nothing else, into region 0.
+    Plain,
+    /// A point light's cull: the frustum is the light's box, and each survivor
+    /// is tagged with the faces whose side planes it reaches and scattered into
+    /// each of those faces' regions. Needs a [`DrawMode::Faces`] generator.
+    Faces(&'a FacePlanes),
+    /// The camera's two-phase occlusion and small-feature culls. Needs a
+    /// [`DrawMode::Occlusion`] generator.
+    Occlusion(OcclusionFrame),
+}
+
+/// The camera's half of an occlusion frame — see [`FrameCull::Occlusion`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OcclusionFrame {
+    /// This frame's world → clip.
+    pub view_projection: Mat4,
+    /// The previous frame's, which the first phase reprojects through.
+    pub previous_view_projection: Mat4,
+    /// The depth prepass's extent, which is level 0 of the pyramid.
+    pub target: (u32, u32),
+    /// Levels of the farthest-depth pyramid, from
+    /// [`occlusion_cull::levels_for`](crate::occlusion_cull::levels_for).
+    pub pyramid_levels: u32,
+    /// Whether the two phases run at all. With this off the frame is
+    /// [`DrawMode::Plain`] and only the small-feature test is added.
+    pub occlusion: bool,
+    /// Whether the pyramid holds the previous frame at this extent, so the first
+    /// phase may test against it. Off, every survivor is drawn early.
+    pub history: bool,
+    /// The small-feature threshold in pixels, or `None` where it is off.
+    pub small_feature_pixels: Option<f32>,
+}
+
+/// The farthest-depth pyramid a frame's occlusion passes read — see
+/// [`DrawGen::add_occlusion_passes`].
+#[derive(Clone, Copy, Debug)]
+pub struct PyramidInputs<'p> {
+    /// Every distinct level image, as the graph knows it, so the two culls can
+    /// declare their reads and the reduction passes their writes.
+    pub levels: &'p [ImageId],
+    /// The group naming those images at the slots `cull.slang` declares in set
+    /// 1, built against [`DrawGen::occlusion_layout`].
+    pub group: BindGroupHandle,
 }
 
 /// What one frame's generated draws live in.
@@ -419,6 +497,27 @@ pub struct DrawGen {
     /// [`draw_gen::runs_words`], checked once at build.
     runs_words: u32,
     hidden_view: u32,
+    /// What [`DrawGenDesc::mode`] built this for.
+    mode: DrawMode,
+    /// `[frame]`: the mode [`DrawGen::begin_frame_with`] last wrote, as its
+    /// word, so the passes a frame records cannot disagree with the block its
+    /// dispatches read.
+    frame_modes: Vec<AtomicU32>,
+    /// The occlusion entry points, on a [`DrawMode::Occlusion`] generator.
+    occlusion: Option<OcclusionPipelines>,
+}
+
+/// The two occlusion phases' cull pipelines and the late draw-argument ones.
+#[derive(Debug)]
+struct OcclusionPipelines {
+    /// Set 1 of the cull layout: the farthest-depth pyramid's levels.
+    pyramid_layout: BindGroupLayoutHandle,
+    /// The cull's set 0 and the pyramid's set 1.
+    cull_pipeline_layout: PipelineLayoutHandle,
+    early: ComputePipelineHandle,
+    late: ComputePipelineHandle,
+    late_scatter: ComputePipelineHandle,
+    late_finish: ComputePipelineHandle,
 }
 
 impl DrawGen {
@@ -485,14 +584,25 @@ impl DrawGen {
         let bucket_count = u32::try_from(desc.bucket_meshes.len())
             .map_err(|_| HalError::InvalidDescriptor("more buckets than a u32".to_string()))?;
         let capacity = desc.instance_capacity;
+        // **The survivor list carries tags above the index**, so a capacity
+        // reaching them would be instance indices read back as faces or as an
+        // occlusion verdict.
+        if capacity > cull_shader::ENTRY_INDEX_MASK + 1 {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{capacity} instances do not fit the {} a survivor entry indexes below its tags",
+                cull_shader::ENTRY_INDEX_MASK + 1
+            )));
+        }
+        let draw_regions = desc.mode.regions();
         // Checked here, once, because the shader indexes the whole buffer with a
         // `uint` and every accessor below does the same arithmetic unchecked.
-        let runs_words = draw_gen::runs_words(capacity, bucket_count).ok_or_else(|| {
-            HalError::InvalidDescriptor(format!(
-                "{capacity} instances and {bucket_count} buckets lay out more survivor and run \
+        let runs_words = draw_gen::runs_words(capacity, bucket_count, desc.mode == DrawMode::Faces)
+            .ok_or_else(|| {
+                HalError::InvalidDescriptor(format!(
+                    "{capacity} instances and {bucket_count} buckets lay out more survivor and run \
                  words than a u32 addresses"
-            ))
-        })?;
+                ))
+            })?;
 
         let mut buffer = |label: &str, size: u64, usage, memory| -> Result<_, HalError> {
             let handle = device.create_buffer(&BufferDesc {
@@ -590,8 +700,9 @@ impl DrawGen {
             MemoryLocation::HostUpload,
         )?;
         // The argument buffer's length in words, from the crate that owns the
-        // argument layout — so the clearing shader never re-declares it.
-        let args_words = bucket_count * draw_gen::DRAW_ARGS_WORDS as u32;
+        // argument layout — so the clearing shader never re-declares it. Every
+        // region's structures, end to end.
+        let args_words = draw_regions * bucket_count * draw_gen::DRAW_ARGS_WORDS as u32;
         device.write_buffer(
             clear_params,
             0,
@@ -599,7 +710,12 @@ impl DrawGen {
                 args_words,
                 counts_words: bucket_count,
                 stats_words: cull_shader::STATS_WORDS,
-                mesh_args_words: bucket_count * draw_gen::MESH_ARGS_WORDS as u32,
+                // Everything behind region 0's counts: its extents, and then
+                // every further region's counts and extents, which alternate.
+                mesh_args_words: draw_regions
+                    * bucket_count
+                    * (1 + draw_gen::MESH_ARGS_WORDS as u32)
+                    - bucket_count,
             }
             .to_bytes(),
         )?;
@@ -685,7 +801,7 @@ impl DrawGen {
             )?);
             args.push(buffer(
                 &format!("draw args {frame}"),
-                u64::from(bucket_count) * draw_gen::DRAW_ARGS_SIZE as u64,
+                u64::from(draw_regions) * u64::from(bucket_count) * draw_gen::DRAW_ARGS_SIZE as u64,
                 BufferUsage::STORAGE
                     | BufferUsage::INDIRECT
                     | BufferUsage::TRANSFER_SRC
@@ -703,7 +819,9 @@ impl DrawGen {
             // module docs on why a binding had to go.
             counts.push(buffer(
                 &format!("draw counts and mesh dispatch args {frame}"),
-                u64::from(bucket_count) * (4 + draw_gen::MESH_ARGS_SIZE as u64),
+                u64::from(draw_regions)
+                    * u64::from(bucket_count)
+                    * (4 + draw_gen::MESH_ARGS_SIZE as u64),
                 BufferUsage::STORAGE
                     | BufferUsage::INDIRECT
                     | BufferUsage::TRANSFER_SRC
@@ -772,10 +890,13 @@ impl DrawGen {
             push_constants: None,
         })?;
         rollback.pipeline_layouts.push(cull_pipeline_layout);
-        let cull_pipeline = compute_pipeline(
+        // Named rather than resolved: `cull.slang` has an entry point per
+        // occlusion phase beside this one.
+        let cull_pipeline = compute_pipeline_entry(
             device,
             "cull",
             &CULL,
+            "computeMain",
             cull_pipeline_layout,
             cull_shader::WORKGROUP_SIZE,
         )?;
@@ -863,6 +984,18 @@ impl DrawGen {
             draw_gen::WORKGROUP_SIZE,
         )?;
         rollback.pipelines.push(scatter_pipeline);
+
+        // --- the occlusion phases, on a generator built for them ---
+        let occlusion = if desc.mode == DrawMode::Occlusion {
+            Some(Self::build_occlusion(
+                device,
+                rollback,
+                cull_layout,
+                gen_pipeline_layout,
+            )?)
+        } else {
+            None
+        };
 
         let mut clear_groups = Vec::with_capacity(frames);
         let mut cull_groups = Vec::with_capacity(frames);
@@ -955,6 +1088,93 @@ impl DrawGen {
             capacity,
             runs_words,
             hidden_view: desc.hidden_view,
+            mode: desc.mode,
+            frame_modes: (0..frames).map(|_| AtomicU32::new(0)).collect(),
+            occlusion,
+        })
+    }
+
+    /// The pipelines only an occlusion generator has: `cull.slang`'s two phases
+    /// over the cull's set 0 and the pyramid's set 1, and `draw_gen.slang`'s late
+    /// scatter and finish over the draw-argument layout.
+    fn build_occlusion(
+        device: &dyn Device,
+        rollback: &mut Rollback,
+        cull_layout: BindGroupLayoutHandle,
+        gen_pipeline_layout: PipelineLayoutHandle,
+    ) -> Result<OcclusionPipelines, HalError> {
+        // One depth texture per level, in `cull.slang`'s declaration order —
+        // which is the order Slang's Metal target hands out texture indices in.
+        let entries: Vec<BindGroupLayoutEntry> = (0..cull_shader::OCCLUSION_MAX_LEVELS)
+            .map(|binding| BindGroupLayoutEntry {
+                binding,
+                visibility: ShaderStages::COMPUTE,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    // `Depth`, on `crate::hiz`'s terms: `DepthTexture2D` in the
+                    // shader, read with `Load` and never through a sampler.
+                    sample_type: SampleType::Depth,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            })
+            .collect();
+        let pyramid_desc = BindGroupLayoutDesc {
+            label: Some("occlusion pyramid"),
+            entries: &entries,
+        };
+        check_portable_storage_buffers(pyramid_desc.label, &[&pyramid_desc])?;
+        let pyramid_layout = device.create_bind_group_layout(&pyramid_desc)?;
+        rollback.bind_group_layouts.push(pyramid_layout);
+        let cull_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("occlusion cull"),
+            bind_group_layouts: &[cull_layout, pyramid_layout],
+            push_constants: None,
+        })?;
+        rollback.pipeline_layouts.push(cull_pipeline_layout);
+        let early = compute_pipeline_entry(
+            device,
+            "occlusion early cull",
+            &CULL,
+            "occlusionMain",
+            cull_pipeline_layout,
+            cull_shader::WORKGROUP_SIZE,
+        )?;
+        rollback.pipelines.push(early);
+        let late = compute_pipeline_entry(
+            device,
+            "occlusion late cull",
+            &CULL,
+            "lateMain",
+            cull_pipeline_layout,
+            cull_shader::WORKGROUP_SIZE,
+        )?;
+        rollback.pipelines.push(late);
+        let late_scatter = compute_pipeline_entry(
+            device,
+            "draw args late scatter",
+            &DRAW_GEN,
+            "lateScatterMain",
+            gen_pipeline_layout,
+            draw_gen::WORKGROUP_SIZE,
+        )?;
+        rollback.pipelines.push(late_scatter);
+        let late_finish = compute_pipeline_entry(
+            device,
+            "draw args late finish",
+            &DRAW_GEN,
+            "lateFinishMain",
+            gen_pipeline_layout,
+            1,
+        )?;
+        rollback.pipelines.push(late_finish);
+        Ok(OcclusionPipelines {
+            pyramid_layout,
+            cull_pipeline_layout,
+            early,
+            late,
+            late_scatter,
+            late_finish,
         })
     }
 
@@ -987,7 +1207,83 @@ impl DrawGen {
     /// camera, every shadow cull and every secondary view.
     #[must_use]
     pub const fn bucket_start_word(&self, bucket: u32) -> u32 {
-        draw_gen::run_start_word(self.capacity, bucket)
+        draw_gen::run_start_word(self.capacity, self.bucket_count, 0, bucket)
+    }
+
+    /// Which word holds where bucket `bucket`'s run of draw region `region`
+    /// starts this frame — [`bucket_start_word`](Self::bucket_start_word) for a
+    /// region past 0, on its terms exactly.
+    ///
+    /// [`draw_gen::DRAW_REGIONS`] regions of start words are laid out in every
+    /// generator whatever it allocates, so this is the same for every generator
+    /// one renderer builds.
+    #[must_use]
+    pub const fn region_start_word(&self, region: u32, bucket: u32) -> u32 {
+        draw_gen::run_start_word(self.capacity, self.bucket_count, region, bucket)
+    }
+
+    /// How far region `region`'s argument structures sit behind region 0's, in
+    /// bytes — what a draw of that region adds to
+    /// [`args_offset`](Self::args_offset).
+    #[must_use]
+    pub const fn args_region_offset(&self, region: u32) -> u64 {
+        region as u64 * self.bucket_count as u64 * draw_gen::DRAW_ARGS_SIZE as u64
+    }
+
+    /// How far region `region`'s draw counts and dispatch extents sit behind
+    /// region 0's, in bytes — what a draw of that region adds to
+    /// [`count_offset`](Self::count_offset) and
+    /// [`mesh_args_offset`](Self::mesh_args_offset). A region is one count and
+    /// one extent structure per bucket, so its counts and its extents move
+    /// together.
+    #[must_use]
+    pub const fn counts_region_offset(&self, region: u32) -> u64 {
+        region as u64 * self.bucket_count as u64 * (4 + draw_gen::MESH_ARGS_SIZE as u64)
+    }
+
+    /// What [`DrawGenDesc::mode`] built this generator for.
+    #[must_use]
+    pub const fn mode(&self) -> DrawMode {
+        self.mode
+    }
+
+    /// Set 1 of the occlusion cull's layout — the farthest-depth pyramid's
+    /// levels — which [`PyramidInputs::group`] is built against. `None` on a
+    /// generator not built for [`DrawMode::Occlusion`].
+    #[must_use]
+    pub fn occlusion_layout(&self) -> Option<BindGroupLayoutHandle> {
+        self.occlusion
+            .as_ref()
+            .map(|pipelines| pipelines.pyramid_layout)
+    }
+
+    /// The mode `frame`'s dispatches were parametrised for by the last
+    /// [`begin_frame_with`](Self::begin_frame_with) on that slot.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    #[must_use]
+    pub fn frame_mode(&self, frame: usize) -> DrawMode {
+        match self.frame_modes[frame].load(Ordering::Relaxed) {
+            SMALL_FEATURE_ONLY => DrawMode::Plain,
+            word if word == DrawMode::Occlusion.word() => DrawMode::Occlusion,
+            word if word == DrawMode::Faces.word() => DrawMode::Faces,
+            _ => DrawMode::Plain,
+        }
+    }
+
+    /// Whether `frame` dispatches `cull.slang`'s occlusion entry point — the two
+    /// phases, or the small-feature test alone — and so must be recorded with
+    /// [`add_occlusion_passes`](Self::add_occlusion_passes).
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    #[must_use]
+    pub fn uses_occlusion_entry(&self, frame: usize) -> bool {
+        let word = self.frame_modes[frame].load(Ordering::Relaxed);
+        word == DrawMode::Occlusion.word() || word == SMALL_FEATURE_ONLY
     }
 
     /// The first word of the run region in [`DrawGen::runs`] — where bucket
@@ -1224,6 +1520,100 @@ impl DrawGen {
         camera_position: [f32; 3],
         lod_params: [f32; 3],
     ) -> Result<(), HalError> {
+        self.begin_frame_with(
+            device,
+            frame,
+            frustum,
+            instance_count,
+            Selection {
+                camera_position,
+                lod_params,
+            },
+            &FrameCull::Plain,
+        )
+    }
+
+    /// [`begin_frame`](Self::begin_frame), with what the cull does beyond the
+    /// frustum this frame.
+    ///
+    /// The mode written here is what [`add_passes`](Self::add_passes) and
+    /// [`add_occlusion_passes`](Self::add_occlusion_passes) check against, so a
+    /// frame whose passes disagree with the block its dispatches read is a panic
+    /// rather than a frame that scatters into regions nothing draws.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] if a write failed.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with, or `cull` asks for a mode
+    /// this generator was not built for.
+    pub fn begin_frame_with(
+        &self,
+        device: &dyn Device,
+        frame: usize,
+        frustum: &Frustum,
+        instance_count: u32,
+        selection: Selection,
+        cull: &FrameCull<'_>,
+    ) -> Result<(), HalError> {
+        let Selection {
+            camera_position,
+            lod_params,
+        } = selection;
+        let mut params = cull_shader::Params {
+            planes: frustum.planes.map(|plane| plane.to_array()),
+            instance_count,
+            capacity: self.capacity,
+            hidden_view: self.hidden_view,
+            ..cull_shader::Params::default()
+        };
+        let mode = match cull {
+            FrameCull::Plain => DrawMode::Plain,
+            FrameCull::Faces(faces) => {
+                assert_eq!(
+                    self.mode,
+                    DrawMode::Faces,
+                    "a point light's face culls need a generator built with its face regions"
+                );
+                params.features = cull_shader::Features::FACES;
+                for (face, planes) in faces.iter().enumerate() {
+                    for (plane, value) in planes.iter().enumerate() {
+                        params.face_planes[face * cull_shader::FACE_PLANES + plane] =
+                            value.to_array();
+                    }
+                }
+                DrawMode::Faces
+            }
+            FrameCull::Occlusion(occlusion) => {
+                assert_eq!(
+                    self.mode,
+                    DrawMode::Occlusion,
+                    "the occlusion culls need a generator built with the occlusion regions"
+                );
+                let mut features = cull_shader::Features::NONE;
+                if occlusion.occlusion && occlusion.history {
+                    features = features.union(cull_shader::Features::OCCLUSION_HISTORY);
+                }
+                if occlusion.small_feature_pixels.is_some() {
+                    features = features.union(cull_shader::Features::SMALL_FEATURE);
+                }
+                params.features = features;
+                params.view_proj = occlusion.view_projection.to_cols_array();
+                params.previous_view_proj = occlusion.previous_view_projection.to_cols_array();
+                params.target_extent = [occlusion.target.0, occlusion.target.1];
+                params.pyramid_levels = occlusion
+                    .pyramid_levels
+                    .min(cull_shader::OCCLUSION_MAX_LEVELS);
+                params.small_feature_pixels = occlusion.small_feature_pixels.unwrap_or(0.0);
+                if occlusion.occlusion {
+                    DrawMode::Occlusion
+                } else {
+                    DrawMode::Plain
+                }
+            }
+        };
         device.write_buffer(
             self.gen_params[frame],
             0,
@@ -1238,20 +1628,26 @@ impl DrawGen {
                 level_meshes_at: self.table_offsets.level_meshes_at,
                 camera_position,
                 lod_params,
+                mode,
+                draw_regions: self.mode.regions(),
+                face_runs_at: draw_gen::face_runs_at(self.capacity, self.bucket_count),
             }
             .to_bytes(),
         )?;
-        device.write_buffer(
-            self.cull_params[frame],
-            0,
-            &cull_shader::Params {
-                planes: frustum.planes.map(|plane| plane.to_array()),
-                instance_count,
-                capacity: self.capacity,
-                hidden_view: self.hidden_view,
+        device.write_buffer(self.cull_params[frame], 0, &params.to_bytes())?;
+        // A frame whose occlusion culls are off but whose small-feature test is
+        // on still dispatches the occlusion entry point — it is where that test
+        // lives — and scatters plainly.
+        let cull_word = match cull {
+            FrameCull::Occlusion(occlusion)
+                if !occlusion.occlusion && occlusion.small_feature_pixels.is_some() =>
+            {
+                SMALL_FEATURE_ONLY
             }
-            .to_bytes(),
-        )
+            _ => mode.word(),
+        };
+        self.frame_modes[frame].store(cull_word, Ordering::Relaxed);
+        Ok(())
     }
 
     /// The maximum number of passes [`add_passes`](Self::add_passes) adds to a
@@ -1273,6 +1669,10 @@ impl DrawGen {
     /// the scatter's, since a dispatch of no workgroups is one Metal rejects.
     pub const DISPATCHES: u32 = 5;
 
+    /// Passes [`add_late_passes`](Self::add_late_passes) adds at most: the
+    /// second occlusion phase, the late scatter and the finish.
+    pub const LATE_PASSES: u32 = 3;
+
     /// Adds the cull and draw-argument passes to `graph` and returns what the
     /// caller's render pass draws from.
     ///
@@ -1289,6 +1689,149 @@ impl DrawGen {
         graph: &mut RenderGraph<'_>,
         frame: usize,
         instance_count: u32,
+    ) -> GeneratedDraws {
+        let word = self.frame_modes[frame].load(Ordering::Relaxed);
+        assert!(
+            word != DrawMode::Occlusion.word() && word != SMALL_FEATURE_ONLY,
+            "frame {frame} was begun with the occlusion culls, whose passes are \
+             `add_occlusion_passes`"
+        );
+        self.record_passes(graph, frame, instance_count, None)
+    }
+
+    /// [`add_passes`](Self::add_passes) for a frame
+    /// [`begin_frame_with`](Self::begin_frame_with) began with
+    /// [`FrameCull::Occlusion`]: the cull is the first occlusion phase against
+    /// `pyramid`, which it reads before this frame's reduction passes write it.
+    ///
+    /// The draws it returns are the **early** ones — region
+    /// [`draw_gen::EARLY_REGION`] — until [`add_late_passes`](Self::add_late_passes)
+    /// has closed the frame; a frame whose occlusion is off and whose
+    /// small-feature test is on draws region 0 from here directly.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with, or was not begun with
+    /// [`FrameCull::Occlusion`].
+    pub fn add_occlusion_passes(
+        &self,
+        graph: &mut RenderGraph<'_>,
+        frame: usize,
+        instance_count: u32,
+        pyramid: &PyramidInputs<'_>,
+    ) -> GeneratedDraws {
+        let word = self.frame_modes[frame].load(Ordering::Relaxed);
+        assert!(
+            word == DrawMode::Occlusion.word() || word == SMALL_FEATURE_ONLY,
+            "frame {frame} was not begun with the occlusion culls"
+        );
+        let occlusion = self
+            .occlusion
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("begin_frame_with checked the generator's mode"));
+        self.record_passes(
+            graph,
+            frame,
+            instance_count,
+            Some((occlusion.early, occlusion.cull_pipeline_layout, pyramid)),
+        )
+    }
+
+    /// The second occlusion phase and the late draw arguments, after this
+    /// frame's farthest-depth pyramid has been reduced from the early prepass.
+    ///
+    /// Three passes: `cull.slang`'s `lateMain` tests every survivor the first
+    /// phase marked against `pyramid`, `draw_gen.slang`'s late scatter appends
+    /// the ones it rescued behind each bucket's early run, and its finish writes
+    /// region [`draw_gen::LATE_REGION`]'s counts and region 0's — the early and
+    /// late draws together, which is what the forward pass draws. A frame that
+    /// tests no instance records the finish alone, because region 0 still needs
+    /// its zeroes written.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with, or was not begun with
+    /// occlusion on.
+    pub fn add_late_passes(
+        &self,
+        graph: &mut RenderGraph<'_>,
+        frame: usize,
+        instance_count: u32,
+        draws: &GeneratedDraws,
+        pyramid: &PyramidInputs<'_>,
+    ) {
+        assert_eq!(
+            self.frame_modes[frame].load(Ordering::Relaxed),
+            DrawMode::Occlusion.word(),
+            "frame {frame} was not begun with the occlusion culls on"
+        );
+        let occlusion = self
+            .occlusion
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("begin_frame_with checked the generator's mode"));
+        let groups = instance_count.div_ceil(cull_shader::WORKGROUP_SIZE);
+        if groups != 0 {
+            let cull_group = self.cull_groups[frame];
+            let pyramid_group = pyramid.group;
+            let layout = occlusion.cull_pipeline_layout;
+            let pipeline = occlusion.late;
+            let mut pass = graph
+                .add_compute_pass("occlusion-late")
+                .use_buffer(draws.runs_id, ResourceState::ShaderReadWrite)
+                .use_buffer(draws.visible_count_id, ResourceState::ShaderReadWrite);
+            for &level in pyramid.levels {
+                pass = pass.read_image(level);
+            }
+            pass.execute(move |ctx| {
+                let encoder = ctx.encoder();
+                encoder.bind_compute_pipeline(pipeline);
+                encoder.bind_group(0, cull_group, &[], layout);
+                encoder.bind_group(1, pyramid_group, &[], layout);
+                encoder.dispatch(groups, 1, 1);
+            });
+        }
+        let gen_layout = self.gen_pipeline_layout;
+        let gen_group = self.gen_groups[frame];
+        for (label, pipeline, groups) in [
+            (
+                "draw-late-scatter",
+                occlusion.late_scatter,
+                instance_count.div_ceil(draw_gen::WORKGROUP_SIZE),
+            ),
+            ("draw-late-finish", occlusion.late_finish, 1),
+        ] {
+            if groups == 0 {
+                continue;
+            }
+            graph
+                .add_compute_pass(label)
+                .read_buffer(draws.visible_count_id)
+                .use_buffer(draws.runs_id, ResourceState::ShaderReadWrite)
+                .use_buffer(draws.args_id, ResourceState::ShaderReadWrite)
+                .use_buffer(draws.counts_id, ResourceState::ShaderReadWrite)
+                .use_buffer(draws.group_state_id, ResourceState::ShaderReadWrite)
+                .execute(move |ctx| {
+                    let encoder = ctx.encoder();
+                    encoder.bind_compute_pipeline(pipeline);
+                    encoder.bind_group(0, gen_group, &[], gen_layout);
+                    encoder.dispatch(groups, 1, 1);
+                });
+        }
+    }
+
+    /// The clear, the cull and the three draw-argument passes, with the cull
+    /// either `cull.slang`'s frustum entry point or `occlusion`'s first phase
+    /// over the pyramid it names.
+    fn record_passes(
+        &self,
+        graph: &mut RenderGraph<'_>,
+        frame: usize,
+        instance_count: u32,
+        occlusion: Option<(
+            ComputePipelineHandle,
+            PipelineLayoutHandle,
+            &PyramidInputs<'_>,
+        )>,
     ) -> GeneratedDraws {
         // Each buffer arrives in the state the *previous* frame that used this
         // slot left it in, which is the state declared as final below. Vacuous
@@ -1356,10 +1899,11 @@ impl DrawGen {
         let clear_layout = self.clear_pipeline_layout;
         let clear_group = self.clear_groups[frame];
         // The longest of the three buffers, which is the arguments: one
-        // structure per bucket, and `new` refuses a table with no buckets, so
-        // this is never the empty dispatch Metal rejects.
-        let clear_groups = (self.bucket_count * draw_gen::DRAW_ARGS_WORDS as u32)
-            .div_ceil(clear_counters::WORKGROUP_SIZE);
+        // structure per bucket per region, and `new` refuses a table with no
+        // buckets, so this is never the empty dispatch Metal rejects.
+        let clear_groups =
+            (self.mode.regions() * self.bucket_count * draw_gen::DRAW_ARGS_WORDS as u32)
+                .div_ceil(clear_counters::WORKGROUP_SIZE);
         graph
             .add_compute_pass("clear-counters")
             .use_buffer(visible_count, ResourceState::ShaderReadWrite)
@@ -1374,8 +1918,10 @@ impl DrawGen {
                 encoder.dispatch(clear_groups, 1, 1);
             });
 
-        let cull_pipeline = self.cull_pipeline;
-        let cull_layout = self.cull_pipeline_layout;
+        let (cull_pipeline, cull_layout, pyramid_group) = match occlusion {
+            Some((pipeline, layout, pyramid)) => (pipeline, layout, Some(pyramid.group)),
+            None => (self.cull_pipeline, self.cull_pipeline_layout, None),
+        };
         let cull_group = self.cull_groups[frame];
         let cull_groups = instance_count.div_ceil(cull_shader::WORKGROUP_SIZE);
         // Omit an empty pass, not just its dispatch: Metal still creates an
@@ -1383,19 +1929,27 @@ impl DrawGen {
         // without work. The clear and argument-generation passes remain needed
         // to erase the preceding frame's counts and populate zero draws.
         if cull_groups != 0 {
-            graph
+            let mut pass = graph
                 .add_compute_pass("cull")
                 // `ShaderReadWrite` rather than a write-only state for both: a
                 // storage-buffer descriptor permits reads whatever the shader does
                 // with it, and the counter is genuinely read-modify-written.
                 .use_buffer(runs, ResourceState::ShaderReadWrite)
-                .use_buffer(visible_count, ResourceState::ShaderReadWrite)
-                .execute(move |ctx| {
-                    let encoder = ctx.encoder();
-                    encoder.bind_compute_pipeline(cull_pipeline);
-                    encoder.bind_group(0, cull_group, &[], cull_layout);
-                    encoder.dispatch(cull_groups, 1, 1);
-                });
+                .use_buffer(visible_count, ResourceState::ShaderReadWrite);
+            // The previous frame's pyramid, read before this frame's reduction
+            // writes over it: the declaration is what orders the two.
+            for &level in occlusion.map_or(&[][..], |(_, _, pyramid)| pyramid.levels) {
+                pass = pass.read_image(level);
+            }
+            pass.execute(move |ctx| {
+                let encoder = ctx.encoder();
+                encoder.bind_compute_pipeline(cull_pipeline);
+                encoder.bind_group(0, cull_group, &[], cull_layout);
+                if let Some(group) = pyramid_group {
+                    encoder.bind_group(1, group, &[], cull_layout);
+                }
+                encoder.dispatch(cull_groups, 1, 1);
+            });
         }
 
         let gen_layout = self.gen_pipeline_layout;
@@ -1468,6 +2022,18 @@ impl DrawGen {
 
     /// Releases everything, in dependency order. The device must be idle.
     pub fn destroy(self, device: &dyn Device) {
+        if let Some(occlusion) = self.occlusion {
+            for pipeline in [
+                occlusion.early,
+                occlusion.late,
+                occlusion.late_scatter,
+                occlusion.late_finish,
+            ] {
+                device.destroy_compute_pipeline(pipeline);
+            }
+            device.destroy_pipeline_layout(occlusion.cull_pipeline_layout);
+            device.destroy_bind_group_layout(occlusion.pyramid_layout);
+        }
         device.destroy_compute_pipeline(self.scatter_pipeline);
         device.destroy_compute_pipeline(self.starts_pipeline);
         device.destroy_compute_pipeline(self.bin_pipeline);
@@ -1781,6 +2347,17 @@ mod tests {
     /// drawing its own flat mesh — the smallest table that is still a table of
     /// that length.
     fn generator(device: &dyn Device, queue: QueueHandle, capacity: u32, buckets: u32) -> DrawGen {
+        generator_in(device, queue, capacity, buckets, DrawMode::Plain)
+    }
+
+    /// [`generator`], built for `mode`.
+    fn generator_in(
+        device: &dyn Device,
+        queue: QueueHandle,
+        capacity: u32,
+        buckets: u32,
+        mode: DrawMode,
+    ) -> DrawGen {
         let storage = |label: &str, size: u64| {
             device
                 .create_buffer(&BufferDesc {
@@ -1817,12 +2394,14 @@ mod tests {
                 level_meshes: &bucket_meshes,
                 instance_capacity: capacity,
                 hidden_view: 0,
+                mode,
             },
         )
         .expect("the null backend builds a generator")
     }
 
-    /// **The runs buffer costs a word per bucket, not a capacity per bucket.**
+    /// **The runs buffer costs a word per bucket per draw region, not a capacity
+    /// per bucket.**
     ///
     /// Two generators of one capacity and very different bucket counts, and the
     /// size the device was actually asked for — read off the allocation rather
@@ -1843,16 +2422,18 @@ mod tests {
                 .expect("the runs buffer is live")
         };
 
+        let regions = u64::from(draw_gen::DRAW_REGIONS);
         assert_eq!(
             size(&many) - size(&few),
-            u64::from(many.bucket_count() - few.bucket_count()) * 4,
-            "sixty-three more buckets cost sixty-three more words of run start, and nothing else"
+            u64::from(many.bucket_count() - few.bucket_count()) * regions * 4,
+            "sixty-three more buckets cost sixty-three more words of run start a region, and \
+             nothing else"
         );
         assert_eq!(
             size(&few),
-            (3 * u64::from(CAPACITY) + 1) * 4,
+            (3 * u64::from(CAPACITY) + regions) * 4,
             "one bucket's generator holds the survivors, their routes, one capacity of runs and \
-             one start"
+             one start per region"
         );
         for draws in [&few, &many] {
             assert_eq!(
@@ -1897,9 +2478,16 @@ mod tests {
             "one word per bucket, in bucket order, behind one capacity of runs"
         );
         assert_eq!(
-            u64::from(starts[starts.len() - 1] + 1) * 4,
+            draws.region_start_word(1, 0),
+            starts[starts.len() - 1] + 1,
+            "region 1's starts directly behind region 0's"
+        );
+        assert_eq!(
+            u64::from(
+                draws.region_start_word(draw_gen::DRAW_REGIONS - 1, draws.bucket_count() - 1) + 1
+            ) * 4,
             draws.runs_size(),
-            "and the last bucket's start is the buffer's last word"
+            "and the last region's last start is the buffer's last word"
         );
 
         draws.destroy(device);
@@ -1919,12 +2507,66 @@ mod tests {
         const BUCKETS: u32 = 938;
         let per_bucket_runs = u64::from(CAPACITY) * (1 + u64::from(BUCKETS)) * 4;
         let shared_runs = u64::from(
-            draw_gen::runs_words(CAPACITY, BUCKETS).expect("the scene's layout addresses"),
+            draw_gen::runs_words(CAPACITY, BUCKETS, false).expect("the scene's layout addresses"),
         ) * 4;
         assert_eq!(
             per_bucket_runs, 64_674_564,
             "61.7 MiB a buffer, as measured"
         );
-        assert_eq!(shared_runs, 210_380, "205.4 KiB a buffer");
+        assert_eq!(
+            shared_runs, 232_892,
+            "227.4 KiB a buffer, with a start word per bucket for every draw region"
+        );
+    }
+
+    /// **What the draw regions cost one frame in flight**, per generator and per
+    /// renderer, in the measured scene of
+    /// [`the_measured_scene_pays_a_word_per_bucket_rather_than_a_capacity`] —
+    /// read off the allocations the device was asked for, so the figures a
+    /// report quotes are these assertions' and not arithmetic beside them.
+    ///
+    /// A renderer holds a camera generator built for [`DrawMode::Occlusion`],
+    /// [`crate::shadow::CASCADES`] built for [`DrawMode::Plain`] and
+    /// [`crate::shadow::LIGHT_SLOTS`] built for [`DrawMode::Faces`] — the point
+    /// light's face culls, whose face runs are most of the cost.
+    #[test]
+    fn the_regions_cost_what_their_layout_says_in_the_measured_scene() {
+        const CAPACITY: u32 = 17219;
+        const BUCKETS: u32 = 938;
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let size = |buffer| recorder.buffer_size(buffer).expect("live");
+        let per_frame = |mode| {
+            let draws = generator_in(device, queue, CAPACITY, BUCKETS, mode);
+            let bytes = size(draws.runs(0)) + size(draws.args(0)) + size(draws.counts(0));
+            draws.destroy(device);
+            bytes
+        };
+        let [plain, occlusion, faces] =
+            [DrawMode::Plain, DrawMode::Occlusion, DrawMode::Faces].map(per_frame);
+        assert_eq!(
+            plain, 266_660,
+            "runs, one region of arguments and one of counts"
+        );
+        assert_eq!(occlusion, 334_196, "three regions of arguments and counts");
+        assert_eq!(
+            faces, 882_528,
+            "seven regions and six capacities of face runs"
+        );
+        // What a generator cost before there were regions: the runs with one
+        // start per bucket, one argument structure and one count region.
+        let before = (3 * u64::from(CAPACITY) + u64::from(BUCKETS)) * 4
+            + u64::from(BUCKETS) * (draw_gen::DRAW_ARGS_SIZE as u64 + 16);
+        assert_eq!(before, 244_148);
+        let cascades = crate::shadow::CASCADES as u64;
+        let slots = crate::shadow::LIGHT_SLOTS as u64;
+        let renderer_before = before * (1 + cascades + slots);
+        let renderer_after = occlusion + plain * cascades + faces * slots;
+        assert_eq!(renderer_before, 1_709_036);
+        assert_eq!(
+            renderer_after, 4_397_628,
+            "4.19 MiB a frame in flight, against 1.63 MiB before"
+        );
+        recorder.assert_valid();
     }
 }

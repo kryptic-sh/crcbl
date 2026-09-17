@@ -114,3 +114,8 @@ under both paths side by side. Exit criteria of the other samples inherit
   fixed-stride march read the prepass directly. The SSR section's standing rule
   — structural ratios rather than tolerances, and never a per-driver re-bless —
   is what had to absorb it, and it was written before this rung was scheduled.
+- **The occlusion cull reads a second pyramid, not this one** (2026-09-17). SSR
+  wants each texel's nearest depth (`max` under reversed-Z); a cull wants the
+  farthest (`min`), or it hides what a single uncovered pixel still shows.
+  `hiz.slang`'s `farthestMain` builds that chain for
+  `crcbl_render::occlusion_cull` and leaves what SSR reads untouched.

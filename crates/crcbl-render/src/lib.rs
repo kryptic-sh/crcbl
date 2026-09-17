@@ -150,6 +150,7 @@ pub mod menu;
 pub mod mesh_pool;
 pub mod mip;
 pub mod nine_slice;
+pub mod occlusion_cull;
 pub mod orbit;
 pub mod pass_stats;
 mod probe;
@@ -213,9 +214,11 @@ pub use crcbl_ui::{ButtonSkin, ButtonState, SkinInsets};
 /// dependency of its own to name what it sets.
 pub use crcbl_water::{BodyError, Medium, WaterBody};
 pub use cull::{Aabb, Frustum, visible_instances};
-pub use cull_stats::{ClusterCull, CullStats, CullStatsRing};
+pub use cull_stats::{ClusterCull, CullStats, CullStatsRing, OcclusionCull};
 pub use debug_draw::{DebugDraw, DebugVertex, frustum_corners};
-pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
+pub use draw_gen::{
+    DrawGen, DrawGenDesc, FrameCull, GeneratedDraws, OcclusionFrame, PyramidInputs, Selection,
+};
 pub use effects::{Antialiasing, EffectOverride, EffectRequest, RenderEffects, ray_tracing_note};
 pub use exposure::{ExposureAdaptation, ExposureBuffers};
 pub use fly::{Flyer, LOOK, SPEED, TURN};
@@ -243,6 +246,7 @@ pub use mesh_pool::{
     Mesh, MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshRange, MeshUpload, UPLOAD_TIMEOUT,
 };
 pub use nine_slice::{NineQuads, NineSliceSource, SliceQuad};
+pub use occlusion_cull::OcclusionCulling;
 pub use orbit::OrbitCamera;
 pub use pass_stats::PassStats;
 pub use scene::{
@@ -312,6 +316,8 @@ pub fn console_table() -> crcbl_console::Table {
         ssao::r_ssao_radius,
         ssao::r_ssao_technique,
         ssao::r_ssao_split,
+        occlusion_cull::r_occlusion_cull,
+        occlusion_cull::r_small_feature_px,
         probe_visibility::r_probe_visibility,
         rsm::r_probe_bounce,
         shadow::r_shadow_cadence,

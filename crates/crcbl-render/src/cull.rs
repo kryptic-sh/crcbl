@@ -61,6 +61,14 @@
 //! planes over exactly as extracted, and this module's
 //! `the_infinite_far_plane_is_degenerate_and_rejects_nothing` is what says so.
 
+mod occlusion;
+
+pub use occlusion::{
+    DepthPyramid, EarlyInputs, FacePlanes, PyramidFootprint, Reduction, ScreenBounds,
+    early_entries, face_entries, face_planes, face_tags, footprint, late_entry, occluded,
+    project_box, small_feature, world_box,
+};
+
 use crcbl_core::bounds::{max_lanes, min_lanes};
 use crcbl_shaders::mesh::{GpuInstance, GpuMaterial, GpuMesh};
 use crcbl_shaders::meshlet::ClusterBounds;

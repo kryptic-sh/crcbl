@@ -166,7 +166,7 @@ use crate::counters::FrameCounters;
 use crate::cull::Frustum;
 use crate::cull_stats::CullStatsRing;
 use crate::debug_draw::DebugDraw;
-use crate::draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
+use crate::draw_gen::{DrawGen, DrawGenDesc, FrameCull, GeneratedDraws};
 use crate::effects::{EffectRequest, RenderEffects};
 use crate::graph::{
     BufferId, ImageId, ImportedBuffer, ImportedImage, InitialClaim, PassBuilder, RenderGraph,
@@ -187,6 +187,7 @@ use crate::light::{Light, sun_row};
 use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshUpload};
+use crate::occlusion_cull::{OcclusionCulling, OcclusionPyramid};
 use crate::probe::{ProbeTable, ProbeTableDesc};
 use crate::probe_gather::{ProbeGather, ProbeGatherDesc, RsmImages, RsmTargets};
 use crate::rsm;
@@ -985,12 +986,27 @@ struct PunctualFace {
     /// Which of the frame's shadow culls generated its draws — [`shadow_cull`]'s
     /// answer for the slot this face belongs to.
     cull: usize,
+    /// Which face of its light this is, and so — where the light's cull tagged
+    /// its casters by face — which draw region it draws.
+    face: usize,
     /// Where it lands in the punctual map — [`rsm::punctual_tile`], which is the
     /// rectangle the pass sets its viewport to *and* the one the gather reads
     /// this face's texels out of.
     tile: shadow::TileRect,
     /// The light this is a face of, as the gather weighs its texels.
     producer: PunctualProducer,
+}
+
+/// The draw region face `face` of a light draws: its own region where the
+/// light's cull tagged casters by face, and region 0 — every survivor — where it
+/// did not. See [`crcbl_shaders::draw_gen::FACE_REGION_BASE`].
+fn face_region(by_face: bool, face: usize) -> u32 {
+    if by_face {
+        crcbl_shaders::draw_gen::FACE_REGION_BASE
+            + u32::try_from(face).unwrap_or_else(|_| unreachable!("a light has six faces"))
+    } else {
+        0
+    }
 }
 
 /// One light's row in the gather's producer table, for the face standing at
@@ -1131,6 +1147,10 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// it is a large one with bloom switched on; every smaller frame records fewer,
 /// exactly as a frame with a free shadow slot does.
 const RENDER_PASSES: u32 = 8
+    // The occlusion cull's late depth prepass and its farthest pyramid, on the
+    // ground grid's terms: off unless a caller switches the cull on.
+    + 1
+    + OcclusionPyramid::PASSES
     + DebugDraw::MAX_PASSES
     + ProbeGather::PASSES
     + Ssao::MAX_PASSES
@@ -1467,6 +1487,9 @@ pub struct ForwardRenderer {
     /// draw needs — how many instances, which indices, which vertices — is in
     /// the arguments the GPU wrote or in a table it resolves them through.
     bucket_constants: Vec<u32>,
+    /// What one draw region adds to a bucket's offsets — the same for every
+    /// generator this renderer built, because they share one bucket table.
+    region_step: RegionStep,
     /// The material mode of each bucket, in the same order — the copy the
     /// **passes** read, where `DrawGen`'s copy is the one the GPU scatters
     /// against.
@@ -1720,6 +1743,12 @@ pub struct ForwardRenderer {
     /// default**: a wireframe is a tool's view of a document, and every sample
     /// and every golden image predates it.
     wireframe_on: bool,
+    /// The occlusion and small-feature culls a caller asked for — see
+    /// [`set_occlusion_culling`](ForwardRenderer::set_occlusion_culling).
+    occlusion_culling: OcclusionCulling,
+    /// Whether a point light's six faces cull separately — see
+    /// [`set_point_face_culls`](ForwardRenderer::set_point_face_culls).
+    point_face_culls: bool,
     /// Whether [`begin_frame`](ForwardRenderer::begin_frame) writes
     /// [`FrameUniforms::NORMALS_VIEW_ON`] into the frame block, which makes
     /// `mesh.slang`'s fragment stage draw world-space normals instead of shading
@@ -2450,6 +2479,10 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s depth pyramid, which owns one
     /// pipeline, one layout and a ring of blocks per level.
     hiz: Option<Hiz>,
+    /// `docs/plan/03-gpu-driven-rendering.md` §3.3's farthest-depth pyramid,
+    /// which owns one pipeline, one layout and — once a frame culled — a chain
+    /// of level images.
+    occlusion_pyramid: Option<OcclusionPyramid>,
     /// `docs/plan/18-render-features.md`'s reflection march, which owns one
     /// pipeline, one layout and a ring of blocks.
     ssr: Option<Ssr>,
@@ -2561,6 +2594,9 @@ impl Rollback {
         }
         if let Some(ssr) = self.ssr {
             ssr.destroy(device);
+        }
+        if let Some(occlusion_pyramid) = self.occlusion_pyramid {
+            occlusion_pyramid.destroy(device);
         }
         if let Some(hiz) = self.hiz {
             hiz.destroy(device);
@@ -3040,8 +3076,22 @@ struct BucketDraws {
     indices: BufferHandle,
     emit: EmitTail,
     /// Per bucket: the dynamic offset of its constant block, and the offsets of
-    /// its argument structure, its count word and its dispatch extents.
+    /// its argument structure, its count word and its dispatch extents — in
+    /// draw region 0.
     calls: Vec<(u32, u64, u64, u64)>,
+    /// How far one draw region moves each of those four: the constant blocks by
+    /// a bucket count of strides, the arguments by a region of structures, and
+    /// the counts and extents — which share a buffer, a region apart — by one
+    /// region of both. See [`crcbl_shaders::draw_gen::DRAW_REGIONS`].
+    region_step: RegionStep,
+}
+
+/// [`BucketDraws::region_step`]: what one draw region adds to a call's offsets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RegionStep {
+    constants: u32,
+    args: u64,
+    counts: u64,
 }
 
 impl BucketDraws {
@@ -3074,9 +3124,28 @@ impl BucketDraws {
         group: BindGroupHandle,
         draws: &GeneratedDraws,
     ) {
+        self.record_region(encoder, group, draws, 0);
+    }
+
+    /// [`record`](Self::record) for draw region `region` of `draws`: the same
+    /// buckets, each call's constant block, arguments, count and extents moved
+    /// `region` regions along — which is what makes the call read that region's
+    /// run start and instance count.
+    fn record_region(
+        &self,
+        encoder: &mut dyn crcbl_hal::CommandEncoder,
+        group: BindGroupHandle,
+        draws: &GeneratedDraws,
+        region: u32,
+    ) {
         let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
         let mesh_stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
-        for (constant_offset, args_offset, count_offset, mesh_args_offset) in &self.calls {
+        let step = self.region_step;
+        for &(constant_offset, args_offset, count_offset, mesh_args_offset) in &self.calls {
+            let constant_offset = &(constant_offset + region * step.constants);
+            let args_offset = &(args_offset + u64::from(region) * step.args);
+            let count_offset = &(count_offset + u64::from(region) * step.counts);
+            let mesh_args_offset = &(mesh_args_offset + u64::from(region) * step.counts);
             // The block written at build for this bucket: which word holds where
             // its run of surviving instances starts this frame. `SV_InstanceID`
             // walks the run from that start, each entry names an instance, the
@@ -4751,7 +4820,12 @@ impl ForwardRenderer {
             })?;
         let draw_constants = device.create_buffer(&BufferDesc {
             label: Some("mesh draw constants"),
-            size: u64::from(draw_stride) * u64::from(bucket_count),
+            // A block per bucket per draw region: a region's draws name their
+            // own run starts, and the mesh path's block names the region's
+            // argument structure. See `crcbl_shaders::draw_gen::DRAW_REGIONS`.
+            size: u64::from(draw_stride)
+                * u64::from(bucket_count)
+                * u64::from(crcbl_shaders::draw_gen::DRAW_REGIONS),
             usage: BufferUsage::UNIFORM,
             memory: MemoryLocation::HostUpload,
         })?;
@@ -4982,12 +5056,22 @@ impl ForwardRenderer {
         // same for all of them.
         let draws = &primary.draws;
         let mut bucket_constants = vec![0u32; bucket_meshes.len()];
-        for (bucket, offset) in bucket_constants.iter_mut().enumerate() {
-            let index = bucket;
-            let bucket =
-                u32::try_from(bucket).unwrap_or_else(|_| unreachable!("a table of a few buckets"));
-            *offset = bucket * draw_stride;
-            let start_at = draws.bucket_start_word(bucket);
+        // **Every draw region's copy**, region 0's at the offsets
+        // `bucket_constants` records and each further region a bucket count of
+        // strides behind the one before: a region's draw reads its own run
+        // start and — on the mesh path — its own argument structure, and the
+        // two are the only words a region changes. See
+        // `crcbl_shaders::draw_gen::DRAW_REGIONS`.
+        for (region, (bucket, index)) in
+            (0..crcbl_shaders::draw_gen::DRAW_REGIONS).flat_map(|region| {
+                (0..bucket_count).map(move |bucket| (region, (bucket, bucket as usize)))
+            })
+        {
+            let offset = (region * bucket_count + bucket) * draw_stride;
+            if region == 0 {
+                bucket_constants[index] = offset;
+            }
+            let start_at = draws.region_start_word(region, bucket);
             // The mesh path's block says three more things — where this
             // bucket's mesh's clusters are, how many it has, and which element
             // of the indirect arguments holds its instance count — because a
@@ -4999,7 +5083,9 @@ impl ForwardRenderer {
                     start_at,
                     cluster_base: bucket_cluster_bases[index],
                     cluster_count: bucket_clusters[index],
-                    bucket,
+                    // The region's argument structure, which is where this
+                    // region's instance count is.
+                    bucket: region * bucket_count + bucket,
                     // The same number the draw-argument pass indexes the state
                     // with, taken from the object that owns the buffer rather
                     // than recomputed from the group table — the two indexing it
@@ -5029,8 +5115,14 @@ impl ForwardRenderer {
                 .to_bytes()
                 .to_vec()
             };
-            device.write_buffer(draw_constants, u64::from(*offset), &block)?;
+            device.write_buffer(draw_constants, u64::from(offset), &block)?;
         }
+
+        let region_step = RegionStep {
+            constants: bucket_count * draw_stride,
+            args: draws.args_region_offset(1),
+            counts: draws.counts_region_offset(1),
+        };
 
         // §3.3's cull, once per cascade and once per shadowed light. Each gets
         // its own `DrawGen` and therefore its own frustum, survivor list and
@@ -5076,6 +5168,14 @@ impl ForwardRenderer {
                     // No view's: a shadow map is drawn from everything resident,
                     // so an instance a camera hides still casts its shadow.
                     hidden_view: 0,
+                    // A light slot may hold a point light, whose six faces cull
+                    // separately into six regions of the one generator; a
+                    // cascade never does.
+                    mode: if cull < shadow::CASCADES {
+                        crcbl_shaders::draw_gen::DrawMode::Plain
+                    } else {
+                        crcbl_shaders::draw_gen::DrawMode::Faces
+                    },
                 },
             )?;
             rollback.shadow_draws.push(draws);
@@ -5426,6 +5526,7 @@ impl ForwardRenderer {
                 .take()
                 .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
             bucket_constants,
+            region_step,
             bucket_modes,
             instances: rollback
                 .instances
@@ -5515,6 +5616,8 @@ impl ForwardRenderer {
             // frame it drew before `set_wireframe` existed.
             wireframe_pipeline: None,
             wireframe_on: false,
+            occlusion_culling: OcclusionCulling::OFF,
+            point_face_culls: true,
             // Off, on the line above's terms: the normals view is opt-in, so a
             // caller that never asks for one draws the frame it drew before
             // `set_normals_view` existed. It builds nothing, so there is no
@@ -5774,23 +5877,27 @@ impl ForwardRenderer {
     /// anything, it is writing a reduction, and a test against the target's
     /// undefined contents would drop texels at random.
     ///
-    /// One caller, [`crate::hiz`], and it stays a method rather than moving
-    /// there because the module lookup and the destroy-before-unwrap above are
-    /// this file's, and `crate::hiz` takes it in exactly as `crate::ssao` takes
-    /// the sibling.
+    /// Two callers, [`crate::hiz`] and [`crate::occlusion_cull`], and it stays
+    /// a method rather than moving there because the module and the
+    /// destroy-before-unwrap above are this file's, and both take it in exactly
+    /// as `crate::ssao` takes the sibling.
+    ///
+    /// **The entry points are named**, unlike the sibling's: `hiz.slang` has a
+    /// fragment stage per pyramid, and a stage looked up by kind would be
+    /// ambiguous.
     ///
     /// # Errors
     ///
-    /// [`HalError`] from the manifest lookup, the module or the pipeline.
+    /// [`HalError`] from the module or the pipeline.
     fn build_depth_fullscreen(
         device: &dyn Device,
         label: &str,
         shader: &crcbl_shaders::Shader,
+        vertex: &str,
+        fragment: &str,
         layout: PipelineLayoutHandle,
         format: Format,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        let vertex = entry(shader, Stage::Vertex)?;
-        let fragment = entry(shader, Stage::Fragment)?;
         let module = device.create_shader_module(&ShaderModuleDesc {
             label: Some(shader.source()),
             spirv: shader.spirv(),
@@ -6501,6 +6608,12 @@ impl ForwardRenderer {
         // the three things the schedule and the reset are decided from.
         let mut views: Vec<(usize, usize, mesh::FrameUniforms)> = Vec::with_capacity(SHADOW_VIEWS);
         let mut culls: Vec<(usize, Frustum)> = Vec::with_capacity(SHADOW_CULLS);
+        // A point light's six faces' side planes, per cull, where the light is
+        // one and the face culls are on — see `set_point_face_culls`. Beside
+        // `culls` rather than in it, because that list is also what the shadow
+        // cache's record is folded from, and the faces are already in it as the
+        // light's matrices.
+        let mut face_culls: [Option<crate::cull::FacePlanes>; SHADOW_CULLS] = [None; SHADOW_CULLS];
         let mut regions: [Option<(usize, Vec3, f32)>; SHADOW_CULLS] = [None; SHADOW_CULLS];
         // One shadowed light slot's per-face matrices and the frustum its one
         // cull runs against, read out of the selection made above.
@@ -6554,6 +6667,7 @@ impl ForwardRenderer {
                 };
                 let group = shadow_cull(slot);
                 let (faces, frustum) = slot_matrices(*held, light);
+                face_culls[group] = self.point_face_planes(light, &faces);
                 for (face, view_proj) in faces.into_iter().enumerate() {
                     views.push((
                         group,
@@ -6745,13 +6859,18 @@ impl ForwardRenderer {
             if !redraw[*cull] {
                 continue;
             }
-            self.shadow_draws[*cull].begin_frame(
+            self.shadow_draws[*cull].begin_frame_with(
                 device,
                 self.frame,
                 frustum,
                 instance_count,
-                eye,
-                self.shadow_lod_params,
+                crate::draw_gen::Selection {
+                    camera_position: eye,
+                    lod_params: self.shadow_lod_params,
+                },
+                &face_culls[*cull]
+                    .as_ref()
+                    .map_or(FrameCull::Plain, FrameCull::Faces),
             )?;
         }
         // Cascade 0's block and cull on a frame with shadows off, and every
@@ -6793,6 +6912,7 @@ impl ForwardRenderer {
                     continue;
                 };
                 let (faces, frustum) = slot_matrices(held, light);
+                let face_planes = self.point_face_planes(light, &faces);
                 for (face, view_proj) in faces.into_iter().enumerate() {
                     device.write_buffer(
                         self.shadow_uniforms[self.frame][shadow_view(slot, face)],
@@ -6800,13 +6920,18 @@ impl ForwardRenderer {
                         &view_block(view_proj, light.sphere().0).to_bytes(),
                     )?;
                 }
-                self.shadow_draws[shadow_cull(slot)].begin_frame(
+                self.shadow_draws[shadow_cull(slot)].begin_frame_with(
                     device,
                     self.frame,
                     &frustum,
                     instance_count,
-                    eye,
-                    self.shadow_lod_params,
+                    crate::draw_gen::Selection {
+                        camera_position: eye,
+                        lod_params: self.shadow_lod_params,
+                    },
+                    &face_planes
+                        .as_ref()
+                        .map_or(FrameCull::Plain, FrameCull::Faces),
                 )?;
             }
         }
@@ -6863,6 +6988,20 @@ impl ForwardRenderer {
     /// `add_shadow_pass`, which is where the rest of it is.
     fn probe_update_runs(&self) -> bool {
         self.probe_update == ProbeUpdate::EveryFrame && rsm::enabled()
+    }
+
+    /// The six side-plane sets a point light's face culls test, or `None` for
+    /// a light that is not a point — or with the face culls switched off, which
+    /// is one cull against the light's box drawn into all six faces.
+    ///
+    /// `faces` are the light's face matrices in face order, the ones its tiles
+    /// render through.
+    fn point_face_planes(&self, light: &Light, faces: &[Mat4]) -> Option<crate::cull::FacePlanes> {
+        if !self.point_face_culls || !matches!(light, Light::Point(_)) {
+            return None;
+        }
+        let matrices: [Mat4; shadow::POINT_FACES] = faces.try_into().ok()?;
+        Some(crate::cull::face_planes(&matrices))
     }
 
     /// Every punctual shadow face this frame draws into the punctual reflective
@@ -6937,6 +7076,7 @@ impl ForwardRenderer {
                 faces.push(PunctualFace {
                     view: shadow_view(slot, face),
                     cull: shadow_cull(slot),
+                    face,
                     tile,
                     producer: producer_row(light, tile),
                 });
@@ -7958,6 +8098,57 @@ impl ForwardRenderer {
         self.primary.draws.args(frame)
     }
 
+    /// `frame`'s survivor list for the primary camera and the culling
+    /// statistics beside it — `cull.slang`'s entries, tags and all, in the first
+    /// [`DrawGen::visible_capacity`](crate::DrawGen::visible_capacity) words of
+    /// the first buffer, and their count in word
+    /// [`INSTANCE_SURVIVOR_WORD`](crcbl_shaders::cull::INSTANCE_SURVIVOR_WORD)
+    /// of the second — for a test holding the GPU's occlusion verdicts against
+    /// [`crate::cull`]'s oracle. The first buffer holds the routes and runs
+    /// behind the list; see [`crate::draw_gen`].
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this renderer was built with.
+    #[must_use]
+    pub fn camera_cull_buffers(&self, frame: usize) -> (BufferHandle, BufferHandle) {
+        (
+            self.primary.draws.visible(frame),
+            self.primary.draws.visible_count(frame),
+        )
+    }
+
+    /// What the primary camera's cull reads, as the oracle in [`crate::cull`]
+    /// takes it: every instance slot the pool has handed out, and the whole mesh
+    /// table — both decoded from the host's own copies of what was uploaded.
+    #[must_use]
+    pub fn cull_records(&self) -> (Vec<mesh::GpuInstance>, Vec<mesh::GpuMesh>) {
+        (self.instances.records(), self.pool.table_entries())
+    }
+
+    /// The generator behind shadow cull `cull` — a cascade's below
+    /// [`shadow::CASCADES`], a light slot's after —
+    /// for a test reading back what a point light's face culls kept.
+    ///
+    /// # Panics
+    ///
+    /// If `cull` is not one of the renderer's shadow culls.
+    #[must_use]
+    pub fn shadow_generator(&self, cull: usize) -> &DrawGen {
+        &self.shadow_draws[cull]
+    }
+
+    /// The primary camera's farthest-depth pyramid — every level's image, view
+    /// and extent, level 1 first — or empty before a frame culled by occlusion.
+    ///
+    /// For a test reading a level back: the images carry `TRANSFER_SRC` for
+    /// exactly that, and they hold the last frame's early depth once that frame
+    /// has finished.
+    #[must_use]
+    pub fn occlusion_pyramid(&self) -> Vec<(crcbl_hal::ImageHandle, ImageViewHandle, (u32, u32))> {
+        self.primary.occlusion_pyramid.level_images()
+    }
+
     /// The most passes [`add_passes`](Self::add_passes) adds to one frame.
     ///
     /// [`DrawGen::MAX_PASSES`] per cull — the camera's, and one per shadow cull
@@ -7973,8 +8164,10 @@ impl ForwardRenderer {
     /// [`PassTimers`](crate::timing::PassTimers) wants
     /// [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES), which adds this to
     /// what the overlay renderers record.
-    pub const MAX_PASSES: u32 =
-        DrawGen::MAX_PASSES * (1 + SHADOW_CULLS as u32) + LightGrid::MAX_PASSES + RENDER_PASSES;
+    pub const MAX_PASSES: u32 = DrawGen::MAX_PASSES * (1 + SHADOW_CULLS as u32)
+        + DrawGen::LATE_PASSES
+        + LightGrid::MAX_PASSES
+        + RENDER_PASSES;
 
     /// Adds the forward and tonemap passes to `graph`, rendering into `target`,
     /// and returns the HDR scene target they went through.
@@ -8229,7 +8422,7 @@ impl ForwardRenderer {
         // The camera's cull dispatch and the draw-argument dispatch, and the
         // light clustering after them — before anything draws, and before the
         // shadow atlas, which is where they always ran. See [`View::add_cull`].
-        let cull = self.primary.add_cull(graph, frame, instance_count);
+        let cull = self.primary.add_cull(graph, pool, frame, instance_count);
 
         // `docs/plan/25-lod.md`'s record of each cascade's cut. Each is written by
         // exactly one mesh pass, so what the graph orders here is this frame's
@@ -8399,6 +8592,7 @@ impl ForwardRenderer {
                     )
                 })
                 .collect(),
+            region_step: self.region_step,
         };
 
         // Every draw this frame records: the shadow pass's, one per bucket in
@@ -8451,8 +8645,17 @@ impl ForwardRenderer {
         self.recorded_grass_draws = grass.as_ref().map_or(0, |grass: &GrassFrame| {
             u64::from(grass.slots) * u64::from(grass.draws_per_slot())
         });
+        // The late depth prepass is a third call per bucket, on a frame whose
+        // camera culls in two phases.
+        let camera_passes: u64 = if self.primary.draws.frame_mode(frame)
+            == crcbl_shaders::draw_gen::DrawMode::Occlusion
+        {
+            3
+        } else {
+            2
+        };
         self.recorded_draws = shadow_draws
-            + 2 * bucket_draws.calls.len() as u64
+            + camera_passes * bucket_draws.calls.len() as u64
             + self.recorded_grass_draws
             + self.direct_draws();
 
@@ -8550,7 +8753,7 @@ impl ForwardRenderer {
             let view = slot
                 .as_mut()
                 .unwrap_or_else(|| unreachable!("checked against the built views above"));
-            let view_cull = view.add_cull(graph, frame, instance_count);
+            let view_cull = view.add_cull(graph, pool, frame, instance_count);
             view.add_passes(
                 graph,
                 &passes,
@@ -8565,6 +8768,9 @@ impl ForwardRenderer {
             );
         }
 
+        // The statistics buffer's id, read before the cull moves into the pass
+        // recording below: the copy that reads it is the frame's last pass.
+        let stats_id = cull.generated.visible_count_id;
         let tonemapped = primary.add_passes(
             graph,
             &passes,
@@ -8590,7 +8796,7 @@ impl ForwardRenderer {
         // next frame on this slot imports it in; there is not a barrier written
         // here.
         if let Some(stats) = cull_stats.as_mut() {
-            stats.add_copy_pass(graph, cull.generated.visible_count_id);
+            stats.add_copy_pass(graph, stats_id);
         }
 
         tonemapped
@@ -8792,11 +8998,21 @@ impl ForwardRenderer {
         // in a closure that outlives this borrow, and asking the selection for
         // it there would be a second reading of an allocation that has to be the
         // one the frame block was written from.
-        let mut views: Vec<(usize, shadow::TileRect, usize)> = cascades
+        //
+        // **And which draw region of that cull**: region 0, every survivor, for
+        // a cascade and a spot; and for a point light whose cull tagged its
+        // casters by face, the region of the face being drawn — see
+        // `set_point_face_culls`.
+        let mut views: Vec<(usize, shadow::TileRect, usize, u32)> = cascades
             .iter()
             .enumerate()
             .map(|(position, cascade)| {
-                (*cascade, self.shadow_lights.atlas_rect(*cascade), position)
+                (
+                    *cascade,
+                    self.shadow_lights.atlas_rect(*cascade),
+                    position,
+                    0,
+                )
             })
             .collect();
         for (index, (slot, held, light)) in occupied.iter().enumerate() {
@@ -8804,12 +9020,15 @@ impl ForwardRenderer {
             // through its own matrix into its own tile. `shadow::tile_span` is
             // the same function `Selection` allocated the run with, so a face
             // here and a tile there cannot disagree about how many there are.
+            let by_face = self.shadow_draws[shadow_cull(*slot)].frame_mode(self.frame)
+                == crcbl_shaders::draw_gen::DrawMode::Faces;
             for face in 0..shadow::tile_span(light) {
                 views.push((
                     shadow_view(*slot, face),
                     self.shadow_lights
                         .atlas_rect(shadow::light_tile(held.base + face)),
                     cascades.len() + index,
+                    face_region(by_face, face),
                 ));
             }
         }
@@ -8917,13 +9136,24 @@ impl ForwardRenderer {
         //
         // Found by cull id rather than by position, so this list and the atlas's
         // cannot be knocked out of step by a slot the other one skipped.
-        let punctual_views: Vec<(BindGroupHandle, shadow::TileRect, GeneratedDraws)> = punctual
-            .iter()
-            .filter_map(|face| {
-                let (_, draws) = generated.iter().find(|(cull, _)| *cull == face.cull)?;
-                Some((groups[face.view], face.tile, *draws))
-            })
-            .collect();
+        //
+        // And the face's draw region, on the atlas's terms: a point light whose
+        // cull tagged its casters draws each face from that face's region.
+        let punctual_views: Vec<(BindGroupHandle, shadow::TileRect, GeneratedDraws, u32)> =
+            punctual
+                .iter()
+                .filter_map(|face| {
+                    let (_, draws) = generated.iter().find(|(cull, _)| *cull == face.cull)?;
+                    let by_face = self.shadow_draws[face.cull].frame_mode(self.frame)
+                        == crcbl_shaders::draw_gen::DrawMode::Faces;
+                    Some((
+                        groups[face.view],
+                        face.tile,
+                        *draws,
+                        face_region(by_face, face.face),
+                    ))
+                })
+                .collect();
         // The culls those faces draw from, **once each**: a point light's six
         // faces draw one visible set, so declaring a face's sources would
         // declare the same buffers six times in one pass.
@@ -8959,6 +9189,7 @@ impl ForwardRenderer {
                     )
                 })
                 .collect(),
+            region_step: self.region_step,
         };
         // Kept back for the reflective shadow map below, which is the same
         // per-bucket call list under a different pipeline — the depth prepass
@@ -9021,7 +9252,7 @@ impl ForwardRenderer {
             let encoder = ctx.encoder();
             if let Some(clear) = clear {
                 encoder.bind_graphics_pipeline(clear);
-                for (view, tile, _) in &views {
+                for (view, tile, _, _) in &views {
                     set_shadow_tile(encoder, *tile);
                     encoder.bind_group(0, groups[*view], &[clear_offset], clear_layout);
                     encoder.draw(0..TILE_CLEAR_VERTICES, 0..1);
@@ -9029,9 +9260,9 @@ impl ForwardRenderer {
             }
             for partition in &tile_partitions {
                 partition.open(encoder);
-                for (view, tile, cull) in &views {
+                for (view, tile, cull, region) in &views {
                     set_shadow_tile(encoder, *tile);
-                    partition.record(encoder, groups[*view], &generated[*cull].1);
+                    partition.record_region(encoder, groups[*view], &generated[*cull].1, *region);
                 }
             }
         });
@@ -9175,9 +9406,9 @@ impl ForwardRenderer {
             // terms: one pipeline bind covers every face of that side.
             for partition in &punctual_partitions {
                 partition.open(encoder);
-                for (group, tile, draws) in &punctual_views {
+                for (group, tile, draws, region) in &punctual_views {
                     set_shadow_tile(encoder, *tile);
-                    partition.record(encoder, *group, draws);
+                    partition.record_region(encoder, *group, draws, *region);
                 }
             }
         });
@@ -9330,6 +9561,13 @@ impl ForwardRenderer {
     #[must_use]
     pub const fn shadow_atlas(&self) -> crcbl_hal::ImageHandle {
         self.shadow_atlas
+    }
+
+    /// The view [`shadow_atlas`](Self::shadow_atlas) is bound and imported
+    /// through, for a reader importing the atlas into a graph of its own.
+    #[must_use]
+    pub const fn shadow_atlas_view(&self) -> ImageViewHandle {
+        self.shadow_atlas_view
     }
 
     /// The base-colour page every material row samples through
@@ -10059,6 +10297,62 @@ impl ForwardRenderer {
     #[must_use]
     pub fn supports_wireframe(device: &dyn Device) -> bool {
         device.caps().supports(Features::POLYGON_MODE_LINE)
+    }
+
+    /// Asks every camera's cull to drop what is hidden or too small to see —
+    /// `docs/plan/03-gpu-driven-rendering.md` §3.3's occlusion cull and its
+    /// small-feature test. See [`crate::occlusion_cull`].
+    ///
+    /// [`OcclusionCulling::occlusion`] **changes no pixel**: the first phase
+    /// guesses from the previous frame's depth, the second tests every rejected
+    /// instance against this frame's, and only the second's rejections are
+    /// dropped. [`OcclusionCulling::small_feature_pixels`] does change pixels,
+    /// and is off unless a threshold is named.
+    ///
+    /// Taken from the next [`begin_frame`](Self::begin_frame), and combined with
+    /// the `r_occlusion_cull` and `r_small_feature_px` console switches — either
+    /// side turning a cull on turns it on. A wireframe frame culls by the frustum
+    /// alone, because a wireframe shows the edges a depth test would hide.
+    pub fn set_occlusion_culling(&mut self, culling: OcclusionCulling) {
+        self.occlusion_culling = culling;
+    }
+
+    /// Whether a point light's shadow cull tags each caster with the faces of
+    /// its cube it reaches, so each face draws only those — **on** by default.
+    ///
+    /// Off is the cull this replaced: one test against the light's box, and
+    /// every caster in it drawn into all six faces for the rasteriser to clip.
+    /// The two write the same atlas, texel for texel — the six faces' pyramids
+    /// tile the box, so a caster a face drops has no texel in that face's tile —
+    /// and the switch exists so a test can hold them against each other and a
+    /// price can be read off both.
+    pub fn set_point_face_culls(&mut self, on: bool) {
+        self.point_face_culls = on;
+    }
+
+    /// What [`set_occlusion_culling`](Self::set_occlusion_culling) last asked
+    /// for, before the console switches and the wireframe are applied.
+    #[must_use]
+    pub const fn occlusion_culling(&self) -> OcclusionCulling {
+        self.occlusion_culling
+    }
+
+    /// The culls the next frame runs: [`occlusion_culling`](Self::occlusion_culling)
+    /// with the console switches applied, and nothing on a wireframe frame.
+    #[must_use]
+    pub fn resolved_occlusion_culling(&self) -> OcclusionCulling {
+        if self.wireframe_on {
+            return OcclusionCulling::OFF;
+        }
+        let console_pixels = crate::occlusion_cull::r_small_feature_px.get_f32();
+        OcclusionCulling {
+            occlusion: self.occlusion_culling.occlusion
+                || crate::occlusion_cull::r_occlusion_cull.get_bool(),
+            small_feature_pixels: self
+                .occlusion_culling
+                .small_feature_pixels
+                .or((console_pixels > 0.0).then_some(console_pixels)),
+        }
     }
 
     /// Draws the scene's triangles as lines, or goes back to filling them.
@@ -11241,7 +11535,10 @@ impl ForwardRenderer {
             // frame that *was* recorded rather than off a constant, so a frame
             // with an effect switched off does not count a triangle it never
             // submitted.
-            drawn: stats.map(|stats| stats.instances + direct),
+            // Less what the occlusion cull's second phase rejected, which were
+            // survivors of the frustum and were not drawn.
+            drawn: stats
+                .map(|stats| stats.instances.saturating_sub(stats.occlusion.late_rejects) + direct),
             triangles: None,
             // The survivors alone: the panel row is "clusters drawn", and the
             // frustum and cone rejection counts beside them are a different
@@ -16093,6 +16390,7 @@ mod tests {
                 instance_count: 2,
                 capacity: scene::Capacities::default().instances,
                 hidden_view: ViewId::PRIMARY.hidden_bit(),
+                ..crcbl_shaders::cull::Params::default()
             }
             .to_bytes()[..],
             "the cull block must carry this frame's own frustum, the pool's whole \
@@ -18366,6 +18664,13 @@ mod tests {
         renderer
             .set_ground_grid(device, Some(GridStyle::default()))
             .expect("the null backend builds every pipeline");
+        // **And the occlusion cull**, whose late prepass, farthest pyramid and
+        // three late compute passes are the ground grid's kind of pass: off
+        // unless a caller asks, and in the widest frame when one does.
+        renderer.set_occlusion_culling(OcclusionCulling {
+            occlusion: true,
+            small_feature_pixels: None,
+        });
         // **A body of water**, on the ground grid's terms: content rather than
         // an effect bit, so the widest frame is one a caller gave water to, and
         // `Water::PASSES` is in the bound for it.

@@ -91,8 +91,17 @@ FullscreenOutput vertexMain(uint index: SV_VertexID)
     return output;
 }
 
-[shader("fragment")]
-HizOutput fragmentMain(FullscreenOutput input)
+/// The two reductions' shared walk: `a` and `b` combined the way the pyramid
+/// being built wants — the nearer of the two for `fragmentMain`'s pyramid, the
+/// farther for `farthestMain`'s.
+float combine(float a, float b, bool farthest)
+{
+    return farthest ? min(a, b) : max(a, b);
+}
+
+/// The destination texel's value: every tap of the 2×2 block it covers, and the
+/// odd axis's leftover, combined by `combine`.
+float reduce(FullscreenOutput input, bool farthest)
 {
     uint width;
     uint height;
@@ -107,40 +116,69 @@ HizOutput fragmentMain(FullscreenOutput input)
     // The 2×2 block, clamped so the last destination texel of an axis whose
     // source extent is odd does not read past the edge before the third tap
     // below covers what it left.
-    float nearest = source.Load(int3(clamp(base, int2(0, 0), extent - int2(1, 1)), 0));
-    nearest = max(nearest,
-                  source.Load(int3(clamp(base + int2(1, 0), int2(0, 0), extent - int2(1, 1)), 0)));
-    nearest = max(nearest,
-                  source.Load(int3(clamp(base + int2(0, 1), int2(0, 0), extent - int2(1, 1)), 0)));
-    nearest = max(nearest,
-                  source.Load(int3(clamp(base + int2(1, 1), int2(0, 0), extent - int2(1, 1)), 0)));
+    float value = source.Load(int3(clamp(base, int2(0, 0), extent - int2(1, 1)), 0));
+    value = combine(value,
+        source.Load(int3(clamp(base + int2(1, 0), int2(0, 0), extent - int2(1, 1)), 0)), farthest);
+    value = combine(value,
+        source.Load(int3(clamp(base + int2(0, 1), int2(0, 0), extent - int2(1, 1)), 0)), farthest);
+    value = combine(value,
+        source.Load(int3(clamp(base + int2(1, 1), int2(0, 0), extent - int2(1, 1)), 0)), farthest);
 
     // The odd axis's leftover. `base + 2` is inside the source only for the last
     // destination texel of an axis the halving floored, so the clamp makes every
-    // other texel's third tap a repeat of one it already took — `max` absorbs it.
+    // other texel's third tap a repeat of one it already took — `min` and `max`
+    // both absorb it.
     bool odd_x = (extent.x & 1) == 1;
     bool odd_y = (extent.y & 1) == 1;
     if (odd_x)
     {
-        nearest = max(nearest,
-                      source.Load(int3(clamp(base + int2(2, 0), int2(0, 0), extent - int2(1, 1)), 0)));
-        nearest = max(nearest,
-                      source.Load(int3(clamp(base + int2(2, 1), int2(0, 0), extent - int2(1, 1)), 0)));
+        value = combine(value,
+            source.Load(int3(clamp(base + int2(2, 0), int2(0, 0), extent - int2(1, 1)), 0)), farthest);
+        value = combine(value,
+            source.Load(int3(clamp(base + int2(2, 1), int2(0, 0), extent - int2(1, 1)), 0)), farthest);
     }
     if (odd_y)
     {
-        nearest = max(nearest,
-                      source.Load(int3(clamp(base + int2(0, 2), int2(0, 0), extent - int2(1, 1)), 0)));
-        nearest = max(nearest,
-                      source.Load(int3(clamp(base + int2(1, 2), int2(0, 0), extent - int2(1, 1)), 0)));
+        value = combine(value,
+            source.Load(int3(clamp(base + int2(0, 2), int2(0, 0), extent - int2(1, 1)), 0)), farthest);
+        value = combine(value,
+            source.Load(int3(clamp(base + int2(1, 2), int2(0, 0), extent - int2(1, 1)), 0)), farthest);
     }
     if (odd_x && odd_y)
     {
-        nearest = max(nearest,
-                      source.Load(int3(clamp(base + int2(2, 2), int2(0, 0), extent - int2(1, 1)), 0)));
+        value = combine(value,
+            source.Load(int3(clamp(base + int2(2, 2), int2(0, 0), extent - int2(1, 1)), 0)), farthest);
     }
+    return value;
+}
 
+/// The reflection march's level: the **nearest** surface in the block.
+[shader("fragment")]
+HizOutput fragmentMain(FullscreenOutput input)
+{
     HizOutput output;
-    output.depth = nearest;
+    output.depth = reduce(input, false);
+    return output;
+}
+
+/// The occlusion cull's level: the **farthest** surface in the block.
+///
+/// `cull.slang`'s occlusion test asks whether a box is behind *everything* drawn
+/// over the pixels it covers, which is a question about the farthest depth there
+/// — the conservative bound. Under reversed-Z that is a `min`, and the far
+/// plane's `0.0` now wins every comparison it is in: a block with one uncovered
+/// pixel hides nothing, which is exactly right, because something behind every
+/// surface can still be seen through that pixel.
+///
+/// **Not a pyramid the march can use**, and the nearest one is not one the cull
+/// can use: tested against a nearest-depth level, a box behind a thin near
+/// occluder but in front of the wall behind it reads as hidden and drops out of
+/// a frame it is visible in. `crcbl_render::cull`'s
+/// `the_nearest_pyramid_hides_what_the_farthest_keeps` is that case.
+[shader("fragment")]
+HizOutput farthestMain(FullscreenOutput input)
+{
+    HizOutput output;
+    output.depth = reduce(input, true);
     return output;
 }

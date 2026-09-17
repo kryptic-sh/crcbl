@@ -913,6 +913,19 @@ mod tests {
                 "computeMain",
                 crcbl_shaders::cull::WORKGROUP_SIZE,
             ),
+            // The two occlusion phases beside it, on its workgroup.
+            (
+                "cull",
+                &crcbl_shaders::CULL,
+                "occlusionMain",
+                crcbl_shaders::cull::WORKGROUP_SIZE,
+            ),
+            (
+                "cull",
+                &crcbl_shaders::CULL,
+                "lateMain",
+                crcbl_shaders::cull::WORKGROUP_SIZE,
+            ),
             (
                 "draw_gen",
                 &crcbl_shaders::DRAW_GEN,
@@ -929,6 +942,14 @@ mod tests {
                 "scatterMain",
                 crcbl_shaders::draw_gen::WORKGROUP_SIZE,
             ),
+            (
+                "draw_gen",
+                &crcbl_shaders::DRAW_GEN,
+                "lateScatterMain",
+                crcbl_shaders::draw_gen::WORKGROUP_SIZE,
+            ),
+            // The late finish is one invocation, on the prefix sum's terms.
+            ("draw_gen", &crcbl_shaders::DRAW_GEN, "lateFinishMain", 1),
         ];
         assert!(!compute.is_empty(), "nothing to check");
         for (name, shader, entry, size) in compute {
@@ -1058,15 +1079,26 @@ mod tests {
             (
                 "cull",
                 &crcbl_shaders::CULL,
-                &["computeMain"],
-                &[Cbv, Srv, Srv, Uav, Uav],
+                // The frustum cull reaches set 0 alone; the two occlusion phases
+                // reach the farthest-depth pyramid's eight levels in set 1 too,
+                // each a depth texture read with `Load`.
+                &["computeMain", "occlusionMain", "lateMain"],
+                &[
+                    Cbv, Srv, Srv, Uav, Uav, Srv, Srv, Srv, Srv, Srv, Srv, Srv, Srv,
+                ],
             ),
             (
                 "draw_gen",
                 &crcbl_shaders::DRAW_GEN,
                 // Three entry points over one layout; `binMain` alone reaches
                 // every binding, and the other two a share of them.
-                &["binMain", "startsMain", "scatterMain"],
+                &[
+                    "binMain",
+                    "startsMain",
+                    "scatterMain",
+                    "lateScatterMain",
+                    "lateFinishMain",
+                ],
                 // **Eight storage bindings and no more**, which is what a
                 // WebGPU device guarantees per stage — see that source's
                 // header. Read only: the instance array (1), the mesh table
@@ -1090,7 +1122,9 @@ mod tests {
             (
                 "hiz",
                 &crcbl_shaders::HIZ,
-                &["vertexMain", "fragmentMain"],
+                // Both reductions: the reflection march's nearest one and the
+                // occlusion cull's farthest one, over the same one binding.
+                &["vertexMain", "fragmentMain", "farthestMain"],
                 // One binding and no sampler — the reduction fetches by integer
                 // texel, so the level being reduced is `t0` and there is nothing
                 // else in the set.

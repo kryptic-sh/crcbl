@@ -992,6 +992,7 @@ mod tests {
                 frustum_rejects: 312,
                 cone_rejects: 157,
             }),
+            occlusion: crcbl::render::OcclusionCull::default(),
             frame: 57,
         }));
         let value = |label: &str| {
@@ -1018,6 +1019,7 @@ mod tests {
         let rows = cull_rows(Some(CullStats {
             instances: 12,
             clusters: None,
+            occlusion: crcbl::render::OcclusionCull::default(),
             frame: 57,
         }));
         for label in ["clusters kept", "clusters rejected"] {
@@ -1045,6 +1047,7 @@ mod tests {
                 frustum_rejects: 312,
                 cone_rejects: 157,
             }),
+            occlusion: crcbl::render::OcclusionCull::default(),
             frame: 57,
         }));
         assert_eq!(
@@ -1068,6 +1071,7 @@ mod tests {
         let row = cull_row(Some(CullStats {
             instances: 12,
             clusters: None,
+            occlusion: crcbl::render::OcclusionCull::default(),
             frame: 57,
         }));
         assert_eq!(row, "12 instance(s), no cluster stage, from frame 57");

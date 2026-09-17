@@ -809,6 +809,10 @@ struct DrawIndexedArgs
 /// Planes in a frustum, as `cull.slang` declares it.
 static const uint PLANE_COUNT = 6;
 
+/// `cull.slang`'s length of `CullParams::face_planes`, which this copy of the
+/// block has to declare to lay it out the same.
+static const uint FACE_PLANE_SLOTS = 24;
+
 /// The frustum this frame culls against, matching `struct CullParams` in
 /// `cull.slang` and `crcbl_shaders::cull::Params`.
 ///
@@ -831,6 +835,21 @@ struct CullParams
     /// The hidden-views bit the instance cull rejected on. Read by nothing
     /// here: an instance it rejected is not in the survivors this stage walks.
     uint hidden_view;
+    /// What the instance cull did beyond the frustum. Read by nothing here, nor
+    /// is anything below: they are the occlusion, small-feature and face tests,
+    /// whose answers reach this stage as the survivors it walks.
+    uint features;
+    float4x4 view_proj;
+    float4x4 previous_view_proj;
+    uint target_width;
+    uint target_height;
+    uint pyramid_levels;
+    uint occlusion_pad;
+    float small_feature_pixels;
+    float small_feature_pad0;
+    float small_feature_pad1;
+    float small_feature_pad2;
+    float4 face_planes[FACE_PLANE_SLOTS];
 };
 
 /// Which element of `cull_stats` counts surviving clusters.

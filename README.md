@@ -43,12 +43,14 @@ What is real today:
 - **Windowing from scratch.** Wayland (with its own protocol scanner), X11,
   AppKit, Win32, the browser canvas, and a headless backend that CI runs
   everything through.
-- **A GPU-driven forward renderer.** Culling and draw generation on the GPU, a
-  shadow pass, screen-space contact shadows that sharpen what a cascade texel is
-  too coarse to hold, depth prepass, ground-truth ambient occlusion with bent
-  normals, SSR, clustered lights — point, spot and rectangular area lights
-  shaded by linearly transformed cosines — an irradiance probe clipmap that
-  re-centres on the camera by whole probe steps, whose probes each carry a
+- **A GPU-driven forward renderer.** Culling and draw generation on the GPU —
+  frustum, two-phase occlusion against a farthest-depth pyramid (opt-in, pixel
+  identical), opt-in small-feature culling and per-face point-light shadow culls
+  — a shadow pass, screen-space contact shadows that sharpen what a cascade
+  texel is too coarse to hold, depth prepass, ground-truth ambient occlusion
+  with bent normals, SSR, clustered lights — point, spot and rectangular area
+  lights shaded by linearly transformed cosines — an irradiance probe clipmap
+  that re-centres on the camera by whole probe steps, whose probes each carry a
   visibility map, captured on the GPU and taken again for the probes a step
   exposes, so a probe a fragment cannot see past a wall lends it no light, and
   reflective shadow maps that refill those probes from the sun and from every

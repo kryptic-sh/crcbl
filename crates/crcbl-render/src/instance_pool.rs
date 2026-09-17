@@ -562,6 +562,17 @@ impl InstancePool {
             .collect()
     }
 
+    /// Every element the pool has handed out, in slot order, dead ones included
+    /// — the array [`slot_count`](Self::slot_count) elements long that a cull
+    /// dispatch walks, decoded from the host mirror.
+    ///
+    /// For `crate::cull`'s oracle, which indexes it the way the shader does:
+    /// [`live`](Self::live) drops the dead slots and with them the indices.
+    #[must_use]
+    pub fn records(&self) -> Vec<GpuInstance> {
+        (0..self.high_water).map(|index| self.read(index)).collect()
+    }
+
     /// Which element of the array `handle` is, or `None` if the handle is stale.
     ///
     /// This is the number a shader indexes with, which is why it is public: a

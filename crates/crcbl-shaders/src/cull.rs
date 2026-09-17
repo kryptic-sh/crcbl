@@ -40,7 +40,7 @@ pub const PLANE_COUNT: usize = 6;
 /// [`crate::clear_counters::Params::stats_words`] — because a clearing pass
 /// that zeroed a prefix would leave one of them carrying the previous frame's
 /// total, which reads as a plausible count rather than as a failure.
-pub const STATS_WORDS: u32 = 5;
+pub const STATS_WORDS: u32 = 8;
 
 /// Which word of the culling statistics counts surviving **instances** — the
 /// one `cull.slang` writes.
@@ -81,6 +81,26 @@ pub const CLUSTER_FRUSTUM_REJECT_WORD: u32 = 3;
 /// facing away is the frustum's.
 pub const CLUSTER_CONE_REJECT_WORD: u32 = 4;
 
+/// Which word counts the survivors the **first** occlusion phase marked hidden
+/// — `cull.slang`'s `occlusionMain`, testing against the previous frame's
+/// pyramid.
+///
+/// Not a count of instances the frame dropped: the second phase tests every one
+/// of these again, and [`OCCLUSION_LATE_REJECT_WORD`] is what it still found
+/// hidden. The difference between the two is what the first phase got wrong —
+/// disocclusions, a camera cut, anything that moved — and costs a late draw
+/// rather than a pixel.
+pub const OCCLUSION_EARLY_REJECT_WORD: u32 = 5;
+
+/// Which word counts the survivors the **second** occlusion phase still found
+/// hidden — `cull.slang`'s `lateMain` — which are the frustum survivors the
+/// frame did not draw.
+pub const OCCLUSION_LATE_REJECT_WORD: u32 = 6;
+
+/// Which word counts the instances the small-feature test dropped, which are
+/// not survivors at all.
+pub const SMALL_FEATURE_REJECT_WORD: u32 = 7;
+
 // Each counter owns one word. A further counter would need `STATS_WORDS` raised
 // with it, and this is what says so at build time. The light grid's own word is
 // asserted the same way beside its declaration in [`crate::light`].
@@ -88,6 +108,9 @@ const _: () = assert!(INSTANCE_SURVIVOR_WORD < STATS_WORDS);
 const _: () = assert!(CLUSTER_SURVIVOR_WORD < STATS_WORDS);
 const _: () = assert!(CLUSTER_FRUSTUM_REJECT_WORD < STATS_WORDS);
 const _: () = assert!(CLUSTER_CONE_REJECT_WORD < STATS_WORDS);
+const _: () = assert!(OCCLUSION_EARLY_REJECT_WORD < STATS_WORDS);
+const _: () = assert!(OCCLUSION_LATE_REJECT_WORD < STATS_WORDS);
+const _: () = assert!(SMALL_FEATURE_REJECT_WORD < STATS_WORDS);
 const _: () = assert!(INSTANCE_SURVIVOR_WORD != CLUSTER_SURVIVOR_WORD);
 const _: () = assert!(INSTANCE_SURVIVOR_WORD != CLUSTER_FRUSTUM_REJECT_WORD);
 const _: () = assert!(INSTANCE_SURVIVOR_WORD != CLUSTER_CONE_REJECT_WORD);
@@ -95,16 +118,110 @@ const _: () = assert!(CLUSTER_SURVIVOR_WORD != CLUSTER_FRUSTUM_REJECT_WORD);
 const _: () = assert!(CLUSTER_SURVIVOR_WORD != CLUSTER_CONE_REJECT_WORD);
 const _: () = assert!(CLUSTER_FRUSTUM_REJECT_WORD != CLUSTER_CONE_REJECT_WORD);
 
+/// Faces of a point light's cube, and the number of face tags a survivor
+/// carries — `crcbl_render::shadow::POINT_FACES`, which is the shader's
+/// `SHADOW_POINT_FACES`.
+pub const FACE_COUNT: usize = crate::mesh::SHADOW_POINT_FACES;
+
+/// Side planes kept per point-light face — see [`Features::FACES`].
+pub const FACE_PLANES: usize = 4;
+
+/// Length of [`Params::face_planes`].
+pub const FACE_PLANE_SLOTS: usize = FACE_COUNT * FACE_PLANES;
+
+/// The low bits of a survivor-list entry, which are the instance index.
+///
+/// **Every bit above it is a tag** the cull writes about the survivor — its
+/// point-light faces, or its occlusion state — so an instance capacity reaching
+/// it is one `crcbl_render::DrawGen::new` refuses rather than one whose indices
+/// would read as tags.
+pub const ENTRY_INDEX_MASK: u32 = (1 << 24) - 1;
+
+/// Where a survivor's six face tags start: bit `ENTRY_FACE_SHIFT + f` is face
+/// `f` of a point light, written under [`Features::FACES`].
+pub const ENTRY_FACE_SHIFT: u32 = 24;
+
+/// The tag `cull.slang`'s `lateMain` sets on a survivor the second occlusion
+/// phase found visible after the first found it hidden.
+pub const ENTRY_RESCUED: u32 = 1 << 30;
+
+/// The tag `cull.slang`'s `occlusionMain` sets on a survivor the first phase
+/// found hidden behind the previous frame's pyramid.
+pub const ENTRY_OCCLUDED: u32 = 1 << 31;
+
+const _: () = assert!(ENTRY_FACE_SHIFT as usize + FACE_COUNT <= 30);
+const _: () = assert!(ENTRY_INDEX_MASK < 1 << ENTRY_FACE_SHIFT);
+
+/// Levels of the farthest-depth pyramid `cull.slang` binds in set 1.
+///
+/// Eight, which reaches a coarsest level of 7×4 texels on a 1920×1080 prepass
+/// and costs eight of the sixteen sampled textures a WebGPU stage guarantees.
+pub const OCCLUSION_MAX_LEVELS: u32 = 8;
+
+/// Texels the projected rectangle is widened by on every side before the
+/// pyramid is read. See `cull.slang`'s declaration.
+pub const OCCLUSION_GUARD_TEXELS: i32 = 1;
+
+/// How much nearer than the stored depth, as a fraction of it, an instance's
+/// nearest corner must be to count as hidden — `2^-12`. See `cull.slang`'s
+/// declaration.
+pub const OCCLUSION_DEPTH_SLACK: f32 = 1.0 / 4096.0;
+
+/// A projected coordinate at or past this many pixels from the origin makes a
+/// box unprojectable. See `cull.slang`'s declaration.
+pub const PROJECTION_LIMIT: f32 = 16_777_216.0;
+
+/// What a frame's cull dispatches do beyond the frustum — `CullParams::features`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Features(u32);
+
+impl Features {
+    /// Nothing beyond the frustum: the bits every cull had before this block
+    /// grew, and every shadow cascade's and spot's.
+    pub const NONE: Self = Self(0);
+    /// Tag each survivor with the point-light faces its box reaches, read by
+    /// `computeMain` from [`Params::face_planes`].
+    pub const FACES: Self = Self(1);
+    /// The farthest-depth pyramid holds the previous frame, so `occlusionMain`
+    /// may test against it through [`Params::previous_view_proj`].
+    pub const OCCLUSION_HISTORY: Self = Self(2);
+    /// `occlusionMain` drops an instance whose projected box's longer side is
+    /// under [`Params::small_feature_pixels`].
+    pub const SMALL_FEATURE: Self = Self(4);
+
+    /// The word the shader reads.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Both sets of bits.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether every bit of `other` is set here.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
 /// Bytes of the uniform block.
 ///
-/// Six `float4` (96) then three `uint`, rounded up to the 16-byte multiple
-/// `std140` requires of a uniform block's size. Checked against the `Offset`
-/// decorations `slangc` emits by this module's
+/// Six `float4` (96), four `uint` (112), two `float4x4` (240), four `uint`
+/// (256), four `float` (272) and [`FACE_PLANE_SLOTS`] `float4`s (656), which is
+/// already the 16-byte multiple `std140` requires of a uniform block's size.
+/// Checked against the `Offset` decorations `slangc` emits by this module's
 /// `the_cull_params_block_matches_the_offsets_slangc_emits`.
-pub const PARAMS_SIZE: usize = 112;
+pub const PARAMS_SIZE: usize = 656;
 
 /// The uniform block, matching `struct CullParams` in `shaders/cull.slang`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// `Default` is a cull of nothing with no features: zero planes reject nothing
+/// and zero instances test nothing, so a caller fills what it uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Params {
     /// The camera frustum's six half-spaces: `[nx, ny, nz, d]`, with a point
     /// inside when `n · p + d >= 0`.
@@ -129,6 +246,25 @@ pub struct Params {
     /// for a camera's cull, and zero for a cull that is no view's — a shadow
     /// cascade's or a shadowed light's — which rejects nothing on it.
     pub hidden_view: u32,
+    /// What the dispatches do beyond the frustum.
+    pub features: Features,
+    /// This frame's world → clip, column-major — the second occlusion phase's
+    /// and the small-feature test's projection.
+    pub view_proj: [f32; 16],
+    /// The previous frame's, which the first occlusion phase reprojects
+    /// through.
+    pub previous_view_proj: [f32; 16],
+    /// The depth prepass's extent in texels, which is level 0 of the pyramid.
+    pub target_extent: [u32; 2],
+    /// Levels of the farthest-depth pyramid bound for the occlusion entry
+    /// points, at most [`OCCLUSION_MAX_LEVELS`]. Zero hides nothing.
+    pub pyramid_levels: u32,
+    /// The small-feature threshold, in pixels of the projected box's longer
+    /// side.
+    pub small_feature_pixels: f32,
+    /// Under [`Features::FACES`], face `f`'s four side planes at
+    /// `f * FACE_PLANES`, on [`planes`](Self::planes)' convention.
+    pub face_planes: [[f32; 4]; FACE_PLANE_SLOTS],
 }
 
 impl Params {
@@ -148,11 +284,39 @@ impl Params {
                 at += 4;
             }
         }
-        for value in [self.instance_count, self.capacity, self.hidden_view] {
+        for value in [
+            self.instance_count,
+            self.capacity,
+            self.hidden_view,
+            self.features.bits(),
+        ] {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
-        debug_assert_eq!(at, 108, "the last four bytes are std140 tail padding");
+        for value in self.view_proj.iter().chain(&self.previous_view_proj) {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        for value in [
+            self.target_extent[0],
+            self.target_extent[1],
+            self.pyramid_levels,
+            0,
+        ] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        for value in [self.small_feature_pixels, 0.0, 0.0, 0.0] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        for plane in &self.face_planes {
+            for value in plane {
+                bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                at += 4;
+            }
+        }
+        debug_assert_eq!(at, PARAMS_SIZE, "the block has no tail padding");
         bytes
     }
 }
@@ -183,8 +347,9 @@ mod tests {
     #[test]
     fn the_cull_params_block_matches_the_offsets_slangc_emits() {
         // `OpDecorate %_arr_v4float_int_6 ArrayStride 16`, and
-        // `OpMemberDecorate %CullParams_std140 n Offset …`: 0, 96, 100, 104.
-        assert_eq!(PARAMS_SIZE, 112);
+        // `OpMemberDecorate %CullParams_std140 n Offset …`: 0, 96, 100, 104,
+        // 108, 112, 176, 240, 244, 248, 252, 256, 260, 264, 268, 272.
+        assert_eq!(PARAMS_SIZE, 656);
         assert_eq!(
             PARAMS_SIZE % 16,
             0,
@@ -201,6 +366,13 @@ mod tests {
             instance_count: 7,
             capacity: 9,
             hidden_view: 1 << 10,
+            features: Features::FACES.union(Features::SMALL_FEATURE),
+            view_proj: core::array::from_fn(|index| 100.0 + index as f32),
+            previous_view_proj: core::array::from_fn(|index| 200.0 + index as f32),
+            target_extent: [640, 480],
+            pyramid_levels: 6,
+            small_feature_pixels: 2.5,
+            face_planes: core::array::from_fn(|index| [300.0 + index as f32, 0.0, 0.0, -1.0]),
         }
         .to_bytes();
         let float_at =
@@ -218,11 +390,29 @@ mod tests {
         assert_eq!(uint_at(96), 7, "instance_count at offset 96");
         assert_eq!(uint_at(100), 9, "capacity at offset 100");
         assert_eq!(uint_at(104), 1 << 10, "hidden_view at offset 104");
+        assert_eq!(uint_at(108), 5, "features at offset 108");
+        assert_eq!(float_at(112), 100.0, "view_proj at offset 112");
+        assert_eq!(float_at(172), 115.0, "and sixteen floats wide");
+        assert_eq!(float_at(176), 200.0, "previous_view_proj at offset 176");
+        assert_eq!(float_at(236), 215.0, "and sixteen floats wide");
+        assert_eq!(uint_at(240), 640, "target_width at offset 240");
+        assert_eq!(uint_at(244), 480, "target_height at offset 244");
+        assert_eq!(uint_at(248), 6, "pyramid_levels at offset 248");
+        assert_eq!(uint_at(252), 0, "then a padding word, written as zero");
+        assert_eq!(float_at(256), 2.5, "small_feature_pixels at offset 256");
         assert!(
-            bytes[108..].iter().all(|byte| *byte == 0),
-            "the std140 tail padding is written, and it is zero: {:?}",
-            &bytes[108..]
+            bytes[260..272].iter().all(|byte| *byte == 0),
+            "three padding floats, written as zero"
         );
+        for slot in 0..FACE_PLANE_SLOTS {
+            let at = 272 + slot * 16;
+            assert_eq!(
+                float_at(at),
+                300.0 + slot as f32,
+                "face plane {slot} at {at}"
+            );
+            assert_eq!(float_at(at + 12), -1.0, "and its offset last");
+        }
     }
 
     /// `cull.slang`, `draw_gen.slang` and `mesh_cluster.slang` re-declare
@@ -392,6 +582,174 @@ mod tests {
                 text.contains(&declaration),
                 "{source} must declare `{declaration}`, or it counts into the other \
                  shader's word"
+            );
+        }
+    }
+
+    /// **The survivor tags, the new statistics words and the occlusion
+    /// constants are the numbers this crate says**, in every shader that spells
+    /// one.
+    ///
+    /// A tag bit two shaders disagree about is a survivor the cull marks hidden
+    /// and the scatter draws early anyway — a frame that looks right and
+    /// measures nothing — and a slack or guard band that drifted from the host
+    /// oracle is a GPU list the oracle comparison reports as a bug in the one
+    /// that did not change.
+    #[test]
+    fn the_occlusion_constants_are_spelled_the_same_in_every_shader() {
+        let cull = include_str!("../shaders/cull.slang");
+        let draw_gen = include_str!("../shaders/draw_gen.slang");
+        for (source, text, declaration) in [
+            (
+                "cull.slang",
+                cull,
+                format!("static const uint ENTRY_INDEX_MASK = {ENTRY_INDEX_MASK};"),
+            ),
+            (
+                "draw_gen.slang",
+                draw_gen,
+                format!("static const uint ENTRY_INDEX_MASK = {ENTRY_INDEX_MASK};"),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!("static const uint ENTRY_FACE_SHIFT = {ENTRY_FACE_SHIFT};"),
+            ),
+            (
+                "draw_gen.slang",
+                draw_gen,
+                format!("static const uint ENTRY_FACE_SHIFT = {ENTRY_FACE_SHIFT};"),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!("static const uint ENTRY_RESCUED = {ENTRY_RESCUED};"),
+            ),
+            (
+                "draw_gen.slang",
+                draw_gen,
+                format!("static const uint ENTRY_RESCUED = {ENTRY_RESCUED};"),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!("static const uint ENTRY_OCCLUDED = {ENTRY_OCCLUDED};"),
+            ),
+            (
+                "draw_gen.slang",
+                draw_gen,
+                format!("static const uint ENTRY_OCCLUDED = {ENTRY_OCCLUDED};"),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!("static const uint FACE_COUNT = {FACE_COUNT};"),
+            ),
+            (
+                "draw_gen.slang",
+                draw_gen,
+                format!("static const uint FACE_COUNT = {FACE_COUNT};"),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!("static const uint FACE_PLANES = {FACE_PLANES};"),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!("static const uint FACE_PLANE_SLOTS = {FACE_PLANE_SLOTS};"),
+            ),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+                format!("static const uint FACE_PLANE_SLOTS = {FACE_PLANE_SLOTS};"),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!(
+                    "static const uint OCCLUSION_EARLY_REJECT_WORD = {OCCLUSION_EARLY_REJECT_WORD};"
+                ),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!(
+                    "static const uint OCCLUSION_LATE_REJECT_WORD = {OCCLUSION_LATE_REJECT_WORD};"
+                ),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!(
+                    "static const uint SMALL_FEATURE_REJECT_WORD = {SMALL_FEATURE_REJECT_WORD};"
+                ),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!("static const uint OCCLUSION_MAX_LEVELS = {OCCLUSION_MAX_LEVELS};"),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!("static const int OCCLUSION_GUARD_TEXELS = {OCCLUSION_GUARD_TEXELS};"),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!("static const float PROJECTION_LIMIT = {PROJECTION_LIMIT:.1};"),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!("static const uint CULL_FACES = {};", Features::FACES.bits()),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!(
+                    "static const uint CULL_OCCLUSION_HISTORY = {};",
+                    Features::OCCLUSION_HISTORY.bits()
+                ),
+            ),
+            (
+                "cull.slang",
+                cull,
+                format!(
+                    "static const uint CULL_SMALL_FEATURE = {};",
+                    Features::SMALL_FEATURE.bits()
+                ),
+            ),
+        ] {
+            assert!(
+                text.contains(&declaration),
+                "{source} must declare `{declaration}`"
+            );
+        }
+        // The slack as the float the shader parses, rather than as text: the
+        // source spells the exact binary fraction, which is not the shortest
+        // decimal Rust prints for it.
+        let slack = cull
+            .split("static const float OCCLUSION_DEPTH_SLACK = ")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .and_then(|literal| literal.parse::<f32>().ok());
+        assert_eq!(
+            slack,
+            Some(OCCLUSION_DEPTH_SLACK),
+            "cull.slang's OCCLUSION_DEPTH_SLACK is not the host's"
+        );
+        // Eight pyramid bindings, one per level, in set 1 and in order.
+        for level in 1..=OCCLUSION_MAX_LEVELS {
+            let declaration = format!(
+                "[[vk::binding({}, 1)]]\nDepthTexture2D pyramid_{level};",
+                level - 1
+            );
+            assert!(
+                cull.contains(&declaration),
+                "cull.slang must declare `{declaration}`"
             );
         }
     }
