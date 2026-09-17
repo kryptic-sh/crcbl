@@ -943,35 +943,54 @@ Sample and browser follow-up:
   large-scenes and scrolling need separate pricing before retaining labels with
   invalidation.
 
-- Shadow preparation follow-up inspected `ForwardRenderer::begin_frame_body`,
-  `shadow_group_record` and the cached-atlas early return in
-  `crcbl-render/src/forward.rs`. It reserves fresh `views` and `culls` vectors
-  using `SHADOW_VIEWS` and `SHADOW_CULLS` before deciding the atlas can be
-  reused. Both remain required inputs to complete cache-key construction and
-  conditional uniform/cull uploads; skipping their construction merely because
-  the previous atlas was cached would miss current changes. A release helper
-  using the actual tuple types and public shadow constants reported capacity
-  footprints of 44,720 and 672 bytes. Disassembly showed those allocation sizes
-  at the corresponding adjacent allocation return sites in `begin_frame_body`.
-  Guarded DHAT queries of both actual renderer fixtures below found matching
-  direct method sites: 24,596,000 bytes in 550 blocks and 369,600 bytes in 550
-  blocks, respectively. This is concrete repeated scratch allocation, including
-  cached frames, rather than a claim that cached shadows redraw. Compare
-  retained private scratch ahead of wider graph-plan caching; it targets a
-  larger observed allocation volume than the instance-list trial below, but its
-  isolated CPU saving has not been measured. Preserve complete cache keys,
-  view/cull order, group ownership, cadence resets, refused/failed writes,
-  shadow-off reflective/probe producers, layout changes and point-face culls.
-  Clear scratch before the next assembly even after failure, and retain it
-  across every early return. Price lifetime host memory and whole-frame peak
-  memory: retaining capacity keeps storage live past frame preparation. Large
-  fixed stack arrays were declined without stack-budget evidence for native and
-  wasm callers. The owning frame-preparation responsibility needs a separate
-  behavior-preserving private-module move before editing this monolith. No
-  retained-scratch implementation, changed-caller gain or browser/native GPU
-  frame measurement is established yet.
+- Shadow preparation follow-up inspected `ForwardRenderer::begin_frame_body` and
+  the cached-atlas early return in `crates/crcbl-render/src/forward.rs`, plus
+  `shadow_group_record` in the private
+  `crates/crcbl-render/src/forward/shadow_inputs.rs` module. Frame preparation
+  reserves fresh `views` and `culls` vectors using `SHADOW_VIEWS` and
+  `SHADOW_CULLS` before deciding the atlas can be reused. Both remain required
+  inputs to complete cache-key construction and conditional uniform/cull
+  uploads; skipping their construction merely because the previous atlas was
+  cached would miss current changes. A release helper using the actual tuple
+  types and public shadow constants reported capacity footprints of 44,720 and
+  672 bytes. Disassembly showed those allocation sizes at the corresponding
+  adjacent allocation return sites in `begin_frame_body`. Guarded DHAT queries
+  of both actual renderer fixtures below found matching direct method sites:
+  24,596,000 bytes in 550 blocks and 369,600 bytes in 550 blocks, respectively.
+  This is concrete repeated scratch allocation, including cached frames, rather
+  than a claim that cached shadows redraw. Compare retained private scratch
+  ahead of wider graph-plan caching; it targets a larger observed allocation
+  volume than the instance-list trial below, but its isolated CPU saving has not
+  been measured. Preserve complete cache keys, view/cull order, group ownership,
+  cadence resets, refused/failed writes, shadow-off reflective/probe producers,
+  layout changes and point-face culls. Clear scratch before the next assembly
+  even after failure, and retain it across every early return. Price lifetime
+  host memory and whole-frame peak memory: retaining capacity keeps storage live
+  past frame preparation. Large fixed stack arrays were declined without
+  stack-budget evidence for native and wasm callers. The owning
+  frame-preparation responsibility needs a separate behavior-preserving
+  private-module move before editing this monolith. No retained-scratch
+  implementation, changed-caller gain or browser/native GPU frame measurement is
+  established yet.
 
-  The related `shadow_group_record` capacity hint always reserves for
+  The changed-record renderer profile reconfirmed those scratch allocation sites
+  after exact key reservation: views still reported 24,596,000 bytes in 550
+  blocks, and culls 369,600 bytes in 550 blocks. Each selector required a unique
+  observed site; disassembly confirmed the matching reservation. This keeps
+  scratch ahead of the instance-list candidate without implying a CPU saving.
+  Source review identified the cached-atlas return and fallible shadow uniform
+  writes, draw-generation preparation, shadow-off reflective producer writes and
+  probe-gather preparation after assembly. A retained implementation must return
+  cleared storage on each of those success/failure exits. Preserve the existing
+  pending shadow commit and group-input update order rather than adding rollback
+  as part of capacity reuse. Tests must observe retained capacity and empty
+  scratch after cached, redrawn and refused-write paths, then compare complete
+  next-frame bytes and recording after recovery. Both ordinary and skinned frame
+  entry points share this body; their earlier instance/palette failures must
+  remain unchanged. These are implementation and coverage requirements, not a
+  completed retained-scratch trial.
+
+  The original `shadow_group_record` capacity hint reserves for
   `shadow::POINT_FACES` uniform blocks, even for a cascade with one view, and
   omits record headers, view IDs and cull plane bytes. A source-format capacity
   probe using the resolved uniform size reported an initial capacity of 11,040
