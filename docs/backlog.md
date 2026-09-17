@@ -638,7 +638,25 @@ Networking preparation follow-up:
   normal runs passed. These are native compatibility fixtures, not a changed
   repository implementation or browser storage run. Production save/hash
   integration, wasm exports, worker restoration and queued/durable browser
-  writes still need their existing repository/CI gates.
+  writes still need their existing repository/CI gates. An isolated WASM
+  executable compiled the current hash source and fixed-padding source copy with
+  the repository's pinned compiler. Node's WebAssembly runtime instantiated it
+  without imports and passed complete digests against independent Python
+  `hashlib` answers at the same boundary and large-input cases, plus
+  original/candidate hex comparisons. Wrong padding length made the digest
+  assertion trap; the normal artifact passed again. The same normal and
+  wrong-padding artifacts then ran in local headless Chromium. The harness read
+  the executed page body's result attribute, rather than finding a success word
+  in its script: the normal artifact passed, the wrong-padding artifact reported
+  failure, and the restored artifact passed. Complete digest and hex assertions
+  therefore ran in the actual browser's WASM runtime too. These pages used no
+  engine or GPU. This verifies the isolated target/runtime comparison, not
+  browser workers, engine exports, stack budgets, production callers or frame
+  performance. Local toolchain bookkeeping is surprising: rustup's
+  installed-target list omitted WASM, adding it rolled back on an
+  existing-library conflict, yet the pinned compiler successfully used the
+  existing sysroot libraries. No conflicting files were removed; target-list
+  output alone did not establish whether this compiler could build the probe.
 
 Simulation and loading follow-up:
 
