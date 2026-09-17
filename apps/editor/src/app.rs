@@ -50,13 +50,12 @@ use crcbl::engine::{
     Handled, LoopError, ModeRequest, Pending, PointerCapture, RunSummary, SettingsSource,
     WINDOWED_IDLE, accept_close, open_window, wait_for_configure,
 };
-use crcbl::greybox::{GREYBOX_CUBE, GREYBOX_GREY, scene3d};
+use crcbl::greybox::scene3d;
 use crcbl::hal::CommandEncoderDesc;
 use crcbl::input::ActionMap;
-use crcbl::math::{Mat4, Quat, Vec2, Vec3};
+use crcbl::math::{Vec2, Vec3};
 use crcbl::reflect::Value;
 use crcbl::render::grid::GridStyle;
-use crcbl::render::scene::InstanceDesc;
 use crcbl::render::{
     Aabb, DirectionalLight, ForwardRenderer, InstanceHandle, OrbitCamera, Projection, RenderGraph,
     TransientPool, UiRenderer,
@@ -73,6 +72,10 @@ use crate::document::{Document, EditError};
 use crate::keys::Action;
 use crate::layout;
 use crate::panel::{PanelInput, Panels};
+
+mod instances;
+
+use instances::{instance_of, place};
 
 /// How far one arrow key moves the selection, in metres.
 ///
@@ -882,40 +885,6 @@ fn scene_bounds(document: &mut Document) -> Aabb {
         min: Vec3::splat(-0.5),
         max: Vec3::splat(0.5),
     })
-}
-
-/// How one entity is drawn: the unit cube, scaled to its own extents.
-fn instance_of(document: &mut Document, id: SceneEntityId) -> Option<InstanceDesc> {
-    let (min, max) = document.bounds(id)?;
-    Some(InstanceDesc {
-        mesh: GREYBOX_CUBE,
-        material: GREYBOX_GREY,
-        transform: Mat4::from_scale_rotation_translation(
-            max - min,
-            Quat::IDENTITY,
-            (min + max) * 0.5,
-        ),
-    })
-}
-
-/// Places one instance per entity, in the document's own order.
-fn place(
-    renderer: &mut ForwardRenderer,
-    document: &mut Document,
-) -> Result<Vec<(SceneEntityId, InstanceHandle)>, crcbl::render::instance_pool::InstancePoolError> {
-    let ids: Vec<SceneEntityId> = document
-        .outline()
-        .into_iter()
-        .flat_map(|(_, ids)| ids)
-        .collect();
-    let mut placed = Vec::with_capacity(ids.len());
-    for id in ids {
-        let Some(desc) = instance_of(document, id) else {
-            continue;
-        };
-        placed.push((id, renderer.add_instance(&desc)?));
-    }
-    Ok(placed)
 }
 
 /// Runs until something stops it.
