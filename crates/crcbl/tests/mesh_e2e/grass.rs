@@ -285,24 +285,49 @@ fn the_price_of_the_shell_passes() {
             .with_shells(Shells { count, fins })
             .expect("every priced stack is a stack")
     };
-    let fields = SHELL_COUNTS
-        .iter()
-        .map(|count| Some(stacked(*count, true)))
-        .chain([Some(stacked(crcbl::shaders::grass::DEFAULT_SHELLS, false))])
-        .collect();
-    let Some(prices) = grass_prices(extent, frames, fields) else {
-        eprintln!(
-            "{}: the shell meadow drew and this backend reports no TIMESTAMP_QUERY, so the \
-             shells' price went unmeasured here",
-            crate::SUITE,
-        );
-        return;
+    // Priced in batches of at most two meadows, the size
+    // `the_price_of_the_grass_passes` holds at once: five renderers on one
+    // device ran WARP out of device memory on CI. The shallowest and deepest
+    // stacks share a batch, so the relation asserted below is measured under
+    // the same contention; the slope's other points come from their own.
+    let batches = [
+        vec![(SHELL_COUNTS[0], true), (SHELL_COUNTS[3], true)],
+        vec![(SHELL_COUNTS[1], true), (SHELL_COUNTS[2], true)],
+        vec![(crcbl::shaders::grass::DEFAULT_SHELLS, false)],
+    ];
+    let mut measured = Vec::new();
+    for batch in batches {
+        let fields = batch
+            .iter()
+            .map(|(count, fins)| Some(stacked(*count, *fins)))
+            .collect();
+        let Some(prices) = grass_prices(extent, frames, fields) else {
+            eprintln!(
+                "{}: the shell meadow drew and this backend reports no TIMESTAMP_QUERY, so \
+                 the shells' price went unmeasured here",
+                crate::SUITE,
+            );
+            return;
+        };
+        measured.extend(batch.into_iter().zip(prices));
+    }
+    let price_of = |count: u32, fins: bool| {
+        measured
+            .iter()
+            .find(|(configuration, _)| *configuration == (count, fins))
+            .map(|(_, price)| price)
+            .expect("every configuration was priced")
     };
+    let prices: Vec<&Priced> = SHELL_COUNTS
+        .iter()
+        .map(|count| price_of(*count, true))
+        .chain([price_of(crcbl::shaders::grass::DEFAULT_SHELLS, false)])
+        .collect();
     let ms = |nanos: u64| nanos as f64 / 1.0e6;
     // `PRICED_PASSES`' order: the draw is the fourth.
     let draw = |price: &Priced| price.passes[3].expect("a frame with a field records `grass`");
     let mut points = Vec::new();
-    for (count, price) in SHELL_COUNTS.iter().zip(&prices) {
+    for (count, price) in SHELL_COUNTS.iter().zip(prices.iter().copied()) {
         let (p50, p95) = draw(price);
         let generate = price.passes[2].expect("a frame with a field records `grass-generate`");
         eprintln!(
@@ -321,7 +346,7 @@ fn the_price_of_the_shell_passes() {
         );
         points.push((f64::from(*count), ms(p50)));
     }
-    let finless = draw(&prices[SHELL_COUNTS.len()]);
+    let finless = draw(prices[SHELL_COUNTS.len()]);
     eprintln!(
         "{}: shell meadow at {}x{}, {} shells without fins — grass {:.3}/{:.3} ms (p50/p95)",
         crate::SUITE,
@@ -351,7 +376,7 @@ fn the_price_of_the_shell_passes() {
         extent.1,
         mean_y - slope * mean_x,
     );
-    let (shallow, deep) = (draw(&prices[0]).0, draw(&prices[SHELL_COUNTS.len() - 1]).0);
+    let (shallow, deep) = (draw(prices[0]).0, draw(prices[SHELL_COUNTS.len() - 1]).0);
     assert!(
         deep > shallow,
         "the grass pass costs {} ms over {} shells and {} ms over {}: the stack's depth is not \
