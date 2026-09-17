@@ -1,6 +1,7 @@
-//! `docs/plan/57-grass.md` rungs G1 and G3's price: the two generation
+//! `docs/plan/57-grass.md` rungs G1, G2 and G3's price: the two generation
 //! dispatches and the grass pass over the meadow, the same frame with no field,
-//! and the meadow's field drawn as shells at several stack heights.
+//! the meadow's field drawn as shells at several stack heights, and the blade
+//! meadow at each level of detail.
 //!
 //! `docs/plan/43-render-standards.md` prices a rung before it counts as built,
 //! off `crcbl_render::PassStats`; this is that measurement for the grass
@@ -385,5 +386,92 @@ fn the_price_of_the_shell_passes() {
         SHELL_COUNTS[SHELL_COUNTS.len() - 1],
         ms(shallow),
         SHELL_COUNTS[0],
+    );
+}
+
+/// **Rung G2's price**: the grass pass over the blade meadow's field with every
+/// blade at one level of detail, then the other, then at the meadow's own
+/// switch — decision 3's "15 or 7 vertices per blade", measured.
+///
+/// The near level is the field with its switch past the field's reach, so every
+/// blade is drawn with fifteen vertices; the far level is the switch a
+/// centimetre from the eye with no band, so the one blade in four the far level
+/// keeps is drawn with seven. Priced two meadows at a time, on
+/// `the_price_of_the_shell_passes`' terms, with the two levels in one batch so
+/// the relation asserted below is measured under one contention.
+///
+/// Prints every configuration's generation and draw; asserts the relation the
+/// plan predicts rather than a duration: the near level's draw costs more than
+/// the far level's.
+///
+/// ```text
+/// CRCBL_PRICE_SIZE=1920x1080 CRCBL_PRICE_FRAMES=400 \
+///   CRCBL_GPU=vk crates/crcbl/tests/run-mesh-e2e.sh grass
+/// ```
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh grass"]
+fn the_price_of_the_blade_passes() {
+    use crcbl::render::grass::BladeLod;
+
+    let (extent, frames) = crate::area_light::price_frame();
+    let at = |distance, band| {
+        crcbl::screenshot::meadow_blades_field()
+            .with_blade_lod(BladeLod { distance, band })
+            .expect("every priced switch is a switch")
+    };
+    let default = crcbl::screenshot::MEADOW_BLADE_LOD;
+    let batches = [
+        vec![
+            ("near", Some(at(crcbl::screenshot::MEADOW_REACH, 0.0))),
+            ("far", Some(at(0.01, 0.0))),
+        ],
+        vec![("meadow", Some(at(default.distance, default.band)))],
+    ];
+    let mut measured = Vec::new();
+    for batch in batches {
+        let (names, fields): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+        let Some(prices) = grass_prices(extent, frames, fields) else {
+            eprintln!(
+                "{}: the blade meadow drew and this backend reports no TIMESTAMP_QUERY, so the \
+                 blades' price went unmeasured here",
+                crate::SUITE,
+            );
+            return;
+        };
+        measured.extend(names.into_iter().zip(prices));
+    }
+    let ms = |nanos: u64| nanos as f64 / 1.0e6;
+    let draw = |price: &Priced| price.passes[3].expect("a frame with a field records `grass`");
+    for (name, price) in &measured {
+        let generate = price.passes[2].expect("a frame with a field records `grass-generate`");
+        let (p50, p95) = draw(price);
+        eprintln!(
+            "{}: blade meadow at {}x{}, {name} level, over {} recorded frames — grass-generate \
+             {:.3}/{:.3} ms, grass {:.3}/{:.3} ms (p50/p95); frame p50 total {:.3} ms",
+            crate::SUITE,
+            extent.0,
+            extent.1,
+            price.recorded,
+            ms(generate.0),
+            ms(generate.1),
+            ms(p50),
+            ms(p95),
+            ms(price.total),
+        );
+    }
+    let price_of = |wanted: &str| {
+        measured
+            .iter()
+            .find(|(name, _)| *name == wanted)
+            .map(|(_, price)| draw(price).0)
+            .expect("every configuration was priced")
+    };
+    let (near, far) = (price_of("near"), price_of("far"));
+    assert!(
+        near > far,
+        "the grass pass costs {} ms with every blade near and {} ms with every blade far: the \
+         near level is not what it pays for",
+        ms(near),
+        ms(far),
     );
 }

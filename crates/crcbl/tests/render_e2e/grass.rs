@@ -30,7 +30,8 @@ use std::collections::BTreeMap;
 use crcbl::render::grass::{SLOT_CAPACITY, placement};
 use crcbl::screenshot::{OffscreenSetup, Scene};
 use crcbl::shaders::grass::{
-    CARD_DRAW, DRAW_ARGS_SIZE, FIN_DRAW, GrassInstance, INSTANCE_STRIDE, SHELL_DRAW, SLOT_ARGS_SIZE,
+    BLADE_FAR_DRAW, BLADE_NEAR_DRAW, CARD_DRAW, DRAW_ARGS_SIZE, FIN_DRAW, GrassInstance,
+    INSTANCE_STRIDE, SHELL_DRAW, SLOT_ARGS_SIZE,
 };
 use crcbl_golden::Image;
 
@@ -305,6 +306,9 @@ pub(super) struct Slot {
     pub(super) fins: u32,
     /// Those card instances, by the cell each was grown from.
     pub(super) blades: BTreeMap<u32, GrassInstance>,
+    /// The near and far mesh blade instances, likewise.
+    pub(super) near: BTreeMap<u32, GrassInstance>,
+    pub(super) far: BTreeMap<u32, GrassInstance>,
 }
 
 /// The cells buffer a field's last generation wrote, as its bytes — every cell
@@ -322,7 +326,7 @@ pub(super) fn cells_of(setup: &mut OffscreenSetup) -> Vec<u8> {
 }
 
 /// Draws one frame of the meadow and copies every slot's instances and draw
-/// arguments back.
+/// arguments back — its cards, and both runs of its mesh blades.
 pub(super) fn generated(setup: &mut OffscreenSetup) -> Vec<Slot> {
     // A frame first: the buffers hold whatever the last frame that generated
     // left there, and a renderer that has drawn nothing has never dispatched.
@@ -336,10 +340,11 @@ pub(super) fn generated(setup: &mut OffscreenSetup) -> Vec<Slot> {
             u64::from(buffers.slots) * SLOT_ARGS_SIZE as u64,
         )
         .expect("the draw arguments copy back");
+    // Both regions: the cards and far blades, then the near blades.
     let instances = setup
         .read_buffer(
             buffers.instances,
-            u64::from(buffers.slots) * u64::from(SLOT_CAPACITY) * INSTANCE_STRIDE as u64,
+            2 * u64::from(buffers.slots) * u64::from(SLOT_CAPACITY) * INSTANCE_STRIDE as u64,
         )
         .expect("the instances copy back");
 
@@ -355,11 +360,19 @@ pub(super) fn generated(setup: &mut OffscreenSetup) -> Vec<Slot> {
                 )
             };
             let count = word(CARD_DRAW, 1);
+            let (near_count, far_count) = (word(BLADE_NEAR_DRAW, 1), word(BLADE_FAR_DRAW, 1));
             assert!(
-                count <= SLOT_CAPACITY,
-                "slot {slot} claims {count} instances, past the {SLOT_CAPACITY} it holds"
+                count + far_count <= SLOT_CAPACITY && near_count <= SLOT_CAPACITY,
+                "slot {slot} claims {count} cards, {near_count} near and {far_count} far blades, \
+                 past the {SLOT_CAPACITY} a region holds"
             );
-            for draw in [CARD_DRAW, SHELL_DRAW, FIN_DRAW] {
+            for draw in [
+                CARD_DRAW,
+                SHELL_DRAW,
+                FIN_DRAW,
+                BLADE_NEAR_DRAW,
+                BLADE_FAR_DRAW,
+            ] {
                 assert_eq!(
                     word(draw, 3),
                     0,
@@ -367,28 +380,46 @@ pub(super) fn generated(setup: &mut OffscreenSetup) -> Vec<Slot> {
                      WebGPU refuses outright"
                 );
             }
-            let base = slot as usize * SLOT_CAPACITY as usize;
-            let blades = (0..count as usize)
-                .map(|index| {
-                    let row = (base + index) * INSTANCE_STRIDE;
-                    let instance = GrassInstance::from_bytes(
-                        instances[row..row + INSTANCE_STRIDE]
-                            .try_into()
-                            .expect("one instance's bytes"),
-                    );
-                    (instance.lanes[0], instance)
-                })
-                .collect::<BTreeMap<_, _>>();
-            assert_eq!(
-                blades.len(),
-                count as usize,
-                "slot {slot} appended two instances for one cell"
-            );
+            let capacity = SLOT_CAPACITY as usize;
+            let base = slot as usize * capacity;
+            let second = (buffers.slots as usize + slot as usize) * capacity;
+            let run = |rows: Vec<usize>, what: &str| {
+                let expected = rows.len();
+                let run = rows
+                    .into_iter()
+                    .map(|index| {
+                        let row = index * INSTANCE_STRIDE;
+                        let instance = GrassInstance::from_bytes(
+                            instances[row..row + INSTANCE_STRIDE]
+                                .try_into()
+                                .expect("one instance's bytes"),
+                        );
+                        (instance.lanes[0], instance)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(
+                    run.len(),
+                    expected,
+                    "slot {slot} appended two {what} for one cell"
+                );
+                run
+            };
             Slot {
                 count,
                 shells: word(SHELL_DRAW, 1),
                 fins: word(FIN_DRAW, 1),
-                blades,
+                blades: run((base..base + count as usize).collect(), "cards"),
+                near: run(
+                    (second..second + near_count as usize).collect(),
+                    "near blades",
+                ),
+                // Counted down from the end of the first region.
+                far: run(
+                    (0..far_count as usize)
+                        .map(|index| base + capacity - 1 - index)
+                        .collect(),
+                    "far blades",
+                ),
             }
         })
         .collect()

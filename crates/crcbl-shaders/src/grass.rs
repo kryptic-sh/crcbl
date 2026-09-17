@@ -37,6 +37,12 @@
 //!   against `grass_gen.slang` and `wind.slang`, over the hash, the ground, the
 //!   wind and the lean the shells are built from, so a shell layer bends by the
 //!   formula a card's tip does.
+//! * [`tests::the_clumps_are_the_shaders_clumps`] — `grass_gen.slang`'s clump
+//!   and level-of-detail keys against [`clump_of`] and [`kept_far`], which are
+//!   what the CPU placement reads.
+//! * [`tests::the_blade_curve_is_the_one_the_claims_read`] — `grass.slang`'s
+//!   blade curve against the copy `tests/render_e2e/grass_blades.rs` finds a
+//!   blade on screen with.
 //!
 //! [`tests::the_wind_sampler_is_the_field_s`]: self
 //! [`tests::the_copied_functions_are_their_sources_bodies`]: self
@@ -44,6 +50,8 @@
 //! [`tests::every_function_the_shader_shares_is_compared`]: self
 //! [`tests::the_two_shaders_declare_one_instance_row`]: self
 //! [`tests::the_shells_copies_are_the_generation_pass_s`]: self
+//! [`tests::the_clumps_are_the_shaders_clumps`]: self
+//! [`tests::the_blade_curve_is_the_one_the_claims_read`]: self
 
 /// Invocations per workgroup, matching `[numthreads(64, 1, 1)]` on both of
 /// `grass_gen.slang`'s entry points.
@@ -61,12 +69,14 @@ pub const DRAW_ARG_WORDS: u32 = 4;
 pub const DRAW_ARGS_SIZE: usize = DRAW_ARG_WORDS as usize * 4;
 
 /// Draws one tile slot owns in the argument buffer, back to back: the cards,
-/// the shells and the fins — [`CARD_DRAW`], [`SHELL_DRAW`] and [`FIN_DRAW`].
+/// the shells, the fins and the mesh blades at each of their two levels of
+/// detail — [`CARD_DRAW`], [`SHELL_DRAW`], [`FIN_DRAW`], [`BLADE_NEAR_DRAW`] and
+/// [`BLADE_FAR_DRAW`].
 ///
-/// `docs/plan/57-grass.md`'s decision 1 gives each slot and look a fixed
+/// `docs/plan/57-grass.md`'s decision 1 gives each slot, look and level a fixed
 /// indirect slot, and this is that table: a look the field does not draw leaves
 /// its slot's instance count at the zero the clear wrote.
-pub const DRAWS_PER_SLOT: u32 = 3;
+pub const DRAWS_PER_SLOT: u32 = 5;
 
 /// Bytes of one slot's draw arguments, every look's together.
 pub const SLOT_ARGS_SIZE: usize = DRAWS_PER_SLOT as usize * DRAW_ARGS_SIZE;
@@ -80,11 +90,82 @@ pub const SHELL_DRAW: u32 = 1;
 /// Which of a slot's draws the fins are.
 pub const FIN_DRAW: u32 = 2;
 
+/// Which of a slot's draws the near mesh blades are: [`BLADE_NEAR_VERTICES`]
+/// each.
+pub const BLADE_NEAR_DRAW: u32 = 3;
+
+/// Which of a slot's draws the far mesh blades are: [`BLADE_FAR_VERTICES`]
+/// each.
+pub const BLADE_FAR_DRAW: u32 = 4;
+
 /// A blade row drawn as cards — `BladeLook::Cards` in `crcbl_render::grass`.
 pub const LOOK_CARDS: u32 = 0;
 
 /// A blade row drawn as shells with fins — `BladeLook::Shells`.
 pub const LOOK_SHELLS: u32 = 1;
+
+/// A blade row drawn as mesh blades — `BladeLook::Blades`.
+pub const LOOK_BLADES: u32 = 2;
+
+/// Quads up a near mesh blade: a triangle strip of a pair of vertices at each
+/// of `segments` heights and one at the tip.
+pub const BLADE_NEAR_SEGMENTS: u32 = 7;
+
+/// The same for a far one.
+///
+/// **Coprime with [`BLADE_NEAR_SEGMENTS`]**, and that is what makes the morph
+/// between the two exact to describe: no near pair but the root stands at a far
+/// pair's height, so every near pair lies strictly inside one far segment and
+/// is moved onto that segment's straight line — see `grass.slang`'s
+/// `grass_blade_vertex`.
+pub const BLADE_FAR_SEGMENTS: u32 = 3;
+
+/// Vertices one near mesh blade draws: decision 3's fifteen.
+pub const BLADE_NEAR_VERTICES: u32 = 2 * BLADE_NEAR_SEGMENTS + 1;
+
+/// Vertices one far mesh blade draws: decision 3's seven.
+pub const BLADE_FAR_VERTICES: u32 = 2 * BLADE_FAR_SEGMENTS + 1;
+
+/// The narrowest a mesh blade is drawn, in pixels across, wherever it is seen
+/// from — the blades' answer to [`STRAND_MIN_PIXELS`], and to a blade turned
+/// edge-on to the camera, whose own width projects to nothing.
+pub const BLADE_MIN_PIXELS: f32 = 1.0;
+
+/// How much wider a blade the far level keeps is drawn than it stands near.
+///
+/// **The far level keeps one blade in four** — decision 3's "the low LOD's tile
+/// twice the size with the same blade count" — so a kept blade stands in for
+/// the three dropped around it. Twice as wide is half of what a sparse field's
+/// coverage would ask for and all of what a closed mat's does, where the blades
+/// already overlap; `docs/backlog.md` carries it as chosen rather than measured.
+pub const BLADE_FAR_WIDEN: f32 = 2.0;
+
+/// Placement cells along one side of a clump's lattice square — decision 2's
+/// clumps, one hash-jittered point per square.
+pub const CLUMP_CELLS: u32 = 8;
+
+/// Integer units a placement cell is divided into for the clump search.
+///
+/// **The Voronoi search is integer arithmetic**, so which clump a blade belongs
+/// to is the same answer on every target and in [`clump_of`]: a blade's place is
+/// its cell times this plus the top eight bits of each of its two jitter lanes,
+/// and a clump's point is its square times this plus a hashed offset. Eight
+/// bits of a sixteen-bit jitter is a 256th of a cell, which is the most a
+/// blade's clump can be decided off its drawn root by.
+pub const CLUMP_UNITS: u32 = 256;
+
+/// The lane a clump's point and identity are drawn from.
+pub const CLUMP_SALT: u32 = 0x2c1b_3c6d;
+
+/// The lane a two-by-two block of cells picks the one blade the far level
+/// keeps from.
+pub const LOD_SALT: u32 = 0x297a_2d39;
+
+/// How far a far blade's shading normal leans out from its clump's point, per
+/// clump radius — the dome decision 3's "far blades blend toward the clump
+/// normal" blends toward, so a clump reads as a tuft rather than as flat
+/// ground.
+pub const CLUMP_DOME: f32 = 0.5;
 
 /// A blade row shaded by the ground's normal under its root.
 pub const NORMAL_GROUND: u32 = 0;
@@ -158,11 +239,6 @@ pub const SHELL_OCCLUSION_BIAS: f32 = 0.35;
 /// them.
 pub const STRAND_MIN_PIXELS: f32 = 1.0;
 
-/// Placement cells along one side of a colour patch — decision 4's
-/// clump-coloured patches, on a square grid of cells until rung G2's Voronoi
-/// clumps exist.
-pub const PATCH_CELLS: u32 = 8;
-
 /// The lane a patch's colour is drawn from.
 pub const PATCH_SALT: u32 = 0x1656_67b1;
 
@@ -213,11 +289,11 @@ pub const SIZE_SALT: u32 = 0xc2b2_ae35;
 /// The lane a blade's tint is drawn from.
 pub const TINT_SALT: u32 = 0x27d4_eb2f;
 
-/// Bytes of [`GenParams`]: six sixteen-byte `std140` rows.
-pub const GEN_PARAMS_SIZE: usize = 16 * 6;
+/// Bytes of [`GenParams`]: seven sixteen-byte `std140` rows.
+pub const GEN_PARAMS_SIZE: usize = 16 * 7;
 
-/// Bytes of [`FieldBlock`]: five sixteen-byte rows and one per shell.
-pub const FIELD_BLOCK_SIZE: usize = 16 * (5 + MAX_SHELLS as usize);
+/// Bytes of [`FieldBlock`]: six sixteen-byte rows and one per shell.
+pub const FIELD_BLOCK_SIZE: usize = 16 * (6 + MAX_SHELLS as usize);
 
 /// Bytes of [`Params`]: two sixteen-byte `std140` rows.
 pub const PARAMS_SIZE: usize = 16 * 2;
@@ -226,10 +302,10 @@ pub const PARAMS_SIZE: usize = 16 * 2;
 pub const TILE_SIZE: usize = 16 * 2;
 
 /// Bytes of one [`GrassBlade`] row.
-pub const BLADE_STRIDE: usize = 16 * 7;
+pub const BLADE_STRIDE: usize = 16 * 9;
 
 /// Bytes of one [`GrassInstance`] row.
-pub const INSTANCE_STRIDE: usize = 16 * 5;
+pub const INSTANCE_STRIDE: usize = 16 * 6;
 
 /// Jarzynski and Olano's `pcg` hash (*Hash Functions for GPU Rendering*,
 /// JCGT 9(3), 2020): PCG's 32-bit LCG step followed by its RXS-M-XS output
@@ -285,17 +361,118 @@ pub const fn accepts(cell: u32, density: u8) -> bool {
     (hash(cell ^ DENSITY_SALT) & 0xffff) < unorm8(density) * 257
 }
 
-/// Which colour patch the placement cell at `(x, z)` — counted along `+X` and
-/// `+Z` from the field's corner — belongs to, as a lane in `0..1`.
+/// Which colour patch a blade of clump `clump` is painted with, as a lane in
+/// `0..1` — decision 4's "clump-coloured patches".
 ///
-/// `grass_patch` in both grass shaders: integer arithmetic on the cell's own
-/// coordinates, so a card, a shell and a fin of one cell agree about it and so
-/// does this copy.
+/// `grass_patch` in `grass.slang`, over the clump identity [`clump_of`] gives
+/// and the generation pass writes into `GrassInstance::lanes`, so a card, a
+/// shell, a fin and a mesh blade of one clump are one colour and so is this
+/// copy.
 #[must_use]
-pub fn patch_of(x: u32, z: u32) -> f32 {
-    let key =
-        (x / PATCH_CELLS).wrapping_mul(0x8da6_b343) ^ (z / PATCH_CELLS).wrapping_mul(0xd816_3841);
-    unit_pair(hash(key ^ PATCH_SALT))[0]
+pub fn patch_of(clump: u32) -> f32 {
+    unit_pair(hash(clump ^ PATCH_SALT))[0]
+}
+
+/// The two-dimensional key a lattice square hashes from, `(x, z)` in whatever
+/// lattice it is — the clumps' or the far level's blocks.
+///
+/// **Wrapping on a negative coordinate**, which a clump search one square
+/// outside the field's corner reaches: the shader's `uint(int)` is the same
+/// two's-complement reinterpretation as the `as` below.
+#[must_use]
+pub const fn lattice_key(x: i32, z: i32) -> u32 {
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the reinterpretation the shader's `uint(int)` makes, on purpose"
+    )]
+    let (x, z) = (x as u32, z as u32);
+    x.wrapping_mul(0x8da6_b343) ^ z.wrapping_mul(0xd816_3841)
+}
+
+/// The clump a blade belongs to: its identity, and where the blade stands from
+/// the clump's point in [`CLUMP_UNITS`] of a cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Clump {
+    /// The clump's hash, which every clump-driven lane is drawn from.
+    pub id: u32,
+    /// The blade's place less the clump's point, along `+X` and `+Z`.
+    pub offset: [i32; 2],
+}
+
+/// Decision 2's clumps: "procedural Voronoi cells over the nine nearest
+/// hash-jittered points", for the blade of placement cell `global` — counted
+/// along `+X` and `+Z` from the field's corner — whose jitter lane is `jitter`.
+///
+/// **Integer throughout**, so the clump a blade belongs to is the same answer
+/// here and on every target: positions are in [`CLUMP_UNITS`] of a cell, the
+/// distances are squared `i32`s that stay under `2³¹` by construction, and a
+/// tie goes to the first point in the search's order. `grass_clump_of` in
+/// `grass_gen.slang` is the same loop.
+#[must_use]
+pub fn clump_of(global: [u32; 2], jitter: u32) -> Clump {
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "a field is at most a few thousand cells a side, far inside an `i32`"
+    )]
+    let (units, span) = (CLUMP_UNITS as i32, (CLUMP_CELLS * CLUMP_UNITS) as i32);
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "a cell index and an eight-bit lane, far inside an `i32`"
+    )]
+    let at = [
+        global[0] as i32 * units + ((jitter & 0xffff) >> 8) as i32,
+        global[1] as i32 * units + (((jitter >> 16) & 0xffff) >> 8) as i32,
+    ];
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "a cell index over the clump side, far inside an `i32`"
+    )]
+    let home = [
+        (global[0] / CLUMP_CELLS) as i32,
+        (global[1] / CLUMP_CELLS) as i32,
+    ];
+    let mut nearest = Clump::default();
+    let mut best = i32::MAX;
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let square = [home[0] + dx, home[1] + dz];
+            let id = hash(lattice_key(square[0], square[1]) ^ CLUMP_SALT);
+            #[expect(
+                clippy::cast_possible_wrap,
+                reason = "masked below the span, which is an `i32`"
+            )]
+            let point = [
+                square[0] * span + (id & (span as u32 - 1)) as i32,
+                square[1] * span + ((id >> 16) & (span as u32 - 1)) as i32,
+            ];
+            let offset = [at[0] - point[0], at[1] - point[1]];
+            let distance = offset[0] * offset[0] + offset[1] * offset[1];
+            if distance < best {
+                best = distance;
+                nearest = Clump { id, offset };
+            }
+        }
+    }
+    nearest
+}
+
+/// Whether the far level of detail keeps the blade of placement cell `global`:
+/// exactly one cell of every two-by-two block, picked by the block's hash.
+///
+/// Decision 3's "the low LOD's tile twice the size with the same blade count",
+/// on a lattice that does not move: a far tile of twice the side keeps as many
+/// cells as a near one holds, and they are cells the near level also draws,
+/// which is what lets the near level drop the other three and morph into the
+/// far one. `grass_gen.slang` is the same three lines.
+#[must_use]
+pub const fn kept_far(global: [u32; 2]) -> bool {
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "a block index, far inside an `i32`"
+    )]
+    let key = lattice_key((global[0] >> 1) as i32, (global[1] >> 1) as i32);
+    let pick = hash(key ^ LOD_SALT) & 3;
+    (global[0] & 1) + 2 * (global[1] & 1) == pick
 }
 
 /// The generation pass's uniform block, matching `struct GrassGenParams` in
@@ -320,6 +497,9 @@ pub struct GenParams {
     /// grows in it — the field's shell count — and `y` its fin draw's, one when
     /// the field stands fins and zero when it does not. `zw` zero.
     pub looks: [u32; 4],
+    /// `x` the distance from the camera, in metres, past which a mesh blade is
+    /// drawn at the far level of detail. `yzw` zero.
+    pub lod: [f32; 4],
 }
 
 impl GenParams {
@@ -340,6 +520,10 @@ impl GenParams {
                 at += 4;
             }
         }
+        for value in self.lod {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
         bytes
     }
 
@@ -356,6 +540,7 @@ impl GenParams {
             maps: core::array::from_fn(|lane| word(12 + lane)),
             limits: core::array::from_fn(|lane| word(16 + lane)),
             looks: core::array::from_fn(|lane| word(20 + lane)),
+            lod: core::array::from_fn(|lane| float(24 + lane)),
         }
     }
 }
@@ -381,6 +566,11 @@ pub struct FieldBlock {
     /// how many shells stand in it, `z` one when fins stand at silhouettes and
     /// zero when they do not, `w` zero.
     pub stack: [f32; 4],
+    /// `x` the distance from the camera, in metres, at which a mesh blade
+    /// changes level of detail, and `y` the band before it over which the near
+    /// level drops three blades in four and then morphs into the far one. `zw`
+    /// zero.
+    pub blades: [f32; 4],
     /// One row per shell, lowest first: `x` its height as a fraction of the
     /// stack and `y` the occlusion it is lit by. Rows past the count are zero.
     pub layers: [[f32; 4]; MAX_SHELLS as usize],
@@ -394,6 +584,7 @@ impl Default for FieldBlock {
             ground: [0.0; 4],
             maps: [0; 4],
             stack: [0.0; 4],
+            blades: [0.0; 4],
             layers: [[0.0; 4]; MAX_SHELLS as usize],
         }
     }
@@ -410,6 +601,7 @@ impl FieldBlock {
             self.ground.map(f32::to_bits),
             self.maps,
             self.stack.map(f32::to_bits),
+            self.blades.map(f32::to_bits),
         ]
         .into_iter()
         .chain(self.layers.iter().map(|row| row.map(f32::to_bits)));
@@ -547,8 +739,21 @@ pub struct GrassBlade {
     /// The colour a patch of blades leans toward in `rgb`, and in `a` the most
     /// of it a patch takes. A share of zero is exactly no patch.
     pub patch: [f32; 4],
-    /// `x` the look — [`LOOK_CARDS`] or [`LOOK_SHELLS`] — and `y` the normal
-    /// it shades by, [`NORMAL_GROUND`] or [`NORMAL_UP`]. `zw` zero.
+    /// A mesh blade's shape: `x` how far its tip leans toward its face, as the
+    /// sine of the lean; `y` how far its middle bows back from the straight
+    /// line, as a fraction of its height; `z` how far its normal tilts out
+    /// toward each edge, so a flat blade shades round. `w` zero. Read by the
+    /// mesh blades alone.
+    pub shape: [f32; 4],
+    /// Decision 2's clumps, for every look: `x` the share of a blade's facing
+    /// its clump's shared facing replaces, `y` the fraction of its height a
+    /// clump may take away. `zw` zero. **Both zero is exactly no clumping** —
+    /// the facing and the height are then the bits they were before clumps
+    /// existed.
+    pub clump: [f32; 4],
+    /// `x` the look — [`LOOK_CARDS`], [`LOOK_SHELLS`] or [`LOOK_BLADES`] — and
+    /// `y` the normal it shades by, [`NORMAL_GROUND`] or [`NORMAL_UP`]. `zw`
+    /// zero.
     pub flags: [u32; 4],
 }
 
@@ -564,6 +769,8 @@ impl GrassBlade {
             self.occlusion,
             self.glow,
             self.patch,
+            self.shape,
+            self.clump,
         ]
         .map(|row| row.map(f32::to_bits))
         .into_iter()
@@ -594,7 +801,12 @@ pub struct GrassInstance {
     pub lean: [f32; 4],
     /// The ground's unit normal under the root in `xyz`; `w` is zero.
     pub ground: [f32; 4],
-    /// `x` the blade's cell in the field, `y` its blade row, `zw` zero.
+    /// Where the blade stands from its clump's point, in metres along `+X` in
+    /// `x` and `+Z` in `y` — [`Clump::offset`] scaled to the cell. `zw` zero.
+    pub clump: [f32; 4],
+    /// `x` the blade's cell in the field, `y` its blade row, `z` its clump's
+    /// identity ([`Clump::id`]) and `w` one where the far level of detail keeps
+    /// it ([`kept_far`]) and zero where it does not.
     pub lanes: [u32; 4],
 }
 
@@ -609,7 +821,8 @@ impl GrassInstance {
             facing: core::array::from_fn(|lane| float(4 + lane)),
             lean: core::array::from_fn(|lane| float(8 + lane)),
             ground: core::array::from_fn(|lane| float(12 + lane)),
-            lanes: core::array::from_fn(|lane| word_at(bytes, 16 + lane)),
+            clump: core::array::from_fn(|lane| float(16 + lane)),
+            lanes: core::array::from_fn(|lane| word_at(bytes, 20 + lane)),
         }
     }
 
@@ -618,7 +831,7 @@ impl GrassInstance {
     pub fn to_bytes(self) -> [u8; INSTANCE_STRIDE] {
         let mut bytes = [0u8; INSTANCE_STRIDE];
         let mut at = 0;
-        for row in [self.root, self.facing, self.lean, self.ground] {
+        for row in [self.root, self.facing, self.lean, self.ground, self.clump] {
             for value in row {
                 bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
                 at += 4;
@@ -779,6 +992,9 @@ mod tests {
             (FIN_GRAZE_START, "GRASS_FIN_GRAZE_START", GRASS),
             (FIN_GRAZE_FULL, "GRASS_FIN_GRAZE_FULL", GRASS),
             (STRAND_MIN_PIXELS, "GRASS_STRAND_MIN_PIXELS", GRASS),
+            (BLADE_MIN_PIXELS, "GRASS_BLADE_MIN_PIXELS", GRASS),
+            (BLADE_FAR_WIDEN, "GRASS_BLADE_FAR_WIDEN", GRASS),
+            (CLUMP_DOME, "GRASS_CLUMP_DOME", GRASS),
         ] {
             assert_eq!(
                 shader_scalar(source, name),
@@ -809,7 +1025,17 @@ mod tests {
             (FIN_ROWS, "GRASS_FIN_ROWS", GEN),
             (FIN_ROWS, "GRASS_FIN_ROWS", GRASS),
             (MAX_SHELLS, "GRASS_MAX_SHELLS", GRASS),
-            (PATCH_CELLS, "GRASS_PATCH_CELLS", GRASS),
+            (LOOK_BLADES, "GRASS_LOOK_BLADES", GEN),
+            (LOOK_BLADES, "GRASS_LOOK_BLADES", GRASS),
+            (BLADE_NEAR_DRAW, "GRASS_BLADE_NEAR_DRAW", GEN),
+            (BLADE_FAR_DRAW, "GRASS_BLADE_FAR_DRAW", GEN),
+            (BLADE_NEAR_VERTICES, "GRASS_BLADE_NEAR_VERTICES", GEN),
+            (BLADE_FAR_VERTICES, "GRASS_BLADE_FAR_VERTICES", GEN),
+            (BLADE_NEAR_SEGMENTS, "GRASS_BLADE_NEAR_SEGMENTS", GRASS),
+            (BLADE_FAR_SEGMENTS, "GRASS_BLADE_FAR_SEGMENTS", GRASS),
+            (CLUMP_CELLS, "GRASS_CLUMP_CELLS", GEN),
+            (CLUMP_CELLS, "GRASS_CLUMP_CELLS", GRASS),
+            (CLUMP_UNITS, "GRASS_CLUMP_UNITS", GEN),
         ] {
             let spelled = format!("static const uint {name} = {value};");
             assert!(
@@ -822,6 +1048,8 @@ mod tests {
             (FACING_SALT, "GRASS_FACING_SALT"),
             (SIZE_SALT, "GRASS_SIZE_SALT"),
             (TINT_SALT, "GRASS_TINT_SALT"),
+            (CLUMP_SALT, "GRASS_CLUMP_SALT"),
+            (LOD_SALT, "GRASS_LOD_SALT"),
         ] {
             let spelled = format!("static const uint {name} = {value:#010x}u;");
             assert!(
@@ -838,6 +1066,16 @@ mod tests {
         // The shader's own vertex counts are derived from the numbers above,
         // and so is this module's.
         assert_eq!(SHELL_VERTICES, SHELL_GRID * SHELL_GRID * CARD_QUAD_VERTICES);
+        // Decision 3's fifteen and seven, and the coprimality the morph rests
+        // on: no near pair above the root stands at a far pair's height.
+        assert_eq!((BLADE_NEAR_VERTICES, BLADE_FAR_VERTICES), (15, 7));
+        for pair in 1..BLADE_NEAR_SEGMENTS {
+            assert_ne!(
+                (pair * BLADE_FAR_SEGMENTS) % BLADE_NEAR_SEGMENTS,
+                0,
+                "near pair {pair} stands at a far pair's height"
+            );
+        }
         assert!(
             GEN.contains(
                 "uint fin_vertices = 2u * (side / GRASS_FIN_SPACING) * GRASS_FIN_SEGMENTS * \
@@ -847,44 +1085,157 @@ mod tests {
         );
     }
 
-    /// **A patch is the shaders' patch**: the key line both copies hash, and the
-    /// lane it comes out as spread over the whole range.
+    /// **A clump is the shaders' clump, and a patch is a clump's colour.**
     ///
-    /// `patch_of` is what a test reads a patch's colour off, so a slip in its
-    /// constants would pass a picture drawn by a shader that has the same slip
-    /// — the text is compared as well as the values examined.
+    /// [`clump_of`], [`kept_far`] and [`patch_of`] are what the CPU placement
+    /// and the tests read a clump, a far blade and a patch's colour off, so a
+    /// slip in their constants would pass a picture drawn by a shader with the
+    /// same slip — the text is compared as well as the values examined.
+    ///
+    /// **Shown red by sabotage twice** (2026-09-17). [`clump_of`] taking nine
+    /// bits of the jitter where the shader takes eight: 961 of 25600 blades
+    /// missed the nearest point. [`kept_far`] picking from `& 7`: a block kept
+    /// no cell.
     #[test]
-    fn the_patch_is_the_shaders_patch() {
-        assert!(
-            GRASS.contains(
-                "uint key = (x / GRASS_PATCH_CELLS) * 0x8da6b343u ^ (z / GRASS_PATCH_CELLS) * \
-                 0xd8163841u;"
-            ),
-            "grass.slang does not key a patch the way `patch_of` does"
-        );
-        assert!(GRASS.contains("return grass_unit_pair(grass_hash(key ^ GRASS_PATCH_SALT)).x;"));
-        // One patch is one lane however far inside it a cell is.
-        let lane = patch_of(3 * PATCH_CELLS, 5 * PATCH_CELLS);
-        for dx in 0..PATCH_CELLS {
-            for dz in 0..PATCH_CELLS {
-                assert_eq!(patch_of(3 * PATCH_CELLS + dx, 5 * PATCH_CELLS + dz), lane);
+    fn the_clumps_are_the_shaders_clumps() {
+        for line in [
+            "return uint(square.x) * 0x8da6b343u ^ uint(square.y) * 0xd8163841u;",
+            "int span = int(GRASS_CLUMP_CELLS * GRASS_CLUMP_UNITS);",
+            "+ int2(int((jitter & 0xffffu) >> 8u), int(((jitter >> 16u) & 0xffffu) >> 8u));",
+            "int2 home = int2(global / GRASS_CLUMP_CELLS);",
+            "for (int dz = -1; dz <= 1; ++dz)",
+            "for (int dx = -1; dx <= 1; ++dx)",
+            "uint id = grass_hash(grass_lattice_key(square) ^ GRASS_CLUMP_SALT);",
+            "+ int2(int(id & uint(span - 1)), int((id >> 16u) & uint(span - 1)));",
+            "int distance = offset.x * offset.x + offset.y * offset.y;",
+            "if (distance < best)",
+            "uint pick = grass_hash(grass_lattice_key(int2(global >> 1u)) ^ GRASS_LOD_SALT) & 3u;",
+            "return (global.x & 1u) + 2u * (global.y & 1u) == pick;",
+        ] {
+            assert!(
+                GEN.contains(line),
+                "grass_gen.slang does not spell `{line}`, so its clumps are not `clump_of`'s"
+            );
+        }
+        assert!(GRASS.contains("return grass_unit_pair(grass_hash(clump ^ GRASS_PATCH_SALT)).x;"));
+
+        // **The far level keeps exactly one cell of every two-by-two block**,
+        // and which one moves from block to block.
+        let mut picks = [0usize; 4];
+        for bz in 0..64u32 {
+            for bx in 0..64u32 {
+                let kept: Vec<u32> = (0..4)
+                    .filter(|local| kept_far([2 * bx + local % 2, 2 * bz + local / 2]))
+                    .collect();
+                assert_eq!(kept.len(), 1, "block ({bx}, {bz}) keeps {kept:?}");
+                picks[kept[0] as usize] += 1;
             }
         }
-        // And neighbouring patches are not one colour: over a sweep of them the
-        // lanes cover the range rather than sitting on a value.
-        let lanes: Vec<f32> = (0..64)
-            .flat_map(|x| (0..64).map(move |z| patch_of(x * PATCH_CELLS, z * PATCH_CELLS)))
-            .collect();
-        let low = lanes.iter().copied().fold(1.0f32, f32::min);
-        let high = lanes.iter().copied().fold(0.0f32, f32::max);
-        eprintln!(
-            "grass patches: lanes {low:.4}..{high:.4} over {} patches",
-            lanes.len()
+        eprintln!("grass clumps: the far level's picks by corner {picks:?}");
+        assert!(
+            picks.iter().all(|count| *count > 800),
+            "the far level favours a corner: {picks:?}"
         );
+
+        // **A clump is a Voronoi cell**: over a sweep of cells and jitters,
+        // the point the nine-point search picks is the nearest of the
+        // twenty-five around it but for the rare blade the approximation
+        // decision 2 names misses, and a clump spans about a lattice square.
+        let span = i64::from(CLUMP_CELLS * CLUMP_UNITS);
+        let (mut blades, mut missed) = (0usize, 0usize);
+        let mut clumps = std::collections::HashSet::new();
+        let mut patches = Vec::new();
+        for z in 0..160u32 {
+            for x in 0..160u32 {
+                let jitter = hash(x * 7919 + z * 104_729);
+                let clump = clump_of([x, z], jitter);
+                let at = [
+                    i64::from(x) * i64::from(CLUMP_UNITS) + i64::from((jitter & 0xffff) >> 8),
+                    i64::from(z) * i64::from(CLUMP_UNITS)
+                        + i64::from(((jitter >> 16) & 0xffff) >> 8),
+                ];
+                let home = [i64::from(x / CLUMP_CELLS), i64::from(z / CLUMP_CELLS)];
+                let wide = (-2..=2)
+                    .flat_map(|dz| (-2..=2).map(move |dx| (dx, dz)))
+                    .map(|(dx, dz)| {
+                        let square = [home[0] + dx, home[1] + dz];
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            reason = "a lattice square near the origin, inside an `i32`"
+                        )]
+                        let id = hash(lattice_key(square[0] as i32, square[1] as i32) ^ CLUMP_SALT);
+                        let seed = [
+                            square[0] * span + i64::from(id) % span,
+                            square[1] * span + i64::from(id >> 16) % span,
+                        ];
+                        let offset = [at[0] - seed[0], at[1] - seed[1]];
+                        (offset[0] * offset[0] + offset[1] * offset[1], id)
+                    })
+                    .min_by_key(|(distance, _)| *distance)
+                    .expect("twenty-five points");
+                blades += 1;
+                missed += usize::from(wide.1 != clump.id);
+                let offset = [i64::from(clump.offset[0]), i64::from(clump.offset[1])];
+                assert!(
+                    offset[0].abs() < 2 * span && offset[1].abs() < 2 * span,
+                    "cell ({x}, {z}) is {offset:?} from its clump's point"
+                );
+                if clumps.insert(clump.id) {
+                    patches.push(patch_of(clump.id));
+                }
+            }
+        }
+        let squares = (160 / CLUMP_CELLS) * (160 / CLUMP_CELLS);
+        eprintln!(
+            "grass clumps: {missed} of {blades} blades missed the nearest of 25 points; {} clumps \
+             over {squares} lattice squares",
+            clumps.len()
+        );
+        assert!(
+            missed * 200 < blades,
+            "{missed} of {blades} blades are not in their nearest clump"
+        );
+        assert!(
+            (squares as usize * 9 / 10..=squares as usize + 4 * 160 / CLUMP_CELLS as usize)
+                .contains(&clumps.len()),
+            "{} clumps over {squares} lattice squares",
+            clumps.len()
+        );
+        // And neighbouring clumps are not one colour.
+        let low = patches.iter().copied().fold(1.0f32, f32::min);
+        let high = patches.iter().copied().fold(0.0f32, f32::max);
         assert!(
             low < 0.05 && high > 0.95,
             "patch lanes span only {low}..{high}"
         );
+    }
+
+    /// **A blade's curve is the one the pixel claims read.**
+    ///
+    /// `tests/render_e2e/grass_blades.rs` finds a blade on screen through its
+    /// own copy of `grass_blade_curve` and its Bézier, in still air — the
+    /// control points, the chord and the bow below. A shader that moved any of
+    /// them would move every blade out from under the pixel that copy reads,
+    /// and the claims would then fail as regressions of what they measure
+    /// rather than as the drift they are.
+    #[test]
+    fn the_blade_curve_is_the_one_the_claims_read() {
+        for line in [
+            "float upright = sqrt(max(1.0 - tilt * tilt, 0.0));",
+            "float3 chord = float3(0.0, height * upright, 0.0) + face * (height * tilt);",
+            "float3 across = float3(face.x * upright, -tilt, face.z * upright);",
+            "float3 bow = across * (row.shape.y * height);",
+            "curve.p1 = curve.p0 + chord * (1.0 / 3.0) - bow;",
+            "curve.p2 = curve.p0 + chord * (2.0 / 3.0) - bow + blade.lean.xyz * (1.0 / 3.0);",
+            "curve.p3 = curve.p0 + chord + blade.lean.xyz;",
+            "float3 centre = curve.p0 * (u * u * u) + curve.p1 * (3.0 * u * u * t)",
+            "+ curve.p2 * (3.0 * u * t * t) + curve.p3 * (t * t * t);",
+        ] {
+            assert!(
+                GRASS.contains(line),
+                "grass.slang does not spell `{line}`, so the blade claims read another curve"
+            );
+        }
     }
 
     /// **The hash is PCG's, constant for constant.**
@@ -1002,6 +1353,7 @@ mod tests {
             maps: [13, 14, 15, 16],
             limits: [17, 18, 19, 20],
             looks: [21, 22, 23, 24],
+            lod: [25.0, 26.0, 27.0, 28.0],
         };
         let bytes = params.to_bytes();
         assert_eq!(bytes.len(), GEN_PARAMS_SIZE);
@@ -1010,11 +1362,12 @@ mod tests {
         assert_eq!(word_at(&bytes, 12), 13);
         assert_eq!(word_at(&bytes, 19), 20);
         assert_eq!(word_at(&bytes, 23), 24);
+        assert_eq!(float_at(&bytes, 27), 28.0);
         assert_eq!(GenParams::from_bytes(&bytes), params);
         assert_eq!(
             declaration(GEN, "GrassGenParams"),
             "struct GrassGenParams { float4 camera; float4 ground; float4 cover; uint4 maps; \
-             uint4 limits; uint4 looks;"
+             uint4 limits; uint4 looks; float4 lod;"
         );
 
         let mut block = FieldBlock {
@@ -1023,6 +1376,7 @@ mod tests {
             ground: [9.0, 10.0, 11.0, 12.0],
             maps: [13, 14, 15, 16],
             stack: [17.0, 18.0, 19.0, 20.0],
+            blades: [25.0, 26.0, 0.0, 0.0],
             ..FieldBlock::default()
         };
         block.layers[0] = [21.0, 22.0, 0.0, 0.0];
@@ -1034,12 +1388,13 @@ mod tests {
         assert_eq!(float_at(&bytes, 8), 9.0);
         assert_eq!(word_at(&bytes, 15), 16);
         assert_eq!(float_at(&bytes, 19), 20.0);
-        assert_eq!(float_at(&bytes, 21), 22.0);
+        assert_eq!(float_at(&bytes, 21), 26.0);
+        assert_eq!(float_at(&bytes, 25), 22.0);
         assert_eq!(float_at(&bytes, FIELD_BLOCK_SIZE / 4 - 3), 24.0);
         assert_eq!(
             declaration(GRASS, "GrassField"),
             "struct GrassField { float4 origin; uint4 tiles; float4 ground; uint4 maps; float4 \
-             stack; float4 layers[GRASS_MAX_SHELLS];"
+             stack; float4 blades; float4 layers[GRASS_MAX_SHELLS];"
         );
 
         let tile = Tile {
@@ -1087,7 +1442,9 @@ mod tests {
             occlusion: [1.5, 0.0, 0.0, 2.5],
             glow: [0.0, 3.5, 0.0, 0.0],
             patch: [0.0, 0.0, 0.0, 4.5],
-            flags: [LOOK_SHELLS, NORMAL_UP, 0, 0],
+            shape: [5.5, 0.0, 6.5, 0.0],
+            clump: [0.0, 7.5, 0.0, 0.0],
+            flags: [LOOK_BLADES, NORMAL_UP, 0, 0],
             ..GrassBlade::default()
         }
         .to_bytes();
@@ -1095,20 +1452,26 @@ mod tests {
         assert_eq!(float_at(&styled, 15), 2.5);
         assert_eq!(float_at(&styled, 17), 3.5);
         assert_eq!(float_at(&styled, 23), 4.5);
-        assert_eq!(word_at(&styled, 24), LOOK_SHELLS);
-        assert_eq!(word_at(&styled, 25), NORMAL_UP);
+        assert_eq!(float_at(&styled, 24), 5.5);
+        assert_eq!(float_at(&styled, 26), 6.5);
+        assert_eq!(float_at(&styled, 29), 7.5);
+        assert_eq!(word_at(&styled, 32), LOOK_BLADES);
+        assert_eq!(word_at(&styled, 33), NORMAL_UP);
 
         let instance = GrassInstance {
             root: [1.0, 2.0, 3.0, 4.0],
             facing: [5.0, 6.0, 7.0, 8.0],
             lean: [9.0, 10.0, 11.0, 0.0],
             ground: [0.0, 1.0, 0.0, 0.0],
-            lanes: [42, 1, 0, 0],
+            clump: [0.25, -0.5, 0.0, 0.0],
+            lanes: [42, 1, 7, 1],
         };
         let bytes = instance.to_bytes();
         assert_eq!(bytes.len(), INSTANCE_STRIDE);
         assert_eq!(float_at(&bytes, 3), 4.0);
-        assert_eq!(word_at(&bytes, 16), 42);
+        assert_eq!(float_at(&bytes, 17), -0.5);
+        assert_eq!(word_at(&bytes, 20), 42);
+        assert_eq!(word_at(&bytes, 22), 7);
         assert_eq!(GrassInstance::from_bytes(&bytes), instance);
     }
 
@@ -1326,6 +1689,9 @@ mod tests {
             "shellVertexMain",
             "finVertexMain",
             "shellFragmentMain",
+            "bladeNearVertexMain",
+            "bladeFarVertexMain",
+            "bladeFragmentMain",
             "clearMain",
             "generateMain",
         ];

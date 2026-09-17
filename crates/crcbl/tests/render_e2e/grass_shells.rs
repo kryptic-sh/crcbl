@@ -62,7 +62,7 @@ fn the_meadow_shells_scene_draws_the_same_frame_on_every_geometry_path() {
 }
 
 /// The meadow's hillside with `field` on it in `wind`, opened at `extent`.
-fn meadow_with(
+pub(super) fn meadow_with(
     extent: (u32, u32),
     field: Option<crcbl::render::grass::GrassField>,
     wind: MeadowWind,
@@ -76,7 +76,7 @@ fn meadow_with(
 }
 
 /// One frame of the meadow with `field` in `wind`, at `extent`.
-fn frame_with(
+pub(super) fn frame_with(
     extent: (u32, u32),
     field: Option<crcbl::render::grass::GrassField>,
     wind: MeadowWind,
@@ -89,7 +89,7 @@ fn frame_with(
 
 /// How many pixels of `left` and `right` differ inside the columns `columns`
 /// and the rows `rows`.
-fn differing_in(
+pub(super) fn differing_in(
     left: &Image,
     right: &Image,
     columns: core::ops::Range<u32>,
@@ -280,7 +280,7 @@ const NEAR_ROWS: (f32, f32) = (0.95, 1.0);
 /// fin could fill a gap beside**: `crcbl_shaders::grass::STRAND_MIN_PIXELS`
 /// widens every far strand to a pixel, which at that size closes the far mat
 /// by itself and leaves the fins a few hundred pixels to prove anything with.
-const CLAIM_EXTENT: (u32, u32) = (1024, 768);
+pub(super) const CLAIM_EXTENT: (u32, u32) = (1024, 768);
 
 /// How much of the ground the bare stack shows on the far hillside the fins
 /// must cover, as a fraction of it.

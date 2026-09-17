@@ -1,7 +1,7 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/57-grass.md`'s rungs G1 and G3, first half: one compute dispatch
-// per tile, generating the blades the grass pass reads.
+// `docs/plan/57-grass.md`'s rungs G1, G2 and G3, first half: one compute
+// dispatch per tile, generating the blades the grass pass reads.
 //
 // # What a dispatch does
 //
@@ -9,11 +9,28 @@
 // plus a hash jitter, then the density test, then the cover map's blade row and
 // the ground's height and slope, then the distance cull, then the wind at the
 // root — and what survives is written twice. Once **by its cell**, into
-// `grassCells`, at an index the cell alone decides; and once **appended** to the
-// tile's slot with an atomic add, decision 1's lock-free append, when its row is
-// drawn as cards. A shell row is not appended: its slot's shell and fin draws
-// are given their instance counts instead, and the shells find the blade by its
-// cell.
+// `grassCells`, at an index the cell alone decides; and once **appended** to one
+// of the tile's runs with an atomic add, decision 1's lock-free append, when its
+// row is drawn as cards or as mesh blades. A shell row is not appended: its
+// slot's shell and fin draws are given their instance counts instead, and the
+// shells find the blade by its cell.
+//
+// # Three runs in two regions, and why none overflows
+//
+// Slot `s` owns two regions of `instances`, each `capacity` rows. The first is
+// `[s * capacity, (s + 1) * capacity)`: **cards counting up from its start and
+// far mesh blades counting down from its end**. The second is the same rows past
+// `slots * capacity`: **near mesh blades** counting up. Every cell appends at
+// most once, to exactly one run, so the cards and far blades between them never
+// pass `capacity` and never meet.
+//
+// # Clumps and the far level, as integers
+//
+// Decision 2's clumps and decision 3's far level are both decided off the
+// cell's place in the whole field, never off a float: `grass_clump_of` is a
+// Voronoi search in integer units of a cell, and `grass_kept_far` picks one cell
+// of every two-by-two block by the block's hash. `crcbl_shaders::grass`'s
+// `clump_of` and `kept_far` are the CPU's copies, the same bits.
 //
 // # One placement, whatever the look
 //
@@ -41,8 +58,8 @@
 // # No transcendental
 //
 // Decision 9's rule, and nothing here needs an escape from it: the jitter, the
-// facing and the sizes come out of an integer hash, the lean is a square root
-// and the wind is `wind.slang`'s own arithmetic, copied below.
+// facing, the sizes and the clumps come out of an integer hash, the lean is a
+// square root and the wind is `wind.slang`'s own arithmetic, copied below.
 //
 // # One bind group, and no storage texture
 //
@@ -124,6 +141,10 @@ struct GrassGenParams
     /// where the field stands fins and zero where it does not. `zw` are written
     /// as zero and unread.
     uint4 looks;
+    /// `x` the distance from the camera, in metres, past which a mesh blade is
+    /// appended to the far run rather than the near one. `yzw` are written as
+    /// zero and unread.
+    float4 lod;
 };
 
 [[vk::binding(4, 0)]]
@@ -171,8 +192,16 @@ struct GrassBlade
     /// The colour a patch leans toward in `rgb`, and in `a` the most of it a
     /// patch takes. A share of zero is exactly no patch.
     float4 patch;
-    /// `x` the look — `GRASS_LOOK_CARDS` or `GRASS_LOOK_SHELLS` — and `y` the
-    /// normal it shades by. `zw` are written as zero and unread.
+    /// A mesh blade's shape: `x` its tilt, `y` its bow and `z` its rounding.
+    /// `w` is written as zero and unread.
+    float4 shape;
+    /// Decision 2's clumps, for every look: `x` the share of a blade's facing
+    /// its clump's replaces, `y` the fraction of its height a clump may take
+    /// away. `zw` are written as zero and unread.
+    float4 clump;
+    /// `x` the look — `GRASS_LOOK_CARDS`, `GRASS_LOOK_SHELLS` or
+    /// `GRASS_LOOK_BLADES` — and `y` the normal it shades by. `zw` are written
+    /// as zero and unread.
     uint4 flags;
 };
 
@@ -193,9 +222,13 @@ struct GrassInstance
     /// and unread. Decision 4's lever: a card shades by the ground's normal, so
     /// a field reads as one surface rather than as a crowd of billboards.
     float4 ground;
+    /// Where the blade stands from its clump's point, in metres along `+X` in
+    /// `x` and `+Z` in `y`. `zw` are written as zero and unread.
+    float4 clump;
     /// `x` the blade's cell in the field, which is the lane every hash below is
     /// drawn from and the key a determinism comparison sorts on. `y` the row of
-    /// `blades` it was given. `zw` are written as zero and unread.
+    /// `blades` it was given. `z` its clump's identity, `w` one where the far
+    /// level of detail keeps it and zero where it does not.
     uint4 lanes;
 };
 
@@ -214,8 +247,8 @@ Texture2D<float> grassGround;
 [[vk::binding(8, 0)]]
 Texture2D<float4> grassCover;
 
-/// Every slot's instances, back to back: slot `s` owns
-/// `[s * capacity, (s + 1) * capacity)`.
+/// Every slot's instances, in two regions of `slots * capacity` rows — see this
+/// file's header for which run is where.
 [[vk::binding(9, 0)]]
 RWStructuredBuffer<GrassInstance> instances;
 
@@ -287,15 +320,43 @@ static const uint GRASS_WORKGROUP_SIZE = 64;
 /// count, first vertex, first instance. `crcbl_shaders::grass::DRAW_ARG_WORDS`.
 static const uint GRASS_DRAW_ARG_WORDS = 4;
 
-/// Draws a slot owns, back to back: cards, shells, fins.
-/// `crcbl_shaders::grass::DRAWS_PER_SLOT`.
-static const uint GRASS_DRAWS_PER_SLOT = 3;
+/// Draws a slot owns, back to back: cards, shells, fins, near blades, far
+/// blades. `crcbl_shaders::grass::DRAWS_PER_SLOT`.
+static const uint GRASS_DRAWS_PER_SLOT = 5;
 
 /// Which of a slot's draws the shells and the fins are.
 /// `crcbl_shaders::grass::SHELL_DRAW` and `FIN_DRAW`.
 static const uint GRASS_SHELL_DRAW = 1;
 
 static const uint GRASS_FIN_DRAW = 2;
+
+/// Which of a slot's draws the two levels of mesh blades are.
+/// `crcbl_shaders::grass::BLADE_NEAR_DRAW` and `BLADE_FAR_DRAW`.
+static const uint GRASS_BLADE_NEAR_DRAW = 3;
+
+static const uint GRASS_BLADE_FAR_DRAW = 4;
+
+/// Vertices one near and one far mesh blade draw.
+/// `crcbl_shaders::grass::BLADE_NEAR_VERTICES` and `BLADE_FAR_VERTICES`.
+static const uint GRASS_BLADE_NEAR_VERTICES = 15;
+
+static const uint GRASS_BLADE_FAR_VERTICES = 7;
+
+/// A row drawn as mesh blades. `crcbl_shaders::grass::LOOK_BLADES`.
+static const uint GRASS_LOOK_BLADES = 2;
+
+/// Placement cells along one side of a clump's lattice square, and the integer
+/// units a cell is divided into for the search.
+/// `crcbl_shaders::grass::CLUMP_CELLS` and `CLUMP_UNITS`.
+static const uint GRASS_CLUMP_CELLS = 8;
+
+static const uint GRASS_CLUMP_UNITS = 256;
+
+/// The lanes a clump and a far-level block are drawn from.
+/// `crcbl_shaders::grass::CLUMP_SALT` and `LOD_SALT`.
+static const uint GRASS_CLUMP_SALT = 0x2c1b3c6du;
+
+static const uint GRASS_LOD_SALT = 0x297a2d39u;
 
 /// A row drawn as shells. `crcbl_shaders::grass::LOOK_SHELLS`.
 static const uint GRASS_LOOK_SHELLS = 1;
@@ -446,6 +507,68 @@ float4 grass_cover_under(float2 world)
     return grassCover.Load(int3(texel, 0));
 }
 
+/// The key a lattice square at `(x, z)` hashes from.
+/// `crcbl_shaders::grass::lattice_key`.
+uint grass_lattice_key(int2 square)
+{
+    return uint(square.x) * 0x8da6b343u ^ uint(square.y) * 0xd8163841u;
+}
+
+/// The clump a blade belongs to: its identity, and where the blade stands from
+/// the clump's point in `GRASS_CLUMP_UNITS` of a cell.
+struct GrassClump
+{
+    uint id;
+    int2 offset;
+};
+
+/// Decision 2's clumps: the nearest of the nine hash-jittered points around the
+/// blade of cell `global`, whose jitter lane is `jitter`.
+///
+/// **Integer throughout** — `crcbl_shaders::grass::clump_of` is the same loop
+/// and the same bits. The squared distances stay under `2^31`: a point is never
+/// more than two squares of `GRASS_CLUMP_CELLS * GRASS_CLUMP_UNITS` away on an
+/// axis.
+GrassClump grass_clump_of(uint2 global, uint jitter)
+{
+    int units = int(GRASS_CLUMP_UNITS);
+    int span = int(GRASS_CLUMP_CELLS * GRASS_CLUMP_UNITS);
+    int2 at = int2(global) * units
+            + int2(int((jitter & 0xffffu) >> 8u), int(((jitter >> 16u) & 0xffffu) >> 8u));
+    int2 home = int2(global / GRASS_CLUMP_CELLS);
+    GrassClump nearest;
+    nearest.id = 0u;
+    nearest.offset = int2(0, 0);
+    int best = 0x7fffffff;
+    for (int dz = -1; dz <= 1; ++dz)
+    {
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            int2 square = home + int2(dx, dz);
+            uint id = grass_hash(grass_lattice_key(square) ^ GRASS_CLUMP_SALT);
+            int2 seed = square * span
+                      + int2(int(id & uint(span - 1)), int((id >> 16u) & uint(span - 1)));
+            int2 offset = at - seed;
+            int distance = offset.x * offset.x + offset.y * offset.y;
+            if (distance < best)
+            {
+                best = distance;
+                nearest.id = id;
+                nearest.offset = offset;
+            }
+        }
+    }
+    return nearest;
+}
+
+/// Whether the far level keeps the blade of cell `global`: one cell of every
+/// two-by-two block, by the block's hash. `crcbl_shaders::grass::kept_far`.
+bool grass_kept_far(uint2 global)
+{
+    uint pick = grass_hash(grass_lattice_key(int2(global >> 1u)) ^ GRASS_LOD_SALT) & 3u;
+    return (global.x & 1u) + 2u * (global.y & 1u) == pick;
+}
+
 /// An eight-bit unorm texel back as the integer it holds.
 ///
 /// `n / 255` is not exactly representable for most `n`, so the round trip needs
@@ -471,17 +594,19 @@ void clearMain(uint3 thread: SV_DispatchThreadID)
     {
         return;
     }
-    // The three draws a slot owns, each at an instance count of zero: the
-    // cards count up from it and the shells and fins are set off it only where
-    // a shell row grows.
+    // The draws a slot owns, each at an instance count of zero: the cards and
+    // both levels of blades count up from it, and the shells and fins are set
+    // off it only where a shell row grows.
     uint side = grass.limits.z;
     uint fin_vertices = 2u * (side / GRASS_FIN_SPACING) * GRASS_FIN_SEGMENTS * GRASS_FIN_ROWS * 6u;
     for (uint draw = 0u; draw < GRASS_DRAWS_PER_SLOT; ++draw)
     {
         uint at = (slot * GRASS_DRAWS_PER_SLOT + draw) * GRASS_DRAW_ARG_WORDS;
-        uint vertices = draw == GRASS_SHELL_DRAW ? GRASS_SHELL_VERTICES
-                      : draw == GRASS_FIN_DRAW   ? fin_vertices
-                                                 : GRASS_CARD_VERTICES;
+        uint vertices = draw == GRASS_SHELL_DRAW      ? GRASS_SHELL_VERTICES
+                      : draw == GRASS_FIN_DRAW        ? fin_vertices
+                      : draw == GRASS_BLADE_NEAR_DRAW ? GRASS_BLADE_NEAR_VERTICES
+                      : draw == GRASS_BLADE_FAR_DRAW  ? GRASS_BLADE_FAR_VERTICES
+                                                      : GRASS_CARD_VERTICES;
         drawArgs[at].store(vertices);
         drawArgs[at + 1u].store(0u);
         drawArgs[at + 2u].store(0u);
@@ -519,10 +644,12 @@ void generateMain(uint3 thread: SV_DispatchThreadID)
     empty.facing = float4(0.0, 0.0, 0.0, 0.0);
     empty.lean = float4(0.0, 0.0, 0.0, 0.0);
     empty.ground = float4(0.0, 0.0, 0.0, 0.0);
+    empty.clump = float4(0.0, 0.0, 0.0, 0.0);
     empty.lanes = uint4(0u, 0u, 0u, 0u);
     grassCells[cell] = empty;
     float side = tile.tile.z / float(cells);
-    float2 jitter = grass_unit_pair(grass_hash(cell));
+    uint jitter_lane = grass_hash(cell);
+    float2 jitter = grass_unit_pair(jitter_lane);
     float2 world = tile.tile.xy
                  + (float2(float(lane % cells), float(lane / cells)) + jitter) * side;
 
@@ -550,10 +677,19 @@ void generateMain(uint3 thread: SV_DispatchThreadID)
         return;
     }
 
+    // The cell's place in the whole field, which is what its clump and its far
+    // level are decided off — integers, so the CPU's copy is the same answer.
+    uint2 global = uint2(tile.slot.y * cells + lane % cells, tile.slot.z * cells + lane / cells);
+    GrassClump clump = grass_clump_of(global, jitter_lane);
+
     // The blade's own size, from one more lane. Each is a fraction *taken away*
-    // from the row's, so a row's numbers are the tallest and widest it draws.
+    // from the row's, so a row's numbers are the tallest and widest it draws —
+    // and the clump takes its own share of the height, a lane every blade of the
+    // clump shares. **A clump share of zero multiplies by exactly one.**
     float2 spread = grass_unit_pair(grass_hash(cell ^ GRASS_SIZE_SALT));
-    float height = blade.size.x * (1.0 - blade.size.z * spread.x);
+    float clump_height = grass_unit_pair(grass_hash(clump.id ^ GRASS_SIZE_SALT)).x;
+    float height = blade.size.x * (1.0 - blade.size.z * spread.x)
+                 * (1.0 - blade.clump.y * clump_height);
     float half_width = blade.size.y * (1.0 - blade.size.w * spread.y);
 
     // The facing, as a normalised point of the square rather than an angle —
@@ -561,7 +697,14 @@ void generateMain(uint3 thread: SV_DispatchThreadID)
     // table. The square is not the circle, so a diagonal is about `sqrt(2)`
     // times as likely as an axis; in a field of crossed cards that is not
     // something an eye can find, and the uniform version is a rejection loop.
-    float2 square = grass_unit_pair(grass_hash(cell ^ GRASS_FACING_SALT)) * 2.0 - 1.0;
+    //
+    // The clump's shared facing is a point of the square drawn the same way,
+    // and the row's share of it moves the blade's point toward it **before**
+    // the one normalisation — so a share of zero leaves the point, and the
+    // facing, exactly the bits they were.
+    float2 own = grass_unit_pair(grass_hash(cell ^ GRASS_FACING_SALT)) * 2.0 - 1.0;
+    float2 clump_square = grass_unit_pair(grass_hash(clump.id ^ GRASS_FACING_SALT)) * 2.0 - 1.0;
+    float2 square = own + (clump_square - own) * blade.clump.x;
     float square_length = dot(square, square);
     float2 facing = square_length > 1e-8 ? square / sqrt(square_length) : float2(1.0, 0.0);
 
@@ -575,7 +718,11 @@ void generateMain(uint3 thread: SV_DispatchThreadID)
         float4(facing, half_width, grass_unit_pair(grass_hash(cell ^ GRASS_TINT_SALT)).x);
     instance.lean = float4(lean, 0.0);
     instance.ground = float4(under.normal, 0.0);
-    instance.lanes = uint4(cell, row, 0u, 0u);
+    // A multiple of a power of two of the cell's side, so the product below is
+    // one exact operation on both copies.
+    instance.clump = float4(float2(clump.offset) * (side * (1.0 / float(GRASS_CLUMP_UNITS))), 0.0, 0.0);
+    bool kept = grass_kept_far(global);
+    instance.lanes = uint4(cell, row, clump.id, kept ? 1u : 0u);
 
     grassCells[cell] = instance;
 
@@ -588,6 +735,27 @@ void generateMain(uint3 thread: SV_DispatchThreadID)
         // writes one value however it resolves.
         drawArgs[(slot_args + GRASS_SHELL_DRAW) * GRASS_DRAW_ARG_WORDS + 1u].store(grass.looks.x);
         drawArgs[(slot_args + GRASS_FIN_DRAW) * GRASS_DRAW_ARG_WORDS + 1u].store(grass.looks.y);
+        return;
+    }
+
+    if (blade.flags.x == GRASS_LOOK_BLADES)
+    {
+        // Decision 3's two levels, by the root's distance from the camera: the
+        // near run up to `lod.x`, and past it the far run — which holds the one
+        // blade of every two-by-two block `grass_kept_far` picks and drops the
+        // other three, having morphed them away in the band before the switch.
+        if (dot(relative, relative) < grass.lod.x * grass.lod.x)
+        {
+            uint near_at = drawArgs[(slot_args + GRASS_BLADE_NEAR_DRAW) * GRASS_DRAW_ARG_WORDS + 1u]
+                               .add(1u);
+            instances[(grass.limits.w + tile.slot.x) * capacity + near_at] = instance;
+        }
+        else if (kept)
+        {
+            uint far_at = drawArgs[(slot_args + GRASS_BLADE_FAR_DRAW) * GRASS_DRAW_ARG_WORDS + 1u]
+                              .add(1u);
+            instances[tile.slot.x * capacity + capacity - 1u - far_at] = instance;
+        }
         return;
     }
 

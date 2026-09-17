@@ -28,6 +28,7 @@ pub fn field_block_of(field: &GrassField) -> FieldBlock {
     let [origin_x, origin_z] = field.origin();
     let [tiles_x, tiles_z] = field.tiles();
     let shells = field.shells();
+    let lod = field.blade_lod();
     FieldBlock {
         origin: [
             origin_x,
@@ -54,6 +55,7 @@ pub fn field_block_of(field: &GrassField) -> FieldBlock {
             f32::from(u8::from(shells.fins)),
             0.0,
         ],
+        blades: [lod.distance, lod.band, 0.0, 0.0],
         layers: shell_layers(shells.count),
     }
 }
@@ -100,6 +102,8 @@ mod tests {
         assert_eq!(block.ground, generation.ground);
         assert_eq!(block.maps, generation.maps);
         assert_eq!(block.stack, [one_blade()[0].height, 8.0, 0.0, 0.0]);
+        let lod = crate::grass::BladeLod::default();
+        assert_eq!(block.blades, [lod.distance, lod.band, 0.0, 0.0]);
         // Rows past the count are zero, so a shader reading one reads nothing.
         assert_eq!(block.layers[8], [0.0; 4]);
         assert!(block.layers[7][0] > 0.0);

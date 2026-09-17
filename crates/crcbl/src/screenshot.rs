@@ -108,13 +108,14 @@ mod ui_tree;
 mod ui_widgets;
 
 pub use meadow::{
-    MEADOW_COVER_METRES_PER_TEXEL, MEADOW_DENSE, MEADOW_DIRECTION_METRES_PER_TEXEL,
-    MEADOW_DIRECTION_TEXELS, MEADOW_GROUND_METRES_PER_TEXEL, MEADOW_HALF,
-    MEADOW_INTENSITY_METRES_PER_TEXEL, MEADOW_INTENSITY_TEXELS, MEADOW_PATH_HALF_WIDTH,
-    MEADOW_REACH, MEADOW_SECOND_ROW, MEADOW_SLOPE, MEADOW_SPARSE, MEADOW_TILE_SIZE, MEADOW_TILES,
-    MEADOW_WEATHER, MeadowWind, meadow_blades, meadow_camera, meadow_cover, meadow_cover_texel,
-    meadow_field, meadow_forward, meadow_forward_with, meadow_ground, meadow_ground_normal,
-    meadow_height, meadow_shell_blades, meadow_shells_field, meadow_sky, meadow_sun,
+    MEADOW_BLADE_LOD, MEADOW_BLADE_TILE_SIZE, MEADOW_BLADE_TILES, MEADOW_COVER_METRES_PER_TEXEL,
+    MEADOW_DENSE, MEADOW_DIRECTION_METRES_PER_TEXEL, MEADOW_DIRECTION_TEXELS,
+    MEADOW_GROUND_METRES_PER_TEXEL, MEADOW_HALF, MEADOW_INTENSITY_METRES_PER_TEXEL,
+    MEADOW_INTENSITY_TEXELS, MEADOW_PATH_HALF_WIDTH, MEADOW_REACH, MEADOW_SECOND_ROW, MEADOW_SLOPE,
+    MEADOW_SPARSE, MEADOW_TILE_SIZE, MEADOW_TILES, MEADOW_WEATHER, MeadowWind, meadow_blades,
+    meadow_blades_field, meadow_camera, meadow_cover, meadow_cover_texel, meadow_field,
+    meadow_forward, meadow_forward_with, meadow_ground, meadow_ground_normal, meadow_height,
+    meadow_mesh_blades, meadow_shell_blades, meadow_shells_field, meadow_sky, meadow_sun,
     meadow_wind_field, meadow_wind_layers,
 };
 pub use still_pool::{
@@ -826,6 +827,25 @@ pub enum Scene {
     /// placement bit-identical to the card meadow's, calm shells upright to the
     /// pixel, and fins filling the far hillside the bare stack leaves open.
     MeadowShells,
+    /// `docs/plan/57-grass.md` rung G2's realistic look: the meadow's hillside
+    /// under a field of mesh blades — a Bézier per blade, fifteen vertices near
+    /// the camera and seven past [`MEADOW_BLADE_LOD`]'s switch, which lands
+    /// mid-frame so both levels and the band between them are in the picture,
+    /// tilted, bowed, rounded, clumped and coloured by their clumps.
+    ///
+    /// **A scene of its own**, on [`Scene::MeadowShells`]' terms, and with a
+    /// field of its own: four times as many cells over the same hillside —
+    /// [`MEADOW_BLADE_TILES`] of [`MEADOW_BLADE_TILE_SIZE`] — and blades a
+    /// couple of centimetres wide where a card is a tuft. The same cover map,
+    /// ground, reach and wind as the card meadow, so the quadrants its claims
+    /// compare are the same quadrants.
+    ///
+    /// The frame's claims are in `tests/render_e2e/grass_blades.rs`: the
+    /// placement bit-identical across all three looks of this field, no pop
+    /// where a blade crosses the level switch, edge-on blades at least a pixel
+    /// wide, clumps a measured structure in the colours, and calm blades
+    /// upright to the pixel.
+    MeadowBlades,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -6692,6 +6712,19 @@ impl SceneState {
                 )?
                 .into()
             }
+            Scene::MeadowBlades => {
+                // `Scene::Meadow`'s build with the blade meadow's field.
+                let field = meadow::meadow_blades_field();
+                meadow::meadow_forward_on_path(
+                    device,
+                    queue,
+                    format,
+                    Some(&field),
+                    MeadowWind::Windy,
+                    path,
+                )?
+                .into()
+            }
             Scene::MeadowShells => {
                 // `Scene::Meadow`'s build with the other look of its field.
                 let field = meadow::meadow_shells_field();
@@ -9127,7 +9160,7 @@ mod tests {
                 ("render", "sky"),
             ],
         );
-        let expected: [(Scene, &[(&str, &str)]); 26] = [
+        let expected: [(Scene, &[(&str, &str)]); 27] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -9200,6 +9233,8 @@ mod tests {
             // The same list: the shells and the fins are draws inside the
             // `grass` pass, not passes of their own.
             (Scene::MeadowShells, &meadow_passes),
+            // And again: both levels of mesh blades are draws inside `grass`.
+            (Scene::MeadowBlades, &meadow_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

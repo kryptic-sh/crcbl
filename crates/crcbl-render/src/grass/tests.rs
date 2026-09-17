@@ -185,6 +185,8 @@ fn the_generation_block_carries_the_fields_numbers() {
         params.looks,
         [crcbl_shaders::grass::DEFAULT_SHELLS, 1, 0, 0]
     );
+    // The mesh blades' switch is the field's, and the default one here.
+    assert_eq!(params.lod, [field.blade_lod().distance, 0.0, 0.0, 0.0]);
     // The camera arrives from the view, and nothing else of the block does.
     let (device, queue) = null();
     let device = device.as_ref();
@@ -200,17 +202,23 @@ fn the_generation_block_carries_the_fields_numbers() {
     scene.destroy(device);
 }
 
-/// **A card field records one draw a slot, a shell field three**, and a shell
-/// field whose fins are off two — the count `crate::forward` adds to its
-/// recorded draws, and what keeps a card field's command stream rung G1's.
+/// **A card field records one draw a slot, a shell field three**, a shell field
+/// whose fins are off two, and a field with mesh blades two more for their two
+/// levels — the count `crate::forward` adds to its recorded draws, and what
+/// keeps a card field's command stream rung G1's.
 #[test]
 fn a_frame_draws_the_looks_its_field_has() {
     let (device, queue) = null();
     let device = device.as_ref();
     let mut scene = GrassScene::new(device, queue, 2).expect("the placeholders upload");
-    let shells = |fins| {
-        let mut rows = one_blade();
-        rows[0].look = BladeLook::Shells;
+    let looks = |looks: &[BladeLook], fins| {
+        let rows = looks
+            .iter()
+            .map(|look| BladeType {
+                look: *look,
+                ..one_blade()[0]
+            })
+            .collect();
         GrassField::new(
             [2, 2],
             8.0,
@@ -223,7 +231,15 @@ fn a_frame_draws_the_looks_its_field_has() {
         .and_then(|field| field.with_shells(Shells { count: 4, fins }))
         .expect("a real field")
     };
-    for (field, draws) in [(field(), 1), (shells(true), 3), (shells(false), 2)] {
+    let shells = |fins| looks(&[BladeLook::Shells], fins);
+    for (field, draws) in [
+        (field(), 1),
+        (shells(true), 3),
+        (shells(false), 2),
+        (looks(&[BladeLook::Blades], true), 3),
+        (looks(&[BladeLook::Cards, BladeLook::Blades], false), 3),
+        (looks(&[BladeLook::Shells, BladeLook::Blades], true), 5),
+    ] {
         scene
             .set(device, queue, Some(&field))
             .expect("the field uploads");

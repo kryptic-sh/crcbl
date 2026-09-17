@@ -40,11 +40,17 @@
 //! [`Shells`] is the field's rather than a row's, because every shell row of a
 //! field stands in one stack: its count is what the shells' overdraw is
 //! proportional to, and a stack cannot be sixteen layers under one row and
-//! thirty-two under the next.
+//! thirty-two under the next. [`BladeLod`] is the field's for the same reason:
+//! where the mesh blades change level is a distance from one camera, and two
+//! rows switching at two distances would pop at both.
+//!
+//! [`BladeType::clumping`] is a row's and is **placement**, not look: decision
+//! 2's clumps move a blade's facing and height, and they move them for every
+//! look alike, so a row's clumping survives a look switch unchanged.
 
 use crcbl_shaders::grass::{
-    BLADE_STRIDE, DEFAULT_SHELLS, GrassBlade, INSTANCE_STRIDE, LOOK_CARDS, LOOK_SHELLS, MAX_SHELLS,
-    NORMAL_GROUND, NORMAL_UP,
+    BLADE_STRIDE, DEFAULT_SHELLS, GrassBlade, INSTANCE_STRIDE, LOOK_BLADES, LOOK_CARDS,
+    LOOK_SHELLS, MAX_SHELLS, NORMAL_GROUND, NORMAL_UP,
 };
 
 /// Cells along one side of a tile's placement grid.
@@ -62,9 +68,9 @@ pub const SLOT_CAPACITY: u32 = CELLS_PER_TILE * CELLS_PER_TILE;
 /// The most tiles a field may hold.
 ///
 /// A ceiling rather than a budget: the instance buffer is
-/// `tiles · SLOT_CAPACITY · INSTANCE_STRIDE` bytes, which at this cap is 21 MiB
-/// — under WebGPU's 128 MiB default maximum storage binding size, which is what
-/// decision 1 asks a ring to stay inside.
+/// [`GrassField::instance_bytes`], which at this cap stays under WebGPU's
+/// 128 MiB default maximum storage binding size — decision 1's limit on a ring,
+/// and `the_widest_field_fits_a_browsers_storage_binding` is where it is held.
 pub const MAX_TILES: u32 = 64;
 
 /// The most blade rows a field's table may hold.
@@ -156,6 +162,17 @@ pub enum GrassError {
         /// Layers that were asked for.
         count: u32,
     },
+    /// A level-of-detail switch that is not a positive distance, or a band
+    /// before it that is negative or longer than the distance.
+    #[error(
+        "a blade level switch at {distance} m over a band of {band} m is not one a field draws"
+    )]
+    BladeLod {
+        /// The switch distance that was offered.
+        distance: f32,
+        /// The band that was offered.
+        band: f32,
+    },
 }
 
 /// The ground a field stands on: one height per texel, and the CPU copy of it.
@@ -196,8 +213,6 @@ pub struct CoverMap {
 }
 
 /// Which geometry a blade row is drawn with — decision 3's looks.
-///
-/// Rung G2's mesh blades are the third, and are not built.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BladeLook {
     /// Two crossed cards per blade, cut out against the cooked coverage chain:
@@ -208,6 +223,10 @@ pub enum BladeLook {
     /// ground, each cutting out a cone about every blade's root, with fins
     /// where the stack is seen at a grazing angle.
     Shells,
+    /// Ghost of Tsushima's mesh blades: a cubic Bézier per blade built from its
+    /// vertex index, fifteen vertices near the camera and seven past the
+    /// field's [`BladeLod`] — the realistic look.
+    Blades,
 }
 
 /// Which normal a blade row shades by — decision 4's last lever.
@@ -249,9 +268,9 @@ pub struct BladeStyle {
     /// The most of [`BladeStyle::patch_color`] a patch takes, in `0..=1`; each
     /// patch takes its own hashed share of it. Zero is no patches.
     ///
-    /// **Patches are squares of `crcbl_shaders::grass::PATCH_CELLS` placement
-    /// cells**, not the Voronoi clumps decision 2 describes: those arrive with
-    /// rung G2, and this lever reads them once they do.
+    /// **A patch is a clump** — decision 2's Voronoi cells, which every blade
+    /// belongs to whatever its row's [`BladeType::clumping`] — so the colour
+    /// follows the same structure the facing and the height do.
     pub patch_share: f32,
     /// The normal the row shades by.
     pub normal: BladeNormal,
@@ -273,6 +292,102 @@ impl BladeStyle {
 impl Default for BladeStyle {
     fn default() -> Self {
         Self::PLAIN
+    }
+}
+
+/// A mesh blade's shape — decision 3's "tilt and facing set the tip, bend sets
+/// the midpoint … normals tilt outward so a flat blade reads as rounded".
+///
+/// Read by [`BladeLook::Blades`] alone; a card or a shell row carries it
+/// unread, so switching a row's look keeps its shape for the day it switches
+/// back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BladeShape {
+    /// How far the tip leans out along the blade's face, as the sine of the
+    /// lean, in `0..1`. The blade keeps its height as its length.
+    pub tilt: f32,
+    /// How far the middle of the blade bows back from the straight line between
+    /// its root and its tip, as a fraction of its height, in `0..=1`.
+    pub bow: f32,
+    /// How far the normal tilts out toward each edge, in `0..=1`, so a flat
+    /// strip shades as a rounded blade.
+    pub rounding: f32,
+}
+
+impl BladeShape {
+    /// A straight, flat, upright blade.
+    pub const STRAIGHT: Self = Self {
+        tilt: 0.0,
+        bow: 0.0,
+        rounding: 0.0,
+    };
+}
+
+impl Default for BladeShape {
+    fn default() -> Self {
+        Self::STRAIGHT
+    }
+}
+
+/// How much a row's blades take from their clump — decision 2's "clumps …
+/// driving height, a shared facing and colour".
+///
+/// **Placement, for every look**: a card, a shell and a mesh blade of one row
+/// and one cell stand the same way at the same height. The colour half is
+/// [`BladeStyle::patch_share`], which is a lever. [`Clumping::NONE`] leaves every
+/// facing and height the bits it was before clumps existed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clumping {
+    /// The share of a blade's own facing its clump's shared facing replaces, in
+    /// `0..=1`.
+    pub facing: f32,
+    /// The fraction of a blade's height its clump may take away, in `0..1` —
+    /// one hashed share per clump, on top of the blade's own
+    /// [`BladeType::height_spread`].
+    pub height: f32,
+}
+
+impl Clumping {
+    /// No clumping: every blade faces and stands by its own hash alone.
+    pub const NONE: Self = Self {
+        facing: 0.0,
+        height: 0.0,
+    };
+}
+
+impl Default for Clumping {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+/// Where a field's mesh blades change level of detail — decision 3's "the low
+/// LOD's tile is twice the size with the same blade count, the high LOD drops
+/// three blades in four first, and the high LOD morphs toward the low LOD's
+/// shape near the switch".
+///
+/// A blade whose root is nearer the camera than [`BladeLod::distance`] is drawn
+/// with fifteen vertices; past it, only the one blade of every two-by-two block
+/// of cells the far level keeps is drawn, with seven. Over the
+/// [`BladeLod::band`] before the switch the near level narrows the other three
+/// away and then morphs onto the far shape, so a blade crossing the switch does
+/// not move a pixel. A band of zero is a hard switch, and pops.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BladeLod {
+    /// The switch, in metres from the camera.
+    pub distance: f32,
+    /// The band before it, in metres, `0..=distance`.
+    pub band: f32,
+}
+
+impl Default for BladeLod {
+    /// A switch at twelve metres over a band of four — a starting value rather
+    /// than a measurement, and a field's own choice to make.
+    fn default() -> Self {
+        Self {
+            distance: 12.0,
+            band: 4.0,
+        }
     }
 }
 
@@ -327,6 +442,11 @@ pub struct BladeType {
     pub look: BladeLook,
     /// Decision 4's levers.
     pub style: BladeStyle,
+    /// A mesh blade's shape, read only where [`BladeType::look`] is
+    /// [`BladeLook::Blades`].
+    pub shape: BladeShape,
+    /// Decision 2's clumping, for every look.
+    pub clumping: Clumping,
 }
 
 impl BladeType {
@@ -347,10 +467,13 @@ impl BladeType {
             occlusion: with(style.root_occlusion, style.occlusion_reach),
             glow: with(style.tip_glow, style.glow_start),
             patch: with(style.patch_color, style.patch_share),
+            shape: [self.shape.tilt, self.shape.bow, self.shape.rounding, 0.0],
+            clump: [self.clumping.facing, self.clumping.height, 0.0, 0.0],
             flags: [
                 match self.look {
                     BladeLook::Cards => LOOK_CARDS,
                     BladeLook::Shells => LOOK_SHELLS,
+                    BladeLook::Blades => LOOK_BLADES,
                 },
                 match style.normal {
                     BladeNormal::Ground => NORMAL_GROUND,
@@ -397,6 +520,19 @@ impl BladeType {
             ),
             ("glow start", style.glow_start, below_one(style.glow_start)),
             ("patch share", style.patch_share, unit(style.patch_share)),
+            ("tilt", self.shape.tilt, below_one(self.shape.tilt)),
+            ("bow", self.shape.bow, unit(self.shape.bow)),
+            ("rounding", self.shape.rounding, unit(self.shape.rounding)),
+            (
+                "clump facing",
+                self.clumping.facing,
+                unit(self.clumping.facing),
+            ),
+            (
+                "clump height",
+                self.clumping.height,
+                below_one(self.clumping.height),
+            ),
         ];
         let colours = [
             ("root occlusion colour", style.root_occlusion),
@@ -428,6 +564,7 @@ pub struct GrassField {
     cover: CoverMap,
     blades: Vec<BladeType>,
     shells: Shells,
+    blade_lod: BladeLod,
 }
 
 impl GrassField {
@@ -487,6 +624,7 @@ impl GrassField {
             cover,
             blades,
             shells: Shells::default(),
+            blade_lod: BladeLod::default(),
         })
     }
 
@@ -504,6 +642,42 @@ impl GrassField {
         }
         self.shells = shells;
         Ok(self)
+    }
+
+    /// This field with its mesh blades' level switch replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`GrassError::BladeLod`] for a switch that is not a positive finite
+    /// distance, or a band that is negative, not finite or longer than the
+    /// distance — and then the field is not built.
+    pub fn with_blade_lod(mut self, lod: BladeLod) -> Result<Self, GrassError> {
+        let BladeLod { distance, band } = lod;
+        if !(distance.is_finite()
+            && distance > 0.0
+            && band.is_finite()
+            && (0.0..=distance).contains(&band))
+        {
+            return Err(GrassError::BladeLod { distance, band });
+        }
+        self.blade_lod = lod;
+        Ok(self)
+    }
+
+    /// Where the field's mesh blades change level of detail. Read by the draw
+    /// only where a row's look is [`BladeLook::Blades`].
+    #[must_use]
+    pub const fn blade_lod(&self) -> BladeLod {
+        self.blade_lod
+    }
+
+    /// Whether any row of the blade table is drawn as mesh blades — which is
+    /// whether a frame records the two blade draws at all.
+    #[must_use]
+    pub fn draws_blades(&self) -> bool {
+        self.blades
+            .iter()
+            .any(|blade| blade.look == BladeLook::Blades)
     }
 
     /// The field's shell stack. Read by the draw only where a row's look is
@@ -599,10 +773,19 @@ impl GrassField {
         ]
     }
 
-    /// Bytes the instance buffer needs for this field.
+    /// Bytes the cells buffer needs for this field: one row per cell of every
+    /// tile.
+    #[must_use]
+    pub fn cell_bytes(&self) -> u64 {
+        u64::from(self.slots()) * u64::from(SLOT_CAPACITY) * INSTANCE_STRIDE as u64
+    }
+
+    /// Bytes the instance buffer needs for this field: two regions of
+    /// [`GrassField::cell_bytes`] each — the cards and the far mesh blades in
+    /// the first, the near mesh blades in the second.
     #[must_use]
     pub fn instance_bytes(&self) -> u64 {
-        u64::from(self.slots()) * u64::from(SLOT_CAPACITY) * INSTANCE_STRIDE as u64
+        2 * self.cell_bytes()
     }
 
     /// Bytes the blade table needs.
@@ -836,6 +1019,8 @@ pub(crate) mod tests {
             width_spread: 0.3,
             look: BladeLook::Cards,
             style: BladeStyle::PLAIN,
+            shape: BladeShape::STRAIGHT,
+            clumping: Clumping::NONE,
         }]
     }
 
@@ -865,7 +1050,17 @@ pub(crate) mod tests {
     #[test]
     fn the_widest_field_fits_a_browsers_storage_binding() {
         const WEBGPU_MAX_STORAGE_BINDING: u64 = 128 * 1024 * 1024;
-        let widest = u64::from(MAX_TILES) * u64::from(SLOT_CAPACITY) * INSTANCE_STRIDE as u64;
+        let widest = GrassField::new(
+            [MAX_TILES, 1],
+            8.0,
+            [0.0, 0.0],
+            100.0,
+            flat_ground(8, 0.0),
+            flat_cover(8, 8),
+            one_blade(),
+        )
+        .expect("the widest field is a field")
+        .instance_bytes();
         eprintln!("grass: the widest field's instances are {widest} byte(s)");
         assert!(
             widest <= WEBGPU_MAX_STORAGE_BINDING,
@@ -1099,6 +1294,28 @@ pub(crate) mod tests {
         assert_eq!(styled.glow, [0.5, 0.6, 0.7, 0.8]);
         assert_eq!(styled.patch, [0.9, 1.0, 1.1, 0.25]);
         assert_eq!(styled.flags, [LOOK_SHELLS, NORMAL_UP, 0, 0]);
+        // A plain row's shape and clumping are all zero, which is what the
+        // shaders read as a straight blade and no clump.
+        assert_eq!(row.shape, [0.0; 4]);
+        assert_eq!(row.clump, [0.0; 4]);
+
+        let blade = BladeType {
+            look: BladeLook::Blades,
+            shape: BladeShape {
+                tilt: 0.25,
+                bow: 0.5,
+                rounding: 0.75,
+            },
+            clumping: Clumping {
+                facing: 0.125,
+                height: 0.375,
+            },
+            ..one_blade()[0]
+        }
+        .row();
+        assert_eq!(blade.shape, [0.25, 0.5, 0.75, 0.0]);
+        assert_eq!(blade.clump, [0.125, 0.375, 0.0, 0.0]);
+        assert_eq!(blade.flags, [LOOK_BLADES, NORMAL_GROUND, 0, 0]);
     }
 
     /// **Every lever a shader divides by or blends with is refused out of
@@ -1163,12 +1380,100 @@ pub(crate) mod tests {
             );
         }
         let stacked = field
+            .clone()
             .with_shells(Shells {
                 count: MAX_SHELLS,
                 fins: false,
             })
             .expect("the widest stack is one the block holds");
         assert_eq!(stacked.shells().count, MAX_SHELLS);
+
+        let with_shape = |shape: BladeShape, clumping: Clumping| {
+            GrassField::new(
+                [1, 1],
+                8.0,
+                [0.0, 0.0],
+                10.0,
+                flat_ground(8, 0.0),
+                flat_cover(8, 8),
+                vec![BladeType {
+                    shape,
+                    clumping,
+                    ..one_blade()[0]
+                }],
+            )
+        };
+        for (shape, clumping, what) in [
+            (
+                BladeShape {
+                    tilt: 1.0,
+                    ..BladeShape::STRAIGHT
+                },
+                Clumping::NONE,
+                "tilt",
+            ),
+            (
+                BladeShape {
+                    bow: f32::INFINITY,
+                    ..BladeShape::STRAIGHT
+                },
+                Clumping::NONE,
+                "bow",
+            ),
+            (
+                BladeShape {
+                    rounding: -0.5,
+                    ..BladeShape::STRAIGHT
+                },
+                Clumping::NONE,
+                "rounding",
+            ),
+            (
+                BladeShape::STRAIGHT,
+                Clumping {
+                    facing: 1.25,
+                    ..Clumping::NONE
+                },
+                "clump facing",
+            ),
+            (
+                BladeShape::STRAIGHT,
+                Clumping {
+                    height: 1.0,
+                    ..Clumping::NONE
+                },
+                "clump height",
+            ),
+        ] {
+            assert!(
+                matches!(with_shape(shape, clumping), Err(GrassError::Blade { row: 0, what: refused, .. }) if refused == what),
+                "{what} was not refused"
+            );
+        }
+
+        assert_eq!(field.blade_lod(), BladeLod::default());
+        for (distance, band) in [
+            (0.0, 0.0),
+            (f32::NAN, 1.0),
+            (10.0, -1.0),
+            (10.0, 10.5),
+            (10.0, f32::INFINITY),
+        ] {
+            assert!(
+                matches!(
+                    field.clone().with_blade_lod(BladeLod { distance, band }),
+                    Err(GrassError::BladeLod { .. })
+                ),
+                "a switch at {distance} m over {band} m was not refused"
+            );
+        }
+        let hard = field
+            .with_blade_lod(BladeLod {
+                distance: 6.0,
+                band: 0.0,
+            })
+            .expect("a hard switch is a switch");
+        assert_eq!(hard.blade_lod().band, 0.0);
     }
 
     /// **The shell stack is the tallest shell row**, and a field with none has
@@ -1206,6 +1511,7 @@ pub(crate) mod tests {
         )
         .expect("a real field");
         assert!(mixed.draws_shells());
+        assert!(!mixed.draws_blades());
         // The taller row is a card row, so the stack is the shell row's height.
         assert_eq!(mixed.shell_stack(), 0.4);
     }
@@ -1216,9 +1522,10 @@ pub(crate) mod tests {
     fn the_buffers_are_the_size_the_shaders_index() {
         let field = field();
         assert_eq!(
-            field.instance_bytes(),
+            field.cell_bytes(),
             u64::from(field.slots()) * u64::from(SLOT_CAPACITY) * INSTANCE_STRIDE as u64
         );
+        assert_eq!(field.instance_bytes(), 2 * field.cell_bytes());
         assert_eq!(field.blade_bytes(), BLADE_STRIDE as u64);
     }
 }

@@ -75,6 +75,33 @@ G2–G6 and T1–T2 are separate slices rather than gaps.
   are committed and compile, but no frame has been drawn on either; CI's
   software adapters are the only verdict available.
 
+## What grass rung G2 shipped without (2026-09-17)
+
+- **`Scene::MeadowBlades` is excused on the SwiftShader browser legs** and the
+  cross-backend step, like the other meadows: 3.53% of pixels past
+  `Tolerance::RASTERISER` and 0.83% past the gross allowance on SwiftShader,
+  while the hardware adapter matched 33 of 33 goldens.
+- **Blades are unpriced in a browser.** Natively at 1920×1080 the `grass` pass
+  costs 0.124 ms near, 0.047 ms far and 0.053 ms at the meadow's switch on an RX
+  7900 XTX; 47.2, 12.4 and 16.2 ms on lavapipe.
+- **Not reviewed or tested**: blades on Metal and D3D12.
+- **`BLADE_FAR_WIDEN` and `CLUMP_DOME` are chosen, not measured.**
+- **The far level lives on fixed tiles**, keeping one cell of each two-by-two
+  block, until G6's rings give the plan's twice-the-size tiles.
+- **No per-blade bob**: decision 5's sine bob needs a time input the grass pass
+  does not have.
+- **Blades seen from behind are nearly black**: grass is Lambert with no
+  translucency term, which the realistic look will want.
+- **The morph's shape change is under a pixel** at meadow scale, so the no-pop
+  claim measures shade; a field of larger blades would exercise the shape half.
+- **The clump search is the 3×3 neighbourhood approximation** (0 of 25600 cells
+  differed from a 5×5 search) and uses 8 of the 16 jitter bits.
+- **The edge-on pixel floor is observable only at low resolution**: at 1024×768
+  the view-perpendicular turn alone keeps blades a pixel wide.
+- **The 1080p, 400-frame lavapipe price run times out** under nextest's 240 s
+  limit with the card, shell and blade price tests running together; radv and
+  CI's default size pass.
+
 ## What grass rung G3 shipped without (2026-09-17)
 
 - **`Scene::MeadowShells` is excused on the SwiftShader browser legs** and the
@@ -87,8 +114,6 @@ G2–G6 and T1–T2 are separate slices rather than gaps.
   1920×1080: 16 shells with fins 0.933 ms on an RX 7900 XTX and 65.7 ms on
   lavapipe, about 0.040 ms per layer on the hardware adapter.
 - **Not reviewed or tested**: shells and fins on Metal and D3D12.
-- **Patches are square 8-cell grids**, standing in for the clumps rung G2
-  brings; the patch lever should read clumps once they exist.
 - **Near the camera the stack shows its layers** at 16 shells over 0.55 m. A
   per-distance shell count or near fins would fix it, if wanted.
 - **The `cells` buffer is allocated for card-only fields too**, the size of the

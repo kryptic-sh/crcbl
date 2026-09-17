@@ -1,6 +1,7 @@
-//! [`Scene::Meadow`](super::Scene::Meadow)'s and
-//! [`Scene::MeadowShells`](super::Scene::MeadowShells)' content:
-//! `docs/plan/57-grass.md` rungs G1 and G3's fixture, and the first and third
+//! [`Scene::Meadow`](super::Scene::Meadow)'s,
+//! [`Scene::MeadowShells`](super::Scene::MeadowShells)' and
+//! [`Scene::MeadowBlades`](super::Scene::MeadowBlades)' content:
+//! `docs/plan/57-grass.md` rungs G1, G2 and G3's fixture, and the first three
 //! milestones of `docs/plan/sample/22-meadow.md`.
 //!
 //! A module of its own rather than more of `screenshot.rs`, which is already the
@@ -63,10 +64,20 @@
 //! the same functions. That is `docs/plan/57-grass.md`'s own test of the three
 //! looks — a switch changes one description and moves nothing else — and
 //! `the_shell_meadow_is_the_card_meadow_but_its_rows` holds it on the CPU.
+//!
+//! # The mesh blades are a field of their own
+//!
+//! [`meadow_blades_field`] stands on the same hillside under the same cover map,
+//! reach and wind, and differs from [`meadow_field`] in two things a card's
+//! numbers cannot carry: **four times the cells** — [`MEADOW_BLADE_TILES`] of
+//! [`MEADOW_BLADE_TILE_SIZE`], so a quarter of the spacing a tuft needed — and
+//! **rows a blade wide** rather than a tuft wide. Its own three looks are the
+//! comparison decision 3 asks for: `tests/render_e2e/grass_blades.rs` draws this
+//! field as cards and as shells as well, changing nothing but each row's look.
 
 use crcbl_render::grass::{
-    BladeLook, BladeNormal, BladeStyle, BladeType, CoverMap, GrassField, Heightfield, WindLayer,
-    WindLayers,
+    BladeLod, BladeLook, BladeNormal, BladeShape, BladeStyle, BladeType, Clumping, CoverMap,
+    GrassField, Heightfield, WindLayer, WindLayers,
 };
 use crcbl_wind::{Beaufort, DirectionLayer, IntensityLayer, LayerGrid, Weather, WindField};
 
@@ -271,6 +282,8 @@ pub fn meadow_blades() -> Vec<BladeType> {
             width_spread: 0.35,
             look: BladeLook::Cards,
             style: BladeStyle::PLAIN,
+            shape: BladeShape::STRAIGHT,
+            clumping: Clumping::NONE,
         },
         BladeType {
             root_color: [0.330, 0.285, 0.080],
@@ -281,6 +294,8 @@ pub fn meadow_blades() -> Vec<BladeType> {
             width_spread: 0.30,
             look: BladeLook::Cards,
             style: BladeStyle::PLAIN,
+            shape: BladeShape::STRAIGHT,
+            clumping: Clumping::NONE,
         },
     ]
 }
@@ -324,6 +339,82 @@ pub fn meadow_shell_blades() -> Vec<BladeType> {
         .collect()
 }
 
+/// Tiles along each axis of the mesh blade field: four, so the field's side is
+/// the card meadow's with a quarter of its cell area.
+pub const MEADOW_BLADE_TILES: [u32; 2] = [4, 4];
+
+/// One tile's side in the mesh blade field, in metres — half the card meadow's,
+/// which is sixteen centimetres of spacing a tuft needs at eight blades' width
+/// becoming six and a quarter at one.
+pub const MEADOW_BLADE_TILE_SIZE: f32 = 4.0;
+
+/// Where the mesh blades change level: seven metres from the eye over a band of
+/// three.
+///
+/// **Chosen to land in the frame**, not to be a good default: the camera stands
+/// seven and a half metres from the field's middle, so the switch crosses the
+/// picture a little below its centre and the band runs across the near half —
+/// every one of the rung's level claims then has blades on both sides of it to
+/// read.
+pub const MEADOW_BLADE_LOD: BladeLod = BladeLod {
+    distance: 7.0,
+    band: 3.0,
+};
+
+/// [`meadow_blades`]' colours and heights drawn as mesh blades: a couple of
+/// centimetres wide, tilted, bowed and rounded, clumped, darkened at the root
+/// and coloured by clump.
+#[must_use]
+pub fn meadow_mesh_blades() -> Vec<BladeType> {
+    let blades = [
+        (
+            0.012,
+            BladeShape {
+                tilt: 0.32,
+                bow: 0.14,
+                rounding: 0.55,
+            },
+            BladeStyle {
+                root_occlusion: [0.045, 0.070, 0.025],
+                occlusion_reach: 0.35,
+                patch_color: [0.400, 0.420, 0.090],
+                patch_share: 0.60,
+                ..BladeStyle::PLAIN
+            },
+        ),
+        (
+            0.010,
+            BladeShape {
+                tilt: 0.40,
+                bow: 0.18,
+                rounding: 0.55,
+            },
+            BladeStyle {
+                root_occlusion: [0.080, 0.065, 0.020],
+                occlusion_reach: 0.30,
+                patch_color: [0.520, 0.400, 0.080],
+                patch_share: 0.50,
+                ..BladeStyle::PLAIN
+            },
+        ),
+    ];
+    meadow_blades()
+        .into_iter()
+        .zip(blades)
+        .map(|(row, (half_width, shape, style))| BladeType {
+            half_width,
+            look: BladeLook::Blades,
+            style,
+            shape,
+            clumping: Clumping {
+                facing: 0.6,
+                height: 0.35,
+            },
+            ..row
+        })
+        .collect()
+}
+
 /// The field this fixture draws.
 ///
 /// # Panics
@@ -362,6 +453,26 @@ pub fn meadow_shells_field() -> GrassField {
         meadow_shell_blades(),
     )
     .unwrap_or_else(|why| unreachable!("the meadow's own shell field: {why}"))
+}
+
+/// The mesh blade meadow — see this module's header.
+///
+/// # Panics
+///
+/// Never, on [`meadow_field`]'s terms.
+#[must_use]
+pub fn meadow_blades_field() -> GrassField {
+    GrassField::new(
+        MEADOW_BLADE_TILES,
+        MEADOW_BLADE_TILE_SIZE,
+        [-MEADOW_HALF, -MEADOW_HALF],
+        MEADOW_REACH,
+        meadow_ground(),
+        meadow_cover(),
+        meadow_mesh_blades(),
+    )
+    .and_then(|field| field.with_blade_lod(MEADOW_BLADE_LOD))
+    .unwrap_or_else(|why| unreachable!("the meadow's own blade field: {why}"))
 }
 
 /// One texel of the intensity layer, by its index along `+X`.
@@ -593,8 +704,8 @@ pub fn meadow_forward_with(
 }
 
 /// [`meadow_forward_with`] on exactly the geometry tail `path`, which is how
-/// [`Scene::Meadow`]'s and [`Scene::MeadowShells`]' build arms honour a
-/// requested path.
+/// [`Scene::Meadow`]'s, [`Scene::MeadowShells`]' and [`Scene::MeadowBlades`]'
+/// build arms honour a requested path.
 ///
 /// # Errors
 ///
@@ -603,6 +714,7 @@ pub fn meadow_forward_with(
 ///
 /// [`Scene::Meadow`]: super::Scene::Meadow
 /// [`Scene::MeadowShells`]: super::Scene::MeadowShells
+/// [`Scene::MeadowBlades`]: super::Scene::MeadowBlades
 pub(super) fn meadow_forward_on_path(
     device: &dyn Device,
     queue: QueueHandle,
@@ -805,6 +917,62 @@ mod tests {
                 "slot {slot} places different blades under the shell look"
             );
         }
+    }
+
+    /// **The blade meadow stands on the card meadow's hillside**: the same
+    /// extent, ground, cover map and reach, with four times the cells — and its
+    /// rows are the card rows' colours and heights, drawn a blade wide.
+    #[test]
+    fn the_blade_meadow_is_the_card_meadows_hillside() {
+        let cards = meadow_field();
+        let blades = meadow_blades_field();
+        let extent = |field: &GrassField| {
+            [
+                field.tiles()[0] as f32 * field.tile_size(),
+                field.tiles()[1] as f32 * field.tile_size(),
+            ]
+        };
+        assert_eq!(extent(&blades), extent(&cards));
+        assert_eq!(blades.origin(), cards.origin());
+        assert_eq!(blades.reach(), cards.reach());
+        assert_eq!(blades.ground(), cards.ground());
+        assert_eq!(blades.cover(), cards.cover());
+        assert_eq!(
+            blades.tiles()[0] * blades.tiles()[1],
+            4 * cards.tiles()[0] * cards.tiles()[1],
+            "the blade field does not hold four times the cells"
+        );
+        assert!(blades.draws_blades() && !blades.draws_shells());
+        for (blade, card) in blades.blades().iter().zip(cards.blades()) {
+            assert_eq!(
+                BladeType {
+                    half_width: card.half_width,
+                    look: card.look,
+                    style: card.style,
+                    shape: card.shape,
+                    clumping: card.clumping,
+                    ..*blade
+                },
+                *card
+            );
+            assert!(blade.half_width * 10.0 < card.half_width);
+        }
+    }
+
+    /// **The level switch lands inside the frame's field**: nearer than the
+    /// field's far edge and further than its near one, with the whole band in
+    /// front of the far edge — so the golden draws both levels and the band.
+    #[test]
+    fn the_blade_level_switch_crosses_the_field() {
+        let eye = meadow_camera().eye;
+        let at = |z: f32| glam::Vec3::new(0.0, meadow_height(0.0, z), z).distance(eye);
+        let (near, far) = (at(MEADOW_HALF - 1.0), at(-MEADOW_HALF));
+        eprintln!(
+            "meadow: blades from {near:.2} m to {far:.2} m, switching at {} m over {} m",
+            MEADOW_BLADE_LOD.distance, MEADOW_BLADE_LOD.band
+        );
+        assert!(near < MEADOW_BLADE_LOD.distance - MEADOW_BLADE_LOD.band);
+        assert!(MEADOW_BLADE_LOD.distance < far);
     }
 
     /// The sun and the camera have no `x` component, so the windy and the calm

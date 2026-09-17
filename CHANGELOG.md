@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **Grass rows carry a blade shape and clumping, and the grass buffers grew
+  again**: `crcbl_render::grass::BladeType` has `shape` and `clumping`,
+  `BladeLook` has `Blades`, and `GrassError` has `BladeLod`. The instance buffer
+  holds two regions (`GrassField::instance_bytes` doubled, with a new
+  `cell_bytes`) and the args buffer five draws per slot;
+  `crcbl_shaders::grass::GrassBlade`, `GrassInstance`, `GenParams` and
+  `FieldBlock` grew; `patch_of` takes a clump id and `PATCH_CELLS` is gone;
+  `crcbl::screenshot::Scene` has `MeadowBlades`.
 - **Grass rows carry a look and a style, and the grass buffers grew**:
   `crcbl_render::grass::BladeType` has `look` and `style`, `GrassBuffers` has
   `cells` and its `args` buffer holds three draws per slot
@@ -212,6 +220,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Mesh-blade grass with two levels of detail and clumps**
+  (`docs/plan/57-grass.md` rung G2). A row with `look: BladeLook::Blades` is
+  drawn as a Bézier per blade, 15 vertices near and 7 past
+  `GrassField::with_blade_lod`, where one blade in four is kept; the near level
+  narrows the others away and morphs into the far strip so the switch does not
+  pop. Blades are shaped by `BladeShape`, stay at least a pixel wide seen
+  edge-on, and bend in the wind field. Voronoi clumps drive facing and height
+  through `Clumping` and colour every look's patches.
+  `crcbl screenshot --scene meadow_blades` draws the fixture.
 
 - **Contacts: rung 1 of the contact solver** (`36-contact-solver.md`). A
   `PhysicsSystem::with_contacts(ContactSettings)` system collides: split

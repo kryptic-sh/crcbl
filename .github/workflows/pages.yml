@@ -901,13 +901,14 @@ jobs:
   # anywhere in it, so none of the compositor machinery the demo and probe gates
   # need applies. Headless Chromium plus SwiftShader is the whole environment.
   #
-  # **`--expect-fail ssr,ui,meadow,meadow_shells` IS A MEASUREMENT, NOT A
-  # TOLERANCE.** Every scene but four matches SwiftShader's output exactly within
-  # `Tolerance::RASTERISER`. Those four reproduce to the digit across runs:
-  # `ssr` at 58 grossly-wrong pixels and ssim 0.988822, `ui` at 506 and ssim
-  # 0.983257, `meadow` at 184 and ssim 0.990042, and `meadow_shells` at 222 and
-  # ssim 0.991457 — and all four match on real hardware, which is what says each
-  # is a rasteriser's limit. They are rasteriser differences rather than backend defects — the
+  # **`--expect-fail ssr,ui,meadow,meadow_shells,meadow_blades` IS A
+  # MEASUREMENT, NOT A TOLERANCE.** Every scene but five matches SwiftShader's
+  # output exactly within `Tolerance::RASTERISER`. Those five reproduce to the
+  # digit across runs: `ssr` at 58 grossly-wrong pixels and ssim 0.988822, `ui`
+  # at 506 and ssim 0.983257, `meadow` at 184 and ssim 0.990042,
+  # `meadow_shells` at 252 and ssim 0.990946, and `meadow_blades` at 409 and ssim
+  # 0.985431 — and all five match on real hardware, which is what says each is a
+  # rasteriser's limit. They are rasteriser differences rather than backend defects — the
   # same `ssr` scene matches on real hardware with a max channel delta of 9 and
   # zero gross pixels, and its diff is banding confined to the reflection
   # ray-march and the horizon edges, so the geometry and the instancing that a
@@ -975,11 +976,23 @@ jobs:
           # the per-channel allowance and 0.45% past the gross one, against
           # 0.29% and 0.031% on an RX 7900 XTX under radv; the same wasm on that
           # machine's own GPU matched **32 of 32** goldens, `meadow_shells`
-          # included.
+          # included. Re-measured on 2026-09-17 after rung G2 coloured its
+          # patches by clump: 2.95% and 0.51%.
+          #
+          # **`meadow_blades` joined them on 2026-09-17, measured the same
+          # way.** Rung G2's mesh blades are strips a pixel or two wide at the
+          # goldens' extent, floored at one — no cutout, but every blade's edge
+          # is a coverage decision along most of its length, which moves with a
+          # rasteriser's last bits the way a cutout's band does. On SwiftShader
+          # it reached 3.53% of the frame past the per-channel allowance and
+          # 0.83% past the gross one, against 0.13% and 0.018% on lavapipe
+          # natively against the radv golden; the same wasm on this machine's
+          # own GPU matched **33 of 33** goldens, `meadow_blades` included, one
+          # pixel of it differing by one level.
           - os: ubuntu-latest
             label: linux
             adapter: swiftshader
-            excuse: --expect-fail ssr,ui,meadow,meadow_shells
+            excuse: --expect-fail ssr,ui,meadow,meadow_shells,meadow_blades
             timeout: 45
           # **macOS runs on the machine's own GPU, and gates every one.** Not a
           # preference — Chrome's Dawn has no Vulkan backend on macOS and so has
@@ -990,7 +1003,8 @@ jobs:
           # — `ssr` and `ui` included, so those two are a SwiftShader limit and
           # not a browser-backend defect. Re-measured on 2026-09-16 with the
           # grass field in the set: **31 of 31**, `meadow` included, and on
-          # 2026-09-17 with the shells: **32 of 32**. That is why this leg carries no excuse
+          # 2026-09-17 with the shells: **32 of 32**, and with the mesh blades:
+          # **33 of 33**. That is why this leg carries no excuse
           # list and is the *stronger* of the three. If Metal turns out to differ
           # on a scene, the answer is a measured excuse here, not a wider
           # tolerance.
@@ -1013,7 +1027,7 @@ jobs:
           - os: windows-latest
             label: windows
             adapter: swiftshader
-            excuse: --expect-fail ssr,ui,meadow,meadow_shells
+            excuse: --expect-fail ssr,ui,meadow,meadow_shells,meadow_blades
             # **Sized for one cold run, because this leg has never had a warm
             # one.** 90 was extrapolated from a first attempt cancelled at
             # 45m20s — it had reached `11/11 scene(s) rendered and saved` with
@@ -1174,7 +1188,12 @@ jobs:
       # `hardware` mode on an RX 7900 XTX matched every golden including this
       # one. **`meadow_shells` joined it on 2026-09-17 on the same argument**:
       # without the excuse this step failed on it at 1382 pixels over tolerance
-      # and 222 grossly wrong, to the digit the golden step reports.
+      # and 222 grossly wrong, to the digit the golden step reports — 1425 and
+      # 251 since rung G2 coloured its patches by clump, against the golden
+      # step's 1448 and 252.
+      # **`meadow_blades` joined it on 2026-09-17 on the same argument**:
+      # without the excuse this step failed on it at 1755 pixels over tolerance
+      # and 415 grossly wrong, against lavapipe's own frame.
       #
       # **Linux only for now**, and that is a scope line rather than a limit:
       # `--reference mtl` on macOS and `--reference dx12` on Windows would each
@@ -1189,7 +1208,7 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run:
           ./web/run-cross-backend-e2e.sh --reference vk --expect-fail
-          ssr,ui,meadow,meadow_shells
+          ssr,ui,meadow,meadow_shells,meadow_blades
 
       # **The strongest form of the same question, and the reason this leg is
       # worth its runner minutes.** On Linux the browser renders on SwiftShader

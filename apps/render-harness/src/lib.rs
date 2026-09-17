@@ -147,6 +147,7 @@ const SCENES: &[(Scene, &str)] = &[
     (Scene::StillPool, "still_pool"),
     (Scene::Meadow, "meadow"),
     (Scene::MeadowShells, "meadow_shells"),
+    (Scene::MeadowBlades, "meadow_blades"),
     (Scene::Ui, "ui"),
     (Scene::UiPrimitives, "ui_primitives"),
     (Scene::UiTree, "ui_tree"),

@@ -2,11 +2,11 @@
 
 Written 2026-09-15, from a survey of the tree and a research brief on how
 shipped games and Acerola's grass and fur series draw vegetation. **Rungs G1
-(2026-09-16) and G3 (2026-09-17) are built; nothing else in this document is.**
-Its place in the set is [18-render-features.md](18-render-features.md)'s index;
-the wind every rung reads is [56-wind.md](56-wind.md)'s; the shell technique it
-shares with fur is [58-hair.md](58-hair.md)'s; the fixture that proves it is
-[sample/22-meadow.md](sample/22-meadow.md).
+(2026-09-16), G2 and G3 (2026-09-17) are built; nothing else in this document
+is.** Its place in the set is [18-render-features.md](18-render-features.md)'s
+index; the wind every rung reads is [56-wind.md](56-wind.md)'s; the shell
+technique it shares with fur is [58-hair.md](58-hair.md)'s; the fixture that
+proves it is [sample/22-meadow.md](sample/22-meadow.md).
 
 **One grass system with three looks, not three grass systems.** Card grass, mesh
 blades and stylised shells differ in the geometry a blade is drawn with; they
@@ -225,7 +225,7 @@ on the WebGPU backend in the fixture's browser demo.
 | Rung | What it buys                                                                                                                                                                                                                                                                                                                                                                                                            | What it costs                                     | Needs                          |
 | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------ |
 | G1   | The field description, tiles, deterministic placement, compute generation into fixed slots, the grass pass lit through a guarded copy of the light walk; card grass with cooked coverage mips; wind lean — **built 2026-09-16**, with the chain's level chosen per instance rather than by the hardware, because a cutout turns an implementation's freedom about a grazing quad's LOD into a binary per-pixel decision | one compute dispatch per tile; one draw per slot  | W1 of [56-wind.md](56-wind.md) |
-| G2   | Mesh blades: Bézier from `vertex_index`, two LODs with morph, clumps, rounding, view-space widening                                                                                                                                                                                                                                                                                                                     | 15 or 7 vertices per blade                        | G1                             |
+| G2   | Mesh blades: Bézier from `vertex_index`, two LODs with morph, clumps, rounding, view-space widening — **built 2026-09-17**: the far level keeps one cell of every two-by-two block of the same tiles until G6's rings arrive, the morph's visible half is the normal's blend toward the clump, and blades are floored at a pixel for the reason cards pick a level per instance                                         | 15 or 7 vertices per blade                        | G1                             |
 | G3   | Shells with fins, instanced; stylised shading levers for every look — **built 2026-09-17**: one instanced draw per tile over a `cells` buffer the generation pass writes at each cell's own index, fins pre-built and folded away in the vertex stage, levers on `BladeStyle`, strands floored at one pixel for the same reason G1's cards pick a level per instance                                                    | overdraw proportional to shell count              | G1                             |
 | G4   | The trail texture: interaction on the tick                                                                                                                                                                                                                                                                                                                                                                              | one small render target and a step per tick       | G1                             |
 | G5   | Per-blade simulation with collision and crush                                                                                                                                                                                                                                                                                                                                                                           | a compute step per tick over the streaming window | G2, G4                         |

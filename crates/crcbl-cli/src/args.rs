@@ -192,6 +192,8 @@ OPTIONS:
                                                bare path, half of it in wind
                            meadow_shells       that hillside's field drawn as
                                                stylised shells with fins
+                           meadow_blades       that hillside under clumped mesh
+                                               blades at two levels of detail
                            sprite              four sprites over three batches
                            ui                  text, a rect and an outline
                            ui_primitives       rounded rects, a clipped image
@@ -1289,6 +1291,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::StillPool,
         Scene::Meadow,
         Scene::MeadowShells,
+        Scene::MeadowBlades,
         Scene::Sprite,
         Scene::Ui,
         Scene::UiPrimitives,
@@ -1332,6 +1335,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::StillPool => "still_pool",
         Scene::Meadow => "meadow",
         Scene::MeadowShells => "meadow_shells",
+        Scene::MeadowBlades => "meadow_blades",
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",
         Scene::UiPrimitives => "ui_primitives",

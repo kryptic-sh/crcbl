@@ -18404,18 +18404,25 @@ mod tests {
                             origin: [-2.0, -2.0],
                             cover: vec![[255, 0]; 16],
                         },
-                        vec![crate::grass::BladeType {
+                        // A shell row and a mesh blade row, so the widest
+                        // frame records every look's draw the grass pass has.
+                        [
+                            crate::grass::BladeLook::Shells,
+                            crate::grass::BladeLook::Blades,
+                        ]
+                        .map(|look| crate::grass::BladeType {
                             root_color: [0.05, 0.1, 0.02],
                             tip_color: [0.3, 0.5, 0.1],
                             height: 0.3,
                             half_width: 0.03,
                             height_spread: 0.3,
                             width_spread: 0.2,
-                            // Shells, so the widest frame records every look's
-                            // draw the grass pass has.
-                            look: crate::grass::BladeLook::Shells,
+                            look,
                             style: crate::grass::BladeStyle::PLAIN,
-                        }],
+                            shape: crate::grass::BladeShape::STRAIGHT,
+                            clumping: crate::grass::Clumping::NONE,
+                        })
+                        .to_vec(),
                     )
                     .expect("a real field"),
                 ),

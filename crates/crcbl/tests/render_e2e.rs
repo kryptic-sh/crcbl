@@ -201,6 +201,11 @@ mod grass;
 #[path = "render_e2e/grass_shells.rs"]
 mod grass_shells;
 
+// `docs/plan/57-grass.md` rung G2's mesh blades, beside the other two looks: its
+// claims read both of their files' helpers.
+#[path = "render_e2e/grass_blades.rs"]
+mod grass_blades;
+
 // `docs/plan/07-ui-debug.md` rung 1's primitives, in a file of their own for the
 // same reason.
 #[path = "render_e2e/ui_primitives.rs"]

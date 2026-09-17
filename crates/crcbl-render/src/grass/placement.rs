@@ -20,7 +20,10 @@
 //! cover map is read with `Load` and its density compared as the eight-bit
 //! number the texel holds — so the accepted set, every cell's jitter, its blade
 //! row, its facing and its size lanes are the same bits here and on every
-//! target.
+//! target. So are its clump, the offset from the clump's point and whether the
+//! far level of detail keeps it: [`crcbl_shaders::grass::clump_of`] and
+//! [`crcbl_shaders::grass::kept_far`] are integer searches over the cell's
+//! place in the whole field.
 //!
 //! **A root's height and the ground's normal are not.** Both are a bilinear
 //! blend of four texels, written in the same order in both copies, and a shader
@@ -30,7 +33,9 @@
 //! the reason `crates/crcbl/tests/render_e2e/grass.rs` compares those two fields
 //! under a tolerance and everything else exactly.
 
-use crcbl_shaders::grass::{FACING_SALT, SIZE_SALT, TINT_SALT, accepts, hash, unit_pair};
+use crcbl_shaders::grass::{
+    CLUMP_UNITS, FACING_SALT, SIZE_SALT, TINT_SALT, accepts, clump_of, hash, kept_far, unit_pair,
+};
 
 use super::field::{CELLS_PER_TILE, GrassField, SLOT_CAPACITY};
 
@@ -59,6 +64,12 @@ pub struct Blade {
     pub ground: [f32; 3],
     /// Its own tint lane, in `0..1`.
     pub tint: f32,
+    /// Its clump's identity — `crcbl_shaders::grass::Clump::id`.
+    pub clump: u32,
+    /// Where it stands from its clump's point, in metres along `+X` and `+Z`.
+    pub clump_offset: [f32; 2],
+    /// Whether the far level of detail keeps it.
+    pub kept_far: bool,
 }
 
 /// Every blade tile `slot` places, in cell order.
@@ -78,10 +89,12 @@ pub fn blades_of_tile(field: &GrassField, slot: u32) -> Vec<Blade> {
     let origin = field.tile_origin(slot);
     let side = field.tile_size() / CELLS_PER_TILE as f32;
     let rows = field.blades();
+    let [tile_x, tile_z] = [slot % field.tiles()[0], slot / field.tiles()[0]];
     let mut blades = Vec::new();
     for lane in 0..SLOT_CAPACITY {
         let cell = slot * SLOT_CAPACITY + lane;
-        let jitter = unit_pair(hash(cell));
+        let jitter_lane = hash(cell);
+        let jitter = unit_pair(jitter_lane);
         let along = [
             (lane % CELLS_PER_TILE) as f32,
             (lane / CELLS_PER_TILE) as f32,
@@ -98,32 +111,55 @@ pub fn blades_of_tile(field: &GrassField, slot: u32) -> Vec<Blade> {
         let row = u32::from(texel_row).min(rows.len() as u32 - 1);
         let blade = rows[row as usize];
 
+        let global = [
+            tile_x * CELLS_PER_TILE + lane % CELLS_PER_TILE,
+            tile_z * CELLS_PER_TILE + lane / CELLS_PER_TILE,
+        ];
+        let clump = clump_of(global, jitter_lane);
         let (height, ground) = field.ground().under(world[0], world[1]);
         let spread = unit_pair(hash(cell ^ SIZE_SALT));
+        let clump_height = unit_pair(hash(clump.id ^ SIZE_SALT))[0];
+        let unit = side * (1.0 / CLUMP_UNITS as f32);
         blades.push(Blade {
             cell,
             row,
             root: [world[0], height, world[1]],
-            height: blade.height * (1.0 - blade.height_spread * spread[0]),
+            height: blade.height
+                * (1.0 - blade.height_spread * spread[0])
+                * (1.0 - blade.clumping.height * clump_height),
             half_width: blade.half_width * (1.0 - blade.width_spread * spread[1]),
-            facing: facing_of(cell),
+            facing: facing_of(cell, clump.id, blade.clumping.facing),
             ground,
             tint: unit_pair(hash(cell ^ TINT_SALT))[0],
+            clump: clump.id,
+            clump_offset: [clump.offset[0] as f32 * unit, clump.offset[1] as f32 * unit],
+            kept_far: kept_far(global),
         });
     }
     blades
 }
 
-/// The unit direction cell `cell`'s card faces.
+/// The unit direction cell `cell`'s blade faces, in clump `clump` with the row's
+/// clump facing share `share`.
 ///
 /// A point of the square, normalised — `grass_gen.slang`'s construction, and
 /// decision 9's last line: a direction is a vector rather than an angle, so
 /// nothing here reaches for a transcendental. The square is not the circle, so
-/// a diagonal is about `sqrt(2)` times as likely as an axis.
+/// a diagonal is about `sqrt(2)` times as likely as an axis. The clump's shared
+/// point is drawn the same way from its identity, and `share` of the way toward
+/// it is taken before the one normalisation — so a share of zero is the blade's
+/// own point, bit for bit.
 #[must_use]
-pub fn facing_of(cell: u32) -> [f32; 2] {
-    let pair = unit_pair(hash(cell ^ FACING_SALT));
-    let square = [pair[0] * 2.0 - 1.0, pair[1] * 2.0 - 1.0];
+pub fn facing_of(cell: u32, clump: u32, share: f32) -> [f32; 2] {
+    let square_of = |lane: u32| {
+        let pair = unit_pair(hash(lane ^ FACING_SALT));
+        [pair[0] * 2.0 - 1.0, pair[1] * 2.0 - 1.0]
+    };
+    let (own, shared) = (square_of(cell), square_of(clump));
+    let square = [
+        own[0] + (shared[0] - own[0]) * share,
+        own[1] + (shared[1] - own[1]) * share,
+    ];
     let length_squared = square[0] * square[0] + square[1] * square[1];
     if length_squared > 1e-8 {
         let scale = 1.0 / length_squared.sqrt();
@@ -296,6 +332,93 @@ mod tests {
             1,
             "a row past the table clamps into it"
         );
+    }
+
+    /// **No clumping is the placement clumps were added to, bit for bit**, and
+    /// every blade carries a clump and a far-level decision all the same.
+    ///
+    /// The height and the facing are recomputed here from the formulas with no
+    /// clump term at all, and compared exactly: a share of zero multiplies by
+    /// one and moves the facing's point by nothing.
+    ///
+    /// **Shown red by sabotage** (2026-09-17): the clump's share of the height
+    /// fixed at a quarter whatever the row asks for.
+    #[test]
+    fn no_clumping_leaves_every_blade_where_it_stood() {
+        let row = one_blade()[0];
+        let field = field_with(flat_cover(32, 255), one_blade());
+        let blades = blades_of_tile(&field, 1);
+        for blade in &blades {
+            let spread = unit_pair(hash(blade.cell ^ SIZE_SALT));
+            assert_eq!(
+                blade.height,
+                row.height * (1.0 - row.height_spread * spread[0])
+            );
+            let pair = unit_pair(hash(blade.cell ^ FACING_SALT));
+            let square = [pair[0] * 2.0 - 1.0, pair[1] * 2.0 - 1.0];
+            let scale = 1.0 / (square[0] * square[0] + square[1] * square[1]).sqrt();
+            assert_eq!(blade.facing, [square[0] * scale, square[1] * scale]);
+        }
+        // Tile 1 is the second along `+X`, so its cells' places start a tile
+        // over — and the far level keeps about a quarter of them.
+        let kept = blades.iter().filter(|blade| blade.kept_far).count();
+        let clumps: std::collections::HashSet<u32> =
+            blades.iter().map(|blade| blade.clump).collect();
+        eprintln!(
+            "grass placement: {kept} of {} blades kept far, {} clumps",
+            blades.len(),
+            clumps.len()
+        );
+        assert!((blades.len() / 5..blades.len() / 3).contains(&kept));
+        assert!(clumps.len() > 30, "{} clumps over a tile", clumps.len());
+    }
+
+    /// **A clumped row stands by its clump**: at a full facing share every
+    /// blade of a clump faces one way, and a clump's height share lowers every
+    /// blade of the clump by one shared fraction.
+    ///
+    /// **Shown red by sabotage** (2026-09-17): the shared facing drawn from the
+    /// blade's own cell rather than its clump.
+    #[test]
+    fn a_clumped_row_faces_and_stands_by_its_clump() {
+        let clumped = |facing, height| {
+            vec![BladeType {
+                clumping: crate::grass::field::Clumping { facing, height },
+                ..one_blade()[0]
+            }]
+        };
+        let plain = blades_of_tile(&field_with(flat_cover(32, 255), clumped(0.0, 0.0)), 0);
+        let full = blades_of_tile(&field_with(flat_cover(32, 255), clumped(1.0, 0.5)), 0);
+        assert_eq!(plain.len(), full.len());
+        let mut by_clump: std::collections::HashMap<u32, Vec<(Blade, Blade)>> =
+            std::collections::HashMap::new();
+        for (before, after) in plain.iter().zip(&full) {
+            assert_eq!((before.cell, before.clump), (after.cell, after.clump));
+            by_clump
+                .entry(after.clump)
+                .or_default()
+                .push((*before, *after));
+        }
+        let mut shared_facings = 0usize;
+        for blades in by_clump.values() {
+            let facing = blades[0].1.facing;
+            let ratio = blades[0].1.height / blades[0].0.height;
+            for (before, after) in blades {
+                assert_eq!(after.facing, facing, "clump {} faces two ways", after.clump);
+                assert!(
+                    (after.height / before.height - ratio).abs() < 1e-5,
+                    "clump {} lowers its blades by two shares",
+                    after.clump
+                );
+                assert!((0.5..=1.0).contains(&(after.height / before.height)));
+            }
+            shared_facings += usize::from(blades.len() > 1);
+        }
+        eprintln!(
+            "grass placement: {} clumps over a tile, {shared_facings} with more than one blade",
+            by_clump.len()
+        );
+        assert!(shared_facings > 20);
     }
 
     /// **Gameplay reads the row's height, not a blade's** — so a field of blades

@@ -365,6 +365,8 @@ fn every_view_draws_the_grass_and_no_field_records_no_pass() {
             width_spread: 0.2,
             look: crate::grass::BladeLook::Cards,
             style: crate::grass::BladeStyle::PLAIN,
+            shape: crate::grass::BladeShape::STRAIGHT,
+            clumping: crate::grass::Clumping::NONE,
         }],
     )
     .expect("a real field");
