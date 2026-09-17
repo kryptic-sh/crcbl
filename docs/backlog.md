@@ -7405,7 +7405,7 @@ Present and working: `Clip::sample_into`, `blend_into`, `BlendSpace1d`, `Pose`,
 `Palette::compute` — `apps/puppet` mixes idle↔walk↔run by measured speed through
 them.
 
-### GPU skinning is built — three follow-ons are not (2026-08-27)
+### GPU skinning follow-ons (2026-08-27)
 
 Recorded because `17-animation.md` read as though the whole section were future
 work and it is not. `crates/crcbl-render/src/skinning.rs` over
@@ -7415,20 +7415,14 @@ shadow passes gained no skinning branch (the one branch is
 `GpuInstance::BASE_VERTEX_OVERRIDE` in the raster stages). `apps/puppet`
 consumes it natively and in the browser, with shadows.
 
-Three things it deliberately left:
+Remaining work:
 
-1. **One dispatch per animated range**, not one over a range table. The
-   GPU-driven form needs a range table the shader can index — a second layout to
-   pin against `slangc`.
-2. **The prev half of the double-buffered region has no reader.**
-   `SkinnedRegion` reserves two runs and `Skinning::begin_frame` alternates, per
-   `17-animation.md`'s 2026-07-27 TAA correction, but there is no TAA pass and
-   `SkinnedRegion::previous_base` has no caller outside its module's tests. That
-   is the correction being followed on purpose; note it so nobody "cleans it
-   up".
-3. **Bad joint indices are contained, not diagnosed.** `Skinning::begin_frame`
-   refuses them by name and the shader clamps, but `crcbl-scene` cannot do
-   better at import because a glTF primitive does not know its skin.
+- **One dispatch per animated range**, not one over a range table. The
+  GPU-driven form needs a range table the shader can index — a second layout to
+  pin against `slangc`.
+- **Bad joint indices are contained, not diagnosed.** `Skinning::begin_frame`
+  refuses them by name and the shader clamps, but `crcbl-scene` cannot do better
+  at import because a glTF primitive does not know its skin.
 
 ## Jobs and threading (`21-jobs.md`)
 
