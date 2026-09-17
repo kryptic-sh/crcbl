@@ -3,10 +3,12 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-Current goal: complete the full codebase performance review, record its findings
-and verification gaps in this backlog, and implement the supported low-effort
-performance improvements first to keep the engine lean. Then continue features
-and backlog items in the plans' priority order. Preserve the culling experiment
+Current goal: test whether richer geometry and a more optimized algorithm make
+culling worthwhile, and report the results. Complete the full codebase
+performance review, record its findings and verification gaps in this backlog,
+and implement the supported low-effort performance improvements first to keep
+the engine lean. After those changes, continue implementing features and backlog
+items in the plans' priority order. Preserve the completed culling experiment
 results and report further measurements as they finish. Profile the relevant
 workload, preserve correctness, and measure the result before keeping an
 optimization. Authored interior and browser culling measurements, CPU
@@ -1003,6 +1005,30 @@ Sample and browser follow-up:
   tests rather than adding a general fault API. This verifies the leaf refusal
   mechanism only: retained renderer capacity, pending commits, next-frame
   recovery, draw-generation and gather failure paths remain unverified.
+
+  A separate cache-efficiency candidate was observed with the actual null
+  renderer: static instances, camera and sun, point and spot lights, and
+  `Cadence::EVERY_FRAME`. Moving only the point left light ownership, tile bases
+  and tier assignments unchanged, but published redraw observations changed from
+  a cached atlas with no redrawn faces to nine faces, both cascades and both
+  occupied light slots. The next unchanged frame reused the atlas again. The
+  observed assignments mapped the point to light index zero and the unchanged
+  spot to index one. The fixture also checked recorded shadow-pass presence,
+  instance mirrors, validation and teardown. Leaving the point unchanged failed
+  the invalidation observation; restoring movement passed. These are null
+  preparation/recording observations, not native images or GPU timing.
+
+  Inspect the `view_block` closure in `ForwardRenderer::begin_frame_body`:
+  `..uniforms` carries primary frame fields into each shadow view, while
+  `shadow_group_record` correctly serializes the complete uploaded blocks.
+  Inherited fields are a possible explanation for collateral invalidation, not
+  an established cause. Audit actual depth vertex, task and mesh shader field
+  reads and compare complete per-group blocks before deciding whether unused
+  fields can be canonicalized. Do not weaken cache records by ignoring GPU
+  inputs. Preserve cadence, layout, skinned previous/current data, reflective
+  and probe producers, failure recovery and native image parity. Price native
+  redraw cost before ranking this ahead of measured scratch allocation; no
+  changed-caller optimization or GPU saving has been verified.
 
   A smaller related candidate is the local `slot_matrices` closure in
   `ForwardRenderer::begin_frame_body`: it collects owned `Mat4` runs from the
