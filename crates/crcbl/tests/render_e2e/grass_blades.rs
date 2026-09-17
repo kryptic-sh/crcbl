@@ -442,18 +442,24 @@ fn the_blade_level_switch_does_not_pop() {
         ..row
     });
     let band = MEADOW_BLADE_LOD.band;
-    let at = |distance: f32, band: f32| {
-        frame_with(
-            CLAIM_EXTENT,
-            Some(rebuilt(
-                &thinned,
-                thinned.blades().to_vec(),
-                BladeLod { distance, band },
-            )),
-            MeadowWind::Calm,
-        )
+    // One renderer for every frame, the field swapped between them: opening a
+    // device and building a renderer is nearly all of what a frame costs, and
+    // this claim draws four a switch. A frame after the swap was the frame a
+    // fresh renderer draws of that field, bit for bit, for every frame here on
+    // lavapipe and on radv (2026-09-17).
+    let mut setup = meadow_with(CLAIM_EXTENT, None, MeadowWind::Calm);
+    let ground = frame_of(&mut setup);
+    let mut at = |distance: f32, band: f32| {
+        let field = rebuilt(
+            &thinned,
+            thinned.blades().to_vec(),
+            BladeLod { distance, band },
+        );
+        setup
+            .set_grass(Some(&field))
+            .expect("the thinned meadow with another switch is made resident");
+        frame_of(&mut setup)
     };
-    let ground = frame_with(CLAIM_EXTENT, None, MeadowWind::Calm);
     let (eye, projection) = view(CLAIM_EXTENT);
     let placed: Vec<(Blade, BladeType)> = (0..thinned.slots())
         .flat_map(|slot| placement::blades_of_tile(&thinned, slot))
@@ -535,6 +541,7 @@ fn the_blade_level_switch_does_not_pop() {
             }
         }
     }
+    setup.finish();
     let share = |changed: usize, covered: usize| changed as f32 / covered.max(1) as f32;
     let [
         (crossing, crossed),
