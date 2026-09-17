@@ -1830,6 +1830,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-webgpu` sends a shader module's WGSL alone.** `create_shader_module`
+  used to carry the SPIR-V, MSL and DXIL across the command stream too, which
+  the browser replayer never reads. A renderer's build is one frame's stream and
+  its buffer keeps its largest size, so those bytes stayed in the wasm heap:
+  shard's page reached 33.8 MiB against its browser gate's 32 MiB ceiling once
+  the culling shaders grew, and now peaks at 16.3 MiB.
+
 - **A grass card reads a whole mip level chosen from its own width**, not one
   the hardware picked from a grazing quad's derivatives. Vulkan lets an
   implementation approximate that level, the approximations differ by about half
