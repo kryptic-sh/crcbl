@@ -2077,6 +2077,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Shadow-atlas group records reserve their complete encoded size**: selected
+  uniform blocks, view and cull IDs, frustum planes and record headers determine
+  capacity. Cascade and spot records avoid the point-cube reservation, and full
+  point records avoid growing beyond the incomplete hint. Encoded bytes, group
+  ordering, cache invalidation and shadow cadence remain unchanged.
+
 - **Forward draw partitions avoid a discarded call-list copy**: partition
   construction copies scalar draw metadata directly instead of cloning the
   complete source call vector before replacing it with the filtered calls.

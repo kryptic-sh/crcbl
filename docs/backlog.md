@@ -44,15 +44,60 @@ The shadow-group record capacity trial is underway on
 been moved to the private `forward::shadow_inputs` module with the algorithm
 unchanged. The moved block matched after visibility, link-path and whitespace
 normalization; a deliberately altered instance-count encoding failed that
-comparison. Workspace formatting, default clippy and default tests passed.
-Capacity changes and their production byte tests have not started.
+comparison. Workspace formatting, default clippy and default tests passed, then
+the unchanged move was committed. The production byte test passed on the
+original implementation and independently failed altered revision, count,
+selected views, view id, uniform bytes, cull planes and order before restoration
+passed. Its exact-capacity observation rejected the original hint. Reservation
+now includes headers and all selected view/cull payloads; the production byte
+and capacity test, workspace clippy and default workspace tests passed. The
+locked all-features workspace build, formatting check and all-features clippy
+also passed. Nextest reported 7,200 passed and 507 skipped; the regular
+all-features workspace test run passed separately. Explicit doctests, public and
+private Rustdoc with warnings denied, dependency checks and the release build
+passed. Actual renderer command captures matched for cascade, point, spot and
+combined lighting across paired repeats, and separately for each geometry tail.
+Complete uploaded shadow uniform bytes matched; a deliberately changed indirect
+offset was detected by the capture comparison. The null fixture checks instance
+mirrors, cached/redrawn shadow claims, warmed bind-group reuse, requested
+effects, validation and teardown outside its timer. Paired original and exact
+reservation preparation p50/p95 observations were:
 
-- Price exact shadow-group record capacity next, then retained
+| Lighting       | Original (ms) | Exact (ms)  | Original repeat | Exact repeat |
+| -------------- | ------------- | ----------- | --------------- | ------------ |
+| Cascade        | 0.061/0.065   | 0.059/0.062 | 0.060/0.063     | 0.059/0.062  |
+| Point          | 0.089/0.093   | 0.090/0.093 | 0.089/0.094     | 0.088/0.093  |
+| Spot           | 0.066/0.070   | 0.066/0.071 | 0.066/0.069     | 0.066/0.071  |
+| Point and spot | 0.097/0.101   | 0.095/0.100 | 0.096/0.102     | 0.096/0.100  |
+
+The workload and timer include the existing actual-renderer fixture described
+below; GPU execution, native/browser frame timing and FPS are not measured.
+These small differences do not establish a general CPU gain. Whole-fixture DHAT
+reported 763,931,430 bytes in 1,478,001 blocks originally and 736,900,027 bytes
+in 1,477,451 blocks with exact reservation. The guarded record allocation return
+site, confirmed against the disassembled reservation, reported 36,432,000 bytes
+in 2,750 blocks versus 9,400,600 bytes in 2,200 blocks. A wrong site selector
+failed before the restored selector passed. Setup, warmup and observers are
+included; instrumented timings are excluded from release prices. Instrumented
+complete command captures matched their release counterparts. Whole-fixture peak
+bytes were 18,251,294 and 18,251,291, so this does not establish a material
+peak-memory improvement. Radeon/RADV passed its render suite with 98 tests and
+no skips, opening the requested discrete adapter with Vulkan validation. Every
+lavapipe engine suite passed without skips on the requested CPU adapter. The
+full Vulkan suite passed with 63 tests; a separate direct positive run passed
+with 60 tests and the deliberate violations excluded. The filtered shell harness
+refused its missing reach marker as described below; it was not counted as a
+passing gate. Vulkan validation was loaded and clean on positive paths. The
+local full harness reported record-time and single-submission reach, with
+cross-submission reach absent. Exact-commit CI/browser/deployment verification
+remains required before retaining this change.
+
+- Finish exact shadow-group record capacity verification, then price retained
   shadow-preparation views/culls: actual caller profiles below show repeated
-  allocation before cached-atlas reuse. Complete group records currently reserve
-  for a point cube even for a cascade, while a full cube outgrows that hint.
-  Compare complete bytes and recording, allocation churn, CPU cost and host
-  memory before keeping either change. Retained instance carry/dirty-run storage
+  allocation before cached-atlas reuse. The original group records reserve for a
+  point cube even for a cascade, while a full cube outgrows that hint. Compare
+  complete bytes and recording, allocation churn, CPU cost and host memory
+  before keeping either change. Retained instance carry/dirty-run storage
   follows as a small candidate; price moving/dense workloads. Fixed SHA-256
   padding follows renderer/instance preparation: its isolated digest and
   authentication prices, allocation profiles, complete wire compatibility and
@@ -965,11 +1010,12 @@ Sample and browser follow-up:
   point-light case and 763,931,427 bytes in 1,478,001 blocks for point plus
   spot. A guarded query at the record allocation return site, confirmed against
   its disassembled allocation size, reported 30,360,000 bytes/2,200 blocks and
-  36,432,000 bytes/2,750 blocks, respectively. These site totals include
-  point-record regrowth; no production reduction has been measured. Profiled
-  complete command captures matched the uninstrumented runs. This establishes
-  the allocation candidate in actual point/spot preparation, while native images
-  and private record-byte checks remain required for the changed implementation.
+  36,432,000 bytes/2,750 blocks, respectively. These original site totals
+  include point-record regrowth; the changed-production profile is recorded
+  above. Profiled complete command captures matched the uninstrumented runs.
+  This establishes the allocation candidate in actual point/spot preparation,
+  while native images and private record-byte checks remain required for the
+  changed implementation.
 
   A reservation prototype then reused actual uploaded shadow uniform payloads
   captured from that point/spot fixture; its complete command capture matched
@@ -16529,6 +16575,15 @@ So a green local run says nothing about a missing barrier _between_ submissions,
 which is the class every missing cross-frame barrier falls into — but the
 missing half is the layer build, not the machine, and it can be fetched. See
 "Reproducing a lavapipe CI hazard locally" above.
+
+The full `crates/crcbl-vk/tests/run-vk-e2e.sh` also requires the reach marker
+from `validation_gate::synchronisation_validation_catches_a_missing_barrier`. A
+filtered invocation excluding that deliberate hazard test was observed to refuse
+its missing marker even though the selected tests passed. Keep the full harness
+as the gate. An additional direct nextest selection can exclude the intentional
+violation tests to inspect clean positive paths, but cannot measure validation
+reach. Declined weakening the marker requirement to permit that filtered shell
+invocation; absence of the measurement must remain visible.
 
 Neither environment subsumes the other: the local run has a real driver, a
 discrete GPU and a real async-compute queue that CI has never had. Treat "green
