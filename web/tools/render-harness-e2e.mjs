@@ -67,7 +67,15 @@ import {
 } from './browser-launch.mjs';
 import { serve } from './serve.mjs';
 
-const RUN_TIMEOUT_MS = 180_000;
+// **How long the harness may go without finishing another scene**, not how
+// long the whole run may take. A whole-run deadline is one every added scene
+// eats into: on Windows' SwiftShader leg the span from driving the scenes to
+// the verdict ran 155 s before the grass scenes and 167–208 s after them
+// (2026-09-16 and 2026-09-17), and a later run passed a 180 s deadline with no
+// scene hanging. The window restarts on each scene the page records, so it
+// still catches a boot or a scene that never finishes, and no longer shrinks as
+// scenes are added.
+const STALL_TIMEOUT_MS = 120_000;
 
 // `stopEverything` and the exit hooks that call it are in
 // `web/tools/browser-launch.mjs`, with the launch that registers each browser.
@@ -260,7 +268,9 @@ async function main() {
 
     // Poll for the harness to finish. It sets `window.harnessDone` once it has
     // driven every scene, whatever the outcome — a page that never sets it is a
-    // page that failed to boot, which the timeout turns into a hard failure.
+    // page that failed to boot or a scene that hung, which the stall window
+    // turns into a hard failure. The window restarts whenever
+    // `window.harnessResult.scenes` grows.
     //
     // Written out rather than run through the shared `until`, which the two
     // check gates use: that one answers `null` on the deadline and swallows a
@@ -269,14 +279,27 @@ async function main() {
     // yet, and the deadline is a failure rather than an answer. The interval is
     // coarse because one boolean over the wire every quarter second is enough
     // to notice a run that takes minutes.
-    const deadline = Date.now() + RUN_TIMEOUT_MS;
+    let deadline = Date.now() + STALL_TIMEOUT_MS;
+    let driven = 0;
     let done = false;
     while (Date.now() < deadline) {
       done = await evaluate(page, 'Boolean(window.harnessDone)');
       if (done) break;
+      const scenes = await evaluate(
+        page,
+        '(window.harnessResult?.scenes ?? []).length'
+      );
+      if (scenes > driven) {
+        driven = scenes;
+        deadline = Date.now() + STALL_TIMEOUT_MS;
+      }
       await pause(250);
     }
-    if (!done) fail(`the harness did not finish within ${RUN_TIMEOUT_MS} ms`);
+    if (!done) {
+      fail(
+        `the harness finished no scene for ${STALL_TIMEOUT_MS} ms, after ${driven} scene(s)`
+      );
+    }
 
     const result = await evaluate(page, 'window.harnessResult');
     if (!result || !result.started) {
