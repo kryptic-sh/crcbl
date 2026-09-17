@@ -39,12 +39,13 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
-- P13's explicit partition metadata copy trial below is underway on
-  `perf/partition-metadata-copy`: avoid cloning the source call vector that
-  struct-update syntax discards, without retaining another cache. Bucket draw
-  recording and partition construction have first been moved into the private
-  `forward::bucket_draws` module with the algorithm unchanged. The moved
-  definitions matched after visibility normalization, and the comparison
+- P13's explicit partition metadata copy trial below is on `main` at `991a6fc`.
+  Its exact-commit CI completed successfully; Pages browser gates, deployment
+  and live-site verification remain pending. Avoid cloning the source call
+  vector that struct-update syntax discards, without retaining another cache.
+  Bucket draw recording and partition construction have first been moved into
+  the private `forward::bucket_draws` module with the algorithm unchanged. The
+  moved definitions matched after visibility normalization, and the comparison
   rejected a deliberately changed draw-region count offset. Workspace
   formatting, default clippy and tests passed before the move was committed. The
   explicit field-copy implementation is now present. Its production metadata
@@ -68,10 +69,20 @@ Next performance trials:
   positive run reported 60 passed and 3 skipped; its loaded validation log was
   clean. The local layer reported record-time and one-submission checking, but
   no cross-submission checking. No native or browser frame speedup is
-  established. Retained instance carry/dirty-run storage and input queue
-  capacity follow as small candidates. Price moving/dense and input-burst
-  workloads, respectively. Backend command-pool reuse, wider graph caching and
-  math changes need stronger workload evidence or carry more lifecycle risk.
+  established. Price exact shadow-group record capacity next, then retained
+  shadow-preparation views/culls: actual caller profiles below show repeated
+  allocation before cached-atlas reuse. Complete group records currently reserve
+  for a point cube even for a cascade, while a full cube outgrows that hint.
+  Compare complete bytes and recording, allocation churn, CPU cost and host
+  memory before keeping either change. Retained instance carry/dirty-run storage
+  follows as a small candidate; price moving/dense workloads. Fixed SHA-256
+  padding follows renderer/instance preparation: its isolated digest and
+  authentication prices, allocation profiles, complete wire compatibility and
+  shader/persistence fixtures are recorded below. Verify the changed production
+  callers, workspace and browser gates before keeping it. Input queue capacity
+  remains an input-burst candidate to price. Backend command-pool reuse, wider
+  graph caching and math changes need stronger workload evidence or carry more
+  lifecycle risk.
 
 P13 paired release preparation/recording measurements used the same actual
 renderer fixture at 960x720, with 550 frames and 500 timed after warmup. The
@@ -98,7 +109,8 @@ as a frame benchmark. `size` reported text sections of 5,113,077 bytes for the
 eager recording executable and 5,112,897 bytes for its explicit-copy
 counterpart; this does not price every backend or build. Retain the allocation
 reduction separately from any claim about complete GPU frame time. Local backend
-gates passed; CI and deployment are still required before this trial ships.
+gates and exact-commit CI passed; Pages browser gates, deployment and live-site
+verification are still required before this trial ships.
 
 Editor image coverage gap:
 `app::instances::tests::filtered_editor_images_match_eager_writes_through_history`
@@ -499,6 +511,135 @@ Networking preparation follow-up:
   derivation, replay rejection and existing wire bytes if changing temporary
   storage.
 
+- SHA-256 padding follow-up read `crcbl_shaders::sha256::sha256`, `compress`,
+  its tests and `crcbl_net::auth::hmac_sha256`. The hash allocates a
+  fixed-capacity tail vector for every digest, then processes whole input blocks
+  and padded tail blocks. This is reached by both inner and outer MAC hashing on
+  packet sealing and verification; asset identity and persistence checksums also
+  call the same hash. Fixed local padding storage could remove this digest
+  allocation without changing the compression algorithm, hash API, full-message
+  buffering or authentication ownership. Price actual small and large packet
+  authentication, allocation churn and stack use before ranking it above the
+  measured renderer candidates. Wider streaming hashing remains a separate
+  design; no production hash change or caller speedup is established. Coverage
+  gap: `every_padding_boundary_is_exercised` asserts fixed digest/hex lengths
+  and unequal digests for differently sized inputs, but has no expected digest
+  for each boundary. Its comment mentions a streaming comparison that the test
+  does not perform. An external copy of the current source passed that exact
+  test even after flipping the first byte of every computed digest. The
+  published-vector test rejected that mutation, and the original source passed
+  both exact tests. This demonstrates a gap in the boundary-specific check,
+  rather than a defect in the current hash or an absence of published-vector
+  coverage. Before changing padding, add independently generated complete
+  expected digests around each padding/block boundary, check original and new
+  implementations against them, and show a padding or digest mutation fails.
+  Preserve existing NIST and HMAC vectors, shader-source manifests, saves,
+  authenticated wire bytes and browser builds. No repository tests were changed
+  or weakened during this source-review probe. A separate safe prototype
+  replaced only the tail vector with fixed local padding storage, preserving the
+  existing compression implementation. Its complete digests and the current
+  release library's digests matched independently generated Python `hashlib`
+  answers for 15 inputs around padding/block boundaries and at larger sizes. An
+  intentionally wrong bit-length field made that comparison fail before restored
+  runs passed. Paired digest-only release timings included padding and
+  compression, with 500 timed batches of 20 calls after warmup; percentiles
+  report batch cost divided by calls. Input creation, expected-answer checks,
+  session authentication and engine/network work were excluded:
+
+  | Input bytes | Original p50/p95 (ns/call) | Fixed padding p50/p95 | Original repeat   | Fixed repeat      |
+  | ----------- | -------------------------- | --------------------- | ----------------- | ----------------- |
+  | 64          | 311.6/312.6                | 289.6/294.1           | 297.1/299.1       | 284.0/289.1       |
+  | 1200        | 2721.7/2810.8              | 2671.6/2707.1         | 2728.2/2827.3     | 2686.1/2714.2     |
+  | 65536       | 139912.5/140911.9          | 138470.2/139502.2     | 139915.0/141022.0 | 138672.6/139701.0 |
+
+  Both timing pairs favored fixed padding in this isolated artifact comparison.
+  It is not a production caller improvement: production caller profiles, browser
+  stack budgets, source-manifest/save verification and workspace gates still
+  need measurement or execution before retaining a repository implementation.
+  The existing HMAC concatenation buffers are separate candidates and remain
+  unchanged. A subsequent whole-fixture DHAT run with a 64-byte input,
+  independent binary and hex checks, warmup and observations reported 1,577,493
+  bytes in 12,172 blocks originally versus 99,090 bytes in 622 blocks for fixed
+  padding. Both reported a whole-fixture allocation peak of 66,276 bytes; this
+  demonstrates churn reduction, not a lower fixture peak. A guarded query rooted
+  in the original hash function and the observed repeated-call site reported
+  1,408,000 padding bytes in 11,000 blocks, including warmup, and no matching
+  site with fixed padding. The original site was required to exist. Original
+  hash allocations still appear in the fixed-padding fixture's independent
+  expected-answer setup, so no zero-allocation claim applies to the fixture.
+  Instrumented timings are excluded from release prices. Production
+  authentication allocation and latency remain unmeasured. The fixed-padding
+  prototype also passed the copied current SHA-256 and authentication source
+  tests in an external fixture: 21 passed with no failures. This includes
+  published NIST/HMAC vectors, oversized HMAC keys, tampering, malformed input,
+  replay-window behavior and counter exhaustion. Its token fixture preserves the
+  current private byte accessor rather than exposing that accessor on the
+  engine's public token. Changing the padding length made the exact RFC
+  HMAC-vector test fail; the unchanged prototype then passed it. A further
+  release fixture compared the current release library's `SessionCrypto` against
+  the unchanged authentication source using fixed padding. Complete envelopes
+  matched across empty, boundary-sized, small and large payloads; each
+  implementation opened the other's envelope, rejected a forged MAC, and refused
+  repeated observer packets. Counter, complete payload and wire-byte checks ran
+  outside timing. Deliberately changing an observed envelope made its full-byte
+  comparison fail before normal runs passed. Timing includes seal, MAC
+  verification, replay acceptance and envelope destruction, with 500 timed
+  batches of 20 calls after warmup. Key derivation, fixtures, assertions and
+  engine/network work are excluded. These percentiles report batch cost divided
+  by calls:
+
+  | Payload bytes | Original p50/p95 (ns/pair) | Fixed padding p50/p95 | Original repeat   | Fixed repeat      |
+  | ------------- | -------------------------- | --------------------- | ----------------- | ----------------- |
+  | 64            | 1649.7/1691.2              | 1556.9/1607.0         | 1611.0/1634.1     | 1533.9/1564.5     |
+  | 1200          | 6714.2/6946.6              | 6465.8/6914.6         | 6616.5/6899.1     | 6437.6/6752.3     |
+  | 65536         | 282218.0/286776.1          | 279743.3/284875.5     | 281587.8/286293.7 | 279570.0/284375.5 |
+
+  Both pairs favored fixed padding in this source-fixture artifact comparison.
+  This is not production server/client receive cost: decoding, transport, packet
+  mix and application tick work were not included. Whole authentication-fixture
+  DHAT for a 64-byte payload reported 13,883,553 bytes in 111,292 blocks
+  originally versus 7,828,638 bytes in 63,988 blocks with fixed padding. Both
+  reported a whole-fixture peak of 328,600 bytes; setup, warmup and independent
+  original-library observers are included, so these are not per-packet totals. A
+  guarded query of the original hash function at the observed repeated seal and
+  open call sites reported 5,632,000 padding bytes in 44,000 blocks, including
+  warmup, and no matching site with fixed padding. The original sites were
+  required to exist. Original hashing remains in the independent wire observers;
+  envelope and HMAC concatenation allocations also remain. Instrumented timings
+  are excluded from release prices. Production caller changes/profiles, browser
+  stack budgets, source-manifest/save verification and repository workspace
+  gates remain open. Shared-consumer review also read `SaveWriter::checksum`,
+  `SaveReader` checksum validation, OPFS `frame`/`unframe` and the shader build
+  script's source and artifact hash checks. A separate prototype used the
+  production manifest parser to verify every listed source and artifact against
+  both original and fixed-padding hashes: 50 shader records and 304
+  source/artifact checks passed. This includes optional target columns and
+  per-entry artifact rows; the input set was required to be nonempty. A wrong
+  padding-length prototype failed the fixed-padding comparison while the
+  original hash matched, then the unchanged prototype passed. This did not
+  regenerate artifacts or execute the repository build script with a changed
+  hash. Production integration and browser stack checks remain open. The native
+  save/OPFS compatibility fixture is recorded below. OPFS framing and validation
+  still concatenate header and payload into an owned digest-input vector; fixed
+  padding alone would not remove that full-payload copy. Price persistence
+  separately before proposing a wider segmented/streaming hash interface.
+  Persistence follow-up exercised the current release `SaveWriter`,
+  `SaveReader`, `MemoryStorage` and safe `OpfsStorage::restore` path. Across 13
+  payload cases, save bytes reconstructed with fixed-padding checksums matched
+  the original writer's complete output, and the original reader accepted the
+  checksum and returned the expected tick, playtime, sector and complete
+  snapshot bytes. Header corruption was refused. A separate source fixture
+  copied the current OPFS framing/unframing functions and changed only their
+  hash provider. Complete frames and decoded payloads matched for the same 13
+  payload cases across 3 generation values each; the current OPFS restore path
+  accepted those frames, retained the newer generation and refused corrupted
+  generation bytes without replacing resident data. Deliberately wrong save and
+  OPFS checksum bytes independently failed the complete-byte comparisons before
+  normal runs passed. These are native compatibility fixtures, not a changed
+  repository implementation or browser storage run. Production save/hash
+  integration, wasm exports, worker restoration and queued/durable browser
+  writes still need their existing repository/CI gates.
+
 Simulation and loading follow-up:
 
 - `crcbl_vfx::system::update` redraws each live particle's `Life` through
@@ -789,6 +930,154 @@ Sample and browser follow-up:
   large-scenes and scrolling need separate pricing before retaining labels with
   invalidation.
 
+- Shadow preparation follow-up inspected `ForwardRenderer::begin_frame_body`,
+  `shadow_group_record` and the cached-atlas early return in
+  `crcbl-render/src/forward.rs`. It reserves fresh `views` and `culls` vectors
+  using `SHADOW_VIEWS` and `SHADOW_CULLS` before deciding the atlas can be
+  reused. Both remain required inputs to complete cache-key construction and
+  conditional uniform/cull uploads; skipping their construction merely because
+  the previous atlas was cached would miss current changes. A release helper
+  using the actual tuple types and public shadow constants reported capacity
+  footprints of 44,720 and 672 bytes. Disassembly showed those allocation sizes
+  at the corresponding adjacent allocation return sites in `begin_frame_body`.
+  Guarded DHAT queries of both actual renderer fixtures below found matching
+  direct method sites: 24,596,000 bytes in 550 blocks and 369,600 bytes in 550
+  blocks, respectively. This is concrete repeated scratch allocation, including
+  cached frames, rather than a claim that cached shadows redraw. Compare
+  retained private scratch ahead of wider graph-plan caching; it targets a
+  larger observed allocation volume than the instance-list trial below, but its
+  isolated CPU saving has not been measured. Preserve complete cache keys,
+  view/cull order, group ownership, cadence resets, refused/failed writes,
+  shadow-off reflective/probe producers, layout changes and point-face culls.
+  Clear scratch before the next assembly even after failure, and retain it
+  across every early return. Price lifetime host memory and whole-frame peak
+  memory: retaining capacity keeps storage live past frame preparation. Large
+  fixed stack arrays were declined without stack-budget evidence for native and
+  wasm callers. The owning frame-preparation responsibility needs a separate
+  behavior-preserving private-module move before editing this monolith. No
+  retained-scratch implementation, changed-caller gain or browser/native GPU
+  frame measurement is established yet.
+
+  The related `shadow_group_record` capacity hint always reserves for
+  `shadow::POINT_FACES` uniform blocks, even for a cascade with one view, and
+  omits record headers, view IDs and cull plane bytes. A source-format capacity
+  probe using the resolved uniform size reported an initial capacity of 11,040
+  bytes. Its cascade record encoded 1,968 bytes and retained that capacity; its
+  full point cube encoded 11,188 bytes and grew capacity to 22,080. An
+  exact-size destination reported capacities of 1,968 and 11,188, respectively.
+  The arithmetic assertion rejected a deliberately wrong expected length before
+  the normal probe passed. This is a copied metadata-format probe, not a
+  production change or a serialization latency comparison. The actual renderer
+  profiles reported the corresponding maximum-size record allocation footprint
+  at 12,144,000 bytes in 1,100 blocks; those fixtures contain cascades, rather
+  than exercising a point cube. Price exact capacity based on actual group
+  views/culls before retained scratch: it can reduce overreservation and
+  point-record regrowth without another cache or lifetime storage. Preserve
+  every encoded byte, group/view/cull order, revision IDs, changed-input
+  detection and cadence behavior. Move the existing group-record serialization
+  and its contract along its private seam before changing capacity. Production
+  complete-byte tests, changed-caller profiles, point/spot/cascade images and
+  CPU/native/browser performance still require verification. A follow-up actual
+  renderer fixture added non-fill point and spot lights through `set_lights`.
+  Cold-frame assertions observed their occupied shadow slots, and recorded
+  redraws versus cached-atlas claims remained independently checked. Full
+  instance mirrors, warmed bind-group reuse, requested effect labels, null
+  validation, teardown and complete command captures passed across repeats. At
+  256 mixed-mode cubes, 960x720, 550 frames and 500 timed, with the same
+  moving/stopped cadence and timer exclusions as below:
+
+  | Extra lights   | Preparation p50/p95 (ms) | Repeat (ms) | Cold shadow faces | Cached/redrawn commands |
+  | -------------- | ------------------------ | ----------- | ----------------- | ----------------------- |
+  | Point          | 0.089/0.094              | 0.090/0.094 | 8                 | 495/1366                |
+  | Spot           | 0.066/0.070              | 0.066/0.069 | 3                 | 495/886                 |
+  | Point and spot | 0.097/0.101              | 0.097/0.121 | 9                 | 495/1492                |
+
+  Each reported 213 cached-shadow and 287 redraw frames among timed frames.
+  Whole-fixture DHAT reported 747,491,409 bytes in 1,399,796 blocks for the
+  point-light case and 763,931,427 bytes in 1,478,001 blocks for point plus
+  spot. A guarded query at the record allocation return site, confirmed against
+  its disassembled allocation size, reported 30,360,000 bytes/2,200 blocks and
+  36,432,000 bytes/2,750 blocks, respectively. These site totals include
+  point-record regrowth; no production reduction has been measured. Profiled
+  complete command captures matched the uninstrumented runs. This establishes
+  the allocation candidate in actual point/spot preparation, while native images
+  and private record-byte checks remain required for the changed implementation.
+
+  A reservation prototype then reused actual uploaded shadow uniform payloads
+  captured from that point/spot fixture; its complete command capture matched
+  the original fixture after adding the observer. Captured payload lengths were
+  checked against the cold shadow-face count. The prototype copied the record
+  format with an explicit synthetic revision/count header, reconstructing frusta
+  from captured matrices and the point light. Original and exact reservations
+  produced identical complete records for cascade, point, spot and empty-group
+  inputs. Wrong expected capacity and a changed final cull byte independently
+  failed their checks before the normal probe passed. The timer includes
+  capacity calculation, key allocation, metadata serialization, payload copying
+  and destruction. Uniform-block encoding, capture, startup, assertions and
+  renderer/GPU work are excluded. Each release run reported 1,000 timed batches
+  of 1,000 calls after warmup. Percentiles report batch cost divided by calls
+  per batch:
+
+  | Group   | Original p50/p95 (ns/call) | Exact p50/p95 (ns/call) | Original repeat | Exact repeat |
+  | ------- | -------------------------- | ----------------------- | --------------- | ------------ |
+  | Cascade | 37.0/39.3                  | 33.3/41.2               | 29.4/29.7       | 33.2/33.9    |
+  | Point   | 86.5/88.7                  | 79.2/81.1               | 85.9/88.5       | 79.4/81.7    |
+  | Spot    | 34.5/35.0                  | 36.2/37.7               | 33.3/33.7       | 35.8/36.9    |
+
+  Point construction improved in both pairs, while single-view construction
+  showed no consistent benefit. A shorter whole-fixture point DHAT comparison
+  reported 994,779,365 bytes in 60,104 blocks for the original hint and
+  336,139,470 bytes in 30,073 blocks for exact reservation. A guarded query of
+  the repeated construction-loop allocation site, including warmup, reported
+  993,600,000 bytes/60,000 blocks versus 335,640,000 bytes/30,000 blocks. Setup
+  and validation sites are separate from that query; the totals are not
+  allocations per engine frame. Instrumented timings are not used as release
+  prices. This supports a narrower allocation trial, without establishing
+  private production-record tests or any whole-renderer, native or browser
+  improvement. Keep the actual renderer comparisons and image gates required
+  before retaining it.
+
+  A further release prototype includes the actual `FrameUniforms::to_bytes` call
+  for every selected view. Inputs use the captured view matrices with explicitly
+  synthetic remaining uniform fields and revision/count headers; these are not
+  the complete original uploaded payloads. Before timing, records built from the
+  typed blocks matched a separate path appending their saved encoded payloads.
+  Changing a typed uniform after saving those payloads made that comparison
+  fail. Changed final cull bytes and wrong expected capacity also failed
+  independently; restored runs passed for cascade, point, spot and empty groups.
+  The timer includes capacity calculation, allocation, metadata serialization,
+  uniform encoding, copying and destruction, while setup, assertions and
+  renderer/GPU work are excluded. Each checked run reported 1,000 timed batches
+  of 1,000 calls after warmup; the percentiles are batch cost divided by calls
+  per batch:
+
+  | Group   | Original p50/p95 (ns/call) | Exact p50/p95 (ns/call) | Original repeat | Exact repeat |
+  | ------- | -------------------------- | ----------------------- | --------------- | ------------ |
+  | Cascade | 84.0/86.9                  | 81.9/102.4              | 80.5/82.8       | 87.2/93.3    |
+  | Point   | 427.7/430.5                | 428.2/437.8             | 410.4/413.9     | 397.7/401.0  |
+  | Spot    | 83.0/85.8                  | 87.0/89.3               | 80.1/82.3       | 83.0/85.0    |
+
+  Including uniform encoding does not establish a consistent CPU improvement for
+  the point case either. Exact reservation still reported final capacities of
+  1,968 bytes for single-view groups and 11,188 for the point group, versus
+  11,040 and 22,080 for the original hint. Keep this as an allocation trial; the
+  narrower pre-encoded timing above cannot establish a full serialization gain.
+  An additional external release fixture extracted the current
+  `shadow_group_record` method unchanged into a private wrapper borrowing the
+  real `InstancePool`, then changed only reservation in its candidate method. A
+  separate reference encoder matched complete records with interleaved group
+  owners, multiple matching culls, unsorted selected view ids and empty
+  selections. Exact capacity matched the complete encoded length. Changed eye,
+  instance count, selected view id, uniform contents, cull-plane signed zero or
+  selected order changed the bytes; changes to unselected uniforms and planes
+  did not. An actual pool write changed only the revision header. Deliberately
+  incorrect capacity and inverted group filters each failed before the normal
+  fixture passed again. Typed uniforms and culls are fixture data; this does not
+  exercise the private production method on an actual `ForwardRenderer`. Port
+  these observations into that method's private tests. Production byte tests,
+  changed-renderer recording/profiles, native images and complete-frame/browser
+  prices remain required or unmeasured.
+
 - `crcbl_render::instance_pool::InstancePool::carry_forward` consumes and drops
   `written_last_frame` through `mem::take`, then takes `written_this_frame`,
   leaving that vector without capacity for the next frame's writes. Moving or
@@ -808,7 +1097,102 @@ Sample and browser follow-up:
   takes and drops a slot's dirty-run vector on successful upload; reuse its
   capacity after clearing the committed runs. Preserve failed-write retry ranges
   and idempotent flush behaviour, and price sparse updates as well as one dense
-  run.
+  run. A fresh actual-pool release fixture alternated moving and stopped phases
+  over 550 frames, with 500 timed after warmup and a ring of three buffers. It
+  checked every complete record, complete current-slot upload bytes, exact
+  coalesced buffer/offset/length tuples, revision increments, motion settling,
+  idempotent flush, null validation and zero live HAL objects after teardown.
+  Deliberately changing an expected metadata byte failed before restoring and
+  passing. This fixture separates set/rotate from flush timing; assertions and
+  observer allocations are outside those timers. With 256 instances, dense
+  updates reported set/rotate p50/p95 of 0.006/0.008 ms and 0.006/0.007 on
+  repeat, with flush 0.000/0.000 and 0.000/0.001. Updating every other instance
+  reported set/rotate 0.004/0.005 ms and 0.004/0.007 on repeat, with flush
+  0.004/0.004 in both repeats. These are unmodified-pool baselines, not native
+  GPU frame costs; synthetic mesh IDs are host metadata and no shader consumes
+  them. Whole-run DHAT, including setup, warmup and observers, reported
+  45,990,451 bytes in 4,700 blocks for dense updates and 64,748,875 bytes in
+  9,164 blocks for sparse updates. Guarded stack queries found actual
+  set-enrollment growth of 477,520 bytes in 1,645 blocks for dense updates and
+  236,880 bytes in 1,410 blocks for sparse updates. Dirty-run growth through
+  `set` and stopped-object settling reported 12,512 bytes/391 blocks and 2,528
+  bytes/79 blocks for dense updates, versus 788,256 bytes/2,346 blocks and
+  159,264 bytes/474 blocks for sparse updates. These are allocation-site totals,
+  not per-frame figures or timed-region heap totals. They support pricing the
+  narrow retained storage change after the shadow trial; no changed
+  implementation or speedup was measured. Slot removal/reuse, repeated writes
+  within one frame and failed-write retry remain separate required coverage
+  before that trial can ship. The existing instance-pool tests cover stale
+  handles, reuse, previous transforms and coalescing; no failed-upload retry
+  test was found. The null device checks the destination byte range before
+  copying and returns `InvalidDescriptor` on an oversized write. A test-private
+  short HostUpload destination can therefore make a later sparse run fail after
+  an earlier run succeeds, without adding a public failure injector. Observe
+  committed versus retained ranges and seed already committed bytes into the
+  restored destination before checking retry bytes and idempotence. Preserve
+  destination identity assumptions in that fixture rather than claiming buffer
+  replacement itself is an ordinary pool operation. An external release fixture
+  now copied the current `InstancePool` implementation, changing only dependency
+  import paths and adding private fixture access. After warming every frame
+  slot, it made sparse writes and substituted a short HostUpload target to fail
+  the first, middle or last run with `InvalidDescriptor`. Recorded successful
+  writes matched the committed prefix; retained dirty ranges matched the failed
+  run and remaining suffix. It seeded the committed prefix into the restored
+  destination, then verified exact retry writes, complete buffer bytes,
+  idempotent flush, unchanged pending runs in other slots, null validation and
+  zero live HAL objects after teardown. Deliberately dropping the failed run or
+  retaining the already committed prefix each made the fixture fail; the normal
+  copy passed again. Buffer substitution and prefix seeding are fixture
+  operations, not supported pool behavior. This establishes the recovery test
+  design, not a production test or an optimized implementation. Port it into the
+  private production tests and repeat against retained dirty-run storage before
+  shipping; actual renderer failure recovery remains unverified. The same
+  external source copy also exercised repeated writes to a handle, removal and
+  same-index reuse before rotation, stale set/remove rejection, continued motion
+  across rotations and stopping. It checked unique enrollment despite repeated
+  writes and reuse, unchanged revisions for stale operations, no premature
+  settling during continued motion, a single settling write after stopping,
+  complete current/previous record bytes and destination bytes through the frame
+  ring, dead-slot preservation, idempotent flush and teardown. A deliberately
+  corrupted settling transform failed the full-byte comparison; normal lifecycle
+  and retry fixtures passed again. These strengthen the production test design;
+  changed storage and actual renderer removal/reuse remain required coverage.
+
+  A follow-up release fixture drove `ForwardRenderer::set_instance` and its
+  actual instance pool with resident mixed-mode cubes, rather than synthetic
+  mesh IDs. It alternated moving and stopped phases, checked complete current
+  and previous host records, requested effect passes, warm bind-group reuse,
+  independently recorded shadow redraws versus cached-atlas claims, null
+  validation and zero live HAL objects. Deliberately changing the final
+  instance's expected mesh field failed; normal runs and full cold/warm command
+  captures matched across repeats. The timer includes `set_instance`,
+  `begin_frame`, graph build/compile/execute and encoder finish; startup,
+  assertions, capture formatting, destruction, UI, acquisition, submission,
+  presentation and GPU shader execution are excluded. At 960x720 each run
+  reported 550 frames with 500 timed, including 213 cached-shadow frames and 287
+  redraw frames. Those states recorded 495 and 760 commands, respectively.
+
+  | Instances | Updated elements | Preparation p50/p95 (ms) | Repeat (ms) |
+  | --------- | ---------------- | ------------------------ | ----------- |
+  | 256       | All              | 0.066/0.078              | 0.059/0.063 |
+  | 256       | Every other      | 0.061/0.071              | 0.061/0.063 |
+  | 1024      | All              | 0.081/0.088              | 0.082/0.098 |
+  | 1024      | Every other      | 0.088/0.097              | 0.088/0.097 |
+
+  Whole-fixture DHAT for the actual 256-instance renderer reported 535,157,061
+  bytes in 1,041,461 blocks for dense updates and 542,067,462 bytes in 1,043,190
+  blocks for sparse updates, including setup, warmup and observers. Guarded
+  queries found set-enrollment growth of 479,552 bytes/1,652 blocks and 237,888
+  bytes/1,416 blocks, respectively. Dirty-run growth through `set` and settling
+  reported 10,048 bytes/314 blocks and 2,528 bytes/79 blocks for dense updates,
+  versus 633,024 bytes/1,884 blocks and 159,264 bytes/474 blocks for sparse
+  updates. Profiled full command captures also matched the corresponding
+  uninstrumented runs. These allocation-site totals establish the candidate in a
+  real renderer caller; they are not per-frame figures or proof of a
+  native/browser frame gain. Compare the same fixtures after retained storage is
+  implemented; integrated removal/reuse and failed upload retry still require
+  coverage.
+
 - Read input tick blocks in shard, puppet, orbit, towers and breach app modules,
   and horde and asteroids game modules: each resets the action map, then
   consumes `pending_keys` with `mem::take`, dropping its capacity after replay.
@@ -2882,14 +3266,52 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   compares payload bytes directly instead of hashing them. `collect_systems`
   still constructs inspector statistics with owned system names, a collision set
   and per-system snapshot buffers. It only uses each statistic's entity count,
-  which `SystemTrait::entity_count` already exposes, so eliminating the
-  inspector collection is a small candidate ahead of a baseline redesign.
-  Preserve replicated-id collision rejection and synthetic count fallback; price
-  a real loopback sample with many systems. Nested baseline maps and per-entity
-  payload ownership need separate measurements before proposing a sorted arena
-  and merge-join representation. Entity vectors in keyframes and deltas still
-  follow map iteration; `encode_delta` preserves that order. Canonical wire
-  ordering is separate correctness work, not a measured speedup.
+  which `SystemTrait::entity_count` already exposes. Replacing owned inspector
+  names with a count-only prepass is a small candidate ahead of a baseline
+  redesign. Lazy count reads during replication were considered and declined:
+  the current inspector captures every count before any `replicate` callback.
+  `SystemTrait` permits shared interior state; a registered-system fixture
+  demonstrated that an earlier callback can change a later system's component
+  count. Inspector/prepass fallback counts matched, while lazy counts differed.
+  Preserve getter/callback order, replicated-id collision rejection and
+  synthetic count fallback; price a real loopback sample with many systems.
+  Nested baseline maps and per-entity payload ownership need separate
+  measurements before proposing a sorted arena and merge-join representation.
+  Entity vectors in keyframes and deltas still follow map iteration;
+  `encode_delta` preserves that order. Canonical wire ordering is separate
+  correctness work, not a measured speedup. An isolated release preparation
+  probe used actual `World`, `System`, `Inspector` and schedule getter APIs. It
+  compared owned name/count inspection with a fresh count-only prepass,
+  retaining name getter calls before each count and consuming borrowed
+  names/counts in schedule order afterwards. Complete names/counts matched
+  independent setup expectations, and a deliberately wrong prepass result failed
+  before normal runs passed. Each run reported 500 timed batches of 100 calls
+  after warmup; percentiles are batch cost divided by calls. Timed work includes
+  name/count preparation and temporary destruction, excluding setup, assertions,
+  replicated-id hashing, collision checks, component serialization, snapshots
+  and transport:
+
+  | Systems | Owned stats p50/p95 (ns/call) | Count prepass p50/p95 | Owned repeat  | Prepass repeat |
+  | ------- | ----------------------------- | --------------------- | ------------- | -------------- |
+  | 1       | 12.8/12.9                     | 7.6/7.7               | 12.6/12.7     | 11.3/11.6      |
+  | 16      | 137.8/139.3                   | 51.3/52.3             | 129.8/254.7   | 52.3/93.5      |
+  | 128     | 1829.0/1917.3                 | 358.0/707.2           | 1884.9/1971.1 | 400.6/422.0    |
+
+  Both timing pairs favored the count prepass in this narrow artifact probe. A
+  count vector still allocates. A subsequent whole-fixture DHAT run with 16
+  systems reported 45,695,192 bytes in 944,538 blocks for owned inspection
+  versus 7,143,490 bytes in 55,738 blocks for the count prepass. Setup, warmup
+  and observations are included; these are not per-server-tick allocations.
+  Guarded queries at the observed repeated preparation site reported 45,210,000
+  bytes in 935,000 blocks for the owned-stat helper versus 7,040,000 bytes in
+  55,000 blocks for the count-prepass helper, including warmup. Each expected
+  allocation site was required to exist; startup and assertion sites were
+  excluded from those queries. Instrumented timings are excluded from release
+  prices. The actual server collector, collision/fallback callback fixtures,
+  complete authenticated wire comparisons and a real loopback tick price remain
+  required or unmeasured. This does not establish complete server or application
+  speedup and stays behind measured renderer/instance preparation.
+
 - **P35 — price client interpolation on its real caller.** `frame_from_baseline`
   reads transforms directly from baseline entities into a map, avoiding a
   snapshot reserialization. `Client::interpolate` still builds and sorts an
@@ -2910,6 +3332,27 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   existing `crcbl bench jobs` workload across worker and chunk settings before
   changing scheduling; preserve deterministic chunk boundaries, wakeup and
   shutdown behaviour, panic propagation, and the driver's frame lifetime.
+- **Audio decoder preparation review — separate asset decoding from callback
+  work.** Read `crcbl_audio::qoa::decode`, its slice helpers, `wav::decode`,
+  native `fill_audio` and `WebAudioOutput::render`, then searched Rust callers
+  across `crates/` and `apps/`. The output paths call the installed
+  `AudioSource`; neither inspected output function directly invokes these file
+  decoders. Outside the codec modules, the decoder reference found by this
+  search was WAV decoding in `synth`'s waveform test; WAV encoding also appears
+  in its explicitly ignored reference writer. No production QOA loading caller
+  was identified. This does not cover external consumers or dynamically supplied
+  audio sources. QOA decoding reserves the complete interleaved output after
+  checking the file-backed sample budget, but constructs a fresh intermediate
+  `Vec<i16>` for each encoded frame and then converts it into that output.
+  Reusing that temporary across encoded frames is a small asset-decoding
+  candidate; decoding directly into the output needs a separate correctness
+  comparison. Declined treating this as a callback optimization or prioritizing
+  it over the measured renderer allocation sites. Price representative loaded
+  sound files first, including allocation and load latency; preserve channel
+  interleaving, partial slices, predictor updates, clipping, exact decoded
+  samples and malformed-file refusal. Decoder allocation profiles, loaded assets
+  and complete asset-to-playback latency remain unmeasured.
+
 - **P37 — price audio contention and retirement before redesigning commands.**
   Callback follow-up read `Mixer::fill`, `route_gain`, the bus accessors and
   `WebAudioOutput::configure`/`render`. Gains are read before the voice loops
@@ -4735,7 +5178,17 @@ What the rung did leave behind:
   a compute pass and there is nothing on the host to compare. A frame with an
   idle character therefore pays for the whole atlas. Making it cheaper needs the
   skinning pass to report that a palette did not change, which nothing asks it
-  for today.
+  for today. The performance review re-read `Skinning::begin_frame`,
+  `ForwardRenderer::begin_skinned_frame`, `point_skinned_instances`,
+  `shadow_group_record` and the group-reuse condition in `begin_frame_body`. The
+  current path validates inputs, advances output parity, repoints current and
+  previous base vertices, uploads instances, then vetoes reuse for an active
+  skinning plan. A static world transform alone is insufficient evidence that a
+  caster's vertices are unchanged. Decline transform-only shadow reuse; any
+  future unchanged-pose optimization must also preserve dynamic bindings,
+  output-half contents, previous-pose motion vectors, empty-plan behavior and
+  failed-upload recovery. Source review establishes these contracts; a priced
+  actual-renderer skinned workload and replacement images remain unverified.
 
 - **A moved instance costs two redraws, not one.** `InstancePool`'s
   carry-forward settles a moved record's `previous_transform` on the frame
