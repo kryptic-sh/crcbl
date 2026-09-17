@@ -1,22 +1,23 @@
 //! Tumble — the physics gallery: each rung of the contact solver on the scene
 //! built to prove it.
 //!
-//! `docs/plan/sample/24-tumble.md`, **milestone 2, rung 0 "Spin"**, from
-//! `docs/plan/36-contact-solver.md`'s rung table: a zero-g T-handle and a box
-//! dropped flat, with angular momentum and energy drift, step time and the
-//! determinism hash on the page. See [`scene`] for both scenes and what each
-//! can and cannot show before rung 1.
+//! `docs/plan/sample/24-tumble.md`, **milestone 3, rung 1 "Pachinko"**, from
+//! `docs/plan/36-contact-solver.md`'s rung table, beside milestone 2's rung 0
+//! "Spin": three rooms, each its own physics system — the zero-g T-handle and
+//! a box that lands ([`spin`]), the obstacle wall with falling balls
+//! ([`wall`]) and a thousand-ball pit ([`pit`]) — with every counter of both
+//! rungs on the page. See [`scene`] for how the rooms share a tick and a hash.
 //!
 //! # What is not here yet
 //!
-//! **Milestone 1 was skipped rather than built**: the ball pit's spawn fountain,
-//! the bullet scene and the wind tunnel, the scene switch, and the golden
-//! frame. Milestone 2 is here because rung 0 is what landed. Every later rung's
-//! scene is `docs/backlog.md`'s to carry.
+//! **Milestone 1 was skipped rather than built**: the bullet scene, the wind
+//! tunnel and the golden frame. Every later rung's scene is `docs/backlog.md`'s
+//! to carry, and what each room cannot show yet is on its hint line.
 //!
 //! # It runs itself
 //!
-//! Nothing here reads a key. The scenes start the same way every run, which is
+//! The one key it reads — `1`, `2`, `3` — picks the room on screen and never
+//! reaches the simulation. The rooms start the same way every run, which is
 //! what lets the browser gate hold the wasm build's hash to the constant the
 //! native test pins.
 //!
@@ -30,8 +31,11 @@ mod args;
 mod gpu;
 pub mod menu;
 pub mod page;
+pub mod pit;
 pub mod scene;
+pub mod spin;
 pub mod stage;
+pub mod wall;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;
@@ -40,4 +44,4 @@ pub use app::{Loop, PendingLoop, Summary, Tumble, TumbleError, run, start, with_
 pub use args::{Invocation, Options, USAGE, parse};
 pub use menu::{MenuKind, Menus};
 pub use page::PageStats;
-pub use scene::{Reading, Scenes};
+pub use scene::{Reading, Scenes, View};

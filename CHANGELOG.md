@@ -213,6 +213,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Contacts: rung 1 of the contact solver** (`36-contact-solver.md`). A
+  `PhysicsSystem::with_contacts(ContactSettings)` system collides: split
+  fattened broadphase trees with a move buffer and pair set; analytic sphere and
+  capsule manifolds against spheres, capsules, oriented boxes and planes
+  (`add_plane`), plus box against plane, with stable feature ids; and a
+  substepped soft solver with warm starting, speculative contacts whose reach
+  grows with speed, and a restitution pass, taking friction and restitution from
+  `SurfaceMaterial`. `kinetic_contacts` reports `KineticContact`s for hard
+  impacts, `contact_counters` and `contacts` expose the rung's counters, and
+  `step_timed` reads a caller's clock between stages.
+  `SemiImplicitEuler::integrate_velocity` and `integrate_position` are the
+  integrator's two halves. `PhysicsSystem::new()` steps as before. `apps/tumble`
+  gains the obstacle wall and a thousand-ball pit beside Spin, on keys 1–3, and
+  its dropped box now lands.
+
 - **Shell grass with fins, and stylised levers for every grass look**
   (`docs/plan/57-grass.md` rung G3). A `BladeType` with
   `look: BladeLook::Shells` is drawn as Acerola-style shells: a stack of

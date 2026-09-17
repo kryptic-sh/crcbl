@@ -552,25 +552,46 @@ optional-extension diagnostics should be deduplicated per asset and extension so
 multiple scene/view imports do not flood the log. Recheck the Mossberg asset in
 EW after the engine implementation lands, then update EW's pinned revision.
 
-## Physics rung 0 shipped without (2026-09-17)
+## Physics rungs 0 and 1 shipped without (2026-09-17)
 
-- **Tumble's milestone 1**: the ball-pit fountain, bullets, wind tunnel, the
-  scene switch and a golden frame ([24-tumble.md](plan/sample/24-tumble.md)).
-  `apps/tumble` has only the Spin scenes.
-- **A browser clock for tumble's step time.** `Instant` panics on wasm32, so the
-  page shows "no clock".
-- **A rotation cap per substep.** `36-contact-solver.md` caps rotation at a
-  quarter turn per substep; `SemiImplicitEuler` does not enforce it.
-- **The cost of `GYROSCOPIC_ITERATIONS` Newton iterations per body** is
-  unmeasured at rung 6's body counts.
-- **Colliders do not rotate with their body**, collider offsets are not rotated,
-  and a centre of mass away from the body origin is not modelled; rung 2's
-  oriented boxes need all three.
+- **Tumble's other milestone 1 scenes**: bullets, the wind tunnel and a golden
+  frame ([24-tumble.md](plan/sample/24-tumble.md)).
+- **Decision: a clock for wasm.** `Instant` panics on wasm32, so tumble's page
+  shows no step time and its browser figure is JS timing around the whole frame
+  call, not a broadphase/narrow-phase/solver split. Options: a `performance.now`
+  import through the web shell, or leave stage times native-only.
+- **Decision: contacts on by default.** `PhysicsSystem::new()` still steps
+  without contacts, so horde, breakout, puppet and the editor are unchanged;
+  only `with_contacts` collides. Turning it on for older samples changes their
+  behaviour and hashes.
+- **The query world does not see what the solver sees**: `add_plane` is
+  solver-only (rays and sweeps pass through planes), the query world keeps its
+  own tree beside the contact broadphase's two, and its capsules and boxes are
+  still Y-aligned and axis-aligned where the solver turns them with the body.
+  Folding the trees together and rotating query colliders are one piece of work.
+- **The rotation cap per substep** exists only in systems with contacts;
+  `SemiImplicitEuler` on its own does not enforce it.
+- **Measured costs worth a look** (release, settled 1000-ball pit): 0.022 ms
+  broadphase, 1.153 ms narrow phase, 2.466 ms solver. Pairs outnumber touching
+  contacts about 4:1 because fat bounds overlap in a dense pile, and the
+  gyroscopic Newton iterations run even for spheres, whose inertia is isotropic
+  and needs none.
+- **Overlap figures**: a settled pile sinks 7 mm (contact spring compliance);
+  spinning pills reach 2.6 cm peak overlap within a tick; the wall's fixtures
+  sit 3–5 mm deep.
+- **Removing a body scans the whole contact pool**; per-body contact edge lists
+  would make it proportional to the body's contacts.
+- **Friction is per point**, not the plan's centroid friction with twist (rung
+  2's scope).
+- **`KineticContact`** uses one global impulse threshold rather than a per-body
+  one, and carries no collider id or tag.
+- **Centre of mass away from the body origin** is not modelled.
 - **Tumble's scenes never exercise `crcbl_core::trig`**: bodies with inertia
-  turn by the Cayley rotation, which needs no sine. Only inertia-less bodies and
-  built orientations call it.
-- **Not verified**: the browser gates ran locally on the hardware adapter, not
-  SwiftShader; tumble on Metal and D3D12 is CI's verdict only.
+  turn by the Cayley rotation, which needs no sine.
+- **Not verified**: tumble's browser gates ran locally on the hardware adapter,
+  not SwiftShader; Metal and D3D12 are CI's verdict only. Shape, manifold,
+  broadphase and softness unit tests were not sabotaged; the integration tests
+  in `crates/crcbl-phys/tests/contacts.rs` were.
 
 ## Physics and tessellation: planned, with decisions owed (2026-09-15)
 
@@ -5184,10 +5205,10 @@ this topic; it shares no vocabulary with it.
 
 ### Contact solver L2/L3 — `36-contact-solver.md` (2026-08-27)
 
-Nothing built. `crcbl-phys` names no manifold, contact, island, sleeping or
-joint; its only mention of a sequential-impulse solver is the layer table in
-`crates/crcbl-phys/src/lib.rs` marking L2 "Stretch". Rung 0's rotation and
-carried `SurfaceMaterial` exist (2026-09-17); rungs 1 onward are the work.
+Rungs 0 and 1 are built (2026-09-17): rotation, dense body sets, and
+`crcbl_phys::contact`'s broadphase, analytic sphere and capsule manifolds and
+soft solver. Boxes against boxes, islands, sleep, sweeps and joints — rungs 2
+onward — are the work.
 
 ### Ragdolls — `35-ragdolls.md` (2026-08-27)
 

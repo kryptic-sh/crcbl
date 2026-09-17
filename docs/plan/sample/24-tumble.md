@@ -95,11 +95,14 @@ Gameplay. Reduced-coordinate articulations, which
 collision math" is kept**: the first cut draws no bounce the engine does not
 compute.
 
-## Status: milestone 2 (Spin) built 2026-09-17
+## Status: milestones 2 (Spin) and 3 (Pachinko) built 2026-09-17
 
-`apps/tumble` runs the zero-g T-handle and a box dropped flat, which falls
-through the floor labelled "no contact solver yet". Milestone 1 and everything
-after milestone 2 are not built.
+`apps/tumble` has three rooms on keys 1–3, each its own physics system: Spin
+(the zero-g T-handle, and a box that lands flat on its corners), the obstacle
+wall (balls and pills, no cubes until rung 2) and the thousand-ball pit (no
+sleep until rung 3, no overflow or despawn until rung 6), each gap labelled on
+screen. Milestone 1's bullet scene, wind tunnel and golden frame, and every
+milestone after 3, are not built.
 
 ## Milestones
 

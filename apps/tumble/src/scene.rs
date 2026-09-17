@@ -1,119 +1,224 @@
-//! The two rung 0 scenes: a T-handle tumbling in zero g, and a box dropped
-//! flat.
+//! The gallery: three rooms, each its own physics system, all stepped every
+//! tick whichever one the camera is looking at.
 //!
 //! ```text
-//!        zero g                         under gravity
-//!
-//!        ━━━┳━━━   spun about its        ┌──┐  dropped flat, no spin
-//!           ┃      middle axis, it       └──┘
-//!           ┃      flips over and back     │
-//!                                          ▼
-//!   ──────────────────────────────────────────────────────  the floor
-//!                                          ▼  and straight through it:
-//!                                             no contact solver yet
+//!   x = 0          x = 12              x = 26
+//!   Spin           Wall                Pit
+//!   rung 0         rung 1              rung 1
+//!   T-handle,      the obstacle wall   a thousand balls
+//!   a box landing  with falling balls  poured into a pit
 //! ```
 //!
-//! Both live in one [`PhysicsSystem`], stepped [`SUBSTEPS`] times a tick. The
-//! T-handle feels nothing; the box feels gravity, applied to it alone through
-//! [`PhysicsSystem::apply_force`], because a gravity provider would pull the
-//! handle down with it.
+//! **The view never reaches the simulation.** Keys `1`, `2` and `3` move the
+//! camera and change which room's counters the panel shows, and nothing else:
+//! every room steps every tick from the same start, so the hash at
+//! [`CHECK_TICK`] is a constant whatever was pressed. [`PINNED_HASH`] is it,
+//! taken natively and asserted by `the_hash_at_the_check_tick_is_the_pinned_one`,
+//! and the browser gate reads the same tick's hash off the wasm build's
+//! heartbeat and holds it to the same constant.
 //!
-//! # What each scene shows, and what it cannot yet
+//! **Each room is its own system** because a gravity provider is global: the
+//! Spin room's T-handle is in zero g, and the wall and the pit are not. It
+//! also makes every counter — pairs, contacts, each stage's time — the room's
+//! own rather than the gallery's.
 //!
-//! **The T-handle** is `docs/plan/36-contact-solver.md` rung 0's proving scene
-//! whole: the inertia tensor from two boxes, the gyroscopic term that turns a
-//! spin about the intermediate axis into a flip, and the conservation that keeps
-//! it flipping for as long as the page is open. Its counters are the flips, and
-//! how far the angular momentum and the energy have drifted from where they
-//! started.
-//!
-//! **The box** can show only half of what its name promises. "Dropped flat"
-//! means landing flat, and landing needs contacts, which are rung 1. What it
-//! can show honestly is that a body dropped with no spin **gains none**: its
-//! orientation stays the identity to the bit and its angular velocity stays
-//! zero all the way down — and then it falls through the floor, which the page
-//! says in as many words rather than hiding. It is put back at the top once it
-//! is well below the floor, and the page counts the drops.
-//!
-//! # Determinism
-//!
-//! [`Scenes::hash`] is the physics system's own state hash under FNV-1a. The
-//! scenes start the same every time and take no input, so the hash at
-//! [`CHECK_TICK`] is a constant: [`PINNED_HASH`] is it, taken natively and
-//! asserted by `the_hash_at_the_check_tick_is_the_pinned_one`, and the browser
-//! gate reads the same tick's hash off the wasm build's heartbeat and holds it
-//! to the same constant — which is the native-against-wasm check
-//! `docs/plan/sample/24-tumble.md` asks for once the simulation's trigonometry
-//! is pinned.
+//! See [`crate::spin`], [`crate::wall`] and [`crate::pit`] for what each room
+//! shows and what it cannot yet.
 
 use std::hash::Hasher;
 
-use crcbl::ecs::{Entity, SystemTrait as _};
+use crcbl::core::input::KeyCode;
+use crcbl::ecs::Entity;
 use crcbl::math::{DQuat, DVec3};
-use crcbl::phys::{MassProperties, PhysicsSystem, RigidBody, Transform};
+use crcbl::phys::{ContactCounters, StageTimes};
+
+use crate::pit::{Pit, PitReading};
+use crate::spin::{Spin, SpinReading};
+use crate::wall::{Wall, WallReading};
 
 /// How fast the loop ticks, in ticks a second: the engine's own default.
 pub const TICK_HZ: u32 = 60;
 
-/// Physics substeps per tick, so the scenes step at 240 Hz — the rate
-/// `crcbl-phys`'s rotation tests measure their bounds at.
-pub const SUBSTEPS: u32 = 4;
-
 /// The tick whose hash [`PINNED_HASH`] is: ten simulated seconds in, far enough
-/// that the handle has flipped and the box has been dropped more than once.
+/// that the handle has flipped, the box has landed three times, the wall has
+/// most of its bodies and the pit three quarters of its balls.
 pub const CHECK_TICK: u64 = 600;
 
 /// [`Scenes::hash`] at [`CHECK_TICK`], taken on x86-64 Linux on 2026-09-17.
-pub const PINNED_HASH: u64 = 0xd73f_feb1_805f_1a71;
+pub const PINNED_HASH: u64 = 0x4e79_f780_ea08_8bcd;
 
-/// Standard gravity, in m/s², pulling the box and nothing else.
+/// Standard gravity, in m/s².
 pub const GRAVITY: f64 = 9.81;
 
-/// The T-handle's bar: half-extents, and where its centre sits above the stem's
-/// before the pair is moved onto their shared centre of mass.
-pub const BAR_HALF: DVec3 = DVec3::new(0.4, 0.05, 0.05);
-/// The bar's centre above the stem's.
-pub const BAR_ABOVE_STEM: f64 = 0.35;
-/// The stem's half-extents.
-pub const STEM_HALF: DVec3 = DVec3::new(0.05, 0.3, 0.05);
-/// Both parts' density, in kg/m³: water, so the handle weighs what a real one
-/// of this size would.
-const DENSITY: f64 = 1000.0;
-
-/// Where the handle's centre of mass floats.
-pub const HANDLE_AT: DVec3 = DVec3::new(-1.6, 2.2, 0.0);
-/// How fast it is spun about its intermediate axis, in rad/s.
-pub const SPIN_RATE: f64 = 6.0;
-/// The nudge about its axis of least inertia: the imperfection every real
-/// spin has, and what the instability grows out of.
-pub const NUDGE_RATE: f64 = 0.06;
-
-/// The box's half-extent, in metres.
-pub const BOX_HALF: f64 = 0.3;
-/// Its mass, in kilograms.
-const BOX_MASS: f64 = 20.0;
-/// Where it is dropped from.
-pub const BOX_START: DVec3 = DVec3::new(1.6, 4.0, 0.0);
-/// How far below the floor it falls before it is put back.
-pub const RESPAWN_BELOW: f64 = -6.0;
-
-/// How near to reversed an axis must come, as a cosine, to count as a flip.
-const FLIPPED: f64 = 0.9;
-
-/// The two bodies' entities. There is no ECS world on this page — the scenes
-/// are one physics system — so they are named by hand, generation one being
+/// A room's entity by index. There is no ECS world on this page — each room is
+/// one physics system — so entities are named by hand, generation one being
 /// the first a pool issues.
-fn entity(index: u32) -> Entity {
+pub(crate) fn entity(index: u32) -> Entity {
     Entity::from_bits((1u64 << 32) | u64::from(index)).expect("generation 1 is never zero")
 }
 
-/// One part of the T-handle, in the handle's own frame.
+/// What a room is drawn as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tint {
+    /// The T-handle.
+    Handle,
+    /// The dropped box.
+    Box,
+    /// A ball.
+    Ball,
+    /// A pill.
+    Pill,
+    /// A peg, a bar or a wedge.
+    Peg,
+    /// A board, a side or a pit wall.
+    Board,
+}
+
+/// A shape to draw, where the physics has it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Part {
-    /// Its centre, relative to the handle's centre of mass.
-    pub centre: DVec3,
-    /// Its half-extents.
-    pub half: DVec3,
+pub enum Shape {
+    /// A ball.
+    Sphere {
+        /// Names it from frame to frame, within its room.
+        key: u64,
+        /// Its centre.
+        centre: DVec3,
+        /// Its radius.
+        radius: f64,
+        /// How it is drawn.
+        tint: Tint,
+    },
+    /// A capsule, between its core's two ends.
+    Capsule {
+        /// Names it from frame to frame, within its room.
+        key: u64,
+        /// One end of its core.
+        a: DVec3,
+        /// The other.
+        b: DVec3,
+        /// Its radius.
+        radius: f64,
+        /// How it is drawn.
+        tint: Tint,
+    },
+    /// A box.
+    Box {
+        /// Names it from frame to frame, within its room.
+        key: u64,
+        /// Its centre.
+        centre: DVec3,
+        /// Its orientation.
+        rotation: DQuat,
+        /// Its half-extents.
+        half: DVec3,
+        /// How it is drawn.
+        tint: Tint,
+    },
+}
+
+/// One room of the gallery.
+pub trait Room {
+    /// One tick of `dt`, reading `clock` between the physics stages if given.
+    fn step(&mut self, dt: f64, clock: Option<&mut dyn FnMut() -> f64>);
+    /// The room's physics state into a determinism hash.
+    fn hash(&self, hasher: &mut dyn Hasher);
+    /// The bodies that move, where they are now.
+    fn bodies(&self, out: &mut Vec<Shape>);
+    /// The fixtures, which never move.
+    fn fixtures(&self, out: &mut Vec<Shape>);
+}
+
+/// A room's contact counters, over its run: `docs/plan/36-contact-solver.md`
+/// rung 1's row.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tally {
+    /// Bodies that step.
+    pub bodies: usize,
+    /// Pairs in the pair set.
+    pub pairs: usize,
+    /// Contacts with a point.
+    pub touching: usize,
+    /// Contacts begun, over the run.
+    pub begun: u64,
+    /// Contacts ended, over the run.
+    pub ended: u64,
+    /// The deepest overlap in the last tick, in metres.
+    pub worst_penetration: f64,
+    /// The deepest overlap in any tick, in metres.
+    pub peak_penetration: f64,
+    /// Points the restitution pass bounced, over the run.
+    pub bounces: u64,
+    pub(crate) bounce_ratio_sum: f64,
+    pub(crate) restitution_sum: f64,
+    /// The last tick's stage times, where the build had a clock.
+    pub stages: Option<StageTimes>,
+}
+
+impl Tally {
+    /// Folds one tick's counters in.
+    pub fn add(&mut self, counters: &ContactCounters) {
+        self.bodies = counters.bodies;
+        self.pairs = counters.pairs;
+        self.touching = counters.touching;
+        self.begun += counters.begun;
+        self.ended += counters.ended;
+        self.worst_penetration = counters.worst_penetration;
+        self.peak_penetration = self.peak_penetration.max(counters.worst_penetration);
+        self.bounces += counters.bounces;
+        self.bounce_ratio_sum += counters.bounce_ratio_sum;
+        self.restitution_sum += counters.restitution_sum;
+        self.stages = counters.stages;
+    }
+
+    /// The mean bounce over the run — separating speed over approach speed —
+    /// or `None` if nothing has bounced.
+    #[must_use]
+    pub fn bounce_ratio(&self) -> Option<f64> {
+        #[allow(clippy::cast_precision_loss)]
+        (self.bounces > 0).then(|| self.bounce_ratio_sum / self.bounces as f64)
+    }
+
+    /// The mean restitution those bounces asked for.
+    #[must_use]
+    pub fn restitution(&self) -> Option<f64> {
+        #[allow(clippy::cast_precision_loss)]
+        (self.bounces > 0).then(|| self.restitution_sum / self.bounces as f64)
+    }
+}
+
+/// Which room the camera and the panel are on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum View {
+    /// Rung 0's room.
+    Spin,
+    /// The obstacle wall.
+    #[default]
+    Wall,
+    /// The ball pit.
+    Pit,
+}
+
+impl View {
+    /// The view a key asks for, if it asks for one.
+    #[must_use]
+    pub const fn for_key(key: KeyCode) -> Option<Self> {
+        match key {
+            KeyCode::Digit1 => Some(Self::Spin),
+            KeyCode::Digit2 => Some(Self::Wall),
+            KeyCode::Digit3 => Some(Self::Pit),
+            _ => None,
+        }
+    }
+
+    /// Its name, as the page and the heartbeat print it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Spin => "spin",
+            Self::Wall => "wall",
+            Self::Pit => "pit",
+        }
+    }
 }
 
 /// What the page and the heartbeat both read, at one instant.
@@ -121,203 +226,82 @@ pub struct Part {
 pub struct Reading {
     /// Ticks stepped.
     pub tick: u64,
-    /// How many times the handle's intermediate axis has reversed.
-    pub flips: u64,
-    /// The worst relative drift of its angular momentum so far.
-    pub momentum_drift: f64,
-    /// The worst relative drift of its kinetic energy so far, either way.
-    pub energy_drift: f64,
-    /// How fast it is turning, in rad/s.
-    pub handle_spin: f64,
-    /// The box's height, in metres.
-    pub box_height: f64,
-    /// How fast the box is turning, in rad/s — zero, if nothing gave it spin.
-    pub box_spin: f64,
-    /// Whether the box's orientation is still the identity, bit for bit.
-    pub box_level: bool,
-    /// How many times the box has been put back at the top.
-    pub drops: u64,
-    /// The last tick's physics step, in microseconds, where this build has a
-    /// clock to measure it with.
+    /// The room on screen.
+    pub view: View,
+    /// The Spin room.
+    pub spin: SpinReading,
+    /// The wall.
+    pub wall: WallReading,
+    /// The pit.
+    pub pit: PitReading,
+    /// The last tick's physics over all three rooms, in microseconds, where
+    /// this build has a clock to measure it with.
     pub step_micros: Option<f64>,
     /// [`Scenes::hash`] now.
     pub hash: u64,
 }
 
-/// Both scenes, in one physics system.
-#[derive(Debug)]
+/// The gallery.
+#[derive(Debug, Default)]
 pub struct Scenes {
-    phys: PhysicsSystem,
-    parts: [Part; 2],
-    /// The handle's principal axes in ascending order of moment.
-    axes: [DVec3; 3],
-    momentum: DVec3,
-    energy: f64,
+    spin: Spin,
+    wall: Wall,
+    pit: Pit,
+    view: View,
     tick: u64,
-    flips: u64,
-    /// Whether the intermediate axis last pointed with the momentum.
-    aligned: bool,
-    momentum_drift: f64,
-    energy_drift: f64,
-    drops: u64,
     step_micros: Option<f64>,
 }
 
-impl Default for Scenes {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Scenes {
-    /// Both scenes at their start.
+    /// Every room at its start, the camera on the wall.
     #[must_use]
     pub fn new() -> Self {
-        let volume = |half: DVec3| 8.0 * half.x * half.y * half.z;
-        let stem = MassProperties::cuboid(DENSITY * volume(STEM_HALF), STEM_HALF, DVec3::ZERO);
-        let bar = MassProperties::cuboid(
-            DENSITY * volume(BAR_HALF),
-            BAR_HALF,
-            DVec3::new(0.0, BAR_ABOVE_STEM, 0.0),
-        );
-        let props = MassProperties::combine(&[bar, stem]);
-        let parts = [
-            Part {
-                centre: bar.centre_of_mass - props.centre_of_mass,
-                half: BAR_HALF,
-            },
-            Part {
-                centre: stem.centre_of_mass - props.centre_of_mass,
-                half: STEM_HALF,
-            },
-        ];
-
-        let inertia = props.inertia;
-        let mut moments = [
-            (inertia.x_axis.x, DVec3::X),
-            (inertia.y_axis.y, DVec3::Y),
-            (inertia.z_axis.z, DVec3::Z),
-        ];
-        moments.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let axes = [moments[0].1, moments[1].1, moments[2].1];
-
-        let mut handle = RigidBody::new_dynamic(props.mass).with_inertia(inertia);
-        handle.angular_velocity = axes[1] * SPIN_RATE + axes[0] * NUDGE_RATE;
-        let momentum = handle.angular_momentum(DQuat::IDENTITY);
-        let energy = handle.kinetic_energy(DQuat::IDENTITY);
-
-        let mut phys = PhysicsSystem::new();
-        phys.set_body(entity(0), handle);
-        phys.set_transform(entity(0), Transform::from_position(HANDLE_AT));
-        let crate_ = MassProperties::cuboid(BOX_MASS, DVec3::splat(BOX_HALF), DVec3::ZERO);
-        phys.set_body(
-            entity(1),
-            RigidBody::new_dynamic(BOX_MASS).with_inertia(crate_.inertia),
-        );
-        phys.set_transform(entity(1), Transform::from_position(BOX_START));
-
-        Self {
-            phys,
-            parts,
-            axes,
-            momentum,
-            energy,
-            tick: 0,
-            flips: 0,
-            aligned: true,
-            momentum_drift: 0.0,
-            energy_drift: 0.0,
-            drops: 0,
-            step_micros: None,
-        }
+        Self::default()
     }
 
-    /// One tick of `tick_dt` seconds: [`SUBSTEPS`] physics steps, then the
-    /// counters.
+    /// One tick of `tick_dt` seconds for every room.
     pub fn step(&mut self, tick_dt: f64) {
         #[cfg(not(target_arch = "wasm32"))]
-        let started = std::time::Instant::now();
-
-        let dt = tick_dt / f64::from(SUBSTEPS);
-        for _ in 0..SUBSTEPS {
-            self.phys
-                .apply_force(entity(1), DVec3::new(0.0, -GRAVITY * BOX_MASS, 0.0));
-            self.phys.step(dt);
-        }
-
-        // The measurement ends before the bookkeeping below, which is the
-        // page's rather than the engine's. The browser build has no clock a
-        // module can read — `std::time::Instant` panics on wasm32 — so there
-        // the reading is absent rather than zero.
-        #[cfg(not(target_arch = "wasm32"))]
         {
-            self.step_micros = Some(started.elapsed().as_secs_f64() * 1.0e6);
+            let epoch = std::time::Instant::now();
+            let mut clock = || epoch.elapsed().as_secs_f64();
+            self.spin.step(tick_dt, Some(&mut clock));
+            self.wall.step(tick_dt, Some(&mut clock));
+            self.pit.step(tick_dt, Some(&mut clock));
+            self.step_micros = Some(clock() * 1.0e6);
         }
-
+        // The browser build has no clock a module can read —
+        // `std::time::Instant` panics on wasm32 — so there the readings are
+        // absent rather than zero.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.spin.step(tick_dt, None);
+            self.wall.step(tick_dt, None);
+            self.pit.step(tick_dt, None);
+        }
         self.tick += 1;
-        self.count_handle();
-        self.recycle_box();
     }
 
-    fn handle(&self) -> (RigidBody, Transform) {
-        (
-            *self.phys.body(entity(0)).expect("the handle has a body"),
-            *self
-                .phys
-                .transform(entity(0))
-                .expect("the handle has a transform"),
-        )
+    /// Points the camera and the panel at `view`. The simulation does not see
+    /// it.
+    pub fn set_view(&mut self, view: View) {
+        self.view = view;
     }
 
-    fn crate_(&self) -> (RigidBody, Transform) {
-        (
-            *self.phys.body(entity(1)).expect("the box has a body"),
-            *self
-                .phys
-                .transform(entity(1))
-                .expect("the box has a transform"),
-        )
+    /// The room on screen.
+    #[must_use]
+    pub const fn view(&self) -> View {
+        self.view
     }
 
-    fn count_handle(&mut self) {
-        let (body, transform) = self.handle();
-        let momentum = body.angular_momentum(transform.rotation);
-        self.momentum_drift = self
-            .momentum_drift
-            .max((momentum - self.momentum).length() / self.momentum.length());
-        let energy = body.kinetic_energy(transform.rotation);
-        self.energy_drift = self
-            .energy_drift
-            .max((energy - self.energy).abs() / self.energy);
-
-        let along = (transform.rotation * self.axes[1]).dot(self.momentum.normalize());
-        if self.aligned && along < -FLIPPED {
-            self.aligned = false;
-            self.flips += 1;
-        } else if !self.aligned && along > FLIPPED {
-            self.aligned = true;
-            self.flips += 1;
-        }
-    }
-
-    fn recycle_box(&mut self) {
-        let (_, transform) = self.crate_();
-        if transform.position.y < RESPAWN_BELOW {
-            self.phys
-                .set_transform(entity(1), Transform::from_position(BOX_START));
-            if let Some(body) = self.phys.body_mut(entity(1)) {
-                body.velocity = DVec3::ZERO;
-            }
-            self.drops += 1;
-        }
-    }
-
-    /// The physics state hash under FNV-1a — a digest that, unlike `std`'s
+    /// Every room's physics state under FNV-1a — a digest that, unlike `std`'s
     /// hasher, means the same thing in every build.
     #[must_use]
     pub fn hash(&self) -> u64 {
         let mut hasher = Fnv(0xcbf2_9ce4_8422_2325);
-        self.phys.hash_state(&mut hasher);
+        self.spin.hash(&mut hasher);
+        self.wall.hash(&mut hasher);
+        self.pit.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -327,43 +311,21 @@ impl Scenes {
         self.tick
     }
 
-    /// The handle's parts, each as a world-space centre, the handle's
-    /// orientation and the part's half-extents.
+    /// Every room, for drawing, in a fixed order.
     #[must_use]
-    pub fn handle_parts(&self) -> [(DVec3, DQuat, DVec3); 2] {
-        let (_, transform) = self.handle();
-        self.parts.map(|part| {
-            (
-                transform.position + transform.rotation * part.centre,
-                transform.rotation,
-                part.half,
-            )
-        })
-    }
-
-    /// The box's world-space centre and orientation.
-    #[must_use]
-    pub fn box_pose(&self) -> (DVec3, DQuat) {
-        let (_, transform) = self.crate_();
-        (transform.position, transform.rotation)
+    pub fn rooms(&self) -> [&dyn Room; 3] {
+        [&self.spin, &self.wall, &self.pit]
     }
 
     /// Every counter, at this instant.
     #[must_use]
     pub fn reading(&self) -> Reading {
-        let (handle, _) = self.handle();
-        let (crate_, pose) = self.crate_();
         Reading {
             tick: self.tick,
-            flips: self.flips,
-            momentum_drift: self.momentum_drift,
-            energy_drift: self.energy_drift,
-            handle_spin: handle.angular_velocity.length(),
-            box_height: pose.position.y,
-            box_spin: crate_.angular_velocity.length(),
-            box_level: pose.rotation.to_array().map(f64::to_bits)
-                == DQuat::IDENTITY.to_array().map(f64::to_bits),
-            drops: self.drops,
+            view: self.view,
+            spin: self.spin.reading(),
+            wall: self.wall.reading(),
+            pit: self.pit.reading(),
             step_micros: self.step_micros,
             hash: self.hash(),
         }
@@ -386,92 +348,69 @@ impl Hasher for Fnv {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The tick the engine's loop hands [`Scenes::step`] — whole nanoseconds,
     /// so not `1.0 / 60.0` — taken from the loop's own clock rather than
     /// copied, because a test stepping by a different `dt` pins a hash no
     /// running build ever reaches.
-    fn tick_dt() -> f64 {
+    pub(crate) fn tick_dt() -> f64 {
         crcbl::core::FrameClock::new(TICK_HZ).tick_dt_secs()
     }
 
-    fn run(ticks: u64) -> Scenes {
+    fn run(ticks: u64, view: View) -> Scenes {
         let mut scenes = Scenes::new();
+        scenes.set_view(view);
         for _ in 0..ticks {
             scenes.step(tick_dt());
         }
         scenes
     }
 
-    /// **The native half of the determinism check.** Two runs agree, and both
-    /// land on the constant the browser gate holds the wasm build to.
+    /// **The native half of the determinism check.** Two runs agree — one of
+    /// them looking at another room the whole time — and both land on the
+    /// constant the browser gate holds the wasm build to.
     #[test]
     fn the_hash_at_the_check_tick_is_the_pinned_one() {
-        let first = run(CHECK_TICK).hash();
-        assert_eq!(first, run(CHECK_TICK).hash(), "two runs disagreed");
+        let first = run(CHECK_TICK, View::Wall).hash();
+        assert_eq!(
+            first,
+            run(CHECK_TICK, View::Pit).hash(),
+            "two runs disagreed"
+        );
         assert_eq!(
             first, PINNED_HASH,
             "tick {CHECK_TICK} hashes to {first:#018x}, not the pinned {PINNED_HASH:#018x}"
         );
         assert_ne!(
-            run(CHECK_TICK + 1).hash(),
+            run(CHECK_TICK + 1, View::Wall).hash(),
             first,
             "the next tick hashed the same, so the hash cannot see the scenes move"
         );
     }
 
-    /// The handle's parts sit about its centre of mass: weighted by volume,
-    /// their offsets cancel.
+    /// The keys pick the rooms, and nothing else does.
     #[test]
-    fn the_handle_is_placed_about_its_centre_of_mass() {
-        let scenes = Scenes::new();
-        let volume = |half: DVec3| half.x * half.y * half.z;
-        let moment = scenes.parts.iter().fold(DVec3::ZERO, |sum, part| {
-            sum + part.centre * volume(part.half)
-        });
-        assert!(moment.length() < 1e-15, "the parts balance at {moment:?}");
-        assert_ne!(
-            scenes.axes[1], scenes.axes[0],
-            "the intermediate axis is not distinct"
-        );
+    fn the_number_keys_pick_the_rooms() {
+        assert_eq!(View::for_key(KeyCode::Digit1), Some(View::Spin));
+        assert_eq!(View::for_key(KeyCode::Digit2), Some(View::Wall));
+        assert_eq!(View::for_key(KeyCode::Digit3), Some(View::Pit));
+        assert_eq!(View::for_key(KeyCode::Space), None);
+        assert_eq!(Scenes::new().view(), View::Wall);
     }
 
-    /// **The page's claims, over what it shows by the check tick.** The handle
-    /// has flipped with its momentum and energy intact, and the box has fallen
-    /// through the floor and been put back without ever turning.
+    /// A native step is timed, stage by stage, in every room with contacts.
     #[test]
-    fn by_the_check_tick_the_handle_has_flipped_and_the_box_never_turned() {
-        let scenes = run(CHECK_TICK);
-        let reading = scenes.reading();
-        assert!(
-            reading.flips >= 2,
-            "only {} flips in ten seconds",
-            reading.flips
-        );
-        assert!(
-            reading.momentum_drift < 1e-10 && reading.energy_drift < 1e-10,
-            "the handle drifted {:e} in momentum and {:e} in energy",
-            reading.momentum_drift,
-            reading.energy_drift
-        );
-        assert!(reading.drops >= 1, "the box was never dropped through");
-        assert_eq!(reading.box_spin, 0.0, "the box picked up spin");
-        assert!(reading.box_level, "the box tilted");
+    fn a_native_step_is_timed_stage_by_stage() {
+        let reading = run(2, View::Wall).reading();
         assert!(reading.step_micros.is_some(), "a native step went untimed");
-    }
-
-    /// Without the nudge the spin is balanced on its axis, and the handle keeps
-    /// it: the flip is the instability growing, not something the page drives.
-    #[test]
-    fn a_handle_with_no_nudge_does_not_flip_within_the_check_window() {
-        let mut scenes = Scenes::new();
-        let body = scenes.phys.body_mut(entity(0)).expect("the handle");
-        body.angular_velocity = scenes.axes[1] * SPIN_RATE;
-        for _ in 0..CHECK_TICK {
-            scenes.step(tick_dt());
+        for tally in [
+            reading.spin.contacts,
+            reading.wall.contacts,
+            reading.pit.contacts,
+        ] {
+            assert!(tally.stages.is_some(), "{tally:?}");
         }
-        assert_eq!(scenes.reading().flips, 0);
     }
 }

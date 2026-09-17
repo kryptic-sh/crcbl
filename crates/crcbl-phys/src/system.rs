@@ -49,6 +49,11 @@ use glam::DVec3;
 
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 use crate::components::{ColliderComponent, RigidBody, Transform};
+use crate::contact::broadphase::ProxyId;
+use crate::contact::{
+    Bodies, ContactCounters, ContactPipeline, ContactReport, ContactSettings, KineticContact,
+    PlaneId, StageTimes,
+};
 use crate::forces::ForceProvider;
 use crate::integrator::{Integrator as _, SemiImplicitEuler};
 use crate::material::SurfaceMaterial;
@@ -61,11 +66,11 @@ use crate::{Ray, Segment};
 // ---------------------------------------------------------------------------
 
 /// A body's generational id: the slot of its [`BodyRecord`].
-type BodyId = Handle<BodyRecord>;
+pub(crate) type BodyId = Handle<BodyRecord>;
 
 /// Which set a body's state lives in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BodySet {
+pub(crate) enum BodySet {
     /// A transform and no body: never stepped.
     Static,
     /// A body, dynamic or kinematic: stepped every [`PhysicsSystem::step`].
@@ -74,32 +79,35 @@ enum BodySet {
 
 /// The cold half of a body: what names it and what the step never reads.
 #[derive(Debug)]
-struct BodyRecord {
+pub(crate) struct BodyRecord {
     /// The entity this body belongs to, for mapping hits and hashing.
-    entity: Entity,
+    pub(crate) entity: Entity,
     /// The set its state lives in.
-    set: BodySet,
+    pub(crate) set: BodySet,
     /// Its index in that set's columns.
-    index: usize,
+    pub(crate) index: usize,
     /// Its collider in the world, and the component it was built from.
-    collider: Option<(ColliderId, ColliderComponent)>,
+    pub(crate) collider: Option<(ColliderId, ColliderComponent)>,
     /// Its surface's friction and restitution.
-    material: SurfaceMaterial,
+    pub(crate) material: SurfaceMaterial,
+    /// Its collider's proxy in the contact broadphase, in a system with
+    /// contacts and for a collider that is not a trigger.
+    pub(crate) proxy: Option<ProxyId>,
 }
 
 /// Transforms with no body: struct-of-arrays, dense, indexed alike.
 #[derive(Debug, Default)]
-struct StaticSet {
-    ids: Vec<BodyId>,
-    transforms: Vec<Transform>,
+pub(crate) struct StaticSet {
+    pub(crate) ids: Vec<BodyId>,
+    pub(crate) transforms: Vec<Transform>,
 }
 
 /// Bodies that step: struct-of-arrays, dense, indexed alike.
 #[derive(Debug, Default)]
-struct AwakeSet {
-    ids: Vec<BodyId>,
-    transforms: Vec<Transform>,
-    bodies: Vec<RigidBody>,
+pub(crate) struct AwakeSet {
+    pub(crate) ids: Vec<BodyId>,
+    pub(crate) transforms: Vec<Transform>,
+    pub(crate) bodies: Vec<RigidBody>,
 }
 
 impl StaticSet {
@@ -148,9 +156,12 @@ impl AwakeSet {
 /// # Integration loop
 ///
 /// Each `tick(dt)` calls `step(dt)` once with the schedule's real tick period.
-/// The caller is responsible for fixed-timestep accumulation (substepping);
-/// call `step(substep_dt)` multiple times per tick to advance physics at a
-/// higher rate than the game tick.
+/// Without contacts the caller is responsible for substepping: call
+/// `step(substep_dt)` multiple times per tick to advance physics at a higher
+/// rate than the game tick. A system made
+/// [`with_contacts`](Self::with_contacts) substeps inside `step` instead,
+/// because collision runs once a tick and the solver several times; see
+/// [`step`](Self::step).
 pub struct PhysicsSystem {
     world: PhysicsWorld,
 
@@ -175,6 +186,10 @@ pub struct PhysicsSystem {
     /// querying from several threads brings its own — see
     /// [`EntityOverlapQueries`].
     scratch: QueryScratch,
+
+    /// The contact pipeline, for a system made with
+    /// [`with_contacts`](Self::with_contacts).
+    contacts: Option<Box<ContactPipeline>>,
 }
 
 /// Read-only overlap queries by entity, against a broadphase already built.
@@ -313,7 +328,86 @@ impl PhysicsSystem {
             collider_to_entity: Vec::new(),
             force_providers: Vec::new(),
             scratch: QueryScratch::new(),
+            contacts: None,
         }
+    }
+
+    /// Create an empty physics system whose bodies collide: see
+    /// [`crate::contact`].
+    ///
+    /// Every collider that is not a trigger takes part, and
+    /// [`step`](Self::step) becomes a whole tick of
+    /// [`ContactSettings::substeps`] solver substeps rather than one
+    /// integration.
+    #[must_use]
+    pub fn with_contacts(settings: ContactSettings) -> Self {
+        Self {
+            contacts: Some(Box::new(ContactPipeline::new(settings))),
+            ..Self::new()
+        }
+    }
+
+    /// The contact settings, or `None` in a system without contacts.
+    #[must_use]
+    pub fn contact_settings(&self) -> Option<&ContactSettings> {
+        self.contacts.as_ref().map(|pipeline| &pipeline.settings)
+    }
+
+    /// The contact settings to change, or `None` in a system without contacts.
+    /// A change takes effect on the next [`step`](Self::step).
+    pub fn contact_settings_mut(&mut self) -> Option<&mut ContactSettings> {
+        self.contacts
+            .as_mut()
+            .map(|pipeline| &mut pipeline.settings)
+    }
+
+    /// Add a static plane: the half-space `normal · x ≤ offset` is solid to
+    /// every body with contacts.
+    ///
+    /// A plane is solver geometry only. It has no entity and no collider in
+    /// [`world`](Self::world), so a ray, a sweep or an overlap query passes
+    /// straight through it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this system has no contacts, or if `normal` is not of unit
+    /// length.
+    pub fn add_plane(&mut self, normal: DVec3, offset: f64, material: SurfaceMaterial) -> PlaneId {
+        assert!(
+            (normal.length_squared() - 1.0).abs() < 1e-9,
+            "a plane's normal has unit length: {normal:?}"
+        );
+        self.contacts
+            .as_mut()
+            .expect("planes are contact geometry: build the system with_contacts")
+            .add_plane(normal, offset, material)
+    }
+
+    /// What the last [`step`](Self::step) of the contact pipeline did, or
+    /// every counter zero in a system without contacts.
+    #[must_use]
+    pub fn contact_counters(&self) -> ContactCounters {
+        self.contacts
+            .as_ref()
+            .map_or_else(ContactCounters::default, |pipeline| pipeline.counters)
+    }
+
+    /// The [`KineticContact`]s the last [`step`](Self::step) raised, in the
+    /// order its contacts were solved.
+    #[must_use]
+    pub fn kinetic_contacts(&self) -> &[KineticContact] {
+        self.contacts
+            .as_ref()
+            .map_or(&[], |pipeline| pipeline.kinetic.as_slice())
+    }
+
+    /// Every contact, touching or not, as the last [`step`](Self::step) left
+    /// it, in the pool's order.
+    #[must_use]
+    pub fn contacts(&self) -> Vec<ContactReport> {
+        self.contacts
+            .as_ref()
+            .map_or_else(Vec::new, |pipeline| pipeline.reports(&self.records))
     }
 
     /// Number of entities with colliders registered.
@@ -348,6 +442,9 @@ impl PhysicsSystem {
                 let record = self.records.get_mut(id).expect("a live record");
                 record.set = BodySet::Awake;
                 record.index = awake_index;
+                if let (Some(pipeline), Some(proxy)) = (self.contacts.as_mut(), record.proxy) {
+                    pipeline.body_changed_set(proxy, BodySet::Awake);
+                }
             }
         }
     }
@@ -359,6 +456,19 @@ impl PhysicsSystem {
         let id = self.record_for(entity, transform);
         *self.transform_slot(id) = transform;
         self.sync_collider(id);
+        if let Some(pipeline) = self.contacts.as_mut()
+            && let Some(proxy) = self.records.get(id).and_then(|record| record.proxy)
+        {
+            pipeline.body_placed(
+                proxy,
+                id,
+                Bodies {
+                    records: &self.records,
+                    statics: &self.statics,
+                    awake: &self.awake,
+                },
+            );
+        }
     }
 
     /// Get a reference to an entity's rigid body.
@@ -406,9 +516,10 @@ impl PhysicsSystem {
     /// Set the surface material of `entity`'s body or collider. Returns `false`
     /// if the entity is not registered.
     ///
-    /// Every registered entity starts with [`SurfaceMaterial::DEFAULT`]. Nothing
-    /// reads it back but [`material`](Self::material) until the contact solver
-    /// exists; see [`crate::material`].
+    /// Every registered entity starts with [`SurfaceMaterial::DEFAULT`]. In a
+    /// system with contacts, each contact combines its two surfaces' materials
+    /// every tick, so a change takes effect on the next
+    /// [`step`](Self::step); see [`crate::material`].
     pub fn set_material(&mut self, entity: Entity, material: SurfaceMaterial) -> bool {
         let Some(&id) = self.entity_to_body.get(&entity) else {
             return false;
@@ -533,6 +644,17 @@ impl PhysicsSystem {
 
         self.records.get_mut(id).expect("a live record").collider =
             Some((collider, component.clone()));
+        if let Some(pipeline) = self.contacts.as_mut() {
+            let proxy = pipeline.create_body_proxy(
+                id,
+                Bodies {
+                    records: &self.records,
+                    statics: &self.statics,
+                    awake: &self.awake,
+                },
+            );
+            self.records.get_mut(id).expect("a live record").proxy = proxy;
+        }
         self.collider_count += 1;
         let slot = collider.index() as usize;
         if slot >= self.collider_to_entity.len() {
@@ -570,6 +692,9 @@ impl PhysicsSystem {
         let Some(record) = self.records.get_mut(id) else {
             return;
         };
+        if let (Some(proxy), Some(pipeline)) = (record.proxy.take(), self.contacts.as_mut()) {
+            pipeline.destroy_proxy(proxy);
+        }
         if let Some((collider, _)) = record.collider.take() {
             self.world.remove(collider);
             self.collider_count -= 1;
@@ -582,21 +707,44 @@ impl PhysicsSystem {
 
     // ── Integration ────────────────────────────────────────────────────
 
-    /// Advance dynamics by one substep of `dt` seconds.
+    /// Advance dynamics by `dt` seconds.
     ///
-    /// Applies all force providers, then integrates every body — position,
-    /// velocity, orientation and angular velocity — with [`SemiImplicitEuler`].
-    /// Collider positions are synced to the new transforms.
+    /// **Without contacts** this is one substep: all force providers, then
+    /// every body integrated — position, velocity, orientation and angular
+    /// velocity — with [`SemiImplicitEuler`]. A caller wanting substeps calls
+    /// this `n` times with `dt / n`.
     ///
-    /// Bodies are visited in the awake set's own order, which is the order of
-    /// the calls that registered them; see the [module docs](self). Nothing a
-    /// step computes for one body reads another's, so the order reaches no
-    /// result today — it is the order the contact solver will inherit.
+    /// **With contacts** ([`with_contacts`](Self::with_contacts)) this is one
+    /// tick: the force providers, then the contact broadphase and every
+    /// manifold once, then [`ContactSettings::substeps`] solver substeps of
+    /// `dt / substeps`, each integrating the bodies with the same
+    /// [`SemiImplicitEuler`] split around the contact impulses. A force applied
+    /// before the call is held for the whole tick. A body that touches nothing
+    /// integrates exactly as the same number of contact-free substeps would,
+    /// short of the speed and rotation caps. See [`crate::contact`].
+    ///
+    /// Either way, collider positions are synced to the new transforms, and
+    /// bodies are visited in the awake set's own order, which is the order of
+    /// the calls that registered them; see the [module docs](self).
     pub fn step(&mut self, dt: f64) {
+        self.step_with_clock(dt, None);
+    }
+
+    /// [`step`](Self::step), reading `clock` — seconds from any fixed origin —
+    /// between the stages, so [`ContactCounters::stages`] reports what each
+    /// took.
+    ///
+    /// The clock is the caller's because this crate reads none: a step's
+    /// results must not depend on time, and `std::time::Instant` does not
+    /// exist in a browser. A system without contacts has no stages and never
+    /// reads it.
+    pub fn step_timed(&mut self, dt: f64, clock: &mut dyn FnMut() -> f64) {
+        self.step_with_clock(dt, Some(clock));
+    }
+
+    fn step_with_clock(&mut self, dt: f64, mut clock: Option<&mut dyn FnMut() -> f64>) {
         let AwakeSet {
-            ids,
-            transforms,
-            bodies,
+            transforms, bodies, ..
         } = &mut self.awake;
 
         for (body, transform) in bodies.iter_mut().zip(transforms.iter()) {
@@ -605,10 +753,43 @@ impl PhysicsSystem {
             }
         }
 
-        for (body, transform) in bodies.iter_mut().zip(transforms.iter_mut()) {
-            SemiImplicitEuler.step(body, transform, dt);
+        match self.contacts.as_mut() {
+            None => {
+                let AwakeSet {
+                    transforms, bodies, ..
+                } = &mut self.awake;
+                for (body, transform) in bodies.iter_mut().zip(transforms.iter_mut()) {
+                    SemiImplicitEuler.step(body, transform, dt);
+                }
+            }
+            Some(pipeline) => {
+                let mut read = || clock.as_mut().map(|clock| clock());
+                let start = read();
+                let lent = Bodies {
+                    records: &self.records,
+                    statics: &self.statics,
+                    awake: &self.awake,
+                };
+                pipeline.update_pairs(lent, dt);
+                let paired = read();
+                pipeline.collide(lent, dt);
+                let collided = read();
+                pipeline.solve(&self.records, &self.statics, &mut self.awake, dt);
+                let solved = read();
+                pipeline.counters.stages = match (start, paired, collided, solved) {
+                    (Some(start), Some(paired), Some(collided), Some(solved)) => Some(StageTimes {
+                        broadphase: paired - start,
+                        narrow_phase: collided - paired,
+                        solver: solved - collided,
+                    }),
+                    _ => None,
+                };
+            }
         }
 
+        let AwakeSet {
+            ids, transforms, ..
+        } = &self.awake;
         for (id, transform) in ids.iter().zip(transforms.iter()) {
             let Some(record) = self.records.get(*id) else {
                 continue;
@@ -813,6 +994,7 @@ impl PhysicsSystem {
             index: 0,
             collider: None,
             material: SurfaceMaterial::DEFAULT,
+            proxy: None,
         });
         let index = self.statics.push(id, transform);
         self.records.get_mut(id).expect("just inserted").index = index;
@@ -890,7 +1072,7 @@ fn place_collider(
 /// `value`'s bits with every zero and every `NaN` made one: `-0.0` hashes as
 /// `+0.0` and any `NaN` as the canonical one, so two states that compare equal
 /// hash equal — `docs/plan/36-contact-solver.md` decision 8.
-fn canonical_bits(value: f64) -> u64 {
+pub(crate) fn canonical_bits(value: f64) -> u64 {
     if value == 0.0 {
         0
     } else if value.is_nan() {
@@ -1011,6 +1193,11 @@ impl SystemTrait for PhysicsSystem {
                 }
                 None => hasher.write(&[0]),
             }
+        }
+
+        if let Some(pipeline) = &self.contacts {
+            hasher.write(&[2]);
+            pipeline.hash_state(&self.records, hasher);
         }
     }
 

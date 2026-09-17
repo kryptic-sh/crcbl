@@ -2365,23 +2365,26 @@ const EXPECTATIONS = {
       maxBounty: 60,
     },
   },
-  // **The demo whose claim is a constant.** tumble takes no input — both scenes
-  // start the same way every run — so `moving` reads the tick, and the
-  // `determinism` block below holds the wasm build's state hash at the check
-  // tick to the value the native test in `apps/tumble/src/scene.rs` pins. The
-  // page logs both, so the constant lives in one place.
+  // **The demo whose claim is a constant.** tumble's only keys pick the room on
+  // screen and never reach the simulation — every room starts the same way
+  // every run — so `moving` reads the tick, and the `determinism` block below
+  // holds the wasm build's state hash at the check tick to the value the native
+  // test in `apps/tumble/src/scene.rs` pins. The page logs both, so the
+  // constant lives in one place.
   tumble: {
-    // A demo that draws mesh instances — the floor and three boxes — so its
-    // cull pass has something to count. See lantern's row and group D.
+    // A demo that draws mesh instances — floors, boards, pegs and balls — so
+    // its cull pass has something to count. See lantern's row and group D.
     culls: true,
     key: null,
     // Read off the *first* line. What it asks is that the simulation is
-    // already stepping and hashing, and that the box has not picked up spin
-    // from nothing, which is the one scene claim true from the first tick.
+    // already stepping and hashing, and that the contact rooms are counting:
+    // the wall has dropped its first body and the pit poured its first wave by
+    // the first heartbeat.
     waiting: (line) =>
       line.includes('[HUD] tick:') &&
       /\bhash: [0-9a-f]{16}/.test(line) &&
-      /\bbox-spin: 0\b/.test(line),
+      /\bwall-bodies: [1-9]\d*\b/.test(line) &&
+      /\bpit-balls: [1-9]\d*\b/.test(line),
     moving: /\btick: (\d+)/,
     movingLabel: 'the scenes step under their own steam',
     // Every pattern is a field of the `[HUD]` line `apps/tumble/src/app.rs`

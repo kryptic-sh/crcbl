@@ -21,9 +21,11 @@ fn main() -> ExitCode {
         parse(std::env::args().skip(1)),
         run,
         |summary| {
+            let r = &summary.reading;
             format!(
                 "tumble: {} frames, {} ticks on the {} shell at {}x{}, {} \
-                 ({} flips, momentum drift {:.1e}, box level {}, {} drops, hash {:016x}, {:?})",
+                 ({} flips, momentum drift {:.1e}, box at {:.3} m, wall {} bodies {}+ {}- \
+                 contacts, pit {} balls {} pairs, hash {:016x}, {:?})",
                 summary.run.frames,
                 summary.run.ticks,
                 summary.run.backend,
@@ -32,11 +34,15 @@ fn main() -> ExitCode {
                 // What the window system actually did, not what `--fullscreen`
                 // asked for. It is free to refuse.
                 summary.run.mode,
-                summary.reading.flips,
-                summary.reading.momentum_drift,
-                summary.reading.box_level,
-                summary.reading.drops,
-                summary.reading.hash,
+                r.spin.flips,
+                r.spin.momentum_drift,
+                r.spin.box_height,
+                r.wall.contacts.bodies,
+                r.wall.contacts.begun,
+                r.wall.contacts.ended,
+                r.pit.balls,
+                r.pit.contacts.pairs,
+                r.hash,
                 summary.run.exit,
             )
         },

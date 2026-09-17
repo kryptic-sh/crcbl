@@ -6,11 +6,11 @@
 //! values to come from per-property combination rules — "multiply / average /
 //! max" — so ice on rubber has an answer that is data rather than code.
 //!
-//! **Nothing consumes these yet.** There is no contact solver until rung 1 of
-//! `36-contact-solver.md`, so a material is carried on its body and read back
-//! through [`crate::PhysicsSystem::material`], and [`SurfaceMaterial::combine`]
-//! is the rule the solver will call. The asset form, the link from a render
-//! material and the other consumers `37-materials.md` lists are not built.
+//! **The contact solver is the one consumer.** Rung 1 of
+//! `36-contact-solver.md` calls [`SurfaceMaterial::combine`] on a contact's two
+//! bodies each tick, and a plane carries a material of its own. The asset form,
+//! the link from a render material and the other consumers `37-materials.md`
+//! lists are not built.
 
 /// How two surfaces' values for one property become the contact's.
 ///

@@ -236,7 +236,7 @@ built it.
 | `breach`         | a first-person firing range, on the controller `puppet` walks          | ✓              |
 | `shard`          | a torch-lit interior zone, walked in an isometric-ish third person     | ✓              |
 | `sparks`         | the VFX fixture: stock effects, a hostile one, and the budget for them | ✓              |
-| `tumble`         | the physics gallery: a zero-g T-handle, and a box dropped flat         | ✓              |
+| `tumble`         | the physics gallery: a zero-g T-handle, a peg wall and a ball pit      | ✓              |
 | `lantern`        | the lighting acceptance fixture: one room, every effect                | ✓              |
 | `alcove`         | the ambient-occlusion acceptance fixture: one court, every technique   | ✓              |
 | `sundial`        | the shadow acceptance fixture: one plaza, a scripted sun, every filter | ✓              |

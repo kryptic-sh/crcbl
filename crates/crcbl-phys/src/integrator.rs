@@ -132,19 +132,86 @@ impl Integrator for SemiImplicitEuler {
     fn step(&self, body: &mut RigidBody, transform: &mut Transform, dt: f64) {
         debug_assert!(dt > 0.0, "integration step dt must be positive");
         debug_assert!(body.inverse_mass.is_finite(), "inverse mass must be finite");
+        let spin = Self::integrate_velocity(body, transform.rotation, dt);
+        Self::integrate_position(body, transform, spin, dt);
+        body.clear_forces();
+    }
+}
 
+/// The angular half of one [`SemiImplicitEuler`] step, carried from
+/// [`SemiImplicitEuler::integrate_velocity`] to
+/// [`SemiImplicitEuler::integrate_position`].
+///
+/// The implicit midpoint rule turns the orientation by the *mean* of the
+/// body-frame angular velocity before and after the gyroscopic step, so the
+/// position half needs both, and not only the world-frame velocity the contact
+/// solver sees between the two halves.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SpinStep {
+    /// The body-frame angular velocity with the torque applied, before the
+    /// gyroscopic step.
+    before: DVec3,
+    /// The body-frame angular velocity after it.
+    after: DVec3,
+    /// `after` in the world, through the orientation at the start of the step:
+    /// what [`SemiImplicitEuler::integrate_velocity`] left in
+    /// [`RigidBody::angular_velocity`]. The position half compares against it
+    /// to learn whether anything — a contact impulse — changed the spin since.
+    world: DVec3,
+}
+
+impl SemiImplicitEuler {
+    /// The velocity half of [`Integrator::step`]: the force and the torque
+    /// applied, and the gyroscopic step taken, for a body oriented at
+    /// `rotation`. The accumulators are left alone.
+    ///
+    /// Between this and [`integrate_position`](Self::integrate_position) the
+    /// body's velocities are the ones a constraint solver works on; the two
+    /// halves back to back are exactly [`Integrator::step`], bit for bit.
+    pub fn integrate_velocity(body: &mut RigidBody, rotation: DQuat, dt: f64) -> SpinStep {
         // a = F / m = F * (1/m)
         let acceleration = body.force_accum * body.inverse_mass;
         body.velocity += acceleration * dt;
+
+        if !body.has_rotational_inertia() {
+            return SpinStep::default();
+        }
+        let local_torque = rotation.inverse() * body.torque_accum;
+        let before = rotation.inverse() * body.angular_velocity
+            + body.inverse_local_inertia * local_torque * dt;
+        let after = gyroscopic_step(body.local_inertia, before, dt);
+        let world = rotation * after;
+        body.angular_velocity = world;
+        SpinStep {
+            before,
+            after,
+            world,
+        }
+    }
+
+    /// The position half of [`Integrator::step`]: the body moved by its
+    /// velocity and turned by its spin.
+    ///
+    /// `spin` is what [`integrate_velocity`](Self::integrate_velocity) returned
+    /// for this body. If its angular velocity has changed since, the changed
+    /// one is read back into the body's frame and the rotation uses that; if
+    /// not, the step is the undivided one's to the bit.
+    pub fn integrate_position(
+        body: &mut RigidBody,
+        transform: &mut Transform,
+        spin: SpinStep,
+        dt: f64,
+    ) {
         transform.position += body.velocity * dt;
 
         if body.has_rotational_inertia() {
             let rotation = transform.rotation;
-            let local_torque = rotation.inverse() * body.torque_accum;
-            let before = rotation.inverse() * body.angular_velocity
-                + body.inverse_local_inertia * local_torque * dt;
-            let after = gyroscopic_step(body.local_inertia, before, dt);
-            let midpoint = rotation * ((before + after) * 0.5);
+            let after = if body.angular_velocity == spin.world {
+                spin.after
+            } else {
+                rotation.inverse() * body.angular_velocity
+            };
+            let midpoint = rotation * ((spin.before + after) * 0.5);
             if midpoint != DVec3::ZERO {
                 transform.rotation = (cayley_rotation(midpoint, dt) * rotation).normalize();
             }
@@ -157,7 +224,6 @@ impl Integrator for SemiImplicitEuler {
         } else if body.angular_velocity != DVec3::ZERO {
             transform.rotation = integrate_rotation(transform.rotation, body.angular_velocity, dt);
         }
-        body.clear_forces();
     }
 }
 

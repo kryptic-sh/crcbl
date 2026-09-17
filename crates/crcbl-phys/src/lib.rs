@@ -12,7 +12,7 @@
 //! | **L0** | Queries + kinematics: ray/segment/sweep/overlap, trigger volumes, character controller | Current |
 //! | **L1** | Forces + ballistics + orbits: gravity, drag, thrust, integrators, Kepler propagation | Current |
 //! | **CCD** | Swept collision: TOI, motion-inflated broadphase | Current |
-//! | **L2** | Contact solver: sequential impulses, warm starting, islands | Stretch |
+//! | **L2** | Contact solver: sequential impulses, warm starting, islands | Rung 1 |
 //!
 //! L1 today is the force pipeline and one integrator: [`GravityForce`],
 //! [`DragForce`], [`DampingForce`] and [`ThrustForce`] feed
@@ -25,8 +25,16 @@
 //! still standing — `AtmosphericDrag`'s exponential, the sphere of influence's
 //! power and the Kepler solution's Stumpff functions — each say why where they
 //! are made.
-//! [`SurfaceMaterial`] carries each body's friction and restitution for the
-//! contact solver that does not exist yet. [`Atmosphere`] and its
+//! [`SurfaceMaterial`] carries each body's friction and restitution.
+//!
+//! L2 is rung 1 of `docs/plan/36-contact-solver.md`, in [`contact`]: a system
+//! made with [`PhysicsSystem::with_contacts`] collides spheres, capsules and
+//! (against planes) boxes through split broadphase trees, analytic manifolds
+//! and a substepped soft solver with warm starting, speculative contacts and a
+//! restitution pass, and raises a [`KineticContact`] for each hard impact.
+//! Box against box, islands and sleep are later rungs.
+//!
+//! [`Atmosphere`] and its
 //! quadratic [`AtmosphericDrag`] have landed, the [`Frames`] hierarchy carries
 //! sphere-of-influence crossings, and [`propagate`] is the analytic Kepler
 //! solution a coasting body is put on rails with.
@@ -48,6 +56,7 @@ pub mod broadphase;
 pub mod character;
 pub mod collider;
 pub mod components;
+pub mod contact;
 pub mod forces;
 pub mod frames;
 pub mod integrator;
@@ -64,10 +73,14 @@ pub use broadphase::{Bvh, BvhHit, Ray, Segment};
 pub use character::{CharacterConfig, CharacterController, GroundContact, MoveOutcome};
 pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};
+pub use contact::{
+    ContactBody, ContactCounters, ContactReport, ContactSettings, KineticContact, KineticSource,
+    PlaneId, StageTimes,
+};
 pub use forces::{DampingForce, DragForce, ForceProvider, GravityForce, PointGravity, ThrustForce};
 pub use frames::{FrameId, Frames, State, sphere_of_influence};
 pub use integrator::{
-    GYROSCOPIC_ITERATIONS, Integrator, MAX_ROTATION_LENGTH_ERROR, SemiImplicitEuler,
+    GYROSCOPIC_ITERATIONS, Integrator, MAX_ROTATION_LENGTH_ERROR, SemiImplicitEuler, SpinStep,
     cayley_rotation, gyroscopic_step, integrate_rotation, rotation_from_scaled_axis,
 };
 pub use mass::MassProperties;

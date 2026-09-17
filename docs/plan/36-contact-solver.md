@@ -6,12 +6,20 @@ as L2 (contacts) and L3 (constraints) and left it as a paragraph because nothing
 in the MVP demanded it. Ragdolls (35), grenades, dropped loot, and vehicles do,
 so it gets a real design here.
 
-**Status: rung 0 built (2026-09-17)** — rotation (inertia tensor, torque, the
-implicit-midpoint gyroscopic step), dense generational body sets, a
-`SurfaceMaterial` carried per body, and `crcbl_core::trig`, proven by
-`apps/tumble`'s T-handle and dropped box. Nothing from rung 1 on: `crcbl-phys`
-names no manifold, contact, island, sleeping or joint, colliders do not rotate
-with their body, and nothing reads the material yet.
+**Status: rungs 0 and 1 built (2026-09-17).** Rung 0: rotation (inertia tensor,
+torque, the implicit-midpoint gyroscopic step), dense generational body sets,
+`SurfaceMaterial` per body and `crcbl_core::trig`. Rung 1, opted into with
+`PhysicsSystem::with_contacts`: split fattened broadphase trees with a move
+buffer and pair set; analytic sphere and capsule manifolds against spheres,
+capsules, oriented boxes and planes, plus box against plane, with feature ids;
+and a substepped soft solver with warm starting, speculative contacts and a
+restitution pass, raising `KineticContact`. Two measured departures from the
+sections below: **the speculative distance grows with the pair's closing
+speed**, because decision 5's fixed four slops let a 30 m/s ball through a 2 cm
+plate, and **separation within a tick is tracked to first order** rather than
+through Box2D's turned anchors, which made a rolling ball slip. Sphere against
+sphere is in rung 1 because the ball pit needs it. Nothing from rung 2 on: no
+box against box, islands, sleep, sweeps or joints.
 
 ## Decisions from the engine research (2026-09-15)
 

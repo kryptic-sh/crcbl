@@ -5,8 +5,8 @@
 //! Everything that is not this sample's — opening a backend, choosing an
 //! adapter that can present, the swapchain, the frames-in-flight ring, resize
 //! and teardown — is [`crcbl::engine::GpuContext`]'s. What is here is a
-//! renderer built from [`crate::stage`]'s description, and the three body
-//! instances in it that follow the physics every frame.
+//! renderer built from [`crate::stage`]'s description, and the body instances
+//! in it that follow the physics every frame.
 //!
 //! # Pass order is declaration order
 //!
@@ -38,7 +38,7 @@ pub struct Gpu {
     /// `None` on a device without timestamp queries — the report degrades, the
     /// frame does not.
     timers: Option<PassTimers>,
-    /// Where the frame is seen from: [`stage::camera`], which is fixed.
+    /// Where the frame is seen from: [`stage::camera`] of the room on screen.
     camera: Camera,
     /// UI compositing — the overlay and the debug panel, in one list.
     ui: UiRenderer,
@@ -109,7 +109,7 @@ impl Gpu {
             drawn,
             pool: TransientPool::new(),
             timers,
-            camera: stage::camera(),
+            camera: stage::camera(crate::scene::View::default()),
             ui,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
@@ -134,9 +134,16 @@ impl Gpu {
         &mut self.ctx
     }
 
-    /// Poses the body instances where the scenes have them now.
+    /// Poses the body instances where the scenes have them now, and points
+    /// the camera at the room on screen.
+    ///
+    /// A pool too small for a new body is logged and that body goes undrawn;
+    /// the stage's own test holds the capacities to what the rooms can reach.
     pub fn place_bodies(&mut self, scenes: &Scenes) {
-        self.drawn.update(&mut self.renderer, scenes);
+        self.camera = stage::camera(scenes.view());
+        if let Err(error) = self.drawn.update(&mut self.renderer, scenes) {
+            crcbl::log::warn!("tumble: a body went undrawn: {error}");
+        }
     }
 
     /// Takes this frame's draw list, handing the previous frame's allocation

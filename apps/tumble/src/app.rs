@@ -16,7 +16,8 @@
 //!
 //! [`Tumble::tick`] steps [`Scenes`] by the fixed timestep and nothing else,
 //! which is what makes the hash at [`crate::scene::CHECK_TICK`] a constant.
-//! [`Tumble::draw`] reads whatever the last tick left.
+//! [`Tumble::draw`] reads whatever the last tick left. The one key this sample
+//! reads picks the room on screen, which the simulation never sees.
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{Booted, Clock, FrameInfo, HostedGame, RunSummary, wait_for_configure};
@@ -26,7 +27,7 @@ use crcbl::ui::{DebugModule, DebugSection};
 
 use crate::gpu::Gpu;
 use crate::menu::{MenuKind, Menus};
-use crate::scene::{CHECK_TICK, PINNED_HASH, Reading, Scenes};
+use crate::scene::{CHECK_TICK, PINNED_HASH, Reading, Scenes, View};
 
 pub use crate::args::Options;
 
@@ -67,7 +68,7 @@ pub type TumbleError = crcbl::engine::LoopError;
 
 // ---- the debug panel ---------------------------------------------------------
 
-/// Tumble's section of the debug panel: the rung 0 counters.
+/// Tumble's section of the debug panel: a line of counters per room.
 #[derive(Debug)]
 struct Stats {
     reading: Reading,
@@ -76,17 +77,26 @@ struct Stats {
 
 impl DebugModule for Stats {
     fn debug_section(&self, out: &mut DebugSection) {
+        let r = &self.reading;
         out.set_title("physics");
-        out.row("tick", format_args!("{}", self.reading.tick));
-        out.row("flips", format_args!("{}", self.reading.flips));
+        out.row("tick", format_args!("{}", r.tick));
         out.row(
-            "momentum",
-            format_args!("{:.1e}", self.reading.momentum_drift),
+            "spin",
+            format_args!(
+                "{} flips, drift {:.1e}, box {:.3} m",
+                r.spin.flips, r.spin.momentum_drift, r.spin.box_height
+            ),
         );
-        out.row("energy", format_args!("{:.1e}", self.reading.energy_drift));
-        out.row("box spin", format_args!("{}", self.reading.box_spin));
-        out.row("drops", format_args!("{}", self.reading.drops));
-        out.row("hash", format_args!("{:016x}", self.reading.hash));
+        for (name, tally) in [("wall", r.wall.contacts), ("pit", r.pit.contacts)] {
+            out.row(
+                name,
+                format_args!(
+                    "{} bodies, {} pairs, {} contacts, {}+ {}-",
+                    tally.bodies, tally.pairs, tally.touching, tally.begun, tally.ended
+                ),
+            );
+        }
+        out.row("hash", format_args!("{:016x}", r.hash));
         out.row("commands", format_args!("{}", self.commands));
     }
 }
@@ -207,25 +217,40 @@ impl Tumble {
     ///
     /// `web/tools/browser-e2e.mjs` reads it. `tick` is the heartbeat itself;
     /// `hash` beside `pinned-tick` and `pinned` is the determinism check, the
-    /// wasm build's hash at the tick the native test pins; `flips`,
-    /// `box-spin` and `box-level` are the two scenes' claims.
+    /// wasm build's hash at the tick the native test pins; the rest are every
+    /// room's counters, whichever room is on screen.
     fn log_heartbeat(&self) {
         if !crcbl::engine::heartbeat_due(self.scenes.tick_count(), HEARTBEAT_TICKS) {
             return;
         }
-        let reading = self.scenes.reading();
+        let r = self.scenes.reading();
+        let (wall, pit) = (r.wall.contacts, r.pit.contacts);
+        let bounce = wall.bounce_ratio().unwrap_or(0.0);
         crcbl::log::info!(
-            "[HUD] tick: {}  flips: {}  momentum-drift: {:.1e}  energy-drift: {:.1e}  \
-             box-spin: {}  box-level: {}  drops: {}  hash: {:016x}  \
-             pinned-tick: {}  pinned: {:016x}",
-            reading.tick,
-            reading.flips,
-            reading.momentum_drift,
-            reading.energy_drift,
-            reading.box_spin,
-            if reading.box_level { "exact" } else { "tilted" },
-            reading.drops,
-            reading.hash,
+            "[HUD] tick: {}  view: {}  flips: {}  momentum-drift: {:.1e}  box-y: {:.3}  \
+             drops: {}  wall-bodies: {}  wall-pairs: {}  wall-begun: {}  wall-ended: {}  \
+             wall-pen-mm: {:.2}  wall-bounce: {:.2}  pit-balls: {}  pit-pairs: {}  \
+             pit-contacts: {}  pit-begun: {}  pit-ended: {}  pit-pen-mm: {:.2}  \
+             hash: {:016x}  pinned-tick: {}  pinned: {:016x}",
+            r.tick,
+            r.view.name(),
+            r.spin.flips,
+            r.spin.momentum_drift,
+            r.spin.box_height,
+            r.spin.drops,
+            wall.bodies,
+            wall.pairs,
+            wall.begun,
+            wall.ended,
+            wall.worst_penetration * 1.0e3,
+            bounce,
+            r.pit.balls,
+            pit.pairs,
+            pit.touching,
+            pit.begun,
+            pit.ended,
+            pit.worst_penetration * 1.0e3,
+            r.hash,
             CHECK_TICK,
             PINNED_HASH,
         );
@@ -253,9 +278,14 @@ impl HostedGame for Tumble {
         self.log_heartbeat();
     }
 
-    /// Tumble reads no key of its own: the scenes run themselves, and a key
-    /// that changed them would change the hash the gate pins.
-    fn key_event(&mut self, _key: KeyCode, _pressed: bool) {}
+    /// `1`, `2` and `3` pick the room on screen. That is the only key, and it
+    /// reaches the camera and the panel and not the simulation, so the hash
+    /// the gate pins is the same whatever is pressed.
+    fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        if pressed && let Some(view) = View::for_key(key) {
+            self.scenes.set_view(view);
+        }
+    }
 
     fn menu_action(_id: crcbl::ui::WidgetId) -> Option<core::convert::Infallible> {
         None
@@ -299,15 +329,22 @@ impl HostedGame for Tumble {
     }
 
     fn log_summary(summary: &Summary) {
+        let r = &summary.reading;
         crcbl::log::info!(
-            "tumble: {} frames, {} ticks, {} flips, momentum drift {:.1e}, {} drops, \
+            "tumble: {} frames, {} ticks, {} flips, momentum drift {:.1e}, box at {:.3} m, \
+             wall {} bodies {}+ {}- contacts, pit {} balls {} pairs, \
              hash {:016x}, {} page commands ({:?})",
             summary.run.frames,
             summary.run.ticks,
-            summary.reading.flips,
-            summary.reading.momentum_drift,
-            summary.reading.drops,
-            summary.reading.hash,
+            r.spin.flips,
+            r.spin.momentum_drift,
+            r.spin.box_height,
+            r.wall.contacts.bodies,
+            r.wall.contacts.begun,
+            r.wall.contacts.ended,
+            r.pit.balls,
+            r.pit.contacts.pairs,
+            r.hash,
             summary.commands,
             summary.run.exit,
         );

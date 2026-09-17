@@ -150,6 +150,23 @@ impl Aabb {
             && self.max.z >= other.min.z
     }
 
+    /// Whether `other` lies wholly inside this AABB (a shared face counts as
+    /// inside).
+    ///
+    /// The contact broadphase's test for a proxy that has left its fattened
+    /// bounds: a `NaN` anywhere in `other` answers `false`, so a poisoned body
+    /// is re-inserted rather than kept on bounds that no longer describe it.
+    #[inline]
+    #[must_use]
+    pub fn contains(&self, other: &Self) -> bool {
+        self.min.x <= other.min.x
+            && self.min.y <= other.min.y
+            && self.min.z <= other.min.z
+            && self.max.x >= other.max.x
+            && self.max.y >= other.max.y
+            && self.max.z >= other.max.z
+    }
+
     // -- ray intersection (slab method) ---------------------------------------
 
     /// The parametric interval `(t_near, t_far)` over which a ray is inside
