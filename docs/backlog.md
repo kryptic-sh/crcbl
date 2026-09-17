@@ -91,8 +91,11 @@ with 60 tests and the deliberate violations excluded. The filtered shell harness
 refused its missing reach marker as described below; it was not counted as a
 passing gate. Vulkan validation was loaded and clean on positive paths. The
 local full harness reported record-time and single-submission reach, with
-cross-submission reach absent. Exact-commit CI/browser/deployment verification
-remains required before retaining this change.
+cross-submission reach absent. Exact-commit CI completed successfully for
+`144d4543fc6dd52c841398457ce36c88e0885f54`; every enumerated job succeeded,
+including Metal, Direct3D, Vulkan, native windowing and threaded wasm.
+Exact-commit browser/deployment verification remains required before retaining
+this change.
 
 - Finish exact shadow-group record capacity verification, then price retained
   shadow-preparation views/culls: actual caller profiles below show repeated
