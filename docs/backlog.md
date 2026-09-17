@@ -39,37 +39,7 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
-- P13's explicit partition metadata copy trial below is on `main` at `991a6fc`.
-  Its exact-commit CI completed successfully; Pages browser gates, deployment
-  and live-site verification remain pending. Avoid cloning the source call
-  vector that struct-update syntax discards, without retaining another cache.
-  Bucket draw recording and partition construction have first been moved into
-  the private `forward::bucket_draws` module with the algorithm unchanged. The
-  moved definitions matched after visibility normalization, and the comparison
-  rejected a deliberately changed draw-region count offset. Workspace
-  formatting, default clippy and tests passed before the move was committed. The
-  explicit field-copy implementation is now present. Its production metadata
-  test passed against both implementations, and independently changing pipeline,
-  layout, indices, emit tail, selected calls or region step made it fail before
-  restoring and passing. The final implementation passed the default workspace
-  build, clippy and tests, the formatting check, all-feature clippy and nextest.
-  Regular all-feature tests, explicit doctests, public/private documentation
-  with warnings denied and dependency checks also passed serially. A fresh
-  release build drove the actual mixed-mode renderer through the preserved eager
-  executable and the explicit-copy executable. Complete cold and warm command
-  captures matched for every tail, including on repeat; deliberately changing an
-  indirect offset made each comparison fail before restoring. Instance mirrors,
-  warmed shadow reuse, bind-group reuse, null validation and teardown checks
-  passed. The pinned Radeon/RADV render suite reported 98 passed with no skips,
-  named the discrete adapter and passed its loaded Vulkan validation check. The
-  pinned lavapipe engine suites reported 304 passed with no skips; every
-  requested suite appeared, the actual adapter was llvmpipe/Cpu and the loaded
-  validation log was clean. The full Vulkan backend suite reported 63 passed
-  with no skips, including its deliberately dirty validation gates. The separate
-  positive run reported 60 passed and 3 skipped; its loaded validation log was
-  clean. The local layer reported record-time and one-submission checking, but
-  no cross-submission checking. No native or browser frame speedup is
-  established. Price exact shadow-group record capacity next, then retained
+- Price exact shadow-group record capacity next, then retained
   shadow-preparation views/culls: actual caller profiles below show repeated
   allocation before cached-atlas reuse. Complete group records currently reserve
   for a point cube even for a cascade, while a full cube outgrows that hint.
@@ -83,34 +53,6 @@ Next performance trials:
   remains an input-burst candidate to price. Backend command-pool reuse, wider
   graph caching and math changes need stronger workload evidence or carry more
   lifecycle risk.
-
-P13 paired release preparation/recording measurements used the same actual
-renderer fixture at 960x720, with 550 frames and 500 timed after warmup. The
-timer includes `begin_frame`, graph build/compile/execute and encoder finish;
-startup, assertions, capture formatting, destruction, UI, acquisition,
-submission, presentation and GPU shader execution are excluded. These results
-show no consistent preparation speedup:
-
-| Tail           | Eager p50/p95 (ms) | Explicit p50/p95 (ms) | Eager repeat (ms) | Explicit repeat (ms) |
-| -------------- | ------------------ | --------------------- | ----------------- | -------------------- |
-| Indirect count | 0.036/0.042        | 0.036/0.039           | 0.036/0.038       | 0.036/0.046          |
-| Per batch      | 0.034/0.036        | 0.034/0.036           | 0.034/0.037       | 0.034/0.051          |
-| Mesh           | 0.031/0.033        | 0.032/0.035           | 0.031/0.036       | 0.033/0.038          |
-
-Fresh whole-fixture DHAT runs for indirect count reported 415,261,796 bytes in
-869,036 blocks for eager construction and 410,609,763 bytes in 865,732 blocks
-for explicit copying. These include startup, warmup and observations, not just
-timed frames. Direct discarded-clone allocation sites accounted for 4,652,032
-bytes in 3,304 blocks before the change and had no matching site afterwards; the
-query asserted the original sites were present. Required filtered-call
-collection sites remained at 4,086,784 bytes in 11,012 blocks in both profiles.
-Complete profiled command captures also matched. Instrumented timing is not used
-as a frame benchmark. `size` reported text sections of 5,113,077 bytes for the
-eager recording executable and 5,112,897 bytes for its explicit-copy
-counterpart; this does not price every backend or build. Retain the allocation
-reduction separately from any claim about complete GPU frame time. Local backend
-gates and exact-commit CI passed; Pages browser gates, deployment and live-site
-verification are still required before this trial ships.
 
 Editor image coverage gap:
 `app::instances::tests::filtered_editor_images_match_eager_writes_through_history`
@@ -3080,80 +3022,17 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   `&'static str` or `Cow` labels, reused scratch vectors, `SmallVec` accesses,
   ordinals computed once. Later: cache a compiled plan keyed by the declarations
   and the pool's ending states.
-- **P13 — bucket partitions are rebuilt and cloned every frame.** `calls` is
-  rebuilt in `add_frame_passes` and `add_shadow_pass`, `partitions` allocates
-  per pipeline, and `View::add_passes` clones both lists per view — though
-  bucket modes are fixed at build. First trial the narrower change in
-  `ForwardRenderer::partitions`: `..draws.clone()` clones the source call list
-  although the result supplies a filtered `calls` list. Explicitly copy its
-  remaining scalar metadata. Keep the separately retained `bucket_calls` clone
-  in `add_shadow_pass` for the later reflective-shadow and punctual partitions;
-  this narrow trial removes the source call-list copy overwritten by filtered
-  `calls`, rather than changing graph ownership. Before changing this monolithic
-  module, move the existing bucket draw descriptors and recording responsibility
-  along their private seam in a behavior-preserving commit, retaining the
-  existing call paths and clone support. A standalone release prototype copied
-  the existing partition algorithm and mirrored `BucketDraws`, comparing cloned
-  struct update with explicit metadata copying. Complete results matched for
-  material-mode masks, emit tails, nondefault region offsets,
-  pipeline/layout/index handles, call coverage and empty inputs. Replacing
-  region offsets with defaults made complete-result validation fail before
-  restoring and passing repeats. With 16 calls and 4 populated partitions,
-  repeated construction/destruction p50/p95 was 91.5/96.5 ns per call originally
-  versus 61.4/65.1 ns with explicit copying; with 1024 calls it was
-  3049.6/3744.6 ns versus 2232.9/2249.2 ns. Setup and result assertions were
-  excluded from timing. Whole-fixture DHAT totals were 1974832934 bytes in
-  416267 blocks originally and 656944937 bytes in 337067 blocks with explicit
-  copying, including setup, reference/equality fixtures and warmup. These are
-  isolated synthetic metadata results, not actual GPU recording or frame gains;
-  fabricated handles were only compared as logical values, with no HAL
-  validation claim. Verify complete recorded draw arguments, frame-region
-  offsets and mixed-mode images on an actual renderer before keeping the change.
-  Broader retained partitions or bucket ranges still need workload evidence and
-  lifecycle design. `MaterialTable::set` can change standalone row modes and
+- **P13 — price retained bucket partitions and per-view call storage.**
+  `ForwardRenderer::partitions` in `forward/bucket_draws.rs` still collects
+  filtered calls per pipeline; `add_frame_passes`, `add_shadow_pass` and
+  `View::add_passes` retain separate lists for graph ownership. Price actual
+  unchanged and changing scenes before caching them. Preserve pipeline/material
+  separation, call order, frame-specific region offsets and reflective/punctual
+  ownership. Broader retained partitions or bucket ranges need workload evidence
+  and lifecycle design. `MaterialTable::set` can change standalone row modes and
   does not re-key existing instances; any future live renderer material editing
-  must invalidate routing together, rather than assuming a permanent build-only
-  contract. An actual release renderer baseline now uses the complete
-  material-mode set and explicit `IndirectCount` and `IndirectPerBatch` tails on
-  the GPU-driven null device. Each render-target graph runs with every effect
-  requested, complete instance-mirror checks, warmed shadow and bind-group
-  reuse, null validation and leak-free teardown. Both tails reported 550 frames,
-  500 timed after warmup and 495 commands per warmed frame. Count-tail
-  preparation and recording p50/p95 was 0.036/0.038 ms and 0.036/0.040 on
-  repeat; per-batch was 0.035/0.038 ms in both runs. The timer includes frame
-  preparation, graph build/compile/execute and encoder finish, excluding
-  startup, observations, destruction, UI, acquisition, submission, presentation
-  and shader execution. Complete cold and warmed command snapshots matched
-  across separate repeats, including logical handles and generations, pipelines,
-  index bindings, dynamic offsets, argument/count offsets, strides, draw limits,
-  attachments and barriers. Mutating an actual recorded draw's argument offset
-  made each tail's snapshot comparison fail; normal repeats matched. These are
-  original-caller baselines and snapshot-observer controls, not production
-  partition changes or GPU execution. Compare the same fixture after
-  implementation and check private host metadata separately: the null recorded
-  `BindGroup` does not retain its pipeline-layout argument. A mesh-capable null
-  device explicitly enabled mesh and task features, and the extended fixture
-  observed actual `DrawMeshTasksIndirect` commands. Its restored run reported
-  550 frames, 500 timed, 377 commands per warmed frame and preparation/recording
-  p50/p95 of 0.032/0.035 ms with the same boundaries and exclusions. Cold and
-  warmed full command snapshots matched across separate mesh repeats; changing a
-  recorded mesh argument offset made comparison fail, and normal snapshots
-  matched. Expecting a mesh command from a count-tail frame independently failed
-  the requested-tail observation. This closes the original mesh recording
-  baseline gap, rather than proving GPU execution or a partition optimization.
-  Mixed-mode native images and actual changed-caller allocations remain
-  unverified. DHAT of the actual count-tail fixture reported 415,261,779 bytes
-  in 869,034 blocks for the whole run, including startup, observers, correctness
-  checks, command-snapshot formatting and warmup. Its full command snapshots
-  matched the uninstrumented baseline. Repeated allocation points rooted
-  directly in the partition closure reported 550 blocks/774400 bytes in their
-  respective call contexts and 1650 blocks/2323200 bytes in another context. The
-  filtered calls collectors and outer partition vectors appeared as separate
-  points; those collections still serve required output. Compare the closure
-  points after explicit metadata copying before attributing a complete caller
-  heap gain. These are original allocation observations, not per-frame byte
-  totals, timed-region totals or a proposed optimization result. Instrumented
-  timing is not a native frame benchmark.
+  must invalidate routing together. Native/browser complete-frame gain remains
+  unmeasured; source metadata-copy allocation savings do not establish it.
 - **P15 — sky LUT upload repeats despite cached construction.** Revalidated
   `SkyPass::begin_frame`: an atmosphere-backed frame calls `SkyView::rows` and
   writes the current slot's LUT buffer. In contrast,
