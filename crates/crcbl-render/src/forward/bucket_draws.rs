@@ -242,12 +242,142 @@ impl ForwardRenderer {
                     .filter(|(_, bucket)| (**bucket & key) == *mode)
                     .map(|(call, _)| *call)
                     .collect();
-                (!calls.is_empty()).then(|| BucketDraws {
+                (!calls.is_empty()).then_some(BucketDraws {
                     pipeline: *pipeline,
+                    layout: draws.layout,
+                    indices: draws.indices,
+                    emit: draws.emit,
                     calls,
-                    ..draws.clone()
+                    region_step: draws.region_step,
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene;
+    use crcbl_hal::null::{NullInstance, Recorder};
+    use crcbl_hal::{AdapterId, DeviceDesc, Format, Instance, QueueKind};
+    use crcbl_shaders::mesh::GpuMaterial;
+
+    #[test]
+    fn partitions_preserve_all_metadata_and_order_for_every_tail() {
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(AdapterId(0)))
+            .unwrap();
+        let queue = device.queue(QueueKind::Graphics).unwrap();
+        let mut renderer = ForwardRenderer::with_scene(
+            device.as_ref(),
+            queue,
+            Format::Rgba8UnormSrgb,
+            &scene::demo(),
+        )
+        .unwrap();
+        let masked = GpuMaterial::ALPHA_MODE_MASK;
+        let double = GpuMaterial::DOUBLE_SIDED;
+        let both = GpuMaterial::MODE_MASK;
+        let unused = both + 1;
+        renderer.bucket_modes = vec![0, masked, double, both, masked, 0, both];
+        let calls = [
+            (17, 29, 41, 53),
+            (71, 83, 97, 109),
+            (127, 139, 151, 163),
+            (181, 193, 211, 223),
+            (241, 257, 269, 281),
+            (307, 331, 347, 359),
+            (373, 389, 401, 419),
+        ];
+        let opaque_pipeline = renderer.shadow_pipeline.single;
+        let masked_pipeline = renderer.depth_masked_pipeline.single;
+        let double_pipeline = renderer.shadow_pipeline.double;
+        let both_pipeline = renderer.depth_masked_pipeline.double;
+        let unused_pipeline = renderer.tonemap_pipeline;
+        let cases = [
+            (
+                both,
+                vec![
+                    (both, both_pipeline),
+                    (unused, unused_pipeline),
+                    (0, opaque_pipeline),
+                    (double, double_pipeline),
+                    (masked, masked_pipeline),
+                ],
+                vec![
+                    (both_pipeline, vec![3, 6]),
+                    (opaque_pipeline, vec![0, 5]),
+                    (double_pipeline, vec![2]),
+                    (masked_pipeline, vec![1, 4]),
+                ],
+            ),
+            (
+                double,
+                vec![
+                    (double, double_pipeline),
+                    (unused, unused_pipeline),
+                    (0, opaque_pipeline),
+                ],
+                vec![
+                    (double_pipeline, vec![2, 3, 6]),
+                    (opaque_pipeline, vec![0, 1, 4, 5]),
+                ],
+            ),
+            (
+                0,
+                vec![(unused, unused_pipeline), (0, opaque_pipeline)],
+                vec![(opaque_pipeline, vec![0, 1, 2, 3, 4, 5, 6])],
+            ),
+        ];
+        for emit in [EmitTail::Count, EmitTail::PerBatch, EmitTail::Mesh] {
+            let source = BucketDraws {
+                pipeline: renderer.mesh_pipeline.single,
+                layout: renderer.tonemap_pipeline_layout,
+                indices: renderer.pool.index_buffer(),
+                emit,
+                calls: calls.to_vec(),
+                region_step: RegionStep {
+                    constants: 256,
+                    args: 1024,
+                    counts: 64,
+                },
+            };
+            assert_ne!(source.layout, renderer.mesh_pipeline_layout);
+            for (key, pipelines, expected) in &cases {
+                let partitions = renderer.partitions(&source, *key, pipelines);
+                assert_eq!(partitions.len(), expected.len());
+                for (partition, (pipeline, selected)) in partitions.iter().zip(expected) {
+                    assert_eq!(partition.pipeline, *pipeline);
+                    assert_eq!(partition.layout, source.layout);
+                    assert_eq!(partition.indices, source.indices);
+                    assert_eq!(partition.emit, emit);
+                    assert_eq!(partition.region_step, source.region_step);
+                    assert_eq!(
+                        partition.calls,
+                        selected
+                            .iter()
+                            .map(|&index| calls[index])
+                            .collect::<Vec<_>>()
+                    );
+                }
+                assert_eq!(source.calls, calls);
+            }
+        }
+        renderer.bucket_modes.clear();
+        let empty = BucketDraws {
+            pipeline: opaque_pipeline,
+            layout: renderer.mesh_pipeline_layout,
+            indices: renderer.pool.index_buffer(),
+            emit: EmitTail::Count,
+            calls: Vec::new(),
+            region_step: RegionStep::default(),
+        };
+        assert!(renderer.partitions(&empty, both, &cases[0].1).is_empty());
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+        assert_eq!(recorder.total_live_objects(), 0);
     }
 }

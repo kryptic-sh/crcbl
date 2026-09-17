@@ -31,166 +31,74 @@ Parallel occlusion bucket finalization passed CI and deployed. Authored interior
 and browser culling measurements, CPU draw-recording cost, and overlapping grass
 workloads remain open below.
 
-The editor slice passed its complete CI and Pages deployment gates, and the
-published site returned HTTP 200. P14 is now in implementation on
-`perf/cached-bind-group-entries`. The shared helper was moved into its own
-private `bind_group_cache` module in a behavior-preserving commit before
-changing its entry argument. Callers now borrow fixed arrays or stored mesh
-templates; SSR also builds its complete pyramid key on the stack. CMAA2 retains
-its separate source-and-working-buffer key. The initial workspace formatting,
-default clippy and test suite passed. Production lifecycle tests also passed
-after deliberately ignoring the second image view and each CMAA2 buffer in turn:
-all stale-key mutations failed, then both restored tests passed. All-feature
-workspace nextest and the pinned Radeon Vulkan render suite passed, with the
-validation messenger loaded and no complaints. The complete engine GPU suites
-passed on pinned lavapipe: 304 tests passed with no skips, all requested suite
-names appeared, and the loaded validation messenger reported no complaints. The
-Vulkan suite reported 63 passed with no skips. Applying a blanket clean-log
-check to that invocation was incorrect: `validation_gate` deliberately emits
-out-of-bounds-copy and synchronization hazards, then asserts the layer observed
-them. The separate positive Vulkan invocation passed its clean-log check; the
-successful full invocation covers its negative gates. The local layer reported
-`record-time=yes one-submission=yes cross-submission=no`; these results do not
-establish cross-submission validation coverage.
+Bind-group replacement-image comparisons and actual browser performance remain
+unverified. Native suite passes do not establish Metal or Direct3D image parity,
+or cross-submission Vulkan validation coverage. The null recording workload did
+not exercise water, grass, probe-capture replacement or FXAA. Keep these
+coverage gaps separate from the completed entry-allocation implementation.
 
-The subsequent default workspace run failed its editor doctest with E0460:
-`libcrcbl_breakout.rlib` did not match the dependency metadata in the editor
-library. Cargo builds had overlapped in a shared target directory, consistent
-with replacing an unversioned artifact. The serialized regular workspace test
-run passed, including the formerly failing editor doctest, without deleting
-build artifacts. That supports overlapping builds as the cause. The all-feature
-`cargo test` run failed the water frame-list comparison when the process-global
-SSAO blur count moved between captures. Those runs did not pass. The water and
-grass comparison fixtures now take the existing shared blur and split guards,
-preserving their assertions and established acquisition order. Deliberately
-changing blur count before the final capture failed each comparison, then both
-restored tests passed. The serialized workspace build, formatting check, default
-and all-feature clippy, and regular workspace tests passed. The serialized
-all-feature nextest run reported 7198 passed and 507 skipped. Both workspace
-`cargo test` configurations and the explicit all-feature doctests passed. Public
-and private-item rustdoc passed with warnings denied, and dependency checks
-passed. The separate positive Vulkan run reported 60 passed and 3 skipped: its
-filter excluded the deliberately dirty validation-gate tests already exercised
-in the full invocation. Its loaded validation messenger reported no complaints.
-CI and deployment remain required before declaring this slice shipped. No shader
-source changed, so artifact regeneration is not part of this entry-template
-change.
+Next performance trials:
 
-The integrated release fixture preserved the complete instance mirror, warmed
-shadow reuse, zero warmed bind-group creation, null validation and leak-free
-teardown. These paired repeats include the same timing boundaries and exclusions
-as the original fixture below. The default fixture retained 213 commands per
-warmed frame; requesting every effect retained 355, with CMAA2 occupying the
-resolve slot. Timing does not establish a broad preparation speedup:
-
-| Null preparation fixture | Eager p50/p95 (ms) | Borrowed p50/p95 (ms) | Eager repeat (ms) | Borrowed repeat (ms) |
-| ------------------------ | ------------------ | --------------------- | ----------------- | -------------------- |
-| Default cube             | 0.019/0.025        | 0.020/0.022           | 0.019/0.028       | 0.020/0.020          |
-| All requested effects    | 0.028/0.029        | 0.028/0.029           | 0.029/0.031       | 0.028/0.029          |
-
-Whole-fixture DHAT totals, including setup, observers and warmup, fell from
-278,661,222 bytes in 466,444 blocks to 276,815,822 bytes in 456,570 blocks for
-the default fixture, and from 392,481,414 bytes in 729,294 blocks to 389,561,934
-bytes in 711,200 blocks for the expanded fixture. Previously repeated direct
-pass callback allocation points shown below no longer appeared at warm-frame
-volume; the shared helper still copies entries on cache misses. These are
-fixture totals, not real-game allocations per frame or timed-region totals.
-
-A paired native headless Vulkan editor fixture presented 550 frames at 960x720,
-with 500 timed after warmup; it includes CPU frame work, acquisition, submission
-and ring waits, rather than isolated GPU time. The default scene improved in
-both pairs; the dense scene did not. Do not claim a general native frame
-speedup:
-
-| Editor fixture | Eager p50/p95 (ms) | Borrowed p50/p95 (ms) | Eager repeat (ms) | Borrowed repeat (ms) |
-| -------------- | ------------------ | --------------------- | ----------------- | -------------------- |
-| Default        | 0.260/0.340        | 0.253/0.304           | 0.262/0.332       | 0.253/0.297          |
-| Dense          | 0.232/0.285        | 0.234/0.291           | 0.233/0.288       | 0.234/0.297          |
-
-`size` reported text sections of 5,073,860 bytes for the eager null-recording
-executable and 5,071,144 bytes for the borrowed executable, and 9,391,881 bytes
-for the eager editor fixture and 9,388,873 bytes for its borrowed counterpart.
-This prices those executables, rather than every backend or build. Pinned Radeon
-and lavapipe native golden results passed as recorded above. Dedicated
-replacement-image comparisons, browser workloads, Metal and Direct3D image
-coverage remain unverified; the null effect fixture does not exercise water,
-grass, probe-capture replacement or FXAA. Baseline figures below remain
-measurements of the original implementation.
-
-Next performance trials, after the current slice's CI and deployment gates:
-
-- Price P14's miss-only bind-group entry construction on an actual render
-  workload. This is a shared, narrow preparation change that can avoid owned
-  entry vectors on cache hits without introducing another cache. Preserve view
-  replacement, frame-ring uniforms and failure reporting. A standalone release
-  baseline drove the actual `ForwardRenderer` with a fixed cube at 960x720 on
-  the GPU-driven null preset. Across 550 frames, 500 timed after warmup,
-  preparation and recording p50/p95 was 0.019/0.020 ms with 213 commands per
-  warmed frame. The timer includes `begin_frame`, graph build/compile/execute
-  and encoder finish; startup, assertions, destruction, UI, acquisition,
-  submission, presentation and shader execution are excluded. Cold frames
-  observed bind-group creation; warmed frames observed none, reused the shadow
-  atlas and preserved the complete host instance mirror. Null validation and
-  teardown leak checks passed. Deliberately expecting a warmed bind-group
-  creation failed before restoring and repeating. This prices the existing
-  preparation path, not the proposed entry-vector reduction or an actual GPU
-  frame gain. Compare the same workload after the change and observe entry
-  construction separately; null recording overhead is not Vulkan or WebGPU
-  driver cost. DHAT profiling of the complete fixture, including warmup,
-  attributed the following allocation points directly to pass callback leaves;
-  inspection of those callbacks confirms entry vectors are built before cache
-  lookup. These are allocation-point totals, not real-game allocations per frame
-  or timed-region totals. Observer snapshots and other allocation points are
-  excluded from this table. Include `cmaa2::cached_group` as a separate
-  buffer-aware cache in the trial: its `GroupKey` notices both source-view and
-  working-buffer replacement, unlike the shared image-view-only helper. Preserve
-  those distinct keys and failure/retry behaviour.
-
-  | Pass callback allocation point            | Blocks |  Bytes |
-  | ----------------------------------------- | -----: | -----: |
-  | `ssao::add_gather`                        |    550 |  44000 |
-  | `ssao::Filter::add_pass`                  |   1650 | 198000 |
-  | `forward::view::View::add_passes` tonemap |    550 |  88000 |
-  | `cmaa2::Cmaa2::add_passes` working        |    550 |  88000 |
-  | `cmaa2::Cmaa2::add_passes` apply          |    550 |  66000 |
-
-  An expanded baseline used the same actual renderer, target, cube, cadence and
-  timer with every effect requested through its programmatic override. CMAA2
-  takes the resolve slot; this does not run FXAA beside it. Warmed frames
-  observed bloom, volumetric, contact-shadow, exposure and SSR passes, unchanged
-  effect resolution and zero bind-group creation. Across 550 frames with 500
-  timed, preparation/recording p50/p95 was 0.028/0.029 ms and 0.028/0.030 ms on
-  repeat, with 355 commands per warmed frame. A deliberately missing required
-  pass label failed before restoring and repeating. Shadow reuse, the complete
-  instance mirror, null validation and teardown checks also passed. The same
-  exclusions apply: this is a broader null recording baseline, not native GPU
-  work or a proposed optimization gain. Whole-fixture DHAT attributed these
-  additional allocation points directly to pass callback leaves. Source
-  inspection ties them to entries and, for SSR, its separately extended view-key
-  vector; exclude observer snapshots, setup and other points. Water, grass,
-  probe-capture replacement and FXAA remain separate integration workloads,
-  rather than assuming the requested-effect fixture covers them.
-
-  | Additional callback allocation point           | Blocks |  Bytes |
-  | ---------------------------------------------- | -----: | -----: |
-  | `contact_shadows::ContactShadows::add_passes`  |    550 |  44000 |
-  | `volumetric::Volumetric::add_passes` composite |    550 | 110000 |
-  | `ssr::Ssr::add_passes` march entries           |   1100 | 594000 |
-  | `ssr::Ssr::add_passes` march view key          |   1100 |  85800 |
-  | `ssr::Ssr::add_passes` blur                    |    550 |  88000 |
-  | `bloom::Bloom::add_passes` down                |   3300 | 396000 |
-  | `bloom::Bloom::add_passes` up                  |   2750 | 330000 |
-  | `bloom::Bloom::add_passes` composite           |    550 |  88000 |
-
-- Follow P14 with P13's explicit partition metadata copy trial below: it avoids
-  cloning the source call vector that struct-update syntax then discards,
-  without retaining another cache. Compare real recording and image behavior
-  before keeping it. Retained instance carry/dirty-run storage and input queue
+- P13's explicit partition metadata copy trial below is underway on
+  `perf/partition-metadata-copy`: avoid cloning the source call vector that
+  struct-update syntax discards, without retaining another cache. Bucket draw
+  recording and partition construction have first been moved into the private
+  `forward::bucket_draws` module with the algorithm unchanged. The moved
+  definitions matched after visibility normalization, and the comparison
+  rejected a deliberately changed draw-region count offset. Workspace
+  formatting, default clippy and tests passed before the move was committed. The
+  explicit field-copy implementation is now present. Its production metadata
+  test passed against both implementations, and independently changing pipeline,
+  layout, indices, emit tail, selected calls or region step made it fail before
+  restoring and passing. The final implementation passed the default workspace
+  build, clippy and tests, the formatting check, all-feature clippy and nextest.
+  Regular all-feature tests, explicit doctests, public/private documentation
+  with warnings denied and dependency checks also passed serially. A fresh
+  release build drove the actual mixed-mode renderer through the preserved eager
+  executable and the explicit-copy executable. Complete cold and warm command
+  captures matched for every tail, including on repeat; deliberately changing an
+  indirect offset made each comparison fail before restoring. Instance mirrors,
+  warmed shadow reuse, bind-group reuse, null validation and teardown checks
+  passed. The pinned Radeon/RADV render suite reported 98 passed with no skips,
+  named the discrete adapter and passed its loaded Vulkan validation check. The
+  pinned lavapipe engine suites reported 304 passed with no skips; every
+  requested suite appeared, the actual adapter was llvmpipe/Cpu and the loaded
+  validation log was clean. The full Vulkan backend suite reported 63 passed
+  with no skips, including its deliberately dirty validation gates. The separate
+  positive run reported 60 passed and 3 skipped; its loaded validation log was
+  clean. The local layer reported record-time and one-submission checking, but
+  no cross-submission checking. No native or browser frame speedup is
+  established. Retained instance carry/dirty-run storage and input queue
   capacity follow as small candidates. Price moving/dense and input-burst
-  workloads, respectively, before keeping them. Backend command-pool reuse,
-  wider graph caching and math changes need stronger workload evidence or carry
-  more lifecycle risk; they do not precede these trials on source inspection
-  alone.
+  workloads, respectively. Backend command-pool reuse, wider graph caching and
+  math changes need stronger workload evidence or carry more lifecycle risk.
+
+P13 paired release preparation/recording measurements used the same actual
+renderer fixture at 960x720, with 550 frames and 500 timed after warmup. The
+timer includes `begin_frame`, graph build/compile/execute and encoder finish;
+startup, assertions, capture formatting, destruction, UI, acquisition,
+submission, presentation and GPU shader execution are excluded. These results
+show no consistent preparation speedup:
+
+| Tail           | Eager p50/p95 (ms) | Explicit p50/p95 (ms) | Eager repeat (ms) | Explicit repeat (ms) |
+| -------------- | ------------------ | --------------------- | ----------------- | -------------------- |
+| Indirect count | 0.036/0.042        | 0.036/0.039           | 0.036/0.038       | 0.036/0.046          |
+| Per batch      | 0.034/0.036        | 0.034/0.036           | 0.034/0.037       | 0.034/0.051          |
+| Mesh           | 0.031/0.033        | 0.032/0.035           | 0.031/0.036       | 0.033/0.038          |
+
+Fresh whole-fixture DHAT runs for indirect count reported 415,261,796 bytes in
+869,036 blocks for eager construction and 410,609,763 bytes in 865,732 blocks
+for explicit copying. These include startup, warmup and observations, not just
+timed frames. Direct discarded-clone allocation sites accounted for 4,652,032
+bytes in 3,304 blocks before the change and had no matching site afterwards; the
+query asserted the original sites were present. Required filtered-call
+collection sites remained at 4,086,784 bytes in 11,012 blocks in both profiles.
+Complete profiled command captures also matched. Instrumented timing is not used
+as a frame benchmark. `size` reported text sections of 5,113,077 bytes for the
+eager recording executable and 5,112,897 bytes for its explicit-copy
+counterpart; this does not price every backend or build. Retain the allocation
+reduction separately from any claim about complete GPU frame time. Local backend
+gates passed; CI and deployment are still required before this trial ships.
 
 Editor image coverage gap:
 `app::instances::tests::filtered_editor_images_match_eager_writes_through_history`
@@ -222,8 +130,56 @@ open):
   partial plan or resurrect the previous successful plan. Empty dispatch
   collection does not itself establish a heap allocation. Dynamic skin bindings
   are allowed by the API, so do not skip their upload merely because a sample's
-  current bindings appear immutable. No skinning preparation latency was
-  measured.
+  current bindings appear immutable. A standalone release probe now exercised
+  the actual `Skinning` implementation on Null with 256 vertices and 64 palette
+  matrices per range, alternating frame slots and output halves. Each run
+  reported 550 frames with 500 timed after warmup. Timing includes input
+  validation, all uploads, graph build/compile/execute and encoder finish;
+  startup, full-byte observations, command assertions, destruction, submission,
+  presentation and shader execution are excluded. It checked complete palette
+  and binding bytes, every range's full parameter block and actual dispatch
+  extents, null validation and zero live HAL objects after teardown. A wrong
+  final-range output-base expectation failed the byte comparison, then the
+  restored fixture passed. These are unchanged-renderer baselines:
+
+  | Ranges | Preparation p50/p95 (ms) | Repeat p50/p95 (ms) |
+  | ------ | ------------------------ | ------------------- |
+  | 1      | 0.002/0.005              | 0.002/0.005         |
+  | 16     | 0.045/0.048              | 0.045/0.052         |
+  | 128    | 0.239/0.297              | 0.236/0.297         |
+
+  Whole-fixture DHAT for 16 ranges reported 347,607,860 bytes in 52,238 blocks,
+  including setup, observers and warmup; it is not allocation per engine frame.
+  Two growth sites rooted directly in `Skinning::begin_frame` reported
+  72,085,200 bytes in 7,700 blocks and 144,161,600 bytes in 7,150 blocks; its
+  plan site reported 35,200 bytes in 550 blocks. The dispatch collection in
+  `add_pass` reported 105,600 bytes in 550 blocks. This establishes physical
+  preparation allocations in this fixture, rather than just vector syntax. No
+  retained-scratch implementation, before/after gain or GPU execution was
+  established by this probe.
+
+  A follow-up built the actual Puppet `Map::built_in`, placed its `Character`
+  into a real `ForwardRenderer` vertex pool on Null, and advanced its `Animator`
+  outside timing. The reported rig had 5 ranges with 24 vertices each and 9
+  joints. Timing included the actual `Character::ranges` allocation,
+  `Skinning::begin_frame` and the standalone skinning graph's build,
+  compilation, execution and encoder finish. Complete changing palette uploads,
+  authored binding bytes, full range parameters, alternating halves, dispatch
+  extents, validation and zero live HAL objects passed. Deliberately expecting a
+  different final-range output base failed before restoration and a passing
+  repeat. Across 550 frames with 500 timed, p50/p95 was 0.002/0.002 ms, with
+  0.002/0.004 ms in the paired repeat. Whole-fixture DHAT reported 29,047,707
+  bytes in 56,022 blocks; it includes map/renderer startup, animation,
+  observations and warmup and is not a per-frame figure. `Character::ranges`
+  reported 132,000 bytes in 550 blocks; the skinning plan reported 11,000 bytes
+  in 550 blocks, its byte-growth sites reported 4,501,200 bytes in 5,500 blocks
+  and 4,488,000 bytes in 4,400 blocks, and the dispatch collection reported
+  33,000 bytes in 550 blocks. Physical allocations remain, but the isolated
+  subpath has small CPU cost for the current rig. This is not an acquired Puppet
+  frame: forward graph recording, UI, submission, presentation and GPU shader
+  execution were excluded. Viewer and native/browser complete-frame impact
+  remain unmeasured; unchanged-frame preparation candidates keep priority.
+
 - `ForwardRenderer::begin_frame_body` collects `PunctualProducer` rows before
   checking `self.probe_gather`. That owned vector is only passed to the gather
   in this block, so constructing it inside the present-gather branch could avoid
@@ -245,11 +201,12 @@ open):
 - Sparks also constructs a `Show::reading` before `DebugPanel::add` in its debug
   hook, but the inspected method reads retained pool counters and looks up
   effect statistics; it does not hash or traverse the particle arrays.
-  `ParticleSystem::stats` reads stored counts and free-span length, while
-  `effect_stats` searches effect records. Do not transfer Tumble's measured
-  physics-hash cost to this superficially similar hook. A hidden guard remains a
-  small candidate, but price actual effect-count workloads before ranking it
-  alongside the Tumble change. No Sparks hook latency was measured.
+  `ParticleSystem::stats` reads stored counts and free-span length and sums free
+  spans for reserved occupancy, while `effect_stats` searches effect records. Do
+  not transfer Tumble's measured physics-hash cost to this superficially similar
+  hook. A hidden guard remains a small candidate, but price actual effect-count
+  workloads before ranking it alongside the Tumble change. No Sparks hook
+  latency was measured.
 - Tumble retains `Drawn::shapes` scratch across rooms and frames, and moves
   retained draw lists by swap; new body's handle vectors are allocated on body
   insertion rather than for every existing body. `Drawn::update` still poses
@@ -376,12 +333,38 @@ open):
   protocol message before the codec copies it into a payload. A borrowed input
   encoder could remove that intermediate copy while retaining input for later
   sends. Check callers before implementation; measure bounded input payloads and
-  preserve bytes, tick identity, retry and authentication behaviour.
+  preserve bytes, tick identity, retry and authentication behaviour. Follow-up
+  read `Client::{update, send_input, send_authenticated, reconnect}`: each
+  consumed tick prepares nonempty input before received snapshots are drained,
+  including while no session crypto exists. `send_authenticated` then returns
+  without sending that prepared payload. An early missing-session check could
+  avoid clone/encoding work during handshake or reconnect; this is a transient
+  path, not an established ordinary authenticated-tick gain. Preserve retained
+  input, tick consumption, handshake driving, the first eligible send and error
+  counters. No handshake/reconnect input preparation cost was measured in this
+  follow-up; keep it behind the measured frame-preparation work.
 - Initial review found existing reuse in `crcbl_anim::Clip::sample_into` and
   `BlendSpace1d`, and in physics query and broadphase scratch. These are not
   evidence for blanket allocation rewrites. `crcbl_audio::Mixer::fill` mixes
   through retained voice storage; allocations found in output-building helpers
   need their call sites checked before treating them as callback work.
+- Physics follow-up read
+  `CharacterController::{move_and_slide, depenetrate, slide, sweep}`, the
+  mutable world's capsule-query wrappers and shared query cores, and
+  `contact::Broadphase::find_new_pairs`. Character depenetration restores its
+  contact vector after temporarily taking it; the world likewise restores its
+  query scratch, and contact broadphase restores candidate and move-buffer
+  vectors before clearing the latter. These `mem::take` calls do not discard
+  scratch capacity on successful ordinary calls. Blocking slide planes use a
+  fixed stack array, while the contact pair hash set persists across calls.
+  Declined replacement scratch vectors and a per-tick pair-cache rebuild: they
+  address no observed capacity loss and would add work. New collider/contact
+  counts can still grow retained storage. Price crowded character sweeps,
+  contact churn and broadphase traversal before changing their algorithms;
+  preserve deepest-first depenetration, exclusion and trigger rules,
+  ground/step/slope semantics, plane limits, pair ordering and reconsideration
+  of refused pairs after movement. No allocation or latency profile was run for
+  these paths in this follow-up.
 - Animation follow-up inspected `Clip::sample_into`, keyframe `locate`,
   `Palette::compute`, `blend_into`, `BlendSpace1d::sample_into`, and Viewer
   `Player` construction, advance/sample, deviation and overlay drawing plus its
@@ -614,6 +597,25 @@ Asset import follow-up:
   generations. No source-read or save-path latency was measured in this
   follow-up, and none of these displace P14 frame preparation.
 
+- Save/replay follow-up read
+  `crcbl_store::replay::{ReplayWriter, FileTransport}`,
+  `SaveWriter::{encode_body, write}`, the CLI replay command and Shard's
+  `Vault::store`/`App::autosave` caller. Replay encoding reserves payload bytes
+  and the file header but omits each entry's `MIN_ENTRY_SIZE`; save encoding
+  reserves the complete body, then appends `CHECKSUM_SIZE` without reserving it.
+  Price complete writes and their physical reallocations before including these
+  missing framing bytes in checked capacity calculations. Preserve exact file
+  bytes, SHA-256 coverage, length-overflow refusal, atomic write errors and
+  Shard's tick-driven save cadence and accepted-write counter. These are
+  periodic save/load or tooling paths, not ordinary render preparation.
+  `FileTransport::open` copies entry payloads and `recv` clones each into its
+  owned message; moving consumed payloads could retain entry tick metadata while
+  avoiding the playback copy, but first establish and price a shipping playback
+  consumer. The inspected production CLI reads metadata without calling `recv`;
+  repository search found no sample replay transport consumer. Replay writer
+  ownership and large-session memory remain unpriced. No save/replay latency or
+  heap profile was run in this follow-up; prioritize the measured frame paths.
+
 Profiling overhead follow-up:
 
 - `PassTimers::begin_frame` retains label-vector and pair-vector capacity but
@@ -624,6 +626,21 @@ Profiling overhead follow-up:
   with `trace::is_enabled`, and `PassStats::record` retains accumulated rows and
   rejects duplicate latent reports. Do not conflate those existing fast paths
   with timer report allocation.
+- CPU trace follow-up read `crcbl_core::trace::{span, counter, drain}`,
+  `TrackBuffer`, thread registration and `crcbl::perf::track_cpu_time`, plus
+  `Loop::record_frame_cost`. Disabled recording returns before clock reads and
+  buffer registration, and the hosted loop does not drain when disabled. Enabled
+  recording retains preallocated record and open-span storage; `drain` clones
+  each nonempty track's records and optional name into an owned snapshot while
+  holding the registry and track locks, then clears the retained recording
+  storage. Frame-time reconstruction also creates a temporary open stack. Price
+  enabled multi-worker trace workloads before retaining consumer scratch or
+  changing snapshot ownership. Preserve cross-drain open spans, reserved end
+  slots, dropped-record reporting, exited-track reclamation, reentrant
+  allocation refusal and complete-frame/idle-span accounting. There is no
+  enabled-trace allocation or contention measurement from this review; this
+  candidate does not justify work on the default disabled path or relaxing the
+  existing browser-clock gap below.
 - A standalone release probe executed synthetic empty compute graphs on a null
   timestamp-capable device with timers disabled and enabled. At 32 passes,
   p50/p95 was 0.001/0.001 ms disabled and 0.003/0.003 ms enabled; at 64 it was
@@ -638,6 +655,58 @@ Profiling overhead follow-up:
   retaining timestamp/report scratch and unchanged label storage; preserve
   changing pass order, duplicate labels, copy-pass exclusion, capacity warnings,
   failed-query behaviour, latent frame identity and elapsed-span semantics.
+
+- Browser reply preparation follow-up read
+  `crates/crcbl-webgpu/src/web.rs::ReplyInbox::drain`,
+  `hal/device.rs::WebGpuDevice::pump`, `ReadbackTracker::absorb`,
+  `QueryReadQueue::absorb`, `ErrorQueue::absorb`, `poll_readback` and
+  `query_results`, plus the reply decoder. Draining first decodes owned payloads
+  and validates the complete batch's expected and duplicate sequences before
+  updating the waiting set. Each tracker then searches the reply batch and
+  clones its ready payload or error; query results later copy into the caller's
+  output and consume the queued answer. Readback answers instead remain ready
+  for repeated polls until destruction. Ownership-aware dispatch could avoid
+  these intermediate clones and repeated scans, but preserve whole-batch
+  validation, offering answers to every waiter, unexpected-shape handling,
+  destruction while waiting, query range matching and repeatable readback bytes.
+  Empty reply batches return before locking the device's tracker maps. No actual
+  reply-volume, dispatch latency or browser heap profile was run in this
+  follow-up; this source candidate follows the measured render preparation work
+  and does not justify replacing the wire format or borrowing reclaimed mapped
+  memory.
+- `web/engine/gpu-replay.js::Replayer#queryResults` creates resolve/readback
+  buffers and a command encoder for each direct query read, submits them and
+  maps asynchronously. It copies the mapped values and expands them into an
+  ordinary array before `gpu-reply.js::ReplyWriter.queryResults` synchronously
+  encodes them. That writer accepts `ArrayLike<bigint>` and uses indexed reads;
+  a typed-view serialization trial could avoid the temporary copied array while
+  keeping serialization before buffer destruction. Ordinary readbacks differ:
+  their ready byte storage must survive mapping release and repeated polls, so
+  removing their retained copy on the same reasoning would be wrong. Price the
+  narrow query serialization change and full enabled-timer browser workload,
+  preserving complete encoded values, atomic reply rollback, asynchronous
+  failure replies, device loss and resource cleanup. Buffer pooling is a
+  separate completion/lifetime design, not a low-effort conclusion from seeing
+  creation calls. Revalidated `PassTimers::resolve`'s fresh timestamp/report
+  vectors and copied labels; the existing timer overhead entry above already
+  covers those allocations. The inspected page, Horde and Viewer constructors
+  request timers when supported; browser timestamp availability and actual
+  enabled-frame cost still need measurement. A Node preparation probe used the
+  production `ReplyWriter` with copied/expanded mapped values versus a direct
+  `BigUint64Array` view. Complete wire fields and bytes matched, including
+  high-bit values and a nonzero source offset; refusing a late invalid value
+  left the reply bytes unchanged. A deliberately wrong final expected value
+  failed before normal runs passed. With 64 values, copied p50/p95 was
+  1.399/3.296 microseconds and 1.352/2.768 on repeat; direct serialization was
+  0.307/1.354 and 0.291/0.313. With 512 values, copying was 7.390/9.957 and
+  7.348/9.638; direct serialization was 1.647/3.839 and 1.619/1.816. Each run
+  reported 1000 timed batches after warmup. Timing included writer clearing,
+  temporary value preparation and serialization; correctness checks, source
+  construction, browser mapping, submission and destruction were excluded. This
+  is an isolated Node candidate price, not a production replayer patch or
+  browser frame gain. Actual mapped lifetime, failure/loss integration and
+  browser allocation profiles remain unverified; keep the existing P14/P13
+  priority before this follow-up.
 
 - Debug-panel review followed `Loop::draw_debug_overlay`,
   `DebugOverlay::begin_frame`, `DebugPanel::add`, `laid_out` and row formatting.
@@ -783,14 +852,14 @@ Water and grass follow-up:
   draw ranges for each frame; price many-body scenes before changing graph
   ownership or capturing borrowed ranges. Water shader and copy-pass costs still
   need separate GPU measurements.
-- `grass::GenGroup::build` constructs a buffer-handle vector before checking
-  unchanged field bindings, then constructs entries before `cached_group` can
-  return a hit. This extends the existing P14 cache-hit allocation candidate to
-  grass generation; retain field-replacement invalidation and wind image views.
-  Grass retirement rebuilds a kept vector while retired resources are pending,
-  but an empty retirement list adds no storage allocation. Price replacement
-  workloads separately from unchanged fields. The grass uniform writes have
-  frame-specific values and are not evidence of redundant geometry uploads.
+- `grass::GenGroup::build` still constructs a buffer-handle vector before
+  checking unchanged field bindings. Entry templates are now borrowed; price
+  this remaining buffer-key preparation separately while preserving
+  field-replacement invalidation and wind image views. Grass retirement rebuilds
+  a kept vector while retired resources are pending, but an empty retirement
+  list adds no storage allocation. Price replacement workloads separately from
+  unchanged fields. The grass uniform writes have frame-specific values and are
+  not evidence of redundant geometry uploads.
 
 Console and diagnostics follow-up:
 
@@ -803,6 +872,21 @@ Console and diagnostics follow-up:
   algorithm. Console `line_asks` also loses scratch capacity through `mem::take`
   after queued requests, an event-driven candidate rather than hidden-panel
   cost.
+- Reviewed `crcbl_core::log::log_at`, `__enabled`, `StderrLogger::emit`,
+  `log::console::push` and `crcbl::web::WebLogger::log`. Normal engine macros
+  consult both the global maximum and the installed sink before evaluating
+  argument expressions. Per-target refusals on that path therefore do not reach
+  the ring; direct `__emit` calls, including console answers, bypass this macro
+  gate and reach the ring before the output filter. Accepted records render
+  their message for the console ring and again for stderr or the browser queue;
+  an active thread-local test capture renders its own copy too, whereas absent
+  capture returns before creating a captured record. Price actual verbose frame
+  logging before sharing a rendered message between these consumers. Preserve
+  filter updates, console answers under an off filter, sequence order, browser
+  UTF-8 truncation and reentrant `Display` behavior: ring and capture currently
+  render before taking their storage borrows. This is a source-review candidate
+  with no caller latency or allocation measurement, below the measured
+  frame-preparation work; hidden-panel snapshots are already incremental.
 - Read typed `crcbl_console::ConVar` getters: they read atomic cells directly,
   and enum values return a static string. They do not allocate a dynamic value
   on these paths. Do not add blanket setting caches without caller measurements
@@ -843,28 +927,6 @@ Backend and render-cache follow-up:
   per-frame call lists: material-mode metadata is fixed, while partitions and
   call vectors are rebuilt. Price unchanged scenes before caching them; retain
   pipeline/material mode separation and frame-specific region offsets.
-- Revalidated P14 in `ssao::cached_group`: a cache hit returns immediately, but
-  callers such as the depth SSAO pass already built an owned entry vector.
-  Follow-up inspection found the same pattern in `Bloom::add_passes` through
-  `chain_entries`, and in `ContactShadows::add_passes`: entries are constructed
-  before cache lookup, although the cached group remains valid on unchanged
-  views. A borrowed template or lazy entry builder is a small candidate worth
-  pricing ahead of graph-plan caching. Repeated hits must allocate fewer entries
-  while view changes still replace the group correctly. Preserve each frame
-  slot's uniform bindings, effect transitions and bind-group failure reporting.
-- P14 caller follow-up: `Ssr::add_passes` extends owned entry and view-key
-  vectors with its pyramid slots before cache lookup. `SsrImages::pyramid` is a
-  fixed array governed by `hiz::MAX_LEVELS`; removing only the helper's owned
-  argument would leave those caller allocations. Trial fixed arrays for both
-  complete templates and keys, preserving binding order, repeated deepest
-  levels, probe-visibility changes and all pyramid views in the cache key. Its
-  separately deduplicated graph read declarations must still avoid repeated
-  depth and pyramid reads; no set-based replacement is justified by source
-  inspection alone. `Water::add_passes` also invalidates its surface group when
-  mesh vertex/media buffers change before using the shared view cache. Retain
-  that buffer invalidation when converting entry templates, including unchanged
-  views with replaced mesh buffers. SSR and water caller integration,
-  replacement images and allocation savings remain unverified.
 - `TransientPool` reuses matching images and buffers and retires idle GPU
   backing through `retire_unused`; do not treat graph reconstruction as
   allocating every GPU target each frame. Its `imported_images` and
@@ -927,6 +989,112 @@ mailbox publish/read exchanges slot ownership. Neither inspected operation
 allocates its own storage, though payload construction and destruction at call
 sites still need pricing. The remaining subsystem, backend, sample, browser and
 tooling review is still open; this is not a full-codebase verdict.
+
+Jobs contract documentation follow-up:
+
+- `crcbl-jobs/src/mailbox.rs` and `ring.rs` describe their producer/consumer
+  halves as non-`Sync`, but the actual types contain an `Arc<Shared<T>>` and
+  scalar cursors and have no non-`Sync` marker. A standalone compile probe
+  against the current release library accepted `Sync` bounds for
+  `Publisher<Cell<u32>>`, `Subscriber<Cell<u32>>`, `Producer<Cell<u32>>` and
+  `Consumer<Cell<u32>>`; the negative control requiring `Cell<u32>: Sync` failed
+  with E0277, and the normal probe passed again. Payload mutation and reading
+  require mutable half borrows, and the shared-borrow methods inspected here
+  expose atomic status or capacity, rather than payload references. Correct the
+  safety prose to describe the enforced mutable-borrow contract instead of
+  claiming an absent auto-trait restriction. This is a verified documentation
+  defect, not evidence of a data race or a performance win; making these public
+  halves non-`Sync` merely to match the comment would change their existing API
+  contract. No new unsafe code was written or dynamic race analysis run in this
+  follow-up. Keep this correction behind the measured performance implementation
+  work.
+
+- Browser command decoding follow-up inspected
+  `web/engine/gpu-transport.js::takeCommandStream`,
+  `web/engine/gpu-stream.js::StreamReader::nextCommand`,
+  `ByteReader::readField`, the `BindGroup` decoding arm, and
+  `web/engine/gpu-replay.js::Replayer::replay`, `#bindGroup` and `#finish`. The
+  transport collects owned decoded commands and releases the wasm stream in
+  `finally` before returning the frame for replay. Byte fields are copied, and
+  dynamic offsets are decoded into an owned array. Replayer records those
+  commands synchronously into the WebGPU encoder; `#finish` retains the finished
+  GPU command buffer, rather than the decoded command objects. Borrowing byte
+  fields or dynamic offsets directly from the released wasm stream was declined
+  under the current handoff contract. Price complete browser decode and replay
+  separately before considering a different handoff or less decoded-object
+  preparation. Preserve complete decode before GPU side effects, release on
+  malformed streams, sequence wrapping, little-endian decoding, field caps,
+  teardown detection after release, and graphics/compute binding behavior. No
+  decode heap profile or browser frame timing was measured; this is distinct
+  from the synchronous query-reply preparation probe above.
+
+- Sprite baking review inspected `crcbl-sprite/src/bake.rs::bake`, `encode_png`,
+  `aseprite_json` and `bake_dir`, together with `crpix::CrpixArt::to_sheet`,
+  `needs_metadata` and the renderer build-script caller. Baking forms an owned
+  horizontal RGBA strip and owned sheet metadata; still art skips JSON
+  serialization, though sheet metadata has already been constructed.
+  `aseprite_json` appends temporary `format!` strings for frame, clip and sheet
+  fields; direct formatting into its output is a possible tool-side allocation
+  reduction. The inspected production call sites are build scripts, so these
+  candidates stay behind measured frame and tick work. Price a large authored
+  sheet and complete bake before choosing either change; PNG compression and
+  file writes may dominate. Preserve byte-identical PNG settings and sidecar
+  formatting, JSON escaping, clip order and repeat rules, hold-to-millisecond
+  conversion, nine-slice fields, checked strip arithmetic, rerun declarations
+  and generated visibility. No bake timing or heap profile was measured. The
+  inspected CLI `crpix_cmd` imports PNG frames and checks names and dimensions;
+  it is not evidence that this baker runs during a game frame.
+
+- Viewer file-watch follow-up inspected `apps/viewer/src/watch.rs::Watch::poll`,
+  `stamp`, and `app.rs::Viewer::poll_for_re_export` and its `draw` caller.
+  Unchanged draws advance scalar state; filesystem metadata is queried only
+  after `POLL_SECONDS`, and a changed stamp must settle before model loading.
+  The inspected polling code does not construct a fresh path or payload vector.
+  Replacing this with continuous document hashing was declined without evidence
+  that stamp collisions matter to an actual authoring workflow; it would add
+  content reads to an otherwise unchanged-file path. A failed load keeps the
+  displayed document and does not retry the same offered stamp. Preserve paused
+  draw polling, progressive exports, disappearance/reappearance and failed-load
+  behavior if this path changes. No metadata syscall timing, remote-filesystem
+  profile or complete reload latency was measured. This finding does not close
+  the separate retained imported-handle ledger candidate above or implement
+  general asset-registry hot reload.
+
+- Screenshot preparation follow-up inspected `crcbl-cli/src/screenshot.rs::run`,
+  `crcbl-golden/src/image.rs::Image::from_readback`, `from_rgba8` and
+  `save_png`, and `crcbl/src/engine.rs::begin_screenshot` and
+  `finish_screenshot`. `from_readback` copies its borrowed bytes before channel
+  swizzling and dimension validation, even when a caller already owns the
+  readback vector. The native engine path additionally compacts staged rows into
+  an owned pixel vector before calling it. An owned-buffer conversion could
+  avoid a copy for those callers, but needs actual capture peak-memory and
+  complete PNG-write measurements before implementation. Ordinary native frames
+  return from `begin_screenshot` before allocating when no request is due; this
+  is capture work, not a steady-frame allocation. Preserve checked dimensions
+  and byte lengths, BGRA swizzling, row padding, completion before cleanup,
+  device-loss handling and the requested presented-frame number. This review
+  does not establish browser capture cost or change the asynchronous HAL
+  readback contract. No capture heap profile or end-to-end latency was measured.
+
+- Native asset-source contract follow-up read
+  `crcbl-assets/src/source.rs::AssetSource::read` and `DirSource::read`,
+  `crcbl-store/src/lib.rs::NativeStorage::read`,
+  `crcbl-assets/src/registry.rs::AssetRegistry::request` and `poll`, and
+  `apps/viewer/src/model.rs::load` with the reload draw caller above.
+  `AssetSource` promises nonblocking reads, but `DirSource` delegates directly
+  to `std::fs::read` through `NativeStorage`; native disk IO runs synchronously
+  on its caller. Registry request and pending polling do not schedule that IO
+  themselves. Viewer re-export loading therefore performs this disk read from
+  the draw hook when a settled change is offered. This is a verified contract
+  mismatch, not a measured stall duration. Profile large documents and slow
+  storage before prioritizing a native queued source and deferred import/reload
+  handoff; merely changing the documentation would leave the portable latency
+  requirement unmet. Preserve canonical-key containment, owned bytes,
+  `Pending`/failure classification, request deduplication, paused reload
+  behavior and retention of the displayed document on failure. Startup
+  scene/balance reads also use this source, so distinguish their cost from live
+  reloads. Native IO latency and full import/reload stalls remain unmeasured. No
+  new dependency or asynchronous source implementation was introduced here.
 
 Additional backend and reflection review:
 
@@ -1283,7 +1451,16 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   `InputTickState::capture` owns action names and values, but the inspected
   direct call sites are tests; establish a shipping consumer before prioritizing
   its allocation API. Raw staging queue capacity remains the separately recorded
-  event-burst candidate.
+  event-burst candidate. Follow-up read `RepeatState::update`, `Held::of`,
+  `set_repeat` and the `begin_tick`/`resolve_one` callers: ordinary repeat
+  updates operate on retained scalar state, and long ticks advance the schedule
+  with arithmetic rather than replaying a loop of overdue pulses. Repeat
+  attachment and reserved text declaration are configuration operations; the
+  text context does not rebuild its key bindings during unchanged editing
+  frames. Declined repeat scratch storage and overdue-pulse batching: neither
+  removes an observed allocation, and batching would change the established
+  single-pulse behavior. Repeat processing at large action counts remains
+  unmeasured.
 - ECS follow-up inspected `Schedule::run`, `World::tick_with_dt` and sweep,
   `System` dense iteration, attach/detach and canonical hashing. Scheduling
   walks retained systems; sweep returns immediately with no dead entities and
@@ -1318,6 +1495,20 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   inspection alone. The crate's opening comment saying nothing consumes it is
   stale: Shard uses it for game state, panels and saves. Runtime latency was not
   measured, and nesting remains feature work rather than this review's finding.
+  Follow-up also read `Shape` serde and catalogue conversion. Shape
+  serialization reuses its row string; deserialization builds a borrowed-row
+  vector. Catalogue parsing interns tags by a linear name search, but inspected
+  Shard and Breach catalogue getters parse their embedded tables through
+  `OnceLock`, so these are loading candidates. The inspected
+  `apps/shard/src/app.rs` calls `game.rs::Game::grid` only while the inventory
+  panel is open. That getter clones the owned grid under the tick mutex so
+  `panel::draw` can run after releasing it; panel summaries also format owned
+  strings. Price complete open-panel drawing, snapshot allocations and tick
+  contention before retaining a versioned snapshot or summary. Preserve every
+  grid mutation and stage replacement, seed-dependent display and pointer/drag
+  semantics; simply borrowing through the mutex would hold it for UI drawing.
+  Open-panel cost and a changed-caller comparison remain unmeasured, and this
+  conditional sample candidate follows frame-wide P14/P13 preparation.
 - Core `Pool::get` and `get_mut` index slots and check generations; insertion
   and removal reuse a linked free list. Iteration scans slots, so a sparse
   high-water pool is a workload to price if a real caller iterates it
@@ -1355,7 +1546,19 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   held across callbacks can panic on re-entry. Preserve that rule, events added
   while processing, coalescing, batch boundaries and ordering. These
   event-driven candidates follow unchanged scene preparation; platform runtime
-  measurements and re-entry coverage are still needed.
+  measurements and re-entry coverage are still needed. Browser follow-up read
+  `crates/crcbl-shell/src/web/mod.rs::WebShell::pump`: it drains the bridge's
+  retained event deque into a local vector, releases the shared borrow, updates
+  fullscreen state, then delivers resize/focus/close changes and the sink
+  callbacks in order. A nonempty batch therefore has a temporary delivery
+  vector; this does not establish an allocation on a quiet frame. The separation
+  allows sink callbacks to re-enter shim functions that borrow the same bridge.
+  Price retained delivery scratch on actual pointer/key bursts before changing
+  it. Preserve borrow release before callbacks, the original batch boundary,
+  newly queued events for a later pump, fullscreen state reconciliation and
+  ordered configuration updates. No browser event-pump latency or allocation
+  profile was run in this follow-up; it remains behind measured unchanged-frame
+  render preparation.
 
 - Sample follow-up inspected lantern and sparks tick, draw and frame
   preparation. Lantern's `room::lights` returns a fixed-size array; `set_lights`
@@ -1372,7 +1575,20 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   preserve live-count transitions, effect replacement, palette changes and
   motion history. Both samples exchange draw-list storage rather than creating a
   new owned list for every handoff. Renderer graph preparation and UI expansion
-  remain the separately recorded candidates.
+  remain the separately recorded candidates. Particle-pool follow-up read
+  `RangeAllocator::{alloc_clamped, free, free_slots}`,
+  `ParticleSystem::{add, remove, step, stats}` and Sparks' `Show::reading`.
+  Free-list searches and coalescing occur on effect allocation or retirement,
+  rather than for each particle; the free-list vector retains storage after
+  removals. Whole-pool statistics sum free spans, and stepping separately sums
+  surviving effect occupancy. Large fragmented effect workloads could price
+  these scans and ordered vector removals, but Sparks' inspected readout is not
+  evidence that they dominate an engine frame. No allocator-churn latency or
+  heap profile was run in this follow-up. Any retained occupancy counter or bulk
+  retirement must preserve clamped grants, first-fit/tie behavior, effect
+  enumeration order, immediate removal, stopped-effect expiry and
+  overlap/double-free refusal. Keep the existing fragmentation/compute
+  compaction plan below; do not replace it with an unmeasured CPU compactor.
 
 ## What UI rung 6 shipped without (2026-09-16)
 
@@ -2231,8 +2447,8 @@ One item at a time: an implementation agent takes an item with the verification
 below, the change is reviewed and the whole verification re-run by hand, then
 committed on its own and pushed to `main`, and its bullet is deleted here. The
 remaining order, by expected win against risk: P3, P20, P2 (log the real stride
-first — it may be moot), P11, P31 and P32, P12, P13 and P14, P22, P23, P21, then
-the rest top to bottom. The verification every item gets:
+first — it may be moot), P11, P31 and P32, P12, P13, P22, P23, P21, then the
+rest top to bottom. The verification every item gets:
 
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
   (it compiles the feature-gated GPU suites too, which a plain workspace check
@@ -2434,55 +2650,74 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   bucket modes are fixed at build. First trial the narrower change in
   `ForwardRenderer::partitions`: `..draws.clone()` clones the source call list
   although the result supplies a filtered `calls` list. Explicitly copy its
-  remaining scalar metadata. A standalone release prototype copied the existing
-  partition algorithm and mirrored `BucketDraws`, comparing cloned struct update
-  with explicit metadata copying. Complete results matched for material-mode
-  masks, emit tails, nondefault region offsets, pipeline/layout/index handles,
-  call coverage and empty inputs. Replacing region offsets with defaults made
-  complete-result validation fail before restoring and passing repeats. With 16
-  calls and 4 populated partitions, repeated construction/destruction p50/p95
-  was 91.5/96.5 ns per call originally versus 61.4/65.1 ns with explicit
-  copying; with 1024 calls it was 3049.6/3744.6 ns versus 2232.9/2249.2 ns.
-  Setup and result assertions were excluded from timing. Whole-fixture DHAT
-  totals were 1974832934 bytes in 416267 blocks originally and 656944937 bytes
-  in 337067 blocks with explicit copying, including setup, reference/equality
-  fixtures and warmup. These are isolated synthetic metadata results, not actual
-  GPU recording or frame gains; fabricated handles were only compared as logical
-  values, with no HAL validation claim. Verify complete recorded draw arguments,
-  frame-region offsets and mixed-mode images on an actual renderer before
-  keeping the change. Broader retained partitions or bucket ranges still need
-  workload evidence and lifecycle design. `MaterialTable::set` can change
-  standalone row modes and does not re-key existing instances; any future live
-  renderer material editing must invalidate routing together, rather than
-  assuming a permanent build-only contract.
-- **P14 — `cached_group` makes every caller allocate its entries on a hit.** It
-  takes `Vec<BindGroupEntry>` by value, so `mesh_group_entries[frame].clone()`
-  and the tonemap `vec![]` run every frame. Take a closure or a slice and copy
-  only on a miss. A standalone release prototype copied the existing helper's
-  implementation and compared its eager owned-entry argument with a borrowed
-  fixed template copied only after cache lookup. On a two-image template,
-  isolated warm-hit p50/p95 was 7.2/7.4 ns per call for eager construction and
-  3.4/3.5 ns for borrowing; restored repeats were 7.0/7.5 ns and 3.4/3.5 ns.
-  Checks observed first creation, unchanged-handle reuse, replacement when only
-  the second view changed, destruction and empty cache on layout refusal,
-  successful retry and unchanged borrowed templates. Restricting the key check
-  to the first view made the replacement assertion fail before restoring and
-  repeating. Null validation and device-object teardown checks passed. DHAT
-  whole-fixture totals were 5678516 bytes in 70484 blocks for eager entries and
-  46439 bytes in 83 blocks for borrowing; these include setup, lifecycle checks,
-  observations and warmup, not just timed calls. This supports the narrower
-  borrowed-template mechanism without a generic entry-builder API; it does not
-  establish a complete frame improvement, every caller's borrowing feasibility,
-  native descriptor cost or caller integration. A separate prototype copied
-  `cmaa2::cached_group` and compared its owned entries with direct borrowed
-  entries, retaining `GroupKey`. Both passed unchanged reuse, independent
-  replacement of each working buffer, source-view replacement, observed stale
-  destruction, layout refusal with an empty cache, retry and null teardown.
-  Ignoring either buffer in the borrowed prototype's key independently made its
-  replacement assertion fail, before restoration and passing repeats. These are
-  isolated helper checks, not production caller or image coverage. Compare the
-  actual render baseline above after implementation, and preserve those
-  caller-specific keys and fallback paths.
+  remaining scalar metadata. Keep the separately retained `bucket_calls` clone
+  in `add_shadow_pass` for the later reflective-shadow and punctual partitions;
+  this narrow trial removes the source call-list copy overwritten by filtered
+  `calls`, rather than changing graph ownership. Before changing this monolithic
+  module, move the existing bucket draw descriptors and recording responsibility
+  along their private seam in a behavior-preserving commit, retaining the
+  existing call paths and clone support. A standalone release prototype copied
+  the existing partition algorithm and mirrored `BucketDraws`, comparing cloned
+  struct update with explicit metadata copying. Complete results matched for
+  material-mode masks, emit tails, nondefault region offsets,
+  pipeline/layout/index handles, call coverage and empty inputs. Replacing
+  region offsets with defaults made complete-result validation fail before
+  restoring and passing repeats. With 16 calls and 4 populated partitions,
+  repeated construction/destruction p50/p95 was 91.5/96.5 ns per call originally
+  versus 61.4/65.1 ns with explicit copying; with 1024 calls it was
+  3049.6/3744.6 ns versus 2232.9/2249.2 ns. Setup and result assertions were
+  excluded from timing. Whole-fixture DHAT totals were 1974832934 bytes in
+  416267 blocks originally and 656944937 bytes in 337067 blocks with explicit
+  copying, including setup, reference/equality fixtures and warmup. These are
+  isolated synthetic metadata results, not actual GPU recording or frame gains;
+  fabricated handles were only compared as logical values, with no HAL
+  validation claim. Verify complete recorded draw arguments, frame-region
+  offsets and mixed-mode images on an actual renderer before keeping the change.
+  Broader retained partitions or bucket ranges still need workload evidence and
+  lifecycle design. `MaterialTable::set` can change standalone row modes and
+  does not re-key existing instances; any future live renderer material editing
+  must invalidate routing together, rather than assuming a permanent build-only
+  contract. An actual release renderer baseline now uses the complete
+  material-mode set and explicit `IndirectCount` and `IndirectPerBatch` tails on
+  the GPU-driven null device. Each render-target graph runs with every effect
+  requested, complete instance-mirror checks, warmed shadow and bind-group
+  reuse, null validation and leak-free teardown. Both tails reported 550 frames,
+  500 timed after warmup and 495 commands per warmed frame. Count-tail
+  preparation and recording p50/p95 was 0.036/0.038 ms and 0.036/0.040 on
+  repeat; per-batch was 0.035/0.038 ms in both runs. The timer includes frame
+  preparation, graph build/compile/execute and encoder finish, excluding
+  startup, observations, destruction, UI, acquisition, submission, presentation
+  and shader execution. Complete cold and warmed command snapshots matched
+  across separate repeats, including logical handles and generations, pipelines,
+  index bindings, dynamic offsets, argument/count offsets, strides, draw limits,
+  attachments and barriers. Mutating an actual recorded draw's argument offset
+  made each tail's snapshot comparison fail; normal repeats matched. These are
+  original-caller baselines and snapshot-observer controls, not production
+  partition changes or GPU execution. Compare the same fixture after
+  implementation and check private host metadata separately: the null recorded
+  `BindGroup` does not retain its pipeline-layout argument. A mesh-capable null
+  device explicitly enabled mesh and task features, and the extended fixture
+  observed actual `DrawMeshTasksIndirect` commands. Its restored run reported
+  550 frames, 500 timed, 377 commands per warmed frame and preparation/recording
+  p50/p95 of 0.032/0.035 ms with the same boundaries and exclusions. Cold and
+  warmed full command snapshots matched across separate mesh repeats; changing a
+  recorded mesh argument offset made comparison fail, and normal snapshots
+  matched. Expecting a mesh command from a count-tail frame independently failed
+  the requested-tail observation. This closes the original mesh recording
+  baseline gap, rather than proving GPU execution or a partition optimization.
+  Mixed-mode native images and actual changed-caller allocations remain
+  unverified. DHAT of the actual count-tail fixture reported 415,261,779 bytes
+  in 869,034 blocks for the whole run, including startup, observers, correctness
+  checks, command-snapshot formatting and warmup. Its full command snapshots
+  matched the uninstrumented baseline. Repeated allocation points rooted
+  directly in the partition closure reported 550 blocks/774400 bytes in their
+  respective call contexts and 1650 blocks/2323200 bytes in another context. The
+  filtered calls collectors and outer partition vectors appeared as separate
+  points; those collections still serve required output. Compare the closure
+  points after explicit metadata copying before attributing a complete caller
+  heap gain. These are original allocation observations, not per-frame byte
+  totals, timed-region totals or a proposed optimization result. Instrumented
+  timing is not a native frame benchmark.
 - **P15 — sky LUT upload repeats despite cached construction.** Revalidated
   `SkyPass::begin_frame`: an atmosphere-backed frame calls `SkyView::rows` and
   writes the current slot's LUT buffer. In contrast,

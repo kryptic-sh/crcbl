@@ -2077,6 +2077,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Forward draw partitions avoid a discarded call-list copy**: partition
+  construction copies scalar draw metadata directly instead of cloning the
+  complete source call vector before replacing it with the filtered calls.
+  Material-mode routing, call order and draw-region offsets remain unchanged.
 - **Render-pass bind-group caches borrow entry templates**: unchanged image
   views reuse cached groups without copying owned entry vectors. Fixed pass
   descriptions and SSR pyramid view keys use stack arrays, while mesh passes

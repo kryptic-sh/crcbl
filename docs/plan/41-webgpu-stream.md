@@ -362,10 +362,12 @@ command counts. Native Vulkan golden suites passed on pinned Radeon and
 lavapipe. Paired editor timings improved for the default scene and showed no
 consistent benefit for the dense scene; retain this as an allocation and code
 size reduction, without claiming a general GPU frame speedup. The performance
-backlog records the measured workloads and remaining browser/backend coverage.
-Full local workspace verification passed, including both test configurations,
-clippy, doctests, public/private documentation and dependency checks. CI and
-deployment gates remain required before shipping.
+backlog records remaining browser/backend coverage gaps. Full local workspace
+verification passed, including both test configurations, clippy, doctests,
+public/private documentation and dependency checks. The pushed implementation
+passed the complete CI run, including platform/backend gates. Pages browser and
+deployment gates passed for the same commit, and the live site returned
+HTTP 200.
 
 ### The destroy op
 
