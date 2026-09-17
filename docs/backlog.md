@@ -1041,8 +1041,15 @@ Sample and browser follow-up:
   cache-input changes in both punctual movement cases in this fixture. The Slang
   and generated WGSL `depthVertexMain` bodies read the view projection rather
   than the punctual sampling matrices, but the full masked, task/mesh and
-  reflective shader dependency audit remains incomplete. Audit those actual
-  field reads before deciding whether unused fields can be canonicalized. Do not
+  reflective shader dependency audit remains incomplete. Additional source
+  review covered the complete `vertexMain`, `depthMaskedFragmentMain` and
+  `rsmFragmentMain` bodies, position/attribute loading, alpha masking, physical
+  UV projection, base-color and packed-material sampling, metalness and
+  double-sided normal helpers. Those inspected bodies do not read
+  `light_view_proj`; the attribute loader does read `frame.vertex_pool`, so
+  replacing whole blocks with only a projection would discard a real input.
+  Task/mesh helper coverage and compiled masked/reflective artifact dependencies
+  still need confirmation before unused fields can be canonicalized. Do not
   weaken cache records by ignoring GPU inputs. Preserve cadence, layout, skinned
   previous/current data, reflective and probe producers, failure recovery and
   native image parity. Price native redraw cost before ranking this ahead of
