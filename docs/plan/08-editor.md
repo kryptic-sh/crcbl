@@ -6,6 +6,29 @@ open scene, move things, edit properties, save, play.
 
 ## Status: slices 1, 2 and 3 landed 2026-09-16, and what still waits
 
+**Performance follow-up:** `apps/editor/src/app/instances` retains each placed
+entity's last description and publishes changes before `begin_frame`. Unchanged
+draws become quiet while the renderer preserves its settling frame. Null-backed
+editor tests cover shadow reuse, current/previous transforms, missing bounds and
+undo/redo with replacement history; recorded uploads verify the frame-ring
+drain. The explicitly run Vulkan screenshot test matches eager writes on
+Radeon/RADV and llvmpipe/lavapipe through edits and history changes, with
+validation logs checked. Disabling publications failed the image comparison;
+eager writes failed the quiet-upload check. Both restored runs passed.
+
+Paired sequential release runs presented 550 frames at 960x720, timing 500 after
+warmup. The default scene contains 4 entities; the dense fixture contains 1024.
+Frame, command and entity counts were checked. Timings include preparation,
+acquisition/submission and frame-ring waits, exclude startup, and are not
+isolated GPU timings.
+
+| Scene and repeat | Eager p50/p95 (ms) | Filtered p50/p95 (ms) |
+| ---------------- | ------------------ | --------------------- |
+| Default, first   | 0.287/0.381        | 0.252/0.299           |
+| Default, repeat  | 0.283/0.329        | 0.249/0.287           |
+| Dense, first     | 0.270/0.307        | 0.229/0.267           |
+| Dense, repeat    | 0.268/0.304        | 0.228/0.278           |
+
 `apps/editor` exists: a native, single-process tool that loads `apps/breakout`'s
 board, renders it with `crcbl_render::orbit::OrbitCamera` and the ground grid,
 lists the entities per system, picks one by ray, draws its bounds, nudges it

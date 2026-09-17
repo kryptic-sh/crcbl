@@ -57,8 +57,8 @@ use crcbl::math::{Vec2, Vec3};
 use crcbl::reflect::Value;
 use crcbl::render::grid::GridStyle;
 use crcbl::render::{
-    Aabb, DirectionalLight, ForwardRenderer, InstanceHandle, OrbitCamera, Projection, RenderGraph,
-    TransientPool, UiRenderer,
+    Aabb, DirectionalLight, ForwardRenderer, OrbitCamera, Projection, RenderGraph, TransientPool,
+    UiRenderer,
 };
 use crcbl::scene::scn::SceneEntityId;
 use crcbl::shell::{ButtonState, DisplayMode, Shell, ShellEvent, WindowDesc, WindowId, open};
@@ -75,7 +75,7 @@ use crate::panel::{PanelInput, Panels};
 
 mod instances;
 
-use instances::{instance_of, place};
+use instances::{PlacedInstance, place};
 
 /// How far one arrow key moves the selection, in metres.
 ///
@@ -138,11 +138,9 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     gpu: GpuContext,
     renderer: ForwardRenderer,
     pool: TransientPool,
-    /// One instance per entity, in [`Document::outline`]'s order, rewritten
-    /// every frame — `apps/towers` does the same and for the same reason: a
-    /// renderer told only about edges needs a second copy of the state to
-    /// compare against.
-    instances: Vec<(SceneEntityId, InstanceHandle)>,
+    /// One instance per entity, retaining its last published description so
+    /// unchanged draws let the renderer settle motion history and reuse shadows.
+    instances: Vec<PlacedInstance>,
     document: Document,
     /// The docked outliner and inspector, and the join between what they show
     /// and what the document holds.
@@ -659,12 +657,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         };
         let extent = acquired.extent;
 
-        for index in 0..self.instances.len() {
-            let (id, handle) = self.instances[index];
-            if let Some(desc) = instance_of(&mut self.document, id) {
-                self.renderer.set_instance(handle, &desc);
-            }
-        }
+        instances::update(&mut self.instances, &mut self.renderer, &mut self.document);
         if let Some(id) = self.document.selected()
             && let Some((min, max)) = self.document.bounds(id)
         {
@@ -943,7 +936,7 @@ mod tests {
     /// [`Editor::with_shell`] takes one, and the concrete type is what a
     /// scripted click needs — so the whole loop runs against the events a
     /// window system would have delivered rather than against a stand-in.
-    fn headless(frames: u64) -> Editor<HeadlessShell> {
+    pub(super) fn headless(frames: u64) -> Editor<HeadlessShell> {
         Editor::with_shell(Box::new(HeadlessShell::new()), &options(frames))
             .expect("the null backend runs everywhere")
     }

@@ -1,4 +1,4 @@
-//! Greybox instance placement and the document descriptions it draws.
+//! Greybox instances and the last document descriptions sent to the renderer.
 
 use crcbl::greybox::{GREYBOX_CUBE, GREYBOX_GREY};
 use crcbl::math::{Mat4, Quat};
@@ -8,8 +8,33 @@ use crcbl::scene::scn::SceneEntityId;
 
 use crate::document::Document;
 
+/// A placed entity and the description last published for its handle.
+#[derive(Debug)]
+pub(super) struct PlacedInstance {
+    id: SceneEntityId,
+    handle: InstanceHandle,
+    desc: InstanceDesc,
+}
+
+/// Publishes changed descriptions before the renderer settles motion history.
+pub(super) fn update(
+    placed: &mut [PlacedInstance],
+    renderer: &mut ForwardRenderer,
+    document: &mut Document,
+) {
+    for instance in placed {
+        let Some(desc) = instance_of(document, instance.id) else {
+            continue;
+        };
+        if desc != instance.desc {
+            renderer.set_instance(instance.handle, &desc);
+            instance.desc = desc;
+        }
+    }
+}
+
 /// How one entity is drawn: the unit cube, scaled to its own extents.
-pub(super) fn instance_of(document: &mut Document, id: SceneEntityId) -> Option<InstanceDesc> {
+fn instance_of(document: &mut Document, id: SceneEntityId) -> Option<InstanceDesc> {
     let (min, max) = document.bounds(id)?;
     Some(InstanceDesc {
         mesh: GREYBOX_CUBE,
@@ -26,7 +51,7 @@ pub(super) fn instance_of(document: &mut Document, id: SceneEntityId) -> Option<
 pub(super) fn place(
     renderer: &mut ForwardRenderer,
     document: &mut Document,
-) -> Result<Vec<(SceneEntityId, InstanceHandle)>, crcbl::render::instance_pool::InstancePoolError> {
+) -> Result<Vec<PlacedInstance>, crcbl::render::instance_pool::InstancePoolError> {
     let ids: Vec<SceneEntityId> = document
         .outline()
         .into_iter()
@@ -37,7 +62,14 @@ pub(super) fn place(
         let Some(desc) = instance_of(document, id) else {
             continue;
         };
-        placed.push((id, renderer.add_instance(&desc)?));
+        placed.push(PlacedInstance {
+            id,
+            handle: renderer.add_instance(&desc)?,
+            desc,
+        });
     }
     Ok(placed)
 }
+
+#[cfg(test)]
+mod tests;

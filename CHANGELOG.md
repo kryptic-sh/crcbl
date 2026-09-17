@@ -2077,6 +2077,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Editor avoids republishing unchanged scene instances**: it retains the last
+  description for each placed entity and publishes changes before the renderer
+  begins its frame, preserving motion-history settling through edits and
+  undo/redo and permitting static shadow reuse.
 - **Tumble skips physics hashing for its hidden debug panel**: the sample's
   debug module borrows the scenes and reads their counters and canonical hash
   only when the panel gathers its visible section. The page and simulation
