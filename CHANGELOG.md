@@ -2077,6 +2077,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Tumble skips physics hashing for its hidden debug panel**: the sample's
+  debug module borrows the scenes and reads their counters and canonical hash
+  only when the panel gathers its visible section. The page and simulation
+  hashes retain their existing behaviour.
 - **`DrawGen` buffers are laid out per draw region**: `DrawGenDesc` takes a
   `mode`, `crcbl_shaders::draw_gen::run_start_word` and `runs_words` take the
   bucket count, region and faces flag, `CullParams` grew and `STATS_WORDS` is 8,

@@ -36,6 +36,11 @@ use crate::pit::{Pit, PitReading};
 use crate::spin::{Spin, SpinReading};
 use crate::wall::{Wall, WallReading};
 
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static HASH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// How fast the loop ticks, in ticks a second: the engine's own default.
 pub const TICK_HZ: u32 = 60;
 
@@ -298,6 +303,8 @@ impl Scenes {
     /// hasher, means the same thing in every build.
     #[must_use]
     pub fn hash(&self) -> u64 {
+        #[cfg(test)]
+        HASH_CALLS.with(|calls| calls.set(calls.get() + 1));
         let mut hasher = Fnv(0xcbf2_9ce4_8422_2325);
         self.spin.hash(&mut hasher);
         self.wall.hash(&mut hasher);

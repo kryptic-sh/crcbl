@@ -27,9 +27,153 @@ Parallel occlusion bucket finalization passed CI and deployed. Authored interior
 and browser culling measurements, CPU draw-recording cost, and overlapping grass
 workloads remain open below.
 
+Next performance trials, after the current slice's CI and deployment gates:
+
+- First test filtering unchanged instance descriptions in the editor caller. The
+  existing null-device comparison observes redundant upload bytes and revision
+  changes, and shadow inputs include that revision. Compare the actual editor's
+  idle frames and an authored dense scene, including shadow redraw counters and
+  images through edits, undo/redo and the settling frame. Keep the change only
+  with preserved behaviour and verified savings. Readiness review confirms
+  `InstanceDesc` has value equality and `place` already constructs the initial
+  description, so the caller can retain that value alongside the entity and
+  handle. Preserve the pool's explicit-write revision contract: its
+  `every_write_moves_the_revision_and_a_still_frame_does_not` test requires
+  identical explicit writes to remain writes. The editor writes before
+  `begin_frame`; `InstancePool::rotate` then carries a previously moved record
+  to rest when this frame does not rewrite it. Check that settling upload and
+  revision before expecting a quiet frame, and drain outstanding dirty ranges in
+  each frame-ring buffer before asserting zero uploads. Test undo followed by a
+  different edit at the same log position; log position is not a valid geometry
+  cache key. Missing bounds currently skip the write; preserve that behaviour
+  until entity creation/removal is implemented. A scene-selecting public-editor
+  probe loaded a disk fixture containing 1024 separately placed blocks on a
+  grid, using the existing editor vocabulary and greybox meshes. With Vulkan
+  explicitly selected and the Radeon ICD and discrete-adapter environment
+  pinned, it presented 550 idle headless frames at 960x720, timing 500 after
+  warmup: p50/p95 was 0.330/0.359 ms. The timer includes editor frame
+  preparation, acquisition/submission and frame-ring waits; it excludes startup
+  and is not isolated GPU time. The frame budget, command count and loaded
+  entity count were checked; deliberately expecting 1025 entities failed with
+  1024 before restoring and repeating the run. This is a dense-scene baseline,
+  not a measured optimization or an authored interior culling experiment. Pair
+  it with the changed caller and correctness observations before keeping a
+  filter. Interleaved repeat baseline runs also showed timing variation: the
+  default scene's p50/p95 was 0.294/0.374 ms then 0.283/0.322 ms, while the
+  dense fixture was 0.268/0.344 ms then 0.269/0.310 ms. Each run presented 550
+  frames and timed 500. Scene population alone does not explain these whole
+  frame timings; do not infer a filter's gain by comparing the earlier default
+  run with a later dense run. Pair unchanged and filtered versions on each same
+  scene and observe upload/revision/shadow behaviour separately.
+- Then price P14's miss-only bind-group entry construction on an actual render
+  workload. This is a shared, narrow preparation change that can avoid owned
+  entry vectors on cache hits without introducing another cache. Preserve view
+  replacement, frame-ring uniforms and failure reporting.
+- Retained instance carry/dirty-run storage and input queue capacity follow as
+  small candidates. Price moving/dense and input-burst workloads, respectively,
+  before keeping them. Backend command-pool reuse, wider graph caching and math
+  changes need stronger workload evidence or carry more lifecycle risk; they do
+  not precede these trials on source inspection alone.
+
+This orders trials, not claimed speedups. Continue the remaining codebase review
+and record its gaps; after supported low-effort performance work, resume the
+plans' feature priorities.
+
 Source review findings (priced where noted; real workload priorities remain
 open):
 
+- `Skinning::begin_frame` creates palette bytes, binding bytes and a dispatch
+  plan on each accepted call; success replaces the slot's retained `active`
+  vector with that new plan. `Skinning::add_pass` also owns a fresh dispatch
+  vector for its graph closure. Puppet reaches this path every acquired frame;
+  Viewer collects fresh borrowed `SkinRange`s when skinning is present. Price
+  Puppet and a loaded skinned Viewer asset before retaining scratch or changing
+  range ownership. Preserve complete validation before writes, frame parity,
+  palette/binding offsets and each slot's uniforms. A partially failed upload
+  must leave that slot dispatching nothing; retaining scratch must not expose a
+  partial plan or resurrect the previous successful plan. Empty dispatch
+  collection does not itself establish a heap allocation. Dynamic skin bindings
+  are allowed by the API, so do not skip their upload merely because a sample's
+  current bindings appear immutable. No skinning preparation latency was
+  measured.
+- `ForwardRenderer::begin_frame_body` collects `PunctualProducer` rows before
+  checking `self.probe_gather`. That owned vector is only passed to the gather
+  in this block, so constructing it inside the present-gather branch could avoid
+  preparation for scenes without a gather but with punctual shadow faces. Price
+  such a scene and verify identical shadow-face selection and rendering. An
+  empty face list collects an empty vector and does not establish heap cost.
+  Construction review confirms `ProbeUpdate::Authored` is the default and
+  creates no gather, while `EveryFrame` constructs one. Include authored-probe
+  scenes with selected punctual faces in this trial; gather creation and its
+  passes are already optional, so do not propose another switch for them. With
+  gather enabled, `ProbeGather::begin_frame` additionally encodes producers into
+  a fresh byte vector. Retaining encoded scratch is a separate candidate;
+  preserve clamping, the claimed row count, frame-ring writes and failure retry.
+  World-space triangle vectors in `probe_visibility::world_triangles` instead
+  feed probe capture/recapture, so price baking and editing separately rather
+  than attributing them to every ordinary frame. These inspected paths remain
+  unmeasured and follow the established Tumble trial.
+
+- Sparks also constructs a `Show::reading` before `DebugPanel::add` in its debug
+  hook, but the inspected method reads retained pool counters and looks up
+  effect statistics; it does not hash or traverse the particle arrays.
+  `ParticleSystem::stats` reads stored counts and free-span length, while
+  `effect_stats` searches effect records. Do not transfer Tumble's measured
+  physics-hash cost to this superficially similar hook. A hidden guard remains a
+  small candidate, but price actual effect-count workloads before ranking it
+  alongside the Tumble change. No Sparks hook latency was measured.
+- Tumble retains `Drawn::shapes` scratch across rooms and frames, and moves
+  retained draw lists by swap; new body's handle vectors are allocated on body
+  insertion rather than for every existing body. `Drawn::update` still poses
+  each body on every draw, including between physics ticks, and removes stale
+  body instances by its seen-frame mark. Any caller-side filtering must preserve
+  room/body identity, changed part counts, material changes, disappearance and
+  motion settling. `Scenes::reading` also calls `Scenes::hash`, which visits
+  every room; `PhysicsSystem::hash_state` collects and canonically sorts body
+  records before hashing their logical state. A release probe of unchanged
+  actual scenes timed 1000 calls after stepping outside the timer. At 4/64/256
+  ticks, the pit held 5/80/320 balls. Reading p50/p95 was 0.009/0.010,
+  0.047/0.054 and 0.281/0.288 ms; separately timed hash p50/p95 was 0.009/0.009,
+  0.045/0.046 and 0.281/0.288 ms. Every result checked hash, tick and pit count;
+  deliberately expecting a zero hash failed before restoring and repeating.
+  Construction, stepping, page drawing and GPU work were excluded. The page
+  still requires a reading and recomputes the canonical hash between ticks.
+  Price a tick-invalidated hash cache separately; invalidation must cover
+  construction and every state mutation without narrowing the canonical hash's
+  coverage.
+- Shader and pipeline construction belongs to a separate startup workload.
+  `crcbl_shaders::Shader::spirv` and `spirv_for` retain decoded words through
+  `OnceLock`; repeated access does not repeatedly decode the artifact. Vulkan's
+  `create_shader_module_impl` still validates entry points and owns a word copy
+  per module creation, and `create_compute_pipeline_impl` passes a null Vulkan
+  pipeline cache. `Exposure::new` calls `compute_pipeline_entry` for each entry
+  point of its shared shader; that helper creates and destroys a module for each
+  pipeline. Price renderer construction and viewer reloads before considering
+  builder-scoped module reuse or a device pipeline cache. These inspected calls
+  do not establish steady-state frame work. Preserve entry-point, storage-stride
+  and workgroup checks, failure cleanup and backend lifetime contracts.
+  Persistent driver caches also need device/driver identity and corrupt-cache
+  recovery; they follow the measured frame-path candidates.
+- Bracket's `page::ladder` calls `Sim::ladder` on every draw; that method
+  allocates the complete population order and sorts by rating with an id tie
+  break. Measure paused and tick-active pages before retaining scratch or
+  invalidating a cached order on rating changes. Preserve deterministic ties and
+  population replacement. `page::convergence` also collects plot points, but
+  moves that vector into `DrawList::polyline`; retaining the producer's capacity
+  alone would not remove command ownership. `Sim::step` shifts its bounded
+  history only on `HISTORY_EVERY` and its bounded recent reports when matches
+  finish, so these shifts do not establish a render-frame bottleneck.
+- Hud's `Game::render_state` clears and extends retained damage storage and
+  fills fixed ability slots; it does not clone the complete ticker. Its draw
+  separately calls `Game::stats`, taking another short shared-state lock. Price
+  contention before combining those reads. `page::ability_row` allocates a
+  ready/countdown status string, then `centred` borrows it and passes that
+  borrow to `DrawList::text`, which creates another owned string. Moving the
+  measured status into the command could avoid the intermediate copy without a
+  cross-frame string cache; verify identical centring, cooldown formatting and
+  ready-state output. Tick-driven values can also remain unchanged between
+  draws, but an owned command string is still required by the current API. These
+  are source candidates; no sample frame-time savings were measured.
 - `crcbl_ui::tree::Ui::layout` collects root indices into a fresh `Vec` on each
   layout. The tree already distinguishes roots by `parent`; iterating indices
   while borrowing the layout fields could avoid this allocation. Measure an
@@ -394,7 +538,10 @@ Sample and browser follow-up:
   preserving that ordering. This is event-driven allocation, rather than an
   idle-frame bottleneck. Price repeated press/release bursts and preserve
   tick-edge semantics, including several ticks within one rendered frame, before
-  keeping the change. No additional wrapper is needed for this loop.
+  keeping the change. Breakout and flappy's `Game::tick` use the same pattern
+  for `pending_input`; their render-state output lists are already cleared and
+  filled in retained storage. Do not conflate those lists with the input queue
+  candidate. No additional wrapper is needed for this loop.
 - Considered and declined: removing browser command-field copies without a
   lifetime redesign. `gpu-stream.js::StreamReader::readField` produces owned
   bytes, and `gpu-transport.js::takeCommandStream` releases the wasm stream
@@ -534,6 +681,126 @@ mailbox publish/read exchanges slot ownership. Neither inspected operation
 allocates its own storage, though payload construction and destruction at call
 sites still need pricing. The remaining subsystem, backend, sample, browser and
 tooling review is still open; this is not a full-codebase verdict.
+
+Additional backend and reflection review:
+
+Metal and D3D12 implementation remain deferred under `docs/plan/ROADMAP.md`. The
+source findings below record possible work if those backends resume; they do not
+move it ahead of the shipping Vulkan and WebGPU paths.
+
+- Metal's `BindCache` already skips unchanged buffer, texture, sampler and
+  inline-byte driver calls; `RenderReplay::apply_draw_state` also compares
+  pipeline and raster state before materializing a draw. Do not propose those
+  caches as missing. Preparation still owns work: `DeviceInner::bind_group_raw`
+  collects dynamic binding indices, searches them for each dynamic binding,
+  constructs a resolved binding vector and clones a bindless table's resident
+  references. `BindCache::bytes_changed` allocates new inline storage when the
+  contents change. Price these separately on macOS before considering immutable
+  dynamic-offset metadata, retained byte capacity or recording-owned shared
+  bindings. Preserve layout identity, offset alignment and bounds, stage masks,
+  resource lifetime and cache reset at encoder boundaries. Source inspection
+  alone does not establish their runtime cost.
+- D3D12's `DeviceInner::bind_group` constructs dynamic-root input and resolved
+  root vectors, obtains an owned heap vector and clones retained resource
+  references before `Dx12CommandEncoder::retain` performs linear pointer
+  deduplication. Submission also constructs command-list and retained payload
+  vectors. These are Windows measurement candidates, not a demonstrated Linux
+  frame bottleneck. Price command recording and submission separately before
+  choosing immutable metadata or scratch reuse. Preserve refusal before
+  execution, root-signature changes, graphics/compute separation, dynamic
+  offsets and the references that keep resources and recordings alive until
+  their fence completes. `RetireQueue::retire` already releases ready entries
+  from its ordered `VecDeque` front; it does not scan or shift the entire queue.
+- Reflection's `path::resolve` and `resolve_mut` iterate borrowed path segments;
+  scalar reads return values directly, while `Reflect for String::get` owns a
+  clone and its setter uses `clone_from`. Editor `EditCommand::apply` reads the
+  replaced leaf and owns the inverse path for later undo, which is edit-driven
+  work rather than proof of an idle-frame allocation. Preserve exact undo
+  payloads and refusal semantics; do not prioritize borrowed reflection values
+  without measuring visible text properties or actual command throughput.
+  Inspected path resolution, scalar/string implementations, command application
+  and document reads. Derive expansion's `field_slice` emits constant field
+  descriptions and enum access uses generated matches; its vector construction
+  happens during macro expansion. The remaining inspector call sites still need
+  review.
+- Browser `shell.js::syncCursor` decodes the requested CSS string before
+  checking whether it matches `appliedCursor`. The Rust cursor exports publish
+  stable static strings; checking pointer and length before decoding could avoid
+  the unchanged-string copy and decode. Price an actual running demo first, and
+  preserve cursor transitions, empty requests before creation and after
+  destruction, canvas identity and threaded-memory decoding. Do not remove
+  `readUtf8`'s owned-byte copy: its shared-memory contract still applies on a
+  change. `syncSize` already suppresses unchanged resize publication and
+  `installKnobs` refreshes at startup and interaction rather than every frame.
+  `demo.js` only changes its status text when the reported state changes. Its
+  empty log/fetch/save drains are polling candidates, not evidence of repeated
+  fetches or filesystem writes; savings from reusing their argument objects or
+  avoiding empty async work remain unmeasured. Pointer-lock polling must still
+  release the pointer when the engine stops. An attempted local horde CPU
+  profile did not reach the demo's running loop with the installed Chromium
+  153.0.8010.36. Hardware startup checks failed; a subsequent page-query
+  observation expired, and browser diagnostics included
+  `TransferBuffer::Initialize() failed`. The explicitly selected SwiftShader
+  attempt also did not provide a completed profile. Temporary runs were stopped;
+  no frame-cost or GPU-speedup conclusion follows. Re-establish the canonical
+  browser harness's startup and readback controls on this browser before using
+  it to price the polling candidates. This was a local profiling attempt, not a
+  verdict on the demo or a replacement for CI's browser gates.
+- Core `Pool::get` and `get_mut` index slots and check generations; insertion
+  and removal reuse a linked free list. Iteration scans slots, so a sparse
+  high-water pool is a workload to price if a real caller iterates it
+  frequently, not a reason to weaken handle checks or compact live indices.
+  `stats::Window` retains its sample deque and sorts copied samples in a stack
+  array when percentiles are requested. `crcbl_rand::Rng` delegates to its
+  retained ChaCha generator and fills caller storage; these inspected methods
+  construct no per-draw heap buffer. The secure entropy path has a different
+  purpose and must keep its source and fail-closed behaviour. Wayland scanner
+  generation is called from the shell build script, and reflection macro vectors
+  are also compile-time work; neither establishes a running-frame allocation
+  priority.
+- Greybox `scene3d` constructs primitive meshes, and `MeshBuilder::finish`
+  creates UV, encoded-vertex and cluster output at scene construction. The
+  inspected editor calls it while opening its renderer, rather than on every
+  draw. Price startup and large authored primitive construction separately
+  before changing those owned geometry APIs. Golden comparison is also outside
+  normal rendering: `compare` scans pixels to compute its metrics;
+  `worst_pixels` collects every differing pixel, sorts them and only then
+  truncates to the requested limit. Its inspected production caller is the
+  `compare-png` example's diagnostics. A bounded selection could reduce memory
+  for large failed comparisons, but preserve deterministic reading-order ties
+  and complete pixel diagnostics. This tooling candidate follows runtime
+  performance work; its actual peak memory and test latency remain unmeasured.
+
+- Native shell delivery already pops queued `ShellEvent`s from retained deques
+  in a bounded batch; inspected X11, Wayland, Win32 and AppKit pumps do not
+  collect a fresh delivery vector. Their waits respect timeouts and pending
+  protocol work, so no unconditional event-polling busy loop was established.
+  Raw staging has a narrower capacity candidate: Wayland `process_raw` takes the
+  dispatcher's event vector, and Win32/AppKit `Shared::take_events` move their
+  callback vectors into `translate`. Processing consumes that storage. Price
+  sustained pointer/key traffic before retaining raw-batch capacity. Win32 and
+  AppKit deliberately end the shared borrow before calling the system; a drain
+  held across callbacks can panic on re-entry. Preserve that rule, events added
+  while processing, coalescing, batch boundaries and ordering. These
+  event-driven candidates follow unchanged scene preparation; platform runtime
+  measurements and re-entry coverage are still needed.
+
+- Sample follow-up inspected lantern and sparks tick, draw and frame
+  preparation. Lantern's `room::lights` returns a fixed-size array; `set_lights`
+  clears and fills retained storage. Its room and monitor require separate
+  camera uniforms and rendering, so treating the monitor as duplicate work to
+  remove would change the scene. Computing the same light array once for both
+  views is a small arithmetic candidate, not an established allocation or frame
+  bottleneck. Sparks' `Block::write` parks only the newly inactive tail;
+  `Block::clear` parks its previously drawn range and resets the count. Declined
+  removing supposed repeated whole-block parking: subsequent clears already do
+  no instance writes. Live particles still rebuild transforms and rewrite their
+  descriptions on draws, including draws between fixed simulation ticks. Price
+  that workload before any caller-side filtering or simulation-generation guard;
+  preserve live-count transitions, effect replacement, palette changes and
+  motion history. Both samples exchange draw-list storage rather than creating a
+  new owned list for every handoff. Renderer graph preparation and UI expansion
+  remain the separately recorded candidates.
 
 ## What UI rung 6 shipped without (2026-09-16)
 

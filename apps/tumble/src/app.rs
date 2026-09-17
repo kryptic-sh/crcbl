@@ -70,14 +70,14 @@ pub type TumbleError = crcbl::engine::LoopError;
 
 /// Tumble's section of the debug panel: a line of counters per room.
 #[derive(Debug)]
-struct Stats {
-    reading: Reading,
+struct Stats<'a> {
+    scenes: &'a Scenes,
     commands: usize,
 }
 
-impl DebugModule for Stats {
+impl DebugModule for Stats<'_> {
     fn debug_section(&self, out: &mut DebugSection) {
-        let r = &self.reading;
+        let r = self.scenes.reading();
         out.set_title("physics");
         out.row("tick", format_args!("{}", r.tick));
         out.row(
@@ -315,7 +315,7 @@ impl HostedGame for Tumble {
     /// sample has neither.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&Stats {
-            reading: self.scenes.reading(),
+            scenes: &self.scenes,
             commands: self.commands,
         });
     }
@@ -367,3 +367,6 @@ crcbl::impl_pending_loop!(
     context: |_options| (),
     assemble: |booted, options| Ok(assemble(booted, options)),
 );
+
+#[cfg(test)]
+mod tests;

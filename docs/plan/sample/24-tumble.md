@@ -104,6 +104,24 @@ sleep until rung 3, no overflow or despawn until rung 6), each gap labelled on
 screen. Milestone 1's bullet scene, wind tunnel and golden frame, and every
 milestone after 3, are not built.
 
+Performance follow-up: the debug module borrows the scenes and constructs its
+reading only inside the visible panel's `debug_section`. Hidden panels avoid the
+extra canonical physics hash; the page still reads the current state. A
+hash-call regression test covers hidden, visible and re-shown panels and checks
+the current tick, hash and command row. Restoring eager reading made its hidden
+hash-call assertion fail before restoring the lazy implementation.
+
+Sequential release Vulkan comparisons at 960x720, pinned to the Radeon ICD and
+discrete adapter, used the same paused state at 256 ticks and 320 pit balls.
+Each run timed 500 complete frames after warmup. Hidden-panel p50/p95 changed
+from 0.907/0.928 to 0.597/0.616 ms, then from 0.876/0.897 to 0.589/0.630 ms in
+the repeat pair; p50 reductions were 34.2% and 32.8%. Visible-panel p50/p95 was
+1.083/1.118 ms eager and 1.101/1.123 ms lazy, without a visible-panel
+improvement. The timer includes page/menu/instance preparation, acquisition,
+submission and frame-ring waits, excluding startup and stepping. It is CPU frame
+time, not isolated GPU time. Simulation hashes and visible hash rows matched
+throughout.
+
 ## Milestones
 
 1. **The honest first cut** — the user's choice of 2026-09-15: ship what the
