@@ -1271,6 +1271,43 @@ Sample and browser follow-up:
   for `pending_input`; their render-state output lists are already cleared and
   filled in retained storage. Do not conflate those lists with the input queue
   candidate. No additional wrapper is needed for this loop.
+
+  A release staging probe used the actual `ActionMap` with Horde's move, restart
+  and choice declarations, comparing the existing take-and-replay loop with a
+  draining replay loop. Queue pushes, `begin_tick` and replay are timed;
+  simulation, network traffic, rendering, startup, reference replay and complete
+  logical action-value comparisons are excluded. Each run reported 500 timed
+  batches of 20 ticks. Deferred event replay, catch-up ticks, held movement,
+  press/release edges, empty replay and later release matched direct action-map
+  replay. Reordered events and discarded retained capacity independently failed
+  before the restored probe passed. Paired p50/p95 prices were:
+
+  | Queued events per tick | Original (ns) | Retained (ns) | Original repeat | Retained repeat |
+  | ---------------------- | ------------- | ------------- | --------------- | --------------- |
+  | 0                      | 72.0/73.5     | 66.0/92.2     | 66.7/131.7      | 66.0/67.5       |
+  | 2                      | 142.3/144.8   | 140.8/273.5   | 141.3/147.8     | 138.2/139.8     |
+  | 16                     | 845.0/856.1   | 801.0/811.5   | 842.6/857.7     | 798.5/832.0     |
+  | 128                    | 6402.1/6509.9 | 6322.9/6419.1 | 6406.6/6532.4   | 6343.0/6483.2   |
+
+  Idle replay starts after a priming input sequence; it is not evidence of an
+  ordinary idle-tick allocation. Small-event tails are mixed, while larger
+  bursts improved slightly in this isolated stage. A paired 16-event DHAT run
+  reported whole-fixture totals of 1,968,156 bytes in 55,147 blocks originally
+  and 1,352,198 bytes in 22,148 blocks retained. Guarded queue-growth sites,
+  including initial priming and warmup, reported 616,008 bytes in 33,001 blocks
+  versus 56 bytes in 3 blocks. Every expected site was required to exist; a
+  missing-site selector failed. The retained growth reuses the observed cold
+  push site; reference and snapshot allocations are separate. Whole-fixture peak
+  bytes rose from 13,876 to 13,908, reflecting retained lifetime storage.
+  Instrumented timings are excluded from release prices. This does not price
+  actual game ticks or implement a sample change. Keep it behind the renderer,
+  instance and hash trials. Before keeping it, compare actual sample intent and
+  loopback results, multi-tick frames, focus-loss releases and full
+  native/browser behavior. Device attribution and context changes during queued
+  replay are not covered by this probe. Breakout's pointer/button staging and
+  Flappy's mixed input still require their own evidence; key-only results do not
+  cover those queues.
+
 - Considered and declined: removing browser command-field copies without a
   lifetime redesign. `gpu-stream.js::StreamReader::readField` produces owned
   bytes, and `gpu-transport.js::takeCommandStream` releases the wasm stream
