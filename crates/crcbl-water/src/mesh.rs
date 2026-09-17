@@ -84,6 +84,10 @@ pub fn surface_mesh(body: &WaterBody, spacing: f32) -> Result<SurfaceMesh, BodyE
         mesh: SurfaceMesh::default(),
         welded: HashMap::new(),
     };
+    // A grid line is computed from its own index, never as its neighbour plus
+    // `spacing`, so two cells sharing an edge round it to the same `f32` and
+    // tile without a crack.
+    let edge = |origin: f32, index: u64| origin + index as f32 * spacing;
     for triangle in ear_clip(outline) {
         let (from, to) = bounds(&triangle);
         let first_column = cell_of(from[0], low[0], spacing);
@@ -92,9 +96,8 @@ pub fn surface_mesh(body: &WaterBody, spacing: f32) -> Result<SurfaceMesh, BodyE
         let last_row = cell_of(to[1], low[1], spacing).min(rows - 1);
         for row in first_row..=last_row {
             for column in first_column..=last_column {
-                let x0 = low[0] + column as f32 * spacing;
-                let z0 = low[1] + row as f32 * spacing;
-                let (x1, z1) = (x0 + spacing, z0 + spacing);
+                let (x0, x1) = (edge(low[0], column), edge(low[0], column + 1));
+                let (z0, z1) = (edge(low[1], row), edge(low[1], row + 1));
                 let cell = vec![[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
                 builder.fan(&clip(cell, &triangle))?;
             }
@@ -308,15 +311,24 @@ mod tests {
         }
     }
 
-    /// The `y` component of each triangle's `(b - a) × (c - a)`, in `f64`.
+    /// The `y` component of each triangle's `(b - a) × (c - a)`, in `f64` —
+    /// the differences too, which are exact there. Taken in `f32`, the two
+    /// edges of a sliver whose far corners sit one step apart round to one
+    /// vector, and a triangle facing up reads as having no normal at all.
     fn normals_y(mesh: &SurfaceMesh) -> Vec<f64> {
         mesh.indices
             .chunks_exact(3)
             .map(|triangle| {
                 let [a, b, c] = [0, 1, 2].map(|i| mesh.positions[triangle[i] as usize]);
                 let (ab, ac) = (
-                    [f64::from(b[0] - a[0]), f64::from(b[2] - a[2])],
-                    [f64::from(c[0] - a[0]), f64::from(c[2] - a[2])],
+                    [
+                        f64::from(b[0]) - f64::from(a[0]),
+                        f64::from(b[2]) - f64::from(a[2]),
+                    ],
+                    [
+                        f64::from(c[0]) - f64::from(a[0]),
+                        f64::from(c[2]) - f64::from(a[2]),
+                    ],
                 );
                 ab[1] * ac[0] - ab[0] * ac[1]
             })
@@ -326,6 +338,50 @@ mod tests {
     /// The total area the triangles cover, which is half the sum of those.
     fn area(mesh: &SurfaceMesh) -> f64 {
         normals_y(mesh).iter().sum::<f64>() / 2.0
+    }
+
+    /// How far a mesh of `outline` at `spacing` may miss the outline's area:
+    /// a relative part, plus what rounding clip points to `f32` can move.
+    ///
+    /// The mesher computes each clip point in `f64` and rounds it to `f32`,
+    /// moving each coordinate by at most half a unit in the last place. No
+    /// coordinate exceeds `reach` — the outline's largest, plus one spacing for
+    /// the grid's far edge — and that unit, for a value no larger, is at most
+    /// `reach × f32::EPSILON`. So each rounded point lies within
+    /// `d = reach × f32::EPSILON` of its exact place, which is on an edge of one
+    /// of the ear clipper's triangles. To first order, taking the `f64`
+    /// arithmetic before the rounding as exact, a triangle edge of length `L`
+    /// can gain or lose:
+    ///
+    /// - `d × L` between the edge and the pieces' sides that run along it;
+    /// - `d × spacing / 2` for each rounded point that should also sit on a cell
+    ///   edge — at most two per cell the edge crosses, and it crosses at most
+    ///   `√2 × L / spacing + 1` cells — so `d × (√2 × L + spacing)`;
+    /// - `d × L / 2` where the grid's far edge rounds inside the outline's.
+    ///
+    /// Together less than `d × (3 × L + spacing)`. Ear clipping cuts `n` points
+    /// into at most `n - 2` triangles, whose edges are the perimeter `P` plus
+    /// both sides of at most `n - 3` diagonals, each a chord no longer than
+    /// `P / 2`: at most `(n - 2) × P` in all, over `3 × (n - 2)` edges. The
+    /// bound is `3 × (n - 2) × d × (P + spacing)`.
+    fn area_tolerance(outline: &[[f32; 2]], spacing: f32) -> f64 {
+        let count = outline.len();
+        let perimeter: f64 = (0..count)
+            .map(|index| {
+                let (a, b) = (outline[index], outline[(index + 1) % count]);
+                let dx = f64::from(b[0]) - f64::from(a[0]);
+                let dz = f64::from(b[1]) - f64::from(a[1]);
+                (dx * dx + dz * dz).sqrt()
+            })
+            .sum();
+        let reach = outline
+            .iter()
+            .flatten()
+            .fold(0.0f64, |reach, value| reach.max(f64::from(value.abs())))
+            + f64::from(spacing);
+        let d = reach * f64::from(f32::EPSILON);
+        let rounding = 3.0 * (count - 2) as f64 * d * (perimeter + f64::from(spacing));
+        signed_area(outline).abs() / 2.0 * 1e-4 + rounding
     }
 
     #[test]
@@ -346,6 +402,26 @@ mod tests {
                 .iter()
                 .all(|index| (*index as usize) < mesh.positions.len())
         );
+    }
+
+    #[test]
+    fn neighbouring_cells_share_their_edge_to_the_bit() {
+        // 0.3 has no exact `f32`, so a cell's far edge taken as its near edge
+        // plus the spacing lands a step away from the next cell's near edge
+        // in some columns — a crack the weld cannot close. Along the square's
+        // bottom edge the only corners are the cells', so a crack shows there
+        // as one vertex too many.
+        let mesh = surface_mesh(
+            &body(&[[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]], 0.0),
+            0.3,
+        )
+        .expect("a square meshes");
+        let bottom = mesh
+            .positions
+            .iter()
+            .filter(|position| position[2] == 0.0)
+            .count();
+        assert_eq!(bottom, 11);
     }
 
     #[test]
@@ -446,6 +522,34 @@ mod tests {
         );
     }
 
+    /// The star CI's coverage job shrank `a_star_meshes_to_its_own_area` to on
+    /// 2026-09-17, held to that property's own assertions. Its third corner is
+    /// all but collinear, so the ear clipper cuts a sliver whose clipped pieces
+    /// have corners one `f32` step apart.
+    #[test]
+    fn a_star_with_a_sliver_ear_meshes_to_its_own_area_facing_up() {
+        let outline = [
+            [-3.1330624, -1.6762365],
+            [-1.8307314, -3.3561707],
+            [-0.49024773, -1.7773137],
+            [0.98649997, -0.03769052],
+        ];
+        let spacing = 1.3730929;
+        let mesh = surface_mesh(&body(&outline, 0.0), spacing).expect("a valid star meshes");
+        let want = signed_area(&outline).abs() / 2.0;
+        let got = area(&mesh);
+        assert!(
+            (got - want).abs() <= area_tolerance(&outline, spacing),
+            "the mesh covers {got} of an outline of {want}"
+        );
+        assert!(normals_y(&mesh).iter().all(|y| *y > 0.0));
+        assert!(
+            mesh.indices
+                .iter()
+                .all(|index| (*index as usize) < mesh.positions.len())
+        );
+    }
+
     /// A star-shaped outline: a point at each angle, at its own radius. Sorted
     /// distinct angles around one centre cannot cross, so every one of these
     /// is simple — convex or not.
@@ -477,7 +581,7 @@ mod tests {
             let want = signed_area(&outline).abs() / 2.0;
             let got = area(&mesh);
             prop_assert!(
-                (got - want).abs() <= want * 1e-4,
+                (got - want).abs() <= area_tolerance(&outline, spacing),
                 "the mesh covers {got} of an outline of {want}"
             );
             prop_assert!(normals_y(&mesh).iter().all(|y| *y > 0.0));

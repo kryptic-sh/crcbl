@@ -1830,6 +1830,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl_water::surface_mesh` tiles its grid without cracks.** A cell's far
+  edge was its near edge plus the spacing, which rounds to a different `f32`
+  than the next cell's near edge in about a third of columns, leaving one-step
+  gaps or overlaps and unwelded duplicate vertices along grid lines. Both edges
+  now come from the grid index.
+
 - **`crcbl-webgpu` sends a shader module's WGSL alone.** `create_shader_module`
   used to carry the SPIR-V, MSL and DXIL across the command stream too, which
   the browser replayer never reads. A renderer's build is one frame's stream and

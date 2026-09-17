@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 9c8b0603e2471449b6ebecfe402cb039a3d44529ec0c7a41f4bb0fa150706e4b # shrinks to outline = [[0.5, 0.0], [0.32980376, 0.3758051], [-0.49890408, 0.03308635]], spacing = 0.2
+cc 17a6a2d03f3d4b1c7967f329302d6d1f90812053810142904e495c79efbf2632 # shrinks to outline = [[-3.1330624, -1.6762365], [-1.8307314, -3.3561707], [-0.49024773, -1.7773137], [0.98649997, -0.03769052]], spacing = 1.3730929
