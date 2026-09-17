@@ -123,6 +123,7 @@
 //! ```
 
 mod atlas_view;
+mod bind_group_cache;
 mod bloom;
 pub mod camera;
 pub mod cluster_pool;
