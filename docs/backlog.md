@@ -1026,12 +1026,16 @@ Sample and browser follow-up:
   `light_view_proj`; every byte outside that encoded array matched. Its range
   was derived from the actual `FrameUniforms::to_bytes` field order and resolved
   shadow constants. Altering a byte outside the array failed the observation.
-  This establishes collateral cache-input changes in this fixture. The Slang and
-  generated WGSL `depthVertexMain` bodies read the view projection rather than
-  the punctual sampling matrices, but the full masked, task/mesh and reflective
-  shader dependency audit remains incomplete. Audit those actual field reads
-  before deciding whether unused fields can be canonicalized. Do not weaken
-  cache records by ignoring GPU inputs. Preserve cadence, layout, skinned
+  The same held-slot, collateral-redraw and complete unchanged-view byte
+  observations passed separately on `IndirectPerBatch` and `MeshShader` null
+  recording paths, as well as the original `IndirectCount` path. This broadens
+  preparation/recording coverage only; the null mesh path does not execute GPU
+  shaders. This establishes collateral cache-input changes in this fixture. The
+  Slang and generated WGSL `depthVertexMain` bodies read the view projection
+  rather than the punctual sampling matrices, but the full masked, task/mesh and
+  reflective shader dependency audit remains incomplete. Audit those actual
+  field reads before deciding whether unused fields can be canonicalized. Do not
+  weaken cache records by ignoring GPU inputs. Preserve cadence, layout, skinned
   previous/current data, reflective and probe producers, failure recovery and
   native image parity. Price native redraw cost before ranking this ahead of
   measured scratch allocation; no changed-caller optimization or GPU saving has
