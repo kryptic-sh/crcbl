@@ -333,8 +333,9 @@ An audit of the workspace found that **no production code inspects which
 `HalError` variant a creation call returned**, and that four callers branch on
 creation failure at all — all in `crcbl-render`, all optional subsystems that
 switch themselves off. Three re-express against capability checks or a frame of
-`take_error` delay. The fourth, `cached_group` in `ssao.rs`, sits inside a graph
-execute closure with nowhere to return an error to.
+`take_error` delay. The shared `cached_group`, now in
+`crates/crcbl-render/src/bind_group_cache.rs` and re-exported through `ssao`,
+sits inside a graph execute closure with nowhere to return an error to.
 
 **Its contract does not change, and nothing has to be built for it.** Under the
 stream it returns `Some` regardless, the pass records its draw, the invalid
@@ -344,6 +345,27 @@ than skipping a pass and it is the right way round: a bind group this code built
 wrongly is a bug, not a device that ran out of room. The existing `None` branch
 stays for the backends that can still answer immediately, and its documented
 per-frame retry is deliberate rather than a flood to fix.
+
+### Cached bind-group entry preparation
+
+The shared cache helper now borrows the complete entry template and copies it
+only after a view-key miss. Fixed pass descriptions use stack arrays, mesh
+passes borrow their stored descriptions, and SSR constructs its complete pyramid
+entries and key on the stack. CMAA2 keeps its separate source-and-buffer key and
+passes borrowed entries directly to creation. Buffer replacement, frame-slot
+uniforms, synchronous failure/retry and the stream's asynchronous error contract
+remain unchanged.
+
+Integrated null recording profiles removed the repeated callback entry
+allocations while preserving warmed group reuse, the full instance mirror and
+command counts. Native Vulkan golden suites passed on pinned Radeon and
+lavapipe. Paired editor timings improved for the default scene and showed no
+consistent benefit for the dense scene; retain this as an allocation and code
+size reduction, without claiming a general GPU frame speedup. The performance
+backlog records the measured workloads and remaining browser/backend coverage.
+Full local workspace verification passed, including both test configurations,
+clippy, doctests, public/private documentation and dependency checks. CI and
+deployment gates remain required before shipping.
 
 ### The destroy op
 

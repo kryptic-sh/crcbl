@@ -652,7 +652,9 @@ impl Ssr {
             let depth_view = ctx.image_view(depth);
             let material_view = ctx.image_view(reflectivity);
             let device = ctx.device();
-            let mut entries = vec![
+            const BASE_ENTRY_COUNT: usize = 9;
+            const BASE_KEY_COUNT: usize = 4;
+            let base: [BindGroupEntry; BASE_ENTRY_COUNT] = [
                 BindGroupEntry {
                     binding: 0,
                     array_index: 0,
@@ -713,28 +715,40 @@ impl Ssr {
                 },
             ];
             let pyramid_views = pyramid.map(|level| ctx.image_view(level));
-            entries.extend(pyramid_views.iter().enumerate().map(|(level, view)| {
-                BindGroupEntry {
-                    binding: 5 + u32::try_from(level)
-                        .unwrap_or_else(|_| unreachable!("a pyramid of a few levels")),
-                    array_index: 0,
-                    resource: BindingResource::ImageView(*view),
-                }
-            }));
-            let mut key = vec![
+            let entries: [BindGroupEntry; BASE_ENTRY_COUNT + crate::hiz::MAX_LEVELS as usize] =
+                std::array::from_fn(|index| {
+                    if index < base.len() {
+                        base[index]
+                    } else {
+                        let level = index - base.len();
+                        BindGroupEntry {
+                            binding: 5 + u32::try_from(level)
+                                .unwrap_or_else(|_| unreachable!("a pyramid of a few levels")),
+                            array_index: 0,
+                            resource: BindingResource::ImageView(pyramid_views[level]),
+                        }
+                    }
+                });
+            let base_key: [(u32, ImageViewHandle); BASE_KEY_COUNT] = [
                 (1, depth_view),
                 (2, color_view),
                 (3, material_view),
                 (PROBE_VISIBILITY_BINDING, probe_visibility),
             ];
-            key.extend(pyramid_views.iter().enumerate().map(|(level, view)| {
-                (
-                    5 + u32::try_from(level)
-                        .unwrap_or_else(|_| unreachable!("a pyramid of a few levels")),
-                    *view,
-                )
-            }));
-            let Some(group) = cached_group(cached, device, &key, "ssr", layout, entries) else {
+            let key: [(u32, ImageViewHandle); BASE_KEY_COUNT + crate::hiz::MAX_LEVELS as usize] =
+                std::array::from_fn(|index| {
+                    if index < base_key.len() {
+                        base_key[index]
+                    } else {
+                        let level = index - base_key.len();
+                        (
+                            5 + u32::try_from(level)
+                                .unwrap_or_else(|_| unreachable!("a pyramid of a few levels")),
+                            pyramid_views[level],
+                        )
+                    }
+                });
+            let Some(group) = cached_group(cached, device, &key, "ssr", layout, &entries) else {
                 return;
             };
             let encoder = ctx.encoder();
@@ -768,7 +782,7 @@ impl Ssr {
                 let depth_view = ctx.image_view(depth);
                 let reflection_view = ctx.image_view(reflection);
                 let device = ctx.device();
-                let entries = vec![
+                let entries = [
                     BindGroupEntry {
                         binding: 0,
                         array_index: 0,
@@ -800,7 +814,7 @@ impl Ssr {
                     &[(1, depth_view), (2, color_view), (3, reflection_view)],
                     "ssr blur",
                     blur_layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };

@@ -234,7 +234,7 @@ impl Fxaa {
             .execute(move |ctx| {
                 let view = ctx.image_view(source);
                 let device = ctx.device();
-                let entries = vec![
+                let entries = [
                     BindGroupEntry {
                         binding: 0,
                         array_index: 0,
@@ -254,9 +254,14 @@ impl Fxaa {
                         resource: BindingResource::whole_buffer(uniforms),
                     },
                 ];
-                let Some(group) =
-                    cached_group(cached, device, &[(0, view)], "fxaa source", layout, entries)
-                else {
+                let Some(group) = cached_group(
+                    cached,
+                    device,
+                    &[(0, view)],
+                    "fxaa source",
+                    layout,
+                    &entries,
+                ) else {
                     return;
                 };
                 let encoder = ctx.encoder();

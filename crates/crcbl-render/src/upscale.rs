@@ -221,7 +221,7 @@ impl Upscale {
             .execute(move |ctx| {
                 let view = ctx.image_view(source);
                 let device = ctx.device();
-                let entries = vec![
+                let entries = [
                     BindGroupEntry {
                         binding: 0,
                         array_index: 0,
@@ -247,7 +247,7 @@ impl Upscale {
                     &[(0, view)],
                     "upscale source",
                     layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };

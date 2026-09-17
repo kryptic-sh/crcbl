@@ -2077,6 +2077,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Render-pass bind-group caches borrow entry templates**: unchanged image
+  views reuse cached groups without copying owned entry vectors. Fixed pass
+  descriptions and SSR pyramid view keys use stack arrays, while mesh passes
+  borrow their stored descriptions. View and working-buffer replacement still
+  invalidate the appropriate cache, and synchronous creation failures retry.
 - **Editor avoids republishing unchanged scene instances**: it retains the last
   description for each placed entity and publishes changes before the renderer
   begins its frame, preserving motion-history settling through edits and

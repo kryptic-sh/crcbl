@@ -417,7 +417,7 @@ impl Cmaa2 {
             .execute(move |ctx| {
                 let view = ctx.image_view(source);
                 let handles = [ctx.buffer(edge_words), ctx.buffer(accum)];
-                let entries = vec![
+                let entries = [
                     bound(0, uniforms),
                     BindGroupEntry {
                         binding: 1,
@@ -436,7 +436,7 @@ impl Cmaa2 {
                     },
                     "cmaa2 working",
                     working_layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };
@@ -484,7 +484,7 @@ impl Cmaa2 {
             .execute(move |ctx| {
                 let view = ctx.image_view(source);
                 let accumulation = ctx.buffer(accum);
-                let entries = vec![
+                let entries = [
                     BindGroupEntry {
                         binding: 0,
                         array_index: 0,
@@ -505,7 +505,7 @@ impl Cmaa2 {
                     },
                     "cmaa2 apply",
                     apply_layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };
@@ -561,7 +561,7 @@ fn cached_group(
     key: GroupKey,
     label: &str,
     layout: BindGroupLayoutHandle,
-    entries: Vec<BindGroupEntry>,
+    entries: &[BindGroupEntry],
 ) -> Option<BindGroupHandle> {
     if let Some((cached, group)) = cache
         && *cached == key
@@ -574,7 +574,7 @@ fn cached_group(
     match device.create_bind_group(&crcbl_hal::BindGroupDesc {
         label: Some(label),
         layout,
-        entries: &entries,
+        entries,
         variable_count: None,
     }) {
         Ok(group) => {
@@ -591,6 +591,213 @@ fn cached_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_buffers_and_source_invalidate_and_failed_creation_retries() {
+        use crcbl_hal::null::{Event, NullInstance, ObjectKind, Recorder};
+        use crcbl_hal::*;
+
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(adapter.id))
+            .unwrap();
+        let images: Vec<_> = (0..2)
+            .map(|_| {
+                device
+                    .create_image(&ImageDesc {
+                        label: Some("buffer cache source"),
+                        image_type: ImageType::D2,
+                        extent: Extent3d::d2(1, 1),
+                        format: Format::Rgba8Unorm,
+                        mip_levels: 1,
+                        samples: 1,
+                        usage: ImageUsage::SAMPLED,
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let views: Vec<_> = images
+            .iter()
+            .map(|&image| {
+                device
+                    .create_image_view(&ImageViewDesc {
+                        label: Some("buffer cache source"),
+                        image,
+                        view_type: ImageViewType::D2,
+                        format: Format::Rgba8Unorm,
+                        range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let buffers: Vec<_> = (0..4)
+            .map(|_| {
+                device
+                    .create_buffer(&BufferDesc {
+                        label: Some("buffer cache working"),
+                        size: 16,
+                        usage: BufferUsage::STORAGE,
+                        memory: MemoryLocation::DeviceLocal,
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let slots = [
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                kind: BindingKind::StorageBuffer {
+                    read_only: false,
+                    dynamic: false,
+                    stride: 4,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                kind: BindingKind::StorageBuffer {
+                    read_only: false,
+                    dynamic: false,
+                    stride: 4,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+        ];
+        let layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("buffer cache"),
+                entries: &slots,
+            })
+            .unwrap();
+        let bad_layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("missing buffer slots"),
+                entries: &slots[..1],
+            })
+            .unwrap();
+        let mut cache = None;
+        let call = |cache: &mut Option<(GroupKey, BindGroupHandle)>, key: GroupKey, layout| {
+            let entries = [
+                BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: BindingResource::ImageView(key.source),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(key.buffers[0]),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(key.buffers[1]),
+                },
+            ];
+
+            cached_group(
+                cache,
+                device.as_ref(),
+                key,
+                "buffer cache",
+                layout,
+                &entries,
+            )
+        };
+        let initial = GroupKey {
+            source: views[0],
+            buffers: [buffers[0], buffers[1]],
+        };
+        let mut previous = call(&mut cache, initial, layout).unwrap();
+        assert_eq!(call(&mut cache, initial, layout), Some(previous));
+        recorder.assert_valid();
+        recorder.clear();
+        let first_buffer = GroupKey {
+            buffers: [buffers[2], buffers[1]],
+            ..initial
+        };
+        let second_buffer = GroupKey {
+            buffers: [buffers[2], buffers[3]],
+            ..initial
+        };
+        let source = GroupKey {
+            source: views[1],
+            ..second_buffer
+        };
+        for (label, key) in [
+            ("first buffer", first_buffer),
+            ("second buffer", second_buffer),
+            ("source view", source),
+        ] {
+            let next = call(&mut cache, key, layout).unwrap();
+            assert_ne!(previous, next, "replacement of {label} must invalidate");
+            assert_eq!(cache.as_ref().unwrap().0, key);
+            assert_eq!(recorder.live_objects(ObjectKind::BindGroup), 1);
+            assert_eq!(call(&mut cache, key, layout), Some(next));
+            previous = next;
+        }
+        let events = recorder.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    Event::Created {
+                        kind: ObjectKind::BindGroup,
+                        ..
+                    }
+                ))
+                .count(),
+            3
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    Event::Destroyed {
+                        kind: ObjectKind::BindGroup
+                    }
+                ))
+                .count(),
+            3
+        );
+        assert_eq!(call(&mut cache, initial, bad_layout), None);
+        assert_eq!(cache, None);
+        assert_eq!(recorder.live_objects(ObjectKind::BindGroup), 0);
+        let retry = call(&mut cache, initial, layout).unwrap();
+        assert_ne!(retry, previous);
+        recorder.assert_valid();
+        device.destroy_bind_group(cache.take().unwrap().1);
+        device.destroy_bind_group_layout(layout);
+        device.destroy_bind_group_layout(bad_layout);
+        for buffer in buffers {
+            device.destroy_buffer(buffer);
+        }
+        for view in views {
+            device.destroy_image_view(view);
+        }
+        for image in images {
+            device.destroy_image(image);
+        }
+        recorder.assert_valid();
+        assert_eq!(recorder.total_live_objects(), 0);
+    }
 
     /// A dispatch is never empty, whatever the extent.
     #[test]

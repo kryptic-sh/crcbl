@@ -734,7 +734,7 @@ impl Volumetric {
                 let color_view = ctx.image_view(color);
                 let depth_view = ctx.image_view(depth);
                 let device = ctx.device();
-                let entries = vec![
+                let entries = [
                     BindGroupEntry {
                         binding: 0,
                         array_index: 0,
@@ -770,7 +770,7 @@ impl Volumetric {
                     &[(1, depth_view), (2, color_view)],
                     "volumetric composite",
                     layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };

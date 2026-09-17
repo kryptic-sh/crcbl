@@ -1076,7 +1076,7 @@ fn add_gather<'a>(
         .execute(move |ctx| {
             let view = ctx.image_view(depth);
             let device = ctx.device();
-            let entries = vec![
+            let entries = [
                 BindGroupEntry {
                     binding: 0,
                     array_index: 0,
@@ -1092,7 +1092,7 @@ fn add_gather<'a>(
                 },
             ];
             let Some(group) =
-                cached_group(cached, device, &[(1, view)], "ssao depth", layout, entries)
+                cached_group(cached, device, &[(1, view)], "ssao depth", layout, &entries)
             else {
                 return;
             };
@@ -1169,7 +1169,7 @@ impl Filter {
                 let view = ctx.image_view(source);
                 let depth_view = ctx.image_view(depth);
                 let device = ctx.device();
-                let entries = vec![
+                let entries = [
                     BindGroupEntry {
                         binding: 0,
                         array_index: 0,
@@ -1196,7 +1196,7 @@ impl Filter {
                     &[(1, view), (2, depth_view)],
                     label,
                     layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };

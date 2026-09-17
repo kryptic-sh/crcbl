@@ -1,5 +1,7 @@
 use super::*;
-use crate::forward::tests::{open, place_cube, swapchain_image_at};
+use crate::forward::tests::{
+    open, place_cube, ssao_blur_switch, ssao_split_switch, swapchain_image_at,
+};
 
 /// A renderer over the demo scene, and a view of it that asks for every effect.
 fn renderer_with_view(device: &dyn Device, queue: QueueHandle) -> (ForwardRenderer, ViewId) {
@@ -270,6 +272,9 @@ fn a_view_records_its_own_frame_and_the_scenes_passes_run_once() {
 /// one.
 #[test]
 fn every_view_draws_the_water_and_no_body_records_no_pass() {
+    // Keep process-wide SSAO settings fixed across the compared frames.
+    let _blurs = ssao_blur_switch();
+    let _split = ssao_split_switch();
     let (_, device, queue) = open();
     let device = device.as_ref();
     let (mut renderer, view) = renderer_with_view(device, queue);
@@ -322,6 +327,9 @@ fn every_view_draws_the_water_and_no_body_records_no_pass() {
 /// one.
 #[test]
 fn every_view_draws_the_grass_and_no_field_records_no_pass() {
+    // Keep process-wide SSAO settings fixed across the compared frames.
+    let _blurs = ssao_blur_switch();
+    let _split = ssao_split_switch();
     let (_, device, queue) = open();
     let device = device.as_ref();
     let (mut renderer, view) = renderer_with_view(device, queue);

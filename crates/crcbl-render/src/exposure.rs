@@ -461,7 +461,7 @@ impl Exposure {
             .execute(move |ctx| {
                 let view = ctx.image_view(scene);
                 let device = ctx.device();
-                let entries = vec![
+                let entries = [
                     bound(0, params),
                     // Overwritten by `cached_group` with the realised view;
                     // written here so the list is a complete description of the
@@ -476,7 +476,7 @@ impl Exposure {
                     bound(4, previous_buffer),
                 ];
                 let Some(built) =
-                    cached_group(cached, device, &[(1, view)], "exposure", layout, entries)
+                    cached_group(cached, device, &[(1, view)], "exposure", layout, &entries)
                 else {
                     return;
                 };

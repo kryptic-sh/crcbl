@@ -15350,7 +15350,7 @@ mod tests {
     /// second, so `--test-threads=1` is not a check for it.
     ///
     /// [`a_second_occlusion_blur_is_a_pass_the_frame_records`]: fn@a_second_occlusion_blur_is_a_pass_the_frame_records
-    fn ssao_blur_switch() -> SsaoBlurSwitch {
+    pub(super) fn ssao_blur_switch() -> SsaoBlurSwitch {
         let guard = SSAO_BLUR_SWITCH
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -15360,7 +15360,7 @@ mod tests {
     }
 
     /// What [`ssao_blur_switch`] hands back.
-    struct SsaoBlurSwitch {
+    pub(super) struct SsaoBlurSwitch {
         _guard: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -15391,7 +15391,7 @@ mod tests {
     /// makes the occlusion chain record its second march, so a test about the
     /// widest frame a renderer can produce has to hold this as well as the blur
     /// count — see `crate::ssao`'s `r_ssao_split`.
-    fn ssao_split_switch() -> SsaoSplitSwitch {
+    pub(super) fn ssao_split_switch() -> SsaoSplitSwitch {
         let guard = SSAO_SPLIT_SWITCH
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -15401,7 +15401,7 @@ mod tests {
     }
 
     /// What [`ssao_split_switch`] hands back.
-    struct SsaoSplitSwitch {
+    pub(super) struct SsaoSplitSwitch {
         _guard: std::sync::MutexGuard<'static, ()>,
     }
 

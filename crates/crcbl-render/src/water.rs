@@ -691,7 +691,7 @@ impl Water {
                 let color_view = ctx.image_view(color);
                 let depth_view = ctx.image_view(depth);
                 let device = ctx.device();
-                let entries = vec![
+                let entries = [
                     BindGroupEntry {
                         binding: 0,
                         array_index: 0,
@@ -709,7 +709,7 @@ impl Water {
                     &[(0, color_view), (1, depth_view)],
                     "water copy",
                     copy_layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };
@@ -799,7 +799,7 @@ impl Water {
                     array_index: 0,
                     resource: BindingResource::ImageView(view),
                 };
-                let entries = vec![
+                let entries = [
                     buffer(binding::PARAMS, params),
                     buffer(binding::FRAME, frame_block),
                     buffer(binding::REFLECTION, reflection_block),
@@ -832,7 +832,7 @@ impl Water {
                     ],
                     "water",
                     surface_layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };

@@ -296,13 +296,13 @@ impl Hiz {
                 .execute(move |ctx| {
                     let view = ctx.image_view(source);
                     let device = ctx.device();
-                    let entries = vec![BindGroupEntry {
+                    let entries = [BindGroupEntry {
                         binding: 0,
                         array_index: 0,
                         resource: BindingResource::ImageView(view),
                     }];
                     let Some(group) =
-                        cached_group(cached, device, &[(0, view)], "hiz", layout, entries)
+                        cached_group(cached, device, &[(0, view)], "hiz", layout, &entries)
                     else {
                         return;
                     };

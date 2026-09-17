@@ -901,7 +901,7 @@ impl GenGroup {
             array_index: 0,
             resource: BindingResource::ImageView(view),
         };
-        let entries = vec![
+        let entries = [
             buffer(gen_binding::WIND, self.wind_params),
             view(gen_binding::WIND_DIRECTION, field.wind_direction),
             view(gen_binding::WIND_INTENSITY, field.wind_intensity),
@@ -941,7 +941,7 @@ impl GenGroup {
             ],
             "grass generate",
             self.layout,
-            entries,
+            &entries,
         )
     }
 }
@@ -1419,7 +1419,7 @@ impl Grass {
                     array_index: 0,
                     resource: BindingResource::whole_buffer(buffer),
                 };
-                let entries = vec![
+                let entries = [
                     buffer(binding::FRAME, frame_block),
                     buffer(binding::PARAMS, raster_params),
                     BindGroupEntry {
@@ -1491,7 +1491,7 @@ impl Grass {
                     ],
                     "grass",
                     raster_layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };

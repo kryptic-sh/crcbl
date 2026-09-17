@@ -367,7 +367,7 @@ impl ProbeGather {
                 let punctual_normal = ctx.image_view(images.punctual.normal);
                 let punctual_world = ctx.image_view(images.punctual.world);
                 let device = ctx.device();
-                let entries = vec![
+                let entries = [
                     bound(0, params),
                     bound(1, positions),
                     BindGroupEntry {
@@ -430,7 +430,7 @@ impl ProbeGather {
                     ],
                     "probe gather",
                     layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };

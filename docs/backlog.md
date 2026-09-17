@@ -31,17 +31,166 @@ Parallel occlusion bucket finalization passed CI and deployed. Authored interior
 and browser culling measurements, CPU draw-recording cost, and overlapping grass
 workloads remain open below.
 
+The editor slice passed its complete CI and Pages deployment gates, and the
+published site returned HTTP 200. P14 is now in implementation on
+`perf/cached-bind-group-entries`. The shared helper was moved into its own
+private `bind_group_cache` module in a behavior-preserving commit before
+changing its entry argument. Callers now borrow fixed arrays or stored mesh
+templates; SSR also builds its complete pyramid key on the stack. CMAA2 retains
+its separate source-and-working-buffer key. The initial workspace formatting,
+default clippy and test suite passed. Production lifecycle tests also passed
+after deliberately ignoring the second image view and each CMAA2 buffer in turn:
+all stale-key mutations failed, then both restored tests passed. All-feature
+workspace nextest and the pinned Radeon Vulkan render suite passed, with the
+validation messenger loaded and no complaints. The complete engine GPU suites
+passed on pinned lavapipe: 304 tests passed with no skips, all requested suite
+names appeared, and the loaded validation messenger reported no complaints. The
+Vulkan suite reported 63 passed with no skips. Applying a blanket clean-log
+check to that invocation was incorrect: `validation_gate` deliberately emits
+out-of-bounds-copy and synchronization hazards, then asserts the layer observed
+them. The separate positive Vulkan invocation passed its clean-log check; the
+successful full invocation covers its negative gates. The local layer reported
+`record-time=yes one-submission=yes cross-submission=no`; these results do not
+establish cross-submission validation coverage.
+
+The subsequent default workspace run failed its editor doctest with E0460:
+`libcrcbl_breakout.rlib` did not match the dependency metadata in the editor
+library. Cargo builds had overlapped in a shared target directory, consistent
+with replacing an unversioned artifact. The serialized regular workspace test
+run passed, including the formerly failing editor doctest, without deleting
+build artifacts. That supports overlapping builds as the cause. The all-feature
+`cargo test` run failed the water frame-list comparison when the process-global
+SSAO blur count moved between captures. Those runs did not pass. The water and
+grass comparison fixtures now take the existing shared blur and split guards,
+preserving their assertions and established acquisition order. Deliberately
+changing blur count before the final capture failed each comparison, then both
+restored tests passed. The serialized workspace build, formatting check, default
+and all-feature clippy, and regular workspace tests passed. The serialized
+all-feature nextest run reported 7198 passed and 507 skipped. Both workspace
+`cargo test` configurations and the explicit all-feature doctests passed. Public
+and private-item rustdoc passed with warnings denied, and dependency checks
+passed. The separate positive Vulkan run reported 60 passed and 3 skipped: its
+filter excluded the deliberately dirty validation-gate tests already exercised
+in the full invocation. Its loaded validation messenger reported no complaints.
+CI and deployment remain required before declaring this slice shipped. No shader
+source changed, so artifact regeneration is not part of this entry-template
+change.
+
+The integrated release fixture preserved the complete instance mirror, warmed
+shadow reuse, zero warmed bind-group creation, null validation and leak-free
+teardown. These paired repeats include the same timing boundaries and exclusions
+as the original fixture below. The default fixture retained 213 commands per
+warmed frame; requesting every effect retained 355, with CMAA2 occupying the
+resolve slot. Timing does not establish a broad preparation speedup:
+
+| Null preparation fixture | Eager p50/p95 (ms) | Borrowed p50/p95 (ms) | Eager repeat (ms) | Borrowed repeat (ms) |
+| ------------------------ | ------------------ | --------------------- | ----------------- | -------------------- |
+| Default cube             | 0.019/0.025        | 0.020/0.022           | 0.019/0.028       | 0.020/0.020          |
+| All requested effects    | 0.028/0.029        | 0.028/0.029           | 0.029/0.031       | 0.028/0.029          |
+
+Whole-fixture DHAT totals, including setup, observers and warmup, fell from
+278,661,222 bytes in 466,444 blocks to 276,815,822 bytes in 456,570 blocks for
+the default fixture, and from 392,481,414 bytes in 729,294 blocks to 389,561,934
+bytes in 711,200 blocks for the expanded fixture. Previously repeated direct
+pass callback allocation points shown below no longer appeared at warm-frame
+volume; the shared helper still copies entries on cache misses. These are
+fixture totals, not real-game allocations per frame or timed-region totals.
+
+A paired native headless Vulkan editor fixture presented 550 frames at 960x720,
+with 500 timed after warmup; it includes CPU frame work, acquisition, submission
+and ring waits, rather than isolated GPU time. The default scene improved in
+both pairs; the dense scene did not. Do not claim a general native frame
+speedup:
+
+| Editor fixture | Eager p50/p95 (ms) | Borrowed p50/p95 (ms) | Eager repeat (ms) | Borrowed repeat (ms) |
+| -------------- | ------------------ | --------------------- | ----------------- | -------------------- |
+| Default        | 0.260/0.340        | 0.253/0.304           | 0.262/0.332       | 0.253/0.297          |
+| Dense          | 0.232/0.285        | 0.234/0.291           | 0.233/0.288       | 0.234/0.297          |
+
+`size` reported text sections of 5,073,860 bytes for the eager null-recording
+executable and 5,071,144 bytes for the borrowed executable, and 9,391,881 bytes
+for the eager editor fixture and 9,388,873 bytes for its borrowed counterpart.
+This prices those executables, rather than every backend or build. Pinned Radeon
+and lavapipe native golden results passed as recorded above. Dedicated
+replacement-image comparisons, browser workloads, Metal and Direct3D image
+coverage remain unverified; the null effect fixture does not exercise water,
+grass, probe-capture replacement or FXAA. Baseline figures below remain
+measurements of the original implementation.
+
 Next performance trials, after the current slice's CI and deployment gates:
 
 - Price P14's miss-only bind-group entry construction on an actual render
   workload. This is a shared, narrow preparation change that can avoid owned
   entry vectors on cache hits without introducing another cache. Preserve view
-  replacement, frame-ring uniforms and failure reporting.
-- Retained instance carry/dirty-run storage and input queue capacity follow as
-  small candidates. Price moving/dense and input-burst workloads, respectively,
-  before keeping them. Backend command-pool reuse, wider graph caching and math
-  changes need stronger workload evidence or carry more lifecycle risk; they do
-  not precede these trials on source inspection alone.
+  replacement, frame-ring uniforms and failure reporting. A standalone release
+  baseline drove the actual `ForwardRenderer` with a fixed cube at 960x720 on
+  the GPU-driven null preset. Across 550 frames, 500 timed after warmup,
+  preparation and recording p50/p95 was 0.019/0.020 ms with 213 commands per
+  warmed frame. The timer includes `begin_frame`, graph build/compile/execute
+  and encoder finish; startup, assertions, destruction, UI, acquisition,
+  submission, presentation and shader execution are excluded. Cold frames
+  observed bind-group creation; warmed frames observed none, reused the shadow
+  atlas and preserved the complete host instance mirror. Null validation and
+  teardown leak checks passed. Deliberately expecting a warmed bind-group
+  creation failed before restoring and repeating. This prices the existing
+  preparation path, not the proposed entry-vector reduction or an actual GPU
+  frame gain. Compare the same workload after the change and observe entry
+  construction separately; null recording overhead is not Vulkan or WebGPU
+  driver cost. DHAT profiling of the complete fixture, including warmup,
+  attributed the following allocation points directly to pass callback leaves;
+  inspection of those callbacks confirms entry vectors are built before cache
+  lookup. These are allocation-point totals, not real-game allocations per frame
+  or timed-region totals. Observer snapshots and other allocation points are
+  excluded from this table. Include `cmaa2::cached_group` as a separate
+  buffer-aware cache in the trial: its `GroupKey` notices both source-view and
+  working-buffer replacement, unlike the shared image-view-only helper. Preserve
+  those distinct keys and failure/retry behaviour.
+
+  | Pass callback allocation point            | Blocks |  Bytes |
+  | ----------------------------------------- | -----: | -----: |
+  | `ssao::add_gather`                        |    550 |  44000 |
+  | `ssao::Filter::add_pass`                  |   1650 | 198000 |
+  | `forward::view::View::add_passes` tonemap |    550 |  88000 |
+  | `cmaa2::Cmaa2::add_passes` working        |    550 |  88000 |
+  | `cmaa2::Cmaa2::add_passes` apply          |    550 |  66000 |
+
+  An expanded baseline used the same actual renderer, target, cube, cadence and
+  timer with every effect requested through its programmatic override. CMAA2
+  takes the resolve slot; this does not run FXAA beside it. Warmed frames
+  observed bloom, volumetric, contact-shadow, exposure and SSR passes, unchanged
+  effect resolution and zero bind-group creation. Across 550 frames with 500
+  timed, preparation/recording p50/p95 was 0.028/0.029 ms and 0.028/0.030 ms on
+  repeat, with 355 commands per warmed frame. A deliberately missing required
+  pass label failed before restoring and repeating. Shadow reuse, the complete
+  instance mirror, null validation and teardown checks also passed. The same
+  exclusions apply: this is a broader null recording baseline, not native GPU
+  work or a proposed optimization gain. Whole-fixture DHAT attributed these
+  additional allocation points directly to pass callback leaves. Source
+  inspection ties them to entries and, for SSR, its separately extended view-key
+  vector; exclude observer snapshots, setup and other points. Water, grass,
+  probe-capture replacement and FXAA remain separate integration workloads,
+  rather than assuming the requested-effect fixture covers them.
+
+  | Additional callback allocation point           | Blocks |  Bytes |
+  | ---------------------------------------------- | -----: | -----: |
+  | `contact_shadows::ContactShadows::add_passes`  |    550 |  44000 |
+  | `volumetric::Volumetric::add_passes` composite |    550 | 110000 |
+  | `ssr::Ssr::add_passes` march entries           |   1100 | 594000 |
+  | `ssr::Ssr::add_passes` march view key          |   1100 |  85800 |
+  | `ssr::Ssr::add_passes` blur                    |    550 |  88000 |
+  | `bloom::Bloom::add_passes` down                |   3300 | 396000 |
+  | `bloom::Bloom::add_passes` up                  |   2750 | 330000 |
+  | `bloom::Bloom::add_passes` composite           |    550 |  88000 |
+
+- Follow P14 with P13's explicit partition metadata copy trial below: it avoids
+  cloning the source call vector that struct-update syntax then discards,
+  without retaining another cache. Compare real recording and image behavior
+  before keeping it. Retained instance carry/dirty-run storage and input queue
+  capacity follow as small candidates. Price moving/dense and input-burst
+  workloads, respectively, before keeping them. Backend command-pool reuse,
+  wider graph caching and math changes need stronger workload evidence or carry
+  more lifecycle risk; they do not precede these trials on source inspection
+  alone.
 
 Editor image coverage gap:
 `app::instances::tests::filtered_editor_images_match_eager_writes_through_history`
@@ -259,6 +408,76 @@ open):
 
 Networking preparation follow-up:
 
+- Revalidated `InboundRateLimiter::allow` and `refill`,
+  `Server::charge_inbound_budget` and `Client::charge_inbound_budget`, including
+  their receive loops. The limiter holds scalar token/remainder state and does
+  not build per-packet collections; unchanged caller time skips refill
+  arithmetic. Both inspected receive loops charge the budget before dispatching
+  payloads to decoding or authentication. Preserve independent channel budgets,
+  rejection charging, backward-time behavior and fractional replenishment; there
+  is no source evidence here for a low-effort limiter allocation fix.
+  `SessionManager::baseline_store_mut` creates stores on first sector use, while
+  lookups borrow retained stores. Rate-limit CPU cost, sector churn and the
+  complete authenticated receive path remain unmeasured. This review covers
+  these functions, not every network decoder or handshake branch.
+- `Server::process_authenticated_message` and `Client::handle_sealed_snapshot`
+  copy the complete opened payload with `to_vec` before decoding. Revalidated
+  `SessionCrypto::open`: its returned slice borrows the caller's envelope,
+  independently of the crypto receiver, after MAC and replay-window acceptance.
+  Retaining that slice through decoding can remove the intermediate full-payload
+  copy while decoded input/delta data still owns its required storage; it needs
+  no public signature change. Price actual small input/ack packets and large
+  deltas, observing heap allocations as well as end-to-end authenticated
+  processing. Preserve MAC/replay checks, session-proof updates,
+  malformed-message accounting, repair acknowledgements and baseline atomicity.
+  A standalone release preparation probe used the actual `SessionCrypto` and
+  input codec, comparing an owned intermediate payload with a borrowed payload.
+  Complete decoded fields and tick IDs matched; bad-MAC refusal, fresh
+  acceptance and replay refusal passed. A wrong expected tick failed before
+  normal repeats passed. With 61440-byte input bodies, owned p50/p95 was
+  141.230/145.146 microseconds per message and 136.879/139.044 on repeat;
+  borrowing was 136.591/137.997 and 136.071/136.854. The timer includes MAC/
+  replay opening, payload copy or borrow, owned decoding and batch output
+  storage; sealing, setup, assertions and destruction were excluded. The repeats
+  do not establish a stable caller latency gain. Whole-fixture DHAT totals,
+  including sealing, setup, correctness fixtures and warmup, were 555737836
+  bytes in 59527 blocks with copying and 445641880 bytes in 54244 blocks with
+  borrowing. Authentication and owned decoded fields still allocate their
+  existing storage. No production caller change, ack/delta comparison or
+  complete receive-path benchmark was run; this is a narrow follow-up after P14
+  rather than a reason to redesign protocol ownership.
+- Inspected `codec::decode_client_to_server`: the input and command branches
+  copy their opaque field into a vector before `ByteReader::assert_empty`
+  rejects trailing bytes. `decode_server_to_client` does the same for events;
+  snapshots allocate system vectors while parsing and need a wider design to
+  defer those copies. A narrow scalar-message trial can borrow the bounded
+  field, reject trailing bytes, then copy only an accepted message, preserving
+  the owned public message types and exact error precedence. Payload/field
+  limits and inbound budgets already bound this work, and authenticated receive
+  handlers open envelopes before dispatching these decoders. This is a
+  malformed-input preparation candidate, not evidence of ordinary frame cost or
+  an authentication bypass. A release probe compared the original public input/
+  command decoder with an isolated copy of its bounded scalar branches that
+  checks trailing bytes before copying. Complete accepted fields and tick IDs
+  matched for empty, 1024-byte and 61440-byte fields; unknown tags, truncated
+  input, hostile lengths and trailing-byte counts matched. Each rejected case
+  observed 17600 refusals, with 1000 timed batches after warmup. On repeat,
+  61440-byte rejected commands reported p50/p95 679.4/749.6 ns per call
+  originally versus 7.5/7.6 ns in the prototype; rejected inputs reported
+  591.8/686.3 ns versus 8.1/8.2 ns. Timing excluded encoding, setup, assertions
+  and accepted messages. Deliberately expecting the wrong trailing-byte count
+  failed, then normal runs passed. DHAT whole-fixture totals were 2199995595
+  bytes in 70534 blocks originally versus 1137869 bytes in 130 blocks in the
+  prototype, including accepted-message fixtures, setup and warmup. These are
+  controlled rejection results. The profile's repeated allocation points are
+  rooted in the original `codec::decode_client_to_server`, confirming that
+  fixture setup alone does not explain the difference. Accepted fields and
+  fixture buffers still require storage. This is not complete authenticated
+  receive cost or a real-game speedup. Accepted-message latency, actual packet
+  mix, event/snapshot integration and decoder-fuzz coverage of the proposed
+  ordering remain unmeasured; it follows the shared render preparation trial. Do
+  not add a borrowed public protocol API or a two-pass snapshot parser without
+  separate workload evidence.
 - Inspected `InMemoryTransport` send and receive paths and `BaselineStore`
   insertion and lookup. The transport moves owned messages through bounded
   channels and prioritizes reliable traffic; its inspected methods do not clone
@@ -267,6 +486,20 @@ Networking preparation follow-up:
   only after a successful send. Do not prioritize a baseline clone or linear
   lookup removal that these paths no longer perform. Channel internals,
   contention and simulator scheduling remain unpriced.
+- Revalidated `ConditionSimulator::drain_pending`: it removes due messages
+  individually from a retained pending vector, builds an unreliable-position
+  vector when reordering is enabled, and clones each forwarded payload. The
+  forwarding clone preserves a refused message because `Transport::send_*`
+  consumes ownership and its error does not return the message; deleting it
+  without changing that contract would lose retry data. A stable partition or
+  compaction trial could reduce shifting in large delayed bursts, but must
+  preserve reliable order, ready-message retries and the seeded shuffle's exact
+  draw sequence. `Loopback::new` uses unwrapped in-memory transports; inspected
+  sample impairment consumers are inside Breakout's test module. This is an
+  impairment-harness candidate, not an established shipping frame bottleneck.
+  Delayed-burst cost, queue growth and memory were not measured; decline a
+  send-interface redesign or prioritizing this ahead of P14 without such
+  evidence.
 - `crcbl_net::auth::hmac_sha256` allocates inner and outer concatenation buffers
   for each MAC. The fixed-size outer hash input could use local array storage; a
   reusable/streaming inner input requires a wider hashing design and must not
@@ -577,6 +810,30 @@ Console and diagnostics follow-up:
 
 Backend and render-cache follow-up:
 
+- `forward::view::View::begin_frame` writes bloom, FXAA, CMAA2 and upscale
+  blocks regardless of whether their passes are added. Revalidated the bloom row
+  writer and FXAA/upscale extent serializers: the serializers use fixed byte
+  arrays, so this is a mapped-write/serialization candidate, not evidence of
+  temporary parameter-vector allocation. A standalone actual default
+  `ForwardRenderer` probe observed 1 canonical FXAA upload and 1 canonical
+  upscale upload in every warmed frame despite neither pass being recorded at
+  full render scale with CMAA2. It checked complete serializer bytes and full
+  buffer sizes; expecting a different FXAA extent made observation fail before
+  restoration and a passing repeat. Null validation, complete instance-mirror
+  preservation and teardown passed. No production reduction or native driver
+  write cost was measured. Trial selected-effect writes for bloom and the
+  resolve tier, using the per-view effects frozen earlier in `begin_frame`, or
+  successful-write extent tracking per ring slot; measure their metadata and
+  branch costs before keeping either. `ViewFrame` currently lacks the target
+  extent, while `ViewOutput` derives upscale selection from internal versus
+  target extent at graph construction. Do not assume an effect flag alone
+  identifies an upscale frame. Preserve inactive-to-active switching after
+  resize, all ring slots, secondary-view masks, late request freezing and
+  write-failure retries. CMAA2 also stores CPU parameters used to size its
+  transient buffers; they must remain current on an active frame. Re-review
+  auto-exposure/adaptation state before applying any broader inactive-pass
+  guard; camera, wind, grass, cull and light-grid blocks have other consumers.
+  Follow P14/P13 first rather than introducing a uniform cache on inspection.
 - Revalidated P11's `VkCommandEncoder::use_object` linear deduplication and
   `bind_group`'s collection and sorting of dynamic binding kinds. Price the
   recording path before moving immutable layout metadata to layout creation or
@@ -595,6 +852,19 @@ Backend and render-cache follow-up:
   pricing ahead of graph-plan caching. Repeated hits must allocate fewer entries
   while view changes still replace the group correctly. Preserve each frame
   slot's uniform bindings, effect transitions and bind-group failure reporting.
+- P14 caller follow-up: `Ssr::add_passes` extends owned entry and view-key
+  vectors with its pyramid slots before cache lookup. `SsrImages::pyramid` is a
+  fixed array governed by `hiz::MAX_LEVELS`; removing only the helper's owned
+  argument would leave those caller allocations. Trial fixed arrays for both
+  complete templates and keys, preserving binding order, repeated deepest
+  levels, probe-visibility changes and all pyramid views in the cache key. Its
+  separately deduplicated graph read declarations must still avoid repeated
+  depth and pyramid reads; no set-based replacement is justified by source
+  inspection alone. `Water::add_passes` also invalidates its surface group when
+  mesh vertex/media buffers change before using the shared view cache. Retain
+  that buffer invalidation when converting entry templates, including unchanged
+  views with replaced mesh buffers. SSR and water caller integration,
+  replacement images and allocation savings remain unverified.
 - `TransientPool` reuses matching images and buffers and retires idle GPU
   backing through `retire_unused`; do not treat graph reconstruction as
   allocating every GPU target each frame. Its `imported_images` and
@@ -2161,12 +2431,58 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 - **P13 — bucket partitions are rebuilt and cloned every frame.** `calls` is
   rebuilt in `add_frame_passes` and `add_shadow_pass`, `partitions` allocates
   per pipeline, and `View::add_passes` clones both lists per view — though
-  bucket modes are fixed at build. Build them once (`Arc<[BucketDraws]>` or
-  ranges).
+  bucket modes are fixed at build. First trial the narrower change in
+  `ForwardRenderer::partitions`: `..draws.clone()` clones the source call list
+  although the result supplies a filtered `calls` list. Explicitly copy its
+  remaining scalar metadata. A standalone release prototype copied the existing
+  partition algorithm and mirrored `BucketDraws`, comparing cloned struct update
+  with explicit metadata copying. Complete results matched for material-mode
+  masks, emit tails, nondefault region offsets, pipeline/layout/index handles,
+  call coverage and empty inputs. Replacing region offsets with defaults made
+  complete-result validation fail before restoring and passing repeats. With 16
+  calls and 4 populated partitions, repeated construction/destruction p50/p95
+  was 91.5/96.5 ns per call originally versus 61.4/65.1 ns with explicit
+  copying; with 1024 calls it was 3049.6/3744.6 ns versus 2232.9/2249.2 ns.
+  Setup and result assertions were excluded from timing. Whole-fixture DHAT
+  totals were 1974832934 bytes in 416267 blocks originally and 656944937 bytes
+  in 337067 blocks with explicit copying, including setup, reference/equality
+  fixtures and warmup. These are isolated synthetic metadata results, not actual
+  GPU recording or frame gains; fabricated handles were only compared as logical
+  values, with no HAL validation claim. Verify complete recorded draw arguments,
+  frame-region offsets and mixed-mode images on an actual renderer before
+  keeping the change. Broader retained partitions or bucket ranges still need
+  workload evidence and lifecycle design. `MaterialTable::set` can change
+  standalone row modes and does not re-key existing instances; any future live
+  renderer material editing must invalidate routing together, rather than
+  assuming a permanent build-only contract.
 - **P14 — `cached_group` makes every caller allocate its entries on a hit.** It
   takes `Vec<BindGroupEntry>` by value, so `mesh_group_entries[frame].clone()`
   and the tonemap `vec![]` run every frame. Take a closure or a slice and copy
-  only on a miss.
+  only on a miss. A standalone release prototype copied the existing helper's
+  implementation and compared its eager owned-entry argument with a borrowed
+  fixed template copied only after cache lookup. On a two-image template,
+  isolated warm-hit p50/p95 was 7.2/7.4 ns per call for eager construction and
+  3.4/3.5 ns for borrowing; restored repeats were 7.0/7.5 ns and 3.4/3.5 ns.
+  Checks observed first creation, unchanged-handle reuse, replacement when only
+  the second view changed, destruction and empty cache on layout refusal,
+  successful retry and unchanged borrowed templates. Restricting the key check
+  to the first view made the replacement assertion fail before restoring and
+  repeating. Null validation and device-object teardown checks passed. DHAT
+  whole-fixture totals were 5678516 bytes in 70484 blocks for eager entries and
+  46439 bytes in 83 blocks for borrowing; these include setup, lifecycle checks,
+  observations and warmup, not just timed calls. This supports the narrower
+  borrowed-template mechanism without a generic entry-builder API; it does not
+  establish a complete frame improvement, every caller's borrowing feasibility,
+  native descriptor cost or caller integration. A separate prototype copied
+  `cmaa2::cached_group` and compared its owned entries with direct borrowed
+  entries, retaining `GroupKey`. Both passed unchanged reuse, independent
+  replacement of each working buffer, source-view replacement, observed stale
+  destruction, layout refusal with an empty cache, retry and null teardown.
+  Ignoring either buffer in the borrowed prototype's key independently made its
+  replacement assertion fail, before restoration and passing repeats. These are
+  isolated helper checks, not production caller or image coverage. Compare the
+  actual render baseline above after implementation, and preserve those
+  caller-specific keys and fallback paths.
 - **P15 — sky LUT upload repeats despite cached construction.** Revalidated
   `SkyPass::begin_frame`: an atmosphere-backed frame calls `SkyView::rows` and
   writes the current slot's LUT buffer. In contrast,
@@ -2360,21 +2676,75 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   changing scheduling; preserve deterministic chunk boundaries, wakeup and
   shutdown behaviour, panic propagation, and the driver's frame lifetime.
 - **P37 — price audio contention and retirement before redesigning commands.**
-  Revalidated `Mixer::fill`: active and releasing voice lists are locked while
-  mixing, and `retain_mut` drops finished voices on that thread. A final sample
-  `Arc` can therefore release its storage in the callback. Delay lines allocate
-  when a voice is built; native `fill_audio` retains channel-conversion scratch,
-  and browser rendering uses configured scratch and planar storage. These are
-  not evidence of per-block scratch allocation. A standalone release probe of
-  looping constant stereo voices with unity gains and zero ITD, filling 128
-  stereo frames without concurrent setters, reported fill p50/p95 of 0.001/0.001
-  ms for 1 voice, 0.005/0.005 ms for 8, 0.018/0.019 ms for 32, and 0.072/0.075
-  ms for 128. Every sample and live voice count were checked; changing the
-  expected sample made validation fail before restoring and repeating the probe.
-  This excludes device callbacks, spatial updates, contention and sample
-  retirement, so it does not establish their latency. Measure those cases before
-  replacing locks with a command ring and atomic gains; preserve stop ramps,
-  routing, cap accounting and sample lifetimes.
+  Callback follow-up read `Mixer::fill`, `route_gain`, the bus accessors and
+  `WebAudioOutput::configure`/`render`. Gains are read before the voice loops
+  and reused for active and releasing voices; there is no gain lock per voice to
+  eliminate. A single bus-array snapshot could reduce per-block locking, but
+  contention and complete routing semantics need pricing before changing it.
+  Browser configuration returns early for unchanged rate/block capacity; render
+  reuses its scratch, carry and planar buffers and resamples while
+  de-interleaving. These are source observations, not browser callback latency
+  measurements or proof that an arbitrary `AudioSource` does not allocate. The
+  inspected sample uses of `Mixer::voice_mixes` in Asteroids, Breakout, Horde
+  and Flappy sit inside their test modules; the snapshot's owned vector is not
+  evidence of an always-on sample audio overlay. `AudioEvent::encode` does build
+  an owned wire vector, but repository `AudioEvent` references were its unit
+  tests and `crates/crcbl-audio/tests/spatial_chain.rs`, rather than a
+  production server sender. Do not prioritize a public encoder signature change
+  as a measured audio callback improvement. Native/browser callback contention,
+  retirement and the production networking sound bridge remain unverified in
+  this follow-up. Revalidated `Mixer::fill`: active and releasing voice lists
+  are locked while mixing, and `retain_mut` drops finished voices on that
+  thread. A final sample `Arc` can therefore release its storage in the
+  callback. Delay lines allocate when a voice is built; native `fill_audio`
+  retains channel-conversion scratch, and browser rendering uses configured
+  scratch and planar storage. These are not evidence of per-block scratch
+  allocation. A standalone release probe of looping constant stereo voices with
+  unity gains and zero ITD, filling 128 stereo frames without concurrent
+  setters, reported fill p50/p95 of 0.001/0.001 ms for 1 voice, 0.005/0.005 ms
+  for 8, 0.018/0.019 ms for 32, and 0.072/0.075 ms for 128. Every sample and
+  live voice count were checked; changing the expected sample made validation
+  fail before restoring and repeating the probe. This excludes device callbacks,
+  spatial updates, contention and sample retirement, so it does not establish
+  their latency. Measure those cases before replacing locks with a command ring
+  and atomic gains; preserve stop ramps, routing, cap accounting and sample
+  lifetimes. Source follow-up: `Mixer::set_listener` and `set_cue_grammar` only
+  replace scalar state under their respective locks; they do not recompute every
+  live voice's spatial mix. Horde and Flappy request `Mixer::cue` from
+  event-driven `Audio::play_at`, so a blanket cache for hypothetical per-frame
+  live-voice spatialization is declined.
+  `apps/horde/src/audio.rs::Audio::play_at` instead creates a voice before its
+  cap check. `SoundBank::create_voice` shares sample storage but
+  `Voice::from_shared` allocates its delay lines, which are then discarded for a
+  capped cue. The existing `SoundBank::sound` getter permits validating borrowed
+  data before that check and deferring voice construction until accepted,
+  without adding an API. Preserve unknown and sub-frame sound refusal, valid-cue
+  counters before the cap, newest-cue dropping and existing play diagnostics.
+  The cap comment's stale-low wording is also reversed: callback removal can
+  make a saved count conservatively high. A controlled release prototype pinned
+  a mixer at a cap of 16 without a stream thread and processed 17600 dropped
+  requests. Eager p50/p95 was 34.4/35.7 ns per request and 35.1/37.0 ns on
+  repeat; borrowed-data prechecking was 12.5/12.6 ns and 12.5/13.1 ns. Setup,
+  assertions, accepted voices, snapshots and mixing were excluded from timing.
+  Unknown and sub-frame sounds remained refused, valid and dropped counters
+  matched, accepted voice mixes matched completely and the filled audio buffers
+  matched. Allowing sub-frame data made the refusal control fail before
+  restoring and repeating. Whole-fixture DHAT totals were 9110939 bytes in 35348
+  blocks for eager construction and 99741 bytes in 148 blocks for prechecking;
+  these include setup and both modes' correctness fixtures, not just timed
+  requests. This verifies the isolated cap-ordering mechanism. A separate
+  release probe compiled the unchanged Horde `Audio::play_at` source and used
+  its headless null stream, including the real counters, cap lock and concurrent
+  null mixing. It verified a full cap after every batch, 17600 dropped requests
+  and 17616 valid cues; p50/p95 was 35.7/38.9 ns per request and 53.2/54.5 ns on
+  repeat. Deliberately expecting 17601 drops failed, then the normal run passed.
+  Startup, assertions and accepted requests were excluded. This is an
+  original-caller baseline, not a production precheck comparison or a full Horde
+  frame measurement; the differing repeats also caution against treating the
+  isolated prototype's timings as a real caller speedup. Accepted-request
+  latency, actual game drop frequency, hardware callback contention and the
+  modified caller remain unmeasured. Price those before keeping the production
+  change; this event-driven candidate follows the frame-wide P14 trial.
 - **P38 — price retained UI triangle output and text storage.** Revalidated
   `DrawList::clear` and `Ui::begin_frame_with`: command and tree collections
   retain capacity. `DrawCommand::Text` still owns label strings, and

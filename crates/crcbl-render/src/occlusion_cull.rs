@@ -479,7 +479,7 @@ impl OcclusionPyramid {
                 pass.execute(move |ctx| {
                     let view = ctx.image_view(source);
                     let device = ctx.device();
-                    let entries = vec![BindGroupEntry {
+                    let entries = [BindGroupEntry {
                         binding: 0,
                         array_index: 0,
                         resource: BindingResource::ImageView(view),
@@ -490,7 +490,7 @@ impl OcclusionPyramid {
                         &[(0, view)],
                         "occlusion hiz",
                         layout,
-                        entries,
+                        &entries,
                     ) else {
                         return;
                     };

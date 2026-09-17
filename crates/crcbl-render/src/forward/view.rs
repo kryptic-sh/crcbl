@@ -2323,7 +2323,7 @@ impl View {
         // frame naming the blur's target are the same code and one cache miss
         // apiece when a toggle moves. **The key is both views**, because a group
         // naming two transients is stale as soon as either one moves.
-        let entries = self.mesh_group_entries[frame].clone();
+        let entries = self.mesh_group_entries[frame].as_slice();
         let mesh_layout = passes.mesh_layout;
         // The captured probe-visibility maps, or the one-texel placeholder when
         // nothing has been captured or the console switch is off. It rides
@@ -2643,7 +2643,7 @@ impl View {
                 .execute(move |ctx| {
                     let view = ctx.image_view(tonemapped);
                     let device = ctx.device();
-                    let entries = vec![
+                    let entries = [
                         BindGroupEntry {
                             binding: 0,
                             array_index: 0,
@@ -2671,7 +2671,7 @@ impl View {
                         &[(0, view)],
                         "tonemap scene",
                         layout,
-                        entries,
+                        &entries,
                     ) else {
                         return;
                     };

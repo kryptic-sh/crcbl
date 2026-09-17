@@ -553,7 +553,7 @@ impl Bloom {
                     let device = ctx.device();
                     let entries = chain_entries(view, sampler, uniforms);
                     let Some(group) =
-                        cached_group(cached, device, &[(0, view)], "bloom down", layout, entries)
+                        cached_group(cached, device, &[(0, view)], "bloom down", layout, &entries)
                     else {
                         return;
                     };
@@ -586,7 +586,7 @@ impl Bloom {
                     let device = ctx.device();
                     let entries = chain_entries(view, sampler, uniforms);
                     let Some(group) =
-                        cached_group(cached, device, &[(0, view)], "bloom up", layout, entries)
+                        cached_group(cached, device, &[(0, view)], "bloom up", layout, &entries)
                     else {
                         return;
                     };
@@ -617,7 +617,7 @@ impl Bloom {
                 let scene_view = ctx.image_view(scene);
                 let bloom_view = ctx.image_view(level_one);
                 let device = ctx.device();
-                let entries = vec![
+                let entries = [
                     BindGroupEntry {
                         binding: 0,
                         array_index: 0,
@@ -649,7 +649,7 @@ impl Bloom {
                     &[(0, scene_view), (1, bloom_view)],
                     "bloom composite",
                     composite_layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };
@@ -696,8 +696,8 @@ fn chain_entries(
     view: ImageViewHandle,
     sampler: SamplerHandle,
     uniforms: BufferHandle,
-) -> Vec<BindGroupEntry> {
-    vec![
+) -> [BindGroupEntry; 3] {
+    [
         BindGroupEntry {
             binding: 0,
             array_index: 0,

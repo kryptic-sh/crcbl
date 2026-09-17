@@ -261,7 +261,7 @@ impl AtlasView {
             .execute(move |ctx| {
                 let view = ctx.image_view(atlas);
                 let device = ctx.device();
-                let entries = vec![
+                let entries = [
                     BindGroupEntry {
                         binding: 0,
                         array_index: 0,
@@ -282,7 +282,7 @@ impl AtlasView {
                     &[(1, view)],
                     "shadow atlas view",
                     layout,
-                    entries,
+                    &entries,
                 ) else {
                     return;
                 };
