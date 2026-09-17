@@ -1193,6 +1193,40 @@ Sample and browser follow-up:
   implemented; integrated removal/reuse and failed upload retry still require
   coverage.
 
+  An external source-copy prototype now retains carry vectors by clearing the
+  consumed list and swapping it with the current list, and retains dirty-run
+  storage by clearing successful runs or draining only the committed prefix
+  after failure. It passed the retry and lifecycle fixtures above, including
+  complete ring bytes and observed run ordering. Separate capacity observations
+  failed against the original implementation for both carry lists and dirty
+  runs, then passed against the prototype. Paired release runs reused the same
+  moving/stopped fixture and timer boundaries as the actual-pool baseline above;
+  all full-byte, revision, upload-range and teardown checks passed. Cells report
+  set/rotate p50/p95 followed by flush p50/p95, in milliseconds:
+
+  | Instances | Updated elements | Original                 | Original repeat          | Retained copy            | Retained repeat          |
+  | --------- | ---------------- | ------------------------ | ------------------------ | ------------------------ | ------------------------ |
+  | 256       | All              | 0.008/0.009; 0.000/0.001 | 0.006/0.008; 0.000/0.000 | 0.008/0.008; 0.000/0.001 | 0.007/0.008; 0.000/0.000 |
+  | 256       | Every other      | 0.005/0.009; 0.005/0.005 | 0.004/0.007; 0.004/0.004 | 0.005/0.006; 0.004/0.004 | 0.005/0.005; 0.004/0.004 |
+  | 1024      | All              | 0.025/0.030; 0.002/0.002 | 0.026/0.030; 0.002/0.002 | 0.025/0.028; 0.002/0.002 | 0.025/0.027; 0.002/0.002 |
+  | 1024      | Every other      | 0.019/0.027; 0.017/0.017 | 0.019/0.024; 0.017/0.017 | 0.019/0.027; 0.017/0.017 | 0.019/0.020; 0.017/0.017 |
+
+  Timings are mixed and do not establish a general preparation or upload gain.
+  This is an external copied implementation, not a repository change or an
+  actual renderer using retained storage. A paired whole-fixture DHAT run for
+  the sparse 256-instance case reported 64,748,875 bytes in 9,164 blocks for the
+  original library and 63,571,435 bytes in 4,955 blocks for the retained copy.
+  Setup, warmup and observers are included. Whole-fixture peak bytes rose from
+  328,387 to 330,435; storage retention is a lifetime-memory trade-off, not a
+  claim of lower peak use. Guarded queries at the observed set/rotate call sites
+  reported 1,184,400 bytes in 4,230 blocks originally versus 1,008 bytes in 6
+  blocks for the copy, including warmup. Every expected allocation site was
+  required to exist; setup and observer sites are separate. Instrumented timings
+  are excluded from release prices. Changed-renderer allocation and host-memory
+  profiles, private production tests, actual renderer comparisons and
+  browser/native gates remain required. Keep this behind the shadow trials;
+  capacity retention alone does not justify an FPS claim.
+
 - Read input tick blocks in shard, puppet, orbit, towers and breach app modules,
   and horde and asteroids game modules: each resets the action map, then
   consumes `pending_keys` with `mem::take`, dropping its capacity after replay.
