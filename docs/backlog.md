@@ -39,6 +39,14 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
+The shadow-group record capacity trial is underway on
+`perf/shadow-record-capacity`. The existing serialization and its contract have
+been moved to the private `forward::shadow_inputs` module with the algorithm
+unchanged. The moved block matched after visibility, link-path and whitespace
+normalization; a deliberately altered instance-count encoding failed that
+comparison. Workspace formatting, default clippy and default tests passed.
+Capacity changes and their production byte tests have not started.
+
 - Price exact shadow-group record capacity next, then retained
   shadow-preparation views/culls: actual caller profiles below show repeated
   allocation before cached-atlas reuse. Complete group records currently reserve
