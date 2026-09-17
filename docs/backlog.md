@@ -189,23 +189,27 @@ open):
   execution were excluded. Viewer and native/browser complete-frame impact
   remain unmeasured; unchanged-frame preparation candidates keep priority.
 
-- `ForwardRenderer::begin_frame_body` collects `PunctualProducer` rows before
-  checking `self.probe_gather`. That owned vector is only passed to the gather
-  in this block, so constructing it inside the present-gather branch could avoid
-  preparation for scenes without a gather but with punctual shadow faces. Price
-  such a scene and verify identical shadow-face selection and rendering. An
-  empty face list collects an empty vector and does not establish heap cost.
-  Construction review confirms `ProbeUpdate::Authored` is the default and
-  creates no gather, while `EveryFrame` constructs one. Include authored-probe
-  scenes with selected punctual faces in this trial; gather creation and its
-  passes are already optional, so do not propose another switch for them. With
-  gather enabled, `ProbeGather::begin_frame` additionally encodes producers into
-  a fresh byte vector. Retaining encoded scratch is a separate candidate;
-  preserve clamping, the claimed row count, frame-ring writes and failure retry.
-  World-space triangle vectors in `probe_visibility::world_triangles` instead
-  feed probe capture/recapture, so price baking and editing separately rather
-  than attributing them to every ordinary frame. These inspected paths remain
-  unmeasured and follow the P14 preparation trial.
+- Declined the no-gather producer-vector rewrite after re-reading
+  `ForwardRenderer::punctual_faces`, `probe_update_runs` and gather construction
+  in `crates/crcbl-render/src/forward.rs`. Although `begin_frame_body` collects
+  producer rows before testing `self.probe_gather`, `punctual_faces` first
+  returns `Vec::new()` when the updater does not run. Authored-probe scenes
+  select no gather and fail that updater guard even with selected punctual
+  lights. The outer collection is therefore empty; moving it inside the gather
+  branch does not establish an allocation saving for that workload. The earlier
+  proposed authored-scene trial was based on an incomplete caller review. Do not
+  reintroduce it as low-hanging heap work without changed evidence.
+
+  Enabled updater preparation remains a separate unpriced candidate:
+  `punctual_faces` builds owned `PunctualFace` rows, `begin_frame_body` collects
+  their `PunctualProducer` rows, and `ProbeGather::begin_frame` encodes
+  producers into a fresh byte vector. Price that actual caller before retaining
+  scratch or changing ownership. Preserve producer ordering, clamping, claimed
+  row count, frame-ring writes, failure retry and the shared selection used by
+  reflective passes. World-space triangle vectors in
+  `probe_visibility::world_triangles` feed probe capture/recapture instead;
+  price baking and editing separately from ordinary frames. These enabled
+  preparation paths remain unmeasured and follow the P14 preparation trial.
 
 - Sparks also constructs a `Show::reading` before `DebugPanel::add` in its debug
   hook, but the inspected method reads retained pool counters and looks up
