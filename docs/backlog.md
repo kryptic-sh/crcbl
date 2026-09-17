@@ -1030,9 +1030,13 @@ Sample and browser follow-up:
   observations passed separately on `IndirectPerBatch` and `MeshShader` null
   recording paths, as well as the original `IndirectCount` path. This broadens
   preparation/recording coverage only; the null mesh path does not execute GPU
-  shaders. This establishes collateral cache-input changes in this fixture. The
-  Slang and generated WGSL `depthVertexMain` bodies read the view projection
-  rather than the punctual sampling matrices, but the full masked, task/mesh and
+  shaders. A reverse fixture moving only the spot also passed on each recording
+  path: the unchanged cascades and every unchanged point face differed only in
+  `light_view_proj`, with held assignments unchanged and both occupied slots
+  redrawn. The next still frame reused the atlas. This establishes collateral
+  cache-input changes in both punctual movement cases in this fixture. The Slang
+  and generated WGSL `depthVertexMain` bodies read the view projection rather
+  than the punctual sampling matrices, but the full masked, task/mesh and
   reflective shader dependency audit remains incomplete. Audit those actual
   field reads before deciding whether unused fields can be canonicalized. Do not
   weaken cache records by ignoring GPU inputs. Preserve cadence, layout, skinned
