@@ -112,8 +112,9 @@ pub use meadow::{
     MEADOW_DIRECTION_TEXELS, MEADOW_GROUND_METRES_PER_TEXEL, MEADOW_HALF,
     MEADOW_INTENSITY_METRES_PER_TEXEL, MEADOW_INTENSITY_TEXELS, MEADOW_PATH_HALF_WIDTH,
     MEADOW_REACH, MEADOW_SECOND_ROW, MEADOW_SLOPE, MEADOW_SPARSE, MEADOW_TILE_SIZE, MEADOW_TILES,
-    MEADOW_WEATHER, meadow_blades, meadow_camera, meadow_cover, meadow_cover_texel, meadow_field,
-    meadow_forward, meadow_ground, meadow_ground_normal, meadow_height, meadow_sky, meadow_sun,
+    MEADOW_WEATHER, MeadowWind, meadow_blades, meadow_camera, meadow_cover, meadow_cover_texel,
+    meadow_field, meadow_forward, meadow_forward_with, meadow_ground, meadow_ground_normal,
+    meadow_height, meadow_shell_blades, meadow_shells_field, meadow_sky, meadow_sun,
     meadow_wind_field, meadow_wind_layers,
 };
 pub use still_pool::{
@@ -810,6 +811,21 @@ pub enum Scene {
     /// And the one that needs a second frame: the same scene with its field
     /// removed is bit for bit the scene never given one.
     Meadow,
+    /// `docs/plan/57-grass.md` rung G3's look: [`Scene::Meadow`]'s field with
+    /// every blade row drawn as Acerola's shells, fins standing where the
+    /// hillside is seen edge-on, and decision 4's stylised levers pulled.
+    ///
+    /// **A scene of its own rather than a change to [`Scene::Meadow`]**, for two
+    /// reasons. The card golden is rung G1's claim and its cross-driver residue
+    /// was measured against that picture; and the claims this scene is graded on
+    /// are relations *between* the two looks of one field — the same placement
+    /// read back from both, strands where a card field of that placement draws
+    /// none — which need both frames to exist.
+    ///
+    /// The frame's claims are in `tests/render_e2e/grass_shells.rs`: the
+    /// placement bit-identical to the card meadow's, calm shells upright to the
+    /// pixel, and fins filling the far hillside the bare stack leaves open.
+    MeadowShells,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -6665,7 +6681,29 @@ impl SceneState {
                 // `Scene::StillPool`'s terms: `tests/render_e2e.rs` builds the
                 // same scene with no field, because the off-switch is only
                 // recognisable against it.
-                meadow::meadow_forward_on_path(device, queue, format, true, path)?.into()
+                let field = meadow::meadow_field();
+                meadow::meadow_forward_on_path(
+                    device,
+                    queue,
+                    format,
+                    Some(&field),
+                    MeadowWind::Windy,
+                    path,
+                )?
+                .into()
+            }
+            Scene::MeadowShells => {
+                // `Scene::Meadow`'s build with the other look of its field.
+                let field = meadow::meadow_shells_field();
+                meadow::meadow_forward_on_path(
+                    device,
+                    queue,
+                    format,
+                    Some(&field),
+                    MeadowWind::Windy,
+                    path,
+                )?
+                .into()
             }
             Scene::Bloom => {
                 // The floor every other overhead fixture stands on, and the
@@ -9089,7 +9127,7 @@ mod tests {
                 ("render", "sky"),
             ],
         );
-        let expected: [(Scene, &[(&str, &str)]); 25] = [
+        let expected: [(Scene, &[(&str, &str)]); 26] = [
             (Scene::Cube, &cube_passes),
             // The cube scene's list again, and that is the whole of what
             // `Scene::Aa` costs a frame now: the resolve is in
@@ -9159,6 +9197,9 @@ mod tests {
             (Scene::Probes, &probe_passes),
             (Scene::StillPool, &still_pool_passes),
             (Scene::Meadow, &meadow_passes),
+            // The same list: the shells and the fins are draws inside the
+            // `grass` pass, not passes of their own.
+            (Scene::MeadowShells, &meadow_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

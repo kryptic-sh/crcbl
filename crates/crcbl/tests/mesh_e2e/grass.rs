@@ -1,5 +1,6 @@
-//! `docs/plan/57-grass.md` rung G1's price: the two generation dispatches and
-//! the grass pass over the meadow, and the same frame with no field.
+//! `docs/plan/57-grass.md` rungs G1 and G3's price: the two generation
+//! dispatches and the grass pass over the meadow, the same frame with no field,
+//! and the meadow's field drawn as shells at several stack heights.
 //!
 //! `docs/plan/43-render-standards.md` prices a rung before it counts as built,
 //! off `crcbl_render::PassStats`; this is that measurement for the grass
@@ -31,13 +32,17 @@ struct Priced {
     total: u64,
 }
 
-/// The meadow with its field and without it, drawn interleaved a frame each on
-/// one device, or [`None`] where the device cannot time a pass.
+/// The meadow with each of `fields` on it, drawn interleaved a frame each on one
+/// device, or [`None`] where the device cannot time a pass.
 ///
 /// `debug_draw.rs`'s `debug_draw_prices` is the shape, down to the warm-up and
-/// the interleaving: a software rasteriser's "GPU" time is CPU time, so the two
+/// the interleaving: a software rasteriser's "GPU" time is CPU time, so the
 /// configurations take their turns in the same contention.
-fn grass_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; 2]> {
+fn grass_prices(
+    extent: (u32, u32),
+    frames: usize,
+    fields: Vec<Option<crcbl::render::grass::GrassField>>,
+) -> Option<Vec<Priced>> {
     use crcbl::hal::{CommandEncoderDesc, Features, PresentInfo, ResourceState, SubmitInfo};
 
     let headless = Headless::open_at(
@@ -46,26 +51,34 @@ fn grass_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; 2]> {
     );
     let device = headless.device.as_ref();
     let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
-    let mut priced = [true, false].map(|grass| {
-        let scene =
-            crcbl::screenshot::meadow_forward(device, headless.queue, headless.format, grass)
-                .expect("the meadow builds");
-        let timers = timed.then(|| {
-            PassTimers::new(
+    let mut priced: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let scene = crcbl::screenshot::meadow_forward_with(
                 device,
-                crcbl::render::forward::FRAMES_IN_FLIGHT,
-                crcbl::render::MAX_TIMED_PASSES,
+                headless.queue,
+                headless.format,
+                field.as_ref(),
+                crcbl::screenshot::MeadowWind::Windy,
             )
-            .expect("a device reporting TIMESTAMP_QUERY gives out timer sets")
-        });
-        (
-            scene,
-            TransientPool::new(),
-            timers,
-            PassStats::new(),
-            Vec::new(),
-        )
-    });
+            .expect("the meadow builds");
+            let timers = timed.then(|| {
+                PassTimers::new(
+                    device,
+                    crcbl::render::forward::FRAMES_IN_FLIGHT,
+                    crcbl::render::MAX_TIMED_PASSES,
+                )
+                .expect("a device reporting TIMESTAMP_QUERY gives out timer sets")
+            });
+            (
+                scene,
+                TransientPool::new(),
+                timers,
+                PassStats::new(),
+                Vec::new(),
+            )
+        })
+        .collect();
 
     for index in 0..crate::area_light::PRICE_WARMUP + frames {
         for (scene, pool, timers, stats, recorded) in &mut priced {
@@ -127,18 +140,20 @@ fn grass_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; 2]> {
 
     device.wait_idle().expect("idle");
     let prices = timed.then(|| {
-        std::array::from_fn(|index| {
-            let (_, _, _, stats, _) = &priced[index];
-            eprintln!("{}: {}", crate::SUITE, stats.report());
-            Priced {
-                recorded: stats.frames(),
-                passes: PRICED_PASSES
-                    .iter()
-                    .map(|pass| stats.percentiles(pass))
-                    .collect(),
-                total: stats.p50_total_nanos(),
-            }
-        })
+        priced
+            .iter()
+            .map(|(_, _, _, stats, _)| {
+                eprintln!("{}: {}", crate::SUITE, stats.report());
+                Priced {
+                    recorded: stats.frames(),
+                    passes: PRICED_PASSES
+                        .iter()
+                        .map(|pass| stats.percentiles(pass))
+                        .collect(),
+                    total: stats.p50_total_nanos(),
+                }
+            })
+            .collect()
     });
     for (scene, mut pool, timers, _, recorded) in priced {
         if let Some(mut timers) = timers {
@@ -170,7 +185,8 @@ fn grass_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; 2]> {
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh grass"]
 fn the_price_of_the_grass_passes() {
     let (extent, frames) = crate::area_light::price_frame();
-    let Some([grown, bare]) = grass_prices(extent, frames) else {
+    let fields = vec![Some(crcbl::screenshot::meadow_field()), None];
+    let Some(prices) = grass_prices(extent, frames, fields) else {
         eprintln!(
             "{}: the meadow drew and this backend reports no TIMESTAMP_QUERY, so the grass \
              passes' price went unmeasured here",
@@ -178,6 +194,8 @@ fn the_price_of_the_grass_passes() {
         );
         return;
     };
+    let [grown, bare] = <[Priced; 2]>::try_from(prices)
+        .unwrap_or_else(|_| unreachable!("one price per configuration"));
     let ms = |nanos: u64| nanos as f64 / 1.0e6;
     let [grown_forward, grown_clear, grown_generate, grown_draw] = grown.passes[..]
         .try_into()
@@ -236,5 +254,111 @@ fn the_price_of_the_grass_passes() {
         bare_clear.is_none() && bare_generate.is_none() && bare_draw.is_none(),
         "a frame with no field timed a grass pass — grass-clear {bare_clear:?}, grass-generate \
          {bare_generate:?}, grass {bare_draw:?} — so it is not free when there is no grass"
+    );
+}
+
+/// The stack heights the shells are priced at: doubling, so a pass whose cost
+/// is proportional to its layers doubles with each step.
+const SHELL_COUNTS: [u32; 4] = [4, 8, 16, 32];
+
+/// **Rung G3's price**: the grass pass over the meadow's field drawn as shells,
+/// at each of [`SHELL_COUNTS`] with fins and at the default count without —
+/// decision 3's "overdraw proportional to shell count", measured.
+///
+/// Prints every configuration's `grass` pass and a least-squares slope of its
+/// p50 against the layer count, which is the cost of one layer over this frame.
+/// What it asserts is the relation the plan predicts rather than a duration:
+/// the deepest stack's pass costs more than the shallowest's.
+///
+/// ```text
+/// CRCBL_PRICE_SIZE=1920x1080 CRCBL_PRICE_FRAMES=400 \
+///   CRCBL_GPU=vk crates/crcbl/tests/run-mesh-e2e.sh grass
+/// ```
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh grass"]
+fn the_price_of_the_shell_passes() {
+    use crcbl::render::grass::Shells;
+
+    let (extent, frames) = crate::area_light::price_frame();
+    let stacked = |count, fins| {
+        crcbl::screenshot::meadow_shells_field()
+            .with_shells(Shells { count, fins })
+            .expect("every priced stack is a stack")
+    };
+    let fields = SHELL_COUNTS
+        .iter()
+        .map(|count| Some(stacked(*count, true)))
+        .chain([Some(stacked(crcbl::shaders::grass::DEFAULT_SHELLS, false))])
+        .collect();
+    let Some(prices) = grass_prices(extent, frames, fields) else {
+        eprintln!(
+            "{}: the shell meadow drew and this backend reports no TIMESTAMP_QUERY, so the \
+             shells' price went unmeasured here",
+            crate::SUITE,
+        );
+        return;
+    };
+    let ms = |nanos: u64| nanos as f64 / 1.0e6;
+    // `PRICED_PASSES`' order: the draw is the fourth.
+    let draw = |price: &Priced| price.passes[3].expect("a frame with a field records `grass`");
+    let mut points = Vec::new();
+    for (count, price) in SHELL_COUNTS.iter().zip(&prices) {
+        let (p50, p95) = draw(price);
+        let generate = price.passes[2].expect("a frame with a field records `grass-generate`");
+        eprintln!(
+            "{}: shell meadow at {}x{}, {count} shells with fins, over {} recorded frames — \
+             grass-generate {:.3}/{:.3} ms, grass {:.3}/{:.3} ms (p50/p95); frame p50 total \
+             {:.3} ms",
+            crate::SUITE,
+            extent.0,
+            extent.1,
+            price.recorded,
+            ms(generate.0),
+            ms(generate.1),
+            ms(p50),
+            ms(p95),
+            ms(price.total),
+        );
+        points.push((f64::from(*count), ms(p50)));
+    }
+    let finless = draw(&prices[SHELL_COUNTS.len()]);
+    eprintln!(
+        "{}: shell meadow at {}x{}, {} shells without fins — grass {:.3}/{:.3} ms (p50/p95)",
+        crate::SUITE,
+        extent.0,
+        extent.1,
+        crcbl::shaders::grass::DEFAULT_SHELLS,
+        ms(finless.0),
+        ms(finless.1),
+    );
+    // Ordinary least squares over the four points: the millisecond one layer
+    // adds, and what the pass costs before its first.
+    let n = points.len() as f64;
+    let mean_x = points.iter().map(|(x, _)| x).sum::<f64>() / n;
+    let mean_y = points.iter().map(|(_, y)| y).sum::<f64>() / n;
+    let slope = points
+        .iter()
+        .map(|(x, y)| (x - mean_x) * (y - mean_y))
+        .sum::<f64>()
+        / points
+            .iter()
+            .map(|(x, _)| (x - mean_x).powi(2))
+            .sum::<f64>();
+    eprintln!(
+        "{}: shell meadow at {}x{} — {slope:.4} ms per shell, {:.3} ms at none",
+        crate::SUITE,
+        extent.0,
+        extent.1,
+        mean_y - slope * mean_x,
+    );
+    let (shallow, deep) = (draw(&prices[0]).0, draw(&prices[SHELL_COUNTS.len() - 1]).0);
+    assert!(
+        deep > shallow,
+        "the grass pass costs {} ms over {} shells and {} ms over {}: the stack's depth is not \
+         what it is paying for",
+        ms(deep),
+        SHELL_COUNTS[SHELL_COUNTS.len() - 1],
+        ms(shallow),
+        SHELL_COUNTS[0],
     );
 }

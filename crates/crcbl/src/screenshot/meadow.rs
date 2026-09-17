@@ -1,6 +1,7 @@
-//! [`Scene::Meadow`](super::Scene::Meadow)'s content: `docs/plan/57-grass.md`
-//! rung G1's fixture, and the first milestone of
-//! `docs/plan/sample/22-meadow.md`.
+//! [`Scene::Meadow`](super::Scene::Meadow)'s and
+//! [`Scene::MeadowShells`](super::Scene::MeadowShells)' content:
+//! `docs/plan/57-grass.md` rungs G1 and G3's fixture, and the first and third
+//! milestones of `docs/plan/sample/22-meadow.md`.
 //!
 //! A module of its own rather than more of `screenshot.rs`, which is already the
 //! largest file in this crate — `still_pool`'s arrangement, down to the parent
@@ -53,8 +54,20 @@
 //! pass that answered `+Y` for every ground normal, or that lost the
 //! heightfield's origin, draws a visibly different frame.
 //! `docs/plan/sample/22-meadow.md`'s hillside is the curved one.
+//!
+//! # Two looks of one field
+//!
+//! [`meadow_shells_field`] is [`meadow_field`] with every blade row's look
+//! switched to shells and its levers pulled, and **nothing else**: the tiles,
+//! the ground, the cover map, the reach and the wind are the same values from
+//! the same functions. That is `docs/plan/57-grass.md`'s own test of the three
+//! looks — a switch changes one description and moves nothing else — and
+//! `the_shell_meadow_is_the_card_meadow_but_its_rows` holds it on the CPU.
 
-use crcbl_render::grass::{BladeType, CoverMap, GrassField, Heightfield, WindLayer, WindLayers};
+use crcbl_render::grass::{
+    BladeLook, BladeNormal, BladeStyle, BladeType, CoverMap, GrassField, Heightfield, WindLayer,
+    WindLayers,
+};
 use crcbl_wind::{Beaufort, DirectionLayer, IntensityLayer, LayerGrid, Weather, WindField};
 
 use crate::hal::{Device, Format, GeometryPath, QueueHandle};
@@ -256,6 +269,8 @@ pub fn meadow_blades() -> Vec<BladeType> {
             half_width: 0.20,
             height_spread: 0.25,
             width_spread: 0.35,
+            look: BladeLook::Cards,
+            style: BladeStyle::PLAIN,
         },
         BladeType {
             root_color: [0.330, 0.285, 0.080],
@@ -264,8 +279,49 @@ pub fn meadow_blades() -> Vec<BladeType> {
             half_width: 0.15,
             height_spread: 0.40,
             width_spread: 0.30,
+            look: BladeLook::Cards,
+            style: BladeStyle::PLAIN,
         },
     ]
+}
+
+/// [`meadow_blades`] drawn as Acerola's shells, with decision 4's levers pulled:
+/// a dark root, a warm tip, patches and a normal straight up.
+///
+/// **Only the look and the style differ from the card rows** — the colours,
+/// heights, widths and spreads are [`meadow_blades`]' own values, taken from it
+/// rather than written twice.
+#[must_use]
+pub fn meadow_shell_blades() -> Vec<BladeType> {
+    let styles = [
+        BladeStyle {
+            root_occlusion: [0.030, 0.055, 0.020],
+            occlusion_reach: 0.45,
+            tip_glow: [0.120, 0.110, 0.020],
+            glow_start: 0.55,
+            patch_color: [0.300, 0.420, 0.060],
+            patch_share: 0.60,
+            normal: BladeNormal::Up,
+        },
+        BladeStyle {
+            root_occlusion: [0.060, 0.045, 0.015],
+            occlusion_reach: 0.40,
+            tip_glow: [0.150, 0.120, 0.030],
+            glow_start: 0.50,
+            patch_color: [0.420, 0.300, 0.050],
+            patch_share: 0.50,
+            normal: BladeNormal::Up,
+        },
+    ];
+    meadow_blades()
+        .into_iter()
+        .zip(styles)
+        .map(|(row, style)| BladeType {
+            look: BladeLook::Shells,
+            style,
+            ..row
+        })
+        .collect()
 }
 
 /// The field this fixture draws.
@@ -287,6 +343,25 @@ pub fn meadow_field() -> GrassField {
         meadow_blades(),
     )
     .unwrap_or_else(|why| unreachable!("the meadow's own field: {why}"))
+}
+
+/// [`meadow_field`] with its rows drawn as shells — see this module's header.
+///
+/// # Panics
+///
+/// Never, on [`meadow_field`]'s terms.
+#[must_use]
+pub fn meadow_shells_field() -> GrassField {
+    GrassField::new(
+        MEADOW_TILES,
+        MEADOW_TILE_SIZE,
+        [-MEADOW_HALF, -MEADOW_HALF],
+        MEADOW_REACH,
+        meadow_ground(),
+        meadow_cover(),
+        meadow_shell_blades(),
+    )
+    .unwrap_or_else(|why| unreachable!("the meadow's own shell field: {why}"))
 }
 
 /// One texel of the intensity layer, by its index along `+X`.
@@ -475,17 +550,51 @@ pub fn meadow_forward(
     format: Format,
     grass: bool,
 ) -> Result<ForwardScene, OffscreenError> {
+    let field = grass.then(meadow_field);
+    meadow_forward_with(device, queue, format, field.as_ref(), MeadowWind::Windy)
+}
+
+/// Whether the meadow's field stands in its authored wind or in none.
+///
+/// **What "calm shells are upright" is compared against**: the same field drawn
+/// in [`MeadowWind::Calm`] is the field no wind layer ever reached, so the half
+/// of a windy frame the intensity layer leaves at zero has to be that frame's
+/// half, pixel for pixel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeadowWind {
+    /// [`meadow_wind_layers`] under [`MEADOW_WEATHER`] — the fixture as its
+    /// goldens draw it.
+    Windy,
+    /// The renderer's calm placeholder layers and a zero wind block.
+    Calm,
+}
+
+/// The meadow's ground, sky and camera with `field` — any field, in either
+/// look — standing on it in `wind`.
+///
+/// # Errors
+///
+/// [`meadow_forward`]'s.
+pub fn meadow_forward_with(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    field: Option<&GrassField>,
+    wind: MeadowWind,
+) -> Result<ForwardScene, OffscreenError> {
     meadow_forward_on_path(
         device,
         queue,
         format,
-        grass,
+        field,
+        wind,
         device.preferred_geometry_path(),
     )
 }
 
-/// [`meadow_forward`] on exactly the geometry tail `path`, which is how
-/// [`Scene::Meadow`]'s build arm honours a requested path.
+/// [`meadow_forward_with`] on exactly the geometry tail `path`, which is how
+/// [`Scene::Meadow`]'s and [`Scene::MeadowShells`]' build arms honour a
+/// requested path.
 ///
 /// # Errors
 ///
@@ -493,23 +602,24 @@ pub fn meadow_forward(
 /// `HalError::UnsupportedFeatures` if the device lacks `path`.
 ///
 /// [`Scene::Meadow`]: super::Scene::Meadow
+/// [`Scene::MeadowShells`]: super::Scene::MeadowShells
 pub(super) fn meadow_forward_on_path(
     device: &dyn Device,
     queue: QueueHandle,
     format: Format,
-    grass: bool,
+    field: Option<&GrassField>,
+    wind: MeadowWind,
     path: GeometryPath,
 ) -> Result<ForwardScene, OffscreenError> {
     let mut renderer =
         ForwardRenderer::with_scene_on_path(device, queue, format, &meadow_scene(), path)?;
     renderer.set_sky(meadow_sky());
     place(&mut renderer, PLATE_MESH, EARTH, ground_model());
-    if grass {
-        let field = meadow_field();
-        if let Err(error) = build_grass(device, queue, &mut renderer, &field) {
-            renderer.destroy(device);
-            return Err(error);
-        }
+    if let Some(field) = field
+        && let Err(error) = build_grass(device, queue, &mut renderer, field, wind)
+    {
+        renderer.destroy(device);
+        return Err(error);
     }
     Ok(ForwardScene {
         camera: meadow_camera(),
@@ -524,8 +634,14 @@ fn build_grass(
     queue: QueueHandle,
     renderer: &mut ForwardRenderer,
     field: &GrassField,
+    wind: MeadowWind,
 ) -> Result<(), OffscreenError> {
     renderer.set_grass(device, queue, Some(field))?;
+    if wind == MeadowWind::Calm {
+        // The placeholders a renderer starts with, and the zero block: calm by
+        // construction rather than by a layer of zeroes this fixture wrote.
+        return Ok(());
+    }
     renderer.set_wind_layers(device, queue, Some(&meadow_wind_layers()))?;
     // The block the GPU copy reads, narrowed from the authoritative `f64`
     // formula at the camera this fixture draws from — decision 3's "the
@@ -644,6 +760,51 @@ mod tests {
             meadow_ground_normal().y < 0.999,
             "a level ground makes the normal claim vacuous"
         );
+    }
+
+    /// **The shell meadow is the card meadow but its rows' looks and styles** —
+    /// decision 3's "switching looks moves nothing but the blade description",
+    /// held on the description itself.
+    ///
+    /// The whole field is compared with the rows put back, so a later edit that
+    /// gave the shell field a tile size or a reach of its own fails here rather
+    /// than in a GPU readback.
+    #[test]
+    fn the_shell_meadow_is_the_card_meadow_but_its_rows() {
+        let cards = meadow_field();
+        let shells = meadow_shells_field();
+        assert_ne!(cards, shells, "the two fields are one description");
+        let restored: Vec<BladeType> = shells
+            .blades()
+            .iter()
+            .map(|row| BladeType {
+                look: BladeLook::Cards,
+                style: BladeStyle::PLAIN,
+                ..*row
+            })
+            .collect();
+        assert_eq!(restored, cards.blades());
+        assert_eq!(
+            GrassField::new(
+                shells.tiles(),
+                shells.tile_size(),
+                shells.origin(),
+                shells.reach(),
+                shells.ground().clone(),
+                shells.cover().clone(),
+                restored,
+            )
+            .expect("the restored field is a field"),
+            cards
+        );
+        // And the placement both draw from is one set of blades, bit for bit.
+        for slot in 0..cards.slots() {
+            assert_eq!(
+                crcbl_render::grass::placement::blades_of_tile(&cards, slot),
+                crcbl_render::grass::placement::blades_of_tile(&shells, slot),
+                "slot {slot} places different blades under the shell look"
+            );
+        }
     }
 
     /// The sun and the camera have no `x` component, so the windy and the calm

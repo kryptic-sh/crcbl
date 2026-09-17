@@ -33,12 +33,17 @@
 //!   stops a later copy from being added without a comparison.
 //! * [`tests::the_two_shaders_declare_one_instance_row`] and its neighbours —
 //!   the rows and the tile block the two grass shaders both declare.
+//! * [`tests::the_shells_copies_are_the_generation_pass_s`] — `grass.slang`
+//!   against `grass_gen.slang` and `wind.slang`, over the hash, the ground, the
+//!   wind and the lean the shells are built from, so a shell layer bends by the
+//!   formula a card's tip does.
 //!
 //! [`tests::the_wind_sampler_is_the_field_s`]: self
 //! [`tests::the_copied_functions_are_their_sources_bodies`]: self
 //! [`tests::the_copied_constants_are_their_sources_declarations`]: self
 //! [`tests::every_function_the_shader_shares_is_compared`]: self
 //! [`tests::the_two_shaders_declare_one_instance_row`]: self
+//! [`tests::the_shells_copies_are_the_generation_pass_s`]: self
 
 /// Invocations per workgroup, matching `[numthreads(64, 1, 1)]` on both of
 /// `grass_gen.slang`'s entry points.
@@ -52,8 +57,114 @@ pub const WORKGROUP_SIZE: u32 = 64;
 /// count, first vertex, first instance.
 pub const DRAW_ARG_WORDS: u32 = 4;
 
-/// Bytes of one slot's draw arguments.
+/// Bytes of one draw's arguments.
 pub const DRAW_ARGS_SIZE: usize = DRAW_ARG_WORDS as usize * 4;
+
+/// Draws one tile slot owns in the argument buffer, back to back: the cards,
+/// the shells and the fins — [`CARD_DRAW`], [`SHELL_DRAW`] and [`FIN_DRAW`].
+///
+/// `docs/plan/57-grass.md`'s decision 1 gives each slot and look a fixed
+/// indirect slot, and this is that table: a look the field does not draw leaves
+/// its slot's instance count at the zero the clear wrote.
+pub const DRAWS_PER_SLOT: u32 = 3;
+
+/// Bytes of one slot's draw arguments, every look's together.
+pub const SLOT_ARGS_SIZE: usize = DRAWS_PER_SLOT as usize * DRAW_ARGS_SIZE;
+
+/// Which of a slot's draws the cards are.
+pub const CARD_DRAW: u32 = 0;
+
+/// Which of a slot's draws the shells are.
+pub const SHELL_DRAW: u32 = 1;
+
+/// Which of a slot's draws the fins are.
+pub const FIN_DRAW: u32 = 2;
+
+/// A blade row drawn as cards — `BladeLook::Cards` in `crcbl_render::grass`.
+pub const LOOK_CARDS: u32 = 0;
+
+/// A blade row drawn as shells with fins — `BladeLook::Shells`.
+pub const LOOK_SHELLS: u32 = 1;
+
+/// A blade row shaded by the ground's normal under its root.
+pub const NORMAL_GROUND: u32 = 0;
+
+/// A blade row shaded by straight up, whatever the ground does.
+pub const NORMAL_UP: u32 = 1;
+
+/// The most shells a field may stack. The field block carries one row per
+/// shell, so this is that block's array length.
+pub const MAX_SHELLS: u32 = 64;
+
+/// Quads along one side of a tile's shell sheet.
+///
+/// **What a shell follows the ground by**: each shell is this grid of quads
+/// lifted off the heightfield, so a tile's sheet bends with the ground at this
+/// resolution and no finer.
+pub const SHELL_GRID: u32 = 16;
+
+/// Vertices one shell draws: [`SHELL_GRID`]² quads of six.
+pub const SHELL_VERTICES: u32 = SHELL_GRID * SHELL_GRID * 6;
+
+/// Placement cells across one band of fins: a fin stands at the centre of every
+/// band and draws the strands rooted inside it.
+pub const FIN_SPACING: u32 = 4;
+
+/// Quads along one fin line — the same resolution a shell follows the ground
+/// at, so a fin's foot and a shell's sheet bend together.
+pub const FIN_SEGMENTS: u32 = SHELL_GRID;
+
+/// Quads up one fin, so the wind's bend — which rises as the square of the
+/// height — is followed piecewise rather than as one straight edge.
+pub const FIN_ROWS: u32 = 4;
+
+/// Vertices one tile's fins draw, for a tile of `cells` cells a side: a line
+/// per band on each of the two axes, each [`FIN_SEGMENTS`] by [`FIN_ROWS`]
+/// quads of six.
+#[must_use]
+pub const fn fin_vertices(cells: u32) -> u32 {
+    2 * (cells / FIN_SPACING) * FIN_SEGMENTS * FIN_ROWS * 6
+}
+
+/// How far toward a grazing view `dot(normal, view)` may rise before a fin
+/// starts to fade in, as the sine of the view's elevation over the ground.
+///
+/// **Where a stack of shells starts showing its gaps**, which is what a fin is
+/// for: a ray crossing the stack at elevation `θ` travels `spacing / tan θ`
+/// sideways between two shells, and once that is wider than a strand the ray
+/// passes between them. `crcbl_render::grass::shell`'s
+/// `the_fins_open_before_the_shells_do` holds this a margin above the steepest
+/// elevation at which [`DEFAULT_SHELLS`] layers over the meadow's tallest row
+/// part around a strand as wide as the meadow's cell.
+pub const FIN_GRAZE_START: f32 = 0.5;
+
+/// The same, where a fin is drawn at full width.
+pub const FIN_GRAZE_FULL: f32 = 0.3;
+
+/// Shells a field stacks until a caller says otherwise.
+pub const DEFAULT_SHELLS: u32 = 16;
+
+/// The light the lowest layers keep however deep in the stack they are: shell
+/// `i` of `n` is lit by `(i + 1) / n + bias`, clamped to one.
+pub const SHELL_OCCLUSION_BIAS: f32 = 0.35;
+
+/// The narrowest a strand is drawn, in pixels across.
+///
+/// **The shells' answer to the card chain's per-instance level.** A strand is a
+/// cutout, and one narrower than a pixel is a binary decision taken off the
+/// last bits of an interpolated position — which two rasterisers make
+/// differently, and which a moving camera turns into noise. Held to a pixel,
+/// a distant strand covers the pixels a near one would and keeps its share of
+/// them.
+pub const STRAND_MIN_PIXELS: f32 = 1.0;
+
+/// Placement cells along one side of a colour patch — decision 4's
+/// clump-coloured patches, on a square grid of cells until rung G2's Voronoi
+/// clumps exist.
+pub const PATCH_CELLS: u32 = 8;
+
+/// The lane a patch's colour is drawn from.
+pub const PATCH_SALT: u32 = 0x1656_67b1;
 
 /// Vertices one card instance draws: two crossed quads of
 /// [`CARD_QUAD_VERTICES`].
@@ -102,8 +213,11 @@ pub const SIZE_SALT: u32 = 0xc2b2_ae35;
 /// The lane a blade's tint is drawn from.
 pub const TINT_SALT: u32 = 0x27d4_eb2f;
 
-/// Bytes of [`GenParams`]: five sixteen-byte `std140` rows.
-pub const GEN_PARAMS_SIZE: usize = 16 * 5;
+/// Bytes of [`GenParams`]: six sixteen-byte `std140` rows.
+pub const GEN_PARAMS_SIZE: usize = 16 * 6;
+
+/// Bytes of [`FieldBlock`]: five sixteen-byte rows and one per shell.
+pub const FIELD_BLOCK_SIZE: usize = 16 * (5 + MAX_SHELLS as usize);
 
 /// Bytes of [`Params`]: two sixteen-byte `std140` rows.
 pub const PARAMS_SIZE: usize = 16 * 2;
@@ -112,7 +226,7 @@ pub const PARAMS_SIZE: usize = 16 * 2;
 pub const TILE_SIZE: usize = 16 * 2;
 
 /// Bytes of one [`GrassBlade`] row.
-pub const BLADE_STRIDE: usize = 16 * 3;
+pub const BLADE_STRIDE: usize = 16 * 7;
 
 /// Bytes of one [`GrassInstance`] row.
 pub const INSTANCE_STRIDE: usize = 16 * 5;
@@ -171,6 +285,19 @@ pub const fn accepts(cell: u32, density: u8) -> bool {
     (hash(cell ^ DENSITY_SALT) & 0xffff) < unorm8(density) * 257
 }
 
+/// Which colour patch the placement cell at `(x, z)` — counted along `+X` and
+/// `+Z` from the field's corner — belongs to, as a lane in `0..1`.
+///
+/// `grass_patch` in both grass shaders: integer arithmetic on the cell's own
+/// coordinates, so a card, a shell and a fin of one cell agree about it and so
+/// does this copy.
+#[must_use]
+pub fn patch_of(x: u32, z: u32) -> f32 {
+    let key =
+        (x / PATCH_CELLS).wrapping_mul(0x8da6_b343) ^ (z / PATCH_CELLS).wrapping_mul(0xd816_3841);
+    unit_pair(hash(key ^ PATCH_SALT))[0]
+}
+
 /// The generation pass's uniform block, matching `struct GrassGenParams` in
 /// `shaders/grass_gen.slang`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -189,6 +316,10 @@ pub struct GenParams {
     /// `x` instances one slot holds, `y` rows in the blade table, `z` cells
     /// along one side of a tile, `w` how many slots there are.
     pub limits: [u32; 4],
+    /// `x` the instance count a slot's shell draw is given when a shell row
+    /// grows in it — the field's shell count — and `y` its fin draw's, one when
+    /// the field stands fins and zero when it does not. `zw` zero.
+    pub looks: [u32; 4],
 }
 
 impl GenParams {
@@ -203,7 +334,7 @@ impl GenParams {
                 at += 4;
             }
         }
-        for row in [self.maps, self.limits] {
+        for row in [self.maps, self.limits, self.looks] {
             for value in row {
                 bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
                 at += 4;
@@ -224,8 +355,104 @@ impl GenParams {
             cover: core::array::from_fn(|lane| float(8 + lane)),
             maps: core::array::from_fn(|lane| word(12 + lane)),
             limits: core::array::from_fn(|lane| word(16 + lane)),
+            looks: core::array::from_fn(|lane| word(20 + lane)),
         }
     }
+}
+
+/// A field's static block, matching `struct GrassField` in `shaders/grass.slang`:
+/// where the placement lattice is, the ground under it and the shell stack.
+///
+/// Written once when a field is set, like the blade table: nothing in it is a
+/// camera's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldBlock {
+    /// `xy` the world XZ of the field's minimum corner, `z` a tile's side and
+    /// `w` a placement cell's side, both in metres.
+    pub origin: [f32; 4],
+    /// `x` tiles along `+X`, `y` along `+Z`, `z` cells along a tile's side and
+    /// `w` instances one slot holds.
+    pub tiles: [u32; 4],
+    /// [`GenParams::ground`], the same four numbers.
+    pub ground: [f32; 4],
+    /// [`GenParams::maps`], the same four numbers.
+    pub maps: [u32; 4],
+    /// `x` the shell stack's height in metres — the tallest shell row's — `y`
+    /// how many shells stand in it, `z` one when fins stand at silhouettes and
+    /// zero when they do not, `w` zero.
+    pub stack: [f32; 4],
+    /// One row per shell, lowest first: `x` its height as a fraction of the
+    /// stack and `y` the occlusion it is lit by. Rows past the count are zero.
+    pub layers: [[f32; 4]; MAX_SHELLS as usize],
+}
+
+impl Default for FieldBlock {
+    fn default() -> Self {
+        Self {
+            origin: [0.0; 4],
+            tiles: [0; 4],
+            ground: [0.0; 4],
+            maps: [0; 4],
+            stack: [0.0; 4],
+            layers: [[0.0; 4]; MAX_SHELLS as usize],
+        }
+    }
+}
+
+impl FieldBlock {
+    /// The block as the bytes a uniform buffer holds, little-endian.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; FIELD_BLOCK_SIZE] {
+        let mut bytes = [0u8; FIELD_BLOCK_SIZE];
+        let rows = [
+            self.origin.map(f32::to_bits),
+            self.tiles,
+            self.ground.map(f32::to_bits),
+            self.maps,
+            self.stack.map(f32::to_bits),
+        ]
+        .into_iter()
+        .chain(self.layers.iter().map(|row| row.map(f32::to_bits)));
+        for (at, row) in rows.enumerate() {
+            for (lane, word) in row.into_iter().enumerate() {
+                let start = (at * 4 + lane) * 4;
+                bytes[start..start + 4].copy_from_slice(&word.to_le_bytes());
+            }
+        }
+        bytes
+    }
+}
+
+/// Every shell's row of [`FieldBlock::layers`] for a stack of `count`: with
+/// `s = (i + 1) / count`, its height is `s^1.5` of the stack and its occlusion
+/// is `s` plus [`SHELL_OCCLUSION_BIAS`], clamped to one.
+///
+/// **The `pow` the plan moves out of the shader.** Both curves are constants of
+/// a shell's index, so they are evaluated here once per field and a fragment
+/// reads a table. The exponent above one crowds the layers toward the root — a
+/// strand here is a cone, widest at its root, which is where a grazing view
+/// looks through the stack; Acerola's `pow(i/N, e)`. It is `s * sqrt(s)` rather
+/// than `powf`, because the table reaches pixels and a platform `powf` rounds
+/// differently per target, where a square root and a product are exact IEEE
+/// operations.
+///
+/// # Panics
+///
+/// If `count` is zero or past [`MAX_SHELLS`].
+#[must_use]
+pub fn shell_layers(count: u32) -> [[f32; 4]; MAX_SHELLS as usize] {
+    assert!(
+        (1..=MAX_SHELLS).contains(&count),
+        "a stack of {count} shells is not one the field block holds"
+    );
+    let mut layers = [[0.0; 4]; MAX_SHELLS as usize];
+    for (shell, row) in layers.iter_mut().take(count as usize).enumerate() {
+        let share = (shell as f32 + 1.0) / count as f32;
+        let height = share * share.sqrt();
+        let occlusion = (share + SHELL_OCCLUSION_BIAS).min(1.0);
+        *row = [height, occlusion, 0.0, 0.0];
+    }
+    layers
 }
 
 /// The grass pass's uniform block, matching `struct GrassParams` in
@@ -310,6 +537,19 @@ pub struct GrassBlade {
     /// height a blade may lose to its own hash, `w` the fraction of the
     /// half-width it may lose.
     pub size: [f32; 4],
+    /// Decision 4's root occlusion: the colour a blade darkens toward at its
+    /// root in `rgb`, and in `a` the fraction of its height the darkening
+    /// reaches. A reach of zero is exactly no occlusion.
+    pub occlusion: [f32; 4],
+    /// Acerola's additive tip colour in `rgb`, and in `a` the fraction of the
+    /// height it starts at. A colour of zero adds exactly nothing.
+    pub glow: [f32; 4],
+    /// The colour a patch of blades leans toward in `rgb`, and in `a` the most
+    /// of it a patch takes. A share of zero is exactly no patch.
+    pub patch: [f32; 4],
+    /// `x` the look — [`LOOK_CARDS`] or [`LOOK_SHELLS`] — and `y` the normal
+    /// it shades by, [`NORMAL_GROUND`] or [`NORMAL_UP`]. `zw` zero.
+    pub flags: [u32; 4],
 }
 
 impl GrassBlade {
@@ -317,11 +557,21 @@ impl GrassBlade {
     #[must_use]
     pub fn to_bytes(self) -> [u8; BLADE_STRIDE] {
         let mut bytes = [0u8; BLADE_STRIDE];
-        let mut at = 0;
-        for row in [self.root_color, self.tip_color, self.size] {
-            for value in row {
-                bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
-                at += 4;
+        let rows = [
+            self.root_color,
+            self.tip_color,
+            self.size,
+            self.occlusion,
+            self.glow,
+            self.patch,
+        ]
+        .map(|row| row.map(f32::to_bits))
+        .into_iter()
+        .chain([self.flags]);
+        for (at, row) in rows.enumerate() {
+            for (lane, word) in row.into_iter().enumerate() {
+                let start = (at * 4 + lane) * 4;
+                bytes[start..start + 4].copy_from_slice(&word.to_le_bytes());
             }
         }
         bytes
@@ -524,6 +774,11 @@ mod tests {
             (TINT_RANGE, "GRASS_TINT_RANGE", GRASS),
             (MAX_BEND, "GRASS_MAX_BEND", GEN),
             (BEND_HALF_SPEED, "GRASS_BEND_HALF_SPEED", GEN),
+            (MAX_BEND, "GRASS_MAX_BEND", GRASS),
+            (BEND_HALF_SPEED, "GRASS_BEND_HALF_SPEED", GRASS),
+            (FIN_GRAZE_START, "GRASS_FIN_GRAZE_START", GRASS),
+            (FIN_GRAZE_FULL, "GRASS_FIN_GRAZE_FULL", GRASS),
+            (STRAND_MIN_PIXELS, "GRASS_STRAND_MIN_PIXELS", GRASS),
         ] {
             assert_eq!(
                 shader_scalar(source, name),
@@ -539,6 +794,22 @@ mod tests {
             (CARD_LEVELS, "GRASS_CARD_LEVELS", GRASS),
             (DRAW_ARG_WORDS, "GRASS_DRAW_ARG_WORDS", GEN),
             (WORKGROUP_SIZE, "GRASS_WORKGROUP_SIZE", GEN),
+            (DRAWS_PER_SLOT, "GRASS_DRAWS_PER_SLOT", GEN),
+            (SHELL_DRAW, "GRASS_SHELL_DRAW", GEN),
+            (FIN_DRAW, "GRASS_FIN_DRAW", GEN),
+            (LOOK_SHELLS, "GRASS_LOOK_SHELLS", GEN),
+            (LOOK_SHELLS, "GRASS_LOOK_SHELLS", GRASS),
+            (NORMAL_UP, "GRASS_NORMAL_UP", GRASS),
+            (SHELL_VERTICES, "GRASS_SHELL_VERTICES", GEN),
+            (SHELL_GRID, "GRASS_SHELL_GRID", GRASS),
+            (FIN_SPACING, "GRASS_FIN_SPACING", GEN),
+            (FIN_SPACING, "GRASS_FIN_SPACING", GRASS),
+            (FIN_SEGMENTS, "GRASS_FIN_SEGMENTS", GEN),
+            (FIN_SEGMENTS, "GRASS_FIN_SEGMENTS", GRASS),
+            (FIN_ROWS, "GRASS_FIN_ROWS", GEN),
+            (FIN_ROWS, "GRASS_FIN_ROWS", GRASS),
+            (MAX_SHELLS, "GRASS_MAX_SHELLS", GRASS),
+            (PATCH_CELLS, "GRASS_PATCH_CELLS", GRASS),
         ] {
             let spelled = format!("static const uint {name} = {value};");
             assert!(
@@ -559,6 +830,61 @@ mod tests {
                  blade in the field"
             );
         }
+        let spelled = format!("static const uint GRASS_PATCH_SALT = {PATCH_SALT:#010x}u;");
+        assert!(
+            GRASS.contains(&spelled),
+            "grass.slang does not declare `{spelled}`"
+        );
+        // The shader's own vertex counts are derived from the numbers above,
+        // and so is this module's.
+        assert_eq!(SHELL_VERTICES, SHELL_GRID * SHELL_GRID * CARD_QUAD_VERTICES);
+        assert!(
+            GEN.contains(
+                "uint fin_vertices = 2u * (side / GRASS_FIN_SPACING) * GRASS_FIN_SEGMENTS * \
+                 GRASS_FIN_ROWS * 6u;"
+            ),
+            "grass_gen.slang does not count a tile's fin vertices as `fin_vertices` does"
+        );
+    }
+
+    /// **A patch is the shaders' patch**: the key line both copies hash, and the
+    /// lane it comes out as spread over the whole range.
+    ///
+    /// `patch_of` is what a test reads a patch's colour off, so a slip in its
+    /// constants would pass a picture drawn by a shader that has the same slip
+    /// — the text is compared as well as the values examined.
+    #[test]
+    fn the_patch_is_the_shaders_patch() {
+        assert!(
+            GRASS.contains(
+                "uint key = (x / GRASS_PATCH_CELLS) * 0x8da6b343u ^ (z / GRASS_PATCH_CELLS) * \
+                 0xd8163841u;"
+            ),
+            "grass.slang does not key a patch the way `patch_of` does"
+        );
+        assert!(GRASS.contains("return grass_unit_pair(grass_hash(key ^ GRASS_PATCH_SALT)).x;"));
+        // One patch is one lane however far inside it a cell is.
+        let lane = patch_of(3 * PATCH_CELLS, 5 * PATCH_CELLS);
+        for dx in 0..PATCH_CELLS {
+            for dz in 0..PATCH_CELLS {
+                assert_eq!(patch_of(3 * PATCH_CELLS + dx, 5 * PATCH_CELLS + dz), lane);
+            }
+        }
+        // And neighbouring patches are not one colour: over a sweep of them the
+        // lanes cover the range rather than sitting on a value.
+        let lanes: Vec<f32> = (0..64)
+            .flat_map(|x| (0..64).map(move |z| patch_of(x * PATCH_CELLS, z * PATCH_CELLS)))
+            .collect();
+        let low = lanes.iter().copied().fold(1.0f32, f32::min);
+        let high = lanes.iter().copied().fold(0.0f32, f32::max);
+        eprintln!(
+            "grass patches: lanes {low:.4}..{high:.4} over {} patches",
+            lanes.len()
+        );
+        assert!(
+            low < 0.05 && high > 0.95,
+            "patch lanes span only {low}..{high}"
+        );
     }
 
     /// **The hash is PCG's, constant for constant.**
@@ -675,6 +1001,7 @@ mod tests {
             cover: [9.0, 10.0, 11.0, 12.0],
             maps: [13, 14, 15, 16],
             limits: [17, 18, 19, 20],
+            looks: [21, 22, 23, 24],
         };
         let bytes = params.to_bytes();
         assert_eq!(bytes.len(), GEN_PARAMS_SIZE);
@@ -682,11 +1009,37 @@ mod tests {
         assert_eq!(float_at(&bytes, 11), 12.0);
         assert_eq!(word_at(&bytes, 12), 13);
         assert_eq!(word_at(&bytes, 19), 20);
+        assert_eq!(word_at(&bytes, 23), 24);
         assert_eq!(GenParams::from_bytes(&bytes), params);
         assert_eq!(
             declaration(GEN, "GrassGenParams"),
             "struct GrassGenParams { float4 camera; float4 ground; float4 cover; uint4 maps; \
-             uint4 limits;"
+             uint4 limits; uint4 looks;"
+        );
+
+        let mut block = FieldBlock {
+            origin: [1.0, 2.0, 3.0, 4.0],
+            tiles: [5, 6, 7, 8],
+            ground: [9.0, 10.0, 11.0, 12.0],
+            maps: [13, 14, 15, 16],
+            stack: [17.0, 18.0, 19.0, 20.0],
+            ..FieldBlock::default()
+        };
+        block.layers[0] = [21.0, 22.0, 0.0, 0.0];
+        block.layers[MAX_SHELLS as usize - 1] = [23.0, 24.0, 0.0, 0.0];
+        let bytes = block.to_bytes();
+        assert_eq!(bytes.len(), FIELD_BLOCK_SIZE);
+        assert_eq!(float_at(&bytes, 3), 4.0);
+        assert_eq!(word_at(&bytes, 4), 5);
+        assert_eq!(float_at(&bytes, 8), 9.0);
+        assert_eq!(word_at(&bytes, 15), 16);
+        assert_eq!(float_at(&bytes, 19), 20.0);
+        assert_eq!(float_at(&bytes, 21), 22.0);
+        assert_eq!(float_at(&bytes, FIELD_BLOCK_SIZE / 4 - 3), 24.0);
+        assert_eq!(
+            declaration(GRASS, "GrassField"),
+            "struct GrassField { float4 origin; uint4 tiles; float4 ground; uint4 maps; float4 \
+             stack; float4 layers[GRASS_MAX_SHELLS];"
         );
 
         let tile = Tile {
@@ -724,11 +1077,26 @@ mod tests {
             root_color: [0.1, 0.2, 0.3, 0.0],
             tip_color: [0.4, 0.5, 0.6, 0.0],
             size: [0.7, 0.8, 0.9, 1.0],
+            ..GrassBlade::default()
         }
         .to_bytes();
         assert_eq!(blade.len(), BLADE_STRIDE);
         assert_eq!(float_at(&blade, 4), 0.4);
         assert_eq!(float_at(&blade, 11), 1.0);
+        let styled = GrassBlade {
+            occlusion: [1.5, 0.0, 0.0, 2.5],
+            glow: [0.0, 3.5, 0.0, 0.0],
+            patch: [0.0, 0.0, 0.0, 4.5],
+            flags: [LOOK_SHELLS, NORMAL_UP, 0, 0],
+            ..GrassBlade::default()
+        }
+        .to_bytes();
+        assert_eq!(float_at(&styled, 12), 1.5);
+        assert_eq!(float_at(&styled, 15), 2.5);
+        assert_eq!(float_at(&styled, 17), 3.5);
+        assert_eq!(float_at(&styled, 23), 4.5);
+        assert_eq!(word_at(&styled, 24), LOOK_SHELLS);
+        assert_eq!(word_at(&styled, 25), NORMAL_UP);
 
         let instance = GrassInstance {
             root: [1.0, 2.0, 3.0, 4.0],
@@ -807,6 +1175,54 @@ mod tests {
         }
     }
 
+    /// **The shells are built from the generation pass's own arithmetic**: the
+    /// hash, the ground under a point, the wind and the lean, body for body, and
+    /// the wind block and constant `wind.slang` declares.
+    ///
+    /// A shell layer bends by `grass_lean` and stands on `grass_ground_under`;
+    /// if either drifted from the copy that placed and bent the cards, the two
+    /// looks of one field would stand on different ground in different wind —
+    /// which is the one thing decision 3 says a look switch must not do.
+    #[test]
+    fn the_shells_copies_are_the_generation_pass_s() {
+        // The two files name the block these read `grass` and `field`, and it is
+        // reached inside a cast as well as at the start of a token — so the
+        // names are replaced wherever they stand, which is safe here because
+        // neither word is followed by a dot anywhere else in these bodies.
+        let body = |source: &str, signature: &str, block: &str| {
+            one_function(source, signature, "\0").replace(block, "BLOCK.")
+        };
+        for signature in SHELL_COPIES {
+            assert_eq!(
+                body(GEN, signature, "grass."),
+                body(GRASS, signature, "field."),
+                "`{signature}` has drifted between grass_gen.slang and grass.slang"
+            );
+        }
+        for signature in [
+            "float windSmoothTriangle(float u)",
+            "float3 windSample(float3 posRel)",
+        ] {
+            assert_eq!(
+                one_function(WIND, signature, "wind."),
+                one_function(GRASS, signature, "wind."),
+                "`{signature}` has drifted between wind.slang and grass.slang"
+            );
+        }
+        assert_eq!(
+            declaration(WIND, "WindParams"),
+            declaration(GRASS, "WindParams")
+        );
+        assert_eq!(
+            declaration(GEN, "GrassGround"),
+            declaration(GRASS, "GrassGround")
+        );
+        assert_eq!(
+            one_declaration(WIND, "float WIND_MIN_DIRECTION_LENGTH_SQUARED", ";"),
+            one_declaration(GRASS, "float WIND_MIN_DIRECTION_LENGTH_SQUARED", ";"),
+        );
+    }
+
     /// **The two borrowed blocks are the forward pass's own, field for
     /// field.**
     #[test]
@@ -846,6 +1262,16 @@ mod tests {
         }
     }
 
+    /// Every function `grass.slang` copies from `grass_gen.slang` for the shells,
+    /// by the signature that opens it.
+    const SHELL_COPIES: &[&str] = &[
+        "uint grass_hash(uint value)",
+        "float2 grass_unit_pair(uint lane)",
+        "float grass_ground_texel(int2 texel)",
+        "GrassGround grass_ground_under(float2 world)",
+        "float3 grass_lean(float3 velocity, float height)",
+    ];
+
     /// The name of every function `source` defines at the start of a line —
     /// `crate::water`'s `defined_functions`.
     fn defined_functions(source: &str) -> Vec<String> {
@@ -869,12 +1295,13 @@ mod tests {
 
     /// **Every function a grass shader shares a name with is compared.**
     ///
-    /// [`COPIED_FUNCTIONS`] and the wind list are hand-written, and a
-    /// hand-written list is what a later copy is not added to. So this reads
-    /// both shaders for every function they define that `mesh.slang` or
-    /// `wind.slang` also defines, and requires each to be on a list —
+    /// [`COPIED_FUNCTIONS`], [`SHELL_COPIES`] and the wind list are
+    /// hand-written, and a hand-written list is what a later copy is not added
+    /// to. So this reads both shaders for every function they define that
+    /// `mesh.slang` or `wind.slang` also defines — and `grass.slang` for every
+    /// one `grass_gen.slang` does — and requires each to be on a list:
     /// `crate::water`'s `every_function_the_shader_shares_is_compared` over
-    /// this pair. The entry points are the names a shader shares and never
+    /// this set. The entry points are the names a shader shares and never
     /// copies.
     #[test]
     fn every_function_the_shader_shares_is_compared() {
@@ -893,12 +1320,36 @@ mod tests {
             .into_iter()
             .flat_map(defined_functions)
             .collect();
-        let entry_points = ["vertexMain", "fragmentMain", "clearMain", "generateMain"];
+        let entry_points = [
+            "vertexMain",
+            "fragmentMain",
+            "shellVertexMain",
+            "finVertexMain",
+            "shellFragmentMain",
+            "clearMain",
+            "generateMain",
+        ];
+        let generation = defined_functions(GEN);
+        let listed: Vec<&str> = listed
+            .into_iter()
+            .chain(SHELL_COPIES.iter().map(|signature| {
+                signature
+                    .split('(')
+                    .next()
+                    .and_then(|head| head.split_whitespace().last())
+                    .expect("a signature names its function")
+            }))
+            .collect();
         let shared: Vec<String> = [GRASS, GEN]
             .into_iter()
             .flat_map(defined_functions)
             .filter(|name| !entry_points.contains(&name.as_str()))
             .filter(|name| elsewhere.contains(name))
+            .chain(
+                defined_functions(GRASS)
+                    .into_iter()
+                    .filter(|name| generation.contains(name)),
+            )
             .collect();
         assert!(
             shared.len() >= listed.len(),

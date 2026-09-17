@@ -29,7 +29,9 @@ use std::collections::BTreeMap;
 
 use crcbl::render::grass::{SLOT_CAPACITY, placement};
 use crcbl::screenshot::{OffscreenSetup, Scene};
-use crcbl::shaders::grass::{DRAW_ARGS_SIZE, GrassInstance, INSTANCE_STRIDE};
+use crcbl::shaders::grass::{
+    CARD_DRAW, DRAW_ARGS_SIZE, FIN_DRAW, GrassInstance, INSTANCE_STRIDE, SHELL_DRAW, SLOT_ARGS_SIZE,
+};
 use crcbl_golden::Image;
 
 use super::{EXTENT, Offscreen, SUITE, block_channel, channel_order};
@@ -149,7 +151,7 @@ fn grass_band(image: &Image, x: f32, z: f32) -> [f32; 3] {
 ///
 /// **Each was shown red by sabotage** (2026-09-16, lavapipe); the two constants
 /// above carry what each edit was and what it reported.
-fn the_meadow_is_green_where_its_cover_map_says(image: &Image) {
+pub(super) fn the_meadow_is_green_where_its_cover_map_says(image: &Image) {
     let [red, green] = [0, 1];
     // On the windy side of the dense near half, close enough to the camera that
     // a card is several pixels across — and well inside a tile and well off the
@@ -214,7 +216,7 @@ fn the_meadow_scene_draws_the_same_frame_on_every_geometry_path() {
 }
 
 /// One frame of `setup`, as an image.
-fn frame_of(setup: &mut OffscreenSetup) -> Image {
+pub(super) fn frame_of(setup: &mut OffscreenSetup) -> Image {
     let format = setup.format();
     let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
     Image::from_readback(width, height, &pixels, channel_order(format)).expect("one image")
@@ -294,17 +296,34 @@ fn a_meadow_with_its_field_removed_is_the_meadow_never_given_one() {
     );
 }
 
-/// Every instance slot `slot` holds, and the count its draw arguments carry.
-struct Slot {
-    /// The instance count the generation dispatch appended.
-    count: u32,
-    /// Those instances, by the cell each was grown from.
-    blades: BTreeMap<u32, GrassInstance>,
+/// Every instance slot `slot` holds, and the counts its draw arguments carry.
+pub(super) struct Slot {
+    /// The card instance count the generation dispatch appended.
+    pub(super) count: u32,
+    /// The instance counts the slot's shell and fin draws were given.
+    pub(super) shells: u32,
+    pub(super) fins: u32,
+    /// Those card instances, by the cell each was grown from.
+    pub(super) blades: BTreeMap<u32, GrassInstance>,
+}
+
+/// The cells buffer a field's last generation wrote, as its bytes — every cell
+/// of every slot, whatever the look.
+pub(super) fn cells_of(setup: &mut OffscreenSetup) -> Vec<u8> {
+    let buffers = setup
+        .grass_buffers()
+        .expect("the meadow was built with a field");
+    setup
+        .read_buffer(
+            buffers.cells,
+            u64::from(buffers.slots) * u64::from(SLOT_CAPACITY) * INSTANCE_STRIDE as u64,
+        )
+        .expect("the cells copy back")
 }
 
 /// Draws one frame of the meadow and copies every slot's instances and draw
 /// arguments back.
-fn generated(setup: &mut OffscreenSetup) -> Vec<Slot> {
+pub(super) fn generated(setup: &mut OffscreenSetup) -> Vec<Slot> {
     // A frame first: the buffers hold whatever the last frame that generated
     // left there, and a renderer that has drawn nothing has never dispatched.
     let _ = frame_of(setup);
@@ -314,7 +333,7 @@ fn generated(setup: &mut OffscreenSetup) -> Vec<Slot> {
     let args = setup
         .read_buffer(
             buffers.args,
-            u64::from(buffers.slots) * DRAW_ARGS_SIZE as u64,
+            u64::from(buffers.slots) * SLOT_ARGS_SIZE as u64,
         )
         .expect("the draw arguments copy back");
     let instances = setup
@@ -326,25 +345,28 @@ fn generated(setup: &mut OffscreenSetup) -> Vec<Slot> {
 
     (0..buffers.slots)
         .map(|slot| {
-            let at = slot as usize * DRAW_ARGS_SIZE;
-            let word = |index: usize| {
-                let word_at = at + index * 4;
+            let word = |draw: u32, index: usize| {
+                let word_at =
+                    slot as usize * SLOT_ARGS_SIZE + draw as usize * DRAW_ARGS_SIZE + index * 4;
                 u32::from_le_bytes(
                     args[word_at..word_at + 4]
                         .try_into()
                         .expect("four bytes of a draw argument"),
                 )
             };
-            let count = word(1);
+            let count = word(CARD_DRAW, 1);
             assert!(
                 count <= SLOT_CAPACITY,
                 "slot {slot} claims {count} instances, past the {SLOT_CAPACITY} it holds"
             );
-            assert_eq!(
-                word(3),
-                0,
-                "slot {slot}'s first instance is not zero, which WebGPU refuses outright"
-            );
+            for draw in [CARD_DRAW, SHELL_DRAW, FIN_DRAW] {
+                assert_eq!(
+                    word(draw, 3),
+                    0,
+                    "slot {slot}'s draw {draw} has a first instance that is not zero, which \
+                     WebGPU refuses outright"
+                );
+            }
             let base = slot as usize * SLOT_CAPACITY as usize;
             let blades = (0..count as usize)
                 .map(|index| {
@@ -362,16 +384,26 @@ fn generated(setup: &mut OffscreenSetup) -> Vec<Slot> {
                 count as usize,
                 "slot {slot} appended two instances for one cell"
             );
-            Slot { count, blades }
+            Slot {
+                count,
+                shells: word(SHELL_DRAW, 1),
+                fins: word(FIN_DRAW, 1),
+                blades,
+            }
         })
         .collect()
 }
 
 /// The meadow, opened with its field.
 fn meadow() -> Offscreen {
+    opened(Scene::Meadow)
+}
+
+/// `scene`, opened.
+pub(super) fn opened(scene: Scene) -> Offscreen {
     crcbl_core::log::init_logging();
-    let setup = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Meadow)
-        .unwrap_or_else(|why| panic!("a GPU backend opens for the meadow: {why}"));
+    let setup = OffscreenSetup::open(EXTENT.0, EXTENT.1, scene)
+        .unwrap_or_else(|why| panic!("a GPU backend opens for {scene:?}: {why}"));
     Offscreen::guard(SUITE, setup)
 }
 

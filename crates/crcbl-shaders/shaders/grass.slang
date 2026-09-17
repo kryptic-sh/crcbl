@@ -1,7 +1,17 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/57-grass.md`'s rung G1, second half: the grass pass, drawing the
-// cards `grass_gen.slang` generated.
+// `docs/plan/57-grass.md`'s rungs G1 and G3, second half: the grass pass,
+// drawing what `grass_gen.slang` generated as cards, as shells and as fins.
+//
+// # Three looks' worth of entry points, one light walk
+//
+// Decision 3's looks differ in geometry and in nothing else, so they are
+// entry points of one module rather than modules of their own: `vertexMain` and
+// `fragmentMain` draw the cards, `shellVertexMain` and `finVertexMain` build the
+// shells and their fins, and `shellFragmentMain` cuts both out. Every one of
+// them is lit by `grass_light` and styled by `grass_style`, which is how
+// decision 4's "any of the three looks can be stylised" is one function rather
+// than a promise kept three times.
 //
 // # One draw per slot, and no vertex stream
 //
@@ -28,7 +38,40 @@
 // * the punctual lights' walk — the falloff, the cone, the atlas tile and the
 //   cube face.
 //
+// And from `grass_gen.slang` and `wind.slang`, for the shells: the placement
+// hash, the ground under a point, the wind sampler and the lean it bends by —
+// a shell layer bends by the very formula the card's tip does.
+//
 // `crcbl_shaders::grass`'s tests are where each is compared.
+//
+// # Shells, and why a fragment finds its strand by position
+//
+// Acerola's shell texturing, as the plan records it: a stack of layers over the
+// ground, each a cutout of a per-cell strand that tapers with height. **The
+// strand is the placement's blade.** Every cell `grass_gen.slang` grew a blade
+// in is written to `grassCells` at the cell's own index, so a shell fragment
+// knows its cell from where it stands and reads the blade's root, height,
+// half-width, tint and row — the same numbers the card of that blade is drawn
+// from. The strand is a cone about the root: its half-width at the root, bounded
+// by half a cell, closing to nothing at the blade's height.
+//
+// Half a cell is the bound because a fragment then needs only the four cells
+// nearest it: a strand of that reach rooted anywhere in a cell cannot touch a
+// point further away. A fin, standing at the centre of a band of cells, reads
+// the band across and the two nearest cells along it.
+//
+// **The shell index is the instance index**, decision 3's "one instanced draw
+// rather than one per layer", counted from the top so that a layer nearer the
+// camera from above is drawn before the ones it hides.
+//
+// # Fins
+//
+// A shell stack seen at a grazing angle shows the gaps between its layers.
+// NVIDIA's shells and fins extrude a fin along every silhouette edge in a
+// geometry stage, which WebGPU has none of; here every fin is a pre-built strip
+// of quads from `SV_VertexID`, and `finVertexMain` collapses the ones whose two
+// sides' ground normals both face the camera squarely. A fin that stays draws
+// the side view of the strands rooted in its band.
 //
 // # What this pass does *not* copy, and why
 //
@@ -77,6 +120,10 @@ static const float CLUSTER_NEAR = 0.1;
 static const float CLUSTER_FAR = 1000.0;
 
 static const uint PROBE_LEVELS = 4;
+
+/// The most shells a field stacks: the length of `GrassField::layers`.
+/// `crcbl_shaders::grass::MAX_SHELLS`.
+static const uint GRASS_MAX_SHELLS = 64;
 
 /// `mesh.slang`'s frame block, bound here as the very buffer the forward pass
 /// read: the camera, the ambient, the sun's cascades and the light grid.
@@ -414,7 +461,7 @@ struct GrassTile
 /// field mixes. `crcbl_shaders::grass::GrassBlade`.
 ///
 /// Decision 3's "one blade description": cards, mesh blades and shells differ in
-/// the geometry a row is drawn with and not in the row. Rung G1 draws the cards.
+/// the geometry a row is drawn with and not in the row — `flags.x` names which.
 struct GrassBlade
 {
     /// The colour at the blade's root in `rgb`; `a` is written as zero and
@@ -426,6 +473,19 @@ struct GrassBlade
     /// fraction of the height a blade may lose to its own hash and `w` the
     /// fraction of the half-width it may lose.
     float4 size;
+    /// Decision 4's root occlusion: the colour a blade darkens toward at its
+    /// root in `rgb`, and in `a` the fraction of its height that reaches. A
+    /// reach of zero is exactly no occlusion.
+    float4 occlusion;
+    /// The additive tip colour in `rgb`, and in `a` the fraction of the height
+    /// it starts at. A colour of zero adds exactly nothing.
+    float4 glow;
+    /// The colour a patch leans toward in `rgb`, and in `a` the most of it a
+    /// patch takes. A share of zero is exactly no patch.
+    float4 patch;
+    /// `x` the look — `GRASS_LOOK_CARDS` or `GRASS_LOOK_SHELLS` — and `y` the
+    /// normal it shades by. `zw` are written as zero and unread.
+    uint4 flags;
 };
 
 /// One generated blade — what a generation dispatch appends and what a draw
@@ -504,6 +564,81 @@ StructuredBuffer<GpuLight> lights;
 /// indices into `lights`, `CLUSTER_STRIDE` words apart.
 [[vk::binding(10, 0)]]
 StructuredBuffer<uint> cluster_lights;
+
+/// A field's static block: where its placement lattice is, the ground under it
+/// and its shell stack. `crcbl_shaders::grass::FieldBlock`.
+struct GrassField
+{
+    /// `xy` the world XZ of the field's minimum corner, `z` a tile's side and
+    /// `w` a placement cell's side, both in metres.
+    float4 origin;
+    /// `x` tiles along `+X`, `y` along `+Z`, `z` cells along a tile's side and
+    /// `w` instances one slot holds.
+    uint4 tiles;
+    /// `grass_gen.slang`'s `GrassGenParams::ground`, the same four numbers.
+    float4 ground;
+    /// `grass_gen.slang`'s `GrassGenParams::maps`, the same four numbers.
+    uint4 maps;
+    /// `x` the shell stack's height in metres, `y` how many shells stand in it,
+    /// `z` one where fins stand and zero where they do not. `w` unread.
+    float4 stack;
+    /// One row per shell, lowest first: `x` its height as a fraction of the
+    /// stack and `y` the occlusion it is lit by — decision 3's per-shell
+    /// constants, evaluated on the CPU so no `pow` reaches this file.
+    float4 layers[GRASS_MAX_SHELLS];
+};
+
+[[vk::binding(11, 0)]]
+ConstantBuffer<GrassField> field;
+
+/// Every cell's blade at the cell's own index, zero where it carries none —
+/// `grass_gen.slang`'s `grassCells`, read here by the shells and fins.
+[[vk::binding(12, 0)]]
+StructuredBuffer<GrassInstance> grassCells;
+
+/// The ground the field stands on, which a shell's sheet is lifted off. Read
+/// with `Load`, on `grass_gen.slang`'s terms.
+[[vk::binding(13, 0)]]
+Texture2D<float> grassGround;
+
+/// `wind.slang`'s uniform block, bound here as the very buffer the generation
+/// pass reads.
+struct WindParams
+{
+    /// Unit horizontal direction the wind blows towards, on the XZ plane.
+    float2 baseDirection;
+    /// Base speed in m/s — `S` in decision 6's formula.
+    float baseSpeed;
+    /// Peak fractional swing of the gust about one. Zero is no gusting.
+    float gustAmplitude;
+    /// `dot(camera - o, baseDirection) / wavelength`, whole turns dropped.
+    float gustPhase;
+    /// One over the gust wavelength, in reciprocal metres.
+    float invGustWavelength;
+    /// Written as zero and unread; the row `std140` leaves.
+    float2 pad0;
+    /// The camera's texture coordinate in the direction layer, wrapped.
+    float2 directionUv;
+    /// Direction-layer texture coordinates per metre of world.
+    float2 directionUvPerMetre;
+    /// The camera's texture coordinate in the intensity layer, wrapped.
+    float2 intensityUv;
+    /// Intensity-layer texture coordinates per metre of world.
+    float2 intensityUvPerMetre;
+};
+
+[[vk::binding(14, 0)]]
+ConstantBuffer<WindParams> wind;
+
+/// The wind's two layers and its sampler, as `grass_gen.slang` binds them.
+[[vk::binding(15, 0)]]
+Texture2D<float4> windDirectionLayer;
+
+[[vk::binding(16, 0)]]
+Texture2D<float4> windIntensityLayer;
+
+[[vk::binding(17, 0)]]
+SamplerState windSampler;
 
 static const float PUNCTUAL_DEPTH_BIAS_TEXELS = 2.0;
 
@@ -653,6 +788,39 @@ float grassCardLevel(float pixels)
     // same fraction of its texels — which is the whole of what the cook buys.
     return min(floor(level + 0.5), float(GRASS_CARD_LEVELS - 1u));
 }
+
+/// The numbers the shells, fins and levers are built from, each the Rust
+/// constant of the same name in `crcbl_shaders::grass` without its `GRASS_`
+/// prefix — `the_shaders_spell_this_module_s_constants` compares them.
+static const uint GRASS_SHELL_GRID = 16;
+
+static const uint GRASS_FIN_SPACING = 4;
+
+static const uint GRASS_FIN_SEGMENTS = 16;
+
+static const uint GRASS_FIN_ROWS = 4;
+
+static const uint GRASS_LOOK_SHELLS = 1;
+
+static const uint GRASS_NORMAL_UP = 1;
+
+static const uint GRASS_PATCH_CELLS = 8;
+
+static const uint GRASS_PATCH_SALT = 0x165667b1u;
+
+static const float GRASS_FIN_GRAZE_START = 0.5;
+
+static const float GRASS_FIN_GRAZE_FULL = 0.3;
+
+static const float GRASS_STRAND_MIN_PIXELS = 1.0;
+
+/// `grass_gen.slang`'s bend constants, copied so a shell layer bends by the
+/// formula a card's tip does.
+static const float GRASS_MAX_BEND = 0.6;
+
+static const float GRASS_BEND_HALF_SPEED = 6.0;
+
+static const float WIND_MIN_DIRECTION_LENGTH_SQUARED = 1e-12;
 
 /// The two triangles of a quad, as corners in `0..1`: `x` across the card and
 /// `y` up it, zero at the root.
@@ -1170,99 +1338,165 @@ uint froxel_of(float2 pixel, float depth)
 }
 
 
-/// What the vertex stage hands the fragment stage.
-struct GrassVertex
+/// `wind.slang`'s smoothed triangle wave, copied through `grass_gen.slang`.
+float windSmoothTriangle(float u)
 {
-    float4 position : SV_Position;
-    /// The world-space point, for the shadow walk and the light grid.
-    float3 world_position : WORLD_POSITION;
-    /// The ground's normal under the blade's root, which is the normal a card
-    /// shades by — decision 4's "normals taken from the ground … so a field
-    /// shades as one surface".
-    float3 normal : NORMAL;
-    /// The blade's colour at this point: its row's root-to-tip gradient, tinted
-    /// by its own lane.
-    float3 color : COLOR;
-    /// `x` across the card and `y` up it, zero at the root.
-    float2 uv : TEXCOORD0;
-    /// Which level of the card's chain this blade reads — see
-    /// `grassCardLevel`. Flat across the card by construction: every vertex of
-    /// one instance computes it from the same width and the same depth.
-    float level : CARD_LEVEL;
-};
-
-/// Two crossed quads per instance, built from `SV_VertexID`.
-[shader("vertex")]
-GrassVertex vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID)
-{
-    // The slot's run, reached by the base this adds rather than by the draw's
-    // `firstInstance` — see the header.
-    GrassInstance blade = instances[tile.slot.x * grass.limits.x + instance_id];
-    GrassBlade row = blades[min(blade.lanes.y, max(grass.limits.y, 1u) - 1u)];
-
-    uint quad = index / GRASS_CARD_QUAD_VERTICES;
-    float2 corner = GRASS_CARD_CORNERS[index % GRASS_CARD_QUAD_VERTICES];
-
-    // The second quad is the first turned a quarter turn about `+Y`, which for
-    // a horizontal unit vector is the swap and one negation below — the
-    // rotation decision 9 asks for, written without an angle.
-    float2 facing = blade.facing.xy;
-    float2 across = quad == 0u ? facing : float2(-facing.y, facing.x);
-
-    float3 sideways = float3(across.x, 0.0, across.y) * (blade.facing.z * (corner.x * 2.0 - 1.0));
-    // The lean rises as the square of the height along the blade, so the root
-    // does not move and the tip carries the whole of it: the curve a stalk
-    // rooted in the ground bends in, and the cheapest one that is flat at the
-    // root.
-    float3 leaning = blade.lean.xyz * (corner.y * corner.y);
-    float3 world = blade.root.xyz + sideways + float3(0.0, blade.root.w * corner.y, 0.0) + leaning;
-
-    GrassVertex output;
-    output.position = mul(frame.view_proj, float4(world, 1.0));
-    output.world_position = world;
-    output.normal = blade.ground.xyz;
-    // The row's root-to-tip gradient — decision 4's first lever — scaled by the
-    // blade's own tint lane over `GRASS_TINT_RANGE`, so a field is not one flat
-    // colour and no blade is darker than that fraction of its row.
-    float tint = 1.0 - GRASS_TINT_RANGE * blade.facing.w;
-    output.color = lerp(row.root_color.rgb, row.tip_color.rgb, corner.y) * tint;
-    output.uv = corner;
-    // The card's width on screen, from its own width in metres and the depth
-    // this vertex came out at. `w` is the view depth for a perspective
-    // projection and one for an orthographic one, which is the right answer in
-    // both cases: an orthographic camera does not shrink a card with distance.
-    output.level = grassCardLevel(2.0 * blade.facing.z * grass.screen.x
-                                  / max(abs(output.position.w), 1e-4));
-    return output;
+    float s = abs(frac(u + 0.5) * 2.0 - 1.0);
+    return s * s * (3.0 - 2.0 * s);
 }
 
-/// The card, cut out and lit.
-[shader("fragment")]
-float4 fragmentMain(GrassVertex input) : SV_Target
+/// `wind.slang`'s sampler, copied body for body.
+float3 windSample(float3 posRel)
 {
-    // The cook's own level, chosen for the whole card by the vertex stage —
-    // see `grassCardLevel` for why it is not the hardware's.
-    float coverage =
-        grassCard
-            .SampleLevel(grassCardSampler, float3(input.uv.x, 1.0 - input.uv.y, 0.0), input.level)
+    float2 deflection =
+        windDirectionLayer
+            .SampleLevel(windSampler, wind.directionUv + posRel.xz * wind.directionUvPerMetre, 0.0)
+            .rg
+            * 2.0
+        - 1.0;
+    float intensity =
+        windIntensityLayer
+            .SampleLevel(windSampler, wind.intensityUv + posRel.xz * wind.intensityUvPerMetre, 0.0)
             .r;
-    if (coverage < GRASS_ALPHA_CUTOFF)
-    {
-        discard;
-    }
 
-    // Interpolation denormalises, `mesh.slang`'s reason exactly.
-    float3 normal = normalize(input.normal);
-    // The card's own plane has no bearing on the shading — see the header — but
-    // it is what the shadow biases want: acne is a property of the triangle
-    // that was rasterised into the map, and the triangle here is the card.
+    float2 base = wind.baseDirection;
+    float2 turned = float2(base.x * deflection.x - base.y * deflection.y,
+                           base.x * deflection.y + base.y * deflection.x);
+    float lengthSquared = dot(turned, turned);
+    float2 direction = lengthSquared > WIND_MIN_DIRECTION_LENGTH_SQUARED
+                           ? turned / sqrt(lengthSquared)
+                           : base;
+
+    float along = dot(posRel.xz, base) * wind.invGustWavelength + wind.gustPhase;
+    float gust = 1.0 + wind.gustAmplitude * (2.0 * windSmoothTriangle(along) - 1.0);
+    float speed = intensity * wind.baseSpeed * gust;
+    return float3(direction.x * speed, 0.0, direction.y * speed);
+}
+
+/// `grass_gen.slang`'s lean, copied: how far the wind moves the tip of a blade
+/// `height` metres tall.
+float3 grass_lean(float3 velocity, float height)
+{
+    float speed = length(velocity);
+    float bend = height * GRASS_MAX_BEND * (speed / (speed + GRASS_BEND_HALF_SPEED));
+    float2 along = velocity.xz * (bend / max(speed, 1e-6));
+    float drop = bend * bend / (height + sqrt(max(height * height - bend * bend, 0.0)));
+    return float3(along.x, -drop, along.y);
+}
+
+/// `grass_gen.slang`'s placement hash, copied — the patch lane below is drawn
+/// from it.
+uint grass_hash(uint value)
+{
+    uint state = value * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+/// `grass_gen.slang`'s pair of sixteen-bit lanes, copied.
+float2 grass_unit_pair(uint lane)
+{
+    return float2(float(lane & 0xffffu), float((lane >> 16u) & 0xffffu)) * (1.0 / 65536.0);
+}
+
+/// The height and the ground's unit normal under a world XZ position.
+struct GrassGround
+{
+    /// Metres above the origin.
+    float height;
+    /// The ground's unit normal.
+    float3 normal;
+};
+
+/// `grass_gen.slang`'s texel of the ground field, copied.
+float grass_ground_texel(int2 texel)
+{
+    int2 last = int2(int(field.maps.x) - 1, int(field.maps.y) - 1);
+    return grassGround.Load(int3(clamp(texel, int2(0, 0), last), 0));
+}
+
+/// `grass_gen.slang`'s ground under a point, copied — so a shell's sheet stands
+/// on the height a card's root was placed at.
+GrassGround grass_ground_under(float2 world)
+{
+    float2 at = (world - field.ground.xy) * field.ground.w;
+    float2 base = floor(at);
+    float2 blend = at - base;
+    int2 texel = int2(base);
+    float h00 = grass_ground_texel(texel);
+    float h10 = grass_ground_texel(texel + int2(1, 0));
+    float h01 = grass_ground_texel(texel + int2(0, 1));
+    float h11 = grass_ground_texel(texel + int2(1, 1));
+
+    GrassGround under;
+    float lower = h00 + blend.x * (h10 - h00);
+    float upper = h01 + blend.x * (h11 - h01);
+    under.height = lower + blend.y * (upper - lower);
+    float rise_x = 0.5 * ((h10 - h00) + (h11 - h01));
+    float rise_z = 0.5 * ((h01 - h00) + (h11 - h10));
+    under.normal = normalize(float3(-rise_x, field.ground.z, -rise_z));
+    return under;
+}
+
+/// Which colour patch cell `cell` — `slot * capacity + lane` — belongs to, as a
+/// lane in `0..1`. `crcbl_shaders::grass::patch_of`.
+///
+/// Integer arithmetic on the cell's place in the whole field rather than in its
+/// tile, so a patch runs across a tile's edge like any other.
+float grass_patch(uint cell)
+{
+    uint capacity = max(field.tiles.w, 1u);
+    uint side = max(field.tiles.z, 1u);
+    uint across = max(field.tiles.x, 1u);
+    uint slot = cell / capacity;
+    uint lane = cell % capacity;
+    uint x = (slot % across) * side + lane % side;
+    uint z = (slot / across) * side + lane / side;
+    uint key = (x / GRASS_PATCH_CELLS) * 0x8da6b343u ^ (z / GRASS_PATCH_CELLS) * 0xd8163841u;
+    return grass_unit_pair(grass_hash(key ^ GRASS_PATCH_SALT)).x;
+}
+
+/// A row by the index an instance names, clamped into the table.
+GrassBlade grass_row(uint index)
+{
+    return blades[min(index, max(grass.limits.y, 1u) - 1u)];
+}
+
+/// Decision 4's levers, over a colour its row has already graded from root to
+/// tip: the root's occlusion colour, the patch's, and the additive tip colour.
+///
+/// `along` is the height up the blade in `0..1` and `patch` the blade's patch
+/// lane. **Every lever at zero returns `color` exactly** — a `lerp` by zero and
+/// an add of zero — which is what keeps a row that pulls none of them drawing
+/// the picture it drew before they existed.
+float3 grass_style(float3 color, GrassBlade row, float along, float patch)
+{
+    float reach = row.occlusion.a;
+    float occluded = reach > 0.0 ? saturate(1.0 - along / reach) : 0.0;
+    float3 styled = lerp(color, row.occlusion.rgb, occluded);
+    styled = lerp(styled, row.patch.rgb, row.patch.a * patch);
+    float start = row.glow.a;
+    float glow = saturate((along - start) / max(1.0 - start, 1e-4));
+    return styled + row.glow.rgb * glow;
+}
+
+/// The light reaching a blade at `world_position` shading by `normal`, before
+/// its albedo: every clustered light through the copied walks, plus the frame's
+/// flat ambient.
+///
+/// **Lambert, and nothing beside it** — see the header.
+float3 grass_light(float3 world_position, float3 normal, float2 pixel)
+{
+    // The blade's own plane has no bearing on the shading — see the header —
+    // but it is what the shadow biases want, and the normal it shades by is the
+    // nearest thing to it a cutout has.
     float3 geometric_normal = normal;
 
     // This fragment's froxel and the lights in it, `mesh.slang`'s lookup: the
     // view depth out of the matrix rather than off `SV_Position.w`, which the
     // four targets have twice disagreed about.
-    float view_depth = mul(frame.view_proj, float4(input.world_position, 1.0)).w;
-    uint base = froxel_of(input.position.xy, view_depth) * CLUSTER_STRIDE;
+    float view_depth = mul(frame.view_proj, float4(world_position, 1.0)).w;
+    uint base = froxel_of(pixel, view_depth) * CLUSTER_STRIDE;
     uint count = min(cluster_lights[base], CLUSTER_LIGHT_CAPACITY);
 
     float3 direct = float3(0.0, 0.0, 0.0);
@@ -1286,7 +1520,7 @@ float4 fragmentMain(GrassVertex input) : SV_Target
         }
         else
         {
-            float3 offset = light.position.xyz - input.world_position;
+            float3 offset = light.position.xyz - world_position;
             float distance = length(offset);
             to_light = offset / max(distance, 1e-6);
             reach = punctual_falloff(distance, light.position.w);
@@ -1302,26 +1536,391 @@ float4 fragmentMain(GrassVertex input) : SV_Target
         {
             uint sun_cascade;
             float sun_fade;
-            reach = sun_visibility(input.world_position, to_light, n_dot_l, geometric_normal,
-                                   input.position.xy, sun_cascade, sun_fade);
+            reach = sun_visibility(world_position, to_light, n_dot_l, geometric_normal, pixel,
+                                   sun_cascade, sun_fade);
         }
         else if (light.kind == KIND_POINT)
         {
             if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
             {
-                reach *= point_visibility(light, light.shadow_tile, input.world_position, to_light,
-                                          n_dot_l, geometric_normal, input.position.xy);
+                reach *= point_visibility(light, light.shadow_tile, world_position, to_light,
+                                          n_dot_l, geometric_normal, pixel);
             }
         }
         else if (light.shadow_tile < SHADOW_LIGHT_TILES)
         {
-            reach *= spot_visibility(light, light.shadow_tile, input.world_position, to_light,
-                                     n_dot_l, geometric_normal, input.position.xy);
+            reach *= spot_visibility(light, light.shadow_tile, world_position, to_light, n_dot_l,
+                                     geometric_normal, pixel);
         }
 
-        // Lambert, and nothing beside it — see the header.
         direct += light.color.rgb * (max(n_dot_l, 0.0) * reach);
     }
 
-    return float4(input.color * (direct + frame.ambient.rgb), 1.0);
+    return direct + frame.ambient.rgb;
+}
+
+/// What the vertex stage hands the fragment stage.
+struct GrassVertex
+{
+    float4 position : SV_Position;
+    /// The world-space point, for the shadow walk and the light grid.
+    float3 world_position : WORLD_POSITION;
+    /// The normal the card shades by: the ground's under the blade's root —
+    /// decision 4's "normals taken from the ground … so a field shades as one
+    /// surface" — or straight up, where its row asks for that.
+    float3 normal : NORMAL;
+    /// The blade's colour at this point: its row's root-to-tip gradient, tinted
+    /// by its own lane.
+    float3 color : COLOR;
+    /// `x` across the card and `y` up it, zero at the root.
+    float2 uv : TEXCOORD0;
+    /// Which level of the card's chain this blade reads — see
+    /// `grassCardLevel`. Flat across the card by construction: every vertex of
+    /// one instance computes it from the same width and the same depth.
+    float level : CARD_LEVEL;
+    /// The blade's row, for the levers the fragment stage pulls.
+    nointerpolation uint row : BLADE_ROW;
+    /// The blade's patch lane — see `grass_patch`.
+    nointerpolation float patch : PATCH;
+};
+
+/// Two crossed quads per instance, built from `SV_VertexID`.
+[shader("vertex")]
+GrassVertex vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID)
+{
+    // The slot's run, reached by the base this adds rather than by the draw's
+    // `firstInstance` — see the header.
+    GrassInstance blade = instances[tile.slot.x * grass.limits.x + instance_id];
+    GrassBlade row = grass_row(blade.lanes.y);
+
+    uint quad = index / GRASS_CARD_QUAD_VERTICES;
+    float2 corner = GRASS_CARD_CORNERS[index % GRASS_CARD_QUAD_VERTICES];
+
+    // The second quad is the first turned a quarter turn about `+Y`, which for
+    // a horizontal unit vector is the swap and one negation below — the
+    // rotation decision 9 asks for, written without an angle.
+    float2 facing = blade.facing.xy;
+    float2 across = quad == 0u ? facing : float2(-facing.y, facing.x);
+
+    float3 sideways = float3(across.x, 0.0, across.y) * (blade.facing.z * (corner.x * 2.0 - 1.0));
+    // The lean rises as the square of the height along the blade, so the root
+    // does not move and the tip carries the whole of it: the curve a stalk
+    // rooted in the ground bends in, and the cheapest one that is flat at the
+    // root.
+    float3 leaning = blade.lean.xyz * (corner.y * corner.y);
+    float3 world = blade.root.xyz + sideways + float3(0.0, blade.root.w * corner.y, 0.0) + leaning;
+
+    GrassVertex output;
+    output.position = mul(frame.view_proj, float4(world, 1.0));
+    output.world_position = world;
+    output.normal = row.flags.y == GRASS_NORMAL_UP ? float3(0.0, 1.0, 0.0) : blade.ground.xyz;
+    // The row's root-to-tip gradient — decision 4's first lever — scaled by the
+    // blade's own tint lane over `GRASS_TINT_RANGE`, so a field is not one flat
+    // colour and no blade is darker than that fraction of its row.
+    float tint = 1.0 - GRASS_TINT_RANGE * blade.facing.w;
+    output.color = lerp(row.root_color.rgb, row.tip_color.rgb, corner.y) * tint;
+    output.uv = corner;
+    // The card's width on screen, from its own width in metres and the depth
+    // this vertex came out at. `w` is the view depth for a perspective
+    // projection and one for an orthographic one, which is the right answer in
+    // both cases: an orthographic camera does not shrink a card with distance.
+    output.level = grassCardLevel(2.0 * blade.facing.z * grass.screen.x
+                                  / max(abs(output.position.w), 1e-4));
+    output.row = min(blade.lanes.y, max(grass.limits.y, 1u) - 1u);
+    output.patch = grass_patch(blade.lanes.x);
+    return output;
+}
+
+/// The card, cut out, styled and lit.
+[shader("fragment")]
+float4 fragmentMain(GrassVertex input) : SV_Target
+{
+    // The cook's own level, chosen for the whole card by the vertex stage —
+    // see `grassCardLevel` for why it is not the hardware's.
+    float coverage =
+        grassCard
+            .SampleLevel(grassCardSampler, float3(input.uv.x, 1.0 - input.uv.y, 0.0), input.level)
+            .r;
+    if (coverage < GRASS_ALPHA_CUTOFF)
+    {
+        discard;
+    }
+
+    float3 color = grass_style(input.color, blades[input.row], input.uv.y, input.patch);
+    // Interpolation denormalises, `mesh.slang`'s reason exactly.
+    float3 normal = normalize(input.normal);
+    return float4(color * grass_light(input.world_position, normal, input.position.xy), 1.0);
+}
+
+/// What a shell's or a fin's vertex hands the fragment stage.
+struct GrassShellVertex
+{
+    float4 position : SV_Position;
+    /// The world-space point as drawn — bent by the wind — for the light walk.
+    float3 world_position : WORLD_POSITION;
+    /// The same point **before** the wind moved it: `xz` where on the ground it
+    /// stands and `y` its height above the ground in metres. What a strand is
+    /// looked up by, so a bent layer carries its strands with it.
+    float3 rest : REST_POSITION;
+    /// The ground's unit normal under the point.
+    float3 normal : NORMAL;
+    /// Metres of world one pixel spans at this point's depth.
+    float footprint : FOOTPRINT;
+    /// The occlusion this height is lit by — a shell's own row of the table, a
+    /// fin's nearest one.
+    float occlusion : OCCLUSION;
+    /// `x` zero for a shell, one for a fin on a line of constant `x` and two for
+    /// one of constant `z`; `y` how far the fin has faded in, one for a shell;
+    /// `z` the fin line's world coordinate; `w` unread.
+    nointerpolation float4 fin : FIN;
+};
+
+/// A point of a shell's or a fin's sheet: `rest` on the ground, `share` of the
+/// stack's height up it.
+GrassShellVertex grass_sheet_vertex(float2 rest, float share, float4 fin, float occlusion)
+{
+    GrassGround under = grass_ground_under(rest);
+    float lift = share * field.stack.x;
+    float3 ground = float3(rest.x, under.height, rest.y);
+    // Decision 5: "shells displace along the wind in proportion to the shell's
+    // height constant". The wind at the ground under this point bends a blade
+    // the stack's height through `grass_lean`, and a layer takes the share of
+    // that bend a card's point at the same share of its height does — the square
+    // of it. **Calm is still by the multiply**, `grass_lean`'s way.
+    float3 lean = grass_lean(windSample(ground - frame.camera_position.xyz), field.stack.x);
+    float3 world = ground + float3(0.0, lift, 0.0) + lean * (share * share);
+
+    GrassShellVertex output;
+    output.position = mul(frame.view_proj, float4(world, 1.0));
+    output.world_position = world;
+    output.rest = float3(rest.x, lift, rest.y);
+    output.normal = under.normal;
+    // `grass.screen.x` is how many pixels a metre spans at one unit of view
+    // depth, so its reciprocal times this depth is one pixel in metres.
+    output.footprint = max(abs(output.position.w), 1e-4) / max(grass.screen.x, 1e-4);
+    output.occlusion = occlusion;
+    output.fin = fin;
+    return output;
+}
+
+/// How many shells the field stacks, at least one.
+uint grass_shell_count()
+{
+    return clamp(uint(field.stack.y + 0.5), 1u, GRASS_MAX_SHELLS);
+}
+
+/// One shell layer of one tile: `GRASS_SHELL_GRID`² quads lifted off the ground.
+[shader("vertex")]
+GrassShellVertex shellVertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID)
+{
+    uint shells = grass_shell_count();
+    // Counted from the top — see the header.
+    uint shell = shells - 1u - min(instance_id, shells - 1u);
+    uint quad = index / GRASS_CARD_QUAD_VERTICES;
+    float2 corner = GRASS_CARD_CORNERS[index % GRASS_CARD_QUAD_VERTICES];
+    float2 cell = float2(float(quad % GRASS_SHELL_GRID), float(quad / GRASS_SHELL_GRID)) + corner;
+    float2 rest = tile.tile.xy + cell * (tile.tile.z / float(GRASS_SHELL_GRID));
+    float4 layer = field.layers[shell];
+    return grass_sheet_vertex(rest, layer.x, float4(0.0, 1.0, 0.0, 0.0), layer.y);
+}
+
+/// The occlusion a point `share` of the way up the stack is lit by: the highest
+/// shell at or below it, or the lowest shell's below that.
+float grass_occlusion_at(float share)
+{
+    uint shells = grass_shell_count();
+    float occlusion = field.layers[0].y;
+    for (uint shell = 0u; shell < shells; ++shell)
+    {
+        if (field.layers[shell].x <= share)
+        {
+            occlusion = field.layers[shell].y;
+        }
+    }
+    return occlusion;
+}
+
+/// One tile's fins: on each axis a line through the centre of every band of
+/// `GRASS_FIN_SPACING` cells, each `GRASS_FIN_SEGMENTS` quads along and
+/// `GRASS_FIN_ROWS` up.
+///
+/// **A fin not near a silhouette is collapsed here**, per segment: the ground
+/// normals either side of it are read, and a segment both of whose sides face
+/// the camera more squarely than `GRASS_FIN_GRAZE_START` is folded onto a point
+/// outside the clip volume. Where the two sides face opposite ways — a crest —
+/// it stands whatever the angle. Between the two thresholds the fin's strands
+/// are narrowed rather than the fin removed, so one does not pop in.
+[shader("vertex")]
+GrassShellVertex finVertexMain(uint index: SV_VertexID)
+{
+    uint quad = index / GRASS_CARD_QUAD_VERTICES;
+    float2 corner = GRASS_CARD_CORNERS[index % GRASS_CARD_QUAD_VERTICES];
+    uint lines = max(field.tiles.z / GRASS_FIN_SPACING, 1u);
+    uint strip = GRASS_FIN_SEGMENTS * GRASS_FIN_ROWS;
+    uint axis = min(quad / (lines * strip), 1u);
+    uint fin_line = (quad / strip) % lines;
+    uint segment = (quad / GRASS_FIN_ROWS) % GRASS_FIN_SEGMENTS;
+    uint rung = quad % GRASS_FIN_ROWS;
+
+    float band = float(GRASS_FIN_SPACING) * field.origin.w;
+    float across = (float(fin_line) + 0.5) * band;
+    float stride = tile.tile.z / float(GRASS_FIN_SEGMENTS);
+    float along = (float(segment) + corner.x) * stride;
+    float middle_along = (float(segment) + 0.5) * stride;
+    float share = (float(rung) + corner.y) / float(GRASS_FIN_ROWS);
+
+    // Axis zero is a line of constant `x` running along `z`, axis one a line of
+    // constant `z` running along `x`.
+    bool along_z = axis == 0u;
+    float2 rest = tile.tile.xy + (along_z ? float2(across, along) : float2(along, across));
+    float2 middle =
+        tile.tile.xy + (along_z ? float2(across, middle_along) : float2(middle_along, across));
+    float2 side = along_z ? float2(0.5 * band, 0.0) : float2(0.0, 0.5 * band);
+
+    GrassGround centre = grass_ground_under(middle);
+    GrassGround near_side = grass_ground_under(middle - side);
+    GrassGround far_side = grass_ground_under(middle + side);
+    float3 eye = frame.camera_position.xyz
+               - float3(middle.x, centre.height + 0.5 * field.stack.x, middle.y);
+    float3 view = eye / max(length(eye), 1e-6);
+    float facing_near = dot(near_side.normal, view);
+    float facing_far = dot(far_side.normal, view);
+    float graze = facing_near * facing_far <= 0.0
+                      ? 0.0
+                      : min(abs(facing_near), abs(facing_far));
+    float fade = saturate((GRASS_FIN_GRAZE_START - graze)
+                          / (GRASS_FIN_GRAZE_START - GRASS_FIN_GRAZE_FULL));
+
+    float line_at = (along_z ? tile.tile.x : tile.tile.y) + across;
+    GrassShellVertex output = grass_sheet_vertex(
+        rest, share, float4(float(axis) + 1.0, fade, line_at, 0.0), grass_occlusion_at(share));
+    if (fade <= 0.0 || field.stack.z <= 0.0)
+    {
+        // Folded onto one point, beyond the far plane of a reversed-Z volume:
+        // every triangle of the segment has no area and no fragment.
+        output.position = float4(0.0, 0.0, -1.0, 1.0);
+    }
+    return output;
+}
+
+/// A row of zeroes: no blade, which is what an empty cell holds.
+GrassInstance grass_no_blade()
+{
+    GrassInstance none;
+    none.root = float4(0.0, 0.0, 0.0, 0.0);
+    none.facing = float4(0.0, 0.0, 0.0, 0.0);
+    none.lean = float4(0.0, 0.0, 0.0, 0.0);
+    none.ground = float4(0.0, 0.0, 0.0, 0.0);
+    none.lanes = uint4(0u, 0u, 0u, 0u);
+    return none;
+}
+
+/// The blade in the cell `global` cells from the field's corner along `+X` and
+/// `+Z`, or a zero row — height zero, no strand — outside the field.
+GrassInstance grass_cell(int2 global)
+{
+    int side = int(max(field.tiles.z, 1u));
+    int2 extent = int2(int(field.tiles.x), int(field.tiles.y)) * side;
+    if (global.x < 0 || global.y < 0 || global.x >= extent.x || global.y >= extent.y)
+    {
+        return grass_no_blade();
+    }
+    uint2 at = uint2(global);
+    uint cells = uint(side);
+    uint slot = (at.y / cells) * field.tiles.x + at.x / cells;
+    uint lane = (at.y % cells) * cells + at.x % cells;
+    return grassCells[slot * field.tiles.w + lane];
+}
+
+/// How far from its root's centre a strand of `blade` reaches at `lift` metres
+/// up, or a negative number where no shell strand stands: an empty cell, a card
+/// row, or a point above the blade.
+float grass_strand_reach(GrassInstance blade, float lift, float floor_reach, float fade)
+{
+    if (!(lift < blade.root.w) || grass_row(blade.lanes.y).flags.x != GRASS_LOOK_SHELLS)
+    {
+        return -1.0;
+    }
+    float bound = 0.5 * field.origin.w;
+    float reach = min(blade.facing.z, bound) * (1.0 - lift / blade.root.w);
+    return min(max(reach, floor_reach), bound) * fade;
+}
+
+/// A shell's or a fin's strand, cut out, styled and lit.
+[shader("fragment")]
+float4 shellFragmentMain(GrassShellVertex input) : SV_Target
+{
+    float cell = field.origin.w;
+    float2 from_corner = (input.rest.xz - field.origin.xy) / cell;
+    int2 home = int2(floor(from_corner));
+    float2 inside = from_corner - floor(from_corner);
+    int2 toward = int2(inside.x < 0.5 ? -1 : 1, inside.y < 0.5 ? -1 : 1);
+    float lift = input.rest.y;
+    // No strand narrower than `GRASS_STRAND_MIN_PIXELS` — see that constant's
+    // Rust twin for why a cutout needs the floor.
+    float floor_reach = 0.5 * GRASS_STRAND_MIN_PIXELS * input.footprint;
+    float fade = input.fin.y;
+
+    GrassInstance found = grass_no_blade();
+    float nearest = 2.0;
+    if (input.fin.x < 0.5)
+    {
+        // A shell: the four cells nearest the point, and the strand's disc.
+        for (int dz = 0; dz < 2; ++dz)
+        {
+            for (int dx = 0; dx < 2; ++dx)
+            {
+                GrassInstance blade = grass_cell(home + int2(dx * toward.x, dz * toward.y));
+                float reach = grass_strand_reach(blade, lift, floor_reach, fade);
+                float2 offset = input.rest.xz - blade.root.xz;
+                float apart = sqrt(dot(offset, offset)) / max(reach, 1e-6);
+                if (reach > 0.0 && apart < nearest)
+                {
+                    nearest = apart;
+                    found = blade;
+                }
+            }
+        }
+    }
+    else
+    {
+        // A fin: every cell of its band across, and the two nearest along it —
+        // each strand seen from the side, as the interval its disc covers.
+        bool along_z = input.fin.x < 1.5;
+        float fin_line = (input.fin.z - (along_z ? field.origin.x : field.origin.y)) / cell;
+        int first = int(floor(fin_line + 0.5)) - int(GRASS_FIN_SPACING / 2u);
+        int along_home = along_z ? home.y : home.x;
+        int along_step = along_z ? toward.y : toward.x;
+        for (int band = 0; band < int(GRASS_FIN_SPACING); ++band)
+        {
+            for (int next = 0; next < 2; ++next)
+            {
+                int along = along_home + next * along_step;
+                GrassInstance blade = grass_cell(along_z ? int2(first + band, along)
+                                                         : int2(along, first + band));
+                float reach = grass_strand_reach(blade, lift, floor_reach, fade);
+                float offset =
+                    along_z ? input.rest.z - blade.root.z : input.rest.x - blade.root.x;
+                float apart = abs(offset) / max(reach, 1e-6);
+                if (reach > 0.0 && apart < nearest)
+                {
+                    nearest = apart;
+                    found = blade;
+                }
+            }
+        }
+    }
+    if (!(nearest < 1.0))
+    {
+        discard;
+    }
+
+    GrassBlade row = grass_row(found.lanes.y);
+    float along_blade = saturate(lift / found.root.w);
+    float tint = 1.0 - GRASS_TINT_RANGE * found.facing.w;
+    float3 color = lerp(row.root_color.rgb, row.tip_color.rgb, along_blade) * tint;
+    color = grass_style(color, row, along_blade, grass_patch(found.lanes.x)) * input.occlusion;
+    float3 normal =
+        row.flags.y == GRASS_NORMAL_UP ? float3(0.0, 1.0, 0.0) : normalize(input.normal);
+    return float4(color * grass_light(input.world_position, normal, input.position.xy), 1.0);
 }

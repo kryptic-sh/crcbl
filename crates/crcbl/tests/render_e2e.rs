@@ -195,6 +195,12 @@ mod wind;
 #[path = "render_e2e/grass.rs"]
 mod grass;
 
+// `docs/plan/57-grass.md` rung G3's shells, beside rung G1's cards: its claims
+// are relations to the card meadow's frame and readback, which `grass` holds
+// the helpers for.
+#[path = "render_e2e/grass_shells.rs"]
+mod grass_shells;
+
 // `docs/plan/07-ui-debug.md` rung 1's primitives, in a file of their own for the
 // same reason.
 #[path = "render_e2e/ui_primitives.rs"]

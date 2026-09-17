@@ -190,6 +190,8 @@ OPTIONS:
                                                shallow basin, a shore and a post
                            meadow              a hillside of card grass over a
                                                bare path, half of it in wind
+                           meadow_shells       that hillside's field drawn as
+                                               stylised shells with fins
                            sprite              four sprites over three batches
                            ui                  text, a rect and an outline
                            ui_primitives       rounded rects, a clipped image
@@ -1286,6 +1288,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::Probes,
         Scene::StillPool,
         Scene::Meadow,
+        Scene::MeadowShells,
         Scene::Sprite,
         Scene::Ui,
         Scene::UiPrimitives,
@@ -1328,6 +1331,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::Probes => "probes",
         Scene::StillPool => "still_pool",
         Scene::Meadow => "meadow",
+        Scene::MeadowShells => "meadow_shells",
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",
         Scene::UiPrimitives => "ui_primitives",

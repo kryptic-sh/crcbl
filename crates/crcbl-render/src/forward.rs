@@ -2381,7 +2381,8 @@ pub struct ForwardRenderer {
     /// [`set_wind`](ForwardRenderer::set_wind). Calm until a caller sets one.
     wind: crcbl_shaders::wind::WindParams,
     /// The grass draws the last [`add_passes`](ForwardRenderer::add_passes)
-    /// recorded for the primary camera: one per tile slot.
+    /// recorded for the primary camera: one per tile slot per look the field
+    /// draws.
     ///
     /// **Not among the direct draws**, unlike the water surface's: every one of
     /// them is an indirect call whose instance count lives in a buffer a
@@ -2474,7 +2475,7 @@ struct Rollback {
     sky_pass: Option<SkyPass>,
     /// The water surface's two pipelines, their layouts and a ring of blocks.
     water: Option<Water>,
-    /// The grass passes' three pipelines, their layouts and two rings of
+    /// The grass passes' pipelines, their layouts and their rings of
     /// blocks.
     grass: Option<Grass>,
     /// The shadow atlas viewer, which owns one pipeline, one layout and a ring
@@ -8445,10 +8446,11 @@ impl ForwardRenderer {
         self.recorded_water_draws = water
             .as_ref()
             .map_or(0, |water: &WaterFrame| water.draws.len() as u64);
-        // One indirect draw per tile slot the frame's field holds.
-        self.recorded_grass_draws = grass
-            .as_ref()
-            .map_or(0, |grass: &GrassFrame| u64::from(grass.slots));
+        // One indirect draw per tile slot the frame's field holds, per look it
+        // draws.
+        self.recorded_grass_draws = grass.as_ref().map_or(0, |grass: &GrassFrame| {
+            u64::from(grass.slots) * u64::from(grass.draws_per_slot())
+        });
         self.recorded_draws = shadow_draws
             + 2 * bucket_draws.calls.len() as u64
             + self.recorded_grass_draws
@@ -10344,8 +10346,8 @@ impl ForwardRenderer {
         self.water.bodies()
     }
 
-    /// The field of grass every view draws — `docs/plan/57-grass.md`'s rung G1,
-    /// and this crate's `grass` module for how.
+    /// The field of grass every view draws — `docs/plan/57-grass.md`'s rungs G1
+    /// and G3, and this crate's `grass` module for how.
     ///
     /// Replaces whatever was set before. The field's ground, cover map, blade
     /// table and per-tile blocks are uploaded here, and the buffers a dispatch
@@ -12150,7 +12152,7 @@ fn entry(shader: &crcbl_shaders::Shader, stage: Stage) -> Result<&'static str, H
 /// to the wrong stage would be a pipeline built with an amplification stage in
 /// its mesh slot, and the failure would arrive as a driver error rather than as
 /// this sentence.
-fn named_entry(
+pub(crate) fn named_entry(
     shader: &crcbl_shaders::Shader,
     name: &'static str,
     stage: Stage,
@@ -18409,6 +18411,10 @@ mod tests {
                             half_width: 0.03,
                             height_spread: 0.3,
                             width_spread: 0.2,
+                            // Shells, so the widest frame records every look's
+                            // draw the grass pass has.
+                            look: crate::grass::BladeLook::Shells,
+                            style: crate::grass::BladeStyle::PLAIN,
                         }],
                     )
                     .expect("a real field"),

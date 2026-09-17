@@ -1,15 +1,27 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/57-grass.md`'s rung G1, first half: one compute dispatch per tile,
-// generating the blades one draw reads.
+// `docs/plan/57-grass.md`'s rungs G1 and G3, first half: one compute dispatch
+// per tile, generating the blades the grass pass reads.
 //
 // # What a dispatch does
 //
 // Decision 2's lanes: each invocation's id becomes a cell of the tile's grid
 // plus a hash jitter, then the density test, then the cover map's blade row and
 // the ground's height and slope, then the distance cull, then the wind at the
-// root — and what survives is appended to the tile's slot with an atomic add,
-// which is decision 1's lock-free append.
+// root — and what survives is written twice. Once **by its cell**, into
+// `grassCells`, at an index the cell alone decides; and once **appended** to the
+// tile's slot with an atomic add, decision 1's lock-free append, when its row is
+// drawn as cards. A shell row is not appended: its slot's shell and fin draws
+// are given their instance counts instead, and the shells find the blade by its
+// cell.
+//
+// # One placement, whatever the look
+//
+// Decision 3's check — "a field that switches from cards to blades should
+// change one description and move nothing else" — is why `grassCells` is
+// written for every look. A row's look decides which draw reads a blade and
+// nothing about the blade: the same cell, root, size, facing, tint and lean
+// land in `grassCells` for a card row and for a shell row, bit for bit.
 //
 // # Deterministic, and exactly where
 //
@@ -36,7 +48,8 @@
 //
 // The ground field and the cover map are sampled textures read with `Load`, so
 // WebGPU's four storage textures per stage are untouched — and three storage
-// buffers, well inside the eight a browser guarantees.
+// buffers, well inside the eight a browser guarantees — four since the shells'
+// `grassCells` joined them.
 
 /// `wind.slang`'s uniform block, bound here as the very buffer that pass is
 /// handed. `crcbl_shaders::grass`'s `the_wind_block_is_the_field_s` is where
@@ -106,6 +119,11 @@ struct GrassGenParams
     /// holds, `z` how many cells lie along one side of a tile, and `w` how many
     /// slots there are.
     uint4 limits;
+    /// `x` the instance count a slot's shell draw is given once a shell row
+    /// grows in it, which is the field's shell count; `y` its fin draw's, one
+    /// where the field stands fins and zero where it does not. `zw` are written
+    /// as zero and unread.
+    uint4 looks;
 };
 
 [[vk::binding(4, 0)]]
@@ -131,7 +149,7 @@ ConstantBuffer<GrassTile> tile;
 /// field mixes. `crcbl_shaders::grass::GrassBlade`.
 ///
 /// Decision 3's "one blade description": cards, mesh blades and shells differ in
-/// the geometry a row is drawn with and not in the row. Rung G1 draws the cards.
+/// the geometry a row is drawn with and not in the row — `flags.x` names which.
 struct GrassBlade
 {
     /// The colour at the blade's root in `rgb`; `a` is written as zero and
@@ -143,6 +161,19 @@ struct GrassBlade
     /// fraction of the height a blade may lose to its own hash and `w` the
     /// fraction of the half-width it may lose.
     float4 size;
+    /// Decision 4's root occlusion: the colour a blade darkens toward at its
+    /// root in `rgb`, and in `a` the fraction of its height that reaches. A
+    /// reach of zero is exactly no occlusion.
+    float4 occlusion;
+    /// The additive tip colour in `rgb`, and in `a` the fraction of the height
+    /// it starts at. A colour of zero adds exactly nothing.
+    float4 glow;
+    /// The colour a patch leans toward in `rgb`, and in `a` the most of it a
+    /// patch takes. A share of zero is exactly no patch.
+    float4 patch;
+    /// `x` the look — `GRASS_LOOK_CARDS` or `GRASS_LOOK_SHELLS` — and `y` the
+    /// normal it shades by. `zw` are written as zero and unread.
+    uint4 flags;
 };
 
 /// One generated blade — what a generation dispatch appends and what a draw
@@ -199,6 +230,14 @@ RWStructuredBuffer<GrassInstance> instances;
 [[vk::binding(10, 0)]]
 RWStructuredBuffer<Atomic<uint> > drawArgs;
 
+/// Every cell's blade, **at the cell's own index** — `[s * capacity + lane]` for
+/// lane `lane` of slot `s` — and zero where the cell carries none. What the
+/// shells and their fins look a strand up in: a fragment knows where it is, so
+/// it knows its cell, and an appended run in scheduler order could not answer
+/// it.
+[[vk::binding(11, 0)]]
+RWStructuredBuffer<GrassInstance> grassCells;
+
 static const float WIND_MIN_DIRECTION_LENGTH_SQUARED = 1e-12;
 
 
@@ -247,6 +286,30 @@ static const uint GRASS_WORKGROUP_SIZE = 64;
 /// Words in one non-indexed draw's argument structure: vertex count, instance
 /// count, first vertex, first instance. `crcbl_shaders::grass::DRAW_ARG_WORDS`.
 static const uint GRASS_DRAW_ARG_WORDS = 4;
+
+/// Draws a slot owns, back to back: cards, shells, fins.
+/// `crcbl_shaders::grass::DRAWS_PER_SLOT`.
+static const uint GRASS_DRAWS_PER_SLOT = 3;
+
+/// Which of a slot's draws the shells and the fins are.
+/// `crcbl_shaders::grass::SHELL_DRAW` and `FIN_DRAW`.
+static const uint GRASS_SHELL_DRAW = 1;
+
+static const uint GRASS_FIN_DRAW = 2;
+
+/// A row drawn as shells. `crcbl_shaders::grass::LOOK_SHELLS`.
+static const uint GRASS_LOOK_SHELLS = 1;
+
+/// Vertices one shell draws. `crcbl_shaders::grass::SHELL_VERTICES`.
+static const uint GRASS_SHELL_VERTICES = 1536;
+
+/// Cells across one band of fins, and the quads along and up one fin.
+/// `crcbl_shaders::grass::FIN_SPACING`, `FIN_SEGMENTS` and `FIN_ROWS`.
+static const uint GRASS_FIN_SPACING = 4;
+
+static const uint GRASS_FIN_SEGMENTS = 16;
+
+static const uint GRASS_FIN_ROWS = 4;
 
 /// Vertices one card instance draws: two crossed quads of six.
 /// `crcbl_shaders::grass::CARD_VERTICES`.
@@ -304,6 +367,28 @@ uint grass_hash(uint value)
 float2 grass_unit_pair(uint lane)
 {
     return float2(float(lane & 0xffffu), float((lane >> 16u) & 0xffffu)) * (1.0 / 65536.0);
+}
+
+/// How far the wind `velocity` moves the tip of a blade `height` metres tall: its
+/// travel along the wind in `xz` and its drop in `y`.
+///
+/// Decision 5's lean, and **the one formula every look bends by** — the card's
+/// tip here, and a shell's layer in `grass.slang`, which copies this body. Calm
+/// is still by the multiply: a zero velocity makes `bend` exactly zero, so the
+/// travel is `0 * (0 / 1e-6)` and the drop is `0 / (2h)`.
+float3 grass_lean(float3 velocity, float height)
+{
+    float speed = length(velocity);
+    float bend = height * GRASS_MAX_BEND * (speed / (speed + GRASS_BEND_HALF_SPEED));
+    float2 along = velocity.xz * (bend / max(speed, 1e-6));
+    // God of War's "translate and restore length": the tip has travelled `bend`
+    // sideways, so it drops by `h - sqrt(h² - bend²)`. Written as the
+    // difference of squares over the sum, which is the same number without the
+    // cancellation — and which is exactly zero when `bend` is, where the
+    // subtraction would leave a rounding of `sqrt(h²)` behind and make a calm
+    // blade lean by a tenth of a micron.
+    float drop = bend * bend / (height + sqrt(max(height * height - bend * bend, 0.0)));
+    return float3(along.x, -drop, along.y);
 }
 
 /// The height and the ground's unit normal under a world XZ position.
@@ -386,14 +471,25 @@ void clearMain(uint3 thread: SV_DispatchThreadID)
     {
         return;
     }
-    uint at = slot * GRASS_DRAW_ARG_WORDS;
-    drawArgs[at].store(GRASS_CARD_VERTICES);
-    drawArgs[at + 1u].store(0u);
-    drawArgs[at + 2u].store(0u);
-    // **Zero, and WebGPU will not take anything else**: `firstInstance` must be
-    // zero unless `indirect-first-instance` is enabled, so a slot's run is
-    // reached by the base the vertex stage adds rather than by this word.
-    drawArgs[at + 3u].store(0u);
+    // The three draws a slot owns, each at an instance count of zero: the
+    // cards count up from it and the shells and fins are set off it only where
+    // a shell row grows.
+    uint side = grass.limits.z;
+    uint fin_vertices = 2u * (side / GRASS_FIN_SPACING) * GRASS_FIN_SEGMENTS * GRASS_FIN_ROWS * 6u;
+    for (uint draw = 0u; draw < GRASS_DRAWS_PER_SLOT; ++draw)
+    {
+        uint at = (slot * GRASS_DRAWS_PER_SLOT + draw) * GRASS_DRAW_ARG_WORDS;
+        uint vertices = draw == GRASS_SHELL_DRAW ? GRASS_SHELL_VERTICES
+                      : draw == GRASS_FIN_DRAW   ? fin_vertices
+                                                 : GRASS_CARD_VERTICES;
+        drawArgs[at].store(vertices);
+        drawArgs[at + 1u].store(0u);
+        drawArgs[at + 2u].store(0u);
+        // **Zero, and WebGPU will not take anything else**: `firstInstance` must
+        // be zero unless `indirect-first-instance` is enabled, so a slot's run
+        // is reached by the base the vertex stage adds rather than by this word.
+        drawArgs[at + 3u].store(0u);
+    }
 }
 
 /// One invocation per cell of one tile.
@@ -415,6 +511,16 @@ void generateMain(uint3 thread: SV_DispatchThreadID)
 
     uint lane = thread.x;
     uint cell = tile.slot.x * capacity + lane;
+    // **Empty first**, so a cell that carries no blade this frame — bare, or
+    // out of reach — reads as zero rather than as whatever the last frame left.
+    // A height of zero is what a shell reads as "no strand here".
+    GrassInstance empty;
+    empty.root = float4(0.0, 0.0, 0.0, 0.0);
+    empty.facing = float4(0.0, 0.0, 0.0, 0.0);
+    empty.lean = float4(0.0, 0.0, 0.0, 0.0);
+    empty.ground = float4(0.0, 0.0, 0.0, 0.0);
+    empty.lanes = uint4(0u, 0u, 0u, 0u);
+    grassCells[cell] = empty;
     float side = tile.tile.z / float(cells);
     float2 jitter = grass_unit_pair(grass_hash(cell));
     float2 world = tile.tile.xy
@@ -460,33 +566,35 @@ void generateMain(uint3 thread: SV_DispatchThreadID)
     float2 facing = square_length > 1e-8 ? square / sqrt(square_length) : float2(1.0, 0.0);
 
     // Decision 5's lean: the wind at the blade's root, sampled through
-    // `wind.slang`'s own formula. **Calm is still by the multiply**: a
-    // zero-intensity texel makes `velocity` exactly zero, so `bend` is exactly
-    // zero and the whole displacement is `0 * (0 / 1e-6)`, which is zero.
-    float3 velocity = windSample(relative);
-    float speed = length(velocity);
-    float bend = height * GRASS_MAX_BEND * (speed / (speed + GRASS_BEND_HALF_SPEED));
-    float2 along = velocity.xz * (bend / max(speed, 1e-6));
-    // God of War's "translate and restore length": the tip has travelled `bend`
-    // sideways, so it drops by `h - sqrt(h² - bend²)`. Written as the
-    // difference of squares over the sum, which is the same number without the
-    // cancellation — and which is exactly zero when `bend` is, where the
-    // subtraction would leave a rounding of `sqrt(h²)` behind and make a calm
-    // blade lean by a tenth of a micron.
-    float drop = bend * bend / (height + sqrt(max(height * height - bend * bend, 0.0)));
+    // `wind.slang`'s own formula and bent by `grass_lean`.
+    float3 lean = grass_lean(windSample(relative), height);
 
     GrassInstance instance;
     instance.root = float4(root, height);
     instance.facing =
         float4(facing, half_width, grass_unit_pair(grass_hash(cell ^ GRASS_TINT_SALT)).x);
-    instance.lean = float4(along.x, -drop, along.y, 0.0);
+    instance.lean = float4(lean, 0.0);
     instance.ground = float4(under.normal, 0.0);
     instance.lanes = uint4(cell, row, 0u, 0u);
+
+    grassCells[cell] = instance;
+
+    uint slot_args = tile.slot.x * GRASS_DRAWS_PER_SLOT;
+    if (blade.flags.x == GRASS_LOOK_SHELLS)
+    {
+        // A shell row is drawn by the slot's shell and fin draws, which read it
+        // out of `grassCells`. **A store rather than an add**: every shell
+        // blade of the slot writes the same count, so the race between them
+        // writes one value however it resolves.
+        drawArgs[(slot_args + GRASS_SHELL_DRAW) * GRASS_DRAW_ARG_WORDS + 1u].store(grass.looks.x);
+        drawArgs[(slot_args + GRASS_FIN_DRAW) * GRASS_DRAW_ARG_WORDS + 1u].store(grass.looks.y);
+        return;
+    }
 
     // Decision 1's lock-free append: the atomic add returns the value the word
     // held, which is this blade's place in the slot. **The order within a
     // slot is not determined** — that is what lock-free means — so a comparison
     // of two runs sorts on `lanes.x` before it compares.
-    uint at = drawArgs[tile.slot.x * GRASS_DRAW_ARG_WORDS + 1u].add(1u);
+    uint at = drawArgs[slot_args * GRASS_DRAW_ARG_WORDS + 1u].add(1u);
     instances[tile.slot.x * capacity + at] = instance;
 }

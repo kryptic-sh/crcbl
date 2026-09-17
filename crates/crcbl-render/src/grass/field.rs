@@ -25,11 +25,27 @@
 //! # No texture is named by a field
 //!
 //! The card every blade is drawn with is the engine's, authored in arithmetic by
-//! [`super::card`]. A field that named an image would need an asset seam, a
-//! page and a cook of its own, and at this rung there is one look; `docs/backlog.md`
-//! carries the authored page.
+//! [`super::card`], and a shell's strand is arithmetic in the shader. A field
+//! that named an image would need an asset seam, a page and a cook of its own;
+//! `docs/backlog.md` carries the authored page.
+//!
+//! # A look and a style are a blade row's, the shell stack is the field's
+//!
+//! Decision 3's three looks are one blade description drawn three ways, so
+//! [`BladeType::look`] is a field of the row and switching it changes nothing
+//! else — not which cells carry a blade, not their size, not the wind they lean
+//! in. Decision 4's levers are [`BladeType::style`] for the same reason: "each
+//! is a field of the blade type, so any of the three looks can be stylised".
+//!
+//! [`Shells`] is the field's rather than a row's, because every shell row of a
+//! field stands in one stack: its count is what the shells' overdraw is
+//! proportional to, and a stack cannot be sixteen layers under one row and
+//! thirty-two under the next.
 
-use crcbl_shaders::grass::{BLADE_STRIDE, GrassBlade, INSTANCE_STRIDE};
+use crcbl_shaders::grass::{
+    BLADE_STRIDE, DEFAULT_SHELLS, GrassBlade, INSTANCE_STRIDE, LOOK_CARDS, LOOK_SHELLS, MAX_SHELLS,
+    NORMAL_GROUND, NORMAL_UP,
+};
 
 /// Cells along one side of a tile's placement grid.
 ///
@@ -123,9 +139,9 @@ pub enum GrassError {
         /// Rows that arrived.
         rows: usize,
     },
-    /// A blade row whose size or spread is not a number a card can be built
-    /// from.
-    #[error("blade row {row}'s {what} of {value} is not one a card is drawn with")]
+    /// A blade row whose size, spread or lever is not a number a blade can be
+    /// drawn with.
+    #[error("blade row {row}'s {what} of {value} is not one a blade is drawn with")]
     Blade {
         /// Which row was refused.
         row: usize,
@@ -133,6 +149,12 @@ pub enum GrassError {
         what: &'static str,
         /// What was offered.
         value: f32,
+    },
+    /// A shell stack of no layers, or of more than [`MAX_SHELLS`].
+    #[error("a stack of {count} shells is not one a field holds; 1 to {MAX_SHELLS} are")]
+    Shells {
+        /// Layers that were asked for.
+        count: u32,
     },
 }
 
@@ -173,8 +195,115 @@ pub struct CoverMap {
     pub cover: Vec<[u8; 2]>,
 }
 
-/// One row of the blade table — decision 3's "one blade description", of which
-/// rung G1 draws the card.
+/// Which geometry a blade row is drawn with — decision 3's looks.
+///
+/// Rung G2's mesh blades are the third, and are not built.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BladeLook {
+    /// Two crossed cards per blade, cut out against the cooked coverage chain:
+    /// the photoreal look, and the cheapest.
+    #[default]
+    Cards,
+    /// Acerola's shell texturing: the field's [`Shells`] stacked over the
+    /// ground, each cutting out a cone about every blade's root, with fins
+    /// where the stack is seen at a grazing angle.
+    Shells,
+}
+
+/// Which normal a blade row shades by — decision 4's last lever.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BladeNormal {
+    /// The ground's under the blade's root, so a field shades as the surface it
+    /// grows on.
+    #[default]
+    Ground,
+    /// Straight up whatever the ground does, so a hillside shades as one flat
+    /// colour — the stylised half of the lever.
+    Up,
+}
+
+/// Decision 4's shading levers: "a base-to-tip gradient along the blade, an
+/// ambient-occlusion colour at the root, an additive tip colour (Acerola),
+/// clump-coloured patches (Ghost of Tsushima), and normals taken from the ground
+/// or straight up".
+///
+/// The gradient is [`BladeType::root_color`] and [`BladeType::tip_color`], which
+/// every row has always carried; the rest are here. **[`BladeStyle::PLAIN`]
+/// pulls none of them**, and a row carrying it draws exactly the picture it drew
+/// before they existed — `grass.slang`'s `grass_style` returns its colour
+/// unchanged for it, not merely close to it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BladeStyle {
+    /// The colour a blade darkens toward at its root.
+    pub root_occlusion: [f32; 3],
+    /// The fraction of a blade's height the occlusion colour reaches up it, in
+    /// `0..=1`. Zero is no occlusion at all.
+    pub occlusion_reach: f32,
+    /// The colour added toward a blade's tip. Black adds nothing.
+    pub tip_glow: [f32; 3],
+    /// The fraction of a blade's height the tip colour starts at, in `0..1`; it
+    /// rises linearly from there to all of itself at the tip.
+    pub glow_start: f32,
+    /// The colour a patch of blades leans toward.
+    pub patch_color: [f32; 3],
+    /// The most of [`BladeStyle::patch_color`] a patch takes, in `0..=1`; each
+    /// patch takes its own hashed share of it. Zero is no patches.
+    ///
+    /// **Patches are squares of `crcbl_shaders::grass::PATCH_CELLS` placement
+    /// cells**, not the Voronoi clumps decision 2 describes: those arrive with
+    /// rung G2, and this lever reads them once they do.
+    pub patch_share: f32,
+    /// The normal the row shades by.
+    pub normal: BladeNormal,
+}
+
+impl BladeStyle {
+    /// No lever pulled: no occlusion, no glow, no patches, the ground's normal.
+    pub const PLAIN: Self = Self {
+        root_occlusion: [0.0; 3],
+        occlusion_reach: 0.0,
+        tip_glow: [0.0; 3],
+        glow_start: 0.0,
+        patch_color: [0.0; 3],
+        patch_share: 0.0,
+        normal: BladeNormal::Ground,
+    };
+}
+
+impl Default for BladeStyle {
+    fn default() -> Self {
+        Self::PLAIN
+    }
+}
+
+/// A field's shell stack: how many layers, and whether fins stand where the
+/// stack is seen edge-on.
+///
+/// **The overdraw of a shell look is proportional to [`Shells::count`]**, which
+/// is decision 3's price and the reason it is a parameter: every layer is a
+/// sheet over the whole field, and a fragment of each is shaded wherever the
+/// sheet is on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shells {
+    /// Layers in the stack, `1..=MAX_SHELLS`.
+    pub count: u32,
+    /// Whether fins stand at silhouettes. Off, a stack seen at a grazing angle
+    /// shows the gaps between its layers — which is what a test of the fins
+    /// compares against.
+    pub fins: bool,
+}
+
+impl Default for Shells {
+    fn default() -> Self {
+        Self {
+            count: DEFAULT_SHELLS,
+            fins: true,
+        }
+    }
+}
+
+/// One row of the blade table — decision 3's "one blade description", drawn as
+/// its [`BladeType::look`] says.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BladeType {
     /// The colour at the blade's root. Decision 4's root-occlusion lever: a
@@ -190,25 +319,97 @@ pub struct BladeType {
     /// in `0..1`.
     pub height_spread: f32,
     /// The same for [`BladeType::half_width`].
+    ///
+    /// A shell strand's root is this half-width too, bounded by half a
+    /// placement cell — see `grass.slang`'s `grass_strand_reach`.
     pub width_spread: f32,
+    /// The geometry the row is drawn with.
+    pub look: BladeLook,
+    /// Decision 4's levers.
+    pub style: BladeStyle,
 }
 
 impl BladeType {
     /// The row as the shader reads it.
     #[must_use]
     pub fn row(&self) -> GrassBlade {
-        let [root_r, root_g, root_b] = self.root_color;
-        let [tip_r, tip_g, tip_b] = self.tip_color;
+        let with = |[r, g, b]: [f32; 3], a: f32| [r, g, b, a];
+        let style = self.style;
         GrassBlade {
-            root_color: [root_r, root_g, root_b, 0.0],
-            tip_color: [tip_r, tip_g, tip_b, 0.0],
+            root_color: with(self.root_color, 0.0),
+            tip_color: with(self.tip_color, 0.0),
             size: [
                 self.height,
                 self.half_width,
                 self.height_spread,
                 self.width_spread,
             ],
+            occlusion: with(style.root_occlusion, style.occlusion_reach),
+            glow: with(style.tip_glow, style.glow_start),
+            patch: with(style.patch_color, style.patch_share),
+            flags: [
+                match self.look {
+                    BladeLook::Cards => LOOK_CARDS,
+                    BladeLook::Shells => LOOK_SHELLS,
+                },
+                match style.normal {
+                    BladeNormal::Ground => NORMAL_GROUND,
+                    BladeNormal::Up => NORMAL_UP,
+                },
+                0,
+                0,
+            ],
         }
+    }
+
+    /// The first of this row's numbers a shader could not draw with, as the
+    /// name and value [`GrassError::Blade`] reports.
+    fn refusal(&self) -> Option<(&'static str, f32)> {
+        let style = self.style;
+        let unit = |value: f32| value.is_finite() && (0.0..=1.0).contains(&value);
+        let below_one = |value: f32| value.is_finite() && (0.0..1.0).contains(&value);
+        let colour = |value: f32| value.is_finite() && value >= 0.0;
+        let checks = [
+            (
+                "height",
+                self.height,
+                self.height.is_finite() && self.height > 0.0,
+            ),
+            (
+                "half-width",
+                self.half_width,
+                self.half_width.is_finite() && self.half_width > 0.0,
+            ),
+            (
+                "height spread",
+                self.height_spread,
+                below_one(self.height_spread),
+            ),
+            (
+                "width spread",
+                self.width_spread,
+                below_one(self.width_spread),
+            ),
+            (
+                "occlusion reach",
+                style.occlusion_reach,
+                unit(style.occlusion_reach),
+            ),
+            ("glow start", style.glow_start, below_one(style.glow_start)),
+            ("patch share", style.patch_share, unit(style.patch_share)),
+        ];
+        let colours = [
+            ("root occlusion colour", style.root_occlusion),
+            ("tip glow", style.tip_glow),
+            ("patch colour", style.patch_color),
+        ]
+        .into_iter()
+        .flat_map(|(what, rgb)| rgb.map(|value| (what, value, colour(value))));
+        checks
+            .into_iter()
+            .chain(colours)
+            .find(|(_, _, ok)| !ok)
+            .map(|(what, value, _)| (what, value))
     }
 }
 
@@ -226,6 +427,7 @@ pub struct GrassField {
     ground: Heightfield,
     cover: CoverMap,
     blades: Vec<BladeType>,
+    shells: Shells,
 }
 
 impl GrassField {
@@ -272,21 +474,8 @@ impl GrassField {
             return Err(GrassError::Blades { rows: blades.len() });
         }
         for (row, blade) in blades.iter().enumerate() {
-            for (what, value, positive) in [
-                ("height", blade.height, true),
-                ("half-width", blade.half_width, true),
-                ("height spread", blade.height_spread, false),
-                ("width spread", blade.width_spread, false),
-            ] {
-                let ok = value.is_finite()
-                    && if positive {
-                        value > 0.0
-                    } else {
-                        (0.0..1.0).contains(&value)
-                    };
-                if !ok {
-                    return Err(GrassError::Blade { row, what, value });
-                }
+            if let Some((what, value)) = blade.refusal() {
+                return Err(GrassError::Blade { row, what, value });
             }
         }
         Ok(Self {
@@ -297,7 +486,50 @@ impl GrassField {
             ground,
             cover,
             blades,
+            shells: Shells::default(),
         })
+    }
+
+    /// This field with its shell stack replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`GrassError::Shells`] for a stack of no layers or of more than
+    /// [`MAX_SHELLS`], and then the field is not built.
+    pub fn with_shells(mut self, shells: Shells) -> Result<Self, GrassError> {
+        if !(1..=MAX_SHELLS).contains(&shells.count) {
+            return Err(GrassError::Shells {
+                count: shells.count,
+            });
+        }
+        self.shells = shells;
+        Ok(self)
+    }
+
+    /// The field's shell stack. Read by the draw only where a row's look is
+    /// [`BladeLook::Shells`].
+    #[must_use]
+    pub const fn shells(&self) -> Shells {
+        self.shells
+    }
+
+    /// Whether any row of the blade table is drawn as shells — which is whether
+    /// a frame records the shell and fin draws at all.
+    #[must_use]
+    pub fn draws_shells(&self) -> bool {
+        self.blades
+            .iter()
+            .any(|blade| blade.look == BladeLook::Shells)
+    }
+
+    /// How tall the shell stack stands, in metres: the tallest shell row's
+    /// height, which no blade of any row exceeds. Zero where no row is shells.
+    #[must_use]
+    pub fn shell_stack(&self) -> f32 {
+        self.blades
+            .iter()
+            .filter(|blade| blade.look == BladeLook::Shells)
+            .fold(0.0, |tallest, blade| tallest.max(blade.height))
     }
 
     /// Tiles along `+X` and along `+Z`.
@@ -602,6 +834,8 @@ pub(crate) mod tests {
             half_width: 0.03,
             height_spread: 0.4,
             width_spread: 0.3,
+            look: BladeLook::Cards,
+            style: BladeStyle::PLAIN,
         }]
     }
 
@@ -840,6 +1074,140 @@ pub(crate) mod tests {
         assert_eq!(row.root_color, [0.05, 0.12, 0.03, 0.0]);
         assert_eq!(row.tip_color, [0.35, 0.55, 0.15, 0.0]);
         assert_eq!(row.size, [0.4, 0.03, 0.4, 0.3]);
+        // A plain card row pulls no lever: every reach, start and share is the
+        // zero the shader returns its colour unchanged for.
+        assert_eq!(row.occlusion, [0.0; 4]);
+        assert_eq!(row.glow, [0.0; 4]);
+        assert_eq!(row.patch, [0.0; 4]);
+        assert_eq!(row.flags, [LOOK_CARDS, NORMAL_GROUND, 0, 0]);
+
+        let styled = BladeType {
+            look: BladeLook::Shells,
+            style: BladeStyle {
+                root_occlusion: [0.1, 0.2, 0.3],
+                occlusion_reach: 0.4,
+                tip_glow: [0.5, 0.6, 0.7],
+                glow_start: 0.8,
+                patch_color: [0.9, 1.0, 1.1],
+                patch_share: 0.25,
+                normal: BladeNormal::Up,
+            },
+            ..one_blade()[0]
+        }
+        .row();
+        assert_eq!(styled.occlusion, [0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(styled.glow, [0.5, 0.6, 0.7, 0.8]);
+        assert_eq!(styled.patch, [0.9, 1.0, 1.1, 0.25]);
+        assert_eq!(styled.flags, [LOOK_SHELLS, NORMAL_UP, 0, 0]);
+    }
+
+    /// **Every lever a shader divides by or blends with is refused out of
+    /// range**, and the shell stack's count is held to the block it fills.
+    #[test]
+    fn a_field_refuses_levers_and_stacks_a_shader_could_not_draw() {
+        let with_style = |style: BladeStyle| {
+            GrassField::new(
+                [1, 1],
+                8.0,
+                [0.0, 0.0],
+                10.0,
+                flat_ground(8, 0.0),
+                flat_cover(8, 8),
+                vec![BladeType {
+                    style,
+                    ..one_blade()[0]
+                }],
+            )
+        };
+        for (style, what) in [
+            (
+                BladeStyle {
+                    occlusion_reach: 1.5,
+                    ..BladeStyle::PLAIN
+                },
+                "occlusion reach",
+            ),
+            (
+                BladeStyle {
+                    glow_start: 1.0,
+                    ..BladeStyle::PLAIN
+                },
+                "glow start",
+            ),
+            (
+                BladeStyle {
+                    patch_share: -0.1,
+                    ..BladeStyle::PLAIN
+                },
+                "patch share",
+            ),
+            (
+                BladeStyle {
+                    tip_glow: [0.0, f32::NAN, 0.0],
+                    ..BladeStyle::PLAIN
+                },
+                "tip glow",
+            ),
+        ] {
+            assert!(
+                matches!(with_style(style), Err(GrassError::Blade { row: 0, what: refused, .. }) if refused == what),
+                "{what} was not refused"
+            );
+        }
+        let field = with_style(BladeStyle::PLAIN).expect("a plain row is a real row");
+        assert_eq!(field.shells(), Shells::default());
+        for count in [0, MAX_SHELLS + 1] {
+            assert_eq!(
+                field.clone().with_shells(Shells { count, fins: true }),
+                Err(GrassError::Shells { count })
+            );
+        }
+        let stacked = field
+            .with_shells(Shells {
+                count: MAX_SHELLS,
+                fins: false,
+            })
+            .expect("the widest stack is one the block holds");
+        assert_eq!(stacked.shells().count, MAX_SHELLS);
+    }
+
+    /// **The shell stack is the tallest shell row**, and a field with none has
+    /// none — so a card field records no shell draw.
+    #[test]
+    fn the_stack_stands_as_tall_as_the_tallest_shell_row() {
+        let mut rows = one_blade();
+        rows.push(BladeType {
+            height: 0.9,
+            look: BladeLook::Cards,
+            ..rows[0]
+        });
+        let cards = GrassField::new(
+            [1, 1],
+            8.0,
+            [0.0, 0.0],
+            10.0,
+            flat_ground(8, 0.0),
+            flat_cover(8, 8),
+            rows.clone(),
+        )
+        .expect("a real field");
+        assert!(!cards.draws_shells());
+        assert_eq!(cards.shell_stack(), 0.0);
+
+        rows[0].look = BladeLook::Shells;
+        let mixed = GrassField::new(
+            [1, 1],
+            8.0,
+            [0.0, 0.0],
+            10.0,
+            flat_ground(8, 0.0),
+            flat_cover(8, 8),
+            rows,
+        )
+        .expect("a real field");
+        assert!(mixed.draws_shells());
+        // The taller row is a card row, so the stack is the shell row's height.
+        assert_eq!(mixed.shell_stack(), 0.4);
     }
 
     /// The buffer sizes are what the shaders index, so a field that fits its

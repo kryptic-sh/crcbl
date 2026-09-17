@@ -75,6 +75,29 @@ G2–G6 and T1–T2 are separate slices rather than gaps.
   are committed and compile, but no frame has been drawn on either; CI's
   software adapters are the only verdict available.
 
+## What grass rung G3 shipped without (2026-09-17)
+
+- **`Scene::MeadowShells` is excused on the SwiftShader browser legs** and the
+  cross-backend step, like `meadow`: 2.81% of pixels past
+  `Tolerance::RASTERISER` and 0.45% past the gross allowance there, against
+  0.29% and 0.031% on radv, and 32 of 32 goldens matched on this machine's own
+  GPU. The Windows leg mirrors the Linux measurement rather than being measured
+  on Windows.
+- **Shells are unpriced in a browser**, as G1's cards are. Measured natively at
+  1920×1080: 16 shells with fins 0.933 ms on an RX 7900 XTX and 65.7 ms on
+  lavapipe, about 0.040 ms per layer on the hardware adapter.
+- **Not reviewed or tested**: shells and fins on Metal and D3D12.
+- **Patches are square 8-cell grids**, standing in for the clumps rung G2
+  brings; the patch lever should read clumps once they exist.
+- **Near the camera the stack shows its layers** at 16 shells over 0.55 m. A
+  per-distance shell count or near fins would fix it, if wanted.
+- **The `cells` buffer is allocated for card-only fields too**, the size of the
+  instance buffer, which is what makes a look switch bit-comparable.
+- **The shell sheet follows the ground at 16 quads per tile** only.
+- **Shell bend deviates from decision 5 on purpose**: a layer bends by `share²`
+  of the stack's lean, matching the card curve, rather than "in proportion to
+  the shell's height constant". Revisit if the plan's form is wanted.
+
 ## What wind rung W1 shipped without (2026-09-16)
 
 `crcbl-wind` landed with the gaps below; `docs/plan/56-wind.md` is the design,

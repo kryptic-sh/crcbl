@@ -16,6 +16,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **Grass rows carry a look and a style, and the grass buffers grew**:
+  `crcbl_render::grass::BladeType` has `look` and `style`, `GrassBuffers` has
+  `cells` and its `args` buffer holds three draws per slot
+  (`crcbl_shaders::grass::SLOT_ARGS_SIZE`), `GrassError` has `Shells`,
+  `crcbl_shaders::grass::GrassBlade` and `GenParams` grew fields, and
+  `crcbl::screenshot::Scene` has `MeadowShells`.
 - **`crcbl::screenshot::Scene` has a `Meadow` member**, so an exhaustive match
   on it — `crcbl-cli`'s `scene_name` is one — needs the new arm, and
   `crcbl screenshot --scene meadow` draws it.
@@ -206,6 +212,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Shell grass with fins, and stylised levers for every grass look**
+  (`docs/plan/57-grass.md` rung G3). A `BladeType` with
+  `look: BladeLook::Shells` is drawn as Acerola-style shells: a stack of
+  `GrassField::with_shells(Shells { count, fins })` layers, each cutting out a
+  tapered strand at every placed blade's root, with fins standing where the
+  stack is seen edge-on and layers bending in the wind field as card tips do.
+  `BladeStyle` adds root occlusion colour, tip glow, patch colour and a
+  ground-or-up normal to cards and shells alike, and `BladeStyle::PLAIN` draws
+  exactly what it drew before. Switching a row's look moves nothing but the row.
+  `crcbl screenshot --scene meadow_shells` draws the fixture.
 
 - **Rotating rigid bodies and the tumble sample** (`36-contact-solver.md` rung
   0). `crcbl_core::trig` is `f64` `sin` and `cos` constructed from exactly

@@ -86,6 +86,10 @@ fn the_binding_constants_are_the_shaders_declaration_order() {
             gen_binding::ARGS,
             "RWStructuredBuffer<Atomic<uint> > drawArgs;",
         ),
+        (
+            gen_binding::CELLS,
+            "RWStructuredBuffer<GrassInstance> grassCells;",
+        ),
     ] {
         let spelled = format!("[[vk::binding({number}, 0)]]\n{name}");
         assert!(
@@ -116,6 +120,22 @@ fn the_binding_constants_are_the_shaders_declaration_order() {
             binding::CLUSTER_LIGHTS,
             "StructuredBuffer<uint> cluster_lights;",
         ),
+        (binding::FIELD, "ConstantBuffer<GrassField> field;"),
+        (
+            binding::CELLS,
+            "StructuredBuffer<GrassInstance> grassCells;",
+        ),
+        (binding::GROUND, "Texture2D<float> grassGround;"),
+        (binding::WIND, "ConstantBuffer<WindParams> wind;"),
+        (
+            binding::WIND_DIRECTION,
+            "Texture2D<float4> windDirectionLayer;",
+        ),
+        (
+            binding::WIND_INTENSITY,
+            "Texture2D<float4> windIntensityLayer;",
+        ),
+        (binding::WIND_SAMPLER, "SamplerState windSampler;"),
     ] {
         let spelled = format!("[[vk::binding({number}, 0)]]\n{name}");
         assert!(
@@ -159,6 +179,12 @@ fn the_generation_block_carries_the_fields_numbers() {
         params.limits,
         [SLOT_CAPACITY, 1, CELLS_PER_TILE, field.slots()]
     );
+    // The shell and fin draws' instance counts are the field's stack, whatever
+    // its rows' looks — so a look switch leaves this block as it was.
+    assert_eq!(
+        params.looks,
+        [crcbl_shaders::grass::DEFAULT_SHELLS, 1, 0, 0]
+    );
     // The camera arrives from the view, and nothing else of the block does.
     let (device, queue) = null();
     let device = device.as_ref();
@@ -171,6 +197,39 @@ fn the_generation_block_carries_the_fields_numbers() {
     let moved = live.gen_params(glam::Vec3::new(1.0, 2.0, 3.0));
     assert_eq!(moved.camera, [1.0, 2.0, 3.0, field.reach()]);
     assert_eq!(moved.ground, params.ground);
+    scene.destroy(device);
+}
+
+/// **A card field records one draw a slot, a shell field three**, and a shell
+/// field whose fins are off two — the count `crate::forward` adds to its
+/// recorded draws, and what keeps a card field's command stream rung G1's.
+#[test]
+fn a_frame_draws_the_looks_its_field_has() {
+    let (device, queue) = null();
+    let device = device.as_ref();
+    let mut scene = GrassScene::new(device, queue, 2).expect("the placeholders upload");
+    let shells = |fins| {
+        let mut rows = one_blade();
+        rows[0].look = BladeLook::Shells;
+        GrassField::new(
+            [2, 2],
+            8.0,
+            [0.0, 0.0],
+            1000.0,
+            flat_ground(32, 0.0),
+            flat_cover(32, 200),
+            rows,
+        )
+        .and_then(|field| field.with_shells(Shells { count: 4, fins }))
+        .expect("a real field")
+    };
+    for (field, draws) in [(field(), 1), (shells(true), 3), (shells(false), 2)] {
+        scene
+            .set(device, queue, Some(&field))
+            .expect("the field uploads");
+        let frame = scene.frame().expect("a field was set");
+        assert_eq!(frame.draws_per_slot(), draws, "{:?}", field.shells());
+    }
     scene.destroy(device);
 }
 
