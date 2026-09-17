@@ -1048,13 +1048,19 @@ Sample and browser follow-up:
   double-sided normal helpers. Those inspected bodies do not read
   `light_view_proj`; the attribute loader does read `frame.vertex_pool`, so
   replacing whole blocks with only a projection would discard a real input.
-  Task/mesh helper coverage and compiled masked/reflective artifact dependencies
-  still need confirmation before unused fields can be canonicalized. Do not
-  weaken cache records by ignoring GPU inputs. Preserve cadence, layout, skinned
-  previous/current data, reflective and probe producers, failure recovery and
-  native image parity. Price native redraw cost before ranking this ahead of
-  measured scratch allocation; no changed-caller optimization or GPU saving has
-  been verified.
+  Mesh-stage review additionally covered complete `emit_cluster`, `meshMain`,
+  `taskMain`, `amplifiedMeshMain`, `cluster_survives`, `cluster_is_selected`,
+  `group_is_live`, position/attribute loads, normal-basis construction and
+  `cluster_heat`, including its level-group lookup, projected error, stretch
+  bound and heat ramp. The inspected bodies use view/camera, pool, overlay and
+  previous-view fields rather than punctual sampling matrices. This source
+  coverage still leaves decoding/packing helper dependencies and compiled
+  masked/reflective/task/mesh artifacts unverified. Confirm them before unused
+  fields can be canonicalized. Do not weaken cache records by ignoring GPU
+  inputs. Preserve cadence, layout, skinned previous/current data, reflective
+  and probe producers, failure recovery and native image parity. Price native
+  redraw cost before ranking this ahead of measured scratch allocation; no
+  changed-caller optimization or GPU saving has been verified.
 
   A smaller related candidate is the local `slot_matrices` closure in
   `ForwardRenderer::begin_frame_body`: it collects owned `Mat4` runs from the
