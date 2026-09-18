@@ -4157,6 +4157,20 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   device-write refusal paths, actual draw/pass images and browser/native upload
   parity remain open.
 
+  Actual-caller integration must keep tessellation scratch owned by `UiRenderer`
+  before entering fallible staging and upload operations.
+  `UiRenderer::begin_frame` currently has early error returns from
+  `stage_glyphs`, geometry buffer creation, both geometry writes and frame
+  bind-group creation after conversion. Moving retained vectors into local
+  temporaries and restoring them only on success would discard their capacity on
+  those paths. Prefer converting into borrowed renderer-owned storage, or
+  restore ownership before every fallible operation. Verify each relevant
+  refusal followed by a successful retry, complete upload bytes, empty-frame
+  reset, allocation reuse and teardown. Preserve the existing commit of draw
+  counts after successful geometry writes; this source review does not establish
+  transactional rollback of the whole frame or current fault-injection coverage.
+  The external conversion trials do not exercise these actual-caller errors.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
