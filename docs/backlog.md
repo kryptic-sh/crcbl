@@ -119,8 +119,13 @@ workload; they are not elapsed tick latency, tail latency or FPS measurements.
 
 Breakout and Shard hardware Vulkan goldens, the hardware Vulkan backend suite,
 and hardware/lavapipe render suites passed with synchronization validation and
-fatal validation errors enabled. Branch/main CI and deployment gates remain
-pending. Earlier source-copy prototype prices below are separate evidence.
+fatal validation errors enabled. Full branch CI at
+`4055c703ea6072fddd77b27cf7da9269a5d49221` passed after the unchanged WARP
+retry. Every required job and its steps passed the terminal audit; deliberately
+failed job and step controls were rejected before restoration passed. Changes
+after that tested source commit affect this backlog alone. Main CI and
+deployment gates remain pending. Earlier source-copy prototype prices below are
+separate evidence.
 
 - Trial fixed outer-input storage in `crcbl_net::auth::hmac_sha256` before the
   sample input-queue changes. Matched source-copy measurements remove outer
@@ -160,11 +165,11 @@ panic is a passing negative-control test, not this job's failure. The render
 source and workflow files are unchanged from the verified main baseline, but
 that alone does not establish timeout causality. The first attempt finished with
 every other job successful. Its complete job and step results were preserved and
-audited. The failed job is now rerunning at the same source commit and with
-unchanged workflow settings. Inspect the complete render summary and investigate
-repeated failures rather than extending deadlines, weakening assertions or
-reducing concurrency to obtain a green gate. Keep the original failure visible
-even if the rerun passes. Source review follows `grass::frame_of` to
+audited. The unchanged failed-job retry completed the full render suite with 98
+tests run, 98 passed and none skipped. The retry's successful result does not
+establish why the first attempt timed out. Investigate repeated failures rather
+than extending deadlines, weakening assertions or reducing concurrency to obtain
+a green gate. Source review follows `grass::frame_of` to
 `OffscreenSetup::draw_and_readback`: its `READBACK_DEADLINE` starts after
 `begin_readback`, and pending polls yield. `PendingReadback::poll` delegates to
 the backend; D3D12 `request_readback` with no explicit timeline records the
