@@ -634,7 +634,20 @@ Networking preparation follow-up:
   runs passed. Paired digest-only release timings included padding and
   compression, with 500 timed batches of 20 calls after warmup; percentiles
   report batch cost divided by calls. Input creation, expected-answer checks,
-  session authentication and engine/network work were excluded:
+  session authentication and engine/network work were excluded: Compiler-frame
+  follow-up compiled the current hash source and unchanged fixed padding
+  prototype as isolated optimized libraries with the repository's pinned
+  compiler on `x86_64-unknown-linux-gnu`. Compression was inlined in both.
+  Complete hash-function assembly reported maximum canonical-frame-address
+  offsets of 432 bytes for the current vector implementation and 528 bytes for
+  the fixed-padding prototype, including saved registers and the return address.
+  The fixed hash body called only `memcpy`; the original body also called the
+  allocator, deallocator and allocation-growth/error paths. An absent-symbol
+  selector was rejected before trusting the frame extraction. This prices the
+  compiled function frame under these isolated flags, not native worker peak
+  stack, production caller inlining, WASM stack budgets or CPU/FPS benefit. Keep
+  the worker/browser stack verification gap open when implementing the padding
+  change.
 
   | Input bytes | Original p50/p95 (ns/call) | Fixed padding p50/p95 | Original repeat   | Fixed repeat      |
   | ----------- | -------------------------- | --------------------- | ----------------- | ----------------- |
