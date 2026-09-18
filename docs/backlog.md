@@ -1213,8 +1213,18 @@ Sample and browser follow-up:
   uninstrumented runs. These allocation-site totals establish the candidate in a
   real renderer caller; they are not per-frame figures or proof of a
   native/browser frame gain. Compare the same fixtures after retained storage is
-  implemented; integrated removal/reuse and failed upload retry still require
-  coverage.
+  implemented. The unchanged-pool actual renderer lifecycle fixture now
+  exercises removal, generation-changed slot reuse and stale set/remove attempts
+  under dense and sparse updates across `IndirectCount`, `IndirectPerBatch` and
+  `MeshShader`, with point and spot shadows enabled. Complete logical records,
+  actual shadow/cache observations, validation and zero-live-object teardown
+  passed. Altered reused previous transforms and accidental fresh-handle
+  set/remove operations independently failed; restored runs passed. Complete
+  pre-lifecycle recording matched the preserved current-renderer capture, and an
+  altered indirect offset was rejected. This is baseline preparation for the
+  retained-pool comparison, not changed-renderer evidence or a timed performance
+  claim. Integrated failed upload retry and complete post-lifecycle upload-byte
+  comparisons remain required.
 
   An external source-copy prototype now retains carry vectors by clearing the
   consumed list and swapping it with the current list, and retains dirty-run
