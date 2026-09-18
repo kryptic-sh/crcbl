@@ -43,25 +43,31 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
-The sample input-queue production trial is in progress on
-`perf/sample-input-queues`. Horde's existing game tests moved into a separate
-module without production changes; workspace formatting, default Clippy and
-regular workspace tests passed on both the extraction and changed queue replay.
-Ordered draining now retains event storage in the inspected sample game and app
-loops. Rebuilt Horde and Flappy release libraries and Breakout's current
-production-source fixture matched their complete preserved gameplay captures.
-Corrupting each changed capture failed its full-value observer; restoration
-passed. Changed DHAT captures also matched their preserved originals. Guarded
-actual queue-growth sites reported 400 bytes in 28 blocks originally versus 240
-bytes in 8 blocks for Horde, and 576 bytes in 20 blocks versus 496 bytes in 10
-blocks for Flappy. Horde's original figure is a reanalysis of the preserved
-post-HMAC production profile; Flappy's preserved original executable and both
-changed executables were profiled freshly. Breakout's current source fixture
-reported 4032 queue bytes in 12 blocks; its source-copy baseline below is
-separate. Missing actual queue-site selectors failed before normal selectors
-passed. These queue sites exclude action-map, setup and capture allocations. The
-changed Horde native focus suite passed its held-key release, paused focus
-return and start-screen cases.
+The sample input-queue production trial merged fast-forward into `main` at
+`f4dce5e3823d64eff05511d2c5bd6f687907203a` after its full branch gates.
+Exact-head main CI
+[35372105178](https://github.com/kryptic-sh/crcbl/actions/runs/35372105178) and
+Pages
+[35372105001](https://github.com/kryptic-sh/crcbl/actions/runs/35372105001) are
+pending; audit their complete jobs and steps, deployment receipt and live URLs
+before closing this trial or starting another production change. Horde's
+existing game tests moved into a separate module without production changes;
+workspace formatting, default Clippy and regular workspace tests passed on both
+the extraction and changed queue replay. Ordered draining now retains event
+storage in the inspected sample game and app loops. Rebuilt Horde and Flappy
+release libraries and Breakout's current production-source fixture matched their
+complete preserved gameplay captures. Corrupting each changed capture failed its
+full-value observer; restoration passed. Changed DHAT captures also matched
+their preserved originals. Guarded actual queue-growth sites reported 400 bytes
+in 28 blocks originally versus 240 bytes in 8 blocks for Horde, and 576 bytes in
+20 blocks versus 496 bytes in 10 blocks for Flappy. Horde's original figure is a
+reanalysis of the preserved post-HMAC production profile; Flappy's preserved
+original executable and both changed executables were profiled freshly.
+Breakout's current source fixture reported 4032 queue bytes in 12 blocks; its
+source-copy baseline below is separate. Missing actual queue-site selectors
+failed before normal selectors passed. These queue sites exclude action-map,
+setup and capture allocations. The changed Horde native focus suite passed its
+held-key release, paused focus return and start-screen cases.
 
 A matched actual Horde tick trial warms the preserved post-HMAC original and
 changed release binaries, pins both to the same allowed CPU, and checks complete
@@ -131,12 +137,13 @@ wrong-head controls each failed before normal restoration passed. The workflow
 definition matches the previously audited main baseline. Main CI and publication
 gates remain required before keeping this slice.
 
-- Trial sample input queue capacity next. Source-copy gameplay and allocation
-  comparisons support the mechanism; matched Horde tick prices did not improve.
-  Verify changed sample behavior, retained lifetime memory, context transitions,
-  held inputs and full native/browser gates before keeping the production
-  change. Backend command-pool reuse, wider graph caching and math changes need
-  stronger workload evidence or carry more lifecycle risk.
+- Close the merged sample input-queue trial after exact-head main CI and Pages
+  verification. Changed gameplay, context transitions, held inputs and full
+  local native/browser gates passed; paired Horde tick prices were mixed.
+  Retained native type storage was measured on synthetic bursts; actual browser
+  layout, full-process lifetime memory and real burst frequency remain gaps.
+  Backend command-pool reuse, wider graph caching and math changes need stronger
+  workload evidence or carry more lifecycle risk.
 
 Browser queued-key regression coverage remains external: the held-key
 blur/resume, real tab switch and visibility-only isolation fixtures are not part
