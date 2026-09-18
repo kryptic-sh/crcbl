@@ -4171,6 +4171,17 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   transactional rollback of the whole frame or current fault-injection coverage.
   The external conversion trials do not exercise these actual-caller errors.
 
+  A complete unchanged external `ui_pass` source copy, including its actual
+  texture staging implementation, now passes the recording-null bitmap caller
+  fixture. Full uploaded vertex fields and index bytes match current production
+  draw-list conversion, both geometry writes are required, and destruction
+  returns all tracked device objects. Corrupted upload contents, missing write
+  receipts, empty timers and omitted cleanup each failed their observer before
+  restoration passed. Installed dependencies are reused; no production code or
+  existing regression test changed. This prepares a matched changed-renderer
+  trial rather than proving a reuse speedup: copied renderer behavior still
+  needs comparison through sans glyphs, graph draws, refusals and real backends.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
