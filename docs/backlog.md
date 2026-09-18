@@ -769,10 +769,29 @@ Simulation and loading follow-up:
   refusal cleanup. Constructor/error-path coverage, upload CPU/peak-memory
   pricing and future streaming costs remain incomplete in this follow-up; no
   mesh-upload speedup was measured.
-- `crcbl_scene::scn::Scene::load` reads and parses scene and system files at
-  load time. Its formatting and owned data are not evidence of a per-frame
-  bottleneck; cooking, importer and large-scene load costs still need review
-  separately.
+- Cooked-scene loading/saving follow-up inspected `Scene::load`, `save`,
+  `ChunkOf::read`, `write`, `codec_named` and `system_named` in
+  `crates/crcbl-scene/src/scn.rs`, plus Breakout `Board::load`, Puppet
+  `Map::load` and editor `Document::open`/`files`. Loading reads/parses chunks
+  and owns their components; its spawn-then-attach staging satisfies disjoint
+  world borrows and is not demonstrated redundant copying. Inspected callers
+  construct a fresh local world before loading. Do not infer a current
+  caller-visible live-world rollback defect from the loader's mutation sequence
+  alone; reusing an existing world would need an explicit atomicity policy.
+
+  Saving sorts borrowed component rows through a temporary `BTreeMap`, then owns
+  a row vector for serialization. A collected vector sorted by stable scene ID
+  could avoid tree-node storage; price actual large editor saves and compare
+  complete emitted RON bytes before implementation. Preserve stable IDs,
+  attach/detach-history independence, missing-ID and serialization refusals,
+  file order and unchanged disk-error handling. Codec and named-system lookup
+  are linear per manifest entry, not per component; indexed lookup is declined
+  until documents with many systems establish a cost worth additional storage
+  and duplicate-name semantics. Returned file strings are the save interface's
+  owned output, not dispensable frame scratch. These are operation-driven load
+  and save candidates, behind measured frame/tick work. No scene load/save
+  latency, row allocation count or changed-output parity was measured; other
+  scene helpers and actual large-document workflows remain review gaps.
 
 - `crcbl_store::crash_ring::CrashRing::push` allocates owned tick bytes, but the
   repository search found no caller outside its own module's examples and tests.
