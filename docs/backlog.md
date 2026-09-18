@@ -611,10 +611,20 @@ Networking preparation follow-up:
   remained. Setup, preflight, observers and warmup are included; actual
   authentication exports used by the observers still allocate their original
   outer buffers. Instrumented timing is excluded. This is a source-copy
-  allocation prototype, not a changed-production caller profile. Native and
-  browser worker stacks, actual packet mix, changed production callers and full
-  shipping gates remain required before keeping it. Keep this separate from
-  wider inner-input streaming design and behind the current hash shipping gates.
+  allocation prototype, not a changed-production caller profile. An isolated
+  constrained-stack WASM helper now checks complete MAC bytes against freshly
+  generated independent Python HMAC answers across patterned message and key
+  boundaries, including oversized keys and session-key derivation. It uses the
+  actual production SHA source with extracted unchanged/fixed outer-input HMAC
+  helper copies. Real Chromium Web Workers passed both providers, trapped on an
+  altered outer XOR source, and passed the restored fixed provider; the harness
+  required the worker result message and required the negative result to be a
+  WASM trap. This covers isolated helper execution, not shared-memory engine
+  workers, full network call chains, exact stack high-water bounds or production
+  authentication integration. Native and browser engine-worker stacks, actual
+  packet mix, changed production callers and full shipping gates remain required
+  before keeping it. Keep this separate from wider inner-input streaming design
+  and behind the current hash shipping gates.
 
 - SHA-256 padding is being implemented in the current trial above.
   `crcbl_shaders::sha256::sha256` now uses fixed local padding storage without
