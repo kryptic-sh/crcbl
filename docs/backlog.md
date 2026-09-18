@@ -2081,6 +2081,34 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   source-review gap; other cooking and importer validation paths still need
   review and workload measurements.
 
+- LOD/DAG loading follow-up inspected `build_lod_chain` in
+  `crates/crcbl-scene/src/lod.rs`, `Simplified` ownership in `simplify.rs`,
+  `MeshletBuild::all_indices` and `cluster_indices` in `meshlet.rs`, and
+  `build_cluster_dag`, `coarsen` and `cluster_adjacency` in `cluster_dag.rs`.
+  `cluster_indices` owns a newly decoded index vector; DAG base flattening,
+  grouping, adjacency and parent output consume these temporary vectors into
+  other owned storage. A borrowed decoded iterator or direct append could avoid
+  that intermediate storage. Price actual Quarry DAG construction and loaded
+  Viewer assets before implementation, recording allocation sites, peak live
+  memory and complete construction latency. Preserve cluster/corner ordering,
+  group face-source mapping, shared-edge multiplicity, deterministic tie breaks,
+  locked boundaries and complete cooked geometry/error/bounds parity. Do not
+  replace adjacency with spatial proximity. The inspected Quarry `quarry_dag`
+  caller constructs and cooks the hierarchy; this is loading work, not evidence
+  of per-frame DAG rebuilding.
+
+  `build_lod_chain` also copies the simplified position/index vectors into each
+  returned level while dropping the owning `Simplified`. Moving those arrays
+  through an internal consuming interface is a separate ownership candidate; the
+  current installed source offers borrowed getters only. A scoped search across
+  `crates` and `apps` found chain-builder invocations only in its tests, so this
+  does not outrank measured runtime callers. Preserve clustering before moving
+  arrays and all validation/error semantics. Considered and declined: cascading
+  decimation from the previous level as a simple speedup. The current chain
+  measures every error against the base mesh; cascading would change that
+  contract. No builder latency, allocation count, peak memory or changed-builder
+  parity was measured. Other builder internals remain a source-review gap.
+
 - Texture/loading follow-up inspected `texture::upload_texture_layers`,
   `upload_texture_mip_layers`, their shared `upload`, `upload_cleared_texture`,
   `stage_region`, `stage_rows` and row-pitch calculation, plus renderer page
