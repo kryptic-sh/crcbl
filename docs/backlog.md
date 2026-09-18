@@ -685,7 +685,24 @@ Simulation and loading follow-up:
   `ActionMap::begin_tick` visits live actions to reset edges and resolve held
   input; no allocation removal was established in the inspected entry points.
   Inventory `Grid::find_slot` is a bounded placement search driven by inventory
-  operations, not proof of continuous tick cost.
+  operations, not proof of continuous tick cost. Follow-up source review read
+  `Grid::can_place`, `place`, `remove`, `move_within`, `rotate`, `find_slot`,
+  `insert`, `check`, `paint`, `erase`, `take_slot`, `slots` and `weight_g`, plus
+  `Shape::rotated`, `turned_once`, `cells` and catalogue lookup functions. Read
+  paths walk retained occupancy and placement storage or value iterators; no
+  temporary allocation was established there. `Catalog::get` indexes directly by
+  item ID, so a blanket hash lookup rewrite is declined. `find_slot` calls
+  `check` for each cell/orientation, and `check` recomputes the rotated
+  footprint; hoisting bounded footprints is a source candidate requiring
+  optimized-code inspection and event-workload pricing, not an established
+  runtime saving. Shard `Stage::take_loot` reaches it through `loot::stow` and
+  `Grid::insert` only after finding a reachable drop. Preserve row-major cell
+  order, orientation order, nonrectangular masks, filter/error precedence and
+  refusal without mutation. Full-occupancy `erase` and slot-table scans need
+  larger-container workload evidence before redesign. Shard render/stat readers
+  also walk `Grid::len` and `weight_g`; their caller costs remain unpriced.
+  Catalogue parsing/serialization, save validation and Breach caller pricing
+  were not completed in this follow-up.
 
 - `crcbl_render::sprite_pass::SpriteRenderer::begin_frame` builds fresh
   instance, batch and padded constant-byte vectors; assigning
