@@ -20949,12 +20949,13 @@ after 4.0118612 s and idle after 30.9632841 s; the auto-exposure-disabled frame
 submitted after 4.9701897 s and idle after 42.7704545 s. The successful run
 therefore locates substantial elapsed time between submission and idle, but does
 not identify the earlier timeout's cause or isolate driver compilation, software
-rendering and waiting. Diagnostics do not fix that variability. Linux Vulkan
-completed successfully; macOS Metal is the remaining live job. Enumerate all
-jobs before treating branch verification as passed. This branch has a separate
-CI concurrency group; the main Pages run completed successfully without
-cancellation. Preserve fresh fixtures, effect assertions and deadlines while
-investigating any recurrence.
+rendering and waiting. Diagnostics do not fix that variability. The exact-commit
+diagnostic branch CI completed successfully; every job was enumerated and
+passed, including Linux Vulkan and macOS Metal. Main publication and its
+exact-commit CI and Pages gates remain required before the next engine slice.
+This branch has a separate CI concurrency group; the main Pages run completed
+successfully without cancellation. Preserve fresh fixtures, effect assertions
+and deadlines while investigating any recurrence.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
