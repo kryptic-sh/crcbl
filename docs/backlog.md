@@ -2135,6 +2135,30 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   contract. No builder latency, allocation count, peak memory or changed-builder
   parity was measured. Other builder internals remain a source-review gap.
 
+  Further review of `build_meshlets`, `triangle_neighbours`, `Pending::new` and
+  `OpenCluster` found that every closed cluster replaces preallocated
+  vertex/corner vectors. An external complete-source-copy trial clears those
+  vectors and the frontier instead, resetting the seed. The unchanged copy's
+  full vertex runs, corner bytes and cluster records matched the current
+  production builder; changed outputs matched the same reference on every
+  measured build. Original/changed/changed/original p50/p95 prices on a pinned
+  CPU were 1496.581/1512.722, 1486.011/1502.282, 1478.928/1487.675 and
+  1503.144/1513.644 microseconds for a connected grid; disconnected triangles
+  reported 205.960/211.309, 205.118/209.796, 203.956/208.514 and
+  206.491/210.267. Each case reported 100 timed builds after warmup. Timers
+  include builder allocations, exclude capture cloning and output destruction,
+  and use synthetic meshes rather than actual Quarry or Viewer loading. Corrupt
+  complete corner capture and empty timer collection independently failed before
+  normal restoration passed. This small source-copy timing difference does not
+  establish meaningful sample-load savings or justify moving it ahead of frame
+  work. Allocation sites, peak builder memory, refusal/nonfinite inputs,
+  complete DAG cooking, browser behavior and changed production callers remain
+  unverified. `Pending::new` also creates traversal scratch separately per
+  connected component; reuse is unpriced. Preserve component labels/counts,
+  lowest pending seed, cluster closure rules and deterministic frontier
+  ordering; replacing the ordered frontier with a hash set is not supported by
+  this trial.
+
 - Texture/loading follow-up inspected `texture::upload_texture_layers`,
   `upload_texture_mip_layers`, their shared `upload`, `upload_cleared_texture`,
   `stage_region`, `stage_rows` and row-pitch calculation, plus renderer page
