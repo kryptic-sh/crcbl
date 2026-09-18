@@ -99,13 +99,17 @@ The production change is committed as `eb4cc30` on
 production commit. Branch pushes do not automatically run `ci.yml`; this run was
 explicitly dispatched. The completed Windows Vulkan job's direct logs report 63
 backend tests, 38 forward-rendering tests and 4 real Win32 presentation tests
-passed with no skips. Exact summary-sequence validation rejected altered pass
-and skip counts before accepting the original log. The full run still awaits
-Metal; these native successes do not close browser shipping gates or explain the
-earlier timeout cause. Watch its complete job list before fast-forwarding into
-`main`, then verify the exact main CI and Pages/browser deployment and actual
-live-site response before starting the next production slice. The later
-readback-investigation documentation commit changes no production source.
+passed with no skips. The completed Windows workspace log explicitly shows
+passing executions of both pool scratch fixtures and the normal/nonempty-skinned
+renderer refusal fixtures. A missing-fixture control was rejected before
+accepting that execution coverage. Exact summary-sequence validation rejected
+altered pass and skip counts before accepting the original log. The full run
+still awaits Metal; these native successes do not close browser shipping gates
+or explain the earlier timeout cause. Watch its complete job list before
+fast-forwarding into `main`, then verify the exact main CI and Pages/browser
+deployment and actual live-site response before starting the next production
+slice. The later readback-investigation documentation commit changes no
+production source.
 
 The first optimized lavapipe render run, with Mesa shader caching disabled and
 normal nextest concurrency, stopped on a readback timeout before the calm-shell
