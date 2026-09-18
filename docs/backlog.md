@@ -43,79 +43,16 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
-- Price retained instance carry/dirty-run storage next, including moving/dense
-  workloads, complete instance-buffer bytes and failed-upload recovery across
-  the frame ring. Fixed SHA-256 padding follows renderer/instance preparation:
-  its isolated digest and authentication prices, allocation profiles, complete
-  wire compatibility and shader/persistence fixtures are recorded below. Verify
-  changed production callers, workspace and browser gates before keeping each
-  change. Input queue capacity remains an input-burst candidate to price.
-  Backend command-pool reuse, wider graph caching and math changes need stronger
-  workload evidence or carry more lifecycle risk.
+- Fixed SHA-256 padding is the next ready trial: its isolated digest and
+  authentication prices, allocation profiles, complete wire compatibility and
+  shader/persistence fixtures are recorded below. Strengthen the repository's
+  padding-boundary assertions, verify changed production callers, native and
+  browser worker stacks, and complete workspace and browser shipping gates
+  before keeping the change. Input queue capacity remains an input-burst
+  candidate to price. Backend command-pool reuse, wider graph caching and math
+  changes need stronger workload evidence or carry more lifecycle risk.
 
-The instance-pool trial is in progress on `perf/retain-instance-scratch`.
-Production `InstancePool::carry_forward` retains its carry vectors, and `flush`
-retains dirty-run storage while removing only the committed prefix after a
-refusal. The actual-pool capacity fixture rejected the eager implementation. The
-refusal fixture exercises first/middle/last run failures, committed prefix
-bytes/events, retained dirty suffix capacity, complete retry bytes, idempotence
-and unaffected other slots. Discarding the refused suffix made that test fail;
-dropping carry capacity made the capacity test fail. The restored instance-pool
-suite passed. Workspace formatting, default clippy and regular workspace tests
-passed. The release build passed. Actual changed-renderer lifecycle observers
-matched complete instance-buffer bytes, ring write destinations, generation
-reuse and full command captures against the preserved baseline for dense and
-sparse workloads on `IndirectCount`, `IndirectPerBatch` and `MeshShader`.
-Mismatched lighting was rejected before rerunning with the baseline's point and
-spot lights enabled. Wrong reuse transforms, stale writes/removals and a wrong
-final uploaded byte made the observer fail; altered indirect offsets made the
-full capture comparison reject, and the restored capture matched. These null
-observations do not establish GPU execution or FPS benefit. The normal
-`ForwardRenderer::begin_frame` upload-refusal fixture now passes
-first/middle/last sparse-run refusals, observes no shared preparation writes,
-checks committed prefix bytes and suffix retry writes, idempotence, complete
-buffers across the ring and teardown. Reversing upload/preparation order made
-its shadow-input assertion fail; the restored fixture passed. Rotation precedes
-the refusal and is preserved, so this does not claim transactional frame
-rollback. Workspace formatting and default clippy passed after adding the
-fixture; regular workspace tests are running. The nonempty skinned caller now
-also passes first/middle/last instance refusals, complete
-palette/binding/parameter bytes, accepted parity and current/ previous instance
-bases, committed prefix and suffix retries, idempotence and complete ring
-recovery. Reversing skinned preparation order, omitting base pointing and
-prematurely freezing pending normal-frame effects each made the relevant fixture
-fail; restored normal and skinned fixtures passed. Palette uploads, parity and
-base pointing precede the refusal and are preserved; no rollback is claimed.
-Workspace formatting, default clippy and regular workspace tests passed after
-these additions. Documentation citations, tracked and new-test wrapped-string
-checks and diff whitespace checks passed. Locked all-feature workspace build,
-clippy and nextest passed; regular all-feature workspace tests, explicit
-doctests, warnings-denied public/private documentation, cargo-machete and
-cargo-deny passed. The nextest runner reported 7205 passed and 507 skipped.
-Required local native gates passed; CI and browser shipping gates remain open.
-The production change is committed as `eb4cc30` on
-`perf/retain-instance-scratch`. Branch CI passed at
-<https://github.com/kryptic-sh/crcbl/actions/runs/35328862232> for that exact
-production commit. Branch pushes do not automatically run `ci.yml`; this run was
-explicitly dispatched. The completed Windows Vulkan job's direct logs report 63
-backend tests, 38 forward-rendering tests and 4 real Win32 presentation tests
-passed with no skips. The completed Windows workspace log explicitly shows
-passing executions of both pool scratch fixtures and the normal/nonempty-skinned
-renderer refusal fixtures. A missing-fixture control was rejected before
-accepting that execution coverage. Exact summary-sequence validation rejected
-altered pass and skip counts before accepting the original log. Every branch CI
-job completed successfully; its step audit found no failures or cancellations.
-These native successes do not close browser shipping gates or explain the
-earlier timeout cause. The verified slice was fast-forwarded and pushed to
-`main` as `90a2c25`. Exact main CI passed at
-<https://github.com/kryptic-sh/crcbl/actions/runs/35332157349>; every job passed
-and the complete step audit found no failures or cancellations. Pages/browser
-shipping remains active at
-<https://github.com/kryptic-sh/crcbl/actions/runs/35332157289>. Enumerate its
-complete job list, confirm deployment and check the actual live-site response
-before starting the next production slice. Preserve these active runs; do not
-push documentation-only updates that would cancel them. The later
-readback-investigation documentation commit changes no production source.
+Cold-cache native readback investigation remains open:
 
 The first optimized lavapipe render run, with Mesa shader caching disabled and
 normal nextest concurrency, stopped on a readback timeout before the calm-shell
@@ -156,55 +93,12 @@ before proposing polling backoff, driver-work limits or fixture reuse. Preserve
 full image comparisons and the existing deadline; the investigation must explain
 the failure rather than turn it green by changing the workload. Preserve the
 cold-cache discrepancy until its cause is established, even if required gates
-pass. Shipping gates remain open.
+pass.
 
-Paired preparation observations used the existing actual null renderer fixture
-with assertions, model updates and captures outside the timer. Baseline,
-retained, retained-repeat and baseline-repeat full commands matched with point
-and spot lighting:
-
-| Workload | Baseline p50/p95 (ms) | Retained    | Retained repeat | Baseline repeat |
-| -------- | --------------------- | ----------- | --------------- | --------------- |
-| Dense    | 0.119/0.126           | 0.096/0.126 | 0.095/0.101     | 0.095/0.103     |
-| Sparse   | 0.097/0.102           | 0.096/0.102 | 0.104/0.110     | 0.099/0.104     |
-
-These small and mixed observations establish no general CPU improvement. The
-fixture includes instance updates, frame preparation, graph build/compile/
-execute and encoder finish, while excluding startup, assertions, captures,
-destruction, UI, acquire/submit/present and shader execution. Lifecycle observer
-prices are excluded because its independent model work occurs inside that
-fixture's timer. Allocation churn is the verified benefit; GPU/FPS benefit
-remains unmeasured.
-
-Paired whole-fixture DHAT measurements used the preserved baseline and changed
-production renderer with the same lifecycle observer, lighting and command
-captures. Every instrumented full capture matched the baseline:
-
-| Workload | Baseline allocated bytes / blocks | Retained allocated bytes / blocks | Baseline peak bytes / blocks | Retained peak bytes / blocks |
-| -------- | --------------------------------- | --------------------------------- | ---------------------------- | ---------------------------- |
-| Dense    | 3,708,104,294 / 1,736,820         | 3,707,614,119 / 1,734,779         | 21,092,622 / 4,333           | 21,093,678 / 4,335           |
-| Sparse   | 3,721,387,046 / 1,738,549         | 3,720,361,767 / 1,734,788         | 21,109,358 / 4,333           | 21,111,406 / 4,335           |
-
-Allocation churn fell while peak memory increased. These totals include startup,
-recording, complete-byte observers and snapshot formatting; they do not isolate
-instance-pool allocation sites or establish CPU, GPU or FPS improvements.
-Disassembly confirms the dirty-run growth call stores the range endpoints and
-the carry-enrollment call stores the instance index. Exact call-site selectors
-matched the DHAT records, while missing-site selectors were rejected:
-
-| Workload | Site             | Baseline allocated bytes / blocks | Retained allocated bytes / blocks |
-| -------- | ---------------- | --------------------------------- | --------------------------------- |
-| Dense    | Dirty runs       | 12,704 / 397                      | 64 / 2                            |
-| Dense    | Carry enrollment | 479,552 / 1,652                   | 2,032 / 7                         |
-| Sparse   | Dirty runs       | 792,416 / 2,362                   | 4,032 / 12                        |
-| Sparse   | Carry enrollment | 237,888 / 1,416                   | 1,008 / 6                         |
-
-Each selected site had no allocated bytes left at process end. These are the
-confirmed growth sites reached by the actual lifecycle workload, including its
-warmup; they are separate from the whole-fixture totals above. The new scratch
-tests have been extracted into `instance_pool::tests::scratch` without changing
-their complete bodies. Workspace formatting, default clippy and regular
-workspace tests passed after extraction.
+Instance carry/dirty storage now retains capacity. Allocation churn was the
+verified benefit; paired preparation prices were small and mixed, so no general
+CPU or FPS improvement was established. Actual browser performance, presentation
+timing and GPU execution benefit remain unmeasured.
 
 Retained shadow-preparation scratch has shipped. Actual browser performance,
 native presentation timing and GPU execution benefit remain unmeasured. Null
