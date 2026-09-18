@@ -84,13 +84,22 @@ and caller bytes matched. The capture matched independently constructed Python
 save-header byte controls failed. A deliberately altered worker capture failed
 before normal restoration. The baseline's compiled hash allocator/deallocator
 targets were resolved through its ELF relocation table, establishing that it
-retains original tail allocation. The changed release binary must still match
-this preserved capture and independent expected bytes; preparing the baseline
-alone does not verify the new callers. The all-feature workspace gates are
-running. Production release-library caller compatibility and allocation
-profiles, native/browser worker integration, branch CI, main CI and browser
-deployment remain open. Keep this slice pending until all required gates close;
-isolated prototype results above do not prove production integration.
+retains original tail allocation. The changed release library now matches the
+preserved capture and independent expected bytes through the same public digest,
+authentication and persistence exports. Native `jobs::Threads::spawn` worker
+bytes match the caller; an altered worker capture fails and the restored capture
+passes. DHAT whole-fixture release-caller totals fell from 2,347,140 bytes in
+1,017 blocks to 2,305,662 bytes in 693 blocks. Peak live memory remained 688,918
+bytes in 28 blocks. This workload includes caller and worker authentication,
+save serialization, capture buffers and runtime setup; it establishes allocation
+churn reduction without a throughput or FPS claim. All-feature workspace build,
+clippy, nextest, regular tests, public/private rustdoc, dependency audits and
+release build passed. The canonical real-browser jobs gate is running.
+Shared-memory engine worker stack high-water use and full hashing subsystem call
+chains in browser workers remain coverage gaps; the jobs gate does not hash.
+Browser integration, branch CI, main CI and browser deployment remain open. Keep
+this slice pending until all required gates close; isolated prototype results
+above do not prove production integration.
 
 Cold-cache native readback investigation remains open:
 
