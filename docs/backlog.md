@@ -45,9 +45,12 @@ The retained shadow-scratch trial is implemented and pushed at `9253b7d`.
 Exact-commit [CI](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020)
 and [Pages](https://github.com/kryptic-sh/crcbl/actions/runs/35311394992) are
 still running. The Windows Vulkan job failed its readback deadlines with LATE
-verdicts; it is not a passing gate. The job rerun request was rejected while the
-overall run remained active. Wait for the same run to finish, retry the failed
-Windows job on the same commit and inspect its complete result. Enumerate every
+verdicts; it is not a passing gate. The initial job rerun request was rejected
+while the overall run remained active. Once the run became terminal, GitHub
+accepted the same-commit Windows Vulkan rerun;
+[job 105501333899](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020/job/105501333899)
+is now running. Every other CI job is successful in the complete enumeration.
+Inspect the rerun's complete result before closing this gate. Enumerate every
 job and check the deployed live site before removing this trial. Shared
 `begin_frame_body` preparation has been moved unchanged into private
 `forward::frame_prepare`, following the existing private-module convention.
