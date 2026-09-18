@@ -118,8 +118,22 @@ settings. Hardware Vulkan render and backend suites also passed on the pinned
 discrete RADV adapter with synchronization validation and fatal validation
 errors enabled. The CI workflow does not disable Mesa shader caching; its
 required settings are checked separately from this extra cold-cache stress.
-Preserve the cold-cache discrepancy until its cause is established, even if
-required gates pass. Shipping gates remain open.
+Source follow-up read `OffscreenSetup::draw_and_readback`, `begin_readback`,
+`PendingReadback::poll`, and Vulkan `Device::request_readback`/`poll_readback`.
+The deadline starts after frame preparation, graph execution/recording,
+submission, presentation and the readback request return. A pending poll checks
+the device retire timeline (for the request without an explicit semaphore) under
+the device-state lock and returns before copying bytes until its value is
+reached. The convenience loop calls `yield_now` between pending polls. Thus
+these logs do not directly price preparation CPU, separate polling contention
+from unfinished device execution, or identify synchronous shader compilation as
+the timeout cause. Instrument preparation, submit, poll duration/count and
+retire progress independently, and profile concurrent cold-cache driver workers
+before proposing polling backoff, driver-work limits or fixture reuse. Preserve
+full image comparisons and the existing deadline; the investigation must explain
+the failure rather than turn it green by changing the workload. Preserve the
+cold-cache discrepancy until its cause is established, even if required gates
+pass. Shipping gates remain open.
 
 Paired preparation observations used the existing actual null renderer fixture
 with assertions, model updates and captures outside the timer. Baseline,
