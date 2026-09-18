@@ -712,12 +712,19 @@ Simulation and loading follow-up:
   scans name hashes. The inspected Shard save encoder and decoder reach these
   helpers for persisted placements, not continuous inventory placement. Large
   tag-heavy catalogue load and save/load pricing remain open; no general frame
-  bottleneck is established. Source inspection also found that tag-index
-  conversion saturates at `u16::MAX`, so excessive distinct tags could alias
-  instead of being refused. An over-limit runtime fixture and a catalogue-limit
-  decision are still required; this was not reproduced or changed. Full save
-  validation, compiled-code inspection and Breach caller pricing were not
-  completed in this follow-up.
+  bottleneck is established. Tag-index conversion saturates at `u16::MAX`; an
+  actual resolved-library release fixture now reproduced excessive distinct tags
+  being accepted with aliased identities. The last supplied name had no lookup
+  and disappeared during `Catalog::to_ron`. A distinct-identity contract failed
+  on the accepted input, and the restored reproduction passed. Reject vocabulary
+  beyond the representable `Tag` range rather than saturating; preserve
+  first-appearance tag order, valid catalogue round trips and RON error
+  locations. Widening the public tag type would instead require a compatibility
+  decision. Production rejection and ordinary/boundary/duplicate-tag fixtures
+  remain unfinished; no catalogue load speedup was measured. Keep this
+  correctness finding separate from the measured frame-preparation priority.
+  Full save validation, compiled-code inspection and Breach caller pricing were
+  not completed in this follow-up.
 
 - `crcbl_render::sprite_pass::SpriteRenderer::begin_frame` builds fresh
   instance, batch and padded constant-byte vectors; assigning
