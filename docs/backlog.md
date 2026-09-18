@@ -43,6 +43,17 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
+The leading production trial is bounded UI triangle scratch reuse in
+`perf/ui-geometry-reuse`. Actual Horde list replay supports small caller savings
+and a bounded CPU cache avoids retaining the large synthetic burst. Existing
+`draw_list` and `ui_pass` tests moved into separate modules with unchanged
+production prefixes and preserved formatted test bodies; workspace formatting,
+default all-target Clippy and regular workspace tests passed. Implement borrowed
+output conversion and bounded renderer ownership next, then compare preserved
+full outputs, cache capacity, ordinary/oversized fallback and real write refusal
+before the required full native/browser and exact-head publication gates. The
+external prototype evidence and remaining gaps are detailed in P38 below.
+
 Sample event queues now retain storage through ordered draining. Remaining queue
 performance work is workload evidence: actual browser element layouts,
 full-process lifetime memory, production burst frequency and whether the
