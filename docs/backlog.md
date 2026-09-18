@@ -94,24 +94,31 @@ passes. DHAT whole-fixture release-caller totals fell from 2,347,140 bytes in
 1,017 blocks to 2,305,662 bytes in 693 blocks. Peak live memory remained 688,918
 bytes in 28 blocks. This workload includes caller and worker authentication,
 save serialization, capture buffers and runtime setup; it establishes allocation
-churn reduction without a throughput or FPS claim. All-feature workspace build,
-clippy, nextest, regular tests, public/private rustdoc, dependency audits and
-release build passed. The canonical real-browser jobs gate passed its normal
-worker execution, deliberate refusal controls and non-isolated-origin fallback
-checks. Shared-memory engine worker stack high-water use and full hashing
-subsystem call chains in browser workers remain coverage gaps; the jobs gate
-does not hash. The complete plain browser demo build passed export and smoke
-gates; actual Chromium Breakout and Shard behavior gates passed on the hardware
-adapter. Native Vulkan HAL and render-image gates also passed with lavapipe and
-synchronization validation after correcting harness backend/adapter invocation
-settings. The local validation-layer cross-submission coverage limitation
-remains recorded separately below; passing images do not close it. The actual
-changed release library additionally matched every committed shader source and
-artifact digest in the manifest; an altered expected digest failed and
-restoration passed. Branch CI is running against the production change. Main CI
-and browser deployment remain open. Keep this slice pending until all required
-gates close; isolated prototype results above do not prove production
-integration.
+churn reduction without a throughput or FPS claim. A fresh Massif stack-enabled
+run of these preserved actual release binaries reported maximum sampled
+aggregate stack use of 4,152 bytes originally and 4,168 bytes after fixed
+padding; complete caller/worker digest, packet and save captures again matched
+independent expected bytes. The observer requires nonempty positive stack
+observations, and a missing-observation control failed before restoration
+passed. These are native workload samples across its threads, not exact
+per-thread high-water bounds or browser engine-worker headroom. All-feature
+workspace build, clippy, nextest, regular tests, public/private rustdoc,
+dependency audits and release build passed. The canonical real-browser jobs gate
+passed its normal worker execution, deliberate refusal controls and
+non-isolated-origin fallback checks. Shared-memory engine worker stack
+high-water use and full hashing subsystem call chains in browser workers remain
+coverage gaps; the jobs gate does not hash. The complete plain browser demo
+build passed export and smoke gates; actual Chromium Breakout and Shard behavior
+gates passed on the hardware adapter. Native Vulkan HAL and render-image gates
+also passed with lavapipe and synchronization validation after correcting
+harness backend/adapter invocation settings. The local validation-layer
+cross-submission coverage limitation remains recorded separately below; passing
+images do not close it. The actual changed release library additionally matched
+every committed shader source and artifact digest in the manifest; an altered
+expected digest failed and restoration passed. Branch CI is running against the
+production change. Main CI and browser deployment remain open. Keep this slice
+pending until all required gates close; isolated prototype results above do not
+prove production integration.
 
 Cold-cache native readback investigation remains open:
 
