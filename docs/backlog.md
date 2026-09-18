@@ -97,7 +97,12 @@ The production change is committed as `eb4cc30` on
 `perf/retain-instance-scratch`. Branch CI is running at
 <https://github.com/kryptic-sh/crcbl/actions/runs/35328862232> for that exact
 production commit. Branch pushes do not automatically run `ci.yml`; this run was
-explicitly dispatched. Watch its complete job list before fast-forwarding into
+explicitly dispatched. The completed Windows Vulkan job's direct logs report 63
+backend tests, 38 forward-rendering tests and 4 real Win32 presentation tests
+passed with no skips. Exact summary-sequence validation rejected altered pass
+and skip counts before accepting the original log. The full run still awaits
+Metal; these native successes do not close browser shipping gates or explain the
+earlier timeout cause. Watch its complete job list before fast-forwarding into
 `main`, then verify the exact main CI and Pages/browser deployment and actual
 live-site response before starting the next production slice. The later
 readback-investigation documentation commit changes no production source.
