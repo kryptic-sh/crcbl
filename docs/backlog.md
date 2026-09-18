@@ -1518,9 +1518,19 @@ Sample and browser follow-up:
   also checks a context pushed before queued replay, held-key suppression after
   popping it, release/repress routing, and keyboard/touch/pointer attribution
   through queued keys and stick input. Complete seeded snapshots matched; the
-  corruption control failed before restoration passed. Native Horde baseline
-  context and attribution observations are now covered, but changed-caller
-  comparison, browser/focus-loss behavior and other samples remain unverified.
+  corruption control failed before restoration passed. A DHAT run of the actual
+  unchanged release-library contextual baseline additionally observed 400 bytes
+  in 28 input-queue growth blocks rooted in `Game::key_event`; the guarded
+  selector requires the exact production frame and exercised allocation sites. A
+  missing-frame control failed before restoration passed. Whole-fixture totals
+  were 3,283,640 bytes in 2,655 blocks, with peak live memory of 766,940 bytes
+  in 95 blocks; these include seeded game setup, both runs, snapshots and
+  output. The narrow queue total excludes the separately observed
+  `ActionMap::key_event` held-key allocation. This confirms production queue
+  churn in the selected script without establishing a large tick cost or FPS
+  benefit. Native Horde baseline context and attribution observations are now
+  covered, but changed-caller comparison, browser/focus-loss behavior and other
+  samples remain unverified.
 
 - Considered and declined: removing browser command-field copies without a
   lifetime redesign. `gpu-stream.js::StreamReader::readField` produces owned
