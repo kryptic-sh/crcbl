@@ -4196,6 +4196,32 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   graph execution performance, actual GPU sampling and browser behavior remain
   unverified by it.
 
+  The matched external retained-renderer trial now keeps owned triangle storage
+  in the renderer, restoring that ownership immediately after conversion and
+  before fallible glyph staging or geometry upload. Its copied draw list reuses
+  the installed production `Vertex2d` and `Primitive` types; no new unsafe
+  implementation is needed. Both bitmap and cached-sans caller trials match
+  complete independent production-reference geometry uploads. The sans trial
+  additionally records the graph outside timers and verifies complete
+  HUD/overlay indexed ranges, clean validation and no timed glyph rasterization.
+  Upload corruption, missing writes, empty timers and omitted teardown fail for
+  both paths; cold-cache recreation and missing draw receipts fail for sans.
+  Normal restoration passes.
+
+  On the same pinned CPU, original/retained/retained/original caller p50/p95
+  prices for 1024 bitmap labels were 383.435/386.150, 363.507/366.653,
+  367.274/370.591 and 387.644/391.180 microseconds. For 1024 cached-sans labels
+  they were 767.231/771.899, 749.077/752.112, 748.566/752.183 and
+  762.893/766.871 microseconds. Each run reported 500 timed frames. These
+  source-copy caller prices include conversion, staging checks, ring rotation
+  and recording-null host-buffer writes; setup, references, observers, graph
+  recording and teardown are excluded. Gains are materially smaller than the
+  differently compiled conversion-only probes; do not infer FPS or actual
+  backend savings. Real UI workloads, retained burst storage through the changed
+  caller, allocation sites, device refusal/retry, image/primitive graph parity,
+  hardware sampling and browser memory/performance remain open before keeping
+  this production change. Current source and existing regressions are unchanged.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
