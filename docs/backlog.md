@@ -43,20 +43,15 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
-- Finish the merged fixed-padding SHA-256 trial's exact-revision main CI,
-  browser deployment and live-site verification before another production
-  change. Its release caller compatibility, allocation profiles and worker
-  coverage limitations are recorded below.
-- After those gates close, trial fixed outer-input storage in
-  `crcbl_net::auth::hmac_sha256` before the sample input-queue changes. Matched
-  source-copy measurements remove outer allocation sites and slightly improve
-  small-packet prices, while large-input prices are slightly worse. The change
-  is confined to private temporary storage and retains the existing hash API;
-  this makes it a narrower next trial, not an established application
-  bottleneck. Verify actual changed authentication exports, complete packet
-  bytes, replay and malformed-input rejection, engine-worker execution and
-  required native/browser shipping gates. Keep wider inner-input streaming
-  design separate.
+- Trial fixed outer-input storage in `crcbl_net::auth::hmac_sha256` before the
+  sample input-queue changes. Matched source-copy measurements remove outer
+  allocation sites and slightly improve small-packet prices, while large-input
+  prices are slightly worse. The change is confined to private temporary storage
+  and retains the existing hash API; this makes it a narrower next trial, not an
+  established application bottleneck. Verify actual changed authentication
+  exports, complete packet bytes, replay and malformed-input rejection,
+  engine-worker execution and required native/browser shipping gates. Keep wider
+  inner-input streaming design separate.
 - Input queue capacity has isolated staging prices and an actual Horde baseline
   below. Trial it next if the HMAC production measurements support keeping that
   change, or if they reject it. The event-burst trial must verify changed sample
@@ -64,85 +59,13 @@ Next performance trials:
   Backend command-pool reuse, wider graph caching and math changes need stronger
   workload evidence or carry more lifecycle risk.
 
-The fixed-padding SHA-256 change has merged to main; its shipping verification
-remains in progress. Production padding now uses fixed local storage without
-changing compression or public APIs. Repository uniform and patterned boundary
-tests compare complete raw and hex digests against independently generated
-Python `hashlib` answers. The original implementation and fixed-padding
-implementation passed the focused hash suite; corrupted digest and wrong
-encoded-length source controls failed. Workspace formatting, default clippy and
-regular workspace tests passed again after moving unchanged test bodies into
-`sha256::tests`; the focused hash suite also passed on that layout. A fresh
-optimized external raw-digest workload compiled the actual production hash
-source and the preserved pre-change source. Complete digests matched independent
-Python `hashlib` answers. DHAT whole-fixture totals fell from 1,283,708 bytes in
-10,011 blocks to 3,708 bytes in 11 blocks. Peak live memory was unchanged at
-1,736 bytes in 3 blocks. This fixture includes setup and output, not
-authentication, persistence or frame rendering; it confirms heap churn reduction
-without claiming throughput or FPS benefit. Release-library caller results and
-remaining browser worker stack gaps are recorded below. An isolated WASM
-executable compiled the actual production hash source with a constrained linker
-stack and checked complete raw and hex digests against fresh Python `hashlib`
-answers for patterned boundary and large inputs. Local Chromium ran it inside a
-real Web Worker: the normal build passed, a corrupted-digest source control
-trapped, and the restored build passed. The harness checked the worker's result
-message and required the negative result to be a WASM trap. This verifies
-isolated production-source worker execution, not shared-memory engine worker
-stack high-water use, full subsystem call chains or browser storage. The
-preserved pre-change release binary additionally captured actual raw/hex hashes,
-sealed packets and save files through the public engine exports, both on the
-caller and through `jobs::Threads::spawn`. Complete worker and caller bytes
-matched. The capture matched independently constructed Python `hashlib`/HMAC
-packets and packed save files; altered digest, MAC and save-header byte controls
-failed. A deliberately altered worker capture failed before normal restoration.
-The baseline's compiled hash allocator/deallocator targets were resolved through
-its ELF relocation table, establishing that it retains original tail allocation.
-The changed release library now matches the preserved capture and independent
-expected bytes through the same public digest, authentication and persistence
-exports. Native `jobs::Threads::spawn` worker bytes match the caller; an altered
-worker capture fails and the restored capture passes. DHAT whole-fixture
-release-caller totals fell from 2,347,140 bytes in 1,017 blocks to 2,305,662
-bytes in 693 blocks. Peak live memory remained 688,918 bytes in 28 blocks. This
-workload includes caller and worker authentication, save serialization, capture
-buffers and runtime setup; it establishes allocation churn reduction without a
-throughput or FPS claim. A fresh Massif stack-enabled run of these preserved
-actual release binaries reported maximum sampled aggregate stack use of 4,152
-bytes originally and 4,168 bytes after fixed padding; complete caller/worker
-digest, packet and save captures again matched independent expected bytes. The
-observer requires nonempty positive stack observations, and a
-missing-observation control failed before restoration passed. These are native
-workload samples across its threads, not exact per-thread high-water bounds or
-browser engine-worker headroom. All-feature workspace build, clippy, nextest,
-regular tests, public/private rustdoc, dependency audits and release build
-passed. The canonical real-browser jobs gate passed its normal worker execution,
-deliberate refusal controls and non-isolated-origin fallback checks.
-Shared-memory engine worker stack high-water use and full hashing subsystem call
-chains in browser workers remain coverage gaps; the jobs gate does not hash.
-Reviewed the threaded Horde driver and its `__crcbl_horde_sim_threads` export:
-its observed off-main work is `steer_enemies` velocity-decision chunks through
-`Pool::par_for`, not authentication or save encoding. The chunk body performs
-overlap queries and steering arithmetic; the exported thread count specifically
-records steering chunk execution. Passing that gate therefore does not close the
-browser hashing call-chain or stack high-water gaps. The complete plain browser
-demo build passed export and smoke gates; actual Chromium Breakout and Shard
-behavior gates passed on the hardware adapter. Native Vulkan HAL and
-render-image gates also passed with lavapipe and synchronization validation
-after correcting harness backend/adapter invocation settings. The local
-validation-layer cross-submission coverage limitation remains recorded
-separately below; passing images do not close it. The actual changed release
-library additionally matched every committed shader source and artifact digest
-in the manifest; an altered expected digest failed and restoration passed. Full
-branch CI passed against the production change. The final audit matched the
-required job set from the unchanged CI workflow and verified every job succeeded
-with no failed or cancelled steps; an altered-job control failed before
-restoration passed. Local commits added after the tested branch revision contain
-backlog verification notes only. Main CI completed successfully for the exact
-merged production revision. Its required job set and every job/step result
-passed the final audit; altering a job to failure made that audit reject it.
-Pages remains active for the same revision. Its final job/step audit and
-deployed-site verification remain open. Keep this slice pending until all
-required gates close; isolated prototype results above do not prove production
-integration.
+Hash and authentication worker coverage gaps remain separate from shipped
+padding storage: native sampled aggregate stack and browser sentinel residue
+measurements are not exact high-water bounds. Browser shared-memory packet
+fixtures exercise actual authentication/hash exports, but client/server update
+scheduling, worker-side persistence and browser storage call chains remain
+unverified. Preserve full byte compatibility when extending those fixtures; do
+not shrink worker stacks from isolated execution or write-residue results.
 
 Cold-cache native readback investigation remains open:
 
@@ -699,8 +622,7 @@ Networking preparation follow-up:
   client/server update scheduling, changed production temporary storage, exact
   stack high-water use or actual packet mix. Those remaining measurements and
   full shipping gates are still required before keeping the production change.
-  Keep this separate from wider inner-input streaming design and behind the
-  current hash shipping gates.
+  Keep this separate from wider inner-input streaming design.
 
   The shared-memory packet fixture additionally seeded the exact worker stack
   allocation before bring-up and scanned write residue after completion.
@@ -715,160 +637,19 @@ Networking preparation follow-up:
   worker stacks from these results. Production integration, representative
   packet workloads and broader stack coverage remain open.
 
-- SHA-256 padding is being implemented in the current trial above.
-  `crcbl_shaders::sha256::sha256` now uses fixed local padding storage without
-  changing `compress`, digest bytes or the public hash API. Both MAC hashing and
-  asset/persistence identities use this shared function. Repository boundary
-  fixtures now compare complete raw and hex digests with independent answers;
-  digest and encoded-length mutation controls fail. The old length-only test and
-  its inaccurate streaming-comparison comment have been replaced. Remaining
-  production caller, allocation, native/browser worker-stack and shipping gates
-  belong to the current trial; prototype prices below do not close them. Wider
-  streaming hashing is separate because it changes buffering and ownership. A
-  separate safe prototype replaced only the tail vector with fixed local padding
-  storage, preserving the existing compression implementation. Its complete
-  digests and the current release library's digests matched independently
-  generated Python `hashlib` answers for 15 inputs around padding/block
-  boundaries and at larger sizes. An intentionally wrong bit-length field made
-  that comparison fail before restored runs passed. Paired digest-only release
-  timings included padding and compression, with 500 timed batches of 20 calls
-  after warmup; percentiles report batch cost divided by calls. Input creation,
-  expected-answer checks, session authentication and engine/network work were
-  excluded: Compiler-frame follow-up compiled the current hash source and
-  unchanged fixed padding prototype as isolated optimized libraries with the
-  repository's pinned compiler on `x86_64-unknown-linux-gnu`. Compression was
-  inlined in both. Complete hash-function assembly reported maximum
-  canonical-frame-address offsets of 432 bytes for the current vector
-  implementation and 528 bytes for the fixed-padding prototype, including saved
-  registers and the return address. The fixed hash body called only `memcpy`;
-  the original body also called the allocator, deallocator and
-  allocation-growth/error paths. An absent-symbol selector was rejected before
-  trusting the frame extraction. This prices the compiled function frame under
-  these isolated flags, not native worker peak stack, production caller
-  inlining, WASM stack budgets or CPU/FPS benefit. Keep the worker/browser stack
-  verification gap open when implementing the padding change. An optimized
-  external native-thread preflight subsequently ran the current source and
-  fixed-padding prototype on `std::thread::Builder` threads using default stacks
-  and a requested 32,768-byte stack. Each worker checked complete digests
-  against freshly generated Python `hashlib` answers for 12 patterned payloads,
-  repeated 16 times, including padding boundaries and large inputs. Both stack
-  configurations passed; deliberately corrupting the candidate hex result failed
-  inside the worker and propagated through `join`; restored runs passed. Input
-  buffers were heap-owned. This checks isolated hash execution on the local
-  native runtime, not actual stack high-water use, platform thread minimums,
-  engine worker call chains, recursive nesting or WASM worker budgets.
-
-  | Input bytes | Original p50/p95 (ns/call) | Fixed padding p50/p95 | Original repeat   | Fixed repeat      |
-  | ----------- | -------------------------- | --------------------- | ----------------- | ----------------- |
-  | 64          | 311.6/312.6                | 289.6/294.1           | 297.1/299.1       | 284.0/289.1       |
-  | 1200        | 2721.7/2810.8              | 2671.6/2707.1         | 2728.2/2827.3     | 2686.1/2714.2     |
-  | 65536       | 139912.5/140911.9          | 138470.2/139502.2     | 139915.0/141022.0 | 138672.6/139701.0 |
-
-  Both timing pairs favored fixed padding in this isolated artifact comparison.
-  It is not a production caller improvement: production caller profiles, browser
-  stack budgets, source-manifest/save verification and workspace gates still
-  need measurement or execution before retaining a repository implementation.
-  The existing HMAC concatenation buffers are separate candidates and remain
-  unchanged. A subsequent whole-fixture DHAT run with a 64-byte input,
-  independent binary and hex checks, warmup and observations reported 1,577,493
-  bytes in 12,172 blocks originally versus 99,090 bytes in 622 blocks for fixed
-  padding. Both reported a whole-fixture allocation peak of 66,276 bytes; this
-  demonstrates churn reduction, not a lower fixture peak. A guarded query rooted
-  in the original hash function and the observed repeated-call site reported
-  1,408,000 padding bytes in 11,000 blocks, including warmup, and no matching
-  site with fixed padding. The original site was required to exist. Original
-  hash allocations still appear in the fixed-padding fixture's independent
-  expected-answer setup, so no zero-allocation claim applies to the fixture.
-  Instrumented timings are excluded from release prices. Production
-  authentication allocation and latency remain unmeasured. The fixed-padding
-  prototype also passed the copied current SHA-256 and authentication source
-  tests in an external fixture: 21 passed with no failures. This includes
-  published NIST/HMAC vectors, oversized HMAC keys, tampering, malformed input,
-  replay-window behavior and counter exhaustion. Its token fixture preserves the
-  current private byte accessor rather than exposing that accessor on the
-  engine's public token. Changing the padding length made the exact RFC
-  HMAC-vector test fail; the unchanged prototype then passed it. A further
-  release fixture compared the current release library's `SessionCrypto` against
-  the unchanged authentication source using fixed padding. Complete envelopes
-  matched across empty, boundary-sized, small and large payloads; each
-  implementation opened the other's envelope, rejected a forged MAC, and refused
-  repeated observer packets. Counter, complete payload and wire-byte checks ran
-  outside timing. Deliberately changing an observed envelope made its full-byte
-  comparison fail before normal runs passed. Timing includes seal, MAC
-  verification, replay acceptance and envelope destruction, with 500 timed
-  batches of 20 calls after warmup. Key derivation, fixtures, assertions and
-  engine/network work are excluded. These percentiles report batch cost divided
-  by calls:
-
-  | Payload bytes | Original p50/p95 (ns/pair) | Fixed padding p50/p95 | Original repeat   | Fixed repeat      |
-  | ------------- | -------------------------- | --------------------- | ----------------- | ----------------- |
-  | 64            | 1649.7/1691.2              | 1556.9/1607.0         | 1611.0/1634.1     | 1533.9/1564.5     |
-  | 1200          | 6714.2/6946.6              | 6465.8/6914.6         | 6616.5/6899.1     | 6437.6/6752.3     |
-  | 65536         | 282218.0/286776.1          | 279743.3/284875.5     | 281587.8/286293.7 | 279570.0/284375.5 |
-
-  Both pairs favored fixed padding in this source-fixture artifact comparison.
-  This is not production server/client receive cost: decoding, transport, packet
-  mix and application tick work were not included. Whole authentication-fixture
-  DHAT for a 64-byte payload reported 13,883,553 bytes in 111,292 blocks
-  originally versus 7,828,638 bytes in 63,988 blocks with fixed padding. Both
-  reported a whole-fixture peak of 328,600 bytes; setup, warmup and independent
-  original-library observers are included, so these are not per-packet totals. A
-  guarded query of the original hash function at the observed repeated seal and
-  open call sites reported 5,632,000 padding bytes in 44,000 blocks, including
-  warmup, and no matching site with fixed padding. The original sites were
-  required to exist. Original hashing remains in the independent wire observers;
-  envelope and HMAC concatenation allocations also remain. Instrumented timings
-  are excluded from release prices. Production caller changes/profiles, browser
-  stack budgets, source-manifest/save verification and repository workspace
-  gates remain open. Shared-consumer review also read `SaveWriter::checksum`,
-  `SaveReader` checksum validation, OPFS `frame`/`unframe` and the shader build
-  script's source and artifact hash checks. A separate prototype used the
-  production manifest parser to verify every listed source and artifact against
-  both original and fixed-padding hashes: 50 shader records and 304
-  source/artifact checks passed. This includes optional target columns and
-  per-entry artifact rows; the input set was required to be nonempty. A wrong
-  padding-length prototype failed the fixed-padding comparison while the
-  original hash matched, then the unchanged prototype passed. This did not
-  regenerate artifacts or execute the repository build script with a changed
-  hash. Production integration and browser stack checks remain open. The native
-  save/OPFS compatibility fixture is recorded below. OPFS framing and validation
-  still concatenate header and payload into an owned digest-input vector; fixed
-  padding alone would not remove that full-payload copy. Price persistence
-  separately before proposing a wider segmented/streaming hash interface.
-  Persistence follow-up exercised the current release `SaveWriter`,
-  `SaveReader`, `MemoryStorage` and safe `OpfsStorage::restore` path. Across 13
-  payload cases, save bytes reconstructed with fixed-padding checksums matched
-  the original writer's complete output, and the original reader accepted the
-  checksum and returned the expected tick, playtime, sector and complete
-  snapshot bytes. Header corruption was refused. A separate source fixture
-  copied the current OPFS framing/unframing functions and changed only their
-  hash provider. Complete frames and decoded payloads matched for the same 13
-  payload cases across 3 generation values each; the current OPFS restore path
-  accepted those frames, retained the newer generation and refused corrupted
-  generation bytes without replacing resident data. Deliberately wrong save and
-  OPFS checksum bytes independently failed the complete-byte comparisons before
-  normal runs passed. These are native compatibility fixtures, not a changed
-  repository implementation or browser storage run. Production save/hash
-  integration, wasm exports, worker restoration and queued/durable browser
-  writes still need their existing repository/CI gates. An isolated WASM
-  executable compiled the current hash source and fixed-padding source copy with
-  the repository's pinned compiler. Node's WebAssembly runtime instantiated it
-  without imports and passed complete digests against independent Python
-  `hashlib` answers at the same boundary and large-input cases, plus
-  original/candidate hex comparisons. Wrong padding length made the digest
-  assertion trap; the normal artifact passed again. The same normal and
-  wrong-padding artifacts then ran in local headless Chromium. The harness read
-  the executed page body's result attribute, rather than finding a success word
-  in its script: the normal artifact passed, the wrong-padding artifact reported
-  failure, and the restored artifact passed. Complete digest and hex assertions
-  therefore ran in the actual browser's WASM runtime too. These pages used no
-  engine or GPU. This verifies the isolated target/runtime comparison, not
-  browser workers, engine exports, stack budgets, production callers or frame
-  performance. Local toolchain bookkeeping is surprising: rustup's
-  installed-target list omitted WASM, adding it rolled back on an
-  existing-library conflict, yet the pinned compiler successfully used the
-  existing sysroot libraries. No conflicting files were removed; target-list
-  output alone did not establish whether this compiler could build the probe.
+- Persistence digest-input preparation remains a separate allocation candidate.
+  OPFS framing and validation concatenate header and payload into an owned
+  vector before hashing. Fixed hash padding does not remove that full-payload
+  copy. Price actual save and browser-storage workloads before proposing a wider
+  segmented/streaming hash interface; preserve complete framing bytes, checksum
+  refusal, generation selection, restoration and queued/durable write behavior.
+  Browser persistence worker call chains and stack coverage remain unverified.
+- WASM toolchain bookkeeping can disagree with available compiler libraries.
+  During external probes, rustup's installed-target list omitted WASM and target
+  installation rolled back on an existing-library conflict, while the pinned
+  compiler successfully built using existing sysroot libraries. No conflicting
+  files were removed. Revalidate compiler capability before treating target-list
+  output as an unavailable build or removing component state.
 
 Simulation and loading follow-up:
 
