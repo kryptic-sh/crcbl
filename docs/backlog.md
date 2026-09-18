@@ -4222,6 +4222,25 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   hardware sampling and browser memory/performance remain open before keeping
   this production change. Current source and existing regressions are unchanged.
 
+  A changed-renderer burst probe now observes renderer-owned scratch directly
+  through large, small and quiet frames across every actual geometry ring slot.
+  Complete uploads match independently built production-reference vertex fields
+  and indices. Geometry lengths and the overlay cut match in every phase,
+  including empty reset; quiet frames make no geometry writes. The actual
+  changed caller retains 13369344 bytes of CPU vector-capacity payload through
+  all phases, alongside 17825792 bytes of recording-null geometry-buffer
+  descriptor sizes. This is observed caller retention, beyond the earlier
+  proposed clearing and conversion-only storage probes. Falsely reported scratch
+  capacity, actual unexpected quiet geometry, missing ring observations and
+  omitted teardown each failed before restoration passed. Figures exclude
+  command lists, atlases, staging, allocator metadata, references and
+  full-process memory; descriptor sizes are not real GPU residency. Do not keep
+  unlimited burst retention solely from the static timing gain. Price releasing
+  empty-frame scratch or another explicit bounded policy, subsequent regrowth,
+  and actual sample/editor burst frequency before deciding how to keep the
+  engine lean. Native/backend and browser lifetime memory remain unverified, and
+  production source remains unchanged.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
