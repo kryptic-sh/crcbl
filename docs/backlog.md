@@ -104,9 +104,13 @@ restart began play immediately; it correctly failed because Horde restarts at
 the title screen. The corrected probe requires that transition and a separate
 start edge. Its initial result parser also matched summary repetitions; it now
 reads only assertion rows. Neither correction changes production code or weakens
-gameplay assertions. Actual hidden-tab delivery, the remaining changed samples'
-canonical browser gates and canonical branch/main CI and publication gates
-remain required.
+gameplay assertions. Canonical hardware browser gates subsequently passed for
+Horde, Asteroids, Breakout, Flappy, Shard, Puppet, Orbit, Towers and Breach,
+including touch input and complete GPU resource cleanup. Removing either the
+complete browser verdict or cleanup receipt failed each log observer before the
+normal logs passed. Actual hidden-tab delivery remains an independent coverage
+gap. Canonical branch/main CI and publication gates remain required before
+keeping this slice.
 
 - Trial sample input queue capacity next. Source-copy gameplay and allocation
   comparisons support the mechanism; matched Horde tick prices did not improve.
