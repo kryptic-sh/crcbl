@@ -727,9 +727,20 @@ Simulation and loading follow-up:
   vocabulary rather than total tag occurrences, since existing duplicate tags
   remain valid. Production rejection and repository
   boundary/duplicate/over-limit tests remain unfinished; no catalogue load
-  speedup was measured. Keep this correctness finding separate from the measured
-  frame-preparation priority. Full save validation, compiled-code inspection and
-  Breach caller pricing were not completed in this follow-up.
+  speedup was measured. An actual release fixture also reproduced item tables
+  beyond the `ItemId` range being accepted: `Catalog::len` includes the excess
+  row, while `items` omits it and `id_of` cannot return its identity.
+  Serialization retains that row, so this differs from the tag-name
+  serialization loss. Ordinary and maximum-representable tables passed every
+  iterated ID/name/get mapping and complete round trips; an every-accepted-entry
+  identity contract failed on the over-limit table, and the restored
+  reproduction passed. Reject excess item entries at the parser conversion
+  boundary while preserving valid order and duplicate-name first-match behavior.
+  Item entry limits and distinct-tag vocabulary limits are separate checks.
+  Production rejection and repository fixtures remain unfinished. Keep these
+  correctness findings separate from the measured frame-preparation priority.
+  Full save validation, compiled-code inspection and Breach caller pricing were
+  not completed in this follow-up.
 
 - `crcbl_render::sprite_pass::SpriteRenderer::begin_frame` builds fresh
   instance, batch and padded constant-byte vectors; assigning
