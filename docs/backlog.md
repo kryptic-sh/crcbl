@@ -4241,6 +4241,23 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   engine lean. Native/backend and browser lifetime memory remain unverified, and
   production source remains unchanged.
 
+  A separate external empty-frame-release renderer policy now passes large,
+  small, quiet, regrown-large and quiet-again phases through every geometry ring
+  slot. CPU capacity payload is 13369344 bytes for nonempty phases and zero for
+  quiet phases; recording-null geometry descriptors remain 17825792 bytes.
+  Complete independently built production-reference uploads, full geometry
+  lengths and overlay cuts, quiet refusal of stale uploads and teardown pass.
+  Suppressing actual scratch release, injecting actual quiet geometry, removing
+  a ring observation and omitting teardown each failed before restoration. This
+  verifies release and regrowth behavior only; no regrowth latency or allocation
+  profile was collected. It does not bound retention while a smaller UI remains
+  active. Freshly read `HordeApp::draw` and `draw_hud` in
+  `apps/horde/src/app.rs` append a HUD backdrop and labels on every draw, so
+  empty-frame release alone will not shed an active Horde UI burst. Price an
+  explicit policy for sustained smaller geometry, actual workload transitions,
+  and the cost of regrowth before keeping a production memory policy. The
+  original unlimited-retention fixture remains separate and unchanged.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
