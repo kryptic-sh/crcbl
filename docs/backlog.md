@@ -92,7 +92,15 @@ checks and diff whitespace checks passed. Locked all-feature workspace build,
 clippy and nextest passed; regular all-feature workspace tests, explicit
 doctests, warnings-denied public/private documentation, cargo-machete and
 cargo-deny passed. The nextest runner reported 7205 passed and 507 skipped.
-Native and shipping gates remain open.
+Required local native gates passed; CI and browser shipping gates remain open.
+The production change is committed as `eb4cc30` on
+`perf/retain-instance-scratch`. Branch CI is running at
+<https://github.com/kryptic-sh/crcbl/actions/runs/35328862232> for that exact
+production commit. Branch pushes do not automatically run `ci.yml`; this run was
+explicitly dispatched. Watch its complete job list before fast-forwarding into
+`main`, then verify the exact main CI and Pages/browser deployment and actual
+live-site response before starting the next production slice. The later
+readback-investigation documentation commit changes no production source.
 
 The first optimized lavapipe render run, with Mesa shader caching disabled and
 normal nextest concurrency, stopped on a readback timeout before the calm-shell
