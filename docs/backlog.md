@@ -720,11 +720,16 @@ Simulation and loading follow-up:
   beyond the representable `Tag` range rather than saturating; preserve
   first-appearance tag order, valid catalogue round trips and RON error
   locations. Widening the public tag type would instead require a compatibility
-  decision. Production rejection and ordinary/boundary/duplicate-tag fixtures
-  remain unfinished; no catalogue load speedup was measured. Keep this
-  correctness finding separate from the measured frame-preparation priority.
-  Full save validation, compiled-code inspection and Breach caller pricing were
-  not completed in this follow-up.
+  decision. Actual resolved-library release fixtures passed ordinary input and
+  the full representable unique-tag vocabulary with an extra duplicate entry,
+  checking every name/identity mapping and complete catalogue round trips. A
+  wrong expected name mapping failed; restored runs passed. Limit distinct
+  vocabulary rather than total tag occurrences, since existing duplicate tags
+  remain valid. Production rejection and repository
+  boundary/duplicate/over-limit tests remain unfinished; no catalogue load
+  speedup was measured. Keep this correctness finding separate from the measured
+  frame-preparation priority. Full save validation, compiled-code inspection and
+  Breach caller pricing were not completed in this follow-up.
 
 - `crcbl_render::sprite_pass::SpriteRenderer::begin_frame` builds fresh
   instance, batch and padded constant-byte vectors; assigning
