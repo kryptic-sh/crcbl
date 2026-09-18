@@ -1525,7 +1525,16 @@ Sample and browser follow-up:
   churn in the selected script without establishing a large tick cost or FPS
   benefit. Native Horde baseline context and attribution observations are now
   covered, but changed-caller comparison, browser/focus-loss behavior and other
-  samples remain unverified.
+  samples remain unverified. The next retained-queue trial should also run the
+  existing shell-driven Horde regressions in `apps/horde/src/app.rs`:
+  `losing_focus_releases_the_keys_the_game_still_thinks_are_down` and
+  `a_focus_loss_event_releases_the_held_keys_and_pauses`. Source review confirms
+  that the latter resumes before checking player motion, so a paused game cannot
+  conceal a missing release. `HostedGame::key_event` forwards those releases to
+  `Game::key_event`; the queue change must preserve replay after
+  `ActionMap::begin_tick` and the existing following-tick movement order. These
+  regressions exist; this review does not extend the retained-queue prototype to
+  the shell or browser.
 
 - Considered and declined: removing browser command-field copies without a
   lifetime redesign. `gpu-stream.js::StreamReader::readField` produces owned
