@@ -58,18 +58,21 @@ public APIs. Repository uniform and patterned boundary tests compare complete
 raw and hex digests against independently generated Python `hashlib` answers.
 The original implementation and fixed-padding implementation passed the focused
 hash suite; corrupted digest and wrong encoded-length source controls failed.
-Workspace formatting, default clippy and regular workspace tests passed. A fresh
-optimized external raw-digest workload compiled the actual production hash
-source and the preserved pre-change source. Complete digests matched independent
-Python `hashlib` answers. DHAT whole-fixture totals fell from 1,283,708 bytes in
-10,011 blocks to 3,708 bytes in 11 blocks. Peak live memory was unchanged at
-1,736 bytes in 3 blocks. This fixture includes setup and output, not
-authentication, persistence or frame rendering; it confirms heap churn reduction
-without claiming throughput or FPS benefit. Production release-library caller
-profiling and browser worker stacks remain open. Production caller checks,
-allocation profiles, native/browser worker integration, branch CI, main CI and
-browser deployment remain open. Keep this slice pending until all required gates
-close; isolated prototype results above do not prove production integration.
+Workspace formatting, default clippy and regular workspace tests passed again
+after moving unchanged test bodies into `sha256::tests`; the focused hash suite
+also passed on that layout. A fresh optimized external raw-digest workload
+compiled the actual production hash source and the preserved pre-change source.
+Complete digests matched independent Python `hashlib` answers. DHAT
+whole-fixture totals fell from 1,283,708 bytes in 10,011 blocks to 3,708 bytes
+in 11 blocks. Peak live memory was unchanged at 1,736 bytes in 3 blocks. This
+fixture includes setup and output, not authentication, persistence or frame
+rendering; it confirms heap churn reduction without claiming throughput or FPS
+benefit. Production release-library caller profiling and browser worker stacks
+remain open. The all-feature workspace gates are running. Production
+release-library caller compatibility and allocation profiles, native/browser
+worker integration, branch CI, main CI and browser deployment remain open. Keep
+this slice pending until all required gates close; isolated prototype results
+above do not prove production integration.
 
 Cold-cache native readback investigation remains open:
 
