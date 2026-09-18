@@ -1552,6 +1552,29 @@ Sample and browser follow-up:
   improvement. Retained lifetime memory and changed-production native/browser
   gates remain required.
 
+  External Breakout and Flappy trials likewise compare current game-source
+  copies changing only their mixed queue replay, with unchanged production
+  companion modules and the same release engine library. Complete captures
+  matched the preserved original in both take and drain modes: Breakout reported
+  16 snapshots and Flappy 17. The mixed-input fixtures retain their deferred
+  replay, catch-up, held input, release, burst and restart assertions; Breakout
+  also retains ordered pointer movement, unchanged positions and rejected NaN
+  observations. Corrupting each draining capture failed its complete-value
+  observer; restoring normal captures passed. Symbolized DHAT captures also
+  matched the preserved originals. Guarded growth sites rooted at the actual
+  mixed-event push expressions reported:
+
+  | Sample   | Take queue bytes/blocks | Drain queue bytes/blocks |
+  | -------- | ----------------------- | ------------------------ |
+  | Breakout | 4480/24                 | 4032/12                  |
+  | Flappy   | 576/20                  | 496/10                   |
+
+  Each selected stack identifies growth of that sample's `Queued` vector;
+  missing-site controls failed before normal selectors passed. Burst growth
+  still allocates in the draining copies. These are source-copy allocation and
+  gameplay comparisons, not changed-production, full packaged shell, browser
+  delivery, elapsed tick or retained-lifetime memory verification.
+
   A matched elapsed-tick trial uses these same game-source copies and the
   complete preserved gameplay capture. After warming both binaries and pinning
   them to the same allowed CPU, take/drain/drain/take p50/p95 normalized prices
