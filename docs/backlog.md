@@ -123,19 +123,22 @@ fatal validation errors enabled. Full branch CI at
 `4055c703ea6072fddd77b27cf7da9269a5d49221` passed after the unchanged WARP
 retry. Every required job and its steps passed the terminal audit; deliberately
 failed job and step controls were rejected before restoration passed. Changes
-after that tested source commit affect this backlog alone. Main CI and
-deployment gates remain pending. Pages run `35357584616` at main
-`c1b031e7ee0ffdf61fc5920c2e08c76c5d643acf` reported its Tide browser job
-`105641587733` failed after the runner received a shutdown signal. Job metadata
-marks the browser render step cancelled and evidence upload skipped. Its full
-log records successful platform, boot, simulation, render and focus checks
-through explicit resume, with no emitted browser assertion failure and no final
-gate verdict. The workflow's job budget was not exhausted in the recorded
-interval; why the runner shut down remains unproven. This interruption does not
-establish a code regression or a passing Tide gate. The unchanged failed job
-still needs retry after the active Pages run reaches a terminal state; keep the
-original log and verify the full retry verdict before deployment closure.
-Earlier source-copy prototype prices below are separate evidence.
+after that tested source commit affect this backlog alone. Main CI run
+`35357584635` at `c1b031e7ee0ffdf61fc5920c2e08c76c5d643acf` passed its terminal
+audit: all expected jobs and their steps succeeded or took their permitted
+conditional skips. Deliberately failed job and step controls were rejected
+before the normal audit passed. Pages and deployment gates remain pending. Pages
+run `35357584616` at main `c1b031e7ee0ffdf61fc5920c2e08c76c5d643acf` reported
+its Tide browser job `105641587733` failed after the runner received a shutdown
+signal. Job metadata marks the browser render step cancelled and evidence upload
+skipped. Its full log records successful platform, boot, simulation, render and
+focus checks through explicit resume, with no emitted browser assertion failure
+and no final gate verdict. The workflow's job budget was not exhausted in the
+recorded interval; why the runner shut down remains unproven. This interruption
+does not establish a code regression or a passing Tide gate. The unchanged
+failed job still needs retry after the active Pages run reaches a terminal
+state; keep the original log and verify the full retry verdict before deployment
+closure. Earlier source-copy prototype prices below are separate evidence.
 
 - Trial fixed outer-input storage in `crcbl_net::auth::hmac_sha256` before the
   sample input-queue changes. Matched source-copy measurements remove outer
