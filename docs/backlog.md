@@ -17846,9 +17846,11 @@ module docs — a newtype over `crcbl_store::web::FetchSource` delegating `read`
 because that type already canonicalises the key, already enqueues on a miss and
 already answers `StorageError::Pending`. It is not written because a wrapper
 with no consumer is a wrapper nobody has exercised. The claim that it needs no
-caller changes is a design argument, **not** something a test proves: no
-`AssetSource` other than `DirSource` and the crate's own scripted test source
-exists.
+caller changes is a design argument, **not** something a test proves: the
+browser fetch wrapper is still absent. `MemorySource` now implements
+`AssetSource`, and `apps/viewer/src/model.rs::load_bytes` inserts caller-owned
+bytes into it before passing it through `load_from` to the importer. This
+resident-byte path does not verify asynchronous fetch behavior.
 
 **A blanket `impl<S: StorageSource> AssetSource for S` was considered and
 declined.** It would have made every storage backend an asset source for free,
@@ -17880,9 +17882,13 @@ failed until a caller releases and re-requests it. No backoff, no retry budget,
 no distinction between a 404 and a transient network error — the last of those
 would matter for a browser source and does not exist yet.
 
-**Nothing depends on `crcbl-assets`.** Like `crcbl-scene`, it is a workspace
-member every `cargo build --workspace` compiles for nothing until task 3 gives
-it a consumer. Same trade-off, same argument as that crate's header.
+**The IO seam has consumers; registry adoption remains separate.**
+`crates/crcbl/Cargo.toml` and `crates/crcbl-scene/Cargo.toml` depend on
+`crcbl-assets`, and the umbrella re-exports it as `crcbl::assets`. The viewer
+loads resident documents through `MemorySource`. These consumers invalidate the
+old claim that the crate has no dependents; they do not establish a frame
+workload for `AssetRegistry::poll`. The performance entry above retains that
+registry-specific adoption and measurement gap.
 
 **Not reviewed or built:** the exit criterion "no synchronous IO anywhere in
 engine crates (CI: deny `std::fs` outside `DirSource` + tooling)". There is no
@@ -20935,11 +20941,19 @@ checks passed. The diagnostics were pushed on
 [CI](https://github.com/kryptic-sh/crcbl/actions/runs/35316357329) was accepted
 and its Windows Vulkan
 [job 105508739038](https://github.com/kryptic-sh/crcbl/actions/runs/35316357329/job/105508739038)
-is running its forward suite after its backend suite passed. This branch has a
-separate CI concurrency group; the main Pages run completed successfully without
-cancellation. The diagnostics do not fix the timeout. Obtain the actual Windows
-stage trace before choosing a remedy; enumerate all jobs before treating branch
-verification as passed.
+completed successfully: its backend runner reported 63 passed with no skips, its
+forward runner reported 38 passed with no skips, and real Win32 presentation
+reported four passed with no skips. The previously timed-out persisted-effects
+test passed in 224.069 s. Its stage trace shows the all-effects frame submitted
+after 4.0118612 s and idle after 30.9632841 s; the auto-exposure-disabled frame
+submitted after 4.9701897 s and idle after 42.7704545 s. The successful run
+therefore locates substantial elapsed time between submission and idle, but does
+not identify the earlier timeout's cause or isolate driver compilation, software
+rendering and waiting. Diagnostics do not fix that variability. Linux Vulkan and
+macOS Metal jobs remain live; enumerate all jobs before treating branch
+verification as passed. This branch has a separate CI concurrency group; the
+main Pages run completed successfully without cancellation. Preserve fresh
+fixtures, effect assertions and deadlines while investigating any recurrence.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
