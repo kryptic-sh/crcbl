@@ -3757,16 +3757,28 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   `DELAY_CAPACITY` for each channel. Construction allocates delay buffers even
   with zero ITD; mixing advances them in the sample loop and indexes with modulo
   their runtime vector length. Fixed array storage could remove construction
-  allocations and make the modulo divisor constant, but that compiler effect has
-  not been verified in release assembly. It would enlarge inline `Voice` storage
-  and increase bytes moved when active/releasing voice vectors grow or compact.
-  Do not treat this as allocation on every callback or assume a net gain. Price
-  accepted cue bursts, voice-list memory/moves and callback mixing separately
-  with unchanged and varied fractional ITD, looping, pitch, stop ramps and
-  complete stereo output equality. Compare release code and native and browser
-  workloads before implementation. This remains behind the measured HMAC/input
-  trials and the existing capped-cue construction-order candidate; no production
-  audio behavior changed in this review.
+  allocations and make the modulo divisor constant. A standalone release helper
+  probe extracted the current delay-line source and compared it with fixed array
+  storage. With helper inlining deliberately disabled, inspected x86-64 assembly
+  retains runtime division branches for the original tap indexes and uses
+  capacity masks for the fixed helper. A missing-symbol selector failed before
+  the exact nonempty helper selectors passed. This establishes the standalone
+  compiler effect, not the actual optimized `Voice::mix_block` instruction
+  sequence. Complete bitwise outputs matched for 16,384 pushes with varying
+  finite samples and fractional delays throughout the supported range, including
+  repeated buffer wraps. Altering an output bit failed the complete-output
+  observer before restoration passed. The probe reported inline helper sizes of
+  32 bytes originally and 264 bytes fixed, with 256 bytes of buffer payload in
+  either representation; allocator overhead and full voice storage are excluded.
+  It would enlarge inline `Voice` storage and increase bytes moved when
+  active/releasing voice vectors grow or compact. Do not treat this as
+  allocation on every callback or assume a net gain. Price accepted cue bursts,
+  voice-list memory/moves and callback mixing separately with unchanged and
+  varied fractional ITD, looping, pitch, stop ramps and complete stereo output
+  equality. Compare release code and native and browser workloads before
+  implementation. This remains behind the measured HMAC/input trials and the
+  existing capped-cue construction-order candidate; no production audio behavior
+  changed in this review.
 
 - **P37 — price audio contention and retirement before redesigning commands.**
   Callback follow-up read `Mixer::fill`, `route_gain`, the bus accessors and
