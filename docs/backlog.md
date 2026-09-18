@@ -1618,24 +1618,28 @@ Sample and browser follow-up:
   samples remain unverified. The next retained-queue trial should also run the
   existing shell-driven Horde regressions in `apps/horde/src/app.rs`:
   `losing_focus_releases_the_keys_the_game_still_thinks_are_down` and
-  `a_focus_loss_event_releases_the_held_keys_and_pauses`. Source review confirms
-  that the latter resumes before checking player motion, so a paused game cannot
-  conceal a missing release. `HostedGame::key_event` forwards those releases to
-  `Game::key_event`; the queue change must preserve replay after
-  `ActionMap::begin_tick` and the existing following-tick movement order. These
-  regressions exist; this review does not extend the retained-queue prototype to
-  the shell or browser. Browser source review confirms `web/engine/shell.js`
-  sends canvas blur and hidden-document visibility through `__crcbl_web_focus`.
-  `Engine::frame` routes focus loss through `lose_focus`, which emits each held
-  key's release through the game before pausing. The inspected browser gate's
-  focus group observes paused status, absence of tick heartbeats, explicit
-  refocus and resume; Horde's touch group observes stick motion and pause-menu
-  contact handling. Those observations alone do not prove a held keyboard
-  direction stays released after blur and resume. Before keeping the queue
-  change, drive a real held direction, blur without a keyup, explicitly resume
-  and observe stopped movement while ticks advance; then verify a fresh press
-  moves again. Keep pause-only success separate from the release observable, and
-  test hidden-tab delivery separately from canvas blur where feasible.
+  `a_focus_loss_event_releases_the_held_keys_and_pauses`. The current unchanged
+  production baseline passed `cargo test -p horde --lib focus --locked`,
+  including both named regressions; the runner reported 5 passed, 0 failed and
+  195 filtered out. This focused run establishes the pre-queue-change native
+  baseline only. Source review confirms that the latter resumes before checking
+  player motion, so a paused game cannot conceal a missing release.
+  `HostedGame::key_event` forwards those releases to `Game::key_event`; the
+  queue change must preserve replay after `ActionMap::begin_tick` and the
+  existing following-tick movement order. These regressions exist; this review
+  does not extend the retained-queue prototype to the shell or browser. Browser
+  source review confirms `web/engine/shell.js` sends canvas blur and
+  hidden-document visibility through `__crcbl_web_focus`. `Engine::frame` routes
+  focus loss through `lose_focus`, which emits each held key's release through
+  the game before pausing. The inspected browser gate's focus group observes
+  paused status, absence of tick heartbeats, explicit refocus and resume;
+  Horde's touch group observes stick motion and pause-menu contact handling.
+  Those observations alone do not prove a held keyboard direction stays released
+  after blur and resume. Before keeping the queue change, drive a real held
+  direction, blur without a keyup, explicitly resume and observe stopped
+  movement while ticks advance; then verify a fresh press moves again. Keep
+  pause-only success separate from the release observable, and test hidden-tab
+  delivery separately from canvas blur where feasible.
 
 - Considered and declined: removing browser command-field copies without a
   lifetime redesign. `gpu-stream.js::StreamReader::readField` produces owned
