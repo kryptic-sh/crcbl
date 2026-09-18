@@ -122,8 +122,14 @@ visibility path's effect separately from canvas blur without overriding document
 visibility. In the ordinary tab-switch fixture, deliberately injecting movement
 after resume failed only the held-movement observer; actual visibility, paused
 return, explicit resume and fresh input continued to pass. That fixture's
-restored full browser run also reported 65/65 checks passed. Canonical
-branch/main CI and publication gates remain required before keeping this slice.
+restored full browser run also reported 65/65 checks passed. Full branch CI
+[35368338923](https://github.com/kryptic-sh/crcbl/actions/runs/35368338923)
+passed at `fbef915413570b5750706651946c3b441a189726`. The terminal audit
+accepted the complete inventory of 27 required jobs and their steps. Failed job,
+failed step, missing job, missing step, unexpectedly skipped required step and
+wrong-head controls each failed before normal restoration passed. The workflow
+definition matches the previously audited main baseline. Main CI and publication
+gates remain required before keeping this slice.
 
 - Trial sample input queue capacity next. Source-copy gameplay and allocation
   comparisons support the mechanism; matched Horde tick prices did not improve.
@@ -3920,7 +3926,23 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   output buffers next, preserving clipping, command order, overlay cuts, glyph
   rasterization and image binding. Compare both bitmap and sans paths before
   keeping the change. A text arena would change draw-command ownership and needs
-  separate evidence.
+  separate evidence. A fresh release probe calls actual
+  `UiRenderer::begin_frame` against the recording null backend with static
+  overlapping bitmap labels and a clipped base plus an overlay. Its final normal
+  restoration reported p50/p95 prices of 10.400/12.965 microseconds for 32
+  labels, 90.761/93.637 for 256, and 403.332/493.001 for 1024; each case
+  reported 500 timed frames. Full uploaded vertex fields and index bytes matched
+  a reference encoded field by field, with both writes required on every timed
+  frame. Corrupt upload contents, missing writes, empty timers and omitted
+  teardown independently failed their exact observers before normal restoration
+  passed. The timer includes tessellation, staging checks, ring rotation and
+  null host-buffer writes; source/list/reference construction, recorder
+  clearing, buffer readback comparisons and teardown are excluded. The fixtures
+  differ from the earlier standalone conversions and are not a speedup
+  comparison. Actual sans rendering, graph draw/overlay partition, native GPU
+  and browser uploads, changed retained output and lifetime geometry memory
+  remain unpriced by this caller probe. Price retained CPU geometry after
+  large-to-small and quiet UI frames before keeping a reuse change.
 
 ### Checked and fine
 
