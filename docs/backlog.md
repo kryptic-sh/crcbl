@@ -112,12 +112,18 @@ normal logs passed. A separate external browser fixture switched to a real
 Chromium tab and required actual hidden/visible state and visibilitychange
 events, paused return without keyup, explicit resume, stationary movement during
 advancing ticks and fresh keyboard movement. Its normal full run reported 65/65
-checks passed. Chromium also delivered a canvas blur, so the visibility-handler
-path without canvas blur remains unisolated. Deliberately injecting movement
+checks passed. Chromium also delivered a canvas blur. A further fixture
+intercepted that actual blur before the engine listener, leaving actual
+visibility delivery to notify the engine of lost focus. Normal and restored full
+runs each reported 66/66 checks passed. Deliberately suppressing visibility
+delivery with blur still intercepted failed only the paused-return observer:
+frames advanced but the engine stayed running. This establishes the actual
+visibility path's effect separately from canvas blur without overriding document
+visibility. In the ordinary tab-switch fixture, deliberately injecting movement
 after resume failed only the held-movement observer; actual visibility, paused
-return, explicit resume and fresh input continued to pass. The restored full
-browser run also reported 65/65 checks passed. Canonical branch/main CI and
-publication gates remain required before keeping this slice.
+return, explicit resume and fresh input continued to pass. That fixture's
+restored full browser run also reported 65/65 checks passed. Canonical
+branch/main CI and publication gates remain required before keeping this slice.
 
 - Trial sample input queue capacity next. Source-copy gameplay and allocation
   comparisons support the mechanism; matched Horde tick prices did not improve.
@@ -125,6 +131,16 @@ publication gates remain required before keeping this slice.
   held inputs and full native/browser gates before keeping the production
   change. Backend command-pool reuse, wider graph caching and math changes need
   stronger workload evidence or carry more lifecycle risk.
+
+Browser queued-key regression coverage remains external: the held-key
+blur/resume, real tab switch and visibility-only isolation fixtures are not part
+of `web/tools/browser-e2e.mjs`. Its existing focus checks observe pause, focus
+and resumption; the external fixtures also observe stationary keyboard movement
+while resumed ticks advance and renewed movement on fresh input. Bring those
+proved observers and precise failure controls into the canonical browser gate,
+with a clear queued-input test seam instead of growing the driver monolith.
+Price added CI runtime under software rendering and preserve scaled waits and
+complete GPU cleanup receipts.
 
 Hash and authentication worker coverage gaps remain separate from shipped
 padding storage: native sampled aggregate stack and browser sentinel residue
