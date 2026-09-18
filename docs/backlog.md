@@ -43,8 +43,11 @@ Next performance trials:
 
 The retained shadow-scratch trial is implemented and pushed at `9253b7d`.
 Exact-commit [CI](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020)
-failed; [Pages](https://github.com/kryptic-sh/crcbl/actions/runs/35311394992) is
-still running. The initial Windows Vulkan job failed readback deadlines with
+failed. Exact-commit
+[Pages](https://github.com/kryptic-sh/crcbl/actions/runs/35311394992) completed
+successfully: browser and golden jobs and deployment passed; the owner-deferred
+macOS seam job was skipped. The deployed site at `https://crcbl.kryptic.sh/`
+returned HTTP 200. The initial Windows Vulkan job failed readback deadlines with
 LATE verdicts. Its same-commit rerun passed the complete backend suite, but
 [job 105501333899](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020/job/105501333899)
 then failed in the forward suite:
@@ -94,8 +97,9 @@ wrapped-string checks and diff whitespace checks. Native RADV rendering and
 lavapipe render, mesh, sprite, draw-generation, tiling, forward, HAL seam, glTF
 and complete Vulkan suites passed with their adapter and validation guards. The
 Vulkan suite reports record-time and one-submission synchronization coverage,
-but no cross-submission coverage on this machine. CI, browser and deployment
-verification remain open before keeping the change.
+but no cross-submission coverage on this machine. CI verification remains open
+before keeping the change. Exact-commit browser and deployment gates passed;
+those correctness gates do not establish browser performance.
 
 | Lighting | Baseline p50/p95 (ms) | Retained    | Baseline repeat | Retained repeat |
 | -------- | --------------------- | ----------- | --------------- | --------------- |
@@ -20931,10 +20935,11 @@ checks passed. The diagnostics were pushed on
 [CI](https://github.com/kryptic-sh/crcbl/actions/runs/35316357329) was accepted
 and its Windows Vulkan
 [job 105508739038](https://github.com/kryptic-sh/crcbl/actions/runs/35316357329/job/105508739038)
-is running. This branch has a separate CI concurrency group, leaving the live
-main Pages run intact. The diagnostics do not fix the timeout. Obtain the actual
-Windows stage trace before choosing a remedy; enumerate all jobs before treating
-branch verification as passed.
+is running its forward suite after its backend suite passed. This branch has a
+separate CI concurrency group; the main Pages run completed successfully without
+cancellation. The diagnostics do not fix the timeout. Obtain the actual Windows
+stage trace before choosing a remedy; enumerate all jobs before treating branch
+verification as passed.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
