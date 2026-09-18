@@ -20889,8 +20889,15 @@ submission diagnostic made the observation guard fail before restoration.
 CI-profile nextest, regular all-feature workspace tests, explicit doctests,
 public and private documentation with warnings denied, cargo-machete and
 cargo-deny passed. Documentation citations, wrapped strings and whitespace
-checks passed. The diagnostics have not been pushed and do not fix the timeout.
-Obtain the actual Windows stage trace before choosing a remedy.
+checks passed. The diagnostics were pushed on
+`fix/windows-forward-timeout-diagnostics` at `04a48cb`. Its exact-commit
+[CI](https://github.com/kryptic-sh/crcbl/actions/runs/35316357329) was accepted
+and its Windows Vulkan
+[job 105508739038](https://github.com/kryptic-sh/crcbl/actions/runs/35316357329/job/105508739038)
+is running. This branch has a separate CI concurrency group, leaving the live
+main Pages run intact. The diagnostics do not fix the timeout. Obtain the actual
+Windows stage trace before choosing a remedy; enumerate all jobs before treating
+branch verification as passed.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
