@@ -3846,7 +3846,25 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   requests remain outside the timers. This supports the saturated source-copy
   mechanism with concurrent null mixing, not actual production behavior,
   accepted-request latency, hardware callback contention, game drop frequency or
-  a frame-rate gain. Price those before keeping the production change; this
+  a frame-rate gain. A separate accepted-cue source-copy trial disabled the null
+  stream in both complete audio modules to compare deterministic counters, voice
+  handles, full mix parameters and stereo sample bits. It reported 30 matched
+  snapshots covering unknown and sub-frame refusal with free and full caps,
+  varied listeners/emitters, accepted cue ids, cap drops and voice retirement.
+  Live cues were required to produce audible finite output. Corrupted sample
+  bits, empty timing collection, silent output and non-finite output each failed
+  their exact observer before normal restoration passed. Both modes were warmed
+  and pinned to the same allowed CPU. The final
+  original/prechecked/prechecked/original p50/p95 normalized accepted-request
+  prices were 133.4/135.2, 129.0/131.5, 127.8/130.2 and 133.4/135.9 nanoseconds.
+  Each run reported 500 timed batches. Voice construction, counters, cap locks
+  and spatial cueing are timed; source construction, retirement, sample fills
+  and assertions are excluded. These are batch-normalized request prices, not
+  individual request tails or device callback latency. Earlier harness revisions
+  produced different absolute prices, so this isolated result does not establish
+  a production latency gain. Actual modified production behavior, game drop
+  frequency, hardware callback contention and browser behavior remain
+  unmeasured. Price those before keeping the production change; this
   event-driven candidate follows the frame-wide P14 trial.
 - **P38 — price retained UI triangle output and text storage.** Revalidated
   `DrawList::clear` and `Ui::begin_frame_with`: command and tree collections
