@@ -619,12 +619,17 @@ Networking preparation follow-up:
   helper copies. Real Chromium Web Workers passed both providers, trapped on an
   altered outer XOR source, and passed the restored fixed provider; the harness
   required the worker result message and required the negative result to be a
-  WASM trap. This covers isolated helper execution, not shared-memory engine
-  workers, full network call chains, exact stack high-water bounds or production
-  authentication integration. Native and browser engine-worker stacks, actual
-  packet mix, changed production callers and full shipping gates remain required
-  before keeping it. Keep this separate from wider inner-input streaming design
-  and behind the current hash shipping gates.
+  WASM trap. The same independently checked helper cases also passed on a local
+  native worker with an explicit stack-size request; the altered outer XOR
+  failed on that worker and the restored fixed provider passed. This is the
+  standard-library worker harness on the observed native host, not a changed
+  engine spawner or a measured stack high-water bound. These checks cover
+  isolated helper execution, not shared-memory engine workers, full network call
+  chains, exact stack high-water bounds or production authentication
+  integration. Native and browser engine-worker stacks, actual packet mix,
+  changed production callers and full shipping gates remain required before
+  keeping it. Keep this separate from wider inner-input streaming design and
+  behind the current hash shipping gates.
 
 - SHA-256 padding is being implemented in the current trial above.
   `crcbl_shaders::sha256::sha256` now uses fixed local padding storage without
