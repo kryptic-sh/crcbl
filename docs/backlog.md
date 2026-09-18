@@ -3979,6 +3979,29 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   remain unpriced by this caller probe. Price retained CPU geometry after
   large-to-small and quiet UI frames before keeping a reuse change.
 
+  A fresh external burst-storage probe called the current production
+  `UiRenderer::begin_frame` through every actual ring slot with 1024 bitmap
+  labels, then 32 labels, then an empty draw list. Complete nonempty uploaded
+  vertex fields and index bytes matched references; quiet frames made no
+  geometry writes. Recording-null buffer descriptors retained 17825792 bytes
+  across the geometry ring through all phases. Separately, current public
+  triangle conversion returned vector-capacity payloads of 13369344 bytes for
+  the large list, 417792 for the small list and zero for the empty list.
+  Clearing the large output vectors retained their 13369344-byte payload
+  capacity: this prices the simplest proposed CPU retention policy, not an
+  implemented reuse caller. Figures exclude allocator metadata, draw commands,
+  atlases, staging, reference copies and full-process memory; null descriptor
+  sizes do not measure real GPU residency. Missing ring observations, falsely
+  reported cleared capacity, actual unexpected quiet-frame geometry and omitted
+  renderer teardown each failed their exact observer before the normal complete
+  restoration passed. The initial external fixture assumed the wrong ring depth
+  and failed; its bound was corrected from the freshly inspected private
+  `ui_pass::FRAMES_IN_FLIGHT` before collecting these results. No production
+  source or existing regression assertion changed. Retained output needs a
+  deliberate burst-memory policy and matched bitmap/sans actual-caller prices;
+  these measurements do not establish a CPU speedup, empty graph draw behavior,
+  hardware residency or browser lifetime cost.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
