@@ -54,75 +54,82 @@ Next performance trials:
   command-pool reuse, wider graph caching and math changes need stronger
   workload evidence or carry more lifecycle risk.
 
-The fixed-padding SHA-256 trial is in progress on `perf/fixed-hash-padding`.
-Production padding now uses fixed local storage without changing compression or
-public APIs. Repository uniform and patterned boundary tests compare complete
-raw and hex digests against independently generated Python `hashlib` answers.
-The original implementation and fixed-padding implementation passed the focused
-hash suite; corrupted digest and wrong encoded-length source controls failed.
-Workspace formatting, default clippy and regular workspace tests passed again
-after moving unchanged test bodies into `sha256::tests`; the focused hash suite
-also passed on that layout. A fresh optimized external raw-digest workload
-compiled the actual production hash source and the preserved pre-change source.
-Complete digests matched independent Python `hashlib` answers. DHAT
-whole-fixture totals fell from 1,283,708 bytes in 10,011 blocks to 3,708 bytes
-in 11 blocks. Peak live memory was unchanged at 1,736 bytes in 3 blocks. This
-fixture includes setup and output, not authentication, persistence or frame
-rendering; it confirms heap churn reduction without claiming throughput or FPS
-benefit. Release-library caller results and remaining browser worker stack gaps
-are recorded below. An isolated WASM executable compiled the actual production
-hash source with a constrained linker stack and checked complete raw and hex
-digests against fresh Python `hashlib` answers for patterned boundary and large
-inputs. Local Chromium ran it inside a real Web Worker: the normal build passed,
-a corrupted-digest source control trapped, and the restored build passed. The
-harness checked the worker's result message and required the negative result to
-be a WASM trap. This verifies isolated production-source worker execution, not
-shared-memory engine worker stack high-water use, full subsystem call chains or
-browser storage. The preserved pre-change release binary additionally captured
-actual raw/hex hashes, sealed packets and save files through the public engine
-exports, both on the caller and through `jobs::Threads::spawn`. Complete worker
-and caller bytes matched. The capture matched independently constructed Python
-`hashlib`/HMAC packets and packed save files; altered digest, MAC and
-save-header byte controls failed. A deliberately altered worker capture failed
-before normal restoration. The baseline's compiled hash allocator/deallocator
-targets were resolved through its ELF relocation table, establishing that it
-retains original tail allocation. The changed release library now matches the
-preserved capture and independent expected bytes through the same public digest,
-authentication and persistence exports. Native `jobs::Threads::spawn` worker
-bytes match the caller; an altered worker capture fails and the restored capture
-passes. DHAT whole-fixture release-caller totals fell from 2,347,140 bytes in
-1,017 blocks to 2,305,662 bytes in 693 blocks. Peak live memory remained 688,918
-bytes in 28 blocks. This workload includes caller and worker authentication,
-save serialization, capture buffers and runtime setup; it establishes allocation
-churn reduction without a throughput or FPS claim. A fresh Massif stack-enabled
-run of these preserved actual release binaries reported maximum sampled
-aggregate stack use of 4,152 bytes originally and 4,168 bytes after fixed
-padding; complete caller/worker digest, packet and save captures again matched
-independent expected bytes. The observer requires nonempty positive stack
-observations, and a missing-observation control failed before restoration
-passed. These are native workload samples across its threads, not exact
-per-thread high-water bounds or browser engine-worker headroom. All-feature
-workspace build, clippy, nextest, regular tests, public/private rustdoc,
-dependency audits and release build passed. The canonical real-browser jobs gate
-passed its normal worker execution, deliberate refusal controls and
-non-isolated-origin fallback checks. Shared-memory engine worker stack
-high-water use and full hashing subsystem call chains in browser workers remain
-coverage gaps; the jobs gate does not hash. The complete plain browser demo
-build passed export and smoke gates; actual Chromium Breakout and Shard behavior
-gates passed on the hardware adapter. Native Vulkan HAL and render-image gates
-also passed with lavapipe and synchronization validation after correcting
-harness backend/adapter invocation settings. The local validation-layer
-cross-submission coverage limitation remains recorded separately below; passing
-images do not close it. The actual changed release library additionally matched
-every committed shader source and artifact digest in the manifest; an altered
-expected digest failed and restoration passed. Full branch CI passed against the
-production change. The final audit matched the required job set from the
-unchanged CI workflow and verified every job succeeded with no failed or
-cancelled steps; an altered-job control failed before restoration passed. Local
-commits added after the tested branch revision contain backlog verification
-notes only. Main CI and browser deployment remain open. Keep this slice pending
-until all required gates close; isolated prototype results above do not prove
-production integration.
+The fixed-padding SHA-256 change has merged to main; its shipping verification
+remains in progress. Production padding now uses fixed local storage without
+changing compression or public APIs. Repository uniform and patterned boundary
+tests compare complete raw and hex digests against independently generated
+Python `hashlib` answers. The original implementation and fixed-padding
+implementation passed the focused hash suite; corrupted digest and wrong
+encoded-length source controls failed. Workspace formatting, default clippy and
+regular workspace tests passed again after moving unchanged test bodies into
+`sha256::tests`; the focused hash suite also passed on that layout. A fresh
+optimized external raw-digest workload compiled the actual production hash
+source and the preserved pre-change source. Complete digests matched independent
+Python `hashlib` answers. DHAT whole-fixture totals fell from 1,283,708 bytes in
+10,011 blocks to 3,708 bytes in 11 blocks. Peak live memory was unchanged at
+1,736 bytes in 3 blocks. This fixture includes setup and output, not
+authentication, persistence or frame rendering; it confirms heap churn reduction
+without claiming throughput or FPS benefit. Release-library caller results and
+remaining browser worker stack gaps are recorded below. An isolated WASM
+executable compiled the actual production hash source with a constrained linker
+stack and checked complete raw and hex digests against fresh Python `hashlib`
+answers for patterned boundary and large inputs. Local Chromium ran it inside a
+real Web Worker: the normal build passed, a corrupted-digest source control
+trapped, and the restored build passed. The harness checked the worker's result
+message and required the negative result to be a WASM trap. This verifies
+isolated production-source worker execution, not shared-memory engine worker
+stack high-water use, full subsystem call chains or browser storage. The
+preserved pre-change release binary additionally captured actual raw/hex hashes,
+sealed packets and save files through the public engine exports, both on the
+caller and through `jobs::Threads::spawn`. Complete worker and caller bytes
+matched. The capture matched independently constructed Python `hashlib`/HMAC
+packets and packed save files; altered digest, MAC and save-header byte controls
+failed. A deliberately altered worker capture failed before normal restoration.
+The baseline's compiled hash allocator/deallocator targets were resolved through
+its ELF relocation table, establishing that it retains original tail allocation.
+The changed release library now matches the preserved capture and independent
+expected bytes through the same public digest, authentication and persistence
+exports. Native `jobs::Threads::spawn` worker bytes match the caller; an altered
+worker capture fails and the restored capture passes. DHAT whole-fixture
+release-caller totals fell from 2,347,140 bytes in 1,017 blocks to 2,305,662
+bytes in 693 blocks. Peak live memory remained 688,918 bytes in 28 blocks. This
+workload includes caller and worker authentication, save serialization, capture
+buffers and runtime setup; it establishes allocation churn reduction without a
+throughput or FPS claim. A fresh Massif stack-enabled run of these preserved
+actual release binaries reported maximum sampled aggregate stack use of 4,152
+bytes originally and 4,168 bytes after fixed padding; complete caller/worker
+digest, packet and save captures again matched independent expected bytes. The
+observer requires nonempty positive stack observations, and a
+missing-observation control failed before restoration passed. These are native
+workload samples across its threads, not exact per-thread high-water bounds or
+browser engine-worker headroom. All-feature workspace build, clippy, nextest,
+regular tests, public/private rustdoc, dependency audits and release build
+passed. The canonical real-browser jobs gate passed its normal worker execution,
+deliberate refusal controls and non-isolated-origin fallback checks.
+Shared-memory engine worker stack high-water use and full hashing subsystem call
+chains in browser workers remain coverage gaps; the jobs gate does not hash.
+Reviewed the threaded Horde driver and its `__crcbl_horde_sim_threads` export:
+its observed off-main work is `steer_enemies` velocity-decision chunks through
+`Pool::par_for`, not authentication or save encoding. The chunk body performs
+overlap queries and steering arithmetic; the exported thread count specifically
+records steering chunk execution. Passing that gate therefore does not close the
+browser hashing call-chain or stack high-water gaps. The complete plain browser
+demo build passed export and smoke gates; actual Chromium Breakout and Shard
+behavior gates passed on the hardware adapter. Native Vulkan HAL and
+render-image gates also passed with lavapipe and synchronization validation
+after correcting harness backend/adapter invocation settings. The local
+validation-layer cross-submission coverage limitation remains recorded
+separately below; passing images do not close it. The actual changed release
+library additionally matched every committed shader source and artifact digest
+in the manifest; an altered expected digest failed and restoration passed. Full
+branch CI passed against the production change. The final audit matched the
+required job set from the unchanged CI workflow and verified every job succeeded
+with no failed or cancelled steps; an altered-job control failed before
+restoration passed. Local commits added after the tested branch revision contain
+backlog verification notes only. Main CI and Pages are running for the exact
+merged production revision. Their final job/step audits and deployed-site
+verification remain open. Keep this slice pending until all required gates
+close; isolated prototype results above do not prove production integration.
 
 Cold-cache native readback investigation remains open:
 
