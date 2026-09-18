@@ -108,9 +108,16 @@ gameplay assertions. Canonical hardware browser gates subsequently passed for
 Horde, Asteroids, Breakout, Flappy, Shard, Puppet, Orbit, Towers and Breach,
 including touch input and complete GPU resource cleanup. Removing either the
 complete browser verdict or cleanup receipt failed each log observer before the
-normal logs passed. Actual hidden-tab delivery remains an independent coverage
-gap. Canonical branch/main CI and publication gates remain required before
-keeping this slice.
+normal logs passed. A separate external browser fixture switched to a real
+Chromium tab and required actual hidden/visible state and visibilitychange
+events, paused return without keyup, explicit resume, stationary movement during
+advancing ticks and fresh keyboard movement. Its normal full run reported 65/65
+checks passed. Chromium also delivered a canvas blur, so the visibility-handler
+path without canvas blur remains unisolated. Deliberately injecting movement
+after resume failed only the held-movement observer; actual visibility, paused
+return, explicit resume and fresh input continued to pass. The restored full
+browser run also reported 65/65 checks passed. Canonical branch/main CI and
+publication gates remain required before keeping this slice.
 
 - Trial sample input queue capacity next. Source-copy gameplay and allocation
   comparisons support the mechanism; matched Horde tick prices did not improve.
