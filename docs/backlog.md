@@ -20951,11 +20951,15 @@ therefore locates substantial elapsed time between submission and idle, but does
 not identify the earlier timeout's cause or isolate driver compilation, software
 rendering and waiting. Diagnostics do not fix that variability. The exact-commit
 diagnostic branch CI completed successfully; every job was enumerated and
-passed, including Linux Vulkan and macOS Metal. Main publication and its
-exact-commit CI and Pages gates remain required before the next engine slice.
-This branch has a separate CI concurrency group; the main Pages run completed
-successfully without cancellation. Preserve fresh fixtures, effect assertions
-and deadlines while investigating any recurrence.
+passed, including Linux Vulkan and macOS Metal. Main was fast-forwarded and
+pushed at `143684a`. Its exact-commit
+[CI](https://github.com/kryptic-sh/crcbl/actions/runs/35318805086) and
+[Pages](https://github.com/kryptic-sh/crcbl/actions/runs/35318805062) runs are
+live, with no reported failure at the latest observation. Enumerate every
+terminal job and verify the newly deployed live site before the next engine
+slice. This branch has a separate CI concurrency group; the main Pages run
+completed successfully without cancellation. Preserve fresh fixtures, effect
+assertions and deadlines while investigating any recurrence.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
