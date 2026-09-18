@@ -1517,6 +1517,25 @@ Sample and browser follow-up:
   memory trade-off warrants a bound. No additional wrapper is needed for this
   loop.
 
+  A separate release staging probe linked the current production `ActionMap` and
+  replayed growing bursts followed by quiet ticks. Complete logical action
+  values matched the take-and-replay reference throughout. Clearing retained
+  capacity deliberately failed the quiet-period observer; restoring the draining
+  loop passed. The probe reported:
+
+  | Burst events | Following quiet ticks | Original capacity | Retained capacity | Retained payload bytes |
+  | ------------ | --------------------- | ----------------- | ----------------- | ---------------------- |
+  | 2            | 256                   | 0                 | 4                 | 8                      |
+  | 16           | 256                   | 0                 | 16                | 32                     |
+  | 128          | 256                   | 0                 | 128               | 256                    |
+  | 4096         | 256                   | 0                 | 4096              | 8192                   |
+
+  Payload bytes are vector capacity multiplied by the actual key-event element
+  size, excluding allocator overhead, maps and reference scaffolding. These are
+  isolated queue lifetime observations, not actual sample retained-memory
+  profiles or timing results. Mixed-input element storage and production event
+  burst frequency remain unverified; this does not establish a queue limit.
+
   A release staging probe used the actual `ActionMap` with Horde's move, restart
   and choice declarations, comparing the existing take-and-replay loop with a
   draining replay loop. Queue pushes, `begin_tick` and replay are timed;
