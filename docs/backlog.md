@@ -76,11 +76,21 @@ corrupted-digest source control trapped, and the restored build passed. The
 harness checked the worker's result message and required the negative result to
 be a WASM trap. This verifies isolated production-source worker execution, not
 shared-memory engine worker stack high-water use, full subsystem call chains or
-browser storage. The all-feature workspace gates are running. Production
-release-library caller compatibility and allocation profiles, native/browser
-worker integration, branch CI, main CI and browser deployment remain open. Keep
-this slice pending until all required gates close; isolated prototype results
-above do not prove production integration.
+browser storage. The preserved pre-change release binary additionally captured
+actual raw/hex hashes, sealed packets and save files through the public engine
+exports, both on the caller and through `jobs::Threads::spawn`. Complete worker
+and caller bytes matched. The capture matched independently constructed Python
+`hashlib`/HMAC packets and packed save files; altered digest, MAC and
+save-header byte controls failed. A deliberately altered worker capture failed
+before normal restoration. The baseline's compiled hash allocator/deallocator
+targets were resolved through its ELF relocation table, establishing that it
+retains original tail allocation. The changed release binary must still match
+this preserved capture and independent expected bytes; preparing the baseline
+alone does not verify the new callers. The all-feature workspace gates are
+running. Production release-library caller compatibility and allocation
+profiles, native/browser worker integration, branch CI, main CI and browser
+deployment remain open. Keep this slice pending until all required gates close;
+isolated prototype results above do not prove production integration.
 
 Cold-cache native readback investigation remains open:
 
