@@ -3832,29 +3832,29 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   Startup, assertions and accepted requests were excluded. This is an
   original-caller baseline, not a production precheck comparison or a full Horde
   frame measurement; the differing repeats also caution against treating the
-  isolated prototype's timings as a real caller speedup. Accepted-request
-  latency, actual game drop frequency, hardware callback contention and the
-  modified production caller remain unmeasured. A fresh source-copy follow-up
-  used the current complete Horde audio module, changed only borrowed-data
-  prechecking and delayed construction, and preserved the headless null stream,
-  counters and cap lock. Both binaries were warmed and pinned to the same
-  allowed CPU. Original/prechecked/prechecked/original p50/p95 prices were
-  41.9/42.6, 15.7/16.3, 15.7/16.3 and 43.2/47.6 nanoseconds per refused request.
-  Each run reported 17600 refused requests, 17616 valid cues and 1000 timed
-  batches; a full cap was verified after every batch. Each incorrect drop-count
-  control failed, then normal restoration passed. Setup, assertions and accepted
-  requests remain outside the timers. This supports the saturated source-copy
-  mechanism with concurrent null mixing, not actual production behavior,
-  accepted-request latency, hardware callback contention, game drop frequency or
-  a frame-rate gain. A separate accepted-cue source-copy trial disabled the null
-  stream in both complete audio modules to compare deterministic counters, voice
-  handles, full mix parameters and stereo sample bits. It reported 30 matched
-  snapshots covering unknown and sub-frame refusal with free and full caps,
-  varied listeners/emitters, accepted cue ids, cap drops and voice retirement.
-  Live cues were required to produce audible finite output. Corrupted sample
-  bits, empty timing collection, silent output and non-finite output each failed
-  their exact observer before normal restoration passed. Both modes were warmed
-  and pinned to the same allowed CPU. The final
+  isolated prototype's timings as a real caller speedup. Production
+  accepted-request latency, late-game drop frequency, hardware callback
+  contention and the modified production caller remain unmeasured. A fresh
+  source-copy follow-up used the current complete Horde audio module, changed
+  only borrowed-data prechecking and delayed construction, and preserved the
+  headless null stream, counters and cap lock. Both binaries were warmed and
+  pinned to the same allowed CPU. Original/prechecked/prechecked/original
+  p50/p95 prices were 41.9/42.6, 15.7/16.3, 15.7/16.3 and 43.2/47.6 nanoseconds
+  per refused request. Each run reported 17600 refused requests, 17616 valid
+  cues and 1000 timed batches; a full cap was verified after every batch. Each
+  incorrect drop-count control failed, then normal restoration passed. Setup,
+  assertions and accepted requests remain outside the timers. This supports the
+  saturated source-copy mechanism with concurrent null mixing, not actual
+  production behavior, accepted-request latency, hardware callback contention,
+  game drop frequency or a frame-rate gain. A separate accepted-cue source-copy
+  trial disabled the null stream in both complete audio modules to compare
+  deterministic counters, voice handles, full mix parameters and stereo sample
+  bits. It reported 30 matched snapshots covering unknown and sub-frame refusal
+  with free and full caps, varied listeners/emitters, accepted cue ids, cap
+  drops and voice retirement. Live cues were required to produce audible finite
+  output. Corrupted sample bits, empty timing collection, silent output and
+  non-finite output each failed their exact observer before normal restoration
+  passed. Both modes were warmed and pinned to the same allowed CPU. The final
   original/prechecked/prechecked/original p50/p95 normalized accepted-request
   prices were 133.4/135.2, 129.0/131.5, 127.8/130.2 and 133.4/135.9 nanoseconds.
   Each run reported 500 timed batches. Voice construction, counters, cap locks
@@ -3862,10 +3862,20 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   and assertions are excluded. These are batch-normalized request prices, not
   individual request tails or device callback latency. Earlier harness revisions
   produced different absolute prices, so this isolated result does not establish
-  a production latency gain. Actual modified production behavior, game drop
-  frequency, hardware callback contention and browser behavior remain
-  unmeasured. Price those before keeping the production change; this
-  event-driven candidate follows the frame-wide P14 trial.
+  a production latency gain. A paced current Horde release-library baseline then
+  ran the actual game at its tick rate with the real null audio stream. The
+  restored normal run reported 30.000 wall seconds, 30.017 simulated seconds and
+  1801 actual ticks; it emitted 92 shot, 41 kill and 2 pickup cues, dropped no
+  cues and observed a maximum of 3 live voices with no missed sleep deadlines.
+  It uses the default seed and enemy limit, synchronous workers and circular
+  virtual-stick movement. Missing start input, a false zero cue count and a tick
+  observer reporting no progress each failed their exact check before the full
+  normal restoration passed. This demonstrates no cap pressure or cap-ordering
+  benefit in this short early-game workload. It excludes GPU rendering, hardware
+  output and browser behavior; late-game bursts, real windowed gameplay and
+  callback contention remain unmeasured. Actual modified production behavior
+  also remains unverified. Price those before keeping the production change;
+  this event-driven candidate follows the frame-wide P14 trial.
 - **P38 — price retained UI triangle output and text storage.** Revalidated
   `DrawList::clear` and `Ui::begin_frame_with`: command and tree collections
   retain capacity. `DrawCommand::Text` still owns label strings, and
