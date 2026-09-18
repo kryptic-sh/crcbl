@@ -41,18 +41,58 @@ or cross-submission Vulkan validation coverage. The null recording workload did
 not exercise water, grass, probe-capture replacement or FXAA. Keep these
 coverage gaps separate from the completed entry-allocation implementation.
 
-Next performance trials:
+Harness documentation gap: `crates/crcbl/tests/run-render-e2e.sh` describes
+`CRCBL_VK_ICD=hardware`, but its shared
+`crates/crcbl-vk/tests/vulkan-icd.sh::crcbl_pin_vk_icd` treats every nonempty
+value as a manifest path. The UI trial refused that shorthand before tests ran;
+using the installed Radeon manifest ran the named discrete adapter and matched
+the render goldens. Correct the header or deliberately unify shorthand handling
+across callers while preserving invalid-pin refusal and loader-variable
+precedence. This is a harness contract mismatch, with no evidence of a renderer
+regression.
 
-The leading production trial is bounded UI triangle scratch reuse in
-`perf/ui-geometry-reuse`. Actual Horde list replay supports small caller savings
-and a bounded CPU cache avoids retaining the large synthetic burst. Existing
-`draw_list` and `ui_pass` tests moved into separate modules with unchanged
-production prefixes and preserved formatted test bodies; workspace formatting,
-default all-target Clippy and regular workspace tests passed. Implement borrowed
-output conversion and bounded renderer ownership next, then compare preserved
-full outputs, cache capacity, ordinary/oversized fallback and real write refusal
-before the required full native/browser and exact-head publication gates. The
-external prototype evidence and remaining gaps are detailed in P38 below.
+Next performance trials: measure streaming bitmap glyph positions and actual
+sans-panel layout before selecting the next UI change. Keep startup-only and
+unexercised candidates behind measured frame-path work.
+
+Retained UI geometry was considered and declined in its current form. The
+`perf/ui-geometry-reuse` production trial preserved complete original geometry,
+clipping, overlay cuts, uploads and rejected-write behavior. Bounded CPU storage
+improved small Horde recording-null workloads, but repeatable medium cached-sans
+prices regressed. The borrowed-output API, renderer cache, trial-specific tests
+and unreleased changelog entries have been removed; the previous fresh-output
+production path is restored. The behavior-neutral test-module extraction
+remains. P38 below preserves the earlier experiment evidence; its proposed
+retained-output implementation is superseded by this decision.
+
+Local-vector ownership, a shared-expansion fresh fallback, explicit inlining,
+and matching the former local-vector release order failed to remove the
+regression and were removed. External renderer source-copy screens using the
+same current production conversion API also failed to improve it with a
+fresh-API fallback or renderer-local scratch. Adding an unused scratch field to
+the former renderer did not reproduce it in that screen. Different compilation
+scopes limit these diagnostics; they do not establish an allocator, layout or
+code-generation cause.
+
+The restored simple trial passed workspace formatting, default all-target
+Clippy, regular workspace tests and production release rebuilding before it was
+declined. A quiet conversion-only diagnostic sharing one warmed actual glyph
+atlas reported the following, checking complete preserved original geometry:
+
+```text
+former exact conversion source: timed_calls=500 p50_us=161.114 p95_us=378.165
+current production fresh API: timed_calls=500 p50_us=165.052 p95_us=385.309
+```
+
+The former converter was compiled as an external source adapter, so this is a
+screen rather than an old/new production speedup verdict. Glyph-frame advance,
+output destruction, comparisons, renderer staging and GPU work were excluded.
+Previously measured actual production cached-sans repetitions support declining
+the trial; neither this diagnostic nor recording-null timings prove GPU, browser
+or FPS gains. Reconsider retained geometry only with a supported resolution or
+explicit workload trade-off and complete final native/browser/publication gates.
+The trial's X11 contention and browser worker observer gates passed; sample
+browser and exact-head publication were not completed for the declined change.
 
 Sample event queues now retain storage through ordered draining. Remaining queue
 performance work is workload evidence: actual browser element layouts,
@@ -396,7 +436,29 @@ open):
   API for callers. Measure it separately from retained vertex/index storage;
   preserve fallback glyphs, empty glyph advances, newlines, anchor, scale and UV
   orientation. The bitmap conversion baseline below includes this work but does
-  not isolate it.
+  not isolate it. A matched external source-copy screen now streams positions
+  directly while preserving the former expansion loop and production
+  vertex/command types. Both lanes matched complete original static bitmap
+  vertex fields, indices and overlay cuts. Corrupting a positioned-glyph
+  reference and a full vertex reference separately failed the intended
+  comparisons. Empty text, spaces, newlines, fallback Unicode, nonzero anchors
+  and varied scales passed full positioned-glyph parity. The first pinned-CPU
+  conversion screen reported:
+
+  ```text
+  labels=32 owned p50/p95_us=8.385/24.276 streamed=7.253/22.933
+  labels=256 owned p50/p95_us=288.435/293.505 streamed=275.320/280.520
+  labels=1024 owned p50/p95_us=281.382/861.979 streamed=248.079/808.217
+  timed_calls=500 per lane and workload
+  ```
+
+  Workspace tests and another repository's compiler were active during this
+  diagnostic; repeat under quiet conditions before relying on prices. This
+  synthetic source-copy screen excludes construction, output destruction,
+  comparisons, uploads and GPU execution. No production change or end-to-end
+  speedup is established. Next: confirm through actual renderer and frozen Horde
+  consumers, preserve the owned layout API, then run complete final gates.
+
 - `crcbl_client::Client::send_input` clones `pending_input` into an owned
   protocol message before the codec copies it into a payload. A borrowed input
   encoder could remove that intermediate copy while retaining input for later
@@ -3652,9 +3714,12 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   callback contention remain unmeasured. Actual modified production behavior
   also remains unverified. Price those before keeping the production change;
   this event-driven candidate follows the frame-wide P14 trial.
-- **P38 — price retained UI triangle output and text storage.** Revalidated
-  `DrawList::clear` and `Ui::begin_frame_with`: command and tree collections
-  retain capacity. `DrawCommand::Text` still owns label strings, and
+- **P38 — price UI text storage; retained geometry trial declined.** The bounded
+  production geometry trial was removed after repeatable medium cached-sans
+  regression; see the current decision above. The evidence below describes
+  earlier experiments, not a pending recommendation to ship that implementation.
+  Revalidated `DrawList::clear` and `Ui::begin_frame_with`: command and tree
+  collections retain capacity. `DrawCommand::Text` still owns label strings, and
   `DrawList::to_triangles_split` creates vertex and index vectors each call;
   `UiRenderer::begin_frame` calls it and retains GPU buffer capacity separately.
   A standalone release CPU probe of unchanged overlapping bitmap labels,
@@ -3669,10 +3734,10 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   0.965/0.972 ms for 1024, excluding text layout and initial glyph
   rasterization. It checked complete triangles and zero rasterization on every
   timed frame; recreating the atlas each frame made the zero-rasterization
-  assertion fail, then restoring it reproduced the baseline. Trial retained
-  output buffers next, preserving clipping, command order, overlay cuts, glyph
-  rasterization and image binding. Compare both bitmap and sans paths before
-  keeping the change. A text arena would change draw-command ownership and needs
+  assertion fail, then restoring it reproduced the baseline. Any future retained
+  output design must resolve the measured regression and preserve clipping,
+  command order, overlay cuts, glyph rasterization and image binding across
+  bitmap and sans paths. A text arena changes draw-command ownership and needs
   separate evidence. A fresh release probe calls actual
   `UiRenderer::begin_frame` against the recording null backend with static
   overlapping bitmap labels and a clipped base plus an overlay. Its final normal
