@@ -3,16 +3,18 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-Current goal: test whether richer geometry and a more optimized algorithm make
-culling worthwhile, and report the results. Complete the full codebase
-performance review, record its findings and verification gaps in this backlog,
-and implement the supported low-effort performance improvements first to keep
-the engine lean. After those changes, continue implementing features and backlog
-items in the plans' priority order. Preserve the completed culling experiment
-results and report further measurements as they finish. Profile the relevant
-workload, preserve correctness, and measure the result before keeping an
-optimization. Authored interior and browser culling measurements, CPU
-draw-recording cost, and overlapping grass workloads remain open below.
+Current goal: complete the full codebase performance review, record actionable
+findings and verification gaps in this backlog, and implement supported
+low-hanging performance improvements before feature expansion to keep the engine
+lean. Preserve and report the culling experiments testing richer geometry and
+algorithm optimization. After the performance improvements, continue
+implementing features and backlog items in the plans' priority order until the
+remaining planned work is complete. Keep the plans, backlog and changelog
+current as work ships, removing completed backlog entries. Profile relevant
+workloads, preserve correctness, measure each optimization, and complete the
+required verification and shipping gates before starting the next production
+change. Authored interior and browser culling measurements, CPU draw-recording
+cost, and overlapping grass workloads remain open below.
 
 ## Performance review and execution priority (2026-09-17)
 
@@ -50,6 +52,122 @@ Next performance trials:
   change. Input queue capacity remains an input-burst candidate to price.
   Backend command-pool reuse, wider graph caching and math changes need stronger
   workload evidence or carry more lifecycle risk.
+
+The instance-pool trial is in progress on `perf/retain-instance-scratch`.
+Production `InstancePool::carry_forward` retains its carry vectors, and `flush`
+retains dirty-run storage while removing only the committed prefix after a
+refusal. The actual-pool capacity fixture rejected the eager implementation. The
+refusal fixture exercises first/middle/last run failures, committed prefix
+bytes/events, retained dirty suffix capacity, complete retry bytes, idempotence
+and unaffected other slots. Discarding the refused suffix made that test fail;
+dropping carry capacity made the capacity test fail. The restored instance-pool
+suite passed. Workspace formatting, default clippy and regular workspace tests
+passed. The release build passed. Actual changed-renderer lifecycle observers
+matched complete instance-buffer bytes, ring write destinations, generation
+reuse and full command captures against the preserved baseline for dense and
+sparse workloads on `IndirectCount`, `IndirectPerBatch` and `MeshShader`.
+Mismatched lighting was rejected before rerunning with the baseline's point and
+spot lights enabled. Wrong reuse transforms, stale writes/removals and a wrong
+final uploaded byte made the observer fail; altered indirect offsets made the
+full capture comparison reject, and the restored capture matched. These null
+observations do not establish GPU execution or FPS benefit. The normal
+`ForwardRenderer::begin_frame` upload-refusal fixture now passes
+first/middle/last sparse-run refusals, observes no shared preparation writes,
+checks committed prefix bytes and suffix retry writes, idempotence, complete
+buffers across the ring and teardown. Reversing upload/preparation order made
+its shadow-input assertion fail; the restored fixture passed. Rotation precedes
+the refusal and is preserved, so this does not claim transactional frame
+rollback. Workspace formatting and default clippy passed after adding the
+fixture; regular workspace tests are running. The nonempty skinned caller now
+also passes first/middle/last instance refusals, complete
+palette/binding/parameter bytes, accepted parity and current/ previous instance
+bases, committed prefix and suffix retries, idempotence and complete ring
+recovery. Reversing skinned preparation order, omitting base pointing and
+prematurely freezing pending normal-frame effects each made the relevant fixture
+fail; restored normal and skinned fixtures passed. Palette uploads, parity and
+base pointing precede the refusal and are preserved; no rollback is claimed.
+Workspace formatting, default clippy and regular workspace tests passed after
+these additions. Documentation citations, tracked and new-test wrapped-string
+checks and diff whitespace checks passed. Locked all-feature workspace build,
+clippy and nextest passed; regular all-feature workspace tests, explicit
+doctests, warnings-denied public/private documentation, cargo-machete and
+cargo-deny passed. The nextest runner reported 7205 passed and 507 skipped.
+Native and shipping gates remain open.
+
+The first optimized lavapipe render run, with Mesa shader caching disabled and
+normal nextest concurrency, stopped on a readback timeout before the calm-shell
+pixel assertion. A complete pre-optimization-pool comparison under the same
+cold-cache settings passed all 98 tests. The restored optimized pool then ran
+the full suite without fail-fast: 95 passed and 3 failed with readback timeouts
+in `grass_shells::fins_fill_the_far_hillside_and_stand_nowhere_else`,
+`the_double_sided_scene_draws_its_back_face_and_matches_its_golden`, and
+`grass_blades::edge_on_blades_stay_a_pixel_wide`. The reversed
+pre-optimization-pool comparison also finished with 95 passed and 3
+readback-timeout failures, in different scenes:
+`grass_shells::shells_draw_strands_at_the_roots_a_card_field_leaves_open`,
+`grass_shells::a_look_switch_leaves_the_placement_bit_identical`, and
+`grass_shells::the_levers_restyle_cards_and_shells_alike`. This establishes that
+the cold-cache failures occur without the optimization; it does not isolate
+shader compilation, driver execution or scheduler pressure as the cause. The
+changed source was restored exactly. Do not extend deadlines, weaken assertions
+or serialize the suite to turn this evidence green. The required render suite
+passed all 98 tests with synchronization validation and fatal validation errors
+enabled. The complete required lavapipe mesh, draw-generation, forward,
+HAL-seam, glTF, sprite, tiling and Vulkan suites also passed with those
+settings. Hardware Vulkan render and backend suites also passed on the pinned
+discrete RADV adapter with synchronization validation and fatal validation
+errors enabled. The CI workflow does not disable Mesa shader caching; its
+required settings are checked separately from this extra cold-cache stress.
+Preserve the cold-cache discrepancy until its cause is established, even if
+required gates pass. Shipping gates remain open.
+
+Paired preparation observations used the existing actual null renderer fixture
+with assertions, model updates and captures outside the timer. Baseline,
+retained, retained-repeat and baseline-repeat full commands matched with point
+and spot lighting:
+
+| Workload | Baseline p50/p95 (ms) | Retained    | Retained repeat | Baseline repeat |
+| -------- | --------------------- | ----------- | --------------- | --------------- |
+| Dense    | 0.119/0.126           | 0.096/0.126 | 0.095/0.101     | 0.095/0.103     |
+| Sparse   | 0.097/0.102           | 0.096/0.102 | 0.104/0.110     | 0.099/0.104     |
+
+These small and mixed observations establish no general CPU improvement. The
+fixture includes instance updates, frame preparation, graph build/compile/
+execute and encoder finish, while excluding startup, assertions, captures,
+destruction, UI, acquire/submit/present and shader execution. Lifecycle observer
+prices are excluded because its independent model work occurs inside that
+fixture's timer. Allocation churn is the verified benefit; GPU/FPS benefit
+remains unmeasured.
+
+Paired whole-fixture DHAT measurements used the preserved baseline and changed
+production renderer with the same lifecycle observer, lighting and command
+captures. Every instrumented full capture matched the baseline:
+
+| Workload | Baseline allocated bytes / blocks | Retained allocated bytes / blocks | Baseline peak bytes / blocks | Retained peak bytes / blocks |
+| -------- | --------------------------------- | --------------------------------- | ---------------------------- | ---------------------------- |
+| Dense    | 3,708,104,294 / 1,736,820         | 3,707,614,119 / 1,734,779         | 21,092,622 / 4,333           | 21,093,678 / 4,335           |
+| Sparse   | 3,721,387,046 / 1,738,549         | 3,720,361,767 / 1,734,788         | 21,109,358 / 4,333           | 21,111,406 / 4,335           |
+
+Allocation churn fell while peak memory increased. These totals include startup,
+recording, complete-byte observers and snapshot formatting; they do not isolate
+instance-pool allocation sites or establish CPU, GPU or FPS improvements.
+Disassembly confirms the dirty-run growth call stores the range endpoints and
+the carry-enrollment call stores the instance index. Exact call-site selectors
+matched the DHAT records, while missing-site selectors were rejected:
+
+| Workload | Site             | Baseline allocated bytes / blocks | Retained allocated bytes / blocks |
+| -------- | ---------------- | --------------------------------- | --------------------------------- |
+| Dense    | Dirty runs       | 12,704 / 397                      | 64 / 2                            |
+| Dense    | Carry enrollment | 479,552 / 1,652                   | 2,032 / 7                         |
+| Sparse   | Dirty runs       | 792,416 / 2,362                   | 4,032 / 12                        |
+| Sparse   | Carry enrollment | 237,888 / 1,416                   | 1,008 / 6                         |
+
+Each selected site had no allocated bytes left at process end. These are the
+confirmed growth sites reached by the actual lifecycle workload, including its
+warmup; they are separate from the whole-fixture totals above. The new scratch
+tests have been extracted into `instance_pool::tests::scratch` without changing
+their complete bodies. Workspace formatting, default clippy and regular
+workspace tests passed after extraction.
 
 Retained shadow-preparation scratch has shipped. Actual browser performance,
 native presentation timing and GPU execution benefit remain unmeasured. Null
@@ -1198,51 +1316,23 @@ Sample and browser follow-up:
   159,264 bytes/474 blocks for sparse updates. These are allocation-site totals,
   not per-frame figures or timed-region heap totals. They support pricing the
   narrow retained storage change after the shadow trial; no changed
-  implementation or speedup was measured. Slot removal/reuse, repeated writes
-  within one frame and failed-write retry remain separate required coverage
-  before that trial can ship. The existing instance-pool tests cover stale
-  handles, reuse, previous transforms and coalescing; no failed-upload retry
-  test was found. The null device checks the destination byte range before
-  copying and returns `InvalidDescriptor` on an oversized write. A test-private
-  short HostUpload destination can therefore make a later sparse run fail after
-  an earlier run succeeds, without adding a public failure injector. Observe
-  committed versus retained ranges and seed already committed bytes into the
-  restored destination before checking retry bytes and idempotence. Preserve
-  destination identity assumptions in that fixture rather than claiming buffer
-  replacement itself is an ordinary pool operation. An external release fixture
-  now copied the current `InstancePool` implementation, changing only dependency
-  import paths and adding private fixture access. After warming every frame
-  slot, it made sparse writes and substituted a short HostUpload target to fail
-  the first, middle or last run with `InvalidDescriptor`. Recorded successful
-  writes matched the committed prefix; retained dirty ranges matched the failed
-  run and remaining suffix. It seeded the committed prefix into the restored
-  destination, then verified exact retry writes, complete buffer bytes,
-  idempotent flush, unchanged pending runs in other slots, null validation and
-  zero live HAL objects after teardown. Deliberately dropping the failed run or
-  retaining the already committed prefix each made the fixture fail; the normal
-  copy passed again. Buffer substitution and prefix seeding are fixture
-  operations, not supported pool behavior. This establishes the recovery test
-  design, not a production test or an optimized implementation. Port it into the
-  private production tests and repeat against retained dirty-run storage before
-  shipping; actual renderer failure recovery remains unverified. Follow-up read
-  `ForwardRenderer::begin_frame` and `begin_skinned_frame`: both rotate the
-  instance ring and call `InstancePool::flush` before shared `begin_frame_body`;
-  the skinned path also updates palettes and instance bases before that flush.
-  The shadow-uniform refusal fixture therefore does not cover instance-upload
-  failure. Add an integrated fixture that observes refusal before shared
-  preparation, preserves the committed prefix and dirty suffix, and verifies
-  recovery across the ring without claiming rollback of rotation or skinning
-  work. No public fault injector is required by this finding. The same external
-  source copy also exercised repeated writes to a handle, removal and same-index
-  reuse before rotation, stale set/remove rejection, continued motion across
-  rotations and stopping. It checked unique enrollment despite repeated writes
-  and reuse, unchanged revisions for stale operations, no premature settling
-  during continued motion, a single settling write after stopping, complete
-  current/previous record bytes and destination bytes through the frame ring,
-  dead-slot preservation, idempotent flush and teardown. A deliberately
-  corrupted settling transform failed the full-byte comparison; normal lifecycle
-  and retry fixtures passed again. These strengthen the production test design;
-  changed storage and actual renderer removal/reuse remain required coverage.
+  implementation or speedup was measured. The production
+  `instance_pool::tests::scratch` fixtures now observe retained capacity after
+  motion/settling and first/middle/last refused uploads, committed prefix
+  bytes/events, pending suffixes, exact retry writes, complete buffers,
+  idempotence and unaffected slots. Dropped suffix and carry-capacity mutations
+  were rejected before restored tests passed. Short-buffer substitution and
+  prefix seeding are fixture operations, not supported pool behavior.
+  `forward::tests::instance_upload` now verifies the normal renderer caller
+  stops before shared preparation and recovers through the ring; reversing that
+  ordering was rejected. The nonempty skinned caller now has its own
+  refusal/recovery fixture observing palette/binding/parameter bytes, committed
+  parity and instance bases, prefix/suffix uploads and complete ring recovery.
+  Wrong preparation order, omitted base pointing and premature normal-frame
+  effect freezing were rejected before restored fixtures passed. Its pre-flush
+  skinning work remains committed after an instance refusal; this is not
+  transactional frame rollback. Native skinning and production shipping gates
+  still need verification for this slice.
 
   A follow-up release fixture drove `ForwardRenderer::set_instance` and its
   actual instance pool with resident mixed-mode cubes, rather than synthetic

@@ -11456,6 +11456,8 @@ fn rebuilt_with_sampler(
 
 #[cfg(test)]
 mod tests {
+    mod instance_upload;
+
     use super::*;
     use crate::effects::{Antialiasing, EffectOverride};
     use crate::scene::{

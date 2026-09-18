@@ -663,16 +663,28 @@ impl InstancePool {
         let slot = self.frame;
         let buffer = self.buffers[slot];
         // Detached so the mirror can be borrowed while the runs are walked.
-        let runs = core::mem::take(&mut self.dirty[slot].runs);
+        let mut runs = core::mem::take(&mut self.dirty[slot].runs);
         for (done, run) in runs.iter().enumerate() {
             let at = run.start as usize * INSTANCE_STRIDE;
             let end = run.end as usize * INSTANCE_STRIDE;
             if let Err(error) = device.write_buffer(buffer, at as u64, &self.mirror[at..end]) {
-                self.dirty[slot].runs = runs[done..].to_vec();
+                runs.drain(..done);
+                self.dirty[slot].runs = runs;
                 return Err(error);
             }
         }
+        runs.clear();
+        self.dirty[slot].runs = runs;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn replace_test_buffer(
+        &mut self,
+        slot: usize,
+        replacement: BufferHandle,
+    ) -> BufferHandle {
+        core::mem::replace(&mut self.buffers[slot], replacement)
     }
 
     /// Releases every buffer. The device must be idle.
@@ -755,7 +767,8 @@ impl InstancePool {
     /// pool that had ever moved anything would re-examine it every frame
     /// forever.
     fn carry_forward(&mut self) {
-        for index in core::mem::take(&mut self.written_last_frame) {
+        for at in 0..self.written_last_frame.len() {
+            let index = self.written_last_frame[at];
             if self.moved_mark[index as usize] {
                 // Written again for the frame about to be drawn, so it is
                 // moving rather than stopping and its own write said where
@@ -769,7 +782,8 @@ impl InstancePool {
             record.previous_transform = record.transform;
             self.write(index, &record);
         }
-        self.written_last_frame = core::mem::take(&mut self.written_this_frame);
+        self.written_last_frame.clear();
+        core::mem::swap(&mut self.written_last_frame, &mut self.written_this_frame);
         for index in &self.written_last_frame {
             self.moved_mark[*index as usize] = false;
         }
@@ -978,6 +992,8 @@ mod tests {
     fn runs(dirty: &DirtyRanges) -> Vec<(u32, u32)> {
         dirty.runs.iter().map(|run| (run.start, run.end)).collect()
     }
+
+    mod scratch;
 
     // --- the coalescing, which is pure logic ---
 

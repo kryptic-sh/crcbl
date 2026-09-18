@@ -2077,6 +2077,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Instance-pool frame preparation retains motion and dirty-run scratch**:
+  `InstancePool::carry_forward` reuses its carry vectors, and `flush` retains
+  run capacity after successful or refused uploads. A refused write keeps the
+  pending suffix for retry without copying it into a newly allocated list.
+  Previous transforms, coalesced upload order and frame-ring bytes are
+  preserved.
+
 - **Forward shadow preparation retains view and frustum scratch capacity**:
   frame preparation clears and reuses private vectors across redraws, cached
   atlas returns and refused uploads. Complete cache records, view/cull order and
