@@ -679,6 +679,20 @@ Simulation and loading follow-up:
   large live effects before caching base size and spin, since caching increases
   particle storage. Preserve seeded results, pool compaction, lifetime
   retirement and curve evaluation.
+- Reviewed `crcbl_rand::Rng` construction, scalar draws and slice filling,
+  `entropy`, the WASM `fill_from`/`seed_into` bridge and its input exports, plus
+  the entropy error type. The resolved ChaCha and block-generator source retains
+  fixed output storage; wrappers fill caller-owned slices and no
+  temporary-vector candidate was established. Native entropy delegates directly
+  to the OS source; WASM draws use thread-local retained generator state and
+  refuse unseeded draws. Declined adding another wrapper output cache without a
+  measured consumer cost. Server `try_new_with_compatibility`, `handle_hello`,
+  `generate_resume_token` and `rotate_session` reach entropy for session
+  creation and reconnect handling; the inspected tick path does not establish a
+  continuous entropy workload. Preserve exact seeded streams, draw ordering,
+  rejected re-seeds and refusal propagation. Other consumer costs, native
+  entropy syscall pricing and browser/worker entropy performance were not
+  measured.
 - Inspected wind sampling uses fixed layer taps and a stored weather direction,
   without building temporary vectors; no low-effort allocation fix was found in
   those functions. Gust arithmetic still runs with zero amplitude, but an
@@ -20849,6 +20863,34 @@ inspect individual setup/execution stages on the constrained workload before
 choosing fixture changes or independent per-switch cases; preserve every
 `VIDEO_KEYS` arm, its all-on control, fresh-renderer startup checks and existing
 deadlines.
+
+A release observer copied the original persisted-effects fixture and added only
+stage timers; removing those observers reconstructed the entire original source
+exactly. With cold compilation, pinned llvmpipe and validation, both
+CPU-affinity runs passed every original effect assertion. Restricting the
+process to four CPUs reported 19.60 s; one CPU reported 19.53 s. Aggregate
+renderer creation was 5.932989/5.945199 s, and command finish, submission,
+presentation and idle was 13.367208/13.301657 s respectively. Device opening was
+0.182738/0.174874 s. These are fixture-stage CPU/wait observations, not GPU
+frame times, and the combined submission stage does not isolate compilation from
+rendering or waiting. Every settings label had every expected stage; removing
+one stage made the observation guard fail before restoration. These runs did not
+reproduce the Windows timeout or concurrent Windows load.
+
+`forward_e2e::antialiasing::frame_passes` now emits settings-label and
+elapsed-stage diagnostics, covering device opening, renderer creation,
+preparation, recording, submission, presentation, idle and teardown. Fresh
+fixture construction, rendering and all assertions remain unchanged. Workspace
+formatting, default clippy and default workspace tests passed, followed by the
+locked all-feature build, formatting check and all-feature clippy. The complete
+cold-compilation lavapipe forward suite passed with the diagnostics. Every
+expected settings label emitted every phase in order; removing an actual
+submission diagnostic made the observation guard fail before restoration.
+CI-profile nextest, regular all-feature workspace tests, explicit doctests,
+public and private documentation with warnings denied, cargo-machete and
+cargo-deny passed. Documentation citations, wrapped strings and whitespace
+checks passed. The diagnostics have not been pushed and do not fix the timeout.
+Obtain the actual Windows stage trace before choosing a remedy.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 

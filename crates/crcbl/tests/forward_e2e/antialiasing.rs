@@ -196,12 +196,23 @@ fn an_unconfigured_run_draws_the_rung_its_settings_resolve() {
 
 /// The passes a settings-derived frame executes, with their render extents.
 fn frame_passes(stack: &SettingsStack, label: &str) -> Vec<(String, (u32, u32))> {
+    let started = std::time::Instant::now();
+    let stage = |phase: &str| {
+        eprintln!(
+            "{suite}: settings frame {label:?} — {phase} after {elapsed:?}",
+            suite = crate::SUITE,
+            elapsed = started.elapsed(),
+        );
+    };
+    stage("opening device");
     let video = crcbl::settings::video(stack);
     let headless = Headless::open_for_mesh();
+    stage("device opened");
     let device = headless.device.as_ref();
     let mut pool = TransientPool::new();
     let mut renderer = ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("the forward renderer builds");
+    stage("renderer built");
     // The default camera stack deliberately excludes lens effects. This frame is
     // the all-on control for the player's clamps, so it must ask for every
     // switch before `apply_video_to` intersects that request with `video`.
@@ -224,6 +235,7 @@ fn frame_passes(stack: &SettingsStack, label: &str) -> Vec<(String, (u32, u32))>
             MESH_EXTENT,
         )
         .expect("the uniform buffer is writable");
+    stage("frame prepared");
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
         label: Some(label),
@@ -257,10 +269,12 @@ fn frame_passes(stack: &SettingsStack, label: &str) -> Vec<(String, (u32, u32))>
     compiled
         .execute(device, &mut pool, encoder.as_mut(), None)
         .expect("the graph executed");
+    stage("graph recorded");
     let commands = encoder.finish().expect("recording succeeded");
     device
         .submit(headless.queue, &SubmitInfo::new(&[commands]))
         .expect("submit");
+    stage("submitted");
     device
         .present(
             headless.queue,
@@ -271,12 +285,15 @@ fn frame_passes(stack: &SettingsStack, label: &str) -> Vec<(String, (u32, u32))>
             },
         )
         .expect("present");
+    stage("presented");
     device.wait_idle().expect("idle");
+    stage("idle");
 
     device.destroy_command_buffer(commands);
     renderer.destroy(device);
     pool.destroy(device);
     headless.finish();
+    stage("teardown complete");
     passes
 }
 
