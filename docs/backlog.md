@@ -1502,7 +1502,18 @@ Sample and browser follow-up:
   native/browser behavior. Device attribution and context changes during queued
   replay are not covered by this probe. Breakout's pointer/button staging and
   Flappy's mixed input still require their own evidence; key-only results do not
-  cover those queues.
+  cover those queues. A preserved release-library Horde baseline now exercises
+  the actual authenticated loopback game with deferred start input, held
+  diagonal movement, catch-up ticks, releases, repeated press/release bursts,
+  restart and retained stick levels. Repeated seeded runs compare complete
+  logical render snapshots, rather than counts alone; corrupting the last
+  snapshot health fails before restoration passes. The capture checks action
+  resolution and the existing simulation order explicitly: physics runs before
+  the game module, so newly resolved movement affects position on the following
+  tick. This is an unchanged-production baseline, not a retained-queue
+  implementation or timing result. Compare the changed game with this preserved
+  capture before keeping a queue change. Browser/focus-loss, queued context
+  changes, device attribution and other samples remain unverified.
 
 - Considered and declined: removing browser command-field copies without a
   lifetime redesign. `gpu-stream.js::StreamReader::readField` produces owned
