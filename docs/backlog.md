@@ -1505,7 +1505,17 @@ Sample and browser follow-up:
   keeping the change. Breakout and flappy's `Game::tick` use the same pattern
   for `pending_input`; their render-state output lists are already cleared and
   filled in retained storage. Do not conflate those lists with the input queue
-  candidate. No additional wrapper is needed for this loop.
+  candidate. Re-reading each production replay block confirms that it borrows
+  the action map separately from the queued vector and processes events in order
+  after `begin_tick`; none calls a method borrowing the complete sample during
+  replay. Breakout's mixed queue dispatches keys, left-button edges and pointer
+  positions directly to the map; Flappy dispatches keys and left-button edges.
+  Their different variants need complete mixed-input comparisons even though a
+  direct draining loop fits the existing fields. Retaining storage also retains
+  the largest observed burst capacity for the lifetime of the sample; measure
+  burst growth and the quiet period afterward before deciding whether that
+  memory trade-off warrants a bound. No additional wrapper is needed for this
+  loop.
 
   A release staging probe used the actual `ActionMap` with Horde's move, restart
   and choice declarations, comparing the existing take-and-replay loop with a
