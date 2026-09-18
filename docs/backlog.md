@@ -107,13 +107,15 @@ altered pass and skip counts before accepting the original log. Every branch CI
 job completed successfully; its step audit found no failures or cancellations.
 These native successes do not close browser shipping gates or explain the
 earlier timeout cause. The verified slice was fast-forwarded and pushed to
-`main` as `90a2c25`. Exact main CI is running at
-<https://github.com/kryptic-sh/crcbl/actions/runs/35332157349> and Pages/browser
-shipping at <https://github.com/kryptic-sh/crcbl/actions/runs/35332157289>.
-Enumerate both complete job lists, confirm deployment and check the actual
-live-site response before starting the next production slice. Preserve these
-active runs; do not push documentation-only updates that would cancel them. The
-later readback-investigation documentation commit changes no production source.
+`main` as `90a2c25`. Exact main CI passed at
+<https://github.com/kryptic-sh/crcbl/actions/runs/35332157349>; every job passed
+and the complete step audit found no failures or cancellations. Pages/browser
+shipping remains active at
+<https://github.com/kryptic-sh/crcbl/actions/runs/35332157289>. Enumerate its
+complete job list, confirm deployment and check the actual live-site response
+before starting the next production slice. Preserve these active runs; do not
+push documentation-only updates that would cancel them. The later
+readback-investigation documentation commit changes no production source.
 
 The first optimized lavapipe render run, with Mesa shader caching disabled and
 normal nextest concurrency, stopped on a readback timeout before the calm-shell
