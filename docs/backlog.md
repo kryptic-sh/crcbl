@@ -636,6 +636,16 @@ Networking preparation follow-up:
   coverage. Before changing padding, add independently generated complete
   expected digests around each padding/block boundary, check original and new
   implementations against them, and show a padding or digest mutation fails.
+  External preflight fixtures now compare complete raw and hex digests from the
+  current production source and the existing safe prototype against newly
+  generated Python `hashlib` answers for 13 uniform and 28 patterned payloads
+  around padding/block boundaries and further whole blocks. Both fixtures
+  passed; flipping a digest byte or changing the encoded bit length made both
+  fail, and restored fixtures passed again. Payload patterning exercises more
+  than identical repeated blocks. This prepares the required boundary assertions
+  but does not close the repository test gap: the production boundary test still
+  checks lengths and must gain expected values when the slice starts. No
+  production hashing or caller implementation changed in this preflight.
   Preserve existing NIST and HMAC vectors, shader-source manifests, saves,
   authenticated wire bytes and browser builds. No repository tests were changed
   or weakened during this source-review probe. A separate safe prototype
