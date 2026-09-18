@@ -43,15 +43,25 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
-- Fixed SHA-256 padding is the next ready trial: its isolated digest and
-  authentication prices, allocation profiles, complete wire compatibility and
-  shader/persistence fixtures are recorded below. Strengthen the repository's
-  padding-boundary assertions, verify changed production callers, native and
-  browser worker stacks, and complete workspace and browser shipping gates
-  before keeping the change. Input queue capacity has isolated staging prices
-  and an actual Horde baseline below; the next event-burst trial must still
-  verify changed sample behavior and full native/browser gates. Backend
-  command-pool reuse, wider graph caching and math changes need stronger
+- Finish the merged fixed-padding SHA-256 trial's exact-revision main CI,
+  browser deployment and live-site verification before another production
+  change. Its release caller compatibility, allocation profiles and worker
+  coverage limitations are recorded below.
+- After those gates close, trial fixed outer-input storage in
+  `crcbl_net::auth::hmac_sha256` before the sample input-queue changes. Matched
+  source-copy measurements remove outer allocation sites and slightly improve
+  small-packet prices, while large-input prices are slightly worse. The change
+  is confined to private temporary storage and retains the existing hash API;
+  this makes it a narrower next trial, not an established application
+  bottleneck. Verify actual changed authentication exports, complete packet
+  bytes, replay and malformed-input rejection, engine-worker execution and
+  required native/browser shipping gates. Keep wider inner-input streaming
+  design separate.
+- Input queue capacity has isolated staging prices and an actual Horde baseline
+  below. Trial it next if the HMAC production measurements support keeping that
+  change, or if they reject it. The event-burst trial must verify changed sample
+  behavior, context transitions, held inputs and full native/browser gates.
+  Backend command-pool reuse, wider graph caching and math changes need stronger
   workload evidence or carry more lifecycle risk.
 
 The fixed-padding SHA-256 change has merged to main; its shipping verification
