@@ -688,6 +688,19 @@ Networking preparation follow-up:
   Keep this separate from wider inner-input streaming design and behind the
   current hash shipping gates.
 
+  The shared-memory packet fixture additionally seeded the exact worker stack
+  allocation before bring-up and scanned write residue after completion.
+  Original/fixed/fixed/original runs reported deepest changed sentinel offsets
+  of 1280/1392/1392/1280 bytes below stack top, with complete packet checks
+  passing. The stack region size was read from the production allocator rather
+  than inferred from a frame pointer. Deliberately replacing the scanner with a
+  constant-zero result failed its changed-byte control; restoration passed. This
+  observes residue on this optimized browser fixture only: matching sentinel
+  bytes, unwritten reserved stack frames and unexercised call chains prevent
+  treating it as an exact high-water or worst-case bound. Do not shrink engine
+  worker stacks from these results. Production integration, representative
+  packet workloads and broader stack coverage remain open.
+
 - SHA-256 padding is being implemented in the current trial above.
   `crcbl_shaders::sha256::sha256` now uses fixed local padding storage without
   changing `compress`, digest bytes or the public hash API. Both MAC hashing and
