@@ -61,7 +61,8 @@ clipping, overlay cuts, uploads and rejected-write behavior. Bounded CPU storage
 improved small Horde recording-null workloads, but repeatable medium cached-sans
 prices regressed. The borrowed-output API, renderer cache, trial-specific tests
 and unreleased changelog entries have been removed; the previous fresh-output
-production path is restored. The behavior-neutral test-module extraction
+production path is restored and passes workspace formatting, default all-target
+Clippy and regular workspace tests. The behavior-neutral test-module extraction
 remains. P38 below preserves the earlier experiment evidence; its proposed
 retained-output implementation is superseded by this decision.
 
@@ -442,22 +443,22 @@ open):
   vertex fields, indices and overlay cuts. Corrupting a positioned-glyph
   reference and a full vertex reference separately failed the intended
   comparisons. Empty text, spaces, newlines, fallback Unicode, nonzero anchors
-  and varied scales passed full positioned-glyph parity. The first pinned-CPU
-  conversion screen reported:
+  and varied scales passed full positioned-glyph parity. A pinned-CPU repeat
+  after compiler processes finished reported:
 
   ```text
-  labels=32 owned p50/p95_us=8.385/24.276 streamed=7.253/22.933
-  labels=256 owned p50/p95_us=288.435/293.505 streamed=275.320/280.520
-  labels=1024 owned p50/p95_us=281.382/861.979 streamed=248.079/808.217
+  labels=32 owned p50/p95_us=9.938/29.927 streamed=8.596/28.494
+  labels=256 owned p50/p95_us=269.679/273.998 streamed=260.602/266.032
+  labels=1024 owned p50/p95_us=277.024/723.578 streamed=243.901/686.638
   timed_calls=500 per lane and workload
   ```
 
-  Workspace tests and another repository's compiler were active during this
-  diagnostic; repeat under quiet conditions before relying on prices. This
-  synthetic source-copy screen excludes construction, output destruction,
-  comparisons, uploads and GPU execution. No production change or end-to-end
-  speedup is established. Next: confirm through actual renderer and frozen Horde
-  consumers, preserve the owned layout API, then run complete final gates.
+  The earlier diagnostic ran alongside workspace tests and another compiler;
+  these repeat prices still establish only a synthetic source-copy screen. It
+  excludes construction, output destruction, comparisons, uploads and GPU
+  execution. No production change or end-to-end speedup is established. Next:
+  confirm through actual renderer and frozen Horde consumers, preserve the owned
+  layout API, then run complete final gates.
 
 - `crcbl_client::Client::send_input` clones `pending_input` into an owned
   protocol message before the codec copies it into a payload. A borrowed input
