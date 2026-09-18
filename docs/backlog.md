@@ -98,9 +98,14 @@ release build passed. The canonical real-browser jobs gate passed its normal
 worker execution, deliberate refusal controls and non-isolated-origin fallback
 checks. Shared-memory engine worker stack high-water use and full hashing
 subsystem call chains in browser workers remain coverage gaps; the jobs gate
-does not hash. Browser integration, branch CI, main CI and browser deployment
-remain open. Keep this slice pending until all required gates close; isolated
-prototype results above do not prove production integration.
+does not hash. The complete plain browser demo build passed export and smoke
+gates; actual Chromium Breakout and Shard behavior gates passed on the hardware
+adapter. The actual changed release library additionally matched every committed
+shader source and artifact digest in the manifest; an altered expected digest
+failed and restoration passed. Branch CI is running against the production
+change. Main CI and browser deployment remain open. Keep this slice pending
+until all required gates close; isolated prototype results above do not prove
+production integration.
 
 Cold-cache native readback investigation remains open:
 
