@@ -3763,19 +3763,28 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   retains runtime division branches for the original tap indexes and uses
   capacity masks for the fixed helper. A missing-symbol selector failed before
   the exact nonempty helper selectors passed. This establishes the standalone
-  compiler effect, not the actual optimized `Voice::mix_block` instruction
-  sequence. Complete bitwise outputs matched for 16,384 pushes with varying
-  finite samples and fractional delays throughout the supported range, including
-  repeated buffer wraps. Altering an output bit failed the complete-output
-  observer before restoration passed. The probe reported inline helper sizes of
-  32 bytes originally and 264 bytes fixed, with 256 bytes of buffer payload in
-  either representation; allocator overhead and full voice storage are excluded.
-  It would enlarge inline `Voice` storage and increase bytes moved when
-  active/releasing voice vectors grow or compact. Do not treat this as
-  allocation on every callback or assume a net gain. Price accepted cue bursts,
-  voice-list memory/moves and callback mixing separately with unchanged and
-  varied fractional ITD, looping, pitch, stop ramps and complete stereo output
-  equality. Compare release code and native and browser workloads before
+  compiler effect. A separate executable rebuilt against the current production
+  release library passed its existing complete voice-mix and stereo-buffer
+  comparisons. Symbol-bounded disassembly of that executable's actual
+  `Voice::from_shared` identifies delay-buffer lengths; `Voice::mix_block` loads
+  those lengths and retains runtime division branches for both channels' tap
+  indexes inside the sample loop. A missing production symbol failed the
+  observer before exact selectors passed. The active/releasing retention helper
+  calls this mix function; its finished-voice path also copies voice records,
+  supporting the need to price larger inline storage. This verifies the original
+  production instruction sequence, not the fixed-array production sequence or a
+  net callback speedup. Complete bitwise outputs matched for 16,384 pushes with
+  varying finite samples and fractional delays throughout the supported range,
+  including repeated buffer wraps. Altering an output bit failed the
+  complete-output observer before restoration passed. The probe reported inline
+  helper sizes of 32 bytes originally and 264 bytes fixed, with 256 bytes of
+  buffer payload in either representation; allocator overhead and full voice
+  storage are excluded. It would enlarge inline `Voice` storage and increase
+  bytes moved when active/releasing voice vectors grow or compact. Do not treat
+  this as allocation on every callback or assume a net gain. Price accepted cue
+  bursts, voice-list memory/moves and callback mixing separately with unchanged
+  and varied fractional ITD, looping, pitch, stop ramps and complete stereo
+  output equality. Compare release code and native and browser workloads before
   implementation. This remains behind the measured HMAC/input trials and the
   existing capped-cue construction-order candidate; no production audio behavior
   changed in this review.
