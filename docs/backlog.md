@@ -3978,6 +3978,37 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   open before keeping the change. The fixture and adapter are external;
   production source and existing regressions remain unchanged.
 
+  A separate external renderer now caps retained triangle payload through
+  `MAX_RETAINED_GEOMETRY_BYTES`. It retains ordinary scratch even on empty
+  frames, but drops oversized scratch after the complete frame attempt while
+  preserving committed GPU geometry counts. Actual Horde lists pass complete
+  paired uploads, HUD/overlay draw ranges, phase collection and cleanup with
+  retained payloads of 104448 bytes with debug hidden and 208896 shown. Final
+  restored gameplay caller p50/p95 prices were 2.175/2.414 microseconds
+  unchanged versus 1.402/1.463 budgeted reuse with debug hidden, and
+  10.600/10.840 versus 7.504/7.695 shown. Each reported 100 timed frames per
+  path/phase; the caller/observer boundaries match the preceding real-list
+  trial. These remain null source-copy prices, not frame/FPS or real-backend
+  claims.
+
+  The budgeted large/small/quiet/regrown-large/quiet-again fixture also passes
+  independent complete uploads, committed HUD/overlay graph ranges, clean
+  validation and all-ring observation. Oversized phases retain zero CPU payload;
+  small and following quiet phases retain 417792 bytes, and the last quiet phase
+  after oversized release retains zero. Recording-null ring descriptors remain
+  17825792 bytes. Suppressing actual budget enforcement, removing draw receipts,
+  omitting ring observations and omitting cleanup each failed before
+  restoration; real-list corrupt uploads, missing draws/phase collection and
+  omitted teardown also failed before restoration. The initial extended fixture
+  refused an unused empty-frame transient target; a background clear now makes
+  that graph valid while the complete empty UI draw-range assertion remains
+  unchanged. No production code or existing regression changed. This bounds
+  retained CPU geometry rather than total process or GPU memory and deliberately
+  forgoes reuse for oversized frames. Price that fallback and allocation sites,
+  exercise actual device refusal/retry on every relevant path, and verify
+  native/browser images before keeping the bounded production candidate. Larger
+  editor UI, glyph pressure and backend runtime/memory remain separate gaps.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
